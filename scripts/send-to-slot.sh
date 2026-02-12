@@ -5,15 +5,25 @@
 # mode detection for Claude Code's vim-style input.
 #
 # Usage:
-#   send-to-slot.sh <slot> <message>          # Send and return
-#   send-to-slot.sh <slot> <message> --wait   # Send and wait for completion
+#   send-to-slot.sh <slot> <message>           # Send and return
+#   send-to-slot.sh <slot> <message> --wait    # Send and wait for completion
+#   send-to-slot.sh <slot> <message> --force   # Skip idle wait (urgent corrections)
 
 SLOT="$1"
 MESSAGE="$2"
-WAIT="$3"
+shift 2 2>/dev/null
+
+WAIT=""
+FORCE=""
+for arg in "$@"; do
+  case "$arg" in
+    --wait)  WAIT="--wait" ;;
+    --force) FORCE="--force" ;;
+  esac
+done
 
 if [ -z "$SLOT" ] || [ -z "$MESSAGE" ]; then
-  echo "Usage: send-to-slot.sh <slot> <message> [--wait]" >&2
+  echo "Usage: send-to-slot.sh <slot> <message> [--wait] [--force]" >&2
   exit 1
 fi
 
@@ -74,15 +84,19 @@ wait_for_prompt() {
   return 1
 }
 
-# Check activity — distinguish active vs idle vs error
-is_slot_active
-rc=$?
-if [ $rc -eq 2 ]; then
-  echo "ERROR: Cannot check activity for slot $SLOT (tmux error)" >&2
-  exit 1
-fi
-if [ $rc -eq 0 ]; then
-  wait_for_idle 120 || exit 1
+# Wait for idle before sending (unless --force)
+if [ "$FORCE" = "--force" ]; then
+  echo "Force mode — sending immediately (skipping idle wait)"
+else
+  is_slot_active
+  rc=$?
+  if [ $rc -eq 2 ]; then
+    echo "ERROR: Cannot check activity for slot $SLOT (tmux error)" >&2
+    exit 1
+  fi
+  if [ $rc -eq 0 ]; then
+    wait_for_idle 120 || exit 1
+  fi
 fi
 
 # Detect INSERT/NORMAL mode and send appropriately.
