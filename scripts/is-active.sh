@@ -25,11 +25,8 @@ FLAG="${2:-}"
 source "$(dirname "$0")/slot-lib.sh"
 load_config
 
-# Validate slot (exit 2 for errors in this script)
-if ! [[ "$SLOT" =~ ^[0-9]+$ ]] || [ "$SLOT" -lt 1 ] || [ "$SLOT" -gt "$NUM_SLOTS" ]; then
-  echo "ERROR: Slot must be 1-$NUM_SLOTS, got: $SLOT" >&2
-  exit 2
-fi
+# Validate slot — exit 2 (error) since exit 1 means IDLE in this script
+check_slot "$SLOT" || exit 2
 
 PANE=$(slot_pane "$SLOT")
 

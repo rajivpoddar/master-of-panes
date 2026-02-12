@@ -16,10 +16,16 @@ Parse `$ARGUMENTS`: first token is the slot number, the rest is an optional goal
 
 Use the Task tool with `run_in_background: true` to launch a monitoring agent. The agent should:
 
-1. **Poll every 60 seconds** using:
+1. **Poll every 60 seconds** using three-valued exit code handling:
    ```bash
-   bash ${CLAUDE_PLUGIN_ROOT}/scripts/is-active.sh <slot> && echo "ACTIVE" || echo "IDLE"
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/is-active.sh <slot>
+   rc=$?
+   if [ $rc -eq 0 ]; then echo "ACTIVE"
+   elif [ $rc -eq 1 ]; then echo "IDLE"
+   else echo "ERROR: cannot detect activity"
+   fi
    ```
+   **IMPORTANT:** Do NOT use `&& ACTIVE || IDLE` — exit code 2 (error) would be misclassified as IDLE.
 
 2. **Capture recent output** each cycle:
    ```bash

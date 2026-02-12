@@ -42,19 +42,23 @@ Store as `state_dir`.
 
 ### Step 1: Write config.json
 
+Use `jq -n` to safely construct the JSON. This prevents injection from special characters (quotes, newlines) in user answers, and writes atomically via temp file + mv to prevent partial reads by concurrent scripts.
+
 ```bash
 mkdir -p ~/.claude/tmux-slots
-cat > ~/.claude/tmux-slots/config.json << 'JSONEOF'
-{
-  "slots": <slots>,
-  "pane_prefix": "<pane_prefix>",
-  "manager_pane": "<manager_pane>",
-  "state_dir": "<state_dir>"
-}
-JSONEOF
+jq -n \
+  --argjson slots <SLOTS> \
+  --arg pane_prefix "<PANE_PREFIX>" \
+  --arg manager_pane "<MANAGER_PANE>" \
+  --arg state_dir "<STATE_DIR>" \
+  '{slots: $slots, pane_prefix: $pane_prefix, manager_pane: $manager_pane, state_dir: $state_dir}' \
+  > /tmp/tmux-manager-config.$$.json \
+  && mv /tmp/tmux-manager-config.$$.json ~/.claude/tmux-slots/config.json
 ```
 
-Replace the placeholders with the user's answers.
+Replace `<SLOTS>` with the numeric value (no quotes), and the others with the user's string answers. The `--arg` flags handle JSON escaping automatically.
+
+**IMPORTANT:** Use `--argjson` (not `--arg`) for `slots` since it's a number. Use `--arg` for strings.
 
 ### Step 2: Initialize state files
 
