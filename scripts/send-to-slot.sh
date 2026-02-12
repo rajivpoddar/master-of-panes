@@ -17,10 +17,17 @@ if [ -z "$SLOT" ] || [ -z "$MESSAGE" ]; then
   exit 1
 fi
 
+# Validate slot
+if ! [[ "$SLOT" =~ ^[1-4]$ ]]; then
+  echo "ERROR: Slot must be 1-4, got: $SLOT" >&2
+  exit 1
+fi
+
 PANE="0:0.$SLOT"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Delegate activity check to is-active.sh
+# Returns: 0=active, 1=idle, 2=error
 is_slot_active() {
   "$SCRIPT_DIR/is-active.sh" "$SLOT" 2>/dev/null
 }
@@ -31,7 +38,13 @@ wait_for_idle() {
   local count=0
   echo "Waiting for slot $SLOT to become idle..."
   while [ $count -lt $max_wait ]; do
-    if ! is_slot_active; then
+    is_slot_active
+    local rc=$?
+    if [ $rc -eq 2 ]; then
+      echo "ERROR: Cannot detect activity for slot $SLOT" >&2
+      return 1
+    fi
+    if [ $rc -eq 1 ]; then
       echo "Slot $SLOT is idle"
       return 0
     fi
@@ -61,8 +74,14 @@ wait_for_prompt() {
   return 1
 }
 
-# Wait for idle before sending
-if is_slot_active; then
+# Check activity — distinguish active vs idle vs error
+is_slot_active
+rc=$?
+if [ $rc -eq 2 ]; then
+  echo "ERROR: Cannot check activity for slot $SLOT (tmux error)" >&2
+  exit 1
+fi
+if [ $rc -eq 0 ]; then
   wait_for_idle 120 || exit 1
 fi
 
@@ -96,7 +115,9 @@ if [ "$WAIT" = "--wait" ]; then
   echo "Waiting for completion..."
   if wait_for_prompt 60; then
     sleep 1
-    if is_slot_active; then
+    is_slot_active
+    rc=$?
+    if [ $rc -eq 0 ]; then
       echo "  Slot became active again, waiting for idle..."
       wait_for_idle 120
     fi

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "test -n \"$SESSION_ID\" && bash ${CLAUDE_PLUGIN_ROOT}/scripts/update-slot-state.sh --cleanup-session $SESSION_ID || true",
+            "command": "test -n \"$SESSION_ID\" && bash \"${CLAUDE_PLUGIN_ROOT}/scripts/update-slot-state.sh\" --cleanup-session \"$SESSION_ID\" || true",
             "timeout": 10
           }
         ]

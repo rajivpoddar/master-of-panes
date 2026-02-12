@@ -11,6 +11,13 @@
 
 SLOT="${1:?Usage: capture-output.sh <slot> [lines|--full]}"
 LINES="${2:-20}"
+
+# Validate slot
+if ! [[ "$SLOT" =~ ^[1-4]$ ]]; then
+  echo "ERROR: Slot must be 1-4, got: $SLOT" >&2
+  exit 1
+fi
+
 PANE="0:0.$SLOT"
 
 # Verify pane exists

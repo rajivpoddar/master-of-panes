@@ -8,36 +8,14 @@
 #   get-slot-status.sh              # Status from state files only
 #   get-slot-status.sh --live       # Also check live tmux activity
 
-# Require jq
-if ! command -v jq &>/dev/null; then
-  echo "ERROR: jq is required but not installed. Install with: brew install jq" >&2
-  exit 1
-fi
+source "$(dirname "$0")/slot-lib.sh"
+require_jq
 
-STATE_DIR="$HOME/.claude/tmux-slots"
 FLAG="${1:-}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Ensure state directory exists
-mkdir -p "$STATE_DIR"
-
-# Initialize state files for slots 1-4 if missing
+# Ensure state directory and all slot files exist
 for i in 1 2 3 4; do
-  STATE_FILE="$STATE_DIR/slot-${i}.json"
-  if [ ! -f "$STATE_FILE" ]; then
-    cat > "$STATE_FILE" << EOF
-{
-  "slot": $i,
-  "occupied": false,
-  "pane": "0:0.$i",
-  "session_id": null,
-  "task": null,
-  "branch": null,
-  "assigned_at": null,
-  "last_activity": null
-}
-EOF
-  fi
+  ensure_state_file "$i"
 done
 
 # Print header
@@ -45,8 +23,10 @@ echo "╔══════╤══════════╤═════�
 echo "║ Slot │ Status   │ Task                         │ Branch             ║"
 echo "╠══════╪══════════╪══════════════════════════════╪════════════════════╣"
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 for i in 1 2 3 4; do
-  STATE_FILE="$STATE_DIR/slot-${i}.json"
+  STATE_FILE="$SLOT_STATE_DIR/slot-${i}.json"
 
   occupied=$(jq -r '.occupied // false' "$STATE_FILE" 2>/dev/null)
   task=$(jq -r '.task // "-"' "$STATE_FILE" 2>/dev/null)
@@ -57,8 +37,12 @@ for i in 1 2 3 4; do
     status="OCCUPIED"
     # Live activity check if requested
     if [ "$FLAG" = "--live" ]; then
-      if "$SCRIPT_DIR/is-active.sh" "$i" --fast 2>/dev/null; then
+      "$SCRIPT_DIR/is-active.sh" "$i" --fast 2>/dev/null
+      rc=$?
+      if [ $rc -eq 0 ]; then
         status="ACTIVE  "
+      elif [ $rc -eq 2 ]; then
+        status="ERROR   "
       else
         status="IDLE    "
       fi

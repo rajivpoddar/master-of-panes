@@ -1,27 +1,22 @@
 #!/bin/bash
 # Update slot state — release, set session_id, or update activity timestamp.
 #
-# Used by hooks (SessionEnd auto-cleanup) and skills (manual management).
+# Used by hooks (Stop auto-cleanup) and skills (manual management).
 #
 # Usage:
 #   update-slot-state.sh <slot> --release              # Mark slot as free
 #   update-slot-state.sh <slot> --session <id>         # Set session ID
-#   update-slot-state.sh <slot> --activity              # Update last_activity
-#   update-slot-state.sh --cleanup-session <id>         # Find and release slot by session ID
+#   update-slot-state.sh <slot> --activity             # Update last_activity
+#   update-slot-state.sh --cleanup-session <id>        # Find and release slot by session ID
 
-# Require jq
-if ! command -v jq &>/dev/null; then
-  echo "ERROR: jq is required but not installed. Install with: brew install jq" >&2
-  exit 1
-fi
+source "$(dirname "$0")/slot-lib.sh"
+require_jq
 
 SLOT="$1"
 ACTION="$2"
 VALUE="$3"
 
-STATE_DIR="$HOME/.claude/tmux-slots"
-
-# Handle --cleanup-session (no slot number needed)
+# Handle --cleanup-session (no slot number needed, scans all 4 slots)
 if [ "$SLOT" = "--cleanup-session" ]; then
   SESSION_ID="$ACTION"
   if [ -z "$SESSION_ID" ]; then
@@ -29,17 +24,18 @@ if [ "$SLOT" = "--cleanup-session" ]; then
     exit 1
   fi
 
-  # Find which slot has this session_id
   for i in 1 2 3 4; do
-    STATE_FILE="$STATE_DIR/slot-${i}.json"
+    STATE_FILE="$SLOT_STATE_DIR/slot-${i}.json"
     [ ! -f "$STATE_FILE" ] && continue
     file_session=$(jq -r '.session_id // ""' "$STATE_FILE" 2>/dev/null)
     if [ "$file_session" = "$SESSION_ID" ]; then
       echo "Found session $SESSION_ID in slot $i — releasing"
+      acquire_slot_lock "$i"
       NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-      jq --arg now "$NOW" \
-        '.occupied = false | .session_id = null | .task = null | .branch = null | .assigned_at = null | .last_activity = $now' \
-        "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+      if ! safe_jq_update "$STATE_FILE" --arg now "$NOW" \
+        '.occupied = false | .session_id = null | .task = null | .branch = null | .assigned_at = null | .last_activity = $now'; then
+        exit 1
+      fi
       echo "Slot $i released"
       exit 0
     fi
@@ -59,20 +55,24 @@ if [ -z "$SLOT" ] || [ -z "$ACTION" ]; then
   exit 1
 fi
 
-STATE_FILE="$STATE_DIR/slot-${SLOT}.json"
+validate_slot "$SLOT"
+STATE_FILE="$SLOT_STATE_DIR/slot-${SLOT}.json"
 
 if [ ! -f "$STATE_FILE" ]; then
   echo "ERROR: State file not found: $STATE_FILE" >&2
   exit 1
 fi
 
+# Acquire lock before any read-modify-write
+acquire_slot_lock "$SLOT"
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 case "$ACTION" in
   --release)
-    jq --arg now "$NOW" \
-      '.occupied = false | .session_id = null | .task = null | .branch = null | .assigned_at = null | .last_activity = $now' \
-      "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+    if ! safe_jq_update "$STATE_FILE" --arg now "$NOW" \
+      '.occupied = false | .session_id = null | .task = null | .branch = null | .assigned_at = null | .last_activity = $now'; then
+      exit 1
+    fi
     echo "Slot $SLOT released"
     ;;
 
@@ -81,15 +81,18 @@ case "$ACTION" in
       echo "Usage: update-slot-state.sh <slot> --session <id>" >&2
       exit 1
     fi
-    jq --arg sid "$VALUE" --arg now "$NOW" \
-      '.session_id = $sid | .last_activity = $now' \
-      "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+    if ! safe_jq_update "$STATE_FILE" --arg sid "$VALUE" --arg now "$NOW" \
+      '.session_id = $sid | .last_activity = $now'; then
+      exit 1
+    fi
     echo "Slot $SLOT session set: $VALUE"
     ;;
 
   --activity)
-    jq --arg now "$NOW" '.last_activity = $now' \
-      "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+    if ! safe_jq_update "$STATE_FILE" --arg now "$NOW" \
+      '.last_activity = $now'; then
+      exit 1
+    fi
     echo "Slot $SLOT activity updated"
     ;;
 
