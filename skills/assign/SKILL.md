@@ -21,7 +21,7 @@ Example: /tmux-manager:assign 1 "Fix login bug" feature/fix-login
 Otherwise, run:
 
 ```bash
-bash {{PLUGIN_DIR}}/scripts/assign-slot.sh $ARGUMENTS
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/assign-slot.sh $ARGUMENTS
 ```
 
 ### On success
@@ -32,5 +32,5 @@ Show the assignment confirmation. The slot is now marked as occupied in `~/.clau
 
 If the slot is already occupied, show the error and suggest using `/tmux-manager:status` to see current state, or manually releasing with:
 ```bash
-bash {{PLUGIN_DIR}}/scripts/update-slot-state.sh <slot> --release
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/update-slot-state.sh <slot> --release
 ```

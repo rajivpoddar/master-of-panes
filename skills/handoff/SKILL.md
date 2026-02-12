@@ -15,7 +15,7 @@ Parse `$ARGUMENTS`: first token is the slot number, the rest is the message to s
 ### Step 1: Verify the slot
 
 ```bash
-bash {{PLUGIN_DIR}}/scripts/get-slot-status.sh
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/get-slot-status.sh
 ```
 
 Check that the target slot exists and note its current state.
@@ -23,7 +23,7 @@ Check that the target slot exists and note its current state.
 ### Step 2: Assign the slot (if not already occupied)
 
 ```bash
-bash {{PLUGIN_DIR}}/scripts/assign-slot.sh <slot> "<task summary>"
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/assign-slot.sh <slot> "<task summary>"
 ```
 
 Use the first ~50 characters of the message as the task summary.
@@ -31,7 +31,7 @@ Use the first ~50 characters of the message as the task summary.
 ### Step 3: Send the message
 
 ```bash
-bash {{PLUGIN_DIR}}/scripts/send-to-slot.sh <slot> '<message>'
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-slot.sh <slot> '<message>'
 ```
 
 This waits for the slot to become idle, then sends the message via tmux send-keys.
@@ -41,7 +41,7 @@ This waits for the slot to become idle, then sends the message via tmux send-key
 Wait 3 seconds, then capture recent output to confirm:
 
 ```bash
-bash {{PLUGIN_DIR}}/scripts/capture-output.sh <slot> 5
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture-output.sh <slot> 5
 ```
 
 ### Report

@@ -1,7 +1,7 @@
 {
   "name": "tmux-slot-manager",
-  "version": "0.1.0",
   "description": "Multi-pane tmux slot manager for Claude Code — orchestrate parallel dev sessions across tmux panes with state tracking, auto-cleanup, and slash commands.",
-  "author": "heydonna-app",
-  "license": "MIT"
+  "author": {
+    "name": "Rajiv Ayyangar"
+  }
 }

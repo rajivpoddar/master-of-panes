@@ -18,12 +18,12 @@ Use the Task tool with `run_in_background: true` to launch a monitoring agent. T
 
 1. **Poll every 60 seconds** using:
    ```bash
-   bash {{PLUGIN_DIR}}/scripts/is-active.sh <slot> && echo "ACTIVE" || echo "IDLE"
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/is-active.sh <slot> && echo "ACTIVE" || echo "IDLE"
    ```
 
 2. **Capture recent output** each cycle:
    ```bash
-   bash {{PLUGIN_DIR}}/scripts/capture-output.sh <slot> 20
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture-output.sh <slot> 20
    ```
 
 3. **Detect stages** in the pane output:
@@ -36,7 +36,7 @@ Use the Task tool with `run_in_background: true` to launch a monitoring agent. T
 
 5. **Handle stalls**: If idle for >10 minutes with no new output, send a nudge:
    ```bash
-   bash {{PLUGIN_DIR}}/scripts/send-to-slot.sh <slot> "continue with the current task"
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-slot.sh <slot> "continue with the current task"
    ```
 
 6. **Stop conditions**:

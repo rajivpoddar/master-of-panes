@@ -13,7 +13,7 @@ Display the current state of all tmux dev slots.
 Run the status script:
 
 ```bash
-bash {{PLUGIN_DIR}}/scripts/get-slot-status.sh $ARGUMENTS
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/get-slot-status.sh $ARGUMENTS
 ```
 
 Display the output as-is (it's a pre-formatted ASCII table).

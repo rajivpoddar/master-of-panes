@@ -1,0 +1,16 @@
+{
+  "description": "Auto-cleanup tmux slot state when Claude Code sessions end",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/update-slot-state.sh --cleanup-session ${SESSION_ID:-unknown}",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
