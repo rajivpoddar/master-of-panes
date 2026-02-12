@@ -11,12 +11,13 @@
 
 source "$(dirname "$0")/slot-lib.sh"
 require_jq
+load_config
 
 SLOT="$1"
 ACTION="$2"
 VALUE="$3"
 
-# Handle --cleanup-session (no slot number needed, scans all 4 slots)
+# Handle --cleanup-session (no slot number needed, scans all slots)
 if [ "$SLOT" = "--cleanup-session" ]; then
   SESSION_ID="$ACTION"
   if [ -z "$SESSION_ID" ]; then
@@ -24,7 +25,7 @@ if [ "$SLOT" = "--cleanup-session" ]; then
     exit 1
   fi
 
-  for i in 1 2 3 4; do
+  for i in $(seq 1 "$NUM_SLOTS"); do
     STATE_FILE="$SLOT_STATE_DIR/slot-${i}.json"
     [ ! -f "$STATE_FILE" ] && continue
     file_session=$(jq -r '.session_id // ""' "$STATE_FILE" 2>/dev/null)

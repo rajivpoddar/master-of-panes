@@ -9,7 +9,23 @@ A Claude Code plugin for managing parallel dev sessions across tmux panes.
 claude --plugin-dir /path/to/claude-tmux-manager
 ```
 
-## Slot Layout
+## Setup
+
+On first use, run the setup command to configure your tmux layout:
+
+```
+/tmux-manager:setup
+```
+
+This creates `~/.claude/tmux-slots/config.json` with your settings:
+- Number of dev slots (default: 4)
+- tmux pane prefix (default: `0:0`)
+- Manager pane (default: `0:0.0`)
+- State directory (default: `~/.claude/tmux-slots`)
+
+If you skip setup, the plugin works with defaults (4 slots at `0:0.1` through `0:0.4`).
+
+## Slot Layout (Default)
 
 | Pane    | Role                  |
 |---------|-----------------------|
@@ -19,10 +35,13 @@ claude --plugin-dir /path/to/claude-tmux-manager
 | `0:0.3` | Dev slot 3            |
 | `0:0.4` | Dev slot 4            |
 
+Custom layouts are configured via `/tmux-manager:setup`.
+
 ## Slash Commands
 
 | Command                  | Description                                      |
 |--------------------------|--------------------------------------------------|
+| `/tmux-manager:setup`    | Configure slots, pane layout, and state directory |
 | `/tmux-manager:status`   | Show all slot status as ASCII table              |
 | `/tmux-manager:assign`   | Allocate a slot with task and branch             |
 | `/tmux-manager:handoff`  | Send a task instruction to a slot                |

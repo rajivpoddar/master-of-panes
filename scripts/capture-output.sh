@@ -18,6 +18,7 @@
 #   capture-output.sh <slot> <lines> --raw  # Last N lines (includes prompt line)
 
 source "$(dirname "$0")/slot-lib.sh"
+load_config
 
 SLOT="${1:?Usage: capture-output.sh <slot> [lines|--full] [--raw]}"
 shift
@@ -33,22 +34,18 @@ for arg in "$@"; do
   esac
 done
 
-# Validate slot
-if ! [[ "$SLOT" =~ ^[1-4]$ ]]; then
-  echo "ERROR: Slot must be 1-4, got: $SLOT" >&2
-  exit 1
-fi
+validate_slot "$SLOT"
 
-PANE="0:0.$SLOT"
+PANE=$(slot_pane "$SLOT")
 
 # Verify pane exists
-if ! tmux has-session -t "0" 2>/dev/null; then
-  echo "ERROR: tmux session 0 not found" >&2
+if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+  echo "ERROR: tmux session $TMUX_SESSION not found" >&2
   exit 1
 fi
 
-if ! tmux list-panes -t "0:0" -F '#{pane_index}' 2>/dev/null | grep -q "^${SLOT}$"; then
-  echo "ERROR: Pane $SLOT not found in window 0:0" >&2
+if ! tmux list-panes -t "$TMUX_WINDOW" -F '#{pane_index}' 2>/dev/null | grep -q "^${SLOT}$"; then
+  echo "ERROR: Pane $SLOT not found in window $TMUX_WINDOW" >&2
   exit 1
 fi
 

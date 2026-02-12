@@ -16,16 +16,17 @@ BRANCH="${3:-}"
 
 source "$(dirname "$0")/slot-lib.sh"
 require_jq
+load_config
 validate_slot "$SLOT"
 
 STATE_FILE="$SLOT_STATE_DIR/slot-${SLOT}.json"
-PANE="0:0.$SLOT"
+PANE=$(slot_pane "$SLOT")
 
 ensure_state_file "$SLOT"
 
 # Verify tmux pane exists (outside lock — read-only check)
-if ! tmux list-panes -t "0:0" -F '#{pane_index}' 2>/dev/null | grep -q "^${SLOT}$"; then
-  echo "ERROR: tmux pane 0:0.$SLOT does not exist" >&2
+if ! tmux list-panes -t "$TMUX_WINDOW" -F '#{pane_index}' 2>/dev/null | grep -q "^${SLOT}$"; then
+  echo "ERROR: tmux pane $PANE does not exist" >&2
   exit 1
 fi
 

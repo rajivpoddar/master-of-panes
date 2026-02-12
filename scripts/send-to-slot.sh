@@ -13,6 +13,9 @@ SLOT="$1"
 MESSAGE="$2"
 shift 2 2>/dev/null
 
+source "$(dirname "$0")/slot-lib.sh"
+load_config
+
 WAIT=""
 FORCE=""
 for arg in "$@"; do
@@ -27,13 +30,9 @@ if [ -z "$SLOT" ] || [ -z "$MESSAGE" ]; then
   exit 1
 fi
 
-# Validate slot
-if ! [[ "$SLOT" =~ ^[1-4]$ ]]; then
-  echo "ERROR: Slot must be 1-4, got: $SLOT" >&2
-  exit 1
-fi
+validate_slot "$SLOT"
 
-PANE="0:0.$SLOT"
+PANE=$(slot_pane "$SLOT")
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Delegate activity check to is-active.sh

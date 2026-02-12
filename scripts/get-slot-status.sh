@@ -16,11 +16,12 @@
 
 source "$(dirname "$0")/slot-lib.sh"
 require_jq
+load_config
 
 FLAG="${1:-}"
 
 # Ensure state directory and all slot files exist
-for i in 1 2 3 4; do
+for i in $(seq 1 "$NUM_SLOTS"); do
   ensure_state_file "$i"
 done
 
@@ -31,7 +32,7 @@ echo "╠══════╪══════════╪═════�
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-for i in 1 2 3 4; do
+for i in $(seq 1 "$NUM_SLOTS"); do
   STATE_FILE="$SLOT_STATE_DIR/slot-${i}.json"
 
   occupied=$(jq -r '.occupied // false' "$STATE_FILE" 2>/dev/null)

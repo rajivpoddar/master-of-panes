@@ -22,13 +22,16 @@
 SLOT="${1:?Usage: is-active.sh <slot> [-v|--debug|--fast]}"
 FLAG="${2:-}"
 
-# Validate slot
-if ! [[ "$SLOT" =~ ^[1-4]$ ]]; then
-  echo "ERROR: Slot must be 1-4, got: $SLOT" >&2
+source "$(dirname "$0")/slot-lib.sh"
+load_config
+
+# Validate slot (exit 2 for errors in this script)
+if ! [[ "$SLOT" =~ ^[0-9]+$ ]] || [ "$SLOT" -lt 1 ] || [ "$SLOT" -gt "$NUM_SLOTS" ]; then
+  echo "ERROR: Slot must be 1-$NUM_SLOTS, got: $SLOT" >&2
   exit 2
 fi
 
-PANE="0:0.$SLOT"
+PANE=$(slot_pane "$SLOT")
 
 # Capture pane with ANSI escape codes for color detection
 output=$(tmux capture-pane -e -t "$PANE" -p 2>/dev/null)

@@ -29,11 +29,9 @@ SLOT="${1:?Usage: run-and-wait.sh <slot> <command> [--timeout 600] [--poll 5]}"
 COMMAND="${2:?Provide a command to send}"
 shift 2
 
-# Validate slot
-if ! [[ "$SLOT" =~ ^[1-4]$ ]]; then
-  echo "ERROR: Slot must be 1-4, got: $SLOT" >&2
-  exit 1
-fi
+source "$(dirname "$0")/slot-lib.sh"
+load_config
+validate_slot "$SLOT"
 
 TIMEOUT=600   # Max seconds to wait for completion
 POLL=5        # Seconds between idle checks
@@ -51,14 +49,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SEND="$SCRIPT_DIR/send-to-slot.sh"
 IS_ACTIVE="$SCRIPT_DIR/is-active.sh"
 CAPTURE="$SCRIPT_DIR/capture-output.sh"
-PANE="0:0.$SLOT"
+PANE=$(slot_pane "$SLOT")
 
 # Verify pane exists
-if ! tmux has-session -t 0 2>/dev/null; then
-  echo "ERROR: tmux session 0 not found" >&2
+if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+  echo "ERROR: tmux session $TMUX_SESSION not found" >&2
   exit 1
 fi
-if ! tmux list-panes -t 0:0 -F '#{pane_index}' 2>/dev/null | grep -q "^${SLOT}$"; then
+if ! tmux list-panes -t "$TMUX_WINDOW" -F '#{pane_index}' 2>/dev/null | grep -q "^${SLOT}$"; then
   echo "ERROR: Pane $PANE not found" >&2
   exit 1
 fi

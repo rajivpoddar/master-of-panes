@@ -1,11 +1,53 @@
 #!/bin/bash
 # Shared library for tmux slot management scripts.
 #
-# Provides: slot validation, jq dependency check, file locking, safe JSON writes.
+# Provides: config loading, slot validation, jq dependency check, file locking,
+# safe JSON writes, ghost text stripping.
 # Source this from other scripts: source "$(dirname "$0")/slot-lib.sh"
 
 SLOT_STATE_DIR="$HOME/.claude/tmux-slots"
 _SLOT_LOCK_DIR=""
+
+# Config defaults — overridden by load_config() if config.json exists.
+NUM_SLOTS=4
+PANE_PREFIX="0:0"
+MANAGER_PANE="0:0.0"
+
+# Derived from PANE_PREFIX — set by load_config().
+TMUX_SESSION=""
+TMUX_WINDOW=""
+
+_CONFIG_LOADED=false
+
+# Load configuration from config.json, or use defaults.
+# Prints a one-time setup suggestion if config.json doesn't exist.
+load_config() {
+  if [ "$_CONFIG_LOADED" = true ]; then
+    return 0
+  fi
+  _CONFIG_LOADED=true
+
+  local config_file="$SLOT_STATE_DIR/config.json"
+  if [ -f "$config_file" ]; then
+    if command -v jq &>/dev/null; then
+      NUM_SLOTS=$(jq -r '.slots // 4' "$config_file" 2>/dev/null)
+      PANE_PREFIX=$(jq -r '.pane_prefix // "0:0"' "$config_file" 2>/dev/null)
+      MANAGER_PANE=$(jq -r '.manager_pane // "0:0.0"' "$config_file" 2>/dev/null)
+      local custom_dir
+      custom_dir=$(jq -r '.state_dir // ""' "$config_file" 2>/dev/null)
+      if [ -n "$custom_dir" ] && [ "$custom_dir" != "" ] && [ "$custom_dir" != "null" ]; then
+        SLOT_STATE_DIR="${custom_dir/#\~/$HOME}"
+      fi
+    fi
+  else
+    echo "Note: No config found. Using defaults ($NUM_SLOTS slots, pane prefix $PANE_PREFIX)." >&2
+    echo "  Run /tmux-manager:setup to configure." >&2
+  fi
+
+  # Derive tmux session and window from pane prefix
+  TMUX_SESSION="${PANE_PREFIX%%:*}"
+  TMUX_WINDOW="$PANE_PREFIX"
+}
 
 # Fail if jq is not installed.
 require_jq() {
@@ -15,11 +57,11 @@ require_jq() {
   fi
 }
 
-# Validate slot number is 1-4. Prevents path traversal and malformed JSON.
+# Validate slot number is 1..NUM_SLOTS. Prevents path traversal and malformed JSON.
 validate_slot() {
   local slot="$1"
-  if ! [[ "$slot" =~ ^[1-4]$ ]]; then
-    echo "ERROR: Slot must be 1-4, got: $slot" >&2
+  if ! [[ "$slot" =~ ^[0-9]+$ ]] || [ "$slot" -lt 1 ] || [ "$slot" -gt "$NUM_SLOTS" ]; then
+    echo "ERROR: Slot must be 1-$NUM_SLOTS, got: $slot" >&2
     exit 1
   fi
 }
@@ -89,6 +131,11 @@ strip_prompt_line() {
   fi
 }
 
+# Build the pane address for a slot: "${PANE_PREFIX}.<slot>"
+slot_pane() {
+  echo "${PANE_PREFIX}.$1"
+}
+
 # Ensure state directory and a slot's state file exist.
 ensure_state_file() {
   local slot="$1"
@@ -99,7 +146,7 @@ ensure_state_file() {
 {
   "slot": $slot,
   "occupied": false,
-  "pane": "0:0.$slot",
+  "pane": "${PANE_PREFIX}.$slot",
   "session_id": null,
   "task": null,
   "branch": null,

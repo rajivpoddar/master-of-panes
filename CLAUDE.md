@@ -25,21 +25,38 @@ claude-tmux-manager/
 ├── .claude-plugin/
 │   └── plugin.json           # Plugin manifest
 ├── skills/
+│   ├── setup/SKILL.md        # /tmux-manager:setup — configure slots and layout
 │   ├── status/SKILL.md       # /tmux-manager:status — show all slot status
 │   ├── assign/SKILL.md       # /tmux-manager:assign N — allocate slot
 │   ├── handoff/SKILL.md      # /tmux-manager:handoff N — hand off work to slot
 │   └── monitor/SKILL.md      # /tmux-manager:monitor N GOAL — background supervisor
 ├── hooks/
-│   └── hooks.json            # SessionEnd → auto-mark slot idle
+│   └── hooks.json            # Stop → auto-mark slot idle
 ├── scripts/
-│   ├── assign-slot.sh        # Allocate slot, update state, spawn session
+│   ├── slot-lib.sh           # Shared library (config, locking, validation)
+│   ├── assign-slot.sh        # Allocate slot, update state
 │   ├── get-slot-status.sh    # Read state files, output ASCII table
 │   ├── send-to-slot.sh       # Forward message to a slot's tmux pane
 │   ├── is-active.sh          # Check if a slot is idle or active
 │   ├── capture-output.sh     # Capture recent output from a slot
+│   ├── run-and-wait.sh       # Send command and block until completion
 │   └── update-slot-state.sh  # Clean up state on session end
 └── README.md
 ```
+
+## Configuration
+
+`~/.claude/tmux-slots/config.json` (created by `/tmux-manager:setup`):
+```json
+{
+  "slots": 4,
+  "pane_prefix": "0:0",
+  "manager_pane": "0:0.0",
+  "state_dir": "~/.claude/tmux-slots"
+}
+```
+
+If no config exists, defaults are used (4 slots, pane prefix `0:0`). All scripts read config via `load_config()` in `slot-lib.sh`.
 
 ## State File Format
 
@@ -69,17 +86,18 @@ Extract the generic parts, remove heydonna-specific references (issue labels, br
 ## Key Technical Details
 
 ### tmux Pane Addressing
+- Configurable via `config.json` (`pane_prefix` and `manager_pane`)
 - Default layout: session 0, window 0, panes 0-4
 - Pane 0 (0:0.0) = PM/orchestrator
-- Panes 1-4 (0:0.1 through 0:0.4) = dev slots
+- Panes 1-N (0:0.1 through 0:0.N) = dev slots
 - Address format: `session:window.pane`
+- Scripts derive session/window from `PANE_PREFIX`: `TMUX_SESSION="${PANE_PREFIX%%:*}"`
 
 ### Detecting Idle vs Active
 The `is-active.sh` script works by:
-1. Capture cursor position
-2. Wait 2 seconds
-3. Re-capture cursor position
-4. If cursor moved → ACTIVE; if same → IDLE
+1. Chevron color: gray ❯ (38;2;153;153;153) = ACTIVE, white ❯ = IDLE
+2. Content hashing: captures pane twice 1.5s apart, compares MD5
+3. Exit codes: 0=active, 1=idle, 2=error
 
 ### Sending Messages to Slots
 The `send-to-slot.sh` script:
