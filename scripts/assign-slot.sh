@@ -15,8 +15,15 @@ SLOT="${1:?Usage: assign-slot.sh <slot> <task> [branch]}"
 TASK="${2:?Usage: assign-slot.sh <slot> <task> [branch]}"
 BRANCH="${3:-}"
 
+# Require jq
+if ! command -v jq &>/dev/null; then
+  echo "ERROR: jq is required but not installed. Install with: brew install jq" >&2
+  exit 1
+fi
+
 STATE_DIR="$HOME/.claude/tmux-slots"
 STATE_FILE="$STATE_DIR/slot-${SLOT}.json"
+LOCK_DIR="$STATE_DIR/.slot-${SLOT}.lock"
 PANE="0:0.$SLOT"
 
 # Ensure state directory exists
@@ -38,7 +45,20 @@ if [ ! -f "$STATE_FILE" ]; then
 EOF
 fi
 
-# Check if slot is already occupied
+# Verify tmux pane exists (outside lock — read-only check)
+if ! tmux list-panes -t "0:0" -F '#{pane_index}' 2>/dev/null | grep -q "^${SLOT}$"; then
+  echo "ERROR: tmux pane 0:0.$SLOT does not exist" >&2
+  exit 1
+fi
+
+# Acquire exclusive lock using mkdir (atomic on all platforms, works on macOS)
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "ERROR: Slot $SLOT is being assigned by another process" >&2
+  exit 1
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+
+# Check if slot is already occupied (inside lock)
 occupied=$(jq -r '.occupied // false' "$STATE_FILE" 2>/dev/null)
 if [ "$occupied" = "true" ]; then
   current_task=$(jq -r '.task // "unknown"' "$STATE_FILE" 2>/dev/null)
@@ -47,13 +67,7 @@ if [ "$occupied" = "true" ]; then
   exit 1
 fi
 
-# Verify tmux pane exists
-if ! tmux list-panes -t "0:0" -F '#{pane_index}' 2>/dev/null | grep -q "^${SLOT}$"; then
-  echo "ERROR: tmux pane 0:0.$SLOT does not exist" >&2
-  exit 1
-fi
-
-# Update state file
+# Update state file (still under lock)
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 jq \
   --arg task "$TASK" \
@@ -61,6 +75,8 @@ jq \
   --arg now "$NOW" \
   '.occupied = true | .task = $task | .branch = (if $branch == "" then null else $branch end) | .assigned_at = $now | .last_activity = $now' \
   "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+
+# Lock released by EXIT trap (rmdir)
 
 echo "Slot $SLOT assigned: $TASK"
 [ -n "$BRANCH" ] && echo "  Branch: $BRANCH"

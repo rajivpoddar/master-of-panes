@@ -9,6 +9,12 @@
 #   update-slot-state.sh <slot> --activity              # Update last_activity
 #   update-slot-state.sh --cleanup-session <id>         # Find and release slot by session ID
 
+# Require jq
+if ! command -v jq &>/dev/null; then
+  echo "ERROR: jq is required but not installed. Install with: brew install jq" >&2
+  exit 1
+fi
+
 SLOT="$1"
 ACTION="$2"
 VALUE="$3"

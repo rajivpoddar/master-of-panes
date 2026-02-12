@@ -66,23 +66,25 @@ if is_slot_active; then
   wait_for_idle 120 || exit 1
 fi
 
-# Detect INSERT/NORMAL mode and send appropriately
+# Detect INSERT/NORMAL mode and send appropriately.
+# Use -l (literal) flag for message text to prevent shell metacharacters
+# and tmux key binding names (e.g., C-c, Space) from being interpreted.
 PANE_BOTTOM=$(tmux capture-pane -t "$PANE" -p | tail -5)
 if echo "$PANE_BOTTOM" | grep -q 'INSERT'; then
   # Already in INSERT mode — send directly
-  tmux send-keys -t "$PANE" "$MESSAGE"
+  tmux send-keys -t "$PANE" -l "$MESSAGE"
   sleep 0.5
   tmux send-keys -t "$PANE" Enter
 elif echo "$PANE_BOTTOM" | grep -q 'NORMAL'; then
   # In NORMAL mode — press 'i' first to enter INSERT
   tmux send-keys -t "$PANE" i
   sleep 0.3
-  tmux send-keys -t "$PANE" "$MESSAGE"
+  tmux send-keys -t "$PANE" -l "$MESSAGE"
   sleep 0.5
   tmux send-keys -t "$PANE" Enter
 else
   # Can't determine mode — assume INSERT (default Claude Code state)
-  tmux send-keys -t "$PANE" "$MESSAGE"
+  tmux send-keys -t "$PANE" -l "$MESSAGE"
   sleep 0.5
   tmux send-keys -t "$PANE" Enter
 fi

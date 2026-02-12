@@ -8,6 +8,12 @@
 #   get-slot-status.sh              # Status from state files only
 #   get-slot-status.sh --live       # Also check live tmux activity
 
+# Require jq
+if ! command -v jq &>/dev/null; then
+  echo "ERROR: jq is required but not installed. Install with: brew install jq" >&2
+  exit 1
+fi
+
 STATE_DIR="$HOME/.claude/tmux-slots"
 FLAG="${1:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
