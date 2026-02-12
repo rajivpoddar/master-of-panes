@@ -4,6 +4,12 @@
 # Reads state files from ~/.claude/tmux-slots/ and optionally
 # checks live activity via is-active.sh.
 #
+# GHOST TEXT SAFETY: The --live flag uses is-active.sh for activity detection,
+# which is immune to ghost text (uses chevron color + content hashing, never
+# reads prompt-line text). This script does NOT read or report any text from
+# the ❯ prompt line. Status is derived from JSON state files and color-based
+# activity detection only.
+#
 # Usage:
 #   get-slot-status.sh              # Status from state files only
 #   get-slot-status.sh --live       # Also check live tmux activity

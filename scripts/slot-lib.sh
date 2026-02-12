@@ -61,6 +61,34 @@ safe_jq_update() {
   fi
 }
 
+# Strip the prompt line and everything after it from tmux capture-pane output.
+#
+# Ghost text safety: Claude Code's autocomplete predictions appear on the ❯
+# prompt line and are INDISTINGUISHABLE from real input in plain capture-pane
+# output. This function removes the last ❯ line and everything below it,
+# returning only trusted output (text above the prompt).
+#
+# Usage: tmux capture-pane -t "$PANE" -p | strip_prompt_line
+strip_prompt_line() {
+  local input
+  input=$(cat)
+
+  # Find the last line number containing ❯
+  local last_chevron
+  last_chevron=$(echo "$input" | grep -n '❯' | tail -1 | cut -d: -f1)
+
+  if [ -z "$last_chevron" ]; then
+    # No ❯ found — output everything (not a standard Claude Code prompt)
+    echo "$input"
+  elif [ "$last_chevron" -le 1 ]; then
+    # ❯ is on the first line — nothing safe above it
+    :
+  else
+    # Output everything before the last ❯ line
+    echo "$input" | head -n $((last_chevron - 1))
+  fi
+}
+
 # Ensure state directory and a slot's state file exist.
 ensure_state_file() {
   local slot="$1"
