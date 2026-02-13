@@ -1,12 +1,12 @@
 {
-  "description": "Auto-cleanup tmux slot state when Claude Code sessions end",
+  "description": "Auto-cleanup tmux pane state when Claude Code sessions end",
   "hooks": {
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "test -n \"$SESSION_ID\" && bash \"${CLAUDE_PLUGIN_ROOT}/scripts/update-slot-state.sh\" --cleanup-session \"$SESSION_ID\" || true",
+            "command": "test -n \"$SESSION_ID\" && bash \"${CLAUDE_PLUGIN_ROOT}/scripts/update-pane-state.sh\" --cleanup-session \"$SESSION_ID\" || true",
             "timeout": 10
           }
         ]

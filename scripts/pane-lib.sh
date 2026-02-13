@@ -1,21 +1,19 @@
 #!/bin/bash
-# Shared library for tmux slot management scripts.
+# Shared library for tmux pane management scripts.
 #
-# Provides: config loading, slot validation, jq dependency check, file locking,
+# Provides: config loading, pane validation, jq dependency check, file locking,
 # safe JSON writes, ghost text stripping.
-# Source this from other scripts: source "$(dirname "$0")/slot-lib.sh"
+# Source this from other scripts: source "$(dirname "$0")/pane-lib.sh"
 
-SLOT_STATE_DIR="$HOME/.claude/tmux-slots"
-_SLOT_LOCK_DIR=""
+PANE_STATE_DIR="$HOME/.claude/tmux-panes"
+_PANE_LOCK_DIR=""
 
 # Config defaults — overridden by load_config() if config.json exists.
-NUM_SLOTS=4
-PANE_PREFIX="0:0"
+NUM_DEV_PANES=4
 MANAGER_PANE="0:0.0"
 
-# Derived from PANE_PREFIX — set by load_config().
-TMUX_SESSION=""
-TMUX_WINDOW=""
+# Newline-separated list of dev pane addresses (bash 3.x safe, no arrays).
+_DEV_PANE_LIST=""
 
 _CONFIG_LOADED=false
 
@@ -28,7 +26,7 @@ load_config() {
   fi
   _CONFIG_LOADED=true
 
-  local config_file="$SLOT_STATE_DIR/config.json"
+  local config_file="$PANE_STATE_DIR/config.json"
   if [ -f "$config_file" ]; then
     if command -v jq &>/dev/null; then
       # Read file once into memory — prevents partial-read race with writers
@@ -38,36 +36,48 @@ load_config() {
         config_content=""
       }
       if [ -n "$config_content" ]; then
-        NUM_SLOTS=$(echo "$config_content" | jq -r '.slots // 4' 2>/dev/null) || NUM_SLOTS=4
-        PANE_PREFIX=$(echo "$config_content" | jq -r '.pane_prefix // "0:0"' 2>/dev/null) || PANE_PREFIX="0:0"
-        MANAGER_PANE=$(echo "$config_content" | jq -r '.manager_pane // "0:0.0"' 2>/dev/null) || MANAGER_PANE="0:0.0"
+        MANAGER_PANE=$(echo "$config_content" | jq -r '.panes.manager // "0:0.0"' 2>/dev/null) || MANAGER_PANE="0:0.0"
+        _DEV_PANE_LIST=$(echo "$config_content" | jq -r '.panes.dev[]' 2>/dev/null) || _DEV_PANE_LIST=""
+        NUM_DEV_PANES=$(echo "$_DEV_PANE_LIST" | grep -c .) || NUM_DEV_PANES=0
+
         local custom_dir
         custom_dir=$(echo "$config_content" | jq -r '.state_dir // ""' 2>/dev/null) || custom_dir=""
         if [ -n "$custom_dir" ] && [ "$custom_dir" != "null" ]; then
-          SLOT_STATE_DIR="${custom_dir/#\~/$HOME}"
+          PANE_STATE_DIR="${custom_dir/#\~/$HOME}"
         fi
       fi
     fi
   else
-    echo "Note: No config found. Using defaults ($NUM_SLOTS slots, pane prefix $PANE_PREFIX)." >&2
-    echo "  Run /master-of-panes:setup to configure." >&2
+    echo "Note: No config found. Using defaults ($NUM_DEV_PANES dev panes, manager $MANAGER_PANE)." >&2
+    echo "  Run /master-of-panes:pane-setup to configure." >&2
   fi
 
-  # Validate NUM_SLOTS is a positive integer
-  if ! [[ "$NUM_SLOTS" =~ ^[0-9]+$ ]] || [ "$NUM_SLOTS" -lt 1 ] || [ "$NUM_SLOTS" -gt 99 ]; then
-    echo "WARNING: Invalid slots value '$NUM_SLOTS' in config. Using default: 4" >&2
-    NUM_SLOTS=4
+  # Build default dev pane list if config didn't provide one
+  if [ -z "$_DEV_PANE_LIST" ] || [ "$NUM_DEV_PANES" -eq 0 ]; then
+    NUM_DEV_PANES=4
+    _DEV_PANE_LIST="0:0.1
+0:0.2
+0:0.3
+0:0.4"
   fi
 
-  # Validate PANE_PREFIX contains exactly one colon (session:window format)
-  if ! [[ "$PANE_PREFIX" =~ ^[^:]+:[^:]+$ ]]; then
-    echo "WARNING: Invalid pane_prefix '$PANE_PREFIX' (must be 'session:window'). Using default: 0:0" >&2
-    PANE_PREFIX="0:0"
+  # Validate NUM_DEV_PANES
+  if ! [[ "$NUM_DEV_PANES" =~ ^[0-9]+$ ]] || [ "$NUM_DEV_PANES" -lt 1 ] || [ "$NUM_DEV_PANES" -gt 99 ]; then
+    echo "WARNING: Invalid dev pane count '$NUM_DEV_PANES'. Using default: 4" >&2
+    NUM_DEV_PANES=4
+    _DEV_PANE_LIST="0:0.1
+0:0.2
+0:0.3
+0:0.4"
   fi
 
-  # Derive tmux session and window from pane prefix
-  TMUX_SESSION="${PANE_PREFIX%%:*}"
-  TMUX_WINDOW="$PANE_PREFIX"
+  # Validate each dev pane address contains a dot (session:window.pane format)
+  local addr
+  while IFS= read -r addr; do
+    if [[ -n "$addr" ]] && ! [[ "$addr" == *.* ]]; then
+      echo "WARNING: Dev pane address '$addr' missing dot separator (expected session:window.pane)" >&2
+    fi
+  done <<< "$_DEV_PANE_LIST"
 }
 
 # Fail if jq is not installed.
@@ -78,32 +88,32 @@ require_jq() {
   fi
 }
 
-# Check if slot number is valid (1..NUM_SLOTS). Returns 1 on failure (does not exit).
+# Check if pane number is valid (1..NUM_DEV_PANES). Returns 1 on failure (does not exit).
 # Use this when the caller needs to choose its own exit code (e.g., is-active.sh exits 2).
-check_slot() {
-  local slot="$1"
-  if ! [[ "$slot" =~ ^[0-9]+$ ]] || [ "$slot" -lt 1 ] || [ "$slot" -gt "$NUM_SLOTS" ]; then
-    echo "ERROR: Slot must be 1-$NUM_SLOTS, got: $slot" >&2
+check_pane() {
+  local pane_num="$1"
+  if ! [[ "$pane_num" =~ ^[0-9]+$ ]] || [ "$pane_num" -lt 1 ] || [ "$pane_num" -gt "$NUM_DEV_PANES" ]; then
+    echo "ERROR: Pane must be 1-$NUM_DEV_PANES, got: $pane_num" >&2
     return 1
   fi
 }
 
-# Validate slot number is 1..NUM_SLOTS. Exits 1 on failure.
+# Validate pane number is 1..NUM_DEV_PANES. Exits 1 on failure.
 # For scripts where exit 1 ≠ a meaningful status, use this directly.
-validate_slot() {
-  check_slot "$1" || exit 1
+validate_pane() {
+  check_pane "$1" || exit 1
 }
 
-# Acquire per-slot exclusive lock using mkdir (atomic on macOS + Linux).
+# Acquire per-pane exclusive lock using mkdir (atomic on macOS + Linux).
 # Sets EXIT trap to auto-release. Only one lock can be held per process.
-acquire_slot_lock() {
-  local slot="$1"
-  _SLOT_LOCK_DIR="$SLOT_STATE_DIR/.slot-${slot}.lock"
-  if ! mkdir "$_SLOT_LOCK_DIR" 2>/dev/null; then
-    echo "ERROR: Slot $slot is locked by another process" >&2
+acquire_pane_lock() {
+  local pane_num="$1"
+  _PANE_LOCK_DIR="$PANE_STATE_DIR/.pane-${pane_num}.lock"
+  if ! mkdir "$_PANE_LOCK_DIR" 2>/dev/null; then
+    echo "ERROR: Pane $pane_num is locked by another process" >&2
     exit 1
   fi
-  trap 'rmdir "$_SLOT_LOCK_DIR" 2>/dev/null' EXIT
+  trap 'rmdir "$_PANE_LOCK_DIR" 2>/dev/null' EXIT
 }
 
 # Atomically update a JSON state file using jq.
@@ -138,7 +148,7 @@ safe_jq_update() {
 # output. This function removes the last ❯ line and everything below it,
 # returning only trusted output (text above the prompt).
 #
-# Usage: tmux capture-pane -t "$PANE" -p | strip_prompt_line
+# Usage: tmux capture-pane -t "$PANE_ADDR" -p | strip_prompt_line
 strip_prompt_line() {
   local input
   input=$(cat)
@@ -159,25 +169,34 @@ strip_prompt_line() {
   fi
 }
 
-# Build the pane address for a slot: "${PANE_PREFIX}.<slot>"
-slot_pane() {
-  echo "${PANE_PREFIX}.$1"
+# Look up the tmux address for dev pane N from _DEV_PANE_LIST.
+pane_address() {
+  echo "$_DEV_PANE_LIST" | sed -n "${1}p"
 }
 
-# Ensure state directory and a slot's state file exist.
+# Validate that a tmux pane exists at the given address.
+# Uses tmux display-message which is a single-command check.
+# Returns 0 if pane exists, 1 if not.
+pane_exists() {
+  tmux display-message -p -t "$1" '#{pane_id}' &>/dev/null
+}
+
+# Ensure state directory and a pane's state file exist.
 # Uses mktemp + mv to prevent torn writes from concurrent startup.
-ensure_state_file() {
-  local slot="$1"
-  mkdir -p "$SLOT_STATE_DIR"
-  local state_file="$SLOT_STATE_DIR/slot-${slot}.json"
+ensure_pane_state() {
+  local pane_num="$1"
+  mkdir -p "$PANE_STATE_DIR"
+  local state_file="$PANE_STATE_DIR/pane-${pane_num}.json"
   if [ ! -f "$state_file" ]; then
+    local addr
+    addr=$(pane_address "$pane_num")
     local tmp
     tmp=$(mktemp "${state_file}.XXXXXX") || return 1
     cat > "$tmp" << EOF
 {
-  "slot": $slot,
+  "pane": $pane_num,
+  "address": "$addr",
   "occupied": false,
-  "pane": "${PANE_PREFIX}.$slot",
   "session_id": null,
   "task": null,
   "branch": null,

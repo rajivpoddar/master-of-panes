@@ -5,8 +5,8 @@ A Claude Code plugin for managing parallel dev sessions across tmux panes.
 ## What This Is
 
 A reusable Claude Code plugin that provides:
-- Slash commands for slot management (`/master-of-panes:status`, `:assign`, `:handoff`, `:monitor`)
-- JSON state files for tracking slot occupancy (`~/.claude/tmux-slots/`)
+- Slash commands for pane management (`/master-of-panes:pane-status`, `:pane-assign`, `:pane-handoff`, `:pane-monitor`)
+- JSON state files for tracking pane occupancy (`~/.claude/tmux-panes/`)
 - SessionEnd hooks for auto-cleanup when sessions finish
 - Shell scripts for tmux orchestration (send-keys, capture-pane, is-active)
 
@@ -14,9 +14,9 @@ A reusable Claude Code plugin that provides:
 
 1. **No project-specific references** — this is generic, works with any Claude Code project
 2. **Shell scripts do tmux work** — Claude Code can't manage tmux directly, scripts bridge the gap
-3. **JSON state files** — reliable tracking in `~/.claude/tmux-slots/slot-N.json`
+3. **JSON state files** — reliable tracking in `~/.claude/tmux-panes/pane-N.json`
 4. **Skills provide the UI** — slash commands invoke shell scripts and format output
-5. **Hooks provide automation** — SessionEnd cleans up stale slots
+5. **Hooks provide automation** — SessionEnd cleans up stale panes
 
 ## Plugin Structure
 
@@ -25,47 +25,48 @@ master-of-panes/
 ├── .claude-plugin/
 │   └── plugin.json           # Plugin manifest
 ├── skills/
-│   ├── setup/SKILL.md        # /master-of-panes:setup — configure slots and layout
-│   ├── status/SKILL.md       # /master-of-panes:status — show all slot status
-│   ├── assign/SKILL.md       # /master-of-panes:assign N — allocate slot
-│   ├── handoff/SKILL.md      # /master-of-panes:handoff N — hand off work to slot
-│   └── monitor/SKILL.md      # /master-of-panes:monitor N GOAL — background supervisor
+│   ├── pane-setup/SKILL.md   # /master-of-panes:pane-setup — configure panes and layout
+│   ├── pane-status/SKILL.md  # /master-of-panes:pane-status — show all pane status
+│   ├── pane-assign/SKILL.md  # /master-of-panes:pane-assign N — allocate pane
+│   ├── pane-handoff/SKILL.md # /master-of-panes:pane-handoff N — hand off work to pane
+│   └── pane-monitor/SKILL.md # /master-of-panes:pane-monitor N GOAL — background supervisor
 ├── hooks/
-│   └── hooks.json            # Stop → auto-mark slot idle
+│   └── hooks.json            # Stop → auto-mark pane idle
 ├── scripts/
-│   ├── slot-lib.sh           # Shared library (config, locking, validation)
-│   ├── assign-slot.sh        # Allocate slot, update state
-│   ├── get-slot-status.sh    # Read state files, output ASCII table
-│   ├── send-to-slot.sh       # Forward message to a slot's tmux pane
-│   ├── is-active.sh          # Check if a slot is idle or active
-│   ├── capture-output.sh     # Capture recent output from a slot
+│   ├── pane-lib.sh           # Shared library (config, locking, validation)
+│   ├── assign-pane.sh        # Allocate pane, update state
+│   ├── get-pane-status.sh    # Read state files, output ASCII table
+│   ├── send-to-pane.sh       # Forward message to a dev pane
+│   ├── is-active.sh          # Check if a pane is idle or active
+│   ├── capture-output.sh     # Capture recent output from a pane
 │   ├── run-and-wait.sh       # Send command and block until completion
-│   └── update-slot-state.sh  # Clean up state on session end
+│   └── update-pane-state.sh  # Clean up state on session end
 └── README.md
 ```
 
 ## Configuration
 
-`~/.claude/tmux-slots/config.json` (created by `/master-of-panes:setup`):
+`~/.claude/tmux-panes/config.json` (created by `/master-of-panes:pane-setup`):
 ```json
 {
-  "slots": 4,
-  "pane_prefix": "0:0",
-  "manager_pane": "0:0.0",
-  "state_dir": "~/.claude/tmux-slots"
+  "panes": {
+    "manager": "0:0.0",
+    "dev": ["0:0.1", "0:0.2", "0:0.3", "0:0.4"]
+  },
+  "state_dir": "~/.claude/tmux-panes"
 }
 ```
 
-If no config exists, defaults are used (4 slots, pane prefix `0:0`). All scripts read config via `load_config()` in `slot-lib.sh`.
+If no config exists, defaults are used (4 dev panes at `0:0.1`-`0:0.4`, manager at `0:0.0`). All scripts read config via `load_config()` in `pane-lib.sh`.
 
 ## State File Format
 
-`~/.claude/tmux-slots/slot-N.json`:
+`~/.claude/tmux-panes/pane-N.json`:
 ```json
 {
-  "slot": 1,
+  "pane": 1,
+  "address": "0:0.1",
   "occupied": false,
-  "pane": "0:0.1",
   "session_id": null,
   "task": null,
   "branch": null,
@@ -77,21 +78,21 @@ If no config exists, defaults are used (4 slots, pane prefix `0:0`). All scripts
 ## Existing Reference Implementation
 
 These ad-hoc scripts in the heydonna project serve as the reference:
-- `~/.claude/skills/tmux-slot-command/scripts/send-to-slot.sh` — sends text to a slot pane via tmux send-keys
-- `~/.claude/skills/tmux-slot-command/scripts/is-active.sh` — checks cursor movement to detect idle/active
-- `~/.claude/skills/slot-handoff-supervisor/scripts/handoff-and-supervise.sh` — hands off issues and monitors
+- `~/.claude/skills/tmux-pane-command/scripts/send-to-pane.sh` — sends text to a pane via tmux send-keys
+- `~/.claude/skills/tmux-pane-command/scripts/is-active.sh` — checks cursor movement to detect idle/active
+- `~/.claude/skills/pane-handoff-supervisor/scripts/handoff-and-supervise.sh` — hands off issues and monitors
 
 Extract the generic parts, remove heydonna-specific references (issue labels, branch naming, Slack channels, Codex reviews).
 
 ## Key Technical Details
 
 ### tmux Pane Addressing
-- Configurable via `config.json` (`pane_prefix` and `manager_pane`)
+- Configurable via `config.json` (`panes.manager` and `panes.dev[]`)
 - Default layout: session 0, window 0, panes 0-4
 - Pane 0 (0:0.0) = PM/orchestrator
-- Panes 1-N (0:0.1 through 0:0.N) = dev slots
+- Panes 1-N (0:0.1 through 0:0.N) = dev panes
 - Address format: `session:window.pane`
-- Scripts derive session/window from `PANE_PREFIX`: `TMUX_SESSION="${PANE_PREFIX%%:*}"`
+- Each dev pane has an explicit address in the config — no prefix derivation needed
 
 ### Detecting Idle vs Active
 The `is-active.sh` script works by:
@@ -99,17 +100,17 @@ The `is-active.sh` script works by:
 2. Content hashing: captures pane twice 1.5s apart, compares MD5
 3. Exit codes: 0=active, 1=idle, 2=error
 
-### Sending Messages to Slots
-The `send-to-slot.sh` script:
-1. Waits for slot to become IDLE (polls every 5s, timeout 10min)
+### Sending Messages to Panes
+The `send-to-pane.sh` script:
+1. Waits for pane to become IDLE (polls every 5s, timeout 10min)
 2. Sends text via `tmux send-keys -t <pane> '<escaped-text>'`
 3. Waits 300ms then sends Enter (delay needed for Claude Code to register input)
 
 ### SessionEnd Hook
-When a Claude Code session ends in a slot pane:
+When a Claude Code session ends in a dev pane:
 1. Hook fires with session context
-2. Script finds which slot file has that session_id
-3. Marks slot as `occupied: false`
+2. Script finds which pane state file has that session_id
+3. Marks pane as `occupied: false`
 4. Clears session_id, task, branch
 
 ## Development Commands
@@ -119,11 +120,11 @@ When a Claude Code session ends in a slot pane:
 claude --plugin-dir /path/to/master-of-panes
 
 # Run a specific script
-bash scripts/get-slot-status.sh
+bash scripts/get-pane-status.sh
 bash scripts/is-active.sh 1
 
 # Initialize state directory
-mkdir -p ~/.claude/tmux-slots
+mkdir -p ~/.claude/tmux-panes
 ```
 
 ## What NOT to Include

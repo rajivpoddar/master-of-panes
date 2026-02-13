@@ -14,51 +14,50 @@ claude --plugin-dir /path/to/master-of-panes
 On first use, run the setup command to configure your tmux layout:
 
 ```
-/master-of-panes:setup
+/master-of-panes:pane-setup
 ```
 
-This creates `~/.claude/tmux-slots/config.json` with your settings:
-- Number of dev slots (default: 4)
-- tmux pane prefix (default: `0:0`)
-- Manager pane (default: `0:0.0`)
-- State directory (default: `~/.claude/tmux-slots`)
+This creates `~/.claude/tmux-panes/config.json` with your settings:
+- Manager pane address (default: `0:0.0`)
+- Dev pane addresses (default: `0:0.1` through `0:0.4`)
+- State directory (default: `~/.claude/tmux-panes`)
 
-If you skip setup, the plugin works with defaults (4 slots at `0:0.1` through `0:0.4`).
+If you skip setup, the plugin works with defaults (4 dev panes at `0:0.1` through `0:0.4`).
 
-## Slot Layout (Default)
+## Pane Layout (Default)
 
 | Pane    | Role                  |
 |---------|-----------------------|
 | `0:0.0` | PM / orchestrator     |
-| `0:0.1` | Dev slot 1            |
-| `0:0.2` | Dev slot 2            |
-| `0:0.3` | Dev slot 3            |
-| `0:0.4` | Dev slot 4            |
+| `0:0.1` | Dev pane 1            |
+| `0:0.2` | Dev pane 2            |
+| `0:0.3` | Dev pane 3            |
+| `0:0.4` | Dev pane 4            |
 
-Custom layouts are configured via `/master-of-panes:setup`.
+Custom layouts are configured via `/master-of-panes:pane-setup`.
 
 ## Slash Commands
 
-| Command                  | Description                                      |
-|--------------------------|--------------------------------------------------|
-| `/master-of-panes:setup`    | Configure slots, pane layout, and state directory |
-| `/master-of-panes:status`   | Show all slot status as ASCII table              |
-| `/master-of-panes:assign`   | Allocate a slot with task and branch             |
-| `/master-of-panes:handoff`  | Send a task instruction to a slot                |
-| `/master-of-panes:monitor`  | Launch background supervisor for a slot          |
+| Command                          | Description                                       |
+|----------------------------------|----------------------------------------------------|
+| `/master-of-panes:pane-setup`    | Configure panes, layout, and state directory       |
+| `/master-of-panes:pane-status`   | Show all pane status as ASCII table                |
+| `/master-of-panes:pane-assign`   | Allocate a pane with task and branch               |
+| `/master-of-panes:pane-handoff`  | Send a task instruction to a pane                  |
+| `/master-of-panes:pane-monitor`  | Launch background supervisor for a pane            |
 
 ## Scripts
 
 | Script               | Purpose                                           |
 |----------------------|---------------------------------------------------|
-| `assign-slot.sh`     | Allocate slot, update JSON state                  |
-| `get-slot-status.sh` | Read state files, render ASCII table              |
-| `send-to-slot.sh`    | Send text to slot via tmux send-keys              |
+| `assign-pane.sh`     | Allocate pane, update JSON state                  |
+| `get-pane-status.sh` | Read state files, render ASCII table              |
+| `send-to-pane.sh`    | Send text to pane via tmux send-keys              |
 | `is-active.sh`       | Detect active/idle via chevron color + content     |
 | `capture-output.sh`  | Capture recent pane output (ghost-text-safe)      |
 | `run-and-wait.sh`    | Send command and block until completion            |
-| `update-slot-state.sh` | Release slot, set session, cleanup                |
-| `slot-lib.sh`        | Shared library (locking, validation, jq helpers)  |
+| `update-pane-state.sh` | Release pane, set session, cleanup               |
+| `pane-lib.sh`        | Shared library (locking, validation, jq helpers)  |
 
 ## GHOST_TEXT_WARNING
 
@@ -67,27 +66,27 @@ Custom layouts are configured via `/master-of-panes:setup`.
 This is not a hypothetical risk. Three real incidents occurred in February 2026:
 
 ### Incident 1: Accidental PR Merge
-Ghost text `merge PR #1223` appeared at an idle slot's prompt. A PM agent read it as an action being taken. Result: a 59-file track-changes refactor was merged without code review.
+Ghost text `merge PR #1223` appeared at an idle pane's prompt. A PM agent read it as an action being taken. Result: a 59-file track-changes refactor was merged without code review.
 
 ### Incident 2: False Status Report
-Ghost text `fix them all` appeared at slot 4's prompt. A PM agent reported "slot 4 is executing: fix them all." The slot was completely idle.
+Ghost text `fix them all` appeared at pane 4's prompt. A PM agent reported "pane 4 is executing: fix them all." The pane was completely idle.
 
 ### Incident 3: Unauthorized Command Trigger
-Ghost text `/review-and-pr` appeared at slot 2's prompt. A PM agent sent `/review-and-pr` to the slot, triggering PR creation while the developer wasn't done.
+Ghost text `/review-and-pr` appeared at pane 2's prompt. A PM agent sent `/review-and-pr` to the pane, triggering PR creation while the developer wasn't done.
 
 ### Hard Rules
 
-1. **NEVER send commands to slots based on prompt-line text** — only when explicitly asked by a human
+1. **NEVER send commands to panes based on prompt-line text** — only when explicitly asked by a human
 2. **NEVER read the `❯` prompt line as actionable** — anything on or after it could be ghost text
-3. **NEVER report prompt-line text as "what slot is doing"** — only report output *above* the prompt
+3. **NEVER report prompt-line text as "what pane is doing"** — only report output *above* the prompt
 
 ### How This Plugin Handles It
 
 - **`is-active.sh`** — Uses chevron *color* detection (ANSI codes) and content *hashing*, never reads prompt-line text. Immune to ghost text.
 - **`capture-output.sh`** — Strips the `❯` prompt line and everything below it by default. Use `--raw` only for debugging.
-- **`get-slot-status.sh`** — Activity detection delegates to `is-active.sh`. Never reads or reports prompt-line content.
-- **`slot-lib.sh`** — Provides `strip_prompt_line` function used by capture scripts.
-- **`send-to-slot.sh`** — Reads INSERT/NORMAL mode from the status bar, not from prompt-line text. Does not interpret ghost text.
+- **`get-pane-status.sh`** — Activity detection delegates to `is-active.sh`. Never reads or reports prompt-line content.
+- **`pane-lib.sh`** — Provides `strip_prompt_line` function used by capture scripts.
+- **`send-to-pane.sh`** — Reads INSERT/NORMAL mode from the status bar, not from prompt-line text. Does not interpret ghost text.
 
 ### Safe Patterns
 
@@ -99,7 +98,7 @@ is-active.sh 1 && echo "ACTIVE" || echo "IDLE"
 capture-output.sh 1 20
 
 # SAFE: Report status (JSON state + color detection)
-get-slot-status.sh --live
+get-pane-status.sh --live
 
 # UNSAFE: Raw capture includes ghost text — for debugging only
 capture-output.sh 1 --raw

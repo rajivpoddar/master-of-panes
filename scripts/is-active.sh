@@ -1,9 +1,9 @@
 #!/bin/bash
-# Check if a Claude Code tmux slot is actively processing.
+# Check if a Claude Code tmux pane is actively processing.
 #
 # Exit codes:
-#   0 = ACTIVE (slot is processing)
-#   1 = IDLE   (slot is waiting for input)
+#   0 = ACTIVE (pane is processing)
+#   1 = IDLE   (pane is waiting for input)
 #   2 = ERROR  (cannot determine — tmux failure, bad pane, etc.)
 #
 # Detection methods:
@@ -14,26 +14,26 @@
 #      If content changed → ACTIVE (catches background agents).
 #
 # Usage:
-#   is-active.sh <slot>           # Exit 0=active, 1=idle, 2=error
-#   is-active.sh <slot> -v        # Verbose output
-#   is-active.sh <slot> --debug   # Full debug with raw ANSI dump
-#   is-active.sh <slot> --fast    # Chevron-only (skip content change)
+#   is-active.sh <pane>           # Exit 0=active, 1=idle, 2=error
+#   is-active.sh <pane> -v        # Verbose output
+#   is-active.sh <pane> --debug   # Full debug with raw ANSI dump
+#   is-active.sh <pane> --fast    # Chevron-only (skip content change)
 
-SLOT="${1:?Usage: is-active.sh <slot> [-v|--debug|--fast]}"
+PANE_NUM="${1:?Usage: is-active.sh <pane> [-v|--debug|--fast]}"
 FLAG="${2:-}"
 
-source "$(dirname "$0")/slot-lib.sh"
+source "$(dirname "$0")/pane-lib.sh"
 load_config
 
-# Validate slot — exit 2 (error) since exit 1 means IDLE in this script
-check_slot "$SLOT" || exit 2
+# Validate pane — exit 2 (error) since exit 1 means IDLE in this script
+check_pane "$PANE_NUM" || exit 2
 
-PANE=$(slot_pane "$SLOT")
+PANE_ADDR=$(pane_address "$PANE_NUM")
 
 # Capture pane with ANSI escape codes for color detection
-output=$(tmux capture-pane -e -t "$PANE" -p 2>/dev/null)
+output=$(tmux capture-pane -e -t "$PANE_ADDR" -p 2>/dev/null)
 if [ -z "$output" ]; then
-  [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "ERROR: Could not capture pane $PANE"
+  [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "ERROR: Could not capture pane $PANE_ADDR"
   exit 2
 fi
 
@@ -68,7 +68,7 @@ fi
 
 # Method 2: Content change detection (catches background agents with no spinner)
 # Capture content area twice, 1.5s apart. Exclude bottom 6 lines (status bar area).
-plain1=$(tmux capture-pane -t "$PANE" -p 2>/dev/null)
+plain1=$(tmux capture-pane -t "$PANE_ADDR" -p 2>/dev/null)
 if [ -z "$plain1" ]; then
   [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "ERROR: Second capture failed"
   exit 2
@@ -83,7 +83,7 @@ fi
 
 sleep 1.5
 
-plain2=$(tmux capture-pane -t "$PANE" -p 2>/dev/null)
+plain2=$(tmux capture-pane -t "$PANE_ADDR" -p 2>/dev/null)
 if [ -z "$plain2" ]; then
   [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "ERROR: Third capture failed"
   exit 2

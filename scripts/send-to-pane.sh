@@ -1,19 +1,19 @@
 #!/bin/bash
-# Send a message/command to a Claude Code session in a tmux slot.
+# Send a message/command to a Claude Code session in a tmux dev pane.
 #
-# Waits for the slot to become idle before sending. Handles INSERT/NORMAL
+# Waits for the pane to become idle before sending. Handles INSERT/NORMAL
 # mode detection for Claude Code's vim-style input.
 #
 # Usage:
-#   send-to-slot.sh <slot> <message>           # Send and return
-#   send-to-slot.sh <slot> <message> --wait    # Send and wait for completion
-#   send-to-slot.sh <slot> <message> --force   # Skip idle wait (urgent corrections)
+#   send-to-pane.sh <pane> <message>           # Send and return
+#   send-to-pane.sh <pane> <message> --wait    # Send and wait for completion
+#   send-to-pane.sh <pane> <message> --force   # Skip idle wait (urgent corrections)
 
-SLOT="$1"
+PANE_NUM="$1"
 MESSAGE="$2"
 shift 2 2>/dev/null
 
-source "$(dirname "$0")/slot-lib.sh"
+source "$(dirname "$0")/pane-lib.sh"
 load_config
 
 WAIT=""
@@ -25,36 +25,36 @@ for arg in "$@"; do
   esac
 done
 
-if [ -z "$SLOT" ] || [ -z "$MESSAGE" ]; then
-  echo "Usage: send-to-slot.sh <slot> <message> [--wait] [--force]" >&2
+if [ -z "$PANE_NUM" ] || [ -z "$MESSAGE" ]; then
+  echo "Usage: send-to-pane.sh <pane> <message> [--wait] [--force]" >&2
   exit 1
 fi
 
-validate_slot "$SLOT"
+validate_pane "$PANE_NUM"
 
-PANE=$(slot_pane "$SLOT")
+PANE_ADDR=$(pane_address "$PANE_NUM")
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Delegate activity check to is-active.sh
 # Returns: 0=active, 1=idle, 2=error
-is_slot_active() {
-  "$SCRIPT_DIR/is-active.sh" "$SLOT" 2>/dev/null
+is_pane_active() {
+  "$SCRIPT_DIR/is-active.sh" "$PANE_NUM" 2>/dev/null
 }
 
-# Wait for slot to become idle
+# Wait for pane to become idle
 wait_for_idle() {
   local max_wait=${1:-120}
   local count=0
-  echo "Waiting for slot $SLOT to become idle..."
+  echo "Waiting for pane $PANE_NUM to become idle..."
   while [ $count -lt $max_wait ]; do
-    is_slot_active
+    is_pane_active
     local rc=$?
     if [ $rc -eq 2 ]; then
-      echo "ERROR: Cannot detect activity for slot $SLOT" >&2
+      echo "ERROR: Cannot detect activity for pane $PANE_NUM" >&2
       return 1
     fi
     if [ $rc -eq 1 ]; then
-      echo "Slot $SLOT is idle"
+      echo "Pane $PANE_NUM is idle"
       return 0
     fi
     sleep 2
@@ -63,7 +63,7 @@ wait_for_idle() {
       echo "  Still waiting... (${count}s)"
     fi
   done
-  echo "ERROR: Timeout waiting for slot $SLOT to become idle (${max_wait}s)" >&2
+  echo "ERROR: Timeout waiting for pane $PANE_NUM to become idle (${max_wait}s)" >&2
   return 1
 }
 
@@ -72,14 +72,14 @@ wait_for_prompt() {
   local max_wait=${1:-60}
   local count=0
   while [ $count -lt $max_wait ]; do
-    if tmux capture-pane -t "$PANE" -p | tail -5 | grep -q '^❯' && \
-       tmux capture-pane -t "$PANE" -p | tail -3 | grep -q 'INSERT'; then
+    if tmux capture-pane -t "$PANE_ADDR" -p | tail -5 | grep -q '^❯' && \
+       tmux capture-pane -t "$PANE_ADDR" -p | tail -3 | grep -q 'INSERT'; then
       return 0
     fi
     sleep 1
     count=$((count + 1))
   done
-  echo "ERROR: Timeout waiting for prompt in slot $SLOT" >&2
+  echo "ERROR: Timeout waiting for prompt in pane $PANE_NUM" >&2
   return 1
 }
 
@@ -87,10 +87,10 @@ wait_for_prompt() {
 if [ "$FORCE" = "--force" ]; then
   echo "Force mode — sending immediately (skipping idle wait)"
 else
-  is_slot_active
+  is_pane_active
   rc=$?
   if [ $rc -eq 2 ]; then
-    echo "ERROR: Cannot check activity for slot $SLOT (tmux error)" >&2
+    echo "ERROR: Cannot check activity for pane $PANE_NUM (tmux error)" >&2
     exit 1
   fi
   if [ $rc -eq 0 ]; then
@@ -101,37 +101,37 @@ fi
 # Detect INSERT/NORMAL mode and send appropriately.
 # Use -l (literal) flag for message text to prevent shell metacharacters
 # and tmux key binding names (e.g., C-c, Space) from being interpreted.
-PANE_BOTTOM=$(tmux capture-pane -t "$PANE" -p | tail -5)
+PANE_BOTTOM=$(tmux capture-pane -t "$PANE_ADDR" -p | tail -5)
 if echo "$PANE_BOTTOM" | grep -q 'INSERT'; then
   # Already in INSERT mode — send directly
-  tmux send-keys -t "$PANE" -l "$MESSAGE"
+  tmux send-keys -t "$PANE_ADDR" -l "$MESSAGE"
   sleep 0.5
-  tmux send-keys -t "$PANE" Enter
+  tmux send-keys -t "$PANE_ADDR" Enter
 elif echo "$PANE_BOTTOM" | grep -q 'NORMAL'; then
   # In NORMAL mode — press 'i' first to enter INSERT
-  tmux send-keys -t "$PANE" i
+  tmux send-keys -t "$PANE_ADDR" i
   sleep 0.3
-  tmux send-keys -t "$PANE" -l "$MESSAGE"
+  tmux send-keys -t "$PANE_ADDR" -l "$MESSAGE"
   sleep 0.5
-  tmux send-keys -t "$PANE" Enter
+  tmux send-keys -t "$PANE_ADDR" Enter
 else
   # Can't determine mode — assume INSERT (default Claude Code state)
-  tmux send-keys -t "$PANE" -l "$MESSAGE"
+  tmux send-keys -t "$PANE_ADDR" -l "$MESSAGE"
   sleep 0.5
-  tmux send-keys -t "$PANE" Enter
+  tmux send-keys -t "$PANE_ADDR" Enter
 fi
 
-echo "Sent to slot $SLOT: $MESSAGE"
+echo "Sent to pane $PANE_NUM: $MESSAGE"
 
-# If --wait, wait for command to complete and slot to become idle
+# If --wait, wait for command to complete and pane to become idle
 if [ "$WAIT" = "--wait" ]; then
   echo "Waiting for completion..."
   if wait_for_prompt 60; then
     sleep 1
-    is_slot_active
+    is_pane_active
     rc=$?
     if [ $rc -eq 0 ]; then
-      echo "  Slot became active again, waiting for idle..."
+      echo "  Pane became active again, waiting for idle..."
       wait_for_idle 120
     fi
     echo "Command completed"

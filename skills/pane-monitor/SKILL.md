@@ -1,16 +1,16 @@
 ---
-name: monitor
-description: Monitor a tmux dev slot — poll activity and report progress. Usage /master-of-panes:monitor <slot> [goal]
-arguments: "<slot> [goal]"
+name: pane-monitor
+description: Monitor a tmux dev pane — poll activity and report progress. Usage /master-of-panes:pane-monitor <pane> [goal]
+arguments: "<pane> [goal]"
 ---
 
-# /master-of-panes:monitor
+# /master-of-panes:pane-monitor
 
-Launch a background monitoring loop for a tmux slot. Polls activity and captures output periodically to track progress toward a goal.
+Launch a background monitoring loop for a tmux dev pane. Polls activity and captures output periodically to track progress toward a goal.
 
 ## Instructions
 
-Parse `$ARGUMENTS`: first token is the slot number, the rest is an optional goal description.
+Parse `$ARGUMENTS`: first token is the pane number, the rest is an optional goal description.
 
 ### Monitoring Protocol
 
@@ -18,7 +18,7 @@ Use the Task tool with `run_in_background: true` to launch a monitoring agent. T
 
 1. **Poll every 60 seconds** using three-valued exit code handling:
    ```bash
-   bash ${CLAUDE_PLUGIN_ROOT}/scripts/is-active.sh <slot>
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/is-active.sh <pane>
    rc=$?
    if [ $rc -eq 0 ]; then echo "ACTIVE"
    elif [ $rc -eq 1 ]; then echo "IDLE"
@@ -29,7 +29,7 @@ Use the Task tool with `run_in_background: true` to launch a monitoring agent. T
 
 2. **Capture recent output** each cycle:
    ```bash
-   bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture-output.sh <slot> 20
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture-output.sh <pane> 20
    ```
 
 3. **Detect stages** in the pane output:
@@ -38,23 +38,23 @@ Use the Task tool with `run_in_background: true` to launch a monitoring agent. T
    - **Testing**: Look for "vitest", "tsc", "pytest", "test", "PASS", "FAIL"
    - **Stalled**: Idle for more than 10 minutes with no progress
 
-4. **Report progress**: Log observations to `/tmp/slot-<N>-monitor.log`
+4. **Report progress**: Log observations to `/tmp/pane-<N>-monitor.log`
 
 5. **Handle stalls**: If idle for >10 minutes with no new output, send a nudge:
    ```bash
-   bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-slot.sh <slot> "continue with the current task"
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-pane.sh <pane> "continue with the current task"
    ```
 
 6. **Stop conditions**:
    - Goal appears to be met (based on pane output)
-   - Slot becomes unoccupied (state file shows `occupied: false`)
+   - Pane becomes unoccupied (state file shows `occupied: false`)
    - 60 minutes elapsed (maximum monitoring duration)
 
 ### Output
 
 Provide an initial confirmation:
-- Slot being monitored
+- Pane being monitored
 - Goal (if provided)
-- Log file location: `/tmp/slot-<N>-monitor.log`
+- Log file location: `/tmp/pane-<N>-monitor.log`
 
 The background agent will continue monitoring autonomously.
