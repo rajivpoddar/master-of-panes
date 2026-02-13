@@ -1,11 +1,11 @@
-# CLAUDE.md — tmux-slot-manager
+# CLAUDE.md — Master of Panes
 
 A Claude Code plugin for managing parallel dev sessions across tmux panes.
 
 ## What This Is
 
 A reusable Claude Code plugin that provides:
-- Slash commands for slot management (`/tmux-manager:status`, `:assign`, `:handoff`, `:monitor`)
+- Slash commands for slot management (`/master-of-panes:status`, `:assign`, `:handoff`, `:monitor`)
 - JSON state files for tracking slot occupancy (`~/.claude/tmux-slots/`)
 - SessionEnd hooks for auto-cleanup when sessions finish
 - Shell scripts for tmux orchestration (send-keys, capture-pane, is-active)
@@ -21,15 +21,15 @@ A reusable Claude Code plugin that provides:
 ## Plugin Structure
 
 ```
-claude-tmux-manager/
+master-of-panes/
 ├── .claude-plugin/
 │   └── plugin.json           # Plugin manifest
 ├── skills/
-│   ├── setup/SKILL.md        # /tmux-manager:setup — configure slots and layout
-│   ├── status/SKILL.md       # /tmux-manager:status — show all slot status
-│   ├── assign/SKILL.md       # /tmux-manager:assign N — allocate slot
-│   ├── handoff/SKILL.md      # /tmux-manager:handoff N — hand off work to slot
-│   └── monitor/SKILL.md      # /tmux-manager:monitor N GOAL — background supervisor
+│   ├── setup/SKILL.md        # /master-of-panes:setup — configure slots and layout
+│   ├── status/SKILL.md       # /master-of-panes:status — show all slot status
+│   ├── assign/SKILL.md       # /master-of-panes:assign N — allocate slot
+│   ├── handoff/SKILL.md      # /master-of-panes:handoff N — hand off work to slot
+│   └── monitor/SKILL.md      # /master-of-panes:monitor N GOAL — background supervisor
 ├── hooks/
 │   └── hooks.json            # Stop → auto-mark slot idle
 ├── scripts/
@@ -46,7 +46,7 @@ claude-tmux-manager/
 
 ## Configuration
 
-`~/.claude/tmux-slots/config.json` (created by `/tmux-manager:setup`):
+`~/.claude/tmux-slots/config.json` (created by `/master-of-panes:setup`):
 ```json
 {
   "slots": 4,
@@ -116,7 +116,7 @@ When a Claude Code session ends in a slot pane:
 
 ```bash
 # Test the plugin locally
-claude --plugin-dir /Users/rajiv/Downloads/projects/claude-tmux-manager
+claude --plugin-dir /path/to/master-of-panes
 
 # Run a specific script
 bash scripts/get-slot-status.sh

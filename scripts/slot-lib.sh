@@ -50,7 +50,7 @@ load_config() {
     fi
   else
     echo "Note: No config found. Using defaults ($NUM_SLOTS slots, pane prefix $PANE_PREFIX)." >&2
-    echo "  Run /tmux-manager:setup to configure." >&2
+    echo "  Run /master-of-panes:setup to configure." >&2
   fi
 
   # Validate NUM_SLOTS is a positive integer

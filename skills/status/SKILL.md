@@ -4,7 +4,7 @@ description: Show the status of all tmux dev slots — occupancy, task, branch, 
 arguments: "[--live]"
 ---
 
-# /tmux-manager:status
+# /master-of-panes:status
 
 Display the current state of all tmux dev slots.
 

@@ -1,10 +1,10 @@
 ---
 name: monitor
-description: Monitor a tmux dev slot — poll activity and report progress. Usage /tmux-manager:monitor <slot> [goal]
+description: Monitor a tmux dev slot — poll activity and report progress. Usage /master-of-panes:monitor <slot> [goal]
 arguments: "<slot> [goal]"
 ---
 
-# /tmux-manager:monitor
+# /master-of-panes:monitor
 
 Launch a background monitoring loop for a tmux slot. Polls activity and captures output periodically to track progress toward a goal.
 

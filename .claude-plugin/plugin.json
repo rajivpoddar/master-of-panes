@@ -1,6 +1,6 @@
 {
-  "name": "tmux-slot-manager",
-  "description": "Multi-pane tmux slot manager for Claude Code — orchestrate parallel dev sessions across tmux panes with state tracking, auto-cleanup, and slash commands.",
+  "name": "master-of-panes",
+  "description": "Master of Panes — orchestrate parallel Claude Code dev sessions across tmux panes with state tracking, auto-cleanup, and slash commands.",
   "author": {
     "name": "Rajiv Ayyangar"
   }

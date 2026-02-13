@@ -1,10 +1,10 @@
 ---
 name: handoff
-description: Hand off a task to a tmux dev slot — assign state, send instructions via tmux. Usage /tmux-manager:handoff <slot> <message>
+description: Hand off a task to a tmux dev slot — assign state, send instructions via tmux. Usage /master-of-panes:handoff <slot> <message>
 arguments: "<slot> <message>"
 ---
 
-# /tmux-manager:handoff
+# /master-of-panes:handoff
 
 Send a task to a tmux dev slot. This assigns the slot and sends a message to the Claude Code session running in that pane.
 

@@ -4,7 +4,7 @@ description: Configure the tmux slot manager — number of slots, pane layout, s
 arguments: ""
 ---
 
-# /tmux-manager:setup
+# /master-of-panes:setup
 
 Interactive setup for the tmux slot manager. Creates `config.json` and initializes state files.
 
@@ -52,8 +52,8 @@ jq -n \
   --arg manager_pane "<MANAGER_PANE>" \
   --arg state_dir "<STATE_DIR>" \
   '{slots: $slots, pane_prefix: $pane_prefix, manager_pane: $manager_pane, state_dir: $state_dir}' \
-  > /tmp/tmux-manager-config.$$.json \
-  && mv /tmp/tmux-manager-config.$$.json ~/.claude/tmux-slots/config.json
+  > /tmp/master-of-panes-config.$$.json \
+  && mv /tmp/master-of-panes-config.$$.json ~/.claude/tmux-slots/config.json
 ```
 
 Replace `<SLOTS>` with the numeric value (no quotes), and the others with the user's string answers. The `--arg` flags handle JSON escaping automatically.
@@ -87,4 +87,4 @@ Show a summary:
 - State directory
 - Config file location: `~/.claude/tmux-slots/config.json`
 
-Tell the user: "Setup complete. All `/tmux-manager:*` commands will use this configuration."
+Tell the user: "Setup complete. All `/master-of-panes:*` commands will use this configuration."

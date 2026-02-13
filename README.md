@@ -1,4 +1,4 @@
-# tmux-slot-manager
+# Master of Panes
 
 A Claude Code plugin for managing parallel dev sessions across tmux panes.
 
@@ -6,7 +6,7 @@ A Claude Code plugin for managing parallel dev sessions across tmux panes.
 
 ```bash
 # Use as a plugin
-claude --plugin-dir /path/to/claude-tmux-manager
+claude --plugin-dir /path/to/master-of-panes
 ```
 
 ## Setup
@@ -14,7 +14,7 @@ claude --plugin-dir /path/to/claude-tmux-manager
 On first use, run the setup command to configure your tmux layout:
 
 ```
-/tmux-manager:setup
+/master-of-panes:setup
 ```
 
 This creates `~/.claude/tmux-slots/config.json` with your settings:
@@ -35,17 +35,17 @@ If you skip setup, the plugin works with defaults (4 slots at `0:0.1` through `0
 | `0:0.3` | Dev slot 3            |
 | `0:0.4` | Dev slot 4            |
 
-Custom layouts are configured via `/tmux-manager:setup`.
+Custom layouts are configured via `/master-of-panes:setup`.
 
 ## Slash Commands
 
 | Command                  | Description                                      |
 |--------------------------|--------------------------------------------------|
-| `/tmux-manager:setup`    | Configure slots, pane layout, and state directory |
-| `/tmux-manager:status`   | Show all slot status as ASCII table              |
-| `/tmux-manager:assign`   | Allocate a slot with task and branch             |
-| `/tmux-manager:handoff`  | Send a task instruction to a slot                |
-| `/tmux-manager:monitor`  | Launch background supervisor for a slot          |
+| `/master-of-panes:setup`    | Configure slots, pane layout, and state directory |
+| `/master-of-panes:status`   | Show all slot status as ASCII table              |
+| `/master-of-panes:assign`   | Allocate a slot with task and branch             |
+| `/master-of-panes:handoff`  | Send a task instruction to a slot                |
+| `/master-of-panes:monitor`  | Launch background supervisor for a slot          |
 
 ## Scripts
 
