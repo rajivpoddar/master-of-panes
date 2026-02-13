@@ -42,7 +42,7 @@ jq -n \
   --arg manager "<MANAGER_PANE>" \
   --arg dev_csv "<DEV_PANES_CSV>" \
   --arg state_dir "<STATE_DIR>" \
-  '{panes: {manager: $manager, dev: ($dev_csv | split(",") | map(gsub("^ +| +$"; "")))}, state_dir: $state_dir}' \
+  '{panes: {manager: $manager, dev: ($dev_csv | split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0)))}, state_dir: $state_dir}' \
   > /tmp/master-of-panes-config.$$.json \
   && mv /tmp/master-of-panes-config.$$.json ~/.claude/tmux-panes/config.json
 ```

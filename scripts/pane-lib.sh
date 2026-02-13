@@ -37,7 +37,7 @@ load_config() {
       }
       if [ -n "$config_content" ]; then
         MANAGER_PANE=$(echo "$config_content" | jq -r '.panes.manager // "0:0.0"' 2>/dev/null) || MANAGER_PANE="0:0.0"
-        _DEV_PANE_LIST=$(echo "$config_content" | jq -r '.panes.dev[]' 2>/dev/null) || _DEV_PANE_LIST=""
+        _DEV_PANE_LIST=$(echo "$config_content" | jq -r '.panes.dev[]' 2>/dev/null | grep .) || _DEV_PANE_LIST=""
         NUM_DEV_PANES=$(echo "$_DEV_PANE_LIST" | grep -c .) || NUM_DEV_PANES=0
 
         local custom_dir
