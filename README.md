@@ -12,10 +12,31 @@ A Claude Code plugin for orchestrating parallel dev sessions across tmux panes. 
 
 ## Installation
 
-### From GitHub (recommended)
+### From Marketplace (recommended)
+
+Install globally so the plugin is available in every Claude Code session:
 
 ```bash
-# Clone and use as a plugin directory
+# 1. Add the marketplace (one-time)
+/plugin marketplace add rajivpoddar/claude-plugins
+
+# 2. Install the plugin
+/plugin install master-of-panes@rajiv-plugins
+```
+
+Restart Claude Code to load the plugin. After this, all `/master-of-panes:*` commands are available in every session — no flags needed.
+
+To update later:
+```bash
+/plugin marketplace update rajiv-plugins
+/plugin update master-of-panes@rajiv-plugins
+```
+
+### From GitHub (development)
+
+For plugin development or testing local changes:
+
+```bash
 git clone https://github.com/rajivpoddar/master-of-panes.git
 claude --plugin-dir /path/to/master-of-panes
 ```
