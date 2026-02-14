@@ -90,62 +90,19 @@ Custom layouts are configured via `/master-of-panes:pane-setup`.
 | `update-pane-state.sh` | Release pane, set session, cleanup               |
 | `pane-lib.sh`        | Shared library (locking, validation, jq helpers)  |
 
-## GHOST_TEXT_WARNING
+## Ghost Text Safety
 
-**Ghost text (autocomplete predictions) in Claude Code tmux sessions is indistinguishable from real input when reading pane output with `tmux capture-pane -p`.**
+**Ghost text (autocomplete predictions) in Claude Code tmux sessions is indistinguishable from real input when reading pane output with `tmux capture-pane -p`.** This plugin handles it automatically:
 
-This is not a hypothetical risk. Three real incidents occurred in February 2026:
+- **`is-active.sh`** — Uses chevron *color* detection (ANSI codes), never reads prompt-line text
+- **`capture-output.sh`** — Strips the `❯` prompt line and everything below it by default
+- **`pane-lib.sh`** — Provides `strip_prompt_line` function used by capture scripts
 
-### Incident 1: Accidental PR Merge
-Ghost text `merge PR #1223` appeared at an idle pane's prompt. A PM agent read it as an action being taken. Result: a 59-file track-changes refactor was merged without code review.
-
-### Incident 2: False Status Report
-Ghost text `fix them all` appeared at pane 4's prompt. A PM agent reported "pane 4 is executing: fix them all." The pane was completely idle.
-
-### Incident 3: Unauthorized Command Trigger
-Ghost text `/review-and-pr` appeared at pane 2's prompt. A PM agent sent `/review-and-pr` to the pane, triggering PR creation while the developer wasn't done.
-
-### Hard Rules
+### Rules
 
 1. **NEVER send commands to panes based on prompt-line text** — only when explicitly asked by a human
 2. **NEVER read the `❯` prompt line as actionable** — anything on or after it could be ghost text
 3. **NEVER report prompt-line text as "what pane is doing"** — only report output *above* the prompt
-
-### How This Plugin Handles It
-
-- **`is-active.sh`** — Uses chevron *color* detection (ANSI codes) and content *hashing*, never reads prompt-line text. Immune to ghost text.
-- **`capture-output.sh`** — Strips the `❯` prompt line and everything below it by default. Use `--raw` only for debugging.
-- **`get-pane-status.sh`** — Activity detection delegates to `is-active.sh`. Never reads or reports prompt-line content.
-- **`pane-lib.sh`** — Provides `strip_prompt_line` function used by capture scripts.
-- **`send-to-pane.sh`** — Reads INSERT/NORMAL mode from the status bar, not from prompt-line text. Does not interpret ghost text.
-
-### Safe Patterns
-
-```bash
-# SAFE: Activity check (color-based, no text interpretation)
-is-active.sh 1 && echo "ACTIVE" || echo "IDLE"
-
-# SAFE: Capture output (auto-strips prompt line)
-capture-output.sh 1 20
-
-# SAFE: Report status (JSON state + color detection)
-get-pane-status.sh --live
-
-# UNSAFE: Raw capture includes ghost text — for debugging only
-capture-output.sh 1 --raw
-
-# UNSAFE: Never trust text on the ❯ line
-tmux capture-pane -t 0:0.1 -p | tail -3   # May contain ghost text!
-```
-
-### Detecting Ghost Text in Raw Output
-
-If you need to distinguish ghost text from real input, use ANSI capture:
-
-```bash
-# Ghost text has dim/gray ANSI codes (^[[2m or ^[[90m)
-tmux capture-pane -e -t 0:0.1 -p | tail -10 | cat -v
-```
 
 ## License
 
