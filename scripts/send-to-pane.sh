@@ -15,6 +15,7 @@ shift 2 2>/dev/null
 
 source "$(dirname "$0")/pane-lib.sh"
 load_config
+require_tmux
 
 WAIT=""
 FORCE=""

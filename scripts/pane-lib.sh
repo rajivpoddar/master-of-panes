@@ -80,10 +80,39 @@ load_config() {
   done <<< "$_DEV_PANE_LIST"
 }
 
+# OS-aware install hint for a package.
+_install_hint() {
+  local pkg="$1"
+  if [[ "$OSTYPE" == darwin* ]]; then
+    echo "brew install $pkg"
+  elif command -v apt-get &>/dev/null; then
+    echo "sudo apt-get install $pkg"
+  elif command -v dnf &>/dev/null; then
+    echo "sudo dnf install $pkg"
+  elif command -v pacman &>/dev/null; then
+    echo "sudo pacman -S $pkg"
+  else
+    echo "your package manager to install $pkg"
+  fi
+}
+
+# Fail if tmux is not available or no sessions exist.
+require_tmux() {
+  if ! command -v tmux &>/dev/null; then
+    echo "ERROR: tmux is not installed. Install with: $(_install_hint tmux)" >&2
+    exit 1
+  fi
+  # Check if tmux server is running (not necessarily inside tmux)
+  if ! tmux list-sessions &>/dev/null 2>&1; then
+    echo "ERROR: No tmux sessions found. Start one with: tmux new-session -s claude" >&2
+    exit 1
+  fi
+}
+
 # Fail if jq is not installed.
 require_jq() {
   if ! command -v jq &>/dev/null; then
-    echo "ERROR: jq is required but not installed. Install with: brew install jq" >&2
+    echo "ERROR: jq is required but not installed. Install with: $(_install_hint jq)" >&2
     exit 1
   fi
 }

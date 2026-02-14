@@ -17,6 +17,7 @@ BRANCH="${3:-}"
 source "$(dirname "$0")/pane-lib.sh"
 require_jq
 load_config
+require_tmux
 validate_pane "$PANE_NUM"
 
 STATE_FILE="$PANE_STATE_DIR/pane-${PANE_NUM}.json"

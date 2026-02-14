@@ -19,6 +19,7 @@
 
 source "$(dirname "$0")/pane-lib.sh"
 load_config
+require_tmux
 
 PANE_NUM="${1:?Usage: capture-output.sh <pane> [lines|--full] [--raw]}"
 shift

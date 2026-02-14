@@ -17,6 +17,7 @@
 source "$(dirname "$0")/pane-lib.sh"
 require_jq
 load_config
+require_tmux
 
 FLAG="${1:-}"
 
@@ -45,20 +46,21 @@ for i in $(seq 1 "$NUM_DEV_PANES"); do
   branch=$(jq -r '.branch // "-"' "$STATE_FILE" 2>/dev/null)
 
   # Determine status
-  if [ "$occupied" = "true" ]; then
-    status="OCCUPIED"
-    # Live activity check if requested
-    if [ "$FLAG" = "--live" ]; then
-      "$SCRIPT_DIR/is-active.sh" "$i" --fast 2>/dev/null
-      rc=$?
-      if [ $rc -eq 0 ]; then
-        status="ACTIVE  "
-      elif [ $rc -eq 2 ]; then
-        status="ERROR   "
-      else
-        status="IDLE    "
-      fi
+  if [ "$FLAG" = "--live" ]; then
+    # Live activity detection — always run regardless of state file
+    "$SCRIPT_DIR/is-active.sh" "$i" --fast 2>/dev/null
+    rc=$?
+    if [ $rc -eq 0 ]; then
+      status="ACTIVE  "
+    elif [ $rc -eq 2 ]; then
+      status="ERROR   "
+    elif [ "$occupied" = "true" ]; then
+      status="IDLE    "
+    else
+      status="FREE    "
     fi
+  elif [ "$occupied" = "true" ]; then
+    status="OCCUPIED"
   else
     status="FREE    "
   fi

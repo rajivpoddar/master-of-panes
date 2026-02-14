@@ -32,6 +32,63 @@ Store as `state_dir`.
 
 ## After collecting answers
 
+### Step 0: Verify or Create Panes
+
+Before writing config, check if the configured panes exist:
+
+```bash
+# Check if tmux is running
+if ! tmux list-sessions &>/dev/null 2>&1; then
+  echo "No tmux session found. Creating one..."
+  tmux new-session -d -s claude
+fi
+
+# Check if manager pane exists
+if ! tmux display-message -p -t "<MANAGER_PANE>" '#{pane_id}' &>/dev/null 2>&1; then
+  echo "Manager pane <MANAGER_PANE> not found."
+fi
+
+# Check each dev pane
+MISSING_PANES=0
+for addr in <DEV_PANES>; do
+  if ! tmux display-message -p -t "$addr" '#{pane_id}' &>/dev/null 2>&1; then
+    MISSING_PANES=$((MISSING_PANES + 1))
+  fi
+done
+```
+
+Replace `<MANAGER_PANE>` with the configured manager address and `<DEV_PANES>` with the space-separated list of dev pane addresses.
+
+If panes are missing, ask the user:
+> "N dev panes don't exist yet. Want me to create them? This will split the current tmux window into N+1 panes (1 manager + N dev panes)."
+
+If yes, create the panes:
+
+```bash
+# Create panes by splitting the current window
+SESSION_NAME="claude"
+tmux new-session -d -s "$SESSION_NAME" 2>/dev/null || true  # OK if exists
+
+# Split window to create dev panes
+for i in $(seq 1 $NUM_DEV_PANES); do
+  tmux split-window -t "${SESSION_NAME}:0" -h 2>/dev/null || \
+  tmux split-window -t "${SESSION_NAME}:0" -v 2>/dev/null
+done
+
+# Rebalance layout
+tmux select-layout -t "${SESSION_NAME}:0" tiled
+```
+
+After creating panes, discover the actual addresses and update the dev pane list:
+
+```bash
+tmux list-panes -t "${SESSION_NAME}:0" -F "#{session_name}:#{window_index}.#{pane_index}"
+```
+
+Use pane index 0 for the manager and indices 1 through N for dev panes. Update the answers accordingly before writing config.json.
+
+If the user declines auto-creation, proceed with the addresses they provided (they may create the panes manually later).
+
 ### Step 1: Write config.json
 
 Use `jq -n` to safely construct the JSON. This prevents injection from special characters (quotes, newlines) in user answers, and writes atomically via temp file + mv to prevent partial reads by concurrent scripts.

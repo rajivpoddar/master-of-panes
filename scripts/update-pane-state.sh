@@ -13,6 +13,9 @@ source "$(dirname "$0")/pane-lib.sh"
 require_jq
 load_config
 
+# require_tmux is called below, after --release/--cleanup-session handling,
+# because those operations only touch JSON state files and don't need tmux.
+
 PANE_NUM="$1"
 ACTION="$2"
 VALUE="$3"
@@ -70,6 +73,7 @@ NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 case "$ACTION" in
   --release)
+    # --release only touches JSON state files, no tmux required
     if ! safe_jq_update "$STATE_FILE" --arg now "$NOW" \
       '.occupied = false | .session_id = null | .task = null | .branch = null | .assigned_at = null | .last_activity = $now'; then
       exit 1
@@ -78,6 +82,7 @@ case "$ACTION" in
     ;;
 
   --session)
+    require_tmux
     if [ -z "$VALUE" ]; then
       echo "Usage: update-pane-state.sh <pane> --session <id>" >&2
       exit 1
@@ -90,6 +95,7 @@ case "$ACTION" in
     ;;
 
   --activity)
+    require_tmux
     if ! safe_jq_update "$STATE_FILE" --arg now "$NOW" \
       '.last_activity = $now'; then
       exit 1

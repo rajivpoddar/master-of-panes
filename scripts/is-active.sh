@@ -24,6 +24,7 @@ FLAG="${2:-}"
 
 source "$(dirname "$0")/pane-lib.sh"
 load_config
+require_tmux
 
 # Validate pane — exit 2 (error) since exit 1 means IDLE in this script
 check_pane "$PANE_NUM" || exit 2
