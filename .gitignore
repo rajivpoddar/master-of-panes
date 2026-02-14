@@ -1,0 +1,14 @@
+# Dependencies
+scripts/node_modules/
+node_modules/
+
+# Logs
+*.log
+/tmp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# State files (user-specific)
+# Note: state files are in ~/.claude/tmux-panes/, not in the repo

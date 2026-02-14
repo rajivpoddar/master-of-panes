@@ -1,12 +1,43 @@
 # Master of Panes
 
-A Claude Code plugin for managing parallel dev sessions across tmux panes.
+A Claude Code plugin for orchestrating parallel dev sessions across tmux panes. Run a PM/orchestrator in one pane and multiple autonomous Claude Code dev agents in others — with state tracking, background supervisors, ghost-text safety, and slash commands.
+
+## Features
+
+- **Pane state management** — track which panes are occupied, what they're working on, and when they were last active
+- **Issue handoff** — extract a GitHub issue, git sync, and send structured instructions to a dev pane in one command
+- **Background supervisors** — autonomous agents that monitor dev panes, auto-approve plans, detect stalls, and trigger PR creation
+- **Ghost text safety** — all output capture strips Claude Code's autocomplete predictions to prevent false readings
+- **Cross-platform** — works on macOS, Linux, and Windows (via WSL)
 
 ## Installation
 
+### From GitHub (recommended)
+
 ```bash
-# Use as a plugin
+# Clone and use as a plugin directory
+git clone https://github.com/rajivpoddar/master-of-panes.git
 claude --plugin-dir /path/to/master-of-panes
+```
+
+### Prerequisites
+
+- **tmux** — terminal multiplexer (the plugin detects if tmux is running and provides OS-specific install hints)
+- **jq** — JSON processor for state file management
+- **Claude Code** — the CLI tool from Anthropic
+
+### Quick Start
+
+```bash
+# 1. Create a tmux session with panes
+scripts/create-layout.sh claude 4    # 1 manager + 4 dev panes
+
+# 2. Start Claude Code in each pane
+# Manager pane (0:0.0): claude
+# Dev panes (0:0.1-0:0.4): claude in each
+
+# 3. In the manager pane, run setup
+/master-of-panes:pane-setup
 ```
 
 ## Setup
