@@ -46,13 +46,47 @@ Based on issue labels and body text, detect the appropriate subagent:
 
 #### Step 1.3: Build handoff file
 
-Extract the full issue (title, body, labels, comments) to `/tmp/handoff-<ISSUE>.md` with:
-1. **Workflow prefix** — branching, plan mode, implementation, testing, QA pipeline
-2. **Subagent recommendation** — primary subagent and QA delegation
-3. **Merge policy** — NEVER merge, PM reviews all PRs
-4. **Dev server rules** — NEVER start/stop/kill dev servers
+Extract the full issue (title, body, labels, comments) to `/tmp/handoff-<ISSUE>.md`.
 
-Use the same format as `gh issue view $ISSUE --json number,title,state,url,body,labels,comments` piped through jq.
+The handoff file MUST use this exact workflow prefix template:
+
+```markdown
+Analyze the following issue and follow the workflow.
+
+## Workflow
+
+1. Create branch: `git checkout -b fix/<ISSUE>-short-description`
+2. Enter plan mode (EnterPlanMode tool)
+3. Explore codebase and design solution
+4. **BEFORE exiting plan mode:** Copy your plan to `docs/plans/issue-<ISSUE>-plan.md` using the Write tool.
+   This persists the plan in the repo so it survives context loss and gets committed with the PR.
+5. Exit plan mode with permissions (ExitPlanMode with allowedPrompts)
+6. Implement using the recommended subagent (see below)
+7. Run automated tests: `npx tsc --noEmit && bunx vitest run && bun lint`
+8. If ANY convex/ files were modified: run `~/.claude/skills/convex-dev-deploy/convex-dev-deploy/scripts/deploy.sh` to sync Convex functions BEFORE QA
+9. Delegate to qa-tester subagent for browser verification and QA report
+10. STOP after QA report is generated — PM will review and trigger PR creation
+
+## CRITICAL: Plan Persistence
+
+Claude Code saves plans to `~/.claude/plans/<random-name>.md` which is NOT in the repo
+and has random filenames. You MUST copy your plan to `docs/plans/issue-<ISSUE>-plan.md`
+BEFORE exiting plan mode. This file:
+- Gets committed with the PR (via safe-commit staging rules)
+- Survives session clears and context compaction
+- Can be referenced by the PM or other agents
+
+## CRITICAL: Dev Server Rules
+- NEVER start, stop, kill, or restart dev servers on ANY port
+- NEVER run kill/pkill/lsof commands targeting server processes
+- The PM manages dev servers. If yours is not running, STOP and report it.
+- Multiple slots share ports 3001-3004. Touching another slot's server destroys their work.
+```
+
+After the workflow prefix, append:
+1. **Subagent recommendation** — primary subagent and QA delegation
+2. **Merge policy** — NEVER merge, PM reviews all PRs
+3. Full issue content from `gh issue view $ISSUE --json number,title,state,url,body,labels,comments` piped through jq
 
 #### Step 1.4: Update GitHub labels
 
@@ -71,27 +105,26 @@ Send `/git-sync-main` to the pane and wait for idle:
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-pane.sh $PANE '/git-sync-main' --wait
 ```
 
-#### Step 2.2: Clear and rename
+#### Step 2.2: Clear session
 
 ```bash
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-pane.sh $PANE '/clear' --wait
 ```
 
-Generate short description from title and rename the session:
-```bash
-SHORT_DESC=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9 ]//g' | awk '{for(i=1;i<=3&&i<=NF;i++) printf "%s-",$i; print ""}' | sed 's/-$//')
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-pane.sh $PANE "/rename issue-${ISSUE}-${SHORT_DESC}" --wait
-```
+**NOTE:** Do NOT send `/rename` after `/clear`. The `/clear` command creates a new session,
+so any `/rename` sent afterward either applies to the dead session or gets lost. Session
+tracking is handled by the pane state file (`assign-pane.sh`) instead.
 
 #### Step 2.3: Send handoff content
 
-Load the handoff file into the pane via tmux buffer:
+Load the handoff file into the pane via tmux buffer.
+**IMPORTANT:** Use separate send-keys calls with a delay between text and Enter.
 
 ```bash
 PANE_ADDR=$(source ${CLAUDE_PLUGIN_ROOT}/scripts/pane-lib.sh && load_config && pane_address $PANE)
 tmux load-buffer "/tmp/handoff-${ISSUE}.md"
 tmux paste-buffer -t "$PANE_ADDR"
-sleep 0.5
+sleep 1
 tmux send-keys -t "$PANE_ADDR" Enter
 ```
 
@@ -101,12 +134,34 @@ tmux send-keys -t "$PANE_ADDR" Enter
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/assign-pane.sh $PANE "#$ISSUE: $TITLE"
 ```
 
-#### Step 2.5: Verify delivery
+#### Step 2.5: Capture session ID
 
-Wait 5 seconds, then capture output:
+After the handoff prompt is delivered, wait for the session to start, then capture the
+Claude Code session UUID from the most recent `.jsonl` file in the worktree's project dir.
 
 ```bash
 sleep 5
+
+# Derive the project dir from the worktree port (pane N → port 300N)
+PORT=$((3000 + PANE))
+PROJECT_DIR="$HOME/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-${PORT}"
+
+# Get the most recent session file
+SESSION_ID=$(ls -t "$PROJECT_DIR"/*.jsonl 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed 's/.jsonl$//')
+
+if [ -n "$SESSION_ID" ]; then
+  bash ${CLAUDE_PLUGIN_ROOT}/scripts/update-pane-state.sh $PANE --session "$SESSION_ID"
+  echo "Session ID: $SESSION_ID"
+fi
+```
+
+This allows later `/resume $SESSION_ID` if the session needs to be restored after a `/clear`.
+
+#### Step 2.6: Verify delivery
+
+Capture output to confirm the pane received the handoff:
+
+```bash
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture-output.sh $PANE 5
 ```
 
