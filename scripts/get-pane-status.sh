@@ -42,11 +42,20 @@ for i in $(seq 1 "$NUM_DEV_PANES"); do
   PANE_ADDR=$(pane_address "$i")
 
   occupied=$(jq -r '.occupied // false' "$STATE_FILE" 2>/dev/null)
+  testing=$(jq -r '.testing // false' "$STATE_FILE" 2>/dev/null)
+  testing_info=$(jq -r '.testing_info // ""' "$STATE_FILE" 2>/dev/null)
   task=$(jq -r '.task // "-"' "$STATE_FILE" 2>/dev/null)
   branch=$(jq -r '.branch // "-"' "$STATE_FILE" 2>/dev/null)
 
+  # Override task display with testing info when in testing mode
+  if [ "$testing" = "true" ] && [ -n "$testing_info" ]; then
+    task="[TEST] $testing_info"
+  fi
+
   # Determine status
-  if [ "$FLAG" = "--live" ]; then
+  if [ "$testing" = "true" ]; then
+    status="TESTING "
+  elif [ "$FLAG" = "--live" ]; then
     # Live activity detection — always run regardless of state file
     "$SCRIPT_DIR/is-active.sh" "$i" --fast 2>/dev/null
     rc=$?

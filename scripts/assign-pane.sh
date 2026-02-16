@@ -34,6 +34,15 @@ fi
 # Acquire exclusive lock for atomic check-and-assign
 acquire_pane_lock "$PANE_NUM"
 
+# Check if pane is in testing mode (inside lock)
+testing=$(jq -r '.testing // false' "$STATE_FILE" 2>/dev/null)
+if [ "$testing" = "true" ]; then
+  testing_info=$(jq -r '.testing_info // "unknown"' "$STATE_FILE" 2>/dev/null)
+  echo "ERROR: Pane $PANE_NUM is in TESTING mode: $testing_info" >&2
+  echo "Use update-pane-state.sh $PANE_NUM --done-testing to release it first." >&2
+  exit 1
+fi
+
 # Check if pane is already occupied (inside lock)
 occupied=$(jq -r '.occupied // false' "$STATE_FILE" 2>/dev/null)
 if [ "$occupied" = "true" ]; then

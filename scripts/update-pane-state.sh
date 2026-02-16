@@ -1,10 +1,12 @@
 #!/bin/bash
-# Update pane state — release, set session_id, or update activity timestamp.
+# Update pane state — release, set session_id, testing mode, or update activity timestamp.
 #
 # Used by hooks (Stop auto-cleanup) and skills (manual management).
 #
 # Usage:
 #   update-pane-state.sh <pane> --release              # Mark pane as free
+#   update-pane-state.sh <pane> --testing <description> # Mark pane as PM testing (blocks handoffs)
+#   update-pane-state.sh <pane> --done-testing         # Clear testing state, release pane
 #   update-pane-state.sh <pane> --session <id>         # Set session ID
 #   update-pane-state.sh <pane> --activity             # Update last_activity
 #   update-pane-state.sh --cleanup-session <id>        # Find and release pane by session ID
@@ -53,6 +55,8 @@ fi
 if [ -z "$PANE_NUM" ] || [ -z "$ACTION" ]; then
   echo "Usage:" >&2
   echo "  update-pane-state.sh <pane> --release" >&2
+  echo "  update-pane-state.sh <pane> --testing <description>" >&2
+  echo "  update-pane-state.sh <pane> --done-testing" >&2
   echo "  update-pane-state.sh <pane> --session <id>" >&2
   echo "  update-pane-state.sh <pane> --activity" >&2
   echo "  update-pane-state.sh --cleanup-session <session_id>" >&2
@@ -75,10 +79,34 @@ case "$ACTION" in
   --release)
     # --release only touches JSON state files, no tmux required
     if ! safe_jq_update "$STATE_FILE" --arg now "$NOW" \
-      '.occupied = false | .session_id = null | .task = null | .branch = null | .assigned_at = null | .last_activity = $now'; then
+      '.occupied = false | .testing = false | .testing_info = null | .session_id = null | .task = null | .branch = null | .assigned_at = null | .last_activity = $now'; then
       exit 1
     fi
     echo "Pane $PANE_NUM released"
+    ;;
+
+  --testing)
+    # Mark pane as testing (PM is manually testing a PR/feature)
+    # Blocks handoffs — pane stays in TESTING until --done-testing
+    if [ -z "$VALUE" ]; then
+      echo "Usage: update-pane-state.sh <pane> --testing <description>" >&2
+      echo "Example: update-pane-state.sh 1 --testing 'PR #1303 model selectors'" >&2
+      exit 1
+    fi
+    if ! safe_jq_update "$STATE_FILE" --arg info "$VALUE" --arg now "$NOW" \
+      '.occupied = true | .testing = true | .testing_info = $info | .last_activity = $now'; then
+      exit 1
+    fi
+    echo "Pane $PANE_NUM marked as TESTING: $VALUE"
+    ;;
+
+  --done-testing)
+    # Clear testing state and release the pane
+    if ! safe_jq_update "$STATE_FILE" --arg now "$NOW" \
+      '.occupied = false | .testing = false | .testing_info = null | .session_id = null | .task = null | .branch = null | .assigned_at = null | .last_activity = $now'; then
+      exit 1
+    fi
+    echo "Pane $PANE_NUM testing complete, released"
     ;;
 
   --session)
