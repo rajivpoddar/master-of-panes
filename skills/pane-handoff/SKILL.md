@@ -131,7 +131,14 @@ Show a summary table:
 
 ## Error Handling
 
+- If pane is in TESTING mode: Show testing info, suggest a different pane. NEVER overwrite a TESTING pane.
 - If pane is already OCCUPIED: Show current task and suggest releasing first
 - If issue not found: Show error and exit
 - If git-sync fails: Retry once, then report failure
 - If pane is ACTIVE when handoff starts: Wait for idle (up to 2 minutes)
+
+## Slot Selection Guidelines
+
+When the PM doesn't specify a slot number, prefer higher-numbered free slots (3, 2, 1) to avoid
+conflicts with PM manual testing which typically uses lower-numbered slots. Always check pane
+status first and skip any slots in TESTING or OCCUPIED state.
