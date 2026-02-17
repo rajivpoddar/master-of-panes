@@ -76,11 +76,11 @@ BEFORE exiting plan mode. This file:
 - Survives session clears and context compaction
 - Can be referenced by the PM or other agents
 
-## CRITICAL: Dev Server Rules
-- NEVER start, stop, kill, or restart dev servers on ANY port
-- NEVER run kill/pkill/lsof commands targeting server processes
-- The PM manages dev servers. If yours is not running, STOP and report it.
-- Multiple slots share ports 3001-3004. Touching another slot's server destroys their work.
+## Dev Server Rules
+- If you need a dev server for QA testing, use the `/bun-dev-server` skill to start it on YOUR slot's port
+- NEVER stop, kill, or restart dev servers on OTHER slots' ports
+- NEVER run kill/pkill/lsof commands targeting server processes on other ports
+- Each slot has its own port (3001-3004) determined by the worktree's .env.local
 ```
 
 After the workflow prefix, append:

@@ -42,7 +42,8 @@ is_pane_active() {
   "$SCRIPT_DIR/is-active.sh" "$PANE_NUM" 2>/dev/null
 }
 
-# Wait for pane to become idle
+# Wait for pane to become idle (prompt visible)
+# Checks every 2 seconds, returns as soon as idle is detected.
 wait_for_idle() {
   local max_wait=${1:-120}
   local count=0
@@ -65,22 +66,6 @@ wait_for_idle() {
     fi
   done
   echo "ERROR: Timeout waiting for pane $PANE_NUM to become idle (${max_wait}s)" >&2
-  return 1
-}
-
-# Wait for Claude Code prompt to appear (command completed)
-wait_for_prompt() {
-  local max_wait=${1:-60}
-  local count=0
-  while [ $count -lt $max_wait ]; do
-    if tmux capture-pane -t "$PANE_ADDR" -p | tail -5 | grep -q '^❯' && \
-       tmux capture-pane -t "$PANE_ADDR" -p | tail -3 | grep -q 'INSERT'; then
-      return 0
-    fi
-    sleep 1
-    count=$((count + 1))
-  done
-  echo "ERROR: Timeout waiting for prompt in pane $PANE_NUM" >&2
   return 1
 }
 
@@ -124,17 +109,14 @@ fi
 
 echo "Sent to pane $PANE_NUM: $MESSAGE"
 
-# If --wait, wait for command to complete and pane to become idle
+# If --wait, wait for command to complete and pane to become idle.
+# Uses is-active.sh which detects idle by checking for the ❯ prompt
+# and INSERT mode indicator. Returns as soon as idle is detected.
 if [ "$WAIT" = "--wait" ]; then
   echo "Waiting for completion..."
-  if wait_for_prompt 60; then
-    sleep 1
-    is_pane_active
-    rc=$?
-    if [ $rc -eq 0 ]; then
-      echo "  Pane became active again, waiting for idle..."
-      wait_for_idle 120
-    fi
-    echo "Command completed"
-  fi
+  # Brief pause to let the command start executing
+  sleep 1
+  # Now wait for the pane to become idle (prompt reappears)
+  wait_for_idle 120
+  echo "Command completed"
 fi
