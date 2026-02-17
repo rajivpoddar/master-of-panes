@@ -8,6 +8,7 @@
 #   send-to-pane.sh <pane> <message>           # Send and return
 #   send-to-pane.sh <pane> <message> --wait    # Send and wait for completion
 #   send-to-pane.sh <pane> <message> --force   # Skip idle wait (urgent corrections)
+#   send-to-pane.sh <pane> <message> --urgent  # Alias for --force
 
 PANE_NUM="$1"
 MESSAGE="$2"
@@ -22,12 +23,12 @@ FORCE=""
 for arg in "$@"; do
   case "$arg" in
     --wait)  WAIT="--wait" ;;
-    --force) FORCE="--force" ;;
+    --force|--urgent) FORCE="--force" ;;
   esac
 done
 
 if [ -z "$PANE_NUM" ] || [ -z "$MESSAGE" ]; then
-  echo "Usage: send-to-pane.sh <pane> <message> [--wait] [--force]" >&2
+  echo "Usage: send-to-pane.sh <pane> <message> [--wait] [--force|--urgent]" >&2
   exit 1
 fi
 
@@ -91,19 +92,19 @@ PANE_BOTTOM=$(tmux capture-pane -t "$PANE_ADDR" -p | tail -5)
 if echo "$PANE_BOTTOM" | grep -q 'INSERT'; then
   # Already in INSERT mode — send directly
   tmux send-keys -t "$PANE_ADDR" -l "$MESSAGE"
-  sleep 0.5
+  sleep 1
   tmux send-keys -t "$PANE_ADDR" Enter
 elif echo "$PANE_BOTTOM" | grep -q 'NORMAL'; then
   # In NORMAL mode — press 'i' first to enter INSERT
   tmux send-keys -t "$PANE_ADDR" i
   sleep 0.3
   tmux send-keys -t "$PANE_ADDR" -l "$MESSAGE"
-  sleep 0.5
+  sleep 1
   tmux send-keys -t "$PANE_ADDR" Enter
 else
   # Can't determine mode — assume INSERT (default Claude Code state)
   tmux send-keys -t "$PANE_ADDR" -l "$MESSAGE"
-  sleep 0.5
+  sleep 1
   tmux send-keys -t "$PANE_ADDR" Enter
 fi
 
