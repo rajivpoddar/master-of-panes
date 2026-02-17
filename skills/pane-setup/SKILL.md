@@ -118,7 +118,30 @@ bash ${CLAUDE_PLUGIN_ROOT}/scripts/update-pane-state.sh <pane> --release 2>/dev/
 
 Or if the state files don't exist yet, they'll be auto-created on first use by `ensure_pane_state()`.
 
-### Step 3: Verify
+### Step 3: Install idle notification hooks
+
+Install Stop hooks on all dev panes so the manager pane gets notified when any slot goes idle:
+
+```bash
+for i in $(seq 1 $NUM_DEV_PANES); do
+  PANE_ADDR=$(source ${CLAUDE_PLUGIN_ROOT}/scripts/pane-lib.sh && load_config && pane_address $i)
+  CHECKOUT_PATH=$(tmux display-message -t "$PANE_ADDR" -p '#{pane_current_path}')
+  if [ -n "$CHECKOUT_PATH" ] && [ -d "$CHECKOUT_PATH" ]; then
+    bash ${CLAUDE_PLUGIN_ROOT}/scripts/install-slot-hooks.sh $i "$CHECKOUT_PATH"
+  else
+    echo "⚠ Slot $i: could not detect checkout path (pane may not be active)"
+  fi
+done
+```
+
+This installs a Claude Code `Stop` hook in each checkout's `.claude/settings.json`. When a dev slot finishes responding, the hook:
+1. Updates pane state with a timestamp
+2. Sends a `tmux display-message` notification to the manager pane
+3. Writes to `/tmp/mop-notifications.log`
+
+**Note:** If a pane doesn't have a Claude Code session running yet, the hook can be installed later during handoff (Step 2.5 of `pane-handoff`).
+
+### Step 4: Verify
 
 ```bash
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/get-pane-status.sh
@@ -126,7 +149,7 @@ bash ${CLAUDE_PLUGIN_ROOT}/scripts/get-pane-status.sh
 
 Show the status table to confirm setup worked.
 
-### Step 4: Report
+### Step 5: Report
 
 Show a summary:
 - Manager pane address
@@ -134,4 +157,4 @@ Show a summary:
 - State directory
 - Config file location: `~/.claude/tmux-panes/config.json`
 
-Tell the user: "Setup complete. All `/master-of-panes:pane-*` commands will use this configuration."
+Tell the user: "Setup complete. All `/master-of-panes:pane-*` commands will use this configuration. Idle notification hooks are installed — you'll see 🔔 notifications in the manager pane when dev slots finish work."
