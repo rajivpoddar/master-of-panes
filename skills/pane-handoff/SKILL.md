@@ -140,14 +140,9 @@ Install the MoP Stop hook into the checkout's `.claude/settings.json` so the PM 
 gets notified when this slot becomes idle:
 
 ```bash
-# Derive checkout path from port (pane N → port 300N)
-PORT=$((3000 + PANE))
-CHECKOUT_PATH="$HOME/Downloads/projects/heydonna-app-${PORT}"
-
-# For pane 1 (port 3001), the checkout may be at the base path
-if [ "$PANE" = "1" ] && [ ! -d "$CHECKOUT_PATH" ]; then
-  CHECKOUT_PATH="$HOME/Downloads/projects/heydonna-app"
-fi
+# Get the checkout path from tmux — the pane's current working directory
+PANE_ADDR=$(source ${CLAUDE_PLUGIN_ROOT}/scripts/pane-lib.sh && load_config && pane_address $PANE)
+CHECKOUT_PATH=$(tmux display-message -t "$PANE_ADDR" -p '#{pane_current_path}')
 
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/install-slot-hooks.sh $PANE "$CHECKOUT_PATH"
 ```
@@ -162,9 +157,11 @@ Claude Code session UUID from the most recent `.jsonl` file in the checkout's pr
 ```bash
 sleep 5
 
-# Derive the project dir from the checkout port (pane N → port 300N)
-PORT=$((3000 + PANE))
-PROJECT_DIR="$HOME/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-${PORT}"
+# Derive the project dir from the checkout path
+# Claude Code stores sessions at ~/.claude/projects/<path-with-dashes>/
+CHECKOUT_PATH=$(tmux display-message -t "$PANE_ADDR" -p '#{pane_current_path}')
+PROJECT_DIR_NAME=$(echo "$CHECKOUT_PATH" | sed 's|^/||; s|/|-|g')
+PROJECT_DIR="$HOME/.claude/projects/-${PROJECT_DIR_NAME}"
 
 # Get the most recent session file
 SESSION_ID=$(ls -t "$PROJECT_DIR"/*.jsonl 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed 's/.jsonl$//')
