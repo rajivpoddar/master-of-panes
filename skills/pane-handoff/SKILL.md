@@ -134,15 +134,35 @@ tmux send-keys -t "$PANE_ADDR" Enter
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/assign-pane.sh $PANE "#$ISSUE: $TITLE"
 ```
 
-#### Step 2.5: Capture session ID
+#### Step 2.5: Install idle notification hook
+
+Install the MoP Stop hook into the checkout's `.claude/settings.json` so the PM pane
+gets notified when this slot becomes idle:
+
+```bash
+# Derive checkout path from port (pane N → port 300N)
+PORT=$((3000 + PANE))
+CHECKOUT_PATH="$HOME/Downloads/projects/heydonna-app-${PORT}"
+
+# For pane 1 (port 3001), the checkout may be at the base path
+if [ "$PANE" = "1" ] && [ ! -d "$CHECKOUT_PATH" ]; then
+  CHECKOUT_PATH="$HOME/Downloads/projects/heydonna-app"
+fi
+
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/install-slot-hooks.sh $PANE "$CHECKOUT_PATH"
+```
+
+This ensures idle notifications work automatically — no polling needed.
+
+#### Step 2.6: Capture session ID
 
 After the handoff prompt is delivered, wait for the session to start, then capture the
-Claude Code session UUID from the most recent `.jsonl` file in the worktree's project dir.
+Claude Code session UUID from the most recent `.jsonl` file in the checkout's project dir.
 
 ```bash
 sleep 5
 
-# Derive the project dir from the worktree port (pane N → port 300N)
+# Derive the project dir from the checkout port (pane N → port 300N)
 PORT=$((3000 + PANE))
 PROJECT_DIR="$HOME/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-${PORT}"
 
@@ -157,7 +177,7 @@ fi
 
 This allows later `/resume $SESSION_ID` if the session needs to be restored after a `/clear`.
 
-#### Step 2.6: Verify delivery
+#### Step 2.7: Verify delivery
 
 Capture output to confirm the pane received the handoff:
 
@@ -183,6 +203,7 @@ Show a summary table:
 - Labels: status:in-progress, slot:<N>
 - Handoff file: /tmp/handoff-<ISSUE>.md
 - State file: ~/.claude/tmux-panes/pane-<N>.json
+- Idle hook: installed ✓ (PM pane will be notified when slot goes idle)
 
 ## Error Handling
 
