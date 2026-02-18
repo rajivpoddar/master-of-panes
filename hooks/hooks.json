@@ -1,5 +1,5 @@
 {
-  "description": "Auto-cleanup tmux pane state when Claude Code sessions end",
+  "description": "Auto-cleanup tmux pane state and notify manager pane when Claude Code sessions end",
   "hooks": {
     "Stop": [
       {
@@ -7,6 +7,11 @@
           {
             "type": "command",
             "command": "test -n \"$SESSION_ID\" && bash \"${CLAUDE_PLUGIN_ROOT}/scripts/update-pane-state.sh\" --cleanup-session \"$SESSION_ID\" || true",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/notify-manager.sh\"",
             "timeout": 10
           }
         ]
