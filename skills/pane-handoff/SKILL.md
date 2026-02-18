@@ -64,7 +64,7 @@ Analyze the following issue and follow the workflow.
 6. Implement using the recommended subagent (see below)
 7. Run automated tests: `npx tsc --noEmit && bunx vitest run && bun lint`
 8. If ANY convex/ files were modified: run `~/.claude/skills/convex-dev-deploy/convex-dev-deploy/scripts/deploy.sh` to sync Convex functions BEFORE QA
-9. Delegate to qa-tester subagent for browser verification and QA report
+9. Delegate to qa-tester subagent for browser verification and QA report — **run synchronously, NOT in background** (`run_in_background: false`). Wait for it to finish before proceeding.
 10. STOP after QA report is generated — PM will review and trigger PR creation
 
 ## CRITICAL: Plan Persistence
