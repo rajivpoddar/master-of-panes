@@ -167,14 +167,15 @@ Capture output to confirm the pane received the handoff:
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture-output.sh $PANE 5
 ```
 
-### Phase 3: Launch Supervisor (Optional)
+### Phase 3: Launch Supervisor (Always)
 
-After the handoff, ask the user:
-> "Handoff complete. Launch a background supervisor to monitor pane $PANE for #$ISSUE?"
+After the handoff, **always** launch a background supervisor automatically using the `master-of-panes:pane-monitor` skill:
 
-If yes, use `/master-of-panes:pane-monitor $PANE "Complete #$ISSUE through PR creation"` — the monitor skill handles background agent launch.
+```
+/master-of-panes:pane-monitor $PANE "Complete #$ISSUE through PR creation"
+```
 
-For autonomous operation (when PM is away), launch automatically.
+The monitor handles plan approval notification (Slack), stall detection, QA report detection → auto-trigger `/review-and-pr`, and PR label updates. No need to ask the PM — just launch it.
 
 ### Report
 

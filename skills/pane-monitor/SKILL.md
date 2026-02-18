@@ -37,14 +37,7 @@ Capture recent output:
 - Check issue labels: `gh issue view <ISSUE> --json labels -q '.labels[].name'`
 - Auto-approve if: labels contain bug/enhancement/infra/types/tech-debt/perf/refactor AND plan touches ≤5 files
   → Send option 2: `bash <PLUGIN_ROOT>/scripts/send-to-pane.sh <PANE> '2'`
-- Otherwise → notify PM via tmux send-keys to manager pane (BEFORE Slack):
-  ```bash
-  LOCAL_TIME=$(date "+%H:%M:%S")
-  tmux send-keys -t "0:0.0" "[slot <PANE> plan ready — #<ISSUE>] [$LOCAL_TIME]" 2>/dev/null || true
-  sleep 0.3
-  tmux send-keys -t "0:0.0" Enter 2>/dev/null || true
-  ```
-  Then also notify via Slack (see below) with plan details.
+- Otherwise → notify PM via Slack (see below) with plan details.
 
 **Implementation Stage**: Look for code changes, file edits, "vitest", "tsc", "lint".
 - On test failure: let pane fix (up to 3 attempts), then escalate
