@@ -58,7 +58,29 @@ Capture recent output:
 - Release pane: `bash <PLUGIN_ROOT>/scripts/update-pane-state.sh <PANE> --release`
 - Notify PM via Slack: "✅ PR #N open for #ISSUE"
 
-## Slack Notifications
+## Notifications
+
+### tmux send-keys to Manager Pane (PRIMARY — fires immediately)
+
+For every PM notification, FIRST send a tmux message to the manager pane so it appears
+as input in the PM's Claude Code session:
+
+```bash
+LOCAL_TIME=$(date "+%H:%M:%S")
+MSG="[slot <N> <event> — #<ISSUE>] [$LOCAL_TIME]"
+tmux send-keys -t "0:0.0" "$MSG" 2>/dev/null || true
+sleep 0.3
+tmux send-keys -t "0:0.0" Enter 2>/dev/null || true
+```
+
+Events:
+- Plan ready: `[slot N plan ready — #ISSUE]`
+- Stalled: `[slot N stalled — #ISSUE]`
+- QA done: `[slot N QA done — #ISSUE]`
+- PR open: `[slot N PR ready — #ISSUE]`
+- Error: `[slot N needs help — #ISSUE]`
+
+### Slack Notifications (SECONDARY — context + details)
 
 Use mcp__slack__conversations_add_message with channel_id from project config.
 NEVER post to public channels.
