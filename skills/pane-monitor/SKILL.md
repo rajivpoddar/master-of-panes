@@ -37,7 +37,14 @@ Capture recent output:
 - Check issue labels: `gh issue view <ISSUE> --json labels -q '.labels[].name'`
 - Auto-approve if: labels contain bug/enhancement/infra/types/tech-debt/perf/refactor AND plan touches ≤5 files
   → Send option 2: `bash <PLUGIN_ROOT>/scripts/send-to-pane.sh <PANE> '2'`
-- Otherwise → notify PM via Slack (see below)
+- Otherwise → notify PM via tmux send-keys to manager pane (BEFORE Slack):
+  ```bash
+  LOCAL_TIME=$(date "+%H:%M:%S")
+  tmux send-keys -t "0:0.0" "[slot <PANE> plan ready — #<ISSUE>] [$LOCAL_TIME]" 2>/dev/null || true
+  sleep 0.3
+  tmux send-keys -t "0:0.0" Enter 2>/dev/null || true
+  ```
+  Then also notify via Slack (see below) with plan details.
 
 **Implementation Stage**: Look for code changes, file edits, "vitest", "tsc", "lint".
 - On test failure: let pane fix (up to 3 attempts), then escalate
@@ -60,27 +67,7 @@ Capture recent output:
 
 ## Notifications
 
-### tmux send-keys to Manager Pane (PRIMARY — fires immediately)
-
-For every PM notification, FIRST send a tmux message to the manager pane so it appears
-as input in the PM's Claude Code session:
-
-```bash
-LOCAL_TIME=$(date "+%H:%M:%S")
-MSG="[slot <N> <event> — #<ISSUE>] [$LOCAL_TIME]"
-tmux send-keys -t "0:0.0" "$MSG" 2>/dev/null || true
-sleep 0.3
-tmux send-keys -t "0:0.0" Enter 2>/dev/null || true
-```
-
-Events:
-- Plan ready: `[slot N plan ready — #ISSUE]`
-- Stalled: `[slot N stalled — #ISSUE]`
-- QA done: `[slot N QA done — #ISSUE]`
-- PR open: `[slot N PR ready — #ISSUE]`
-- Error: `[slot N needs help — #ISSUE]`
-
-### Slack Notifications (SECONDARY — context + details)
+### Slack Notifications
 
 Use mcp__slack__conversations_add_message with channel_id from project config.
 NEVER post to public channels.
