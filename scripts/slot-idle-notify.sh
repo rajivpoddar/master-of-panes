@@ -75,7 +75,9 @@ if command -v tmux &>/dev/null; then
   fi
 
   tmux send-keys -t "$MANAGER_PANE" \
-    "[slot $SLOT_NUM idle — $SHORT_TASK$BRANCH_INFO] [$LOCAL_TIME]" Enter 2>/dev/null
+    "[slot $SLOT_NUM idle — $SHORT_TASK$BRANCH_INFO] [$LOCAL_TIME]" 2>/dev/null
+  sleep 0.1
+  tmux send-keys -t "$MANAGER_PANE" Enter 2>/dev/null
 fi
 
 # Always exit 0 — never block Claude from stopping
