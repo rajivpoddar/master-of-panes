@@ -15,6 +15,7 @@
 #   2. Updates pane state with last_activity timestamp
 #   3. Writes to /tmp/mop-notifications.log
 #   4. Notifies PM pane via tmux send-keys (injects as user message)
+#   5. Auto-starts ci-watch.sh if an open PR exists for the slot's branch
 
 SLOT_NUM="$1"
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -68,6 +69,23 @@ if command -v tmux &>/dev/null; then
 
   tmux send-keys -t "$MANAGER_PANE" \
     "[slot $SLOT_NUM idle — $SHORT_TASK] [$LOCAL_TIME]" Enter 2>/dev/null
+fi
+
+# 5. Auto-start ci-watch if an open PR exists for this slot's branch
+# Runs ci-watch.sh in the background so CI completion triggers a Slack DM.
+# Guard: skip if ci-watch is already running for this PR (prevents duplicates).
+CI_WATCH="$HOME/.claude/commands/ci-watch.sh"
+if [ -n "$CWD" ] && [ -f "$CI_WATCH" ] && command -v gh &>/dev/null; then
+  BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null)
+  if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ]; then
+    PR_NUMBER=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)
+    if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+      if ! pgrep -f "ci-watch.sh $PR_NUMBER" > /dev/null 2>&1; then
+        bash "$CI_WATCH" "$PR_NUMBER" >> "/tmp/ci-watch-${PR_NUMBER}.log" 2>&1 &
+        echo "[$TIMESTAMP] Started ci-watch for PR #$PR_NUMBER (slot $SLOT_NUM, branch $BRANCH)" >> "$LOG_FILE" 2>/dev/null
+      fi
+    fi
+  fi
 fi
 
 # Always exit 0 — never block Claude from stopping
