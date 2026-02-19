@@ -14,7 +14,7 @@
 #   1. Checks stop_hook_active to prevent infinite loops
 #   2. Updates pane state with last_activity timestamp
 #   3. Writes to /tmp/mop-notifications.log
-#   4. Optionally notifies PM pane via tmux display-message
+#   4. Notifies PM pane via tmux send-keys (injects as user message)
 
 SLOT_NUM="$1"
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -57,8 +57,7 @@ fi
 LOG_FILE="/tmp/mop-notifications.log"
 echo "[$TIMESTAMP] Slot $SLOT_NUM idle | $TASK | session=$SESSION_ID" >> "$LOG_FILE" 2>/dev/null
 
-# 3. Notify PM pane via tmux (non-blocking, best-effort)
-# Uses display-message which shows briefly at the bottom of the PM pane
+# 3. Notify PM pane via tmux send-keys (injects as user message into PM Claude Code session)
 if command -v tmux &>/dev/null; then
   # Load config to get manager pane address
   source "$SCRIPTS_DIR/pane-lib.sh" 2>/dev/null
@@ -67,8 +66,8 @@ if command -v tmux &>/dev/null; then
   # Short task label (first 40 chars)
   SHORT_TASK=$(echo "$TASK" | cut -c1-40)
 
-  tmux display-message -t "$MANAGER_PANE" \
-    "🔔 Slot $SLOT_NUM idle — $SHORT_TASK [$LOCAL_TIME]" 2>/dev/null
+  tmux send-keys -t "$MANAGER_PANE" \
+    "[slot $SLOT_NUM idle — $SHORT_TASK] [$LOCAL_TIME]" Enter 2>/dev/null
 fi
 
 # Always exit 0 — never block Claude from stopping

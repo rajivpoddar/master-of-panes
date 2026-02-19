@@ -158,19 +158,7 @@ bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-pane.sh $PANE '/git-sync-main' --wait
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-pane.sh $PANE '/clear' --wait
 ```
 
-**NOTE:** Do NOT send `/rename` after `/clear`.
-
-#### Step 2.2b: Install Stop hook (idle notify)
-
-After clearing, install the MoP Stop hook into the slot's `.claude/settings.json`.
-This ensures idle notifications fire correctly for this slot:
-
-```bash
-CHECKOUT_PATH="/Users/rajiv/Downloads/projects/heydonna-app-300${PANE}"
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/install-slot-hooks.sh $PANE "$CHECKOUT_PATH"
-```
-
-This is a merge operation — it adds the `Stop` hook without overwriting `promptSuggestionEnabled` or `plansDirectory`. The `/clear` command creates a new session,
+**NOTE:** Do NOT send `/rename` after `/clear`. The `/clear` command creates a new session,
 so any `/rename` sent afterward either applies to the dead session or gets lost. Session
 tracking is handled by the pane state file (`assign-pane.sh`) instead.
 
@@ -228,10 +216,11 @@ bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture-output.sh $PANE 5
 
 ### Phase 3: Verify Hooks Are Active
 
-No supervisor needed — hooks handle the full lifecycle automatically:
+No supervisor needed — hooks handle the full lifecycle automatically. Hooks are permanently
+configured in each slot's `.claude/settings.json` (no per-handoff installation needed):
 
-- **Plan written** → `notify-plan-ready.sh` PostToolUse hook fires → PM pane receives tmux notification
-- **Slot goes idle** → `slot-idle-notify.sh` Stop hook fires → PM pane notified
+- **Plan written** → `notify-plan-ready.sh` PostToolUse hook fires → PM pane receives message
+- **Slot goes idle** → `slot-idle-notify.sh` Stop hook fires → `tmux send-keys` injects idle notification into PM pane
 
 After verifying delivery (Step 2.6), the handoff is complete.
 
