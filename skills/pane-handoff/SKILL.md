@@ -92,7 +92,11 @@ Analyze the following issue and follow the workflow.
    - Simple create/upload flows: tests/e2e/fixtures/heydonna.mp3 (200KB, creates new project)
    - Fallback if IDs don't exist in dev deployment: use any transcript from dashboard projects list
 
-   **Profile:** admin (default) | regular (if testing non-admin flows)
+   **Profile:** Use per-slot profiles — derive slot from port:
+   `SLOT=$((PORT - 3000))`  → 3001→1, 3002→2, 3003→3, 3004→4
+   Admin: `--profile ~/.agent-browser/profiles/admin-slot${SLOT}`
+   Regular: `--profile ~/.agent-browser/profiles/regular-slot${SLOT}`
+   ⚠️ NEVER use the shared `admin` or `regular` profiles — per-slot only.
 
    **Test plan** (5-10 steps, each with exact action and expected outcome):
    1. Navigate to http://localhost:PORT/...   ← always use absolute URL with actual PORT number
@@ -105,7 +109,7 @@ Analyze the following issue and follow the workflow.
    ⛔ CROSS-PORT RULE: NEVER follow Clerk redirects to another port.
    If redirected to a different port, STOP — kill daemon, restart on YOUR port.
    All navigation must use absolute URLs: http://localhost:PORT/path
-   Use persistent profiles: --profile ~/.agent-browser/profiles/admin (or /regular)
+   Use per-slot profiles: `--profile ~/.agent-browser/profiles/admin-slot${SLOT}`
    See the `heydonna-agent-browser` skill for full patterns.
    ```
    Delegate to qa-tester — **run synchronously, NOT in background** (`run_in_background: false`).
