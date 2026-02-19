@@ -58,29 +58,72 @@ Analyze the following issue and follow the workflow.
 1. Create branch: `git checkout -b fix/<ISSUE>-short-description`
 2. Enter plan mode (EnterPlanMode tool)
 3. Explore codebase and design solution
-4. **BEFORE exiting plan mode:** Copy your plan to `docs/plans/issue-<ISSUE>-plan.md` using the Write tool.
-   This persists the plan in the repo so it survives context loss and gets committed with the PR.
-5. Exit plan mode with permissions (ExitPlanMode with allowedPrompts)
-6. Implement using the recommended subagent (see below)
-7. Run automated tests: `npx tsc --noEmit && bunx vitest run && bun lint`
-8. If ANY convex/ files were modified: run `~/.claude/skills/convex-dev-deploy/convex-dev-deploy/scripts/deploy.sh` to sync Convex functions BEFORE QA
-9. Delegate to qa-tester subagent for browser verification and QA report — **run synchronously, NOT in background** (`run_in_background: false`). Wait for it to finish before proceeding.
-10. STOP after QA report is generated — PM will review and trigger PR creation
+4. Exit plan mode with permissions (ExitPlanMode with allowedPrompts)
+   — Plan is saved automatically to `docs/plans/` (configured in `.claude/settings.json`)
+   — PM is notified automatically via tmux when the plan file is written
+   — **Immediately after ExitPlanMode**, rename the plan file to the issue slug:
+     ```bash
+     # Find the file just written (newest in docs/plans/)
+     PLAN=$(ls -t docs/plans/*.md | head -1)
+     # Rename to issue-NNN-short-slug.md (3-5 words from issue title, lowercase, hyphenated)
+     mv "$PLAN" docs/plans/issue-<ISSUE>-short-slug.md
+     # Example: docs/plans/issue-1364-per-template-formatting-rules.md
+     ```
+5. Implement using the recommended subagent (see below)
+6. Run automated tests: `npx tsc --noEmit && bunx vitest run && bun lint`
+7. **Pre-QA setup — complete ALL that apply before delegating:**
+   - **Dev server:** Check if running: `curl -s -o /dev/null -w "%{http_code}" http://localhost:$(grep PORT .env.local | cut -d= -f2)/`
+     If not 200, run `/bun-dev-server` skill to start it on your slot's port
+   - **Convex:** If ANY `convex/` files changed → `~/.claude/skills/convex-dev-deploy/scripts/deploy.sh`
+   - **Modal:** If ANY `modal/` files changed → `cd modal/docx && modal deploy processor.py` (or `modal/audio`)
+8. **Write a QA Brief BEFORE delegating to qa-tester.** Fill in all values by running the commands shown:
+   ```
+   ## QA Brief for Issue #NNN
 
-## CRITICAL: Plan Persistence
+   **Port:** $(grep PORT .env.local | cut -d= -f2)   ← run this, include actual number
+   **Branch:** $(git branch --show-current)
+   **Dev server running:** YES/NO
+   **Convex deployed:** YES/NO
+   **Modal deployed:** YES/NO
 
-Claude Code saves plans to `~/.claude/plans/<random-name>.md` which is NOT in the repo
-and has random filenames. You MUST copy your plan to `docs/plans/issue-<ISSUE>-plan.md`
-BEFORE exiting plan mode. This file:
-- Gets committed with the PR (via safe-commit staging rules)
-- Survives session clears and context compaction
-- Can be referenced by the PM or other agents
+   **Test data** — choose based on what you're testing:
+   - Performance/editor: transcript k171t7vczd62twehrtdvhz8mcx81aejg (long-test-file, 4853 paragraphs)
+   - Proofreading/formatting/DOCX: transcript k17ad8qja2qaj97rk9834b54sh81a024 (TRZ Corporation, Legal)
+   - Simple create/upload flows: tests/e2e/fixtures/heydonna.mp3 (200KB, creates new project)
+   - Fallback if IDs don't exist in dev deployment: use any transcript from dashboard projects list
+
+   **Profile:** admin (default) | regular (if testing non-admin flows)
+
+   **Test plan** (5-10 steps, each with exact action and expected outcome):
+   1. Navigate to http://localhost:PORT/...   ← always use absolute URL with actual PORT number
+   2. [Exact action: click X / type Y / wait for Z] → [Expected outcome]
+   3. [Continue...]
+
+   **What cannot be tested automatically and why:**
+   (List backend-only scenarios, network error conditions, Modal-dependent flows)
+
+   ⛔ CROSS-PORT RULE: NEVER follow Clerk redirects to another port.
+   If redirected to a different port, STOP — kill daemon, restart on YOUR port.
+   All navigation must use absolute URLs: http://localhost:PORT/path
+   Use persistent profiles: --profile ~/.agent-browser/profiles/admin (or /regular)
+   See the `heydonna-agent-browser` skill for full patterns.
+   ```
+   Delegate to qa-tester — **run synchronously, NOT in background** (`run_in_background: false`).
+   **The qa-tester must NOT send the report to Slack.** Generate `/tmp/qa-report-<ISSUE>.md` and
+   screenshots to `/tmp/qa-<ISSUE>-*.png` only. PM reads and delivers the report.
+9. STOP after QA report is generated — PM will review and trigger PR creation
 
 ## Dev Server Rules
-- If you need a dev server for QA testing, use the `/bun-dev-server` skill to start it on YOUR slot's port
-- NEVER stop, kill, or restart dev servers on OTHER slots' ports
+- Use `/bun-dev-server` skill to start YOUR slot's server (detects port from .env.local automatically)
+- **NEVER stop, kill, or restart dev servers on OTHER slots' ports**
 - NEVER run kill/pkill/lsof commands targeting server processes on other ports
 - Each slot has its own port (3001-3004) determined by the worktree's .env.local
+
+## E2E Test Rules
+- **DO NOT add new E2E smoke tests** unless the issue explicitly says to write one
+- The smoke test suite covers critical paths only — new tests require PM approval
+- You may add unit tests and integration tests freely
+- If the `/review-and-pr` skill suggests adding an E2E test, skip it and proceed without
 ```
 
 After the workflow prefix, append:
@@ -111,7 +154,19 @@ bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-pane.sh $PANE '/git-sync-main' --wait
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/send-to-pane.sh $PANE '/clear' --wait
 ```
 
-**NOTE:** Do NOT send `/rename` after `/clear`. The `/clear` command creates a new session,
+**NOTE:** Do NOT send `/rename` after `/clear`.
+
+#### Step 2.2b: Install Stop hook (idle notify)
+
+After clearing, install the MoP Stop hook into the slot's `.claude/settings.json`.
+This ensures idle notifications fire correctly for this slot:
+
+```bash
+CHECKOUT_PATH="/Users/rajiv/Downloads/projects/heydonna-app-300${PANE}"
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/install-slot-hooks.sh $PANE "$CHECKOUT_PATH"
+```
+
+This is a merge operation — it adds the `Stop` hook without overwriting `promptSuggestionEnabled` or `plansDirectory`. The `/clear` command creates a new session,
 so any `/rename` sent afterward either applies to the dead session or gets lost. Session
 tracking is handled by the pane state file (`assign-pane.sh`) instead.
 
@@ -167,15 +222,14 @@ Capture output to confirm the pane received the handoff:
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture-output.sh $PANE 5
 ```
 
-### Phase 3: Launch Supervisor (Always)
+### Phase 3: Verify Hooks Are Active
 
-After the handoff, **always** launch a background supervisor automatically using the `master-of-panes:pane-monitor` skill:
+No supervisor needed — hooks handle the full lifecycle automatically:
 
-```
-/master-of-panes:pane-monitor $PANE "Complete #$ISSUE through PR creation"
-```
+- **Plan written** → `notify-plan-ready.sh` PostToolUse hook fires → PM pane receives tmux notification
+- **Slot goes idle** → `slot-idle-notify.sh` Stop hook fires → PM pane notified
 
-The monitor handles plan approval notification (Slack), stall detection, QA report detection → auto-trigger `/review-and-pr`, and PR label updates. No need to ask the PM — just launch it.
+After verifying delivery (Step 2.6), the handoff is complete.
 
 ### Report
 

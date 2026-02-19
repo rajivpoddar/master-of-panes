@@ -71,5 +71,27 @@ if command -v tmux &>/dev/null; then
     "🔔 Slot $SLOT_NUM idle — $SHORT_TASK [$LOCAL_TIME]" 2>/dev/null
 fi
 
+# 4. Send Slack DM to PM (non-blocking, best-effort)
+# Reads bot token from ~/.claude.json MCP server config
+SLACK_TOKEN=$(python3 -c "
+import json, sys, os
+try:
+    with open(os.path.expanduser('~/.claude.json')) as f:
+        d = json.load(f)
+    print(d['mcpServers']['slack']['env']['SLACK_MCP_XOXB_TOKEN'])
+except Exception:
+    pass
+" 2>/dev/null)
+
+if [ -n "$SLACK_TOKEN" ]; then
+  SHORT_TASK=$(echo "$TASK" | cut -c1-50)
+  SLACK_MSG="[slot $SLOT_NUM idle — $SHORT_TASK] [$LOCAL_TIME]"
+  curl -s -X POST "https://slack.com/api/chat.postMessage" \
+    -H "Authorization: Bearer $SLACK_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"channel\":\"D0ADL956AJH\",\"text\":\"$SLACK_MSG\"}" \
+    > /tmp/slack-idle-notify-${SLOT_NUM}.log 2>&1 &
+fi
+
 # Always exit 0 — never block Claude from stopping
 exit 0

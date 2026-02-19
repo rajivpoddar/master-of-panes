@@ -39,24 +39,9 @@ Capture recent output:
   → Send option 2: `bash <PLUGIN_ROOT>/scripts/send-to-pane.sh <PANE> '2'`
 - Otherwise → notify PM via Slack (see below) with plan details.
 
-**Implementation Stage**: Look for code changes, file edits, "vitest", "tsc", "lint".
-- On test failure: let pane fix (up to 3 attempts), then escalate
-- On stall (idle >10 min with no new output):
-  → Nudge: `bash <PLUGIN_ROOT>/scripts/send-to-pane.sh <PANE> 'continue with the implementation'`
-  → Max 3 nudges, then escalate
+**Implementation Stage**: Once plan is approved and pane enters implementation, the supervisor's job is DONE. Exit immediately after plan approval.
 
-**QA Stage**: Check for `/tmp/qa-report-<ISSUE>*.md`.
-- HIGH confidence + PASS → trigger PR creation:
-  `bash <PLUGIN_ROOT>/scripts/send-to-pane.sh <PANE> '/review-and-pr'`
-  CRITICAL: Use EXACTLY '/review-and-pr'. Do NOT paraphrase.
-- PARTIAL → notify PM: "QA report needs review"
-- FAIL → notify PM: "QA failed"
-
-**PR Created**: Look for "github.com/.../pull/" in pane output.
-- Extract PR number
-- Update labels: `gh issue edit <ISSUE> --add-label status:in-review --remove-label status:in-progress`
-- Release pane: `bash <PLUGIN_ROOT>/scripts/update-pane-state.sh <PANE> --release`
-- Notify PM via Slack: "✅ PR #N open for #ISSUE"
+**Do NOT monitor through implementation, testing, QA, or PR creation.** The idle notification hook handles all of that — when the pane goes idle, the PM receives a `[slot N idle — #ISSUE]` message and handles the QA report and PR trigger directly.
 
 ## Notifications
 
@@ -89,7 +74,7 @@ Write all actions to /tmp/pane-<N>-monitor.log:
 2. NEVER touch dev servers
 3. NEVER approve plans for features or multi-file refactors — escalate
 4. Max 3 nudges per stage, then escalate
-5. Max 60 minutes total runtime, then escalate and stop
+5. Max 15 minutes total runtime — supervisor only covers the planning stage. Exit after plan approved or escalated.
 6. Always send Slack notification on completion
 ```
 
@@ -118,13 +103,6 @@ The background agent continues monitoring autonomously until goal is met or time
 ## Quick Reference: Stage Flow
 
 ```
-PLANNING → [auto-approve or notify PM]
-    ↓
-IMPLEMENTING → [nudge on stall, escalate on repeated failure]
-    ↓
-TESTING → [watch for pass/fail]
-    ↓
-QA → [trigger /review-and-pr on PASS]
-    ↓
-PR CREATED → [update labels, release pane, notify PM]
+PLANNING → [auto-approve or notify PM] → EXIT
+           (idle notification handles QA + PR from here)
 ```
