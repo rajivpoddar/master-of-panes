@@ -141,6 +141,30 @@ This installs a Claude Code `Stop` hook in each checkout's `.claude/settings.jso
 
 **Note:** If a pane doesn't have a Claude Code session running yet, the hook can be installed later during handoff (Step 2.5 of `pane-handoff`).
 
+### Step 3.5: Install manager pane SessionStart hook
+
+Install a SessionStart hook in the manager pane so slot status is injected into the PM's session context at every startup:
+
+```bash
+MANAGER_PATH=$(tmux display-message -t "<MANAGER_PANE>" -p '#{pane_current_path}')
+if [ -n "$MANAGER_PATH" ] && [ -d "$MANAGER_PATH" ]; then
+  bash ${CLAUDE_PLUGIN_ROOT}/scripts/install-manager-hooks.sh "$MANAGER_PATH"
+else
+  echo "⚠ Manager pane: could not detect checkout path (pane may not be active yet)"
+fi
+```
+
+Replace `<MANAGER_PANE>` with the configured manager address. When installed, the hook prints a live slot status table at every session start:
+
+```
+=== Slot Status ===
+Slot 1: OCCUPIED [DND] — #1364: [templates][ai] Per-template formatting rules...
+Slot 2: OCCUPIED — #1432: feat(ai): Route Gemini formatting calls...
+Slot 3: FREE
+Slot 4: OCCUPIED — #1150: [e2e] Large file performance smoke test...
+=========================
+```
+
 ### Step 4: Verify
 
 ```bash

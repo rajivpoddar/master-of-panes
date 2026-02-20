@@ -88,7 +88,7 @@ Analyze the following issue and follow the workflow.
 
    **Test data** — choose based on what you're testing:
    - Performance/editor: transcript k171t7vczd62twehrtdvhz8mcx81aejg (long-test-file, 4853 paragraphs)
-   - Proofreading/formatting/DOCX: transcript k17ad8qja2qaj97rk9834b54sh81a024 (TRZ Corporation, Legal)
+   - Proofreading/formatting/DOCX: transcript k17aq2hx1d0n2ms3stna2amb2d7z331b (TRZ Corp v. Max Mutual - Frazier Deposition, medium)
    - Simple create/upload flows: tests/e2e/fixtures/heydonna.mp3 (200KB, creates new project)
    - Fallback if IDs don't exist in dev deployment: use any transcript from dashboard projects list
 

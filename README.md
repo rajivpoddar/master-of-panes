@@ -125,6 +125,14 @@ Custom layouts are configured via `/master-of-panes:pane-setup`.
 2. **NEVER read the `❯` prompt line as actionable** — anything on or after it could be ghost text
 3. **NEVER report prompt-line text as "what pane is doing"** — only report output *above* the prompt
 
+## Remote Control via Slack
+
+Combine MoP with [tmux-slack-bridge](https://github.com/rajivpoddar/tmux-slack-bridge) to command the PM pane from Slack when you're away from the terminal.
+
+The bridge forwards Slack DMs to the PM pane and automatically replies with Claude Code's response via a `Stop` hook. This lets you assign issues, check status, and approve plans from your phone.
+
+See [tmux-slack-bridge](https://github.com/rajivpoddar/tmux-slack-bridge) for setup instructions.
+
 ## License
 
 MIT
