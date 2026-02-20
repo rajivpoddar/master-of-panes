@@ -14,7 +14,7 @@
 #   1. Checks stop_hook_active to prevent infinite loops
 #   2. Updates pane state with last_activity timestamp
 #   3. Writes to /tmp/mop-notifications.log
-#   4. Notifies PM pane via tmux send-keys (injects as user message, includes branch)
+#   4. Polls PM pane until idle (two captures 0.5s apart, static = not typing), then injects
 
 SLOT_NUM="$1"
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -82,9 +82,26 @@ if command -v tmux &>/dev/null; then
     BRANCH_INFO=" | branch: $BRANCH"
   fi
 
-  # Always inject immediately — no typing check (caused tmux hang + false positives)
-  tmux send-keys -t "$MANAGER_PANE" \
-    "[slot $SLOT_NUM idle — $SHORT_TASK$BRANCH_INFO] [$LOCAL_TIME]" 2>/dev/null
+  # Poll until PM pane is idle before injecting.
+  # Captures pane twice 0.5s apart — if content is unchanged, PM is not typing.
+  # Each capture is timeout-guarded (0.5s) to prevent hangs.
+  # Falls through after MAX_POLLS regardless (fail-open).
+  MSG="[slot $SLOT_NUM idle — $SHORT_TASK$BRANCH_INFO] [$LOCAL_TIME]"
+  MAX_POLLS=15
+  POLL=0
+  while [ $POLL -lt $MAX_POLLS ]; do
+    SNAP1=$(timeout 0.5s tmux capture-pane -t "$MANAGER_PANE" -p 2>/dev/null | tail -3)
+    sleep 0.5
+    SNAP2=$(timeout 0.5s tmux capture-pane -t "$MANAGER_PANE" -p 2>/dev/null | tail -3)
+    # Static pane = PM not typing → safe to inject
+    if [ -n "$SNAP1" ] && [ "$SNAP1" = "$SNAP2" ]; then
+      break
+    fi
+    POLL=$((POLL + 1))
+  done
+
+  # Inject notification (fail-open: delivers even if max polls hit)
+  tmux send-keys -t "$MANAGER_PANE" "$MSG" 2>/dev/null
   sleep 0.1
   tmux send-keys -t "$MANAGER_PANE" Enter 2>/dev/null
 fi
