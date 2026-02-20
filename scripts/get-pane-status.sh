@@ -44,6 +44,7 @@ for i in $(seq 1 "$NUM_DEV_PANES"); do
   occupied=$(jq -r '.occupied // false' "$STATE_FILE" 2>/dev/null)
   testing=$(jq -r '.testing // false' "$STATE_FILE" 2>/dev/null)
   testing_info=$(jq -r '.testing_info // ""' "$STATE_FILE" 2>/dev/null)
+  dnd=$(jq -r '.dnd // false' "$STATE_FILE" 2>/dev/null)
   task=$(jq -r '.task // "-"' "$STATE_FILE" 2>/dev/null)
   branch=$(jq -r '.branch // "-"' "$STATE_FILE" 2>/dev/null)
 
@@ -52,8 +53,10 @@ for i in $(seq 1 "$NUM_DEV_PANES"); do
     task="[TEST] $testing_info"
   fi
 
-  # Determine status
-  if [ "$testing" = "true" ]; then
+  # Determine status — DND takes priority over testing/activity
+  if [ "$dnd" = "true" ]; then
+    status="DND     "
+  elif [ "$testing" = "true" ]; then
     status="TESTING "
   elif [ "$FLAG" = "--live" ]; then
     # Live activity detection — always run regardless of state file

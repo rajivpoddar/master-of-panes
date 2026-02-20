@@ -34,6 +34,19 @@ fi
 
 validate_pane "$PANE_NUM"
 
+# Check DND flag — block sends unless --force is used
+PANE_STATE_DIR="${PANE_STATE_DIR:-$HOME/.claude/tmux-panes}"
+STATE_FILE_DND="$PANE_STATE_DIR/pane-${PANE_NUM}.json"
+if [ "$FORCE" != "--force" ] && [ -f "$STATE_FILE_DND" ] && command -v jq &>/dev/null; then
+  DND=$(jq -r '.dnd // false' "$STATE_FILE_DND" 2>/dev/null)
+  if [ "$DND" = "true" ]; then
+    echo "⚠ Pane $PANE_NUM is in DND mode — command not sent."
+    echo "  To clear: update-pane-state.sh $PANE_NUM --undnd"
+    echo "  To override: send-to-pane.sh $PANE_NUM '<message>' --force"
+    exit 0
+  fi
+fi
+
 PANE_ADDR=$(pane_address "$PANE_NUM")
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

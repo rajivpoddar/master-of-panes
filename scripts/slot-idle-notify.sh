@@ -59,6 +59,14 @@ echo "[$TIMESTAMP] Slot $SLOT_NUM idle | $TASK | session=$SESSION_ID" >> "$LOG_F
 
 # 3. Notify PM pane via tmux send-keys (injects as user message into PM Claude Code session)
 # Include branch so PM can decide to start ci-watch if a PR is open.
+# Skip notification if pane is in DND mode.
+if [ -f "$STATE_FILE" ] && command -v jq &>/dev/null; then
+  DND=$(jq -r '.dnd // false' "$STATE_FILE" 2>/dev/null)
+  if [ "$DND" = "true" ]; then
+    exit 0
+  fi
+fi
+
 if command -v tmux &>/dev/null; then
   # Load config to get manager pane address
   source "$SCRIPTS_DIR/pane-lib.sh" 2>/dev/null
@@ -74,6 +82,7 @@ if command -v tmux &>/dev/null; then
     BRANCH_INFO=" | branch: $BRANCH"
   fi
 
+  # Always inject immediately — no typing check (caused tmux hang + false positives)
   tmux send-keys -t "$MANAGER_PANE" \
     "[slot $SLOT_NUM idle — $SHORT_TASK$BRANCH_INFO] [$LOCAL_TIME]" 2>/dev/null
   sleep 0.1
