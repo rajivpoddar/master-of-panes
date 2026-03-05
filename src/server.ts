@@ -39,18 +39,50 @@ const app = new Hono();
 
 // ─── Validation ──────────────────────────────────────────
 
+// Claude Code HTTP hooks send `hook_event_name` (not `type`), along with
+// session_id, cwd, transcript_path, permission_mode, and event-specific
+// fields like tool_name/tool_input (PreToolUse/PostToolUse),
+// stop_hook_active/last_assistant_message (Stop).
 const hookPayloadSchema = z.object({
-  type: z.enum(["PreToolUse", "PostToolUse", "Notification", "Stop"]),
+  // Core fields present in ALL hook events
+  hook_event_name: z.enum(["PreToolUse", "PostToolUse", "Notification", "Stop"]),
+  session_id: z.string().optional(),
+  cwd: z.string().optional(),
+  transcript_path: z.string().optional(),
+  permission_mode: z.string().optional(),
+
+  // PreToolUse / PostToolUse fields
   tool_name: z.string().optional(),
   tool_input: z.record(z.unknown()).optional(),
   tool_output: z.string().optional(),
-  session_id: z.string().optional(),
-  notification_type: z.string().optional(),
+
+  // Stop fields
+  stop_hook_active: z.boolean().optional(),
+  last_assistant_message: z.string().optional(),
   stop_reason: z.string().optional(),
-  transcript: z.string().optional(),
-});
+
+  // Notification fields
+  notification_type: z.string().optional(),
+}).passthrough(); // Accept additional unknown fields gracefully
 
 const slotParamSchema = z.coerce.number().int().min(0).max(4);
+
+// ─── Normalize Payload ───────────────────────────────────
+
+/** Convert Claude Code's wire format to our internal HookPayload */
+function normalizePayload(raw: z.infer<typeof hookPayloadSchema>): HookPayload {
+  return {
+    type: raw.hook_event_name,
+    tool_name: raw.tool_name,
+    tool_input: raw.tool_input,
+    tool_output: raw.tool_output,
+    session_id: raw.session_id,
+    notification_type: raw.notification_type,
+    stop_reason: raw.stop_reason,
+    // Preserve useful context
+    transcript: raw.last_assistant_message,
+  };
+}
 
 // ─── Routes ──────────────────────────────────────────────
 
@@ -76,15 +108,16 @@ app.post("/hooks/slot/:slotNum", async (c) => {
 
   const payloadParse = hookPayloadSchema.safeParse(body);
   if (!payloadParse.success) {
-    // Log invalid payloads for debugging
+    // Log invalid payloads for debugging but still return 200
+    // to avoid Claude Code retrying or showing errors
     db.logEvent(slotNum, "invalid_payload", null, null, {
       raw: body,
       errors: payloadParse.error.issues,
     });
-    return c.json({ error: "Invalid payload", issues: payloadParse.error.issues }, 400);
+    return c.json({});
   }
 
-  const payload = payloadParse.data as HookPayload;
+  const payload = normalizePayload(payloadParse.data);
 
   // Process the hook event
   const response = processor.process(slotNum, payload);
