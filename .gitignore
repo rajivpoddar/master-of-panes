@@ -12,3 +12,16 @@ Thumbs.db
 
 # State files (user-specific)
 # Note: state files are in ~/.claude/tmux-panes/, not in the repo
+
+# Build output
+dist/
+
+# SQLite database
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Environment
+.env
+.env.local
