@@ -1,12 +1,12 @@
 ---
 name: pane-handoff
-description: Hand off a GitHub issue to a tmux dev pane — extract issue, git sync, assign state, send instructions, and optionally launch supervisor. Usage /master-of-panes:pane-handoff <pane> <issue>
+description: Hand off a GitHub issue to a tmux dev pane — extract issue, git sync, assign state, send instructions. Usage /master-of-panes:pane-handoff <pane> <issue>
 arguments: "<pane> <issue>"
 ---
 
 # /master-of-panes:pane-handoff
 
-Full-workflow handoff of a GitHub issue to a tmux dev pane. Extracts the issue, syncs git, assigns state, sends instructions, and optionally launches a background supervisor.
+Full-workflow handoff of a GitHub issue to a tmux dev pane. Extracts the issue, syncs git, assigns state, and sends instructions.
 
 ## Arguments
 
@@ -17,6 +17,34 @@ Example: `/master-of-panes:pane-handoff 4 1284`
 ## Instructions
 
 Parse `$ARGUMENTS`: first token is the pane number, second is the GitHub issue number.
+
+### Phase 0: Issue Freshness Review (MANDATORY)
+
+Before extracting, review the issue for stale information. This prevents slots from building plans on outdated assumptions.
+
+```bash
+ISSUE=<issue_number>
+
+# Check issue age + recent merged PRs that may invalidate assumptions
+CREATED_DATE=$(gh issue view $ISSUE --json createdAt -q '.createdAt' | cut -dT -f1)
+echo "Issue created: $CREATED_DATE"
+
+# PRs merged since issue creation
+gh pr list --state merged --search "merged:>=$CREATED_DATE" --limit 15 \
+  --json number,title --jq '.[] | "#\(.number): \(.title)"'
+
+# Dependency status
+gh issue view $ISSUE --json body -q '.body' | grep -oE '#[0-9]+' | sort -u | while read ref; do
+  NUM=${ref#\#}; STATE=$(gh issue view $NUM --json state -q '.state' 2>/dev/null || echo "NOT_FOUND")
+  echo "$ref: $STATE"
+done
+```
+
+**Review for:** stale API limits/file sizes, resolved dependencies still marked "blocked", superseded comments, missing context from recent PRs.
+
+**If stale:** Post a "PM Notes for Implementation" comment on the issue with corrections before handing off.
+
+**If fresh:** Proceed to Phase 1.
 
 ### Phase 1: Extract and Prepare
 
@@ -34,21 +62,15 @@ BODY=$(gh issue view $ISSUE --json body -q '.body')
 
 #### Step 1.2: Detect recommended subagent
 
-Based on issue labels and body text, detect the appropriate subagent:
+Check if the project defines a subagent routing table (typically in the project's own `pm-handoff` skill or `CLAUDE.md`). Route based on issue labels and body text.
 
-| Pattern | Subagent |
-|---------|----------|
-| `integration.test`, `test.coverage`, `write.*test` | `integration-test-specialist` |
-| `editor`, `track.change`, `prosemirror`, `tiptap`, `marks`, `extension` | `editor-specialist` |
-| `pagination`, `page.break`, `template`, `layout.dsl`, `placeholder` | `pagination-template-specialist` |
-| `ai`, `proofread`, `gemini`, `modal`, `transcription` | `ai-pipeline-specialist` |
-| Everything else | `fullstack-dev` |
+If no project-specific routing exists, use a generic developer subagent.
 
 #### Step 1.3: Build handoff file
 
 Extract the full issue (title, body, labels, comments) to `/tmp/handoff-<ISSUE>.md`.
 
-The handoff file MUST use this exact workflow prefix template:
+The handoff file MUST use this workflow prefix template:
 
 ```markdown
 Analyze the following issue and follow the workflow.
@@ -63,75 +85,24 @@ Analyze the following issue and follow the workflow.
    — PM is notified automatically via tmux when the plan file is written
    — **Immediately after ExitPlanMode**, rename the plan file to the issue slug:
      ```bash
-     # Find the file just written (newest in docs/plans/)
      PLAN=$(ls -t docs/plans/*.md | head -1)
-     # Rename to issue-NNN-short-slug.md (3-5 words from issue title, lowercase, hyphenated)
      mv "$PLAN" docs/plans/issue-<ISSUE>-short-slug.md
-     # Example: docs/plans/issue-1364-per-template-formatting-rules.md
      ```
 5. Implement using the recommended subagent (see below)
-6. Run automated tests: `npx tsc --noEmit && bunx vitest run && bun lint`
-7. **Pre-QA setup — complete ALL that apply before delegating:**
-   - **Dev server:** Check if running: `curl -s -o /dev/null -w "%{http_code}" http://localhost:$(grep PORT .env.local | cut -d= -f2)/`
-     If not 200, run `/bun-dev-server` skill to start it on your slot's port
-   - **Convex:** If ANY `convex/` files changed → `~/.claude/skills/convex-dev-deploy/scripts/deploy.sh`
-   - **Modal:** If ANY `modal/` files changed → `cd modal/docx && modal deploy processor.py` (or `modal/audio`)
-8. **Write a QA Brief BEFORE delegating to qa-tester.** Fill in all values by running the commands shown:
-   ```
-   ## QA Brief for Issue #NNN
-
-   **Port:** $(grep PORT .env.local | cut -d= -f2)   ← run this, include actual number
-   **Branch:** $(git branch --show-current)
-   **Dev server running:** YES/NO
-   **Convex deployed:** YES/NO
-   **Modal deployed:** YES/NO
-
-   **Test data** — choose based on what you're testing:
-   - Performance/editor: transcript k171t7vczd62twehrtdvhz8mcx81aejg (long-test-file, 4853 paragraphs)
-   - Proofreading/formatting/DOCX: transcript k17aq2hx1d0n2ms3stna2amb2d7z331b (TRZ Corp v. Max Mutual - Frazier Deposition, medium)
-   - Simple create/upload flows: tests/e2e/fixtures/heydonna.mp3 (200KB, creates new project)
-   - Fallback if IDs don't exist in dev deployment: use any transcript from dashboard projects list
-
-   **Profile:** Use per-slot profiles — derive slot from port:
-   `SLOT=$((PORT - 3000))`  → 3001→1, 3002→2, 3003→3, 3004→4
-   Admin: `--profile ~/.agent-browser/profiles/admin-slot${SLOT}`
-   Regular: `--profile ~/.agent-browser/profiles/regular-slot${SLOT}`
-   ⚠️ NEVER use the shared `admin` or `regular` profiles — per-slot only.
-
-   **Test plan** (5-10 steps, each with exact action and expected outcome):
-   1. Navigate to http://localhost:PORT/...   ← always use absolute URL with actual PORT number
-   2. [Exact action: click X / type Y / wait for Z] → [Expected outcome]
-   3. [Continue...]
-
-   **What cannot be tested automatically and why:**
-   (List backend-only scenarios, network error conditions, Modal-dependent flows)
-
-   ⛔ CROSS-PORT RULE: NEVER follow Clerk redirects to another port.
-   If redirected to a different port, STOP — kill daemon, restart on YOUR port.
-   All navigation must use absolute URLs: http://localhost:PORT/path
-   Use per-slot profiles: `--profile ~/.agent-browser/profiles/admin-slot${SLOT}`
-   See the `heydonna-agent-browser` skill for full patterns.
-   ```
-   Delegate to qa-tester — **run synchronously, NOT in background** (`run_in_background: false`).
-   **The qa-tester must NOT send the report to Slack.** Generate `/tmp/qa-report-<ISSUE>.md` and
-   screenshots to `/tmp/qa-<ISSUE>-*.png` only. PM reads and delivers the report.
-9. STOP after QA report is generated — PM will review and trigger PR creation
-
-## Dev Server Rules
-- Use `/bun-dev-server` skill to start YOUR slot's server (detects port from .env.local automatically)
-- **NEVER stop, kill, or restart dev servers on OTHER slots' ports**
-- NEVER run kill/pkill/lsof commands targeting server processes on other ports
-- Each slot has its own port (3001-3004) determined by the worktree's .env.local
-
-## E2E Test Rules
-- **DO NOT add new E2E smoke tests** unless the issue explicitly says to write one
-- The smoke test suite covers critical paths only — new tests require PM approval
-- You may add unit tests and integration tests freely
-- If the `/review-and-pr` skill suggests adding an E2E test, skip it and proceed without
+   **For bug fixes — test-first is mandatory, no exceptions:**
+   - Write a failing test that reproduces the bug BEFORE implementing
+   - The test must fail on current code, pass after your fix
+   - If you can't write a failing test, STOP and ask PM for clarification
+6. Run project-specific tests and linting (see project's CLAUDE.md for commands)
+7. Deploy if needed (see project's deploy skills/scripts)
+8. **STOP and wait for PM.** Do NOT run QA yourself. Do NOT create a PR.
+   The PM will send the next instruction — just wait.
 ```
 
+**Project-specific rules:** The project's `pm-handoff` skill may inject additional sections into the handoff file (dev server rules, deploy commands, test data, etc.). Check for a project-level handoff skill and include its content after the workflow prefix.
+
 After the workflow prefix, append:
-1. **Subagent recommendation** — primary subagent and QA delegation
+1. **Subagent recommendation** — from project-specific routing (Step 1.2)
 2. **Merge policy** — NEVER merge, PM reviews all PRs
 3. Full issue content from `gh issue view $ISSUE --json number,title,state,url,body,labels,comments` piped through jq
 
@@ -190,7 +161,6 @@ Claude Code session UUID from the most recent `.jsonl` file in the checkout's pr
 sleep 5
 
 # Derive the project dir from the checkout path
-# Claude Code stores sessions at ~/.claude/projects/<path-with-dashes>/
 CHECKOUT_PATH=$(tmux display-message -t "$PANE_ADDR" -p '#{pane_current_path}')
 PROJECT_DIR_NAME=$(echo "$CHECKOUT_PATH" | sed 's|^/||; s|/|-|g')
 PROJECT_DIR="$HOME/.claude/projects/-${PROJECT_DIR_NAME}"
@@ -217,10 +187,10 @@ bash ${CLAUDE_PLUGIN_ROOT}/scripts/capture-output.sh $PANE 5
 ### Phase 3: Verify Hooks Are Active
 
 No supervisor needed — hooks handle the full lifecycle automatically. Hooks are permanently
-configured in each slot's `.claude/settings.json` (no per-handoff installation needed):
+configured in each slot's settings (no per-handoff installation needed):
 
-- **Plan written** → `notify-plan-ready.sh` PostToolUse hook fires → PM pane receives message
-- **Slot goes idle** → `slot-idle-notify.sh` Stop hook fires → `tmux send-keys` injects idle notification into PM pane
+- **Plan written** → PostToolUse hook fires → PM pane receives notification
+- **Slot goes idle** → Stop hook fires → PM pane receives idle notification
 
 After verifying delivery (Step 2.6), the handoff is complete.
 
@@ -232,7 +202,6 @@ Show a summary table:
 - Subagent: <detected_subagent>
 - Labels: status:in-progress, slot:<N>
 - Handoff file: /tmp/handoff-<ISSUE>.md
-- State file: ~/.claude/tmux-panes/pane-<N>.json
 
 ## Error Handling
 
