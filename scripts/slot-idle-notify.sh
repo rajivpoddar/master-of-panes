@@ -40,12 +40,12 @@ CWD=$(echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 LOCAL_TIME=$(date "+%H:%M:%S")
 
-# Read pane state to get current task info
+# Read pane state to get current task info (use python3, not jq — jq may not be in hook PATH)
 PANE_STATE_DIR="$HOME/.claude/tmux-panes"
 STATE_FILE="$PANE_STATE_DIR/pane-${SLOT_NUM}.json"
 TASK="unknown"
-if [ -f "$STATE_FILE" ] && command -v jq &>/dev/null; then
-  TASK=$(jq -r '.task // "unknown"' "$STATE_FILE" 2>/dev/null)
+if [ -f "$STATE_FILE" ]; then
+  TASK=$(python3 -c "import json; d=json.load(open('$STATE_FILE')); print(d.get('task') or 'unknown')" 2>/dev/null)
 fi
 
 # 1. Update pane state — last_activity timestamp
@@ -59,10 +59,10 @@ echo "[$TIMESTAMP] Slot $SLOT_NUM idle | $TASK | session=$SESSION_ID" >> "$LOG_F
 
 # 3. Notify PM pane via tmux send-keys (injects as user message into PM Claude Code session)
 # Include branch so PM can decide to start ci-watch if a PR is open.
-# Skip notification if pane is in DND mode.
-if [ -f "$STATE_FILE" ] && command -v jq &>/dev/null; then
-  DND=$(jq -r '.dnd // false' "$STATE_FILE" 2>/dev/null)
-  if [ "$DND" = "true" ]; then
+# Skip PM injection if pane is in DND mode (MoP still has the log from step 2).
+if [ -f "$STATE_FILE" ]; then
+  DND=$(python3 -c "import json; d=json.load(open('$STATE_FILE')); print(d.get('dnd', False))" 2>/dev/null)
+  if [ "$DND" = "True" ] || [ "$DND" = "true" ]; then
     exit 0
   fi
 fi
@@ -86,7 +86,11 @@ if command -v tmux &>/dev/null; then
   # Captures pane twice 0.5s apart — if content is unchanged, PM is not typing.
   # Each capture is timeout-guarded (0.5s) to prevent hangs.
   # Falls through after MAX_POLLS regardless (fail-open).
-  MSG="[slot $SLOT_NUM idle — $SHORT_TASK$BRANCH_INFO] [$LOCAL_TIME]"
+  # Send /slot-idle command instead of free text — forces PM to create subtasks
+  # and follow the full pm-idle-notification decision tree (no shortcuts).
+  COMMENT="# slot $SLOT_NUM idle — $SHORT_TASK$BRANCH_INFO | $LOCAL_TIME"
+  COMMAND="/slot-idle $SLOT_NUM"
+
   MAX_POLLS=15
   POLL=0
   while [ $POLL -lt $MAX_POLLS ]; do
@@ -100,10 +104,36 @@ if command -v tmux &>/dev/null; then
     POLL=$((POLL + 1))
   done
 
-  # Inject notification (fail-open: delivers even if max polls hit)
-  tmux send-keys -t "$MANAGER_PANE" "$MSG" 2>/dev/null
-  sleep 0.1
+  # Inject context comment + slash command as ONE multi-line message.
+  # Uses Shift+Enter (S-Enter) to insert newline without submitting,
+  # then Enter to submit the combined message. Only Enter gets a delay.
+  tmux send-keys -t "$MANAGER_PANE" "$COMMENT" S-Enter "$COMMAND" 2>/dev/null
+  sleep 0.5
   tmux send-keys -t "$MANAGER_PANE" Enter 2>/dev/null
+fi
+
+# 4. Auto-release slot if POST-PR (a PR exists for the current branch).
+# This frees the slot immediately — PM still gets the notification for CI watch/labels.
+# Only triggers when: branch is not main AND a PR exists for that branch.
+if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ] && [ -f "$STATE_FILE" ]; then
+  PR_NUM=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null)
+  if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ] && [ "$PR_NUM" != "" ]; then
+    python3 -c "
+import json
+f = open('$STATE_FILE', 'r+')
+d = json.load(f)
+d['occupied'] = False
+d['status'] = 'free'
+d['state'] = 'FREE'
+d['pr'] = int('$PR_NUM')
+d['dnd'] = False
+f.seek(0)
+f.truncate()
+json.dump(d, f, indent=2)
+f.close()
+" 2>/dev/null
+    echo "[$TIMESTAMP] Slot $SLOT_NUM auto-released (POST-PR: #$PR_NUM)" >> "$LOG_FILE" 2>/dev/null
+  fi
 fi
 
 # Always exit 0 — never block Claude from stopping

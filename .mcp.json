@@ -1,0 +1,12 @@
+{
+  "mop": {
+    "command": "npx",
+    "args": [
+      "tsx",
+      "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/src/mcp.ts"
+    ],
+    "env": {
+      "MOP_DB_PATH": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/data/mop.db"
+    }
+  }
+}

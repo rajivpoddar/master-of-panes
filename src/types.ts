@@ -51,6 +51,8 @@ export interface SlotState {
   slot: number;
   /** Tmux pane address */
   address: string;
+  /** Human-readable name for this slot (e.g., "Rohini", "Hasta") */
+  name: string | null;
   /** Current status */
   status: SlotStatus;
   /** Whether the slot is occupied */

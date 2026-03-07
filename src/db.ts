@@ -44,6 +44,7 @@ export class MoPDatabase {
       CREATE TABLE IF NOT EXISTS slots (
         slot INTEGER PRIMARY KEY,
         address TEXT NOT NULL,
+        name TEXT,
         status TEXT NOT NULL DEFAULT 'free',
         occupied INTEGER NOT NULL DEFAULT 0,
         session_id TEXT,
@@ -56,6 +57,12 @@ export class MoPDatabase {
         dnd INTEGER NOT NULL DEFAULT 0
       );
     `);
+
+    // Migration: add name column if missing (for existing databases)
+    const columns = this.db.prepare("PRAGMA table_info(slots)").all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === "name")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN name TEXT");
+    }
 
     // Seed slot rows if they don't exist
     const insertSlot = this.db.prepare(`
@@ -142,7 +149,7 @@ export class MoPDatabase {
 
   updateSlot(slot: number, updates: Partial<SlotState>): void {
     const allowedFields = [
-      "status", "occupied", "session_id", "task", "issue",
+      "name", "status", "occupied", "session_id", "task", "issue",
       "branch", "pr", "assigned_at", "last_activity", "dnd",
     ];
 

@@ -22,14 +22,15 @@ export class TmuxRelay {
 
   /**
    * Inject a raw message into the PM pane via tmux send-keys.
-   * Uses send-to-slot.sh with --force to skip idle wait (PM is always "active").
+   * IMPORTANT: Text and Enter must be separate send-keys calls —
+   * appending Enter to the text send-keys can silently drop the Enter.
    */
   private injectToPM(message: string): boolean {
     try {
-      // For PM pane (slot 0), we use tmux directly since send-to-slot.sh
-      // expects slot numbers 1-4
       execSync(
-        `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)} Enter`,
+        `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)} && ` +
+        `sleep 0.3 && ` +
+        `tmux send-keys -t ${this.pmPaneAddress} Enter`,
         { timeout: 10_000 }
       );
       return true;
@@ -40,25 +41,54 @@ export class TmuxRelay {
   }
 
   /**
+   * Inject a comment line + slash command into the PM pane as ONE message.
+   * Types comment, Shift+Enter (newline without submit), command, then Enter.
+   * This ensures the MoP relay delivers a single combined user message.
+   */
+  private injectCommandToPM(comment: string, command: string): boolean {
+    try {
+      execSync(
+        // Type comment + Shift+Enter (newline) + command as one input
+        `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(comment)} S-Enter ${shellEscape(command)} && ` +
+        `sleep 0.5 && ` +
+        `tmux send-keys -t ${this.pmPaneAddress} Enter`,
+        { timeout: 10_000 }
+      );
+      return true;
+    } catch (err) {
+      console.error(`[relay] Failed to inject command into PM pane:`, err);
+      return false;
+    }
+  }
+
+  /**
    * Notify PM that a slot went idle.
-   * Format: [slot N idle — <task> | branch: <branch>] [HH:MM:SS]
+   * Sends: # comment line, then /slot-idle N slash command.
    */
   notifySlotIdle(slot: SlotState): void {
     const time = new Date().toLocaleTimeString("en-US", { hour12: false });
-    const taskPart = slot.task ? ` — ${truncate(slot.task, 50)}` : "";
-    const branchPart = slot.branch ? ` | branch: ${slot.branch}` : "";
-    const message = `[slot ${slot.slot} idle${taskPart}${branchPart}] [${time}]`;
-    this.injectToPM(message);
+    const taskPart = slot.task ? ` — ${truncate(slot.task, 40)}` : "";
+    const branchPart =
+      slot.branch && slot.branch !== "main"
+        ? ` | branch: ${slot.branch}`
+        : "";
+
+    const comment = `# slot ${slot.slot} idle${taskPart}${branchPart} | ${time}`;
+    const command = `/slot-idle ${slot.slot}`;
+    this.injectCommandToPM(comment, command);
   }
 
   /**
    * Notify PM that a plan is ready for review.
-   * Format: [plan-ready | slot N] [HH:MM:SS]
+   * Sends: # comment line, then /plan-ready N ISSUE slash command.
    */
-  notifyPlanReady(slotNum: number): void {
-    const time = new Date().toLocaleTimeString("en-US", { hour12: false });
-    const message = `[plan-ready | slot ${slotNum}] [${time}]`;
-    this.injectToPM(message);
+  notifyPlanReady(slotNum: number, issueNum = 0, planFile = ""): void {
+    const issuePart = issueNum ? ` | #${issueNum}` : "";
+    const filePart = planFile || "plan.md";
+
+    const comment = `# plan written by slot ${slotNum}${issuePart}: ${filePart}`;
+    const command = `/plan-ready ${slotNum} ${issueNum || 0}`;
+    this.injectCommandToPM(comment, command);
   }
 
   /**

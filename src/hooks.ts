@@ -5,6 +5,8 @@
  * plan ready), updates slot state, and relays notifications to PM.
  */
 
+import { execSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 import type { HookPayload, HookResponse } from "./types.js";
@@ -71,6 +73,34 @@ export class HookProcessor {
       branch: slot.branch,
     });
 
+    // Auto-release slot if POST-PR (a PR exists for current branch).
+    // Frees the slot immediately — PM still gets notification for CI watch/labels.
+    if (slot.branch && slot.branch !== "main") {
+      try {
+        const prNum = execSync(
+          `gh pr list --head "${slot.branch}" --json number --jq '.[0].number'`,
+          { timeout: 10_000 }
+        ).toString().trim();
+
+        if (prNum && prNum !== "null" && /^\d+$/.test(prNum)) {
+          const stateFile = `${process.env.HOME}/.claude/tmux-panes/pane-${slotNum}.json`;
+          try {
+            const state = JSON.parse(readFileSync(stateFile, "utf-8"));
+            state.occupied = false;
+            state.status = "free";
+            state.state = "FREE";
+            state.pr = parseInt(prNum, 10);
+            state.dnd = false;
+            writeFileSync(stateFile, JSON.stringify(state, null, 2));
+            this.db.logEvent(slotNum, "auto_released_post_pr", "Stop", null, {
+              pr: parseInt(prNum, 10),
+              branch: slot.branch,
+            });
+          } catch { /* pane state update failed — non-fatal */ }
+        }
+      } catch { /* gh pr list failed — non-fatal, PM handles manually */ }
+    }
+
     return {};
   }
 
@@ -85,9 +115,16 @@ export class HookProcessor {
     ) {
       const filePath = (payload.tool_input as Record<string, string>).file_path ?? "";
       if (filePath.includes("/plans/") && filePath.endsWith(".md")) {
-        this.relay.notifyPlanReady(slotNum);
+        // Extract issue number from slot's task field (e.g., "#1755: Fix something")
+        const slot = this.db.getSlot(slotNum);
+        const issueMatch = slot?.task?.match(/#(\d+)/);
+        const issueNum = issueMatch ? parseInt(issueMatch[1], 10) : 0;
+        const planFile = filePath.split("/").pop() ?? "plan.md";
+
+        this.relay.notifyPlanReady(slotNum, issueNum, planFile);
         this.db.logEvent(slotNum, "plan_ready", "PostToolUse", "Write", {
           file: filePath,
+          issue: issueNum,
         });
       }
     }

@@ -61,7 +61,10 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       const free = slots.filter((s) => s.status === "free").length;
       const active = slots.filter((s) => s.status === "active").length;
       const dnd = slots.filter((s) => s.dnd).length;
-      const summary = `${free} free, ${active} active, ${dnd} DND`;
+      const slotNames = slots
+        .map((s) => `${s.name ?? `slot-${s.slot}`}: ${s.status}${s.dnd ? " (DND)" : ""}${s.task ? ` — ${s.task}` : ""}`)
+        .join("\n");
+      const summary = `${free} free, ${active} active, ${dnd} DND\n${slotNames}`;
 
       return {
         content: [
@@ -155,17 +158,21 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_assign_slot",
-    "Assign a task to a slot. Sets status to active, stores task/issue/branch metadata.",
+    "Assign a task to a slot. Sets status to active, stores task/issue/branch metadata. Optionally set a human-readable name.",
     {
       slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
       task: z.string().describe("Task description"),
       issue: z.number().int().nullable().default(null).describe("GitHub issue number"),
       branch: z.string().nullable().default(null).describe("Git branch name"),
       session_id: z.string().nullable().default(null).describe("Claude Code session ID"),
+      name: z.string().nullable().default(null).describe("Human-readable slot name (e.g., 'Rohini')"),
     },
-    async ({ slot, task, issue, branch, session_id }) => {
+    async ({ slot, task, issue, branch, session_id, name }) => {
       db.assignSlot(slot, task, issue, branch, session_id);
-      db.logEvent(slot, "slot_assigned", null, null, { task, issue, branch });
+      if (name !== null) {
+        db.updateSlot(slot, { name } as Partial<import("./types.js").SlotState>);
+      }
+      db.logEvent(slot, "slot_assigned", null, null, { task, issue, branch, name });
       const updated = db.getSlot(slot);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(updated, null, 2) }],
