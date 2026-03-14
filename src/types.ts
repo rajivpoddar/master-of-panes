@@ -73,6 +73,10 @@ export interface SlotState {
   last_activity: string;
   /** Do not disturb flag */
   dnd: boolean;
+  /** Whether the slot is idle (at prompt) vs busy (executing) */
+  idle: boolean;
+  /** Current activity type (testing, coding, committing, etc.) — null if unknown */
+  activity: string | null;
 }
 
 // ─── Event Log ───────────────────────────────────────────────

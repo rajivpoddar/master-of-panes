@@ -1,5 +1,5 @@
 {
-  "description": "Auto-cleanup tmux pane state and notify manager pane when Claude Code sessions end",
+  "description": "MoP hooks: session cleanup, idle notification, activity tracking, and autocompact handling",
   "hooks": {
     "Stop": [
       {
@@ -13,6 +13,28 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/notify-manager.sh\"",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook-relay.sh\" PostToolUse",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook-relay.sh\" Notification",
+            "timeout": 5
           }
         ]
       }

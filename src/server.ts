@@ -12,12 +12,16 @@
  * 5. Returns a HookResponse that Claude Code acts on
  */
 
+import { execSync } from "node:child_process";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { MoPDatabase } from "./db.js";
 import { TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
+import { LogManager } from "./logs.js";
+import { StuckDetector } from "./stuck.js";
+import { ProcessHealthChecker } from "./health.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 
@@ -34,6 +38,26 @@ const config: MoPConfig = {
 const db = new MoPDatabase(config);
 const relay = new TmuxRelay(config);
 const processor = new HookProcessor(db, relay);
+
+// ─── Pane Logging (Phase 2) ─────────────────────────────
+const logManager = new LogManager();
+logManager.enableLogging(config.slotCount);
+relay.setLogManager(logManager);
+
+// ─── Stuck Detection (Phase 3) ──────────────────────────
+const stuckDetector = new StuckDetector(db, logManager, relay);
+stuckDetector.start();
+
+// ─── Process Health (Phase 4) ───────────────────────────
+const healthChecker = new ProcessHealthChecker(db, relay);
+healthChecker.start();
+
+// ─── Log Rotation (every 10 minutes) ────────────────────
+const rotationTimer = setInterval(() => {
+  for (let i = 1; i <= config.slotCount; i++) {
+    logManager.rotateIfNeeded(i);
+  }
+}, 10 * 60 * 1000);
 
 const app = new Hono();
 
@@ -209,10 +233,78 @@ app.post("/slots/:slotNum/release", (c) => {
     return c.json({ error: "Invalid slot number" }, 400);
   }
 
+  processor.clearPlanApprovalTimer(slotParse.data);
   db.releaseSlot(slotParse.data);
   db.logEvent(slotParse.data, "slot_released", null, null, {});
 
   return c.json({ success: true });
+});
+
+// ─── Slack Message Routing ───────────────────────────────
+
+/** Bot user ID → tmux pane address mapping */
+const SLOT_BOT_MAP: Record<string, string> = {
+  "U0ALEAYCAUT": "0:0.0",  // Dhruva PM
+  "U0AMETSAHC0": "0:0.1",  // Rohini SD
+  "U0ALE8Z8X2P": "0:0.2",  // Hasta QA
+  "U0AMEUQ8DR6": "0:0.3",  // Ashwini JD
+  "U0AMEUZPQ5N": "0:0.4",  // Chitra QA
+};
+
+/**
+ * Route a Slack message to the correct pane(s) based on @mentions.
+ * POST /api/slack-route { text, user, channel, ts, thread_ts? }
+ *
+ * Routing logic:
+ * - If message @mentions a specific slot bot → send to that slot's pane
+ * - If message @mentions multiple bots → send to all mentioned panes
+ * - If no slot mention → send to PM pane (0:0.0) as default
+ * - Always send to PM pane regardless (PM sees everything)
+ */
+app.post("/api/slack-route", async (c) => {
+  const body = await c.req.json();
+  const { text, user, channel, ts, formatted } = body;
+
+  if (!text || !formatted) {
+    return c.json({ error: "Missing text or formatted" }, 400);
+  }
+
+  // Find all @mentioned bot user IDs in the message text
+  const mentionPattern = /<@(U[A-Z0-9]+)>/g;
+  const mentions = [...text.matchAll(mentionPattern)].map((m: RegExpMatchArray) => m[1]);
+
+  // Determine target panes
+  const targetPanes = new Set<string>();
+
+  // Always route to PM
+  targetPanes.add("0:0.0");
+
+  // Route to mentioned slot panes
+  for (const userId of mentions) {
+    const pane = SLOT_BOT_MAP[userId];
+    if (pane && pane !== "0:0.0") {
+      targetPanes.add(pane);
+    }
+  }
+
+  // Send the formatted message to each target pane via tmux
+  const results: string[] = [];
+  for (const pane of targetPanes) {
+    try {
+      // Write to temp file and paste (handles multiline + special chars)
+      const tmpFile = `/tmp/slack-route-${Date.now()}.txt`;
+      const { writeFileSync, unlinkSync } = await import("node:fs");
+      writeFileSync(tmpFile, formatted);
+      execSync(`tmux load-buffer ${tmpFile} && tmux paste-buffer -t ${pane}`, { timeout: 5000 });
+      execSync(`tmux send-keys -t ${pane} Enter`, { timeout: 3000 });
+      try { unlinkSync(tmpFile); } catch {}
+      results.push(`${pane}: delivered`);
+    } catch (e) {
+      results.push(`${pane}: failed (${e})`);
+    }
+  }
+
+  return c.json({ routed: results, mentions, targets: [...targetPanes] });
 });
 
 // ─── Start ───────────────────────────────────────────────
@@ -231,6 +323,10 @@ console.log(`
 ║  Events:      /events?slot=N&limit=50   ║
 ║  Activity:    /activity?minutes=60       ║
 ║  Health:      /health                    ║
+╠══════════════════════════════════════════╣
+║  Pipe-pane:   /tmp/slot-N.log            ║
+║  Stuck watch: 60s check, 5min threshold  ║
+║  Log rotate:  10min, 100KB cap           ║
 ╚══════════════════════════════════════════╝
 `);
 
@@ -242,12 +338,20 @@ serve({ fetch: app.fetch, port }, (info) => {
 
 process.on("SIGINT", () => {
   console.log("\n[mop] Shutting down...");
+  healthChecker.stop();
+  stuckDetector.stop();
+  clearInterval(rotationTimer);
+  logManager.disableLogging(config.slotCount);
   db.close();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
   console.log("[mop] Terminated");
+  healthChecker.stop();
+  stuckDetector.stop();
+  clearInterval(rotationTimer);
+  logManager.disableLogging(config.slotCount);
   db.close();
   process.exit(0);
 });

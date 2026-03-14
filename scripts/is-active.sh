@@ -31,6 +31,25 @@ check_pane "$PANE_NUM" || exit 2
 
 PANE_ADDR=$(pane_address "$PANE_NUM")
 
+# Method 0: pane_last_activity — fastest check, no content capture needed.
+# tmux tracks the Unix epoch of the last output write to the pane.
+# If no output in the last N seconds, the pane is almost certainly idle.
+# This avoids expensive capture-pane calls for the common "definitely idle" case.
+ACTIVITY_THRESHOLD=3  # seconds — if no output in 3s, skip to chevron check
+last_activity=$(tmux display -t "$PANE_ADDR" -p '#{pane_last_activity}' 2>/dev/null)
+if [ -n "$last_activity" ]; then
+  now=$(date +%s)
+  age=$(( now - last_activity ))
+  if [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ]; then
+    echo "Method 0: pane_last_activity = $last_activity (${age}s ago, threshold ${ACTIVITY_THRESHOLD}s)"
+  fi
+  # If output is VERY recent, pane is definitely active — skip all other checks
+  if [ "$age" -le 1 ]; then
+    [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "RESULT: ACTIVE (output ${age}s ago)"
+    exit 0
+  fi
+fi
+
 # Capture pane with ANSI escape codes for color detection
 output=$(tmux capture-pane -e -t "$PANE_ADDR" -p 2>/dev/null)
 if [ -z "$output" ]; then

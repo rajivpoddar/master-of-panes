@@ -54,7 +54,8 @@ export class MoPDatabase {
         pr INTEGER,
         assigned_at TEXT,
         last_activity TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
-        dnd INTEGER NOT NULL DEFAULT 0
+        dnd INTEGER NOT NULL DEFAULT 0,
+        idle INTEGER NOT NULL DEFAULT 1
       );
     `);
 
@@ -63,6 +64,19 @@ export class MoPDatabase {
     if (!columns.some((c) => c.name === "name")) {
       this.db.exec("ALTER TABLE slots ADD COLUMN name TEXT");
     }
+
+    // Migration: add idle column if missing
+    if (!columns.some((c) => c.name === "idle")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN idle INTEGER NOT NULL DEFAULT 1");
+    }
+
+    // Migration: add activity column if missing
+    if (!columns.some((c) => c.name === "activity")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN activity TEXT");
+    }
+
+    // Initialize config KV table
+    this.initConfig();
 
     // Seed slot rows if they don't exist
     const insertSlot = this.db.prepare(`
@@ -124,7 +138,7 @@ export class MoPDatabase {
   getSlot(slot: number): SlotState | undefined {
     const row = this.db
       .prepare("SELECT * FROM slots WHERE slot = ?")
-      .get(slot) as (Record<string, unknown> & { dnd: number; occupied: number }) | undefined;
+      .get(slot) as (Record<string, unknown> & { dnd: number; occupied: number; idle: number }) | undefined;
 
     if (!row) return undefined;
 
@@ -132,25 +146,27 @@ export class MoPDatabase {
       ...row,
       dnd: Boolean(row.dnd),
       occupied: Boolean(row.occupied),
+      idle: Boolean(row.idle),
     } as unknown as SlotState;
   }
 
   getAllSlots(): SlotState[] {
     const rows = this.db
       .prepare("SELECT * FROM slots ORDER BY slot")
-      .all() as Array<Record<string, unknown> & { dnd: number; occupied: number }>;
+      .all() as Array<Record<string, unknown> & { dnd: number; occupied: number; idle: number }>;
 
     return rows.map((row) => ({
       ...row,
       dnd: Boolean(row.dnd),
       occupied: Boolean(row.occupied),
+      idle: Boolean(row.idle),
     })) as unknown as SlotState[];
   }
 
   updateSlot(slot: number, updates: Partial<SlotState>): void {
     const allowedFields = [
       "name", "status", "occupied", "session_id", "task", "issue",
-      "branch", "pr", "assigned_at", "last_activity", "dnd",
+      "branch", "pr", "assigned_at", "last_activity", "dnd", "idle", "activity",
     ];
 
     const sets: string[] = [];
@@ -183,6 +199,8 @@ export class MoPDatabase {
       pr: null,
       assigned_at: null,
       dnd: false,
+      idle: true,
+      activity: null,
     });
   }
 
@@ -203,6 +221,64 @@ export class MoPDatabase {
       assigned_at: new Date().toISOString(),
       dnd: false,
     });
+  }
+
+  // ─── Config (KV Store) ──────────────────────────────────
+
+  private initConfig(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+      )
+    `);
+  }
+
+  getConfig(key: string): string | null {
+    const row = this.db
+      .prepare("SELECT value FROM config WHERE key = ?")
+      .get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setConfig(key: string, value: string): void {
+    this.db.prepare(`
+      INSERT INTO config (key, value, updated_at)
+      VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `).run(key, value);
+  }
+
+  // ─── Exit Pending ──────────────────────────────────────
+
+  getExitPending(): boolean {
+    return this.getConfig("exit_pending") === "true";
+  }
+
+  setExitPending(enabled: boolean): void {
+    this.setConfig("exit_pending", enabled ? "true" : "false");
+    if (enabled) {
+      // Reset all slot exit-cycled tracking when enabling
+      for (let i = 0; i <= 4; i++) {
+        this.setConfig(`exit_cycled_${i}`, "false");
+      }
+    }
+  }
+
+  markSlotExitCycled(slot: number): void {
+    this.setConfig(`exit_cycled_${slot}`, "true");
+  }
+
+  getExitStatus(): { pending: boolean; cycled: Record<number, boolean> } {
+    const pending = this.getExitPending();
+    const cycled: Record<number, boolean> = {};
+    for (let i = 0; i <= 4; i++) {
+      cycled[i] = this.getConfig(`exit_cycled_${i}`) === "true";
+    }
+    return { pending, cycled };
   }
 
   // ─── Queries ─────────────────────────────────────────────

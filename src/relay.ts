@@ -8,6 +8,7 @@
  */
 
 import { execSync } from "node:child_process";
+import type { LogManager } from "./logs.js";
 import type { MoPConfig, SlotState } from "./types.js";
 
 const SEND_TO_SLOT_SCRIPT =
@@ -15,9 +16,15 @@ const SEND_TO_SLOT_SCRIPT =
 
 export class TmuxRelay {
   private pmPaneAddress: string;
+  private logManager: LogManager | null = null;
 
   constructor(config: MoPConfig) {
     this.pmPaneAddress = config.pmPaneAddress;
+  }
+
+  /** Attach a LogManager for log-based output capture and activity detection. */
+  setLogManager(lm: LogManager): void {
+    this.logManager = lm;
   }
 
   /**
@@ -25,7 +32,7 @@ export class TmuxRelay {
    * IMPORTANT: Text and Enter must be separate send-keys calls —
    * appending Enter to the text send-keys can silently drop the Enter.
    */
-  private injectToPM(message: string): boolean {
+  injectToPM(message: string): boolean {
     try {
       execSync(
         `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)} && ` +
@@ -92,6 +99,47 @@ export class TmuxRelay {
   }
 
   /**
+   * Notify PM that a slot is (still) waiting for plan approval.
+   * Fires when Stop hook detects awaiting_plan_approval state — typically
+   * after autocompact re-displays the plan prompt. PM should re-send "2".
+   */
+  notifyPlanApprovalNeeded(slotNum: number, issueNum: number): void {
+    const time = new Date().toLocaleTimeString("en-US", { hour12: false });
+    const issuePart = issueNum ? ` #${issueNum}` : "";
+    const comment = `# ⚠️ slot ${slotNum} still awaiting plan approval${issuePart} — re-send 2 | ${time}`;
+    this.injectToPM(comment);
+  }
+
+  /**
+   * Notify PM that a background subagent completed in a slot.
+   * Informational only — PM decides what to do next.
+   */
+  notifySubagentComplete(slotNum: number): void {
+    const time = new Date().toLocaleTimeString("en-US", { hour12: false });
+    const comment = `# subagent completed in slot ${slotNum} | ${time}`;
+    this.injectToPM(comment);
+  }
+
+  /**
+   * Notify PM that a slot has escalated — needs PM intervention.
+   * This is a high-priority notification: slot is blocked and waiting.
+   */
+  notifyEscalation(slotNum: number, issueNum: number, description: string): void {
+    const time = new Date().toLocaleTimeString("en-US", { hour12: false });
+    const issuePart = issueNum ? ` #${issueNum}` : "";
+    const descPart = description ? ` — ${truncate(description, 60)}` : "";
+    const comment = `# 🚨 slot ${slotNum} ESCALATED${issuePart}${descPart} | ${time}`;
+    this.injectToPM(comment);
+  }
+
+  /**
+   * Notify PM that a slot is about to compact (lose context).
+   */
+  notifyCompactWarning(slotNum: number, comment: string): void {
+    this.injectToPM(comment);
+  }
+
+  /**
    * Notify PM of a scheduled task trigger.
    * Format: [scheduled-task | <name> | HH:MM]
    */
@@ -108,12 +156,13 @@ export class TmuxRelay {
   /**
    * Send a command to a dev slot.
    */
-  sendToSlot(slotNum: number, command: string, force = false): boolean {
+  sendToSlot(slotNum: number, command: string, force = false, raw = false): boolean {
     try {
       const forceFlag = force ? " --force" : "";
+      const rawFlag = raw ? " --raw" : "";
       execSync(
-        `${SEND_TO_SLOT_SCRIPT} ${slotNum} ${shellEscape(command)}${forceFlag}`,
-        { timeout: 130_000 } // send-to-slot.sh has 120s wait timeout
+        `${SEND_TO_SLOT_SCRIPT} ${slotNum} ${shellEscape(command)}${forceFlag}${rawFlag}`,
+        { timeout: 15_000 } // send-to-slot.sh has 10s wait timeout
       );
       return true;
     } catch (err) {
@@ -124,17 +173,72 @@ export class TmuxRelay {
 
   /**
    * Check if a slot is currently active (processing).
+   * is-active.sh communicates via exit codes: 0=ACTIVE, 1=IDLE, 2=ERROR.
+   * execSync throws on non-zero exit — so reaching the return means exit 0 (ACTIVE).
    */
   isSlotActive(slotNum: number): boolean {
     try {
-      const result = execSync(
+      execSync(
         `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`,
         { timeout: 5_000 }
       );
-      return result.toString().trim() === "ACTIVE";
+      // exit code 0 = ACTIVE
+      return true;
     } catch {
+      // exit code 1 = IDLE, exit code 2 = ERROR, timeout = assume idle
       return false;
     }
+  }
+
+  /**
+   * Capture the current output of a slot's tmux pane.
+   * Prefers log-based capture (persistent, never loses content) when LogManager is attached.
+   * Falls back to tmux capture-pane if no LogManager.
+   */
+  captureOutput(slotNum: number, lines = 30): { output: string; activity: "busy" | "idle" } {
+    let output = "";
+
+    if (this.logManager) {
+      // Log-based: read last ~N lines worth of bytes
+      const bytes = lines * 120; // ~120 chars per line
+      output = this.logManager.tailLog(slotNum, bytes);
+    }
+
+    // Fallback to tmux capture-pane if log is empty or no LogManager
+    if (!output) {
+      const paneAddress = `0:0.${slotNum}`;
+      try {
+        const raw = execSync(
+          `tmux capture-pane -t ${paneAddress} -p -S -${lines}`,
+          { timeout: 5_000 }
+        );
+        output = raw.toString();
+      } catch (err) {
+        output = `[capture failed: ${err}]`;
+      }
+    }
+
+    const activity = this.isSlotActive(slotNum) ? "busy" as const : "idle" as const;
+    return { output, activity };
+  }
+
+  /**
+   * Check if a slot is actively producing output based on log mtime.
+   * If log was modified in the last 5 seconds, the slot is actively working.
+   * Falls back to is-active.sh if no LogManager.
+   */
+  isSlotActiveFromLog(slotNum: number): boolean {
+    if (!this.logManager) return this.isSlotActive(slotNum);
+
+    const mtime = this.logManager.getLogMtime(slotNum);
+    if (!mtime) return this.isSlotActive(slotNum); // No log → fallback
+
+    const ageMs = Date.now() - mtime.getTime();
+    if (ageMs < 5_000) return true; // Log modified recently → active
+
+    // Log is stale, but slot might be waiting for input (no output)
+    // Fall back to is-active.sh as secondary check
+    return this.isSlotActive(slotNum);
   }
 }
 

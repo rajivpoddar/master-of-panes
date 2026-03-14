@@ -14,6 +14,7 @@
  * - mop_assign_slot: Assign a task to a slot
  * - mop_release_slot: Release a slot (mark free)
  * - mop_set_dnd: Set/clear DND on a slot
+ * - mop_capture_output: Capture live tmux output from a slot + busy/idle status
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -37,9 +38,13 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_slot_status",
-    "Get the current state of a specific dev slot (1-4). Returns status, task, issue, branch, DND flag, and last activity.",
+    "Get the current state of a specific dev slot (1-4). Returns status, task, issue, branch, DND flag, and last activity. Refreshes idle state via is-active.sh for real-time accuracy.",
     { slot: z.number().int().min(1).max(4).describe("Slot number (1-4)") },
     async ({ slot }) => {
+      // Refresh idle state from is-active.sh (real-time chevron + content check)
+      const isActive = relay.isSlotActive(slot);
+      db.updateSlot(slot, { idle: !isActive });
+
       const state = db.getSlot(slot);
       if (!state) {
         return { content: [{ type: "text" as const, text: `Slot ${slot} not found` }] };
@@ -57,6 +62,12 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "Get the status of all 4 dev slots in one call. Returns an array of slot states with a summary line.",
     {},
     async () => {
+      // Refresh idle state for all slots from is-active.sh (real-time)
+      for (let i = 1; i <= config.slotCount; i++) {
+        const isActive = relay.isSlotActive(i);
+        db.updateSlot(i, { idle: !isActive });
+      }
+
       const slots = db.getAllSlots();
       const free = slots.filter((s) => s.status === "free").length;
       const active = slots.filter((s) => s.status === "active").length;
@@ -124,22 +135,43 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
       command: z.string().describe("Command or message to send"),
       force: z.boolean().default(false).describe("Skip idle wait (for urgent corrections)"),
+      raw: z.boolean().default(false).describe("Send as raw tmux key sequence (e.g., Escape, BTab for Shift+Tab, C-c). No Enter appended, no mode detection."),
     },
-    async ({ slot, command, force }) => {
+    async ({ slot, command, force, raw }) => {
       const slotState = db.getSlot(slot);
-      if (slotState?.dnd) {
+      if (slotState?.dnd && !force) {
         return {
           content: [
             {
               type: "text" as const,
-              text: `⚠️ Slot ${slot} is DND. Cannot send command. Clear DND first with mop_set_dnd.`,
+              text: `⚠️ Slot ${slot} (${slotState.name ?? "unknown"}) is DND. Command NOT sent.\n` +
+                `Suggest: escalate to Rajiv, or use force: true to override DND.\n` +
+                `To clear DND: mop_set_dnd(slot: ${slot}, dnd: false)`,
+            },
+          ],
+        };
+      }
+      if (slotState?.dnd && force) {
+        db.logEvent(slot, "dnd_override", null, null, {
+          command: command.slice(0, 200),
+          reason: "force: true used to override DND",
+        });
+      }
+
+      // Guard: block /review-and-pr when slot is active (even with force)
+      if (command.includes("/review-and-pr") && relay.isSlotActive(slot)) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `⚠️ Slot ${slot} is ACTIVE — cannot send /review-and-pr while processing. Wait for idle notification first.`,
             },
           ],
         };
       }
 
-      const success = relay.sendToSlot(slot, command, force);
-      db.logEvent(slot, "command_sent", null, null, { command, force, success });
+      const success = relay.sendToSlot(slot, command, force, raw);
+      db.logEvent(slot, "command_sent", null, null, { command, force, raw, success });
 
       return {
         content: [
@@ -147,7 +179,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
             type: "text" as const,
             text: success
               ? `✓ Sent to slot ${slot}: ${command.slice(0, 100)}`
-              : `✗ Failed to send to slot ${slot}`,
+              : `✗ Slot ${slot} is busy (timed out after 10s). Use force: true to send immediately, or wait and retry.`,
           },
         ],
       };
@@ -214,6 +246,78 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
           {
             type: "text" as const,
             text: `✓ Slot ${slot} DND ${dnd ? "enabled" : "disabled"}`,
+          },
+        ],
+      };
+    }
+  );
+
+  // ─── mop_set_exit_pending ──────────────────────────────
+
+  server.tool(
+    "mop_set_exit_pending",
+    "Set or clear the exit_pending flag. When enabled, slots will receive /exit when they next go idle, allowing graceful restart (e.g., for config changes, upgrades). Watchdog auto-restarts them with --continue. Tracks which slots have cycled.",
+    {
+      enabled: z.boolean().describe("true to enable exit_pending, false to clear"),
+    },
+    async ({ enabled }) => {
+      db.setExitPending(enabled);
+      db.logEvent(0, enabled ? "exit_pending_enabled" : "exit_pending_disabled", null, null, {
+        reason: enabled ? "PM set exit_pending — slots will /exit at next idle" : "PM cleared exit_pending flag",
+      });
+      const status = db.getExitStatus();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `✓ exit_pending ${enabled ? "ENABLED" : "DISABLED"}\n${JSON.stringify(status, null, 2)}`,
+          },
+        ],
+      };
+    }
+  );
+
+  // ─── mop_exit_status ─────────────────────────────────
+
+  server.tool(
+    "mop_exit_status",
+    "Check exit_pending flag status and which slots have cycled through exit. Slot 0 = PM, 1-3 = dev, 4 = QA.",
+    {},
+    async () => {
+      const status = db.getExitStatus();
+      const cycledList = Object.entries(status.cycled)
+        .map(([slot, done]) => `  slot ${slot}: ${done ? "✅ cycled" : "⏳ pending"}`)
+        .join("\n");
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `exit_pending: ${status.pending ? "ENABLED" : "disabled"}\n\n${cycledList}`,
+          },
+        ],
+      };
+    }
+  );
+
+  // ─── mop_capture_output ────────────────────────────────
+
+  server.tool(
+    "mop_capture_output",
+    "Capture live tmux pane output from a dev slot. Returns the last N lines of output and whether the slot is busy or idle. Use this instead of raw tmux commands to see what a slot is actually doing.",
+    {
+      slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
+      lines: z.number().int().min(5).max(200).default(30).describe("Number of lines to capture (default 30)"),
+    },
+    async ({ slot, lines }) => {
+      const { output, activity } = relay.captureOutput(slot, lines);
+      const slotState = db.getSlot(slot);
+      const taskPart = slotState?.task ? ` | task: ${slotState.task}` : "";
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `[slot ${slot}: ${activity}${taskPart}]\n\n${output}`,
           },
         ],
       };

@@ -16,6 +16,12 @@
 #   capture-output.sh <pane> --full       # Full visible pane (prompt-stripped)
 #   capture-output.sh <pane> --raw        # Last 20 lines (includes prompt line)
 #   capture-output.sh <pane> <lines> --raw  # Last N lines (includes prompt line)
+#
+# STATUS BAR STRIPPING: By default, the Claude Code TUI status bar (bottom 3
+# lines: border + model/git info + mode/permissions) is stripped from output.
+# During active processing, there is no ❯ prompt — the status bar contains a
+# text-based spinner that changes constantly, causing noise in captures.
+# Use --keep-statusbar to include the status bar (only for debugging).
 
 source "$(dirname "$0")/pane-lib.sh"
 load_config
@@ -26,11 +32,13 @@ shift
 
 LINES="20"
 RAW=""
+KEEP_STATUSBAR=""
 
 for arg in "$@"; do
   case "$arg" in
     --full) LINES="--full" ;;
     --raw)  RAW="--raw" ;;
+    --keep-statusbar) KEEP_STATUSBAR="1" ;;
     *)      LINES="$arg" ;;
   esac
 done
@@ -53,6 +61,20 @@ if [ "$RAW" = "--raw" ]; then
   safe_output="$raw_output"
 else
   safe_output=$(echo "$raw_output" | strip_prompt_line)
+fi
+
+# Strip status bar (bottom 3 lines: border + model/git + mode/permissions)
+# During active processing, there's no ❯ prompt, so strip_prompt_line doesn't
+# help — the status bar contains a text spinner that creates capture noise.
+# When idle, strip_prompt_line already removed ❯ and below, but the status bar
+# lines above ❯ (border + info) remain. This strips them too.
+if [ -z "$KEEP_STATUSBAR" ] && [ "$RAW" != "--raw" ]; then
+  # Count lines, strip bottom 3 (border + model info + INSERT mode line)
+  line_count=$(echo "$safe_output" | wc -l | tr -d ' ')
+  if [ "$line_count" -gt 3 ]; then
+    keep=$((line_count - 3))
+    safe_output=$(echo "$safe_output" | head -n "$keep")
+  fi
 fi
 
 if [ "$LINES" = "--full" ]; then
