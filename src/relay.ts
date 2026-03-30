@@ -37,7 +37,8 @@ export class TmuxRelay {
       execSync(
         `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)} && ` +
         `sleep 0.3 && ` +
-        `tmux send-keys -t ${this.pmPaneAddress} Enter`,
+        `tmux send-keys -t ${this.pmPaneAddress} Enter && ` +
+        `sleep 0.5`,
         { timeout: 10_000 }
       );
       return true;
@@ -73,29 +74,26 @@ export class TmuxRelay {
    * Sends: # comment line, then /slot-idle N slash command.
    */
   notifySlotIdle(slot: SlotState): void {
-    const time = new Date().toLocaleTimeString("en-US", { hour12: false });
-    const taskPart = slot.task ? ` — ${truncate(slot.task, 40)}` : "";
-    const branchPart =
-      slot.branch && slot.branch !== "main"
-        ? ` | branch: ${slot.branch}`
-        : "";
-
-    const comment = `# slot ${slot.slot} idle${taskPart}${branchPart} | ${time}`;
-    const command = `/slot-idle ${slot.slot}`;
-    this.injectCommandToPM(comment, command);
+    // Send /slot-idle N command — triggers the PM's slot-idle skill for proper handling.
+    // Root cause of earlier failures was MoP HTTP server being down + missing HTTP hooks
+    // on slots, NOT the slash command format. (Lesson: 2026-03-18)
+    this.injectToPM(`/slot-idle ${slot.slot}`);
   }
 
   /**
    * Notify PM that a plan is ready for review.
    * Sends: # comment line, then /plan-ready N ISSUE slash command.
    */
-  notifyPlanReady(slotNum: number, issueNum = 0, planFile = ""): void {
-    const issuePart = issueNum ? ` | #${issueNum}` : "";
+  notifyPlanReady(slotNum: number, issueNum = 0, planFile = "", isRevision = false): void {
+    // RETIRED (2026-03-24): Plan-ready notification disabled.
+    // Slots now self-review via /codex-plan-review. PM is not in the loop.
+    // Rajiv directive: "remove the plan ready processing from MoP as well"
+    const verb = isRevision ? "plan revised" : "plan written";
     const filePart = planFile || "plan.md";
-
-    const comment = `# plan written by slot ${slotNum}${issuePart}: ${filePart}`;
-    const command = `/plan-ready ${slotNum} ${issueNum || 0}`;
-    this.injectCommandToPM(comment, command);
+    const issuePart = issueNum ? ` | #${issueNum}` : "";
+    // Log for visibility only — no command injection to PM
+    const comment = `# ${verb} by slot ${slotNum}${issuePart}: ${filePart}`;
+    console.log(`[relay] Plan-ready SUPPRESSED (retired): ${comment}`);
   }
 
   /**
@@ -196,26 +194,19 @@ export class TmuxRelay {
    * Falls back to tmux capture-pane if no LogManager.
    */
   captureOutput(slotNum: number, lines = 30): { output: string; activity: "busy" | "idle" } {
+    // Always use tmux capture-pane — captures the visible terminal screen including
+    // Claude Code TUI prompts (plan approval, status bar) that pipe-pane logs miss.
+    // (Rajiv directive 2026-03-18: "change it to use tmux capture pane instead")
     let output = "";
-
-    if (this.logManager) {
-      // Log-based: read last ~N lines worth of bytes
-      const bytes = lines * 120; // ~120 chars per line
-      output = this.logManager.tailLog(slotNum, bytes);
-    }
-
-    // Fallback to tmux capture-pane if log is empty or no LogManager
-    if (!output) {
-      const paneAddress = `0:0.${slotNum}`;
-      try {
-        const raw = execSync(
-          `tmux capture-pane -t ${paneAddress} -p -S -${lines}`,
-          { timeout: 5_000 }
-        );
-        output = raw.toString();
-      } catch (err) {
-        output = `[capture failed: ${err}]`;
-      }
+    const paneAddress = `0:0.${slotNum}`;
+    try {
+      const raw = execSync(
+        `tmux capture-pane -t ${paneAddress} -p -S -${lines}`,
+        { timeout: 5_000 }
+      );
+      output = raw.toString();
+    } catch (err) {
+      output = `[capture failed: ${err}]`;
     }
 
     const activity = this.isSlotActive(slotNum) ? "busy" as const : "idle" as const;

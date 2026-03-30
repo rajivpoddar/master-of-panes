@@ -35,10 +35,43 @@ function classifyBashCommand(cmd: string): string | null {
 export class HookProcessor {
   /**
    * Pending plan-ready notifications, keyed by slot number.
-   * PostToolUse stores here; Stop handler sends to PM once the prompt renders.
+   * ExitPlanMode stores here; Stop handler sends to PM once the prompt renders.
    * This prevents the race where PM sends "2" before the slot shows the prompt.
+   *
+   * IMPORTANT: Only ExitPlanMode sets this — NOT plan file writes.
+   * Plan file writes during revision would trigger repeated notifications.
+   * (Bug fix 2026-03-18: plan-ready fired on every Write to docs/plans/ during
+   * revision, causing 6+ duplicate notifications. Now ties to ExitPlanMode only.)
    */
-  private pendingPlanReady = new Map<number, { issueNum: number; planFile: string }>();
+  private pendingPlanReady = new Map<number, { issueNum: number; planFile: string; isRevision?: boolean }>();
+
+  /**
+   * Last plan file written per slot. Recorded on Write/Edit to docs/plans/*.md.
+   * Used to populate pendingPlanReady with the correct filename.
+   */
+  private lastPlanFile = new Map<number, string>();
+
+  /**
+   * Timestamp of last plan-ready notification sent per slot.
+   * Used to detect revisions (within cooldown = revision, outside = first submission).
+   */
+  private lastPlanReadySent = new Map<number, number>();
+
+  /** Cooldown period for revision detection */
+  private static readonly PLAN_READY_COOLDOWN_MS = 5 * 60 * 1000;
+
+  /**
+   * Write-debounce timers for plan files, keyed by slot number.
+   * Each Write/Edit to docs/plans/*.md resets this timer. When it fires (10s after
+   * last write), we set pendingPlanReady. The Stop handler then polls for the prompt.
+   * This replaces the ExitPlanMode-based trigger — handles both initial plans and revisions.
+   * (Rajiv directive 2026-03-19: "debounce on MoP side, trigger only after last hook fire
+   * and tmux capture shows the plan approval prompt")
+   */
+  private planWriteDebounceTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+  /** Debounce delay after last plan file write before triggering plan-ready */
+  private static readonly PLAN_WRITE_DEBOUNCE_MS = 10_000;
 
   /**
    * Plan approval timeout timers, keyed by slot number.
@@ -92,6 +125,57 @@ export class HookProcessor {
   }
 
   /**
+   * Poll for the plan approval prompt (numbered choices) before notifying PM.
+   * The prompt renders AFTER Claude stops, so we check the pane output.
+   * Retries every 5s for up to 60s, then sends anyway as a fallback.
+   * (Rajiv directive 2026-03-18: "change MoP to look for the plan approval prompt")
+   */
+  private pollForPlanApprovalPrompt(
+    slotNum: number,
+    pending: { issueNum: number; planFile: string; isRevision?: boolean },
+    attempt: number,
+  ): void {
+    const MAX_ATTEMPTS = 12; // 12 × 5s = 60s
+    const POLL_INTERVAL_MS = 5_000;
+
+    // MUST use tmux capture-pane directly — NOT relay.captureOutput() which prefers
+    // log-based output (pipe-pane). The plan approval prompt is rendered by Claude Code's
+    // TUI directly to the terminal, NOT to stdout — so the log file never captures it.
+    // (Bug fix 2026-03-18: polling timed out every time because captureOutput returned
+    // log content without the TUI prompt.)
+    let output = "";
+    try {
+      const raw = execSync(`tmux capture-pane -t 0:0.${slotNum} -p -S -20`, { timeout: 5_000 });
+      output = raw.toString();
+    } catch { output = ""; }
+    const hasPrompt = /Would you like to proceed|❯\s*1\.\s*Yes|ctrl-g to edit/i.test(output);
+
+    if (hasPrompt || attempt >= MAX_ATTEMPTS) {
+      // Prompt found (or timeout) — send notification to PM
+      const reason = hasPrompt
+        ? `Plan approval prompt detected on attempt ${attempt + 1}`
+        : `Timeout after ${MAX_ATTEMPTS} attempts (${MAX_ATTEMPTS * 5}s) — sending anyway`;
+
+      this.relay.notifyPlanReady(slotNum, pending.issueNum, pending.planFile, pending.isRevision ?? false);
+      this.lastPlanReadySent.set(slotNum, Date.now()); // Record for cooldown
+      this.db.logEvent(slotNum, "plan_ready_deferred_sent", "Stop", null, {
+        issue: pending.issueNum,
+        planFile: pending.planFile,
+        attempt: attempt + 1,
+        reason,
+      });
+      this.startPlanApprovalTimer(slotNum, pending.issueNum);
+      return;
+    }
+
+    // Not found yet — retry after interval
+    const timer = setTimeout(() => {
+      this.pollForPlanApprovalPrompt(slotNum, pending, attempt + 1);
+    }, POLL_INTERVAL_MS);
+    if (timer.unref) timer.unref();
+  }
+
+  /**
    * Clear plan approval timer for a slot (approval received or slot released).
    * Public so server.ts can call it on slot release via MCP/HTTP.
    */
@@ -117,6 +201,11 @@ export class HookProcessor {
       payload as unknown as Record<string, unknown>
     );
 
+    // Capture pre-update idle state for idle→active transition detection.
+    // Must read BEFORE updateSlot clears the idle flag, otherwise
+    // handlePostToolUse never sees the transition. (Bug fix 2026-03-16)
+    const wasIdle = this.db.getSlot(slotNum)?.idle ?? false;
+
     // Update last_activity and mark as busy (any hook = slot is working)
     this.db.updateSlot(slotNum, {
       last_activity: new Date().toISOString(),
@@ -128,11 +217,15 @@ export class HookProcessor {
       case "Stop":
         return this.handleStop(slotNum, payload);
       case "PostToolUse":
-        return this.handlePostToolUse(slotNum, payload);
+        return this.handlePostToolUse(slotNum, payload, wasIdle);
       case "PreToolUse":
         return this.handlePreToolUse(slotNum, payload);
       case "Notification":
         return this.handleNotification(slotNum, payload);
+      case "UserPromptSubmit":
+        // User sent a message — slot is becoming active. Handle like PostToolUse
+        // for idle→active transition detection. (Added 2026-03-18)
+        return this.handlePostToolUse(slotNum, payload, wasIdle);
       default:
         return {};
     }
@@ -152,31 +245,38 @@ export class HookProcessor {
       return {};
     }
 
-    // Check if slot was awaiting plan approval — the prompt is now visible.
+    // Check if slot was awaiting plan approval.
+    // The plan approval prompt (numbered choices) renders AFTER Stop fires,
+    // so we poll for it before notifying PM. (Rajiv directive 2026-03-18)
     if (slot.activity === "awaiting_plan_approval") {
       const pending = this.pendingPlanReady.get(slotNum);
       if (pending) {
-        // First Stop after plan was written — prompt is now rendered.
-        // Send the full /plan-ready notification to PM (deferred from PostToolUse).
+        // Start polling for the plan approval prompt before notifying PM.
         this.pendingPlanReady.delete(slotNum);
-        this.relay.notifyPlanReady(slotNum, pending.issueNum, pending.planFile);
-        this.db.logEvent(slotNum, "plan_ready_deferred_sent", "Stop", null, {
-          issue: pending.issueNum,
-          planFile: pending.planFile,
-          reason: "Plan prompt now visible — deferred notification sent to PM",
-        });
-
-        // Start 15m watchdog — if PM doesn't approve, re-notify
-        this.startPlanApprovalTimer(slotNum, pending.issueNum);
+        this.pollForPlanApprovalPrompt(slotNum, pending, 0);
       } else {
-        // No pending = PM was already notified. This is a re-display
-        // (e.g., post-compaction). Send reminder to re-approve.
-        this.db.logEvent(slotNum, "plan_approval_still_pending", "Stop", null, {
-          task: slot.task,
-          issue: slot.issue,
-          reason: "Stop hook fired while awaiting_plan_approval — plan prompt re-displayed (likely post-compaction)",
-        });
-        this.relay.notifyPlanApprovalNeeded(slotNum, slot.issue ?? 0);
+        // No pending = PM was already notified. Check cooldown before re-sending.
+        // During revision cycles, the slot may stop multiple times while
+        // awaiting_plan_approval — don't spam PM with reminders.
+        const lastSent = this.lastPlanReadySent.get(slotNum) ?? 0;
+        const elapsed = Date.now() - lastSent;
+        if (elapsed > HookProcessor.PLAN_READY_COOLDOWN_MS) {
+          // Outside cooldown — genuine re-display (post-compaction). Send reminder.
+          this.db.logEvent(slotNum, "plan_approval_still_pending", "Stop", null, {
+            task: slot.task,
+            issue: slot.issue,
+            reason: "Stop hook fired while awaiting_plan_approval — plan prompt re-displayed (likely post-compaction)",
+          });
+          this.relay.notifyPlanApprovalNeeded(slotNum, slot.issue ?? 0);
+        } else {
+          // Inside cooldown — suppress. Slot is mid-revision.
+          this.db.logEvent(slotNum, "plan_approval_reminder_suppressed", "Stop", null, {
+            task: slot.task,
+            issue: slot.issue,
+            elapsed_ms: elapsed,
+            reason: "Suppressed — within cooldown, slot likely mid-revision",
+          });
+        }
       }
       // Don't clear activity — slot is still awaiting approval
       return {};
@@ -261,8 +361,32 @@ export class HookProcessor {
 
   // ─── PostToolUse Hook ──────────────────────────────────
 
-  private handlePostToolUse(slotNum: number, payload: HookPayload): HookResponse {
-    // Detect plan-ready: Write or Edit tool to a plan file
+  private handlePostToolUse(slotNum: number, payload: HookPayload, wasIdle?: boolean): HookResponse {
+    // ─── Active Notification (idle → active transition) ──────
+    // First PostToolUse after a Stop means the slot became active.
+    // Notify PM so they know not to send new work to this slot.
+    // Uses wasIdle from process() — captured BEFORE updateSlot clears idle flag.
+    const slot = this.db.getSlot(slotNum);
+    if (slot && wasIdle) {
+      // Notify PM for ALL slots (not just occupied — rework slots may be released)
+      if (!slot.dnd) {
+        const label = slot.task || slot.activity || "working";
+        this.relay.injectToPM(
+          `# slot ${slotNum} active — ${label}\n/slot-active ${slotNum}`,
+        );
+        this.db.logEvent(slotNum, "slot_active_notified", "PostToolUse", payload.tool_name ?? null, {
+          task: slot.task,
+          issue: slot.issue,
+        });
+      }
+    }
+
+    // Plan file write → debounce timer. After last write settles (10s), set pending.
+    // RETIRED (2026-03-24): Plan-ready detection removed.
+    // Slots now use plan-agent subagent + /codex-plan-review skill.
+    // PM is no longer in the plan approval loop.
+    // The old flow: Write to docs/plans/ → debounce → poll for approval prompt → notify PM
+    // is replaced by: plan-agent → slot runs Codex itself → implements.
     if (
       (payload.tool_name === "Write" || payload.tool_name === "Edit") &&
       typeof payload.tool_input === "object" &&
@@ -270,31 +394,22 @@ export class HookProcessor {
     ) {
       const filePath = (payload.tool_input as Record<string, string>).file_path ?? "";
       if (filePath.includes("/plans/") && filePath.endsWith(".md")) {
-        // Extract issue number from slot's task field (e.g., "#1755: Fix something")
+        // Log for visibility but do NOT set awaiting_plan_approval or notify PM
+        this.db.logEvent(slotNum, "plan_file_written", "PostToolUse", null, {
+          file: filePath,
+          note: "Plan-ready detection retired — slot self-reviews via /codex-plan-review",
+        });
+
+        // Auto-assign slot if not already occupied (extract issue from task)
         const slot = this.db.getSlot(slotNum);
         const issueMatch = slot?.task?.match(/#(\d+)/);
         const issueNum = issueMatch ? parseInt(issueMatch[1], 10) : 0;
-        const planFile = filePath.split("/").pop() ?? "plan.md";
-
-        // Defer notification — slot hasn't rendered the plan prompt yet.
-        // Store details; the Stop handler will notify PM once the prompt appears.
-        this.pendingPlanReady.set(slotNum, { issueNum, planFile });
-        this.db.updateSlot(slotNum, { activity: "awaiting_plan_approval" });
-        this.db.logEvent(slotNum, "plan_ready_deferred", "PostToolUse", payload.tool_name, {
-          file: filePath,
-          issue: issueNum,
-          reason: "Notification deferred to Stop hook — prompt not yet visible",
-        });
-
-        // Auto-assign slot if not already occupied (handles handoff agent failure)
         if (!slot?.occupied && issueNum > 0) {
           const taskLabel = slot?.task || `#${issueNum}`;
           this.db.assignSlot(slotNum, taskLabel, issueNum, null, null);
-          this.db.logEvent(slotNum, "auto_assigned_plan_ready", "PostToolUse", payload.tool_name, {
-            issue: issueNum,
-            reason: "plan-ready detected but slot not occupied — handoff agent likely failed to assign",
-          });
         }
+
+        // Don't early return — let normal activity tracking classify this as "coding"
       }
     }
 
@@ -373,7 +488,11 @@ export class HookProcessor {
 
     if (payload.tool_name === "ExitPlanMode") {
       this.clearPlanApprovalTimer(slotNum);
-      this.db.updateSlot(slotNum, { activity: "implementing" });
+      // ExitPlanMode just clears the timer and sets activity.
+      // Plan-ready notification is triggered by the write-debounce timer (not ExitPlanMode).
+      // (Rajiv directive 2026-03-19: debounce on file writes, poll for prompt after last write)
+      // RETIRED (2026-03-24): No longer set awaiting_plan_approval.
+      // Slots self-review via /codex-plan-review. PM is not in the loop.
       this.db.logEvent(slotNum, "exit_plan_mode", "PostToolUse", "ExitPlanMode", {});
     }
 

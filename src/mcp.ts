@@ -324,6 +324,151 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     }
   );
 
+  // ─── mop_approve_plan ──────────────────────────────────
+  // Wraps POST /slots/:slotNum/approve-plan — handles prompt detection,
+  // retry, and verification atomically. Use this instead of mop_send_to_slot
+  // for plan approvals. (Rajiv directive 2026-03-18)
+
+  server.tool(
+    "mop_approve_plan",
+    "Approve or reject a slot's implementation plan. Wraps the approve-plan HTTP endpoint which handles prompt detection, retry (up to 3x), and verification. Use this instead of mop_send_to_slot for plan approvals.",
+    {
+      slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
+      option: z.enum(["2", "4"]).default("2").describe("2 = approve, 4 = comment/reject"),
+      comment: z.string().optional().describe("Comment text when option is 4 (reject/revise)"),
+    },
+    async ({ slot, option, comment }) => {
+      try {
+        const body: Record<string, string> = { option };
+        if (comment) body.comment = comment;
+        const res = await fetch(`http://localhost:3100/slots/${slot}/approve-plan`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json() as Record<string, unknown>;
+        const success = data.success === true;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: success
+                ? `✓ Plan ${option === "2" ? "approved" : "rejected"} on slot ${slot} (attempt ${data.attempt})`
+                : `✗ Plan approval failed on slot ${slot}: ${JSON.stringify(data)}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `✗ approve-plan request failed: ${err}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // ─── mop_stream_slot ──────────────────────────────────
+  // Periodic tmux pane screenshots to a Slack thread
+  // Rajiv directive 2026-03-19: "Screenshots of the pane to a slack thread
+  // whenever it is active, every minute or so, whenever enabled."
+
+  const streamingSlots = new Map<number, ReturnType<typeof setInterval>>();
+
+  server.tool(
+    "mop_stream_slot",
+    "Enable/disable periodic pane screenshots to a Slack thread. Posts a tmux capture every 60s while the slot is active. Stops when slot goes idle or streaming is disabled.",
+    {
+      slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
+      enable: z.boolean().describe("true to start streaming, false to stop"),
+      thread_ts: z.string().optional().describe("Slack thread timestamp to post screenshots to (required when enabling)"),
+      channel_id: z.string().optional().describe("Slack channel ID (default: C0ALZJHGE49 #heydonna-dev)"),
+      interval_seconds: z.number().optional().describe("Capture interval in seconds (default: 60)"),
+    },
+    async ({ slot, enable, thread_ts, channel_id, interval_seconds }) => {
+      const channelId = channel_id ?? "C0ALZJHGE49";
+      const intervalMs = (interval_seconds ?? 60) * 1000;
+
+      if (!enable) {
+        // Stop streaming
+        const timer = streamingSlots.get(slot);
+        if (timer) {
+          clearInterval(timer);
+          streamingSlots.delete(slot);
+        }
+        return {
+          content: [{ type: "text" as const, text: `✓ Streaming stopped for slot ${slot}` }],
+        };
+      }
+
+      if (!thread_ts) {
+        return {
+          content: [{ type: "text" as const, text: `✗ thread_ts required when enabling streaming` }],
+        };
+      }
+
+      // Stop existing timer if any
+      const existing = streamingSlots.get(slot);
+      if (existing) clearInterval(existing);
+
+      // Read Slack bot token from env
+      const slackToken = process.env.SLACK_BOT_TOKEN;
+      if (!slackToken) {
+        // Try sourcing from .env.local
+        try {
+          const { execSync } = await import("node:child_process");
+          const token = execSync(
+            `source /Users/rajiv/Downloads/projects/heydonna-app/.env.local 2>/dev/null && echo $SLACK_BOT_TOKEN`,
+            { timeout: 5000 }
+          ).toString().trim();
+          if (token) process.env.SLACK_BOT_TOKEN = token;
+        } catch { /* ignore */ }
+      }
+
+      const captureAndPost = async () => {
+        try {
+          // Check if slot is active
+          const isActive = relay.isSlotActive(slot);
+          if (!isActive) return; // Skip idle slots
+
+          const { execSync } = await import("node:child_process");
+
+          // Use pane-screenshot.sh which does: tmux zoom → ttyd → Playwright → unzoom → Slack upload
+          // Pass thread_ts so the script handles the Slack upload directly
+          execSync(
+            `bash ${process.env.HOME}/.claude/skills/tmux-pane-screenshot/scripts/pane-screenshot.sh ${slot} ${thread_ts}`,
+            { timeout: 30_000, env: { ...process.env, SLACK_CHANNEL: channelId } }
+          );
+
+          db.logEvent(slot, "stream_screenshot", "Timer", null, {
+            thread_ts,
+            channel: channelId,
+          });
+        } catch {
+          // Silent failure — don't break the timer
+        }
+      };
+
+      // Start interval
+      const timer = setInterval(captureAndPost, intervalMs);
+      if (timer.unref) timer.unref();
+      streamingSlots.set(slot, timer);
+
+      // Fire immediately
+      captureAndPost();
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `✓ Streaming slot ${slot} to thread ${thread_ts} every ${interval_seconds ?? 60}s (while active)`,
+        }],
+      };
+    }
+  );
+
   // ─── Start Transport ───────────────────────────────────
 
   const transport = new StdioServerTransport();

@@ -13,6 +13,7 @@
  */
 
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
@@ -69,7 +70,7 @@ const app = new Hono();
 // stop_hook_active/last_assistant_message (Stop).
 const hookPayloadSchema = z.object({
   // Core fields present in ALL hook events
-  hook_event_name: z.enum(["PreToolUse", "PostToolUse", "Notification", "Stop"]),
+  hook_event_name: z.enum(["PreToolUse", "PostToolUse", "Notification", "Stop", "UserPromptSubmit", "SubagentStop"]),
   session_id: z.string().optional(),
   cwd: z.string().optional(),
   transcript_path: z.string().optional(),
@@ -113,6 +114,14 @@ function normalizePayload(raw: z.infer<typeof hookPayloadSchema>): HookPayload {
 /** Health check */
 app.get("/health", (c) => {
   return c.json({ status: "ok", uptime: process.uptime() });
+});
+
+/** Restart the MoP server — exits process, session watcher restarts it */
+app.post("/restart", (c) => {
+  console.log("[mop] Restart requested via /restart endpoint");
+  // Respond first, then exit. The session-start health watcher restarts us.
+  setTimeout(() => process.exit(0), 100);
+  return c.json({ status: "restarting" });
 });
 
 /** Receive hook from a specific slot */
@@ -240,6 +249,283 @@ app.post("/slots/:slotNum/release", (c) => {
   return c.json({ success: true });
 });
 
+// ─── Send Command to Slot (Single Gateway) ─────────────
+
+/**
+ * Send a command or file content to a dev slot. ALL slot communication
+ * goes through this endpoint — send-to-slot.sh calls this instead of
+ * tmux directly.
+ *
+ * If the command is "2" and the slot is awaiting plan approval, this
+ * internally routes to the approve-plan handler (with Codex gate).
+ *
+ * POST /slots/:slotNum/send { command: string, file?: string, force?: boolean }
+ *
+ * Rajiv directive 2026-03-20: "route all tmux commands through MoP.
+ * the send to slot 2 should trigger plan approval internally."
+ */
+app.post("/slots/:slotNum/send", async (c) => {
+  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
+  if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
+
+  const slotNum = slotParse.data;
+  const body = await c.req.json().catch(() => ({}));
+  const command = body.command?.trim() || "";
+  const filePath = body.file || "";
+  const force = body.force === true;
+  const paneAddress = `0:0.${slotNum}`;
+
+  if (!command && !filePath) {
+    return c.json({ error: "Missing 'command' or 'file' field" }, 400);
+  }
+
+  // Check DND
+  const slotState = db.getSlot(slotNum);
+  if (slotState?.dnd && !force) {
+    return c.json({ error: `Slot ${slotNum} is DND. Use force: true to override.` }, 409);
+  }
+
+  // ── GATE: If command is "2" and slot is awaiting plan approval → route to approve-plan
+  if (command === "2") {
+    const activity = slotState?.activity;
+    if (activity === "awaiting_plan_approval") {
+      db.logEvent(slotNum, "send_routed_to_approve_plan", null, null, { command, activity });
+      // Internally call the approve-plan handler via fetch to localhost
+      try {
+        const approveRes = await fetch(`http://localhost:${config.httpPort}/slots/${slotNum}/approve-plan`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ option: "2" }),
+        });
+        const approveData = await approveRes.json() as Record<string, unknown>;
+        return c.json(approveData, approveRes.status as 200 | 403 | 408);
+      } catch (err: any) {
+        return c.json({ error: `Approve-plan internal call failed: ${err.message?.slice(0, 200)}` }, 500);
+      }
+    }
+    // If NOT awaiting plan approval, "2" is just a normal command — send it through
+    db.logEvent(slotNum, "send_command_2_not_plan_approval", null, null, { activity });
+  }
+
+  try {
+    if (filePath) {
+      // File mode: load-buffer + paste-buffer
+      execSync(`tmux load-buffer "${filePath}"`, { timeout: 5000 });
+      execSync(`tmux paste-buffer -t ${paneAddress}`, { timeout: 5000 });
+      await new Promise(r => setTimeout(r, 2000));
+      execSync(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+      db.logEvent(slotNum, "send_file", null, null, { file: filePath });
+      return c.json({ success: true, mode: "file", slot: slotNum });
+    } else {
+      // Command mode: detect INSERT mode, send-keys
+      let output = "";
+      try {
+        output = execSync(`tmux capture-pane -t ${paneAddress} -p | tail -5`, { timeout: 5000 }).toString();
+      } catch { output = ""; }
+
+      const isInsert = /INSERT/.test(output);
+      const isNormal = /NORMAL/.test(output);
+
+      if (isNormal) {
+        execSync(`tmux send-keys -t ${paneAddress} i`, { timeout: 5000 });
+        await new Promise(r => setTimeout(r, 300));
+      }
+
+      // Use -l flag for literal text to avoid tmux key interpretation
+      const escaped = command.replace(/'/g, "'\\''");
+      execSync(`tmux send-keys -t ${paneAddress} -l '${escaped}'`, { timeout: 5000 });
+      await new Promise(r => setTimeout(r, 500));
+      execSync(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+
+      db.logEvent(slotNum, "send_command", null, null, { command: command.slice(0, 200), force, mode: isInsert ? "insert" : isNormal ? "normal" : "unknown" });
+      return c.json({ success: true, mode: "command", slot: slotNum });
+    }
+  } catch (err: any) {
+    db.logEvent(slotNum, "send_error", null, null, { error: err.message?.slice(0, 200), command: command.slice(0, 100) });
+    return c.json({ error: `Send failed: ${err.message?.slice(0, 200)}` }, 500);
+  }
+});
+
+// ─── Plan Approval ──────────────────────────────────────
+
+/**
+ * Approve or reject a slot's plan. MoP handles sending the option
+ * and verifying the slot becomes active (retries up to 3 times).
+ *
+ * For approvals (option "2"): verifies that a real Codex CLI session ran
+ * after plan-ready was sent. Reads ~/.codex/session_index.jsonl for a session
+ * created after the plan-ready timestamp. This prevents PM from approving
+ * without running Codex review. (Constitutional Principle #1 enforcement)
+ *
+ * POST /slots/:slotNum/approve-plan { option: "2" | "4", comment?: string }
+ */
+app.post("/slots/:slotNum/approve-plan", async (c) => {
+  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
+  if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
+
+  const slotNum = slotParse.data;
+  const body = await c.req.json().catch(() => ({}));
+  const option = body.option || "2";
+  const comment = body.comment || "";
+  // skipCodexCheck removed — Codex gate is mandatory, no bypass. (Rajiv directive 2026-03-20)
+  const paneAddress = `0:0.${slotNum}`;
+  const MAX_RETRIES = 3;
+
+  // ── Codex Session Verification (approvals only) ──────────
+  // Constitutional Principle #1: Every plan approval must be backed by a real Codex review.
+  // Check that a Codex session was created AFTER the plan-ready notification was sent.
+  if (option === "2") {
+    const CODEX_SESSION_INDEX = `${process.env.HOME}/.codex/session_index.jsonl`;
+    const slotState = db.getSlot(slotNum);
+    const issueNum = slotState?.issue;
+
+    // Find when plan-ready was sent for this slot
+    const planReadyEvents = db.getEvents(slotNum, 1, "plan_ready_deferred_sent");
+    const planReadyHookEvents = db.getEvents(slotNum, 1, "plan_ready_hook");
+    const timerEvents = db.getEvents(slotNum, 1, "plan_approval_timer_started");
+
+    // Pick the most recent plan-ready timestamp across all sources
+    const allEvents = [...planReadyEvents, ...planReadyHookEvents, ...timerEvents];
+    const latestPlanReady = allEvents.reduce((latest, ev) => {
+      const evTime = new Date(ev.timestamp).getTime();
+      return evTime > latest ? evTime : latest;
+    }, 0);
+
+    if (latestPlanReady === 0) {
+      db.logEvent(slotNum, "codex_check_no_plan_ready", null, null, { reason: "No plan-ready event found" });
+      // Allow approval anyway — plan-ready event might have been lost (MoP restart)
+    } else {
+      try {
+        const indexContent = readFileSync(CODEX_SESSION_INDEX, "utf-8").trim();
+        const lines = indexContent.split("\n").filter(Boolean);
+
+        // Parse sessions and find any created after plan-ready
+        const matchingSessions = lines
+          .map(line => { try { return JSON.parse(line); } catch { return null; } })
+          .filter(Boolean)
+          .filter((session: any) => {
+            const sessionTime = new Date(session.updated_at).getTime();
+            // Session must be AFTER plan-ready was sent (with 10s grace for clock skew)
+            return sessionTime > (latestPlanReady - 10_000);
+          });
+
+        if (matchingSessions.length === 0) {
+          db.logEvent(slotNum, "codex_check_failed", null, null, {
+            reason: "No Codex session found after plan-ready",
+            plan_ready_at: new Date(latestPlanReady).toISOString(),
+            issue: issueNum,
+          });
+          relay.injectToPM(
+            `# ⚠️ CODEX GATE: No Codex session found after plan-ready for slot ${slotNum} (#${issueNum || "?"}). ` +
+            `Plan-ready at ${new Date(latestPlanReady).toISOString()}. Run Codex review before approving.`
+          );
+          return c.json({
+            success: false,
+            error: "No Codex review session found after plan-ready. Constitutional Principle #1 requires Codex review before approval.",
+            status: "codex_gate_blocked",
+            plan_ready_at: new Date(latestPlanReady).toISOString(),
+          }, 403);
+        }
+
+        // Log success
+        const latestSession = matchingSessions[matchingSessions.length - 1];
+        db.logEvent(slotNum, "codex_check_passed", null, null, {
+          session_id: latestSession.id,
+          thread_name: latestSession.thread_name,
+          session_at: latestSession.updated_at,
+          plan_ready_at: new Date(latestPlanReady).toISOString(),
+          issue: issueNum,
+        });
+      } catch (err: any) {
+        // If we can't read the session index, log but allow (don't block on file errors)
+        db.logEvent(slotNum, "codex_check_error", null, null, {
+          error: err.message?.slice(0, 200),
+          issue: issueNum,
+        });
+      }
+    }
+  }
+
+  // Phase 1: Wait for the choices prompt to be visible before sending.
+  // The prompt can be absent during compaction, rendering, or queued-messages state.
+  // Poll pane output for up to 60s looking for the choices prompt. (Rajiv directive 2026-03-18)
+  const PROMPT_POLL_MAX = 12; // 12 × 5s = 60s
+  const PROMPT_POLL_INTERVAL = 5000;
+  const promptPattern = /Would you like to proceed|❯\s*1\.\s*Yes|ctrl-g to edit/i;
+
+  let promptVisible = false;
+  for (let poll = 0; poll < PROMPT_POLL_MAX; poll++) {
+    // Use tmux capture-pane directly — relay.captureOutput prefers log-based output
+    // which doesn't contain the TUI prompt. (Bug fix 2026-03-18)
+    let output = "";
+    try {
+      const raw = execSync(`tmux capture-pane -t 0:0.${slotNum} -p -S -20`, { timeout: 5_000 });
+      output = raw.toString();
+    } catch { output = ""; }
+    if (promptPattern.test(output)) {
+      promptVisible = true;
+      break;
+    }
+    db.logEvent(slotNum, "plan_approval_waiting_for_prompt", null, null, { poll: poll + 1 });
+    await new Promise(r => setTimeout(r, PROMPT_POLL_INTERVAL));
+  }
+
+  if (!promptVisible) {
+    db.logEvent(slotNum, "plan_approval_prompt_timeout", null, null, { waited_s: PROMPT_POLL_MAX * 5 });
+    return c.json({ success: false, error: "Plan approval prompt not visible after 60s", status: "prompt_timeout" }, 408);
+  }
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      // Send the option (2 = approve, 4 = comment)
+      if (option === "4" && comment) {
+        execSync(`tmux send-keys -t ${paneAddress} -l '4' && sleep 0.3 && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+        await new Promise(r => setTimeout(r, 1000));
+        const escaped = comment.replace(/'/g, "'\\''");
+        execSync(`tmux send-keys -t ${paneAddress} -l '${escaped}' && sleep 0.3 && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+      } else {
+        execSync(`tmux send-keys -t ${paneAddress} -l '${option}' && sleep 0.3 && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+      }
+
+      // Wait longer for the approval to process — slot needs time to
+      // render the prompt, receive "2", and trigger ExitPlanMode.
+      await new Promise(r => setTimeout(r, 3000));
+
+      // Verify approval landed by checking if activity changed from
+      // awaiting_plan_approval. is-active.sh alone is insufficient —
+      // the slot can be "active" (processing plan output) without
+      // having received the option. (Bug fix 2026-03-16)
+      const slotAfter = db.getSlot(slotNum);
+      const approvalLanded = slotAfter?.activity !== "awaiting_plan_approval";
+
+      try {
+        execSync(`${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`, { timeout: 5000 });
+        // Pane is active — approval landed. The pane becoming active IS the success signal.
+        // Don't re-check MoP activity state — it may not have updated yet (race condition).
+        // (Bug fix 2026-03-21: MoP reported failure after 3 retries even though attempt 1 succeeded,
+        //  because activity state hadn't updated from "awaiting_plan_approval" in time.)
+        processor.clearPlanApprovalTimer(slotNum);
+        db.updateSlot(slotNum, { activity: "implementing" });
+        db.logEvent(slotNum, "plan_approved", null, null, { attempt, option });
+        return c.json({ success: true, attempt, status: "active" });
+      } catch {
+        // Exit code 1 = still idle — retry
+        if (attempt < MAX_RETRIES) {
+          db.logEvent(slotNum, "plan_approval_retry", null, null, { attempt });
+          await new Promise(r => setTimeout(r, 1000));
+        }
+      }
+    } catch (err: any) {
+      db.logEvent(slotNum, "plan_approval_error", null, null, { attempt, error: err.message?.slice(0, 200) });
+    }
+  }
+
+  // All retries exhausted
+  db.logEvent(slotNum, "plan_approval_failed", null, null, { maxRetries: MAX_RETRIES });
+  relay.injectToPM(`# ⚠️ Plan approval failed for slot ${slotNum} after ${MAX_RETRIES} retries`);
+  return c.json({ success: false, error: `Approval failed after ${MAX_RETRIES} retries`, status: "idle" });
+});
+
 // ─── Slack Message Routing ───────────────────────────────
 
 /** Bot user ID → tmux pane address mapping */
@@ -278,6 +564,13 @@ app.post("/api/slack-route", async (c) => {
 
   // Always route to PM
   targetPanes.add("0:0.0");
+
+  // @channel or @here → broadcast to ALL panes
+  if (text.includes("<!channel>") || text.includes("<!here>")) {
+    for (const pane of Object.values(SLOT_BOT_MAP)) {
+      targetPanes.add(pane);
+    }
+  }
 
   // Route to mentioned slot panes
   for (const userId of mentions) {

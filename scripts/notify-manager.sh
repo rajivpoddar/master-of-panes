@@ -1,68 +1,108 @@
 #!/usr/bin/env bash
 # notify-manager.sh — Send idle notification to manager pane when a slot's session ends.
 #
-# Called as a Claude Code Stop hook. Reads JSON from stdin (Claude Code hook protocol).
-# Scans pane state files to find which slot this session belongs to, then sends
-# a tmux send-keys message to the manager pane so the PM session receives it.
+# Called as a Claude Code Stop hook. Uses MoP HTTP API (not legacy pane-N.json files)
+# to identify which slot this session belongs to.
 #
-# Why send-keys instead of display-message:
-#   display-message shows a brief overlay in the pane border — the PM's Claude Code
-#   session doesn't receive it as input. send-keys types text into the input buffer,
-#   which the PM Claude Code session receives and can act on.
+# Rajiv directive 2026-03-20: "fix it. audit other hooks as well. add logging."
+# Root cause: was reading pane-N.json which is blocked by redirect-pane-json-to-mcp.sh hook.
+# Fix: use MoP HTTP API at localhost:3100 instead.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/pane-lib.sh" 2>/dev/null || exit 0
-require_jq 2>/dev/null || exit 0
-load_config 2>/dev/null || true
+LOG_FILE="/tmp/mop-notifications.log"
+MOP_PORT="${MOP_PORT:-3100}"
+
+log() {
+  echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] [notify-manager] $*" >> "$LOG_FILE" 2>/dev/null || true
+}
 
 # Read hook JSON from stdin (Claude Code hook protocol)
 INPUT=$(cat 2>/dev/null || true)
 
-# CRITICAL: Prevent infinite loop — if this Stop was triggered by a hook action, don't fire again
+# CRITICAL: Prevent infinite loop
 STOP_HOOK_ACTIVE=$(echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('stop_hook_active', False))" 2>/dev/null || echo "false")
 if [ "$STOP_HOOK_ACTIVE" = "True" ] || [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+  log "Skipped: stop_hook_active=true (loop prevention)"
   exit 0
 fi
 
-# Get session ID — prefer stdin JSON, fall back to env var
+# Get session ID from stdin JSON
 SESSION_ID=$(echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('session_id', ''))" 2>/dev/null || echo "")
 if [ -z "$SESSION_ID" ]; then
-  SESSION_ID="${SESSION_ID:-}"  # From env var set by hooks.json
+  SESSION_ID="${SESSION_ID:-}"
 fi
-[ -z "$SESSION_ID" ] && exit 0
+if [ -z "$SESSION_ID" ]; then
+  log "Skipped: no session_id in Stop hook payload"
+  exit 0
+fi
 
-# Scan pane state files to find which slot this session belongs to
+log "Stop hook fired: session=$SESSION_ID"
+
+# Use MoP HTTP API to find which slot this session belongs to
+SLOT_INFO=$(curl -s "http://localhost:${MOP_PORT}/slots" 2>/dev/null || echo "{}")
 PANE_NUM=""
 TASK=""
-for i in $(seq 1 "$NUM_DEV_PANES"); do
-  STATE_FILE="$PANE_STATE_DIR/pane-${i}.json"
-  [ ! -f "$STATE_FILE" ] && continue
-  file_session=$(jq -r '.session_id // ""' "$STATE_FILE" 2>/dev/null || echo "")
-  if [ "$file_session" = "$SESSION_ID" ]; then
-    PANE_NUM="$i"
-    TASK=$(jq -r '.task // "unknown"' "$STATE_FILE" 2>/dev/null || echo "unknown")
-    break
+
+if [ -n "$SLOT_INFO" ] && [ "$SLOT_INFO" != "{}" ]; then
+  # Parse slot data via Python for reliability
+  read -r PANE_NUM TASK <<< $(echo "$SLOT_INFO" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    slots = data if isinstance(data, list) else data.get('slots', [])
+    session_id = '$SESSION_ID'
+    for slot in slots:
+        sid = slot.get('session_id', '')
+        if sid == session_id:
+            print(f'{slot[\"slot\"]} {slot.get(\"task\", \"unknown\")}')
+            sys.exit(0)
+    # No session match — try matching by CWD/pane address
+    # Fallback: determine slot from the CWD in the hook payload
+    print('')
+except Exception as e:
+    print('')
+" 2>/dev/null || echo "")
+fi
+
+# Fallback: determine slot from CWD if MoP session lookup failed
+if [ -z "$PANE_NUM" ]; then
+  CWD=$(echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('cwd', ''))" 2>/dev/null || echo "")
+  case "$CWD" in
+    *heydonna-app-3001*) PANE_NUM=1 ;;
+    *heydonna-app-3002*) PANE_NUM=2 ;;
+    *heydonna-app-3003*) PANE_NUM=3 ;;
+    *heydonna-app-3004*) PANE_NUM=4 ;;
+    *) ;;
+  esac
+  if [ -n "$PANE_NUM" ]; then
+    # Get task from MoP for this slot
+    TASK=$(curl -s "http://localhost:${MOP_PORT}/slots/${PANE_NUM}" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('task','unknown'))" 2>/dev/null || echo "unknown")
+    log "Slot identified via CWD fallback: slot=$PANE_NUM task=$TASK"
   fi
-done
+fi
 
-[ -z "$PANE_NUM" ] && exit 0  # Not a tracked dev pane — skip
+if [ -z "$PANE_NUM" ]; then
+  log "Skipped: could not identify slot for session=$SESSION_ID"
+  exit 0
+fi
 
-# Write to notification log
-LOG_FILE="/tmp/mop-notifications.log"
-TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-echo "[$TIMESTAMP] Slot $PANE_NUM idle | $TASK | session=$SESSION_ID" >> "$LOG_FILE" 2>/dev/null || true
+log "Slot $PANE_NUM idle | task=$TASK | session=$SESSION_ID"
 
-# Send notification to manager pane via send-keys so PM session receives it as input
+# Post Stop event to MoP HTTP for event logging
+curl -s -X POST "http://localhost:${MOP_PORT}/hooks/slot/${PANE_NUM}" \
+  -H "Content-Type: application/json" \
+  -d "{\"type\":\"Stop\",\"session_id\":\"$SESSION_ID\"}" 2>/dev/null || true
+
+# Send notification to manager pane (0:0.0) via tmux send-keys
 if command -v tmux &>/dev/null; then
-  LOCAL_TIME=$(date "+%H:%M:%S")
+  MANAGER_PANE="${MANAGER_PANE:-0:0.0}"
   SHORT_TASK=$(echo "$TASK" | cut -c1-50)
-  MSG="[slot $PANE_NUM idle — $SHORT_TASK] [$LOCAL_TIME]"
+  MSG="/slot-idle $PANE_NUM"
   tmux send-keys -t "$MANAGER_PANE" "$MSG" 2>/dev/null || true
   sleep 0.3
   tmux send-keys -t "$MANAGER_PANE" Enter 2>/dev/null || true
+  log "Sent idle notification to PM: $MSG"
 fi
 
-# Always exit 0 — never block Claude from stopping
 exit 0

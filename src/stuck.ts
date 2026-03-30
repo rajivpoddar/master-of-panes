@@ -15,9 +15,9 @@ import type { SlotState } from "./types.js";
 
 export class StuckDetector {
   private readonly STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes no output
-  private readonly PLAN_APPROVAL_THRESHOLD_MS = 10 * 60 * 1000; // 10 min waiting for approval
+  private readonly PLAN_APPROVAL_THRESHOLD_MS = 5 * 60 * 1000; // 5 min waiting for approval (Rajiv directive 2026-03-23)
   private readonly CHECK_INTERVAL_MS = 60 * 1000; // Check every minute
-  private readonly DEDUP_WINDOW_MS = 10 * 60 * 1000; // Notify at most every 10 min per slot
+  private readonly DEDUP_WINDOW_MS = 5 * 60 * 1000; // Notify at most every 5 min per slot (Rajiv directive 2026-03-23)
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -37,14 +37,17 @@ export class StuckDetector {
   checkAll(): void {
     const slots = this.db.getAllSlots();
     for (const slot of slots) {
-      // Check for stale plan approval waits (separate from stuck detection)
+      // RETIRED (2026-03-24): Plan approval watchdog disabled.
+      // Slots now use plan-agent + /codex-plan-review (self-managing).
+      // PM is not in the plan approval loop. Rajiv directive: "remove the plan approval watchdog as well"
       if (slot.activity === "awaiting_plan_approval" && !slot.dnd) {
-        this.checkPlanApproval(slot);
-        continue; // Skip normal stuck check — slot is waiting for PM, not hung
+        continue; // Skip — no longer monitoring plan approvals
       }
 
-      // Only check slots that should be producing output
-      if (!slot.occupied || slot.idle || slot.dnd) continue;
+      // Rajiv directive 2026-03-17: stuck detection only for plan approval waits.
+      // General "no output" detection creates too much noise.
+      // Skip all non-plan-approval slots.
+      continue;
 
       const mtime = this.logManager.getLogMtime(slot.slot);
       if (!mtime) continue; // No log file — can't determine
@@ -61,12 +64,18 @@ export class StuckDetector {
    * Uses last_activity timestamp to measure wait duration.
    */
   private checkPlanApproval(slot: SlotState): void {
-    const lastActivity = new Date(slot.last_activity);
-    const waitMs = Date.now() - lastActivity.getTime();
+    // Redesign 2026-03-23 (Rajiv directive): Use last_activity timestamp as
+    // the sole anchor. No event-based anchors — they get stale across sessions
+    // and the 1-hour guard prevented detection.
+    //
+    // Simple logic: if activity === "awaiting_plan_approval" AND last_activity
+    // was set >5min ago, remind PM. Dedup every 5min.
+    if (!slot.last_activity) return;
 
+    const waitMs = Date.now() - new Date(slot.last_activity).getTime();
     if (waitMs < this.PLAN_APPROVAL_THRESHOLD_MS) return;
 
-    // Dedup: check if we already notified recently
+    // Dedup: don't spam — check if we already notified within the window
     const recentEvents = this.db.getEvents(slot.slot, 1, "plan_approval_stale");
     if (recentEvents.length > 0) {
       const lastNotified = new Date(recentEvents[0].timestamp);
@@ -80,10 +89,11 @@ export class StuckDetector {
       task: slot.task,
       issue: slot.issue,
       wait_minutes: minutes,
+      anchor_source: "last_activity",
     });
 
     const issuePart = slot.issue ? ` #${slot.issue}` : "";
-    const comment = `# ⏰ slot ${slot.slot} waiting for plan approval${issuePart} for ${minutes}min — re-send 2 to approve`;
+    const comment = `# ⏰ slot ${slot.slot} waiting for plan approval${issuePart} for ${minutes}min`;
     this.relay.injectToPM(comment);
   }
 

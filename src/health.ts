@@ -42,6 +42,7 @@ export class ProcessHealthChecker {
   private readonly RESTART_COOLDOWN_MS = 120 * 1000;    // 2min cooldown per slot
   private readonly MAX_RESTARTS_PER_HOUR = 3;           // Prevent crash loops
   private timer: NodeJS.Timeout | null = null;
+  private readonly startTime = Date.now();        // Startup grace period anchor
 
   /** slot -> timestamp of last restart */
   private lastRestart = new Map<number, number>();
@@ -148,21 +149,18 @@ export class ProcessHealthChecker {
   checkAll(): void {
     const now = Date.now();
 
+    // Startup grace period — skip checks for first 30s after MoP starts
+    // Prevents false "process dead" alerts during MoP restart
+    if (now - this.startTime < 30_000) return;
+
     for (let slot = 0; slot <= 4; slot++) {
       // Skip if on cooldown (recently restarted)
       const lastTime = this.lastRestart.get(slot);
       if (lastTime && now - lastTime < this.RESTART_COOLDOWN_MS) continue;
 
-      // Skip DND slots (Rajiv is manually working there)
-      if (slot > 0) {
-        try {
-          const slotState = this.db.getSlot(slot);
-          if (slotState?.dnd) continue;
-        } catch {
-          // DB error — skip this slot
-          continue;
-        }
-      }
+      // DND does NOT skip health checks — Claude must run on all slots always.
+      // DND only means "don't assign new work" — NOT "don't keep alive."
+      // Rajiv directive (2026-03-16): "heartbeat should ignore dnd. claude has to run on all ports all the time."
 
       // Check if the Claude Code process is dead
       if (!this.isProcessDead(slot)) continue;
