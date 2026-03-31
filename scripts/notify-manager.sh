@@ -89,20 +89,16 @@ fi
 
 log "Slot $PANE_NUM idle | task=$TASK | session=$SESSION_ID"
 
-# Post Stop event to MoP HTTP for event logging
+# Post Stop event to MoP HTTP — MoP handles debounced idle notification to PM.
+# Rajiv directive 2026-03-31: debounce on MoP side, 60s delay, cancel on re-activation.
+# The bash hook ONLY reports the event — MoP decides when/whether to notify PM.
 curl -s -X POST "http://localhost:${MOP_PORT}/hooks/slot/${PANE_NUM}" \
   -H "Content-Type: application/json" \
   -d "{\"type\":\"Stop\",\"session_id\":\"$SESSION_ID\"}" 2>/dev/null || true
 
-# Send notification to manager pane (0:0.0) via tmux send-keys
-if command -v tmux &>/dev/null; then
-  MANAGER_PANE="${MANAGER_PANE:-0:0.0}"
-  SHORT_TASK=$(echo "$TASK" | cut -c1-50)
-  MSG="/slot-idle $PANE_NUM"
-  tmux send-keys -t "$MANAGER_PANE" "$MSG" 2>/dev/null || true
-  sleep 0.3
-  tmux send-keys -t "$MANAGER_PANE" Enter 2>/dev/null || true
-  log "Sent idle notification to PM: $MSG"
-fi
+log "Stop event posted to MoP (debounced notification)"
+# NOTE: Direct tmux send-keys to PM removed (2026-03-31).
+# MoP server now handles idle notification with 60s debounce.
+# This eliminates the double-notification path that caused 24 duplicates on Mar 30.
 
 exit 0

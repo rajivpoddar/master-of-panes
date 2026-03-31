@@ -74,6 +74,19 @@ export class HookProcessor {
   private static readonly PLAN_WRITE_DEBOUNCE_MS = 10_000;
 
   /**
+   * Idle notification debounce timers, keyed by slot number.
+   * When a Stop hook fires, instead of immediately notifying PM, we start a 60s timer.
+   * If the slot becomes active (PostToolUse/UserPromptSubmit with idle→active transition)
+   * within that window, the timer is cancelled — no notification sent.
+   * This prevents 24+ duplicate idle notifications per session.
+   * (Rajiv directive 2026-03-31: "debounce on MoP side, wait 60s, cancel on re-activation")
+   */
+  private pendingIdleTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+  /** Idle debounce delay: 60 seconds */
+  private static readonly IDLE_DEBOUNCE_MS = 60_000;
+
+  /**
    * Plan approval timeout timers, keyed by slot number.
    * Started when plan-ready notification is sent to PM; cleared on ExitPlanMode
    * or slot release. If 15 minutes elapse with no approval, re-sends notification.
@@ -173,6 +186,21 @@ export class HookProcessor {
       this.pollForPlanApprovalPrompt(slotNum, pending, attempt + 1);
     }, POLL_INTERVAL_MS);
     if (timer.unref) timer.unref();
+  }
+
+  /**
+   * Cancel pending idle notification timer for a slot.
+   * Called when a slot becomes active during the 60s debounce window.
+   * Returns true if a timer was cancelled, false if no timer was pending.
+   */
+  cancelPendingIdleTimer(slotNum: number): boolean {
+    const existing = this.pendingIdleTimers.get(slotNum);
+    if (existing) {
+      clearTimeout(existing);
+      this.pendingIdleTimers.delete(slotNum);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -320,12 +348,35 @@ export class HookProcessor {
       return {};
     }
 
-    // Normal idle flow — notify PM
-    this.relay.notifySlotIdle(slot);
+    // Normal idle flow — debounced notification to PM.
+    // Wait 60s before notifying. If slot becomes active, cancel the timer.
+    // (Rajiv directive 2026-03-31: 24 duplicate idle notifications on Mar 30)
+    this.cancelPendingIdleTimer(slotNum);
 
-    this.db.logEvent(slotNum, "slot_idle_notified", "Stop", null, {
+    const idleTimer = setTimeout(() => {
+      this.pendingIdleTimers.delete(slotNum);
+      // Re-check slot is still idle before notifying
+      const currentSlot = this.db.getSlot(slotNum);
+      if (currentSlot?.idle) {
+        this.relay.notifySlotIdle(currentSlot);
+        this.db.logEvent(slotNum, "slot_idle_notified", "Stop", null, {
+          task: currentSlot.task,
+          branch: currentSlot.branch,
+          debounce_ms: HookProcessor.IDLE_DEBOUNCE_MS,
+        });
+      } else {
+        this.db.logEvent(slotNum, "slot_idle_cancelled", "Timer", null, {
+          reason: "slot became active during debounce window",
+        });
+      }
+    }, HookProcessor.IDLE_DEBOUNCE_MS);
+    if (idleTimer.unref) idleTimer.unref();
+    this.pendingIdleTimers.set(slotNum, idleTimer);
+
+    this.db.logEvent(slotNum, "slot_idle_debounce_started", "Stop", null, {
       task: slot.task,
       branch: slot.branch,
+      debounce_ms: HookProcessor.IDLE_DEBOUNCE_MS,
     });
 
     // Auto-release slot if POST-PR (a PR exists for current branch).
@@ -368,12 +419,20 @@ export class HookProcessor {
     // Uses wasIdle from process() — captured BEFORE updateSlot clears idle flag.
     const slot = this.db.getSlot(slotNum);
     if (slot && wasIdle) {
+      // Cancel pending idle timer — slot is active again, no notification needed
+      const hadPendingIdle = this.cancelPendingIdleTimer(slotNum);
+      if (hadPendingIdle) {
+        this.db.logEvent(slotNum, "idle_debounce_cancelled", "PostToolUse", payload.tool_name ?? null, {
+          reason: "slot became active during 60s debounce window",
+        });
+      }
+
       // Notify PM for ALL slots (not just occupied — rework slots may be released)
       if (!slot.dnd) {
         const label = slot.task || slot.activity || "working";
-        this.relay.injectToPM(
-          `# slot ${slotNum} active — ${label}\n/slot-active ${slotNum}`,
-        );
+        // Send slash command to trigger slot-active skill (includes slot number as arg)
+        // Comment context is available via mop_slot_status — no need for separate comment
+        this.relay.injectToPM(`/slot-active ${slotNum}`);
         this.db.logEvent(slotNum, "slot_active_notified", "PostToolUse", payload.tool_name ?? null, {
           task: slot.task,
           issue: slot.issue,
