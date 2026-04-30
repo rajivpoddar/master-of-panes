@@ -13,7 +13,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, appendFileSync } from "node:fs";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
@@ -22,7 +22,7 @@ import { TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
 import { StuckDetector } from "./stuck.js";
-import { ProcessHealthChecker } from "./health.js";
+import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS } from "./health.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 
@@ -70,7 +70,17 @@ const app = new Hono();
 // stop_hook_active/last_assistant_message (Stop).
 const hookPayloadSchema = z.object({
   // Core fields present in ALL hook events
-  hook_event_name: z.enum(["PreToolUse", "PostToolUse", "Notification", "Stop", "UserPromptSubmit", "SubagentStop"]),
+  hook_event_name: z.enum([
+    "PreToolUse",
+    "PostToolUse",
+    "Notification",
+    "Stop",
+    "UserPromptSubmit",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+  ]),
   session_id: z.string().optional(),
   cwd: z.string().optional(),
   transcript_path: z.string().optional(),
@@ -88,6 +98,14 @@ const hookPayloadSchema = z.object({
 
   // Notification fields
   notification_type: z.string().optional(),
+
+  // SessionStart fields
+  source: z.string().optional(),
+
+  // PreCompact / PostCompact fields
+  trigger: z.string().optional(),
+  custom_instructions: z.string().optional(),
+  compact_summary: z.string().optional(),
 }).passthrough(); // Accept additional unknown fields gracefully
 
 const slotParamSchema = z.coerce.number().int().min(0).max(4);
@@ -106,6 +124,10 @@ function normalizePayload(raw: z.infer<typeof hookPayloadSchema>): HookPayload {
     stop_reason: raw.stop_reason,
     // Preserve useful context
     transcript: raw.last_assistant_message,
+    // SessionStart / PreCompact / PostCompact
+    source: raw.source,
+    trigger: raw.trigger,
+    compact_summary: raw.compact_summary,
   };
 }
 
@@ -199,6 +221,46 @@ app.get("/activity", (c) => {
   return c.json({ events, count: events.length });
 });
 
+/**
+ * Review status endpoint — unforgeable gate for PR creation hooks.
+ *
+ * Checks MoP's event log for actual Skill invocations (codex-app-code-review,
+ * zen-code-review, etc.) matching the issue number. Slots cannot forge these
+ * entries — only real tool invocations logged by MoP hooks create them.
+ *
+ * Used by: block-direct-pr-create.sh hook (curl http://localhost:3100/review-status/ISSUE)
+ *
+ * Query params:
+ *   window - minutes to search back (default 60)
+ *
+ * Debug log: /tmp/mop-review-status-debug.log
+ */
+app.get("/review-status/:issueNumber", (c) => {
+  const issueNumber = parseInt(c.req.param("issueNumber"), 10);
+  if (isNaN(issueNumber)) {
+    return c.json({ error: "Invalid issue number" }, 400);
+  }
+
+  const window = parseInt(c.req.query("window") ?? "60", 10);
+  const result = db.findReviewEvent(issueNumber, window);
+
+  // Debug log for traceability (Rajiv directive 2026-04-02)
+  const debugLine = `${new Date().toISOString()} | /review-status/${issueNumber} | window=${window}m | found=${result.found} | method=${result.method} | slot=${result.slot} | ts=${result.timestamp}\n`;
+  try {
+    appendFileSync("/tmp/mop-review-status-debug.log", debugLine);
+  } catch { /* ignore log errors */ }
+
+  return c.json({
+    issueNumber,
+    reviewed: result.found,
+    method: result.method,
+    timestamp: result.timestamp,
+    slot: result.slot,
+    details: result.details,
+    windowMinutes: window,
+  });
+});
+
 /** Update slot state (for PM to manage slots) */
 app.patch("/slots/:slotNum", async (c) => {
   const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
@@ -247,6 +309,190 @@ app.post("/slots/:slotNum/release", (c) => {
   db.logEvent(slotParse.data, "slot_released", null, null, {});
 
   return c.json({ success: true });
+});
+
+// ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────
+
+/** Helper: sleep for ms milliseconds. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Orchestrate a slot respawn — /exit at idle, wait for shell, launch script, wait for claude, inject continue.
+ * Replaces slot-side respawn.sh. Suppresses crash notifications via healthChecker.markPmInitiatedRespawn.
+ *
+ * POST /slots/:slotNum/respawn { continue_session?: boolean, model?: "opus"|"sonnet"|"kimi"|"glm" }
+ *
+ * Rajiv directive 2026-04-05: "we need to change the respawn behaviour. it should be a MoP command.
+ * MoP should inject /exit at idle. then the start command at zsh prompt and inject continue when it
+ * is back up. also not send slot crash events to pm."
+ *
+ * Rajiv directive 2026-04-16: "update the respawn command to accept the model". When `model` is
+ * supplied, we inject it as the first positional arg to launch-slot-N.sh — the launch script's
+ * shared lib (launch-slot-lib.sh) parses `[model] [--continue|--fresh]` in any order and switches
+ * the env vars accordingly (Max subscription for opus/sonnet, Moonshot proxy for kimi, Z.AI for glm).
+ */
+const ALLOWED_MODELS = new Set(["opus", "sonnet", "kimi", "kimi26", "glm", "gpt55"]);
+
+app.post("/slots/:slotNum/respawn", async (c) => {
+  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
+  if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
+
+  const slotNum = slotParse.data;
+  const body = await c.req.json().catch(() => ({}));
+  const continueSession = body.continue_session !== false; // default true
+  const model: string | undefined = typeof body.model === "string" ? body.model : undefined;
+  if (model !== undefined && !ALLOWED_MODELS.has(model)) {
+    return c.json({
+      error: `Invalid model '${model}'. Expected one of: opus, sonnet, kimi, kimi26, glm, gpt55`,
+    }, 400);
+  }
+  const paneAddress = `0:0.${slotNum}`;
+  const restartCmd = RESTART_COMMANDS[slotNum];
+
+  if (!restartCmd) {
+    return c.json({ error: `No restart command configured for slot ${slotNum}` }, 500);
+  }
+
+  // Guard: don't allow concurrent respawns on the same slot.
+  if (healthChecker.isPmInitiatedRespawn(slotNum)) {
+    return c.json({ error: `Slot ${slotNum} respawn already in progress` }, 409);
+  }
+
+  // Guard: slot must be idle before we send /exit. Avoid killing in-flight work.
+  const slotState = db.getSlot(slotNum);
+  if (slotState && slotState.occupied && !slotState.idle) {
+    return c.json({
+      error: `Slot ${slotNum} is busy (not idle). Wait for idle before respawning.`,
+    }, 409);
+  }
+
+  const steps: Array<{ step: string; elapsed_ms: number; detail?: string }> = [];
+  const startTime = Date.now();
+  const recordStep = (step: string, detail?: string) => {
+    steps.push({ step, elapsed_ms: Date.now() - startTime, detail });
+  };
+
+  // Mark as PM-initiated to suppress crash notifications.
+  healthChecker.markPmInitiatedRespawn(slotNum);
+  recordStep("marked_pm_initiated");
+
+  try {
+    // Step 1: Inject /exit into the Claude Code session.
+    try {
+      execSync(`tmux send-keys -t ${paneAddress} "/exit" Enter`, { timeout: 5_000 });
+      recordStep("sent_exit");
+    } catch (err) {
+      healthChecker.clearPmInitiatedRespawn(slotNum);
+      return c.json({
+        error: `Failed to send /exit to slot ${slotNum}`,
+        detail: String(err),
+        steps,
+      }, 500);
+    }
+
+    // Step 2: Wait for claude to actually exit (pane command transitions to shell).
+    const exitTimeout = 20_000;
+    const exitDeadline = Date.now() + exitTimeout;
+    let exited = false;
+    while (Date.now() < exitDeadline) {
+      await sleep(500);
+      const cmd = healthChecker.getPaneCommandPublic(slotNum);
+      if (cmd && SHELL_COMMANDS.has(cmd)) {
+        exited = true;
+        recordStep("claude_exited", `shell=${cmd}`);
+        break;
+      }
+    }
+    if (!exited) {
+      healthChecker.clearPmInitiatedRespawn(slotNum);
+      return c.json({
+        error: `Claude did not exit after /exit (waited ${exitTimeout}ms)`,
+        steps,
+      }, 504);
+    }
+
+    // Step 3: Send the launch script at the zsh prompt.
+    // RESTART_COMMANDS[slot] looks like `bash /abs/path/launch-slot-N.sh --continue`.
+    // Rebuild as `bash /abs/path/launch-slot-N.sh [model] [--continue]` so the slot's
+    // shared launcher lib can switch env vars based on the model arg.
+    const baseCmd = restartCmd.replace(" --continue", "");
+    const parts = [baseCmd];
+    if (model) parts.push(model);
+    if (continueSession) parts.push("--continue");
+    const launchCmd = parts.join(" ");
+    try {
+      execSync(
+        `tmux send-keys -t ${paneAddress} '${launchCmd}' Enter`,
+        { timeout: 10_000 },
+      );
+      recordStep("sent_launch_cmd", launchCmd);
+    } catch (err) {
+      healthChecker.clearPmInitiatedRespawn(slotNum);
+      return c.json({
+        error: `Failed to send launch command to slot ${slotNum}`,
+        detail: String(err),
+        steps,
+      }, 500);
+    }
+
+    // Step 4: Wait for claude to boot (pane command back to "claude").
+    const bootTimeout = 60_000;
+    const bootDeadline = Date.now() + bootTimeout;
+    let booted = false;
+    while (Date.now() < bootDeadline) {
+      await sleep(500);
+      const cmd = healthChecker.getPaneCommandPublic(slotNum);
+      if (cmd === "claude") {
+        booted = true;
+        recordStep("claude_booted");
+        break;
+      }
+    }
+    if (!booted) {
+      healthChecker.clearPmInitiatedRespawn(slotNum);
+      return c.json({
+        error: `Claude did not boot after launch command (waited ${bootTimeout}ms)`,
+        steps,
+      }, 504);
+    }
+
+    // Step 5: Let the UI settle, then inject "continue" to resume the previous prompt.
+    await sleep(2_000);
+    if (continueSession) {
+      try {
+        execSync(
+          `tmux send-keys -t ${paneAddress} 'continue' && sleep 0.3 && tmux send-keys -t ${paneAddress} Enter`,
+          { timeout: 5_000 },
+        );
+        recordStep("sent_continue");
+      } catch (err) {
+        // Not fatal — Claude is up, user just has to manually send "continue".
+        recordStep("continue_inject_failed", String(err));
+      }
+    }
+  } finally {
+    // Always clear the flag — restore normal crash detection.
+    healthChecker.clearPmInitiatedRespawn(slotNum);
+    recordStep("cleared_pm_initiated");
+  }
+
+  db.logEvent(slotNum, "slot_respawned", null, null, {
+    continue_session: continueSession,
+    model: model ?? null,
+    duration_ms: Date.now() - startTime,
+    steps: steps.map((s) => s.step),
+  });
+
+  return c.json({
+    success: true,
+    slot: slotNum,
+    continue_session: continueSession,
+    model: model ?? null,
+    duration_ms: Date.now() - startTime,
+    steps,
+  });
 });
 
 // ─── Send Command to Slot (Single Gateway) ─────────────
@@ -331,14 +577,44 @@ app.post("/slots/:slotNum/send", async (c) => {
         await new Promise(r => setTimeout(r, 300));
       }
 
-      // Use -l flag for literal text to avoid tmux key interpretation
+      // Multiline / long content: use load-buffer + paste-buffer via tempfile.
+      // tmux send-keys -l with embedded newlines collapses whitespace and may
+      // swallow the trailing Enter in the Claude Code TUI composer. Tempfile
+      // paste preserves bytes exactly. Threshold mirrors the Slack-route path
+      // already in this file (see ~L833). (Bug 3 fix, 2026-04-29)
+      const isMultiline = /\n/.test(command);
+      const isLong = command.length > 500;
+
+      if (isMultiline || isLong) {
+        const { writeFileSync, unlinkSync } = await import("node:fs");
+        const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}.txt`;
+        writeFileSync(tmpFile, command);
+        try {
+          execSync(`tmux load-buffer ${tmpFile} && tmux paste-buffer -t ${paneAddress}`, { timeout: 5000 });
+          // Composer needs a beat after a large paste before Enter is honored.
+          await new Promise(r => setTimeout(r, 800));
+          execSync(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+        } finally {
+          try { unlinkSync(tmpFile); } catch {}
+        }
+        db.logEvent(slotNum, "send_command", null, null, {
+          command: command.slice(0, 200),
+          force,
+          mode: isInsert ? "insert" : isNormal ? "normal" : "unknown",
+          paste: "buffer",
+          bytes: command.length,
+        });
+        return c.json({ success: true, mode: "command", slot: slotNum, paste: "buffer" });
+      }
+
+      // Short single-line: use -l flag for literal text to avoid tmux key interpretation
       const escaped = command.replace(/'/g, "'\\''");
       execSync(`tmux send-keys -t ${paneAddress} -l '${escaped}'`, { timeout: 5000 });
       await new Promise(r => setTimeout(r, 500));
       execSync(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
 
-      db.logEvent(slotNum, "send_command", null, null, { command: command.slice(0, 200), force, mode: isInsert ? "insert" : isNormal ? "normal" : "unknown" });
-      return c.json({ success: true, mode: "command", slot: slotNum });
+      db.logEvent(slotNum, "send_command", null, null, { command: command.slice(0, 200), force, mode: isInsert ? "insert" : isNormal ? "normal" : "unknown", paste: "send-keys" });
+      return c.json({ success: true, mode: "command", slot: slotNum, paste: "send-keys" });
     }
   } catch (err: any) {
     db.logEvent(slotNum, "send_error", null, null, { error: err.message?.slice(0, 200), command: command.slice(0, 100) });

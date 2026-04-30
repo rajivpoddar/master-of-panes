@@ -132,7 +132,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "mop_send_to_slot",
     "Send a command or message to a dev slot. Uses send-to-slot.sh for reliable delivery (waits for idle, handles vim mode).",
     {
-      slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
+      slot: z.number().int().min(0).max(4).describe("Slot number (0-4). 0 = PM pane."),
       command: z.string().describe("Command or message to send"),
       force: z.boolean().default(false).describe("Skip idle wait (for urgent corrections)"),
       raw: z.boolean().default(false).describe("Send as raw tmux key sequence (e.g., Escape, BTab for Shift+Tab, C-c). No Enter appended, no mode detection."),
@@ -226,6 +226,56 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       return {
         content: [{ type: "text" as const, text: `✓ Slot ${slot} released` }],
       };
+    }
+  );
+
+  // ─── mop_respawn_slot ──────────────────────────────────
+
+  server.tool(
+    "mop_respawn_slot",
+    "Respawn a slot: /exit at idle → launch script at shell → continue the session. Suppresses crash notifications during the orchestration. Replaces slot-side respawn.sh. Slot must be idle before calling.",
+    {
+      slot: z.number().int().min(0).max(4).describe("Slot number (0-4). 0 = PM pane."),
+      continue_session: z.boolean().default(true).describe("Use --continue flag and inject 'continue' after boot. Default true. Set false for a fresh session."),
+    },
+    async ({ slot, continue_session }) => {
+      try {
+        const res = await fetch(`http://localhost:3100/slots/${slot}/respawn`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ continue_session }),
+        });
+        const data = await res.json() as Record<string, unknown>;
+        const success = data.success === true;
+        if (success) {
+          const duration = typeof data.duration_ms === "number" ? `${Math.round(data.duration_ms / 1000)}s` : "?";
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `✓ Slot ${slot} respawned in ${duration} (continue=${continue_session})`,
+              },
+            ],
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `✗ Respawn failed on slot ${slot}: ${JSON.stringify(data)}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `✗ Respawn request failed: ${err}`,
+            },
+          ],
+        };
+      }
     }
   );
 
@@ -465,6 +515,115 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
           type: "text" as const,
           text: `✓ Streaming slot ${slot} to thread ${thread_ts} every ${interval_seconds ?? 60}s (while active)`,
         }],
+      };
+    }
+  );
+
+  // ─── mop_clear_all_slots ──────────────────────────────
+  // Clears all slot contexts and releases MoP state in one call.
+  // Rajiv directive 2026-04-03: "we need an MoP command that clears all slots"
+
+  server.tool(
+    "mop_clear_all_slots",
+    "Clear ALL slot contexts (0-4 including PM) and release MoP state. Sends /clear to idle dev slots immediately. PM is always queued (active during tool call) and cleared via Stop hook when idle. Non-idle dev slots are queued for next idle. Use after session export or at start of day.",
+    {
+      slots: z.array(z.number().int().min(0).max(4)).optional().describe("Specific slots to clear (default: all 0-4 including PM)."),
+    },
+    async ({ slots: specificSlots }) => {
+      const targetSlots = specificSlots ?? [0, 1, 2, 3, 4]; // Always include PM by default
+      const results: Array<{ slot: number; name: string; status: string }> = [];
+
+      // Clear any stale pending clears from previous invocation
+      db.clearAllPendingClears();
+
+      // Process dev slots (1-4) first, PM (0) last with deferred approach
+      const devSlots = targetSlots.filter((s) => s !== 0);
+      const includePmSlot = targetSlots.includes(0);
+
+      for (const slotNum of devSlots) {
+        // Refresh idle state from is-active.sh (real-time) — same as mop_all_slots
+        const isActive = relay.isSlotActive(slotNum);
+        db.updateSlot(slotNum, { idle: !isActive });
+
+        const slotState = db.getSlot(slotNum);
+        const name = slotState?.name ?? `slot-${slotNum}`;
+        const isIdle = slotState?.idle ?? true;
+
+        if (isIdle) {
+          // Slot is idle — clear immediately
+          try {
+            const paneAddress = `0:0.${slotNum}`;
+            const { execSync } = await import("node:child_process");
+            execSync(
+              `tmux send-keys -t ${paneAddress} '/clear' Enter`,
+              { timeout: 5_000 }
+            );
+
+            // Release slot state in DB
+            db.releaseSlot(slotNum);
+
+            db.logEvent(slotNum, "slot_cleared", null, null, {
+              name,
+              cleared_at: new Date().toISOString(),
+              immediate: true,
+            });
+
+            results.push({ slot: slotNum, name, status: "✅ cleared (idle)" });
+          } catch (err) {
+            results.push({ slot: slotNum, name, status: `❌ failed: ${err}` });
+          }
+        } else {
+          // Slot is active — queue for next idle
+          db.setPendingClear(slotNum);
+          db.logEvent(slotNum, "clear_pending_queued", null, null, {
+            name,
+            queued_at: new Date().toISOString(),
+            reason: "Slot is active — will clear on next idle notification",
+          });
+          results.push({ slot: slotNum, name, status: "⏳ queued (active — will clear on next idle)" });
+        }
+
+        // Small delay between clears to avoid tmux race conditions
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+
+      // PM pane (slot 0) — always queue via setPendingClear.
+      // PM is always active when this tool runs (it's running this very call).
+      // The Stop hook will detect the pending clear and inject /clear when PM
+      // next goes idle (after this tool response returns).
+      // Rajiv directive 2026-04-10: "use the idle notify hook instead of poll"
+      if (includePmSlot) {
+        db.setPendingClear(0);
+        db.logEvent(0, "clear_pending_queued", null, null, {
+          name: "PM",
+          queued_at: new Date().toISOString(),
+          reason: "PM is always active during tool call — queued for next Stop hook",
+        });
+
+        results.push({ slot: 0, name: "PM", status: "⏳ queued (will clear on next idle via Stop hook)" });
+      }
+
+      const cleared = results.filter((r) => r.status.includes("cleared")).length;
+      const queued = results.filter((r) => r.status.includes("queued")).length;
+      const failed = results.filter((r) => r.status.includes("failed")).length;
+
+      const table = results
+        .map((r) => `  ${r.slot} | ${r.name.padEnd(12)} | ${r.status}`)
+        .join("\n");
+
+      const summary = [
+        cleared > 0 ? `${cleared} cleared` : null,
+        queued > 0 ? `${queued} queued` : null,
+        failed > 0 ? `${failed} failed` : null,
+      ].filter(Boolean).join(", ");
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Clear results (${summary}):\n\n${table}\n\nIdle slots cleared immediately. Active slots will receive /clear when they next go idle.`,
+          },
+        ],
       };
     }
   );
