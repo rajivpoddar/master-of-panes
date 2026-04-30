@@ -281,6 +281,50 @@ export class MoPDatabase {
     return { pending, cycled };
   }
 
+  // ─── Clear Pending ─────────────────────────────────────
+
+  /**
+   * Set pending clear for a specific slot.
+   * When the slot next goes idle, handleStop will send /clear.
+   */
+  setPendingClear(slot: number): void {
+    this.setConfig(`clear_pending_${slot}`, "true");
+  }
+
+  /**
+   * Check if a specific slot has a pending clear.
+   */
+  hasPendingClear(slot: number): boolean {
+    return this.getConfig(`clear_pending_${slot}`) === "true";
+  }
+
+  /**
+   * Clear the pending clear flag for a slot (after /clear sent).
+   */
+  clearPendingClear(slot: number): void {
+    this.setConfig(`clear_pending_${slot}`, "false");
+  }
+
+  /**
+   * Get all pending clear statuses.
+   */
+  getClearPendingStatus(): Record<number, boolean> {
+    const status: Record<number, boolean> = {};
+    for (let i = 0; i <= 4; i++) {
+      status[i] = this.hasPendingClear(i);
+    }
+    return status;
+  }
+
+  /**
+   * Clear all pending clear flags.
+   */
+  clearAllPendingClears(): void {
+    for (let i = 0; i <= 4; i++) {
+      this.clearPendingClear(i);
+    }
+  }
+
   // ─── Queries ─────────────────────────────────────────────
 
   getSlotHistory(slot: number, limit: number = 20): EventLogEntry[] {
@@ -294,6 +338,72 @@ export class MoPDatabase {
       ORDER BY timestamp DESC
     `);
     return stmt.all(minutes) as EventLogEntry[];
+  }
+
+  // ─── Review Status (unforgeable gate) ───────────────────
+
+  /**
+   * Check if a code review was run for a given issue number.
+   * Searches the events table for Skill invocations matching review patterns.
+   * This is unforgeable — only actual tool invocations logged by MoP hooks
+   * can create these entries. Slots cannot write to the events table.
+   *
+   * @param issueNumber - GitHub issue number
+   * @param windowMinutes - How far back to search (default 60 min)
+   * @returns Review status with method, timestamp, and verdict if found
+   */
+  findReviewEvent(
+    issueNumber: number,
+    windowMinutes: number = 60
+  ): { found: boolean; method: string | null; timestamp: string | null; slot: number | null; details: string | null } {
+    const issueStr = String(issueNumber);
+
+    // Search for Skill tool calls that match review patterns
+    // Covers: codex-app-code-review, codex-review, zen-code-review, zen-review
+    const stmt = this.db.prepare(`
+      SELECT slot, timestamp, tool_name, payload
+      FROM events
+      WHERE timestamp > datetime('now', '-' || ? || ' minutes')
+        AND (
+          (tool_name = 'Skill' AND (
+            payload LIKE '%codex%review%' OR
+            payload LIKE '%zen%review%'
+          ))
+          OR
+          (tool_name = 'Bash' AND (
+            payload LIKE '%codex exec%' OR
+            payload LIKE '%codex-companion%review%'
+          ))
+        )
+        AND payload LIKE ?
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `);
+
+    const row = stmt.get(windowMinutes, `%${issueStr}%`) as {
+      slot: number; timestamp: string; tool_name: string; payload: string;
+    } | undefined;
+
+    if (!row) {
+      return { found: false, method: null, timestamp: null, slot: null, details: null };
+    }
+
+    // Determine method from the match
+    let method = "unknown";
+    const payload = row.payload.toLowerCase();
+    if (payload.includes("codex-app")) method = "codex-app";
+    else if (payload.includes("zen")) method = "zen";
+    else if (payload.includes("codex exec")) method = "codex-cli";
+    else if (payload.includes("codex-companion")) method = "codex-plugin";
+    else if (payload.includes("codex")) method = "codex";
+
+    return {
+      found: true,
+      method,
+      timestamp: row.timestamp,
+      slot: row.slot,
+      details: `tool=${row.tool_name}, matched in events DB`,
+    };
   }
 
   close(): void {
