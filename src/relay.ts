@@ -34,6 +34,7 @@ export class TmuxRelay {
    */
   injectToPM(message: string): boolean {
     try {
+      console.log(`[relay-debug] injectToPM → ${message}`);
       execSync(
         `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)} && ` +
         `sleep 0.3 && ` +
@@ -41,6 +42,7 @@ export class TmuxRelay {
         `sleep 0.5`,
         { timeout: 10_000 }
       );
+      console.log(`[relay-debug] injectToPM success → ${message}`);
       return true;
     } catch (err) {
       console.error(`[relay] Failed to inject into PM pane:`, err);

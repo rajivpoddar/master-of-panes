@@ -6,10 +6,21 @@
  */
 
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 import type { HookPayload, HookResponse } from "./types.js";
+
+function debugLog(line: string): void {
+  try {
+    appendFileSync(
+      "/tmp/mop-debug.log",
+      `${new Date().toISOString()} ${line}\n`
+    );
+  } catch {
+    // never fail hook processing on log write errors
+  }
+}
 
 // ─── Activity Classification ──────────────────────────────
 
@@ -83,8 +94,8 @@ export class HookProcessor {
    */
   private pendingIdleTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
-  /** Idle debounce delay: 60 seconds */
-  private static readonly IDLE_DEBOUNCE_MS = 60_000;
+  /** Idle debounce delay: 30 seconds (Rajiv directive 2026-04-01: reduced from 60s) */
+  private static readonly IDLE_DEBOUNCE_MS = 30_000;
 
   /**
    * Plan approval timeout timers, keyed by slot number.
@@ -97,10 +108,103 @@ export class HookProcessor {
   /** Plan approval timeout duration: 15 minutes */
   private static readonly PLAN_APPROVAL_TIMEOUT_MS = 15 * 60 * 1000;
 
+  /**
+   * Check-slot periodic timers, keyed by slot number.
+   * Started when slot transitions idle→active. Every 5 minutes, captures tmux
+   * output to /tmp/slot-N-check.txt and injects /check-slot N into PM pane.
+   * Cleared when slot goes idle (Stop hook).
+   * Rajiv directive 2026-04-03: "trigger check slot from MoP instead of through the loop"
+   */
+  private checkSlotTimers = new Map<number, ReturnType<typeof setInterval>>();
+
+  /** Check-slot interval: 5 minutes */
+  private static readonly CHECK_SLOT_INTERVAL_MS = 5 * 60 * 1000;
+
   constructor(
     private db: MoPDatabase,
     private relay: TmuxRelay
   ) {}
+
+  /**
+   * Start periodic check-slot timer for an active slot.
+   * Fires every 5 minutes: captures tmux, writes to file, injects /check-slot N.
+   * Idempotent: if a timer is already running for this slot, keeps it (doesn't restart).
+   * This prevents rapid idle↔active transitions from killing the timer.
+   */
+  private startCheckSlotTimer(slotNum: number): void {
+    // If timer already exists, keep it running — don't restart
+    if (this.checkSlotTimers.has(slotNum)) {
+      return;
+    }
+
+    const now = new Date().toISOString().slice(11, 19);
+    console.log(`[check-slot] ${now} Starting timer for slot ${slotNum} (interval: ${HookProcessor.CHECK_SLOT_INTERVAL_MS}ms, active timers: ${this.checkSlotTimers.size})`);
+
+    const timer = setInterval(() => {
+      const now = new Date().toISOString().slice(11, 19);
+      // Only fire if slot is occupied and not DND.
+      // Do NOT check idle — slots are idle between tool calls (every few seconds).
+      // The timer should survive through normal idle↔active cycling.
+      // Only stop when truly unoccupied (released) or DND.
+      const currentSlot = this.db.getSlot(slotNum);
+      console.log(`[check-slot] ${now} Slot ${slotNum} timer tick — occupied=${currentSlot?.occupied}, idle=${currentSlot?.idle}, dnd=${currentSlot?.dnd}, task=${currentSlot?.task?.slice(0,30)}`);
+      if (!currentSlot || !currentSlot.occupied || currentSlot.dnd) {
+        console.log(`[check-slot] ${now} Slot ${slotNum} STOPPING timer — occupied=${currentSlot?.occupied}, dnd=${currentSlot?.dnd}`);
+        this.stopCheckSlotTimer(slotNum);
+        return;
+      }
+
+      // Skip firing if slot is momentarily idle (between tool calls), but keep timer alive
+      if (currentSlot.idle) {
+        console.log(`[check-slot] ${now} Slot ${slotNum} SKIP tick — idle between tool calls, timer stays alive`);
+        return;
+      }
+
+      console.log(`[check-slot] ${now} Slot ${slotNum} FIRING — capturing tmux and injecting /check-slot`);
+
+      // Capture tmux and write to file
+      const checkFile = `/tmp/slot-${slotNum}-check.txt`;
+      try {
+        const capture = execSync(
+          `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
+          { timeout: 5_000 }
+        ).toString();
+        writeFileSync(checkFile, capture);
+        console.log(`[check-slot] Slot ${slotNum} capture written to ${checkFile} (${capture.length} bytes)`);
+      } catch (err) {
+        writeFileSync(checkFile, "[capture failed]");
+        console.log(`[check-slot] Slot ${slotNum} capture FAILED: ${err}`);
+      }
+
+      // Inject /check-slot N into PM pane
+      this.relay.injectToPM(`/check-slot ${slotNum}`);
+      console.log(`[check-slot] Slot ${slotNum} — injected /check-slot into PM pane`);
+      this.db.logEvent(slotNum, "check_slot_triggered", "Timer", null, {
+        check_file: checkFile,
+        interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
+      });
+    }, HookProcessor.CHECK_SLOT_INTERVAL_MS);
+
+    if (timer.unref) timer.unref();
+    this.checkSlotTimers.set(slotNum, timer);
+
+    this.db.logEvent(slotNum, "check_slot_timer_started", "PostToolUse", null, {
+      interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
+    });
+  }
+
+  /**
+   * Stop check-slot timer for a slot (slot went idle or DND).
+   */
+  private stopCheckSlotTimer(slotNum: number): void {
+    const existing = this.checkSlotTimers.get(slotNum);
+    if (existing) {
+      clearInterval(existing);
+      this.checkSlotTimers.delete(slotNum);
+      console.log(`[check-slot] Stopped timer for slot ${slotNum}`);
+      this.db.logEvent(slotNum, "check_slot_timer_stopped", "Stop", null, {});
+    }
+  }
 
   /**
    * Start a 15m timer for plan approval. If PM doesn't respond, re-notify.
@@ -190,7 +294,7 @@ export class HookProcessor {
 
   /**
    * Cancel pending idle notification timer for a slot.
-   * Called when a slot becomes active during the 60s debounce window.
+   * Called when a slot becomes active during the 30s debounce window.
    * Returns true if a timer was cancelled, false if no timer was pending.
    */
   cancelPendingIdleTimer(slotNum: number): boolean {
@@ -234,11 +338,24 @@ export class HookProcessor {
     // handlePostToolUse never sees the transition. (Bug fix 2026-03-16)
     const wasIdle = this.db.getSlot(slotNum)?.idle ?? false;
 
-    // Update last_activity and mark as busy (any hook = slot is working)
-    this.db.updateSlot(slotNum, {
-      last_activity: new Date().toISOString(),
-      idle: payload.type === "Stop", // Stop marks idle; everything else marks busy
-    });
+    // Update last_activity and mark as busy (any hook = slot is working).
+    // SessionStart / PreCompact / PostCompact don't change idle flag — they're
+    // lifecycle events that don't reflect work-in-progress state.
+    const lifecycleEvents = new Set([
+      "SessionStart",
+      "PreCompact",
+      "PostCompact",
+    ]);
+    if (!lifecycleEvents.has(payload.type)) {
+      this.db.updateSlot(slotNum, {
+        last_activity: new Date().toISOString(),
+        idle: payload.type === "Stop", // Stop marks idle; everything else marks busy
+      });
+    } else {
+      this.db.updateSlot(slotNum, {
+        last_activity: new Date().toISOString(),
+      });
+    }
 
     // Route by hook type
     switch (payload.type) {
@@ -254,9 +371,62 @@ export class HookProcessor {
         // User sent a message — slot is becoming active. Handle like PostToolUse
         // for idle→active transition detection. (Added 2026-03-18)
         return this.handlePostToolUse(slotNum, payload, wasIdle);
+      case "SessionStart":
+        return this.handleSessionStart(slotNum, payload);
+      case "PreCompact":
+      case "PostCompact":
+        // Logged via this.db.logEvent at top of process(); no special action.
+        // SessionStart:compact carries the resume signal we react to.
+        return {};
       default:
         return {};
     }
+  }
+
+  // ─── SessionStart Hook ─────────────────────────────────
+  /**
+   * Fires when Claude Code (re)initializes a session.
+   * Matchers: "startup" | "resume" | "clear" | "compact"
+   *
+   * For source="compact" (post-/compact), send "continue your work"
+   * directly to the slot's pane. Critical for slots 1+4 (codex-proxy /
+   * GPT-5.5) which do not auto-resume their task after compaction.
+   * Slots 2+3 (native Sonnet) auto-resume but receive the same nudge —
+   * a duplicate "continue" is harmless and keeps the path uniform.
+   *
+   * Direct-recovery model (Rajiv directive 2026-04-30 12:44-12:45):
+   * Previously injected /slot-compact-resumed into the PM pane; the PM
+   * skill then sent "continue" to the slot. That round-trip is now gone.
+   * The legacy /slot-compact-resumed PM-side skill is deprecated.
+   *
+   * Reference: feedback_gpt55_compact_needs_continue_trigger.md
+   */
+  private handleSessionStart(slotNum: number, payload: HookPayload): HookResponse {
+    const source = payload.source ?? "";
+    debugLog(
+      `[hooks] SessionStart slot=${slotNum} source=${source || "(none)"}`
+    );
+    if (slotNum === 0) {
+      debugLog(`[hooks] SessionStart slot=0 (PM) — skip orchestration`);
+      return {}; // PM pane — no orchestration
+    }
+    if (source === "compact") {
+      this.db.logEvent(slotNum, "session_start_compact", "SessionStart", null, {
+        source,
+      });
+      // Direct-recovery: send "continue your work" straight to the slot.
+      // force=true because the slot just resumed and may not yet show
+      // the active prompt to the active-check.
+      const ok = this.relay.sendToSlot(slotNum, "continue your work", true);
+      debugLog(
+        `[hooks] SessionStart:compact slot=${slotNum} sendToSlot(continue)=${ok}`
+      );
+    } else {
+      debugLog(
+        `[hooks] SessionStart slot=${slotNum} source=${source} — no nudge (only 'compact' triggers)`
+      );
+    }
+    return {};
   }
 
   // ─── Stop Hook ─────────────────────────────────────────
@@ -310,7 +480,9 @@ export class HookProcessor {
       return {};
     }
 
-    // Slot went idle — clear activity, cancel any pending plan timer
+    // Slot went idle — clear activity, cancel any pending plan timer.
+    // NOTE: Do NOT stop check-slot timer here — idle fires between every tool call.
+    // Timer self-manages: skips ticks while idle, stops when unoccupied or DND.
     this.clearPlanApprovalTimer(slotNum);
     this.db.updateSlot(slotNum, { activity: null });
 
@@ -348,8 +520,46 @@ export class HookProcessor {
       return {};
     }
 
+    // ─── Clear Pending Check ───────────────────────────────
+    // If this slot has a pending clear (from mop_clear_all_slots), send /clear now
+    // that the slot is idle, then release it. Similar pattern to exit_pending.
+    // Rajiv directive 2026-04-04: "if idle trigger immediately or wait till next idle"
+    if (this.db.hasPendingClear(slotNum)) {
+      try {
+        const paneAddress = `0:0.${slotNum}`;
+        execSync(`tmux send-keys -t ${paneAddress} '/clear' Enter`, { timeout: 5_000 });
+
+        // Release slot state (slots 1-4 only)
+        if (slotNum >= 1 && slotNum <= 4) {
+          this.db.releaseSlot(slotNum);
+        }
+
+        this.db.clearPendingClear(slotNum);
+        this.db.logEvent(slotNum, "clear_pending_executed", "Stop", null, {
+          name: slot.name,
+          reason: "Slot went idle — executing queued /clear from mop_clear_all_slots",
+        });
+
+        this.relay.injectToPM(
+          `# 🧹 Slot ${slotNum} (${slot.name ?? "unnamed"}) cleared (was queued, now idle)`,
+        );
+
+        // Check if all pending clears are done
+        const pendingStatus = this.db.getClearPendingStatus();
+        const allDone = Object.values(pendingStatus).every((v) => !v);
+        if (allDone) {
+          this.relay.injectToPM("# ✅ All queued slot clears completed");
+        }
+      } catch (err) {
+        this.db.logEvent(slotNum, "clear_pending_failed", "Stop", null, {
+          error: String(err),
+        });
+      }
+      return {};
+    }
+
     // Normal idle flow — debounced notification to PM.
-    // Wait 60s before notifying. If slot becomes active, cancel the timer.
+    // Wait 30s before notifying. If slot becomes active, cancel the timer.
     // (Rajiv directive 2026-03-31: 24 duplicate idle notifications on Mar 30)
     this.cancelPendingIdleTimer(slotNum);
 
@@ -357,11 +567,32 @@ export class HookProcessor {
       this.pendingIdleTimers.delete(slotNum);
       // Re-check slot is still idle before notifying
       const currentSlot = this.db.getSlot(slotNum);
+      console.log(`[idle-debug] slot ${slotNum} debounce fired: occupied=${currentSlot?.occupied}, idle=${currentSlot?.idle}, dnd=${currentSlot?.dnd}, task=${currentSlot?.task ?? 'undefined'}`);
       if (currentSlot?.idle) {
+        console.log(`[idle-debug] slot ${slotNum} still idle after debounce — preparing /slot-idle relay`);
+        // ─── Capture tmux output and write to file ────────────
+        // Rajiv directive 2026-04-03: "inject the tmux capture of the slot
+        // along with the command through MoP during slot idle"
+        // PM just reads the file instead of launching a classification agent.
+        const captureFile = `/tmp/slot-${slotNum}-idle-capture.txt`;
+        try {
+          const capture = execSync(
+            `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
+            { timeout: 5_000 }
+          ).toString();
+          writeFileSync(captureFile, capture);
+        } catch {
+          writeFileSync(captureFile, "[capture failed]");
+        }
+
+        console.log(`[idle-debug] slot ${slotNum} calling relay.notifySlotIdle()`);
         this.relay.notifySlotIdle(currentSlot);
         this.db.logEvent(slotNum, "slot_idle_notified", "Stop", null, {
+            relay_path: "Stop.debounce.notifySlotIdle",
+            notification_type: "slot-idle",
           task: currentSlot.task,
           branch: currentSlot.branch,
+          capture_file: captureFile,
           debounce_ms: HookProcessor.IDLE_DEBOUNCE_MS,
         });
       } else {
@@ -429,14 +660,34 @@ export class HookProcessor {
 
       // Notify PM for ALL slots (not just occupied — rework slots may be released)
       if (!slot.dnd) {
-        const label = slot.task || slot.activity || "working";
+        // ─── Capture tmux output on active transition ────────
+        // Rajiv directive 2026-04-03: inject tmux capture with slot-active too
+        const captureFile = `/tmp/slot-${slotNum}-active-capture.txt`;
+        try {
+          const capture = execSync(
+            `tmux capture-pane -t 0:0.${slotNum} -p -S -15`,
+            { timeout: 5_000 }
+          ).toString();
+          writeFileSync(captureFile, capture);
+        } catch {
+          writeFileSync(captureFile, "[capture failed]");
+        }
+
         // Send slash command to trigger slot-active skill (includes slot number as arg)
-        // Comment context is available via mop_slot_status — no need for separate comment
         this.relay.injectToPM(`/slot-active ${slotNum}`);
         this.db.logEvent(slotNum, "slot_active_notified", "PostToolUse", payload.tool_name ?? null, {
           task: slot.task,
           issue: slot.issue,
+          capture_file: captureFile,
         });
+
+        // ─── Start check-slot periodic timer ────────────────
+        // Rajiv directive 2026-04-03: MoP drives check-slot instead of PM cron loop
+        // Only start timer if slot is occupied (has a task). Released slots in auto-compact
+        // cycles trigger active transitions but should NOT get timers.
+        if (slot.occupied) {
+          this.startCheckSlotTimer(slotNum);
+        }
       }
     }
 
@@ -590,11 +841,21 @@ export class HookProcessor {
 
   private handleNotification(slotNum: number, payload: HookPayload): HookResponse {
     const notifType = payload.notification_type ?? "unknown";
+    const slot = this.db.getSlot(slotNum);
+    console.log(`[idle-debug] Notification hook slot ${slotNum}: type=${notifType}, occupied=${slot?.occupied}, idle=${slot?.idle}, dnd=${slot?.dnd}, task=${slot?.task ?? 'undefined'}`);
 
     // Log notification type for queryability
     this.db.logEvent(slotNum, `notification_${notifType}`, "Notification", null, {
       notification_type: notifType,
+      occupied: slot?.occupied,
+      idle: slot?.idle,
+      dnd: slot?.dnd,
+      task: slot?.task,
     });
+
+    if (notifType === "idle_prompt") {
+      console.log(`[idle-debug] slot ${slotNum} received idle_prompt notification but Notification path does not relay /slot-idle`);
+    }
 
     // Handle autocompact — slot is losing context
     if (notifType === "autocompact") {
