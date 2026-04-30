@@ -24,16 +24,23 @@ import type { TmuxRelay } from "./relay.js";
 // These are shell aliases defined in ~/.zshrc. Since tmux panes
 // run interactive zsh shells, aliases are available after Claude exits.
 
-const RESTART_COMMANDS: Record<number, string> = {
-  0: "claude-pm --continue",
-  1: "claude-dev-1 --continue",
-  2: "claude-qa-2 --continue",
-  3: "claude-dev-3 --continue",
-  4: "claude-qa --continue",
+// Use standalone scripts instead of shell aliases — eliminates .zshrc/OMZ dependency.
+// Scripts are bash, not zsh, so no alias resolution issues.
+// (Rajiv directive 2026-04-03: "use scripts to launch claude on the slots instead of aliases")
+// Absolute paths — scripts live in the main repo, but slots are in separate clones
+export const SCRIPTS_DIR = "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts";
+// Health checker: always --continue (crash recovery preserves session/work).
+// Respawn skill: --continue is optional arg (fresh start for atma updates).
+export const RESTART_COMMANDS: Record<number, string> = {
+  0: `bash ${SCRIPTS_DIR}/launch-pm.sh --continue`,
+  1: `bash ${SCRIPTS_DIR}/launch-slot-1.sh --continue`,
+  2: `bash ${SCRIPTS_DIR}/launch-slot-2.sh --continue`,
+  3: `bash ${SCRIPTS_DIR}/launch-slot-3.sh --continue`,
+  4: `bash ${SCRIPTS_DIR}/launch-slot-4.sh --continue`,
 };
 
 /** Shell command names that indicate Claude Code has exited back to the shell */
-const SHELL_COMMANDS = new Set(["zsh", "bash", "sh", "fish"]);
+export const SHELL_COMMANDS = new Set(["zsh", "bash", "sh", "fish"]);
 
 // ─── Health Checker ────────────────────────────────────────
 
@@ -48,11 +55,38 @@ export class ProcessHealthChecker {
   private lastRestart = new Map<number, number>();
   /** slot -> restart count in current hour window */
   private restartCounts = new Map<number, { count: number; windowStart: number }>();
+  /** Slots currently being respawned by PM via /respawn endpoint.
+   * While a slot is in this set, the health checker skips both auto-restart
+   * and the "process died — auto-restarted" notification to PM. Prevents
+   * intentional respawn from looking like a crash. */
+  private pmInitiatedRespawns = new Set<number>();
 
   constructor(
     private db: MoPDatabase,
     private relay: TmuxRelay,
   ) {}
+
+  // ─── PM-Initiated Respawn Tracking ─────────────────────
+
+  /** Mark slot as being respawned by PM — suppress crash notification. */
+  markPmInitiatedRespawn(slotNum: number): void {
+    this.pmInitiatedRespawns.add(slotNum);
+  }
+
+  /** Clear PM-initiated respawn flag — restore normal crash detection. */
+  clearPmInitiatedRespawn(slotNum: number): void {
+    this.pmInitiatedRespawns.delete(slotNum);
+  }
+
+  /** Check if a slot is currently being respawned by PM. */
+  isPmInitiatedRespawn(slotNum: number): boolean {
+    return this.pmInitiatedRespawns.has(slotNum);
+  }
+
+  /** Public getter for pane's current command (used by respawn orchestration). */
+  getPaneCommandPublic(slotNum: number): string | null {
+    return this.getPaneCommand(slotNum);
+  }
 
   // ─── Detection ─────────────────────────────────────────
 
@@ -124,8 +158,9 @@ export class ProcessHealthChecker {
 
     const paneAddress = `0:0.${slotNum}`;
     try {
-      // Send restart command to the pane's shell
-      // The pane should be at a zsh prompt after Claude Code died
+      // Send restart command to the pane's shell.
+      // Uses standalone bash scripts (not aliases) — no .zshrc/OMZ dependency.
+      // Scripts resolve the atma template vars directly via sed.
       execSync(
         `tmux send-keys -t ${paneAddress} '${restartCmd}' Enter`,
         { timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] },
@@ -161,6 +196,11 @@ export class ProcessHealthChecker {
       // DND does NOT skip health checks — Claude must run on all slots always.
       // DND only means "don't assign new work" — NOT "don't keep alive."
       // Rajiv directive (2026-03-16): "heartbeat should ignore dnd. claude has to run on all ports all the time."
+
+      // PM-initiated respawn in progress — the shell state is expected, not a crash.
+      // Skip both auto-restart AND notification while flag is set.
+      // (Rajiv directive 2026-04-05: "not send slot crash events to pm" during respawn)
+      if (this.pmInitiatedRespawns.has(slot)) continue;
 
       // Check if the Claude Code process is dead
       if (!this.isProcessDead(slot)) continue;
