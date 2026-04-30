@@ -34,6 +34,15 @@ export class StuckDetector {
   // Context-overflow detector dedup: don't re-inject /slot-context-overflow
   // for the same slot within 10 minutes (banner persists until /compact runs).
   private readonly CONTEXT_OVERFLOW_DEDUP_MS = 10 * 60 * 1000;
+  // Post-/compact dispatch dedup. Detector re-fires post-compact because
+  // "Context limit reached" lingers in tmux scrollback after Claude clears
+  // its conversation. Time-based guard prevents double-fire that
+  // concatenates the second /compact with the SessionStart:compact
+  // "continue your work" trigger (Rajiv directive 2026-04-30 13:35
+  // thread 1777536325.083369). Resets implicitly when no overflow tick
+  // occurs within the window — a NEW genuine overflow with a fresh
+  // signature ≥5min later passes through.
+  private readonly COMPACT_DISPATCH_DEDUP_MS = 5 * 60 * 1000;
   // Slots that bypass native auto-compact (codex-proxy / GPT-5.5 wrapper).
   // These need tmux-string detection because PreCompact:auto won't fire.
   // Reference: feedback_autocompact_v3_native_vs_wrapper.md
@@ -177,6 +186,23 @@ export class StuckDetector {
       }
     }
 
+    // Post-/compact dispatch guard — prevents duplicate /compact when the
+    // overflow banner lingers in tmux scrollback after Claude has already
+    // compacted. Without this, the detector re-fires /compact and it
+    // concatenates with the SessionStart:compact "continue your work"
+    // trigger as `continue your work/compact`. (Rajiv directive
+    // 2026-04-30 13:35 thread 1777536325.083369.)
+    const lastDispatch = this.db.getEvents(slot.slot, 1, "compact_dispatched");
+    if (lastDispatch.length > 0) {
+      const lastDispatchTs = new Date(lastDispatch[0].timestamp).getTime();
+      if (Date.now() - lastDispatchTs < this.COMPACT_DISPATCH_DEDUP_MS) {
+        debugLog(
+          `[stuck] slot=${slot.slot} post-compact-suppress sig=${signature.slice(0, 12)} age_ms=${Date.now() - lastDispatchTs}`
+        );
+        return;
+      }
+    }
+
     this.db.logEvent(
       slot.slot,
       "context_overflow_detected",
@@ -195,6 +221,16 @@ export class StuckDetector {
     debugLog(
       `[stuck] slot=${slot.slot} fire-overflow-direct sig=${signature.slice(0, 12)} pattern=${matched.source}`
     );
+
+    // Log the dispatch BEFORE sending so the next detector tick (which may
+    // arrive within seconds if the scrollback banner is still visible)
+    // sees the dedup record and suppresses re-fire.
+    this.db.logEvent(slot.slot, "compact_dispatched", null, null, {
+      slot: slot.slot,
+      match_signature: signature,
+      matched_pattern: matched.source,
+    });
+
     // Direct-recovery (Rajiv directive 2026-04-30): send /compact straight
     // to the slot. force=true bypasses the active-check because the slot
     // is by definition stuck on the overflow banner at this point.
