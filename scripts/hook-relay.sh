@@ -27,13 +27,15 @@ try:
 except Exception:
     sys.exit(0)
 
-# Determine slot number from cwd: heydonna-app-300N → N
+# Determine slot number from cwd: heydonna-app-300N → N, or heydonna-app (no suffix) → 0
 cwd = data.get('cwd', '')
 m = re.search(r'heydonna-app-300([1-4])', cwd)
-if not m:
-    sys.exit(0)  # Not a dev slot (PM pane or unknown) — skip
-
-slot = m.group(1)
+if m:
+    slot = m.group(1)
+elif re.search(r'heydonna-app(?!-300)', cwd):
+    slot = '0'  # PM pane (heydonna-app, no -300N suffix)
+else:
+    sys.exit(0)  # Unknown project — skip
 
 # Add hook_event_name (command hooks don't include it, only HTTP hooks do)
 data['hook_event_name'] = hook_type

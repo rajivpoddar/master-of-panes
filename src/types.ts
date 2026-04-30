@@ -10,7 +10,16 @@
 // ─── Claude Code HTTP Hook Events ────────────────────────────
 
 /** Claude Code hook event types */
-export type HookType = "PreToolUse" | "PostToolUse" | "Notification" | "Stop";
+export type HookType =
+  | "PreToolUse"
+  | "PostToolUse"
+  | "Notification"
+  | "Stop"
+  | "UserPromptSubmit"
+  | "SubagentStop"
+  | "PreCompact"
+  | "PostCompact"
+  | "SessionStart";
 
 /** Incoming HTTP hook payload from Claude Code */
 export interface HookPayload {
@@ -30,6 +39,12 @@ export interface HookPayload {
   stop_reason?: string;
   /** Transcript of the conversation (for Stop hooks) */
   transcript?: string;
+  /** SessionStart source: "startup" | "resume" | "clear" | "compact" */
+  source?: string;
+  /** PreCompact / PostCompact trigger: "manual" | "auto" */
+  trigger?: string;
+  /** PostCompact summary text */
+  compact_summary?: string;
 }
 
 /** Response to Claude Code hook — can modify behavior */
