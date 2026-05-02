@@ -5,11 +5,14 @@
  * plan ready), updates slot state, and relays notifications to PM.
  */
 
-import { execSync } from "node:child_process";
+import { execFile, execSync } from "node:child_process";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { promisify } from "node:util";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 import type { HookPayload, HookResponse } from "./types.js";
+
+const pExecFile = promisify(execFile);
 
 function debugLog(line: string): void {
   try {
@@ -120,10 +123,36 @@ export class HookProcessor {
   /** Check-slot interval: 5 minutes */
   private static readonly CHECK_SLOT_INTERVAL_MS = 5 * 60 * 1000;
 
+  /**
+   * Per-slot consecutive-suppressed counter for the codex activity-review gate.
+   * Incremented each tick the verdict says "suppress"; reset to 0 when MoP
+   * actually injects /check-slot. Provides liveness pings: every 3rd UNCHANGED
+   * (~15min) and every 6th HEALTH:OK (~30min) injects so PM still sees the slot
+   * is alive without paying tokens for clean ticks.
+   * (Rajiv directive 2026-05-01 13:35: "implement v2. check every 5m.")
+   */
+  private suppressedConsecutive = new Map<number, number>();
+
+  // Optional reference to StuckDetector — set post-construction by server.ts
+  // so that SessionStart:compact can clear the per-slot lastMatchLine
+  // tracker. Optional to avoid a circular construction dependency.
+  private stuckDetector: {
+    resetOverflowTracking(slotNum: number): void;
+    resetBlockTracking(slotNum: number): void;
+  } | null = null;
+
   constructor(
     private db: MoPDatabase,
     private relay: TmuxRelay
   ) {}
+
+  /** Wire StuckDetector for post-compact overflow + idle→active block tracker reset. */
+  setStuckDetector(detector: {
+    resetOverflowTracking(slotNum: number): void;
+    resetBlockTracking(slotNum: number): void;
+  }): void {
+    this.stuckDetector = detector;
+  }
 
   /**
    * Start periodic check-slot timer for an active slot.
@@ -141,48 +170,83 @@ export class HookProcessor {
     console.log(`[check-slot] ${now} Starting timer for slot ${slotNum} (interval: ${HookProcessor.CHECK_SLOT_INTERVAL_MS}ms, active timers: ${this.checkSlotTimers.size})`);
 
     const timer = setInterval(() => {
-      const now = new Date().toISOString().slice(11, 19);
-      // Only fire if slot is occupied and not DND.
-      // Do NOT check idle — slots are idle between tool calls (every few seconds).
-      // The timer should survive through normal idle↔active cycling.
-      // Only stop when truly unoccupied (released) or DND.
-      const currentSlot = this.db.getSlot(slotNum);
-      console.log(`[check-slot] ${now} Slot ${slotNum} timer tick — occupied=${currentSlot?.occupied}, idle=${currentSlot?.idle}, dnd=${currentSlot?.dnd}, task=${currentSlot?.task?.slice(0,30)}`);
-      if (!currentSlot || !currentSlot.occupied || currentSlot.dnd) {
-        console.log(`[check-slot] ${now} Slot ${slotNum} STOPPING timer — occupied=${currentSlot?.occupied}, dnd=${currentSlot?.dnd}`);
-        this.stopCheckSlotTimer(slotNum);
-        return;
-      }
+      // Run async tick body via IIFE; setInterval ignores returned promise.
+      // Each tick is independent — overlap is acceptable (see Section 2.x risk #2).
+      void (async () => {
+        const now = new Date().toISOString().slice(11, 19);
+        // Only fire if slot is occupied and not DND.
+        // Do NOT check idle — slots are idle between tool calls (every few seconds).
+        // The timer should survive through normal idle↔active cycling.
+        // Only stop when truly unoccupied (released) or DND.
+        const currentSlot = this.db.getSlot(slotNum);
+        console.log(`[check-slot] ${now} Slot ${slotNum} timer tick — occupied=${currentSlot?.occupied}, idle=${currentSlot?.idle}, dnd=${currentSlot?.dnd}, task=${currentSlot?.task?.slice(0,30)}`);
+        if (!currentSlot || !currentSlot.occupied || currentSlot.dnd) {
+          console.log(`[check-slot] ${now} Slot ${slotNum} STOPPING timer — occupied=${currentSlot?.occupied}, dnd=${currentSlot?.dnd}`);
+          this.stopCheckSlotTimer(slotNum);
+          return;
+        }
 
-      // Skip firing if slot is momentarily idle (between tool calls), but keep timer alive
-      if (currentSlot.idle) {
-        console.log(`[check-slot] ${now} Slot ${slotNum} SKIP tick — idle between tool calls, timer stays alive`);
-        return;
-      }
+        // Skip firing if slot is momentarily idle (between tool calls), but keep timer alive
+        if (currentSlot.idle) {
+          console.log(`[check-slot] ${now} Slot ${slotNum} SKIP tick — idle between tool calls, timer stays alive`);
+          return;
+        }
 
-      console.log(`[check-slot] ${now} Slot ${slotNum} FIRING — capturing tmux and injecting /check-slot`);
+        console.log(`[check-slot] ${now} Slot ${slotNum} FIRING — capturing tmux + running activity review`);
 
-      // Capture tmux and write to file
-      const checkFile = `/tmp/slot-${slotNum}-check.txt`;
-      try {
-        const capture = execSync(
-          `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
-          { timeout: 5_000 }
-        ).toString();
-        writeFileSync(checkFile, capture);
-        console.log(`[check-slot] Slot ${slotNum} capture written to ${checkFile} (${capture.length} bytes)`);
-      } catch (err) {
-        writeFileSync(checkFile, "[capture failed]");
-        console.log(`[check-slot] Slot ${slotNum} capture FAILED: ${err}`);
-      }
+        // Step 1: Capture tmux (always — preserves today's behavior of /tmp/slot-N-check.txt liveness)
+        const checkFile = `/tmp/slot-${slotNum}-check.txt`;
+        let tmuxCapture = "";
+        try {
+          tmuxCapture = execSync(
+            `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
+            { timeout: 5_000 }
+          ).toString();
+        } catch (err) {
+          tmuxCapture = `[capture failed: ${err}]`;
+          console.log(`[check-slot] Slot ${slotNum} capture FAILED: ${err}`);
+        }
 
-      // Inject /check-slot N into PM pane
-      this.relay.injectToPM(`/check-slot ${slotNum}`);
-      console.log(`[check-slot] Slot ${slotNum} — injected /check-slot into PM pane`);
-      this.db.logEvent(slotNum, "check_slot_triggered", "Timer", null, {
-        check_file: checkFile,
-        interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
-      });
+        // Step 2: Run codex activity review (check-slot-bg.sh wraps codex-companion.mjs)
+        const summary = await this.runActivityReview(slotNum);
+
+        // Step 3: Apply gate
+        const suppressed = this.suppressedConsecutive.get(slotNum) ?? 0;
+        const inject = this.shouldInject(summary, suppressed);
+
+        // Always update the check file. When injecting, prefix with summary so PM
+        // sees the verdict at the top. When suppressing, still write the summary
+        // + tmux capture so PM can read manually if desired.
+        const fileContent = `${summary}\n\n--- tmux capture ---\n${tmuxCapture}`;
+        try {
+          writeFileSync(checkFile, fileContent);
+        } catch (err) {
+          console.log(`[check-slot] Slot ${slotNum} write FAILED: ${err}`);
+        }
+
+        if (inject) {
+          this.suppressedConsecutive.set(slotNum, 0);
+          this.relay.injectToPM(`/check-slot ${slotNum}`);
+          console.log(`[check-slot] Slot ${slotNum} INJECT — verdict=${summary.split("\n")[0].slice(0,80)} suppressed_was=${suppressed}`);
+          this.db.logEvent(slotNum, "check_slot_triggered", "Timer", null, {
+            check_file: checkFile,
+            interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
+            verdict: summary.split("\n")[0].slice(0, 200),
+            suppressed_consecutive_before: suppressed,
+            decision: "inject",
+          });
+        } else {
+          this.suppressedConsecutive.set(slotNum, suppressed + 1);
+          console.log(`[check-slot] Slot ${slotNum} SUPPRESS — verdict=${summary.split("\n")[0].slice(0,80)} suppressed_now=${suppressed + 1}`);
+          this.db.logEvent(slotNum, "check_slot_suppressed", "Timer", null, {
+            check_file: checkFile,
+            interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
+            verdict: summary.split("\n")[0].slice(0, 200),
+            suppressed_consecutive_after: suppressed + 1,
+            decision: "suppress",
+          });
+        }
+      })();
     }, HookProcessor.CHECK_SLOT_INTERVAL_MS);
 
     if (timer.unref) timer.unref();
@@ -201,9 +265,84 @@ export class HookProcessor {
     if (existing) {
       clearInterval(existing);
       this.checkSlotTimers.delete(slotNum);
+      this.suppressedConsecutive.delete(slotNum);
       console.log(`[check-slot] Stopped timer for slot ${slotNum}`);
       this.db.logEvent(slotNum, "check_slot_timer_stopped", "Stop", null, {});
     }
+  }
+
+  /**
+   * Run the codex activity-review script (check-slot-bg.sh) for a slot.
+   * Reuses the same shell script the PM /check-slot skill body invokes today,
+   * which wraps codex-companion.mjs with the activity-review prompt.
+   *
+   * Returns the structured summary (STATUS:..., HEALTH:..., BLOCKERS:..., etc.)
+   * or a STATUS:ERROR sentinel on any failure. The caller MUST treat
+   * STATUS:ERROR as "inject anyway" so we never silently drop oversight.
+   *
+   * Auth: codex-companion.mjs reads ~/.codex/auth.json (user's ChatGPT login)
+   * which is filesystem-scoped; MoP's parent process inherits it transparently.
+   *
+   * cwd: the slot's clone directory (heydonna-app-300N) so any relative paths
+   * inside the script resolve correctly.
+   *
+   * Timeout: 130s (slightly above the script's internal 120s codex timeout
+   * so we let the script's own timeout fire and emit STATUS:ERROR cleanly
+   * rather than truncate via execFile's hard kill).
+   */
+  private async runActivityReview(slotNum: number): Promise<string> {
+    try {
+      const { stdout } = await pExecFile(
+        "bash",
+        [`${process.env.HOME}/.claude/scripts/check-slot-bg.sh`, String(slotNum)],
+        {
+          timeout: 130_000,
+          maxBuffer: 64 * 1024,
+          cwd: `${process.env.HOME}/Downloads/projects/heydonna-app-300${slotNum}`,
+        }
+      );
+      const trimmed = stdout.trim();
+      if (!trimmed) {
+        return `STATUS:ERROR slot=${slotNum} reason=empty-stdout`;
+      }
+      return trimmed;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`[check-slot] runActivityReview slot=${slotNum} FAILED: ${msg.slice(0, 200)}`);
+      return `STATUS:ERROR slot=${slotNum} reason=bg-script-failed`;
+    }
+  }
+
+  /**
+   * Decide whether MoP should inject /check-slot into the PM pane.
+   *
+   * Architecture (Rajiv directive 2026-05-01): the codex-app-activity-review
+   * skill emits an `INJECT_DECISION:<inject|skip> REASON:...` line as the
+   * first non-blank line of its output. MoP just reads that line — no regex
+   * pattern-matching of summary fields, no liveness pings, no duplicate rule
+   * surface. Classification rules live ONLY in the codex prompt.
+   *
+   * Failsafe: if the classifier itself errored (STATUS:ERROR), inject
+   * unconditionally so PM sees the infra failure rather than dropping it.
+   */
+  private shouldInject(summary: string, suppressedConsecutive: number): boolean {
+    // Failsafe: classifier infrastructure failure → always inject so PM sees it.
+    if (summary.includes("STATUS:ERROR")) {
+      console.log(`[shouldInject] inject=true reason=STATUS:ERROR_failsafe suppressed_was=${suppressedConsecutive}`);
+      return true;
+    }
+    // Codex emits INJECT_DECISION on the first non-blank line.
+    const decisionMatch = summary.match(/^\s*INJECT_DECISION:\s*(inject|skip)\b/m);
+    const reasonMatch = summary.match(/^\s*INJECT_DECISION:[^\n]*?REASON:\s*([^\n]+)$/m);
+    const reason = reasonMatch ? reasonMatch[1].trim().slice(0, 120) : "(no reason)";
+    if (!decisionMatch) {
+      // Codex output missing the decision line — treat as inject (safer than dropping).
+      console.log(`[shouldInject] inject=true reason=missing_INJECT_DECISION_line suppressed_was=${suppressedConsecutive} preview="${summary.slice(0, 80).replace(/\n/g, " ")}"`);
+      return true;
+    }
+    const inject = decisionMatch[1] === "inject";
+    console.log(`[shouldInject] inject=${inject} reason="${reason}" suppressed_was=${suppressedConsecutive}`);
+    return inject;
   }
 
   /**
@@ -406,20 +545,71 @@ export class HookProcessor {
     debugLog(
       `[hooks] SessionStart slot=${slotNum} source=${source || "(none)"}`
     );
-    if (slotNum === 0) {
-      debugLog(`[hooks] SessionStart slot=0 (PM) — skip orchestration`);
-      return {}; // PM pane — no orchestration
+    // Slot 0 (PM): non-compact SessionStart sources skip orchestration as
+    // before (no plan-approval polling, no notify-PM-of-itself, etc.).
+    // For source="compact" we DO run the post-compact recovery (event log,
+    // overflow tracker reset, "continue your work" nudge) so that PM
+    // recovers cleanly after auto-compact fires on it. (Rajiv directive
+    // 2026-05-01 14:54 IST, Slack thread 1777626989.055709 option a.)
+    if (slotNum === 0 && source !== "compact") {
+      debugLog(`[hooks] SessionStart slot=0 (PM) source=${source || "(none)"} — skip orchestration`);
+      return {}; // PM pane — no orchestration for non-compact sources
     }
     if (source === "compact") {
       this.db.logEvent(slotNum, "session_start_compact", "SessionStart", null, {
         source,
       });
-      // Direct-recovery: send "continue your work" straight to the slot.
-      // force=true because the slot just resumed and may not yet show
-      // the active prompt to the active-check.
-      const ok = this.relay.sendToSlot(slotNum, "continue your work", true);
+      // Reset StuckDetector overflow line-offset tracker so a NEW genuine
+      // overflow after this compaction can fire even if its line position
+      // happens to be ≤ the pre-compact fire line.
+      if (this.stuckDetector) {
+        try {
+          this.stuckDetector.resetOverflowTracking(slotNum);
+        } catch (e) {
+          debugLog(`[hooks] resetOverflowTracking failed: ${(e as Error).message}`);
+        }
+      }
+      // Direct-recovery: send "continue your work" straight to the slot —
+      // but ONLY if the slot is still idle a few seconds after the compact
+      // event fires. Native CLI slots (Sonnet/Opus) auto-resume their task
+      // post-compact and start producing tokens immediately; injecting
+      // "continue your work" on top causes a stray prompt. Proxy-mode
+      // slots (slot 1 Rohini, slot 4 Chitra — GPT-5.5 via codex-proxy)
+      // do NOT auto-resume and need the nudge.
+      //
+      // Idle-gate (Rajiv directive 2026-05-02 07:26 IST): wait 8s for the
+      // CLI to start streaming, then call relay.isSlotActive(). If active,
+      // skip — auto-resume worked. If still idle, inject the nudge. This
+      // replaces hardcoded slot-by-model knowledge with a runtime check.
+      const COMPACT_IDLE_GATE_MS = 8_000;
+      setTimeout(() => {
+        try {
+          const active = this.relay.isSlotActive(slotNum);
+          if (active) {
+            debugLog(
+              `[hooks] [compact] slot ${slotNum} already active post-compact, skipping continue-nudge`
+            );
+            this.db.logEvent(
+              slotNum,
+              "session_start_compact_skip_active",
+              "SessionStart",
+              null,
+              { reason: "slot active post-compact" }
+            );
+            return;
+          }
+          const ok = this.relay.sendToSlot(slotNum, "continue your work", true);
+          debugLog(
+            `[hooks] [compact] slot ${slotNum} idle post-compact, sendToSlot(continue)=${ok}`
+          );
+        } catch (e) {
+          debugLog(
+            `[hooks] [compact] slot ${slotNum} idle-gate check failed: ${(e as Error).message}`
+          );
+        }
+      }, COMPACT_IDLE_GATE_MS);
       debugLog(
-        `[hooks] SessionStart:compact slot=${slotNum} sendToSlot(continue)=${ok}`
+        `[hooks] SessionStart:compact slot=${slotNum} idle-gate scheduled (${COMPACT_IDLE_GATE_MS}ms)`
       );
     } else {
       debugLog(
@@ -650,6 +840,19 @@ export class HookProcessor {
     // Uses wasIdle from process() — captured BEFORE updateSlot clears idle flag.
     const slot = this.db.getSlot(slotNum);
     if (slot && wasIdle) {
+      // Reset answer-prompt block tracker — slot has moved past whatever
+      // numbered-options menu it was parked at (or never was). A fresh
+      // block prompt later in the session needs a clean line-offset map
+      // to fire even if its line happens to be ≤ a previous fire offset.
+      // (Rajiv directive 2026-04-30 slot-blocked detector.)
+      if (this.stuckDetector) {
+        try {
+          this.stuckDetector.resetBlockTracking(slotNum);
+        } catch (e) {
+          debugLog(`[hooks] resetBlockTracking failed: ${(e as Error).message}`);
+        }
+      }
+
       // Cancel pending idle timer — slot is active again, no notification needed
       const hadPendingIdle = this.cancelPendingIdleTimer(slotNum);
       if (hadPendingIdle) {
