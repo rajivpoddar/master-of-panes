@@ -340,6 +340,93 @@ export class MoPDatabase {
     return stmt.all(minutes) as EventLogEntry[];
   }
 
+  /**
+   * Detect whether a slot has dispatched a Task subagent in the last `windowSec`
+   * seconds AND has not yet emitted a terminal Stop event after that dispatch.
+   *
+   * Used by the slot-idle staleness gate (mirroring check-slot's idle-skip):
+   * between the IDLE_DEBOUNCE_MS window opening and the timer firing, the slot
+   * may have transitioned active again (e.g. plan-agent fired). The MoP
+   * idle flag on the SlotState is point-in-time and lags real activity by up
+   * to one debounce window. The events table is the source of truth.
+   *
+   * Returns the latest Task dispatch timestamp if a recent unclosed dispatch
+   * exists; null otherwise.
+   *
+   * Rajiv directive 2026-05-05: PM nudge interrupted slot 4's plan-agent
+   * because the classifier captured JSONL delta BEFORE the Task fired but
+   * the PM didn't process the notification until 43s later — by which time
+   * the subagent was already running.
+   */
+  hasRecentSubagentDispatch(
+    slotNum: number,
+    windowSec: number = 60
+  ): { taskTs: string; lastStopTs: string | null } | null {
+    // Most recent Task dispatch within the window.
+    // Use strftime() not datetime() so the cutoff has the same 'YYYY-MM-DDTHH:MM:SS.fff'
+    // shape as stored timestamps — datetime() returns 'YYYY-MM-DD HH:MM:SS' (space, no
+    // fraction) which lexicographically sorts BELOW any stored 'T...' timestamp,
+    // making every row "in window".
+    const taskStmt = this.db.prepare(`
+      SELECT timestamp FROM events
+      WHERE slot = ?
+        AND event_type IN ('PostToolUse', 'PreToolUse')
+        AND tool_name = 'Task'
+        AND timestamp > strftime('%Y-%m-%dT%H:%M:%f', 'now', '-' || ? || ' seconds')
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `);
+    const taskRow = taskStmt.get(slotNum, windowSec) as { timestamp: string } | undefined;
+    if (!taskRow) return null;
+
+    // Any Stop event strictly AFTER that Task dispatch closes the subagent.
+    const stopStmt = this.db.prepare(`
+      SELECT timestamp FROM events
+      WHERE slot = ?
+        AND event_type = 'Stop'
+        AND timestamp > ?
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `);
+    const stopRow = stopStmt.get(slotNum, taskRow.timestamp) as { timestamp: string } | undefined;
+
+    // If a Stop fired after the Task, the subagent is closed → no gate.
+    if (stopRow) return null;
+
+    return { taskTs: taskRow.timestamp, lastStopTs: null };
+  }
+
+  /**
+   * Generic recent-tool detector: was ANY tool fired in the last `windowSec`
+   * seconds? Used as a secondary staleness gate for slot-idle when the slot
+   * is mid-tool-call but happens to be momentarily idle between PostToolUse
+   * and the next PreToolUse.
+   *
+   * Returns the latest tool tuple or null.
+   */
+  getLastToolFire(
+    slotNum: number,
+    windowSec: number = 30
+  ): { tool: string; timestamp: string } | null {
+    // strftime() (not datetime()) for the same lexicographic shape reason as
+    // hasRecentSubagentDispatch above.
+    const stmt = this.db.prepare(`
+      SELECT tool_name, timestamp FROM events
+      WHERE slot = ?
+        AND event_type = 'PostToolUse'
+        AND tool_name IS NOT NULL
+        AND tool_name != ''
+        AND timestamp > strftime('%Y-%m-%dT%H:%M:%f', 'now', '-' || ? || ' seconds')
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `);
+    const row = stmt.get(slotNum, windowSec) as
+      | { tool_name: string; timestamp: string }
+      | undefined;
+    if (!row) return null;
+    return { tool: row.tool_name, timestamp: row.timestamp };
+  }
+
   // ─── Review Status (unforgeable gate) ───────────────────
 
   /**

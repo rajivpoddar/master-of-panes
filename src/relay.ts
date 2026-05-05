@@ -155,6 +155,19 @@ export class TmuxRelay {
 
   /**
    * Send a command to a dev slot.
+   *
+   * ETIMEDOUT handling (Rajiv-confirmed 2026-05-01 07:46 IST):
+   * `tmux send-keys` is fire-and-forget at the paste-buffer level — the
+   * keystrokes land on the pane regardless of whether the wrapper script
+   * (send-to-slot.sh) returns in time. The script's 10s --wait poll for
+   * slot acknowledgment can ETIMEDOUT when the slot is busy/slow, but the
+   * `/compact` (or whatever command) already arrived. Treating ETIMEDOUT
+   * as a hard failure causes upstream callers (or detector ticks) to retry,
+   * landing the same keystrokes a second time and queueing duplicates.
+   *
+   * Therefore: ETIMEDOUT is treated as "send completed at the keystroke
+   * level" and returns true. Other errors (bad slot number, tmux pane
+   * missing, script exit non-zero) still return false.
    */
   sendToSlot(slotNum: number, command: string, force = false, raw = false): boolean {
     try {
@@ -166,6 +179,18 @@ export class TmuxRelay {
       );
       return true;
     } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ETIMEDOUT") {
+        // Keystrokes already landed via tmux send-keys (idempotent at the
+        // paste-buffer level). The wrapper script just couldn't observe
+        // the slot's acknowledgment within 10s. Do NOT signal failure —
+        // upstream retries land duplicate sends.
+        console.warn(
+          `[relay] sendToSlot ${slotNum} (${command}) wrapper timed out; ` +
+          `keystrokes already delivered — treating as success`
+        );
+        return true;
+      }
       console.error(`[relay] Failed to send to slot ${slotNum}:`, err);
       return false;
     }

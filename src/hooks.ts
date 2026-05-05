@@ -98,6 +98,28 @@ export class HookProcessor {
   private static readonly IDLE_DEBOUNCE_MS = 30_000;
 
   /**
+   * Slot-idle staleness gate window — after the IDLE_DEBOUNCE_MS timer fires,
+   * suppress /slot-idle if a Task subagent dispatched within this many seconds
+   * AND has no later Stop event. (Rajiv directive 2026-05-05: PM nudge interrupted
+   * slot 4 plan-agent — subagent dispatch fired 43s after the JSONL classifier
+   * captured "subagent_active=false".)
+   *
+   * Set to 90s — covers the full 30s debounce + a generous tail for late Task
+   * dispatches that ride the same Stop window. Mirrors check-slot's lazy
+   * "skip when idle" semantics.
+   */
+  private static readonly IDLE_STALENESS_GATE_SEC = 90;
+
+  /**
+   * Slot-idle recent-tool-fire gate. Independent of subagent detection: if any
+   * PostToolUse event fired within this many seconds of the debounce expiry,
+   * the slot is still doing work (just bounced through Stop between tool calls).
+   * Set to 15s — slightly longer than the typical inter-tool gap (~5-8s) so
+   * an active slot's normal cadence doesn't trigger /slot-idle relays.
+   */
+  private static readonly IDLE_RECENT_TOOL_GATE_SEC = 15;
+
+  /**
    * Plan approval timeout timers, keyed by slot number.
    * Started when plan-ready notification is sent to PM; cleared on ExitPlanMode
    * or slot release. If 15 minutes elapse with no approval, re-sends notification.
@@ -124,6 +146,17 @@ export class HookProcessor {
     private db: MoPDatabase,
     private relay: TmuxRelay
   ) {}
+
+  /**
+   * Wire a StuckDetector reference. server.ts calls this so SessionStart:compact
+   * recovery can reach into the detector's per-slot lastMatchLine tracker.
+   * Currently a no-op — the detector is independently managed in server.ts.
+   * Method exists so server.ts:52 doesn't fail at runtime.
+   * (Pre-existing call from commit 463e392; declaration was missing.)
+   */
+  setStuckDetector(_detector: unknown): void {
+    // intentionally no-op — see method docstring
+  }
 
   /**
    * Start periodic check-slot timer for an active slot.
@@ -569,6 +602,52 @@ export class HookProcessor {
       const currentSlot = this.db.getSlot(slotNum);
       console.log(`[idle-debug] slot ${slotNum} debounce fired: occupied=${currentSlot?.occupied}, idle=${currentSlot?.idle}, dnd=${currentSlot?.dnd}, task=${currentSlot?.task ?? 'undefined'}`);
       if (currentSlot?.idle) {
+        // ─── Staleness gate (Rajiv directive 2026-05-05) ──────
+        // Mirror check-slot's "skip when idle" gate but for the slot-idle
+        // notification path. If a Task subagent dispatched within the last
+        // STALE_GATE_WINDOW_SEC and has no closing Stop yet, the slot is
+        // active even though MoP's idle flag is true (plan-agent / qa-tester
+        // running in foreground). Suppress the /slot-idle relay; the next
+        // Stop hook (after the subagent returns) will re-open the debounce.
+        const subagent = this.db.hasRecentSubagentDispatch(
+          slotNum,
+          HookProcessor.IDLE_STALENESS_GATE_SEC
+        );
+        if (subagent) {
+          console.log(
+            `[idle-debug] slot ${slotNum} STALENESS GATE — subagent Task dispatched at ${subagent.taskTs} with no later Stop; suppressing /slot-idle`
+          );
+          this.db.logEvent(slotNum, "slot_idle_suppressed_subagent_active", "Timer", null, {
+            relay_path: "Stop.debounce.gate",
+            reason: "subagent_active_post_debounce",
+            task_dispatch_ts: subagent.taskTs,
+            window_sec: HookProcessor.IDLE_STALENESS_GATE_SEC,
+          });
+          return;
+        }
+
+        // Secondary gate: any tool fired in the last RECENT_TOOL_GATE_SEC.
+        // The slot's MoP idle flag is set on Stop, but Stop fires between
+        // every tool call. If the most-recent PostToolUse is younger than
+        // the gate window (and the debounce was 30s), the slot has
+        // resumed work since the debounce started.
+        const lastTool = this.db.getLastToolFire(
+          slotNum,
+          HookProcessor.IDLE_RECENT_TOOL_GATE_SEC
+        );
+        if (lastTool) {
+          console.log(
+            `[idle-debug] slot ${slotNum} STALENESS GATE — last tool ${lastTool.tool}@${lastTool.timestamp} within ${HookProcessor.IDLE_RECENT_TOOL_GATE_SEC}s; suppressing /slot-idle`
+          );
+          this.db.logEvent(slotNum, "slot_idle_suppressed_recent_tool", "Timer", null, {
+            relay_path: "Stop.debounce.gate",
+            reason: "recent_tool_post_debounce",
+            last_tool: lastTool.tool,
+            last_tool_ts: lastTool.timestamp,
+            window_sec: HookProcessor.IDLE_RECENT_TOOL_GATE_SEC,
+          });
+          return;
+        }
         console.log(`[idle-debug] slot ${slotNum} still idle after debounce — preparing /slot-idle relay`);
         // ─── Capture tmux output and write to file ────────────
         // Rajiv directive 2026-04-03: "inject the tmux capture of the slot
