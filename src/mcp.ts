@@ -130,11 +130,11 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_send_to_slot",
-    "Send a command or message to a dev slot. Uses send-to-slot.sh for reliable delivery (waits for idle, handles vim mode).",
+    "Send a command or message to a slot pane. Returns success ONLY if keystrokes actually landed (pane existence + post-send content-diff verification). On failure, the response carries a reason field: pane_not_found | slot_active_force_required | dnd_no_force | delivery_unverified | tmux_exec_error. Slot 0 = PM pane. Use the message-pm skill for slot→PM communication.",
     {
       slot: z.number().int().min(0).max(4).describe("Slot number (0-4). 0 = PM pane."),
       command: z.string().describe("Command or message to send"),
-      force: z.boolean().default(false).describe("Skip idle wait (for urgent corrections)"),
+      force: z.boolean().default(true).describe("Skip idle wait. Default TRUE — queued sends silently swallow during mid-tool-call windows (memory: feedback_pm_always_send_nudges_with_force.md, feedback_slot_to_pm_raw_mop_send_false_success.md). Pass force: false explicitly only when you specifically want queued behavior."),
       raw: z.boolean().default(false).describe("Send as raw tmux key sequence (e.g., Escape, BTab for Shift+Tab, C-c). No Enter appended, no mode detection."),
     },
     async ({ slot, command, force, raw }) => {
@@ -170,6 +170,83 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
         };
       }
 
+      // Route ALL non-raw sends through the HTTP /slots/N/send endpoint.
+      // The HTTP route does pane-existence + force-active gates and post-send
+      // delivery verification (capture-pane diff). It returns success: true
+      // ONLY if keystrokes actually landed in the receiving pane.
+      //
+      // `raw: true` keeps the legacy direct-tmux path because raw key
+      // sequences (Escape, BTab, C-c) intentionally bypass mode detection
+      // and don't carry user content that needs UserPromptSubmit verification.
+      //
+      // (Fix for feedback_mop_send_to_slot_no_false_success.md, 2026-05-05.
+      //  Earlier slot=0-only fix is feedback_slot_to_pm_raw_mop_send_false_success.md.)
+      if (!raw) {
+        try {
+          const res = await fetch(`http://localhost:3100/slots/${slot}/send`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command, force: force === true }),
+          });
+          const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+          const ok = res.ok && data.success === true;
+          db.logEvent(slot, "command_sent", null, null, {
+            command: command.slice(0, 200),
+            force,
+            raw,
+            success: ok,
+            via: `http_slots_${slot}_send`,
+            status: res.status,
+            reason: data.reason,
+          });
+          if (ok) {
+            const target = slot === 0 ? "PM (slot 0)" : `slot ${slot}`;
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `✓ Sent to ${target} via HTTP: ${command.slice(0, 100)}`,
+                },
+              ],
+            };
+          }
+          const errMsg = (data.error as string | undefined) ?? `HTTP ${res.status}`;
+          const reason = (data.reason as string | undefined) ?? "unknown";
+          const hint = slot === 0
+            ? "If you're a dev slot trying to reach PM, use the message-pm skill instead."
+            : reason === "slot_active_force_required"
+              ? `Pass force: true to deliver immediately (now the default).`
+              : reason === "pane_not_found"
+                ? `Run /slot-boot ${slot} to bring the slot up, or check tmux session.`
+                : reason === "delivery_unverified"
+                  ? `Keystrokes did not produce a pane-content change. The slot pane may be wedged or the TUI is dropping input.`
+                  : "";
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `✗ Failed to send to slot ${slot} (reason=${reason}): ${errMsg}${hint ? "\n" + hint : ""}`,
+              },
+            ],
+          };
+        } catch (err: any) {
+          db.logEvent(slot, "send_error", null, null, {
+            error: err?.message?.slice(0, 200),
+            command: command.slice(0, 100),
+            via: `http_slots_${slot}_send`,
+          });
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `✗ HTTP send to slot ${slot} failed: ${err?.message?.slice(0, 200) ?? "unknown"}. MoP HTTP server may be down — run the mop-restart skill.`,
+              },
+            ],
+          };
+        }
+      }
+
+      // raw: true → legacy direct-tmux send (key sequences only)
       const success = relay.sendToSlot(slot, command, force, raw);
       db.logEvent(slot, "command_sent", null, null, { command, force, raw, success });
 
@@ -178,8 +255,8 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
           {
             type: "text" as const,
             text: success
-              ? `✓ Sent to slot ${slot}: ${command.slice(0, 100)}`
-              : `✗ Slot ${slot} is busy (timed out after 10s). Use force: true to send immediately, or wait and retry.`,
+              ? `✓ Sent raw keys to slot ${slot}: ${command.slice(0, 100)}`
+              : `✗ Slot ${slot} raw send failed (busy or pane unreachable). Use force: true or check pane.`,
           },
         ],
       };

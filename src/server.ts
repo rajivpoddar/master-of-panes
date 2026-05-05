@@ -47,6 +47,9 @@ relay.setLogManager(logManager);
 
 // ─── Stuck Detection (Phase 3) ──────────────────────────
 const stuckDetector = new StuckDetector(db, logManager, relay);
+// Wire stuckDetector into HookProcessor so SessionStart:compact can clear
+// the per-slot lastMatchLine tracker (Bug A defense — see stuck.ts).
+processor.setStuckDetector(stuckDetector);
 stuckDetector.start();
 
 // ─── Process Health (Phase 4) ───────────────────────────
@@ -510,6 +513,50 @@ app.post("/slots/:slotNum/respawn", async (c) => {
  * Rajiv directive 2026-03-20: "route all tmux commands through MoP.
  * the send to slot 2 should trigger plan approval internally."
  */
+/**
+ * Verify pane exists and return a snapshot of recent content for delivery
+ * verification. Returns null if the pane doesn't exist or tmux is unreachable.
+ */
+function capturePaneSnapshot(paneAddress: string): string | null {
+  try {
+    return execSync(`tmux capture-pane -t ${paneAddress} -p`, { timeout: 5000 }).toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Confirm a tmux pane address is live (session + window + pane exist).
+ * `tmux list-panes -t <pane>` exits 0 only when the address resolves.
+ */
+function paneExists(paneAddress: string): boolean {
+  try {
+    execSync(`tmux list-panes -t ${paneAddress}`, { timeout: 3000, stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify keystrokes actually landed in the receiving pane after send.
+ * Strategy: post-send pane content must DIFFER from pre-send (Enter cleared
+ * input box, or text is now visible, or tool output appeared, or composer
+ * scrolled). If the pane is byte-for-byte identical, tmux silently dropped
+ * the keystrokes (dead/detached pane, or — worst case — the TUI is in a
+ * state that ignores input). Either way: return failure.
+ */
+function deliveryConfirmed(paneAddress: string, preSnapshot: string): { ok: boolean; reason?: string } {
+  const post = capturePaneSnapshot(paneAddress);
+  if (post === null) {
+    return { ok: false, reason: "pane disappeared after send (capture-pane failed)" };
+  }
+  if (post === preSnapshot) {
+    return { ok: false, reason: "post-send pane content identical to pre-send (keystrokes dropped)" };
+  }
+  return { ok: true };
+}
+
 app.post("/slots/:slotNum/send", async (c) => {
   const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
   if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
@@ -525,10 +572,68 @@ app.post("/slots/:slotNum/send", async (c) => {
     return c.json({ error: "Missing 'command' or 'file' field" }, 400);
   }
 
+  // ── GATE 1: pane existence ─────────────────────────────
+  // tmux can have a dead/detached session. Catching this up-front prevents
+  // false-success where send-keys silently fails. (Rajiv directive 2026-05-05)
+  if (!paneExists(paneAddress)) {
+    db.logEvent(slotNum, "send_error", null, null, {
+      error: "pane does not exist",
+      command: command.slice(0, 100),
+      paneAddress,
+    });
+    return c.json(
+      {
+        success: false,
+        error: `Pane ${paneAddress} does not exist (tmux session detached, or slot not booted). Run /slot-boot ${slotNum} or check tmux session.`,
+        reason: "pane_not_found",
+      },
+      404,
+    );
+  }
+
   // Check DND
   const slotState = db.getSlot(slotNum);
   if (slotState?.dnd && !force) {
-    return c.json({ error: `Slot ${slotNum} is DND. Use force: true to override.` }, 409);
+    return c.json(
+      {
+        success: false,
+        error: `Slot ${slotNum} is DND. Use force: true to override.`,
+        reason: "dnd_no_force",
+      },
+      409,
+    );
+  }
+
+  // ── GATE 2: force=false on active slot returns failure ─
+  // Previous behavior: send-to-slot.sh waited up to 10s for idle, then
+  // exited 1; the HTTP route ignored force on the active-slot dimension and
+  // pasted regardless. Either path returned a misleading status to the
+  // caller. New behavior: explicit force:false on an active slot is a
+  // first-class failure with a clear reason. Callers must opt into queued
+  // delivery by passing force:true (the new default).
+  // (Rajiv directive 2026-05-05 21:31 IST — "should never return success
+  // if message was not sent.")
+  if (!force && slotNum >= 1 && slotNum <= 4) {
+    let active = false;
+    try {
+      active = relay.isSlotActive(slotNum);
+    } catch {
+      active = false;
+    }
+    if (active) {
+      db.logEvent(slotNum, "send_rejected_force_required", null, null, {
+        command: command.slice(0, 100),
+        force,
+      });
+      return c.json(
+        {
+          success: false,
+          error: `Slot ${slotNum} is active and force=false. Pass force: true to deliver immediately, or wait for idle.`,
+          reason: "slot_active_force_required",
+        },
+        409,
+      );
+    }
   }
 
   // ── GATE: If command is "2" and slot is awaiting plan approval → route to approve-plan
@@ -546,12 +651,15 @@ app.post("/slots/:slotNum/send", async (c) => {
         const approveData = await approveRes.json() as Record<string, unknown>;
         return c.json(approveData, approveRes.status as 200 | 403 | 408);
       } catch (err: any) {
-        return c.json({ error: `Approve-plan internal call failed: ${err.message?.slice(0, 200)}` }, 500);
+        return c.json({ success: false, error: `Approve-plan internal call failed: ${err.message?.slice(0, 200)}`, reason: "approve_plan_failed" }, 500);
       }
     }
     // If NOT awaiting plan approval, "2" is just a normal command — send it through
     db.logEvent(slotNum, "send_command_2_not_plan_approval", null, null, { activity });
   }
+
+  // Capture pane snapshot before send, for post-send delivery verification.
+  const preSnapshot = capturePaneSnapshot(paneAddress) ?? "";
 
   try {
     if (filePath) {
@@ -560,6 +668,23 @@ app.post("/slots/:slotNum/send", async (c) => {
       execSync(`tmux paste-buffer -t ${paneAddress}`, { timeout: 5000 });
       await new Promise(r => setTimeout(r, 2000));
       execSync(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+      // Verify pane content actually changed.
+      await new Promise(r => setTimeout(r, 600));
+      const verify = deliveryConfirmed(paneAddress, preSnapshot);
+      if (!verify.ok) {
+        db.logEvent(slotNum, "send_unverified", null, null, {
+          file: filePath,
+          reason: verify.reason,
+        });
+        return c.json(
+          {
+            success: false,
+            error: `Send dispatched but delivery not verified: ${verify.reason}`,
+            reason: "delivery_unverified",
+          },
+          502,
+        );
+      }
       db.logEvent(slotNum, "send_file", null, null, { file: filePath });
       return c.json({ success: true, mode: "file", slot: slotNum });
     } else {
@@ -597,6 +722,24 @@ app.post("/slots/:slotNum/send", async (c) => {
         } finally {
           try { unlinkSync(tmpFile); } catch {}
         }
+        // Post-send verification.
+        await new Promise(r => setTimeout(r, 600));
+        const verify = deliveryConfirmed(paneAddress, preSnapshot);
+        if (!verify.ok) {
+          db.logEvent(slotNum, "send_unverified", null, null, {
+            command: command.slice(0, 200),
+            paste: "buffer",
+            reason: verify.reason,
+          });
+          return c.json(
+            {
+              success: false,
+              error: `Send dispatched but delivery not verified: ${verify.reason}`,
+              reason: "delivery_unverified",
+            },
+            502,
+          );
+        }
         db.logEvent(slotNum, "send_command", null, null, {
           command: command.slice(0, 200),
           force,
@@ -613,12 +756,38 @@ app.post("/slots/:slotNum/send", async (c) => {
       await new Promise(r => setTimeout(r, 500));
       execSync(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
 
+      // Post-send verification.
+      await new Promise(r => setTimeout(r, 500));
+      const verify = deliveryConfirmed(paneAddress, preSnapshot);
+      if (!verify.ok) {
+        db.logEvent(slotNum, "send_unverified", null, null, {
+          command: command.slice(0, 200),
+          paste: "send-keys",
+          reason: verify.reason,
+        });
+        return c.json(
+          {
+            success: false,
+            error: `Send dispatched but delivery not verified: ${verify.reason}`,
+            reason: "delivery_unverified",
+          },
+          502,
+        );
+      }
+
       db.logEvent(slotNum, "send_command", null, null, { command: command.slice(0, 200), force, mode: isInsert ? "insert" : isNormal ? "normal" : "unknown", paste: "send-keys" });
       return c.json({ success: true, mode: "command", slot: slotNum, paste: "send-keys" });
     }
   } catch (err: any) {
     db.logEvent(slotNum, "send_error", null, null, { error: err.message?.slice(0, 200), command: command.slice(0, 100) });
-    return c.json({ error: `Send failed: ${err.message?.slice(0, 200)}` }, 500);
+    return c.json(
+      {
+        success: false,
+        error: `Send failed: ${err.message?.slice(0, 200)}`,
+        reason: "tmux_exec_error",
+      },
+      500,
+    );
   }
 });
 
