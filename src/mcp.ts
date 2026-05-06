@@ -602,7 +602,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_clear_all_slots",
-    "Clear ALL slot contexts (0-4 including PM) and release MoP state. Sends /clear to idle dev slots immediately. PM is always queued (active during tool call) and cleared via Stop hook when idle. Non-idle dev slots are queued for next idle. Use after session export or at start of day.",
+    "Clear ALL slot contexts (0-4 including PM) and release MoP state. Sends /clear to idle dev slots immediately. PM (slot 0) gets /clear injected directly via tmux send-keys (paste-buffered to PM input — executes when PM finishes current turn). Non-idle dev slots are queued for next idle. Use after session export or at start of day.",
     {
       slots: z.array(z.number().int().min(0).max(4)).optional().describe("Specific slots to clear (default: all 0-4 including PM)."),
     },
@@ -664,20 +664,34 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
-      // PM pane (slot 0) — always queue via setPendingClear.
-      // PM is always active when this tool runs (it's running this very call).
-      // The Stop hook will detect the pending clear and inject /clear when PM
-      // next goes idle (after this tool response returns).
-      // Rajiv directive 2026-04-10: "use the idle notify hook instead of poll"
+      // PM pane (slot 0) — inject /clear directly via tmux send-keys.
+      // tmux paste-buffers the keystrokes; PM processes them when current turn finishes.
+      // Rajiv directive 2026-05-06 10:24 IST: deferred Stop-hook approach was unreliable,
+      // switched to direct paste-buffer (matches dev-slot path).
+      // Original Rajiv directive 2026-04-10: "use the idle notify hook instead of poll"
       if (includePmSlot) {
-        db.setPendingClear(0);
-        db.logEvent(0, "clear_pending_queued", null, null, {
-          name: "PM",
-          queued_at: new Date().toISOString(),
-          reason: "PM is always active during tool call — queued for next Stop hook",
-        });
+        try {
+          const paneAddress = `0:0.0`;
+          const { execSync } = await import("node:child_process");
+          execSync(
+            `tmux send-keys -t ${paneAddress} '/clear' Enter`,
+            { timeout: 5_000 }
+          );
 
-        results.push({ slot: 0, name: "PM", status: "⏳ queued (will clear on next idle via Stop hook)" });
+          // Release slot state in DB
+          db.releaseSlot(0);
+
+          db.logEvent(0, "slot_cleared", null, null, {
+            name: "PM",
+            cleared_at: new Date().toISOString(),
+            immediate: true,
+            via: "tmux_paste_buffer",
+          });
+
+          results.push({ slot: 0, name: "PM", status: "✅ cleared (queued via tmux paste-buffer)" });
+        } catch (err) {
+          results.push({ slot: 0, name: "PM", status: `❌ failed: ${err}` });
+        }
       }
 
       const cleared = results.filter((r) => r.status.includes("cleared")).length;
