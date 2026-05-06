@@ -440,8 +440,30 @@ export class HookProcessor {
       `[hooks] SessionStart slot=${slotNum} source=${source || "(none)"}`
     );
     if (slotNum === 0) {
-      debugLog(`[hooks] SessionStart slot=0 (PM) — skip orchestration`);
-      return {}; // PM pane — no orchestration
+      // PM pane — covers compact-resume so PM doesn't sit silent post-/compact.
+      // PM pane hook coverage gap — direct tmux inject because Stop/SessionStart hook
+      // delivery is unreliable on slot 0 (see feedback_mop_clear_all_slots_pm_direct_inject.md
+      // + 2026-05-06 wedge analysis /tmp/mop-midnight-wedge-2026-05-06.md). tmux paste-buffers
+      // the keystrokes; PM processes them when the current turn finishes — same pattern as
+      // mop_clear_all_slots commit 93ab9aa.
+      if (source === "compact") {
+        this.db.logEvent(0, "session_start_compact", "SessionStart", null, {
+          source,
+          via: "tmux_paste_buffer",
+        });
+        try {
+          execSync(
+            `tmux send-keys -t 0:0.0 'continue your work' Enter`,
+            { timeout: 5_000 }
+          );
+          debugLog(`[hooks] SessionStart:compact slot=0 (PM) — tmux inject OK`);
+        } catch (err) {
+          debugLog(`[hooks] SessionStart:compact slot=0 (PM) — tmux inject FAILED: ${err}`);
+        }
+      } else {
+        debugLog(`[hooks] SessionStart slot=0 (PM) source=${source} — no nudge (only 'compact' triggers)`);
+      }
+      return {};
     }
     if (source === "compact") {
       this.db.logEvent(slotNum, "session_start_compact", "SessionStart", null, {
