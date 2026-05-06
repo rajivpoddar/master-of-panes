@@ -40,6 +40,28 @@ export class TmuxRelay {
    */
   private pmBusy: boolean = true;
 
+  /**
+   * Debounce timer for busy→idle drain. Claude Code's Stop hook fires after
+   * EVERY tool call, not only at end-of-turn. Without debounce, the first
+   * Stop in an agentic loop would flush the queue and subsequent injectToPM
+   * calls would bypass the queue (pmBusy=false) and paste directly into the
+   * PM tmux input, stacking up in the CLI's queued-prompt buffer.
+   *
+   * Behavior:
+   *   - busy=true  → cancel any pending drain, set pmBusy=true immediately.
+   *   - busy=false → start (or reset) the debounce timer; pmBusy STAYS TRUE
+   *                  during the window. Drain only fires after
+   *                  DRAIN_DEBOUNCE_MS of sustained idle.
+   *
+   * Configurable via env var `MOP_DRAIN_DEBOUNCE_MS` (default 7000).
+   */
+  private drainTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly DRAIN_DEBOUNCE_MS: number = (() => {
+    const raw = process.env.MOP_DRAIN_DEBOUNCE_MS;
+    const n = raw ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(n) && n >= 0 ? n : 7000;
+  })();
+
   constructor(config: MoPConfig) {
     this.pmPaneAddress = config.pmPaneAddress;
   }
@@ -50,18 +72,51 @@ export class TmuxRelay {
   }
 
   /**
-   * Set the PM busy state. TRUE = queue all injectToPM calls. FALSE = drain
-   * any queued events and resume direct inject. Called by the /pm-status
-   * HTTP endpoint via Stop / SessionStart hooks fired from the PM project's
+   * Set the PM busy state.
+   *   busy=true  → cancel pending drain, mark PM busy.
+   *   busy=false → schedule debounced drain (DRAIN_DEBOUNCE_MS); pmBusy
+   *                stays TRUE until the timer fires. Subsequent busy=true
+   *                or busy=false within the window resets/cancels the timer.
+   *
+   * Called by /pm-status HTTP endpoint via UserPromptSubmit (start) + Stop
+   * (stop) + SessionStart (stop) hooks fired from the PM project's
    * settings.json.
+   *
+   * Return value `drained` is the SYNCHRONOUS drain count, which is now
+   * always 0 (drain is debounced/async). The async drain logs its count
+   * separately via console + DB event.
    */
   setPMBusy(busy: boolean): { drained: number } {
-    const wasBusy = this.pmBusy;
-    this.pmBusy = busy;
-    if (wasBusy && !busy) {
-      const n = this.drainPMQueue();
-      return { drained: n };
+    if (busy) {
+      // Cancel any pending drain — PM is back in a tool call.
+      if (this.drainTimer) {
+        clearTimeout(this.drainTimer);
+        this.drainTimer = null;
+        console.log(`[relay-debug] setPMBusy(true) — cancelled pending drain`);
+      }
+      this.pmBusy = true;
+      return { drained: 0 };
     }
+    // busy=false — schedule debounced drain. Reset timer if one is already
+    // pending so the window is from the LAST Stop, not the first.
+    if (this.drainTimer) {
+      clearTimeout(this.drainTimer);
+    }
+    const debounceMs = TmuxRelay.DRAIN_DEBOUNCE_MS;
+    this.drainTimer = setTimeout(() => {
+      this.pmBusy = false;
+      const n = this.drainPMQueue();
+      this.drainTimer = null;
+      console.log(
+        `[relay-debug] debounce drain fired after ${debounceMs}ms idle, drained ${n}`
+      );
+      if (this.db) {
+        this.db.logEvent(0, "pm_debounce_drain_fired", null, null, {
+          debounce_ms: debounceMs,
+          drained: n,
+        });
+      }
+    }, debounceMs);
     return { drained: 0 };
   }
 
