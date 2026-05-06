@@ -75,6 +75,23 @@ export class MoPDatabase {
       this.db.exec("ALTER TABLE slots ADD COLUMN activity TEXT");
     }
 
+    // PM busy-queue table — coalesce-on-key (slot, event_type) so the latest
+    // enqueue per (slot, event_type) wins via INSERT OR REPLACE. Drained on
+    // PM Stop transition.
+    //
+    // Rajiv directive 2026-05-06 11:18 IST: queue slot-idle/active/check-slot
+    // events to PM while PM is busy (mid-tool/turn), drain on PM stop hook.
+    // Mirrors pm_pending_clears semantics but for PM-pane slash-command relays.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pm_pending_events (
+        slot INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        payload TEXT,
+        enqueued_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+        PRIMARY KEY (slot, event_type)
+      );
+    `);
+
     // Initialize config KV table
     this.initConfig();
 
@@ -323,6 +340,98 @@ export class MoPDatabase {
     for (let i = 0; i <= 4; i++) {
       this.clearPendingClear(i);
     }
+  }
+
+  // ─── PM Pending Events Queue ─────────────────────────────
+  //
+  // Holds slot-idle / slot-active / check-slot relays (and any other PM-bound
+  // injectToPM calls) when the PM pane is busy. Drained on PM Stop hook.
+  //
+  // Coalesce semantics: PRIMARY KEY (slot, event_type) means a fresher event
+  // of the same shape replaces the older one — we only ever want the latest
+  // signal per (slot, event_type) by the time PM drains the queue.
+  //
+  // Rajiv directive 2026-05-06 11:18 IST.
+
+  enqueuePendingPMEvent(
+    slot: number,
+    eventType: string,
+    payload: string | null = null,
+  ): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO pm_pending_events (slot, event_type, payload, enqueued_at)
+      VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+      ON CONFLICT(slot, event_type) DO UPDATE SET
+        payload = excluded.payload,
+        enqueued_at = excluded.enqueued_at
+    `);
+    stmt.run(slot, eventType, payload);
+  }
+
+  /**
+   * Drain all queued PM-bound events. Returns rows ordered by slot,
+   * with cross-event-type coalescing applied: per slot, if a slot-idle
+   * is queued alongside a check-slot or slot-active, the terminal idle
+   * signal wins (drop check-slot/slot-active). If slot-active and
+   * check-slot coexist, slot-active wins. Caller is responsible for
+   * actually injecting these into the PM pane and then calling
+   * clearAllPendingPMEvents() (or the rows are deleted as part of the
+   * drain transaction below).
+   */
+  drainPendingPMEvents(): Array<{ slot: number; event_type: string; payload: string | null; enqueued_at: string }> {
+    const rows = this.db.prepare(`
+      SELECT slot, event_type, payload, enqueued_at
+      FROM pm_pending_events
+      ORDER BY slot ASC, enqueued_at ASC
+    `).all() as Array<{ slot: number; event_type: string; payload: string | null; enqueued_at: string }>;
+
+    // Coalesce per slot: idle > active > check-slot. Other event_types pass
+    // through untouched.
+    const bySlot = new Map<number, Map<string, typeof rows[number]>>();
+    for (const row of rows) {
+      let m = bySlot.get(row.slot);
+      if (!m) { m = new Map(); bySlot.set(row.slot, m); }
+      m.set(row.event_type, row);
+    }
+
+    const out: typeof rows = [];
+    const slots = [...bySlot.keys()].sort((a, b) => a - b);
+    for (const slot of slots) {
+      const m = bySlot.get(slot)!;
+      const hasIdle = m.has("slot-idle");
+      const hasActive = m.has("slot-active");
+      // `check-slot` is the lowest-priority signal — always dropped if
+      // either slot-idle or slot-active is queued for the same slot.
+      const dropCheck = hasIdle || hasActive;
+      // `slot-active` is dropped if `slot-idle` is queued for the same slot
+      // (idle is terminal — slot finished its turn).
+      const dropActive = hasIdle;
+
+      for (const [eventType, row] of m) {
+        if (eventType === "check-slot" && dropCheck) continue;
+        if (eventType === "slot-active" && dropActive) continue;
+        out.push(row);
+      }
+    }
+
+    // Delete drained rows.
+    this.db.exec("DELETE FROM pm_pending_events");
+    return out;
+  }
+
+  /** Returns count of rows currently queued. */
+  getPendingPMEventCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM pm_pending_events").get() as { n: number };
+    return row?.n ?? 0;
+  }
+
+  /** Inspect (without draining). Used by /pm-status GET for diagnostics. */
+  peekPendingPMEvents(): Array<{ slot: number; event_type: string; payload: string | null; enqueued_at: string }> {
+    return this.db.prepare(`
+      SELECT slot, event_type, payload, enqueued_at
+      FROM pm_pending_events
+      ORDER BY slot ASC, enqueued_at ASC
+    `).all() as Array<{ slot: number; event_type: string; payload: string | null; enqueued_at: string }>;
   }
 
   // ─── Queries ─────────────────────────────────────────────

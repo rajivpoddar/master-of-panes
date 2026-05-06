@@ -9,17 +9,91 @@
 
 import { execSync } from "node:child_process";
 import type { LogManager } from "./logs.js";
+import type { MoPDatabase } from "./db.js";
 import type { MoPConfig, SlotState } from "./types.js";
 
 const SEND_TO_SLOT_SCRIPT =
   `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/send-to-slot.sh`;
 
+/**
+ * Parse a slash-command relay message (e.g. "/slot-idle 3", "/slot-active 1",
+ * "/check-slot 2") into (eventType, slot). Returns null for free-form messages
+ * (escalation comments, plan-approval-needed, etc.) — those go through the
+ * queue too but keyed by their own slot extraction or fall back to slot 0.
+ */
+function parseRelayMessage(message: string): { eventType: string; slot: number } | null {
+  const m = /^\/(slot-idle|slot-active|check-slot|slot-blocked)\s+(\d+)\b/.exec(message);
+  if (!m) return null;
+  const slot = parseInt(m[2], 10);
+  if (!Number.isFinite(slot) || slot < 0 || slot > 4) return null;
+  return { eventType: m[1], slot };
+}
+
 export class TmuxRelay {
   private pmPaneAddress: string;
   private logManager: LogManager | null = null;
+  private db: MoPDatabase | null = null;
+  /**
+   * PM busy flag. Default TRUE — assume PM is busy until /pm-status proves
+   * otherwise (this prevents a flood of injects on MoP startup before the
+   * first PM Stop hook lands).
+   */
+  private pmBusy: boolean = true;
 
   constructor(config: MoPConfig) {
     this.pmPaneAddress = config.pmPaneAddress;
+  }
+
+  /** Attach the MoP DB so injectToPM can enqueue when PM is busy. */
+  setDatabase(db: MoPDatabase): void {
+    this.db = db;
+  }
+
+  /**
+   * Set the PM busy state. TRUE = queue all injectToPM calls. FALSE = drain
+   * any queued events and resume direct inject. Called by the /pm-status
+   * HTTP endpoint via Stop / SessionStart hooks fired from the PM project's
+   * settings.json.
+   */
+  setPMBusy(busy: boolean): { drained: number } {
+    const wasBusy = this.pmBusy;
+    this.pmBusy = busy;
+    if (wasBusy && !busy) {
+      const n = this.drainPMQueue();
+      return { drained: n };
+    }
+    return { drained: 0 };
+  }
+
+  /** Public read of the busy flag (diagnostics). */
+  isPMBusy(): boolean {
+    return this.pmBusy;
+  }
+
+  /**
+   * Drain queued PM-bound events into the PM pane. Called from setPMBusy
+   * on busy→idle transition. Each row's payload (if non-null) is preferred
+   * over the canonical slash-command form so callers can queue free-form
+   * messages too.
+   *
+   * Returns the count of rows actually injected.
+   */
+  drainPMQueue(): number {
+    if (!this.db) return 0;
+    const rows = this.db.drainPendingPMEvents();
+    let injected = 0;
+    for (const row of rows) {
+      const message = row.payload ?? `/${row.event_type} ${row.slot}`;
+      const ok = this.injectDirect(message);
+      if (ok) injected++;
+      this.db.logEvent(row.slot, "pm_queue_drained", null, null, {
+        event_type: row.event_type,
+        message: message.slice(0, 200),
+        enqueued_at: row.enqueued_at,
+        injected: ok,
+      });
+    }
+    return injected;
   }
 
   /** Attach a LogManager for log-based output capture and activity detection. */
@@ -28,11 +102,71 @@ export class TmuxRelay {
   }
 
   /**
-   * Inject a raw message into the PM pane via tmux send-keys.
+   * Inject a raw message into the PM pane via tmux send-keys, OR queue it
+   * for later drain if PM is currently busy.
+   *
+   * Rajiv directive 2026-05-06 11:18 IST: queue slot-idle / slot-active /
+   * check-slot relays (and any other PM-bound message) while PM is busy
+   * (mid-tool/turn). Drain on PM Stop hook via /pm-status.
+   *
+   * Coalesce semantics live in the DB layer (PRIMARY KEY (slot, event_type)
+   * means latest enqueue per (slot, event_type) wins via INSERT OR REPLACE,
+   * cross-event-type drop happens in drainPendingPMEvents).
+   *
+   * IMPORTANT EXCLUSIONS (do NOT route through this queue):
+   * - `mop_clear_all_slots` PM-pane direct inject (mcp.ts) — uses raw
+   *   `tmux send-keys '/clear' Enter` directly, bypassing the relay.
+   * - `handleSessionStart` slot=0 source=compact (hooks.ts) — uses raw
+   *   `tmux send-keys 'continue your work' Enter` directly, bypassing
+   *   the relay.
+   *
+   * Both excluded paths are PM-internal recovery nudges, not slot-event
+   * signals — they must never sit in a queue waiting to drain.
+   */
+  injectToPM(message: string): boolean {
+    if (this.pmBusy && this.db) {
+      const parsed = parseRelayMessage(message);
+      if (parsed) {
+        // Slash-command relay (slot-idle/active/check-slot/blocked) —
+        // queue keyed by (slot, event_type). PRIMARY KEY auto-coalesces.
+        this.db.enqueuePendingPMEvent(parsed.slot, parsed.eventType, null);
+        this.db.logEvent(parsed.slot, "pm_queue_enqueued", null, null, {
+          event_type: parsed.eventType,
+          via: "injectToPM",
+        });
+        console.log(`[relay-debug] injectToPM queued (PM busy) → ${message}`);
+        return true;
+      }
+      // Free-form message (escalation, plan-approval-needed, scheduled-task,
+      // compact warning, queued-clear ack). Try to extract slot from
+      // "slot N" substring; otherwise key by slot 0 + a synthetic event
+      // type derived from a hash so multiple distinct free-form messages
+      // for the same slot don't collapse onto each other.
+      const slotMatch = /\bslot\s+(\d+)\b/i.exec(message);
+      const slot = slotMatch ? Math.min(4, Math.max(0, parseInt(slotMatch[1], 10))) : 0;
+      const synthHash = simpleHash(message);
+      const eventType = `freeform-${synthHash}`;
+      this.db.enqueuePendingPMEvent(slot, eventType, message);
+      this.db.logEvent(slot, "pm_queue_enqueued", null, null, {
+        event_type: eventType,
+        via: "injectToPM",
+        message: message.slice(0, 200),
+      });
+      console.log(`[relay-debug] injectToPM queued freeform (PM busy) → ${message.slice(0, 80)}`);
+      return true;
+    }
+    return this.injectDirect(message);
+  }
+
+  /**
+   * Raw paste-buffer inject into PM pane. Used by injectToPM (for the
+   * not-busy fast path) and drainPMQueue (when replaying queued events).
+   * Bypasses the busy-queue. Do NOT call from outside the relay.
+   *
    * IMPORTANT: Text and Enter must be separate send-keys calls —
    * appending Enter to the text send-keys can silently drop the Enter.
    */
-  injectToPM(message: string): boolean {
+  private injectDirect(message: string): boolean {
     try {
       console.log(`[relay-debug] injectToPM → ${message}`);
       execSync(
@@ -268,4 +402,18 @@ function shellEscape(str: string): string {
 
 function truncate(str: string, maxLen: number): string {
   return str.length <= maxLen ? str : str.slice(0, maxLen - 1) + "…";
+}
+
+/**
+ * Compact 32-bit FNV-1a hash, base36 encoded. Used to key free-form PM
+ * relay messages so distinct messages for the same slot don't collapse
+ * onto each other in the busy-queue.
+ */
+function simpleHash(str: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }

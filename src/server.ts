@@ -38,6 +38,9 @@ const config: MoPConfig = {
 
 const db = new MoPDatabase(config);
 const relay = new TmuxRelay(config);
+// Wire DB into relay so injectToPM can queue when PM is busy.
+// Rajiv directive 2026-05-06 11:18 IST.
+relay.setDatabase(db);
 const processor = new HookProcessor(db, relay);
 
 // ─── Pane Logging (Phase 2) ─────────────────────────────
@@ -147,6 +150,56 @@ app.post("/restart", (c) => {
   // Respond first, then exit. The session-start health watcher restarts us.
   setTimeout(() => process.exit(0), 100);
   return c.json({ status: "restarting" });
+});
+
+/**
+ * /pm-status — toggle the PM busy flag.
+ *
+ * Rajiv directive 2026-05-06 11:18 IST: queue slot-idle / slot-active /
+ * check-slot relays (and any other PM-bound message) while PM is busy
+ * (mid-tool/turn). Drain on PM Stop hook.
+ *
+ * Wired from the heydonna-app project's `.claude/settings.json` Stop +
+ * SessionStart hooks via curl POST. Body: `{ "event": "start" | "stop" }`.
+ *   start → pm_busy = true
+ *   stop  → pm_busy = false + drain queue
+ *
+ * GET returns current busy flag + queued event peek (diagnostics).
+ */
+app.post("/pm-status", async (c) => {
+  let body: { event?: string } = {};
+  try {
+    body = (await c.req.json()) as { event?: string };
+  } catch {
+    return c.json({ success: false, error: "Body must be JSON: { event: 'start'|'stop' }" }, 400);
+  }
+  const event = body.event;
+  if (event !== "start" && event !== "stop") {
+    return c.json({ success: false, error: "event must be 'start' or 'stop'" }, 400);
+  }
+  if (event === "start") {
+    const result = relay.setPMBusy(true);
+    db.logEvent(0, "pm_status_busy", null, null, { event });
+    return c.json({ success: true, pm_busy: true, drained: result.drained });
+  } else {
+    // event === "stop" → drain
+    const before = db.getPendingPMEventCount();
+    const result = relay.setPMBusy(false);
+    db.logEvent(0, "pm_status_idle_drained", null, null, {
+      event,
+      queued_before: before,
+      drained: result.drained,
+    });
+    return c.json({ success: true, pm_busy: false, queued_before: before, drained: result.drained });
+  }
+});
+
+app.get("/pm-status", (c) => {
+  return c.json({
+    pm_busy: relay.isPMBusy(),
+    queue: db.peekPendingPMEvents(),
+    queue_count: db.getPendingPMEventCount(),
+  });
 });
 
 /** Receive hook from a specific slot */
