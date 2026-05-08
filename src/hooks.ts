@@ -998,7 +998,76 @@ export class HookProcessor {
     });
 
     if (notifType === "idle_prompt") {
-      console.log(`[idle-debug] slot ${slotNum} received idle_prompt notification but Notification path does not relay /slot-idle`);
+      // Defensive secondary relay path (2026-05-08, Rajiv directive "fix MoP and restart").
+      // Claude Code's runtime fires Notification(idle_prompt) when the slot's CLI is
+      // displaying an idle prompt awaiting user input. This is a strong runtime fact —
+      // stronger than MoP's `idle` flag, which is a derived signal that bounces between
+      // every PostToolUse/Stop pair. Trust the notification fact and relay /slot-idle as
+      // a redundant trigger to the Stop-debounce path. Coalescing happens at the
+      // injectToPM layer (PM busy-queue PRIMARY KEY (slot, event_type) — two enqueues
+      // of /slot-idle N collapse to one).
+      //
+      // Apply the SAME staleness gates as the Stop-debounce path so we don't relay
+      // during fg subagent runs (plan-agent, qa-tester, codex-companion).
+      if (slot?.occupied && !slot.dnd) {
+        const subagent = this.db.hasRecentSubagentDispatch(
+          slotNum,
+          HookProcessor.IDLE_STALENESS_GATE_SEC
+        );
+        if (subagent) {
+          console.log(
+            `[idle-debug] slot ${slotNum} Notification(idle_prompt) STALENESS GATE — subagent active (taskTs=${subagent.taskTs}); suppressing relay`
+          );
+          this.db.logEvent(slotNum, "slot_idle_suppressed_subagent_active", "Notification", null, {
+            relay_path: "Notification.idle_prompt.gate",
+            reason: "subagent_active",
+            task_dispatch_ts: subagent.taskTs,
+            window_sec: HookProcessor.IDLE_STALENESS_GATE_SEC,
+          });
+        } else {
+          const lastTool = this.db.getLastToolFire(
+            slotNum,
+            HookProcessor.IDLE_RECENT_TOOL_GATE_SEC
+          );
+          if (lastTool) {
+            console.log(
+              `[idle-debug] slot ${slotNum} Notification(idle_prompt) STALENESS GATE — recent tool ${lastTool.tool}@${lastTool.timestamp}; suppressing relay`
+            );
+            this.db.logEvent(slotNum, "slot_idle_suppressed_recent_tool", "Notification", null, {
+              relay_path: "Notification.idle_prompt.gate",
+              reason: "recent_tool",
+              last_tool: lastTool.tool,
+              last_tool_ts: lastTool.timestamp,
+              window_sec: HookProcessor.IDLE_RECENT_TOOL_GATE_SEC,
+            });
+          } else {
+            // Capture tmux output so PM's slot-idle skill has the same artifact
+            // shape as Path 1 (Stop.debounce.notifySlotIdle).
+            const captureFile = `/tmp/slot-${slotNum}-idle-capture.txt`;
+            try {
+              const capture = execSync(
+                `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
+                { timeout: 5_000 }
+              ).toString();
+              writeFileSync(captureFile, capture);
+            } catch {
+              writeFileSync(captureFile, "[capture failed]");
+            }
+            console.log(`[idle-debug] slot ${slotNum} Notification(idle_prompt) — relaying /slot-idle (defensive secondary path)`);
+            this.relay.notifySlotIdle(slot);
+            this.db.logEvent(slotNum, "slot_idle_notified", "Notification", null, {
+              relay_path: "Notification.idle_prompt.notifySlotIdle",
+              notification_type: "slot-idle",
+              task: slot.task,
+              branch: slot.branch,
+              capture_file: captureFile,
+              source: "idle_prompt_notification",
+            });
+          }
+        }
+      } else {
+        console.log(`[idle-debug] slot ${slotNum} Notification(idle_prompt) — skipping (occupied=${slot?.occupied}, dnd=${slot?.dnd})`);
+      }
     }
 
     // Handle autocompact — slot is losing context
