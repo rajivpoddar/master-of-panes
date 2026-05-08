@@ -193,21 +193,63 @@ export class HookProcessor {
         return;
       }
 
-      console.log(`[check-slot] ${now} Slot ${slotNum} FIRING — capturing tmux and injecting /check-slot`);
-
-      // Capture tmux and write to file
+      // Run bg-script GATE first — only inject when there's a real JSONL delta.
+      // Bg-script (~/.claude/scripts/check-slot-bg.sh) emits "INJECT_DECISION:skip ..."
+      // when the slot's JSONL hasn't changed since last tick (UNCHANGED path).
+      // On Codex review path, the prompt template emits "INJECT_DECISION:inject" or
+      // "INJECT_DECISION:skip" based on classified slot health.
+      // Default behavior: if the marker is absent or the bg-script fails/times out,
+      // FALL THROUGH to inject (preserves prior behavior, never drops a notification
+      // due to gate-script issues).
+      // (Rajiv directive 2026-05-08 20:34 IST — gate at MoP server, not PM-side.)
       const checkFile = `/tmp/slot-${slotNum}-check.txt`;
+      const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
+      let bgOutput = "";
+      let bgFailed = false;
       try {
-        const capture = execSync(
-          `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
-          { timeout: 5_000 }
-        ).toString();
-        writeFileSync(checkFile, capture);
-        console.log(`[check-slot] Slot ${slotNum} capture written to ${checkFile} (${capture.length} bytes)`);
+        bgOutput = execSync(`bash ${bgScript} ${slotNum}`, {
+          timeout: 30_000,
+          maxBuffer: 1024 * 1024,
+        }).toString();
+      } catch (err) {
+        bgFailed = true;
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(`[check-slot] ${now} Slot ${slotNum} bg-script FAILED (falling through to inject): ${msg.slice(0, 200)}`);
+      }
+
+      // Always preserve the file artifact contract — write bg output (or fallback) to /tmp/slot-N-check.txt.
+      // On bg-script failure, fall back to tmux capture-pane (legacy behavior).
+      try {
+        if (!bgFailed && bgOutput.length > 0) {
+          writeFileSync(checkFile, bgOutput);
+        } else {
+          const capture = execSync(
+            `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
+            { timeout: 5_000 }
+          ).toString();
+          writeFileSync(checkFile, capture);
+        }
       } catch (err) {
         writeFileSync(checkFile, "[capture failed]");
         console.log(`[check-slot] Slot ${slotNum} capture FAILED: ${err}`);
       }
+
+      // Decide based on bg-script INJECT_DECISION marker.
+      // skip → log + return (timer keeps running for next tick).
+      // inject (or absent/failed) → fire injection.
+      const skipMatch = bgOutput.match(/INJECT_DECISION:skip(?:\s+REASON:([^\n]*))?/);
+      if (!bgFailed && skipMatch) {
+        const reason = (skipMatch[1] || "unspecified").trim().slice(0, 120);
+        console.log(`[check-slot] ${now} Slot ${slotNum} SKIPPED — bg-script INJECT_DECISION:skip REASON:${reason}`);
+        this.db.logEvent(slotNum, "check_slot_skipped", "Timer", null, {
+          check_file: checkFile,
+          reason,
+          interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
+        });
+        return;
+      }
+
+      console.log(`[check-slot] ${now} Slot ${slotNum} FIRING — bg-script ${bgFailed ? "FAILED (falling through)" : "INJECT_DECISION:inject"}`);
 
       // Inject /check-slot N into PM pane
       this.relay.injectToPM(`/check-slot ${slotNum}`);
@@ -215,6 +257,7 @@ export class HookProcessor {
       this.db.logEvent(slotNum, "check_slot_triggered", "Timer", null, {
         check_file: checkFile,
         interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
+        bg_failed: bgFailed,
       });
     }, HookProcessor.CHECK_SLOT_INTERVAL_MS);
 
