@@ -150,6 +150,30 @@ export class MoPDatabase {
     this.db.prepare("UPDATE events SET processed = 1 WHERE id = ?").run(eventId);
   }
 
+  /**
+   * Dedup helper for notifyEscalation — returns the most recent
+   * `escalation` event row for (slot, issueNum) within the timestamp
+   * window, or undefined if none. Payload match uses LIKE on the
+   * JSON-serialized `"issue":N` substring (cheap; payload is < 500 chars).
+   */
+  getRecentEscalation(
+    slot: number,
+    issueNum: number,
+    sinceIso: string
+  ): { id: number; timestamp: string } | undefined {
+    return this.db
+      .prepare(
+        `SELECT id, timestamp FROM events
+         WHERE slot = ? AND event_type = 'escalation'
+           AND timestamp > ?
+           AND payload LIKE ?
+         ORDER BY id DESC LIMIT 1`
+      )
+      .get(slot, sinceIso, `%"issue":${issueNum}%`) as
+      | { id: number; timestamp: string }
+      | undefined;
+  }
+
   // ─── Slot State ──────────────────────────────────────────
 
   getSlot(slot: number): SlotState | undefined {

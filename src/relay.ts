@@ -314,6 +314,29 @@ export class TmuxRelay {
    * This is a high-priority notification: slot is blocked and waiting.
    */
   notifyEscalation(slotNum: number, issueNum: number, description: string): void {
+    // Dedup: suppress same-(slot, issue) escalation within 5 min window.
+    // Prevents duplicate 🚨 inject when a slot re-invokes /escalate
+    // (autocompact-resumed retry, follow-up Codex round, etc.).
+    // The hooks.ts caller logs an `escalation` event AFTER this call returns,
+    // so the row we look up here is the PRIOR escalation, not the current one.
+    if (this.db && issueNum > 0) {
+      const cutoff = new Date(Date.now() - 5 * 60_000).toISOString();
+      const recent = this.db.getRecentEscalation(slotNum, issueNum, cutoff);
+      if (recent) {
+        console.log(
+          `[relay-debug] notifyEscalation SUPPRESSED (dupe within 5min) → slot ${slotNum} #${issueNum} (last escalation id=${recent.id} at ${recent.timestamp})`
+        );
+        this.db.logEvent(slotNum, "escalation_suppressed", null, null, {
+          issue: issueNum,
+          reason: "dupe_within_5min",
+          last_escalation_id: recent.id,
+          last_escalation_timestamp: recent.timestamp,
+          description_preview: description.slice(0, 200),
+        });
+        return;
+      }
+    }
+
     const time = new Date().toLocaleTimeString("en-US", { hour12: false });
     const issuePart = issueNum ? ` #${issueNum}` : "";
     const descPart = description ? ` — ${truncate(description, 60)}` : "";
@@ -345,44 +368,116 @@ export class TmuxRelay {
   /**
    * Send a command to a dev slot.
    *
-   * ETIMEDOUT handling (Rajiv-confirmed 2026-05-01 07:46 IST):
-   * `tmux send-keys` is fire-and-forget at the paste-buffer level — the
-   * keystrokes land on the pane regardless of whether the wrapper script
-   * (send-to-slot.sh) returns in time. The script's 10s --wait poll for
-   * slot acknowledgment can ETIMEDOUT when the slot is busy/slow, but the
-   * `/compact` (or whatever command) already arrived. Treating ETIMEDOUT
-   * as a hard failure causes upstream callers (or detector ticks) to retry,
-   * landing the same keystrokes a second time and queueing duplicates.
+   * Wrapper-timeout handling (Rajiv directive 2026-05-09 12:25 IST):
+   * `tmux send-keys` is fire-and-forget at the paste-buffer level — keystrokes
+   * may have landed, but if `send-to-slot.sh --wait` ETIMEDOUTs the post-send
+   * delivery verification (content-diff or ack poll) did NOT confirm. Prior
+   * behavior treated ETIMEDOUT as success, masking the case where the slot is
+   * actually wedged (TUI dropping input, pane unresponsive). Observed slot 1
+   * #4228 2026-05-09 11:53 IST: /compact wrapper timed out, slot still parked
+   * at "Context limit reached" wall 16+ min later, manual recovery required.
    *
-   * Therefore: ETIMEDOUT is treated as "send completed at the keystroke
-   * level" and returns true. Other errors (bad slot number, tmux pane
-   * missing, script exit non-zero) still return false.
+   * New behavior: wrapper-timeout = ERROR class. Retry up to MAX_RETRIES with
+   * short backoff. If all retries time out, return false with the call
+   * surfaced via console.error. Per-(slot, command) cooldown prevents the
+   * caller (e.g., stuck.ts /compact) from immediately re-firing on the next
+   * detector tick — see `lastFailureAt` map.
+   *
+   * Loop-protection: stuck.ts already sets compactInFlightAt BEFORE calling
+   * sendToSlot and uses COMPACT_INFLIGHT_DEDUP_MS (30s) + COMPACT_DISPATCH_DEDUP_MS
+   * (5min) windows; a returned-failure does not reset those, so /compact
+   * cannot enter a tight retry loop here. The local cooldown is a defensive
+   * second layer for non-stuck.ts callers (mcp.ts raw mode, hooks.ts
+   * SessionStart:compact "continue your work").
    */
+  private static readonly SEND_MAX_RETRIES = 2; // initial + 2 retries = 3 total attempts
+  private static readonly SEND_RETRY_BACKOFF_MS = [1000, 2000];
+  private static readonly SEND_FAILURE_COOLDOWN_MS = 30_000;
+  private lastSendFailureAt: Map<string, number> = new Map();
+
   sendToSlot(slotNum: number, command: string, force = false, raw = false): boolean {
-    try {
-      const forceFlag = force ? " --force" : "";
-      const rawFlag = raw ? " --raw" : "";
-      execSync(
-        `${SEND_TO_SLOT_SCRIPT} ${slotNum} ${shellEscape(command)}${forceFlag}${rawFlag}`,
-        { timeout: 15_000 } // send-to-slot.sh has 10s wait timeout
+    const forceFlag = force ? " --force" : "";
+    const rawFlag = raw ? " --raw" : "";
+    const cmdLine = `${SEND_TO_SLOT_SCRIPT} ${slotNum} ${shellEscape(command)}${forceFlag}${rawFlag}`;
+    const cooldownKey = `${slotNum}:${command.slice(0, 80)}`;
+
+    // Per-(slot, command) cooldown: if we just failed delivery for this same
+    // pair within COOLDOWN_MS, skip the send entirely. Prevents tight retry
+    // loops from external callers without their own dedup tracker.
+    const lastFail = this.lastSendFailureAt.get(cooldownKey);
+    if (lastFail && Date.now() - lastFail < TmuxRelay.SEND_FAILURE_COOLDOWN_MS) {
+      console.warn(
+        `[relay] sendToSlot ${slotNum} (${command.slice(0, 60)}) suppressed by ` +
+        `failure cooldown (last failure ${Math.round((Date.now() - lastFail) / 1000)}s ago)`
       );
-      return true;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException)?.code;
-      if (code === "ETIMEDOUT") {
-        // Keystrokes already landed via tmux send-keys (idempotent at the
-        // paste-buffer level). The wrapper script just couldn't observe
-        // the slot's acknowledgment within 10s. Do NOT signal failure —
-        // upstream retries land duplicate sends.
-        console.warn(
-          `[relay] sendToSlot ${slotNum} (${command}) wrapper timed out; ` +
-          `keystrokes already delivered — treating as success`
-        );
-        return true;
+      if (this.db) {
+        this.db.logEvent(slotNum, "send_suppressed_cooldown", null, null, {
+          command: command.slice(0, 200),
+          last_failure_at: new Date(lastFail).toISOString(),
+          cooldown_ms: TmuxRelay.SEND_FAILURE_COOLDOWN_MS,
+        });
       }
-      console.error(`[relay] Failed to send to slot ${slotNum}:`, err);
       return false;
     }
+
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt <= TmuxRelay.SEND_MAX_RETRIES; attempt++) {
+      try {
+        execSync(cmdLine, { timeout: 15_000 }); // send-to-slot.sh has 10s wait timeout
+        if (attempt > 0) {
+          console.log(
+            `[relay] sendToSlot ${slotNum} (${command.slice(0, 60)}) succeeded on retry ${attempt}`
+          );
+          if (this.db) {
+            this.db.logEvent(slotNum, "send_succeeded_after_retry", null, null, {
+              command: command.slice(0, 200),
+              attempt,
+            });
+          }
+        }
+        // Clear any prior cooldown on success.
+        this.lastSendFailureAt.delete(cooldownKey);
+        return true;
+      } catch (err) {
+        lastErr = err;
+        const code = (err as NodeJS.ErrnoException)?.code;
+        const isTimeout = code === "ETIMEDOUT";
+        console.warn(
+          `[relay] sendToSlot ${slotNum} (${command.slice(0, 60)}) attempt ${attempt + 1}/` +
+          `${TmuxRelay.SEND_MAX_RETRIES + 1} failed (${isTimeout ? "wrapper timeout" : `code=${code ?? "unknown"}`})`
+        );
+        if (attempt < TmuxRelay.SEND_MAX_RETRIES) {
+          const backoff = TmuxRelay.SEND_RETRY_BACKOFF_MS[attempt] ?? 2000;
+          // Synchronous sleep via Atomics.wait on a dummy SharedArrayBuffer —
+          // blocks the event loop without burning CPU. sendToSlot is sync
+          // to preserve callsite contract (callers in stuck.ts/hooks.ts use
+          // it as fire-and-forget without await).
+          const sab = new SharedArrayBuffer(4);
+          const view = new Int32Array(sab);
+          Atomics.wait(view, 0, 0, backoff);
+        }
+      }
+    }
+
+    // All retries exhausted. Mark cooldown so the next caller within 30s
+    // is short-circuited (defensive; primary dedup lives in callers).
+    this.lastSendFailureAt.set(cooldownKey, Date.now());
+    const code = (lastErr as NodeJS.ErrnoException)?.code;
+    const reason = code === "ETIMEDOUT" ? "delivery_unverified_after_retries" : "send_error";
+    console.error(
+      `[relay] sendToSlot ${slotNum} (${command.slice(0, 60)}) FAILED after ` +
+      `${TmuxRelay.SEND_MAX_RETRIES + 1} attempts (reason=${reason}):`,
+      lastErr
+    );
+    if (this.db) {
+      this.db.logEvent(slotNum, "send_failed_after_retries", null, null, {
+        command: command.slice(0, 200),
+        attempts: TmuxRelay.SEND_MAX_RETRIES + 1,
+        reason,
+        last_error_code: code ?? null,
+      });
+    }
+    return false;
   }
 
   /**
