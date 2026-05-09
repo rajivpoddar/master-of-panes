@@ -8,12 +8,19 @@
  */
 
 import { execSync } from "node:child_process";
+import * as fs from "node:fs";
 import type { LogManager } from "./logs.js";
 import type { MoPDatabase } from "./db.js";
 import type { MoPConfig, SlotState } from "./types.js";
 
+// v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
+// wrapper. Kept for reference / fallback diagnostic; no longer invoked by
+// sendToSlot. send-to-slot.sh waits for chevron-idle confirmation that
+// never arrives when slot is at "Context limit reached" wall — keystrokes
+// must land regardless of slot state.
 const SEND_TO_SLOT_SCRIPT =
   `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/send-to-slot.sh`;
+void SEND_TO_SLOT_SCRIPT;
 
 /**
  * Parse a slash-command relay message (e.g. "/slot-idle 3", "/slot-active 1",
@@ -395,15 +402,34 @@ export class TmuxRelay {
   private static readonly SEND_FAILURE_COOLDOWN_MS = 30_000;
   private lastSendFailureAt: Map<string, number> = new Map();
 
-  sendToSlot(slotNum: number, command: string, force = false, raw = false): boolean {
-    const forceFlag = force ? " --force" : "";
-    const rawFlag = raw ? " --raw" : "";
-    const cmdLine = `${SEND_TO_SLOT_SCRIPT} ${slotNum} ${shellEscape(command)}${forceFlag}${rawFlag}`;
+  /**
+   * v3 (Rajiv directive 2026-05-09 14:15 IST): direct tmux send-keys.
+   *
+   * Drops the send-to-slot.sh wait-for-idle wrapper. When a slot is hung
+   * at "Context limit reached" wall (or any other state that prevents
+   * chevron-idle transition), the wrapper's pre-send confirmation poll
+   * times out and the wrapper exits ETIMEDOUT — but keystrokes never
+   * reach the pane because the wrapper bails before the send.
+   *
+   * v3 sends keystrokes directly via `tmux send-keys` / `tmux paste-buffer`
+   * regardless of slot's main-thread state. Force flag becomes implicit
+   * (every send is unconditional). Raw mode dispatches key literals
+   * (Escape, C-c, BTab, S-Enter); text mode uses load-buffer + paste-buffer
+   * for multi-line safety, then Enter.
+   *
+   * Retry semantics kept: only true tmux command failures (pane gone,
+   * server down) will fail now. Per-(slot, command) cooldown kept as
+   * defense-in-depth.
+   *
+   * `force` parameter is now a no-op (kept for callsite compatibility).
+   */
+  sendToSlot(slotNum: number, command: string, _force = false, raw = false): boolean {
+    void _force; // v3: every send is unconditional
+    const paneAddr = `0:0.${slotNum}`;
     const cooldownKey = `${slotNum}:${command.slice(0, 80)}`;
 
-    // Per-(slot, command) cooldown: if we just failed delivery for this same
-    // pair within COOLDOWN_MS, skip the send entirely. Prevents tight retry
-    // loops from external callers without their own dedup tracker.
+    // Per-(slot, command) cooldown — defensive layer against tight retry
+    // loops from external callers that lack their own dedup tracker.
     const lastFail = this.lastSendFailureAt.get(cooldownKey);
     if (lastFail && Date.now() - lastFail < TmuxRelay.SEND_FAILURE_COOLDOWN_MS) {
       console.warn(
@@ -423,7 +449,39 @@ export class TmuxRelay {
     let lastErr: unknown = null;
     for (let attempt = 0; attempt <= TmuxRelay.SEND_MAX_RETRIES; attempt++) {
       try {
-        execSync(cmdLine, { timeout: 15_000 }); // send-to-slot.sh has 10s wait timeout
+        if (raw) {
+          // Raw: tmux interprets key names (Escape, C-c, BTab, etc.).
+          // Do NOT pass -l (literal) flag — that would type the name as text.
+          execSync(
+            `tmux send-keys -t ${paneAddr} ${shellEscape(command)}`,
+            { timeout: 5_000 }
+          );
+        } else {
+          // Text mode: load-buffer + paste-buffer + Enter is multi-line safe
+          // and avoids quoting hell vs. a single send-keys 'long $string'.
+          const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}-${attempt}.txt`;
+          const bufName = `mop-send-${slotNum}`;
+          fs.writeFileSync(tmpFile, command);
+          try {
+            execSync(
+              `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
+              { timeout: 3_000 }
+            );
+            execSync(
+              `tmux paste-buffer -b ${bufName} -t ${paneAddr} -d`,
+              { timeout: 3_000 }
+            );
+            // Small breathing room so the TUI registers the paste before Enter.
+            // Matches the 0.3s that injectDirect uses for PM pane sends.
+            execSync(`sleep 0.3`, { timeout: 2_000 });
+            execSync(
+              `tmux send-keys -t ${paneAddr} Enter`,
+              { timeout: 3_000 }
+            );
+          } finally {
+            try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+          }
+        }
         if (attempt > 0) {
           console.log(
             `[relay] sendToSlot ${slotNum} (${command.slice(0, 60)}) succeeded on retry ${attempt}`
@@ -444,7 +502,7 @@ export class TmuxRelay {
         const isTimeout = code === "ETIMEDOUT";
         console.warn(
           `[relay] sendToSlot ${slotNum} (${command.slice(0, 60)}) attempt ${attempt + 1}/` +
-          `${TmuxRelay.SEND_MAX_RETRIES + 1} failed (${isTimeout ? "wrapper timeout" : `code=${code ?? "unknown"}`})`
+          `${TmuxRelay.SEND_MAX_RETRIES + 1} failed (${isTimeout ? "tmux timeout" : `code=${code ?? "unknown"}`})`
         );
         if (attempt < TmuxRelay.SEND_MAX_RETRIES) {
           const backoff = TmuxRelay.SEND_RETRY_BACKOFF_MS[attempt] ?? 2000;
@@ -463,7 +521,7 @@ export class TmuxRelay {
     // is short-circuited (defensive; primary dedup lives in callers).
     this.lastSendFailureAt.set(cooldownKey, Date.now());
     const code = (lastErr as NodeJS.ErrnoException)?.code;
-    const reason = code === "ETIMEDOUT" ? "delivery_unverified_after_retries" : "send_error";
+    const reason = code === "ETIMEDOUT" ? "tmux_send_timeout" : "send_error";
     console.error(
       `[relay] sendToSlot ${slotNum} (${command.slice(0, 60)}) FAILED after ` +
       `${TmuxRelay.SEND_MAX_RETRIES + 1} attempts (reason=${reason}):`,
