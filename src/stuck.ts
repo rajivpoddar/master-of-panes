@@ -8,7 +8,8 @@
  * Dedup: Only notifies PM once per 10 minutes per slot to prevent spam.
  */
 
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { MoPDatabase } from "./db.js";
 import type { LogManager } from "./logs.js";
@@ -92,6 +93,7 @@ export class StuckDetector {
     /Context low\s*[·•]/i,
     /\/compact or \/clear to continue/i,
     /conversation needs to be compacted/i,
+    /API Error: 400[\s\S]*?maximum context length/i,
   ];
   // Answer-prompt block detector (Rajiv directive 2026-04-30: "we also need
   // to detect this in MoP and trigger a slot-blocked command on pm pane,
@@ -129,6 +131,58 @@ export class StuckDetector {
   // so a NEW block prompt later in the session can fire even if its line
   // offset happens to be ≤ a previous fire offset.
   private lastBlockMatchLine: Map<number, number> = new Map();
+  // Per-slot consecutive bg-script failure count. Incremented each detector
+  // tick that sees a [check-slot] Slot N bg-script FAILED line in the MoP
+  // server log. Reset when a tick passes without a failure for the slot.
+  private bgScriptFailures: Map<number, number> = new Map();
+  // Dedup: don't re-inject /compact for bg-script failures within 10 min.
+  private readonly BG_SCRIPT_FAILURE_DEDUP_MS = 10 * 60 * 1000;
+  // Bg-script failure is INFRA error (Codex CLI auth, ETIMEDOUT, script crash),
+  // NOT slot-stuck signal. Require an ADDITIONAL real-slot-stuck signal before
+  // firing /compact: slot's tmux pipe-pane log mtime older than
+  // BG_SCRIPT_COMPACT_LOG_STALE_MS = the slot has produced no output recently
+  // and is plausibly stuck. If log is fresh, the slot is actively running —
+  // bg-script failure is its OWN problem (PM-direct investigation needed), not
+  // a slot to compact.
+  // Per Rajiv directive 2026-05-17 12:33+12:40 IST thread `1779001405.544099`:
+  //   *"are you triggering /compact on slot 1 and 2? check MoP logs? why?"*
+  //   *"was this fixed?"*
+  // Companion: feedback_mop_bg_script_failure_compact_misfire_2026_05_17.md
+  private readonly BG_SCRIPT_COMPACT_LOG_STALE_MS = 5 * 60 * 1000;
+
+  // ─── API 500 backoff detector ───────────────────────────────────────────
+  // Colocated with autocompact detector per Rajiv directive 2026-05-17 07:59 IST
+  // thread `1778957625.997439`: *"note that mop also detects context limit
+  // reached and injects 'continue your work' after autocompact. this change
+  // should do in the same place."*
+  //
+  // Prior bg-script path (check-slot-bg.sh Step 1a → INJECT_DECISION:mop-
+  // direct-nudge marker → hooks.ts handleApi500MopDirectNudge) had a fatal
+  // flaw: MoP skips check-slot-bg.sh when slot is `idle:true` (between tool
+  // calls). When a slot is stuck at an API 500 error waiting for retry, the
+  // slot IS idle from MoP's view → bg-script never runs → marker never emitted
+  // → nudge never sent. Slots 1+3 stayed stuck 1h+ on 2026-05-17 morning
+  // through that path.
+  //
+  // This detector colocates with checkContextOverflow — same setInterval timer,
+  // same tmux capture-pane mechanism, same direct-injection delivery. Runs
+  // regardless of slot idle state since the timer doesn't gate on idleness.
+  //
+  // Backoff schedule (cumulative from first_seen_ts):
+  //   retry 0: nudge at +120s (2m suppress)
+  //   retry 1: nudge at +360s (next 4m suppress; cumulative 6m)
+  //   retry 2: nudge at +840s (next 8m suppress; cumulative 14m)
+  //   retry 3: nudge at +1800s (next 16m suppress; cumulative 30m)
+  //   retry 4: nudge at +3720s (next 32m suppress; cumulative 62m)
+  //   retry ≥5: cap → PM-surfaced as bg-script API_500_PERSISTENT
+  //
+  // State file: /tmp/slot-N-api500-state.json
+  //   {first_seen_ts, retry_count, next_nudge_at, last_500_ts, last_nudge_at}
+  //   Cleared when tmux scrollback no longer shows the error (recovery).
+  private readonly API_500_PATTERN =
+    /API Error: 500|API Error: 529|Internal server error/;
+  private readonly API_500_BACKOFF_SCHEDULE = [120, 360, 840, 1800, 3720];
+  private readonly API_500_RETRY_CAP = 5;
 
   constructor(
     private db: MoPDatabase,
@@ -159,6 +213,17 @@ export class StuckDetector {
   resetBlockTracking(slotNum: number): void {
     this.lastBlockMatchLine.delete(slotNum);
     debugLog(`[stuck] slot=${slotNum} block tracking reset (idle→active)`);
+  }
+
+  /**
+   * Reset bg-script failure tracking for a slot. Called by hooks.ts when
+   * SessionStart:compact fires (post-compact recovery). After /compact
+   * completes the failure count should reset so a genuine new failure
+   * series is detected fresh.
+   */
+  resetBgScriptFailureTracking(slotNum: number): void {
+    this.bgScriptFailures.delete(slotNum);
+    debugLog(`[stuck] slot=${slotNum} bg-script failure tracking reset (post-compact)`);
   }
 
   /**
@@ -222,6 +287,21 @@ export class StuckDetector {
     };
     this.checkContextOverflow(pmSlot);
 
+    // Phase 1a-API500: API 500 backoff detection colocated with autocompact.
+    // Rajiv directive 2026-05-17 07:59 IST thread `1778957625.997439`:
+    //   *"note that mop also detects context limit reached and injects
+    //   'continue your work' after autocompact. this change should do in the
+    //   same place."*
+    // Applies to slots 1..N (not PM/slot 0). Same tmux-grep + direct-injection
+    // mechanism as checkContextOverflow, but on the API 500 error string.
+    // Runs every 60s regardless of slot idle state.
+    for (const slot of slots) {
+      if (slot.slot === 0) continue;
+      if (slot.dnd) continue;
+      if (!slot.occupied) continue;
+      this.checkApi500Backoff(slot);
+    }
+
     // Phase 1b: answer-prompt block detection. Applies to ALL slots, not
     // just wrappers — any slot can hit a numbered-options menu mid-task
     // (codex-companion, plan approval, manual interactive shell, etc.).
@@ -231,6 +311,13 @@ export class StuckDetector {
       if (slot.slot === 0) continue; // PM pane — no self-detection
       this.detectAnswerPromptBlock(slot);
     }
+
+    // Phase 1c: bg-script failure detection. Watches the MoP server log
+    // for persistent [check-slot] Slot N bg-script FAILED lines. Two
+    // consecutive failures (10 min = 2 check-slot cycles) indicate the
+    // slot may be hitting resource limits or context exhaustion. Auto-
+    // inject /compact directly (deduped, same guards as checkContextOverflow).
+    this.detectBgScriptFailures();
 
     for (const slot of slots) {
       // RETIRED (2026-03-24): Plan approval watchdog disabled.
@@ -307,39 +394,36 @@ export class StuckDetector {
     // overflow banner. The standard idle-prompt + signature dedup checks
     // below still apply and provide additional defense.
     if (slot.slot === 0) {
-      const lines = pane.split("\n");
-      const hasCanonicalBanner = lines.some((line) =>
-        /Context limit reached/i.test(line) &&
-        /\/compact\s+or\s+\/clear\s+to\s+continue/i.test(line)
-      );
-      if (!hasCanonicalBanner) {
-        debugLog(
-          `[stuck] slot=0 PM overflow-substring-without-canonical-banner — suppress (likely PM tool output mentioning overflow, not the live banner)`
+      // API Error 400 (model context limit) is a provider-level rejection —
+      // it never appears in PM tool output quoting other slots. Allow it
+      // through without the canonical TUI banner check (Rajiv directive
+      // 2026-05-14 16:17 IST thread 1778754566.417819).
+      const isApiContextError = /API Error: 400[\s\S]*?maximum context length/i.test(pane);
+      if (!isApiContextError) {
+        const lines = pane.split("\n");
+        const hasCanonicalBanner = lines.some((line) =>
+          /Context limit reached/i.test(line) &&
+          /\/compact\s+or\s+\/clear\s+to\s+continue/i.test(line)
         );
-        return;
+        if (!hasCanonicalBanner) {
+          debugLog(
+            `[stuck] slot=0 PM overflow-substring-without-canonical-banner — suppress (likely PM tool output mentioning overflow, not the live banner)`
+          );
+          return;
+        }
       }
     }
 
-    // Defensive idle-prompt check (Rajiv directive 2026-04-30 18:40:
-    // "compact should be sent only at idle prompt"). The detector fired a
-    // duplicate /compact because the slot had a tool running — the /compact
-    // text landed in the queued-messages input buffer (visible in the
-    // screenshot at /tmp/slack-img-1777554603454-image.png) instead of
-    // submitting as a slash command. False negatives (skipping when slot
-    // really does need /compact) are recoverable on the next 60s tick;
-    // false positives (sending while busy) corrupt the input buffer and
-    // produce the visible duplicate-fire bug.
-    //
-    // is-active.sh detects the gray vs white ❯ chevron — when idle, ❯ is
-    // white. An overflow-banner slot SHOULD be idle (Claude can't keep
-    // running tools once context is exhausted). If is-active reports busy,
-    // the banner is stale scrollback or the slot is mid-recovery — defer.
-    if (this.relay.isSlotActive(slot.slot)) {
-      debugLog(
-        `[stuck] slot=${slot.slot} overflow-detected-but-active — defer (banner likely stale, no idle prompt)`
-      );
-      return;
-    }
+    // Idle-prompt check REMOVED 2026-05-09 (Rajiv directive thread 1778329240.526399):
+    // raine GPT-5.5 chevron rendering can confuse is-active.sh, causing the
+    // detector to defer indefinitely. Slot 1 stuck ~58min at context-wall on
+    // 2026-05-09 because of this. Send /compact regardless; existing dedup
+    // (signature, line-offset, in-flight, post-compact) prevents duplicate fires.
+    // The original duplicate-/compact-into-input-buffer concern (2026-04-30)
+    // is mitigated by the line-offset + signature dedup landed since.
+    console.log(
+      `[stuck-info] slot=${slot.slot} overflow-banner-detected pattern=${matched.source} pane_tail=${pane.slice(-200).replace(/\n/g, "\\n")}`
+    );
 
     // Line-offset dedup (Bug A defense): tmux capture-pane returns lines
     // bottom-aligned. A stale banner stays at (or scrolls UP to) the SAME
@@ -352,8 +436,8 @@ export class StuckDetector {
     const matchLine = this.computeMatchLineIndex(pane, matched);
     const lastLine = this.lastMatchLine.get(slot.slot);
     if (matchLine >= 0 && lastLine !== undefined && matchLine <= lastLine) {
-      debugLog(
-        `[stuck] slot=${slot.slot} stale-line-offset-suppress curr=${matchLine} last=${lastLine}`
+      console.log(
+        `[stuck-info] slot=${slot.slot} suppress=stale-line-offset curr=${matchLine} last=${lastLine}`
       );
       return;
     }
@@ -382,14 +466,17 @@ export class StuckDetector {
       // If we already fired on this exact banner AND no /compact has run
       // since, treat this tick as stale scrollback — do not re-fire.
       if (sameSignature && !lastIsPreResume) {
-        debugLog(
-          `[stuck] slot=${slot.slot} stale-scrollback-suppress sig=${signature.slice(0, 12)}`
+        console.log(
+          `[stuck-info] slot=${slot.slot} suppress=stale-scrollback sig=${signature.slice(0, 12)}`
         );
         return;
       }
 
       // Time window (covers brief flapping or different-signature near-miss).
       if (Date.now() - lastTs < this.CONTEXT_OVERFLOW_DEDUP_MS && !lastIsPreResume) {
+        console.log(
+          `[stuck-info] slot=${slot.slot} suppress=time-window age_ms=${Date.now() - lastTs}`
+        );
         return;
       }
     }
@@ -407,8 +494,8 @@ export class StuckDetector {
       inFlightAt !== undefined &&
       Date.now() - inFlightAt < this.COMPACT_INFLIGHT_DEDUP_MS
     ) {
-      debugLog(
-        `[stuck] slot=${slot.slot} compact-in-flight-suppress age_ms=${Date.now() - inFlightAt}`
+      console.log(
+        `[stuck-info] slot=${slot.slot} suppress=compact-in-flight age_ms=${Date.now() - inFlightAt}`
       );
       return;
     }
@@ -423,8 +510,8 @@ export class StuckDetector {
     if (lastDispatch.length > 0) {
       const lastDispatchTs = parseDbTimestampMs(lastDispatch[0].timestamp);
       if (Date.now() - lastDispatchTs < this.COMPACT_DISPATCH_DEDUP_MS) {
-        debugLog(
-          `[stuck] slot=${slot.slot} post-compact-suppress sig=${signature.slice(0, 12)} age_ms=${Date.now() - lastDispatchTs}`
+        console.log(
+          `[stuck-info] slot=${slot.slot} suppress=post-compact sig=${signature.slice(0, 12)} age_ms=${Date.now() - lastDispatchTs}`
         );
         return;
       }
@@ -445,8 +532,8 @@ export class StuckDetector {
       }
     );
 
-    debugLog(
-      `[stuck] slot=${slot.slot} fire-overflow-direct sig=${signature.slice(0, 12)} pattern=${matched.source}`
+    console.log(
+      `[stuck-info] slot=${slot.slot} fire-overflow-direct sig=${signature.slice(0, 12)} pattern=${matched.source}`
     );
 
     // Log the dispatch BEFORE sending so the next detector tick (which may
@@ -480,6 +567,205 @@ export class StuckDetector {
     // sees the marker and suppresses a duplicate dispatch.
     this.compactInFlightAt.set(slot.slot, Date.now());
     this.relay.sendToSlot(slot.slot, "/compact");
+  }
+
+  /**
+   * API 500 backoff detector — colocated with autocompact "continue your
+   * work" injection per Rajiv directive 2026-05-17 07:59 IST thread
+   * `1778957625.997439`.
+   *
+   * Tmux-grep input model (refactor 2026-05-17 07:40 IST):
+   *   tmux capture-pane -p -S -100 | grep -qE "API Error: 500|API Error:
+   *   529|Internal server error"
+   *
+   * On detection:
+   *   - First seen: initialize state {first_seen_ts, retry_count: 0,
+   *     next_nudge_at: now + 120s, last_500_ts}; suppress this tick.
+   *   - In backoff window (now < next_nudge_at): suppress.
+   *   - Window expired (now >= next_nudge_at) AND retry_count < cap:
+   *     direct-inject "continue your work" via relay.sendToSlot(slot,
+   *     "continue your work", true). On success, bump retry_count + reschedule
+   *     next_nudge_at against next backoff index. On failure, do NOT bump —
+   *     next 60s tick will retry the injection.
+   *   - retry_count >= cap: log PERSISTENT line; don't auto-nudge.
+   *
+   * On non-detection AND state file exists: slot recovered (error scrolled
+   * out or slot resumed rendering tool output). Clear state file.
+   *
+   * State file: /tmp/slot-N-api500-state.json
+   * Forensic log: /tmp/mop-api500-nudges.log
+   */
+  private checkApi500Backoff(slot: SlotState): void {
+    const slotNum = slot.slot;
+    const stateFile = `/tmp/slot-${slotNum}-api500-state.json`;
+    const logFile = `/tmp/mop-api500-nudges.log`;
+
+    // 1. Capture last 100 lines of slot's tmux pane scrollback.
+    let pane = "";
+    try {
+      pane = execSync(`tmux capture-pane -t 0:0.${slotNum} -p -S -100`, {
+        timeout: 5_000,
+      }).toString();
+    } catch {
+      return; // capture failure — try again next tick
+    }
+
+    const detected = this.API_500_PATTERN.test(pane);
+    const nowEpoch = Math.floor(Date.now() / 1000);
+
+    // 2. Load existing state file (if any).
+    let state: {
+      first_seen_ts: number;
+      retry_count: number;
+      next_nudge_at: number;
+      last_500_ts: number;
+      last_nudge_at?: number;
+    } | null = null;
+    try {
+      if (existsSync(stateFile)) {
+        const parsed = JSON.parse(readFileSync(stateFile, "utf8"));
+        if (parsed && typeof parsed === "object" &&
+            typeof parsed.first_seen_ts === "number") {
+          state = parsed;
+        }
+      }
+    } catch {
+      state = null;
+    }
+
+    // 3. Recovery branch — error string no longer in scrollback.
+    if (!detected) {
+      if (state) {
+        try {
+          unlinkSync(stateFile);
+        } catch { /* non-fatal */ }
+        const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} RECOVERED — error string no longer in scrollback; state file cleared`;
+        debugLog(msg);
+        try {
+          appendFileSync(logFile, msg + "\n");
+        } catch { /* non-fatal */ }
+      }
+      return;
+    }
+
+    // 4. Detected. Initialize state if missing.
+    if (!state) {
+      state = {
+        first_seen_ts: nowEpoch,
+        retry_count: 0,
+        next_nudge_at: nowEpoch + this.API_500_BACKOFF_SCHEDULE[0],
+        last_500_ts: nowEpoch,
+      };
+      try {
+        writeFileSync(stateFile, JSON.stringify(state));
+      } catch { /* non-fatal */ }
+      const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} FIRST_SEEN — state initialized retry_count=0 next_nudge_at=${state.next_nudge_at} (in ${this.API_500_BACKOFF_SCHEDULE[0]}s)`;
+      debugLog(msg);
+      try {
+        appendFileSync(logFile, msg + "\n");
+      } catch { /* non-fatal */ }
+      return;
+    }
+
+    // 5. State exists. Refresh last_500_ts (metadata only).
+    if (nowEpoch > (state.last_500_ts || 0)) {
+      state.last_500_ts = nowEpoch;
+      try {
+        writeFileSync(stateFile, JSON.stringify(state));
+      } catch { /* non-fatal */ }
+    }
+
+    // 6. Cap check — already past retry limit.
+    if (state.retry_count >= this.API_500_RETRY_CAP) {
+      const firstSeenAge = nowEpoch - state.first_seen_ts;
+      const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} PERSISTENT — retry_count=${state.retry_count} (past cap of ${this.API_500_RETRY_CAP}) first_seen_age=${firstSeenAge}s; auto-nudge no longer applies, PM triage required`;
+      debugLog(msg);
+      // Only log to file once per minute to avoid spam.
+      try {
+        const lastLog = state.last_nudge_at || 0;
+        if (nowEpoch - lastLog > 60) {
+          appendFileSync(logFile, msg + "\n");
+          state.last_nudge_at = nowEpoch;
+          writeFileSync(stateFile, JSON.stringify(state));
+        }
+      } catch { /* non-fatal */ }
+      return;
+    }
+
+    // 7. In suppression window — skip injection.
+    if (nowEpoch < (state.next_nudge_at || 0)) {
+      const remaining = state.next_nudge_at - nowEpoch;
+      debugLog(
+        `[api500-nudge] slot=${slotNum} backoff window (retry_count=${state.retry_count} next_nudge_in=${remaining}s) — suppress`
+      );
+      return;
+    }
+
+    // 8. Window expired AND retry_count < cap — inject "continue your work".
+    // Verify slot is occupied + not DND (caller already filtered, defensive).
+    const dbSlot = this.db.getSlot(slotNum);
+    if (!dbSlot?.occupied || dbSlot.dnd) {
+      const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} SKIPPED (occupied=${!!dbSlot?.occupied} dnd=${!!dbSlot?.dnd}) retry=${state.retry_count}`;
+      debugLog(msg);
+      try {
+        appendFileSync(logFile, msg + "\n");
+      } catch { /* non-fatal */ }
+      return;
+    }
+
+    // 9. Inject via tmux paste-buffer. force=true to land regardless of pane
+    //    prompt state — same shape as SessionStart:compact direct-recovery.
+    let ok = false;
+    try {
+      ok = this.relay.sendToSlot(slotNum, "continue your work", true);
+    } catch (err) {
+      debugLog(`[api500-nudge] slot=${slotNum} sendToSlot threw: ${err}`);
+      ok = false;
+    }
+
+    if (!ok) {
+      const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} FAILED (sendToSlot returned false) retry=${state.retry_count} — state NOT ticked; will retry next tick`;
+      debugLog(msg);
+      try {
+        appendFileSync(logFile, msg + "\n");
+      } catch { /* non-fatal */ }
+      return;
+    }
+
+    // 10. Success — bump retry_count + reschedule next_nudge_at against the
+    //     NEXT backoff index. Cumulative from first_seen_ts.
+    state.retry_count = (state.retry_count || 0) + 1;
+    state.last_nudge_at = nowEpoch;
+    if (state.retry_count >= this.API_500_RETRY_CAP) {
+      // Just crossed cap — write final state, no further scheduling.
+    } else {
+      const delta =
+        this.API_500_BACKOFF_SCHEDULE[state.retry_count] ||
+        this.API_500_BACKOFF_SCHEDULE[this.API_500_BACKOFF_SCHEDULE.length - 1];
+      // Schedule cumulatively from first_seen_ts to preserve
+      // 2m/6m/14m/30m/62m semantics across ticks.
+      state.next_nudge_at = state.first_seen_ts + delta;
+    }
+    try {
+      writeFileSync(stateFile, JSON.stringify(state));
+    } catch { /* non-fatal */ }
+
+    const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} OK retry_count=${state.retry_count} next_nudge_at=${state.next_nudge_at} (cumulative from first_seen_ts=${state.first_seen_ts})`;
+    debugLog(msg);
+    try {
+      appendFileSync(logFile, msg + "\n");
+    } catch { /* non-fatal */ }
+
+    // Log MoP DB event for forensic timeline (mirrors prior
+    // slot_idle_suppressed_api500_mop_direct event shape).
+    try {
+      this.db.logEvent(slotNum, "api500_direct_nudge", "Stuck", null, {
+        relay_path: "stuck.checkApi500Backoff",
+        retry_count: state.retry_count,
+        first_seen_ts: state.first_seen_ts,
+        next_nudge_at: state.next_nudge_at,
+      });
+    } catch { /* non-fatal */ }
   }
 
   /**
@@ -613,6 +899,192 @@ export class StuckDetector {
 
     // Inject the slash command into PM pane — mirrors /slot-context-overflow.
     this.relay.injectToPM(`/slot-blocked ${slot.slot}`);
+  }
+
+  /**
+   * Detect persistent check-slot bg-script failures from the MoP server log.
+   *
+   * The check-slot bg-script fires every ~5 min per slot. When it fails
+   * repeatedly (≥2 failures for the same slot in the log tail), the slot
+   * may be hitting resource limits or context exhaustion. Auto-inject
+   * /compact directly into the affected slot.
+   *
+   * Dedup: logs a `bg_script_failure_compact` event per slot; no re-fire
+   * within BG_SCRIPT_FAILURE_DEDUP_MS (10 min). Also respects the existing
+   * compactInFlightAt and COMPACT_DISPATCH_DEDUP_MS guards.
+   */
+  private detectBgScriptFailures(): void {
+    const LOG_PATH = "/tmp/mop-server.log";
+    let logText: string;
+    try {
+      logText = readFileSync(LOG_PATH, "utf-8");
+    } catch {
+      return; // log file not available yet
+    }
+
+    const lines = logText.split("\n");
+    const tail = lines.slice(-200);
+    const regex = /\[check-slot\].*Slot (\d+) bg-script FAILED/;
+
+    // Count unique failure occurrences per slot. Each check-slot tick
+    // produces a distinct log line (different timestamp), so ≥2 lines
+    // for the same slot = ≥2 consecutive failed ticks.
+    const failureCounts = new Map<number, number>();
+    for (const line of tail) {
+      const match = line.match(regex);
+      if (match) {
+        const slotNum = parseInt(match[1], 10);
+        failureCounts.set(slotNum, (failureCounts.get(slotNum) || 0) + 1);
+      }
+    }
+
+    const slots = this.db.getAllSlots();
+
+    for (const slot of slots) {
+      if (slot.dnd) continue;
+      if (!slot.occupied) continue;
+
+      const failCount = failureCounts.get(slot.slot) || 0;
+
+      if (failCount >= 2) {
+        // Update the per-slot consecutive failure tracker.
+        const prev = this.bgScriptFailures.get(slot.slot) || 0;
+        this.bgScriptFailures.set(slot.slot, prev + 1);
+
+        console.log(
+          `[stuck-info] slot=${slot.slot} bg-script-failure consecutive_fails=${prev + 1} log_lines=${failCount}`
+        );
+
+        // Dedup: don't re-fire within 10 min of last bg_script_failure_compact.
+        const recentEvents = this.db.getEvents(
+          slot.slot,
+          1,
+          "bg_script_failure_compact"
+        );
+        if (recentEvents.length > 0) {
+          const lastTs = parseDbTimestampMs(recentEvents[0].timestamp);
+          if (
+            Date.now() - lastTs <
+            this.BG_SCRIPT_FAILURE_DEDUP_MS
+          ) {
+            console.log(
+              `[stuck-info] slot=${slot.slot} suppress=bg-script-failure-dedup age_ms=${Date.now() - lastTs}`
+            );
+            continue;
+          }
+        }
+
+        // In-flight guard: don't send /compact if one was just dispatched.
+        const inFlightAt = this.compactInFlightAt.get(slot.slot);
+        if (
+          inFlightAt !== undefined &&
+          Date.now() - inFlightAt < this.COMPACT_INFLIGHT_DEDUP_MS
+        ) {
+          console.log(
+            `[stuck-info] slot=${slot.slot} suppress=compact-in-flight age_ms=${Date.now() - inFlightAt}`
+          );
+          continue;
+        }
+
+        // Post-/compact dispatch guard: don't double-fire.
+        const lastDispatch = this.db.getEvents(slot.slot, 1, "compact_dispatched");
+        if (lastDispatch.length > 0) {
+          const lastDispatchTs = parseDbTimestampMs(lastDispatch[0].timestamp);
+          if (
+            Date.now() - lastDispatchTs <
+            this.COMPACT_DISPATCH_DEDUP_MS
+          ) {
+            console.log(
+              `[stuck-info] slot=${slot.slot} suppress=post-compact age_ms=${Date.now() - lastDispatchTs}`
+            );
+            continue;
+          }
+        }
+
+        // Real-slot-stuck signal gate (Rajiv directive 2026-05-17 12:33 IST
+        // thread `1779001405.544099`). Bg-script failure alone = INFRA error
+        // (Codex CLI auth expired, spawnSync ETIMEDOUT, script crash). It does
+        // NOT mean the slot itself is stuck. /compact on an actively producing
+        // slot destroys productive context.
+        //
+        // Require: slot's tmux pipe-pane log mtime is OLDER than
+        // BG_SCRIPT_COMPACT_LOG_STALE_MS. If the slot has produced output
+        // recently, it's actively running — skip /compact, alarm PM instead.
+        //
+        // See feedback_mop_bg_script_failure_compact_misfire_2026_05_17.md.
+        const slotLogMtime = this.logManager.getLogMtime(slot.slot);
+        if (slotLogMtime) {
+          const logAgeMs = Date.now() - slotLogMtime.getTime();
+          if (logAgeMs < this.BG_SCRIPT_COMPACT_LOG_STALE_MS) {
+            console.log(
+              `[stuck-info] slot=${slot.slot} suppress=bg-script-compact-slot-active log_age_ms=${logAgeMs} threshold_ms=${this.BG_SCRIPT_COMPACT_LOG_STALE_MS} — bg-script likely infra failure (Codex/ETIMEDOUT), slot itself is producing output`
+            );
+            // Surface PM alarm once per dedup window so the underlying
+            // bg-script infra failure gets investigated. Reuse the
+            // BG_SCRIPT_FAILURE_DEDUP_MS guard via the same event row.
+            this.db.logEvent(
+              slot.slot,
+              "bg_script_failure_compact",
+              null,
+              null,
+              {
+                slot: slot.slot,
+                consecutive_fails: prev + 1,
+                log_lines: failCount,
+                task: slot.task,
+                issue: slot.issue,
+                action: "suppressed_compact_slot_active",
+                log_age_ms: logAgeMs,
+              }
+            );
+            this.relay.injectToPM(
+              `# warning slot ${slot.slot} bg-script failing (${prev + 1} consecutive ticks) — slot itself active (log age ${Math.round(logAgeMs / 1000)}s). Likely Codex CLI auth / ETIMEDOUT / script crash. /compact SUPPRESSED. PM-direct investigation needed.`
+            );
+            continue;
+          }
+        }
+
+        // Log detection event before dispatch so next tick sees dedup.
+        this.db.logEvent(
+          slot.slot,
+          "bg_script_failure_compact",
+          null,
+          null,
+          {
+            slot: slot.slot,
+            consecutive_fails: prev + 1,
+            log_lines: failCount,
+            task: slot.task,
+            issue: slot.issue,
+          }
+        );
+
+        console.log(
+          `[stuck-info] slot=${slot.slot} fire-bg-script-failure-compact consecutive_fails=${prev + 1}`
+        );
+
+        // Log compact dispatch for post-compact dedup.
+        this.db.logEvent(slot.slot, "compact_dispatched", null, null, {
+          slot: slot.slot,
+          trigger: "bg_script_failure",
+          consecutive_fails: prev + 1,
+        });
+
+        // Mark in-flight and send /compact (same direct-recovery path as
+        // checkContextOverflow — Rajiv directive 2026-04-30).
+        this.compactInFlightAt.set(slot.slot, Date.now());
+        this.relay.sendToSlot(slot.slot, "/compact");
+      } else {
+        // No (or only 1) failure line in log tail for this slot — reset
+        // the consecutive failure counter.
+        if (this.bgScriptFailures.has(slot.slot)) {
+          this.bgScriptFailures.delete(slot.slot);
+          debugLog(
+            `[stuck] slot=${slot.slot} bg-script failure count reset (tick passed without ≥2 failures)`
+          );
+        }
+      }
+    }
   }
 
   /**

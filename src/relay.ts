@@ -9,9 +9,58 @@
 
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type { LogManager } from "./logs.js";
 import type { MoPDatabase } from "./db.js";
 import type { MoPConfig, SlotState } from "./types.js";
+
+/**
+ * Resolve the PM session JSONL directory. Claude Code stores per-project
+ * session transcripts under `~/.claude/projects/<encoded-cwd>/*.jsonl`.
+ *
+ * Override via env `MOP_PM_JSONL_DIR` if needed (e.g., PM main project
+ * isn't heydonna-app).
+ */
+const PM_JSONL_DIR =
+  process.env.MOP_PM_JSONL_DIR ??
+  `${process.env.HOME}/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app`;
+
+/**
+ * Threshold (ms) — if PM JSONL has been written within this window, PM is
+ * still actively producing tokens / running tools and we MUST NOT drain
+ * the queue (Rajiv directive 2026-05-13 14:13 IST thread `1778661820.586119`).
+ *
+ * Configurable via `MOP_PM_JSONL_IDLE_MS` (default 15s). The drain timer
+ * uses this to verify true idle before injecting; if JSONL is fresher
+ * than this threshold the timer re-arms instead of draining.
+ */
+const PM_JSONL_IDLE_MS: number = (() => {
+  const raw = process.env.MOP_PM_JSONL_IDLE_MS;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : 15_000;
+})();
+
+/**
+ * Return mtime (ms epoch) of the most recently modified PM session JSONL,
+ * or null if none found. Used to verify PM is genuinely idle before
+ * draining the relay queue.
+ */
+function pmJsonlMtimeMs(): number | null {
+  try {
+    const entries = fs.readdirSync(PM_JSONL_DIR);
+    let max = 0;
+    for (const name of entries) {
+      if (!name.endsWith(".jsonl")) continue;
+      try {
+        const st = fs.statSync(path.join(PM_JSONL_DIR, name));
+        if (st.mtimeMs > max) max = st.mtimeMs;
+      } catch { /* ignore unreadable */ }
+    }
+    return max > 0 ? max : null;
+  } catch {
+    return null;
+  }
+}
 
 // v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
 // wrapper. Kept for reference / fallback diagnostic; no longer invoked by
@@ -23,17 +72,57 @@ const SEND_TO_SLOT_SCRIPT =
 void SEND_TO_SLOT_SCRIPT;
 
 /**
- * Parse a slash-command relay message (e.g. "/slot-idle 3", "/slot-active 1",
- * "/check-slot 2") into (eventType, slot). Returns null for free-form messages
- * (escalation comments, plan-approval-needed, etc.) — those go through the
- * queue too but keyed by their own slot extraction or fall back to slot 0.
+ * Parse a slot-event relay message into (eventType, slot). Two shapes are
+ * accepted so the busy-queue PRIMARY KEY (slot, event_type) keeps coalescing
+ * across the cutover:
+ *
+ *   1. Legacy slash command (kept for manual PM invocation + back-compat):
+ *      "/slot-idle 3", "/slot-active 1", "/check-slot 2", "/slot-blocked 4".
+ *
+ *   2. MoP message prefix (Rajiv directive 2026-05-22 22:23 IST thread
+ *      `1779468118.901709` — "inject is a string instead of a command"):
+ *      "MoP: slot 3 idle", "MoP: slot 1 active",
+ *      "MoP: check slot 2 for <reason>", "MoP: slot 4 blocked".
+ *
+ * Both shapes resolve to the same `eventType` taxonomy
+ * (slot-idle | slot-active | check-slot | slot-blocked) so logging and the
+ * (slot, event_type) coalesce key stay stable.
+ *
+ * Returns null for free-form messages (escalation comments,
+ * plan-approval-needed, etc.) — those go through the queue keyed by their
+ * own slot extraction or fall back to slot 0 in the freeform path.
  */
 function parseRelayMessage(message: string): { eventType: string; slot: number } | null {
-  const m = /^\/(slot-idle|slot-active|check-slot|slot-blocked)\s+(\d+)\b/.exec(message);
-  if (!m) return null;
-  const slot = parseInt(m[2], 10);
-  if (!Number.isFinite(slot) || slot < 0 || slot > 4) return null;
-  return { eventType: m[1], slot };
+  // First-line scan: a multi-line check-slot payload starts with the prefix
+  // line and is followed by the bg-script summary. We only key off the
+  // prefix.
+  const firstLine = message.split("\n", 1)[0];
+
+  // Shape 1: legacy slash command.
+  const slash = /^\/(slot-idle|slot-active|check-slot|slot-blocked)\s+(\d+)\b/.exec(firstLine);
+  if (slash) {
+    const slot = parseInt(slash[2], 10);
+    if (!Number.isFinite(slot) || slot < 0 || slot > 4) return null;
+    return { eventType: slash[1], slot };
+  }
+
+  // Shape 2a: "MoP: check slot N ..." (with optional `for <reason>` tail).
+  const mopCheck = /^MoP:\s+check\s+slot\s+(\d+)\b/i.exec(firstLine);
+  if (mopCheck) {
+    const slot = parseInt(mopCheck[1], 10);
+    if (!Number.isFinite(slot) || slot < 0 || slot > 4) return null;
+    return { eventType: "check-slot", slot };
+  }
+
+  // Shape 2b: "MoP: slot N idle | active | blocked".
+  const mopSlot = /^MoP:\s+slot\s+(\d+)\s+(idle|active|blocked)\b/i.exec(firstLine);
+  if (mopSlot) {
+    const slot = parseInt(mopSlot[1], 10);
+    if (!Number.isFinite(slot) || slot < 0 || slot > 4) return null;
+    return { eventType: `slot-${mopSlot[2].toLowerCase()}`, slot };
+  }
+
+  return null;
 }
 
 export class TmuxRelay {
@@ -63,11 +152,29 @@ export class TmuxRelay {
    * Configurable via env var `MOP_DRAIN_DEBOUNCE_MS` (default 7000).
    */
   private drainTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Debounce default raised 7s → 30s on 2026-05-13 14:13 IST per Rajiv
+   * directive thread `1778661820.586119`: "queue all notifications and send
+   * the last one when pm goes idle after stop hook fire." 7s was too short
+   * for agentic PM loops — inter-tool gaps can exceed 7s without the PM
+   * being truly idle, causing premature drains that injected commands
+   * into the PM's queued-prompt buffer while the model was still working.
+   * 30s + JSONL-mtime re-verification (see PM_JSONL_IDLE_MS) is the new
+   * idle floor.
+   */
   private static readonly DRAIN_DEBOUNCE_MS: number = (() => {
     const raw = process.env.MOP_DRAIN_DEBOUNCE_MS;
     const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) && n >= 0 ? n : 7000;
+    return Number.isFinite(n) && n >= 0 ? n : 30_000;
   })();
+  /**
+   * Bound on how many times the drain timer may re-arm while the PM JSONL
+   * keeps moving. Prevents infinite re-arm if PM is in a long agentic
+   * burst — after this many re-arms we accept the drain and trust the
+   * coalesce layer to collapse rows to a single per-slot notification.
+   */
+  private static readonly DRAIN_MAX_REARMS = 10;
+  private drainRearmCount = 0;
 
   constructor(config: MoPConfig) {
     this.pmPaneAddress = config.pmPaneAddress;
@@ -101,6 +208,7 @@ export class TmuxRelay {
         this.drainTimer = null;
         console.log(`[relay-debug] setPMBusy(true) — cancelled pending drain`);
       }
+      this.drainRearmCount = 0;
       this.pmBusy = true;
       return { drained: 0 };
     }
@@ -109,22 +217,75 @@ export class TmuxRelay {
     if (this.drainTimer) {
       clearTimeout(this.drainTimer);
     }
-    const debounceMs = TmuxRelay.DRAIN_DEBOUNCE_MS;
+    this.drainRearmCount = 0;
+    this.armDrainTimer(TmuxRelay.DRAIN_DEBOUNCE_MS);
+    return { drained: 0 };
+  }
+
+  /**
+   * Arm the debounced drain timer with optional JSONL-mtime re-verification.
+   *
+   * On timer fire:
+   *   1. Read PM JSONL mtime. If JSONL was written within PM_JSONL_IDLE_MS,
+   *      PM is still actively producing tokens (mid-tool or mid-message).
+   *      Re-arm the timer; do NOT drain.
+   *   2. If re-arm count exceeds DRAIN_MAX_REARMS (PM in a sustained burst),
+   *      accept the drain — the coalesce layer collapses to one row per slot
+   *      so at most 4 notifications fire.
+   *   3. Else, drain and clear pmBusy.
+   *
+   * Rajiv directive 2026-05-13 14:13 IST thread `1778661820.586119`:
+   * "queue up all these notifications and send the last one when pm goes
+   * idle after stop hook fire" — Stop hook alone is not a strong enough
+   * idle signal in agentic loops, so we cross-check JSONL mtime.
+   */
+  private armDrainTimer(delayMs: number): void {
     this.drainTimer = setTimeout(() => {
+      const mtimeMs = pmJsonlMtimeMs();
+      const ageMs = mtimeMs ? Date.now() - mtimeMs : Number.POSITIVE_INFINITY;
+      const stillActive = ageMs < PM_JSONL_IDLE_MS;
+      const maxRearmsHit = this.drainRearmCount >= TmuxRelay.DRAIN_MAX_REARMS;
+
+      if (stillActive && !maxRearmsHit) {
+        this.drainRearmCount += 1;
+        console.log(
+          `[relay-debug] drain re-armed — PM JSONL active (age=${Math.round(ageMs)}ms < ${PM_JSONL_IDLE_MS}ms) ` +
+          `rearm=${this.drainRearmCount}/${TmuxRelay.DRAIN_MAX_REARMS}`
+        );
+        if (this.db) {
+          this.db.logEvent(0, "pm_drain_rearmed", null, null, {
+            jsonl_age_ms: Math.round(ageMs),
+            jsonl_idle_threshold_ms: PM_JSONL_IDLE_MS,
+            rearm_count: this.drainRearmCount,
+            max_rearms: TmuxRelay.DRAIN_MAX_REARMS,
+          });
+        }
+        // Re-arm for another PM_JSONL_IDLE_MS window (shorter than initial
+        // debounce — we already passed the initial Stop debounce).
+        this.armDrainTimer(PM_JSONL_IDLE_MS);
+        return;
+      }
+
+      // Drain.
       this.pmBusy = false;
       const n = this.drainPMQueue();
       this.drainTimer = null;
+      const reason = maxRearmsHit ? "max_rearms_hit" : "jsonl_idle_confirmed";
       console.log(
-        `[relay-debug] debounce drain fired after ${debounceMs}ms idle, drained ${n}`
+        `[relay-debug] debounce drain fired (${reason}) after ${delayMs}ms timer, ` +
+        `jsonl_age=${Math.round(ageMs)}ms, drained ${n}`
       );
       if (this.db) {
         this.db.logEvent(0, "pm_debounce_drain_fired", null, null, {
-          debounce_ms: debounceMs,
+          debounce_ms: delayMs,
           drained: n,
+          reason,
+          jsonl_age_ms: Math.round(ageMs),
+          rearm_count: this.drainRearmCount,
         });
       }
-    }, debounceMs);
-    return { drained: 0 };
+      this.drainRearmCount = 0;
+    }, delayMs);
   }
 
   /** Public read of the busy flag (diagnostics). */
@@ -145,7 +306,30 @@ export class TmuxRelay {
     const rows = this.db.drainPendingPMEvents();
     let injected = 0;
     for (const row of rows) {
-      const message = row.payload ?? `/${row.event_type} ${row.slot}`;
+      // Reconstruct message when payload is null (slot-event enqueue path).
+      // Rajiv directive 2026-05-22 22:23 IST thread `1779468118.901709` —
+      // inject is a string, not a command. Reconstruct in MoP shape so the
+      // drained event hits the PM-side pm-context-injector.sh recognizer.
+      // slot-blocked is preserved as slash form (out of cutover scope).
+      let fallback: string;
+      switch (row.event_type) {
+        case "slot-idle":
+        case "slot-active":
+          fallback = `MoP: slot ${row.slot} ${row.event_type === "slot-idle" ? "idle" : "active"}`;
+          break;
+        case "check-slot":
+          // Payload-less check-slot drain (rare — check-slot normally enqueues
+          // with full bg-script payload via the freeform path because it's a
+          // multi-line message). Emit MoP prefix without a reason.
+          fallback = `MoP: check slot ${row.slot} for queued`;
+          break;
+        case "slot-blocked":
+          fallback = `/slot-blocked ${row.slot}`;
+          break;
+        default:
+          fallback = `/${row.event_type} ${row.slot}`;
+      }
+      const message = row.payload ?? fallback;
       const ok = this.injectDirect(message);
       if (ok) injected++;
       this.db.logEvent(row.slot, "pm_queue_drained", null, null, {
@@ -230,15 +414,40 @@ export class TmuxRelay {
    */
   private injectDirect(message: string): boolean {
     try {
-      console.log(`[relay-debug] injectToPM → ${message}`);
-      execSync(
-        `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)} && ` +
-        `sleep 0.3 && ` +
-        `tmux send-keys -t ${this.pmPaneAddress} Enter && ` +
-        `sleep 0.5`,
-        { timeout: 10_000 }
-      );
-      console.log(`[relay-debug] injectToPM success → ${message}`);
+      const firstLine = message.split("\n", 1)[0];
+      console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""}`);
+      if (message.includes("\n")) {
+        // Multi-line payload (e.g., /check-slot N\n<bg-summary>): use
+        // load-buffer + paste-buffer + Enter — same pattern sendToSlot uses
+        // for multi-line content. send-keys with embedded \n would press
+        // Enter on each newline and submit the prompt prematurely.
+        // Rajiv directive 2026-05-15 13:44 IST thread `1778831723.165019`:
+        // "make it inline" — MoP injects command + bg-output as one atomic prompt.
+        const tmpFile = `/tmp/mop-pm-inject-${Date.now()}.txt`;
+        const bufName = `mop-pm-inject`;
+        fs.writeFileSync(tmpFile, message);
+        try {
+          execSync(
+            `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)} && ` +
+            `tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d && ` +
+            `sleep 0.3 && ` +
+            `tmux send-keys -t ${this.pmPaneAddress} Enter && ` +
+            `sleep 0.5`,
+            { timeout: 10_000 }
+          );
+        } finally {
+          try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+        }
+      } else {
+        execSync(
+          `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)} && ` +
+          `sleep 0.3 && ` +
+          `tmux send-keys -t ${this.pmPaneAddress} Enter && ` +
+          `sleep 0.5`,
+          { timeout: 10_000 }
+        );
+      }
+      console.log(`[relay-debug] injectToPM success → ${firstLine}`);
       return true;
     } catch (err) {
       console.error(`[relay] Failed to inject into PM pane:`, err);
@@ -272,10 +481,14 @@ export class TmuxRelay {
    * Sends: # comment line, then /slot-idle N slash command.
    */
   notifySlotIdle(slot: SlotState): void {
-    // Send /slot-idle N command — triggers the PM's slot-idle skill for proper handling.
-    // Root cause of earlier failures was MoP HTTP server being down + missing HTTP hooks
-    // on slots, NOT the slash command format. (Lesson: 2026-03-18)
-    this.injectToPM(`/slot-idle ${slot.slot}`);
+    // Inject MoP message prefix (replaces former slash command `/slot-idle N`).
+    // Rajiv directive 2026-05-22 22:23 IST thread `1779468118.901709`:
+    // "inject is a string instead of a command." PM-side
+    // pm-context-injector.sh recognizes the prefix and emits
+    // [MoP_SLOT_NOTIFICATION] system-reminder hinting Skill(slot-idle).
+    // Busy-queue (slot, event_type) coalesce key unchanged — parseRelayMessage
+    // recognizes both shapes.
+    this.injectToPM(`MoP: slot ${slot.slot} idle`);
   }
 
   /**

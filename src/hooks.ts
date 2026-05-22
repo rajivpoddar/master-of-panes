@@ -94,8 +94,11 @@ export class HookProcessor {
    */
   private pendingIdleTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
-  /** Idle debounce delay: 30 seconds (Rajiv directive 2026-04-01: reduced from 60s) */
-  private static readonly IDLE_DEBOUNCE_MS = 30_000;
+  /** Idle debounce delay: 60 seconds (Rajiv directive 2026-05-15 12:02 IST thread `1778825746.293759`:
+   * bumped from 30s → 60s to reduce duplicate slot-notification injection. Modern slots run longer
+   * atomic tool sequences than 2026-04-01 baseline; 30s window fired during mid-sequence "pause"
+   * causing 5+ FIRINGs in 30min on healthy slots. See feedback memo dated 2026-05-15.) */
+  private static readonly IDLE_DEBOUNCE_MS = 60_000;
 
   /**
    * Slot-idle staleness gate window — after the IDLE_DEBOUNCE_MS timer fires,
@@ -217,21 +220,18 @@ export class HookProcessor {
         console.log(`[check-slot] ${now} Slot ${slotNum} bg-script FAILED (falling through to inject): ${msg.slice(0, 200)}`);
       }
 
-      // Always preserve the file artifact contract — write bg output (or fallback) to /tmp/slot-N-check.txt.
-      // On bg-script failure, fall back to tmux capture-pane (legacy behavior).
+      // Write bg output to /tmp/slot-N-check.txt.
+      // On bg-script failure, write structured error — NOT tmux capture (deprecated).
+      // Rajiv directive 2026-05-14 14:46 IST: tmux capture is not needed.
       try {
         if (!bgFailed && bgOutput.length > 0) {
           writeFileSync(checkFile, bgOutput);
         } else {
-          const capture = execSync(
-            `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
-            { timeout: 5_000 }
-          ).toString();
-          writeFileSync(checkFile, capture);
+          writeFileSync(checkFile, `STATUS:ERROR reason=${bgFailed ? 'bg-script-failed' : 'empty-output'} slot=${slotNum}`);
         }
       } catch (err) {
-        writeFileSync(checkFile, "[capture failed]");
-        console.log(`[check-slot] Slot ${slotNum} capture FAILED: ${err}`);
+        writeFileSync(checkFile, "STATUS:ERROR reason=write-failed");
+        console.log(`[check-slot] Slot ${slotNum} write FAILED: ${err}`);
       }
 
       // Decide based on bg-script INJECT_DECISION marker.
@@ -251,13 +251,48 @@ export class HookProcessor {
 
       console.log(`[check-slot] ${now} Slot ${slotNum} FIRING — bg-script ${bgFailed ? "FAILED (falling through)" : "INJECT_DECISION:inject"}`);
 
-      // Inject /check-slot N into PM pane
-      this.relay.injectToPM(`/check-slot ${slotNum}`);
-      console.log(`[check-slot] Slot ${slotNum} — injected /check-slot into PM pane`);
+      // Inject "MoP: check slot N for <reason>" + bg-output as ONE atomic
+      // multi-line payload.
+      // Rajiv directive 2026-05-15 13:44 IST thread `1778831723.165019`:
+      // "make it inline" — eliminate /tmp/slot-N-check.txt file dependency;
+      // PM sees prefix + summary as a single prompt.
+      // Rajiv directive 2026-05-22 22:23 IST thread `1779468118.901709`:
+      // "inject is a string instead of a command." Switched from slash
+      // command `/check-slot N` to message prefix `MoP: check slot N for <reason>`.
+      // PM-side pm-context-injector.sh recognizes the prefix and emits
+      // [MoP_SLOT_NOTIFICATION] system-reminder hinting Skill(check-slot).
+      // The relay detects \n and uses load-buffer + paste-buffer so embedded
+      // newlines don't submit the prompt prematurely.
+      const payload = bgFailed
+        ? `STATUS:ERROR reason=bg-script-failed slot=${slotNum}`
+        : (bgOutput.trimEnd() || `STATUS:ERROR reason=empty-output slot=${slotNum}`);
+      // Derive a one-line <reason> from the bg-script summary so PM sees
+      // the headline status without re-parsing the payload. Order of
+      // preference: WARNING line > NEXT_ACTION line > HEALTH line > STATUS
+      // line > fallback "routine timer". Strips the marker prefix so the
+      // reason reads cleanly inline.
+      let reason = "routine timer";
+      if (bgFailed) {
+        reason = "bg-script failed";
+      } else {
+        const warn = payload.match(/^WARNING:([^\n]+)/m);
+        const next = payload.match(/^NEXT_ACTION:([^\n]+)/m);
+        const health = payload.match(/^HEALTH:([^\n]+)/m);
+        const status = payload.match(/^STATUS:([^\n]+)/m);
+        if (warn) reason = `WARNING:${warn[1].trim()}`;
+        else if (next) reason = `NEXT_ACTION:${next[1].trim()}`;
+        else if (health) reason = `HEALTH:${health[1].trim()}`;
+        else if (status) reason = `STATUS:${status[1].trim()}`;
+        reason = reason.replace(/\s+/g, " ").slice(0, 120);
+      }
+      this.relay.injectToPM(`MoP: check slot ${slotNum} for ${reason}\n${payload}`);
+      console.log(`[check-slot] Slot ${slotNum} — injected MoP message inline (reason="${reason.slice(0,60)}", payload ${payload.length} chars)`);
       this.db.logEvent(slotNum, "check_slot_triggered", "Timer", null, {
         check_file: checkFile,
         interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
         bg_failed: bgFailed,
+        payload_chars: payload.length,
+        inline: true,
       });
     }, HookProcessor.CHECK_SLOT_INTERVAL_MS);
 
@@ -394,6 +429,13 @@ export class HookProcessor {
       this.planApprovalTimers.delete(slotNum);
     }
   }
+
+  // handleApi500MopDirectNudge REMOVED 2026-05-17 08:00 IST per Rajiv
+  // directive thread `1778957625.997439`: API 500 detection colocated with
+  // autocompact handler in stuck.ts checkApi500Backoff (same setInterval
+  // timer that injects "continue your work" after autocompact). bg-script
+  // Step 1a + INJECT_DECISION:mop-direct-nudge marker path was dead when
+  // slots were idle (MoP skips bg-script on idle=true). Refer to stuck.ts.
 
   /**
    * Process an incoming hook from a Claude Code slot.
@@ -657,7 +699,7 @@ export class HookProcessor {
     }
 
     // Normal idle flow — debounced notification to PM.
-    // Wait 30s before notifying. If slot becomes active, cancel the timer.
+    // Wait 60s before notifying. If slot becomes active, cancel the timer.
     // (Rajiv directive 2026-03-31: 24 duplicate idle notifications on Mar 30)
     this.cancelPendingIdleTimer(slotNum);
 
@@ -727,6 +769,48 @@ export class HookProcessor {
           writeFileSync(captureFile, capture);
         } catch {
           writeFileSync(captureFile, "[capture failed]");
+        }
+
+        // ─── INJECT_DECISION gate (Rajiv 2026-05-16 18:26 IST thread `1778935572.419629`) ───
+        // Mirror /check-slot gate at hooks.ts:208-250. Run check-slot-bg.sh; if
+        // it emits "INJECT_DECISION:skip REASON:...", suppress the /slot-idle
+        // relay (slot is qualitatively healthy / no JSONL delta).
+        //
+        // ALSO handles INJECT_DECISION:mop-direct-nudge (Rajiv 2026-05-17 00:31
+        // IST thread `1778957625.997439`): MoP itself sends "continue your work"
+        // to the slot's tmux pane on API-500 backoff window expiry. PM remains
+        // uninvolved through retry 0-4. After successful injection, bump
+        // retry_count + reschedule next_nudge_at via --api-500-state-tick.
+        //
+        // Fail-open: bg-script failure → fall through to inject (preserves
+        // prior behavior).
+        {
+          const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
+          let bgOutput = "";
+          let bgFailed = false;
+          try {
+            bgOutput = execSync(`bash ${bgScript} ${slotNum}`, {
+              timeout: 8_000,
+              maxBuffer: 1024 * 1024,
+            }).toString();
+          } catch {
+            bgFailed = true;
+          }
+          // (INJECT_DECISION:mop-direct-nudge consumer REMOVED 2026-05-17 08:00 IST
+          // per Rajiv directive thread `1778957625.997439`. API 500 detection
+          // colocated with autocompact handler in stuck.ts checkApi500Backoff,
+          // running independently of slot idle state. bg-script Step 1a no
+          // longer emits this marker.)
+          const skipMatch = bgOutput.match(/INJECT_DECISION:skip(?:\s+REASON:([^\n]*))?/);
+          if (!bgFailed && skipMatch) {
+            const reason = (skipMatch[1] || "unspecified").trim().slice(0, 120);
+            console.log(`[idle-debug] slot ${slotNum} INJECT_DECISION GATE — bg-script skip REASON:${reason}; suppressing /slot-idle`);
+            this.db.logEvent(slotNum, "slot_idle_suppressed_inject_decision", "Stop", null, {
+              relay_path: "Stop.debounce.inject_decision",
+              reason,
+            });
+            return;
+          }
         }
 
         console.log(`[idle-debug] slot ${slotNum} calling relay.notifySlotIdle()`);
@@ -817,13 +901,47 @@ export class HookProcessor {
           writeFileSync(captureFile, "[capture failed]");
         }
 
-        // Send slash command to trigger slot-active skill (includes slot number as arg)
-        this.relay.injectToPM(`/slot-active ${slotNum}`);
-        this.db.logEvent(slotNum, "slot_active_notified", "PostToolUse", payload.tool_name ?? null, {
-          task: slot.task,
-          issue: slot.issue,
-          capture_file: captureFile,
-        });
+        // ─── INJECT_DECISION gate (Rajiv 2026-05-16 18:26 IST thread `1778935572.419629`) ───
+        // Mirror /check-slot gate at hooks.ts:208-250. /slot-active is
+        // informational; suppress when bg-script classifies the slot as
+        // qualitatively-healthy with no new signal for PM to act on.
+        // Fail-open: bg-script failure → fall through to inject.
+        // NOTE: timer-start (below) runs regardless — gate only suppresses
+        // the PM injection, not check-slot lifecycle wiring.
+        {
+          const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
+          let bgOutput = "";
+          let bgFailed = false;
+          try {
+            bgOutput = execSync(`bash ${bgScript} ${slotNum}`, {
+              timeout: 8_000,
+              maxBuffer: 1024 * 1024,
+            }).toString();
+          } catch {
+            bgFailed = true;
+          }
+          const skipMatch = bgOutput.match(/INJECT_DECISION:skip(?:\s+REASON:([^\n]*))?/);
+          if (!bgFailed && skipMatch) {
+            const reason = (skipMatch[1] || "unspecified").trim().slice(0, 120);
+            console.log(`[active-debug] slot ${slotNum} INJECT_DECISION GATE — bg-script skip REASON:${reason}; suppressing /slot-active`);
+            this.db.logEvent(slotNum, "slot_active_suppressed_inject_decision", "PostToolUse", payload.tool_name ?? null, {
+              relay_path: "PostToolUse.slot_active.inject_decision",
+              reason,
+            });
+          } else {
+            // Inject MoP message prefix (replaces former slash command `/slot-active N`).
+            // Rajiv directive 2026-05-22 22:23 IST thread `1779468118.901709`:
+            // "inject is a string instead of a command." PM-side
+            // pm-context-injector.sh recognizes the prefix and emits
+            // [MoP_SLOT_NOTIFICATION] system-reminder hinting Skill(slot-active).
+            this.relay.injectToPM(`MoP: slot ${slotNum} active`);
+            this.db.logEvent(slotNum, "slot_active_notified", "PostToolUse", payload.tool_name ?? null, {
+              task: slot.task,
+              issue: slot.issue,
+              capture_file: captureFile,
+            });
+          }
+        }
 
         // ─── Start check-slot periodic timer ────────────────
         // Rajiv directive 2026-04-03: MoP drives check-slot instead of PM cron loop
@@ -1053,6 +1171,47 @@ export class HookProcessor {
             } catch {
               writeFileSync(captureFile, "[capture failed]");
             }
+
+            // ─── INJECT_DECISION gate (Rajiv 2026-05-16 18:26 IST thread `1778935572.419629`) ───
+            // Mirror /check-slot gate at hooks.ts:208-250 — also gate the
+            // defensive secondary path (Notification idle_prompt) so a
+            // qualitatively-healthy slot doesn't surface a false-positive
+            // /slot-idle.
+            //
+            // ALSO handles INJECT_DECISION:mop-direct-nudge (Rajiv 2026-05-17
+            // 00:31 IST thread `1778957625.997439`). See Stop.debounce path
+            // above for full semantics.
+            //
+            // Fail-open on bg-script failure.
+            {
+              const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
+              let bgOutput = "";
+              let bgFailed = false;
+              try {
+                bgOutput = execSync(`bash ${bgScript} ${slotNum}`, {
+                  timeout: 8_000,
+                  maxBuffer: 1024 * 1024,
+                }).toString();
+              } catch {
+                bgFailed = true;
+              }
+              // (INJECT_DECISION:mop-direct-nudge consumer REMOVED 2026-05-17 08:00 IST
+              // per Rajiv directive thread `1778957625.997439`. API 500 detection
+              // colocated with autocompact handler in stuck.ts checkApi500Backoff,
+              // running independently of slot idle state. bg-script Step 1a no
+              // longer emits this marker.)
+              const skipMatch = bgOutput.match(/INJECT_DECISION:skip(?:\s+REASON:([^\n]*))?/);
+              if (!bgFailed && skipMatch) {
+                const reason = (skipMatch[1] || "unspecified").trim().slice(0, 120);
+                console.log(`[idle-debug] slot ${slotNum} Notification(idle_prompt) INJECT_DECISION GATE — bg-script skip REASON:${reason}; suppressing /slot-idle`);
+                this.db.logEvent(slotNum, "slot_idle_suppressed_inject_decision", "Notification", null, {
+                  relay_path: "Notification.idle_prompt.inject_decision",
+                  reason,
+                });
+                return {};
+              }
+            }
+
             console.log(`[idle-debug] slot ${slotNum} Notification(idle_prompt) — relaying /slot-idle (defensive secondary path)`);
             this.relay.notifySlotIdle(slot);
             this.db.logEvent(slotNum, "slot_idle_notified", "Notification", null, {

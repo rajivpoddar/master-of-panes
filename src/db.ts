@@ -393,14 +393,34 @@ export class MoPDatabase {
   }
 
   /**
-   * Drain all queued PM-bound events. Returns rows ordered by slot,
-   * with cross-event-type coalescing applied: per slot, if a slot-idle
-   * is queued alongside a check-slot or slot-active, the terminal idle
-   * signal wins (drop check-slot/slot-active). If slot-active and
-   * check-slot coexist, slot-active wins. Caller is responsible for
-   * actually injecting these into the PM pane and then calling
-   * clearAllPendingPMEvents() (or the rows are deleted as part of the
-   * drain transaction below).
+   * Drain all queued PM-bound events. Returns AT MOST ONE row per slot —
+   * the most-relevant single notification — so PM sees one summary signal
+   * per slot rather than a stream of intermediate state transitions.
+   *
+   * Coalesce policy (Rajiv directive 2026-05-13 14:13 IST thread
+   * `1778661820.586119`: "send the last one when pm goes idle after stop
+   * hook fire"):
+   *
+   *   Per-slot priority (highest first):
+   *     1. `slot-blocked` — terminal blocker, PM must intervene
+   *     2. `slot-idle`     — terminal turn-end, PM acts
+   *     3. `slot-active`   — informational state-change
+   *     4. `check-slot`    — periodic 5-min wellness ping
+   *     5. `freeform-*`    — escalation comments, plan-approval-needed,
+   *                          compact warning, scheduled-task. Free-form
+   *                          rows are ALSO collapsed to one per slot;
+   *                          the most-recently-enqueued wins.
+   *
+   *   When a higher-priority signal exists for a slot, all lower-priority
+   *   rows for that slot are dropped. Within a tie (same priority bucket)
+   *   the most-recently-enqueued row wins.
+   *
+   *   Free-form rows (`freeform-<hash>`) DO NOT mix with slot-state rows —
+   *   they are emitted as a separate notification per slot ONLY IF no
+   *   slot-state signal exists for that slot. This preserves escalation
+   *   visibility when the slot has nothing else queued.
+   *
+   * Returns the deduped rows. Caller injects each row into PM.
    */
   drainPendingPMEvents(): Array<{ slot: number; event_type: string; payload: string | null; enqueued_at: string }> {
     const rows = this.db.prepare(`
@@ -409,33 +429,40 @@ export class MoPDatabase {
       ORDER BY slot ASC, enqueued_at ASC
     `).all() as Array<{ slot: number; event_type: string; payload: string | null; enqueued_at: string }>;
 
-    // Coalesce per slot: idle > active > check-slot. Other event_types pass
-    // through untouched.
-    const bySlot = new Map<number, Map<string, typeof rows[number]>>();
+    // Priority: lower number = higher priority. Free-form bucket sits below
+    // slot-state rows; within free-form, most-recent wins.
+    const priorityOf = (eventType: string): number => {
+      if (eventType === "slot-blocked") return 1;
+      if (eventType === "slot-idle") return 2;
+      if (eventType === "slot-active") return 3;
+      if (eventType === "check-slot") return 4;
+      // freeform-<hash> or any other custom event_type — only emit when no
+      // slot-state row exists. Most-recently-enqueued wins within bucket.
+      return 5;
+    };
+
+    // Group by slot, pick winner per slot.
+    type Row = typeof rows[number];
+    const bySlot = new Map<number, Row[]>();
     for (const row of rows) {
-      let m = bySlot.get(row.slot);
-      if (!m) { m = new Map(); bySlot.set(row.slot, m); }
-      m.set(row.event_type, row);
+      const arr = bySlot.get(row.slot) ?? [];
+      arr.push(row);
+      bySlot.set(row.slot, arr);
     }
 
-    const out: typeof rows = [];
+    const out: Row[] = [];
     const slots = [...bySlot.keys()].sort((a, b) => a - b);
     for (const slot of slots) {
-      const m = bySlot.get(slot)!;
-      const hasIdle = m.has("slot-idle");
-      const hasActive = m.has("slot-active");
-      // `check-slot` is the lowest-priority signal — always dropped if
-      // either slot-idle or slot-active is queued for the same slot.
-      const dropCheck = hasIdle || hasActive;
-      // `slot-active` is dropped if `slot-idle` is queued for the same slot
-      // (idle is terminal — slot finished its turn).
-      const dropActive = hasIdle;
-
-      for (const [eventType, row] of m) {
-        if (eventType === "check-slot" && dropCheck) continue;
-        if (eventType === "slot-active" && dropActive) continue;
-        out.push(row);
-      }
+      const slotRows = bySlot.get(slot)!;
+      // Sort: priority ASC (higher prio first), then enqueued_at DESC
+      // (most-recent first within same priority).
+      slotRows.sort((a, b) => {
+        const pa = priorityOf(a.event_type);
+        const pb = priorityOf(b.event_type);
+        if (pa !== pb) return pa - pb;
+        return b.enqueued_at.localeCompare(a.enqueued_at);
+      });
+      out.push(slotRows[0]);
     }
 
     // Delete drained rows.
