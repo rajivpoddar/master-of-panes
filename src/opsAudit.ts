@@ -2,8 +2,9 @@
  * MoP Ops Audit Scheduler — Hourly PM-pane ops review
  *
  * Owns: cadence (1h interval), no-overlap lock, PM busy queueing (via TmuxRelay),
- * trace logging. Does NOT own: business logic of the audit (delegated to
- * ~/.claude/scripts/hourly-ops-review-bg.sh — bounded Codex + local-signal call).
+ * trace logging, payload sanitization before PM injection (R4). Does NOT own:
+ * business logic of the audit (delegated to ~/.claude/scripts/hourly-ops-review-bg.sh
+ * — bounded Codex + local-signal call).
  *
  * Flow per tick:
  *   1. Acquire in-process lock (skip if previous tick still running).
@@ -11,8 +12,19 @@
  *   3. Spawn hourly-ops-review-bg.sh with --reason scheduled. Capture stdout.
  *   4. Parse first line: INJECT_DECISION:<inject|skip> REASON:<short>.
  *      - skip → log skip event, write last-run timestamp, exit.
- *      - inject → relay.injectToPM("MoP: hourly ops audit for <reason>\n<payload>").
- *        TmuxRelay handles PM busy queueing + debounce via its existing path.
+ *      - inject → sanitizePMPayload(raw) strips internal scheduler envelope
+ *        (INJECT_DECISION line, `---` separators, `-- META:` trailer, legacy
+ *        OWNER:dhruv/PM/Dhruv prefixes) and emits the clean R4 body shape:
+ *          MoP: hourly ops audit                       (stable title — no reason)
+ *          (blank line)
+ *          REASON: <parsed reason>
+ *          (blank line)
+ *          ACTION_ITEMS:
+ *          <ownerless-by-default items>
+ *          (blank line)
+ *          NEXT: invoke Skill(hourly-ops-audit) to process these action items.
+ *        Then relay.injectToPM(clean) is called. INJECT_DECISION remains the
+ *        internal bg-script → scheduler control channel — PM never sees it.
  *   5. Write last-run/status to DB config keys.
  *   6. Bound total wall-clock at BG_SCRIPT_TIMEOUT_MS (default 180s, allowing
  *      Codex 120s + overhead).
@@ -254,22 +266,25 @@ export class OpsAuditScheduler {
         return result;
       }
 
-      // inject
-      let payload = stdout;
+      // inject — R4: sanitize bg-script envelope before PM sees the payload.
+      // PM-facing title is stable (no reason); reason moves into body REASON: field.
+      // Per Rajiv CTO directive 2026-05-26 18:47 IST thread `1779790681.847219`:
+      // strip INJECT_DECISION / `---` / `-- META:` / legacy OWNER:dhruv|PM|Dhruv prefixes.
+      let cleanBody = sanitizePMPayload(stdout, parsed.reason);
       let truncated = false;
-      if (payload.length > this.PAYLOAD_HARD_CAP) {
-        payload = payload.slice(0, this.PAYLOAD_HARD_CAP) + "\n-- TRUNCATED (mop-side hard cap)";
+      if (cleanBody.length > this.PAYLOAD_HARD_CAP) {
+        cleanBody = cleanBody.slice(0, this.PAYLOAD_HARD_CAP) + "\n-- TRUNCATED (mop-side hard cap)";
         truncated = true;
       }
-      // Compose the MoP-prefixed message that pm-context-injector.sh recognizes.
-      // First line MUST be the recognized prefix. Subsequent lines = payload.
-      const message = `MoP: hourly ops audit for ${parsed.reason}\n${payload}`;
+      const message = cleanBody;
       const injected = this.relay.injectToPM(message);
+      // payloadBytes accounting reflects the PM-facing message size, not raw stdout.
+      const payloadBytes = message.length;
       const result: OpsAuditTickResult = {
         decision: "inject",
         reason: parsed.reason,
         elapsedMs,
-        payloadBytes: payload.length,
+        payloadBytes,
         injected,
         truncated,
       };
@@ -381,4 +396,103 @@ export function parseFirstLine(stdout: string): { decision: "inject" | "skip"; r
   const decision = match[1].toLowerCase() as "inject" | "skip";
   const reason = (match[2] ?? "unspecified").trim();
   return { decision, reason };
+}
+
+/**
+ * R4 — Sanitize bg-script payload before PM injection.
+ *
+ * The bg-script emits a scheduler-control envelope:
+ *
+ *   INJECT_DECISION:inject REASON:<short>
+ *   ---
+ *   ACTION_ITEMS:
+ *     - ACTION: ...
+ *       EVIDENCE: ...
+ *       TRANSITION: ...
+ *       TARGET: ...
+ *   ---
+ *   -- META: codex_status=ok elapsed_s=10 reason=ok
+ *
+ * INJECT_DECISION / `---` / `-- META:` are scheduler-internal — they let the
+ * scheduler decide inject-vs-skip and log run telemetry. PM should never see
+ * them. Per Rajiv CTO directive 2026-05-26 18:47 IST thread `1779790681.847219`,
+ * the scheduler MUST strip those, drop any legacy `OWNER: dhruv|PM|Dhruv`
+ * prefix lines (they encode the implicit PM-owned default — noise), and emit
+ * the clean R4 shape to PM:
+ *
+ *   MoP: hourly ops audit              (stable title — no reason in title)
+ *
+ *   REASON: <parsed reason>
+ *
+ *   ACTION_ITEMS:
+ *     - ACTION: <imperative>
+ *       EVIDENCE: <one-line>
+ *       TRANSITION: <verb>
+ *       TARGET: <id>
+ *     - ACTION: <imperative>
+ *       OWNER: slot:N                  (OWNER kept ONLY for slot/rajiv exceptions)
+ *       EVIDENCE: ...
+ *       TRANSITION: ...
+ *       TARGET: ...
+ *
+ *   NEXT: invoke Skill(hourly-ops-audit) to process these action items.
+ *
+ * The Stop hook + PreToolUse guard match on the title `MoP: hourly ops audit`
+ * (Shape 3 regex in pm-context-injector.sh accepts both legacy `for <reason>`
+ * and the new stable form during migration).
+ *
+ * Pure function — no side effects, no I/O. Exported for unit testing.
+ */
+export function sanitizePMPayload(rawStdout: string, parsedReason: string): string {
+  const lines = (rawStdout ?? "").split("\n");
+  const bodyLines: string[] = [];
+  let inMetaTrailer = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Strip the INJECT_DECISION scheduler-control line entirely.
+    if (/^INJECT_DECISION:/i.test(trimmed)) continue;
+
+    // Strip the internal `---` separators.
+    if (trimmed === "---") continue;
+
+    // Strip the `-- META:` trailer (everything from `-- META:` onward, including
+    // any following lines like `-- ORIGINAL_CODEX_OUTPUT:` blocks).
+    if (/^--\s*(META|ORIGINAL_CODEX_OUTPUT)\b/i.test(trimmed)) {
+      inMetaTrailer = true;
+      continue;
+    }
+    if (inMetaTrailer) continue;
+
+    // Strip ownerless-default OWNER lines (legacy noise per R2/R4):
+    //   `OWNER: dhruv`, `OWNER:dhruv`, `OWNER: PM`, `OWNER: Dhruv`, `OWNER: Dhruva`
+    // (case-insensitive). Real exception OWNER lines (`OWNER: slot:N`,
+    // `OWNER: rajiv`) are preserved.
+    if (/^\s*OWNER:\s*(dhruv(a)?|PM)\s*$/i.test(line)) continue;
+
+    // Also strip leading `Dhruv:` / `PM:` directive prefixes (rare legacy shape).
+    if (/^\s*(Dhruv(a)?|PM):\s*$/i.test(line)) continue;
+
+    bodyLines.push(line);
+  }
+
+  // Collapse leading + trailing blank lines, and collapse runs of 3+ blanks to 2.
+  let body = bodyLines.join("\n").replace(/^\n+|\n+$/g, "").replace(/\n{3,}/g, "\n\n");
+
+  // Compose the clean R4 PM-facing message.
+  // Title is STABLE — no reason. Reason goes in body.
+  // NEXT line tells PM to invoke the skill (informational; the hook + guard
+  // enforce mechanically).
+  const safeReason = (parsedReason ?? "").trim() || "unspecified";
+  const out =
+    `MoP: hourly ops audit\n` +
+    `\n` +
+    `REASON: ${safeReason}\n` +
+    `\n` +
+    `${body}\n` +
+    `\n` +
+    `NEXT: invoke Skill(hourly-ops-audit) to process these action items.\n`;
+
+  return out;
 }
