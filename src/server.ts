@@ -22,6 +22,7 @@ import { TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
 import { StuckDetector } from "./stuck.js";
+import { OpsAuditScheduler } from "./opsAudit.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS } from "./health.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import type { HookPayload, MoPConfig } from "./types.js";
@@ -58,6 +59,13 @@ stuckDetector.start();
 // ─── Process Health (Phase 4) ───────────────────────────
 const healthChecker = new ProcessHealthChecker(db, relay);
 healthChecker.start();
+
+// ─── Ops Audit Scheduler (hourly PM-pane exceptions review) ──
+// Owns cadence (1h), in-process lock, PM busy queueing (via TmuxRelay).
+// Delegates business logic to ~/.claude/scripts/hourly-ops-review-bg.sh.
+// Rajiv CTO directive 2026-05-26 thread C0ALZJHGE49/1779790681.847219.
+const opsAuditScheduler = new OpsAuditScheduler(db, relay);
+opsAuditScheduler.start();
 
 // ─── Log Rotation (every 10 minutes) ────────────────────
 const rotationTimer = setInterval(() => {
@@ -200,6 +208,41 @@ app.get("/pm-status", (c) => {
     queue: db.peekPendingPMEvents(),
     queue_count: db.getPendingPMEventCount(),
   });
+});
+
+// ─── Ops Audit Endpoints ────────────────────────────────
+// Force an audit run (manual trigger from MCP tool / operator).
+// reason defaults to "manual" — bypasses pause for operator override.
+app.post("/ops-audit/run", async (c) => {
+  let body: { reason?: string } = {};
+  try {
+    body = (await c.req.json()) as { reason?: string };
+  } catch {
+    /* allow empty body */
+  }
+  const triggerReason = body.reason === "scheduled" || body.reason === "boot" ? body.reason : "manual";
+  const result = await opsAuditScheduler.tick(triggerReason);
+  return c.json({ success: true, result });
+});
+
+// Status of the scheduler (paused?, last-run, payload bytes, etc.).
+app.get("/ops-audit/status", (c) => {
+  return c.json(opsAuditScheduler.getStatus());
+});
+
+// Pause/unpause the scheduler. Body: { paused: boolean }
+app.post("/ops-audit/pause", async (c) => {
+  let body: { paused?: boolean } = {};
+  try {
+    body = (await c.req.json()) as { paused?: boolean };
+  } catch {
+    return c.json({ success: false, error: "Body must be JSON: { paused: boolean }" }, 400);
+  }
+  if (typeof body.paused !== "boolean") {
+    return c.json({ success: false, error: "paused must be boolean" }, 400);
+  }
+  opsAuditScheduler.setPaused(body.paused);
+  return c.json({ success: true, status: opsAuditScheduler.getStatus() });
 });
 
 /** Receive hook from a specific slot */
@@ -1131,6 +1174,7 @@ process.on("SIGINT", () => {
   console.log("\n[mop] Shutting down...");
   healthChecker.stop();
   stuckDetector.stop();
+  opsAuditScheduler.stop();
   clearInterval(rotationTimer);
   logManager.disableLogging(config.slotCount);
   db.close();
@@ -1141,6 +1185,7 @@ process.on("SIGTERM", () => {
   console.log("[mop] Terminated");
   healthChecker.stop();
   stuckDetector.stop();
+  opsAuditScheduler.stop();
   clearInterval(rotationTimer);
   logManager.disableLogging(config.slotCount);
   db.close();

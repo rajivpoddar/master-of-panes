@@ -719,6 +719,107 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     }
   );
 
+  // ─── mop_ops_audit_now ─────────────────────────────────
+  // Manual trigger for the hourly ops-audit scheduler. POSTs to the HTTP
+  // server which owns the in-process lock + relay queue.
+  // Rajiv CTO directive 2026-05-26 thread C0ALZJHGE49/1779790681.847219.
+
+  server.tool(
+    "mop_ops_audit_now",
+    "Force one ops-audit tick immediately (bypasses pause). Returns the decision (inject|skip|error), reason, elapsed_ms, payload_bytes, and whether the payload was injected into PM. Use when you suspect an exception that the next hourly tick would catch — equivalent to running ~/.claude/scripts/hourly-ops-review-bg.sh through MoP's lock + PM-busy queueing path.",
+    {
+      reason: z
+        .enum(["manual", "scheduled", "boot"])
+        .default("manual")
+        .describe("Trigger reason — manual bypasses pause. Default 'manual'."),
+    },
+    async ({ reason }) => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/ops-audit/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ reason }),
+        });
+        const json = (await res.json()) as { success: boolean; result?: unknown; error?: string };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(json, null, 2),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `ERROR: failed to reach MoP HTTP server on port ${config.httpPort}: ${err}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // ─── mop_ops_audit_status ──────────────────────────────
+
+  server.tool(
+    "mop_ops_audit_status",
+    "Get ops-audit scheduler status: paused flag, in-process running flag, interval_ms, bg_script presence, last_run_ts, last_run_decision (inject|skip|error), last_run_reason, last_run_elapsed_ms, last_run_payload_bytes.",
+    {},
+    async () => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/ops-audit/status`);
+        const json = await res.json();
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `ERROR: failed to reach MoP HTTP server: ${err}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // ─── mop_ops_audit_pause ───────────────────────────────
+
+  server.tool(
+    "mop_ops_audit_pause",
+    "Pause or resume the hourly ops-audit scheduler. Pause persists across MoP restarts (stored in MoP SQLite config table). Manual ticks via mop_ops_audit_now still run while paused.",
+    {
+      paused: z.boolean().describe("true = pause, false = resume"),
+    },
+    async ({ paused }) => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/ops-audit/pause`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ paused }),
+        });
+        const json = await res.json();
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `ERROR: failed to reach MoP HTTP server: ${err}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
   // ─── Start Transport ───────────────────────────────────
 
   const transport = new StdioServerTransport();
