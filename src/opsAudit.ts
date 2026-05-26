@@ -37,7 +37,14 @@ import os from "node:os";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 
-const BG_SCRIPT_PATH = path.join(os.homedir(), ".claude", "scripts", "hourly-ops-review-bg.sh");
+/**
+ * bg-script path. Honors OPS_AUDIT_BG_SCRIPT_OVERRIDE env for deterministic tests
+ * (R1 fix 3 — Rajiv directive 2026-05-26 16:29 IST thread `1779790681.847219`:
+ * "Real Codex invocation + PM injection during `npm test` is unacceptable.").
+ * Resolved at module load — process.env is stable for the scheduler lifetime.
+ */
+const BG_SCRIPT_PATH = process.env.OPS_AUDIT_BG_SCRIPT_OVERRIDE
+  ?? path.join(os.homedir(), ".claude", "scripts", "hourly-ops-review-bg.sh");
 
 // Config keys persisted in MoP DB (config table is KV).
 const CFG_PAUSED = "ops_audit_paused";

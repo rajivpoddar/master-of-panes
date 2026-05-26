@@ -89,8 +89,17 @@ void SEND_TO_SLOT_SCRIPT;
  * (slot, event_type) coalesce key stay stable.
  *
  * Returns null for free-form messages (escalation comments,
- * plan-approval-needed, etc.) — those go through the queue keyed by their
- * own slot extraction or fall back to slot 0 in the freeform path.
+ * plan-approval-needed, hourly-ops-audit "MoP: hourly ops audit for <reason>",
+ * etc.) — those go through the queue keyed by their own slot extraction or
+ * fall back to slot 0 in the freeform path.
+ *
+ * NOTE (R1 fix 4 option b, 2026-05-26 thread `1779790681.847219`): hourly-ops-audit
+ * payloads (Shape 3: "MoP: hourly ops audit for <reason>") are INTENTIONALLY
+ * NOT keyed here. They route through the freeform branch of `injectToPM` so
+ * multiple distinct audit payloads do not collapse onto one another when PM is
+ * busy. The (slot, event_type) coalesce key in Shapes 1/2a/2b is the right
+ * choice for slot-keyed events (only the latest matters); the audit payload
+ * is a one-shot exception list whose contents matter individually.
  */
 function parseRelayMessage(message: string): { eventType: string; slot: number } | null {
   // First-line scan: a multi-line check-slot payload starts with the prefix
@@ -122,6 +131,10 @@ function parseRelayMessage(message: string): { eventType: string; slot: number }
     return { eventType: `slot-${mopSlot[2].toLowerCase()}`, slot };
   }
 
+  // Shape 3 ("MoP: hourly ops audit for <reason>"): intentional pass-through.
+  // Returning null here routes the message through injectToPM's freeform branch,
+  // which enqueues with slot=0 + a hash-derived event_type so concurrent audit
+  // payloads do not collapse onto each other when PM is busy.
   return null;
 }
 
@@ -384,10 +397,14 @@ export class TmuxRelay {
         return true;
       }
       // Free-form message (escalation, plan-approval-needed, scheduled-task,
-      // compact warning, queued-clear ack). Try to extract slot from
-      // "slot N" substring; otherwise key by slot 0 + a synthetic event
-      // type derived from a hash so multiple distinct free-form messages
-      // for the same slot don't collapse onto each other.
+      // compact warning, queued-clear ack, hourly-ops-audit). Try to extract
+      // slot from "slot N" substring; otherwise key by slot 0 + a synthetic
+      // event type derived from a hash so multiple distinct free-form
+      // messages for the same slot don't collapse onto each other.
+      // Hourly-audit ("MoP: hourly ops audit for <reason>") deliberately
+      // lands here per parseRelayMessage Shape 3 note (R1 fix 4 option b,
+      // 2026-05-26 thread `1779790681.847219`) — each audit payload is a
+      // one-shot exception list whose contents matter individually.
       const slotMatch = /\bslot\s+(\d+)\b/i.exec(message);
       const slot = slotMatch ? Math.min(4, Math.max(0, parseInt(slotMatch[1], 10))) : 0;
       const synthHash = simpleHash(message);
