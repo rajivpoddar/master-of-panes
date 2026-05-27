@@ -82,6 +82,7 @@ export class OpsAuditScheduler {
   private db: MoPDatabase;
   private relay: TmuxRelay;
   private timer: NodeJS.Timeout | null = null;
+  private bootCatchupTimer: NodeJS.Timeout | null = null;
   private running: boolean = false; // in-process lock
 
   // 1-hour cadence. Configurable via env for tests.
@@ -97,6 +98,10 @@ export class OpsAuditScheduler {
   // Inject payload hard cap (truncate above this).
   private readonly PAYLOAD_HARD_CAP: number = parseInt(
     process.env.MOP_OPS_AUDIT_PAYLOAD_CAP ?? "32768",
+    10
+  );
+  private readonly BOOT_CATCHUP_DELAY_MS: number = parseInt(
+    process.env.MOP_OPS_AUDIT_BOOT_DELAY_MS ?? `${30 * 1000}`,
     10
   );
 
@@ -117,6 +122,11 @@ export class OpsAuditScheduler {
       `[ops-audit] Scheduler started — interval ${this.TICK_INTERVAL_MS}ms, ` +
         `bg-script ${BG_SCRIPT_PATH}, timeout ${this.BG_SCRIPT_TIMEOUT_MS}ms`
     );
+    this.bootCatchupTimer = setTimeout(() => {
+      this.tickBootCatchup().catch((err) => {
+        console.error("[ops-audit] boot catch-up threw:", err);
+      });
+    }, this.BOOT_CATCHUP_DELAY_MS);
   }
 
   /** Stop the scheduler (for clean shutdown). */
@@ -125,6 +135,29 @@ export class OpsAuditScheduler {
       clearInterval(this.timer);
       this.timer = null;
     }
+    if (this.bootCatchupTimer) {
+      clearTimeout(this.bootCatchupTimer);
+      this.bootCatchupTimer = null;
+    }
+  }
+
+  private async tickBootCatchup(): Promise<void> {
+    this.bootCatchupTimer = null;
+    if (this.db.getConfig(CFG_PAUSED) === "true") {
+      console.log("[ops-audit] boot catch-up skipped — paused");
+      return;
+    }
+
+    const lastRunRaw = this.db.getConfig(CFG_LAST_RUN_TS);
+    const lastRunMs = lastRunRaw ? Date.parse(lastRunRaw) : NaN;
+    const ageMs = Number.isFinite(lastRunMs) ? Date.now() - lastRunMs : Infinity;
+    if (ageMs < this.TICK_INTERVAL_MS) {
+      console.log(`[ops-audit] boot catch-up skipped — last run age_ms=${ageMs}`);
+      return;
+    }
+
+    console.log(`[ops-audit] boot catch-up running — last_run=${lastRunRaw ?? "none"} age_ms=${ageMs}`);
+    await this.tick("boot");
   }
 
   /** Status snapshot for MCP/HTTP reporting. */

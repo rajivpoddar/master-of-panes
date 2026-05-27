@@ -144,6 +144,14 @@ export class HookProcessor {
 
   /** Check-slot interval: 5 minutes */
   private static readonly CHECK_SLOT_INTERVAL_MS = 5 * 60 * 1000;
+  /**
+   * Emergency containment: keep the heavyweight check-slot classifier out of
+   * the MoP HTTP process unless explicitly re-enabled. The classifier can run
+   * Codex/gh/tmux work for up to 30s per active slot; doing that via execSync
+   * inside this process starves /health and the hourly ops scheduler.
+   */
+  private static readonly CHECK_SLOT_BG_ENABLED =
+    process.env.MOP_CHECK_SLOT_BG_ENABLED === "1";
 
   constructor(
     private db: MoPDatabase,
@@ -193,6 +201,27 @@ export class HookProcessor {
       // Skip firing if slot is momentarily idle (between tool calls), but keep timer alive
       if (currentSlot.idle) {
         console.log(`[check-slot] ${now} Slot ${slotNum} SKIP tick — idle between tool calls, timer stays alive`);
+        return;
+      }
+
+      if (!HookProcessor.CHECK_SLOT_BG_ENABLED) {
+        const checkFile = `/tmp/slot-${slotNum}-check.txt`;
+        try {
+          writeFileSync(
+            checkFile,
+            `STATUS:SKIP reason=check-slot-bg-disabled slot=${slotNum}`
+          );
+        } catch {
+          // Best-effort diagnostic only.
+        }
+        console.log(
+          `[check-slot] ${now} Slot ${slotNum} SKIPPED — check-slot-bg disabled in MoP HTTP process`
+        );
+        this.db.logEvent(slotNum, "check_slot_skipped", "Timer", null, {
+          check_file: checkFile,
+          reason: "check-slot-bg-disabled",
+          interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
+        });
         return;
       }
 
@@ -784,7 +813,7 @@ export class HookProcessor {
         //
         // Fail-open: bg-script failure → fall through to inject (preserves
         // prior behavior).
-        {
+        if (HookProcessor.CHECK_SLOT_BG_ENABLED) {
           const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
           let bgOutput = "";
           let bgFailed = false;
@@ -811,6 +840,14 @@ export class HookProcessor {
             });
             return;
           }
+        } else {
+          console.log(
+            `[idle-debug] slot ${slotNum} INJECT_DECISION GATE SKIPPED — check-slot-bg disabled in MoP HTTP process`
+          );
+          this.db.logEvent(slotNum, "slot_idle_inject_decision_skipped", "Stop", null, {
+            relay_path: "Stop.debounce.inject_decision",
+            reason: "check-slot-bg-disabled",
+          });
         }
 
         console.log(`[idle-debug] slot ${slotNum} calling relay.notifySlotIdle()`);
@@ -908,7 +945,8 @@ export class HookProcessor {
         // Fail-open: bg-script failure → fall through to inject.
         // NOTE: timer-start (below) runs regardless — gate only suppresses
         // the PM injection, not check-slot lifecycle wiring.
-        {
+        let suppressSlotActive = false;
+        if (HookProcessor.CHECK_SLOT_BG_ENABLED) {
           const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
           let bgOutput = "";
           let bgFailed = false;
@@ -928,7 +966,19 @@ export class HookProcessor {
               relay_path: "PostToolUse.slot_active.inject_decision",
               reason,
             });
-          } else {
+            suppressSlotActive = true;
+          }
+        } else {
+          console.log(
+            `[active-debug] slot ${slotNum} INJECT_DECISION GATE SKIPPED — check-slot-bg disabled in MoP HTTP process`
+          );
+          this.db.logEvent(slotNum, "slot_active_inject_decision_skipped", "PostToolUse", payload.tool_name ?? null, {
+            relay_path: "PostToolUse.slot_active.inject_decision",
+            reason: "check-slot-bg-disabled",
+          });
+        }
+
+        if (!suppressSlotActive) {
             // Inject MoP message prefix (replaces former slash command `/slot-active N`).
             // Rajiv directive 2026-05-22 22:23 IST thread `1779468118.901709`:
             // "inject is a string instead of a command." PM-side
@@ -940,7 +990,6 @@ export class HookProcessor {
               issue: slot.issue,
               capture_file: captureFile,
             });
-          }
         }
 
         // ─── Start check-slot periodic timer ────────────────
@@ -1183,7 +1232,7 @@ export class HookProcessor {
             // above for full semantics.
             //
             // Fail-open on bg-script failure.
-            {
+            if (HookProcessor.CHECK_SLOT_BG_ENABLED) {
               const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
               let bgOutput = "";
               let bgFailed = false;
@@ -1210,6 +1259,14 @@ export class HookProcessor {
                 });
                 return {};
               }
+            } else {
+              console.log(
+                `[idle-debug] slot ${slotNum} Notification(idle_prompt) INJECT_DECISION GATE SKIPPED — check-slot-bg disabled in MoP HTTP process`
+              );
+              this.db.logEvent(slotNum, "slot_idle_inject_decision_skipped", "Notification", null, {
+                relay_path: "Notification.idle_prompt.inject_decision",
+                reason: "check-slot-bg-disabled",
+              });
             }
 
             console.log(`[idle-debug] slot ${slotNum} Notification(idle_prompt) — relaying /slot-idle (defensive secondary path)`);

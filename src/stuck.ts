@@ -148,7 +148,7 @@ export class StuckDetector {
   //   *"are you triggering /compact on slot 1 and 2? check MoP logs? why?"*
   //   *"was this fixed?"*
   // Companion: feedback_mop_bg_script_failure_compact_misfire_2026_05_17.md
-  private readonly BG_SCRIPT_COMPACT_LOG_STALE_MS = 5 * 60 * 1000;
+  private readonly BG_SCRIPT_COMPACT_LOG_STALE_MS = 30 * 60 * 1000; // 5 → 30 min (Rajiv directive 2026-05-25 13:28 IST channel C0ALZJHGE49 thread 1779695516.850089 — slot 4 false-positive compacts during long-thinking bursts that exceed 5min)
 
   // ─── API 500 backoff detector ───────────────────────────────────────────
   // Colocated with autocompact detector per Rajiv directive 2026-05-17 07:59 IST
@@ -1016,12 +1016,25 @@ export class StuckDetector {
         if (slotLogMtime) {
           const logAgeMs = Date.now() - slotLogMtime.getTime();
           if (logAgeMs < this.BG_SCRIPT_COMPACT_LOG_STALE_MS) {
+            // Rajiv directive 2026-05-27 19:14 IST channel C0ALZJHGE49
+            // thread `1779889477.891309`: "fix the classifier with a bg agent
+            // and restart MoP". The PM was getting 100+ false-positive
+            // bg-script-failed warnings on actively-producing slots (latest
+            // 109 consecutive ticks for slot 3 during a legitimate 60+min
+            // DeepSeek v4 Flash xhigh envisioning cycle).
+            //
+            // When the slot's tmux log is FRESH (active < threshold), the
+            // bg-script telemetry failure is uninteresting infra noise —
+            // slot is actually working, just no Codex heartbeat. Do NOT
+            // inject a PM warning. Reset the consecutive-fails counter so
+            // the count doesn't grow unbounded into the next genuine wedge.
+            //
+            // Event row STILL logged (for observability + 10-min dedup), but
+            // with action="suppressed_silent_slot_active" so it's distinct
+            // from a real wedge.
             console.log(
-              `[stuck-info] slot=${slot.slot} suppress=bg-script-compact-slot-active log_age_ms=${logAgeMs} threshold_ms=${this.BG_SCRIPT_COMPACT_LOG_STALE_MS} — bg-script likely infra failure (Codex/ETIMEDOUT), slot itself is producing output`
+              `[stuck-info] slot=${slot.slot} suppress=bg-script-compact-slot-active-silent log_age_ms=${logAgeMs} threshold_ms=${this.BG_SCRIPT_COMPACT_LOG_STALE_MS} — slot actively producing output, no PM alarm`
             );
-            // Surface PM alarm once per dedup window so the underlying
-            // bg-script infra failure gets investigated. Reuse the
-            // BG_SCRIPT_FAILURE_DEDUP_MS guard via the same event row.
             this.db.logEvent(
               slot.slot,
               "bg_script_failure_compact",
@@ -1033,13 +1046,19 @@ export class StuckDetector {
                 log_lines: failCount,
                 task: slot.task,
                 issue: slot.issue,
-                action: "suppressed_compact_slot_active",
+                action: "suppressed_silent_slot_active",
                 log_age_ms: logAgeMs,
               }
             );
-            this.relay.injectToPM(
-              `# warning slot ${slot.slot} bg-script failing (${prev + 1} consecutive ticks) — slot itself active (log age ${Math.round(logAgeMs / 1000)}s). Likely Codex CLI auth / ETIMEDOUT / script crash. /compact SUPPRESSED. PM-direct investigation needed.`
-            );
+            // Reset the consecutive-fails counter — slot is healthy from
+            // the standpoint of producing output, so don't carry a stale
+            // tick count forward (which inflates the "109 ticks" framing
+            // when the next genuine bg-script glitch occurs).
+            this.bgScriptFailures.set(slot.slot, 0);
+            // NOTE: PM inject removed. To re-enable for debug:
+            //   this.relay.injectToPM(
+            //     `# warning slot ${slot.slot} bg-script failing (${prev + 1} consecutive ticks) — slot itself active (log age ${Math.round(logAgeMs / 1000)}s). Likely Codex CLI auth / ETIMEDOUT / script crash. /compact SUPPRESSED. PM-direct investigation needed.`
+            //   );
             continue;
           }
         }

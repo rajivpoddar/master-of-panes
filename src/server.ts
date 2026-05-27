@@ -14,6 +14,7 @@
 
 import { execSync } from "node:child_process";
 import { readFileSync, appendFileSync } from "node:fs";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
@@ -73,6 +74,27 @@ const rotationTimer = setInterval(() => {
     logManager.rotateIfNeeded(i);
   }
 }, 10 * 60 * 1000);
+
+// ─── Event-Loop Lag Instrumentation ─────────────────────
+// /health must stay trivial, but healthcheck needs to distinguish "dead"
+// from "alive but event-loop starved." Sample here and expose the last value.
+const eventLoopHist = monitorEventLoopDelay({ resolution: 20 });
+eventLoopHist.enable();
+let lastLagSampleMs = 0;
+const eventLoopLagTimer = setInterval(() => {
+  const maxMs = eventLoopHist.max / 1e6;
+  const p99Ms = eventLoopHist.percentile(99) / 1e6;
+  const meanMs = eventLoopHist.mean / 1e6;
+  lastLagSampleMs = maxMs;
+  if (maxMs >= 1000) {
+    console.log(
+      `[event-loop-lag] WARN max=${maxMs.toFixed(0)}ms p99=${p99Ms.toFixed(0)}ms mean=${meanMs.toFixed(1)}ms — event loop starved, /health may flap`
+    );
+  } else {
+    console.log(`[event-loop-lag] max=${maxMs.toFixed(0)}ms p99=${p99Ms.toFixed(0)}ms mean=${meanMs.toFixed(1)}ms`);
+  }
+  eventLoopHist.reset();
+}, 60 * 1000);
 
 const app = new Hono();
 
@@ -147,9 +169,48 @@ function normalizePayload(raw: z.infer<typeof hookPayloadSchema>): HookPayload {
 
 // ─── Routes ──────────────────────────────────────────────
 
-/** Health check */
+/**
+ * Liveness probe. Keep this event-loop trivial: no SQLite, tmux, log scans,
+ * or filesystem reads. Deep diagnostics live at /ready.
+ */
 app.get("/health", (c) => {
-  return c.json({ status: "ok", uptime: process.uptime() });
+  return c.json({
+    status: "ok",
+    uptime: process.uptime(),
+    lastLagMs: Math.round(lastLagSampleMs),
+  });
+});
+
+/** Deep readiness / control-plane status. Not used by launchd liveness. */
+app.get("/ready", (c) => {
+  const slots = (() => {
+    try {
+      return db.getAllSlots().map((s) => ({
+        slot: s.slot,
+        occupied: s.occupied,
+        dnd: s.dnd,
+        activity: s.activity,
+      }));
+    } catch (e) {
+      return { error: String(e) };
+    }
+  })();
+  return c.json({
+    status: "ok",
+    uptime: process.uptime(),
+    eventLoop: {
+      lastSampleMs: Math.round(lastLagSampleMs),
+      warnThresholdMs: 1000,
+    },
+    watchdogs: {
+      stuckDetector: !!stuckDetector,
+      healthChecker: !!healthChecker,
+      opsAuditScheduler: !!opsAuditScheduler,
+      rotationTimer: !!rotationTimer,
+      eventLoopLagTimer: !!eventLoopLagTimer,
+    },
+    slots,
+  });
 });
 
 /** Restart the MoP server — exits process, session watcher restarts it */
@@ -1176,6 +1237,8 @@ process.on("SIGINT", () => {
   stuckDetector.stop();
   opsAuditScheduler.stop();
   clearInterval(rotationTimer);
+  clearInterval(eventLoopLagTimer);
+  eventLoopHist.disable();
   logManager.disableLogging(config.slotCount);
   db.close();
   process.exit(0);
@@ -1187,6 +1250,8 @@ process.on("SIGTERM", () => {
   stuckDetector.stop();
   opsAuditScheduler.stop();
   clearInterval(rotationTimer);
+  clearInterval(eventLoopLagTimer);
+  eventLoopHist.disable();
   logManager.disableLogging(config.slotCount);
   db.close();
   process.exit(0);
