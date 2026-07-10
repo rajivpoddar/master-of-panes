@@ -15,6 +15,7 @@
  * - mop_release_slot: Release a slot (mark free)
  * - mop_set_dnd: Set/clear DND on a slot
  * - mop_capture_output: Capture live tmux output from a slot + busy/idle status
+ * - mop_clear_slot: Clear one slot or all slots through MoP logging
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -23,7 +24,12 @@ import { z } from "zod";
 import { MoPDatabase } from "./db.js";
 import { TmuxRelay } from "./relay.js";
 import { DEFAULT_CONFIG } from "./types.js";
+import { execShell, sleep } from "./asyncCommand.js";
 import type { MoPConfig } from "./types.js";
+
+function isPmControlCommand(command: string): boolean {
+  return command.trim().startsWith("/");
+}
 
 export async function startMcpServer(config: MoPConfig): Promise<void> {
   const db = new MoPDatabase(config);
@@ -42,7 +48,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     { slot: z.number().int().min(1).max(4).describe("Slot number (1-4)") },
     async ({ slot }) => {
       // Refresh idle state from is-active.sh (real-time chevron + content check)
-      const isActive = relay.isSlotActive(slot);
+      const isActive = await relay.isSlotActive(slot);
       db.updateSlot(slot, { idle: !isActive });
 
       const state = db.getSlot(slot);
@@ -64,7 +70,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     async () => {
       // Refresh idle state for all slots from is-active.sh (real-time)
       for (let i = 1; i <= config.slotCount; i++) {
-        const isActive = relay.isSlotActive(i);
+        const isActive = await relay.isSlotActive(i);
         db.updateSlot(i, { idle: !isActive });
       }
 
@@ -138,6 +144,38 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       raw: z.boolean().default(false).describe("Send as raw tmux key sequence (e.g., Escape, BTab for Shift+Tab, C-c). No Enter appended, no mode detection."),
     },
     async ({ slot, command, force, raw }) => {
+      if (slot === 0 && raw) {
+        db.logEvent(slot, "send_rejected_pm_raw", null, null, {
+          command: command.slice(0, 200),
+          raw,
+          reason: "pm_raw_send_blocked",
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "✗ Refused raw send to PM pane (reason=pm_raw_send_blocked). Use message-pm with a plain message body.",
+            },
+          ],
+        };
+      }
+      if (slot === 0 && isPmControlCommand(command)) {
+        db.logEvent(slot, "send_rejected_pm_control_command", null, null, {
+          command: command.slice(0, 200),
+          force,
+          raw,
+          reason: "pm_control_command_blocked",
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "✗ Refused PM-pane slash command (reason=pm_control_command_blocked). Use message-pm with a plain status body; hard blocks should start with ESCALATION:.",
+            },
+          ],
+        };
+      }
+
       const slotState = db.getSlot(slot);
       if (slotState?.dnd && !force) {
         return {
@@ -159,7 +197,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       }
 
       // Guard: block /review-and-pr when slot is active (even with force)
-      if (command.includes("/review-and-pr") && relay.isSlotActive(slot)) {
+      if (command.includes("/review-and-pr") && await relay.isSlotActive(slot)) {
         return {
           content: [
             {
@@ -247,7 +285,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       }
 
       // raw: true → legacy direct-tmux send (key sequences only)
-      const success = relay.sendToSlot(slot, command, force, raw);
+      const success = await relay.sendToSlotAsync(slot, command, force, raw);
       db.logEvent(slot, "command_sent", null, null, { command, force, raw, success });
 
       return {
@@ -267,21 +305,22 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_assign_slot",
-    "Assign a task to a slot. Sets status to active, stores task/issue/branch metadata. Optionally set a human-readable name.",
+    "Assign a task to a slot. Sets status to active, stores task/issue/pr/branch metadata. Optionally set a human-readable name.",
     {
       slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
       task: z.string().describe("Task description"),
       issue: z.number().int().nullable().default(null).describe("GitHub issue number"),
+      pr: z.number().int().nullable().default(null).describe("GitHub PR number"),
       branch: z.string().nullable().default(null).describe("Git branch name"),
       session_id: z.string().nullable().default(null).describe("Claude Code session ID"),
       name: z.string().nullable().default(null).describe("Human-readable slot name (e.g., 'Rohini')"),
     },
-    async ({ slot, task, issue, branch, session_id, name }) => {
-      db.assignSlot(slot, task, issue, branch, session_id);
+    async ({ slot, task, issue, pr, branch, session_id, name }) => {
+      db.assignSlot(slot, task, issue, branch, session_id, pr);
       if (name !== null) {
         db.updateSlot(slot, { name } as Partial<import("./types.js").SlotState>);
       }
-      db.logEvent(slot, "slot_assigned", null, null, { task, issue, branch, name });
+      db.logEvent(slot, "slot_assigned", null, null, { task, issue, pr, branch, name });
       const updated = db.getSlot(slot);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(updated, null, 2) }],
@@ -366,6 +405,20 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       dnd: z.boolean().describe("true to enable DND, false to clear"),
     },
     async ({ slot, dnd }) => {
+      const current = db.getSlot(slot);
+      if (dnd && current && !current.occupied) {
+        db.updateSlot(slot, { dnd: false });
+        db.logEvent(slot, "dnd_free_slot_rejected", null, null, {
+          requested: true,
+          reason: "free_slot_cannot_be_dnd",
+        });
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Slot ${slot} is free; DND request ignored and cleared so dispatch can use the slot.`,
+          }],
+        };
+      }
       db.updateSlot(slot, { dnd });
       db.logEvent(slot, dnd ? "dnd_enabled" : "dnd_disabled", null, null, {});
       return {
@@ -436,7 +489,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       lines: z.number().int().min(5).max(200).default(30).describe("Number of lines to capture (default 30)"),
     },
     async ({ slot, lines }) => {
-      const { output, activity } = relay.captureOutput(slot, lines);
+      const { output, activity } = await relay.captureOutput(slot, lines);
       const slotState = db.getSlot(slot);
       const taskPart = slotState?.task ? ` | task: ${slotState.task}` : "";
 
@@ -546,26 +599,23 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       if (!slackToken) {
         // Try sourcing from .env.local
         try {
-          const { execSync } = await import("node:child_process");
-          const token = execSync(
+          const token = await execShell(
             `source /Users/rajiv/Downloads/projects/heydonna-app/.env.local 2>/dev/null && echo $SLACK_BOT_TOKEN`,
             { timeout: 5000 }
-          ).toString().trim();
-          if (token) process.env.SLACK_BOT_TOKEN = token;
+          );
+          if (token.stdout.trim()) process.env.SLACK_BOT_TOKEN = token.stdout.trim();
         } catch { /* ignore */ }
       }
 
       const captureAndPost = async () => {
         try {
           // Check if slot is active
-          const isActive = relay.isSlotActive(slot);
+          const isActive = await relay.isSlotActive(slot);
           if (!isActive) return; // Skip idle slots
-
-          const { execSync } = await import("node:child_process");
 
           // Use pane-screenshot.sh which does: tmux zoom → ttyd → Playwright → unzoom → Slack upload
           // Pass thread_ts so the script handles the Slack upload directly
-          execSync(
+          await execShell(
             `bash ${process.env.HOME}/.claude/skills/tmux-pane-screenshot/scripts/pane-screenshot.sh ${slot} ${thread_ts}`,
             { timeout: 30_000, env: { ...process.env, SLACK_CHANNEL: channelId } }
           );
@@ -596,123 +646,144 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     }
   );
 
-  // ─── mop_clear_all_slots ──────────────────────────────
-  // Clears all slot contexts and releases MoP state in one call.
+  // ─── MoP clear helpers ─────────────────────────────────
+  // Clears slot contexts and releases MoP state in one logged command path.
   // Rajiv directive 2026-04-03: "we need an MoP command that clears all slots"
+  // Rajiv directive 2026-06-09: PM-facing clears use mop_clear_slot for one/all slots.
+
+  type ClearSlotResult = { slot: number; name: string; status: string };
+
+  const formatClearResults = (results: ClearSlotResult[]): string => {
+    const cleared = results.filter((r) => r.status.includes("cleared")).length;
+    const queued = results.filter((r) => r.status.includes("queued")).length;
+    const failed = results.filter((r) => r.status.includes("failed")).length;
+
+    const table = results
+      .map((r) => `  ${r.slot} | ${r.name.padEnd(12)} | ${r.status}`)
+      .join("\n");
+
+    const summary = [
+      cleared > 0 ? `${cleared} cleared` : null,
+      queued > 0 ? `${queued} queued` : null,
+      failed > 0 ? `${failed} failed` : null,
+    ].filter(Boolean).join(", ");
+
+    return `Clear results (${summary}):\n\n${table}\n\nIdle slots cleared immediately. Active slots will receive /clear when they next go idle.`;
+  };
+
+  const clearSlotsThroughMop = async (
+    targetSlots: number[],
+    options: { clearExistingPendingForTargets: boolean; sourceTool: string },
+  ): Promise<ClearSlotResult[]> => {
+    const normalizedTargets = Array.from(new Set(targetSlots))
+      .filter((slot) => slot >= 0 && slot <= 4);
+    const results: ClearSlotResult[] = [];
+
+    // Process dev slots (1-4) first, PM (0) last. The HTTP clear endpoint is
+    // the single authority for clear delivery, duplicate suppression, and
+    // SessionStart acknowledgement. Do not duplicate tmux injection here.
+    const devSlots = normalizedTargets.filter((s) => s !== 0);
+    const includePmSlot = normalizedTargets.includes(0);
+    const orderedSlots = includePmSlot ? [...devSlots, 0] : devSlots;
+
+    for (const slotNum of orderedSlots) {
+      try {
+        const slotLabel = slotNum === 0 ? "pm" : String(slotNum);
+        const res = await fetch(`http://localhost:${config.httpPort}/slots/${slotLabel}/clear`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source: options.sourceTool,
+            clear_existing_pending: options.clearExistingPendingForTargets,
+          }),
+        });
+        const data = (await res.json().catch(() => ({}))) as {
+          results?: ClearSlotResult[];
+          error?: string;
+        };
+        if (!res.ok || !Array.isArray(data.results)) {
+          results.push({
+            slot: slotNum,
+            name: slotNum === 0 ? "PM" : `slot-${slotNum}`,
+            status: `❌ failed: ${data.error ?? `HTTP ${res.status}`}`,
+          });
+        } else {
+          results.push(...data.results);
+        }
+      } catch (err) {
+        results.push({
+          slot: slotNum,
+          name: slotNum === 0 ? "PM" : `slot-${slotNum}`,
+          status: `❌ failed: ${err}`,
+        });
+      }
+      await sleep(500);
+    }
+
+    return results;
+  };
 
   server.tool(
     "mop_clear_all_slots",
-    "Clear ALL slot contexts (0-4 including PM) and release MoP state. Sends /clear to idle dev slots immediately. PM (slot 0) gets /clear injected directly via tmux send-keys (paste-buffered to PM input — executes when PM finishes current turn). Non-idle dev slots are queued for next idle. Use after session export or at start of day.",
+    "Compatibility wrapper for mop_clear_slot(slot: 'all'). Clears ALL slot contexts (0-4 including PM) and releases MoP state. PM should prefer mop_clear_slot for one-slot or all-slot clears. Idle dev slots receive /clear through the MoP send path. Active dev slots are queued for next idle. PM (slot 0) receives /clear through the MoP send path and is acknowledged by SessionStart:clear.",
     {
       slots: z.array(z.number().int().min(0).max(4)).optional().describe("Specific slots to clear (default: all 0-4 including PM)."),
     },
     async ({ slots: specificSlots }) => {
       const targetSlots = specificSlots ?? [0, 1, 2, 3, 4]; // Always include PM by default
-      const results: Array<{ slot: number; name: string; status: string }> = [];
-
-      // Clear any stale pending clears from previous invocation
-      db.clearAllPendingClears();
-
-      // Process dev slots (1-4) first, PM (0) last with deferred approach
-      const devSlots = targetSlots.filter((s) => s !== 0);
-      const includePmSlot = targetSlots.includes(0);
-
-      for (const slotNum of devSlots) {
-        // Refresh idle state from is-active.sh (real-time) — same as mop_all_slots
-        const isActive = relay.isSlotActive(slotNum);
-        db.updateSlot(slotNum, { idle: !isActive });
-
-        const slotState = db.getSlot(slotNum);
-        const name = slotState?.name ?? `slot-${slotNum}`;
-        const isIdle = slotState?.idle ?? true;
-
-        if (isIdle) {
-          // Slot is idle — clear immediately
-          try {
-            const paneAddress = `0:0.${slotNum}`;
-            const { execSync } = await import("node:child_process");
-            execSync(
-              `tmux send-keys -t ${paneAddress} '/clear' Enter`,
-              { timeout: 5_000 }
-            );
-
-            // Release slot state in DB
-            db.releaseSlot(slotNum);
-
-            db.logEvent(slotNum, "slot_cleared", null, null, {
-              name,
-              cleared_at: new Date().toISOString(),
-              immediate: true,
-            });
-
-            results.push({ slot: slotNum, name, status: "✅ cleared (idle)" });
-          } catch (err) {
-            results.push({ slot: slotNum, name, status: `❌ failed: ${err}` });
-          }
-        } else {
-          // Slot is active — queue for next idle
-          db.setPendingClear(slotNum);
-          db.logEvent(slotNum, "clear_pending_queued", null, null, {
-            name,
-            queued_at: new Date().toISOString(),
-            reason: "Slot is active — will clear on next idle notification",
-          });
-          results.push({ slot: slotNum, name, status: "⏳ queued (active — will clear on next idle)" });
-        }
-
-        // Small delay between clears to avoid tmux race conditions
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-
-      // PM pane (slot 0) — inject /clear directly via tmux send-keys.
-      // tmux paste-buffers the keystrokes; PM processes them when current turn finishes.
-      // Rajiv directive 2026-05-06 10:24 IST: deferred Stop-hook approach was unreliable,
-      // switched to direct paste-buffer (matches dev-slot path).
-      // Original Rajiv directive 2026-04-10: "use the idle notify hook instead of poll"
-      if (includePmSlot) {
-        try {
-          const paneAddress = `0:0.0`;
-          const { execSync } = await import("node:child_process");
-          execSync(
-            `tmux send-keys -t ${paneAddress} '/clear' Enter`,
-            { timeout: 5_000 }
-          );
-
-          // Release slot state in DB
-          db.releaseSlot(0);
-
-          db.logEvent(0, "slot_cleared", null, null, {
-            name: "PM",
-            cleared_at: new Date().toISOString(),
-            immediate: true,
-            via: "tmux_paste_buffer",
-          });
-
-          results.push({ slot: 0, name: "PM", status: "✅ cleared (queued via tmux paste-buffer)" });
-        } catch (err) {
-          results.push({ slot: 0, name: "PM", status: `❌ failed: ${err}` });
-        }
-      }
-
-      const cleared = results.filter((r) => r.status.includes("cleared")).length;
-      const queued = results.filter((r) => r.status.includes("queued")).length;
-      const failed = results.filter((r) => r.status.includes("failed")).length;
-
-      const table = results
-        .map((r) => `  ${r.slot} | ${r.name.padEnd(12)} | ${r.status}`)
-        .join("\n");
-
-      const summary = [
-        cleared > 0 ? `${cleared} cleared` : null,
-        queued > 0 ? `${queued} queued` : null,
-        failed > 0 ? `${failed} failed` : null,
-      ].filter(Boolean).join(", ");
+      const results = await clearSlotsThroughMop(targetSlots, {
+        clearExistingPendingForTargets: true,
+        sourceTool: "mop_clear_all_slots",
+      });
 
       return {
         content: [
           {
             type: "text" as const,
-            text: `Clear results (${summary}):\n\n${table}\n\nIdle slots cleared immediately. Active slots will receive /clear when they next go idle.`,
+            text: formatClearResults(results),
+          },
+        ],
+      };
+    }
+  );
+
+  // ─── mop_clear_slot ────────────────────────────────────
+
+  server.tool(
+    "mop_clear_slot",
+    "Clear one slot context or all slot contexts through MoP logging. Slot '0' is PM; slots '1'-'4' are dev/QA panes; 'all' clears 0-4. Idle dev slots receive /clear through the MoP send path. Active dev slots are queued for next idle. PM gets /clear through the MoP send path and is acknowledged by SessionStart:clear.",
+    {
+      slot: z.string().describe("Slot to clear: '0', '1', '2', '3', '4', 'pm', or 'all'."),
+    },
+    async ({ slot }) => {
+      const normalizedSlot = slot.trim().toLowerCase();
+      const targetSlots =
+        normalizedSlot === "all" ? [0, 1, 2, 3, 4] :
+        normalizedSlot === "pm" ? [0] :
+        /^[0-4]$/.test(normalizedSlot) ? [Number(normalizedSlot)] :
+        null;
+
+      if (!targetSlots) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "ERROR: slot must be one of '0', '1', '2', '3', '4', 'pm', or 'all'.",
+            },
+          ],
+        };
+      }
+
+      const results = await clearSlotsThroughMop(targetSlots, {
+        clearExistingPendingForTargets: false,
+        sourceTool: "mop_clear_slot",
+      });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: formatClearResults(results),
           },
         ],
       };
@@ -726,7 +797,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_ops_audit_now",
-    "Force one ops-audit tick immediately (bypasses pause). Returns the decision (inject|skip|error), reason, elapsed_ms, payload_bytes, and whether the payload was injected into PM. Use when you suspect an exception that the next hourly tick would catch — equivalent to running ~/.claude/scripts/hourly-ops-review-bg.sh through MoP's lock + PM-busy queueing path.",
+    "Enqueue one ops-audit tick immediately (manual bypasses pause). Returns a durable job id immediately; use mop_ops_audit_job or mop_ops_audit_status to inspect completion. Use when you suspect an exception that the next hourly tick would catch.",
     {
       reason: z
         .enum(["manual", "scheduled", "boot"])
@@ -766,11 +837,39 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_ops_audit_status",
-    "Get ops-audit scheduler status: paused flag, in-process running flag, interval_ms, bg_script presence, last_run_ts, last_run_decision (inject|skip|error), last_run_reason, last_run_elapsed_ms, last_run_payload_bytes.",
+    "Get ops-audit scheduler status: paused flag, running flag, current job, recent jobs, bg_script presence, and legacy last-run summary.",
     {},
     async () => {
       try {
         const res = await fetch(`http://127.0.0.1:${config.httpPort}/ops-audit/status`);
+        const json = await res.json();
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `ERROR: failed to reach MoP HTTP server: ${err}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // ─── mop_ops_audit_job ─────────────────────────────────
+
+  server.tool(
+    "mop_ops_audit_job",
+    "Get one durable ops-audit job by id, including queued/running/succeeded/skipped/failed/timed_out state and stdout/trace paths.",
+    {
+      job_id: z.string().describe("Job id returned by mop_ops_audit_now"),
+    },
+    async ({ job_id }) => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/ops-audit/jobs/${encodeURIComponent(job_id)}`);
         const json = await res.json();
         return {
           content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }],
@@ -802,6 +901,97 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ paused }),
+        });
+        const json = await res.json();
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `ERROR: failed to reach MoP HTTP server: ${err}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // ─── mop_pm_cadence_status ─────────────────────────────
+
+  server.tool(
+    "mop_pm_cadence_status",
+    "Get MoP-owned PM cadence status for the 3h heartbeat and daily morning brief. Shows persisted last-fired bucket/day, paused flags, and whether each task is currently due.",
+    {},
+    async () => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/pm-cadence/status`);
+        const json = await res.json();
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `ERROR: failed to reach MoP HTTP server: ${err}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // ─── mop_pm_cadence_run ────────────────────────────────
+
+  server.tool(
+    "mop_pm_cadence_run",
+    "Manually inject one MoP-owned PM cadence task now. Use for operator recovery; scheduled ticks are owned by MoP and persisted by due bucket/day.",
+    {
+      task: z.enum(["heartbeat", "morning-brief"]).describe("Which PM cadence task to inject now"),
+    },
+    async ({ task }) => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/pm-cadence/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ task }),
+        });
+        const json = await res.json();
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `ERROR: failed to reach MoP HTTP server: ${err}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // ─── mop_pm_cadence_pause ──────────────────────────────
+
+  server.tool(
+    "mop_pm_cadence_pause",
+    "Pause or resume MoP-owned PM cadence injection. Pause globally or for just heartbeat/morning-brief; persisted in MoP SQLite config.",
+    {
+      paused: z.boolean().describe("true = pause, false = resume"),
+      task: z.enum(["heartbeat", "morning-brief"]).optional().describe("Optional specific task. Omit to pause/resume all PM cadence tasks."),
+    },
+    async ({ paused, task }) => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/pm-cadence/pause`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ paused, task }),
         });
         const json = await res.json();
         return {

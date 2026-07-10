@@ -9,7 +9,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { EventLogEntry, MoPConfig, SlotState, SlotStatus } from "./types.js";
+import type { EventLogEntry, MoPConfig, OpsJobRecord, OpsJobStatus, SlotState, SlotStatus } from "./types.js";
 
 export class MoPDatabase {
   private db: Database.Database;
@@ -40,6 +40,9 @@ export class MoPDatabase {
       CREATE INDEX IF NOT EXISTS idx_events_slot ON events(slot);
       CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
       CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_events_slot_id ON events(slot, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_events_type_id ON events(event_type, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_events_slot_type_id ON events(slot, event_type, id DESC);
 
       CREATE TABLE IF NOT EXISTS slots (
         slot INTEGER PRIMARY KEY,
@@ -92,6 +95,31 @@ export class MoPDatabase {
       );
     `);
 
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS ops_jobs (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+        started_at TEXT,
+        finished_at TEXT,
+        pid INTEGER,
+        exit_code INTEGER,
+        decision TEXT,
+        result_reason TEXT,
+        payload_bytes INTEGER,
+        error TEXT,
+        stdout_path TEXT,
+        trace_path TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ops_jobs_kind_status_created
+        ON ops_jobs(kind, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ops_jobs_kind_finished
+        ON ops_jobs(kind, finished_at DESC);
+    `);
+
     // Initialize config KV table
     this.initConfig();
 
@@ -140,10 +168,39 @@ export class MoPDatabase {
       params.push(eventType);
     }
 
-    sql += " ORDER BY timestamp DESC LIMIT ?";
+    // id is monotonic and avoids filtered timestamp scans plus temp sorting.
+    sql += " ORDER BY id DESC LIMIT ?";
     params.push(limit);
 
     return this.db.prepare(sql).all(...params) as EventLogEntry[];
+  }
+
+  /**
+   * Bound the operational event log. MoP events are diagnostics, not durable
+   * product records; keeping the newest rows and a short time window prevents
+   * synchronous hook/API reads from starving the event loop indefinitely.
+   */
+  pruneEvents(maxRows: number = 200_000, maxAgeDays: number = 14): number {
+    const safeMaxRows = Math.max(1_000, Math.floor(maxRows));
+    const safeMaxAgeDays = Math.max(1, Math.floor(maxAgeDays));
+    const cutoff = this.db
+      .prepare("SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?")
+      .get(safeMaxRows - 1) as { id: number } | undefined;
+
+    const result = cutoff
+      ? this.db.prepare(`
+          DELETE FROM events
+          WHERE id < ?
+             OR timestamp < strftime('%Y-%m-%dT%H:%M:%f', 'now', ?)
+        `).run(cutoff.id, `-${safeMaxAgeDays} days`)
+      : this.db.prepare(`
+          DELETE FROM events
+          WHERE timestamp < strftime('%Y-%m-%dT%H:%M:%f', 'now', ?)
+        `).run(`-${safeMaxAgeDays} days`);
+
+    this.db.pragma("wal_checkpoint(PASSIVE)");
+    this.db.pragma("optimize");
+    return result.changes;
   }
 
   markProcessed(eventId: number): void {
@@ -250,7 +307,8 @@ export class MoPDatabase {
     task: string,
     issue: number | null,
     branch: string | null,
-    sessionId: string | null
+    sessionId: string | null,
+    pr: number | null = null
   ): void {
     this.updateSlot(slot, {
       status: "active" as SlotStatus,
@@ -259,6 +317,7 @@ export class MoPDatabase {
       task,
       issue,
       branch,
+      pr,
       assigned_at: new Date().toISOString(),
       dnd: false,
     });
@@ -392,6 +451,14 @@ export class MoPDatabase {
     stmt.run(slot, eventType, payload);
   }
 
+  deletePendingPMEvent(slot: number, eventType: string): number {
+    const result = this.db.prepare(`
+      DELETE FROM pm_pending_events
+      WHERE slot = ? AND event_type = ?
+    `).run(slot, eventType);
+    return result.changes;
+  }
+
   /**
    * Drain all queued PM-bound events. Returns AT MOST ONE row per slot —
    * the most-relevant single notification — so PM sees one summary signal
@@ -485,6 +552,119 @@ export class MoPDatabase {
     `).all() as Array<{ slot: number; event_type: string; payload: string | null; enqueued_at: string }>;
   }
 
+  // ─── Ops Jobs ──────────────────────────────────────────────
+
+  createOpsJob(job: OpsJobRecord): void {
+    this.db.prepare(`
+      INSERT INTO ops_jobs (
+        id, kind, reason, status, created_at, started_at, finished_at,
+        pid, exit_code, decision, result_reason, payload_bytes, error,
+        stdout_path, trace_path
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      job.id,
+      job.kind,
+      job.reason,
+      job.status,
+      job.created_at,
+      job.started_at,
+      job.finished_at,
+      job.pid,
+      job.exit_code,
+      job.decision,
+      job.result_reason,
+      job.payload_bytes,
+      job.error,
+      job.stdout_path,
+      job.trace_path,
+    );
+  }
+
+  updateOpsJob(id: string, updates: Partial<Omit<OpsJobRecord, "id">>): void {
+    const allowedFields = [
+      "kind", "reason", "status", "created_at", "started_at", "finished_at",
+      "pid", "exit_code", "decision", "result_reason", "payload_bytes",
+      "error", "stdout_path", "trace_path",
+    ];
+    const sets: string[] = [];
+    const values: unknown[] = [];
+    for (const [key, value] of Object.entries(updates)) {
+      if (!allowedFields.includes(key)) continue;
+      sets.push(`${key} = ?`);
+      values.push(value);
+    }
+    if (sets.length === 0) return;
+    values.push(id);
+    this.db.prepare(`UPDATE ops_jobs SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+  }
+
+  getOpsJob(id: string): OpsJobRecord | null {
+    const row = this.db.prepare("SELECT * FROM ops_jobs WHERE id = ?").get(id);
+    return row ? normalizeOpsJob(row as Record<string, unknown>) : null;
+  }
+
+  getRunningOpsJob(kind: string): OpsJobRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM ops_jobs
+      WHERE kind = ? AND status = 'running'
+      ORDER BY started_at DESC, created_at DESC
+      LIMIT 1
+    `).get(kind);
+    return row ? normalizeOpsJob(row as Record<string, unknown>) : null;
+  }
+
+  getQueuedOpsJob(kind: string, reason?: string): OpsJobRecord | null {
+    const row = reason
+      ? this.db.prepare(`
+          SELECT * FROM ops_jobs
+          WHERE kind = ? AND reason = ? AND status = 'queued'
+          ORDER BY created_at ASC
+          LIMIT 1
+        `).get(kind, reason)
+      : this.db.prepare(`
+          SELECT * FROM ops_jobs
+          WHERE kind = ? AND status = 'queued'
+          ORDER BY created_at ASC
+          LIMIT 1
+        `).get(kind);
+    return row ? normalizeOpsJob(row as Record<string, unknown>) : null;
+  }
+
+  getNextQueuedOpsJob(kind: string): OpsJobRecord | null {
+    return this.getQueuedOpsJob(kind);
+  }
+
+  getLatestOpsJob(kind: string): OpsJobRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM ops_jobs
+      WHERE kind = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(kind);
+    return row ? normalizeOpsJob(row as Record<string, unknown>) : null;
+  }
+
+  getLatestCompletedOpsJob(kind: string): OpsJobRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM ops_jobs
+      WHERE kind = ? AND status NOT IN ('queued', 'running')
+      ORDER BY COALESCE(finished_at, created_at) DESC
+      LIMIT 1
+    `).get(kind);
+    return row ? normalizeOpsJob(row as Record<string, unknown>) : null;
+  }
+
+  listOpsJobs(kind: string, limit: number = 10): OpsJobRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM ops_jobs
+      WHERE kind = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(kind, limit) as Record<string, unknown>[];
+    return rows.map(normalizeOpsJob);
+  }
+
   // ─── Queries ─────────────────────────────────────────────
 
   getSlotHistory(slot: number, limit: number = 20): EventLogEntry[] {
@@ -500,9 +680,28 @@ export class MoPDatabase {
     return stmt.all(minutes) as EventLogEntry[];
   }
 
+  getLastVisibleSlotState(
+    slotNum: number
+  ): { state: "idle" | "active"; timestamp: string; eventType: string } | null {
+    const row = this.db.prepare(`
+      SELECT event_type, timestamp FROM events
+      WHERE slot = ?
+        AND event_type IN ('slot_idle_notified', 'slot_active_notified')
+      ORDER BY timestamp DESC, id DESC
+      LIMIT 1
+    `).get(slotNum) as { event_type: string; timestamp: string } | undefined;
+
+    if (!row) return null;
+    return {
+      state: row.event_type === "slot_idle_notified" ? "idle" : "active",
+      timestamp: row.timestamp,
+      eventType: row.event_type,
+    };
+  }
+
   /**
-   * Detect whether a slot has dispatched a Task subagent in the last `windowSec`
-   * seconds AND has not yet emitted a terminal Stop event after that dispatch.
+   * Detect whether a slot has dispatched a subagent in the last `windowSec`
+   * seconds and that subagent has not been closed yet.
    *
    * Used by the slot-idle staleness gate (mirroring check-slot's idle-skip):
    * between the IDLE_DEBOUNCE_MS window opening and the timer firing, the slot
@@ -510,7 +709,7 @@ export class MoPDatabase {
    * idle flag on the SlotState is point-in-time and lags real activity by up
    * to one debounce window. The events table is the source of truth.
    *
-   * Returns the latest Task dispatch timestamp if a recent unclosed dispatch
+   * Returns the latest subagent dispatch timestamp if a recent unclosed dispatch
    * exists; null otherwise.
    *
    * Rajiv directive 2026-05-05: PM nudge interrupted slot 4's plan-agent
@@ -521,25 +720,28 @@ export class MoPDatabase {
   hasRecentSubagentDispatch(
     slotNum: number,
     windowSec: number = 60
-  ): { taskTs: string; lastStopTs: string | null } | null {
-    // Most recent Task dispatch within the window.
+  ): { taskTs: string; lastStopTs: string | null; toolName?: string } | null {
+    // Most recent Task/Agent dispatches within the window.
     // Use strftime() not datetime() so the cutoff has the same 'YYYY-MM-DDTHH:MM:SS.fff'
     // shape as stored timestamps — datetime() returns 'YYYY-MM-DD HH:MM:SS' (space, no
     // fraction) which lexicographically sorts BELOW any stored 'T...' timestamp,
     // making every row "in window".
     const taskStmt = this.db.prepare(`
-      SELECT timestamp FROM events
+      SELECT timestamp, tool_name, payload FROM events
       WHERE slot = ?
         AND event_type IN ('PostToolUse', 'PreToolUse')
-        AND tool_name = 'Task'
+        AND tool_name IN ('Task', 'Agent')
         AND timestamp > strftime('%Y-%m-%dT%H:%M:%f', 'now', '-' || ? || ' seconds')
       ORDER BY timestamp DESC
-      LIMIT 1
+      LIMIT 20
     `);
-    const taskRow = taskStmt.get(slotNum, windowSec) as { timestamp: string } | undefined;
-    if (!taskRow) return null;
+    const taskRows = taskStmt.all(slotNum, windowSec) as Array<{
+      timestamp: string;
+      tool_name: string;
+      payload: string;
+    }>;
+    if (taskRows.length === 0) return null;
 
-    // Any Stop event strictly AFTER that Task dispatch closes the subagent.
     const stopStmt = this.db.prepare(`
       SELECT timestamp FROM events
       WHERE slot = ?
@@ -548,12 +750,43 @@ export class MoPDatabase {
       ORDER BY timestamp DESC
       LIMIT 1
     `);
-    const stopRow = stopStmt.get(slotNum, taskRow.timestamp) as { timestamp: string } | undefined;
 
-    // If a Stop fired after the Task, the subagent is closed → no gate.
-    if (stopRow) return null;
+    const agentCloseStmt = this.db.prepare(`
+      SELECT timestamp FROM events
+      WHERE slot = ?
+        AND timestamp > ?
+        AND (
+          (event_type = 'PostToolUse' AND tool_name = 'TaskStop')
+          OR event_type = 'subagent_completed'
+        )
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `);
 
-    return { taskTs: taskRow.timestamp, lastStopTs: null };
+    for (const taskRow of taskRows) {
+      if (taskRow.tool_name === "Agent") {
+        let runInBackground = false;
+        try {
+          const payload = JSON.parse(taskRow.payload) as { tool_input?: { run_in_background?: unknown } };
+          runInBackground = payload.tool_input?.run_in_background === true;
+        } catch {
+          runInBackground = false;
+        }
+        if (!runInBackground) continue;
+
+        // A normal Stop after Agent dispatch only means the parent prompt is idle;
+        // the background agent remains active until TaskStop/subagent_completed.
+        const closeRow = agentCloseStmt.get(slotNum, taskRow.timestamp) as { timestamp: string } | undefined;
+        if (!closeRow) return { taskTs: taskRow.timestamp, lastStopTs: null, toolName: "Agent" };
+        continue;
+      }
+
+      // Foreground Task dispatches are closed by the next Stop.
+      const stopRow = stopStmt.get(slotNum, taskRow.timestamp) as { timestamp: string } | undefined;
+      if (!stopRow) return { taskTs: taskRow.timestamp, lastStopTs: null, toolName: "Task" };
+    }
+
+    return null;
   }
 
   /**
@@ -656,4 +889,24 @@ export class MoPDatabase {
   close(): void {
     this.db.close();
   }
+}
+
+function normalizeOpsJob(row: Record<string, unknown>): OpsJobRecord {
+  return {
+    id: String(row.id),
+    kind: String(row.kind),
+    reason: String(row.reason),
+    status: String(row.status) as OpsJobStatus,
+    created_at: String(row.created_at),
+    started_at: row.started_at === null || row.started_at === undefined ? null : String(row.started_at),
+    finished_at: row.finished_at === null || row.finished_at === undefined ? null : String(row.finished_at),
+    pid: row.pid === null || row.pid === undefined ? null : Number(row.pid),
+    exit_code: row.exit_code === null || row.exit_code === undefined ? null : Number(row.exit_code),
+    decision: row.decision === null || row.decision === undefined ? null : String(row.decision),
+    result_reason: row.result_reason === null || row.result_reason === undefined ? null : String(row.result_reason),
+    payload_bytes: row.payload_bytes === null || row.payload_bytes === undefined ? null : Number(row.payload_bytes),
+    error: row.error === null || row.error === undefined ? null : String(row.error),
+    stdout_path: row.stdout_path === null || row.stdout_path === undefined ? null : String(row.stdout_path),
+    trace_path: row.trace_path === null || row.trace_path === undefined ? null : String(row.trace_path),
+  };
 }

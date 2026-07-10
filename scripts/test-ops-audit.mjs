@@ -23,7 +23,7 @@
 
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { existsSync, writeFileSync, unlinkSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdtempSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
@@ -71,8 +71,10 @@ cat <<EOF
 INJECT_DECISION:inject REASON:test_inject_fixture
 ---
 ACTION_ITEMS:
-  - OWNER:dhruv EVIDENCE:test fixture TRANSITION:traced TARGET:misc
-    ITEM: synthetic action item from stub-bg-inject.sh
+  - ACTION: synthetic action item from stub-bg-inject.sh
+    EVIDENCE: test fixture
+    TRANSITION: traced
+    TARGET: misc
 ---
 -- META: codex_status=stub elapsed_s=0 reason=test_fixture
 EOF
@@ -165,10 +167,50 @@ if (!distExists) {
     const dbStub = {
       _kv: new Map(),
       _events: [],
+      _opsJobs: [],
       getConfig(k) { return this._kv.get(k) ?? null; },
       setConfig(k, v) { this._kv.set(k, v); },
       logEvent(slot, type, key, value, payload) {
         this._events.push({ slot, type, key, value, payload });
+      },
+      createOpsJob(job) {
+        this._opsJobs.push({ ...job });
+      },
+      updateOpsJob(id, updates) {
+        const job = this._opsJobs.find((j) => j.id === id);
+        if (job) Object.assign(job, updates);
+      },
+      getOpsJob(id) {
+        const job = this._opsJobs.find((j) => j.id === id);
+        return job ? { ...job } : null;
+      },
+      getRunningOpsJob(kind) {
+        const job = this._opsJobs
+          .filter((j) => j.kind === kind && j.status === "running")
+          .sort((a, b) => String(b.started_at ?? b.created_at).localeCompare(String(a.started_at ?? a.created_at)))[0];
+        return job ? { ...job } : null;
+      },
+      getQueuedOpsJob(kind, reason) {
+        const job = this._opsJobs
+          .filter((j) => j.kind === kind && j.status === "queued" && (reason === undefined || j.reason === reason))
+          .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))[0];
+        return job ? { ...job } : null;
+      },
+      getNextQueuedOpsJob(kind) {
+        return this.getQueuedOpsJob(kind);
+      },
+      getLatestCompletedOpsJob(kind) {
+        const job = this._opsJobs
+          .filter((j) => j.kind === kind && !["queued", "running"].includes(j.status))
+          .sort((a, b) => String(b.finished_at ?? b.created_at).localeCompare(String(a.finished_at ?? a.created_at)))[0];
+        return job ? { ...job } : null;
+      },
+      listOpsJobs(kind, limit = 10) {
+        return this._opsJobs
+          .filter((j) => j.kind === kind)
+          .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+          .slice(0, limit)
+          .map((j) => ({ ...j }));
       },
     };
     const relayStub = {
@@ -201,12 +243,20 @@ if (!distExists) {
     assert.equal(r.reason, "test_inject_fixture");
     assert.equal(relayStub._injected.length, 1, "inject path must call relay.injectToPM exactly once");
     assert.ok(
-      relayStub._injected[0].startsWith("MoP: hourly ops audit for test_inject_fixture\n"),
-      `expected MoP-prefixed freeform message; got: ${relayStub._injected[0].slice(0, 120)}`
+      relayStub._injected[0].startsWith("MoP: hourly ops audit\n\nREASON: test_inject_fixture\n"),
+      `expected stable MoP hourly-audit title/body; got: ${relayStub._injected[0].slice(0, 120)}`
     );
     assert.ok(
-      relayStub._injected[0].includes("INJECT_DECISION:inject"),
-      "payload must include the bg-script INJECT_DECISION line"
+      !relayStub._injected[0].includes("INJECT_DECISION:inject"),
+      "PM-facing payload must strip the bg-script INJECT_DECISION line"
+    );
+    assert.ok(
+      !relayStub._injected[0].includes("NEXT: invoke Skill(hourly-ops-audit)"),
+      "MoP payload must not encode sentinel-era skill enforcement text"
+    );
+    assert.ok(
+      relayStub._injected[0].includes("Run Skill(hourly-ops-audit) to process these action items."),
+      "MoP payload must retain the heartbeat-era skill instruction footer"
     );
   });
 
@@ -243,6 +293,66 @@ if (!distExists) {
     assert.equal(relayStub._injected.length, 0, "skip path must not inject");
     // Restore inject-stub override.
     process.env.OPS_AUDIT_BG_SCRIPT_OVERRIDE = stubBgScript;
+  });
+
+  await asyncTest("enqueue() returns immediately and completes durable job out of band", async () => {
+    const { dbStub, relayStub } = makeStubs();
+    const slowModuleUrl = opsAuditModulePath + `?cb=${Date.now()}-enqueue`;
+    process.env.OPS_AUDIT_BG_SCRIPT_OVERRIDE = stubBgScriptSlow;
+    const slowMod = await import(slowModuleUrl);
+    const scheduler4 = new slowMod.OpsAuditScheduler(dbStub, relayStub);
+    const start = Date.now();
+    const enqueued = scheduler4.enqueue("manual");
+    const elapsed = Date.now() - start;
+    assert.equal(enqueued.status, "queued");
+    assert.ok(enqueued.job_id, "enqueue must return a durable job id");
+    assert.ok(elapsed < 250, `enqueue should not await slow bg script; elapsed=${elapsed}ms`);
+
+    await new Promise((resolve) => setTimeout(resolve, 1900));
+    const job = scheduler4.getJob(enqueued.job_id);
+    assert.equal(job.status, "skipped");
+    assert.equal(job.decision, "skip");
+    assert.equal(job.result_reason, "test_stub_slow_done");
+    assert.equal(relayStub._injected.length, 0, "skip job must not inject");
+    process.env.OPS_AUDIT_BG_SCRIPT_OVERRIDE = stubBgScript;
+  });
+
+  await asyncTest("scheduled enqueue reaps stale running job with dead pid", async () => {
+    const { dbStub, relayStub } = makeStubs();
+    const staleModuleUrl = opsAuditModulePath + `?cb=${Date.now()}-stale-running`;
+    process.env.OPS_AUDIT_BG_SCRIPT_OVERRIDE = stubBgScriptSlow;
+    process.env.MOP_OPS_AUDIT_STALE_RUNNING_MS = "100";
+    const staleMod = await import(staleModuleUrl);
+    const scheduler5 = new staleMod.OpsAuditScheduler(dbStub, relayStub);
+    dbStub._opsJobs.push({
+      id: "stale-running-job",
+      kind: "ops-audit",
+      reason: "scheduled",
+      status: "running",
+      created_at: new Date(Date.now() - 60_000).toISOString(),
+      started_at: new Date(Date.now() - 60_000).toISOString(),
+      finished_at: null,
+      pid: 99999999,
+      exit_code: null,
+      decision: null,
+      result_reason: null,
+      payload_bytes: null,
+      error: null,
+      stdout_path: null,
+      trace_path: null,
+    });
+
+    const enqueued = scheduler5.enqueue("scheduled");
+    const staleJob = dbStub._opsJobs.find((j) => j.id === "stale-running-job");
+    assert.equal(staleJob.status, "failed");
+    assert.equal(staleJob.result_reason, "stale_running_job_reaped");
+    assert.ok(staleJob.error.startsWith("stale_running_job_reaped:dead:"), `unexpected error=${staleJob.error}`);
+    assert.equal(enqueued.status, "queued");
+    assert.equal(enqueued.reused_existing, false);
+    assert.notEqual(enqueued.job_id, "stale-running-job");
+
+    process.env.OPS_AUDIT_BG_SCRIPT_OVERRIDE = stubBgScript;
+    delete process.env.MOP_OPS_AUDIT_STALE_RUNNING_MS;
   });
 }
 
@@ -310,37 +420,19 @@ const injector = "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-
 if (!existsSync(injector)) {
   console.log("  (SKIP) injector not at " + injector);
 } else {
-  test("hook accepts hourly-ops-audit prefix payload", () => {
-    const probe = `MoP: hourly ops audit for unassigned_status_todo\nINJECT_DECISION:inject REASON:unassigned_status_todo\n---\nACTION_ITEMS:\n  - OWNER:dhruv EVIDENCE:test TRANSITION:traced TARGET:misc\n    ITEM: probe\n---\n`;
-    const json = JSON.stringify({ prompt: probe });
-    const out = spawnSync("/bin/bash", [injector], {
-      input: json,
-      encoding: "utf8",
-      env: { ...process.env, CLAUDE_PROJECT_DIR: "/Users/rajiv/Downloads/projects/heydonna-app" },
-      timeout: 10000,
-    });
+  const injectorSrc = readFileSync(injector, "utf8");
+  test("hook source accepts hourly-ops-audit prefix payload", () => {
     assert.ok(
-      out.stdout.includes("MoP_SLOT_NOTIFICATION") && out.stdout.includes("hourly-ops-audit"),
-      `expected MoP_SLOT_NOTIFICATION + hourly-ops-audit in stdout; got:\n${out.stdout.slice(0, 400)}`
+      injectorSrc.includes("MOP_SKILL=\"hourly-ops-audit\"") &&
+        injectorSrc.includes("[MoP_SLOT_NOTIFICATION] MoP hourly-ops-audit"),
+      "expected explicit hourly-ops-audit routing and notification contract"
     );
   });
 
-  test("hook does NOT match for non-hourly MoP prefix", () => {
-    const probe = `MoP: slot 2 idle\n`;
-    const json = JSON.stringify({ prompt: probe });
-    const out = spawnSync("/bin/bash", [injector], {
-      input: json,
-      encoding: "utf8",
-      env: { ...process.env, CLAUDE_PROJECT_DIR: "/Users/rajiv/Downloads/projects/heydonna-app" },
-      timeout: 10000,
-    });
+  test("hook source keeps non-hourly slot events on the generic route", () => {
     assert.ok(
-      !out.stdout.includes("hourly-ops-audit"),
-      `expected no hourly-ops-audit match for slot-idle payload; got:\n${out.stdout.slice(0, 400)}`
-    );
-    assert.ok(
-      out.stdout.includes("slot-idle"),
-      `expected slot-idle skill hint; got:\n${out.stdout.slice(0, 400)}`
+      injectorSrc.includes("[MoP_SLOT_NOTIFICATION] MoP ${MOP_EVENT} for slot ${MOP_SLOT}"),
+      "expected generic non-hourly MoP event routing contract"
     );
   });
 }
@@ -369,6 +461,21 @@ test("bg-script references SLACK_BRIDGE_DB env override (R1 fix 1)", () => {
   assert.ok(src.includes("C0ALZJHGE49"), "bg-script must query #heydonna-dev channel");
   assert.ok(src.includes("D0AMF0XE6TS"), "bg-script must query Rajiv↔PM DM");
   assert.ok(src.includes("U0ALEAYCAUT"), "bg-script must filter Kanban posts by Dhruv user_id");
+});
+test("bg-script treats quiet Slack sections as quiet, not capture loss", () => {
+  const src = _readFileSync(bgScript, "utf8");
+  assert.ok(
+    src.includes("index($0, h) == 1"),
+    "Slack section detection must use literal prefix matching, not regex matching"
+  );
+  assert.ok(
+    src.includes("slack input query failed"),
+    "Slack input gap should be reserved for query failures or missing sections"
+  );
+  assert.ok(
+    !src.includes("zero visible bridge DB rows"),
+    "Quiet Slack sections must not be reported as bridge capture loss"
+  );
 });
 
 // Note: we DELIBERATELY do not invoke the real bg-script with --reason boot here.

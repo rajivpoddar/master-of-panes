@@ -16,7 +16,10 @@
  * PM coordinates all slots, so downtime must be minimized.
  */
 
-import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { execShell } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 
@@ -42,12 +45,73 @@ export const RESTART_COMMANDS: Record<number, string> = {
 /** Shell command names that indicate Claude Code has exited back to the shell */
 export const SHELL_COMMANDS = new Set(["zsh", "bash", "sh", "fish"]);
 
+const SLOT_JSONL_DIRS: Record<number, string> = {
+  0: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app",
+  1: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-3001",
+  2: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-3002",
+  3: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-3003",
+  4: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-3004",
+};
+
+const SLOT_CWDS: Record<number, string> = {
+  0: "/Users/rajiv/Downloads/projects/heydonna-app",
+  1: "/Users/rajiv/Downloads/projects/heydonna-app-3001",
+  2: "/Users/rajiv/Downloads/projects/heydonna-app-3002",
+  3: "/Users/rajiv/Downloads/projects/heydonna-app-3003",
+  4: "/Users/rajiv/Downloads/projects/heydonna-app-3004",
+};
+
+type PaneProbe = {
+  fingerprint: string;
+  jsonlMtimeMs: number;
+  lastEventId: number;
+};
+
+type UnresponsiveState = PaneProbe & {
+  unchangedChecks: number;
+  probeSentAt?: number;
+};
+
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, `'\''`)}'`;
+}
+
+function typedLaunchCommandForPane(slotNum: number): string | null {
+  const restartCmd = RESTART_COMMANDS[slotNum];
+  const cwd = SLOT_CWDS[slotNum];
+  if (!restartCmd || !cwd) return null;
+
+  // This string is typed into an existing shell pane. Do not wrap it in
+  // `/bin/zsh -lc ...`: tmux send-keys sends text, not an argv vector, and the
+  // extra shell layer collapses quoting into broken pane input.
+  return `cd ${shellEscape(cwd)} && ${restartCmd}`;
+}
+
+function latestJsonlMtimeMs(slotNum: number): number {
+  const dir = SLOT_JSONL_DIRS[slotNum];
+  if (!dir) return 0;
+  try {
+    let max = 0;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".jsonl")) continue;
+      const st = statSync(join(dir, name));
+      if (st.mtimeMs > max) max = st.mtimeMs;
+    }
+    return max;
+  } catch {
+    return 0;
+  }
+}
+
 // ─── Health Checker ────────────────────────────────────────
 
 export class ProcessHealthChecker {
   private readonly CHECK_INTERVAL_MS = 30 * 1000;       // Check every 30s
   private readonly RESTART_COOLDOWN_MS = 120 * 1000;    // 2min cooldown per slot
   private readonly MAX_RESTARTS_PER_HOUR = 3;           // Prevent crash loops
+  private readonly UNRESPONSIVE_PROBE_CHECKS = 6;       // 6 unchanged 30s ticks (~3m) before redraw probe
+  private readonly UNRESPONSIVE_RESPAWN_CHECKS = 8;     // 8 unchanged ticks (~4m) before force respawn
+  private readonly UNRESPONSIVE_FORCE_RESPAWN_COOLDOWN_MS = 15 * 60 * 1000;
   private timer: NodeJS.Timeout | null = null;
   private readonly startTime = Date.now();        // Startup grace period anchor
 
@@ -60,6 +124,10 @@ export class ProcessHealthChecker {
    * and the "process died — auto-restarted" notification to PM. Prevents
    * intentional respawn from looking like a crash. */
   private pmInitiatedRespawns = new Set<number>();
+  /** slot -> last stable pane/jsonl/event probe. Used to catch cmd=claude but TUI-wedged panes. */
+  private unresponsiveStates = new Map<number, UnresponsiveState>();
+  /** slot -> timestamp of last force respawn for unresponsive cmd=claude pane. */
+  private lastForceRespawn = new Map<number, number>();
 
   constructor(
     private db: MoPDatabase,
@@ -84,7 +152,7 @@ export class ProcessHealthChecker {
   }
 
   /** Public getter for pane's current command (used by respawn orchestration). */
-  getPaneCommandPublic(slotNum: number): string | null {
+  getPaneCommandPublic(slotNum: number): Promise<string | null> {
     return this.getPaneCommand(slotNum);
   }
 
@@ -94,14 +162,37 @@ export class ProcessHealthChecker {
    * Get the current command running in a tmux pane.
    * Returns "claude" when Claude Code is running, "zsh" when it's dead.
    */
-  private getPaneCommand(slotNum: number): string | null {
+  private async getPaneCommand(slotNum: number): Promise<string | null> {
     const paneAddress = `0:0.${slotNum}`;
     try {
-      const result = execSync(
+      const result = await execShell(
         `tmux display-message -t ${paneAddress} -p '#{pane_current_command}'`,
-        { timeout: 5_000, stdio: ["pipe", "pipe", "pipe"] },
-      ).toString().trim();
-      return result || null;
+        { timeout: 5_000 },
+      );
+      const stdout = result.stdout.trim();
+      if (!stdout) return null;
+      if (stdout === "claude") return stdout;
+
+      if (SHELL_COMMANDS.has(stdout)) {
+        const pidResult = await execShell(
+          `tmux display-message -t ${paneAddress} -p '#{pane_pid}'`,
+          { timeout: 5_000 },
+        );
+        const panePid = pidResult.stdout.trim();
+        if (panePid && /^[0-9]+$/.test(panePid)) {
+          try {
+            const childResult = await execShell(
+              `pgrep -P ${panePid} -fl '^claude( |$)'`,
+              { timeout: 5_000 },
+            );
+            if (childResult.stdout.trim()) return "claude";
+          } catch {
+            // No direct Claude child; fall through to the pane command.
+          }
+        }
+      }
+
+      return stdout;
     } catch {
       return null; // Pane doesn't exist or tmux error
     }
@@ -111,8 +202,8 @@ export class ProcessHealthChecker {
    * Check if a slot's Claude Code process is dead.
    * Dead = pane shows a shell (zsh/bash) instead of "claude".
    */
-  isProcessDead(slotNum: number): boolean {
-    const cmd = this.getPaneCommand(slotNum);
+  async isProcessDead(slotNum: number): Promise<boolean> {
+    const cmd = await this.getPaneCommand(slotNum);
     if (!cmd) return false; // Can't determine — don't restart blindly
     return SHELL_COMMANDS.has(cmd);
   }
@@ -152,23 +243,165 @@ export class ProcessHealthChecker {
   /**
    * Restart a slot's Claude Code process by sending the alias command.
    */
-  private restartSlot(slotNum: number): boolean {
-    const restartCmd = RESTART_COMMANDS[slotNum];
-    if (!restartCmd) return false;
+  private async restartSlot(slotNum: number): Promise<boolean> {
+    const launchCmd = typedLaunchCommandForPane(slotNum);
+    if (!launchCmd) return false;
 
     const paneAddress = `0:0.${slotNum}`;
     try {
       // Send restart command to the pane's shell.
       // Uses standalone bash scripts (not aliases) — no .zshrc/OMZ dependency.
       // Scripts resolve the atma template vars directly via sed.
-      execSync(
-        `tmux send-keys -t ${paneAddress} '${restartCmd}' Enter`,
-        { timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] },
+      await execShell(
+        `tmux send-keys -t ${paneAddress} ${shellEscape(launchCmd)} Enter`,
+        { timeout: 10_000 },
       );
       return true;
     } catch (err) {
       console.error(`[health] Failed to restart slot ${slotNum}:`, err);
       return false;
+    }
+  }
+
+  private async forceRespawnSlot(slotNum: number, reason: string): Promise<boolean> {
+    const launchCmd = RESTART_COMMANDS[slotNum];
+    const cwd = SLOT_CWDS[slotNum];
+    if (!launchCmd || !cwd) return false;
+
+    const paneAddress = `0:0.${slotNum}`;
+    try {
+      await execShell(
+        `tmux respawn-pane -k -t ${paneAddress} -c ${shellEscape(cwd)} ${shellEscape(launchCmd)}`,
+        { timeout: 10_000 },
+      );
+      this.lastForceRespawn.set(slotNum, Date.now());
+      this.unresponsiveStates.delete(slotNum);
+      console.log(`[health] Force-respawned slot ${slotNum} after unresponsive probe (${reason})`);
+      return true;
+    } catch (err) {
+      console.error(`[health] Failed to force-respawn slot ${slotNum}:`, err);
+      return false;
+    }
+  }
+
+  private async capturePaneFingerprint(slotNum: number): Promise<string | null> {
+    const paneAddress = `0:0.${slotNum}`;
+    try {
+      const result = await execShell(
+        `tmux capture-pane -t ${paneAddress} -p -S -80`,
+        { timeout: 5_000, maxBuffer: 256 * 1024 },
+      );
+      return createHash("sha256").update(result.stdout).digest("hex");
+    } catch {
+      return null;
+    }
+  }
+
+  private latestEventId(slotNum: number): number {
+    try {
+      const event = this.db.getEvents(slotNum, 1)[0];
+      return event?.id ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Detect panes where tmux still reports `claude` but the TUI no longer
+   * reacts to keyboard input. This avoids activity-only false positives by
+   * requiring all three signals to stay unchanged across multiple health ticks:
+   * visible pane fingerprint, Claude JSONL mtime, and MoP hook/event id.
+   */
+  private async checkClaudeResponsiveness(slotNum: number): Promise<void> {
+    const fingerprint = await this.capturePaneFingerprint(slotNum);
+    if (!fingerprint) {
+      this.unresponsiveStates.delete(slotNum);
+      return;
+    }
+
+    const probe: PaneProbe = {
+      fingerprint,
+      jsonlMtimeMs: latestJsonlMtimeMs(slotNum),
+      lastEventId: this.latestEventId(slotNum),
+    };
+    const prev = this.unresponsiveStates.get(slotNum);
+
+    if (!prev ||
+        prev.fingerprint !== probe.fingerprint ||
+        prev.jsonlMtimeMs !== probe.jsonlMtimeMs ||
+        prev.lastEventId !== probe.lastEventId) {
+      this.unresponsiveStates.set(slotNum, { ...probe, unchangedChecks: 1 });
+      return;
+    }
+
+    const state: UnresponsiveState = {
+      ...probe,
+      unchangedChecks: prev.unchangedChecks + 1,
+      probeSentAt: prev.probeSentAt,
+    };
+    this.unresponsiveStates.set(slotNum, state);
+
+    if (state.unchangedChecks === this.UNRESPONSIVE_PROBE_CHECKS) {
+      try {
+        await execShell(`tmux send-keys -t 0:0.${slotNum} C-l`, { timeout: 5_000 });
+        state.probeSentAt = Date.now();
+        this.unresponsiveStates.set(slotNum, state);
+        this.db.logEvent(slotNum, "pane_unresponsive_probe_sent", null, null, {
+          unchanged_checks: state.unchangedChecks,
+          probe: "C-l",
+          jsonl_mtime_ms: state.jsonlMtimeMs,
+          last_event_id: state.lastEventId,
+        });
+      } catch (err) {
+        this.db.logEvent(slotNum, "pane_unresponsive_probe_failed", null, null, {
+          unchanged_checks: state.unchangedChecks,
+          error: String(err).slice(0, 300),
+        });
+      }
+      return;
+    }
+
+    if (state.unchangedChecks < this.UNRESPONSIVE_RESPAWN_CHECKS) return;
+
+    const lastForce = this.lastForceRespawn.get(slotNum);
+    if (lastForce && Date.now() - lastForce < this.UNRESPONSIVE_FORCE_RESPAWN_COOLDOWN_MS) {
+      this.db.logEvent(slotNum, "pane_unresponsive_respawn_suppressed", null, null, {
+        unchanged_checks: state.unchangedChecks,
+        cooldown_ms: this.UNRESPONSIVE_FORCE_RESPAWN_COOLDOWN_MS,
+        last_force_respawn_at: new Date(lastForce).toISOString(),
+      });
+      return;
+    }
+
+    if (this.isInCrashLoop(slotNum)) {
+      this.db.logEvent(slotNum, "pane_unresponsive_crash_loop_suppressed", null, null, {
+        unchanged_checks: state.unchangedChecks,
+        max_restarts_per_hour: this.MAX_RESTARTS_PER_HOUR,
+      });
+      if (slotNum !== 0) {
+        this.relay.injectToPM(
+          `# 🔴 slot ${slotNum} appears unresponsive but is in restart limit — manual intervention needed.`,
+        );
+      }
+      return;
+    }
+
+    this.db.logEvent(slotNum, "pane_unresponsive_force_respawn", null, null, {
+      unchanged_checks: state.unchangedChecks,
+      probe_sent_at: state.probeSentAt ? new Date(state.probeSentAt).toISOString() : null,
+      command: RESTART_COMMANDS[slotNum],
+    });
+
+    const restarted = await this.forceRespawnSlot(slotNum, `unchanged_checks=${state.unchangedChecks}`);
+    if (restarted) {
+      this.lastRestart.set(slotNum, Date.now());
+      this.recordRestart(slotNum);
+      if (slotNum !== 0) {
+        this.relay.injectToPM(
+          `# 🔄 slot ${slotNum} pane was unresponsive — force-respawned with --continue`,
+        );
+      }
+      this.scheduleContinueInjection(slotNum);
     }
   }
 
@@ -181,7 +414,7 @@ export class ProcessHealthChecker {
    * Slots 1-3 = Dev (claude-dev-N)
    * Slot 4 = QA (claude-qa)
    */
-  checkAll(): void {
+  async checkAll(): Promise<void> {
     const now = Date.now();
 
     // Startup grace period — skip checks for first 30s after MoP starts
@@ -202,8 +435,19 @@ export class ProcessHealthChecker {
       // (Rajiv directive 2026-04-05: "not send slot crash events to pm" during respawn)
       if (this.pmInitiatedRespawns.has(slot)) continue;
 
-      // Check if the Claude Code process is dead
-      if (!this.isProcessDead(slot)) continue;
+      const paneCommand = await this.getPaneCommand(slot);
+
+      if (paneCommand === "claude") {
+        await this.checkClaudeResponsiveness(slot);
+        continue;
+      }
+
+      if (!paneCommand || !SHELL_COMMANDS.has(paneCommand)) {
+        this.unresponsiveStates.delete(slot);
+        continue;
+      }
+
+      this.unresponsiveStates.delete(slot);
 
       // Crash loop protection
       if (this.isInCrashLoop(slot)) {
@@ -228,10 +472,10 @@ export class ProcessHealthChecker {
       // Log the death event
       this.db.logEvent(slot, "process_dead", null, null, {
         detected_at: new Date().toISOString(),
-        pane_command: this.getPaneCommand(slot),
+        pane_command: paneCommand,
       });
 
-      const restarted = this.restartSlot(slot);
+      const restarted = await this.restartSlot(slot);
       if (restarted) {
         this.lastRestart.set(slot, now);
         this.recordRestart(slot);
@@ -267,7 +511,7 @@ export class ProcessHealthChecker {
     }
 
     // After dead-process checks, scan for exit_pending on idle slots
-    this.checkExitPending();
+    await this.checkExitPending();
   }
 
   // ─── Exit Pending: Scan for Already-Idle Slots ─────────
@@ -281,7 +525,7 @@ export class ProcessHealthChecker {
    * already-idle slots: if exit_pending is true, process is alive
    * (cmd=claude), slot is idle, and hasn't cycled yet → send /exit.
    */
-  private checkExitPending(): void {
+  private async checkExitPending(): Promise<void> {
     if (!this.db.getExitPending()) return;
 
     const status = this.db.getExitStatus();
@@ -303,11 +547,11 @@ export class ProcessHealthChecker {
 
       // Process must be alive (cmd=claude) — if dead, the main
       // checkAll loop handles restart, not /exit
-      const cmd = this.getPaneCommand(slot);
+      const cmd = await this.getPaneCommand(slot);
       if (!cmd || SHELL_COMMANDS.has(cmd)) continue;
 
       // Slot must be idle (not actively processing)
-      if (this.relay.isSlotActive(slot)) continue;
+      if (await this.relay.isSlotActive(slot)) continue;
 
       // ─── Idle + alive + exit_pending + not cycled → send /exit ──
       const exitLabel = slot === 0 ? "PM" : `slot ${slot}`;
@@ -352,8 +596,8 @@ export class ProcessHealthChecker {
    * and next checkAll() cycle will handle it.
    */
   private scheduleContinueInjection(slotNum: number): void {
-    const timer = setTimeout(() => {
-      const cmd = this.getPaneCommand(slotNum);
+    const timer = setTimeout(async () => {
+      const cmd = await this.getPaneCommand(slotNum);
       if (cmd !== "claude") {
         console.log(
           `[health] Slot ${slotNum} not yet at claude prompt (cmd: ${cmd}) — skipping continue injection`,
@@ -363,14 +607,15 @@ export class ProcessHealthChecker {
 
       const paneAddress = `0:0.${slotNum}`;
       try {
-        execSync(
+        await execShell(
           `tmux send-keys -t ${paneAddress} 'continue' Enter`,
-          { timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] },
+          { timeout: 10_000 },
         );
         console.log(`[health] Sent "continue" to slot ${slotNum} after restart`);
         this.db.logEvent(slotNum, "continue_injected", null, null, {
           reason: "Post-restart continue injection — session resuming",
         });
+        this.unresponsiveStates.delete(slotNum);
       } catch (err) {
         console.error(`[health] Failed to send continue to slot ${slotNum}:`, err);
       }
@@ -386,7 +631,7 @@ export class ProcessHealthChecker {
     if (this.timer) return;
     this.timer = setInterval(() => {
       try {
-        this.checkAll();
+        void this.checkAll();
       } catch (err) {
         console.error("[health] Check failed:", err);
       }

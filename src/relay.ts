@@ -7,9 +7,9 @@
  * Uses the send-to-slot.sh script infrastructure for reliable delivery.
  */
 
-import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { execShell, execShellOk, sleep } from "./asyncCommand.js";
 import type { LogManager } from "./logs.js";
 import type { MoPDatabase } from "./db.js";
 import type { MoPConfig, SlotState } from "./types.js";
@@ -38,6 +38,12 @@ const PM_JSONL_IDLE_MS: number = (() => {
   const raw = process.env.MOP_PM_JSONL_IDLE_MS;
   const n = raw ? parseInt(raw, 10) : NaN;
   return Number.isFinite(n) && n >= 0 ? n : 15_000;
+})();
+
+const PM_INJECT_ENTER_DELAY_MS: number = (() => {
+  const raw = process.env.MOP_PM_INJECT_ENTER_DELAY_MS;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : 250;
 })();
 
 /**
@@ -105,7 +111,10 @@ function parseRelayMessage(message: string): { eventType: string; slot: number }
   // First-line scan: a multi-line check-slot payload starts with the prefix
   // line and is followed by the bg-script summary. We only key off the
   // prefix.
-  const firstLine = message.split("\n", 1)[0];
+  const lines = message.split("\n");
+  const firstLine = /^#\s*mop\b/i.test(lines[0] ?? "")
+    ? (lines[1] ?? "")
+    : (lines[0] ?? "");
 
   // Shape 1: legacy slash command.
   const slash = /^\/(slot-idle|slot-active|check-slot|slot-blocked)\s+(\d+)\b/.exec(firstLine);
@@ -136,6 +145,46 @@ function parseRelayMessage(message: string): { eventType: string; slot: number }
   // which enqueues with slot=0 + a hash-derived event_type so concurrent audit
   // payloads do not collapse onto each other when PM is busy.
   return null;
+}
+
+function formatMopTimestamp(date = new Date()): string {
+  return date.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function withMopSlotHeader(message: string, parsed: { eventType: string; slot: number } | null): string {
+  if (!parsed) return message;
+  if (/^#\s*mop\b/i.test(message)) return message;
+  const lines = message.split("\n");
+  const firstLine = lines[0] ?? "";
+  const timestamp = formatMopTimestamp();
+  if (/^MoP:/i.test(firstLine)) {
+    if (!/\|\s*\d{1,2}:\d{2}\s*[AP]M\b/i.test(firstLine)) {
+      lines[0] = `${firstLine} | ${timestamp}`;
+    }
+    return lines.join("\n");
+  }
+
+  switch (parsed.eventType) {
+    case "check-slot":
+      lines[0] = `MoP: check slot ${parsed.slot} | ${timestamp}`;
+      break;
+    case "slot-idle":
+      lines[0] = `MoP: slot ${parsed.slot} idle | ${timestamp}`;
+      break;
+    case "slot-active":
+      lines[0] = `MoP: slot ${parsed.slot} active | ${timestamp}`;
+      break;
+    case "slot-blocked":
+      lines[0] = `MoP: slot ${parsed.slot} blocked | ${timestamp}`;
+      break;
+    default:
+      lines[0] = `${firstLine} | ${timestamp}`;
+  }
+  return lines.join("\n");
 }
 
 export class TmuxRelay {
@@ -188,6 +237,13 @@ export class TmuxRelay {
    */
   private static readonly DRAIN_MAX_REARMS = 10;
   private drainRearmCount = 0;
+  private static readonly CHECK_SLOT_QUEUE_MAX_AGE_MS: number = (() => {
+    const raw = process.env.MOP_CHECK_SLOT_QUEUE_MAX_AGE_MS;
+    const n = raw ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(n) && n >= 0 ? n : 90_000;
+  })();
+  private directInjectChain: Promise<unknown> = Promise.resolve();
+  private directInjectSeq = 0;
 
   constructor(config: MoPConfig) {
     this.pmPaneAddress = config.pmPaneAddress;
@@ -319,6 +375,30 @@ export class TmuxRelay {
     const rows = this.db.drainPendingPMEvents();
     let injected = 0;
     for (const row of rows) {
+      if (row.event_type === "check-slot" && !row.payload) {
+        this.db.logEvent(row.slot, "pm_queue_dropped", null, null, {
+          event_type: row.event_type,
+          reason: "missing-check-slot-payload",
+          enqueued_at: row.enqueued_at,
+        });
+        continue;
+      }
+      if (row.event_type === "check-slot") {
+        const drop = this.shouldDropQueuedCheckSlot(row);
+        if (drop) {
+          this.db.logEvent(row.slot, "pm_queue_dropped", null, null, {
+            event_type: row.event_type,
+            enqueued_at: row.enqueued_at,
+            ...drop,
+          });
+          console.log(
+            `[relay-debug] dropped queued check-slot ${row.slot} — ${drop.reason}` +
+            (drop.latest_reason ? ` (${drop.latest_reason})` : "")
+          );
+          continue;
+        }
+      }
+
       // Reconstruct message when payload is null (slot-event enqueue path).
       // Rajiv directive 2026-05-22 22:23 IST thread `1779468118.901709` —
       // inject is a string, not a command. Reconstruct in MoP shape so the
@@ -343,16 +423,55 @@ export class TmuxRelay {
           fallback = `/${row.event_type} ${row.slot}`;
       }
       const message = row.payload ?? fallback;
-      const ok = this.injectDirect(message);
-      if (ok) injected++;
+      void this.injectDirect(message);
+      injected++;
       this.db.logEvent(row.slot, "pm_queue_drained", null, null, {
         event_type: row.event_type,
         message: message.slice(0, 200),
         enqueued_at: row.enqueued_at,
-        injected: ok,
+        injected: true,
       });
     }
     return injected;
+  }
+
+  private shouldDropQueuedCheckSlot(row: {
+    slot: number;
+    event_type: string;
+    payload: string | null;
+    enqueued_at: string;
+  }): Record<string, unknown> | null {
+    const enqueuedMs = parseDbTimestampMs(row.enqueued_at);
+    if (Number.isFinite(enqueuedMs)) {
+      const ageMs = Date.now() - enqueuedMs;
+      if (ageMs > TmuxRelay.CHECK_SLOT_QUEUE_MAX_AGE_MS) {
+        return {
+          reason: "stale-check-slot-queue-age",
+          age_ms: Math.round(ageMs),
+          max_age_ms: TmuxRelay.CHECK_SLOT_QUEUE_MAX_AGE_MS,
+        };
+      }
+
+      const checkFile = `/tmp/slot-${row.slot}-check.txt`;
+      try {
+        const st = fs.statSync(checkFile);
+        if (st.mtimeMs > enqueuedMs) {
+          const latest = fs.readFileSync(checkFile, "utf8");
+          const skipMatch = /^INJECT_DECISION:skip(?:\s+REASON:([^\n]*))?/m.exec(latest);
+          if (skipMatch) {
+            return {
+              reason: "superseded-by-latest-check-slot-skip",
+              latest_reason: (skipMatch[1] || "unspecified").trim().slice(0, 160),
+              check_file: checkFile,
+              check_file_mtime: new Date(st.mtimeMs).toISOString(),
+            };
+          }
+        }
+      } catch {
+        // Missing/unreadable check file should not drop a fresh queued inject.
+      }
+    }
+    return null;
   }
 
   /** Attach a LogManager for log-based output capture and activity detection. */
@@ -373,8 +492,8 @@ export class TmuxRelay {
    * cross-event-type drop happens in drainPendingPMEvents).
    *
    * IMPORTANT EXCLUSIONS (do NOT route through this queue):
-   * - `mop_clear_all_slots` PM-pane direct inject (mcp.ts) — uses raw
-   *   `tmux send-keys '/clear' Enter` directly, bypassing the relay.
+   * - PM self-clear is handled by the MoP clear path, which routes `/clear`
+   *   through `/slots/0/send` and waits for SessionStart:clear acknowledgement.
    * - `handleSessionStart` slot=0 source=compact (hooks.ts) — uses raw
    *   `tmux send-keys 'continue your work' Enter` directly, bypassing
    *   the relay.
@@ -386,14 +505,17 @@ export class TmuxRelay {
     if (this.pmBusy && this.db) {
       const parsed = parseRelayMessage(message);
       if (parsed) {
+        const decorated = withMopSlotHeader(message, parsed);
         // Slash-command relay (slot-idle/active/check-slot/blocked) —
         // queue keyed by (slot, event_type). PRIMARY KEY auto-coalesces.
-        this.db.enqueuePendingPMEvent(parsed.slot, parsed.eventType, null);
+        const payload = decorated;
+        this.db.enqueuePendingPMEvent(parsed.slot, parsed.eventType, payload);
         this.db.logEvent(parsed.slot, "pm_queue_enqueued", null, null, {
           event_type: parsed.eventType,
           via: "injectToPM",
+          payload: "inline",
         });
-        console.log(`[relay-debug] injectToPM queued (PM busy) → ${message}`);
+        console.log(`[relay-debug] injectToPM queued (PM busy) → ${decorated}`);
         return true;
       }
       // Free-form message (escalation, plan-approval-needed, scheduled-task,
@@ -418,7 +540,37 @@ export class TmuxRelay {
       console.log(`[relay-debug] injectToPM queued freeform (PM busy) → ${message.slice(0, 80)}`);
       return true;
     }
-    return this.injectDirect(message);
+    const parsed = parseRelayMessage(message);
+    void this.injectDirect(withMopSlotHeader(message, parsed));
+    return true;
+  }
+
+  /**
+   * Inject into PM immediately, bypassing the busy queue. Use only for
+   * low-cost state signals where stale delivery is worse than interrupting PM.
+   */
+  injectToPMDirect(message: string): boolean {
+    const parsed = parseRelayMessage(message);
+    const decorated = withMopSlotHeader(message, parsed);
+    if (parsed && this.db) {
+      if (parsed.eventType === "slot-active") {
+        const deleted = this.db.deletePendingPMEvent(parsed.slot, "check-slot");
+        if (deleted > 0) {
+          this.db.logEvent(parsed.slot, "pm_queue_dropped", null, null, {
+            event_type: "check-slot",
+            reason: "superseded-by-direct-slot-active",
+            dropped_count: deleted,
+          });
+          console.log(`[relay-debug] dropped queued check-slot ${parsed.slot} — superseded by direct slot-active`);
+        }
+      }
+      this.db.logEvent(parsed.slot, "pm_direct_inject_bypass_queue", null, null, {
+        event_type: parsed.eventType,
+        message: decorated.slice(0, 200),
+      });
+    }
+    void this.injectDirect(decorated);
+    return true;
   }
 
   /**
@@ -426,10 +578,19 @@ export class TmuxRelay {
    * not-busy fast path) and drainPMQueue (when replaying queued events).
    * Bypasses the busy-queue. Do NOT call from outside the relay.
    *
-   * IMPORTANT: Text and Enter must be separate send-keys calls —
-   * appending Enter to the text send-keys can silently drop the Enter.
+   * IMPORTANT: Text/paste and Enter must be separate tmux calls with a short
+   * dwell between them. tmux can accept the operations sequentially while the
+   * target pane is still rendering the inserted prompt; pressing Enter in the
+   * same shell invocation can leave the message buffered instead of submitted.
    */
-  private injectDirect(message: string): boolean {
+  private async injectDirect(message: string): Promise<boolean> {
+    const run = (): Promise<boolean> => this.injectDirectNow(message);
+    const result = this.directInjectChain.then(run, run);
+    this.directInjectChain = result.catch(() => undefined);
+    return result;
+  }
+
+  private async injectDirectNow(message: string): Promise<boolean> {
     try {
       const firstLine = message.split("\n", 1)[0];
       console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""}`);
@@ -440,29 +601,24 @@ export class TmuxRelay {
         // Enter on each newline and submit the prompt prematurely.
         // Rajiv directive 2026-05-15 13:44 IST thread `1778831723.165019`:
         // "make it inline" — MoP injects command + bg-output as one atomic prompt.
-        const tmpFile = `/tmp/mop-pm-inject-${Date.now()}.txt`;
-        const bufName = `mop-pm-inject`;
+        const seq = ++this.directInjectSeq;
+        const tmpFile = `/tmp/mop-pm-inject-${Date.now()}-${process.pid}-${seq}.txt`;
+        const bufName = `mop-pm-inject-${process.pid}-${seq}`;
         fs.writeFileSync(tmpFile, message);
         try {
-          execSync(
-            `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)} && ` +
-            `tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d && ` +
-            `sleep 0.3 && ` +
-            `tmux send-keys -t ${this.pmPaneAddress} Enter && ` +
-            `sleep 0.5`,
-            { timeout: 10_000 }
-          );
+          await execShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+          await execShell(`tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
+          await sleep(PM_INJECT_ENTER_DELAY_MS);
+          await execShell(`tmux send-keys -t ${this.pmPaneAddress} Enter`, { timeout: 10_000 });
+          await sleep(500);
         } finally {
           try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
         }
       } else {
-        execSync(
-          `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)} && ` +
-          `sleep 0.3 && ` +
-          `tmux send-keys -t ${this.pmPaneAddress} Enter && ` +
-          `sleep 0.5`,
-          { timeout: 10_000 }
-        );
+        await execShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
+        await sleep(PM_INJECT_ENTER_DELAY_MS);
+        await execShell(`tmux send-keys -t ${this.pmPaneAddress} Enter`, { timeout: 10_000 });
+        await sleep(500);
       }
       console.log(`[relay-debug] injectToPM success → ${firstLine}`);
       return true;
@@ -479,13 +635,16 @@ export class TmuxRelay {
    */
   private injectCommandToPM(comment: string, command: string): boolean {
     try {
-      execSync(
-        // Type comment + Shift+Enter (newline) + command as one input
-        `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(comment)} S-Enter ${shellEscape(command)} && ` +
-        `sleep 0.5 && ` +
-        `tmux send-keys -t ${this.pmPaneAddress} Enter`,
-        { timeout: 10_000 }
-      );
+      void (async () => {
+        // Type comment + Shift+Enter (newline) + command as one input, then
+        // submit after a short dwell so the target TUI has applied the text.
+        await execShell(
+          `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(comment)} S-Enter ${shellEscape(command)}`,
+          { timeout: 10_000 }
+        );
+        await sleep(PM_INJECT_ENTER_DELAY_MS);
+        await execShell(`tmux send-keys -t ${this.pmPaneAddress} Enter`, { timeout: 10_000 });
+      })().catch((err) => console.error(`[relay] Failed to inject command into PM pane:`, err));
       return true;
     } catch (err) {
       console.error(`[relay] Failed to inject command into PM pane:`, err);
@@ -497,7 +656,7 @@ export class TmuxRelay {
    * Notify PM that a slot went idle.
    * Sends: # comment line, then /slot-idle N slash command.
    */
-  notifySlotIdle(slot: SlotState): void {
+  notifySlotIdle(slot: SlotState, direct = false): void {
     // Inject MoP message prefix (replaces former slash command `/slot-idle N`).
     // Rajiv directive 2026-05-22 22:23 IST thread `1779468118.901709`:
     // "inject is a string instead of a command." PM-side
@@ -505,7 +664,12 @@ export class TmuxRelay {
     // [MoP_SLOT_NOTIFICATION] system-reminder hinting Skill(slot-idle).
     // Busy-queue (slot, event_type) coalesce key unchanged — parseRelayMessage
     // recognizes both shapes.
-    this.injectToPM(`MoP: slot ${slot.slot} idle`);
+    const message = `MoP: slot ${slot.slot} idle`;
+    if (direct) {
+      this.injectToPMDirect(message);
+    } else {
+      this.injectToPM(message);
+    }
   }
 
   /**
@@ -654,6 +818,11 @@ export class TmuxRelay {
    * `force` parameter is now a no-op (kept for callsite compatibility).
    */
   sendToSlot(slotNum: number, command: string, _force = false, raw = false): boolean {
+    void this.sendToSlotAsync(slotNum, command, _force, raw);
+    return true;
+  }
+
+  async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false): Promise<boolean> {
     void _force; // v3: every send is unconditional
     const paneAddr = `0:0.${slotNum}`;
     const cooldownKey = `${slotNum}:${command.slice(0, 80)}`;
@@ -682,7 +851,7 @@ export class TmuxRelay {
         if (raw) {
           // Raw: tmux interprets key names (Escape, C-c, BTab, etc.).
           // Do NOT pass -l (literal) flag — that would type the name as text.
-          execSync(
+          await execShell(
             `tmux send-keys -t ${paneAddr} ${shellEscape(command)}`,
             { timeout: 5_000 }
           );
@@ -693,18 +862,18 @@ export class TmuxRelay {
           const bufName = `mop-send-${slotNum}`;
           fs.writeFileSync(tmpFile, command);
           try {
-            execSync(
+            await execShell(
               `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
               { timeout: 3_000 }
             );
-            execSync(
+            await execShell(
               `tmux paste-buffer -b ${bufName} -t ${paneAddr} -d`,
               { timeout: 3_000 }
             );
             // Small breathing room so the TUI registers the paste before Enter.
             // Matches the 0.3s that injectDirect uses for PM pane sends.
-            execSync(`sleep 0.3`, { timeout: 2_000 });
-            execSync(
+            await sleep(300);
+            await execShell(
               `tmux send-keys -t ${paneAddr} Enter`,
               { timeout: 3_000 }
             );
@@ -736,13 +905,7 @@ export class TmuxRelay {
         );
         if (attempt < TmuxRelay.SEND_MAX_RETRIES) {
           const backoff = TmuxRelay.SEND_RETRY_BACKOFF_MS[attempt] ?? 2000;
-          // Synchronous sleep via Atomics.wait on a dummy SharedArrayBuffer —
-          // blocks the event loop without burning CPU. sendToSlot is sync
-          // to preserve callsite contract (callers in stuck.ts/hooks.ts use
-          // it as fire-and-forget without await).
-          const sab = new SharedArrayBuffer(4);
-          const view = new Int32Array(sab);
-          Atomics.wait(view, 0, 0, backoff);
+          await sleep(backoff);
         }
       }
     }
@@ -771,20 +934,13 @@ export class TmuxRelay {
   /**
    * Check if a slot is currently active (processing).
    * is-active.sh communicates via exit codes: 0=ACTIVE, 1=IDLE, 2=ERROR.
-   * execSync throws on non-zero exit — so reaching the return means exit 0 (ACTIVE).
+   * is-active.sh exits 0 for ACTIVE; non-zero means IDLE or ERROR.
    */
-  isSlotActive(slotNum: number): boolean {
-    try {
-      execSync(
-        `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`,
-        { timeout: 5_000 }
-      );
-      // exit code 0 = ACTIVE
-      return true;
-    } catch {
-      // exit code 1 = IDLE, exit code 2 = ERROR, timeout = assume idle
-      return false;
-    }
+  async isSlotActive(slotNum: number): Promise<boolean> {
+    return execShellOk(
+      `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`,
+      { timeout: 5_000 }
+    );
   }
 
   /**
@@ -792,23 +948,23 @@ export class TmuxRelay {
    * Prefers log-based capture (persistent, never loses content) when LogManager is attached.
    * Falls back to tmux capture-pane if no LogManager.
    */
-  captureOutput(slotNum: number, lines = 30): { output: string; activity: "busy" | "idle" } {
+  async captureOutput(slotNum: number, lines = 30): Promise<{ output: string; activity: "busy" | "idle" }> {
     // Always use tmux capture-pane — captures the visible terminal screen including
     // Claude Code TUI prompts (plan approval, status bar) that pipe-pane logs miss.
     // (Rajiv directive 2026-03-18: "change it to use tmux capture pane instead")
     let output = "";
     const paneAddress = `0:0.${slotNum}`;
     try {
-      const raw = execSync(
+      const raw = await execShell(
         `tmux capture-pane -t ${paneAddress} -p -S -${lines}`,
         { timeout: 5_000 }
       );
-      output = raw.toString();
+      output = raw.stdout;
     } catch (err) {
       output = `[capture failed: ${err}]`;
     }
 
-    const activity = this.isSlotActive(slotNum) ? "busy" as const : "idle" as const;
+    const activity = (await this.isSlotActive(slotNum)) ? "busy" as const : "idle" as const;
     return { output, activity };
   }
 
@@ -817,7 +973,7 @@ export class TmuxRelay {
    * If log was modified in the last 5 seconds, the slot is actively working.
    * Falls back to is-active.sh if no LogManager.
    */
-  isSlotActiveFromLog(slotNum: number): boolean {
+  async isSlotActiveFromLog(slotNum: number): Promise<boolean> {
     if (!this.logManager) return this.isSlotActive(slotNum);
 
     const mtime = this.logManager.getLogMtime(slotNum);
@@ -840,6 +996,13 @@ function shellEscape(str: string): string {
 
 function truncate(str: string, maxLen: number): string {
   return str.length <= maxLen ? str : str.slice(0, maxLen - 1) + "…";
+}
+
+function parseDbTimestampMs(timestamp: string): number {
+  if (/Z$|[+-]\d{2}:?\d{2}$/.test(timestamp)) {
+    return new Date(timestamp).getTime();
+  }
+  return new Date(timestamp + "Z").getTime();
 }
 
 /**

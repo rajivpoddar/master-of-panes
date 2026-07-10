@@ -9,7 +9,6 @@
  * - pipe-pane initialization on server startup
  */
 
-import { execSync } from "node:child_process";
 import {
   closeSync,
   openSync,
@@ -17,6 +16,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { execShell } from "./asyncCommand.js";
 
 export class LogManager {
   private readonly MAX_LOG_SIZE = 100 * 1024; // 100KB per slot
@@ -100,7 +100,7 @@ export class LogManager {
    * The -o flag captures output only (not input keystrokes).
    * Idempotent — if already piping, pipe-pane replaces the existing pipe.
    */
-  enableLogging(slotCount: number): void {
+  async enableLogging(slotCount: number): Promise<void> {
     for (let i = 1; i <= slotCount; i++) {
       const logPath = this.getLogPath(i);
       try {
@@ -108,7 +108,7 @@ export class LogManager {
         writeFileSync(logPath, "", { flag: "a" });
 
         // Enable pipe-pane — streams all output to log file
-        execSync(`tmux pipe-pane -t "0:0.${i}" -o 'cat >> ${logPath}'`, {
+        await execShell(`tmux pipe-pane -t "0:0.${i}" -o 'cat >> ${logPath}'`, {
           timeout: 5_000,
         });
       } catch (err) {
@@ -121,10 +121,10 @@ export class LogManager {
   /**
    * Disable pipe-pane for all slots (cleanup).
    */
-  disableLogging(slotCount: number): void {
+  async disableLogging(slotCount: number): Promise<void> {
     for (let i = 1; i <= slotCount; i++) {
       try {
-        execSync(`tmux pipe-pane -t "0:0.${i}"`, { timeout: 5_000 });
+        await execShell(`tmux pipe-pane -t "0:0.${i}"`, { timeout: 5_000 });
       } catch {
         // Ignore — pane may not exist
       }

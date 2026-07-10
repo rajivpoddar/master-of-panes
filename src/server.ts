@@ -12,8 +12,7 @@
  * 5. Returns a HookResponse that Claude Code acts on
  */
 
-import { execSync } from "node:child_process";
-import { readFileSync, appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
@@ -24,7 +23,10 @@ import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
 import { StuckDetector } from "./stuck.js";
 import { OpsAuditScheduler } from "./opsAudit.js";
+import { PMCadenceScheduler } from "./pmCadence.js";
+import { P0EscalationWatcher } from "./p0EscalationWatch.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS } from "./health.js";
+import { execShell, execShellOk, sleep } from "./asyncCommand.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 
@@ -45,9 +47,22 @@ const relay = new TmuxRelay(config);
 relay.setDatabase(db);
 const processor = new HookProcessor(db, relay);
 
+// MoP events are a bounded operational ring, not an audit archive. Prune once
+// after startup and then every six hours so recent-event endpoints stay cheap.
+const eventRetentionMaxRows = parseInt(process.env.MOP_EVENT_RETENTION_MAX_ROWS ?? "200000", 10);
+const eventRetentionDays = parseInt(process.env.MOP_EVENT_RETENTION_DAYS ?? "14", 10);
+const pruneEvents = (): void => {
+  const removed = db.pruneEvents(eventRetentionMaxRows, eventRetentionDays);
+  if (removed > 0) {
+    console.log(`[mop] pruned ${removed} old events; retention rows=${eventRetentionMaxRows} days=${eventRetentionDays}`);
+  }
+};
+pruneEvents();
+const eventRetentionTimer = setInterval(pruneEvents, 6 * 60 * 60 * 1000);
+
 // ─── Pane Logging (Phase 2) ─────────────────────────────
 const logManager = new LogManager();
-logManager.enableLogging(config.slotCount);
+await logManager.enableLogging(config.slotCount);
 relay.setLogManager(logManager);
 
 // ─── Stuck Detection (Phase 3) ──────────────────────────
@@ -67,6 +82,19 @@ healthChecker.start();
 // Rajiv CTO directive 2026-05-26 thread C0ALZJHGE49/1779790681.847219.
 const opsAuditScheduler = new OpsAuditScheduler(db, relay);
 opsAuditScheduler.start();
+
+// ─── PM Cadence Scheduler (3h heartbeat + daily morning brief) ──
+// MoP owns these recurring PM injections so ops cadence state is observable and
+// persisted in one control plane. launchd remains only the MoP watchdog.
+const pmCadenceScheduler = new PMCadenceScheduler(db, relay);
+pmCadenceScheduler.start();
+
+// ─── P0 Escalation Watcher ──────────────────────────────────
+// Reads PM-owned p0_escalation obligations and wakes PM with a normal prompt
+// that tells PM to invoke Skill(alert-processing). It never injects slash
+// commands and never clears PM obligations.
+const p0EscalationWatcher = new P0EscalationWatcher(db, relay);
+p0EscalationWatcher.start();
 
 // ─── Log Rotation (every 10 minutes) ────────────────────
 const rotationTimer = setInterval(() => {
@@ -97,6 +125,286 @@ const eventLoopLagTimer = setInterval(() => {
 }, 60 * 1000);
 
 const app = new Hono();
+
+// ─── MoP Clear Helpers ─────────────────────────────────
+// HTTP path for deterministic schedulers that cannot call MCP tools.
+// This keeps clears logged in MoP and avoids raw /clear injection from shell.
+
+type ClearSlotResult = { slot: number; name: string; status: string };
+
+const PM_CLEAR_RECENT_SUPPRESS_MS = parseInt(
+  process.env.MOP_PM_CLEAR_RECENT_SUPPRESS_MS ?? `${10 * 60 * 1000}`,
+  10,
+);
+const PM_CLEAR_STALE_ACK_REPAIR_MS = parseInt(
+  process.env.MOP_PM_CLEAR_STALE_ACK_REPAIR_MS ?? `${10 * 60 * 1000}`,
+  10,
+);
+const PM_CLEAR_RETRY_SUPPRESS_MS = parseInt(
+  process.env.MOP_PM_CLEAR_RETRY_SUPPRESS_MS ?? `${60 * 1000}`,
+  10,
+);
+const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
+const PM_CLEAR_CONFIRMED_AT_KEY = "pm_clear_confirmed_at";
+
+function normalizeClearTarget(raw: string): number[] | null {
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "all") return [0, 1, 2, 3, 4];
+  if (normalized === "pm") return [0];
+  if (/^[0-4]$/.test(normalized)) return [Number(normalized)];
+  return null;
+}
+
+function isRecentIso(value: string | null, windowMs: number): boolean {
+  if (!value) return false;
+  const ts = Date.parse(value);
+  return Number.isFinite(ts) && Date.now() - ts >= 0 && Date.now() - ts < windowMs;
+}
+
+function parseMoPIsoMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(trimmed) ? trimmed : `${trimmed}Z`;
+  const ts = Date.parse(normalized);
+  return Number.isFinite(ts) ? ts : null;
+}
+
+function hasRecentClearEvent(slotNum: number, windowMs: number): boolean {
+  const cutoff = Date.now() - windowMs;
+  return db
+    .getEvents(slotNum, 20)
+    .some((event) => {
+      if (!["slot_cleared", "clear_pending_executed"].includes(event.event_type)) return false;
+      const ts = parseMoPIsoMs(event.timestamp);
+      return ts !== null && ts >= cutoff;
+    });
+}
+
+function hasRecentPmClearSend(windowMs: number): boolean {
+  const cutoff = Date.now() - windowMs;
+  return db
+    .getEvents(0, 30)
+    .some((event) => {
+      if (
+        ![
+          "send_allowed_pm_clear_control_command",
+          "clear_pending_queued",
+          "clear_pending_pm_retry_sent",
+        ].includes(event.event_type)
+      ) {
+        return false;
+      }
+
+      const ts = parseMoPIsoMs(event.timestamp);
+      if (ts === null || ts < cutoff) return false;
+
+      if (event.event_type === "send_allowed_pm_clear_control_command") {
+        try {
+          const payload = JSON.parse(event.payload) as { command?: unknown };
+          return payload.command === "/clear";
+        } catch {
+          return false;
+        }
+      }
+
+      return true;
+    });
+}
+
+function findPmSessionStartAfter(cutoffMs: number) {
+  return db
+    .getEvents(0, 50, "SessionStart")
+    .find((event) => {
+      const ts = parseMoPIsoMs(event.timestamp);
+      return ts !== null && ts >= cutoffMs;
+    });
+}
+
+function reconcileStalePmClearRequest(source: string): boolean {
+  if (!db.hasPendingClear(0)) return false;
+
+  const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
+  const requestedMs = parseMoPIsoMs(requestedAt);
+  if (requestedMs === null) return false;
+  if (Date.now() - requestedMs < PM_CLEAR_STALE_ACK_REPAIR_MS) return false;
+
+  const laterSessionStart = findPmSessionStartAfter(requestedMs);
+  if (!laterSessionStart) return false;
+
+  db.clearPendingClear(0);
+  db.logEvent(0, "clear_pending_stale_repaired", null, null, {
+    name: "PM",
+    requested_at: requestedAt,
+    repaired_at: new Date().toISOString(),
+    later_session_start_event_id: laterSessionStart.id,
+    later_session_start_timestamp: laterSessionStart.timestamp,
+    via: source,
+    reason: "PM clear request never received SessionStart:clear ack; later SessionStart proves the latch is stale. Clearing latch only, not marking clear complete.",
+  });
+  return true;
+}
+
+async function sendClearViaMopSendPath(
+  slotNum: number,
+  source: string,
+): Promise<{ success: boolean; status: number; reason?: string; error?: string }> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slotNum}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        command: "/clear",
+        force: true,
+        allow_pm_clear: slotNum === 0,
+        source,
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return {
+      success: res.ok && data.success === true,
+      status: res.status,
+      reason: typeof data.reason === "string" ? data.reason : undefined,
+      error: typeof data.error === "string" ? data.error : undefined,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      status: 0,
+      reason: "mop_send_path_error",
+      error: String(err),
+    };
+  }
+}
+
+async function clearSlotsThroughMopHttp(
+  targetSlots: number[],
+  options: { clearExistingPendingForTargets: boolean; source: string; terminalOnly: boolean },
+): Promise<ClearSlotResult[]> {
+  const normalizedTargets = Array.from(new Set(targetSlots))
+    .filter((slot) => slot >= 0 && slot <= 4);
+  const results: ClearSlotResult[] = [];
+
+  if (options.clearExistingPendingForTargets) {
+    for (const slotNum of normalizedTargets) {
+      db.clearPendingClear(slotNum);
+    }
+  }
+
+  const devSlots = normalizedTargets.filter((slotNum) => slotNum !== 0);
+  const includePmSlot = normalizedTargets.includes(0);
+
+  for (const slotNum of devSlots) {
+    const isActive = await relay.isSlotActive(slotNum);
+    db.updateSlot(slotNum, { idle: !isActive });
+
+    const slotState = db.getSlot(slotNum);
+    const name = slotState?.name ?? `slot-${slotNum}`;
+    const isIdle = slotState?.idle ?? true;
+
+    if (isIdle) {
+      try {
+        const sent = await sendClearViaMopSendPath(slotNum, options.source);
+        if (!sent.success) {
+          throw new Error(sent.error ?? sent.reason ?? `send failed status=${sent.status}`);
+        }
+
+        db.releaseSlot(slotNum);
+        db.clearPendingClear(slotNum);
+        db.logEvent(slotNum, "slot_cleared", null, null, {
+          name,
+          cleared_at: new Date().toISOString(),
+          immediate: true,
+          via: options.source,
+          delivery: "mop_send_to_slot",
+        });
+
+        results.push({ slot: slotNum, name, status: "cleared (idle)" });
+      } catch (err) {
+        results.push({ slot: slotNum, name, status: `failed: ${err}` });
+      }
+    } else if (options.terminalOnly) {
+      db.logEvent(slotNum, "clear_terminal_only_skipped", null, null, {
+        name,
+        checked_at: new Date().toISOString(),
+        reason: "Slot is active; terminal-only clear did not arm a pending clear",
+        via: options.source,
+        delivery: "http_clear_endpoint",
+      });
+      results.push({ slot: slotNum, name, status: "active (not terminal; no clear queued)" });
+    } else {
+      db.setPendingClear(slotNum);
+      db.logEvent(slotNum, "clear_pending_queued", null, null, {
+        name,
+        queued_at: new Date().toISOString(),
+        reason: "Slot is active - will clear on next idle notification",
+        via: options.source,
+        delivery: "http_clear_endpoint",
+      });
+      results.push({ slot: slotNum, name, status: "queued (active - will clear on next idle)" });
+    }
+
+    await sleep(500);
+  }
+
+  if (includePmSlot) {
+    reconcileStalePmClearRequest(options.source);
+
+    if (
+      db.hasPendingClear(0) ||
+      isRecentIso(db.getConfig(PM_CLEAR_REQUESTED_AT_KEY), PM_CLEAR_RECENT_SUPPRESS_MS)
+    ) {
+      db.logEvent(0, "clear_pending_duplicate_suppressed", null, null, {
+        name: "PM",
+        via: options.source,
+        reason: "pm_clear_already_requested",
+        requested_at: db.getConfig(PM_CLEAR_REQUESTED_AT_KEY),
+      });
+      results.push({ slot: 0, name: "PM", status: "skipped (PM clear already requested)" });
+      return results;
+    }
+
+    if (
+      isRecentIso(db.getConfig(PM_CLEAR_CONFIRMED_AT_KEY), PM_CLEAR_RECENT_SUPPRESS_MS) ||
+      hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS)
+    ) {
+      db.logEvent(0, "clear_recent_duplicate_suppressed", null, null, {
+        name: "PM",
+        via: options.source,
+        reason: "pm_clear_recently_confirmed",
+        confirmed_at: db.getConfig(PM_CLEAR_CONFIRMED_AT_KEY),
+        suppress_window_ms: PM_CLEAR_RECENT_SUPPRESS_MS,
+      });
+      results.push({ slot: 0, name: "PM", status: "skipped (PM clear recently confirmed)" });
+      return results;
+    }
+
+    try {
+      db.setPendingClear(0);
+      const requestedAt = new Date().toISOString();
+      db.setConfig(PM_CLEAR_REQUESTED_AT_KEY, requestedAt);
+
+      const sent = await sendClearViaMopSendPath(0, options.source);
+      if (!sent.success) {
+        db.clearPendingClear(0);
+        throw new Error(sent.error ?? sent.reason ?? `send failed status=${sent.status}`);
+      }
+
+      db.logEvent(0, "clear_pending_queued", null, null, {
+        name: "PM",
+        queued_at: requestedAt,
+        reason: "PM clear sent through MoP send path; awaiting SessionStart source=clear acknowledgement",
+        via: options.source,
+        delivery: "mop_send_to_slot",
+      });
+
+      results.push({ slot: 0, name: "PM", status: "queued (PM /clear sent; awaiting clear acknowledgement)" });
+    } catch (err) {
+      results.push({ slot: 0, name: "PM", status: `failed: ${err}` });
+    }
+  }
+
+  return results;
+}
 
 // ─── Validation ──────────────────────────────────────────
 
@@ -156,6 +464,8 @@ function normalizePayload(raw: z.infer<typeof hookPayloadSchema>): HookPayload {
     tool_input: raw.tool_input,
     tool_output: raw.tool_output,
     session_id: raw.session_id,
+    cwd: raw.cwd,
+    transcript_path: raw.transcript_path,
     notification_type: raw.notification_type,
     stop_reason: raw.stop_reason,
     // Preserve useful context
@@ -206,6 +516,8 @@ app.get("/ready", (c) => {
       stuckDetector: !!stuckDetector,
       healthChecker: !!healthChecker,
       opsAuditScheduler: !!opsAuditScheduler,
+      pmCadenceScheduler: !!pmCadenceScheduler,
+      p0EscalationWatcher: !!p0EscalationWatcher,
       rotationTimer: !!rotationTimer,
       eventLoopLagTimer: !!eventLoopLagTimer,
     },
@@ -259,6 +571,29 @@ app.post("/pm-status", async (c) => {
       queued_before: before,
       drained: result.drained,
     });
+    if (db.hasPendingClear(0)) {
+      const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
+      if (
+        isRecentIso(requestedAt, PM_CLEAR_RETRY_SUPPRESS_MS) ||
+        hasRecentPmClearSend(PM_CLEAR_RETRY_SUPPRESS_MS)
+      ) {
+        db.logEvent(0, "clear_pending_pm_retry_suppressed", null, null, {
+          name: "PM",
+          reason: "PM clear is already pending and a /clear was recently sent; suppressing duplicate retry",
+          requested_at: requestedAt,
+          suppress_window_ms: PM_CLEAR_RETRY_SUPPRESS_MS,
+        });
+      } else {
+        const sent = await sendClearViaMopSendPath(0, "pm_status_stop_pending_clear");
+        db.logEvent(0, sent.success ? "clear_pending_pm_retry_sent" : "clear_pending_failed", null, null, {
+          name: "PM",
+          reason: "PM status stop observed while clear_pending_0=true; retrying /clear through MoP clear path",
+          status: sent.status,
+          send_reason: sent.reason ?? null,
+          error: sent.error ?? null,
+        });
+      }
+    }
     return c.json({ success: true, pm_busy: false, queued_before: before, drained: result.drained });
   }
 });
@@ -272,8 +607,9 @@ app.get("/pm-status", (c) => {
 });
 
 // ─── Ops Audit Endpoints ────────────────────────────────
-// Force an audit run (manual trigger from MCP tool / operator).
+// Enqueue an audit run (manual trigger from MCP tool / operator).
 // reason defaults to "manual" — bypasses pause for operator override.
+// Returns immediately with a durable job id; the bg-script runs out of band.
 app.post("/ops-audit/run", async (c) => {
   let body: { reason?: string } = {};
   try {
@@ -282,13 +618,21 @@ app.post("/ops-audit/run", async (c) => {
     /* allow empty body */
   }
   const triggerReason = body.reason === "scheduled" || body.reason === "boot" ? body.reason : "manual";
-  const result = await opsAuditScheduler.tick(triggerReason);
-  return c.json({ success: true, result });
+  const result = opsAuditScheduler.enqueue(triggerReason);
+  return c.json({ success: true, ...result });
 });
 
 // Status of the scheduler (paused?, last-run, payload bytes, etc.).
 app.get("/ops-audit/status", (c) => {
   return c.json(opsAuditScheduler.getStatus());
+});
+
+app.get("/ops-audit/jobs/:jobId", (c) => {
+  const job = opsAuditScheduler.getJob(c.req.param("jobId"));
+  if (!job) {
+    return c.json({ success: false, error: "job not found" }, 404);
+  }
+  return c.json({ success: true, job });
 });
 
 // Pause/unpause the scheduler. Body: { paused: boolean }
@@ -304,6 +648,55 @@ app.post("/ops-audit/pause", async (c) => {
   }
   opsAuditScheduler.setPaused(body.paused);
   return c.json({ success: true, status: opsAuditScheduler.getStatus() });
+});
+
+// ─── PM Cadence Endpoints ─────────────────────────────────
+// MoP-owned recurring PM tasks:
+// - heartbeat: `[scheduled-task | 3h heartbeat | HH:MM]`
+// - morning-brief: `/morning-brief`
+app.get("/pm-cadence/status", (c) => {
+  return c.json(pmCadenceScheduler.getStatus());
+});
+
+app.post("/pm-cadence/run", async (c) => {
+  let body: { task?: string } = {};
+  try {
+    body = (await c.req.json()) as { task?: string };
+  } catch {
+    return c.json({ success: false, error: "Body must be JSON: { task: 'heartbeat'|'morning-brief' }" }, 400);
+  }
+  if (body.task !== "heartbeat" && body.task !== "morning-brief") {
+    return c.json({ success: false, error: "task must be 'heartbeat' or 'morning-brief'" }, 400);
+  }
+  const result = pmCadenceScheduler.runManual(body.task);
+  return c.json({ success: true, result, status: pmCadenceScheduler.getStatus() });
+});
+
+app.post("/pm-cadence/pause", async (c) => {
+  let body: { paused?: boolean; task?: string } = {};
+  try {
+    body = (await c.req.json()) as { paused?: boolean; task?: string };
+  } catch {
+    return c.json({ success: false, error: "Body must be JSON: { paused: boolean, task?: 'heartbeat'|'morning-brief' }" }, 400);
+  }
+  if (typeof body.paused !== "boolean") {
+    return c.json({ success: false, error: "paused must be boolean" }, 400);
+  }
+  if (body.task !== undefined && body.task !== "heartbeat" && body.task !== "morning-brief") {
+    return c.json({ success: false, error: "task must be 'heartbeat' or 'morning-brief' when provided" }, 400);
+  }
+  pmCadenceScheduler.setPaused(body.paused, body.task);
+  return c.json({ success: true, status: pmCadenceScheduler.getStatus() });
+});
+
+// ─── P0 Escalation Watch Endpoints ───────────────────────────
+app.get("/p0-escalation-watch/status", (c) => {
+  return c.json(p0EscalationWatcher.getStatus());
+});
+
+app.post("/p0-escalation-watch/run", async (c) => {
+  const result = await p0EscalationWatcher.tick("manual");
+  return c.json({ success: true, result, status: p0EscalationWatcher.getStatus() });
 });
 
 /** Receive hook from a specific slot */
@@ -335,7 +728,7 @@ app.post("/hooks/slot/:slotNum", async (c) => {
   const payload = normalizePayload(payloadParse.data);
 
   // Process the hook event
-  const response = processor.process(slotNum, payload);
+  const response = await processor.process(slotNum, payload);
 
   // Return hook response — Claude Code uses this to modify behavior
   return c.json(response);
@@ -360,6 +753,52 @@ app.get("/slots/:slotNum", (c) => {
   }
 
   return c.json(slot);
+});
+
+/** Clear one slot, PM, or all slots through MoP logging. */
+app.post("/slots/:slotNum/clear", async (c) => {
+  const targetSlots = normalizeClearTarget(c.req.param("slotNum"));
+  if (!targetSlots) {
+    return c.json({ error: "slotNum must be 0, 1, 2, 3, 4, pm, or all" }, 400);
+  }
+
+  let body: { source?: string; clear_existing_pending?: boolean; terminal_only?: boolean } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+
+  const source = body.source ?? "http_clear_endpoint";
+  const results = await clearSlotsThroughMopHttp(targetSlots, {
+    clearExistingPendingForTargets: body.clear_existing_pending ?? false,
+    source,
+    terminalOnly: body.terminal_only ?? false,
+  });
+  return c.json({ ok: true, source, results });
+});
+
+/** Clear endpoint that accepts {slot:"pm"|"all"|"0"..}. */
+app.post("/clear", async (c) => {
+  let body: { slot?: string; source?: string; clear_existing_pending?: boolean; terminal_only?: boolean } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+
+  const targetSlots = normalizeClearTarget(body.slot ?? "all");
+  if (!targetSlots) {
+    return c.json({ error: "slot must be 0, 1, 2, 3, 4, pm, or all" }, 400);
+  }
+
+  const source = body.source ?? "http_clear_endpoint";
+  const results = await clearSlotsThroughMopHttp(targetSlots, {
+    clearExistingPendingForTargets: body.clear_existing_pending ?? false,
+    source,
+    terminalOnly: body.terminal_only ?? false,
+  });
+  return c.json({ ok: true, source, results });
 });
 
 /** Get event log (optionally filtered by slot) */
@@ -429,6 +868,15 @@ app.patch("/slots/:slotNum", async (c) => {
   }
 
   const updates = await c.req.json();
+  const current = db.getSlot(slotParse.data);
+  if (updates?.dnd === true && current && !current.occupied) {
+    updates.dnd = false;
+    db.logEvent(slotParse.data, "dnd_free_slot_rejected", null, null, {
+      requested: true,
+      surface: "rest_patch",
+      reason: "free_slot_cannot_be_dnd",
+    });
+  }
   db.updateSlot(slotParse.data, updates);
 
   const updated = db.getSlot(slotParse.data);
@@ -443,12 +891,15 @@ app.post("/slots/:slotNum/assign", async (c) => {
   }
 
   const body = await c.req.json();
+  const rawPr = body.pr ?? null;
+  const pr = rawPr === null ? null : Number(rawPr);
   db.assignSlot(
     slotParse.data,
     body.task ?? "",
     body.issue ?? null,
     body.branch ?? null,
-    body.session_id ?? null
+    body.session_id ?? null,
+    Number.isInteger(pr) ? pr : null
   );
 
   db.logEvent(slotParse.data, "slot_assigned", null, null, body);
@@ -472,11 +923,6 @@ app.post("/slots/:slotNum/release", (c) => {
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────
-
-/** Helper: sleep for ms milliseconds. */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /**
  * Orchestrate a slot respawn — /exit at idle, wait for shell, launch script, wait for claude, inject continue.
@@ -541,7 +987,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   try {
     // Step 1: Inject /exit into the Claude Code session.
     try {
-      execSync(`tmux send-keys -t ${paneAddress} "/exit" Enter`, { timeout: 5_000 });
+      await execShell(`tmux send-keys -t ${paneAddress} "/exit" Enter`, { timeout: 5_000 });
       recordStep("sent_exit");
     } catch (err) {
       healthChecker.clearPmInitiatedRespawn(slotNum);
@@ -558,7 +1004,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     let exited = false;
     while (Date.now() < exitDeadline) {
       await sleep(500);
-      const cmd = healthChecker.getPaneCommandPublic(slotNum);
+      const cmd = await healthChecker.getPaneCommandPublic(slotNum);
       if (cmd && SHELL_COMMANDS.has(cmd)) {
         exited = true;
         recordStep("claude_exited", `shell=${cmd}`);
@@ -583,7 +1029,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     if (continueSession) parts.push("--continue");
     const launchCmd = parts.join(" ");
     try {
-      execSync(
+      await execShell(
         `tmux send-keys -t ${paneAddress} '${launchCmd}' Enter`,
         { timeout: 10_000 },
       );
@@ -603,7 +1049,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     let booted = false;
     while (Date.now() < bootDeadline) {
       await sleep(500);
-      const cmd = healthChecker.getPaneCommandPublic(slotNum);
+      const cmd = await healthChecker.getPaneCommandPublic(slotNum);
       if (cmd === "claude") {
         booted = true;
         recordStep("claude_booted");
@@ -622,8 +1068,8 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     await sleep(2_000);
     if (continueSession) {
       try {
-        execSync(
-          `tmux send-keys -t ${paneAddress} 'continue' && sleep 0.3 && tmux send-keys -t ${paneAddress} Enter`,
+        await execShell(
+          `tmux send-keys -t ${paneAddress} 'continue' && tmux send-keys -t ${paneAddress} Enter`,
           { timeout: 5_000 },
         );
         recordStep("sent_continue");
@@ -674,9 +1120,10 @@ app.post("/slots/:slotNum/respawn", async (c) => {
  * Verify pane exists and return a snapshot of recent content for delivery
  * verification. Returns null if the pane doesn't exist or tmux is unreachable.
  */
-function capturePaneSnapshot(paneAddress: string): string | null {
+async function capturePaneSnapshot(paneAddress: string): Promise<string | null> {
   try {
-    return execSync(`tmux capture-pane -t ${paneAddress} -p`, { timeout: 5000 }).toString();
+    const result = await execShell(`tmux capture-pane -t ${paneAddress} -p`, { timeout: 5000 });
+    return result.stdout;
   } catch {
     return null;
   }
@@ -686,13 +1133,97 @@ function capturePaneSnapshot(paneAddress: string): string | null {
  * Confirm a tmux pane address is live (session + window + pane exist).
  * `tmux list-panes -t <pane>` exits 0 only when the address resolves.
  */
-function paneExists(paneAddress: string): boolean {
-  try {
-    execSync(`tmux list-panes -t ${paneAddress}`, { timeout: 3000, stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
+async function paneExists(paneAddress: string): Promise<boolean> {
+  return execShellOk(`tmux list-panes -t ${paneAddress}`, { timeout: 3000 });
+}
+
+function isPmControlCommand(command: string): boolean {
+  return command.trim().startsWith("/");
+}
+
+function shellWords(input: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  let escaping = false;
+
+  for (const ch of input) {
+    if (escaping) {
+      current += ch;
+      escaping = false;
+      continue;
+    }
+    if (ch === "\\" && quote !== "'") {
+      escaping = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        words.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
   }
+
+  if (current) {
+    words.push(current);
+  }
+  return quote || escaping ? [] : words;
+}
+
+function parseMessageSlotWrapper(command: string): { targetSlot: number | null; file: string | null; sawMessageToken: boolean } | null {
+  const words = shellWords(command.trim());
+  const scriptIndex = words.findIndex((word) => /(^|\/)message-slot\.sh$/.test(word));
+  if (scriptIndex < 0) {
+    return null;
+  }
+
+  let targetSlot: number | null = null;
+  let file: string | null = null;
+  let sawMessageToken = false;
+  const args = words.slice(scriptIndex + 1);
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if ((arg === "--slot" || arg === "--to") && args[i + 1]) {
+      targetSlot = Number(args[++i]);
+      continue;
+    }
+    if (arg === "--file" && args[i + 1]) {
+      file = args[++i];
+      continue;
+    }
+    if (arg === "--force" || arg === "--wait" || arg === "--allow-command" || arg === "--dry-run") {
+      continue;
+    }
+    if (arg === "--from" && args[i + 1]) {
+      i++;
+      continue;
+    }
+    if (!arg.startsWith("-") && targetSlot === null && /^[0-9]+$/.test(arg)) {
+      targetSlot = Number(arg);
+      continue;
+    }
+    if (!arg.startsWith("-")) {
+      sawMessageToken = true;
+    }
+  }
+
+  return { targetSlot, file, sawMessageToken };
 }
 
 /**
@@ -703,8 +1234,8 @@ function paneExists(paneAddress: string): boolean {
  * the keystrokes (dead/detached pane, or — worst case — the TUI is in a
  * state that ignores input). Either way: return failure.
  */
-function deliveryConfirmed(paneAddress: string, preSnapshot: string): { ok: boolean; reason?: string } {
-  const post = capturePaneSnapshot(paneAddress);
+async function deliveryConfirmed(paneAddress: string, preSnapshot: string): Promise<{ ok: boolean; reason?: string }> {
+  const post = await capturePaneSnapshot(paneAddress);
   if (post === null) {
     return { ok: false, reason: "pane disappeared after send (capture-pane failed)" };
   }
@@ -714,25 +1245,153 @@ function deliveryConfirmed(paneAddress: string, preSnapshot: string): { ok: bool
   return { ok: true };
 }
 
+function shellEscape(str: string): string {
+  return `'${str.replace(/'/g, "'\\''")}'`;
+}
+
+function sendChunkSizeBytes(): number {
+  const raw = process.env.MOP_SEND_BUFFER_CHUNK_BYTES;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed >= 4096 ? parsed : 48 * 1024;
+}
+
+async function pastePayloadWithTmuxBuffer(
+  slotNum: number,
+  paneAddress: string,
+  payload: Buffer,
+  meta: { source: "command" | "file"; label: string },
+): Promise<{ chunks: number; bytes: number; chunkSize: number }> {
+  const chunkSize = sendChunkSizeBytes();
+  const bytes = payload.byteLength;
+  const chunks = Math.max(1, Math.ceil(bytes / chunkSize));
+  const bufName = `mop-send-${slotNum}-${Date.now()}`;
+
+  db.logEvent(slotNum, "send_buffer_start", null, null, {
+    source: meta.source,
+    label: meta.label.slice(0, 200),
+    bytes,
+    chunkSize,
+    chunks,
+    paste: "buffer",
+  });
+  console.log(
+    `[slots/send] slot=${slotNum} source=${meta.source} bytes=${bytes} chunks=${chunks} chunkSize=${chunkSize} paste=buffer`
+  );
+
+  for (let index = 0; index < chunks; index++) {
+    const start = index * chunkSize;
+    const end = Math.min(start + chunkSize, bytes);
+    const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}-${index + 1}-of-${chunks}.txt`;
+    writeFileSync(tmpFile, payload.subarray(start, end));
+    try {
+      await execShell(`tmux load-buffer -b ${shellEscape(bufName)} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+      await execShell(`tmux paste-buffer -b ${shellEscape(bufName)} -t ${paneAddress} -d`, { timeout: 10_000 });
+      db.logEvent(slotNum, "send_buffer_chunk", null, null, {
+        source: meta.source,
+        chunk: index + 1,
+        chunks,
+        bytes: end - start,
+      });
+    } finally {
+      try { unlinkSync(tmpFile); } catch {}
+    }
+    if (chunks > 1) {
+      await sleep(150);
+    }
+  }
+
+  await sleep(bytes > chunkSize ? 1000 : 500);
+  await execShell(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 10_000 });
+  return { chunks, bytes, chunkSize };
+}
+
 app.post("/slots/:slotNum/send", async (c) => {
   const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
   if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
 
   const slotNum = slotParse.data;
   const body = await c.req.json().catch(() => ({}));
-  const command = body.command?.trim() || "";
-  const filePath = body.file || "";
+  let command = body.command?.trim() || "";
+  let filePath = body.file || "";
   const force = body.force === true;
+  const allowPmClear =
+    slotNum === 0 &&
+    body.allow_pm_clear === true &&
+    command === "/clear";
   const paneAddress = `0:0.${slotNum}`;
 
   if (!command && !filePath) {
     return c.json({ error: "Missing 'command' or 'file' field" }, 400);
   }
 
+  const messageSlotWrapper = command ? parseMessageSlotWrapper(command) : null;
+  if (messageSlotWrapper) {
+    if (messageSlotWrapper.targetSlot !== slotNum) {
+      db.logEvent(slotNum, "send_rejected_message_slot_wrapper", null, null, {
+        command: command.slice(0, 200),
+        targetSlot: messageSlotWrapper.targetSlot,
+        reason: "message_slot_wrapper_target_mismatch",
+      });
+      return c.json(
+        {
+          success: false,
+          error: `Refused message-slot wrapper command for slot ${messageSlotWrapper.targetSlot ?? "unknown"} on /slots/${slotNum}/send. Execute message-slot.sh locally or call /slots/${messageSlotWrapper.targetSlot}/send.`,
+          reason: "message_slot_wrapper_target_mismatch",
+        },
+        400,
+      );
+    }
+    if (!messageSlotWrapper.file) {
+      db.logEvent(slotNum, "send_rejected_message_slot_wrapper", null, null, {
+        command: command.slice(0, 200),
+        reason: messageSlotWrapper.sawMessageToken ? "message_slot_wrapper_inline_message_blocked" : "message_slot_wrapper_missing_file",
+      });
+      return c.json(
+        {
+          success: false,
+          error: "Refused to paste message-slot.sh into a dev slot. Execute message-slot.sh locally; file-backed deliveries must use the file transport.",
+          reason: messageSlotWrapper.sawMessageToken ? "message_slot_wrapper_inline_message_blocked" : "message_slot_wrapper_missing_file",
+        },
+        400,
+      );
+    }
+    filePath = messageSlotWrapper.file;
+    command = "";
+    db.logEvent(slotNum, "send_converted_message_slot_wrapper", null, null, {
+      file: filePath,
+      reason: "message_slot_wrapper_file_transport",
+    });
+  }
+
+  // Slot 0 is PM. Dev slots may send PM status text, but must not be able to
+  // execute PM-pane slash commands such as /exit, /clear, or /compact.
+  if (slotNum === 0 && isPmControlCommand(command) && !allowPmClear) {
+    db.logEvent(slotNum, "send_rejected_pm_control_command", null, null, {
+      command: command.slice(0, 200),
+      force,
+      reason: "pm_control_command_blocked",
+    });
+    return c.json(
+      {
+        success: false,
+        error: "Refused PM-pane slash command. Use message-pm with a plain status body; hard blocks should start with ESCALATION:.",
+        reason: "pm_control_command_blocked",
+      },
+      403,
+    );
+  }
+  if (allowPmClear) {
+    db.logEvent(slotNum, "send_allowed_pm_clear_control_command", null, null, {
+      command,
+      force,
+      via: body.source ?? "unknown",
+    });
+  }
+
   // ── GATE 1: pane existence ─────────────────────────────
   // tmux can have a dead/detached session. Catching this up-front prevents
   // false-success where send-keys silently fails. (Rajiv directive 2026-05-05)
-  if (!paneExists(paneAddress)) {
+  if (!(await paneExists(paneAddress))) {
     db.logEvent(slotNum, "send_error", null, null, {
       error: "pane does not exist",
       command: command.slice(0, 100),
@@ -773,7 +1432,7 @@ app.post("/slots/:slotNum/send", async (c) => {
   if (!force && slotNum >= 1 && slotNum <= 4) {
     let active = false;
     try {
-      active = relay.isSlotActive(slotNum);
+      active = await relay.isSlotActive(slotNum);
     } catch {
       active = false;
     }
@@ -816,21 +1475,25 @@ app.post("/slots/:slotNum/send", async (c) => {
   }
 
   // Capture pane snapshot before send, for post-send delivery verification.
-  const preSnapshot = capturePaneSnapshot(paneAddress) ?? "";
+  const preSnapshot = (await capturePaneSnapshot(paneAddress)) ?? "";
 
   try {
     if (filePath) {
-      // File mode: load-buffer + paste-buffer
-      execSync(`tmux load-buffer "${filePath}"`, { timeout: 5000 });
-      execSync(`tmux paste-buffer -t ${paneAddress}`, { timeout: 5000 });
-      await new Promise(r => setTimeout(r, 2000));
-      execSync(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+      // File mode: load-buffer + paste-buffer, chunked when needed. No payload cap.
+      const filePayload = readFileSync(filePath);
+      const paste = await pastePayloadWithTmuxBuffer(slotNum, paneAddress, filePayload, {
+        source: "file",
+        label: filePath,
+      });
       // Verify pane content actually changed.
-      await new Promise(r => setTimeout(r, 600));
-      const verify = deliveryConfirmed(paneAddress, preSnapshot);
+      await sleep(600);
+      const verify = await deliveryConfirmed(paneAddress, preSnapshot);
       if (!verify.ok) {
         db.logEvent(slotNum, "send_unverified", null, null, {
           file: filePath,
+          paste: "buffer",
+          bytes: paste.bytes,
+          chunks: paste.chunks,
           reason: verify.reason,
         });
         return c.json(
@@ -842,84 +1505,39 @@ app.post("/slots/:slotNum/send", async (c) => {
           502,
         );
       }
-      db.logEvent(slotNum, "send_file", null, null, { file: filePath });
-      return c.json({ success: true, mode: "file", slot: slotNum });
+      db.logEvent(slotNum, "send_file", null, null, { file: filePath, paste: "buffer", bytes: paste.bytes, chunks: paste.chunks, chunkSize: paste.chunkSize });
+      return c.json({ success: true, mode: "file", slot: slotNum, paste: "buffer", bytes: paste.bytes, chunks: paste.chunks });
     } else {
-      // Command mode: detect INSERT mode, send-keys
+      // Command mode: detect INSERT/NORMAL, then always paste through tmux buffer.
       let output = "";
       try {
-        output = execSync(`tmux capture-pane -t ${paneAddress} -p | tail -5`, { timeout: 5000 }).toString();
+        const result = await execShell(`tmux capture-pane -t ${paneAddress} -p | tail -5`, { timeout: 5000 });
+        output = result.stdout;
       } catch { output = ""; }
 
       const isInsert = /INSERT/.test(output);
       const isNormal = /NORMAL/.test(output);
 
       if (isNormal) {
-        execSync(`tmux send-keys -t ${paneAddress} i`, { timeout: 5000 });
-        await new Promise(r => setTimeout(r, 300));
+        await execShell(`tmux send-keys -t ${paneAddress} i`, { timeout: 5000 });
+        await sleep(300);
       }
 
-      // Multiline / long content: use load-buffer + paste-buffer via tempfile.
-      // tmux send-keys -l with embedded newlines collapses whitespace and may
-      // swallow the trailing Enter in the Claude Code TUI composer. Tempfile
-      // paste preserves bytes exactly. Threshold mirrors the Slack-route path
-      // already in this file (see ~L833). (Bug 3 fix, 2026-04-29)
-      const isMultiline = /\n/.test(command);
-      const isLong = command.length > 500;
-
-      if (isMultiline || isLong) {
-        const { writeFileSync, unlinkSync } = await import("node:fs");
-        const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}.txt`;
-        writeFileSync(tmpFile, command);
-        try {
-          execSync(`tmux load-buffer ${tmpFile} && tmux paste-buffer -t ${paneAddress}`, { timeout: 5000 });
-          // Composer needs a beat after a large paste before Enter is honored.
-          await new Promise(r => setTimeout(r, 800));
-          execSync(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
-        } finally {
-          try { unlinkSync(tmpFile); } catch {}
-        }
-        // Post-send verification.
-        await new Promise(r => setTimeout(r, 600));
-        const verify = deliveryConfirmed(paneAddress, preSnapshot);
-        if (!verify.ok) {
-          db.logEvent(slotNum, "send_unverified", null, null, {
-            command: command.slice(0, 200),
-            paste: "buffer",
-            reason: verify.reason,
-          });
-          return c.json(
-            {
-              success: false,
-              error: `Send dispatched but delivery not verified: ${verify.reason}`,
-              reason: "delivery_unverified",
-            },
-            502,
-          );
-        }
-        db.logEvent(slotNum, "send_command", null, null, {
-          command: command.slice(0, 200),
-          force,
-          mode: isInsert ? "insert" : isNormal ? "normal" : "unknown",
-          paste: "buffer",
-          bytes: command.length,
-        });
-        return c.json({ success: true, mode: "command", slot: slotNum, paste: "buffer" });
-      }
-
-      // Short single-line: use -l flag for literal text to avoid tmux key interpretation
-      const escaped = command.replace(/'/g, "'\\''");
-      execSync(`tmux send-keys -t ${paneAddress} -l '${escaped}'`, { timeout: 5000 });
-      await new Promise(r => setTimeout(r, 500));
-      execSync(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+      const commandPayload = Buffer.from(command, "utf8");
+      const paste = await pastePayloadWithTmuxBuffer(slotNum, paneAddress, commandPayload, {
+        source: "command",
+        label: command.slice(0, 200),
+      });
 
       // Post-send verification.
-      await new Promise(r => setTimeout(r, 500));
-      const verify = deliveryConfirmed(paneAddress, preSnapshot);
+      await sleep(500);
+      const verify = await deliveryConfirmed(paneAddress, preSnapshot);
       if (!verify.ok) {
         db.logEvent(slotNum, "send_unverified", null, null, {
           command: command.slice(0, 200),
-          paste: "send-keys",
+          paste: "buffer",
+          bytes: paste.bytes,
+          chunks: paste.chunks,
           reason: verify.reason,
         });
         return c.json(
@@ -932,8 +1550,16 @@ app.post("/slots/:slotNum/send", async (c) => {
         );
       }
 
-      db.logEvent(slotNum, "send_command", null, null, { command: command.slice(0, 200), force, mode: isInsert ? "insert" : isNormal ? "normal" : "unknown", paste: "send-keys" });
-      return c.json({ success: true, mode: "command", slot: slotNum, paste: "send-keys" });
+      db.logEvent(slotNum, "send_command", null, null, {
+        command: command.slice(0, 200),
+        force,
+        mode: isInsert ? "insert" : isNormal ? "normal" : "unknown",
+        paste: "buffer",
+        bytes: paste.bytes,
+        chunks: paste.chunks,
+        chunkSize: paste.chunkSize,
+      });
+      return c.json({ success: true, mode: "command", slot: slotNum, paste: "buffer", bytes: paste.bytes, chunks: paste.chunks });
     }
   } catch (err: any) {
     db.logEvent(slotNum, "send_error", null, null, { error: err.message?.slice(0, 200), command: command.slice(0, 100) });
@@ -954,10 +1580,10 @@ app.post("/slots/:slotNum/send", async (c) => {
  * Approve or reject a slot's plan. MoP handles sending the option
  * and verifying the slot becomes active (retries up to 3 times).
  *
- * For approvals (option "2"): verifies that a real Codex CLI session ran
- * after plan-ready was sent. Reads ~/.codex/session_index.jsonl for a session
- * created after the plan-ready timestamp. This prevents PM from approving
- * without running Codex review. (Constitutional Principle #1 enforcement)
+ * For approvals (option "2"): verifies that MoP observed a real plan-review
+ * tool event after plan-ready was sent. MoP DB events are authoritative here;
+ * raw Codex session/transcript files are not used for approval proof.
+ * (Constitutional Principle #1 enforcement)
  *
  * POST /slots/:slotNum/approve-plan { option: "2" | "4", comment?: string }
  */
@@ -973,11 +1599,10 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
   const paneAddress = `0:0.${slotNum}`;
   const MAX_RETRIES = 3;
 
-  // ── Codex Session Verification (approvals only) ──────────
+  // ── MoP Plan Review Verification (approvals only) ──────────
   // Constitutional Principle #1: Every plan approval must be backed by a real Codex review.
-  // Check that a Codex session was created AFTER the plan-ready notification was sent.
+  // Check that MoP recorded a plan-review tool event AFTER plan-ready was sent.
   if (option === "2") {
-    const CODEX_SESSION_INDEX = `${process.env.HOME}/.codex/session_index.jsonl`;
     const slotState = db.getSlot(slotNum);
     const issueNum = slotState?.issue;
 
@@ -998,48 +1623,72 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
       // Allow approval anyway — plan-ready event might have been lost (MoP restart)
     } else {
       try {
-        const indexContent = readFileSync(CODEX_SESSION_INDEX, "utf-8").trim();
-        const lines = indexContent.split("\n").filter(Boolean);
+        const cutoff = latestPlanReady - 10_000;
+        const events = db.getEvents(slotNum, 500, "PostToolUse");
+        const matchingEvent = events.find((event) => {
+          const eventTime = new Date(event.timestamp).getTime();
+          if (!Number.isFinite(eventTime) || eventTime < cutoff) return false;
 
-        // Parse sessions and find any created after plan-ready
-        const matchingSessions = lines
-          .map(line => { try { return JSON.parse(line); } catch { return null; } })
-          .filter(Boolean)
-          .filter((session: any) => {
-            const sessionTime = new Date(session.updated_at).getTime();
-            // Session must be AFTER plan-ready was sent (with 10s grace for clock skew)
-            return sessionTime > (latestPlanReady - 10_000);
-          });
+          let payload: Record<string, unknown> = {};
+          try {
+            payload = event.payload ? JSON.parse(event.payload) : {};
+          } catch {
+            payload = {};
+          }
 
-        if (matchingSessions.length === 0) {
+          const toolName = event.tool_name ?? (payload.tool_name as string | undefined) ?? "";
+          const toolInput =
+            typeof payload.tool_input === "object" && payload.tool_input !== null
+              ? (payload.tool_input as Record<string, unknown>)
+              : {};
+          const rawInput = JSON.stringify(toolInput).toLowerCase();
+          const issueText = issueNum ? String(issueNum) : "";
+          if (issueText && !rawInput.includes(issueText)) return false;
+
+          if (toolName === "Skill") {
+            const skill = String(toolInput.skill ?? "").toLowerCase();
+            return ["codex-app-plan-review", "codex-plan-review", "zen-plan-review"].includes(skill);
+          }
+
+          if (toolName === "Agent" || toolName === "Task") {
+            return rawInput.includes("plan review") && (rawInput.includes("verdict") || rawInput.includes("review"));
+          }
+
+          if (toolName === "Bash") {
+            const command = String(toolInput.command ?? "").toLowerCase();
+            return command.includes("codex-review-companion") && command.includes("--review-type plan");
+          }
+
+          return false;
+        });
+
+        if (!matchingEvent) {
           db.logEvent(slotNum, "codex_check_failed", null, null, {
-            reason: "No Codex session found after plan-ready",
+            reason: "No MoP plan-review event found after plan-ready",
             plan_ready_at: new Date(latestPlanReady).toISOString(),
             issue: issueNum,
           });
           relay.injectToPM(
-            `# ⚠️ CODEX GATE: No Codex session found after plan-ready for slot ${slotNum} (#${issueNum || "?"}). ` +
-            `Plan-ready at ${new Date(latestPlanReady).toISOString()}. Run Codex review before approving.`
+            `# ⚠️ CODEX GATE: No MoP plan-review event found after plan-ready for slot ${slotNum} (#${issueNum || "?"}). ` +
+            `Plan-ready at ${new Date(latestPlanReady).toISOString()}. Run Codex plan review through the slot before approving.`
           );
           return c.json({
             success: false,
-            error: "No Codex review session found after plan-ready. Constitutional Principle #1 requires Codex review before approval.",
+            error: "No MoP plan-review event found after plan-ready. Constitutional Principle #1 requires Codex review before approval.",
             status: "codex_gate_blocked",
             plan_ready_at: new Date(latestPlanReady).toISOString(),
           }, 403);
         }
 
-        // Log success
-        const latestSession = matchingSessions[matchingSessions.length - 1];
         db.logEvent(slotNum, "codex_check_passed", null, null, {
-          session_id: latestSession.id,
-          thread_name: latestSession.thread_name,
-          session_at: latestSession.updated_at,
+          event_id: matchingEvent.id,
+          tool_name: matchingEvent.tool_name,
+          event_at: matchingEvent.timestamp,
           plan_ready_at: new Date(latestPlanReady).toISOString(),
           issue: issueNum,
         });
       } catch (err: any) {
-        // If we can't read the session index, log but allow (don't block on file errors)
+        // If MoP event inspection itself errors, log but allow (do not wedge PM on control-plane read errors).
         db.logEvent(slotNum, "codex_check_error", null, null, {
           error: err.message?.slice(0, 200),
           issue: issueNum,
@@ -1061,15 +1710,15 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
     // which doesn't contain the TUI prompt. (Bug fix 2026-03-18)
     let output = "";
     try {
-      const raw = execSync(`tmux capture-pane -t 0:0.${slotNum} -p -S -20`, { timeout: 5_000 });
-      output = raw.toString();
+      const raw = await execShell(`tmux capture-pane -t 0:0.${slotNum} -p -S -20`, { timeout: 5_000 });
+      output = raw.stdout;
     } catch { output = ""; }
     if (promptPattern.test(output)) {
       promptVisible = true;
       break;
     }
     db.logEvent(slotNum, "plan_approval_waiting_for_prompt", null, null, { poll: poll + 1 });
-    await new Promise(r => setTimeout(r, PROMPT_POLL_INTERVAL));
+    await sleep(PROMPT_POLL_INTERVAL);
   }
 
   if (!promptVisible) {
@@ -1081,17 +1730,17 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
     try {
       // Send the option (2 = approve, 4 = comment)
       if (option === "4" && comment) {
-        execSync(`tmux send-keys -t ${paneAddress} -l '4' && sleep 0.3 && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
-        await new Promise(r => setTimeout(r, 1000));
+        await execShell(`tmux send-keys -t ${paneAddress} -l '4' && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+        await sleep(1000);
         const escaped = comment.replace(/'/g, "'\\''");
-        execSync(`tmux send-keys -t ${paneAddress} -l '${escaped}' && sleep 0.3 && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+        await execShell(`tmux send-keys -t ${paneAddress} -l '${escaped}' && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
       } else {
-        execSync(`tmux send-keys -t ${paneAddress} -l '${option}' && sleep 0.3 && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+        await execShell(`tmux send-keys -t ${paneAddress} -l '${option}' && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
       }
 
       // Wait longer for the approval to process — slot needs time to
       // render the prompt, receive "2", and trigger ExitPlanMode.
-      await new Promise(r => setTimeout(r, 3000));
+      await sleep(3000);
 
       // Verify approval landed by checking if activity changed from
       // awaiting_plan_approval. is-active.sh alone is insufficient —
@@ -1101,7 +1750,7 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
       const approvalLanded = slotAfter?.activity !== "awaiting_plan_approval";
 
       try {
-        execSync(`${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`, { timeout: 5000 });
+        await execShell(`${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`, { timeout: 5000 });
         // Pane is active — approval landed. The pane becoming active IS the success signal.
         // Don't re-check MoP activity state — it may not have updated yet (race condition).
         // (Bug fix 2026-03-21: MoP reported failure after 3 retries even though attempt 1 succeeded,
@@ -1114,7 +1763,7 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
         // Exit code 1 = still idle — retry
         if (attempt < MAX_RETRIES) {
           db.logEvent(slotNum, "plan_approval_retry", null, null, { attempt });
-          await new Promise(r => setTimeout(r, 1000));
+          await sleep(1000);
         }
       }
     } catch (err: any) {
@@ -1190,8 +1839,8 @@ app.post("/api/slack-route", async (c) => {
       const tmpFile = `/tmp/slack-route-${Date.now()}.txt`;
       const { writeFileSync, unlinkSync } = await import("node:fs");
       writeFileSync(tmpFile, formatted);
-      execSync(`tmux load-buffer ${tmpFile} && tmux paste-buffer -t ${pane}`, { timeout: 5000 });
-      execSync(`tmux send-keys -t ${pane} Enter`, { timeout: 3000 });
+      await execShell(`tmux load-buffer ${tmpFile} && tmux paste-buffer -t ${pane}`, { timeout: 5000 });
+      await execShell(`tmux send-keys -t ${pane} Enter`, { timeout: 3000 });
       try { unlinkSync(tmpFile); } catch {}
       results.push(`${pane}: delivered`);
     } catch (e) {
@@ -1236,8 +1885,11 @@ process.on("SIGINT", () => {
   healthChecker.stop();
   stuckDetector.stop();
   opsAuditScheduler.stop();
+  pmCadenceScheduler.stop();
+  p0EscalationWatcher.stop();
   clearInterval(rotationTimer);
   clearInterval(eventLoopLagTimer);
+  clearInterval(eventRetentionTimer);
   eventLoopHist.disable();
   logManager.disableLogging(config.slotCount);
   db.close();
@@ -1249,8 +1901,11 @@ process.on("SIGTERM", () => {
   healthChecker.stop();
   stuckDetector.stop();
   opsAuditScheduler.stop();
+  pmCadenceScheduler.stop();
+  p0EscalationWatcher.stop();
   clearInterval(rotationTimer);
   clearInterval(eventLoopLagTimer);
+  clearInterval(eventRetentionTimer);
   eventLoopHist.disable();
   logManager.disableLogging(config.slotCount);
   db.close();

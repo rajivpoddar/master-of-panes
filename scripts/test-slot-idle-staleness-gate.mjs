@@ -8,6 +8,8 @@
  *   2. hasRecentSubagentDispatch() returns null when a Stop event closed the Task
  *   3. hasRecentSubagentDispatch() returns null when Task is older than window
  *   4. getLastToolFire() returns the latest PostToolUse within the window
+ *   5. background Agent dispatch stays active across Stop until TaskStop
+ *   6. getLastVisibleSlotState() tracks PM-visible idle/active state
  *
  * Run: node scripts/test-slot-idle-staleness-gate.mjs
  *
@@ -50,12 +52,11 @@ try {
 
   // ─── Test 1: Task fired with no later Stop → gate fires ───
   // Insert a synthetic Task PostToolUse 5s ago with no Stop.
-  const insertEvent = (slot, type, tool, offsetSec) => {
-    const stmt = raw.prepare(
+  const insertEvent = (slot, type, tool, offsetSec, payload = "{}") => {
+    raw.prepare(
       `INSERT INTO events (timestamp, slot, event_type, tool_name, payload)
-       VALUES (strftime('%Y-%m-%dT%H:%M:%f', 'now', ? || ' seconds'), ?, ?, ?, '{}')`
-    );
-    stmt.run(`-${offsetSec}`, slot, type, tool);
+       VALUES (strftime('%Y-%m-%dT%H:%M:%f', 'now', ? || ' seconds'), ?, ?, ?, ?)`
+    ).run(`-${offsetSec}`, slot, type, tool, payload);
   };
 
   // Slot 1: Task fired 5s ago, no Stop → subagent active
@@ -87,6 +88,43 @@ try {
   // ─── Test 6: Empty slot → null ───
   const r5 = db.hasRecentSubagentDispatch(99, 90);
   assert("slot 99 (empty) — no events → gate does NOT fire", r5 === null);
+
+  const bgAgentPayload = JSON.stringify({
+    type: "PostToolUse",
+    tool_name: "Agent",
+    tool_input: { run_in_background: true, description: "background review" },
+  });
+  const fgAgentPayload = JSON.stringify({
+    type: "PostToolUse",
+    tool_name: "Agent",
+    tool_input: { run_in_background: false, description: "foreground review" },
+  });
+
+  insertEvent(5, "PostToolUse", "Agent", 5, bgAgentPayload);
+  insertEvent(5, "Stop", null, 1);
+  const r6 = db.hasRecentSubagentDispatch(5, 90);
+  assert("slot 5 — background Agent + later Stop still gates", r6 !== null && r6.toolName === "Agent", JSON.stringify(r6));
+
+  insertEvent(6, "PostToolUse", "Agent", 5, bgAgentPayload);
+  insertEvent(6, "PostToolUse", "TaskStop", 1, JSON.stringify({ type: "PostToolUse", tool_name: "TaskStop" }));
+  const r7 = db.hasRecentSubagentDispatch(6, 90);
+  assert("slot 6 — background Agent + TaskStop closes gate", r7 === null, JSON.stringify(r7));
+
+  insertEvent(7, "PostToolUse", "Agent", 5, fgAgentPayload);
+  const r8 = db.hasRecentSubagentDispatch(7, 90);
+  assert("slot 7 — foreground Agent does NOT gate", r8 === null, JSON.stringify(r8));
+
+  const r9 = db.getLastVisibleSlotState(8);
+  assert("slot 8 — no visible slot state → null", r9 === null, JSON.stringify(r9));
+
+  insertEvent(9, "slot_idle_notified", null, 5);
+  const r10 = db.getLastVisibleSlotState(9);
+  assert("slot 9 — last visible state idle", r10 !== null && r10.state === "idle", JSON.stringify(r10));
+
+  insertEvent(10, "slot_idle_notified", null, 10);
+  insertEvent(10, "slot_active_notified", null, 5);
+  const r11 = db.getLastVisibleSlotState(10);
+  assert("slot 10 — latest visible state active", r11 !== null && r11.state === "active", JSON.stringify(r11));
 } catch (err) {
   console.error("test crashed:", err.stack || err.message);
   fail++;

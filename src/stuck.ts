@@ -9,8 +9,8 @@
  */
 
 import { appendFileSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
-import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { execShell } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import type { LogManager } from "./logs.js";
 import type { TmuxRelay } from "./relay.js";
@@ -126,6 +126,11 @@ export class StuckDetector {
   // Rajiv-confirmed 2026-05-01 07:46 IST.
   private compactInFlightAt: Map<number, number> = new Map();
   private readonly COMPACT_INFLIGHT_DEDUP_MS = 30_000;
+  // Auto-/compact injection is opt-in. check-slot-bg may stay enabled for
+  // telemetry without causing MoP to type /compact into worker panes.
+  private readonly AUTO_COMPACT_INJECTION_ENABLED =
+    process.env.MOP_AUTO_COMPACT_DISABLED !== "1" &&
+    process.env.MOP_AUTO_COMPACT_INJECTION_ENABLED === "1";
   // Per-slot last fired block-prompt match line offset. Mirrors
   // lastMatchLine for the block detector. Reset on idle→active transition
   // so a NEW block prompt later in the session can fire even if its line
@@ -234,58 +239,25 @@ export class StuckDetector {
    * - dnd = false (not under manual control)
    * - Log mtime > STUCK_THRESHOLD_MS ago (no output produced)
    */
-  checkAll(): void {
+  async checkAll(): Promise<void> {
     const slots = this.db.getAllSlots();
 
-    // Phase 1: context-overflow detection for ALL active+occupied slots
-    // INCLUDING slot 0 (PM). Originally gated to codex-proxy wrapper slots
-    // (1+4) because those slots bypass native auto-compact. But native
-    // auto-compact CAN fail on Sonnet/Opus slots too (Ashwini/slot 3 incident
-    // 2026-05-01 — Sonnet 4.6 hit "Context limit reached" and sat idle for
-    // ~hour because native auto-compact never fired). The overflow banner
-    // only appears when native auto-compact has FAILED, so firing /compact
-    // on any slot showing it is safe — and necessary. PM slot 0 was added
-    // 2026-05-01 14:54 IST (Rajiv directive Slack thread 1777626989.055709
-    // option a, "including pm slot"): PM is also subject to native
-    // auto-compact failure and needs the same recovery path. Slot 0 has no
-    // DB row (slots table holds 1-4 only), so we synthesize a minimal
-    // SlotState — the overflow detector only reads .slot, .dnd, .occupied,
-    // .task, .issue from it. PM is treated as always occupied.
+    // Phase 1: context-overflow detection for active+occupied DEV slots only.
+    // Slot 0 (PM) is intentionally excluded: Rajiv removed the PM-pane
+    // auto-continue path, so MoP should no longer auto-compact PM and then
+    // inject "continue your work". Dev slots still keep the direct-recovery
+    // path because their overflow remediation remains deterministic.
     //
     // Skip released slots: nothing to recover, and the banner won't appear
     // because Claude isn't actively running tools there. checkContextOverflow
     // also has its own idle-prompt + dedup + in-flight guards.
     // (2026-04-29 analysis /tmp/mop-compact-hook-analysis.md)
     for (const slot of slots) {
-      if (slot.slot === 0) continue; // handled separately below (no DB row)
+      if (slot.slot === 0) continue;
       if (slot.dnd) continue;
       if (!slot.occupied) continue;
-      this.checkContextOverflow(slot);
+      await this.checkContextOverflow(slot);
     }
-    // Slot 0 (PM) — synthesize a minimal SlotState. PM pane is always
-    // occupied with the orchestrator session; never DND from MoP's view.
-    // The overflow detector's strict canonical-banner pattern + idle-prompt
-    // guard + signature dedup prevent false fires from PM tool output that
-    // happens to include the substring "Context limit reached" (e.g., when
-    // PM reads memory files or summarizes another slot's overflow event).
-    const pmSlot: SlotState = {
-      slot: 0,
-      address: "0:0.0",
-      name: "PM",
-      status: "active",
-      occupied: true,
-      session_id: null,
-      task: null,
-      issue: null,
-      branch: null,
-      pr: null,
-      assigned_at: null,
-      last_activity: new Date().toISOString(),
-      dnd: false,
-      idle: false,
-      activity: null,
-    };
-    this.checkContextOverflow(pmSlot);
 
     // Phase 1a-API500: API 500 backoff detection colocated with autocompact.
     // Rajiv directive 2026-05-17 07:59 IST thread `1778957625.997439`:
@@ -299,7 +271,7 @@ export class StuckDetector {
       if (slot.slot === 0) continue;
       if (slot.dnd) continue;
       if (!slot.occupied) continue;
-      this.checkApi500Backoff(slot);
+      await this.checkApi500Backoff(slot);
     }
 
     // Phase 1b: answer-prompt block detection. Applies to ALL slots, not
@@ -309,7 +281,7 @@ export class StuckDetector {
     for (const slot of slots) {
       if (slot.dnd) continue;
       if (slot.slot === 0) continue; // PM pane — no self-detection
-      this.detectAnswerPromptBlock(slot);
+      await this.detectAnswerPromptBlock(slot);
     }
 
     // Phase 1c: bg-script failure detection. Watches the MoP server log
@@ -370,10 +342,10 @@ export class StuckDetector {
    *  - Without dedup, scrollback persistence would cause the slot to
    *    receive /compact 2-3× per real overflow event. Do NOT remove.
    */
-  private checkContextOverflow(slot: SlotState): void {
+  private async checkContextOverflow(slot: SlotState): Promise<void> {
     let pane = "";
     try {
-      const { output } = this.relay.captureOutput(slot.slot, 60);
+      const { output } = await this.relay.captureOutput(slot.slot, 60);
       pane = output;
     } catch {
       return; // capture failure — try again next tick
@@ -533,8 +505,33 @@ export class StuckDetector {
     );
 
     console.log(
-      `[stuck-info] slot=${slot.slot} fire-overflow-direct sig=${signature.slice(0, 12)} pattern=${matched.source}`
+      `[stuck-info] slot=${slot.slot} overflow-direct-candidate sig=${signature.slice(0, 12)} pattern=${matched.source}`
     );
+
+    if (!this.AUTO_COMPACT_INJECTION_ENABLED) {
+      this.db.logEvent(
+        slot.slot,
+        "compact_suppressed_disabled",
+        null,
+        null,
+        {
+          slot: slot.slot,
+          task: slot.task,
+          issue: slot.issue,
+          matched_pattern: matched.source,
+          match_signature: signature,
+          capture_excerpt: pane.slice(-400),
+          action: "suppressed_auto_compact_disabled",
+        }
+      );
+      if (matchLine >= 0) {
+        this.lastMatchLine.set(slot.slot, matchLine);
+      }
+      console.log(
+        `[stuck-info] slot=${slot.slot} suppress=auto-compact-disabled sig=${signature.slice(0, 12)}`
+      );
+      return;
+    }
 
     // Log the dispatch BEFORE sending so the next detector tick (which may
     // arrive within seconds if the scrollback banner is still visible)
@@ -595,7 +592,7 @@ export class StuckDetector {
    * State file: /tmp/slot-N-api500-state.json
    * Forensic log: /tmp/mop-api500-nudges.log
    */
-  private checkApi500Backoff(slot: SlotState): void {
+  private async checkApi500Backoff(slot: SlotState): Promise<void> {
     const slotNum = slot.slot;
     const stateFile = `/tmp/slot-${slotNum}-api500-state.json`;
     const logFile = `/tmp/mop-api500-nudges.log`;
@@ -603,9 +600,10 @@ export class StuckDetector {
     // 1. Capture last 100 lines of slot's tmux pane scrollback.
     let pane = "";
     try {
-      pane = execSync(`tmux capture-pane -t 0:0.${slotNum} -p -S -100`, {
+      const result = await execShell(`tmux capture-pane -t 0:0.${slotNum} -p -S -100`, {
         timeout: 5_000,
-      }).toString();
+      });
+      pane = result.stdout;
     } catch {
       return; // capture failure — try again next tick
     }
@@ -793,10 +791,10 @@ export class StuckDetector {
    * in MoP and trigger a slot-blocked command on pm pane, same way we do
    * for compact".
    */
-  private detectAnswerPromptBlock(slot: SlotState): void {
+  private async detectAnswerPromptBlock(slot: SlotState): Promise<void> {
     let pane = "";
     try {
-      const { output } = this.relay.captureOutput(slot.slot, 50);
+      const { output } = await this.relay.captureOutput(slot.slot, 50);
       pane = output;
     } catch {
       return;
@@ -833,7 +831,7 @@ export class StuckDetector {
     // Idle-prompt gate. A slot truly parked at an answer menu reports
     // idle (white ❯ chevron). If is-active reports busy, the menu is
     // either stale scrollback or rendering mid-update — defer.
-    if (this.relay.isSlotActive(slot.slot)) {
+    if (await this.relay.isSlotActive(slot.slot)) {
       debugLog(
         `[stuck] slot=${slot.slot} block-detected-but-active — defer (banner likely stale or mid-render)`
       );
@@ -1079,8 +1077,29 @@ export class StuckDetector {
         );
 
         console.log(
-          `[stuck-info] slot=${slot.slot} fire-bg-script-failure-compact consecutive_fails=${prev + 1}`
+          `[stuck-info] slot=${slot.slot} bg-script-failure-compact-candidate consecutive_fails=${prev + 1}`
         );
+
+        if (!this.AUTO_COMPACT_INJECTION_ENABLED) {
+          this.db.logEvent(
+            slot.slot,
+            "bg_script_failure_compact",
+            null,
+            null,
+            {
+              slot: slot.slot,
+              consecutive_fails: prev + 1,
+              log_lines: failCount,
+              task: slot.task,
+              issue: slot.issue,
+              action: "suppressed_auto_compact_disabled",
+            }
+          );
+          console.log(
+            `[stuck-info] slot=${slot.slot} suppress=auto-compact-disabled trigger=bg-script-failure consecutive_fails=${prev + 1}`
+          );
+          continue;
+        }
 
         // Log compact dispatch for post-compact dedup.
         this.db.logEvent(slot.slot, "compact_dispatched", null, null, {
@@ -1212,7 +1231,7 @@ export class StuckDetector {
     if (this.timer) return; // Already running
     this.timer = setInterval(() => {
       try {
-        this.checkAll();
+        void this.checkAll();
       } catch (err) {
         console.error("[stuck] Check failed:", err);
       }

@@ -33,6 +33,10 @@ export interface HookPayload {
   tool_output?: string;
   /** Session ID of the Claude Code instance */
   session_id?: string;
+  /** Current working directory of the Claude Code instance */
+  cwd?: string;
+  /** Path to the session JSONL transcript */
+  transcript_path?: string;
   /** Notification type (for Notification hooks) */
   notification_type?: string;
   /** Stop reason (for Stop hooks) */
@@ -105,6 +109,35 @@ export interface EventLogEntry {
   tool_name: string | null;
   payload: string; // JSON string
   processed: boolean;
+}
+
+// ─── Ops Jobs ───────────────────────────────────────────────
+
+export type OpsJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "skipped"
+  | "failed"
+  | "timed_out"
+  | "cancelled";
+
+export interface OpsJobRecord {
+  id: string;
+  kind: string;
+  reason: string;
+  status: OpsJobStatus;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  pid: number | null;
+  exit_code: number | null;
+  decision: string | null;
+  result_reason: string | null;
+  payload_bytes: number | null;
+  error: string | null;
+  stdout_path: string | null;
+  trace_path: string | null;
 }
 
 // ─── MCP Tool Results ────────────────────────────────────────

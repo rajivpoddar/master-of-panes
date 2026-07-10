@@ -5,11 +5,17 @@
  * plan ready), updates slot state, and relays notifications to PM.
  */
 
-import { execSync } from "node:child_process";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { execShell, sleep } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
-import type { HookPayload, HookResponse } from "./types.js";
+import type { HookPayload, HookResponse, SlotState } from "./types.js";
+
+const PM_CLEAR_RETRY_SUPPRESS_MS = parseInt(
+  process.env.MOP_PM_CLEAR_RETRY_SUPPRESS_MS ?? `${60 * 1000}`,
+  10,
+);
+const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
 
 function debugLog(line: string): void {
   try {
@@ -93,25 +99,25 @@ export class HookProcessor {
    * (Rajiv directive 2026-03-31: "debounce on MoP side, wait 60s, cancel on re-activation")
    */
   private pendingIdleTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private pendingActiveTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
   /** Idle debounce delay: 60 seconds (Rajiv directive 2026-05-15 12:02 IST thread `1778825746.293759`:
    * bumped from 30s → 60s to reduce duplicate slot-notification injection. Modern slots run longer
    * atomic tool sequences than 2026-04-01 baseline; 30s window fired during mid-sequence "pause"
    * causing 5+ FIRINGs in 30min on healthy slots. See feedback memo dated 2026-05-15.) */
   private static readonly IDLE_DEBOUNCE_MS = 60_000;
+  private static readonly ACTIVE_DEBOUNCE_MS = 60_000;
 
   /**
    * Slot-idle staleness gate window — after the IDLE_DEBOUNCE_MS timer fires,
-   * suppress /slot-idle if a Task subagent dispatched within this many seconds
-   * AND has no later Stop event. (Rajiv directive 2026-05-05: PM nudge interrupted
-   * slot 4 plan-agent — subagent dispatch fired 43s after the JSONL classifier
-   * captured "subagent_active=false".)
+   * suppress /slot-idle if a Task/Agent subagent dispatched within this many
+   * seconds and has not closed. Background Agent dispatches are closed by
+   * TaskStop/subagent_completed, not by the parent prompt's Stop.
    *
-   * Set to 90s — covers the full 30s debounce + a generous tail for late Task
-   * dispatches that ride the same Stop window. Mirrors check-slot's lazy
-   * "skip when idle" semantics.
+   * Set to 60m because background Codex reviews can outlive the parent prompt
+   * by many minutes; a visible idle notification during that window is false.
    */
-  private static readonly IDLE_STALENESS_GATE_SEC = 90;
+  private static readonly IDLE_STALENESS_GATE_SEC = 60 * 60;
 
   /**
    * Slot-idle recent-tool-fire gate. Independent of subagent detection: if any
@@ -147,16 +153,475 @@ export class HookProcessor {
   /**
    * Emergency containment: keep the heavyweight check-slot classifier out of
    * the MoP HTTP process unless explicitly re-enabled. The classifier can run
-   * Codex/gh/tmux work for up to 30s per active slot; doing that via execSync
+   * Codex/gh/tmux work for up to 30s per active slot; doing that inside this
    * inside this process starves /health and the hourly ops scheduler.
    */
   private static readonly CHECK_SLOT_BG_ENABLED =
     process.env.MOP_CHECK_SLOT_BG_ENABLED === "1";
 
+  private static readonly SLOT_STATE_DIRECT_DEDUP_MS = 45_000;
+  /**
+   * Plain "MoP: slot N idle/active" PM injects are now opt-in only.
+   * PM-wait reminder/check-slot inserts are also opt-in. Dev slots now use
+   * message-pm for explicit PM-bound status and ESCALATION bodies for hard
+   * blocks; background "still waiting for PM" pings add duplicate PM noise.
+   */
+  private static readonly SLOT_STATE_INJECTS_ENABLED =
+    process.env.MOP_SLOT_STATE_INJECTS_ENABLED === "1";
+  private static readonly PM_WAIT_REMINDERS_ENABLED =
+    process.env.MOP_PM_WAIT_REMINDERS_ENABLED === "1";
+  private static readonly WAITING_PM_CHECK_SLOT_INJECTS_ENABLED =
+    process.env.MOP_WAITING_PM_CHECK_SLOT_INJECTS_ENABLED === "1";
+  private lastDirectSlotStateNotificationAt = new Map<string, number>();
+  private static readonly PM_WAIT_REMINDER_INTERVAL_MS = 5 * 60 * 1000;
+  private static readonly PM_WAIT_REMINDER_SWEEP_MS = 60 * 1000;
+  private static readonly PM_WAIT_ACTIVITIES = new Set([
+    "awaiting_plan_approval",
+    "waiting_for_pm_action",
+    "waiting_for_pm_direction",
+  ]);
+  private pmWaitReminderTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private pmWaitStartedAt = new Map<number, number>();
+  private pmWaitReminderSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private promisedActionContinueAt = new Map<number, number>();
+  private static readonly PROMISED_ACTION_CONTINUE_DEDUP_MS = 5 * 60 * 1000;
+  private static readonly SLOT_PROMISE_AUDIT_SCRIPT =
+    "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/slot-promised-action-audit.py";
+
   constructor(
     private db: MoPDatabase,
     private relay: TmuxRelay
-  ) {}
+  ) {
+    if (HookProcessor.PM_WAIT_REMINDERS_ENABLED) {
+      this.startPmWaitReminderSweep();
+    }
+  }
+
+  private getPollMonitorSkipReason(slot: Pick<SlotState, "task" | "branch" | "activity">): string | null {
+    const text = [slot.task, slot.branch, slot.activity]
+      .filter((v): v is string => typeof v === "string" && v.length > 0)
+      .join(" ");
+    if (!text) return null;
+
+    const patterns: Array<[RegExp, string]> = [
+      [/\bci[-_ ]?watch\b/i, "ci-watch task"],
+      [/\bwatch(?:ing|er)?\b/i, "watch task"],
+      [/\bmonitor(?:ing|s)?\b/i, "monitor task"],
+      [/\bpoll(?:ing|er)?\b/i, "poll task"],
+      [/\bheartbeat\b/i, "heartbeat monitor task"],
+      [/\bcheck\s+back\b/i, "check-back monitor task"],
+      [/\bkeep\s+an\s+eye\b/i, "monitor task"],
+    ];
+    for (const [pattern, reason] of patterns) {
+      if (pattern.test(text)) return reason;
+    }
+    return null;
+  }
+
+  private injectSlotStateDirect(
+    slot: SlotState,
+    state: "idle" | "active",
+    source: string,
+    toolName: string | null,
+    payload: Record<string, unknown> = {}
+  ): boolean {
+    const eventBase = state === "idle" ? "slot_idle" : "slot_active";
+    const pollMonitorReason = this.getPollMonitorSkipReason(slot);
+    if (pollMonitorReason) {
+      console.log(
+        `[${state}-debug] slot ${slot.slot} suppress=${pollMonitorReason.replace(/\s+/g, "-")} task=${slot.task ?? "undefined"}`
+      );
+      this.db.logEvent(slot.slot, `${eventBase}_suppressed_poll_monitor`, source, toolName, {
+        ...payload,
+        reason: pollMonitorReason,
+        task: slot.task,
+        branch: slot.branch,
+        activity: slot.activity,
+      });
+      return false;
+    }
+
+    if (state === "active") {
+      const lastVisible = this.db.getLastVisibleSlotState(slot.slot);
+      if (lastVisible?.state !== "idle") {
+        this.db.logEvent(slot.slot, "slot_active_suppressed_no_visible_idle", source, toolName, {
+          ...payload,
+          reason: "last PM-visible slot state was not idle",
+          last_visible_state: lastVisible?.state ?? null,
+          last_visible_event: lastVisible?.eventType ?? null,
+          last_visible_ts: lastVisible?.timestamp ?? null,
+        });
+        return false;
+      }
+    }
+
+    const key = `${slot.slot}:${state}`;
+    const nowMs = Date.now();
+    const lastAt = this.lastDirectSlotStateNotificationAt.get(key);
+    if (lastAt !== undefined && nowMs - lastAt < HookProcessor.SLOT_STATE_DIRECT_DEDUP_MS) {
+      this.db.logEvent(slot.slot, `${eventBase}_suppressed_direct_dedup`, source, toolName, {
+        ...payload,
+        reason: "recent-direct-state-notification",
+        age_ms: nowMs - lastAt,
+        dedup_ms: HookProcessor.SLOT_STATE_DIRECT_DEDUP_MS,
+      });
+      return false;
+    }
+    this.lastDirectSlotStateNotificationAt.set(key, nowMs);
+
+    const message = `MoP: slot ${slot.slot} ${state}`;
+    if (state === "idle") {
+      this.startPmWaitReminder(slot.slot, nowMs, true);
+      if (HookProcessor.SLOT_STATE_INJECTS_ENABLED) {
+        this.relay.notifySlotIdle(slot, true);
+      } else {
+        this.db.logEvent(slot.slot, "slot_idle_plain_inject_suppressed", source, toolName, {
+          ...payload,
+          reason: "plain slot-state PM injects disabled",
+          pm_wait_reminder_enabled: HookProcessor.PM_WAIT_REMINDERS_ENABLED,
+          task: slot.task,
+          branch: slot.branch,
+          issue: slot.issue,
+        });
+      }
+    } else {
+      this.stopPmWaitReminder(slot.slot, "slot-active");
+      if (HookProcessor.SLOT_STATE_INJECTS_ENABLED) {
+        this.relay.injectToPMDirect(message);
+      } else {
+        this.db.logEvent(slot.slot, "slot_active_plain_inject_suppressed", source, toolName, {
+          ...payload,
+          reason: "plain slot-state PM injects disabled",
+          task: slot.task,
+          branch: slot.branch,
+          issue: slot.issue,
+        });
+      }
+    }
+    this.db.logEvent(slot.slot, `${eventBase}_notified`, source, toolName, {
+      ...payload,
+      relay_path: `${source}.direct.${state}`,
+      notification_type: `slot-${state}`,
+      pm_injected: HookProcessor.SLOT_STATE_INJECTS_ENABLED,
+      task: slot.task,
+      branch: slot.branch,
+      issue: slot.issue,
+      direct: true,
+    });
+    return true;
+  }
+
+  private startPmWaitReminder(slotNum: number, startedAt = Date.now(), reset = false): void {
+    if (!HookProcessor.PM_WAIT_REMINDERS_ENABLED) {
+      this.stopPmWaitReminder(slotNum, "pm-wait-reminders-disabled");
+      this.db.logEvent(slotNum, "slot_idle_pm_wait_reminder_suppressed", "Timer", null, {
+        reason: "pm-wait-reminders-disabled",
+        started_at: new Date(startedAt).toISOString(),
+        reset,
+      });
+      return;
+    }
+
+    const existing = this.pmWaitReminderTimers.get(slotNum);
+    if (existing) {
+      if (!reset) return;
+      clearTimeout(existing);
+      this.pmWaitReminderTimers.delete(slotNum);
+    }
+    this.pmWaitStartedAt.set(slotNum, startedAt);
+
+    const schedule = (): void => {
+      const timer = setTimeout(() => {
+        if (this.sendPmWaitReminder(slotNum)) {
+          schedule();
+        }
+      }, HookProcessor.PM_WAIT_REMINDER_INTERVAL_MS);
+      if (timer.unref) timer.unref();
+      this.pmWaitReminderTimers.set(slotNum, timer);
+    };
+
+    schedule();
+    this.db.logEvent(slotNum, "slot_idle_pm_wait_reminder_started", "Timer", null, {
+      interval_ms: HookProcessor.PM_WAIT_REMINDER_INTERVAL_MS,
+      started_at: new Date(startedAt).toISOString(),
+      reset,
+    });
+
+    if (Date.now() - startedAt >= HookProcessor.PM_WAIT_REMINDER_INTERVAL_MS) {
+      const immediate = setTimeout(() => {
+        this.sendPmWaitReminder(slotNum);
+      }, 0);
+      if (immediate.unref) immediate.unref();
+    }
+  }
+
+  private slotWaitStartedAt(slot: Pick<SlotState, "last_activity">): number {
+    const parsed = Date.parse(slot.last_activity);
+    return Number.isFinite(parsed) ? parsed : Date.now();
+  }
+
+  private sendPmWaitReminder(slotNum: number): boolean {
+    const slot = this.db.getSlot(slotNum);
+    const waitingForPm =
+      typeof slot?.activity === "string" &&
+      HookProcessor.PM_WAIT_ACTIVITIES.has(slot.activity);
+    if (!slot || !slot.occupied || (!slot.idle && !waitingForPm)) {
+      this.stopPmWaitReminder(slotNum, "slot-no-longer-waiting");
+      return false;
+    }
+    const pollMonitorReason = this.getPollMonitorSkipReason(slot);
+    if (pollMonitorReason) {
+      this.stopPmWaitReminder(slotNum, pollMonitorReason);
+      return false;
+    }
+    const subagent = this.db.hasRecentSubagentDispatch(
+      slotNum,
+      HookProcessor.IDLE_STALENESS_GATE_SEC
+    );
+    if (subagent) {
+      this.db.logEvent(slotNum, "slot_idle_pm_wait_reminder_suppressed_subagent_active", "Timer", null, {
+        reason: "subagent_active",
+        task_dispatch_ts: subagent.taskTs,
+        tool_name: subagent.toolName ?? null,
+        window_sec: HookProcessor.IDLE_STALENESS_GATE_SEC,
+        task: slot.task,
+        branch: slot.branch,
+        issue: slot.issue,
+      });
+      return true;
+    }
+
+    const startedAt = this.pmWaitStartedAt.get(slotNum) ?? Date.now();
+    const waitedMin = Math.max(1, Math.floor((Date.now() - startedAt) / 60_000));
+    const isPlanApproval = slot.activity === "awaiting_plan_approval";
+    const issuePart = slot.issue ? ` #${slot.issue}` : "";
+    const message = isPlanApproval
+      ? `MoP: slot ${slotNum} awaiting plan approval${issuePart} (${waitedMin}m)\n` +
+        `\n` +
+        `Run approve-plan for slot ${slotNum}, or send "2" so MoP routes through the approval endpoint. This is a WAITING_PM_ACTION re-fire; PM must approve/reject the plan or explicitly keep the wait open.`
+      : `MoP: slot ${slotNum} idle — still waiting for PM input (${waitedMin}m)\n` +
+        `\n` +
+        `Run Skill(slot-idle) with arg ${slotNum} now. This is a WAITING_PM_ACTION re-fire; PM must either send a directive via mop_send_to_slot or explicitly mark the wait as valid.`;
+    this.relay.injectToPMDirect(message);
+    this.db.logEvent(slotNum, "slot_idle_pm_wait_reminder", "Timer", null, {
+      waited_ms: Date.now() - startedAt,
+      interval_ms: HookProcessor.PM_WAIT_REMINDER_INTERVAL_MS,
+      task: slot.task,
+      branch: slot.branch,
+      issue: slot.issue,
+      dnd: slot.dnd,
+      direct: true,
+    });
+    return true;
+  }
+
+  private stopPmWaitReminder(slotNum: number, reason: string): void {
+    const timer = this.pmWaitReminderTimers.get(slotNum);
+    if (timer) {
+      clearTimeout(timer);
+      this.pmWaitReminderTimers.delete(slotNum);
+      this.db.logEvent(slotNum, "slot_idle_pm_wait_reminder_stopped", "Timer", null, {
+        reason,
+      });
+    }
+    this.pmWaitStartedAt.delete(slotNum);
+  }
+
+  private async sendClearViaMopSendPath(slotNum: number, source: string): Promise<boolean> {
+    try {
+      const port = parseInt(process.env.MOP_PORT ?? "3100", 10);
+      const res = await fetch(`http://127.0.0.1:${port}/slots/${slotNum}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          command: "/clear",
+          force: true,
+          allow_pm_clear: slotNum === 0,
+          source,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      return res.ok && data.success === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private parseMoPIsoMs(value: string | null | undefined): number | null {
+    if (!value) return null;
+    const trimmed = value.trim();
+    const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(trimmed) ? trimmed : `${trimmed}Z`;
+    const ts = Date.parse(normalized);
+    return Number.isFinite(ts) ? ts : null;
+  }
+
+  private isRecentIso(value: string | null, windowMs: number): boolean {
+    const ts = this.parseMoPIsoMs(value);
+    return ts !== null && Date.now() - ts >= 0 && Date.now() - ts < windowMs;
+  }
+
+  private hasRecentPmClearSend(windowMs: number): boolean {
+    const cutoff = Date.now() - windowMs;
+    return this.db
+      .getEvents(0, 30)
+      .some((event) => {
+        if (
+          ![
+            "send_allowed_pm_clear_control_command",
+            "clear_pending_queued",
+            "clear_pending_pm_retry_sent",
+          ].includes(event.event_type)
+        ) {
+          return false;
+        }
+
+        const ts = this.parseMoPIsoMs(event.timestamp);
+        if (ts === null || ts < cutoff) return false;
+
+        if (event.event_type === "send_allowed_pm_clear_control_command") {
+          try {
+            const payload = JSON.parse(event.payload) as { command?: unknown };
+            return payload.command === "/clear";
+          } catch {
+            return false;
+          }
+        }
+
+        return true;
+      });
+  }
+
+  private detectPmDirectionRequest(transcript?: string): { summary: string; reason: string; issue: number | null } | null {
+    const text = (transcript ?? "").trim();
+    if (!text) return null;
+
+    const issueMatch = /\b(?:PR|#)\s*#?(\d{3,6})\b/i.exec(text);
+    const issue = issueMatch ? parseInt(issueMatch[1], 10) : null;
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const tail = lines.slice(-10).join(" ");
+
+    const questionPatterns: Array<[RegExp, string]> = [
+      [/\bwant me to\b/i, "slot asked whether to proceed"],
+      [/\bshould I\b/i, "slot asked whether to proceed"],
+      [/\bshall I\b/i, "slot asked whether to proceed"],
+      [/\bdo you want me to\b/i, "slot asked whether to proceed"],
+      [/\bwould you like me to\b/i, "slot asked whether to proceed"],
+      [/\bneed(?:s)? PM (?:direction|decision|input)\b/i, "slot requested PM direction"],
+      [/\bawaiting PM\b|\bwaiting for PM\b/i, "slot is waiting for PM"],
+      [/\bconfirm(?: whether)?\b/i, "slot requested confirmation"],
+      [/\bor\b.{0,120}\bsufficient\b/i, "slot asked PM to choose sufficiency"],
+    ];
+
+    for (const [pattern, reason] of questionPatterns) {
+      if (pattern.test(tail) || pattern.test(text)) {
+        return {
+          summary: this.extractPmDirectionSummary(text),
+          reason,
+          issue,
+        };
+      }
+    }
+
+    if (/\bVerdict:\s*\*\*?FAIL\b/i.test(text) || /\bFAIL\s*\((?:critical|blocker|major)\)/i.test(text)) {
+      if (/\b(correct fix needs|root cause|blocker|critical|requires|must)\b/i.test(text)) {
+        return {
+          summary: this.extractPmDirectionSummary(text, "critical QA fail needs PM dispatch/rework direction"),
+          reason: "critical QA fail stopped at idle",
+          issue,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  private extractPmDirectionSummary(text: string, fallback = "PM direction needed"): string {
+    const compact = text.replace(/\s+/g, " ").trim();
+    const question = compact.match(/([^.!?]{0,220}\?)/);
+    const marker = compact.match(/((?:Correct fix needs|However, Rajiv's directive|Given the local E2E|Root cause:|QA complete\. Verdict:)[^.!?]{0,260}[.!?]?)/i);
+    const picked = (question?.[1] ?? marker?.[1] ?? fallback).trim();
+    return picked.replace(/\s+/g, " ").slice(0, 220);
+  }
+
+  private startPmWaitReminderSweep(): void {
+    if (this.pmWaitReminderSweepTimer) return;
+    const run = async (): Promise<void> => {
+      for (const slot of this.db.getAllSlots()) {
+        if (!slot.occupied || this.getPollMonitorSkipReason(slot)) {
+          this.stopPmWaitReminder(slot.slot, "slot-not-remindable");
+          continue;
+        }
+
+        this.startCheckSlotTimer(slot.slot);
+
+        let active = true;
+        try {
+          active = await this.relay.isSlotActive(slot.slot);
+        } catch {
+          active = true;
+        }
+
+        if (active) {
+          const waitingForPm =
+            typeof slot.activity === "string" &&
+            HookProcessor.PM_WAIT_ACTIVITIES.has(slot.activity);
+          if (waitingForPm) {
+            this.startPmWaitReminder(slot.slot, this.slotWaitStartedAt(slot));
+            continue;
+          }
+          if (slot.idle) {
+            this.db.updateSlot(slot.slot, {
+              idle: false,
+              last_activity: new Date().toISOString(),
+            });
+          }
+          this.stopPmWaitReminder(slot.slot, "slot-active-sweep");
+          continue;
+        }
+
+        const subagent = this.db.hasRecentSubagentDispatch(
+          slot.slot,
+          HookProcessor.IDLE_STALENESS_GATE_SEC
+        );
+        if (subagent) {
+          if (slot.idle) {
+            this.db.updateSlot(slot.slot, {
+              idle: false,
+              last_activity: new Date().toISOString(),
+            });
+          }
+          this.stopPmWaitReminder(slot.slot, "subagent-active-sweep");
+          this.db.logEvent(slot.slot, "slot_idle_reconcile_suppressed_subagent_active", "Timer", null, {
+            reason: "subagent_active",
+            task_dispatch_ts: subagent.taskTs,
+            tool_name: subagent.toolName ?? null,
+            window_sec: HookProcessor.IDLE_STALENESS_GATE_SEC,
+          });
+          continue;
+        }
+
+        if (!slot.idle) {
+          this.db.updateSlot(slot.slot, {
+            idle: true,
+            last_activity: new Date().toISOString(),
+          });
+          this.db.logEvent(slot.slot, "slot_idle_reconciled_from_pane", "Timer", null, {
+            reason: "pm-wait-reminder-sweep",
+          });
+        }
+        this.startPmWaitReminder(slot.slot, this.slotWaitStartedAt(slot));
+      }
+    };
+
+    void run();
+    this.pmWaitReminderSweepTimer = setInterval(() => {
+      void run();
+    }, HookProcessor.PM_WAIT_REMINDER_SWEEP_MS);
+    if (this.pmWaitReminderSweepTimer.unref) this.pmWaitReminderSweepTimer.unref();
+  }
 
   /**
    * Wire a StuckDetector reference. server.ts calls this so SessionStart:compact
@@ -184,23 +649,37 @@ export class HookProcessor {
     const now = new Date().toISOString().slice(11, 19);
     console.log(`[check-slot] ${now} Starting timer for slot ${slotNum} (interval: ${HookProcessor.CHECK_SLOT_INTERVAL_MS}ms, active timers: ${this.checkSlotTimers.size})`);
 
-    const timer = setInterval(() => {
+    const timer = setInterval(async () => {
       const now = new Date().toISOString().slice(11, 19);
-      // Only fire if slot is occupied and not DND.
+      // Only fire if slot is occupied.
       // Do NOT check idle — slots are idle between tool calls (every few seconds).
       // The timer should survive through normal idle↔active cycling.
-      // Only stop when truly unoccupied (released) or DND.
+      // Only stop when truly unoccupied (released). DND suppresses normal
+      // PM-visible slot state noise, but must not suppress stuck/wait reminders.
       const currentSlot = this.db.getSlot(slotNum);
       console.log(`[check-slot] ${now} Slot ${slotNum} timer tick — occupied=${currentSlot?.occupied}, idle=${currentSlot?.idle}, dnd=${currentSlot?.dnd}, task=${currentSlot?.task?.slice(0,30)}`);
-      if (!currentSlot || !currentSlot.occupied || currentSlot.dnd) {
+      if (!currentSlot || !currentSlot.occupied) {
         console.log(`[check-slot] ${now} Slot ${slotNum} STOPPING timer — occupied=${currentSlot?.occupied}, dnd=${currentSlot?.dnd}`);
         this.stopCheckSlotTimer(slotNum);
+        return;
+      }
+
+      const pollMonitorReason = this.getPollMonitorSkipReason(currentSlot);
+      if (pollMonitorReason) {
+        console.log(`[check-slot] ${now} Slot ${slotNum} SKIPPED — ${pollMonitorReason}`);
+        this.db.logEvent(slotNum, "check_slot_skipped", "Timer", null, {
+          reason: pollMonitorReason,
+          interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
+          task: currentSlot.task,
+          branch: currentSlot.branch,
+        });
         return;
       }
 
       // Skip firing if slot is momentarily idle (between tool calls), but keep timer alive
       if (currentSlot.idle) {
         console.log(`[check-slot] ${now} Slot ${slotNum} SKIP tick — idle between tool calls, timer stays alive`);
+        this.startPmWaitReminder(slotNum, this.slotWaitStartedAt(currentSlot));
         return;
       }
 
@@ -230,19 +709,20 @@ export class HookProcessor {
       // when the slot's JSONL hasn't changed since last tick (UNCHANGED path).
       // On Codex review path, the prompt template emits "INJECT_DECISION:inject" or
       // "INJECT_DECISION:skip" based on classified slot health.
-      // Default behavior: if the marker is absent or the bg-script fails/times out,
-      // FALL THROUGH to inject (preserves prior behavior, never drops a notification
-      // due to gate-script issues).
+      // Default behavior: if the marker is absent, fall through to inject. If the
+      // bg-script itself fails/times out, write diagnostics but do not notify PM;
+      // a broken classifier should not create back-to-back slot noise.
       // (Rajiv directive 2026-05-08 20:34 IST — gate at MoP server, not PM-side.)
       const checkFile = `/tmp/slot-${slotNum}-check.txt`;
       const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
       let bgOutput = "";
       let bgFailed = false;
       try {
-        bgOutput = execSync(`bash ${bgScript} ${slotNum}`, {
+        const result = await execShell(`bash ${bgScript} ${slotNum}`, {
           timeout: 30_000,
           maxBuffer: 1024 * 1024,
-        }).toString();
+        });
+        bgOutput = result.stdout;
       } catch (err) {
         bgFailed = true;
         const msg = err instanceof Error ? err.message : String(err);
@@ -263,11 +743,22 @@ export class HookProcessor {
         console.log(`[check-slot] Slot ${slotNum} write FAILED: ${err}`);
       }
 
+      if (bgFailed) {
+        console.log(`[check-slot] ${now} Slot ${slotNum} SKIPPED — bg-script failed; wrote ${checkFile}`);
+        this.db.logEvent(slotNum, "check_slot_skipped", "Timer", null, {
+          check_file: checkFile,
+          reason: "bg-script-failed",
+          interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
+          bg_failed: true,
+        });
+        return;
+      }
+
       // Decide based on bg-script INJECT_DECISION marker.
       // skip → log + return (timer keeps running for next tick).
-      // inject (or absent/failed) → fire injection.
+      // inject → fire injection.
       const skipMatch = bgOutput.match(/INJECT_DECISION:skip(?:\s+REASON:([^\n]*))?/);
-      if (!bgFailed && skipMatch) {
+      if (skipMatch) {
         const reason = (skipMatch[1] || "unspecified").trim().slice(0, 120);
         console.log(`[check-slot] ${now} Slot ${slotNum} SKIPPED — bg-script INJECT_DECISION:skip REASON:${reason}`);
         this.db.logEvent(slotNum, "check_slot_skipped", "Timer", null, {
@@ -278,50 +769,77 @@ export class HookProcessor {
         return;
       }
 
-      console.log(`[check-slot] ${now} Slot ${slotNum} FIRING — bg-script ${bgFailed ? "FAILED (falling through)" : "INJECT_DECISION:inject"}`);
+      console.log(`[check-slot] ${now} Slot ${slotNum} FIRING — bg-script INJECT_DECISION:inject`);
 
-      // Inject "MoP: check slot N for <reason>" + bg-output as ONE atomic
-      // multi-line payload.
-      // Rajiv directive 2026-05-15 13:44 IST thread `1778831723.165019`:
-      // "make it inline" — eliminate /tmp/slot-N-check.txt file dependency;
-      // PM sees prefix + summary as a single prompt.
+      // Inject only the check-slot signal. The bg-script output remains in
+      // /tmp/slot-N-check.txt and the event log; PM should not receive the
+      // full classifier payload inline.
+      // Rajiv directive 2026-05-29: "disable this full check slot bg result
+      // inject as well. just inject check slot message and time."
       // Rajiv directive 2026-05-22 22:23 IST thread `1779468118.901709`:
       // "inject is a string instead of a command." Switched from slash
-      // command `/check-slot N` to message prefix `MoP: check slot N for <reason>`.
+      // command `/check-slot N` to message prefix `MoP: check slot N`.
       // PM-side pm-context-injector.sh recognizes the prefix and emits
       // [MoP_SLOT_NOTIFICATION] system-reminder hinting Skill(check-slot).
-      // The relay detects \n and uses load-buffer + paste-buffer so embedded
-      // newlines don't submit the prompt prematurely.
-      const payload = bgFailed
-        ? `STATUS:ERROR reason=bg-script-failed slot=${slotNum}`
-        : (bgOutput.trimEnd() || `STATUS:ERROR reason=empty-output slot=${slotNum}`);
+      const payload = bgOutput.trimEnd() || `STATUS:ERROR reason=empty-output slot=${slotNum}`;
       // Derive a one-line <reason> from the bg-script summary so PM sees
       // the headline status without re-parsing the payload. Order of
       // preference: WARNING line > NEXT_ACTION line > HEALTH line > STATUS
       // line > fallback "routine timer". Strips the marker prefix so the
       // reason reads cleanly inline.
       let reason = "routine timer";
-      if (bgFailed) {
-        reason = "bg-script failed";
-      } else {
-        const warn = payload.match(/^WARNING:([^\n]+)/m);
-        const next = payload.match(/^NEXT_ACTION:([^\n]+)/m);
-        const health = payload.match(/^HEALTH:([^\n]+)/m);
-        const status = payload.match(/^STATUS:([^\n]+)/m);
-        if (warn) reason = `WARNING:${warn[1].trim()}`;
-        else if (next) reason = `NEXT_ACTION:${next[1].trim()}`;
-        else if (health) reason = `HEALTH:${health[1].trim()}`;
-        else if (status) reason = `STATUS:${status[1].trim()}`;
-        reason = reason.replace(/\s+/g, " ").slice(0, 120);
+      const warn = payload.match(/^WARNING:([^\n]+)/m);
+      const next = payload.match(/^NEXT_ACTION:([^\n]+)/m);
+      const health = payload.match(/^HEALTH:([^\n]+)/m);
+      const status = payload.match(/^STATUS:([^\n]+)/m);
+      if (warn) reason = `WARNING:${warn[1].trim()}`;
+      else if (next) reason = `NEXT_ACTION:${next[1].trim()}`;
+      else if (health) reason = `HEALTH:${health[1].trim()}`;
+      else if (status) reason = `STATUS:${status[1].trim()}`;
+      reason = reason.replace(/\s+/g, " ").slice(0, 120);
+      if (/^STATUS:WAITING_PM_ACTION\b/m.test(payload)) {
+        if (!HookProcessor.WAITING_PM_CHECK_SLOT_INJECTS_ENABLED) {
+          this.db.updateSlot(slotNum, {
+            status: "active",
+            occupied: true,
+            idle: true,
+            activity: "waiting_for_pm_action",
+          });
+          this.stopPmWaitReminder(slotNum, "waiting-pm-check-slot-injects-disabled");
+          this.db.logEvent(slotNum, "check_slot_waiting_pm_action_suppressed", "Timer", null, {
+            check_file: checkFile,
+            reason,
+            task: currentSlot.task,
+            branch: currentSlot.branch,
+            issue: currentSlot.issue,
+          });
+          console.log(`[check-slot] ${now} Slot ${slotNum} SKIPPED — WAITING_PM_ACTION inserts disabled`);
+          return;
+        }
+        this.db.updateSlot(slotNum, {
+          status: "active",
+          occupied: true,
+          idle: true,
+          activity: "waiting_for_pm_action",
+        });
+        this.startPmWaitReminder(slotNum);
+        this.db.logEvent(slotNum, "slot_waiting_pm_action_from_check_slot", "Timer", null, {
+          check_file: checkFile,
+          reason,
+          task: currentSlot.task,
+          branch: currentSlot.branch,
+          issue: currentSlot.issue,
+        });
       }
-      this.relay.injectToPM(`MoP: check slot ${slotNum} for ${reason}\n${payload}`);
-      console.log(`[check-slot] Slot ${slotNum} — injected MoP message inline (reason="${reason.slice(0,60)}", payload ${payload.length} chars)`);
+      this.relay.injectToPM(`MoP: check slot ${slotNum}`);
+      console.log(`[check-slot] Slot ${slotNum} — injected short MoP check-slot message (reason="${reason.slice(0,60)}", payload ${payload.length} chars kept in ${checkFile})`);
       this.db.logEvent(slotNum, "check_slot_triggered", "Timer", null, {
         check_file: checkFile,
         interval_ms: HookProcessor.CHECK_SLOT_INTERVAL_MS,
         bg_failed: bgFailed,
+        reason,
         payload_chars: payload.length,
-        inline: true,
+        inline: false,
       });
     }, HookProcessor.CHECK_SLOT_INTERVAL_MS);
 
@@ -387,11 +905,11 @@ export class HookProcessor {
    * Retries every 5s for up to 60s, then sends anyway as a fallback.
    * (Rajiv directive 2026-03-18: "change MoP to look for the plan approval prompt")
    */
-  private pollForPlanApprovalPrompt(
+  private async pollForPlanApprovalPrompt(
     slotNum: number,
     pending: { issueNum: number; planFile: string; isRevision?: boolean },
     attempt: number,
-  ): void {
+  ): Promise<void> {
     const MAX_ATTEMPTS = 12; // 12 × 5s = 60s
     const POLL_INTERVAL_MS = 5_000;
 
@@ -402,8 +920,8 @@ export class HookProcessor {
     // log content without the TUI prompt.)
     let output = "";
     try {
-      const raw = execSync(`tmux capture-pane -t 0:0.${slotNum} -p -S -20`, { timeout: 5_000 });
-      output = raw.toString();
+      const raw = await execShell(`tmux capture-pane -t 0:0.${slotNum} -p -S -20`, { timeout: 5_000 });
+      output = raw.stdout;
     } catch { output = ""; }
     const hasPrompt = /Would you like to proceed|❯\s*1\.\s*Yes|ctrl-g to edit/i.test(output);
 
@@ -427,7 +945,7 @@ export class HookProcessor {
 
     // Not found yet — retry after interval
     const timer = setTimeout(() => {
-      this.pollForPlanApprovalPrompt(slotNum, pending, attempt + 1);
+      void this.pollForPlanApprovalPrompt(slotNum, pending, attempt + 1);
     }, POLL_INTERVAL_MS);
     if (timer.unref) timer.unref();
   }
@@ -445,6 +963,237 @@ export class HookProcessor {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Cancel pending active notification timer for a slot.
+   * Called when a Stop/idle-prompt lands during the active debounce window.
+   */
+  cancelPendingActiveTimer(slotNum: number): boolean {
+    const existing = this.pendingActiveTimers.get(slotNum);
+    if (existing) {
+      clearTimeout(existing);
+      this.pendingActiveTimers.delete(slotNum);
+      return true;
+    }
+    return false;
+  }
+
+  private startActiveDebounceTimer(slotNum: number, toolName: string | null): void {
+    if (this.pendingActiveTimers.has(slotNum)) return;
+
+    const timer = setTimeout(async () => {
+      this.pendingActiveTimers.delete(slotNum);
+      const currentSlot = this.db.getSlot(slotNum);
+      if (!currentSlot || currentSlot.idle || currentSlot.dnd) {
+        this.db.logEvent(slotNum, "slot_active_cancelled", "Timer", toolName, {
+          reason: currentSlot?.idle ? "slot became idle during active debounce window" : "slot not active",
+          debounce_ms: HookProcessor.ACTIVE_DEBOUNCE_MS,
+        });
+        return;
+      }
+
+      const lastVisible = this.db.getLastVisibleSlotState(slotNum);
+      if (lastVisible?.state !== "idle") {
+        this.db.logEvent(slotNum, "slot_active_cancelled", "Timer", toolName, {
+          reason: "last PM-visible slot state was not idle",
+          debounce_ms: HookProcessor.ACTIVE_DEBOUNCE_MS,
+          last_visible_state: lastVisible?.state ?? null,
+          last_visible_event: lastVisible?.eventType ?? null,
+          last_visible_ts: lastVisible?.timestamp ?? null,
+        });
+        return;
+      }
+
+      const captureFile = `/tmp/slot-${slotNum}-active-capture.txt`;
+      try {
+        const capture = await execShell(
+          `tmux capture-pane -t 0:0.${slotNum} -p -S -15`,
+          { timeout: 5_000 }
+        );
+        writeFileSync(captureFile, capture.stdout);
+      } catch {
+        writeFileSync(captureFile, "[capture failed]");
+      }
+
+      this.injectSlotStateDirect(currentSlot, "active", "PostToolUse", toolName, {
+        capture_file: captureFile,
+        debounce_ms: HookProcessor.ACTIVE_DEBOUNCE_MS,
+      });
+    }, HookProcessor.ACTIVE_DEBOUNCE_MS);
+    if (timer.unref) timer.unref();
+    this.pendingActiveTimers.set(slotNum, timer);
+    this.db.logEvent(slotNum, "slot_active_debounce_started", "PostToolUse", toolName, {
+      debounce_ms: HookProcessor.ACTIVE_DEBOUNCE_MS,
+    });
+  }
+
+  private shellQuote(value: string): string {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+  }
+
+  private async maybeContinuePromisedActionMiss(
+    slotNum: number,
+    currentSlot: SlotState,
+    source: "Stop" | "Notification",
+    payload?: HookPayload
+  ): Promise<boolean> {
+    if (currentSlot.dnd || !currentSlot.occupied) return false;
+
+    const transcriptPath = payload?.transcript_path;
+    if (!transcriptPath) {
+      this.db.logEvent(slotNum, "slot_promised_action_scan_skipped", source, null, {
+        reason: "missing_transcript_path",
+      });
+      return false;
+    }
+
+    const nowMs = Date.now();
+    const lastAt = this.promisedActionContinueAt.get(slotNum);
+    if (lastAt !== undefined && nowMs - lastAt < HookProcessor.PROMISED_ACTION_CONTINUE_DEDUP_MS) {
+      this.db.logEvent(slotNum, "slot_promised_action_continue_suppressed", source, null, {
+        reason: "dedup",
+        age_ms: nowMs - lastAt,
+        dedup_ms: HookProcessor.PROMISED_ACTION_CONTINUE_DEDUP_MS,
+        transcript_path: transcriptPath,
+      });
+      return true;
+    }
+
+    let stdout = "";
+    try {
+      const cwd = payload?.cwd ?? `/Users/rajiv/Downloads/projects/heydonna-app-300${slotNum}`;
+      const cmd = [
+        "python3",
+        this.shellQuote(HookProcessor.SLOT_PROMISE_AUDIT_SCRIPT),
+        "stop",
+        "--transcript",
+        this.shellQuote(transcriptPath),
+        "--cwd",
+        this.shellQuote(cwd),
+      ].join(" ");
+      const result = await execShell(cmd, { timeout: 3_000, maxBuffer: 16 * 1024 });
+      stdout = result.stdout.trim();
+    } catch (err) {
+      this.db.logEvent(slotNum, "slot_promised_action_scan_failed", source, null, {
+        error: String(err),
+        transcript_path: transcriptPath,
+      });
+      return false;
+    }
+
+    if (!stdout.startsWith("BLOCK\t")) return false;
+
+    this.promisedActionContinueAt.set(slotNum, nowMs);
+    const reason = stdout.slice("BLOCK\t".length).slice(0, 1000);
+    this.relay.sendToSlot(slotNum, "continue your work", true);
+    this.db.logEvent(slotNum, "slot_promised_action_continue_injected", source, null, {
+      reason,
+      command: "continue your work",
+      transcript_path: transcriptPath,
+      task: currentSlot.task,
+      branch: currentSlot.branch,
+      issue: currentSlot.issue,
+      dedup_ms: HookProcessor.PROMISED_ACTION_CONTINUE_DEDUP_MS,
+    });
+    console.log(`[idle-debug] slot ${slotNum} promised-action miss detected — injected continue your work`);
+    return true;
+  }
+
+  private startIdleDebounceTimer(slotNum: number, slot: SlotState, source: "Stop" | "Notification", payload?: HookPayload): void {
+    this.cancelPendingIdleTimer(slotNum);
+
+    const idleTimer = setTimeout(async () => {
+      this.pendingIdleTimers.delete(slotNum);
+      const currentSlot = this.db.getSlot(slotNum);
+      console.log(`[idle-debug] slot ${slotNum} debounce fired: occupied=${currentSlot?.occupied}, idle=${currentSlot?.idle}, dnd=${currentSlot?.dnd}, task=${currentSlot?.task ?? 'undefined'}`);
+      if (currentSlot?.idle) {
+        const subagent = this.db.hasRecentSubagentDispatch(
+          slotNum,
+          HookProcessor.IDLE_STALENESS_GATE_SEC
+        );
+        if (subagent) {
+          console.log(
+            `[idle-debug] slot ${slotNum} STALENESS GATE — subagent ${subagent.toolName ?? "tool"} dispatched at ${subagent.taskTs} is still active; suppressing /slot-idle`
+          );
+          this.db.logEvent(slotNum, "slot_idle_suppressed_subagent_active", "Timer", null, {
+            relay_path: `${source}.debounce.gate`,
+            reason: "subagent_active_post_debounce",
+            task_dispatch_ts: subagent.taskTs,
+            tool_name: subagent.toolName ?? null,
+            window_sec: HookProcessor.IDLE_STALENESS_GATE_SEC,
+          });
+          return;
+        }
+
+        const lastTool = this.db.getLastToolFire(
+          slotNum,
+          HookProcessor.IDLE_RECENT_TOOL_GATE_SEC
+        );
+        if (lastTool) {
+          console.log(
+            `[idle-debug] slot ${slotNum} STALENESS GATE — last tool ${lastTool.tool}@${lastTool.timestamp} within ${HookProcessor.IDLE_RECENT_TOOL_GATE_SEC}s; suppressing /slot-idle`
+          );
+          this.db.logEvent(slotNum, "slot_idle_suppressed_recent_tool", "Timer", null, {
+            relay_path: `${source}.debounce.gate`,
+            reason: "recent_tool_post_debounce",
+            last_tool: lastTool.tool,
+            last_tool_ts: lastTool.timestamp,
+            window_sec: HookProcessor.IDLE_RECENT_TOOL_GATE_SEC,
+          });
+          return;
+        }
+
+        if (await this.maybeContinuePromisedActionMiss(slotNum, currentSlot, source, payload)) {
+          return;
+        }
+
+        const lastVisible = this.db.getLastVisibleSlotState(slotNum);
+        if (lastVisible?.state === "idle") {
+          console.log(
+            `[idle-debug] slot ${slotNum} already PM-visible idle since ${lastVisible.timestamp}; suppressing duplicate /slot-idle`
+          );
+          this.db.logEvent(slotNum, "slot_idle_suppressed_already_visible", "Timer", null, {
+            relay_path: `${source}.debounce.gate`,
+            reason: "last PM-visible slot state was already idle",
+            last_visible_state: lastVisible.state,
+            last_visible_event: lastVisible.eventType,
+            last_visible_ts: lastVisible.timestamp,
+          });
+          return;
+        }
+
+        console.log(`[idle-debug] slot ${slotNum} still idle after debounce — preparing /slot-idle relay`);
+        const captureFile = `/tmp/slot-${slotNum}-idle-capture.txt`;
+        try {
+          const capture = await execShell(
+            `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
+            { timeout: 5_000 }
+          );
+          writeFileSync(captureFile, capture.stdout);
+        } catch {
+          writeFileSync(captureFile, "[capture failed]");
+        }
+
+        console.log(`[idle-debug] slot ${slotNum} direct slot-idle notification candidate`);
+        this.injectSlotStateDirect(currentSlot, "idle", source, null, {
+          capture_file: captureFile,
+          debounce_ms: HookProcessor.IDLE_DEBOUNCE_MS,
+        });
+      } else {
+        this.db.logEvent(slotNum, "slot_idle_cancelled", "Timer", null, {
+          reason: "slot became active during debounce window",
+        });
+      }
+    }, HookProcessor.IDLE_DEBOUNCE_MS);
+    if (idleTimer.unref) idleTimer.unref();
+    this.pendingIdleTimers.set(slotNum, idleTimer);
+
+    this.db.logEvent(slotNum, "slot_idle_debounce_started", source, null, {
+      task: slot.task,
+      branch: slot.branch,
+      debounce_ms: HookProcessor.IDLE_DEBOUNCE_MS,
+    });
   }
 
   /**
@@ -470,7 +1219,7 @@ export class HookProcessor {
    * Process an incoming hook from a Claude Code slot.
    * Returns a HookResponse that Claude Code will act on.
    */
-  process(slotNum: number, payload: HookPayload): HookResponse {
+  async process(slotNum: number, payload: HookPayload): Promise<HookResponse> {
     // Log every event
     this.db.logEvent(
       slotNum,
@@ -485,7 +1234,14 @@ export class HookProcessor {
     // handlePostToolUse never sees the transition. (Bug fix 2026-03-16)
     const wasIdle = this.db.getSlot(slotNum)?.idle ?? false;
 
-    // Update last_activity and mark as busy (any hook = slot is working).
+    const isIdlePromptNotification =
+      payload.type === "Notification" &&
+      payload.notification_type === "idle_prompt";
+    const isPermissionPromptNotification =
+      payload.type === "Notification" &&
+      payload.notification_type === "permission_prompt";
+
+    // Update last_activity and mark busy/idle from runtime state.
     // SessionStart / PreCompact / PostCompact don't change idle flag — they're
     // lifecycle events that don't reflect work-in-progress state.
     const lifecycleEvents = new Set([
@@ -494,10 +1250,14 @@ export class HookProcessor {
       "PostCompact",
     ]);
     if (!lifecycleEvents.has(payload.type)) {
+      const idle = payload.type === "Stop" || isIdlePromptNotification || isPermissionPromptNotification;
       this.db.updateSlot(slotNum, {
         last_activity: new Date().toISOString(),
-        idle: payload.type === "Stop", // Stop marks idle; everything else marks busy
+        idle,
       });
+      if (!idle) {
+        this.stopPmWaitReminder(slotNum, `${payload.type}-active`);
+      }
     } else {
       this.db.updateSlot(slotNum, {
         last_activity: new Date().toISOString(),
@@ -507,19 +1267,19 @@ export class HookProcessor {
     // Route by hook type
     switch (payload.type) {
       case "Stop":
-        return this.handleStop(slotNum, payload);
+        return await this.handleStop(slotNum, payload);
       case "PostToolUse":
-        return this.handlePostToolUse(slotNum, payload, wasIdle);
+        return await this.handlePostToolUse(slotNum, payload, wasIdle);
       case "PreToolUse":
         return this.handlePreToolUse(slotNum, payload);
       case "Notification":
-        return this.handleNotification(slotNum, payload);
+        return await this.handleNotification(slotNum, payload);
       case "UserPromptSubmit":
         // User sent a message — slot is becoming active. Handle like PostToolUse
         // for idle→active transition detection. (Added 2026-03-18)
-        return this.handlePostToolUse(slotNum, payload, wasIdle);
+        return await this.handlePostToolUse(slotNum, payload, wasIdle);
       case "SessionStart":
-        return this.handleSessionStart(slotNum, payload);
+        return await this.handleSessionStart(slotNum, payload);
       case "PreCompact":
       case "PostCompact":
         // Logged via this.db.logEvent at top of process(); no special action.
@@ -548,32 +1308,46 @@ export class HookProcessor {
    *
    * Reference: feedback_gpt55_compact_needs_continue_trigger.md
    */
-  private handleSessionStart(slotNum: number, payload: HookPayload): HookResponse {
+  private async handleSessionStart(slotNum: number, payload: HookPayload): Promise<HookResponse> {
     const source = payload.source ?? "";
     debugLog(
       `[hooks] SessionStart slot=${slotNum} source=${source || "(none)"}`
     );
     if (slotNum === 0) {
-      // PM pane — covers compact-resume so PM doesn't sit silent post-/compact.
-      // PM pane hook coverage gap — direct tmux inject because Stop/SessionStart hook
-      // delivery is unreliable on slot 0 (see feedback_mop_clear_all_slots_pm_direct_inject.md
-      // + 2026-05-06 wedge analysis /tmp/mop-midnight-wedge-2026-05-06.md). tmux paste-buffers
-      // the keystrokes; PM processes them when the current turn finishes — same pattern as
-      // mop_clear_all_slots commit 93ab9aa.
+      if (source === "clear") {
+        const confirmedAt = new Date().toISOString();
+        const wasPending = this.db.hasPendingClear(0);
+        this.db.releaseSlot(0);
+        this.db.clearPendingClear(0);
+        this.db.setConfig("pm_clear_confirmed_at", confirmedAt);
+        this.db.logEvent(0, "clear_pending_executed", "SessionStart", null, {
+          name: "PM",
+          source,
+          was_pending: wasPending,
+          confirmed_at: confirmedAt,
+          delivery: "mop_send_to_slot",
+          reason: "PM SessionStart source=clear acknowledged requested /clear",
+        });
+        this.db.logEvent(0, "slot_cleared", "SessionStart", null, {
+          name: "PM",
+          cleared_at: confirmedAt,
+          immediate: false,
+          confirmed: true,
+          via: "SessionStart:clear",
+          delivery: "mop_send_to_slot",
+        });
+        debugLog(`[hooks] SessionStart:clear slot=0 (PM) — clear acknowledged`);
+        return {};
+      }
+      // PM pane — compact sessions are now passive from MoP's perspective.
+      // Record the compact event for auditing/dedup, but do not auto-inject
+      // "continue your work" into the PM pane anymore.
       if (source === "compact") {
         this.db.logEvent(0, "session_start_compact", "SessionStart", null, {
           source,
-          via: "tmux_paste_buffer",
+          via: "no_auto_continue",
         });
-        try {
-          execSync(
-            `tmux send-keys -t 0:0.0 'continue your work' Enter`,
-            { timeout: 5_000 }
-          );
-          debugLog(`[hooks] SessionStart:compact slot=0 (PM) — tmux inject OK`);
-        } catch (err) {
-          debugLog(`[hooks] SessionStart:compact slot=0 (PM) — tmux inject FAILED: ${err}`);
-        }
+        debugLog(`[hooks] SessionStart:compact slot=0 (PM) — no auto-continue`);
       } else {
         debugLog(`[hooks] SessionStart slot=0 (PM) source=${source} — no nudge (only 'compact' triggers)`);
       }
@@ -600,7 +1374,43 @@ export class HookProcessor {
 
   // ─── Stop Hook ─────────────────────────────────────────
 
-  private handleStop(slotNum: number, payload: HookPayload): HookResponse {
+  private async handleStop(slotNum: number, payload: HookPayload): Promise<HookResponse> {
+    // PM (slot 0) is not represented in the slots table, so handle its pending
+    // clear latch before the normal slot-row lookup. Without this, a PM clear
+    // request can be logged as queued but never retried when PM reaches Stop.
+    if (slotNum === 0 && this.db.hasPendingClear(0)) {
+      try {
+        const requestedAt = this.db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
+        if (
+          this.isRecentIso(requestedAt, PM_CLEAR_RETRY_SUPPRESS_MS) ||
+          this.hasRecentPmClearSend(PM_CLEAR_RETRY_SUPPRESS_MS)
+        ) {
+          this.db.logEvent(0, "clear_pending_pm_retry_suppressed", "Stop", null, {
+            name: "PM",
+            reason: "PM clear is already pending and a /clear was recently sent; suppressing duplicate retry",
+            requested_at: requestedAt,
+            suppress_window_ms: PM_CLEAR_RETRY_SUPPRESS_MS,
+          });
+          return {};
+        }
+
+        const sent = await this.sendClearViaMopSendPath(0, "pm_clear_pending_stop_hook");
+        if (!sent) {
+          throw new Error("MoP send path failed for PM queued /clear");
+        }
+        this.db.logEvent(0, "clear_pending_pm_retry_sent", "Stop", null, {
+          name: "PM",
+          reason: "PM reached Stop while clear_pending_0=true; resent /clear through MoP clear path",
+        });
+      } catch (err) {
+        this.db.logEvent(0, "clear_pending_failed", "Stop", null, {
+          name: "PM",
+          error: String(err),
+        });
+      }
+      return {};
+    }
+
     const slot = this.db.getSlot(slotNum);
     if (!slot) return {};
 
@@ -612,6 +1422,14 @@ export class HookProcessor {
       return {};
     }
 
+    const hadPendingActive = this.cancelPendingActiveTimer(slotNum);
+    if (hadPendingActive) {
+      this.db.logEvent(slotNum, "slot_active_debounce_cancelled", "Stop", null, {
+        reason: "slot became idle during active debounce window",
+        debounce_ms: HookProcessor.ACTIVE_DEBOUNCE_MS,
+      });
+    }
+
     // Check if slot was awaiting plan approval.
     // The plan approval prompt (numbered choices) renders AFTER Stop fires,
     // so we poll for it before notifying PM. (Rajiv directive 2026-03-18)
@@ -620,7 +1438,7 @@ export class HookProcessor {
       if (pending) {
         // Start polling for the plan approval prompt before notifying PM.
         this.pendingPlanReady.delete(slotNum);
-        this.pollForPlanApprovalPrompt(slotNum, pending, 0);
+        void this.pollForPlanApprovalPrompt(slotNum, pending, 0);
       } else {
         // No pending = PM was already notified. Check cooldown before re-sending.
         // During revision cycles, the slot may stop multiple times while
@@ -646,6 +1464,49 @@ export class HookProcessor {
         }
       }
       // Don't clear activity — slot is still awaiting approval
+      return {};
+    }
+
+    const pmDirection = this.detectPmDirectionRequest(payload.transcript);
+    if (pmDirection) {
+      const taskLabel = slot.task ?? `PM direction needed${pmDirection.issue ? ` #${pmDirection.issue}` : ""}`;
+      if (!slot.occupied) {
+        this.db.assignSlot(
+          slotNum,
+          taskLabel,
+          pmDirection.issue,
+          slot.branch,
+          payload.session_id ?? slot.session_id
+        );
+      }
+      this.db.updateSlot(slotNum, {
+        status: "active",
+        occupied: true,
+        idle: true,
+        task: taskLabel,
+        issue: slot.issue ?? pmDirection.issue,
+        activity: "waiting_for_pm_direction",
+      });
+
+      const recent = this.db.getEvents(slotNum, 1, "slot_pm_direction_needed")[0];
+      const recentMs = recent ? Date.parse(`${recent.timestamp}Z`) : NaN;
+      const suppressDirect = Number.isFinite(recentMs) && Date.now() - recentMs < 3 * 60_000;
+      const pmWaitDirectEnabled = HookProcessor.PM_WAIT_REMINDERS_ENABLED;
+      if (pmWaitDirectEnabled && !suppressDirect) {
+        this.relay.injectToPMDirect(
+          `MoP: slot ${slotNum} idle — waiting for PM direction: ${pmDirection.summary}`
+        );
+      }
+      this.startPmWaitReminder(slotNum, Date.now(), true);
+      this.db.logEvent(slotNum, "slot_pm_direction_needed", "Stop", null, {
+        summary: pmDirection.summary,
+        reason: pmDirection.reason,
+        issue: pmDirection.issue,
+        task: taskLabel,
+        was_occupied: slot.occupied,
+        direct_injected: pmWaitDirectEnabled && !suppressDirect,
+        suppressed_reason: pmWaitDirectEnabled ? (suppressDirect ? "recent-duplicate" : null) : "pm-wait-reminders-disabled",
+      });
       return {};
     }
 
@@ -690,13 +1551,15 @@ export class HookProcessor {
     }
 
     // ─── Clear Pending Check ───────────────────────────────
-    // If this slot has a pending clear (from mop_clear_all_slots), send /clear now
+    // If this slot has a pending clear (from a MoP clear command), send /clear now
     // that the slot is idle, then release it. Similar pattern to exit_pending.
     // Rajiv directive 2026-04-04: "if idle trigger immediately or wait till next idle"
     if (this.db.hasPendingClear(slotNum)) {
       try {
-        const paneAddress = `0:0.${slotNum}`;
-        execSync(`tmux send-keys -t ${paneAddress} '/clear' Enter`, { timeout: 5_000 });
+        const sent = await this.sendClearViaMopSendPath(slotNum, "clear_pending_stop_hook");
+        if (!sent) {
+          throw new Error("MoP send path failed for queued /clear");
+        }
 
         // Release slot state (slots 1-4 only)
         if (slotNum >= 1 && slotNum <= 4) {
@@ -706,7 +1569,7 @@ export class HookProcessor {
         this.db.clearPendingClear(slotNum);
         this.db.logEvent(slotNum, "clear_pending_executed", "Stop", null, {
           name: slot.name,
-          reason: "Slot went idle — executing queued /clear from mop_clear_all_slots",
+          reason: "Slot went idle — executing queued /clear from MoP clear command",
         });
 
         this.relay.injectToPM(
@@ -730,159 +1593,17 @@ export class HookProcessor {
     // Normal idle flow — debounced notification to PM.
     // Wait 60s before notifying. If slot becomes active, cancel the timer.
     // (Rajiv directive 2026-03-31: 24 duplicate idle notifications on Mar 30)
-    this.cancelPendingIdleTimer(slotNum);
-
-    const idleTimer = setTimeout(() => {
-      this.pendingIdleTimers.delete(slotNum);
-      // Re-check slot is still idle before notifying
-      const currentSlot = this.db.getSlot(slotNum);
-      console.log(`[idle-debug] slot ${slotNum} debounce fired: occupied=${currentSlot?.occupied}, idle=${currentSlot?.idle}, dnd=${currentSlot?.dnd}, task=${currentSlot?.task ?? 'undefined'}`);
-      if (currentSlot?.idle) {
-        // ─── Staleness gate (Rajiv directive 2026-05-05) ──────
-        // Mirror check-slot's "skip when idle" gate but for the slot-idle
-        // notification path. If a Task subagent dispatched within the last
-        // STALE_GATE_WINDOW_SEC and has no closing Stop yet, the slot is
-        // active even though MoP's idle flag is true (plan-agent / qa-tester
-        // running in foreground). Suppress the /slot-idle relay; the next
-        // Stop hook (after the subagent returns) will re-open the debounce.
-        const subagent = this.db.hasRecentSubagentDispatch(
-          slotNum,
-          HookProcessor.IDLE_STALENESS_GATE_SEC
-        );
-        if (subagent) {
-          console.log(
-            `[idle-debug] slot ${slotNum} STALENESS GATE — subagent Task dispatched at ${subagent.taskTs} with no later Stop; suppressing /slot-idle`
-          );
-          this.db.logEvent(slotNum, "slot_idle_suppressed_subagent_active", "Timer", null, {
-            relay_path: "Stop.debounce.gate",
-            reason: "subagent_active_post_debounce",
-            task_dispatch_ts: subagent.taskTs,
-            window_sec: HookProcessor.IDLE_STALENESS_GATE_SEC,
-          });
-          return;
-        }
-
-        // Secondary gate: any tool fired in the last RECENT_TOOL_GATE_SEC.
-        // The slot's MoP idle flag is set on Stop, but Stop fires between
-        // every tool call. If the most-recent PostToolUse is younger than
-        // the gate window (and the debounce was 30s), the slot has
-        // resumed work since the debounce started.
-        const lastTool = this.db.getLastToolFire(
-          slotNum,
-          HookProcessor.IDLE_RECENT_TOOL_GATE_SEC
-        );
-        if (lastTool) {
-          console.log(
-            `[idle-debug] slot ${slotNum} STALENESS GATE — last tool ${lastTool.tool}@${lastTool.timestamp} within ${HookProcessor.IDLE_RECENT_TOOL_GATE_SEC}s; suppressing /slot-idle`
-          );
-          this.db.logEvent(slotNum, "slot_idle_suppressed_recent_tool", "Timer", null, {
-            relay_path: "Stop.debounce.gate",
-            reason: "recent_tool_post_debounce",
-            last_tool: lastTool.tool,
-            last_tool_ts: lastTool.timestamp,
-            window_sec: HookProcessor.IDLE_RECENT_TOOL_GATE_SEC,
-          });
-          return;
-        }
-        console.log(`[idle-debug] slot ${slotNum} still idle after debounce — preparing /slot-idle relay`);
-        // ─── Capture tmux output and write to file ────────────
-        // Rajiv directive 2026-04-03: "inject the tmux capture of the slot
-        // along with the command through MoP during slot idle"
-        // PM just reads the file instead of launching a classification agent.
-        const captureFile = `/tmp/slot-${slotNum}-idle-capture.txt`;
-        try {
-          const capture = execSync(
-            `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
-            { timeout: 5_000 }
-          ).toString();
-          writeFileSync(captureFile, capture);
-        } catch {
-          writeFileSync(captureFile, "[capture failed]");
-        }
-
-        // ─── INJECT_DECISION gate (Rajiv 2026-05-16 18:26 IST thread `1778935572.419629`) ───
-        // Mirror /check-slot gate at hooks.ts:208-250. Run check-slot-bg.sh; if
-        // it emits "INJECT_DECISION:skip REASON:...", suppress the /slot-idle
-        // relay (slot is qualitatively healthy / no JSONL delta).
-        //
-        // ALSO handles INJECT_DECISION:mop-direct-nudge (Rajiv 2026-05-17 00:31
-        // IST thread `1778957625.997439`): MoP itself sends "continue your work"
-        // to the slot's tmux pane on API-500 backoff window expiry. PM remains
-        // uninvolved through retry 0-4. After successful injection, bump
-        // retry_count + reschedule next_nudge_at via --api-500-state-tick.
-        //
-        // Fail-open: bg-script failure → fall through to inject (preserves
-        // prior behavior).
-        if (HookProcessor.CHECK_SLOT_BG_ENABLED) {
-          const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
-          let bgOutput = "";
-          let bgFailed = false;
-          try {
-            bgOutput = execSync(`bash ${bgScript} ${slotNum}`, {
-              timeout: 8_000,
-              maxBuffer: 1024 * 1024,
-            }).toString();
-          } catch {
-            bgFailed = true;
-          }
-          // (INJECT_DECISION:mop-direct-nudge consumer REMOVED 2026-05-17 08:00 IST
-          // per Rajiv directive thread `1778957625.997439`. API 500 detection
-          // colocated with autocompact handler in stuck.ts checkApi500Backoff,
-          // running independently of slot idle state. bg-script Step 1a no
-          // longer emits this marker.)
-          const skipMatch = bgOutput.match(/INJECT_DECISION:skip(?:\s+REASON:([^\n]*))?/);
-          if (!bgFailed && skipMatch) {
-            const reason = (skipMatch[1] || "unspecified").trim().slice(0, 120);
-            console.log(`[idle-debug] slot ${slotNum} INJECT_DECISION GATE — bg-script skip REASON:${reason}; suppressing /slot-idle`);
-            this.db.logEvent(slotNum, "slot_idle_suppressed_inject_decision", "Stop", null, {
-              relay_path: "Stop.debounce.inject_decision",
-              reason,
-            });
-            return;
-          }
-        } else {
-          console.log(
-            `[idle-debug] slot ${slotNum} INJECT_DECISION GATE SKIPPED — check-slot-bg disabled in MoP HTTP process`
-          );
-          this.db.logEvent(slotNum, "slot_idle_inject_decision_skipped", "Stop", null, {
-            relay_path: "Stop.debounce.inject_decision",
-            reason: "check-slot-bg-disabled",
-          });
-        }
-
-        console.log(`[idle-debug] slot ${slotNum} calling relay.notifySlotIdle()`);
-        this.relay.notifySlotIdle(currentSlot);
-        this.db.logEvent(slotNum, "slot_idle_notified", "Stop", null, {
-            relay_path: "Stop.debounce.notifySlotIdle",
-            notification_type: "slot-idle",
-          task: currentSlot.task,
-          branch: currentSlot.branch,
-          capture_file: captureFile,
-          debounce_ms: HookProcessor.IDLE_DEBOUNCE_MS,
-        });
-      } else {
-        this.db.logEvent(slotNum, "slot_idle_cancelled", "Timer", null, {
-          reason: "slot became active during debounce window",
-        });
-      }
-    }, HookProcessor.IDLE_DEBOUNCE_MS);
-    if (idleTimer.unref) idleTimer.unref();
-    this.pendingIdleTimers.set(slotNum, idleTimer);
-
-    this.db.logEvent(slotNum, "slot_idle_debounce_started", "Stop", null, {
-      task: slot.task,
-      branch: slot.branch,
-      debounce_ms: HookProcessor.IDLE_DEBOUNCE_MS,
-    });
+    this.startIdleDebounceTimer(slotNum, slot, "Stop", payload);
 
     // Auto-release slot if POST-PR (a PR exists for current branch).
     // Frees the slot immediately — PM still gets notification for CI watch/labels.
     if (slot.branch && slot.branch !== "main") {
       try {
-        const prNum = execSync(
+        const prResult = await execShell(
           `gh pr list --head "${slot.branch}" --json number --jq '.[0].number'`,
           { timeout: 10_000 }
-        ).toString().trim();
+        );
+        const prNum = prResult.stdout.trim();
 
         if (prNum && prNum !== "null" && /^\d+$/.test(prNum)) {
           const stateFile = `${process.env.HOME}/.claude/tmux-panes/pane-${slotNum}.json`;
@@ -908,12 +1629,19 @@ export class HookProcessor {
 
   // ─── PostToolUse Hook ──────────────────────────────────
 
-  private handlePostToolUse(slotNum: number, payload: HookPayload, wasIdle?: boolean): HookResponse {
+  private async handlePostToolUse(slotNum: number, payload: HookPayload, wasIdle?: boolean): Promise<HookResponse> {
     // ─── Active Notification (idle → active transition) ──────
     // First PostToolUse after a Stop means the slot became active.
     // Notify PM so they know not to send new work to this slot.
     // Uses wasIdle from process() — captured BEFORE updateSlot clears idle flag.
     const slot = this.db.getSlot(slotNum);
+    if (
+      slot?.activity &&
+      HookProcessor.PM_WAIT_ACTIVITIES.has(slot.activity)
+    ) {
+      this.stopPmWaitReminder(slotNum, "slot-resumed-from-pm-wait");
+      this.db.updateSlot(slotNum, { activity: null });
+    }
     if (slot && wasIdle) {
       // Cancel pending idle timer — slot is active again, no notification needed
       const hadPendingIdle = this.cancelPendingIdleTimer(slotNum);
@@ -925,80 +1653,19 @@ export class HookProcessor {
 
       // Notify PM for ALL slots (not just occupied — rework slots may be released)
       if (!slot.dnd) {
-        // ─── Capture tmux output on active transition ────────
-        // Rajiv directive 2026-04-03: inject tmux capture with slot-active too
-        const captureFile = `/tmp/slot-${slotNum}-active-capture.txt`;
-        try {
-          const capture = execSync(
-            `tmux capture-pane -t 0:0.${slotNum} -p -S -15`,
-            { timeout: 5_000 }
-          ).toString();
-          writeFileSync(captureFile, capture);
-        } catch {
-          writeFileSync(captureFile, "[capture failed]");
-        }
+        // Active notifications are debounced just like idle notifications.
+        // A quick tool blip after an idle prompt must not produce an immediate
+        // idle→active PM-visible flip. Stop/idle-prompt cancels this timer.
+        this.startActiveDebounceTimer(slotNum, payload.tool_name ?? null);
+      }
 
-        // ─── INJECT_DECISION gate (Rajiv 2026-05-16 18:26 IST thread `1778935572.419629`) ───
-        // Mirror /check-slot gate at hooks.ts:208-250. /slot-active is
-        // informational; suppress when bg-script classifies the slot as
-        // qualitatively-healthy with no new signal for PM to act on.
-        // Fail-open: bg-script failure → fall through to inject.
-        // NOTE: timer-start (below) runs regardless — gate only suppresses
-        // the PM injection, not check-slot lifecycle wiring.
-        let suppressSlotActive = false;
-        if (HookProcessor.CHECK_SLOT_BG_ENABLED) {
-          const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
-          let bgOutput = "";
-          let bgFailed = false;
-          try {
-            bgOutput = execSync(`bash ${bgScript} ${slotNum}`, {
-              timeout: 8_000,
-              maxBuffer: 1024 * 1024,
-            }).toString();
-          } catch {
-            bgFailed = true;
-          }
-          const skipMatch = bgOutput.match(/INJECT_DECISION:skip(?:\s+REASON:([^\n]*))?/);
-          if (!bgFailed && skipMatch) {
-            const reason = (skipMatch[1] || "unspecified").trim().slice(0, 120);
-            console.log(`[active-debug] slot ${slotNum} INJECT_DECISION GATE — bg-script skip REASON:${reason}; suppressing /slot-active`);
-            this.db.logEvent(slotNum, "slot_active_suppressed_inject_decision", "PostToolUse", payload.tool_name ?? null, {
-              relay_path: "PostToolUse.slot_active.inject_decision",
-              reason,
-            });
-            suppressSlotActive = true;
-          }
-        } else {
-          console.log(
-            `[active-debug] slot ${slotNum} INJECT_DECISION GATE SKIPPED — check-slot-bg disabled in MoP HTTP process`
-          );
-          this.db.logEvent(slotNum, "slot_active_inject_decision_skipped", "PostToolUse", payload.tool_name ?? null, {
-            relay_path: "PostToolUse.slot_active.inject_decision",
-            reason: "check-slot-bg-disabled",
-          });
-        }
-
-        if (!suppressSlotActive) {
-            // Inject MoP message prefix (replaces former slash command `/slot-active N`).
-            // Rajiv directive 2026-05-22 22:23 IST thread `1779468118.901709`:
-            // "inject is a string instead of a command." PM-side
-            // pm-context-injector.sh recognizes the prefix and emits
-            // [MoP_SLOT_NOTIFICATION] system-reminder hinting Skill(slot-active).
-            this.relay.injectToPM(`MoP: slot ${slotNum} active`);
-            this.db.logEvent(slotNum, "slot_active_notified", "PostToolUse", payload.tool_name ?? null, {
-              task: slot.task,
-              issue: slot.issue,
-              capture_file: captureFile,
-            });
-        }
-
-        // ─── Start check-slot periodic timer ────────────────
-        // Rajiv directive 2026-04-03: MoP drives check-slot instead of PM cron loop
-        // Only start timer if slot is occupied (has a task). Released slots in auto-compact
-        // cycles trigger active transitions but should NOT get timers.
-        if (slot.occupied) {
-          this.startCheckSlotTimer(slotNum);
-        }
+      // ─── Start check-slot periodic timer ────────────────
+      // Rajiv directive 2026-04-03: MoP drives check-slot instead of PM cron loop
+      // Only start timer if slot is occupied (has a task). Released slots in auto-compact
+      // cycles trigger active transitions but should NOT get timers. DND does not stop
+      // watchdogs; it only suppresses normal slot-state notifications.
+      if (slot.occupied && !this.getPollMonitorSkipReason(slot)) {
+        this.startCheckSlotTimer(slotNum);
       }
     }
 
@@ -1087,24 +1754,21 @@ export class HookProcessor {
       this.relay.notifySubagentComplete(slotNum);
     }
 
-    // ─── Plan Mode Detection ─────────────────────────────────
-    // EnterPlanMode/ExitPlanMode indicate slot state transitions.
-    // Ensures MoP state reflects planning vs implementing.
+    // ─── Native Plan Mode Guard ───────────────────────────────
+    // Dev slots must use plan-agent + codex-plan-reviewer. If EnterPlanMode
+    // leaks past Claude PreToolUse settings, record it as a workflow violation.
 
     if (payload.tool_name === "EnterPlanMode") {
       const slot = this.db.getSlot(slotNum);
-      this.db.updateSlot(slotNum, { activity: "planning" });
-      // Auto-assign if slot is working but not yet marked occupied
-      if (!slot?.occupied) {
-        const taskLabel = slot?.task || "planning";
-        const issueMatch = slot?.task?.match(/#(\d+)/);
-        const issueNum = issueMatch ? parseInt(issueMatch[1], 10) : null;
-        this.db.assignSlot(slotNum, taskLabel, issueNum, null, null);
-        this.db.logEvent(slotNum, "auto_assigned_enter_plan", "PostToolUse", "EnterPlanMode", {
-          issue: issueNum,
-          reason: "EnterPlanMode detected but slot not occupied",
-        });
-      }
+      const reason =
+        "PLAN_MODE_VIOLATION: native Claude Plan Mode is blocked for dev slots; use foreground plan-agent, then codex-plan-reviewer.";
+      this.db.updateSlot(slotNum, { activity: "plan_mode_violation" });
+      this.db.logEvent(slotNum, "plan_mode_violation", "PostToolUse", "EnterPlanMode", {
+        reason,
+        issue: slot?.issue,
+        task: slot?.task,
+        branch: slot?.branch,
+      });
     }
 
     if (payload.tool_name === "ExitPlanMode") {
@@ -1142,15 +1806,27 @@ export class HookProcessor {
 
   // ─── PreToolUse Hook ───────────────────────────────────
 
-  private handlePreToolUse(_slotNum: number, _payload: HookPayload): HookResponse {
-    // Future: could block dangerous operations, enforce conventions
-    // For now, pass-through
+  private handlePreToolUse(slotNum: number, payload: HookPayload): HookResponse {
+    if (payload.tool_name === "EnterPlanMode") {
+      const slot = this.db.getSlot(slotNum);
+      const reason =
+        "PLAN_MODE_BLOCKED: Dev slots must not use native Claude Plan Mode / EnterPlanMode. Use foreground plan-agent, then codex-plan-reviewer.";
+      this.db.updateSlot(slotNum, { activity: "plan_mode_violation" });
+      this.db.logEvent(slotNum, "plan_mode_blocked_pretool", "PreToolUse", "EnterPlanMode", {
+        reason,
+        issue: slot?.issue,
+        task: slot?.task,
+        branch: slot?.branch,
+      });
+      return { blocked: true, reason, message: reason };
+    }
+
     return {};
   }
 
   // ─── Notification Hook ─────────────────────────────────
 
-  private handleNotification(slotNum: number, payload: HookPayload): HookResponse {
+  private async handleNotification(slotNum: number, payload: HookPayload): Promise<HookResponse> {
     const notifType = payload.notification_type ?? "unknown";
     const slot = this.db.getSlot(slotNum);
     console.log(`[idle-debug] Notification hook slot ${slotNum}: type=${notifType}, occupied=${slot?.occupied}, idle=${slot?.idle}, dnd=${slot?.dnd}, task=${slot?.task ?? 'undefined'}`);
@@ -1165,124 +1841,71 @@ export class HookProcessor {
     });
 
     if (notifType === "idle_prompt") {
-      // Defensive secondary relay path (2026-05-08, Rajiv directive "fix MoP and restart").
-      // Claude Code's runtime fires Notification(idle_prompt) when the slot's CLI is
-      // displaying an idle prompt awaiting user input. This is a strong runtime fact —
-      // stronger than MoP's `idle` flag, which is a derived signal that bounces between
-      // every PostToolUse/Stop pair. Trust the notification fact and relay /slot-idle as
-      // a redundant trigger to the Stop-debounce path. Coalescing happens at the
-      // injectToPM layer (PM busy-queue PRIMARY KEY (slot, event_type) — two enqueues
-      // of /slot-idle N collapse to one).
-      //
-      // Apply the SAME staleness gates as the Stop-debounce path so we don't relay
-      // during fg subagent runs (plan-agent, qa-tester, codex-companion).
-      if (slot?.occupied && !slot.dnd) {
-        const subagent = this.db.hasRecentSubagentDispatch(
-          slotNum,
-          HookProcessor.IDLE_STALENESS_GATE_SEC
-        );
-        if (subagent) {
-          console.log(
-            `[idle-debug] slot ${slotNum} Notification(idle_prompt) STALENESS GATE — subagent active (taskTs=${subagent.taskTs}); suppressing relay`
-          );
-          this.db.logEvent(slotNum, "slot_idle_suppressed_subagent_active", "Notification", null, {
-            relay_path: "Notification.idle_prompt.gate",
-            reason: "subagent_active",
-            task_dispatch_ts: subagent.taskTs,
-            window_sec: HookProcessor.IDLE_STALENESS_GATE_SEC,
-          });
-        } else {
-          const lastTool = this.db.getLastToolFire(
-            slotNum,
-            HookProcessor.IDLE_RECENT_TOOL_GATE_SEC
-          );
-          if (lastTool) {
-            console.log(
-              `[idle-debug] slot ${slotNum} Notification(idle_prompt) STALENESS GATE — recent tool ${lastTool.tool}@${lastTool.timestamp}; suppressing relay`
-            );
-            this.db.logEvent(slotNum, "slot_idle_suppressed_recent_tool", "Notification", null, {
-              relay_path: "Notification.idle_prompt.gate",
-              reason: "recent_tool",
-              last_tool: lastTool.tool,
-              last_tool_ts: lastTool.timestamp,
-              window_sec: HookProcessor.IDLE_RECENT_TOOL_GATE_SEC,
-            });
-          } else {
-            // Capture tmux output so PM's slot-idle skill has the same artifact
-            // shape as Path 1 (Stop.debounce.notifySlotIdle).
-            const captureFile = `/tmp/slot-${slotNum}-idle-capture.txt`;
-            try {
-              const capture = execSync(
-                `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
-                { timeout: 5_000 }
-              ).toString();
-              writeFileSync(captureFile, capture);
-            } catch {
-              writeFileSync(captureFile, "[capture failed]");
-            }
+      const hadPendingActive = this.cancelPendingActiveTimer(slotNum);
+      if (hadPendingActive) {
+        this.db.logEvent(slotNum, "slot_active_debounce_cancelled", "Notification", null, {
+          reason: "idle_prompt during active debounce window",
+          debounce_ms: HookProcessor.ACTIVE_DEBOUNCE_MS,
+        });
+      }
 
-            // ─── INJECT_DECISION gate (Rajiv 2026-05-16 18:26 IST thread `1778935572.419629`) ───
-            // Mirror /check-slot gate at hooks.ts:208-250 — also gate the
-            // defensive secondary path (Notification idle_prompt) so a
-            // qualitatively-healthy slot doesn't surface a false-positive
-            // /slot-idle.
-            //
-            // ALSO handles INJECT_DECISION:mop-direct-nudge (Rajiv 2026-05-17
-            // 00:31 IST thread `1778957625.997439`). See Stop.debounce path
-            // above for full semantics.
-            //
-            // Fail-open on bg-script failure.
-            if (HookProcessor.CHECK_SLOT_BG_ENABLED) {
-              const bgScript = `${process.env.HOME}/.claude/scripts/check-slot-bg.sh`;
-              let bgOutput = "";
-              let bgFailed = false;
-              try {
-                bgOutput = execSync(`bash ${bgScript} ${slotNum}`, {
-                  timeout: 8_000,
-                  maxBuffer: 1024 * 1024,
-                }).toString();
-              } catch {
-                bgFailed = true;
-              }
-              // (INJECT_DECISION:mop-direct-nudge consumer REMOVED 2026-05-17 08:00 IST
-              // per Rajiv directive thread `1778957625.997439`. API 500 detection
-              // colocated with autocompact handler in stuck.ts checkApi500Backoff,
-              // running independently of slot idle state. bg-script Step 1a no
-              // longer emits this marker.)
-              const skipMatch = bgOutput.match(/INJECT_DECISION:skip(?:\s+REASON:([^\n]*))?/);
-              if (!bgFailed && skipMatch) {
-                const reason = (skipMatch[1] || "unspecified").trim().slice(0, 120);
-                console.log(`[idle-debug] slot ${slotNum} Notification(idle_prompt) INJECT_DECISION GATE — bg-script skip REASON:${reason}; suppressing /slot-idle`);
-                this.db.logEvent(slotNum, "slot_idle_suppressed_inject_decision", "Notification", null, {
-                  relay_path: "Notification.idle_prompt.inject_decision",
-                  reason,
-                });
-                return {};
-              }
-            } else {
-              console.log(
-                `[idle-debug] slot ${slotNum} Notification(idle_prompt) INJECT_DECISION GATE SKIPPED — check-slot-bg disabled in MoP HTTP process`
-              );
-              this.db.logEvent(slotNum, "slot_idle_inject_decision_skipped", "Notification", null, {
-                relay_path: "Notification.idle_prompt.inject_decision",
-                reason: "check-slot-bg-disabled",
-              });
-            }
-
-            console.log(`[idle-debug] slot ${slotNum} Notification(idle_prompt) — relaying /slot-idle (defensive secondary path)`);
-            this.relay.notifySlotIdle(slot);
-            this.db.logEvent(slotNum, "slot_idle_notified", "Notification", null, {
-              relay_path: "Notification.idle_prompt.notifySlotIdle",
-              notification_type: "slot-idle",
-              task: slot.task,
-              branch: slot.branch,
-              capture_file: captureFile,
-              source: "idle_prompt_notification",
-            });
-          }
-        }
+      if (slot?.occupied) {
+        // idle_prompt is a strong idle signal, but it still has to dwell before
+        // becoming a PM-visible state transition. The debounce callback applies
+        // the same subagent/recent-tool gates as Stop.
+        this.startIdleDebounceTimer(slotNum, slot, "Notification", payload);
       } else {
         console.log(`[idle-debug] slot ${slotNum} Notification(idle_prompt) — skipping (occupied=${slot?.occupied}, dnd=${slot?.dnd})`);
+      }
+    }
+
+    if (notifType === "permission_prompt") {
+      const hadPendingActive = this.cancelPendingActiveTimer(slotNum);
+      if (hadPendingActive) {
+        this.db.logEvent(slotNum, "slot_active_debounce_cancelled", "Notification", null, {
+          reason: "permission_prompt during active debounce window",
+          debounce_ms: HookProcessor.ACTIVE_DEBOUNCE_MS,
+        });
+      }
+
+      if (slot?.occupied && !slot.dnd) {
+        const recentEvents = this.db.getEvents(slotNum, 25);
+        const recentNativePlanMode = recentEvents.some(
+          (event) => event.tool_name === "EnterPlanMode" || event.event_type === "plan_mode_violation"
+        );
+        if (recentNativePlanMode) {
+          const reason =
+            "PLAN_MODE_PERMISSION_PROMPT_SUPPRESSED: native Claude Plan Mode prompt leaked through; do not start PM plan approval flow. Slot must exit and use foreground plan-agent + codex-plan-reviewer.";
+          this.db.updateSlot(slotNum, { activity: "plan_mode_violation" });
+          this.db.logEvent(slotNum, "plan_mode_permission_prompt_suppressed", "Notification", null, {
+            notification_type: notifType,
+            issue: slot.issue,
+            task: slot.task,
+            branch: slot.branch,
+            reason,
+          });
+          return {};
+        }
+
+        this.clearPlanApprovalTimer(slotNum);
+        this.db.updateSlot(slotNum, {
+          status: "active",
+          occupied: true,
+          idle: true,
+          activity: "awaiting_plan_approval",
+        });
+        this.relay.notifyPlanApprovalNeeded(slotNum, slot.issue ?? 0);
+        this.startPlanApprovalTimer(slotNum, slot.issue ?? 0);
+        this.startPmWaitReminder(slotNum, Date.now(), true);
+        this.db.logEvent(slotNum, "slot_plan_approval_from_permission_prompt", "Notification", null, {
+          notification_type: notifType,
+          issue: slot.issue,
+          task: slot.task,
+          branch: slot.branch,
+          direct: true,
+        });
+      } else {
+        console.log(`[idle-debug] slot ${slotNum} Notification(permission_prompt) — skipping (occupied=${slot?.occupied}, dnd=${slot?.dnd})`);
       }
     }
 
