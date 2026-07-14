@@ -308,7 +308,10 @@ async function clearSlotsThroughMopHttp(
           throw new Error(sent.error ?? sent.reason ?? `send failed status=${sent.status}`);
         }
 
-        db.releaseSlot(slotNum);
+        const current = db.getSlot(slotNum);
+        if (!current) throw new Error(`slot ${slotNum} not found`);
+        const released = db.releaseSlot(slotNum, current.assignment_epoch);
+        if (!released.ok) throw new Error(`slot ${slotNum} epoch conflict during clear`);
         db.clearPendingClear(slotNum);
         db.logEvent(slotNum, "slot_cleared", null, null, {
           name,
@@ -424,6 +427,7 @@ const hookPayloadSchema = z.object({
     "PreCompact",
     "PostCompact",
     "SessionStart",
+    "SessionEnd",
   ]),
   session_id: z.string().optional(),
   cwd: z.string().optional(),
@@ -728,7 +732,16 @@ app.post("/hooks/slot/:slotNum", async (c) => {
   const payload = normalizePayload(payloadParse.data);
 
   // Process the hook event
+  const turnId = payload.session_id ?? `${slotNum}:${Date.now()}`;
+  if (payload.type === "UserPromptSubmit") {
+    db.startAgentTurn(slotNum, turnId);
+  } else if (payload.type === "PreToolUse" || payload.type === "PostToolUse") {
+    db.touchMeaningfulWork(slotNum, payload.session_id);
+  }
   const response = await processor.process(slotNum, payload);
+  if (payload.type === "Stop" || payload.type === "SessionEnd") {
+    db.finishAgentTurn(slotNum, payload.session_id);
+  }
 
   // Return hook response — Claude Code uses this to modify behavior
   return c.json(response);
@@ -891,35 +904,57 @@ app.post("/slots/:slotNum/assign", async (c) => {
   }
 
   const body = await c.req.json();
+  if (!Number.isInteger(body.expected_epoch)) {
+    return c.json({ success: false, conflict: true, error: "expected_epoch is required and must be an integer" }, 409);
+  }
   const rawPr = body.pr ?? null;
   const pr = rawPr === null ? null : Number(rawPr);
-  db.assignSlot(
+  const result = db.assignSlot(
     slotParse.data,
     body.task ?? "",
     body.issue ?? null,
     body.branch ?? null,
     body.session_id ?? null,
-    Number.isInteger(pr) ? pr : null
+    Number.isInteger(pr) ? pr : null,
+    body.head_sha ?? null,
+    body.expected_epoch
   );
 
-  db.logEvent(slotParse.data, "slot_assigned", null, null, body);
+  if (!result.ok) {
+    return c.json({ success: false, ...result }, 409);
+  }
+
+  db.logEvent(slotParse.data, "slot_assigned", null, null, { ...body, assignment_epoch: result.assignment_epoch, idempotent: result.idempotent });
 
   const updated = db.getSlot(slotParse.data);
   return c.json(updated);
 });
 
 /** Release a slot */
-app.post("/slots/:slotNum/release", (c) => {
+app.post("/slots/:slotNum/release", async (c) => {
   const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
   if (!slotParse.success) {
     return c.json({ error: "Invalid slot number" }, 400);
   }
 
-  processor.clearPlanApprovalTimer(slotParse.data);
-  db.releaseSlot(slotParse.data);
-  db.logEvent(slotParse.data, "slot_released", null, null, {});
+  let body: { expected_epoch?: unknown } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  if (!Number.isInteger(body.expected_epoch)) {
+    return c.json({ success: false, conflict: true, error: "expected_epoch is required and must be an integer" }, 409);
+  }
 
-  return c.json({ success: true });
+  const result = db.releaseSlot(slotParse.data, body.expected_epoch as number);
+  if (!result.ok) {
+    return c.json({ success: false, ...result }, 409);
+  }
+  processor.clearPlanApprovalTimer(slotParse.data);
+  db.logEvent(slotParse.data, "slot_released", null, null, { assignment_epoch: result.assignment_epoch, idempotent: result.idempotent });
+
+  return c.json({ success: true, ...result });
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────

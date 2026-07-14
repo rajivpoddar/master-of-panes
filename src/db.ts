@@ -11,6 +11,14 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { EventLogEntry, MoPConfig, OpsJobRecord, OpsJobStatus, SlotState, SlotStatus } from "./types.js";
 
+export interface SlotMutationResult {
+  ok: boolean;
+  conflict: boolean;
+  assignment_epoch: number;
+  idempotent: boolean;
+  reason?: "expected_epoch_required" | "epoch_mismatch";
+}
+
 export class MoPDatabase {
   private db: Database.Database;
 
@@ -55,6 +63,8 @@ export class MoPDatabase {
         issue INTEGER,
         branch TEXT,
         pr INTEGER,
+        head_sha TEXT,
+        assignment_epoch INTEGER NOT NULL DEFAULT 0,
         assigned_at TEXT,
         last_activity TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
         dnd INTEGER NOT NULL DEFAULT 0,
@@ -76,6 +86,25 @@ export class MoPDatabase {
     // Migration: add activity column if missing
     if (!columns.some((c) => c.name === "activity")) {
       this.db.exec("ALTER TABLE slots ADD COLUMN activity TEXT");
+    }
+
+    if (!columns.some((c) => c.name === "head_sha")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN head_sha TEXT");
+    }
+    if (!columns.some((c) => c.name === "assignment_epoch")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN assignment_epoch INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!columns.some((c) => c.name === "active_turn_id")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN active_turn_id TEXT");
+    }
+    if (!columns.some((c) => c.name === "active_turn_started_at")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN active_turn_started_at TEXT");
+    }
+    if (!columns.some((c) => c.name === "active_turn_state")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN active_turn_state TEXT NOT NULL DEFAULT 'inactive'");
+    }
+    if (!columns.some((c) => c.name === "last_meaningful_work_at")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN last_meaningful_work_at TEXT");
     }
 
     // PM busy-queue table — coalesce-on-key (slot, event_type) so the latest
@@ -264,7 +293,8 @@ export class MoPDatabase {
   updateSlot(slot: number, updates: Partial<SlotState>): void {
     const allowedFields = [
       "name", "status", "occupied", "session_id", "task", "issue",
-      "branch", "pr", "assigned_at", "last_activity", "dnd", "idle", "activity",
+      "branch", "pr", "head_sha", "assigned_at", "last_activity", "dnd", "idle", "activity",
+      "active_turn_id", "active_turn_started_at", "active_turn_state", "last_meaningful_work_at",
     ];
 
     const sets: string[] = [];
@@ -286,20 +316,46 @@ export class MoPDatabase {
     this.db.prepare(`UPDATE slots SET ${sets.join(", ")} WHERE slot = ?`).run(...values);
   }
 
-  releaseSlot(slot: number): void {
-    this.updateSlot(slot, {
-      status: "free" as SlotStatus,
-      occupied: false,
-      session_id: null,
-      task: null,
-      issue: null,
-      branch: null,
-      pr: null,
-      assigned_at: null,
-      dnd: false,
-      idle: true,
-      activity: null,
-    });
+  releaseSlot(slot: number, expectedEpoch?: number): SlotMutationResult {
+    if (!Number.isInteger(expectedEpoch)) {
+      const current = this.getSlot(slot);
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "expected_epoch_required",
+      };
+    }
+
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      if (!current || epoch !== expectedEpoch) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      if (!current.occupied) {
+        return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
+      }
+      this.updateSlot(slot, {
+        status: "free" as SlotStatus,
+        occupied: false,
+        session_id: null,
+        task: null,
+        issue: null,
+        branch: null,
+        pr: null,
+        head_sha: null,
+        assigned_at: null,
+        dnd: false,
+        idle: true,
+        activity: null,
+        active_turn_id: null,
+        active_turn_started_at: null,
+        active_turn_state: "inactive",
+      });
+      return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: false };
+    })();
   }
 
   assignSlot(
@@ -308,18 +364,86 @@ export class MoPDatabase {
     issue: number | null,
     branch: string | null,
     sessionId: string | null,
-    pr: number | null = null
-  ): void {
+    pr: number | null = null,
+    headSha: string | null = null,
+    expectedEpoch?: number
+  ): SlotMutationResult {
+    if (!Number.isInteger(expectedEpoch)) {
+      const current = this.getSlot(slot);
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "expected_epoch_required",
+      };
+    }
+
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      if (!current || epoch !== expectedEpoch) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      const idempotent = current.occupied
+        && current.issue === issue
+        && current.pr === pr
+        && current.branch === branch
+        && current.head_sha === headSha;
+      const nextEpoch = idempotent ? epoch : epoch + 1;
+      this.updateSlot(slot, {
+        status: "active" as SlotStatus,
+        occupied: true,
+        session_id: sessionId,
+        task,
+        issue,
+        branch,
+        pr,
+        head_sha: headSha,
+        assigned_at: idempotent ? current.assigned_at : new Date().toISOString(),
+        dnd: false,
+      });
+      if (!idempotent) {
+        this.db.prepare("UPDATE slots SET assignment_epoch = ? WHERE slot = ?").run(nextEpoch, slot);
+      }
+      return { ok: true, conflict: false, assignment_epoch: nextEpoch, idempotent };
+    })();
+  }
+
+  startAgentTurn(slot: number, turnId: string): void {
+    const now = new Date().toISOString();
     this.updateSlot(slot, {
-      status: "active" as SlotStatus,
-      occupied: true,
-      session_id: sessionId,
-      task,
-      issue,
-      branch,
-      pr,
-      assigned_at: new Date().toISOString(),
-      dnd: false,
+      active_turn_id: turnId,
+      active_turn_started_at: now,
+      active_turn_state: "active",
+      last_meaningful_work_at: now,
+      idle: false,
+    });
+  }
+
+  touchMeaningfulWork(slot: number, turnId?: string | null): void {
+    const current = this.getSlot(slot);
+    const now = new Date().toISOString();
+    this.updateSlot(slot, {
+      active_turn_id: turnId ?? current?.active_turn_id ?? null,
+      active_turn_state: "active",
+      last_meaningful_work_at: now,
+      idle: false,
+    });
+  }
+
+  finishAgentTurn(slot: number, turnId?: string | null): void {
+    const current = this.getSlot(slot);
+    if (!current) return;
+    if (turnId && current.active_turn_id && turnId !== current.active_turn_id) {
+      this.updateSlot(slot, { active_turn_state: "indeterminate" });
+      return;
+    }
+    this.updateSlot(slot, {
+      active_turn_id: null,
+      active_turn_started_at: null,
+      active_turn_state: "inactive",
+      idle: true,
     });
   }
 

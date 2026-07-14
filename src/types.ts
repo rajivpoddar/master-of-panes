@@ -19,7 +19,8 @@ export type HookType =
   | "SubagentStop"
   | "PreCompact"
   | "PostCompact"
-  | "SessionStart";
+  | "SessionStart"
+  | "SessionEnd";
 
 /** Incoming HTTP hook payload from Claude Code */
 export interface HookPayload {
@@ -86,6 +87,10 @@ export interface SlotState {
   branch: string | null;
   /** PR number if one exists */
   pr: number | null;
+  /** Full commit SHA for the assigned PR head, when applicable */
+  head_sha: string | null;
+  /** Monotonic ownership generation; new assignment tuples increment it */
+  assignment_epoch: number;
   /** When the slot was assigned */
   assigned_at: string | null;
   /** Last activity timestamp */
@@ -96,6 +101,14 @@ export interface SlotState {
   idle: boolean;
   /** Current activity type (testing, coding, committing, etc.) — null if unknown */
   activity: string | null;
+  /** Durable hook-derived turn identifier */
+  active_turn_id: string | null;
+  /** When the current agent turn started */
+  active_turn_started_at: string | null;
+  /** Hook-derived turn state; indeterminate is fail-closed for release */
+  active_turn_state: "active" | "inactive" | "indeterminate";
+  /** Last event proven to represent meaningful work rather than notification noise */
+  last_meaningful_work_at: string | null;
 }
 
 // ─── Event Log ───────────────────────────────────────────────

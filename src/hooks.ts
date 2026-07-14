@@ -1476,7 +1476,10 @@ export class HookProcessor {
           taskLabel,
           pmDirection.issue,
           slot.branch,
-          payload.session_id ?? slot.session_id
+          payload.session_id ?? slot.session_id,
+          slot.pr,
+          slot.head_sha,
+          slot.assignment_epoch
         );
       }
       this.db.updateSlot(slotNum, {
@@ -1563,7 +1566,7 @@ export class HookProcessor {
 
         // Release slot state (slots 1-4 only)
         if (slotNum >= 1 && slotNum <= 4) {
-          this.db.releaseSlot(slotNum);
+          this.db.releaseSlot(slotNum, slot.assignment_epoch);
         }
 
         this.db.clearPendingClear(slotNum);
@@ -1694,7 +1697,7 @@ export class HookProcessor {
         const issueNum = issueMatch ? parseInt(issueMatch[1], 10) : 0;
         if (!slot?.occupied && issueNum > 0) {
           const taskLabel = slot?.task || `#${issueNum}`;
-          this.db.assignSlot(slotNum, taskLabel, issueNum, null, null);
+          this.db.assignSlot(slotNum, taskLabel, issueNum, null, null, null, null, slot?.assignment_epoch ?? 0);
         }
 
         // Don't early return — let normal activity tracking classify this as "coding"
@@ -1793,7 +1796,7 @@ export class HookProcessor {
         const taskLabel = slot?.task || "awaiting input";
         const issueMatch = slot?.task?.match(/#(\d+)/);
         const issueNum = issueMatch ? parseInt(issueMatch[1], 10) : null;
-        this.db.assignSlot(slotNum, taskLabel, issueNum, null, null);
+        this.db.assignSlot(slotNum, taskLabel, issueNum, null, null, null, null, slot?.assignment_epoch ?? 0);
         this.db.logEvent(slotNum, "auto_assigned_ask_user", "PostToolUse", "AskUserQuestion", {
           issue: issueNum,
           reason: "AskUserQuestion detected but slot not occupied",

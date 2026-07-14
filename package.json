@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
+    "test:epoch": "/Users/rajiv/.nvm/versions/node/v22.13.1/bin/node --import tsx --test test/db-epoch.test.ts",
     "start": "node dist/server.js",
     "lint": "eslint src/"
   },

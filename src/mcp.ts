@@ -314,9 +314,17 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       branch: z.string().nullable().default(null).describe("Git branch name"),
       session_id: z.string().nullable().default(null).describe("Claude Code session ID"),
       name: z.string().nullable().default(null).describe("Human-readable slot name (e.g., 'Rohini')"),
+      head_sha: z.string().nullable().default(null).describe("Full assigned PR head SHA"),
+      expected_epoch: z.number().int().nonnegative().describe("Current MoP assignment epoch"),
     },
-    async ({ slot, task, issue, pr, branch, session_id, name }) => {
-      db.assignSlot(slot, task, issue, branch, session_id, pr);
+    async ({ slot, task, issue, pr, branch, session_id, name, head_sha, expected_epoch }) => {
+      const result = db.assignSlot(slot, task, issue, branch, session_id, pr, head_sha, expected_epoch);
+      if (!result.ok) {
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      }
       if (name !== null) {
         db.updateSlot(slot, { name } as Partial<import("./types.js").SlotState>);
       }
@@ -335,10 +343,17 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "Release a slot — mark it free, clear task/issue/branch/session metadata.",
     {
       slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
+      expected_epoch: z.number().int().nonnegative().describe("Current MoP assignment epoch"),
     },
-    async ({ slot }) => {
-      db.releaseSlot(slot);
-      db.logEvent(slot, "slot_released", null, null, {});
+    async ({ slot, expected_epoch }) => {
+      const result = db.releaseSlot(slot, expected_epoch);
+      if (!result.ok) {
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      }
+      db.logEvent(slot, "slot_released", null, null, { assignment_epoch: result.assignment_epoch, idempotent: result.idempotent });
       return {
         content: [{ type: "text" as const, text: `✓ Slot ${slot} released` }],
       };
