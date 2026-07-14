@@ -1471,16 +1471,15 @@ export class HookProcessor {
     if (pmDirection) {
       const taskLabel = slot.task ?? `PM direction needed${pmDirection.issue ? ` #${pmDirection.issue}` : ""}`;
       if (!slot.occupied) {
-        this.db.assignSlot(
-          slotNum,
-          taskLabel,
-          pmDirection.issue,
-          slot.branch,
-          payload.session_id ?? slot.session_id,
-          slot.pr,
-          slot.head_sha,
-          slot.assignment_epoch
-        );
+        this.db.logEvent(slotNum, "stale_pm_direction_after_release", "Stop", null, {
+          summary: pmDirection.summary,
+          reason: pmDirection.reason,
+          issue: pmDirection.issue,
+          session_id: payload.session_id ?? slot.session_id,
+          assignment_epoch: slot.assignment_epoch,
+          action: "ignored_no_ownership_mutation",
+        });
+        return {};
       }
       this.db.updateSlot(slotNum, {
         status: "active",
