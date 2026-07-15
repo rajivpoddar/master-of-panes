@@ -9,7 +9,8 @@
  *   3. hasRecentSubagentDispatch() returns null when Task is older than window
  *   4. getLastToolFire() returns the latest PostToolUse within the window
  *   5. background Agent dispatch stays active across Stop until TaskStop
- *   6. getLastVisibleSlotState() tracks PM-visible idle/active state
+ *   6. getLastVisibleSlotState() tracks PM-visible idle/active state only for
+ *      the current occupied assignment
  *
  * Run: node scripts/test-slot-idle-staleness-gate.mjs
  *
@@ -57,6 +58,12 @@ try {
       `INSERT INTO events (timestamp, slot, event_type, tool_name, payload)
        VALUES (strftime('%Y-%m-%dT%H:%M:%f', 'now', ? || ' seconds'), ?, ?, ?, ?)`
     ).run(`-${offsetSec}`, slot, type, tool, payload);
+  };
+  const assignSlot = (slot, offsetSec) => {
+    raw.prepare(
+      `INSERT INTO slots (slot, address, status, occupied, assigned_at)
+       VALUES (?, ?, 'active', 1, strftime('%Y-%m-%dT%H:%M:%f', 'now', ? || ' seconds'))`
+    ).run(slot, `test:${slot}`, `-${offsetSec}`);
   };
 
   // Slot 1: Task fired 5s ago, no Stop → subagent active
@@ -117,14 +124,27 @@ try {
   const r9 = db.getLastVisibleSlotState(8);
   assert("slot 8 — no visible slot state → null", r9 === null, JSON.stringify(r9));
 
+  assignSlot(9, 30);
   insertEvent(9, "slot_idle_notified", null, 5);
   const r10 = db.getLastVisibleSlotState(9);
   assert("slot 9 — last visible state idle", r10 !== null && r10.state === "idle", JSON.stringify(r10));
 
+  assignSlot(10, 30);
   insertEvent(10, "slot_idle_notified", null, 10);
   insertEvent(10, "slot_active_notified", null, 5);
   const r11 = db.getLastVisibleSlotState(10);
   assert("slot 10 — latest visible state active", r11 !== null && r11.state === "active", JSON.stringify(r11));
+
+  insertEvent(11, "slot_idle_notified", null, 30);
+  assignSlot(11, 5);
+  const r12 = db.getLastVisibleSlotState(11);
+  assert("slot 11 — prior-assignment idle is ignored", r12 === null, JSON.stringify(r12));
+
+  insertEvent(12, "slot_idle_notified", null, 30);
+  assignSlot(12, 5);
+  insertEvent(12, "slot_idle_notified", null, 1);
+  const r13 = db.getLastVisibleSlotState(12);
+  assert("slot 12 — current-assignment idle is visible", r13 !== null && r13.state === "idle", JSON.stringify(r13));
 } catch (err) {
   console.error("test crashed:", err.stack || err.message);
   fail++;

@@ -808,10 +808,14 @@ export class MoPDatabase {
     slotNum: number
   ): { state: "idle" | "active"; timestamp: string; eventType: string } | null {
     const row = this.db.prepare(`
-      SELECT event_type, timestamp FROM events
-      WHERE slot = ?
-        AND event_type IN ('slot_idle_notified', 'slot_active_notified')
-      ORDER BY timestamp DESC, id DESC
+      SELECT e.event_type, e.timestamp FROM events e
+      JOIN slots s ON s.slot = e.slot
+      WHERE e.slot = ?
+        AND s.occupied = 1
+        AND s.assigned_at IS NOT NULL
+        AND julianday(e.timestamp) >= julianday(s.assigned_at)
+        AND e.event_type IN ('slot_idle_notified', 'slot_active_notified')
+      ORDER BY e.timestamp DESC, e.id DESC
       LIMIT 1
     `).get(slotNum) as { event_type: string; timestamp: string } | undefined;
 
