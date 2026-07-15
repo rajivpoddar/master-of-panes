@@ -1,6 +1,17 @@
 {
   "description": "MoP hooks: session cleanup, idle notification, activity tracking, and autocompact handling",
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook-relay.sh\" UserPromptSubmit",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

@@ -18,3 +18,22 @@ test("Stop hooks relay PM and dev-pane terminal events to MoP", () => {
     "Stop must use the existing cwd-aware relay so the PM pane is recorded as slot 0"
   );
 });
+
+test("UserPromptSubmit hooks relay exact turn starts to MoP", () => {
+  const config = JSON.parse(
+    readFileSync(new URL("../hooks/hooks.json", import.meta.url), "utf8")
+  ) as {
+    hooks: { UserPromptSubmit: Array<{ hooks: Array<{ command: string }> }> };
+  };
+
+  const commands = config.hooks.UserPromptSubmit.flatMap((entry) =>
+    entry.hooks.map((hook) => hook.command)
+  );
+
+  assert.ok(
+    commands.includes(
+      'bash "${CLAUDE_PLUGIN_ROOT}/scripts/hook-relay.sh" UserPromptSubmit'
+    ),
+    "UserPromptSubmit must use the existing cwd-aware relay"
+  );
+});
