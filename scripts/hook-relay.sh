@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # hook-relay.sh — Forward Claude Code hook events to MoP server
 #
-# Called as a Claude Code command hook for PostToolUse and Notification events.
+# Called as a Claude Code command hook for Stop, PostToolUse, and Notification events.
 # Reads JSON from stdin (Claude Code hook protocol), determines slot number
 # from the cwd field, and POSTs to the MoP HTTP server.
 #
 # Slot detection: Each slot runs in /Users/rajiv/Downloads/projects/heydonna-app-300N
-# where N is the slot number (1-4). PM pane (heydonna-app, no suffix) is skipped.
+# where N is the slot number (1-4). The PM pane (heydonna-app, no suffix) is slot 0.
 #
 # Usage: hook-relay.sh <hook_type>
-#   hook_type: PostToolUse | PreToolUse | Notification
+#   hook_type: Stop | PostToolUse | PreToolUse | Notification
 
 set -euo pipefail
 

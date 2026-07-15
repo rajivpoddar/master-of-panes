@@ -6,6 +6,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook-relay.sh\" Stop",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "test -n \"$SESSION_ID\" && bash \"${CLAUDE_PLUGIN_ROOT}/scripts/update-pane-state.sh\" --cleanup-session \"$SESSION_ID\" || true",
             "timeout": 10
           }
