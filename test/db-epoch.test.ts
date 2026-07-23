@@ -59,3 +59,52 @@ test("release preserves epoch and hook turn state fails closed on mismatch", () 
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
   });
 });
+
+test("assignment rejects a target already owned by another occupied slot", () => {
+  withDatabase((db) => {
+    const first = db.assignSlot(4, "original", 6735, "fix/6735-pending", null, 6737, "old-head", 0);
+    assert.equal(first.ok, true);
+
+    const duplicate = db.assignSlot(2, "failover", 6735, "fix/6735-pending", null, 6737, "new-head", 0);
+    assert.deepEqual(duplicate, {
+      ok: false,
+      conflict: true,
+      assignment_epoch: 0,
+      idempotent: false,
+      reason: "target_already_assigned",
+      owner_slots: [4],
+    });
+    assert.equal(db.getSlot(2)?.occupied, false);
+    assert.equal(db.getSlot(2)?.assignment_epoch, 0);
+  });
+});
+
+test("assignment rejects issue-only and branch-only duplicate ownership", () => {
+  withDatabase((db) => {
+    db.assignSlot(4, "original", 6735, "fix/6735-pending", null, null, null, 0);
+
+    const sameIssue = db.assignSlot(2, "same issue", 6735, "different-branch", null, null, null, 0);
+    assert.equal(sameIssue.reason, "target_already_assigned");
+    assert.deepEqual(sameIssue.owner_slots, [4]);
+
+    const sameBranch = db.assignSlot(3, "same branch", 9999, "fix/6735-pending", null, null, null, 0);
+    assert.equal(sameBranch.reason, "target_already_assigned");
+    assert.deepEqual(sameBranch.owner_slots, [4]);
+  });
+});
+
+test("released ownership can be explicitly reassigned", () => {
+  withDatabase((db) => {
+    db.assignSlot(4, "original", 6735, "fix/6735-pending", null, 6737, "old-head", 0);
+    const released = db.releaseSlot(4, 1);
+    assert.equal(released.ok, true);
+
+    const reassigned = db.assignSlot(2, "replacement", 6735, "fix/6735-pending", null, 6737, "new-head", 0);
+    assert.deepEqual(reassigned, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 1,
+      idempotent: false,
+    });
+  });
+});

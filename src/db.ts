@@ -16,7 +16,8 @@ export interface SlotMutationResult {
   conflict: boolean;
   assignment_epoch: number;
   idempotent: boolean;
-  reason?: "expected_epoch_required" | "epoch_mismatch";
+  reason?: "expected_epoch_required" | "epoch_mismatch" | "target_already_assigned";
+  owner_slots?: number[];
 }
 
 export class MoPDatabase {
@@ -384,6 +385,34 @@ export class MoPDatabase {
       const epoch = current?.assignment_epoch ?? 0;
       if (!current || epoch !== expectedEpoch) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      const normalizedBranch = branch?.trim() || null;
+      const ownerSlots = this.db.prepare(`
+        SELECT slot
+        FROM slots
+        WHERE occupied = 1
+          AND slot != ?
+          AND (
+            (? IS NOT NULL AND pr = ?)
+            OR (? IS NOT NULL AND issue = ?)
+            OR (? IS NOT NULL AND branch = ?)
+          )
+        ORDER BY slot
+      `).all(
+        slot,
+        pr, pr,
+        issue, issue,
+        normalizedBranch, normalizedBranch
+      ) as Array<{ slot: number }>;
+      if (ownerSlots.length > 0) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "target_already_assigned",
+          owner_slots: ownerSlots.map((owner) => owner.slot),
+        };
       }
       const idempotent = current.occupied
         && current.issue === issue
