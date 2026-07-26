@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -33,6 +34,80 @@ test("a stale PM-direction Stop cannot reclaim a released slot", async () => {
     assert.equal(slot?.assignment_epoch, 1);
     const events = db.getEvents(3, 10, "stale_pm_direction_after_release");
     assert.equal(events.length, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("hook events synchronize exact-branch checkout heads without advancing the epoch", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-checkout-sync-test-"));
+  try {
+    execFileSync("git", ["init", "-q", directory]);
+    execFileSync("git", ["-C", directory, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", directory, "config", "user.name", "MoP Test"]);
+    execFileSync("git", ["-C", directory, "switch", "-q", "-c", "fix/10-exact"]);
+    writeFileSync(join(directory, "proof"), "one\n");
+    execFileSync("git", ["-C", directory, "add", "proof"]);
+    execFileSync("git", ["-C", directory, "commit", "-q", "-m", "first"]);
+    const firstHead = execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    db.assignSlot(1, "issue", 10, "fix/10-exact", "turn-a", null, null, 0);
+    const processor = new HookProcessor(db, {} as TmuxRelay);
+    await processor.process(1, {
+      type: "PostToolUse",
+      session_id: "turn-a",
+      cwd: directory,
+      tool_name: "Bash",
+    });
+    assert.equal(db.getSlot(1)?.head_sha, firstHead);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+
+    writeFileSync(join(directory, "proof"), "two\n");
+    execFileSync("git", ["-C", directory, "add", "proof"]);
+    execFileSync("git", ["-C", directory, "commit", "-q", "-m", "second"]);
+    const secondHead = execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    await processor.process(1, {
+      type: "PostToolUse",
+      session_id: "turn-a",
+      cwd: directory,
+      tool_name: "Bash",
+    });
+    assert.equal(db.getSlot(1)?.head_sha, secondHead);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    assert.equal(db.getEvents(1, 10, "slot_checkout_synced").length, 2);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("hook checkout synchronization never adopts an unregistered branch", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-checkout-mismatch-test-"));
+  try {
+    execFileSync("git", ["init", "-q", directory]);
+    execFileSync("git", ["-C", directory, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", directory, "config", "user.name", "MoP Test"]);
+    execFileSync("git", ["-C", directory, "switch", "-q", "-c", "fix/10-wrong"]);
+    writeFileSync(join(directory, "proof"), "one\n");
+    execFileSync("git", ["-C", directory, "add", "proof"]);
+    execFileSync("git", ["-C", directory, "commit", "-q", "-m", "first"]);
+
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    db.assignSlot(1, "issue", 10, "fix/10-exact", "turn-a", null, null, 0);
+    const processor = new HookProcessor(db, {} as TmuxRelay);
+    await processor.process(1, {
+      type: "PostToolUse",
+      session_id: "turn-a",
+      cwd: directory,
+      tool_name: "Bash",
+    });
+    assert.equal(db.getSlot(1)?.branch, "fix/10-exact");
+    assert.equal(db.getSlot(1)?.head_sha, null);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

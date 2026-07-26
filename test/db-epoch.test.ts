@@ -30,6 +30,51 @@ test("assignment epochs increment only for new tuples", () => {
   });
 });
 
+test("checkout synchronization updates head without changing ownership epoch or turn", () => {
+  withDatabase((db) => {
+    db.assignSlot(1, "issue", 10, "fix/10-exact", null, null, null, 0);
+    db.startAgentTurn(1, "turn-a");
+
+    const first = db.syncSlotCheckout(1, "fix/10-exact", "a".repeat(40), 1);
+    assert.deepEqual(first, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 1,
+      idempotent: false,
+    });
+    assert.equal(db.getSlot(1)?.head_sha, "a".repeat(40));
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    assert.equal(db.getSlot(1)?.active_turn_id, "turn-a");
+    assert.equal(db.getSlot(1)?.active_turn_state, "active");
+
+    const repeated = db.syncSlotCheckout(1, "fix/10-exact", "a".repeat(40), 1);
+    assert.equal(repeated.idempotent, true);
+    assert.equal(repeated.assignment_epoch, 1);
+  });
+});
+
+test("checkout synchronization fails closed on stale epoch, wrong branch, or free slot", () => {
+  withDatabase((db) => {
+    db.assignSlot(1, "issue", 10, "fix/10-exact", null, null, null, 0);
+
+    assert.equal(
+      db.syncSlotCheckout(1, "fix/10-exact", "a".repeat(40), 0).reason,
+      "epoch_mismatch",
+    );
+    assert.equal(
+      db.syncSlotCheckout(1, "fix/10-wrong", "a".repeat(40), 1).reason,
+      "branch_mismatch",
+    );
+    assert.equal(db.getSlot(1)?.head_sha, null);
+
+    db.releaseSlot(1, 1);
+    assert.equal(
+      db.syncSlotCheckout(1, "fix/10-exact", "a".repeat(40), 1).reason,
+      "slot_not_occupied",
+    );
+  });
+});
+
 test("missing and stale expected epochs fail without mutation", () => {
   withDatabase((db) => {
     const missing = db.assignSlot(1, "issue", 10, "fix/10", null);

@@ -5,12 +5,15 @@
  * plan ready), updates slot state, and relays notifications to PM.
  */
 
+import { execFile } from "node:child_process";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { promisify } from "node:util";
 import { execShell, sleep } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 import type { HookPayload, HookResponse, SlotState } from "./types.js";
 
+const execFileAsync = promisify(execFile);
 const PM_CLEAR_RETRY_SUPPRESS_MS = parseInt(
   process.env.MOP_PM_CLEAR_RETRY_SUPPRESS_MS ?? `${60 * 1000}`,
   10,
@@ -194,6 +197,60 @@ export class HookProcessor {
   ) {
     if (HookProcessor.PM_WAIT_REMINDERS_ENABLED) {
       this.startPmWaitReminderSweep();
+    }
+  }
+
+  /**
+   * Bind the locally observed HEAD to the branch already reserved in MoP.
+   * Branch mismatches are intentionally left untouched so the external
+   * capacity/ownership guard can fail closed instead of silently adopting an
+   * unrelated checkout.
+   */
+  private async syncObservedCheckout(slotNum: number, payload: HookPayload): Promise<void> {
+    if (slotNum < 1 || slotNum > 4 || !payload.cwd) return;
+    if (!["PostToolUse", "SessionStart", "Stop"].includes(payload.type)) return;
+    const slot = this.db.getSlot(slotNum);
+    if (!slot?.occupied || !slot.branch) return;
+    if (
+      slot.active_turn_id
+      && payload.session_id
+      && payload.session_id !== slot.active_turn_id
+    ) return;
+
+    try {
+      const { stdout: branchOutput } = await execFileAsync(
+        "git",
+        ["-C", payload.cwd, "symbolic-ref", "--quiet", "--short", "HEAD"],
+        { encoding: "utf8", timeout: 1000 },
+      );
+      const branch = branchOutput.trim();
+      if (!branch || branch !== slot.branch) return;
+
+      const { stdout: headOutput } = await execFileAsync(
+        "git",
+        ["-C", payload.cwd, "rev-parse", "--verify", "HEAD^{commit}"],
+        { encoding: "utf8", timeout: 1000 },
+      );
+      const head = headOutput.trim();
+      if (!/^[0-9a-f]{40}$/i.test(head)) return;
+
+      const result = this.db.syncSlotCheckout(
+        slotNum,
+        branch,
+        head,
+        slot.assignment_epoch,
+      );
+      if (result.ok && !result.idempotent) {
+        this.db.logEvent(slotNum, "slot_checkout_synced", payload.type, payload.tool_name ?? null, {
+          branch,
+          head_sha: head,
+          assignment_epoch: result.assignment_epoch,
+          source: "hook",
+        });
+      }
+    } catch {
+      // A non-Git cwd, detached checkout, or concurrent ownership change is
+      // not synchronizable. Leave the registered tuple untouched.
     }
   }
 
@@ -1228,6 +1285,7 @@ export class HookProcessor {
       payload.tool_name ?? null,
       payload as unknown as Record<string, unknown>
     );
+    await this.syncObservedCheckout(slotNum, payload);
 
     // Capture pre-update idle state for idle→active transition detection.
     // Must read BEFORE updateSlot clears the idle flag, otherwise

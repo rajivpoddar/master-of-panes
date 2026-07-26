@@ -16,7 +16,12 @@ export interface SlotMutationResult {
   conflict: boolean;
   assignment_epoch: number;
   idempotent: boolean;
-  reason?: "expected_epoch_required" | "epoch_mismatch" | "target_already_assigned";
+  reason?:
+    | "expected_epoch_required"
+    | "epoch_mismatch"
+    | "target_already_assigned"
+    | "slot_not_occupied"
+    | "branch_mismatch";
   owner_slots?: number[];
 }
 
@@ -436,6 +441,72 @@ export class MoPDatabase {
         this.db.prepare("UPDATE slots SET assignment_epoch = ? WHERE slot = ?").run(nextEpoch, slot);
       }
       return { ok: true, conflict: false, assignment_epoch: nextEpoch, idempotent };
+    })();
+  }
+
+  /**
+   * Synchronize the observed checkout head for the branch already owned by a
+   * slot. This is not a new assignment: the ownership epoch and active turn
+   * remain unchanged.
+   */
+  syncSlotCheckout(
+    slot: number,
+    branch: string,
+    headSha: string,
+    expectedEpoch?: number
+  ): SlotMutationResult {
+    if (!Number.isInteger(expectedEpoch)) {
+      const current = this.getSlot(slot);
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "expected_epoch_required",
+      };
+    }
+
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      if (!current || epoch !== expectedEpoch) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "epoch_mismatch",
+        };
+      }
+      if (!current.occupied) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_not_occupied",
+        };
+      }
+      if (current.branch !== branch) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "branch_mismatch",
+        };
+      }
+
+      const idempotent = current.head_sha === headSha;
+      if (!idempotent) {
+        this.updateSlot(slot, { head_sha: headSha });
+      }
+      return {
+        ok: true,
+        conflict: false,
+        assignment_epoch: epoch,
+        idempotent,
+      };
     })();
   }
 
