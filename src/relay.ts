@@ -7,7 +7,7 @@
  * Uses the send-to-slot.sh script infrastructure for reliable delivery.
  */
 
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import { execShell, sleep } from "./asyncCommand.js";
 import type { LogManager } from "./logs.js";
 import type { MoPDatabase } from "./db.js";
@@ -367,7 +367,7 @@ export class TmuxRelay {
 
       // Drain.
       this.pmBusy = false;
-      const n = this.drainPMQueue();
+      const n = await this.drainPMQueue();
       this.drainTimer = null;
       const reason = decision.reason === "max-rearms-hit"
         ? "max_rearms_hit"
@@ -406,7 +406,7 @@ export class TmuxRelay {
    *
    * Returns the count of rows actually injected.
    */
-  drainPMQueue(): number {
+  async drainPMQueue(): Promise<number> {
     if (!this.db) return 0;
     const rows = this.db.drainPendingPMEvents();
     let injected = 0;
@@ -420,7 +420,7 @@ export class TmuxRelay {
         continue;
       }
       if (row.event_type === "check-slot") {
-        const drop = this.shouldDropQueuedCheckSlot(row);
+        const drop = await this.shouldDropQueuedCheckSlot(row);
         if (drop) {
           this.db.logEvent(row.slot, "pm_queue_dropped", null, null, {
             event_type: row.event_type,
@@ -471,12 +471,12 @@ export class TmuxRelay {
     return injected;
   }
 
-  private shouldDropQueuedCheckSlot(row: {
+  private async shouldDropQueuedCheckSlot(row: {
     slot: number;
     event_type: string;
     payload: string | null;
     enqueued_at: string;
-  }): Record<string, unknown> | null {
+  }): Promise<Record<string, unknown> | null> {
     const enqueuedMs = parseDbTimestampMs(row.enqueued_at);
     if (Number.isFinite(enqueuedMs)) {
       const ageMs = Date.now() - enqueuedMs;
@@ -490,9 +490,9 @@ export class TmuxRelay {
 
       const checkFile = `/tmp/slot-${row.slot}-check.txt`;
       try {
-        const st = fs.statSync(checkFile);
+        const st = await fs.stat(checkFile);
         if (st.mtimeMs > enqueuedMs) {
-          const latest = fs.readFileSync(checkFile, "utf8");
+          const latest = await fs.readFile(checkFile, "utf8");
           const skipMatch = /^INJECT_DECISION:skip(?:\s+REASON:([^\n]*))?/m.exec(latest);
           if (skipMatch) {
             return {
@@ -640,7 +640,7 @@ export class TmuxRelay {
         const seq = ++this.directInjectSeq;
         const tmpFile = `/tmp/mop-pm-inject-${Date.now()}-${process.pid}-${seq}.txt`;
         const bufName = `mop-pm-inject-${process.pid}-${seq}`;
-        fs.writeFileSync(tmpFile, message);
+        await fs.writeFile(tmpFile, message);
         try {
           await execShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
           await execShell(`tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
@@ -648,7 +648,7 @@ export class TmuxRelay {
           await execShell(`tmux send-keys -t ${this.pmPaneAddress} Enter`, { timeout: 10_000 });
           await sleep(500);
         } finally {
-          try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+          await fs.unlink(tmpFile).catch(() => undefined);
         }
       } else {
         await execShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
@@ -896,7 +896,7 @@ export class TmuxRelay {
           // and avoids quoting hell vs. a single send-keys 'long $string'.
           const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}-${attempt}.txt`;
           const bufName = `mop-send-${slotNum}`;
-          fs.writeFileSync(tmpFile, command);
+          await fs.writeFile(tmpFile, command);
           try {
             await execShell(
               `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
@@ -914,7 +914,7 @@ export class TmuxRelay {
               { timeout: 3_000 }
             );
           } finally {
-            try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+            await fs.unlink(tmpFile).catch(() => undefined);
           }
         }
         if (attempt > 0) {
@@ -1024,7 +1024,7 @@ export class TmuxRelay {
   async isSlotActiveFromLog(slotNum: number): Promise<boolean> {
     if (!this.logManager) return this.isSlotActive(slotNum);
 
-    const mtime = this.logManager.getLogMtime(slotNum);
+    const mtime = await this.logManager.getLogMtime(slotNum);
     if (!mtime) return this.isSlotActive(slotNum); // No log → fallback
 
     const ageMs = Date.now() - mtime.getTime();

@@ -9,13 +9,7 @@
  * - pipe-pane initialization on server startup
  */
 
-import {
-  closeSync,
-  openSync,
-  readSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { open, stat, writeFile } from "node:fs/promises";
 import { execShell } from "./asyncCommand.js";
 
 export class LogManager {
@@ -31,23 +25,25 @@ export class LogManager {
    * Read last N bytes from a slot's log file.
    * More reliable than capture-pane — never loses content that scrolled past.
    */
-  tailLog(slot: number, bytes: number = 4096): string {
+  async tailLog(slot: number, bytes: number = 4096): Promise<string> {
     const logPath = this.getLogPath(slot);
+    let handle: Awaited<ReturnType<typeof open>> | null = null;
     try {
-      const stat = statSync(logPath);
-      if (stat.size === 0) return "";
+      const fileStat = await stat(logPath);
+      if (fileStat.size === 0) return "";
 
-      const start = Math.max(0, stat.size - bytes);
-      const readSize = Math.min(bytes, stat.size);
-      const fd = openSync(logPath, "r");
+      const start = Math.max(0, fileStat.size - bytes);
+      const readSize = Math.min(bytes, fileStat.size);
+      handle = await open(logPath, "r");
       const buf = Buffer.alloc(readSize);
-      readSync(fd, buf, 0, readSize, start);
-      closeSync(fd);
+      await handle.read(buf, 0, readSize, start);
 
       // Strip ANSI escape codes for cleaner output
       return stripAnsi(buf.toString("utf-8"));
     } catch {
       return "";
+    } finally {
+      await handle?.close().catch(() => undefined);
     }
   }
 
@@ -55,13 +51,13 @@ export class LogManager {
    * Rotate a slot's log if it exceeds MAX_LOG_SIZE.
    * Keeps the last KEEP_SIZE bytes, discards the rest.
    */
-  rotateIfNeeded(slot: number): boolean {
+  async rotateIfNeeded(slot: number): Promise<boolean> {
     const logPath = this.getLogPath(slot);
     try {
-      const stat = statSync(logPath);
-      if (stat.size > this.MAX_LOG_SIZE) {
-        const tail = this.tailLog(slot, this.KEEP_SIZE);
-        writeFileSync(logPath, tail);
+      const fileStat = await stat(logPath);
+      if (fileStat.size > this.MAX_LOG_SIZE) {
+        const tail = await this.tailLog(slot, this.KEEP_SIZE);
+        await writeFile(logPath, tail);
         return true; // Rotated
       }
       return false;
@@ -74,9 +70,9 @@ export class LogManager {
    * Get a slot log's last-modified time.
    * Used by StuckDetector to determine if a slot is producing output.
    */
-  getLogMtime(slot: number): Date | null {
+  async getLogMtime(slot: number): Promise<Date | null> {
     try {
-      return statSync(this.getLogPath(slot)).mtime;
+      return (await stat(this.getLogPath(slot))).mtime;
     } catch {
       return null;
     }
@@ -85,9 +81,9 @@ export class LogManager {
   /**
    * Get a slot log's file size in bytes.
    */
-  getLogSize(slot: number): number {
+  async getLogSize(slot: number): Promise<number> {
     try {
-      return statSync(this.getLogPath(slot)).size;
+      return (await stat(this.getLogPath(slot))).size;
     } catch {
       return 0;
     }
@@ -105,7 +101,7 @@ export class LogManager {
       const logPath = this.getLogPath(i);
       try {
         // Touch log file so it exists for stat queries
-        writeFileSync(logPath, "", { flag: "a" });
+        await writeFile(logPath, "", { flag: "a" });
 
         // Enable pipe-pane — streams all output to log file
         await execShell(`tmux pipe-pane -t "0:0.${i}" -o 'cat >> ${logPath}'`, {

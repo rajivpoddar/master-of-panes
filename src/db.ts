@@ -57,6 +57,8 @@ export class MoPDatabase {
       CREATE INDEX IF NOT EXISTS idx_events_slot_id ON events(slot, id DESC);
       CREATE INDEX IF NOT EXISTS idx_events_type_id ON events(event_type, id DESC);
       CREATE INDEX IF NOT EXISTS idx_events_slot_type_id ON events(slot, event_type, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_events_slot_type_tool_time
+        ON events(slot, event_type, tool_name, timestamp DESC, id DESC);
 
       CREATE TABLE IF NOT EXISTS slots (
         slot INTEGER PRIMARY KEY,
@@ -898,7 +900,7 @@ export class MoPDatabase {
   getRecentActivity(minutes: number = 60): EventLogEntry[] {
     const stmt = this.db.prepare(`
       SELECT * FROM events
-      WHERE timestamp > datetime('now', '-' || ? || ' minutes')
+      WHERE timestamp > strftime('%Y-%m-%dT%H:%M:%f', 'now', '-' || ? || ' minutes')
       ORDER BY timestamp DESC
     `);
     return stmt.all(minutes) as EventLogEntry[];
@@ -1071,7 +1073,7 @@ export class MoPDatabase {
     const stmt = this.db.prepare(`
       SELECT slot, timestamp, tool_name, payload
       FROM events
-      WHERE timestamp > datetime('now', '-' || ? || ' minutes')
+      WHERE timestamp > strftime('%Y-%m-%dT%H:%M:%f', 'now', '-' || ? || ' minutes')
         AND (
           (tool_name = 'Skill' AND (
             payload LIKE '%codex%review%' OR

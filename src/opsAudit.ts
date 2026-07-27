@@ -42,7 +42,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { appendFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
@@ -598,15 +599,27 @@ export class OpsAuditScheduler {
         { detached: true, stdio: ["ignore", "pipe", "pipe"] }
       );
       onPid?.(child.pid ?? null);
-      if (stdoutPath) {
-        try {
-          writeFileSync(stdoutPath, "", { encoding: "utf8", mode: 0o600 });
-        } catch (err) {
-          console.error("[ops-audit] stdout file init failed:", err);
-        }
-      }
+      const recordWriteError = (err: unknown): void => {
+        console.error("[ops-audit] stdout file write failed:", err);
+      };
+      let stdoutWrite = stdoutPath
+        ? writeFile(stdoutPath, "", { encoding: "utf8", mode: 0o600 }).catch(
+            recordWriteError
+          )
+        : Promise.resolve();
       let stdoutBuf = "";
       let timedOut = false;
+      let settled = false;
+      const finish = async (result: {
+        stdout: string;
+        exitCode: number;
+        timedOut: boolean;
+      }): Promise<void> => {
+        if (settled) return;
+        settled = true;
+        await stdoutWrite;
+        resolve(result);
+      };
       const timer = setTimeout(() => {
         timedOut = true;
         try {
@@ -623,11 +636,9 @@ export class OpsAuditScheduler {
       child.stdout.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8");
         if (stdoutPath) {
-          try {
-            appendFileSync(stdoutPath, text, "utf8");
-          } catch (err) {
-            console.error("[ops-audit] stdout file append failed:", err);
-          }
+          stdoutWrite = stdoutWrite
+            .then(() => appendFile(stdoutPath, text, "utf8"))
+            .catch(recordWriteError);
         }
         stdoutBuf += text;
         // Hard cap streaming buffer at 2x cap to prevent OOM.
@@ -641,7 +652,7 @@ export class OpsAuditScheduler {
       });
       child.on("exit", (code) => {
         clearTimeout(timer);
-        resolve({
+        void finish({
           stdout: stdoutBuf,
           exitCode: code ?? -1,
           timedOut,
@@ -650,7 +661,7 @@ export class OpsAuditScheduler {
       child.on("error", (err) => {
         clearTimeout(timer);
         console.error("[ops-audit] spawn error:", err);
-        resolve({ stdout: stdoutBuf, exitCode: -1, timedOut });
+        void finish({ stdout: stdoutBuf, exitCode: -1, timedOut });
       });
     });
   }

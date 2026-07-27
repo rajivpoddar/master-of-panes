@@ -8,7 +8,7 @@
  * Dedup: Only notifies PM once per 10 minutes per slot to prevent spam.
  */
 
-import { appendFileSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
+import { access, appendFile, readFile, unlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { execShell } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
@@ -17,13 +17,18 @@ import type { TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
 
 function debugLog(line: string): void {
+  void appendFile(
+    "/tmp/mop-debug.log",
+    `${new Date().toISOString()} ${line}\n`
+  ).catch(() => undefined);
+}
+
+async function pathExists(path: string): Promise<boolean> {
   try {
-    appendFileSync(
-      "/tmp/mop-debug.log",
-      `${new Date().toISOString()} ${line}\n`
-    );
+    await access(path);
+    return true;
   } catch {
-    // never fail the detector on log write errors
+    return false;
   }
 }
 
@@ -292,7 +297,7 @@ export class StuckDetector {
     // consecutive failures (10 min = 2 check-slot cycles) indicate the
     // slot may be hitting resource limits or context exhaustion. Auto-
     // inject /compact directly (deduped, same guards as checkContextOverflow).
-    this.detectBgScriptFailures();
+    await this.detectBgScriptFailures();
 
     // Phase 1d: resume dev slots that remain assigned but sit at a proven idle
     // prompt for more than five minutes. This is intentionally dev-only:
@@ -315,7 +320,7 @@ export class StuckDetector {
       // Skip all non-plan-approval slots.
       continue;
 
-      const mtime = this.logManager.getLogMtime(slot.slot);
+      const mtime = await this.logManager.getLogMtime(slot.slot);
       if (!mtime) continue; // No log file — can't determine
 
       const ageMs = Date.now() - mtime!.getTime();
@@ -354,7 +359,7 @@ export class StuckDetector {
     }
 
     // Do not compete with a more specific recovery path for this idle episode.
-    if (existsSync(`/tmp/slot-${slot.slot}-api500-state.json`)) return;
+    if (await pathExists(`/tmp/slot-${slot.slot}-api500-state.json`)) return;
     if (this.compactInFlightAt.has(slot.slot)) return;
     const specializedEvents = [
       "context_overflow_detected",
@@ -766,8 +771,8 @@ export class StuckDetector {
       last_nudge_at?: number;
     } | null = null;
     try {
-      if (existsSync(stateFile)) {
-        const parsed = JSON.parse(readFileSync(stateFile, "utf8"));
+      if (await pathExists(stateFile)) {
+        const parsed = JSON.parse(await readFile(stateFile, "utf8"));
         if (parsed && typeof parsed === "object" &&
             typeof parsed.first_seen_ts === "number") {
           state = parsed;
@@ -781,12 +786,12 @@ export class StuckDetector {
     if (!detected) {
       if (state) {
         try {
-          unlinkSync(stateFile);
+          await unlink(stateFile);
         } catch { /* non-fatal */ }
         const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} RECOVERED — error string no longer in scrollback; state file cleared`;
         debugLog(msg);
         try {
-          appendFileSync(logFile, msg + "\n");
+          await appendFile(logFile, msg + "\n");
         } catch { /* non-fatal */ }
       }
       return;
@@ -801,12 +806,12 @@ export class StuckDetector {
         last_500_ts: nowEpoch,
       };
       try {
-        writeFileSync(stateFile, JSON.stringify(state));
+        await writeFile(stateFile, JSON.stringify(state));
       } catch { /* non-fatal */ }
       const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} FIRST_SEEN — state initialized retry_count=0 next_nudge_at=${state.next_nudge_at} (in ${this.API_500_BACKOFF_SCHEDULE[0]}s)`;
       debugLog(msg);
       try {
-        appendFileSync(logFile, msg + "\n");
+        await appendFile(logFile, msg + "\n");
       } catch { /* non-fatal */ }
       return;
     }
@@ -815,7 +820,7 @@ export class StuckDetector {
     if (nowEpoch > (state.last_500_ts || 0)) {
       state.last_500_ts = nowEpoch;
       try {
-        writeFileSync(stateFile, JSON.stringify(state));
+        await writeFile(stateFile, JSON.stringify(state));
       } catch { /* non-fatal */ }
     }
 
@@ -828,9 +833,9 @@ export class StuckDetector {
       try {
         const lastLog = state.last_nudge_at || 0;
         if (nowEpoch - lastLog > 60) {
-          appendFileSync(logFile, msg + "\n");
+          await appendFile(logFile, msg + "\n");
           state.last_nudge_at = nowEpoch;
-          writeFileSync(stateFile, JSON.stringify(state));
+          await writeFile(stateFile, JSON.stringify(state));
         }
       } catch { /* non-fatal */ }
       return;
@@ -852,7 +857,7 @@ export class StuckDetector {
       const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} SKIPPED (occupied=${!!dbSlot?.occupied} dnd=${!!dbSlot?.dnd}) retry=${state.retry_count}`;
       debugLog(msg);
       try {
-        appendFileSync(logFile, msg + "\n");
+        await appendFile(logFile, msg + "\n");
       } catch { /* non-fatal */ }
       return;
     }
@@ -871,7 +876,7 @@ export class StuckDetector {
       const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} FAILED (sendToSlot returned false) retry=${state.retry_count} — state NOT ticked; will retry next tick`;
       debugLog(msg);
       try {
-        appendFileSync(logFile, msg + "\n");
+        await appendFile(logFile, msg + "\n");
       } catch { /* non-fatal */ }
       return;
     }
@@ -891,13 +896,13 @@ export class StuckDetector {
       state.next_nudge_at = state.first_seen_ts + delta;
     }
     try {
-      writeFileSync(stateFile, JSON.stringify(state));
+      await writeFile(stateFile, JSON.stringify(state));
     } catch { /* non-fatal */ }
 
     const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} OK retry_count=${state.retry_count} next_nudge_at=${state.next_nudge_at} (cumulative from first_seen_ts=${state.first_seen_ts})`;
     debugLog(msg);
     try {
-      appendFileSync(logFile, msg + "\n");
+      await appendFile(logFile, msg + "\n");
     } catch { /* non-fatal */ }
 
     // Log MoP DB event for forensic timeline (mirrors prior
@@ -1034,7 +1039,7 @@ export class StuckDetector {
 
     // Write the menu capture so PM's /slot-blocked skill can read it.
     try {
-      writeFileSync(`/tmp/slot-${slot.slot}-blocked-capture.txt`, pane);
+      await writeFile(`/tmp/slot-${slot.slot}-blocked-capture.txt`, pane);
     } catch (e) {
       debugLog(
         `[stuck] slot=${slot.slot} block-capture-write-failed: ${(e as Error).message}`
@@ -1057,11 +1062,11 @@ export class StuckDetector {
    * within BG_SCRIPT_FAILURE_DEDUP_MS (10 min). Also respects the existing
    * compactInFlightAt and COMPACT_DISPATCH_DEDUP_MS guards.
    */
-  private detectBgScriptFailures(): void {
+  private async detectBgScriptFailures(): Promise<void> {
     const LOG_PATH = "/tmp/mop-server.log";
     let logText: string;
     try {
-      logText = readFileSync(LOG_PATH, "utf-8");
+      logText = await readFile(LOG_PATH, "utf-8");
     } catch {
       return; // log file not available yet
     }
@@ -1156,7 +1161,7 @@ export class StuckDetector {
         // recently, it's actively running — skip /compact, alarm PM instead.
         //
         // See feedback_mop_bg_script_failure_compact_misfire_2026_05_17.md.
-        const slotLogMtime = this.logManager.getLogMtime(slot.slot);
+        const slotLogMtime = await this.logManager.getLogMtime(slot.slot);
         if (slotLogMtime) {
           const logAgeMs = Date.now() - slotLogMtime.getTime();
           if (logAgeMs < this.BG_SCRIPT_COMPACT_LOG_STALE_MS) {

@@ -12,7 +12,7 @@
  * 5. Returns a HookResponse that Claude Code acts on
  */
 
-import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
@@ -97,10 +97,20 @@ const p0EscalationWatcher = new P0EscalationWatcher(db, relay);
 p0EscalationWatcher.start();
 
 // ─── Log Rotation (every 10 minutes) ────────────────────
+let rotationInFlight = false;
 const rotationTimer = setInterval(() => {
-  for (let i = 1; i <= config.slotCount; i++) {
-    logManager.rotateIfNeeded(i);
+  if (rotationInFlight) {
+    console.warn("[logs] Skipping overlapping log rotation");
+    return;
   }
+  rotationInFlight = true;
+  void Promise.all(
+    Array.from({ length: config.slotCount }, (_, index) =>
+      logManager.rotateIfNeeded(index + 1)
+    )
+  ).finally(() => {
+    rotationInFlight = false;
+  });
 }, 10 * 60 * 1000);
 
 // ─── Event-Loop Lag Instrumentation ─────────────────────
@@ -859,7 +869,7 @@ app.get("/review-status/:issueNumber", (c) => {
   // Debug log for traceability (Rajiv directive 2026-04-02)
   const debugLine = `${new Date().toISOString()} | /review-status/${issueNumber} | window=${window}m | found=${result.found} | method=${result.method} | slot=${result.slot} | ts=${result.timestamp}\n`;
   try {
-    appendFileSync("/tmp/mop-review-status-debug.log", debugLine);
+    void appendFile("/tmp/mop-review-status-debug.log", debugLine).catch(() => undefined);
   } catch { /* ignore log errors */ }
 
   return c.json({
@@ -1317,7 +1327,7 @@ async function pastePayloadWithTmuxBuffer(
     const start = index * chunkSize;
     const end = Math.min(start + chunkSize, bytes);
     const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}-${index + 1}-of-${chunks}.txt`;
-    writeFileSync(tmpFile, payload.subarray(start, end));
+    await writeFile(tmpFile, payload.subarray(start, end));
     try {
       await execShell(`tmux load-buffer -b ${shellEscape(bufName)} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
       await execShell(`tmux paste-buffer -b ${shellEscape(bufName)} -t ${paneAddress} -d`, { timeout: 10_000 });
@@ -1328,7 +1338,7 @@ async function pastePayloadWithTmuxBuffer(
         bytes: end - start,
       });
     } finally {
-      try { unlinkSync(tmpFile); } catch {}
+      await unlink(tmpFile).catch(() => undefined);
     }
     if (chunks > 1) {
       await sleep(150);
@@ -1515,7 +1525,7 @@ app.post("/slots/:slotNum/send", async (c) => {
   try {
     if (filePath) {
       // File mode: load-buffer + paste-buffer, chunked when needed. No payload cap.
-      const filePayload = readFileSync(filePath);
+      const filePayload = await readFile(filePath);
       const paste = await pastePayloadWithTmuxBuffer(slotNum, paneAddress, filePayload, {
         source: "file",
         label: filePath,
@@ -1872,11 +1882,10 @@ app.post("/api/slack-route", async (c) => {
     try {
       // Write to temp file and paste (handles multiline + special chars)
       const tmpFile = `/tmp/slack-route-${Date.now()}.txt`;
-      const { writeFileSync, unlinkSync } = await import("node:fs");
-      writeFileSync(tmpFile, formatted);
+      await writeFile(tmpFile, formatted);
       await execShell(`tmux load-buffer ${tmpFile} && tmux paste-buffer -t ${pane}`, { timeout: 5000 });
       await execShell(`tmux send-keys -t ${pane} Enter`, { timeout: 3000 });
-      try { unlinkSync(tmpFile); } catch {}
+      await unlink(tmpFile).catch(() => undefined);
       results.push(`${pane}: delivered`);
     } catch (e) {
       results.push(`${pane}: failed (${e})`);

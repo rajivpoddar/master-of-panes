@@ -6,7 +6,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { execShell, sleep } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
@@ -21,14 +21,10 @@ const PM_CLEAR_RETRY_SUPPRESS_MS = parseInt(
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
 
 function debugLog(line: string): void {
-  try {
-    appendFileSync(
-      "/tmp/mop-debug.log",
-      `${new Date().toISOString()} ${line}\n`
-    );
-  } catch {
-    // never fail hook processing on log write errors
-  }
+  void appendFile(
+    "/tmp/mop-debug.log",
+    `${new Date().toISOString()} ${line}\n`
+  ).catch(() => undefined);
 }
 
 // ─── Activity Classification ──────────────────────────────
@@ -743,7 +739,7 @@ export class HookProcessor {
       if (!HookProcessor.CHECK_SLOT_BG_ENABLED) {
         const checkFile = `/tmp/slot-${slotNum}-check.txt`;
         try {
-          writeFileSync(
+          await writeFile(
             checkFile,
             `STATUS:SKIP reason=check-slot-bg-disabled slot=${slotNum}`
           );
@@ -791,12 +787,12 @@ export class HookProcessor {
       // Rajiv directive 2026-05-14 14:46 IST: tmux capture is not needed.
       try {
         if (!bgFailed && bgOutput.length > 0) {
-          writeFileSync(checkFile, bgOutput);
+          await writeFile(checkFile, bgOutput);
         } else {
-          writeFileSync(checkFile, `STATUS:ERROR reason=${bgFailed ? 'bg-script-failed' : 'empty-output'} slot=${slotNum}`);
+          await writeFile(checkFile, `STATUS:ERROR reason=${bgFailed ? 'bg-script-failed' : 'empty-output'} slot=${slotNum}`);
         }
       } catch (err) {
-        writeFileSync(checkFile, "STATUS:ERROR reason=write-failed");
+        await writeFile(checkFile, "STATUS:ERROR reason=write-failed").catch(() => undefined);
         console.log(`[check-slot] Slot ${slotNum} write FAILED: ${err}`);
       }
 
@@ -1068,9 +1064,9 @@ export class HookProcessor {
           `tmux capture-pane -t 0:0.${slotNum} -p -S -15`,
           { timeout: 5_000 }
         );
-        writeFileSync(captureFile, capture.stdout);
+        await writeFile(captureFile, capture.stdout);
       } catch {
-        writeFileSync(captureFile, "[capture failed]");
+        await writeFile(captureFile, "[capture failed]").catch(() => undefined);
       }
 
       this.injectSlotStateDirect(currentSlot, "active", "PostToolUse", toolName, {
@@ -1227,9 +1223,9 @@ export class HookProcessor {
             `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
             { timeout: 5_000 }
           );
-          writeFileSync(captureFile, capture.stdout);
+          await writeFile(captureFile, capture.stdout);
         } catch {
-          writeFileSync(captureFile, "[capture failed]");
+          await writeFile(captureFile, "[capture failed]").catch(() => undefined);
         }
 
         console.log(`[idle-debug] slot ${slotNum} direct slot-idle notification candidate`);
@@ -1668,13 +1664,13 @@ export class HookProcessor {
         if (prNum && prNum !== "null" && /^\d+$/.test(prNum)) {
           const stateFile = `${process.env.HOME}/.claude/tmux-panes/pane-${slotNum}.json`;
           try {
-            const state = JSON.parse(readFileSync(stateFile, "utf-8"));
+            const state = JSON.parse(await readFile(stateFile, "utf-8"));
             state.occupied = false;
             state.status = "free";
             state.state = "FREE";
             state.pr = parseInt(prNum, 10);
             state.dnd = false;
-            writeFileSync(stateFile, JSON.stringify(state, null, 2));
+            await writeFile(stateFile, JSON.stringify(state, null, 2));
             this.db.logEvent(slotNum, "auto_released_post_pr", "Stop", null, {
               pr: parseInt(prNum, 10),
               branch: slot.branch,
