@@ -33,6 +33,7 @@ function activityHarness(maxRecentFiles = 2): ActivityHarness {
   const statCallNames: string[] = [];
   const tracker = new RecentJsonlActivity({
     maxRecentFiles,
+    watchRetryMs: 120_000,
     now: () => now,
     watchFactory: (_dir, nextListener) => {
       listener = nextListener;
@@ -106,6 +107,77 @@ test("watch failure produces one stable unknown epoch for both consumers", async
   assert.equal(signalA.reason, "watch-failed");
   assert.equal(signalA.token, signalB.token);
   assert.equal(decidePMDrain(signalB, 61_000, 15_000, true).action, "rearm");
+});
+
+test("watch failure retries after backoff and resumes observed activity", async () => {
+  let now = 1_000;
+  let attempts = 0;
+  let listener: ((eventType: string, filename: string | Buffer | null) => void) | null =
+    null;
+  const failedWatcher = new FakeWatcher();
+  const recoveredWatcher = new FakeWatcher();
+  const tracker = new RecentJsonlActivity({
+    now: () => now,
+    watchRetryMs: 30_000,
+    watchFactory: (_dir, nextListener) => {
+      attempts += 1;
+      listener = nextListener;
+      return attempts === 1 ? failedWatcher : recoveredWatcher;
+    },
+    statFactory: async () => ({ mtimeMs: now }),
+  });
+  tracker.watchDirectory("/sessions");
+  failedWatcher.emit("error", new Error("watch failed"));
+
+  const failed = await tracker.latestActivity("/sessions");
+  assertUnknown(failed);
+  assert.equal(failed.reason, "watch-failed");
+  assert.equal(attempts, 1);
+
+  now += 29_999;
+  const beforeBackoff = await tracker.latestActivity("/sessions");
+  assertUnknown(beforeBackoff);
+  assert.equal(beforeBackoff.token, failed.token);
+  assert.equal(attempts, 1);
+
+  now += 1;
+  const probationary = await tracker.latestActivity("/sessions");
+  assertUnknown(probationary);
+  assert.equal(probationary.reason, "watch-failed");
+  assert.equal(attempts, 2);
+  assert.equal(probationary.token, failed.token);
+
+  assert.ok(listener);
+  listener("change", "recovered.jsonl");
+  const observed = await tracker.latestActivity("/sessions");
+  assert.equal(observed.kind, "observed");
+  assert.equal(observed.observedAtMs, now);
+});
+
+test("permanent watch failure keeps one stable token across retry ticks", async () => {
+  let now = 1_000;
+  let attempts = 0;
+  const tracker = new RecentJsonlActivity({
+    now: () => now,
+    watchRetryMs: 30_000,
+    watchFactory: () => {
+      attempts += 1;
+      throw new Error("watch unavailable");
+    },
+  });
+
+  const first = await tracker.latestActivity("/sessions");
+  assertUnknown(first);
+  assert.equal(first.reason, "watch-failed");
+
+  for (let tick = 1; tick <= 10; tick += 1) {
+    now += 30_000;
+    const signal = await tracker.latestActivity("/sessions");
+    assertUnknown(signal);
+    assert.equal(signal.reason, "watch-failed");
+    assert.equal(signal.token, first.token);
+  }
+  assert.equal(attempts, 11);
 });
 
 test("real writes advance health tokens and allow observed-idle PM drains", async () => {

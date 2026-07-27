@@ -34,6 +34,7 @@ interface DirectoryActivity {
   lastActivityMs: number | null;
   recentFiles: Map<string, number>;
   failed: boolean;
+  nextWatchAttemptMs: number;
 }
 
 interface RecentJsonlActivityOptions {
@@ -42,6 +43,7 @@ interface RecentJsonlActivityOptions {
   watchFactory?: WatchFactory;
   statFactory?: StatFactory;
   statTimeoutMs?: number;
+  watchRetryMs?: number;
 }
 
 export interface JsonlActivitySnapshot {
@@ -68,6 +70,7 @@ export class RecentJsonlActivity {
   private readonly watchFactory: WatchFactory;
   private readonly statFactory: StatFactory;
   private readonly statTimeoutMs: number;
+  private readonly watchRetryMs: number;
 
   constructor(options: RecentJsonlActivityOptions = {}) {
     this.maxRecentFiles = options.maxRecentFiles ?? 16;
@@ -75,6 +78,7 @@ export class RecentJsonlActivity {
     this.watchFactory = options.watchFactory ?? defaultWatchFactory;
     this.statFactory = options.statFactory ?? defaultStatFactory;
     this.statTimeoutMs = options.statTimeoutMs ?? 2_000;
+    this.watchRetryMs = options.watchRetryMs ?? 30_000;
   }
 
   watchDirectory(dir: string): void {
@@ -87,15 +91,21 @@ export class RecentJsonlActivity {
       lastActivityMs: null,
       recentFiles: new Map(),
       failed: false,
+      nextWatchAttemptMs: 0,
     };
     this.states.set(dir, state);
+    this.startWatcher(dir, state);
+  }
 
+  private startWatcher(dir: string, state: DirectoryActivity): void {
+    const wasFailed = state.failed;
     try {
-      state.watcher = this.watchFactory(dir, (_eventType, filename) => {
+      const watcher = this.watchFactory(dir, (_eventType, filename) => {
         const name = filename?.toString();
         if (name && !name.endsWith(".jsonl")) return;
 
         const observedAt = this.now();
+        state.failed = false;
         state.sequence += 1;
         state.lastActivityMs = observedAt;
         if (name) {
@@ -108,14 +118,26 @@ export class RecentJsonlActivity {
           }
         }
       });
-      state.watcher.on("error", (error) => {
+      state.watcher = watcher;
+      // A replacement watcher is probationary until it observes a real write.
+      // Keeping the failed state here prevents relay from draining based on an
+      // old timestamp and keeps health's unknown token stable across retries.
+      state.failed = wasFailed;
+      state.nextWatchAttemptMs = 0;
+      watcher.on("error", (error) => {
+        if (state.watcher !== watcher) return;
+        watcher.close();
+        state.watcher = null;
+        if (!state.failed) state.sequence += 1;
         state.failed = true;
-        state.sequence += 1;
+        state.nextWatchAttemptMs = this.now() + this.watchRetryMs;
         console.warn(`[jsonl-activity] watcher failed for ${dir}: ${String(error)}`);
       });
     } catch (error) {
+      state.watcher = null;
+      if (!wasFailed) state.sequence += 1;
       state.failed = true;
-      state.sequence += 1;
+      state.nextWatchAttemptMs = this.now() + this.watchRetryMs;
       console.warn(`[jsonl-activity] unable to watch ${dir}: ${String(error)}`);
     }
   }
@@ -130,6 +152,14 @@ export class RecentJsonlActivity {
         observedAtMs: null,
         reason: "watch-failed",
       };
+    }
+
+    if (
+      state.failed &&
+      state.watcher === null &&
+      this.now() >= state.nextWatchAttemptMs
+    ) {
+      this.startWatcher(dir, state);
     }
 
     if (!state.failed && state.recentFiles.size > 0) {
