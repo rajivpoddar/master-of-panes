@@ -9,10 +9,12 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { execShell, execShellOk, sleep } from "./asyncCommand.js";
+import { execShell, sleep } from "./asyncCommand.js";
 import type { LogManager } from "./logs.js";
 import type { MoPDatabase } from "./db.js";
 import type { MoPConfig, SlotState } from "./types.js";
+
+export type SlotActivityState = "active" | "idle" | "unknown";
 
 /**
  * Resolve the PM session JSONL directory. Claude Code stores per-project
@@ -934,13 +936,25 @@ export class TmuxRelay {
   /**
    * Check if a slot is currently active (processing).
    * is-active.sh communicates via exit codes: 0=ACTIVE, 1=IDLE, 2=ERROR.
-   * is-active.sh exits 0 for ACTIVE; non-zero means IDLE or ERROR.
+   * Existing boolean callers retain their historical behavior; watchdogs that
+   * can inject input must use getSlotActivityState() and fail closed on unknown.
    */
   async isSlotActive(slotNum: number): Promise<boolean> {
-    return execShellOk(
-      `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`,
-      { timeout: 5_000 }
-    );
+    return (await this.getSlotActivityState(slotNum)) === "active";
+  }
+
+  async getSlotActivityState(slotNum: number): Promise<SlotActivityState> {
+    try {
+      await execShell(
+        `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`,
+        { timeout: 5_000 }
+      );
+      return "active";
+    } catch (err) {
+      const code = (err as { code?: string | number })?.code;
+      if (code === 1 || code === "1") return "idle";
+      return "unknown";
+    }
   }
 
   /**

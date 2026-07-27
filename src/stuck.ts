@@ -60,6 +60,8 @@ function parseDbTimestampMs(timestamp: string): number {
 
 export class StuckDetector {
   private readonly STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes no output
+  private readonly IDLE_OCCUPIED_THRESHOLD_MS = 5 * 60 * 1000;
+  private readonly IDLE_OCCUPIED_SUBAGENT_LOOKBACK_SEC = 6 * 60 * 60;
   private readonly PLAN_APPROVAL_THRESHOLD_MS = 5 * 60 * 1000; // 5 min waiting for approval (Rajiv directive 2026-03-23)
   private readonly CHECK_INTERVAL_MS = 60 * 1000; // Check every minute
   private readonly DEDUP_WINDOW_MS = 5 * 60 * 1000; // Notify at most every 5 min per slot (Rajiv directive 2026-03-23)
@@ -291,6 +293,14 @@ export class StuckDetector {
     // inject /compact directly (deduped, same guards as checkContextOverflow).
     this.detectBgScriptFailures();
 
+    // Phase 1d: resume dev slots that remain assigned but sit at a proven idle
+    // prompt for more than five minutes. This is intentionally dev-only:
+    // slot 0's historical auto-continue path was removed because it flooded
+    // the PM input queue. Specialized recovery paths above take precedence.
+    for (const slot of slots) {
+      await this.checkIdleOccupied(slot);
+    }
+
     for (const slot of slots) {
       // RETIRED (2026-03-24): Plan approval watchdog disabled.
       // Slots now use plan-agent + /codex-plan-review (self-managing).
@@ -312,6 +322,141 @@ export class StuckDetector {
         this.handleStuck(slot, ageMs);
       }
     }
+  }
+
+  /**
+   * Inject one "continue your work" message per idle episode for an occupied
+   * dev slot. The idle anchor comes from hook/reconciliation events rather
+   * than slots.last_activity because status reads also refresh last_activity.
+   */
+  async checkIdleOccupied(slot: SlotState): Promise<void> {
+    if (slot.slot < 1 || slot.slot > 4) return;
+    if (!slot.occupied || !slot.idle || slot.dnd) return;
+    if (slot.active_turn_state !== "inactive") return;
+    if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
+
+    const anchor = this.getIdleOccupiedAnchor(slot);
+    if (!anchor) return;
+    const idleAgeMs = Date.now() - anchor.timestampMs;
+    if (!Number.isFinite(idleAgeMs) || idleAgeMs < this.IDLE_OCCUPIED_THRESHOLD_MS) return;
+
+    const activeSubagent = this.db.hasRecentSubagentDispatch(
+      slot.slot,
+      this.IDLE_OCCUPIED_SUBAGENT_LOOKBACK_SEC
+    );
+    if (activeSubagent) {
+      debugLog(
+        `[idle-occupied] slot=${slot.slot} suppress=subagent-active ` +
+        `dispatch=${activeSubagent.taskTs}`
+      );
+      return;
+    }
+
+    // Do not compete with a more specific recovery path for this idle episode.
+    if (existsSync(`/tmp/slot-${slot.slot}-api500-state.json`)) return;
+    if (this.compactInFlightAt.has(slot.slot)) return;
+    const specializedEvents = [
+      "context_overflow_detected",
+      "compact_dispatched",
+      "api500_direct_nudge",
+      "block_dispatched",
+      "slot_promised_action_continue_injected",
+      "continue_injected",
+    ];
+    for (const eventType of specializedEvents) {
+      const event = this.db.getEvents(slot.slot, 1, eventType)[0];
+      if (event && parseDbTimestampMs(event.timestamp) >= anchor.timestampMs) return;
+    }
+
+    const prior = this.db.getEvents(slot.slot, 1, "idle_occupied_continue_injected")[0];
+    if (prior) {
+      try {
+        const payload = JSON.parse(prior.payload) as {
+          assignment_epoch?: number;
+          idle_anchor?: string;
+        };
+        if (
+          payload.assignment_epoch === slot.assignment_epoch &&
+          payload.idle_anchor === anchor.timestamp
+        ) {
+          return;
+        }
+      } catch {
+        // Malformed historical diagnostics must not suppress a current nudge.
+      }
+    }
+
+    const liveState = await this.relay.getSlotActivityState(slot.slot);
+    if (liveState !== "idle") {
+      debugLog(`[idle-occupied] slot=${slot.slot} suppress=live-${liveState}`);
+      return;
+    }
+
+    // Re-pin ownership after the live check so a concurrent release/reassign
+    // cannot receive a stale nudge.
+    const current = this.db.getSlot(slot.slot);
+    if (
+      !current?.occupied ||
+      !current.idle ||
+      current.dnd ||
+      current.active_turn_state !== "inactive" ||
+      current.assignment_epoch !== slot.assignment_epoch ||
+      current.assigned_at !== slot.assigned_at
+    ) {
+      return;
+    }
+
+    const sent = await this.relay.sendToSlotAsync(
+      slot.slot,
+      "continue your work",
+      false
+    );
+    const payload = {
+      command: "continue your work",
+      assignment_epoch: slot.assignment_epoch,
+      idle_anchor: anchor.timestamp,
+      idle_anchor_source: anchor.source,
+      idle_age_ms: idleAgeMs,
+      issue: current.issue,
+      pr: current.pr,
+      branch: current.branch,
+    };
+    this.db.logEvent(
+      slot.slot,
+      sent ? "idle_occupied_continue_injected" : "idle_occupied_continue_failed",
+      "Stuck",
+      null,
+      payload
+    );
+    debugLog(
+      `[idle-occupied] slot=${slot.slot} ${sent ? "injected" : "failed"} ` +
+      `epoch=${slot.assignment_epoch} anchor=${anchor.timestamp}`
+    );
+  }
+
+  private getIdleOccupiedAnchor(
+    slot: SlotState
+  ): { timestamp: string; timestampMs: number; source: string } | null {
+    const assignedMs = slot.assigned_at ? parseDbTimestampMs(slot.assigned_at) : NaN;
+    const candidates: Array<{ timestamp: string; timestampMs: number; source: string }> = [];
+    for (const eventType of ["Stop", "SessionEnd", "slot_idle_reconciled_from_pane"]) {
+      const event = this.db.getEvents(slot.slot, 1, eventType)[0];
+      if (!event) continue;
+      const timestampMs = parseDbTimestampMs(event.timestamp);
+      if (!Number.isFinite(timestampMs)) continue;
+      if (Number.isFinite(assignedMs) && timestampMs < assignedMs) continue;
+      candidates.push({ timestamp: event.timestamp, timestampMs, source: eventType });
+    }
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => b.timestampMs - a.timestampMs);
+      return candidates[0];
+    }
+    if (!slot.assigned_at || !Number.isFinite(assignedMs)) return null;
+    return {
+      timestamp: slot.assigned_at,
+      timestampMs: assignedMs,
+      source: "assigned_at",
+    };
   }
 
   /**
