@@ -190,6 +190,7 @@ export class StuckDetector {
     /API Error: 500|API Error: 529|Internal server error/;
   private readonly API_500_BACKOFF_SCHEDULE = [120, 360, 840, 1800, 3720];
   private readonly API_500_RETRY_CAP = 5;
+  private checkInFlight = false;
 
   constructor(
     private db: MoPDatabase,
@@ -1372,14 +1373,25 @@ export class StuckDetector {
   /**
    * Start periodic stuck checking.
    */
+  private async runCheck(): Promise<void> {
+    if (this.checkInFlight) {
+      console.warn("[stuck] Skipping overlapping watchdog check");
+      return;
+    }
+    this.checkInFlight = true;
+    try {
+      await this.checkAll();
+    } catch (err) {
+      console.error("[stuck] Check failed:", err);
+    } finally {
+      this.checkInFlight = false;
+    }
+  }
+
   start(): void {
     if (this.timer) return; // Already running
     this.timer = setInterval(() => {
-      try {
-        void this.checkAll();
-      } catch (err) {
-        console.error("[stuck] Check failed:", err);
-      }
+      void this.runCheck();
     }, this.CHECK_INTERVAL_MS);
     console.log("[stuck] Watchdog started — checking every 60s, threshold 5min");
   }

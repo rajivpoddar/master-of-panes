@@ -17,10 +17,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
 import { execShell } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
+import { recentJsonlActivity } from "./jsonlActivity.js";
 import type { TmuxRelay } from "./relay.js";
 
 // ─── Restart Commands ──────────────────────────────────────
@@ -63,7 +62,7 @@ const SLOT_CWDS: Record<number, string> = {
 
 type PaneProbe = {
   fingerprint: string;
-  jsonlMtimeMs: number;
+  jsonlActivityToken: string;
   lastEventId: number;
 };
 
@@ -87,22 +86,6 @@ function typedLaunchCommandForPane(slotNum: number): string | null {
   return `cd ${shellEscape(cwd)} && ${restartCmd}`;
 }
 
-function latestJsonlMtimeMs(slotNum: number): number {
-  const dir = SLOT_JSONL_DIRS[slotNum];
-  if (!dir) return 0;
-  try {
-    let max = 0;
-    for (const name of readdirSync(dir)) {
-      if (!name.endsWith(".jsonl")) continue;
-      const st = statSync(join(dir, name));
-      if (st.mtimeMs > max) max = st.mtimeMs;
-    }
-    return max;
-  } catch {
-    return 0;
-  }
-}
-
 // ─── Health Checker ────────────────────────────────────────
 
 export class ProcessHealthChecker {
@@ -114,6 +97,7 @@ export class ProcessHealthChecker {
   private readonly UNRESPONSIVE_FORCE_RESPAWN_COOLDOWN_MS = 15 * 60 * 1000;
   private timer: NodeJS.Timeout | null = null;
   private readonly startTime = Date.now();        // Startup grace period anchor
+  private checkInFlight = false;
 
   /** slot -> timestamp of last restart */
   private lastRestart = new Map<number, number>();
@@ -321,14 +305,16 @@ export class ProcessHealthChecker {
 
     const probe: PaneProbe = {
       fingerprint,
-      jsonlMtimeMs: latestJsonlMtimeMs(slotNum),
+      jsonlActivityToken: (
+        await recentJsonlActivity.latestActivity(SLOT_JSONL_DIRS[slotNum])
+      ).token,
       lastEventId: this.latestEventId(slotNum),
     };
     const prev = this.unresponsiveStates.get(slotNum);
 
     if (!prev ||
         prev.fingerprint !== probe.fingerprint ||
-        prev.jsonlMtimeMs !== probe.jsonlMtimeMs ||
+        prev.jsonlActivityToken !== probe.jsonlActivityToken ||
         prev.lastEventId !== probe.lastEventId) {
       this.unresponsiveStates.set(slotNum, { ...probe, unchangedChecks: 1 });
       return;
@@ -349,7 +335,7 @@ export class ProcessHealthChecker {
         this.db.logEvent(slotNum, "pane_unresponsive_probe_sent", null, null, {
           unchanged_checks: state.unchangedChecks,
           probe: "C-l",
-          jsonl_mtime_ms: state.jsonlMtimeMs,
+          jsonl_activity_token: state.jsonlActivityToken,
           last_event_id: state.lastEventId,
         });
       } catch (err) {
@@ -627,14 +613,28 @@ export class ProcessHealthChecker {
 
   // ─── Lifecycle ─────────────────────────────────────────
 
+  private async runCheck(): Promise<void> {
+    if (this.checkInFlight) {
+      console.warn("[health] Skipping overlapping health check");
+      return;
+    }
+    this.checkInFlight = true;
+    try {
+      await this.checkAll();
+    } catch (err) {
+      console.error("[health] Check failed:", err);
+    } finally {
+      this.checkInFlight = false;
+    }
+  }
+
   start(): void {
     if (this.timer) return;
+    for (const dir of Object.values(SLOT_JSONL_DIRS)) {
+      recentJsonlActivity.watchDirectory(dir);
+    }
     this.timer = setInterval(() => {
-      try {
-        void this.checkAll();
-      } catch (err) {
-        console.error("[health] Check failed:", err);
-      }
+      void this.runCheck();
     }, this.CHECK_INTERVAL_MS);
     console.log(
       `[health] Process health checker started — ` +

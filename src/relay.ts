@@ -8,10 +8,13 @@
  */
 
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { execShell, sleep } from "./asyncCommand.js";
 import type { LogManager } from "./logs.js";
 import type { MoPDatabase } from "./db.js";
+import {
+  recentJsonlActivity,
+  type JsonlActivitySignal,
+} from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
@@ -47,28 +50,6 @@ const PM_INJECT_ENTER_DELAY_MS: number = (() => {
   const n = raw ? parseInt(raw, 10) : NaN;
   return Number.isFinite(n) && n >= 0 ? n : 250;
 })();
-
-/**
- * Return mtime (ms epoch) of the most recently modified PM session JSONL,
- * or null if none found. Used to verify PM is genuinely idle before
- * draining the relay queue.
- */
-function pmJsonlMtimeMs(): number | null {
-  try {
-    const entries = fs.readdirSync(PM_JSONL_DIR);
-    let max = 0;
-    for (const name of entries) {
-      if (!name.endsWith(".jsonl")) continue;
-      try {
-        const st = fs.statSync(path.join(PM_JSONL_DIR, name));
-        if (st.mtimeMs > max) max = st.mtimeMs;
-      } catch { /* ignore unreadable */ }
-    }
-    return max > 0 ? max : null;
-  } catch {
-    return null;
-  }
-}
 
 // v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
 // wrapper. Kept for reference / fallback diagnostic; no longer invoked by
@@ -189,6 +170,31 @@ function withMopSlotHeader(message: string, parsed: { eventType: string; slot: n
   return lines.join("\n");
 }
 
+export type PMDrainDecision =
+  | { action: "rearm"; reason: "activity-unknown" | "jsonl-active"; ageMs: number | null }
+  | { action: "drain"; reason: "jsonl-idle" | "max-rearms-hit"; ageMs: number };
+
+export function decidePMDrain(
+  activity: JsonlActivitySignal,
+  nowMs: number,
+  idleThresholdMs: number,
+  maxRearmsHit: boolean,
+): PMDrainDecision {
+  if (activity.kind === "unknown") {
+    return { action: "rearm", reason: "activity-unknown", ageMs: null };
+  }
+
+  const ageMs = Math.max(0, nowMs - activity.observedAtMs);
+  if (ageMs < idleThresholdMs && !maxRearmsHit) {
+    return { action: "rearm", reason: "jsonl-active", ageMs };
+  }
+  return {
+    action: "drain",
+    reason: maxRearmsHit ? "max-rearms-hit" : "jsonl-idle",
+    ageMs,
+  };
+}
+
 export class TmuxRelay {
   private pmPaneAddress: string;
   private logManager: LogManager | null = null;
@@ -232,13 +238,13 @@ export class TmuxRelay {
     return Number.isFinite(n) && n >= 0 ? n : 30_000;
   })();
   /**
-   * Bound on how many times the drain timer may re-arm while the PM JSONL
-   * keeps moving. Prevents infinite re-arm if PM is in a long agentic
-   * burst — after this many re-arms we accept the drain and trust the
-   * coalesce layer to collapse rows to a single per-slot notification.
+   * Bound on re-arms for observed PM JSONL activity. Unknown activity never
+   * drains: accepting a timeout there would turn a missing watcher signal into
+   * false proof that PM is idle.
    */
   private static readonly DRAIN_MAX_REARMS = 10;
   private drainRearmCount = 0;
+  private drainGeneration = 0;
   private static readonly CHECK_SLOT_QUEUE_MAX_AGE_MS: number = (() => {
     const raw = process.env.MOP_CHECK_SLOT_QUEUE_MAX_AGE_MS;
     const n = raw ? parseInt(raw, 10) : NaN;
@@ -249,6 +255,7 @@ export class TmuxRelay {
 
   constructor(config: MoPConfig) {
     this.pmPaneAddress = config.pmPaneAddress;
+    recentJsonlActivity.watchDirectory(PM_JSONL_DIR);
   }
 
   /** Attach the MoP DB so injectToPM can enqueue when PM is busy. */
@@ -273,6 +280,7 @@ export class TmuxRelay {
    */
   setPMBusy(busy: boolean): { drained: number } {
     if (busy) {
+      this.drainGeneration += 1;
       // Cancel any pending drain — PM is back in a tool call.
       if (this.drainTimer) {
         clearTimeout(this.drainTimer);
@@ -311,24 +319,44 @@ export class TmuxRelay {
    * idle signal in agentic loops, so we cross-check JSONL mtime.
    */
   private armDrainTimer(delayMs: number): void {
+    const generation = ++this.drainGeneration;
     this.drainTimer = setTimeout(() => {
-      const mtimeMs = pmJsonlMtimeMs();
-      const ageMs = mtimeMs ? Date.now() - mtimeMs : Number.POSITIVE_INFINITY;
-      const stillActive = ageMs < PM_JSONL_IDLE_MS;
-      const maxRearmsHit = this.drainRearmCount >= TmuxRelay.DRAIN_MAX_REARMS;
+      void this.runDrainCheck(delayMs, generation);
+    }, delayMs);
+  }
 
-      if (stillActive && !maxRearmsHit) {
-        this.drainRearmCount += 1;
+  private async runDrainCheck(delayMs: number, generation: number): Promise<void> {
+    try {
+      const activity = await recentJsonlActivity.latestActivity(PM_JSONL_DIR);
+      if (generation !== this.drainGeneration) return;
+
+      const maxRearmsHit = this.drainRearmCount >= TmuxRelay.DRAIN_MAX_REARMS;
+      const decision = decidePMDrain(
+        activity,
+        Date.now(),
+        PM_JSONL_IDLE_MS,
+        maxRearmsHit,
+      );
+
+      if (decision.action === "rearm") {
+        this.drainRearmCount = Math.min(
+          this.drainRearmCount + 1,
+          TmuxRelay.DRAIN_MAX_REARMS,
+        );
+        const ageText = decision.ageMs === null ? "unknown" : `${Math.round(decision.ageMs)}ms`;
         console.log(
-          `[relay-debug] drain re-armed — PM JSONL active (age=${Math.round(ageMs)}ms < ${PM_JSONL_IDLE_MS}ms) ` +
+          `[relay-debug] drain re-armed — PM JSONL ${decision.reason} (age=${ageText}) ` +
           `rearm=${this.drainRearmCount}/${TmuxRelay.DRAIN_MAX_REARMS}`
         );
         if (this.db) {
           this.db.logEvent(0, "pm_drain_rearmed", null, null, {
-            jsonl_age_ms: Math.round(ageMs),
+            jsonl_activity_kind: activity.kind,
+            jsonl_activity_token: activity.token,
+            jsonl_age_ms: decision.ageMs === null ? null : Math.round(decision.ageMs),
             jsonl_idle_threshold_ms: PM_JSONL_IDLE_MS,
             rearm_count: this.drainRearmCount,
             max_rearms: TmuxRelay.DRAIN_MAX_REARMS,
+            reason: decision.reason,
           });
         }
         // Re-arm for another PM_JSONL_IDLE_MS window (shorter than initial
@@ -341,22 +369,28 @@ export class TmuxRelay {
       this.pmBusy = false;
       const n = this.drainPMQueue();
       this.drainTimer = null;
-      const reason = maxRearmsHit ? "max_rearms_hit" : "jsonl_idle_confirmed";
+      const reason = decision.reason === "max-rearms-hit"
+        ? "max_rearms_hit"
+        : "jsonl_idle_confirmed";
       console.log(
         `[relay-debug] debounce drain fired (${reason}) after ${delayMs}ms timer, ` +
-        `jsonl_age=${Math.round(ageMs)}ms, drained ${n}`
+        `jsonl_age=${Math.round(decision.ageMs)}ms, drained ${n}`
       );
       if (this.db) {
         this.db.logEvent(0, "pm_debounce_drain_fired", null, null, {
           debounce_ms: delayMs,
           drained: n,
           reason,
-          jsonl_age_ms: Math.round(ageMs),
+          jsonl_age_ms: Math.round(decision.ageMs),
           rearm_count: this.drainRearmCount,
         });
       }
       this.drainRearmCount = 0;
-    }, delayMs);
+    } catch (error) {
+      if (generation !== this.drainGeneration) return;
+      console.error(`[relay-debug] PM JSONL activity check failed: ${String(error)}`);
+      this.armDrainTimer(PM_JSONL_IDLE_MS);
+    }
   }
 
   /** Public read of the busy flag (diagnostics). */
