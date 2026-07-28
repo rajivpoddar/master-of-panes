@@ -1,12 +1,66 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { Hono } from "hono";
 
 import {
   assignmentIdentityPatchFields,
   isPmTransitionAssignmentRequest,
   PM_TRANSITION_ASSIGNMENT_AUTHORITY,
+  PM_TRANSITION_ASSIGNMENT_HEADER,
 } from "../src/assignmentAuthority.js";
+import { registerAssignmentRoute } from "../src/assignmentRoute.js";
+import { MoPDatabase } from "../src/db.js";
+import type { MoPConfig } from "../src/types.js";
+
+async function withAssignmentRoute(
+  run: (app: Hono, db: MoPDatabase) => Promise<void>,
+): Promise<void> {
+  const directory = mkdtempSync(join(tmpdir(), "mop-assignment-route-"));
+  const config: MoPConfig = {
+    httpPort: 0,
+    mcpTransport: "stdio",
+    dbPath: join(directory, "mop.db"),
+    slotCount: 4,
+    pmPaneAddress: "0:0.0",
+    legacyRepositoryId: null,
+  };
+  const db = new MoPDatabase(config);
+  const app = new Hono();
+  registerAssignmentRoute(app, db);
+  try {
+    await run(app, db);
+  } finally {
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+const assignment = {
+  task: "route authority fixture",
+  repository_id: "github:repo-1",
+  issue: 10,
+  pr: 20,
+  branch: "fix/10",
+  head_sha: "a".repeat(40),
+  expected_epoch: 0,
+};
+
+function assignmentRequest(
+  authority?: string,
+): RequestInit {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (authority !== undefined) {
+    headers.set(PM_TRANSITION_ASSIGNMENT_HEADER, authority);
+  }
+  return {
+    method: "POST",
+    headers,
+    body: JSON.stringify(assignment),
+  };
+}
 
 test("only the guarded PM transition authority reaches REST assignment", () => {
   assert.equal(
@@ -16,6 +70,43 @@ test("only the guarded PM transition authority reaches REST assignment", () => {
   assert.equal(isPmTransitionAssignmentRequest(undefined), false);
   assert.equal(isPmTransitionAssignmentRequest("mop"), false);
   assert.equal(isPmTransitionAssignmentRequest("pm-transition"), false);
+});
+
+test("production assignment route enforces PM authority before mutation", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const initial = db.getSlot(1);
+
+    for (const authority of [undefined, "wrong-authority"]) {
+      const response = await app.request(
+        "/slots/1/assign",
+        assignmentRequest(authority),
+      );
+      assert.equal(response.status, 403);
+      assert.deepEqual(await response.json(), {
+        success: false,
+        conflict: true,
+        error: "assignment authority is required",
+        reason: "assignment_authority_required",
+      });
+      assert.deepEqual(db.getSlot(1), initial);
+      assert.equal(db.getEvents(1, 10, "slot_assigned").length, 0);
+    }
+
+    const authorized = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY),
+    );
+    assert.equal(authorized.status, 200);
+    const assigned = await authorized.json() as Record<string, unknown>;
+    assert.equal(assigned.occupied, true);
+    assert.equal(assigned.repository_id, assignment.repository_id);
+    assert.equal(assigned.issue, assignment.issue);
+    assert.equal(assigned.pr, assignment.pr);
+    assert.equal(assigned.branch_ref, `refs/heads/${assignment.branch}`);
+    assert.equal(assigned.head_sha, assignment.head_sha);
+    assert.equal(assigned.assignment_epoch, 1);
+    assert.equal(db.getEvents(1, 10, "slot_assigned").length, 1);
+  });
 });
 
 test("generic PATCH refuses every assignment identity field", () => {
