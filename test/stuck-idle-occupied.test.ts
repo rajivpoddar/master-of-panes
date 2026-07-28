@@ -42,10 +42,12 @@ interface Harness {
   events: EventLogEntry[];
   sends: string[];
   setActivity: (state: SlotActivityState) => void;
+  setSlotReads: (slots: SlotState[]) => void;
 }
 
 function harness(currentSlot: SlotState): Harness {
   let activity: SlotActivityState = "idle";
+  let slotReads: SlotState[] = [];
   let nextEventId = 2;
   const sends: string[] = [];
   const events: EventLogEntry[] = [{
@@ -63,7 +65,7 @@ function harness(currentSlot: SlotState): Harness {
     getExitPending: () => false,
     hasPendingClear: () => false,
     hasRecentSubagentDispatch: () => null,
-    getSlot: () => currentSlot,
+    getSlot: () => slotReads.shift() ?? currentSlot,
     getEvents: (_slot: number, limit: number, eventType?: string) =>
       events
         .filter((event) => !eventType || event.event_type === eventType)
@@ -104,6 +106,9 @@ function harness(currentSlot: SlotState): Harness {
     sends,
     setActivity: (state) => {
       activity = state;
+    },
+    setSlotReads: (slots) => {
+      slotReads = [...slots];
     },
   };
 }
@@ -187,6 +192,30 @@ test("requires current ownership, idle state, and an inactive turn", async () =>
       await h.detector.checkIdleOccupied(candidate);
       assert.deepEqual(h.sends, []);
     }
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("suppresses continuation when DND is enabled at the delivery boundary", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const initial = slot();
+    const h = harness(initial);
+    h.setSlotReads([
+      initial,
+      slot({ dnd: true }),
+    ]);
+
+    await h.detector.checkIdleOccupied(initial);
+
+    assert.deepEqual(h.sends, []);
+    const suppressed = h.events.filter(
+      (event) => event.event_type === "continue_suppressed_slot_state",
+    );
+    assert.equal(suppressed.length, 1);
+    assert.equal(JSON.parse(suppressed[0].payload).reason, "dnd");
   } finally {
     Date.now = originalNow;
   }

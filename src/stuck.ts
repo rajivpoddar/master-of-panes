@@ -63,6 +63,12 @@ function parseDbTimestampMs(timestamp: string): number {
   return new Date(timestamp + "Z").getTime();
 }
 
+type ContinueDeliveryResult = {
+  sent: boolean;
+  reason: "sent" | "send_failed" | "slot_missing" | "released" | "dnd" | "identity_changed";
+  slot: SlotState | null;
+};
+
 export class StuckDetector {
   private readonly STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes no output
   private readonly IDLE_OCCUPIED_THRESHOLD_MS = 5 * 60 * 1000;
@@ -412,20 +418,25 @@ export class StuckDetector {
       return;
     }
 
-    const sent = await this.relay.sendToSlotAsync(
-      slot.slot,
-      "continue your work",
-      false
-    );
+    const delivery = await this.sendContinueIfAllowed(slot.slot, {
+      assignment_epoch: slot.assignment_epoch,
+      assigned_at: slot.assigned_at,
+    });
+    if (delivery.reason === "dnd" || delivery.reason === "released" ||
+        delivery.reason === "slot_missing" || delivery.reason === "identity_changed") {
+      return;
+    }
+    const sent = delivery.sent;
+    const deliveredSlot = delivery.slot ?? current;
     const payload = {
       command: "continue your work",
       assignment_epoch: slot.assignment_epoch,
       idle_anchor: anchor.timestamp,
       idle_anchor_source: anchor.source,
       idle_age_ms: idleAgeMs,
-      issue: current.issue,
-      pr: current.pr,
-      branch: current.branch,
+      issue: deliveredSlot.issue,
+      pr: deliveredSlot.pr,
+      branch: deliveredSlot.branch,
     };
     this.db.logEvent(
       slot.slot,
@@ -438,6 +449,59 @@ export class StuckDetector {
       `[idle-occupied] slot=${slot.slot} ${sent ? "injected" : "failed"} ` +
       `epoch=${slot.assignment_epoch} anchor=${anchor.timestamp}`
     );
+  }
+
+  /**
+   * Final guard for detector-owned continuation nudges. The relay intentionally
+   * supports unconditional recovery sends, so every stuck-detector path must
+   * re-read authoritative slot state immediately before asking it to type.
+   */
+  private async sendContinueIfAllowed(
+    slotNum: number,
+    expected?: { assignment_epoch?: number; assigned_at?: string | null },
+  ): Promise<ContinueDeliveryResult> {
+    const current = this.db.getSlot(slotNum) ?? null;
+    let reason: ContinueDeliveryResult["reason"] | null = null;
+    if (!current) {
+      reason = "slot_missing";
+    } else if (!current.occupied) {
+      reason = "released";
+    } else if (current.dnd) {
+      reason = "dnd";
+    } else if (
+      expected &&
+      (current.assignment_epoch !== expected.assignment_epoch ||
+        current.assigned_at !== expected.assigned_at)
+    ) {
+      reason = "identity_changed";
+    }
+
+    if (reason) {
+      this.db.logEvent(slotNum, "continue_suppressed_slot_state", "Stuck", null, {
+        command: "continue your work",
+        reason,
+        occupied: current?.occupied ?? false,
+        dnd: current?.dnd ?? false,
+        expected_assignment_epoch: expected?.assignment_epoch ?? null,
+        observed_assignment_epoch: current?.assignment_epoch ?? null,
+      });
+      debugLog(
+        `[stuck-continue] slot=${slotNum} suppress=${reason} ` +
+        `occupied=${current?.occupied ?? false} dnd=${current?.dnd ?? false}`
+      );
+      return { sent: false, reason, slot: current };
+    }
+
+    const sent = await this.relay.sendToSlotAsync(
+      slotNum,
+      "continue your work",
+      false
+    );
+    return {
+      sent,
+      reason: sent ? "sent" : "send_failed",
+      slot: current,
+    };
   }
 
   private getIdleOccupiedAnchor(
@@ -851,10 +915,15 @@ export class StuckDetector {
     }
 
     // 8. Window expired AND retry_count < cap — inject "continue your work".
-    // Verify slot is occupied + not DND (caller already filtered, defensive).
-    const dbSlot = this.db.getSlot(slotNum);
-    if (!dbSlot?.occupied || dbSlot.dnd) {
-      const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} SKIPPED (occupied=${!!dbSlot?.occupied} dnd=${!!dbSlot?.dnd}) retry=${state.retry_count}`;
+    // The final helper re-reads DND/ownership at the delivery boundary.
+    const delivery = await this.sendContinueIfAllowed(slotNum);
+    if (
+      delivery.reason === "dnd" ||
+      delivery.reason === "released" ||
+      delivery.reason === "slot_missing" ||
+      delivery.reason === "identity_changed"
+    ) {
+      const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} SKIPPED (reason=${delivery.reason} occupied=${!!delivery.slot?.occupied} dnd=${!!delivery.slot?.dnd}) retry=${state.retry_count}`;
       debugLog(msg);
       try {
         await appendFile(logFile, msg + "\n");
@@ -862,15 +931,9 @@ export class StuckDetector {
       return;
     }
 
-    // 9. Inject via tmux paste-buffer. force=true to land regardless of pane
-    //    prompt state — same shape as SessionStart:compact direct-recovery.
-    let ok = false;
-    try {
-      ok = this.relay.sendToSlot(slotNum, "continue your work", true);
-    } catch (err) {
-      debugLog(`[api500-nudge] slot=${slotNum} sendToSlot threw: ${err}`);
-      ok = false;
-    }
+    // 9. The guarded delivery uses the normal async relay path. DND is never
+    //    overridden by stuck recovery.
+    const ok = delivery.sent;
 
     if (!ok) {
       const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} FAILED (sendToSlot returned false) retry=${state.retry_count} — state NOT ticked; will retry next tick`;
