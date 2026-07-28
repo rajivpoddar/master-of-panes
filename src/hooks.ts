@@ -186,6 +186,13 @@ export class HookProcessor {
   private static readonly PROMISED_ACTION_CONTINUE_DEDUP_MS = 5 * 60 * 1000;
   private static readonly SLOT_PROMISE_AUDIT_SCRIPT =
     "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/slot-promised-action-audit.py";
+  /**
+   * Live transcripts are multi-megabyte JSONL files. Under host CPU pressure the
+   * otherwise sub-second scanner has exceeded the old 3s wall-clock budget and
+   * failed open. Keep the child bounded, but tolerate the event-loop lag already
+   * observed by the health monitor.
+   */
+  private static readonly SLOT_PROMISE_AUDIT_TIMEOUT_MS = 15_000;
 
   constructor(
     private db: MoPDatabase,
@@ -1125,7 +1132,10 @@ export class HookProcessor {
         "--cwd",
         this.shellQuote(cwd),
       ].join(" ");
-      const result = await execShell(cmd, { timeout: 3_000, maxBuffer: 16 * 1024 });
+      const result = await execShell(cmd, {
+        timeout: HookProcessor.SLOT_PROMISE_AUDIT_TIMEOUT_MS,
+        maxBuffer: 16 * 1024,
+      });
       stdout = result.stdout.trim();
     } catch (err) {
       this.db.logEvent(slotNum, "slot_promised_action_scan_failed", source, null, {

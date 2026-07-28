@@ -112,3 +112,64 @@ test("hook checkout synchronization never adopts an unregistered branch", async 
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("Stop debounce tolerates a four-second promised-action scanner under host pressure", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-promise-audit-timeout-test-"));
+  const auditScript = join(directory, "slow-audit.py");
+  const originalAuditScript = (HookProcessor as any).SLOT_PROMISE_AUDIT_SCRIPT;
+  const originalIdleDebounce = (HookProcessor as any).IDLE_DEBOUNCE_MS;
+  try {
+    writeFileSync(
+      auditScript,
+      [
+        "import time",
+        "time.sleep(4)",
+        'print("BLOCK\\t[SLOT_PROMISE_ACTION_REQUIRED] continue the promised work")',
+        "",
+      ].join("\n"),
+    );
+
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    db.assignSlot(
+      1,
+      "issue",
+      "github:repo-1",
+      10,
+      "main",
+      "turn-a",
+      null,
+      "a".repeat(40),
+      0,
+    );
+    const sent: Array<{ slot: number; command: string; force: boolean }> = [];
+    const relay = {
+      sendToSlot(slot: number, command: string, force: boolean) {
+        sent.push({ slot, command, force });
+      },
+    } as TmuxRelay;
+    const processor = new HookProcessor(db, relay);
+    (HookProcessor as any).SLOT_PROMISE_AUDIT_SCRIPT = auditScript;
+    (HookProcessor as any).IDLE_DEBOUNCE_MS = 0;
+
+    await processor.process(1, {
+      type: "Stop",
+      session_id: "turn-a",
+      transcript_path: join(directory, "transcript.jsonl"),
+      cwd: directory,
+    });
+    const deadline = Date.now() + 10_000;
+    while (sent.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    assert.deepEqual(sent, [{ slot: 1, command: "continue your work", force: true }]);
+    assert.equal(db.getEvents(1, 10, "Stop").length, 1);
+    assert.equal(db.getEvents(1, 10, "slot_idle_debounce_started").length, 1);
+    assert.equal(db.getEvents(1, 10, "slot_promised_action_scan_failed").length, 0);
+    assert.equal(db.getEvents(1, 10, "slot_promised_action_continue_injected").length, 1);
+  } finally {
+    (HookProcessor as any).SLOT_PROMISE_AUDIT_SCRIPT = originalAuditScript;
+    (HookProcessor as any).IDLE_DEBOUNCE_MS = originalIdleDebounce;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
