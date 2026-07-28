@@ -11,7 +11,6 @@
  * - mop_slot_history: Get recent events for a slot
  * - mop_recent_activity: Get all events in last N minutes
  * - mop_send_to_slot: Send a command to a slot
- * - mop_assign_slot: Assign a task to a slot
  * - mop_release_slot: Release a slot (mark free)
  * - mop_set_dnd: Set/clear DND on a slot
  * - mop_capture_output: Capture live tmux output from a slot + busy/idle status
@@ -297,41 +296,6 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
               : `✗ Slot ${slot} raw send failed (busy or pane unreachable). Use force: true or check pane.`,
           },
         ],
-      };
-    }
-  );
-
-  // ─── mop_assign_slot ───────────────────────────────────
-
-  server.tool(
-    "mop_assign_slot",
-    "Assign a task to a slot. Sets status to active, stores task/issue/pr/branch metadata. Optionally set a human-readable name.",
-    {
-      slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
-      task: z.string().describe("Task description"),
-      issue: z.number().int().nullable().default(null).describe("GitHub issue number"),
-      pr: z.number().int().nullable().default(null).describe("GitHub PR number"),
-      branch: z.string().nullable().default(null).describe("Git branch name"),
-      session_id: z.string().nullable().default(null).describe("Claude Code session ID"),
-      name: z.string().nullable().default(null).describe("Human-readable slot name (e.g., 'Rohini')"),
-      head_sha: z.string().nullable().default(null).describe("Full assigned PR head SHA"),
-      expected_epoch: z.number().int().nonnegative().describe("Current MoP assignment epoch"),
-    },
-    async ({ slot, task, issue, pr, branch, session_id, name, head_sha, expected_epoch }) => {
-      const result = db.assignSlot(slot, task, issue, branch, session_id, pr, head_sha, expected_epoch);
-      if (!result.ok) {
-        return {
-          isError: true,
-          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
-        };
-      }
-      if (name !== null) {
-        db.updateSlot(slot, { name } as Partial<import("./types.js").SlotState>);
-      }
-      db.logEvent(slot, "slot_assigned", null, null, { task, issue, pr, branch, name });
-      const updated = db.getSlot(slot);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(updated, null, 2) }],
       };
     }
   );
@@ -1045,6 +1009,9 @@ if (process.argv[1]?.endsWith("mcp.ts") || process.argv[1]?.endsWith("mcp.js")) 
   const config: MoPConfig = {
     ...DEFAULT_CONFIG,
     dbPath: process.env.MOP_DB_PATH ?? DEFAULT_CONFIG.dbPath,
+    legacyRepositoryId:
+      process.env.MOP_LEGACY_REPOSITORY_ID
+      ?? DEFAULT_CONFIG.legacyRepositoryId,
   };
   startMcpServer(config).catch(console.error);
 }

@@ -14,9 +14,11 @@ function withDatabase(
   const path = join(directory, "mop.db");
   const config: MoPConfig = {
     httpPort: 0,
+    mcpTransport: "stdio",
     dbPath: path,
     slotCount: 4,
     pmPaneAddress: "0:0.0",
+    legacyRepositoryId: null,
   };
   const db = new MoPDatabase(config);
   try {

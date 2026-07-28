@@ -81,10 +81,14 @@ export interface SlotState {
   session_id: string | null;
   /** Current task description */
   task: string | null;
+  /** Immutable repository identity for the current assignment */
+  repository_id: string | null;
   /** GitHub issue number */
   issue: number | null;
-  /** Git branch name */
+  /** Git branch name retained for compatibility and display */
   branch: string | null;
+  /** Canonical full branch ref used for assignment identity */
+  branch_ref: string | null;
   /** PR number if one exists */
   pr: number | null;
   /** Full commit SHA for the assigned PR head, when applicable */
@@ -178,6 +182,11 @@ export interface MoPConfig {
   pmPaneAddress: string;
   /** Number of dev slots */
   slotCount: number;
+  /**
+   * Immutable repository identity used only to backfill occupied rows created
+   * before repository-scoped assignment identity existed.
+   */
+  legacyRepositoryId: string | null;
 }
 
 export const DEFAULT_CONFIG: MoPConfig = {
@@ -186,4 +195,5 @@ export const DEFAULT_CONFIG: MoPConfig = {
   dbPath: "./data/mop.db",
   pmPaneAddress: "0:0.0",
   slotCount: 4,
+  legacyRepositoryId: null,
 };

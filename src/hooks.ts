@@ -1744,13 +1744,19 @@ export class HookProcessor {
           note: "Plan-ready detection retired — slot self-reviews via /codex-plan-review",
         });
 
-        // Auto-assign slot if not already occupied (extract issue from task)
+        // Assignment identity is owned by the guarded PM-transition boundary.
+        // A hook can observe work on a free slot but cannot synthesize a claim.
         const slot = this.db.getSlot(slotNum);
         const issueMatch = slot?.task?.match(/#(\d+)/);
         const issueNum = issueMatch ? parseInt(issueMatch[1], 10) : 0;
         if (!slot?.occupied && issueNum > 0) {
-          const taskLabel = slot?.task || `#${issueNum}`;
-          this.db.assignSlot(slotNum, taskLabel, issueNum, null, null, null, null, slot?.assignment_epoch ?? 0);
+          this.db.logEvent(
+            slotNum,
+            "assignment_bypass_refused",
+            "PostToolUse",
+            payload.tool_name ?? null,
+            { issue: issueNum, source: "plan_file_write" }
+          );
         }
 
         // Don't early return — let normal activity tracking classify this as "coding"
@@ -1844,15 +1850,14 @@ export class HookProcessor {
     if (payload.tool_name === "AskUserQuestion") {
       const slot = this.db.getSlot(slotNum);
       this.db.updateSlot(slotNum, { activity: "waiting_for_input" });
-      // Auto-assign if slot is asking questions but not marked occupied
+      // Hooks may not create assignment identity. Preserve the observation for
+      // PM reconciliation instead of claiming the slot directly.
       if (!slot?.occupied) {
-        const taskLabel = slot?.task || "awaiting input";
         const issueMatch = slot?.task?.match(/#(\d+)/);
         const issueNum = issueMatch ? parseInt(issueMatch[1], 10) : null;
-        this.db.assignSlot(slotNum, taskLabel, issueNum, null, null, null, null, slot?.assignment_epoch ?? 0);
-        this.db.logEvent(slotNum, "auto_assigned_ask_user", "PostToolUse", "AskUserQuestion", {
+        this.db.logEvent(slotNum, "assignment_bypass_refused", "PostToolUse", "AskUserQuestion", {
           issue: issueNum,
-          reason: "AskUserQuestion detected but slot not occupied",
+          source: "ask_user_question",
         });
       }
     }

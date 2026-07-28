@@ -18,6 +18,11 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { MoPDatabase } from "./db.js";
+import {
+  assignmentIdentityPatchFields,
+  isPmTransitionAssignmentRequest,
+  PM_TRANSITION_ASSIGNMENT_HEADER,
+} from "./assignmentAuthority.js";
 import { TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
@@ -36,6 +41,9 @@ const config: MoPConfig = {
   ...DEFAULT_CONFIG,
   httpPort: parseInt(process.env.MOP_PORT ?? "3100", 10),
   dbPath: process.env.MOP_DB_PATH ?? DEFAULT_CONFIG.dbPath,
+  legacyRepositoryId:
+    process.env.MOP_LEGACY_REPOSITORY_ID
+    ?? DEFAULT_CONFIG.legacyRepositoryId,
 };
 
 // ─── Initialize ──────────────────────────────────────────
@@ -890,7 +898,17 @@ app.patch("/slots/:slotNum", async (c) => {
     return c.json({ error: "Invalid slot number" }, 400);
   }
 
-  const updates = await c.req.json();
+  const updates = await c.req.json() as Record<string, unknown>;
+  const identityFields = assignmentIdentityPatchFields(updates);
+  if (identityFields.length > 0) {
+    return c.json({
+      success: false,
+      conflict: true,
+      error: "assignment identity must use the guarded assign/release endpoints",
+      reason: "assignment_identity_patch_refused",
+      identity_fields: identityFields,
+    }, 409);
+  }
   const current = db.getSlot(slotParse.data);
   if (updates?.dnd === true && current && !current.occupied) {
     updates.dnd = false;
@@ -912,6 +930,16 @@ app.post("/slots/:slotNum/assign", async (c) => {
   if (!slotParse.success) {
     return c.json({ error: "Invalid slot number" }, 400);
   }
+  if (!isPmTransitionAssignmentRequest(
+    c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER)
+  )) {
+    return c.json({
+      success: false,
+      conflict: true,
+      error: "assignment authority is required",
+      reason: "assignment_authority_required",
+    }, 403);
+  }
 
   const body = await c.req.json();
   if (!Number.isInteger(body.expected_epoch)) {
@@ -919,10 +947,15 @@ app.post("/slots/:slotNum/assign", async (c) => {
   }
   const rawPr = body.pr ?? null;
   const pr = rawPr === null ? null : Number(rawPr);
+  const rawIssue = body.issue ?? null;
+  const issue = rawIssue === null ? null : Number(rawIssue);
   const result = db.assignSlot(
     slotParse.data,
     body.task ?? "",
-    body.issue ?? null,
+    body.repository_id ?? null,
+    typeof issue === "number" && Number.isInteger(issue) && issue > 0
+      ? issue
+      : null,
     body.branch ?? null,
     body.session_id ?? null,
     Number.isInteger(pr) ? pr : null,

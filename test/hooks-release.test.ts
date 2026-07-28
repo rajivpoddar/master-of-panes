@@ -14,7 +14,7 @@ test("a stale PM-direction Stop cannot reclaim a released slot", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-release-stop-test-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    db.assignSlot(3, "PR rework", 6245, "fix/6245", "turn-a", 6411, "a".repeat(40), 0);
+    db.assignSlot(3, "PR rework", "github:repo-1", 6245, "fix/6245", "turn-a", 6411, "a".repeat(40), 0);
     db.finishAgentTurn(3, "turn-a");
     db.releaseSlot(3, 1);
     assert.equal(db.getSlot(3)?.occupied, false);
@@ -54,7 +54,7 @@ test("hook events synchronize exact-branch checkout heads without advancing the 
     }).trim();
 
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    db.assignSlot(1, "issue", 10, "fix/10-exact", "turn-a", null, null, 0);
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", "turn-a", null, null, 0);
     const processor = new HookProcessor(db, {} as TmuxRelay);
     await processor.process(1, {
       type: "PostToolUse",
@@ -97,7 +97,7 @@ test("hook checkout synchronization never adopts an unregistered branch", async 
     execFileSync("git", ["-C", directory, "commit", "-q", "-m", "first"]);
 
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    db.assignSlot(1, "issue", 10, "fix/10-exact", "turn-a", null, null, 0);
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", "turn-a", null, null, 0);
     const processor = new HookProcessor(db, {} as TmuxRelay);
     await processor.process(1, {
       type: "PostToolUse",

@@ -19,23 +19,81 @@ export interface SlotMutationResult {
   reason?:
     | "expected_epoch_required"
     | "epoch_mismatch"
+    | "invalid_repository_id"
+    | "invalid_branch_ref"
     | "target_already_assigned"
+    | "slot_already_occupied"
     | "slot_not_occupied"
     | "branch_mismatch";
   owner_slots?: number[];
+  owner_conflicts?: Array<{
+    slot: number;
+    matching_fields: Array<"issue" | "pr" | "branch_ref">;
+  }>;
+}
+
+interface BranchIdentity {
+  branch: string | null;
+  branchRef: string | null;
+}
+
+export function normalizeRepositoryId(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const repositoryId = String(value).trim();
+  if (
+    !repositoryId
+    || repositoryId.length > 255
+    || /[\u0000-\u001f\u007f\s]/.test(repositoryId)
+  ) {
+    return null;
+  }
+  return repositoryId;
+}
+
+export function normalizeBranchIdentity(
+  value: string | null
+): BranchIdentity | null {
+  if (value === null || value.trim() === "") {
+    return { branch: null, branchRef: null };
+  }
+
+  const raw = value.trim();
+  const branch = raw.startsWith("refs/heads/")
+    ? raw.slice("refs/heads/".length)
+    : raw;
+  if (
+    (raw.startsWith("refs/") && !raw.startsWith("refs/heads/"))
+    || !branch
+    || branch.startsWith("/")
+    || branch.endsWith("/")
+    || branch.endsWith(".")
+    || branch.includes("..")
+    || branch.includes("//")
+    || branch.includes("@{")
+    || branch.includes("\\")
+    || /[\u0000-\u0020\u007f~^:?*\[]/.test(branch)
+  ) {
+    return null;
+  }
+  return { branch, branchRef: `refs/heads/${branch}` };
 }
 
 export class MoPDatabase {
   private db: Database.Database;
 
-  constructor(config: MoPConfig) {
+  constructor(private readonly config: MoPConfig) {
     // Ensure data directory exists
     mkdirSync(dirname(config.dbPath), { recursive: true });
 
     this.db = new Database(config.dbPath);
     this.db.pragma("journal_mode = WAL"); // Better concurrent read perf
     this.db.pragma("foreign_keys = ON");
-    this.init();
+    try {
+      this.init();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   private init(): void {
@@ -68,8 +126,10 @@ export class MoPDatabase {
         occupied INTEGER NOT NULL DEFAULT 0,
         session_id TEXT,
         task TEXT,
+        repository_id TEXT,
         issue INTEGER,
         branch TEXT,
+        branch_ref TEXT,
         pr INTEGER,
         head_sha TEXT,
         assignment_epoch INTEGER NOT NULL DEFAULT 0,
@@ -114,6 +174,14 @@ export class MoPDatabase {
     if (!columns.some((c) => c.name === "last_meaningful_work_at")) {
       this.db.exec("ALTER TABLE slots ADD COLUMN last_meaningful_work_at TEXT");
     }
+    if (!columns.some((c) => c.name === "repository_id")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN repository_id TEXT");
+    }
+    if (!columns.some((c) => c.name === "branch_ref")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN branch_ref TEXT");
+    }
+
+    this.migrateAssignmentIdentity();
 
     // PM busy-queue table — coalesce-on-key (slot, event_type) so the latest
     // enqueue per (slot, event_type) wins via INSERT OR REPLACE. Drained on
@@ -169,6 +237,83 @@ export class MoPDatabase {
     for (let i = 1; i <= 4; i++) {
       insertSlot.run(i, `0:0.${i}`);
     }
+  }
+
+  private migrateAssignmentIdentity(): void {
+    const legacyRepositoryId = this.configuredLegacyRepositoryId();
+    const legacyRows = this.db.prepare(`
+      SELECT slot, occupied, repository_id, branch, branch_ref
+      FROM slots
+      WHERE (occupied = 1 AND (repository_id IS NULL OR repository_id = ''))
+         OR (branch IS NOT NULL AND branch <> '' AND (branch_ref IS NULL OR branch_ref = ''))
+    `).all() as Array<{
+      slot: number;
+      occupied: number;
+      repository_id: string | null;
+      branch: string | null;
+      branch_ref: string | null;
+    }>;
+
+    this.db.transaction(() => {
+      for (const row of legacyRows) {
+        const branchIdentity = normalizeBranchIdentity(row.branch);
+        if (!branchIdentity) {
+          throw new Error(
+            `cannot migrate slot ${row.slot}: invalid legacy branch ${JSON.stringify(row.branch)}`
+          );
+        }
+        if (branchIdentity.branchRef && !row.branch_ref) {
+          this.db.prepare(`
+            UPDATE slots SET branch = ?, branch_ref = ? WHERE slot = ?
+          `).run(branchIdentity.branch, branchIdentity.branchRef, row.slot);
+        }
+        if (row.occupied === 1 && !row.repository_id) {
+          if (!legacyRepositoryId) {
+            throw new Error(
+              "MOP_LEGACY_REPOSITORY_ID is required to migrate occupied legacy slots"
+            );
+          }
+          this.db.prepare(`
+            UPDATE slots SET repository_id = ? WHERE slot = ?
+          `).run(legacyRepositoryId, row.slot);
+        }
+      }
+    })();
+
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_slots_occupied_repository_issue
+        ON slots(repository_id, issue)
+        WHERE occupied = 1
+          AND repository_id IS NOT NULL
+          AND repository_id <> ''
+          AND issue IS NOT NULL
+          AND issue > 0;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_slots_occupied_repository_pr
+        ON slots(repository_id, pr)
+        WHERE occupied = 1
+          AND repository_id IS NOT NULL
+          AND repository_id <> ''
+          AND pr IS NOT NULL
+          AND pr > 0;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_slots_occupied_repository_branch_ref
+        ON slots(repository_id, branch_ref)
+        WHERE occupied = 1
+          AND repository_id IS NOT NULL
+          AND repository_id <> ''
+          AND branch_ref IS NOT NULL
+          AND branch_ref <> '';
+    `);
+  }
+
+  private configuredLegacyRepositoryId(): string | null {
+    if (this.config.legacyRepositoryId === null) return null;
+    const repositoryId = normalizeRepositoryId(this.config.legacyRepositoryId);
+    if (!repositoryId) {
+      throw new Error("MOP_LEGACY_REPOSITORY_ID is invalid");
+    }
+    return repositoryId;
   }
 
   // ─── Event Log ───────────────────────────────────────────
@@ -300,11 +445,29 @@ export class MoPDatabase {
 
   updateSlot(slot: number, updates: Partial<SlotState>): void {
     const allowedFields = [
-      "name", "status", "occupied", "session_id", "task", "issue",
-      "branch", "pr", "head_sha", "assigned_at", "last_activity", "dnd", "idle", "activity",
+      "name", "session_id", "task", "last_activity", "dnd", "idle", "activity",
       "active_turn_id", "active_turn_started_at", "active_turn_state", "last_meaningful_work_at",
     ];
+    this.updateSlotFields(slot, updates, allowedFields);
+  }
 
+  private updateAssignmentState(
+    slot: number,
+    updates: Partial<SlotState>
+  ): void {
+    this.updateSlotFields(slot, updates, [
+      "status", "occupied", "session_id", "task", "repository_id", "issue",
+      "branch", "branch_ref", "pr", "head_sha", "assignment_epoch",
+      "assigned_at", "dnd", "idle", "activity", "active_turn_id",
+      "active_turn_started_at", "active_turn_state",
+    ]);
+  }
+
+  private updateSlotFields(
+    slot: number,
+    updates: Partial<SlotState>,
+    allowedFields: string[]
+  ): void {
     const sets: string[] = [];
     const values: unknown[] = [];
 
@@ -345,13 +508,15 @@ export class MoPDatabase {
       if (!current.occupied) {
         return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
       }
-      this.updateSlot(slot, {
+      this.updateAssignmentState(slot, {
         status: "free" as SlotStatus,
         occupied: false,
         session_id: null,
         task: null,
+        repository_id: null,
         issue: null,
         branch: null,
+        branch_ref: null,
         pr: null,
         head_sha: null,
         assigned_at: null,
@@ -369,6 +534,7 @@ export class MoPDatabase {
   assignSlot(
     slot: number,
     task: string,
+    repositoryId: string | number | null,
     issue: number | null,
     branch: string | null,
     sessionId: string | null,
@@ -376,8 +542,8 @@ export class MoPDatabase {
     headSha: string | null = null,
     expectedEpoch?: number
   ): SlotMutationResult {
+    const current = this.getSlot(slot);
     if (!Number.isInteger(expectedEpoch)) {
-      const current = this.getSlot(slot);
       return {
         ok: false,
         conflict: true,
@@ -386,6 +552,32 @@ export class MoPDatabase {
         reason: "expected_epoch_required",
       };
     }
+    const normalizedRepositoryId = normalizeRepositoryId(repositoryId);
+    if (!normalizedRepositoryId) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "invalid_repository_id",
+      };
+    }
+    const branchIdentity = normalizeBranchIdentity(branch);
+    if (!branchIdentity) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "invalid_branch_ref",
+      };
+    }
+    const normalizedIssue = Number.isInteger(issue) && Number(issue) > 0
+      ? Number(issue)
+      : null;
+    const normalizedPr = Number.isInteger(pr) && Number(pr) > 0
+      ? Number(pr)
+      : null;
 
     return this.db.transaction((): SlotMutationResult => {
       const current = this.getSlot(slot);
@@ -393,56 +585,161 @@ export class MoPDatabase {
       if (!current || epoch !== expectedEpoch) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
       }
-      const normalizedBranch = branch?.trim() || null;
-      const ownerSlots = this.db.prepare(`
-        SELECT slot
+      const idempotent = current.occupied
+        && current.repository_id === normalizedRepositoryId
+        && current.issue === normalizedIssue
+        && current.pr === normalizedPr
+        && current.branch_ref === branchIdentity.branchRef
+        && current.head_sha === headSha;
+      if (current.occupied) {
+        if (idempotent) {
+          return {
+            ok: true,
+            conflict: false,
+            assignment_epoch: epoch,
+            idempotent: true,
+          };
+        }
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_already_occupied",
+          owner_slots: [slot],
+        };
+      }
+
+      const owners = this.db.prepare(`
+        SELECT slot, issue, pr, branch_ref
         FROM slots
         WHERE occupied = 1
+          AND repository_id = ?
           AND slot != ?
           AND (
             (? IS NOT NULL AND pr = ?)
             OR (? IS NOT NULL AND issue = ?)
-            OR (? IS NOT NULL AND branch = ?)
+            OR (? IS NOT NULL AND branch_ref = ?)
           )
         ORDER BY slot
       `).all(
+        normalizedRepositoryId,
         slot,
-        pr, pr,
-        issue, issue,
-        normalizedBranch, normalizedBranch
-      ) as Array<{ slot: number }>;
-      if (ownerSlots.length > 0) {
+        normalizedPr, normalizedPr,
+        normalizedIssue, normalizedIssue,
+        branchIdentity.branchRef, branchIdentity.branchRef
+      ) as Array<{
+        slot: number;
+        issue: number | null;
+        pr: number | null;
+        branch_ref: string | null;
+      }>;
+      if (owners.length > 0) {
+        const ownerConflicts = owners.map((owner) => ({
+          slot: owner.slot,
+          matching_fields: [
+            ...(normalizedIssue !== null && owner.issue === normalizedIssue
+              ? ["issue" as const]
+              : []),
+            ...(normalizedPr !== null && owner.pr === normalizedPr
+              ? ["pr" as const]
+              : []),
+            ...(branchIdentity.branchRef !== null
+              && owner.branch_ref === branchIdentity.branchRef
+              ? ["branch_ref" as const]
+              : []),
+          ],
+        }));
         return {
           ok: false,
           conflict: true,
           assignment_epoch: epoch,
           idempotent: false,
           reason: "target_already_assigned",
-          owner_slots: ownerSlots.map((owner) => owner.slot),
+          owner_slots: ownerConflicts.map((owner) => owner.slot),
+          owner_conflicts: ownerConflicts,
         };
       }
-      const idempotent = current.occupied
-        && current.issue === issue
-        && current.pr === pr
-        && current.branch === branch
-        && current.head_sha === headSha;
-      const nextEpoch = idempotent ? epoch : epoch + 1;
-      this.updateSlot(slot, {
-        status: "active" as SlotStatus,
-        occupied: true,
-        session_id: sessionId,
-        task,
-        issue,
-        branch,
-        pr,
-        head_sha: headSha,
-        assigned_at: idempotent ? current.assigned_at : new Date().toISOString(),
-        dnd: false,
-      });
-      if (!idempotent) {
-        this.db.prepare("UPDATE slots SET assignment_epoch = ? WHERE slot = ?").run(nextEpoch, slot);
+
+      const nextEpoch = epoch + 1;
+      try {
+        this.updateAssignmentState(slot, {
+          status: "active" as SlotStatus,
+          occupied: true,
+          session_id: sessionId,
+          task,
+          repository_id: normalizedRepositoryId,
+          issue: normalizedIssue,
+          branch: branchIdentity.branch,
+          branch_ref: branchIdentity.branchRef,
+          pr: normalizedPr,
+          head_sha: headSha,
+          assignment_epoch: nextEpoch,
+          assigned_at: new Date().toISOString(),
+          dnd: false,
+        });
+      } catch (error) {
+        if (
+          error instanceof Error
+          && error.message.includes("UNIQUE constraint failed")
+        ) {
+          const racedOwners = this.db.prepare(`
+            SELECT slot, issue, pr, branch_ref
+            FROM slots
+            WHERE occupied = 1
+              AND repository_id = ?
+              AND slot != ?
+              AND (
+                (? IS NOT NULL AND pr = ?)
+                OR (? IS NOT NULL AND issue = ?)
+                OR (? IS NOT NULL AND branch_ref = ?)
+              )
+            ORDER BY slot
+          `).all(
+            normalizedRepositoryId,
+            slot,
+            normalizedPr, normalizedPr,
+            normalizedIssue, normalizedIssue,
+            branchIdentity.branchRef, branchIdentity.branchRef
+          ) as Array<{
+            slot: number;
+            issue: number | null;
+            pr: number | null;
+            branch_ref: string | null;
+          }>;
+          const ownerConflicts = racedOwners.map((owner) => ({
+            slot: owner.slot,
+            matching_fields: [
+              ...(normalizedIssue !== null && owner.issue === normalizedIssue
+                ? ["issue" as const]
+                : []),
+              ...(normalizedPr !== null && owner.pr === normalizedPr
+                ? ["pr" as const]
+                : []),
+              ...(branchIdentity.branchRef !== null
+                && owner.branch_ref === branchIdentity.branchRef
+                ? ["branch_ref" as const]
+                : []),
+            ],
+          }));
+          return {
+            ok: false,
+            conflict: true,
+            assignment_epoch: epoch,
+            idempotent: false,
+            reason: "target_already_assigned",
+            owner_slots: ownerConflicts.map((owner) => owner.slot),
+            owner_conflicts: ownerConflicts,
+          };
+        }
+        throw error;
       }
-      return { ok: true, conflict: false, assignment_epoch: nextEpoch, idempotent };
+      return {
+        ok: true,
+        conflict: false,
+        assignment_epoch: nextEpoch,
+        idempotent: false,
+      };
     })();
   }
 
@@ -489,7 +786,8 @@ export class MoPDatabase {
           reason: "slot_not_occupied",
         };
       }
-      if (current.branch !== branch) {
+      const branchIdentity = normalizeBranchIdentity(branch);
+      if (!branchIdentity || current.branch_ref !== branchIdentity.branchRef) {
         return {
           ok: false,
           conflict: true,
@@ -501,7 +799,7 @@ export class MoPDatabase {
 
       const idempotent = current.head_sha === headSha;
       if (!idempotent) {
-        this.updateSlot(slot, { head_sha: headSha });
+        this.updateAssignmentState(slot, { head_sha: headSha });
       }
       return {
         ok: true,
