@@ -540,7 +540,8 @@ export class MoPDatabase {
     sessionId: string | null,
     pr: number | null = null,
     headSha: string | null = null,
-    expectedEpoch?: number
+    expectedEpoch?: number,
+    allowIssueClaimAdoption = false
   ): SlotMutationResult {
     const current = this.getSlot(slot);
     if (!Number.isInteger(expectedEpoch)) {
@@ -591,6 +592,26 @@ export class MoPDatabase {
         && current.pr === normalizedPr
         && current.branch_ref === branchIdentity.branchRef
         && current.head_sha === headSha;
+      const issueClaimAdoption = allowIssueClaimAdoption
+        && current.occupied
+        && current.repository_id === normalizedRepositoryId
+        && current.issue === normalizedIssue
+        && normalizedIssue !== null
+        && normalizedPr !== null
+        && branchIdentity.branchRef !== null
+        && typeof headSha === "string"
+        && /^[0-9a-f]{40}$/i.test(headSha)
+        && current.active_turn_state === "inactive"
+        && !current.dnd;
+      if (allowIssueClaimAdoption && !current.occupied) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_not_occupied",
+        };
+      }
       if (current.occupied) {
         if (idempotent) {
           return {
@@ -600,14 +621,16 @@ export class MoPDatabase {
             idempotent: true,
           };
         }
-        return {
-          ok: false,
-          conflict: true,
-          assignment_epoch: epoch,
-          idempotent: false,
-          reason: "slot_already_occupied",
-          owner_slots: [slot],
-        };
+        if (!issueClaimAdoption) {
+          return {
+            ok: false,
+            conflict: true,
+            assignment_epoch: epoch,
+            idempotent: false,
+            reason: "slot_already_occupied",
+            owner_slots: [slot],
+          };
+        }
       }
 
       const owners = this.db.prepare(`
@@ -666,7 +689,7 @@ export class MoPDatabase {
         this.updateAssignmentState(slot, {
           status: "active" as SlotStatus,
           occupied: true,
-          session_id: sessionId,
+          session_id: issueClaimAdoption ? current.session_id : sessionId,
           task,
           repository_id: normalizedRepositoryId,
           issue: normalizedIssue,
@@ -741,6 +764,30 @@ export class MoPDatabase {
         idempotent: false,
       };
     })();
+  }
+
+  adoptIssueClaimSlot(
+    slot: number,
+    task: string,
+    repositoryId: string | number | null,
+    issue: number | null,
+    branch: string | null,
+    pr: number | null,
+    headSha: string | null,
+    expectedEpoch?: number
+  ): SlotMutationResult {
+    return this.assignSlot(
+      slot,
+      task,
+      repositoryId,
+      issue,
+      branch,
+      null,
+      pr,
+      headSha,
+      expectedEpoch,
+      true,
+    );
   }
 
   /**

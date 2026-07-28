@@ -65,4 +65,50 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
     const updated = db.getSlot(slotParse.data);
     return c.json(updated);
   });
+
+  app.post("/slots/:slotNum/adopt-issue-claim", async (c) => {
+    const slotParse = assignmentSlotParamSchema.safeParse(c.req.param("slotNum"));
+    if (!slotParse.success) {
+      return c.json({ error: "Invalid slot number" }, 400);
+    }
+    if (!isPmTransitionAssignmentRequest(
+      c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER)
+    )) {
+      return c.json({
+        success: false,
+        conflict: true,
+        error: "assignment authority is required",
+        reason: "assignment_authority_required",
+      }, 403);
+    }
+
+    const body = await c.req.json();
+    if (!Number.isInteger(body.expected_epoch)) {
+      return c.json({
+        success: false,
+        conflict: true,
+        error: "expected_epoch is required and must be an integer",
+      }, 409);
+    }
+    const result = db.adoptIssueClaimSlot(
+      slotParse.data,
+      body.task ?? "",
+      body.repository_id ?? null,
+      Number(body.issue),
+      body.branch ?? null,
+      Number(body.pr),
+      body.head_sha ?? null,
+      body.expected_epoch
+    );
+    if (!result.ok) {
+      return c.json({ success: false, ...result }, 409);
+    }
+
+    db.logEvent(slotParse.data, "slot_issue_claim_adopted", null, null, {
+      ...body,
+      assignment_epoch: result.assignment_epoch,
+      idempotent: result.idempotent,
+    });
+    return c.json(db.getSlot(slotParse.data));
+  });
 }

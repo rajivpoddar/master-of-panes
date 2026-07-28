@@ -148,6 +148,155 @@ test("release preserves epoch and hook turn state fails closed on mismatch", () 
   });
 });
 
+test("issue claim adoption rebinds the occupied tuple atomically", () => {
+  withDatabase((db) => {
+    assert.equal(
+      db.assignSlot(
+        1,
+        "placeholder",
+        "github:repo-1",
+        10,
+        "fix/10-pending",
+        "session-a",
+        null,
+        null,
+        0,
+      ).ok,
+      true,
+    );
+
+    const adopted = db.adoptIssueClaimSlot(
+      1,
+      "PR #20",
+      "github:repo-1",
+      10,
+      "fix/10-real",
+      20,
+      "a".repeat(40),
+      1,
+    );
+    assert.deepEqual(adopted, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 2,
+      idempotent: false,
+    });
+    assert.deepEqual(
+      {
+        occupied: db.getSlot(1)?.occupied,
+        repository_id: db.getSlot(1)?.repository_id,
+        issue: db.getSlot(1)?.issue,
+        pr: db.getSlot(1)?.pr,
+        branch: db.getSlot(1)?.branch,
+        head_sha: db.getSlot(1)?.head_sha,
+        session_id: db.getSlot(1)?.session_id,
+        assignment_epoch: db.getSlot(1)?.assignment_epoch,
+      },
+      {
+        occupied: true,
+        repository_id: "github:repo-1",
+        issue: 10,
+        pr: 20,
+        branch: "fix/10-real",
+        head_sha: "a".repeat(40),
+        session_id: "session-a",
+        assignment_epoch: 2,
+      },
+    );
+    assert.deepEqual(
+      db.adoptIssueClaimSlot(
+        1,
+        "ignored replay",
+        "github:repo-1",
+        10,
+        "refs/heads/fix/10-real",
+        20,
+        "a".repeat(40),
+        2,
+      ),
+      {
+        ok: true,
+        conflict: false,
+        assignment_epoch: 2,
+        idempotent: true,
+      },
+    );
+  });
+});
+
+test("issue claim adoption fails closed on stale, active, or different claims", () => {
+  withDatabase((db) => {
+    assert.equal(
+      db.adoptIssueClaimSlot(
+        2,
+        "free",
+        "github:repo-1",
+        10,
+        "fix/10-real",
+        20,
+        "a".repeat(40),
+        0,
+      ).reason,
+      "slot_not_occupied",
+    );
+    db.assignSlot(
+      1,
+      "placeholder",
+      "github:repo-1",
+      10,
+      "fix/10-pending",
+      null,
+      null,
+      null,
+      0,
+    );
+    assert.equal(
+      db.adoptIssueClaimSlot(
+        1,
+        "stale",
+        "github:repo-1",
+        10,
+        "fix/10-real",
+        20,
+        "a".repeat(40),
+        0,
+      ).reason,
+      "epoch_mismatch",
+    );
+
+    db.startAgentTurn(1, "turn-a");
+    assert.equal(
+      db.adoptIssueClaimSlot(
+        1,
+        "active",
+        "github:repo-1",
+        10,
+        "fix/10-real",
+        20,
+        "a".repeat(40),
+        1,
+      ).reason,
+      "slot_already_occupied",
+    );
+    db.finishAgentTurn(1, "turn-a");
+    assert.equal(
+      db.adoptIssueClaimSlot(
+        1,
+        "wrong issue",
+        "github:repo-1",
+        11,
+        "fix/11-real",
+        21,
+        "b".repeat(40),
+        1,
+      ).reason,
+      "slot_already_occupied",
+    );
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    assert.equal(db.getSlot(1)?.branch, "fix/10-pending");
+  });
+});
+
 test("assignment rejects a target already owned by another occupied slot", () => {
   withDatabase((db) => {
     const first = db.assignSlot(4, "original", "github:repo-1", 6735, "fix/6735-pending", null, 6737, "old-head", 0);

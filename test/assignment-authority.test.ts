@@ -50,6 +50,7 @@ const assignment = {
 
 function assignmentRequest(
   authority?: string,
+  body: Record<string, unknown> = assignment,
 ): RequestInit {
   const headers = new Headers({ "content-type": "application/json" });
   if (authority !== undefined) {
@@ -58,7 +59,7 @@ function assignmentRequest(
   return {
     method: "POST",
     headers,
-    body: JSON.stringify(assignment),
+    body: JSON.stringify(body),
   };
 }
 
@@ -70,6 +71,46 @@ test("only the guarded PM transition authority reaches REST assignment", () => {
   assert.equal(isPmTransitionAssignmentRequest(undefined), false);
   assert.equal(isPmTransitionAssignmentRequest("mop"), false);
   assert.equal(isPmTransitionAssignmentRequest("pm-transition"), false);
+});
+
+test("issue-claim adoption route is authority-gated and atomic", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const placeholder = {
+      ...assignment,
+      pr: null,
+      branch: "fix/10-pending",
+      head_sha: null,
+    };
+    const assigned = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, placeholder),
+    );
+    assert.equal(assigned.status, 200);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+
+    const adopt = { ...assignment, expected_epoch: 1 };
+    const denied = await app.request(
+      "/slots/1/adopt-issue-claim",
+      assignmentRequest(undefined, adopt),
+    );
+    assert.equal(denied.status, 403);
+    assert.equal(db.getSlot(1)?.branch, "fix/10-pending");
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+
+    const accepted = await app.request(
+      "/slots/1/adopt-issue-claim",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, adopt),
+    );
+    assert.equal(accepted.status, 200);
+    const adopted = await accepted.json() as Record<string, unknown>;
+    assert.equal(adopted.occupied, true);
+    assert.equal(adopted.issue, assignment.issue);
+    assert.equal(adopted.pr, assignment.pr);
+    assert.equal(adopted.branch, assignment.branch);
+    assert.equal(adopted.head_sha, assignment.head_sha);
+    assert.equal(adopted.assignment_epoch, 2);
+    assert.equal(db.getEvents(1, 10, "slot_issue_claim_adopted").length, 1);
+  });
 });
 
 test("production assignment route enforces PM authority before mutation", async () => {
