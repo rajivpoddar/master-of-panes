@@ -337,10 +337,10 @@ export class StuckDetector {
   }
 
   /**
-   * Inject one "continue your work or remind pm if blocked" message per idle
-   * episode for an occupied dev slot. The idle anchor comes from
-   * hook/reconciliation events rather than slots.last_activity because status
-   * reads also refresh last_activity.
+   * Inject one polite Hinglish continuation reminder per idle episode for an
+   * occupied dev slot. The idle anchor comes from hook/reconciliation events
+   * rather than slots.last_activity because status reads also refresh
+   * last_activity.
    */
   async checkIdleOccupied(slot: SlotState): Promise<void> {
     if (slot.slot < 1 || slot.slot > 4) return;
@@ -419,10 +419,14 @@ export class StuckDetector {
       return;
     }
 
-    const delivery = await this.sendContinueIfAllowed(slot.slot, {
-      assignment_epoch: slot.assignment_epoch,
-      assigned_at: slot.assigned_at,
-    });
+    const delivery = await this.sendContinueIfAllowed(
+      slot.slot,
+      {
+        assignment_epoch: slot.assignment_epoch,
+        assigned_at: slot.assigned_at,
+      },
+      "continue your work. if blocked, remind pm with details politely in hinglish"
+    );
     if (delivery.reason === "dnd" || delivery.reason === "released" ||
         delivery.reason === "slot_missing" || delivery.reason === "identity_changed") {
       return;
@@ -430,7 +434,7 @@ export class StuckDetector {
     const sent = delivery.sent;
     const deliveredSlot = delivery.slot ?? current;
     const payload = {
-      command: "continue your work or remind pm if blocked",
+      command: "continue your work. if blocked, remind pm with details politely in hinglish",
       assignment_epoch: slot.assignment_epoch,
       idle_anchor: anchor.timestamp,
       idle_anchor_source: anchor.source,
@@ -460,6 +464,7 @@ export class StuckDetector {
   private async sendContinueIfAllowed(
     slotNum: number,
     expected?: { assignment_epoch?: number; assigned_at?: string | null },
+    command = "continue your work or remind pm if blocked",
   ): Promise<ContinueDeliveryResult> {
     const current = this.db.getSlot(slotNum) ?? null;
     let reason: ContinueDeliveryResult["reason"] | null = null;
@@ -479,7 +484,7 @@ export class StuckDetector {
 
     if (reason) {
       this.db.logEvent(slotNum, "continue_suppressed_slot_state", "Stuck", null, {
-        command: "continue your work or remind pm if blocked",
+        command,
         reason,
         occupied: current?.occupied ?? false,
         dnd: current?.dnd ?? false,
@@ -495,7 +500,7 @@ export class StuckDetector {
 
     const sent = await this.relay.sendToSlotAsync(
       slotNum,
-      "continue your work or remind pm if blocked",
+      command,
       false
     );
     return {
