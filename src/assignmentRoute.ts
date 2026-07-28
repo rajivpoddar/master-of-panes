@@ -90,6 +90,34 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
         error: "expected_epoch is required and must be an integer",
       }, 409);
     }
+    if (
+      !Object.prototype.hasOwnProperty.call(body, "expected_current_pr")
+      || !Object.prototype.hasOwnProperty.call(body, "expected_current_branch_ref")
+      || !Object.prototype.hasOwnProperty.call(body, "expected_current_head_sha")
+      || !(
+        body.expected_current_pr === null
+        || (
+          Number.isInteger(body.expected_current_pr)
+          && Number(body.expected_current_pr) > 0
+        )
+      )
+      || typeof body.expected_current_branch_ref !== "string"
+      || !body.expected_current_branch_ref.startsWith("refs/heads/")
+      || !(
+        body.expected_current_head_sha === null
+        || (
+          typeof body.expected_current_head_sha === "string"
+          && /^[0-9a-f]{40}$/i.test(body.expected_current_head_sha)
+        )
+      )
+    ) {
+      return c.json({
+        success: false,
+        conflict: true,
+        error: "observed current tuple is required",
+        reason: "observed_tuple_mismatch",
+      }, 409);
+    }
     const result = db.adoptIssueClaimSlot(
       slotParse.data,
       body.task ?? "",
@@ -98,6 +126,9 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
       body.branch ?? null,
       Number(body.pr),
       body.head_sha ?? null,
+      body.expected_current_pr ?? null,
+      body.expected_current_branch_ref,
+      body.expected_current_head_sha ?? null,
       body.expected_epoch
     );
     if (!result.ok) {

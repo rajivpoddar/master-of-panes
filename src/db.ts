@@ -24,7 +24,8 @@ export interface SlotMutationResult {
     | "target_already_assigned"
     | "slot_already_occupied"
     | "slot_not_occupied"
-    | "branch_mismatch";
+    | "branch_mismatch"
+    | "observed_tuple_mismatch";
   owner_slots?: number[];
   owner_conflicts?: Array<{
     slot: number;
@@ -35,6 +36,12 @@ export interface SlotMutationResult {
 interface BranchIdentity {
   branch: string | null;
   branchRef: string | null;
+}
+
+interface ExpectedAssignmentTuple {
+  pr: number | null;
+  branchRef: string;
+  headSha: string | null;
 }
 
 export function normalizeRepositoryId(value: unknown): string | null {
@@ -541,7 +548,8 @@ export class MoPDatabase {
     pr: number | null = null,
     headSha: string | null = null,
     expectedEpoch?: number,
-    allowIssueClaimAdoption = false
+    allowIssueClaimAdoption = false,
+    expectedCurrentTuple: ExpectedAssignmentTuple | null = null
   ): SlotMutationResult {
     const current = this.getSlot(slot);
     if (!Number.isInteger(expectedEpoch)) {
@@ -592,8 +600,13 @@ export class MoPDatabase {
         && current.pr === normalizedPr
         && current.branch_ref === branchIdentity.branchRef
         && current.head_sha === headSha;
+      const observedTupleMatches = expectedCurrentTuple !== null
+        && current.pr === expectedCurrentTuple.pr
+        && current.branch_ref === expectedCurrentTuple.branchRef
+        && current.head_sha === expectedCurrentTuple.headSha;
       const issueClaimAdoption = allowIssueClaimAdoption
         && current.occupied
+        && observedTupleMatches
         && current.repository_id === normalizedRepositoryId
         && current.issue === normalizedIssue
         && normalizedIssue !== null
@@ -610,6 +623,19 @@ export class MoPDatabase {
           assignment_epoch: epoch,
           idempotent: false,
           reason: "slot_not_occupied",
+        };
+      }
+      if (
+        allowIssueClaimAdoption
+        && current.occupied
+        && !observedTupleMatches
+      ) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "observed_tuple_mismatch",
         };
       }
       if (current.occupied) {
@@ -774,6 +800,9 @@ export class MoPDatabase {
     branch: string | null,
     pr: number | null,
     headSha: string | null,
+    expectedCurrentPr: number | null,
+    expectedCurrentBranchRef: string,
+    expectedCurrentHeadSha: string | null,
     expectedEpoch?: number
   ): SlotMutationResult {
     return this.assignSlot(
@@ -787,6 +816,11 @@ export class MoPDatabase {
       headSha,
       expectedEpoch,
       true,
+      {
+        pr: expectedCurrentPr,
+        branchRef: expectedCurrentBranchRef,
+        headSha: expectedCurrentHeadSha,
+      },
     );
   }
 

@@ -88,7 +88,13 @@ test("issue-claim adoption route is authority-gated and atomic", async () => {
     assert.equal(assigned.status, 200);
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
 
-    const adopt = { ...assignment, expected_epoch: 1 };
+    const adopt = {
+      ...assignment,
+      expected_epoch: 1,
+      expected_current_pr: null,
+      expected_current_branch_ref: "refs/heads/fix/10-pending",
+      expected_current_head_sha: null,
+    };
     const denied = await app.request(
       "/slots/1/adopt-issue-claim",
       assignmentRequest(undefined, adopt),

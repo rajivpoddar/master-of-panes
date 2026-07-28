@@ -173,6 +173,9 @@ test("issue claim adoption rebinds the occupied tuple atomically", () => {
       "fix/10-real",
       20,
       "a".repeat(40),
+      null,
+      "refs/heads/fix/10-pending",
+      null,
       1,
     );
     assert.deepEqual(adopted, {
@@ -212,6 +215,9 @@ test("issue claim adoption rebinds the occupied tuple atomically", () => {
         "refs/heads/fix/10-real",
         20,
         "a".repeat(40),
+        20,
+        "refs/heads/fix/10-real",
+        "a".repeat(40),
         2,
       ),
       {
@@ -235,6 +241,9 @@ test("issue claim adoption fails closed on stale, active, or different claims", 
         "fix/10-real",
         20,
         "a".repeat(40),
+        null,
+        "refs/heads/fix/10-real",
+        null,
         0,
       ).reason,
       "slot_not_occupied",
@@ -259,6 +268,9 @@ test("issue claim adoption fails closed on stale, active, or different claims", 
         "fix/10-real",
         20,
         "a".repeat(40),
+        null,
+        "refs/heads/fix/10-pending",
+        null,
         0,
       ).reason,
       "epoch_mismatch",
@@ -274,6 +286,9 @@ test("issue claim adoption fails closed on stale, active, or different claims", 
         "fix/10-real",
         20,
         "a".repeat(40),
+        null,
+        "refs/heads/fix/10-pending",
+        null,
         1,
       ).reason,
       "slot_already_occupied",
@@ -288,12 +303,56 @@ test("issue claim adoption fails closed on stale, active, or different claims", 
         "fix/11-real",
         21,
         "b".repeat(40),
+        null,
+        "refs/heads/fix/10-pending",
+        null,
         1,
       ).reason,
       "slot_already_occupied",
     );
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
     assert.equal(db.getSlot(1)?.branch, "fix/10-pending");
+  });
+});
+
+test("issue claim adoption rejects same-epoch checkout identity drift", () => {
+  withDatabase((db) => {
+    assert.equal(
+      db.assignSlot(
+        1,
+        "placeholder",
+        "github:repo-1",
+        10,
+        "fix/10-real",
+        null,
+        null,
+        null,
+        0,
+      ).ok,
+      true,
+    );
+    assert.equal(
+      db.syncSlotCheckout(1, "fix/10-real", "b".repeat(40), 1).ok,
+      true,
+    );
+
+    const result = db.adoptIssueClaimSlot(
+      1,
+      "stale observation",
+      "github:repo-1",
+      10,
+      "fix/10-real",
+      20,
+      "a".repeat(40),
+      null,
+      "refs/heads/fix/10-real",
+      null,
+      1,
+    );
+    assert.equal(result.reason, "observed_tuple_mismatch");
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    assert.equal(db.getSlot(1)?.pr, null);
+    assert.equal(db.getSlot(1)?.head_sha, "b".repeat(40));
   });
 });
 
