@@ -337,9 +337,10 @@ export class StuckDetector {
   }
 
   /**
-   * Inject one "continue your work" message per idle episode for an occupied
-   * dev slot. The idle anchor comes from hook/reconciliation events rather
-   * than slots.last_activity because status reads also refresh last_activity.
+   * Inject one "continue your work or remind pm if blocked" message per idle
+   * episode for an occupied dev slot. The idle anchor comes from
+   * hook/reconciliation events rather than slots.last_activity because status
+   * reads also refresh last_activity.
    */
   async checkIdleOccupied(slot: SlotState): Promise<void> {
     if (slot.slot < 1 || slot.slot > 4) return;
@@ -429,7 +430,7 @@ export class StuckDetector {
     const sent = delivery.sent;
     const deliveredSlot = delivery.slot ?? current;
     const payload = {
-      command: "continue your work",
+      command: "continue your work or remind pm if blocked",
       assignment_epoch: slot.assignment_epoch,
       idle_anchor: anchor.timestamp,
       idle_anchor_source: anchor.source,
@@ -478,7 +479,7 @@ export class StuckDetector {
 
     if (reason) {
       this.db.logEvent(slotNum, "continue_suppressed_slot_state", "Stuck", null, {
-        command: "continue your work",
+        command: "continue your work or remind pm if blocked",
         reason,
         occupied: current?.occupied ?? false,
         dnd: current?.dnd ?? false,
@@ -494,7 +495,7 @@ export class StuckDetector {
 
     const sent = await this.relay.sendToSlotAsync(
       slotNum,
-      "continue your work",
+      "continue your work or remind pm if blocked",
       false
     );
     return {
@@ -795,10 +796,10 @@ export class StuckDetector {
    *     next_nudge_at: now + 120s, last_500_ts}; suppress this tick.
    *   - In backoff window (now < next_nudge_at): suppress.
    *   - Window expired (now >= next_nudge_at) AND retry_count < cap:
-   *     direct-inject "continue your work" via relay.sendToSlot(slot,
-   *     "continue your work", true). On success, bump retry_count + reschedule
-   *     next_nudge_at against next backoff index. On failure, do NOT bump —
-   *     next 60s tick will retry the injection.
+   *     inject "continue your work or remind pm if blocked" through the guarded
+   *     async relay. On success, bump retry_count + reschedule next_nudge_at
+   *     against the next backoff index. On failure, do NOT bump — the next 60s
+   *     tick will retry the injection.
    *   - retry_count >= cap: log PERSISTENT line; don't auto-nudge.
    *
    * On non-detection AND state file exists: slot recovered (error scrolled
@@ -914,7 +915,7 @@ export class StuckDetector {
       return;
     }
 
-    // 8. Window expired AND retry_count < cap — inject "continue your work".
+    // 8. Window expired and under cap — inject the guarded continuation.
     // The final helper re-reads DND/ownership at the delivery boundary.
     const delivery = await this.sendContinueIfAllowed(slotNum);
     if (
