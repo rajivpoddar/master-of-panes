@@ -122,7 +122,7 @@ test("nudges an occupied idle dev slot once per idle episode", async () => {
     await h.detector.checkIdleOccupied(slot());
 
     assert.deepEqual(h.sends, [
-      "continue your work. if blocked, remind pm with details politely in hinglish",
+      "continue your work. if blocked, remind pm with details politely",
     ]);
     const injected = h.events.filter(
       (event) => event.event_type === "idle_occupied_continue_injected",
@@ -130,7 +130,7 @@ test("nudges an occupied idle dev slot once per idle episode", async () => {
     assert.equal(injected.length, 1);
     assert.deepEqual(JSON.parse(injected[0].payload), {
       command:
-        "continue your work. if blocked, remind pm with details politely in hinglish",
+        "continue your work. if blocked, remind pm with details politely",
       assignment_epoch: 4,
       idle_anchor: OLD_IDLE,
       idle_anchor_source: "Stop",

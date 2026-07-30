@@ -337,7 +337,7 @@ export class StuckDetector {
   }
 
   /**
-   * Inject one polite Hinglish continuation reminder per idle episode for an
+   * Inject one polite continuation reminder per idle episode for an
    * occupied dev slot. The idle anchor comes from hook/reconciliation events
    * rather than slots.last_activity because status reads also refresh
    * last_activity.
@@ -425,7 +425,7 @@ export class StuckDetector {
         assignment_epoch: slot.assignment_epoch,
         assigned_at: slot.assigned_at,
       },
-      "continue your work. if blocked, remind pm with details politely in hinglish"
+      "continue your work. if blocked, remind pm with details politely"
     );
     if (delivery.reason === "dnd" || delivery.reason === "released" ||
         delivery.reason === "slot_missing" || delivery.reason === "identity_changed") {
@@ -434,7 +434,7 @@ export class StuckDetector {
     const sent = delivery.sent;
     const deliveredSlot = delivery.slot ?? current;
     const payload = {
-      command: "continue your work. if blocked, remind pm with details politely in hinglish",
+      command: "continue your work. if blocked, remind pm with details politely",
       assignment_epoch: slot.assignment_epoch,
       idle_anchor: anchor.timestamp,
       idle_anchor_source: anchor.source,
