@@ -917,7 +917,10 @@ export class MoPDatabase {
     const current = this.getSlot(slot);
     if (!current) return;
     if (turnId && current.active_turn_id && turnId !== current.active_turn_id) {
-      this.updateSlot(slot, { active_turn_state: "indeterminate" });
+      this.updateSlot(slot, {
+        active_turn_state: "indeterminate",
+        idle: false,
+      });
       return;
     }
     this.updateSlot(slot, {

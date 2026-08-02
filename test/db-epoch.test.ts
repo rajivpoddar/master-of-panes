@@ -138,6 +138,7 @@ test("release preserves epoch and hook turn state fails closed on mismatch", () 
     assert.equal(db.getSlot(1)?.active_turn_state, "active");
     db.finishAgentTurn(1, "turn-b");
     assert.equal(db.getSlot(1)?.active_turn_state, "indeterminate");
+    assert.equal(db.getSlot(1)?.idle, false);
     db.finishAgentTurn(1, "turn-a");
     assert.equal(db.getSlot(1)?.active_turn_state, "inactive");
 

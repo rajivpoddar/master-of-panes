@@ -1920,13 +1920,35 @@ export class HookProcessor {
         });
       }
 
-      if (slot?.occupied) {
+      // Claude Code can reach an idle prompt without emitting Stop/SessionEnd.
+      // Close only the matching session's turn so stale notifications cannot
+      // make a newer turn eligible for an idle-occupied nudge.
+      if (payload.session_id) {
+        this.db.finishAgentTurn(slotNum, payload.session_id);
+        const finishedSlot = this.db.getSlot(slotNum);
+        this.db.logEvent(
+          slotNum,
+          finishedSlot?.active_turn_state === "inactive"
+            ? "idle_prompt_turn_finished"
+            : "idle_prompt_turn_mismatch",
+          "Notification",
+          null,
+          {
+            notification_session_id: payload.session_id,
+            active_turn_id: finishedSlot?.active_turn_id ?? null,
+            active_turn_state: finishedSlot?.active_turn_state ?? "unknown",
+          },
+        );
+      }
+
+      const currentSlot = this.db.getSlot(slotNum);
+      if (currentSlot?.occupied) {
         // idle_prompt is a strong idle signal, but it still has to dwell before
         // becoming a PM-visible state transition. The debounce callback applies
         // the same subagent/recent-tool gates as Stop.
-        this.startIdleDebounceTimer(slotNum, slot, "Notification", payload);
+        this.startIdleDebounceTimer(slotNum, currentSlot, "Notification", payload);
       } else {
-        console.log(`[idle-debug] slot ${slotNum} Notification(idle_prompt) — skipping (occupied=${slot?.occupied}, dnd=${slot?.dnd})`);
+        console.log(`[idle-debug] slot ${slotNum} Notification(idle_prompt) — skipping (occupied=${currentSlot?.occupied}, dnd=${currentSlot?.dnd})`);
       }
     }
 
