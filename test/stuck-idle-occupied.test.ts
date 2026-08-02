@@ -9,12 +9,17 @@ import type { EventLogEntry, SlotState } from "../src/types.js";
 
 const NOW = Date.parse("2026-07-27T02:30:00.000Z");
 const OLD_IDLE = "2026-07-27T02:24:00.000";
+const NEW_IDLE_PROMPT = "2026-07-27T02:24:30.000";
 
-function expectedNudge(waitAgeMinutes: number, urgency: string): string {
+function expectedNudge(
+  waitAgeMinutes: number,
+  urgency: string,
+  idleAnchor = OLD_IDLE,
+): string {
   return (
     "Use Skill(pm-wait-nudge) now with slot=2 assignment_epoch=4 pr=7001 " +
     "issue=7000 branch=fix/7000 head=" + "a".repeat(40) +
-    ` wait_started_at=${OLD_IDLE} wait_age_minutes=${waitAgeMinutes} ` +
+    ` wait_started_at=${idleAnchor} wait_age_minutes=${waitAgeMinutes} ` +
     `urgency=${urgency}. Classify PM_WAIT vs LOCAL_CONTINUE. If ` +
     "LOCAL_CONTINUE, resume the existing work now; API timeouts and " +
     "interrupted local work are not PM waits."
@@ -151,6 +156,53 @@ test("nudges an occupied idle dev slot once per idle episode", async () => {
       pr: 7001,
       branch: "fix/7000",
     });
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("a matching idle prompt starts a new idle episode after an earlier nudge", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const h = harness(slot());
+    h.events.push(
+      {
+        id: 2,
+        timestamp: "2026-07-27T02:29:00.000",
+        slot: 2,
+        event_type: "idle_occupied_continue_injected",
+        hook_type: "Stuck",
+        tool_name: null,
+        payload: JSON.stringify({
+          assignment_epoch: 4,
+          idle_anchor: OLD_IDLE,
+        }),
+        processed: false,
+      },
+      {
+        id: 3,
+        timestamp: NEW_IDLE_PROMPT,
+        slot: 2,
+        event_type: "idle_prompt_turn_finished",
+        hook_type: "Notification",
+        tool_name: null,
+        payload: "{}",
+        processed: false,
+      },
+    );
+
+    await h.detector.checkIdleOccupied(slot());
+
+    assert.deepEqual(h.sends, [
+      expectedNudge(5, "REMINDER", NEW_IDLE_PROMPT),
+    ]);
+    const latest = h.events.filter(
+      (event) => event.event_type === "idle_occupied_continue_injected",
+    ).at(-1);
+    assert.ok(latest);
+    assert.equal(JSON.parse(latest.payload).idle_anchor, NEW_IDLE_PROMPT);
+    assert.equal(JSON.parse(latest.payload).idle_anchor_source, "idle_prompt_turn_finished");
   } finally {
     Date.now = originalNow;
   }

@@ -537,7 +537,12 @@ export class StuckDetector {
   ): { timestamp: string; timestampMs: number; source: string } | null {
     const assignedMs = slot.assigned_at ? parseDbTimestampMs(slot.assigned_at) : NaN;
     const candidates: Array<{ timestamp: string; timestampMs: number; source: string }> = [];
-    for (const eventType of ["Stop", "SessionEnd", "slot_idle_reconciled_from_pane"]) {
+    for (const eventType of [
+      "Stop",
+      "SessionEnd",
+      "slot_idle_reconciled_from_pane",
+      "idle_prompt_turn_finished",
+    ]) {
       const event = this.db.getEvents(slot.slot, 1, eventType)[0];
       if (!event) continue;
       const timestampMs = parseDbTimestampMs(event.timestamp);
