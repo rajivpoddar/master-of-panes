@@ -71,6 +71,12 @@ type ContinueDeliveryResult = {
 
 type IdleOccupiedUrgency = "REMINDER" | "FOLLOW_UP" | "URGENT" | "ESCALATION";
 
+type IdleOccupiedAnchor = {
+  timestamp: string;
+  timestampMs: number;
+  source: string;
+};
+
 export class StuckDetector {
   private readonly STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes no output
   private readonly IDLE_OCCUPIED_THRESHOLD_MS = 5 * 60 * 1000;
@@ -350,10 +356,12 @@ export class StuckDetector {
     if (slot.active_turn_state !== "inactive") return;
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
 
-    const anchor = this.getIdleOccupiedAnchor(slot);
-    if (!anchor) return;
-    const idleAgeMs = Date.now() - anchor.timestampMs;
+    const idleAnchor = this.getIdleOccupiedAnchor(slot);
+    if (!idleAnchor) return;
+    const idleAgeMs = Date.now() - idleAnchor.timestampMs;
     if (!Number.isFinite(idleAgeMs) || idleAgeMs < this.IDLE_OCCUPIED_THRESHOLD_MS) return;
+    const waitAnchor = this.getIdleOccupiedWaitAnchor(slot, idleAnchor);
+    const waitAgeMs = Date.now() - waitAnchor.timestampMs;
 
     const activeSubagent = this.db.hasRecentSubagentDispatch(
       slot.slot,
@@ -380,7 +388,7 @@ export class StuckDetector {
     ];
     for (const eventType of specializedEvents) {
       const event = this.db.getEvents(slot.slot, 1, eventType)[0];
-      if (event && parseDbTimestampMs(event.timestamp) >= anchor.timestampMs) return;
+      if (event && parseDbTimestampMs(event.timestamp) >= idleAnchor.timestampMs) return;
     }
 
     const prior = this.db.getEvents(slot.slot, 1, "idle_occupied_continue_injected")[0];
@@ -392,7 +400,7 @@ export class StuckDetector {
         };
         if (
           payload.assignment_epoch === slot.assignment_epoch &&
-          payload.idle_anchor === anchor.timestamp
+          payload.idle_anchor === idleAnchor.timestamp
         ) {
           return;
         }
@@ -421,13 +429,13 @@ export class StuckDetector {
       return;
     }
 
-    const waitAgeMinutes = Math.max(5, Math.floor(idleAgeMs / 60_000));
+    const waitAgeMinutes = Math.max(5, Math.floor(waitAgeMs / 60_000));
     const urgency = this.idleOccupiedUrgency(waitAgeMinutes);
     const command =
       `Use Skill(pm-wait-nudge) now with slot=${slot.slot} ` +
       `assignment_epoch=${slot.assignment_epoch} pr=${current.pr ?? "unknown"} ` +
       `issue=${current.issue ?? "unknown"} branch=${current.branch ?? "unknown"} ` +
-      `head=${current.head_sha ?? "unknown"} wait_started_at=${anchor.timestamp} ` +
+      `head=${current.head_sha ?? "unknown"} wait_started_at=${waitAnchor.timestamp} ` +
       `wait_age_minutes=${waitAgeMinutes} urgency=${urgency}. ` +
       "Classify PM_WAIT vs LOCAL_CONTINUE. If LOCAL_CONTINUE, resume the existing " +
       "work now; API timeouts and interrupted local work are not PM waits.";
@@ -449,9 +457,12 @@ export class StuckDetector {
     const payload = {
       command,
       assignment_epoch: slot.assignment_epoch,
-      idle_anchor: anchor.timestamp,
-      idle_anchor_source: anchor.source,
+      idle_anchor: idleAnchor.timestamp,
+      idle_anchor_source: idleAnchor.source,
       idle_age_ms: idleAgeMs,
+      wait_anchor: waitAnchor.timestamp,
+      wait_anchor_source: waitAnchor.source,
+      wait_age_ms: waitAgeMs,
       wait_age_minutes: waitAgeMinutes,
       urgency,
       issue: deliveredSlot.issue,
@@ -467,7 +478,8 @@ export class StuckDetector {
     );
     debugLog(
       `[idle-occupied] slot=${slot.slot} ${sent ? "injected" : "failed"} ` +
-      `epoch=${slot.assignment_epoch} anchor=${anchor.timestamp}`
+      `epoch=${slot.assignment_epoch} idle_anchor=${idleAnchor.timestamp} ` +
+      `wait_anchor=${waitAnchor.timestamp}`
     );
   }
 
@@ -534,7 +546,7 @@ export class StuckDetector {
 
   private getIdleOccupiedAnchor(
     slot: SlotState
-  ): { timestamp: string; timestampMs: number; source: string } | null {
+  ): IdleOccupiedAnchor | null {
     const assignedMs = slot.assigned_at ? parseDbTimestampMs(slot.assigned_at) : NaN;
     const candidates: Array<{ timestamp: string; timestampMs: number; source: string }> = [];
     for (const eventType of [
@@ -560,6 +572,87 @@ export class StuckDetector {
       timestampMs: assignedMs,
       source: "assigned_at",
     };
+  }
+
+  /**
+   * Preserve the original wait start across detector-generated PM_WAIT turns.
+   *
+   * A nudge wakes the slot, which runs pm-wait-nudge, reminds PM, and stops.
+   * That Stop/idle-prompt pair is a new idle episode for re-nudge cadence, but
+   * it is not progress on the blocked task. Walk only directly linked nudge
+   * completions whose terminal result is classification=PM_WAIT. Any normal
+   * work turn, LOCAL_CONTINUE result, ownership change, or missing link leaves
+   * the latest idle episode as the new logical wait start.
+   */
+  private getIdleOccupiedWaitAnchor(
+    slot: SlotState,
+    latestIdleAnchor: IdleOccupiedAnchor
+  ): IdleOccupiedAnchor {
+    const nudges = this.db.getEvents(slot.slot, 50, "idle_occupied_continue_injected");
+    const idleCompletions = this.db
+      .getEvents(slot.slot, 100, "idle_prompt_turn_finished")
+      .map((event) => ({ event, timestampMs: parseDbTimestampMs(event.timestamp) }))
+      .filter((item) => Number.isFinite(item.timestampMs));
+    const stops = this.db
+      .getEvents(slot.slot, 200, "Stop")
+      .map((event) => ({ event, timestampMs: parseDbTimestampMs(event.timestamp) }))
+      .filter((item) => Number.isFinite(item.timestampMs));
+
+    let waitAnchor = latestIdleAnchor;
+    let episodeTimestampMs = latestIdleAnchor.timestampMs;
+
+    for (const nudge of nudges) {
+      const nudgeTimestampMs = parseDbTimestampMs(nudge.timestamp);
+      if (!Number.isFinite(nudgeTimestampMs) || nudgeTimestampMs >= episodeTimestampMs) continue;
+
+      let payload: {
+        assignment_epoch?: number;
+        idle_anchor?: string;
+        wait_anchor?: string;
+        wait_anchor_source?: string;
+      };
+      try {
+        payload = JSON.parse(nudge.payload) as typeof payload;
+      } catch {
+        continue;
+      }
+      if (payload.assignment_epoch !== slot.assignment_epoch || !payload.idle_anchor) continue;
+
+      const completion = idleCompletions
+        .filter((item) => item.timestampMs > nudgeTimestampMs)
+        .sort((a, b) => a.timestampMs - b.timestampMs)[0];
+      if (!completion || completion.timestampMs !== episodeTimestampMs) continue;
+
+      const endedAsPmWait = stops.some((item) => {
+        if (item.timestampMs < nudgeTimestampMs || item.timestampMs > completion.timestampMs) {
+          return false;
+        }
+        try {
+          const stopPayload = JSON.parse(item.event.payload) as { transcript?: unknown };
+          return typeof stopPayload.transcript === "string" &&
+            /PM_WAIT_NUDGE_RESULT\s+classification=PM_WAIT\b/.test(stopPayload.transcript);
+        } catch {
+          return false;
+        }
+      });
+      if (!endedAsPmWait) continue;
+
+      const priorWaitTimestamp = payload.wait_anchor ?? payload.idle_anchor;
+      const priorWaitTimestampMs = parseDbTimestampMs(priorWaitTimestamp);
+      const priorEpisodeTimestampMs = parseDbTimestampMs(payload.idle_anchor);
+      if (!Number.isFinite(priorWaitTimestampMs) || !Number.isFinite(priorEpisodeTimestampMs)) {
+        continue;
+      }
+
+      waitAnchor = {
+        timestamp: priorWaitTimestamp,
+        timestampMs: priorWaitTimestampMs,
+        source: payload.wait_anchor_source ?? "pm_wait_nudge_carry",
+      };
+      episodeTimestampMs = priorEpisodeTimestampMs;
+    }
+
+    return waitAnchor;
   }
 
   /**

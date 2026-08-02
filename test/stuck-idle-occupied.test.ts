@@ -150,6 +150,9 @@ test("nudges an occupied idle dev slot once per idle episode", async () => {
       idle_anchor: OLD_IDLE,
       idle_anchor_source: "Stop",
       idle_age_ms: 360_000,
+      wait_anchor: OLD_IDLE,
+      wait_anchor_source: "Stop",
+      wait_age_ms: 360_000,
       wait_age_minutes: 6,
       urgency: "REMINDER",
       issue: 7000,
@@ -203,6 +206,238 @@ test("a matching idle prompt starts a new idle episode after an earlier nudge", 
     assert.ok(latest);
     assert.equal(JSON.parse(latest.payload).idle_anchor, NEW_IDLE_PROMPT);
     assert.equal(JSON.parse(latest.payload).idle_anchor_source, "idle_prompt_turn_finished");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => {
+  const originalNow = Date.now;
+  Date.now = () => Date.parse("2026-07-27T02:36:00.000Z");
+  try {
+    const h = harness(slot());
+    h.events.push(
+      {
+        id: 2,
+        timestamp: "2026-07-27T02:30:00.000",
+        slot: 2,
+        event_type: "idle_occupied_continue_injected",
+        hook_type: "Stuck",
+        tool_name: null,
+        payload: JSON.stringify({
+          assignment_epoch: 4,
+          idle_anchor: OLD_IDLE,
+        }),
+        processed: false,
+      },
+      {
+        id: 3,
+        timestamp: "2026-07-27T02:30:30.000",
+        slot: 2,
+        event_type: "Stop",
+        hook_type: "Stop",
+        tool_name: null,
+        payload: JSON.stringify({
+          transcript: "PM_WAIT_NUDGE_RESULT classification=PM_WAIT action=reminded_pm waiting=6m urgency=REMINDER",
+        }),
+        processed: false,
+      },
+      {
+        id: 4,
+        timestamp: "2026-07-27T02:31:00.000",
+        slot: 2,
+        event_type: "idle_prompt_turn_finished",
+        hook_type: "Notification",
+        tool_name: null,
+        payload: "{}",
+        processed: false,
+      },
+    );
+
+    await h.detector.checkIdleOccupied(slot());
+
+    assert.deepEqual(h.sends, [expectedNudge(12, "REMINDER")]);
+    const latest = h.events.filter(
+      (event) => event.event_type === "idle_occupied_continue_injected",
+    ).at(-1);
+    assert.ok(latest);
+    assert.deepEqual(JSON.parse(latest.payload), {
+      command: expectedNudge(12, "REMINDER"),
+      assignment_epoch: 4,
+      idle_anchor: "2026-07-27T02:31:00.000",
+      idle_anchor_source: "idle_prompt_turn_finished",
+      idle_age_ms: 300_000,
+      wait_anchor: OLD_IDLE,
+      wait_anchor_source: "pm_wait_nudge_carry",
+      wait_age_ms: 720_000,
+      wait_age_minutes: 12,
+      urgency: "REMINDER",
+      issue: 7000,
+      pr: 7001,
+      branch: "fix/7000",
+    });
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("keeps the original wait start across repeated PM_WAIT nudge turns", async () => {
+  const originalNow = Date.now;
+  Date.now = () => Date.parse("2026-07-27T02:42:00.000Z");
+  try {
+    const h = harness(slot());
+    h.events.push(
+      {
+        id: 2,
+        timestamp: "2026-07-27T02:30:00.000",
+        slot: 2,
+        event_type: "idle_occupied_continue_injected",
+        hook_type: "Stuck",
+        tool_name: null,
+        payload: JSON.stringify({
+          assignment_epoch: 4,
+          idle_anchor: OLD_IDLE,
+          wait_anchor: OLD_IDLE,
+          wait_anchor_source: "Stop",
+        }),
+        processed: false,
+      },
+      {
+        id: 3,
+        timestamp: "2026-07-27T02:30:30.000",
+        slot: 2,
+        event_type: "Stop",
+        hook_type: "Stop",
+        tool_name: null,
+        payload: JSON.stringify({
+          transcript: "PM_WAIT_NUDGE_RESULT classification=PM_WAIT action=reminded_pm waiting=6m urgency=REMINDER",
+        }),
+        processed: false,
+      },
+      {
+        id: 4,
+        timestamp: "2026-07-27T02:31:00.000",
+        slot: 2,
+        event_type: "idle_prompt_turn_finished",
+        hook_type: "Notification",
+        tool_name: null,
+        payload: "{}",
+        processed: false,
+      },
+      {
+        id: 5,
+        timestamp: "2026-07-27T02:36:00.000",
+        slot: 2,
+        event_type: "idle_occupied_continue_injected",
+        hook_type: "Stuck",
+        tool_name: null,
+        payload: JSON.stringify({
+          assignment_epoch: 4,
+          idle_anchor: "2026-07-27T02:31:00.000",
+          wait_anchor: OLD_IDLE,
+          wait_anchor_source: "Stop",
+        }),
+        processed: false,
+      },
+      {
+        id: 6,
+        timestamp: "2026-07-27T02:36:30.000",
+        slot: 2,
+        event_type: "Stop",
+        hook_type: "Stop",
+        tool_name: null,
+        payload: JSON.stringify({
+          transcript: "PM_WAIT_NUDGE_RESULT classification=PM_WAIT action=reminded_pm waiting=12m urgency=REMINDER",
+        }),
+        processed: false,
+      },
+      {
+        id: 7,
+        timestamp: "2026-07-27T02:37:00.000",
+        slot: 2,
+        event_type: "idle_prompt_turn_finished",
+        hook_type: "Notification",
+        tool_name: null,
+        payload: "{}",
+        processed: false,
+      },
+    );
+
+    await h.detector.checkIdleOccupied(slot());
+
+    assert.deepEqual(h.sends, [expectedNudge(18, "FOLLOW_UP")]);
+    const latest = h.events.filter(
+      (event) => event.event_type === "idle_occupied_continue_injected",
+    ).at(-1);
+    assert.ok(latest);
+    assert.deepEqual(JSON.parse(latest.payload), {
+      command: expectedNudge(18, "FOLLOW_UP"),
+      assignment_epoch: 4,
+      idle_anchor: "2026-07-27T02:37:00.000",
+      idle_anchor_source: "idle_prompt_turn_finished",
+      idle_age_ms: 300_000,
+      wait_anchor: OLD_IDLE,
+      wait_anchor_source: "Stop",
+      wait_age_ms: 1_080_000,
+      wait_age_minutes: 18,
+      urgency: "FOLLOW_UP",
+      issue: 7000,
+      pr: 7001,
+      branch: "fix/7000",
+    });
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("resets wait age when the prior nudge turn resumes local work", async () => {
+  const originalNow = Date.now;
+  Date.now = () => Date.parse("2026-07-27T02:36:00.000Z");
+  try {
+    const h = harness(slot());
+    h.events.push(
+      {
+        id: 2,
+        timestamp: "2026-07-27T02:30:00.000",
+        slot: 2,
+        event_type: "idle_occupied_continue_injected",
+        hook_type: "Stuck",
+        tool_name: null,
+        payload: JSON.stringify({
+          assignment_epoch: 4,
+          idle_anchor: OLD_IDLE,
+        }),
+        processed: false,
+      },
+      {
+        id: 3,
+        timestamp: "2026-07-27T02:30:30.000",
+        slot: 2,
+        event_type: "Stop",
+        hook_type: "Stop",
+        tool_name: null,
+        payload: JSON.stringify({
+          transcript: "PM_WAIT_NUDGE_RESULT classification=LOCAL_CONTINUE action=resumed waiting=6m urgency=REMINDER",
+        }),
+        processed: false,
+      },
+      {
+        id: 4,
+        timestamp: "2026-07-27T02:31:00.000",
+        slot: 2,
+        event_type: "idle_prompt_turn_finished",
+        hook_type: "Notification",
+        tool_name: null,
+        payload: "{}",
+        processed: false,
+      },
+    );
+
+    await h.detector.checkIdleOccupied(slot());
+
+    assert.deepEqual(h.sends, [
+      expectedNudge(5, "REMINDER", "2026-07-27T02:31:00.000"),
+    ]);
   } finally {
     Date.now = originalNow;
   }
