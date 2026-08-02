@@ -597,6 +597,10 @@ export class StuckDetector {
       .getEvents(slot.slot, 200, "Stop")
       .map((event) => ({ event, timestampMs: parseDbTimestampMs(event.timestamp) }))
       .filter((item) => Number.isFinite(item.timestampMs));
+    const promptStarts = this.db
+      .getEvents(slot.slot, 100, "UserPromptSubmit")
+      .map((event) => ({ event, timestampMs: parseDbTimestampMs(event.timestamp) }))
+      .filter((item) => Number.isFinite(item.timestampMs));
 
     let waitAnchor = latestIdleAnchor;
     let episodeTimestampMs = latestIdleAnchor.timestampMs;
@@ -623,13 +627,37 @@ export class StuckDetector {
         .sort((a, b) => a.timestampMs - b.timestampMs)[0];
       if (!completion || completion.timestampMs !== episodeTimestampMs) continue;
 
-      const endedAsPmWait = stops.some((item) => {
-        if (item.timestampMs < nudgeTimestampMs || item.timestampMs > completion.timestampMs) {
-          return false;
-        }
+      const directPromptStarts = promptStarts.filter(
+        (item) => item.timestampMs > nudgeTimestampMs && item.timestampMs < completion.timestampMs
+      );
+      const directStops = stops.filter(
+        (item) => item.timestampMs > nudgeTimestampMs && item.timestampMs < completion.timestampMs
+      );
+      if (directPromptStarts.length !== 1 || directStops.length === 0) continue;
+
+      const readSessionId = (rawPayload: string, field: string): string | null => {
         try {
-          const stopPayload = JSON.parse(item.event.payload) as { transcript?: unknown };
-          return typeof stopPayload.transcript === "string" &&
+          const value = JSON.parse(rawPayload) as Record<string, unknown>;
+          return typeof value[field] === "string" ? value[field] : null;
+        } catch {
+          return null;
+        }
+      };
+      const promptSessionId = readSessionId(directPromptStarts[0].event.payload, "session_id");
+      const completionSessionId = readSessionId(
+        completion.event.payload,
+        "notification_session_id"
+      );
+      if (!promptSessionId || promptSessionId !== completionSessionId) continue;
+
+      const endedAsPmWait = directStops.every((item) => {
+        try {
+          const stopPayload = JSON.parse(item.event.payload) as {
+            session_id?: unknown;
+            transcript?: unknown;
+          };
+          return stopPayload.session_id === promptSessionId &&
+            typeof stopPayload.transcript === "string" &&
             /PM_WAIT_NUDGE_RESULT\s+classification=PM_WAIT\b/.test(stopPayload.transcript);
         } catch {
           return false;

@@ -10,6 +10,7 @@ import type { EventLogEntry, SlotState } from "../src/types.js";
 const NOW = Date.parse("2026-07-27T02:30:00.000Z");
 const OLD_IDLE = "2026-07-27T02:24:00.000";
 const NEW_IDLE_PROMPT = "2026-07-27T02:24:30.000";
+const SESSION_ID = "session-2";
 
 function expectedNudge(
   waitAgeMinutes: number,
@@ -232,24 +233,35 @@ test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => 
       },
       {
         id: 3,
+        timestamp: "2026-07-27T02:30:05.000",
+        slot: 2,
+        event_type: "UserPromptSubmit",
+        hook_type: "UserPromptSubmit",
+        tool_name: null,
+        payload: JSON.stringify({ session_id: SESSION_ID }),
+        processed: false,
+      },
+      {
+        id: 4,
         timestamp: "2026-07-27T02:30:30.000",
         slot: 2,
         event_type: "Stop",
         hook_type: "Stop",
         tool_name: null,
         payload: JSON.stringify({
+          session_id: SESSION_ID,
           transcript: "PM_WAIT_NUDGE_RESULT classification=PM_WAIT action=reminded_pm waiting=6m urgency=REMINDER",
         }),
         processed: false,
       },
       {
-        id: 4,
+        id: 5,
         timestamp: "2026-07-27T02:31:00.000",
         slot: 2,
         event_type: "idle_prompt_turn_finished",
         hook_type: "Notification",
         tool_name: null,
-        payload: "{}",
+        payload: JSON.stringify({ notification_session_id: SESSION_ID }),
         processed: false,
       },
     );
@@ -304,28 +316,39 @@ test("keeps the original wait start across repeated PM_WAIT nudge turns", async 
       },
       {
         id: 3,
+        timestamp: "2026-07-27T02:30:05.000",
+        slot: 2,
+        event_type: "UserPromptSubmit",
+        hook_type: "UserPromptSubmit",
+        tool_name: null,
+        payload: JSON.stringify({ session_id: SESSION_ID }),
+        processed: false,
+      },
+      {
+        id: 4,
         timestamp: "2026-07-27T02:30:30.000",
         slot: 2,
         event_type: "Stop",
         hook_type: "Stop",
         tool_name: null,
         payload: JSON.stringify({
+          session_id: SESSION_ID,
           transcript: "PM_WAIT_NUDGE_RESULT classification=PM_WAIT action=reminded_pm waiting=6m urgency=REMINDER",
         }),
         processed: false,
       },
       {
-        id: 4,
+        id: 5,
         timestamp: "2026-07-27T02:31:00.000",
         slot: 2,
         event_type: "idle_prompt_turn_finished",
         hook_type: "Notification",
         tool_name: null,
-        payload: "{}",
+        payload: JSON.stringify({ notification_session_id: SESSION_ID }),
         processed: false,
       },
       {
-        id: 5,
+        id: 6,
         timestamp: "2026-07-27T02:36:00.000",
         slot: 2,
         event_type: "idle_occupied_continue_injected",
@@ -340,25 +363,36 @@ test("keeps the original wait start across repeated PM_WAIT nudge turns", async 
         processed: false,
       },
       {
-        id: 6,
+        id: 7,
+        timestamp: "2026-07-27T02:36:05.000",
+        slot: 2,
+        event_type: "UserPromptSubmit",
+        hook_type: "UserPromptSubmit",
+        tool_name: null,
+        payload: JSON.stringify({ session_id: SESSION_ID }),
+        processed: false,
+      },
+      {
+        id: 8,
         timestamp: "2026-07-27T02:36:30.000",
         slot: 2,
         event_type: "Stop",
         hook_type: "Stop",
         tool_name: null,
         payload: JSON.stringify({
+          session_id: SESSION_ID,
           transcript: "PM_WAIT_NUDGE_RESULT classification=PM_WAIT action=reminded_pm waiting=12m urgency=REMINDER",
         }),
         processed: false,
       },
       {
-        id: 7,
+        id: 9,
         timestamp: "2026-07-27T02:37:00.000",
         slot: 2,
         event_type: "idle_prompt_turn_finished",
         hook_type: "Notification",
         tool_name: null,
-        payload: "{}",
+        payload: JSON.stringify({ notification_session_id: SESSION_ID }),
         processed: false,
       },
     );
@@ -385,6 +419,83 @@ test("keeps the original wait start across repeated PM_WAIT nudge turns", async 
       pr: 7001,
       branch: "fix/7000",
     });
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("resets wait age when normal work stops before a later PM_WAIT result", async () => {
+  const originalNow = Date.now;
+  Date.now = () => Date.parse("2026-07-27T02:36:00.000Z");
+  try {
+    const h = harness(slot());
+    h.events.push(
+      {
+        id: 2,
+        timestamp: "2026-07-27T02:30:00.000",
+        slot: 2,
+        event_type: "idle_occupied_continue_injected",
+        hook_type: "Stuck",
+        tool_name: null,
+        payload: JSON.stringify({
+          assignment_epoch: 4,
+          idle_anchor: OLD_IDLE,
+        }),
+        processed: false,
+      },
+      {
+        id: 3,
+        timestamp: "2026-07-27T02:30:05.000",
+        slot: 2,
+        event_type: "UserPromptSubmit",
+        hook_type: "UserPromptSubmit",
+        tool_name: null,
+        payload: JSON.stringify({ session_id: SESSION_ID }),
+        processed: false,
+      },
+      {
+        id: 4,
+        timestamp: "2026-07-27T02:30:20.000",
+        slot: 2,
+        event_type: "Stop",
+        hook_type: "Stop",
+        tool_name: null,
+        payload: JSON.stringify({
+          session_id: SESSION_ID,
+          transcript: "Finished another local validation step.",
+        }),
+        processed: false,
+      },
+      {
+        id: 5,
+        timestamp: "2026-07-27T02:30:30.000",
+        slot: 2,
+        event_type: "Stop",
+        hook_type: "Stop",
+        tool_name: null,
+        payload: JSON.stringify({
+          session_id: SESSION_ID,
+          transcript: "PM_WAIT_NUDGE_RESULT classification=PM_WAIT action=reminded_pm waiting=6m urgency=REMINDER",
+        }),
+        processed: false,
+      },
+      {
+        id: 6,
+        timestamp: "2026-07-27T02:31:00.000",
+        slot: 2,
+        event_type: "idle_prompt_turn_finished",
+        hook_type: "Notification",
+        tool_name: null,
+        payload: JSON.stringify({ notification_session_id: SESSION_ID }),
+        processed: false,
+      },
+    );
+
+    await h.detector.checkIdleOccupied(slot());
+
+    assert.deepEqual(h.sends, [
+      expectedNudge(5, "REMINDER", "2026-07-27T02:31:00.000"),
+    ]);
   } finally {
     Date.now = originalNow;
   }
