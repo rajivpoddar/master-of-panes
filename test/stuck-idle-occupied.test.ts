@@ -10,6 +10,17 @@ import type { EventLogEntry, SlotState } from "../src/types.js";
 const NOW = Date.parse("2026-07-27T02:30:00.000Z");
 const OLD_IDLE = "2026-07-27T02:24:00.000";
 
+function expectedNudge(waitAgeMinutes: number, urgency: string): string {
+  return (
+    "Use Skill(pm-wait-nudge) now with slot=2 assignment_epoch=4 pr=7001 " +
+    "issue=7000 branch=fix/7000 head=" + "a".repeat(40) +
+    ` wait_started_at=${OLD_IDLE} wait_age_minutes=${waitAgeMinutes} ` +
+    `urgency=${urgency}. Classify PM_WAIT vs LOCAL_CONTINUE. If ` +
+    "LOCAL_CONTINUE, resume the existing work now; API timeouts and " +
+    "interrupted local work are not PM waits."
+  );
+}
+
 function slot(overrides: Partial<SlotState> = {}): SlotState {
   return {
     slot: 2,
@@ -122,23 +133,45 @@ test("nudges an occupied idle dev slot once per idle episode", async () => {
     await h.detector.checkIdleOccupied(slot());
 
     assert.deepEqual(h.sends, [
-      "continue your work. if blocked, remind pm with details politely",
+      expectedNudge(6, "REMINDER"),
     ]);
     const injected = h.events.filter(
       (event) => event.event_type === "idle_occupied_continue_injected",
     );
     assert.equal(injected.length, 1);
     assert.deepEqual(JSON.parse(injected[0].payload), {
-      command:
-        "continue your work. if blocked, remind pm with details politely",
+      command: expectedNudge(6, "REMINDER"),
       assignment_epoch: 4,
       idle_anchor: OLD_IDLE,
       idle_anchor_source: "Stop",
       idle_age_ms: 360_000,
+      wait_age_minutes: 6,
+      urgency: "REMINDER",
       issue: 7000,
       pr: 7001,
       branch: "fix/7000",
     });
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("raises urgency with the occupied idle age", async () => {
+  const originalNow = Date.now;
+  try {
+    const cases = [
+      { minutes: 15, urgency: "FOLLOW_UP" },
+      { minutes: 30, urgency: "URGENT" },
+      { minutes: 60, urgency: "ESCALATION" },
+    ];
+    for (const item of cases) {
+      Date.now = () => Date.parse(OLD_IDLE + "Z") + item.minutes * 60_000;
+      const h = harness(slot());
+      await h.detector.checkIdleOccupied(slot());
+      assert.equal(h.sends.length, 1);
+      assert.match(h.sends[0], new RegExp(`wait_age_minutes=${item.minutes}`));
+      assert.match(h.sends[0], new RegExp(`urgency=${item.urgency}`));
+    }
   } finally {
     Date.now = originalNow;
   }

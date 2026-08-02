@@ -69,6 +69,8 @@ type ContinueDeliveryResult = {
   slot: SlotState | null;
 };
 
+type IdleOccupiedUrgency = "REMINDER" | "FOLLOW_UP" | "URGENT" | "ESCALATION";
+
 export class StuckDetector {
   private readonly STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes no output
   private readonly IDLE_OCCUPIED_THRESHOLD_MS = 5 * 60 * 1000;
@@ -419,13 +421,24 @@ export class StuckDetector {
       return;
     }
 
+    const waitAgeMinutes = Math.max(5, Math.floor(idleAgeMs / 60_000));
+    const urgency = this.idleOccupiedUrgency(waitAgeMinutes);
+    const command =
+      `Use Skill(pm-wait-nudge) now with slot=${slot.slot} ` +
+      `assignment_epoch=${slot.assignment_epoch} pr=${current.pr ?? "unknown"} ` +
+      `issue=${current.issue ?? "unknown"} branch=${current.branch ?? "unknown"} ` +
+      `head=${current.head_sha ?? "unknown"} wait_started_at=${anchor.timestamp} ` +
+      `wait_age_minutes=${waitAgeMinutes} urgency=${urgency}. ` +
+      "Classify PM_WAIT vs LOCAL_CONTINUE. If LOCAL_CONTINUE, resume the existing " +
+      "work now; API timeouts and interrupted local work are not PM waits.";
+
     const delivery = await this.sendContinueIfAllowed(
       slot.slot,
       {
         assignment_epoch: slot.assignment_epoch,
         assigned_at: slot.assigned_at,
       },
-      "continue your work. if blocked, remind pm with details politely"
+      command
     );
     if (delivery.reason === "dnd" || delivery.reason === "released" ||
         delivery.reason === "slot_missing" || delivery.reason === "identity_changed") {
@@ -434,11 +447,13 @@ export class StuckDetector {
     const sent = delivery.sent;
     const deliveredSlot = delivery.slot ?? current;
     const payload = {
-      command: "continue your work. if blocked, remind pm with details politely",
+      command,
       assignment_epoch: slot.assignment_epoch,
       idle_anchor: anchor.timestamp,
       idle_anchor_source: anchor.source,
       idle_age_ms: idleAgeMs,
+      wait_age_minutes: waitAgeMinutes,
+      urgency,
       issue: deliveredSlot.issue,
       pr: deliveredSlot.pr,
       branch: deliveredSlot.branch,
@@ -454,6 +469,13 @@ export class StuckDetector {
       `[idle-occupied] slot=${slot.slot} ${sent ? "injected" : "failed"} ` +
       `epoch=${slot.assignment_epoch} anchor=${anchor.timestamp}`
     );
+  }
+
+  private idleOccupiedUrgency(waitAgeMinutes: number): IdleOccupiedUrgency {
+    if (waitAgeMinutes >= 60) return "ESCALATION";
+    if (waitAgeMinutes >= 30) return "URGENT";
+    if (waitAgeMinutes >= 15) return "FOLLOW_UP";
+    return "REMINDER";
   }
 
   /**
