@@ -157,10 +157,6 @@ const PM_CLEAR_STALE_ACK_REPAIR_MS = parseInt(
   process.env.MOP_PM_CLEAR_STALE_ACK_REPAIR_MS ?? `${10 * 60 * 1000}`,
   10,
 );
-const PM_CLEAR_RETRY_SUPPRESS_MS = parseInt(
-  process.env.MOP_PM_CLEAR_RETRY_SUPPRESS_MS ?? `${60 * 1000}`,
-  10,
-);
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
 const PM_CLEAR_CONFIRMED_AT_KEY = "pm_clear_confirmed_at";
 
@@ -194,37 +190,6 @@ function hasRecentClearEvent(slotNum: number, windowMs: number): boolean {
       if (!["slot_cleared", "clear_pending_executed"].includes(event.event_type)) return false;
       const ts = parseMoPIsoMs(event.timestamp);
       return ts !== null && ts >= cutoff;
-    });
-}
-
-function hasRecentPmClearSend(windowMs: number): boolean {
-  const cutoff = Date.now() - windowMs;
-  return db
-    .getEvents(0, 30)
-    .some((event) => {
-      if (
-        ![
-          "send_allowed_pm_clear_control_command",
-          "clear_pending_queued",
-          "clear_pending_pm_retry_sent",
-        ].includes(event.event_type)
-      ) {
-        return false;
-      }
-
-      const ts = parseMoPIsoMs(event.timestamp);
-      if (ts === null || ts < cutoff) return false;
-
-      if (event.event_type === "send_allowed_pm_clear_control_command") {
-        try {
-          const payload = JSON.parse(event.payload) as { command?: unknown };
-          return payload.command === "/clear";
-        } catch {
-          return false;
-        }
-      }
-
-      return true;
     });
 }
 
@@ -594,26 +559,12 @@ app.post("/pm-status", async (c) => {
     });
     if (db.hasPendingClear(0)) {
       const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
-      if (
-        isRecentIso(requestedAt, PM_CLEAR_RETRY_SUPPRESS_MS) ||
-        hasRecentPmClearSend(PM_CLEAR_RETRY_SUPPRESS_MS)
-      ) {
-        db.logEvent(0, "clear_pending_pm_retry_suppressed", null, null, {
-          name: "PM",
-          reason: "PM clear is already pending and a /clear was recently sent; suppressing duplicate retry",
-          requested_at: requestedAt,
-          suppress_window_ms: PM_CLEAR_RETRY_SUPPRESS_MS,
-        });
-      } else {
-        const sent = await sendClearViaMopSendPath(0, "pm_status_stop_pending_clear");
-        db.logEvent(0, sent.success ? "clear_pending_pm_retry_sent" : "clear_pending_failed", null, null, {
-          name: "PM",
-          reason: "PM status stop observed while clear_pending_0=true; retrying /clear through MoP clear path",
-          status: sent.status,
-          send_reason: sent.reason ?? null,
-          error: sent.error ?? null,
-        });
-      }
+      db.logEvent(0, "clear_pending_duplicate_suppressed", null, null, {
+        name: "PM",
+        reason: "PM clear delivery is already latched; awaiting SessionStart source=clear acknowledgement",
+        requested_at: requestedAt,
+        via: "pm_status_stop",
+      });
     }
     return c.json({ success: true, pm_busy: false, queued_before: before, drained: result.drained });
   }

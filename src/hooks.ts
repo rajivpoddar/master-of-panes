@@ -14,10 +14,6 @@ import type { TmuxRelay } from "./relay.js";
 import type { HookPayload, HookResponse, SlotState } from "./types.js";
 
 const execFileAsync = promisify(execFile);
-const PM_CLEAR_RETRY_SUPPRESS_MS = parseInt(
-  process.env.MOP_PM_CLEAR_RETRY_SUPPRESS_MS ?? `${60 * 1000}`,
-  10,
-);
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
 
 function debugLog(line: string): void {
@@ -505,50 +501,6 @@ export class HookProcessor {
     } catch {
       return false;
     }
-  }
-
-  private parseMoPIsoMs(value: string | null | undefined): number | null {
-    if (!value) return null;
-    const trimmed = value.trim();
-    const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(trimmed) ? trimmed : `${trimmed}Z`;
-    const ts = Date.parse(normalized);
-    return Number.isFinite(ts) ? ts : null;
-  }
-
-  private isRecentIso(value: string | null, windowMs: number): boolean {
-    const ts = this.parseMoPIsoMs(value);
-    return ts !== null && Date.now() - ts >= 0 && Date.now() - ts < windowMs;
-  }
-
-  private hasRecentPmClearSend(windowMs: number): boolean {
-    const cutoff = Date.now() - windowMs;
-    return this.db
-      .getEvents(0, 30)
-      .some((event) => {
-        if (
-          ![
-            "send_allowed_pm_clear_control_command",
-            "clear_pending_queued",
-            "clear_pending_pm_retry_sent",
-          ].includes(event.event_type)
-        ) {
-          return false;
-        }
-
-        const ts = this.parseMoPIsoMs(event.timestamp);
-        if (ts === null || ts < cutoff) return false;
-
-        if (event.event_type === "send_allowed_pm_clear_control_command") {
-          try {
-            const payload = JSON.parse(event.payload) as { command?: unknown };
-            return payload.command === "/clear";
-          } catch {
-            return false;
-          }
-        }
-
-        return true;
-      });
   }
 
   private detectPmDirectionRequest(transcript?: string): { summary: string; reason: string; issue: number | null } | null {
@@ -1439,39 +1391,16 @@ export class HookProcessor {
   // ─── Stop Hook ─────────────────────────────────────────
 
   private async handleStop(slotNum: number, payload: HookPayload): Promise<HookResponse> {
-    // PM (slot 0) is not represented in the slots table, so handle its pending
-    // clear latch before the normal slot-row lookup. Without this, a PM clear
-    // request can be logged as queued but never retried when PM reaches Stop.
+    // PM (slot 0) is not represented in the slots table. A pending clear is an
+    // exactly-once delivery latch: repeated Stop events must not append more
+    // /clear commands while the original waits for SessionStart:clear.
     if (slotNum === 0 && this.db.hasPendingClear(0)) {
-      try {
-        const requestedAt = this.db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
-        if (
-          this.isRecentIso(requestedAt, PM_CLEAR_RETRY_SUPPRESS_MS) ||
-          this.hasRecentPmClearSend(PM_CLEAR_RETRY_SUPPRESS_MS)
-        ) {
-          this.db.logEvent(0, "clear_pending_pm_retry_suppressed", "Stop", null, {
-            name: "PM",
-            reason: "PM clear is already pending and a /clear was recently sent; suppressing duplicate retry",
-            requested_at: requestedAt,
-            suppress_window_ms: PM_CLEAR_RETRY_SUPPRESS_MS,
-          });
-          return {};
-        }
-
-        const sent = await this.sendClearViaMopSendPath(0, "pm_clear_pending_stop_hook");
-        if (!sent) {
-          throw new Error("MoP send path failed for PM queued /clear");
-        }
-        this.db.logEvent(0, "clear_pending_pm_retry_sent", "Stop", null, {
-          name: "PM",
-          reason: "PM reached Stop while clear_pending_0=true; resent /clear through MoP clear path",
-        });
-      } catch (err) {
-        this.db.logEvent(0, "clear_pending_failed", "Stop", null, {
-          name: "PM",
-          error: String(err),
-        });
-      }
+      this.db.logEvent(0, "clear_pending_duplicate_suppressed", "Stop", null, {
+        name: "PM",
+        reason: "PM clear delivery is already latched; awaiting SessionStart source=clear acknowledgement",
+        requested_at: this.db.getConfig(PM_CLEAR_REQUESTED_AT_KEY),
+        via: "hook_stop",
+      });
       return {};
     }
 
