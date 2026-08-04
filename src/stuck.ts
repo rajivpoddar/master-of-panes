@@ -77,9 +77,30 @@ type IdleOccupiedAnchor = {
   source: string;
 };
 
+type FreeSlotAssignmentGate = {
+  allowed: boolean;
+  slot: number;
+  recommendation_kind: "rework" | "todo" | null;
+  rework_packet_count: number;
+  rework_pr_count: number;
+  ready_pool_size: number;
+  recommended_obligation_id: number | null;
+  recommended_pr: number | null;
+  recommended_issue: number | null;
+  recommended_packet: string | null;
+  recommended_action: string | null;
+  slot_dispatch_wedge_id: number | null;
+  reason: string;
+};
+
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
 export class StuckDetector {
   private readonly STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes no output
   private readonly IDLE_OCCUPIED_THRESHOLD_MS = 5 * 60 * 1000;
+  private readonly IDLE_FREE_THRESHOLD_MS = 5 * 60 * 1000;
   private readonly IDLE_OCCUPIED_SUBAGENT_LOOKBACK_SEC = 6 * 60 * 60;
   private readonly PLAN_APPROVAL_THRESHOLD_MS = 5 * 60 * 1000; // 5 min waiting for approval (Rajiv directive 2026-03-23)
   private readonly CHECK_INTERVAL_MS = 60 * 1000; // Check every minute
@@ -321,6 +342,14 @@ export class StuckDetector {
       await this.checkIdleOccupied(slot);
     }
 
+    // Phase 1e: a free slot cannot ask PM for work on its own. Wake it once
+    // per urgency tier when the read-only PM obligation gate proves that
+    // assignable work exists; the slot then uses the same pm-wait-nudge skill
+    // as occupied waits. PM remains the sole assignment writer.
+    for (const slot of slots) {
+      await this.checkIdleFree(slot);
+    }
+
     for (const slot of slots) {
       // RETIRED (2026-03-24): Plan approval watchdog disabled.
       // Slots now use plan-agent + /codex-plan-review (self-managing).
@@ -491,6 +520,167 @@ export class StuckDetector {
   }
 
   /**
+   * Wake one genuinely free dev slot to remind PM about one packet-backed
+   * rework or Ready Pool obligation. The original release timestamp remains
+   * the wait anchor, and each urgency tier fires at most once. The gate is
+   * local/read-only and runs asynchronously, so this detector neither scans
+   * GitHub nor mutates capacity.
+   */
+  async checkIdleFree(slot: SlotState): Promise<void> {
+    if (slot.slot < 1 || slot.slot > 4) return;
+    if (slot.occupied || !slot.idle || slot.dnd) return;
+    if (slot.active_turn_state !== "inactive") return;
+    if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
+
+    const anchor = this.getIdleFreeAnchor(slot);
+    if (!anchor) return;
+    const freeAgeMs = Date.now() - anchor.timestampMs;
+    if (!Number.isFinite(freeAgeMs) || freeAgeMs < this.IDLE_FREE_THRESHOLD_MS) return;
+    const waitAgeMinutes = Math.max(5, Math.floor(freeAgeMs / 60_000));
+    const urgency = this.idleOccupiedUrgency(waitAgeMinutes);
+
+    const prior = this.db.getEvents(slot.slot, 1, "idle_free_assignment_nudge_injected")[0];
+    if (prior) {
+      try {
+        const payload = JSON.parse(prior.payload) as {
+          assignment_epoch?: number;
+          free_anchor?: string;
+          urgency?: IdleOccupiedUrgency;
+        };
+        if (
+          payload.assignment_epoch === slot.assignment_epoch &&
+          payload.free_anchor === anchor.timestamp &&
+          this.idleOccupiedUrgencyRank(payload.urgency) >=
+            this.idleOccupiedUrgencyRank(urgency)
+        ) {
+          return;
+        }
+      } catch {
+        // Malformed diagnostics must not suppress a current free episode.
+      }
+    }
+
+    const liveState = await this.relay.getSlotActivityState(slot.slot);
+    if (liveState !== "idle") {
+      debugLog(`[idle-free] slot=${slot.slot} suppress=live-${liveState}`);
+      return;
+    }
+
+    const occupiedPrs = this.db.getAllSlots()
+      .filter((candidate) => candidate.occupied && candidate.slot !== slot.slot)
+      .map((candidate) => candidate.pr)
+      .filter((pr): pr is number => typeof pr === "number" && Number.isInteger(pr) && pr > 0);
+    const gate = await this.readFreeSlotAssignmentGate(slot.slot, occupiedPrs);
+    if (!gate?.allowed) {
+      debugLog(
+        `[idle-free] slot=${slot.slot} suppress=${gate?.reason ?? "gate-failed"} ` +
+        `rework_pr_count=${gate?.rework_pr_count ?? 0} ` +
+        `ready_pool_size=${gate?.ready_pool_size ?? 0}`
+      );
+      return;
+    }
+
+    // Re-pin the free state after the asynchronous gate so a concurrent PM
+    // assignment cannot receive a stale reminder command.
+    const current = this.db.getSlot(slot.slot);
+    if (
+      !current ||
+      current.occupied ||
+      !current.idle ||
+      current.dnd ||
+      current.active_turn_state !== "inactive" ||
+      current.assignment_epoch !== slot.assignment_epoch
+    ) {
+      return;
+    }
+
+    const command =
+      `Use Skill(pm-wait-nudge) now with mode=FREE_WAIT_ASSIGNMENT slot=${slot.slot} ` +
+      `assignment_epoch=${slot.assignment_epoch} wait_started_at=${anchor.timestamp} ` +
+      `wait_age_minutes=${waitAgeMinutes} urgency=${urgency} ` +
+      `recommendation_kind=${gate.recommendation_kind ?? "none"} ` +
+      `rework_packet_count=${gate.rework_packet_count} ` +
+      `rework_pr_count=${gate.rework_pr_count} ready_pool_size=${gate.ready_pool_size} ` +
+      `recommended_obligation_id=${gate.recommended_obligation_id ?? "unknown"} ` +
+      `recommended_pr=${gate.recommended_pr ?? "unknown"} ` +
+      `recommended_issue=${gate.recommended_issue ?? "unknown"} ` +
+      `recommended_packet=${gate.recommended_packet ?? "unknown"}. ` +
+      "Revalidate that this slot is still free and the recommended obligation is open, " +
+      "then remind PM once; do not assign work or run reconcile-capacity.";
+
+    const sent = await this.relay.sendToSlotAsync(slot.slot, command, false);
+    const payload = {
+      command,
+      assignment_epoch: slot.assignment_epoch,
+      free_anchor: anchor.timestamp,
+      free_anchor_source: anchor.source,
+      free_age_ms: freeAgeMs,
+      wait_age_minutes: waitAgeMinutes,
+      urgency,
+      recommendation_kind: gate.recommendation_kind,
+      rework_packet_count: gate.rework_packet_count,
+      rework_pr_count: gate.rework_pr_count,
+      ready_pool_size: gate.ready_pool_size,
+      recommended_obligation_id: gate.recommended_obligation_id,
+      recommended_pr: gate.recommended_pr,
+      recommended_issue: gate.recommended_issue,
+      recommended_packet: gate.recommended_packet,
+      slot_dispatch_wedge_id: gate.slot_dispatch_wedge_id,
+    };
+    this.db.logEvent(
+      slot.slot,
+      sent ? "idle_free_assignment_nudge_injected" : "idle_free_assignment_nudge_failed",
+      "Stuck",
+      null,
+      payload
+    );
+    debugLog(
+      `[idle-free] slot=${slot.slot} ${sent ? "injected" : "failed"} ` +
+      `anchor=${anchor.timestamp} ready_pool_size=${gate.ready_pool_size}`
+    );
+  }
+
+  private async readFreeSlotAssignmentGate(
+    slotNum: number,
+    occupiedPrs: number[]
+  ): Promise<FreeSlotAssignmentGate | null> {
+    const gatePath = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE ??
+      "/Users/rajiv/.claude/skills/pm-wait-nudge/scripts/ready-pool-assignment-gate.py";
+    try {
+      const { stdout } = await execShell(
+        `${shellEscape(gatePath)} --slot ${slotNum}` +
+          occupiedPrs.map((pr) => ` --exclude-pr ${pr}`).join(""),
+        { timeout: 4_000, maxBuffer: 64 * 1024 }
+      );
+      const parsed = JSON.parse(stdout.trim()) as FreeSlotAssignmentGate;
+      if (
+        typeof parsed.allowed !== "boolean" ||
+        parsed.slot !== slotNum ||
+        !Number.isInteger(parsed.rework_packet_count) ||
+        !Number.isInteger(parsed.rework_pr_count) ||
+        !Number.isInteger(parsed.ready_pool_size)
+      ) {
+        throw new Error("invalid gate response");
+      }
+      return parsed;
+    } catch (error) {
+      this.db.logEvent(slotNum, "idle_free_assignment_gate_failed", "Stuck", null, {
+        error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+        gate_path: gatePath,
+      });
+      return null;
+    }
+  }
+
+  private idleOccupiedUrgencyRank(urgency?: IdleOccupiedUrgency): number {
+    if (urgency === "ESCALATION") return 4;
+    if (urgency === "URGENT") return 3;
+    if (urgency === "FOLLOW_UP") return 2;
+    if (urgency === "REMINDER") return 1;
+    return 0;
+  }
+
+  /**
    * Final guard for detector-owned continuation nudges. The relay intentionally
    * supports unconditional recovery sends, so every stuck-detector path must
    * re-read authoritative slot state immediately before asking it to type.
@@ -571,6 +761,31 @@ export class StuckDetector {
       timestamp: slot.assigned_at,
       timestampMs: assignedMs,
       source: "assigned_at",
+    };
+  }
+
+  private getIdleFreeAnchor(
+    slot: SlotState
+  ): { timestamp: string; timestampMs: number; source: string } | null {
+    const candidates: Array<{ timestamp: string; timestampMs: number; source: string }> = [];
+    for (const eventType of ["slot_released", "auto_released_post_pr"]) {
+      const event = this.db.getEvents(slot.slot, 1, eventType)[0];
+      if (!event) continue;
+      const timestampMs = parseDbTimestampMs(event.timestamp);
+      if (Number.isFinite(timestampMs)) {
+        candidates.push({ timestamp: event.timestamp, timestampMs, source: eventType });
+      }
+    }
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => b.timestampMs - a.timestampMs);
+      return candidates[0];
+    }
+    const fallbackMs = parseDbTimestampMs(slot.last_activity);
+    if (!Number.isFinite(fallbackMs)) return null;
+    return {
+      timestamp: slot.last_activity,
+      timestampMs: fallbackMs,
+      source: "last_activity",
     };
   }
 

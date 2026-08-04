@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import type { MoPDatabase } from "../src/db.js";
@@ -54,6 +57,34 @@ function slot(overrides: Partial<SlotState> = {}): SlotState {
   };
 }
 
+function freeSlot(overrides: Partial<SlotState> = {}): SlotState {
+  return slot({
+    status: "free",
+    occupied: false,
+    session_id: null,
+    task: null,
+    issue: null,
+    branch: null,
+    pr: null,
+    head_sha: null,
+    assigned_at: null,
+    last_activity: OLD_IDLE,
+    ...overrides,
+  });
+}
+
+function installGate(result: Record<string, unknown>): { path: string; cleanup: () => void } {
+  const directory = mkdtempSync(join(tmpdir(), "mop-free-slot-gate-"));
+  const path = join(directory, "gate.py");
+  const payload = Buffer.from(JSON.stringify(result), "utf8").toString("base64");
+  writeFileSync(
+    path,
+    `#!/usr/bin/env python3\nimport base64\nprint(base64.b64decode("${payload}").decode())\n`,
+  );
+  chmodSync(path, 0o755);
+  return { path, cleanup: () => rmSync(directory, { recursive: true, force: true }) };
+}
+
 interface Harness {
   detector: StuckDetector;
   events: EventLogEntry[];
@@ -83,6 +114,7 @@ function harness(currentSlot: SlotState): Harness {
     hasPendingClear: () => false,
     hasRecentSubagentDispatch: () => null,
     getSlot: () => slotReads.shift() ?? currentSlot,
+    getAllSlots: () => [currentSlot],
     getEvents: (_slot: number, limit: number, eventType?: string) =>
       events
         .filter((event) => !eventType || event.event_type === eventType)
@@ -652,5 +684,171 @@ test("suppresses continuation when DND is enabled at the delivery boundary", asy
     assert.equal(JSON.parse(suppressed[0].payload).reason, "dnd");
   } finally {
     Date.now = originalNow;
+  }
+});
+
+test("nudges a free idle slot once per urgency tier with the total free time", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  const gate = installGate({
+    allowed: true,
+    slot: 2,
+    recommendation_kind: "rework",
+    rework_packet_count: 3,
+    rework_pr_count: 2,
+    ready_pool_size: 3,
+    recommended_obligation_id: 91,
+    recommended_pr: 7001,
+    recommended_issue: 7000,
+    recommended_packet: "/tmp/rework-7001.md",
+    recommended_action: "assign rework",
+    slot_dispatch_wedge_id: 93,
+    reason: "packet_backed_rework_available",
+  });
+  Date.now = () => NOW;
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+  try {
+    const candidate = freeSlot();
+    const h = harness(candidate);
+    h.events[0] = { ...h.events[0], event_type: "slot_released" };
+    await h.detector.checkIdleFree(candidate);
+    await h.detector.checkIdleFree(candidate);
+
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0], /mode=FREE_WAIT_ASSIGNMENT slot=2/);
+    assert.match(h.sends[0], /wait_started_at=2026-07-27T02:24:00.000/);
+    assert.match(h.sends[0], /wait_age_minutes=6 urgency=REMINDER/);
+    assert.match(h.sends[0], /recommendation_kind=rework/);
+    assert.match(h.sends[0], /rework_packet_count=3 rework_pr_count=2 ready_pool_size=3/);
+    assert.match(h.sends[0], /recommended_pr=7001 recommended_issue=7000/);
+    assert.equal(
+      h.events.filter((event) => event.event_type === "idle_free_assignment_nudge_injected").length,
+      1,
+    );
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+    gate.cleanup();
+  }
+});
+
+test("does not wake a free slot when the Ready Pool gate is closed", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  const gate = installGate({
+    allowed: false,
+    slot: 2,
+    recommendation_kind: null,
+    rework_packet_count: 0,
+    rework_pr_count: 0,
+    ready_pool_size: 0,
+    recommended_obligation_id: null,
+    recommended_pr: null,
+    recommended_issue: null,
+    recommended_packet: null,
+    recommended_action: null,
+    slot_dispatch_wedge_id: null,
+    reason: "no_ready_pool_obligation",
+  });
+  Date.now = () => NOW;
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+  try {
+    const candidate = freeSlot();
+    const h = harness(candidate);
+    h.events[0] = { ...h.events[0], event_type: "slot_released" };
+    await h.detector.checkIdleFree(candidate);
+    assert.deepEqual(h.sends, []);
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+    gate.cleanup();
+  }
+});
+
+test("does not send a free-slot nudge after concurrent assignment", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  const gate = installGate({
+    allowed: true,
+    slot: 2,
+    recommendation_kind: "todo",
+    rework_packet_count: 0,
+    rework_pr_count: 0,
+    ready_pool_size: 1,
+    recommended_obligation_id: 101,
+    recommended_pr: null,
+    recommended_issue: 7000,
+    recommended_packet: null,
+    recommended_action: "assign todo",
+    slot_dispatch_wedge_id: null,
+    reason: "ready_pool_work_available",
+  });
+  Date.now = () => NOW;
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+  try {
+    const candidate = freeSlot();
+    const h = harness(candidate);
+    h.events[0] = { ...h.events[0], event_type: "slot_released" };
+    h.setSlotReads([slot({ assignment_epoch: 5 })]);
+    await h.detector.checkIdleFree(candidate);
+    assert.deepEqual(h.sends, []);
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+    gate.cleanup();
+  }
+});
+
+test("escalates a free-slot PM reminder without resetting the release anchor", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  const gate = installGate({
+    allowed: true,
+    slot: 2,
+    recommendation_kind: "todo",
+    rework_packet_count: 0,
+    rework_pr_count: 0,
+    ready_pool_size: 1,
+    recommended_obligation_id: 101,
+    recommended_pr: null,
+    recommended_issue: 7000,
+    recommended_packet: null,
+    recommended_action: "assign todo",
+    slot_dispatch_wedge_id: null,
+    reason: "ready_pool_work_available",
+  });
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+  try {
+    const candidate = freeSlot();
+    const h = harness(candidate);
+    h.events[0] = { ...h.events[0], event_type: "slot_released" };
+
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 6 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 10 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 16 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 31 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 61 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+
+    assert.equal(h.sends.length, 4);
+    assert.match(h.sends[0], /wait_age_minutes=6 urgency=REMINDER/);
+    assert.match(h.sends[1], /wait_age_minutes=16 urgency=FOLLOW_UP/);
+    assert.match(h.sends[2], /wait_age_minutes=31 urgency=URGENT/);
+    assert.match(h.sends[3], /wait_age_minutes=61 urgency=ESCALATION/);
+    for (const command of h.sends) {
+      assert.match(command, /wait_started_at=2026-07-27T02:24:00.000/);
+    }
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+    gate.cleanup();
   }
 });
