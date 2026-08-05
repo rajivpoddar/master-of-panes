@@ -101,6 +101,11 @@ export class StuckDetector {
   private readonly STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes no output
   private readonly IDLE_OCCUPIED_THRESHOLD_MS = 5 * 60 * 1000;
   private readonly IDLE_FREE_THRESHOLD_MS = 5 * 60 * 1000;
+  // How many recent release events per type are walked to find the newest
+  // non-idempotent free-episode start. Idempotent replays are skipped; if
+  // every recent event is a replay, the last_activity fallback still points
+  // at the last real transition because replays never update the slot row.
+  private readonly IDLE_FREE_RELEASE_LOOKBACK = 25;
   private readonly IDLE_OCCUPIED_SUBAGENT_LOOKBACK_SEC = 6 * 60 * 60;
   private readonly PLAN_APPROVAL_THRESHOLD_MS = 5 * 60 * 1000; // 5 min waiting for approval (Rajiv directive 2026-03-23)
   private readonly CHECK_INTERVAL_MS = 60 * 1000; // Check every minute
@@ -769,11 +774,29 @@ export class StuckDetector {
   ): { timestamp: string; timestampMs: number; source: string } | null {
     const candidates: Array<{ timestamp: string; timestampMs: number; source: string }> = [];
     for (const eventType of ["slot_released", "auto_released_post_pr"]) {
-      const event = this.db.getEvents(slot.slot, 1, eventType)[0];
-      if (!event) continue;
-      const timestampMs = parseDbTimestampMs(event.timestamp);
-      if (Number.isFinite(timestampMs)) {
-        candidates.push({ timestamp: event.timestamp, timestampMs, source: eventType });
+      // A release pass on an already-free slot logs a NEW slot_released event
+      // whose payload marks idempotent: true (mcp.ts / server.ts pass through
+      // releaseSlot's result). That replay is not a new free episode: treating
+      // it as the anchor would reset the wait age and re-fire the REMINDER.
+      // Walk back through the newest release events of each type and select
+      // the newest one that does not self-identify as an idempotent replay.
+      // Events without an explicit idempotent marker (legacy rows and
+      // auto_released_post_pr) remain candidates, preserving the previous
+      // behavior for every event the writers do not mark.
+      const recent = this.db.getEvents(slot.slot, this.IDLE_FREE_RELEASE_LOOKBACK, eventType);
+      for (const event of recent) {
+        let idempotent = false;
+        try {
+          idempotent = (JSON.parse(event.payload) as { idempotent?: unknown }).idempotent === true;
+        } catch {
+          // Unparseable diagnostics payloads are treated as real releases.
+        }
+        if (idempotent) continue;
+        const timestampMs = parseDbTimestampMs(event.timestamp);
+        if (Number.isFinite(timestampMs)) {
+          candidates.push({ timestamp: event.timestamp, timestampMs, source: eventType });
+        }
+        break;
       }
     }
     if (candidates.length > 0) {

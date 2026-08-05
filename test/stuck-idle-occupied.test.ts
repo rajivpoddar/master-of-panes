@@ -802,6 +802,137 @@ test("does not send a free-slot nudge after concurrent assignment", async () => 
   }
 });
 
+test("an idempotent release replay keeps the t0 anchor and the FOLLOW_UP wait_started_at", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  const gate = installGate({
+    allowed: true,
+    slot: 2,
+    recommendation_kind: "rework",
+    rework_packet_count: 3,
+    rework_pr_count: 2,
+    ready_pool_size: 3,
+    recommended_obligation_id: 91,
+    recommended_pr: 7001,
+    recommended_issue: 7000,
+    recommended_packet: "/tmp/rework-7001.md",
+    recommended_action: "assign rework",
+    slot_dispatch_wedge_id: 93,
+    reason: "packet_backed_rework_available",
+  });
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+  try {
+    const candidate = freeSlot();
+    const h = harness(candidate);
+    // Real occupied->free release at t0 carries the anchor.
+    h.events[0] = {
+      ...h.events[0],
+      event_type: "slot_released",
+      payload: JSON.stringify({ assignment_epoch: 4, idempotent: false }),
+    };
+
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 6 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+
+    // A later release pass on the already-free slot logs a NEW slot_released
+    // event marked idempotent. It must not become the wait anchor.
+    h.events.push({
+      id: 99,
+      timestamp: "2026-07-27T02:34:00.000",
+      slot: 2,
+      event_type: "slot_released",
+      hook_type: null,
+      tool_name: null,
+      payload: JSON.stringify({ assignment_epoch: 4, idempotent: true }),
+      processed: false,
+    });
+
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 10 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 16 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+
+    assert.equal(h.sends.length, 2);
+    assert.match(h.sends[0], /wait_age_minutes=6 urgency=REMINDER/);
+    assert.match(h.sends[1], /wait_age_minutes=16 urgency=FOLLOW_UP/);
+    for (const command of h.sends) {
+      assert.match(command, new RegExp(`wait_started_at=${OLD_IDLE}`));
+    }
+    const injected = h.events.filter(
+      (event) => event.event_type === "idle_free_assignment_nudge_injected",
+    );
+    assert.equal(injected.length, 2);
+    for (const event of injected) {
+      assert.equal(JSON.parse(event.payload).free_anchor, OLD_IDLE);
+    }
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+    gate.cleanup();
+  }
+});
+
+test("a real release restarts the free-wait anchor", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  const gate = installGate({
+    allowed: true,
+    slot: 2,
+    recommendation_kind: "rework",
+    rework_packet_count: 3,
+    rework_pr_count: 2,
+    ready_pool_size: 3,
+    recommended_obligation_id: 91,
+    recommended_pr: 7001,
+    recommended_issue: 7000,
+    recommended_packet: "/tmp/rework-7001.md",
+    recommended_action: "assign rework",
+    slot_dispatch_wedge_id: 93,
+    reason: "packet_backed_rework_available",
+  });
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+  try {
+    const candidate = freeSlot();
+    const h = harness(candidate);
+    h.events[0] = {
+      ...h.events[0],
+      event_type: "slot_released",
+      payload: JSON.stringify({ assignment_epoch: 4, idempotent: false }),
+    };
+
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 6 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+
+    // A NEW occupied->free transition (assign, work, real release) at
+    // t0 + 10m legitimately starts a fresh free episode.
+    h.events.push({
+      id: 99,
+      timestamp: "2026-07-27T02:34:00.000",
+      slot: 2,
+      event_type: "slot_released",
+      hook_type: null,
+      tool_name: null,
+      payload: JSON.stringify({ assignment_epoch: 4, idempotent: false }),
+      processed: false,
+    });
+
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 16 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+
+    assert.equal(h.sends.length, 2);
+    assert.match(h.sends[0], /wait_age_minutes=6 urgency=REMINDER/);
+    assert.match(h.sends[0], new RegExp(`wait_started_at=${OLD_IDLE}`));
+    assert.match(h.sends[1], /wait_age_minutes=6 urgency=REMINDER/);
+    assert.match(h.sends[1], /wait_started_at=2026-07-27T02:34:00.000/);
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+    gate.cleanup();
+  }
+});
+
 test("escalates a free-slot PM reminder without resetting the release anchor", async () => {
   const originalNow = Date.now;
   const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
@@ -830,6 +961,17 @@ test("escalates a free-slot PM reminder without resetting the release anchor", a
     await h.detector.checkIdleFree(candidate);
     Date.now = () => Date.parse(OLD_IDLE + "Z") + 10 * 60_000;
     await h.detector.checkIdleFree(candidate);
+    // Idempotent release replay at t0 + 10m must not reset the anchor mid-tier.
+    h.events.push({
+      id: 99,
+      timestamp: "2026-07-27T02:34:00.000",
+      slot: 2,
+      event_type: "slot_released",
+      hook_type: null,
+      tool_name: null,
+      payload: JSON.stringify({ assignment_epoch: 4, idempotent: true }),
+      processed: false,
+    });
     Date.now = () => Date.parse(OLD_IDLE + "Z") + 16 * 60_000;
     await h.detector.checkIdleFree(candidate);
     Date.now = () => Date.parse(OLD_IDLE + "Z") + 31 * 60_000;
