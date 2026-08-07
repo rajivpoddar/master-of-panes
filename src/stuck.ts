@@ -471,8 +471,11 @@ export class StuckDetector {
       `issue=${current.issue ?? "unknown"} branch=${current.branch ?? "unknown"} ` +
       `head=${current.head_sha ?? "unknown"} wait_started_at=${waitAnchor.timestamp} ` +
       `wait_age_minutes=${waitAgeMinutes} urgency=${urgency}. ` +
-      "Classify PM_WAIT vs LOCAL_CONTINUE. If LOCAL_CONTINUE, resume the existing " +
-      "work now; API timeouts and interrupted local work are not PM waits.";
+      "Classify PM_WAIT vs LOCAL_CONTINUE. If LOCAL_CONTINUE, continue the exact " +
+      "unfinished phase NOW: edits → affected tests → commit → push; do not end " +
+      "the turn without a new head, a typed blocker, or a terminal receipt; " +
+      "classification-only or \"will continue\" prose is a violation. API timeouts " +
+      "and interrupted local work are not PM waits.";
 
     const delivery = await this.sendContinueIfAllowed(
       slot.slot,

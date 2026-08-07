@@ -25,8 +25,11 @@ function expectedNudge(
     "issue=7000 branch=fix/7000 head=" + "a".repeat(40) +
     ` wait_started_at=${idleAnchor} wait_age_minutes=${waitAgeMinutes} ` +
     `urgency=${urgency}. Classify PM_WAIT vs LOCAL_CONTINUE. If ` +
-    "LOCAL_CONTINUE, resume the existing work now; API timeouts and " +
-    "interrupted local work are not PM waits."
+    "LOCAL_CONTINUE, continue the exact unfinished phase NOW: edits → " +
+    "affected tests → commit → push; do not end the turn without a new " +
+    "head, a typed blocker, or a terminal receipt; classification-only or " +
+    "\"will continue\" prose is a violation. API timeouts and interrupted " +
+    "local work are not PM waits."
   );
 }
 
@@ -161,6 +164,32 @@ function harness(currentSlot: SlotState): Harness {
     },
   };
 }
+
+test("the idle-occupied nudge carries the terminal LOCAL_CONTINUE directive", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const h = harness(slot());
+    await h.detector.checkIdleOccupied(slot());
+
+    assert.equal(h.sends.length, 1);
+    assert.match(
+      h.sends[0],
+      /continue the exact unfinished phase NOW: edits → affected tests → commit → push/,
+    );
+    assert.match(
+      h.sends[0],
+      /do not end the turn without a new head, a typed blocker, or a terminal receipt/,
+    );
+    assert.match(
+      h.sends[0],
+      /classification-only or "will continue" prose is a violation/,
+    );
+    assert.doesNotMatch(h.sends[0], /resume the existing work now/);
+  } finally {
+    Date.now = originalNow;
+  }
+});
 
 test("nudges an occupied idle dev slot once per idle episode", async () => {
   const originalNow = Date.now;
