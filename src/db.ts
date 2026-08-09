@@ -604,8 +604,14 @@ export class MoPDatabase {
         && current.pr === expectedCurrentTuple.pr
         && current.branch_ref === expectedCurrentTuple.branchRef
         && current.head_sha === expectedCurrentTuple.headSha;
+      // A non-idempotent adoption is an issue-only -> PR identity bind: it may
+      // start ONLY from an issue-only claim (pr === null). A PR-bound row can
+      // be re-adopted only idempotently (same PR); a caller supplying a NEW PR
+      // for an already PR-bound observed tuple must fail closed, never rewrite
+      // the PR at unchanged epoch.
       const issueClaimAdoption = allowIssueClaimAdoption
         && current.occupied
+        && current.pr === null
         && observedTupleMatches
         && current.repository_id === normalizedRepositoryId
         && current.issue === normalizedIssue
@@ -614,7 +620,6 @@ export class MoPDatabase {
         && branchIdentity.branchRef !== null
         && typeof headSha === "string"
         && /^[0-9a-f]{40}$/i.test(headSha)
-        && current.active_turn_state === "inactive"
         && !current.dnd;
       if (allowIssueClaimAdoption && !current.occupied) {
         return {
@@ -711,6 +716,10 @@ export class MoPDatabase {
       }
 
       const nextEpoch = epoch + 1;
+      // An issue-claim adoption is an identity bind (pr + head onto the same
+      // slot/issue/branch), not a new assignment: the assignment epoch is
+      // preserved so downstream pickup validation sees no tuple drift.
+      const boundEpoch = issueClaimAdoption ? epoch : nextEpoch;
       try {
         this.updateAssignmentState(slot, {
           status: "active" as SlotStatus,
@@ -723,7 +732,7 @@ export class MoPDatabase {
           branch_ref: branchIdentity.branchRef,
           pr: normalizedPr,
           head_sha: headSha,
-          assignment_epoch: nextEpoch,
+          assignment_epoch: boundEpoch,
           assigned_at: new Date().toISOString(),
           dnd: false,
         });
@@ -786,7 +795,7 @@ export class MoPDatabase {
       return {
         ok: true,
         conflict: false,
-        assignment_epoch: nextEpoch,
+        assignment_epoch: boundEpoch,
         idempotent: false,
       };
     })();

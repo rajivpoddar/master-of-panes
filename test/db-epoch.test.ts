@@ -182,7 +182,7 @@ test("issue claim adoption rebinds the occupied tuple atomically", () => {
     assert.deepEqual(adopted, {
       ok: true,
       conflict: false,
-      assignment_epoch: 2,
+      assignment_epoch: 1,
       idempotent: false,
     });
     assert.deepEqual(
@@ -204,7 +204,7 @@ test("issue claim adoption rebinds the occupied tuple atomically", () => {
         branch: "fix/10-real",
         head_sha: "a".repeat(40),
         session_id: "session-a",
-        assignment_epoch: 2,
+        assignment_epoch: 1,
       },
     );
     assert.deepEqual(
@@ -219,15 +219,135 @@ test("issue claim adoption rebinds the occupied tuple atomically", () => {
         20,
         "refs/heads/fix/10-real",
         "a".repeat(40),
-        2,
+        1,
       ),
       {
         ok: true,
         conflict: false,
-        assignment_epoch: 2,
+        assignment_epoch: 1,
         idempotent: true,
       },
     );
+  });
+});
+
+test("issue claim adoption refuses a different-PR rewrite on an already PR-bound tuple", () => {
+  withDatabase((db) => {
+    db.assignSlot(
+      1,
+      "placeholder",
+      "github:repo-1",
+      10,
+      "fix/10-pending",
+      "session-a",
+      null,
+      null,
+      0,
+    );
+    // Legitimate issue-only -> PR identity bind first (pr=20, epoch preserved).
+    const bound = db.adoptIssueClaimSlot(
+      1,
+      "PR #20",
+      "github:repo-1",
+      10,
+      "fix/10-real",
+      20,
+      "a".repeat(40),
+      null,
+      "refs/heads/fix/10-pending",
+      null,
+      1,
+    );
+    assert.deepEqual(bound, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 1,
+      idempotent: false,
+    });
+
+    const before = db.getSlot(1);
+    // Reviewer scenario (ordinal-2 block): the observed tuple matches
+    // (expected_current_pr=P1=20, same branch/head/epoch) but the caller
+    // supplies a NEW pr=P2=21 — the row must fail closed, never be rewritten.
+    const rewrite = db.adoptIssueClaimSlot(
+      1,
+      "rewrite",
+      "github:repo-1",
+      10,
+      "fix/10-real",
+      21,
+      "a".repeat(40),
+      20,
+      "refs/heads/fix/10-real",
+      "a".repeat(40),
+      1,
+    );
+    assert.deepEqual(rewrite, {
+      ok: false,
+      conflict: true,
+      assignment_epoch: 1,
+      idempotent: false,
+      reason: "slot_already_occupied",
+      owner_slots: [1],
+    });
+    assert.deepEqual(db.getSlot(1), before, "PR-bound tuple must not be rewritten");
+    assert.equal(db.getSlot(1)?.pr, 20);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+  });
+});
+
+test("issue claim adoption is idempotent on an already PR-bound tuple (same PR)", () => {
+  withDatabase((db) => {
+    db.assignSlot(
+      1,
+      "placeholder",
+      "github:repo-1",
+      10,
+      "fix/10-pending",
+      "session-a",
+      null,
+      null,
+      0,
+    );
+    assert.equal(
+      db.adoptIssueClaimSlot(
+        1,
+        "PR #20",
+        "github:repo-1",
+        10,
+        "fix/10-real",
+        20,
+        "a".repeat(40),
+        null,
+        "refs/heads/fix/10-pending",
+        null,
+        1,
+      ).ok,
+      true,
+    );
+    const before = db.getSlot(1);
+    // Re-issued adoption claiming the now PR-bound observed tuple with the
+    // SAME pr is an idempotent no-op: epoch unchanged, no mutation.
+    const replay = db.adoptIssueClaimSlot(
+      1,
+      "ignored replay",
+      "github:repo-1",
+      10,
+      "refs/heads/fix/10-real",
+      20,
+      "a".repeat(40),
+      20,
+      "refs/heads/fix/10-real",
+      "a".repeat(40),
+      1,
+    );
+    assert.deepEqual(replay, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 1,
+      idempotent: true,
+    });
+    assert.deepEqual(db.getSlot(1), before, "idempotent re-adoption must not mutate the slot");
   });
 });
 
@@ -277,24 +397,8 @@ test("issue claim adoption fails closed on stale, active, or different claims", 
       "epoch_mismatch",
     );
 
-    db.startAgentTurn(1, "turn-a");
-    assert.equal(
-      db.adoptIssueClaimSlot(
-        1,
-        "active",
-        "github:repo-1",
-        10,
-        "fix/10-real",
-        20,
-        "a".repeat(40),
-        null,
-        "refs/heads/fix/10-pending",
-        null,
-        1,
-      ).reason,
-      "slot_already_occupied",
-    );
-    db.finishAgentTurn(1, "turn-a");
+    // A wrong issue on a matching observed tuple is not an adoption: the
+    // claim identity (issue) must agree, so the occupied slot stays put.
     assert.equal(
       db.adoptIssueClaimSlot(
         1,
@@ -313,6 +417,56 @@ test("issue claim adoption fails closed on stale, active, or different claims", 
     );
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
     assert.equal(db.getSlot(1)?.branch, "fix/10-pending");
+
+    // An ACTIVE turn with an exactly matching observed tuple is the wedge
+    // case: the identity bind proceeds while preserving the epoch and turn.
+    db.startAgentTurn(1, "turn-a");
+    assert.deepEqual(
+      db.adoptIssueClaimSlot(
+        1,
+        "active bind",
+        "github:repo-1",
+        10,
+        "fix/10-real",
+        20,
+        "a".repeat(40),
+        null,
+        "refs/heads/fix/10-pending",
+        null,
+        1,
+      ),
+      {
+        ok: true,
+        conflict: false,
+        assignment_epoch: 1,
+        idempotent: false,
+      },
+    );
+    assert.equal(db.getSlot(1)?.pr, 20);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    assert.equal(db.getSlot(1)?.active_turn_state, "active");
+    assert.equal(db.getSlot(1)?.active_turn_id, "turn-a");
+
+    // After the bind the observed tuple is pr-bound; an attempt that still
+    // claims the old issue-only tuple is drift and fails closed.
+    assert.equal(
+      db.adoptIssueClaimSlot(
+        1,
+        "stale observation",
+        "github:repo-1",
+        10,
+        "fix/10-real",
+        20,
+        "a".repeat(40),
+        null,
+        "refs/heads/fix/10-pending",
+        null,
+        1,
+      ).reason,
+      "observed_tuple_mismatch",
+    );
+    assert.equal(db.getSlot(1)?.pr, 20);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
   });
 });
 
@@ -354,6 +508,196 @@ test("issue claim adoption rejects same-epoch checkout identity drift", () => {
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
     assert.equal(db.getSlot(1)?.pr, null);
     assert.equal(db.getSlot(1)?.head_sha, "b".repeat(40));
+  });
+});
+
+test("active-turn issue claim adoption binds preserving epoch, turn, session, and dnd (#7208 wedge)", () => {
+  withDatabase((db, path) => {
+    // Issue-only claim already mid-work: pr=null but branch and recorded
+    // checkout head are present, exactly the #7208 incident shape.
+    assert.equal(
+      db.assignSlot(
+        4,
+        "claim",
+        "heydonna-app",
+        7135,
+        "fix/7135-proper-noun-letter-drop-corruption",
+        "session-s4",
+        null,
+        "be79bc4817cda506798ec87f81543d1a808b8bd6",
+        0,
+      ).ok,
+      true,
+    );
+    // Pin the live claim epoch (430 in the incident) and open an active turn.
+    const raw = new Database(path);
+    try {
+      raw.prepare("UPDATE slots SET assignment_epoch = 430 WHERE slot = 4").run();
+    } finally {
+      raw.close();
+    }
+    db.startAgentTurn(4, "turn-4-active");
+    assert.equal(db.getSlot(4)?.assignment_epoch, 430);
+    assert.equal(db.getSlot(4)?.active_turn_state, "active");
+
+    const adopted = db.adoptIssueClaimSlot(
+      4,
+      "rework PR #7208",
+      "heydonna-app",
+      7135,
+      "refs/heads/fix/7135-proper-noun-letter-drop-corruption",
+      7208,
+      "be79bc4817cda506798ec87f81543d1a808b8bd6",
+      null,
+      "refs/heads/fix/7135-proper-noun-letter-drop-corruption",
+      "be79bc4817cda506798ec87f81543d1a808b8bd6",
+      430,
+    );
+    assert.deepEqual(adopted, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 430,
+      idempotent: false,
+    });
+    assert.deepEqual(
+      {
+        occupied: db.getSlot(4)?.occupied,
+        repository_id: db.getSlot(4)?.repository_id,
+        issue: db.getSlot(4)?.issue,
+        pr: db.getSlot(4)?.pr,
+        branch_ref: db.getSlot(4)?.branch_ref,
+        head_sha: db.getSlot(4)?.head_sha,
+        assignment_epoch: db.getSlot(4)?.assignment_epoch,
+        active_turn_state: db.getSlot(4)?.active_turn_state,
+        active_turn_id: db.getSlot(4)?.active_turn_id,
+        session_id: db.getSlot(4)?.session_id,
+        dnd: db.getSlot(4)?.dnd,
+      },
+      {
+        occupied: true,
+        repository_id: "heydonna-app",
+        issue: 7135,
+        pr: 7208,
+        branch_ref: "refs/heads/fix/7135-proper-noun-letter-drop-corruption",
+        head_sha: "be79bc4817cda506798ec87f81543d1a808b8bd6",
+        assignment_epoch: 430,
+        active_turn_state: "active",
+        active_turn_id: "turn-4-active",
+        session_id: "session-s4",
+        dnd: false,
+      },
+    );
+  });
+});
+
+test("active-turn adoption fails closed on every observed-tuple drift", () => {
+  withDatabase((db) => {
+    db.assignSlot(
+      1,
+      "placeholder",
+      "github:repo-1",
+      10,
+      "fix/10-pending",
+      "session-a",
+      null,
+      null,
+      0,
+    );
+    db.startAgentTurn(1, "turn-a");
+
+    const drifts: Array<{
+      name: string;
+      args: Parameters<MoPDatabase["adoptIssueClaimSlot"]>;
+      reason: string;
+    }> = [
+      {
+        name: "branch_ref drift",
+        args: [1, "bind", "github:repo-1", 10, "fix/10-real", 20, "a".repeat(40), null, "refs/heads/fix/10-wrong", null, 1],
+        reason: "observed_tuple_mismatch",
+      },
+      {
+        name: "head_sha drift",
+        args: [1, "bind", "github:repo-1", 10, "fix/10-real", 20, "a".repeat(40), null, "refs/heads/fix/10-pending", "b".repeat(40), 1],
+        reason: "observed_tuple_mismatch",
+      },
+      {
+        name: "expected_current_pr drift",
+        args: [1, "bind", "github:repo-1", 10, "fix/10-real", 20, "a".repeat(40), 20, "refs/heads/fix/10-pending", null, 1],
+        reason: "observed_tuple_mismatch",
+      },
+      {
+        name: "issue drift",
+        args: [1, "bind", "github:repo-1", 11, "fix/11-real", 21, "b".repeat(40), null, "refs/heads/fix/10-pending", null, 1],
+        reason: "slot_already_occupied",
+      },
+      {
+        name: "repository drift",
+        args: [1, "bind", "github:repo-2", 10, "fix/10-real", 20, "a".repeat(40), null, "refs/heads/fix/10-pending", null, 1],
+        reason: "slot_already_occupied",
+      },
+      {
+        name: "epoch drift",
+        args: [1, "bind", "github:repo-1", 10, "fix/10-real", 20, "a".repeat(40), null, "refs/heads/fix/10-pending", null, 0],
+        reason: "epoch_mismatch",
+      },
+    ];
+
+    for (const drift of drifts) {
+      const before = db.getSlot(1);
+      const result = db.adoptIssueClaimSlot(...drift.args);
+      assert.equal(
+        result.reason,
+        drift.reason,
+        `${drift.name} must fail closed with ${drift.reason}`,
+      );
+      assert.equal(result.ok, false);
+      assert.deepEqual(db.getSlot(1), before, `${drift.name} must not mutate the slot`);
+    }
+  });
+});
+
+test("issue claim adoption refuses a target already owned by another slot", () => {
+  withDatabase((db) => {
+    db.assignSlot(4, "original", "github:repo-1", 20, "fix/20", null, 20, null, 0);
+    db.assignSlot(
+      2,
+      "claim",
+      "github:repo-1",
+      10,
+      "fix/10-pending",
+      "session-b",
+      null,
+      null,
+      0,
+    );
+
+    const duplicate = db.adoptIssueClaimSlot(
+      2,
+      "bind conflict",
+      "github:repo-1",
+      10,
+      "fix/10-real",
+      20,
+      "a".repeat(40),
+      null,
+      "refs/heads/fix/10-pending",
+      null,
+      1,
+    );
+    assert.deepEqual(duplicate, {
+      ok: false,
+      conflict: true,
+      assignment_epoch: 1,
+      idempotent: false,
+      reason: "target_already_assigned",
+      owner_slots: [4],
+      owner_conflicts: [{
+        slot: 4,
+        matching_fields: ["pr"],
+      }],
+    });
+    assert.equal(db.getSlot(2)?.pr, null);
+    assert.equal(db.getSlot(2)?.assignment_epoch, 1);
   });
 });
 

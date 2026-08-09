@@ -114,8 +114,125 @@ test("issue-claim adoption route is authority-gated and atomic", async () => {
     assert.equal(adopted.pr, assignment.pr);
     assert.equal(adopted.branch, assignment.branch);
     assert.equal(adopted.head_sha, assignment.head_sha);
-    assert.equal(adopted.assignment_epoch, 2);
+    assert.equal(adopted.assignment_epoch, 1);
     assert.equal(db.getEvents(1, 10, "slot_issue_claim_adopted").length, 1);
+  });
+});
+
+test("issue-claim adoption route binds an active-turn claim preserving epoch and turn", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const placeholder = {
+      ...assignment,
+      pr: null,
+      branch: "fix/10-pending",
+      head_sha: null,
+    };
+    const assigned = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, placeholder),
+    );
+    assert.equal(assigned.status, 200);
+    db.startAgentTurn(1, "turn-a");
+    assert.equal(db.getSlot(1)?.active_turn_state, "active");
+
+    const adopt = {
+      ...assignment,
+      expected_epoch: 1,
+      expected_current_pr: null,
+      expected_current_branch_ref: "refs/heads/fix/10-pending",
+      expected_current_head_sha: null,
+    };
+    const accepted = await app.request(
+      "/slots/1/adopt-issue-claim",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, adopt),
+    );
+    assert.equal(accepted.status, 200);
+    const adopted = await accepted.json() as Record<string, unknown>;
+    assert.equal(adopted.occupied, true);
+    assert.equal(adopted.issue, assignment.issue);
+    assert.equal(adopted.pr, assignment.pr);
+    assert.equal(adopted.branch, assignment.branch);
+    assert.equal(adopted.head_sha, assignment.head_sha);
+    assert.equal(adopted.assignment_epoch, 1);
+    assert.equal(adopted.active_turn_state, "active");
+    assert.equal(adopted.active_turn_id, "turn-a");
+    assert.equal(db.getEvents(1, 10, "slot_issue_claim_adopted").length, 1);
+  });
+});
+
+test("issue-claim adoption route refuses a different-PR rewrite on a PR-bound tuple", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const placeholder = {
+      ...assignment,
+      pr: null,
+      branch: "fix/10-pending",
+      head_sha: null,
+    };
+    const assigned = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, placeholder),
+    );
+    assert.equal(assigned.status, 200);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+
+    const bind = {
+      ...assignment,
+      expected_epoch: 1,
+      expected_current_pr: null,
+      expected_current_branch_ref: "refs/heads/fix/10-pending",
+      expected_current_head_sha: null,
+    };
+    const bound = await app.request(
+      "/slots/1/adopt-issue-claim",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, bind),
+    );
+    assert.equal(bound.status, 200);
+    assert.equal(db.getSlot(1)?.pr, assignment.pr);
+
+    const eventsBefore = db.getEvents(1, 10, "slot_issue_claim_adopted").length;
+    const rewrite = {
+      ...assignment,
+      pr: assignment.pr + 1,
+      expected_epoch: 1,
+      expected_current_pr: assignment.pr,
+      expected_current_branch_ref: `refs/heads/${assignment.branch}`,
+      expected_current_head_sha: assignment.head_sha,
+    };
+    const refused = await app.request(
+      "/slots/1/adopt-issue-claim",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, rewrite),
+    );
+    assert.equal(refused.status, 409);
+    const body = await refused.json() as Record<string, unknown>;
+    assert.equal(body.reason, "slot_already_occupied");
+    assert.equal(body.conflict, true);
+    assert.equal(db.getSlot(1)?.pr, assignment.pr);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    assert.equal(
+      db.getEvents(1, 10, "slot_issue_claim_adopted").length,
+      eventsBefore,
+      "refused PR rewrite must not log an adoption event",
+    );
+
+    // Re-issued adoption claiming the PR-bound observed tuple with the SAME
+    // pr is an idempotent no-op success.
+    const replay = {
+      ...assignment,
+      expected_epoch: 1,
+      expected_current_pr: assignment.pr,
+      expected_current_branch_ref: `refs/heads/${assignment.branch}`,
+      expected_current_head_sha: assignment.head_sha,
+    };
+    const replayed = await app.request(
+      "/slots/1/adopt-issue-claim",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, replay),
+    );
+    assert.equal(replayed.status, 200);
+    const row = await replayed.json() as Record<string, unknown>;
+    assert.equal(row.pr, assignment.pr);
+    assert.equal(row.assignment_epoch, 1);
+    assert.equal(db.getSlot(1)?.pr, assignment.pr);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
   });
 });
 
