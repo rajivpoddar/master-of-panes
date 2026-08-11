@@ -94,11 +94,13 @@ interface Harness {
   sends: string[];
   setActivity: (state: SlotActivityState) => void;
   setSlotReads: (slots: SlotState[]) => void;
+  setLogMtime: (date: Date | null) => void;
 }
 
 function harness(currentSlot: SlotState): Harness {
   let activity: SlotActivityState = "idle";
   let slotReads: SlotState[] = [];
+  let logMtime: Date | null = new Date(NOW);
   let nextEventId = 2;
   const sends: string[] = [];
   const events: EventLogEntry[] = [{
@@ -151,9 +153,12 @@ function harness(currentSlot: SlotState): Harness {
       return true;
     },
   } as unknown as TmuxRelay;
+  const logManager = {
+    getLogMtime: async () => logMtime,
+  } as unknown as LogManager;
 
   return {
-    detector: new StuckDetector(db, {} as LogManager, relay),
+    detector: new StuckDetector(db, logManager, relay),
     events,
     sends,
     setActivity: (state) => {
@@ -161,6 +166,9 @@ function harness(currentSlot: SlotState): Harness {
     },
     setSlotReads: (slots) => {
       slotReads = [...slots];
+    },
+    setLogMtime: (date) => {
+      logMtime = date;
     },
   };
 }
@@ -217,6 +225,7 @@ test("nudges an occupied idle dev slot once per idle episode", async () => {
       wait_age_ms: 360_000,
       wait_age_minutes: 6,
       urgency: "REMINDER",
+      turn_state: "inactive",
       issue: 7000,
       pr: 7001,
       branch: "fix/7000",
@@ -345,6 +354,7 @@ test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => 
       wait_age_ms: 720_000,
       wait_age_minutes: 12,
       urgency: "REMINDER",
+      turn_state: "inactive",
       issue: 7000,
       pr: 7001,
       branch: "fix/7000",
@@ -476,6 +486,7 @@ test("keeps the original wait start across repeated PM_WAIT nudge turns", async 
       wait_age_ms: 1_080_000,
       wait_age_minutes: 18,
       urgency: "FOLLOW_UP",
+      turn_state: "inactive",
       issue: 7000,
       pr: 7001,
       branch: "fix/7000",
@@ -1016,6 +1027,126 @@ test("escalates a free-slot PM reminder without resetting the release anchor", a
     for (const command of h.sends) {
       assert.match(command, /wait_started_at=2026-07-27T02:24:00.000/);
     }
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+    gate.cleanup();
+  }
+});
+
+test("nudges a wedged occupied slot whose turn state is stuck active", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const candidate = slot({
+      active_turn_state: "active",
+      idle: false,
+      active_turn_started_at: null,
+    });
+    const h = harness(candidate);
+    h.setLogMtime(new Date(Date.parse(OLD_IDLE + "Z")));
+    await h.detector.checkIdleOccupied(candidate);
+
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0], /turn_state=wedged/);
+    const wedged = h.events.filter(
+      (event) => event.event_type === "idle_occupied_wedge_detected",
+    );
+    assert.equal(wedged.length, 1);
+    assert.equal(JSON.parse(wedged[0].payload).log_age_ms, 360_000);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("does not nudge an active slot with a fresh JSONL write", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const candidate = slot({
+      active_turn_state: "active",
+      idle: false,
+      active_turn_started_at: null,
+    });
+    const h = harness(candidate);
+    h.setLogMtime(new Date(NOW - 1_000));
+    await h.detector.checkIdleOccupied(candidate);
+    assert.deepEqual(h.sends, []);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("re-fires the occupied nudge when urgency advances on the same anchor", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const h = harness(slot());
+    h.events.push({
+      id: 50,
+      timestamp: "2026-07-27T02:26:00.000",
+      slot: 2,
+      event_type: "idle_occupied_continue_injected",
+      hook_type: "Stuck",
+      tool_name: null,
+      payload: JSON.stringify({
+        command: expectedNudge(6, "REMINDER"),
+        assignment_epoch: 4,
+        idle_anchor: OLD_IDLE,
+        wait_anchor: OLD_IDLE,
+        urgency: "REMINDER",
+      }),
+      processed: false,
+    });
+
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 30 * 60_000;
+    await h.detector.checkIdleOccupied(slot());
+
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0], /urgency=URGENT/);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("nudges a wedged free slot whose turn state is stuck active", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  const gate = installGate({
+    allowed: true,
+    slot: 2,
+    recommendation_kind: "rework",
+    rework_packet_count: 1,
+    rework_pr_count: 1,
+    ready_pool_size: 1,
+    recommended_obligation_id: 91,
+    recommended_pr: 7001,
+    recommended_issue: 7000,
+    recommended_packet: "/tmp/rework-7001.md",
+    recommended_action: "assign rework",
+    slot_dispatch_wedge_id: null,
+    reason: "packet_backed_rework_available",
+  });
+  Date.now = () => NOW;
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+  try {
+    const candidate = freeSlot({
+      active_turn_state: "active",
+      idle: false,
+      active_turn_started_at: null,
+    });
+    const h = harness(candidate);
+    h.events[0] = { ...h.events[0], event_type: "slot_released" };
+    h.setLogMtime(new Date(Date.parse(OLD_IDLE + "Z")));
+    await h.detector.checkIdleFree(candidate);
+
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0], /turn_state=wedged/);
+    const wedged = h.events.filter(
+      (event) => event.event_type === "idle_free_wedge_detected",
+    );
+    assert.equal(wedged.length, 1);
   } finally {
     Date.now = originalNow;
     if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
