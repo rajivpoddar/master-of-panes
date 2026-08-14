@@ -35,8 +35,8 @@ export const SCRIPTS_DIR = "/Users/rajiv/Downloads/projects/heydonna-app/.claude
 // Respawn skill: --continue is optional arg (fresh start for atma updates).
 export const RESTART_COMMANDS: Record<number, string> = {
   0: `bash ${SCRIPTS_DIR}/launch-pm.sh --continue`,
-  1: `bash ${SCRIPTS_DIR}/launch-slot-1.sh --continue`,
-  2: `bash ${SCRIPTS_DIR}/launch-slot-2.sh --continue`,
+  1: `bash ${SCRIPTS_DIR}/launch-slot-1-omp.sh --continue`,
+  2: `bash ${SCRIPTS_DIR}/launch-slot-2-omp.sh --continue`,
   3: `bash ${SCRIPTS_DIR}/launch-slot-3-omp.sh --continue`,
   4: `bash ${SCRIPTS_DIR}/launch-slot-4-omp.sh --continue`,
 };
