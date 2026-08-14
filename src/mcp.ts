@@ -43,13 +43,9 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_slot_status",
-    "Get the current state of a specific dev slot (1-4). Returns status, task, issue, branch, DND flag, and last activity. Refreshes idle state via is-active.sh for real-time accuracy.",
+    "Get the authoritative hook-derived state of a specific dev slot (1-4). Returns status, task, issue, branch, DND flag, and last activity.",
     { slot: z.number().int().min(1).max(4).describe("Slot number (1-4)") },
     async ({ slot }) => {
-      // Refresh idle state from is-active.sh (real-time chevron + content check)
-      const isActive = await relay.isSlotActive(slot);
-      db.updateSlot(slot, { idle: !isActive });
-
       const state = db.getSlot(slot);
       if (!state) {
         return { content: [{ type: "text" as const, text: `Slot ${slot} not found` }] };
@@ -64,15 +60,9 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_all_slots",
-    "Get the status of all 4 dev slots in one call. Returns an array of slot states with a summary line.",
+    "Get the authoritative hook-derived status of all 4 dev slots in one call. Returns an array of slot states with a summary line.",
     {},
     async () => {
-      // Refresh idle state for all slots from is-active.sh (real-time)
-      for (let i = 1; i <= config.slotCount; i++) {
-        const isActive = await relay.isSlotActive(i);
-        db.updateSlot(i, { idle: !isActive });
-      }
-
       const slots = db.getAllSlots();
       const free = slots.filter((s) => s.status === "free").length;
       const active = slots.filter((s) => s.status === "active").length;

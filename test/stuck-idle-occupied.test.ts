@@ -6,7 +6,7 @@ import test from "node:test";
 
 import type { MoPDatabase } from "../src/db.js";
 import type { LogManager } from "../src/logs.js";
-import type { TmuxRelay, SlotActivityState } from "../src/relay.js";
+import type { TmuxRelay } from "../src/relay.js";
 import { StuckDetector } from "../src/stuck.js";
 import type { EventLogEntry, SlotState } from "../src/types.js";
 
@@ -92,13 +92,11 @@ interface Harness {
   detector: StuckDetector;
   events: EventLogEntry[];
   sends: string[];
-  setActivity: (state: SlotActivityState) => void;
   setSlotReads: (slots: SlotState[]) => void;
   setLogMtime: (date: Date | null) => void;
 }
 
 function harness(currentSlot: SlotState): Harness {
-  let activity: SlotActivityState = "idle";
   let slotReads: SlotState[] = [];
   let logMtime: Date | null = new Date(NOW);
   let nextEventId = 2;
@@ -147,7 +145,9 @@ function harness(currentSlot: SlotState): Harness {
   } as unknown as MoPDatabase;
 
   const relay = {
-    getSlotActivityState: async () => activity,
+    getSlotActivityState: async () => {
+      throw new Error("nudge path must not inspect terminal prompt state");
+    },
     sendToSlotAsync: async (_slot: number, command: string) => {
       sends.push(command);
       return true;
@@ -161,9 +161,6 @@ function harness(currentSlot: SlotState): Harness {
     detector: new StuckDetector(db, logManager, relay),
     events,
     sends,
-    setActivity: (state) => {
-      activity = state;
-    },
     setSlotReads: (slots) => {
       slotReads = [...slots];
     },
@@ -647,14 +644,14 @@ test("raises urgency with the occupied idle age", async () => {
   }
 });
 
-test("fails closed when live pane activity is unknown", async () => {
+test("uses authoritative inactive turn state when the legacy idle flag is stale", async () => {
   const originalNow = Date.now;
   Date.now = () => NOW;
   try {
-    const h = harness(slot());
-    h.setActivity("unknown");
-    await h.detector.checkIdleOccupied(slot());
-    assert.deepEqual(h.sends, []);
+    const candidate = slot({ idle: false, active_turn_state: "inactive" });
+    const h = harness(candidate);
+    await h.detector.checkIdleOccupied(candidate);
+    assert.deepEqual(h.sends, [expectedNudge(6, "REMINDER")]);
   } finally {
     Date.now = originalNow;
   }
@@ -682,14 +679,13 @@ test("does not compete with a specialized recovery in the same idle episode", as
   }
 });
 
-test("requires current ownership, idle state, and an inactive turn", async () => {
+test("requires current ownership and an inactive turn", async () => {
   const originalNow = Date.now;
   Date.now = () => NOW;
   try {
     const guarded = [
       slot({ slot: 0 }),
       slot({ occupied: false }),
-      slot({ idle: false }),
       slot({ dnd: true }),
       slot({ active_turn_state: "active" }),
     ];

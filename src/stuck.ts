@@ -451,14 +451,10 @@ export class StuckDetector {
       }
     }
 
-    const liveState = await this.relay.getSlotActivityState(slot.slot);
-    if (liveState !== "idle") {
-      debugLog(`[idle-occupied] slot=${slot.slot} suppress=live-${liveState}`);
-      return;
-    }
-
-    // Re-pin ownership after the live check so a concurrent release/reassign
-    // cannot receive a stale nudge.
+    // Hook-derived turn state is authoritative. Re-pin ownership immediately
+    // before delivery so a concurrent release/reassign cannot receive a stale
+    // nudge. Do not overwrite or veto it with terminal prompt heuristics: those
+    // are runtime-specific and cannot represent Claude and OMP uniformly.
     const current = this.db.getSlot(slot.slot);
     const currentIdleState = current ? await this.isIdleOrWedged(current) : null;
     if (
@@ -587,12 +583,6 @@ export class StuckDetector {
       } catch {
         // Malformed diagnostics must not suppress a current free episode.
       }
-    }
-
-    const liveState = await this.relay.getSlotActivityState(slot.slot);
-    if (liveState !== "idle") {
-      debugLog(`[idle-free] slot=${slot.slot} suppress=live-${liveState}`);
-      return;
     }
 
     const occupiedPrs = this.db.getAllSlots()
@@ -732,7 +722,11 @@ export class StuckDetector {
   private async isIdleOrWedged(
     slot: SlotState
   ): Promise<{ idle: boolean; wedged: boolean; logAgeMs: number | null }> {
-    if (slot.active_turn_state === "inactive" && slot.idle) {
+    // active_turn_state is maintained by ordered UserPromptSubmit/work/Stop
+    // hook events. The legacy idle boolean may be stale after an older status
+    // read used terminal prompt heuristics, so it must not veto a completed
+    // turn.
+    if (slot.active_turn_state === "inactive") {
       return { idle: true, wedged: false, logAgeMs: null };
     }
     if (
