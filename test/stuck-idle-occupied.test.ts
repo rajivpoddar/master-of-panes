@@ -973,6 +973,111 @@ test("a real release restarts the free-wait anchor", async () => {
   }
 });
 
+test("nudges a free idle slot after a slot_cleared marker (no slot_released)", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  const gate = installGate({
+    allowed: true,
+    slot: 2,
+    recommendation_kind: "rework",
+    rework_packet_count: 3,
+    rework_pr_count: 2,
+    ready_pool_size: 3,
+    recommended_obligation_id: 91,
+    recommended_pr: 7001,
+    recommended_issue: 7000,
+    recommended_packet: "/tmp/rework-7001.md",
+    recommended_action: "assign rework",
+    slot_dispatch_wedge_id: 93,
+    reason: "packet_backed_rework_available",
+  });
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+  try {
+    const candidate = freeSlot();
+    const h = harness(candidate);
+    // Slot became free via a clear, not a release. The clear must establish
+    // the free-wait anchor so the assignment nudge fires.
+    h.events[0] = {
+      ...h.events[0],
+      event_type: "slot_cleared",
+      payload: JSON.stringify({ assignment_epoch: 4, idempotent: false }),
+    };
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 6 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0], /mode=FREE_WAIT_ASSIGNMENT slot=2/);
+    assert.match(h.sends[0], /wait_started_at=2026-07-27T02:24:00.000/);
+    assert.match(h.sends[0], /wait_age_minutes=6 urgency=REMINDER/);
+    assert.equal(
+      h.events.filter((event) => event.event_type === "idle_free_assignment_nudge_injected").length,
+      1,
+    );
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+    gate.cleanup();
+  }
+});
+
+test("nudges a free idle slot with no free marker using a stable created watermark", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  const gate = installGate({
+    allowed: true,
+    slot: 2,
+    recommendation_kind: "rework",
+    rework_packet_count: 3,
+    rework_pr_count: 2,
+    ready_pool_size: 3,
+    recommended_obligation_id: 91,
+    recommended_pr: 7001,
+    recommended_issue: 7000,
+    recommended_packet: "/tmp/rework-7001.md",
+    recommended_action: "assign rework",
+    slot_dispatch_wedge_id: 93,
+    reason: "packet_backed_rework_available",
+  });
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+  try {
+    const candidate = freeSlot();
+    const h = harness(candidate);
+    // No slot_released and no slot_cleared marker: the slot row is free but
+    // MoP never recorded a free transition. The detector must still nudge by
+    // writing one stable idle_free_anchor_created watermark on first
+    // observation, then measuring the wait from it.
+    Date.now = () => NOW;
+    await h.detector.checkIdleFree(candidate);
+    assert.equal(h.sends.length, 0); // just created the watermark; not yet 5m
+    const created = h.events.filter((event) => event.event_type === "idle_free_anchor_created");
+    assert.equal(created.length, 1);
+    assert.equal(JSON.parse(created[0].payload).assignment_epoch, 4);
+
+    // 10 minutes after the watermark, the nudge fires with a stable anchor.
+    Date.now = () => NOW + 10 * 60_000;
+    await h.detector.checkIdleFree(candidate);
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0], /mode=FREE_WAIT_ASSIGNMENT slot=2/);
+    assert.match(h.sends[0], /wait_started_at=2026-07-27T02:30:00.000/);
+    assert.match(h.sends[0], /wait_age_minutes=10 urgency=REMINDER/);
+    assert.equal(
+      h.events.filter((event) => event.event_type === "idle_free_assignment_nudge_injected").length,
+      1,
+    );
+    // The watermark is not recreated on later checks (stable anchor + dedup).
+    assert.equal(
+      h.events.filter((event) => event.event_type === "idle_free_anchor_created").length,
+      1,
+    );
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+    gate.cleanup();
+  }
+});
+
 test("escalates a free-slot PM reminder without resetting the release anchor", async () => {
   const originalNow = Date.now;
   const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;

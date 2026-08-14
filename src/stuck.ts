@@ -102,9 +102,10 @@ export class StuckDetector {
   private readonly IDLE_OCCUPIED_THRESHOLD_MS = 5 * 60 * 1000;
   private readonly IDLE_FREE_THRESHOLD_MS = 5 * 60 * 1000;
   // How many recent release events per type are walked to find the newest
-  // non-idempotent free-episode start. Idempotent replays are skipped; if
-  // every recent event is a replay, the last_activity fallback still points
-  // at the last real transition because replays never update the slot row.
+  // non-idempotent free-episode start. Idempotent replays are skipped; if no
+  // real release/clear marker exists, a stable idle_free_anchor_created
+  // watermark is written on first observation instead of using the moving
+  // last_activity field (status reads refresh last_activity every minute).
   private readonly IDLE_FREE_RELEASE_LOOKBACK = 25;
   private readonly IDLE_OCCUPIED_SUBAGENT_LOOKBACK_SEC = 6 * 60 * 60;
   private readonly PLAN_APPROVAL_THRESHOLD_MS = 5 * 60 * 1000; // 5 min waiting for approval (Rajiv directive 2026-03-23)
@@ -560,7 +561,7 @@ export class StuckDetector {
     const idleState = await this.isIdleOrWedged(slot);
     if (!idleState.idle) return;
 
-    const anchor = this.getIdleFreeAnchor(slot);
+    const anchor = this.getOrCreateFreeAnchor(slot);
     if (!anchor) return;
     const freeAgeMs = Date.now() - anchor.timestampMs;
     if (!Number.isFinite(freeAgeMs) || freeAgeMs < this.IDLE_FREE_THRESHOLD_MS) return;
@@ -840,7 +841,7 @@ export class StuckDetector {
     slot: SlotState
   ): { timestamp: string; timestampMs: number; source: string } | null {
     const candidates: Array<{ timestamp: string; timestampMs: number; source: string }> = [];
-    for (const eventType of ["slot_released", "auto_released_post_pr"]) {
+    for (const eventType of ["slot_released", "auto_released_post_pr", "slot_cleared"]) {
       // A release pass on an already-free slot logs a NEW slot_released event
       // whose payload marks idempotent: true (mcp.ts / server.ts pass through
       // releaseSlot's result). That replay is not a new free episode: treating
@@ -870,12 +871,51 @@ export class StuckDetector {
       candidates.sort((a, b) => b.timestampMs - a.timestampMs);
       return candidates[0];
     }
-    const fallbackMs = parseDbTimestampMs(slot.last_activity);
-    if (!Number.isFinite(fallbackMs)) return null;
+    // No release/clear marker: do NOT fall back to last_activity. Status
+    // reads and idle probes refresh last_activity on a free slot, so a moving
+    // fallback would reset the wait age every minute and the nudge would
+    // never fire. A stable watermark is created on first observation instead.
+    return null;
+  }
+
+  /**
+   * Free-slot wait anchor that works even when MoP never wrote a
+   * `slot_released`/`slot_cleared` marker (a slot can become free through a
+   * clear or an assignment handoff that only flips the DB row). On first
+   * observation of a genuinely free+idle+inactive slot with no release/clear
+   * anchor, persist one `idle_free_anchor_created` watermark so the wait age
+   * is stable and the free-slot assignment nudge fires after the threshold.
+   */
+  private getOrCreateFreeAnchor(
+    slot: SlotState
+  ): { timestamp: string; timestampMs: number; source: string } | null {
+    const existing = this.getIdleFreeAnchor(slot);
+    if (existing) return existing;
+
+    const prior = this.db.getEvents(slot.slot, 1, "idle_free_anchor_created")[0];
+    if (prior) {
+      try {
+        const payload = JSON.parse(prior.payload) as { assignment_epoch?: number };
+        if (payload.assignment_epoch === slot.assignment_epoch) {
+          const priorMs = parseDbTimestampMs(prior.timestamp);
+          if (Number.isFinite(priorMs)) {
+            return { timestamp: prior.timestamp, timestampMs: priorMs, source: "idle_free_anchor_created" };
+          }
+        }
+      } catch {
+        // Malformed watermark is ignored; a fresh one is written below.
+      }
+    }
+
+    const nowIso = new Date().toISOString().replace(/Z$/, "");
+    this.db.logEvent(slot.slot, "idle_free_anchor_created", "Stuck", null, {
+      assignment_epoch: slot.assignment_epoch,
+      free_since: nowIso,
+    });
     return {
-      timestamp: slot.last_activity,
-      timestampMs: fallbackMs,
-      source: "last_activity",
+      timestamp: nowIso,
+      timestampMs: Date.now(),
+      source: "idle_free_anchor_created",
     };
   }
 
