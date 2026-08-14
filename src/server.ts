@@ -29,7 +29,7 @@ import { StuckDetector } from "./stuck.js";
 import { OpsAuditScheduler } from "./opsAudit.js";
 import { PMCadenceScheduler } from "./pmCadence.js";
 import { P0EscalationWatcher } from "./p0EscalationWatch.js";
-import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS } from "./health.js";
+import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import type { HookPayload, MoPConfig } from "./types.js";
@@ -1025,30 +1025,36 @@ app.post("/slots/:slotNum/respawn", async (c) => {
       }, 500);
     }
 
-    // Step 4: Wait for claude to boot (pane command back to "claude").
+    // Step 4: Wait for the agent to boot (pane command back to an agent TUI:
+    // "claude" or "omp"). omp does not use the literal "continue" prompt below;
+    // its launcher resumes via the --continue flag.
     const bootTimeout = 60_000;
     const bootDeadline = Date.now() + bootTimeout;
     let booted = false;
+    let bootCommand = "";
     while (Date.now() < bootDeadline) {
       await sleep(500);
       const cmd = await healthChecker.getPaneCommandPublic(slotNum);
-      if (cmd === "claude") {
+      if (cmd && AGENT_COMMANDS.has(cmd)) {
         booted = true;
-        recordStep("claude_booted");
+        bootCommand = cmd;
+        recordStep("agent_booted", `cmd=${cmd}`);
         break;
       }
     }
     if (!booted) {
       healthChecker.clearPmInitiatedRespawn(slotNum);
       return c.json({
-        error: `Claude did not boot after launch command (waited ${bootTimeout}ms)`,
+        error: `Agent did not boot after launch command (waited ${bootTimeout}ms)`,
         steps,
       }, 504);
     }
 
-    // Step 5: Let the UI settle, then inject "continue" to resume the previous prompt.
+    // Step 5: Let the UI settle, then inject "continue" to resume the previous
+    // prompt. Claude Code needs the literal prompt; omp resumes from the
+    // --continue launch flag instead, so skip text injection for omp.
     await sleep(2_000);
-    if (continueSession) {
+    if (continueSession && bootCommand === "claude") {
       try {
         await execShell(
           `tmux send-keys -t ${paneAddress} 'continue' && tmux send-keys -t ${paneAddress} Enter`,

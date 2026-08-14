@@ -44,6 +44,10 @@ export const RESTART_COMMANDS: Record<number, string> = {
 /** Shell command names that indicate Claude Code has exited back to the shell */
 export const SHELL_COMMANDS = new Set(["zsh", "bash", "sh", "fish"]);
 
+// Pane current-commands that indicate an agent TUI is booted (Claude Code or
+// omp/oh-my-pi). The respawn endpoint uses this to know when a launch succeeded.
+export const AGENT_COMMANDS = new Set(["claude", "omp"]);
+
 const SLOT_JSONL_DIRS: Record<number, string> = {
   0: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app",
   1: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-3001",
