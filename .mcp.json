@@ -1,9 +1,8 @@
 {
   "mop": {
-    "command": "npx",
+    "command": "/Users/rajiv/.nvm/versions/node/v22.13.1/bin/node",
     "args": [
-      "tsx",
-      "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/src/mcp.ts"
+      "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/mcp.js"
     ],
     "env": {
       "MOP_DB_PATH": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/data/mop.db"
