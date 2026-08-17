@@ -195,6 +195,24 @@ export function decidePMDrain(
   };
 }
 
+export type PMSubmitKey = "Enter" | "C-q";
+
+/**
+ * Busy-aware PM submit key for automated PM delivery.
+ *
+ * idle   → "Enter" (submit normally and start the turn);
+ * busy   → "C-q"   (OMP followUp: queues while streaming, so the active
+ *                    turn is never steered by an Enter queue-jump);
+ * unknown→ "C-q"   (fail closed — pmBusy defaults true until /pm-status
+ *                    proves PM idle, so an unknown snapshot selects C-q).
+ *
+ * Slots 1-4 never route through this decision: they keep the always-Enter
+ * sendToSlot path where steering the active turn is the intended behavior.
+ */
+export function decidePMSubmitKey(pmBusy: boolean): PMSubmitKey {
+  return pmBusy ? "C-q" : "Enter";
+}
+
 export class TmuxRelay {
   private pmPaneAddress: string;
   private logManager: LogManager | null = null;
@@ -252,9 +270,11 @@ export class TmuxRelay {
   })();
   private directInjectChain: Promise<unknown> = Promise.resolve();
   private directInjectSeq = 0;
+  private runShell: typeof execShell;
 
-  constructor(config: MoPConfig) {
+  constructor(config: MoPConfig, deps: { runShell?: typeof execShell } = {}) {
     this.pmPaneAddress = config.pmPaneAddress;
+    this.runShell = deps.runShell ?? execShell;
     recentJsonlActivity.watchDirectory(PM_JSONL_DIR);
   }
 
@@ -613,26 +633,48 @@ export class TmuxRelay {
    * Raw paste-buffer inject into PM pane. Used by injectToPM (for the
    * not-busy fast path) and drainPMQueue (when replaying queued events).
    * Bypasses the busy-queue. Do NOT call from outside the relay.
+   * Submits with Enter — these callers only fire when PM is already idle.
    *
-   * IMPORTANT: Text/paste and Enter must be separate tmux calls with a short
-   * dwell between them. tmux can accept the operations sequentially while the
-   * target pane is still rendering the inserted prompt; pressing Enter in the
-   * same shell invocation can leave the message buffered instead of submitted.
+   * IMPORTANT: Text/paste and the submit key must be separate tmux calls with
+   * a short dwell between them. tmux can accept the operations sequentially
+   * while the target pane is still rendering the inserted prompt; pressing the
+   * submit key in the same shell invocation can leave the message buffered
+   * instead of submitted.
    */
-  private async injectDirect(message: string): Promise<boolean> {
-    const run = (): Promise<boolean> => this.injectDirectNow(message);
+  private injectDirect(message: string): Promise<boolean> {
+    return this.injectDirectWithSubmitKey(message, "Enter");
+  }
+
+  /**
+   * The single MoP relay submit primitive for automated PM delivery
+   * (ordinary slot→PM status bodies routed via POST /slots/0/send).
+   *
+   * Busy-aware submit key: idle → Enter, busy/unknown → C-q. See
+   * decidePMSubmitKey. Unlike the queued injectToPM path, this primitive
+   * always delivers immediately (it never sits in the busy-queue), but it
+   * selects the key that queues a follow-up in OMP instead of steering the
+   * active turn when PM is busy.
+   */
+  async submitToPM(message: string): Promise<{ ok: boolean; submitKey: PMSubmitKey }> {
+    const submitKey = decidePMSubmitKey(this.pmBusy);
+    const ok = await this.injectDirectWithSubmitKey(message, submitKey);
+    return { ok, submitKey };
+  }
+
+  private injectDirectWithSubmitKey(message: string, submitKey: PMSubmitKey): Promise<boolean> {
+    const run = (): Promise<boolean> => this.injectDirectNow(message, submitKey);
     const result = this.directInjectChain.then(run, run);
     this.directInjectChain = result.catch(() => undefined);
     return result;
   }
 
-  private async injectDirectNow(message: string): Promise<boolean> {
+  private async injectDirectNow(message: string, submitKey: PMSubmitKey): Promise<boolean> {
     try {
       const firstLine = message.split("\n", 1)[0];
-      console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""}`);
+      console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""} (submit=${submitKey})`);
       if (message.includes("\n")) {
         // Multi-line payload (e.g., /check-slot N\n<bg-summary>): use
-        // load-buffer + paste-buffer + Enter — same pattern sendToSlot uses
+        // load-buffer + paste-buffer + submit — same pattern sendToSlot uses
         // for multi-line content. send-keys with embedded \n would press
         // Enter on each newline and submit the prompt prematurely.
         // Rajiv directive 2026-05-15 13:44 IST thread `1778831723.165019`:
@@ -642,21 +684,21 @@ export class TmuxRelay {
         const bufName = `mop-pm-inject-${process.pid}-${seq}`;
         await fs.writeFile(tmpFile, message);
         try {
-          await execShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
-          await execShell(`tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
+          await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+          await this.runShell(`tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
           await sleep(PM_INJECT_ENTER_DELAY_MS);
-          await execShell(`tmux send-keys -t ${this.pmPaneAddress} Enter`, { timeout: 10_000 });
+          await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${submitKey}`, { timeout: 10_000 });
           await sleep(500);
         } finally {
           await fs.unlink(tmpFile).catch(() => undefined);
         }
       } else {
-        await execShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
+        await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
         await sleep(PM_INJECT_ENTER_DELAY_MS);
-        await execShell(`tmux send-keys -t ${this.pmPaneAddress} Enter`, { timeout: 10_000 });
+        await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${submitKey}`, { timeout: 10_000 });
         await sleep(500);
       }
-      console.log(`[relay-debug] injectToPM success → ${firstLine}`);
+      console.log(`[relay-debug] injectToPM success → ${firstLine} (submit=${submitKey})`);
       return true;
     } catch (err) {
       console.error(`[relay] Failed to inject into PM pane:`, err);

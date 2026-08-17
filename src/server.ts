@@ -1511,6 +1511,61 @@ app.post("/slots/:slotNum/send", async (c) => {
         await sleep(300);
       }
 
+      if (slotNum === 0) {
+        // Slot 0 is the PM pane. Ordinary slot→PM status bodies must route
+        // through the relay's busy-aware submit primitive (idle → Enter,
+        // busy/unknown → C-q) instead of pastePayloadWithTmuxBuffer's
+        // always-Enter, so a busy PM never has the active turn steered by an
+        // Enter queue-jump.
+        //
+        // Delivery verification is preserved as a submit-aware receipt: the
+        // relay returns ok=true only when the paste (load/paste-buffer) AND
+        // the selected submit key (send-keys) all dispatched without a tmux
+        // error, and the chosen key is recorded on the send_command event and
+        // the response. The pane-diff deliveryConfirmed check does not apply
+        // here because C-q queues a follow-up and does NOT enter the active
+        // turn — a pane that looks unchanged after the queue is the expected
+        // success state.
+        const bytes = Buffer.byteLength(command, "utf8");
+        const submitted = await relay.submitToPM(command);
+        if (!submitted.ok) {
+          db.logEvent(slotNum, "send_error", null, null, {
+            error: "pm_submit_failed",
+            command: command.slice(0, 200),
+            submit: submitted.submitKey,
+          });
+          return c.json(
+            {
+              success: false,
+              error: "PM pane submit failed (tmux send-keys).",
+              reason: "tmux_exec_error",
+            },
+            500,
+          );
+        }
+        db.logEvent(slotNum, "send_command", null, null, {
+          command: command.slice(0, 200),
+          force,
+          mode: isInsert ? "insert" : isNormal ? "normal" : "unknown",
+          paste: "buffer",
+          submit: submitted.submitKey,
+          verified: true,
+          verification: "submit_aware_receipt",
+          bytes,
+          chunks: 1,
+        });
+        return c.json({
+          success: true,
+          mode: "command",
+          slot: slotNum,
+          paste: "buffer",
+          submit: submitted.submitKey,
+          verified: true,
+          bytes,
+          chunks: 1,
+        });
+      }
+
       const commandPayload = Buffer.from(command, "utf8");
       const paste = await pastePayloadWithTmuxBuffer(slotNum, paneAddress, commandPayload, {
         source: "command",
