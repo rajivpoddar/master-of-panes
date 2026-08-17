@@ -181,6 +181,14 @@ export function decidePMDrain(
   maxRearmsHit: boolean,
 ): PMDrainDecision {
   if (activity.kind === "unknown") {
+    // A healthy watcher with no event since process start is expected after a
+    // Codex/OMP restart: Codex does not write the legacy Claude JSONL stream.
+    // Keep the conservative busy state through the full debounce window, then
+    // honor the existing max-rearm escape hatch so a real Stop can eventually
+    // establish idle. A failed watcher remains fail-closed indefinitely.
+    if (activity.reason === "no-event" && maxRearmsHit) {
+      return { action: "drain", reason: "max-rearms-hit", ageMs: 0 };
+    }
     return { action: "rearm", reason: "activity-unknown", ageMs: null };
   }
 

@@ -74,7 +74,7 @@ function assertUnknown(signal: JsonlActivitySignal): asserts signal is Extract<
   assert.equal(signal.kind, "unknown");
 }
 
-test("restart with no events is stable for health and never drains PM", async () => {
+test("restart with no events stays fail-closed until the max-rearm cap", async () => {
   const first = activityHarness();
   const signalA = await first.tracker.latestActivity("/sessions");
   first.advance(60_000);
@@ -83,10 +83,15 @@ test("restart with no events is stable for health and never drains PM", async ()
   assertUnknown(signalA);
   assertUnknown(signalB);
   assert.equal(signalA.token, signalB.token);
-  assert.deepEqual(decidePMDrain(signalB, 61_000, 15_000, true), {
+  assert.deepEqual(decidePMDrain(signalB, 61_000, 15_000, false), {
     action: "rearm",
     reason: "activity-unknown",
     ageMs: null,
+  });
+  assert.deepEqual(decidePMDrain(signalB, 61_000, 15_000, true), {
+    action: "drain",
+    reason: "max-rearms-hit",
+    ageMs: 0,
   });
 
   const afterRestart = activityHarness();
