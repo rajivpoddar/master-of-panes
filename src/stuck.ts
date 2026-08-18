@@ -386,6 +386,11 @@ export class StuckDetector {
    * last_activity.
    */
   async checkIdleOccupied(slot: SlotState): Promise<void> {
+    // Master kill switch (Rajiv directive 2026-08-18): read at call time so
+    // a runtime-env toggle is honored without a process restart. The flag
+    // lives in the launchd EnvironmentVariables
+    // (com.heydonna.mop-server.plist).
+    if (process.env.MOP_PM_WAIT_NUDGES_DISABLED === "1") return;
     if (slot.slot < 1 || slot.slot > 4) return;
     if (!slot.occupied || slot.dnd) return;
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
@@ -550,6 +555,7 @@ export class StuckDetector {
    * GitHub nor mutates capacity.
    */
   async checkIdleFree(slot: SlotState): Promise<void> {
+    if (process.env.MOP_PM_WAIT_NUDGES_DISABLED === "1") return;
     if (slot.slot < 1 || slot.slot > 4) return;
     if (slot.occupied || slot.dnd) return;
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;

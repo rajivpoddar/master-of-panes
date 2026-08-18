@@ -769,6 +769,26 @@ test("nudges a free idle slot once per urgency tier with the total free time", a
   }
 });
 
+test("MOP_PM_WAIT_NUDGES_DISABLED=1 suppresses occupied and free PM wait nudges", async () => {
+  const previous = process.env.MOP_PM_WAIT_NUDGES_DISABLED;
+  process.env.MOP_PM_WAIT_NUDGES_DISABLED = "1";
+  try {
+    const occupied = harness(slot());
+    await occupied.detector.checkIdleOccupied(slot());
+    assert.deepEqual(occupied.sends, []);
+
+    const free = harness(freeSlot());
+    await free.detector.checkIdleFree(freeSlot());
+    assert.deepEqual(free.sends, []);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MOP_PM_WAIT_NUDGES_DISABLED;
+    } else {
+      process.env.MOP_PM_WAIT_NUDGES_DISABLED = previous;
+    }
+  }
+});
+
 test("does not wake a free slot when the Ready Pool gate is closed", async () => {
   const originalNow = Date.now;
   const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
