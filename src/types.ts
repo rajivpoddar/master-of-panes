@@ -97,6 +97,12 @@ export interface SlotState {
   assignment_epoch: number;
   /** When the slot was assigned */
   assigned_at: string | null;
+  /** Work classification bound to the authoritative assignment, when supplied */
+  work_kind: string | null;
+  /** Stable handoff identity bound to the authoritative assignment, when supplied */
+  handoff_id: string | null;
+  /** Authoritative MoP claim timestamp for the current occupied tuple */
+  claimed_at: string | null;
   /** Last activity timestamp */
   last_activity: string;
   /** Do not disturb flag */

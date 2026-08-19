@@ -21,6 +21,7 @@ export interface SlotMutationResult {
     | "epoch_mismatch"
     | "invalid_repository_id"
     | "invalid_branch_ref"
+    | "invalid_assignment_metadata"
     | "target_already_assigned"
     | "slot_already_occupied"
     | "slot_not_occupied"
@@ -141,6 +142,9 @@ export class MoPDatabase {
         head_sha TEXT,
         assignment_epoch INTEGER NOT NULL DEFAULT 0,
         assigned_at TEXT,
+        work_kind TEXT,
+        handoff_id TEXT,
+        claimed_at TEXT,
         last_activity TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
         dnd INTEGER NOT NULL DEFAULT 0,
         idle INTEGER NOT NULL DEFAULT 1
@@ -186,6 +190,15 @@ export class MoPDatabase {
     }
     if (!columns.some((c) => c.name === "branch_ref")) {
       this.db.exec("ALTER TABLE slots ADD COLUMN branch_ref TEXT");
+    }
+    if (!columns.some((c) => c.name === "work_kind")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN work_kind TEXT");
+    }
+    if (!columns.some((c) => c.name === "handoff_id")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN handoff_id TEXT");
+    }
+    if (!columns.some((c) => c.name === "claimed_at")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN claimed_at TEXT");
     }
 
     this.migrateAssignmentIdentity();
@@ -465,7 +478,7 @@ export class MoPDatabase {
     this.updateSlotFields(slot, updates, [
       "status", "occupied", "session_id", "task", "repository_id", "issue",
       "branch", "branch_ref", "pr", "head_sha", "assignment_epoch",
-      "assigned_at", "dnd", "idle", "activity", "active_turn_id",
+      "assigned_at", "work_kind", "handoff_id", "claimed_at", "dnd", "idle", "activity", "active_turn_id",
       "active_turn_started_at", "active_turn_state",
     ]);
   }
@@ -527,6 +540,9 @@ export class MoPDatabase {
         pr: null,
         head_sha: null,
         assigned_at: null,
+        work_kind: null,
+        handoff_id: null,
+        claimed_at: null,
         dnd: false,
         idle: true,
         activity: null,
@@ -549,7 +565,9 @@ export class MoPDatabase {
     headSha: string | null = null,
     expectedEpoch?: number,
     allowIssueClaimAdoption = false,
-    expectedCurrentTuple: ExpectedAssignmentTuple | null = null
+    expectedCurrentTuple: ExpectedAssignmentTuple | null = null,
+    workKind: string | null = null,
+    handoffId: string | null = null,
   ): SlotMutationResult {
     const current = this.getSlot(slot);
     if (!Number.isInteger(expectedEpoch)) {
@@ -587,6 +605,23 @@ export class MoPDatabase {
     const normalizedPr = Number.isInteger(pr) && Number(pr) > 0
       ? Number(pr)
       : null;
+    const normalizedWorkKind = typeof workKind === "string" ? workKind.trim() : workKind;
+    const normalizedHandoffId = typeof handoffId === "string" ? handoffId.trim() : handoffId;
+    if (
+      (workKind !== null && typeof workKind !== "string")
+      || (handoffId !== null && typeof handoffId !== "string")
+      || (normalizedWorkKind !== null && normalizedWorkKind.length === 0)
+      || (normalizedHandoffId !== null && normalizedHandoffId.length === 0)
+      || ((normalizedWorkKind === null) !== (normalizedHandoffId === null))
+    ) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "invalid_assignment_metadata",
+      };
+    }
 
     return this.db.transaction((): SlotMutationResult => {
       const current = this.getSlot(slot);
@@ -599,7 +634,9 @@ export class MoPDatabase {
         && current.issue === normalizedIssue
         && current.pr === normalizedPr
         && current.branch_ref === branchIdentity.branchRef
-        && current.head_sha === headSha;
+        && current.head_sha === headSha
+        && (normalizedWorkKind === null || current.work_kind === normalizedWorkKind)
+        && (normalizedHandoffId === null || current.handoff_id === normalizedHandoffId);
       const observedTupleMatches = expectedCurrentTuple !== null
         && current.pr === expectedCurrentTuple.pr
         && current.branch_ref === expectedCurrentTuple.branchRef
@@ -720,6 +757,16 @@ export class MoPDatabase {
       // slot/issue/branch), not a new assignment: the assignment epoch is
       // preserved so downstream pickup validation sees no tuple drift.
       const boundEpoch = issueClaimAdoption ? epoch : nextEpoch;
+      const assignmentTime = new Date().toISOString();
+      const claimedAt = issueClaimAdoption && current.claimed_at
+        ? current.claimed_at
+        : assignmentTime;
+      const assignmentWorkKind = issueClaimAdoption && normalizedWorkKind === null
+        ? current.work_kind
+        : normalizedWorkKind;
+      const assignmentHandoffId = issueClaimAdoption && normalizedHandoffId === null
+        ? current.handoff_id
+        : normalizedHandoffId;
       try {
         this.updateAssignmentState(slot, {
           status: "active" as SlotStatus,
@@ -733,7 +780,10 @@ export class MoPDatabase {
           pr: normalizedPr,
           head_sha: headSha,
           assignment_epoch: boundEpoch,
-          assigned_at: new Date().toISOString(),
+          assigned_at: assignmentTime,
+          work_kind: assignmentWorkKind,
+          handoff_id: assignmentHandoffId,
+          claimed_at: claimedAt,
           dnd: false,
         });
       } catch (error) {

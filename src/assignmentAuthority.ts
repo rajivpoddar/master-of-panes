@@ -14,6 +14,9 @@ export const ASSIGNMENT_IDENTITY_PATCH_FIELDS = new Set([
   "head_sha",
   "assignment_epoch",
   "assigned_at",
+  "work_kind",
+  "handoff_id",
+  "claimed_at",
 ]);
 
 export function isPmTransitionAssignmentRequest(

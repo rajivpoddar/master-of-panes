@@ -49,7 +49,11 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
       body.session_id ?? null,
       Number.isInteger(pr) ? pr : null,
       body.head_sha ?? null,
-      body.expected_epoch
+      body.expected_epoch,
+      false,
+      null,
+      body.work_kind ?? null,
+      body.handoff_id ?? null,
     );
 
     if (!result.ok) {

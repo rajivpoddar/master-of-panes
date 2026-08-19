@@ -273,6 +273,40 @@ test("production assignment route enforces PM authority before mutation", async 
   });
 });
 
+test("assignment route persists claim metadata and release clears it", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const response = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        ...assignment,
+        work_kind: "implementation",
+        handoff_id: "handoff-route-1",
+      }),
+    );
+    assert.equal(response.status, 200);
+    const assigned = await response.json() as Record<string, unknown>;
+    assert.equal(assigned.work_kind, "implementation");
+    assert.equal(assigned.handoff_id, "handoff-route-1");
+    assert.equal(typeof assigned.claimed_at, "string");
+    assert.notEqual(assigned.claimed_at, "");
+    assert.equal(assigned.claimed_at, assigned.assigned_at);
+    assert.equal(db.getSlot(1)?.work_kind, "implementation");
+    assert.equal(db.getSlot(1)?.handoff_id, "handoff-route-1");
+
+    const released = db.releaseSlot(1, 1);
+    assert.deepEqual(released, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 1,
+      idempotent: false,
+    });
+    const free = db.getSlot(1);
+    assert.equal(free?.work_kind, null);
+    assert.equal(free?.handoff_id, null);
+    assert.equal(free?.claimed_at, null);
+  });
+});
+
 test("generic PATCH refuses every assignment identity field", () => {
   assert.deepEqual(
     assignmentIdentityPatchFields({
@@ -287,6 +321,9 @@ test("generic PATCH refuses every assignment identity field", () => {
       head_sha: "a".repeat(40),
       assignment_epoch: 3,
       assigned_at: "2026-07-28T00:00:00Z",
+      work_kind: "implementation",
+      handoff_id: "handoff-1",
+      claimed_at: "2026-07-28T00:00:00Z",
       status: "active",
     }),
     [
@@ -294,12 +331,15 @@ test("generic PATCH refuses every assignment identity field", () => {
       "assignment_epoch",
       "branch",
       "branch_ref",
+      "claimed_at",
+      "handoff_id",
       "head_sha",
       "issue",
       "occupied",
       "pr",
       "repository_id",
       "status",
+      "work_kind",
     ],
   );
   assert.deepEqual(

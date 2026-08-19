@@ -73,6 +73,48 @@ test("same-slot replay is exact, canonical, and mutation-free", () => {
   });
 });
 
+test("assignment metadata is stored and cleared with the occupied tuple", () => {
+  withDatabase((db) => {
+    const assigned = db.assignSlot(
+      1,
+      "metadata assignment",
+      "github:repo-1",
+      10,
+      "fix/10",
+      null,
+      20,
+      "a".repeat(40),
+      0,
+      false,
+      null,
+      "implementation",
+      "handoff-epoch-1",
+    );
+    assert.deepEqual(assigned, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 1,
+      idempotent: false,
+    });
+    const occupied = db.getSlot(1);
+    assert.equal(occupied?.work_kind, "implementation");
+    assert.equal(occupied?.handoff_id, "handoff-epoch-1");
+    assert.equal(typeof occupied?.claimed_at, "string");
+    assert.equal(occupied?.claimed_at, occupied?.assigned_at);
+
+    assert.deepEqual(db.releaseSlot(1, 1), {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 1,
+      idempotent: false,
+    });
+    const free = db.getSlot(1);
+    assert.equal(free?.work_kind, null);
+    assert.equal(free?.handoff_id, null);
+    assert.equal(free?.claimed_at, null);
+  });
+});
+
 test("checkout synchronization updates head without changing ownership epoch or turn", () => {
   withDatabase((db) => {
     db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", null, null, null, 0);
