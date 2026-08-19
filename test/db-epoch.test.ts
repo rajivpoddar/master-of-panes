@@ -115,6 +115,98 @@ test("assignment metadata is stored and cleared with the occupied tuple", () => 
   });
 });
 
+test("canonical metadata rows reject omitted-metadata replay without mutation", () => {
+  withDatabase((db) => {
+    assert.equal(
+      db.assignSlot(
+        1,
+        "canonical assignment",
+        "github:repo-1",
+        10,
+        "fix/10",
+        null,
+        20,
+        "a".repeat(40),
+        0,
+        false,
+        null,
+        "rework",
+        "handoff-replay-1",
+      ).ok,
+      true,
+    );
+    const before = db.getSlot(1);
+    const replay = db.assignSlot(
+      1,
+      "legacy replay",
+      "github:repo-1",
+      10,
+      "refs/heads/fix/10",
+      "different-session",
+      20,
+      "a".repeat(40),
+      1,
+    );
+    assert.equal(replay.reason, "slot_already_occupied");
+    assert.equal(replay.idempotent, false);
+    assert.deepEqual(db.getSlot(1), before);
+  });
+});
+
+test("legacy-null metadata rows retain omitted-metadata replay compatibility", () => {
+  withDatabase((db) => {
+    assert.equal(
+      db.assignSlot(1, "legacy assignment", "github:repo-1", 10, "fix/10", null, 20, "a".repeat(40), 0).ok,
+      true,
+    );
+    const replay = db.assignSlot(
+      1,
+      "legacy replay",
+      "github:repo-1",
+      10,
+      "refs/heads/fix/10",
+      "different-session",
+      20,
+      "a".repeat(40),
+      1,
+    );
+    assert.deepEqual(replay, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 1,
+      idempotent: true,
+    });
+  });
+});
+
+test("unsupported assignment work kinds fail closed before mutation", () => {
+  withDatabase((db) => {
+    const refused = db.assignSlot(
+      1,
+      "invalid kind",
+      "github:repo-1",
+      10,
+      "fix/10",
+      null,
+      20,
+      "a".repeat(40),
+      0,
+      false,
+      null,
+      "debug",
+      "handoff-invalid-1",
+    );
+    assert.deepEqual(refused, {
+      ok: false,
+      conflict: true,
+      assignment_epoch: 0,
+      idempotent: false,
+      reason: "invalid_assignment_metadata",
+    });
+    assert.equal(db.getSlot(1)?.occupied, false);
+  });
+});
+
 test("checkout synchronization updates head without changing ownership epoch or turn", () => {
   withDatabase((db) => {
     db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", null, null, null, 0);

@@ -45,6 +45,13 @@ interface ExpectedAssignmentTuple {
   headSha: string | null;
 }
 
+const ASSIGNMENT_WORK_KINDS = new Set([
+  "implementation",
+  "rework",
+  "repro",
+  "review",
+]);
+
 export function normalizeRepositoryId(value: unknown): string | null {
   if (typeof value !== "string" && typeof value !== "number") return null;
   const repositoryId = String(value).trim();
@@ -611,6 +618,7 @@ export class MoPDatabase {
       (workKind !== null && typeof workKind !== "string")
       || (handoffId !== null && typeof handoffId !== "string")
       || (normalizedWorkKind !== null && normalizedWorkKind.length === 0)
+      || (normalizedWorkKind !== null && !ASSIGNMENT_WORK_KINDS.has(normalizedWorkKind))
       || (normalizedHandoffId !== null && normalizedHandoffId.length === 0)
       || ((normalizedWorkKind === null) !== (normalizedHandoffId === null))
     ) {
@@ -629,14 +637,17 @@ export class MoPDatabase {
       if (!current || epoch !== expectedEpoch) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
       }
+      const metadataMatches = normalizedWorkKind === null
+        ? current.work_kind === null && current.handoff_id === null
+        : current.work_kind === normalizedWorkKind
+          && current.handoff_id === normalizedHandoffId;
       const idempotent = current.occupied
         && current.repository_id === normalizedRepositoryId
         && current.issue === normalizedIssue
         && current.pr === normalizedPr
         && current.branch_ref === branchIdentity.branchRef
         && current.head_sha === headSha
-        && (normalizedWorkKind === null || current.work_kind === normalizedWorkKind)
-        && (normalizedHandoffId === null || current.handoff_id === normalizedHandoffId);
+        && metadataMatches;
       const observedTupleMatches = expectedCurrentTuple !== null
         && current.pr === expectedCurrentTuple.pr
         && current.branch_ref === expectedCurrentTuple.branchRef

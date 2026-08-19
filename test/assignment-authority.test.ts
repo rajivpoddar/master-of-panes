@@ -293,6 +293,19 @@ test("assignment route persists claim metadata and release clears it", async () 
     assert.equal(db.getSlot(1)?.work_kind, "implementation");
     assert.equal(db.getSlot(1)?.handoff_id, "handoff-route-1");
 
+    const omittedMetadataReplay = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        ...assignment,
+        expected_epoch: 1,
+      }),
+    );
+    assert.equal(omittedMetadataReplay.status, 409);
+    const replayBody = await omittedMetadataReplay.json() as Record<string, unknown>;
+    assert.equal(replayBody.reason, "slot_already_occupied");
+    assert.equal(db.getSlot(1)?.work_kind, "implementation");
+    assert.equal(db.getSlot(1)?.handoff_id, "handoff-route-1");
+
     const released = db.releaseSlot(1, 1);
     assert.deepEqual(released, {
       ok: true,
