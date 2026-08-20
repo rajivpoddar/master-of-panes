@@ -679,8 +679,11 @@ export class MoPDatabase {
         // A retry after a committed release observes FREE at exactly E+1.
         // Any later epoch belongs to another owner and must not be treated as
         // the prior release's acknowledgement.
+        const replayEpochMatches = expectedTuple
+          ? epoch === requiredEpoch + 1
+          : epoch === requiredEpoch || epoch === requiredEpoch + 1;
         if (
-          (epoch === requiredEpoch || epoch === requiredEpoch + 1)
+          replayEpochMatches
           && currentTuple === null
           && current.issue === null
           && current.pr === null

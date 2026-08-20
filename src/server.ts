@@ -935,7 +935,9 @@ app.post("/slots/:slotNum/release", async (c) => {
     return c.json({ success: false, ...result }, 409);
   }
   processor.clearPlanApprovalTimer(slotParse.data);
-  db.logEvent(slotParse.data, "slot_released", null, null, { assignment_epoch: result.assignment_epoch, idempotent: result.idempotent });
+  if (!result.idempotent) {
+    db.logEvent(slotParse.data, "slot_released", null, null, { assignment_epoch: result.assignment_epoch, idempotent: false });
+  }
 
   return c.json({ success: true, ...result, slot: db.getSlot(slotParse.data) });
 });

@@ -219,3 +219,29 @@ test("release clears the complete tuple at epoch plus one and lost-ack replay is
     assert.equal(db.getSlot(1)?.assignment_epoch, current.assignment_epoch + 1);
   });
 });
+
+test("canonical release against a pre-existing free epoch refuses while legacy no-tuple replay remains compatible", () => {
+  withDatabase((db) => {
+    const canonicalExpected = tuple({ claimed_at: "2026-08-20T10:00:00Z" });
+    const before = db.getSlot(1);
+    const refused = db.releaseSlot(1, 0, canonicalExpected);
+    assert.deepEqual(refused, {
+      ok: false,
+      conflict: true,
+      assignment_epoch: 0,
+      idempotent: false,
+      reason: "epoch_mismatch",
+    });
+    assert.deepEqual(db.getSlot(1), before);
+
+    const legacyReplay = db.releaseSlot(1, 0);
+    assert.deepEqual(legacyReplay, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 0,
+      idempotent: true,
+    });
+    assert.equal(db.getSlot(1)?.assignment_epoch, 0);
+    assert.equal(db.getEvents(1, 10, "slot_released").length, 0);
+  });
+});
