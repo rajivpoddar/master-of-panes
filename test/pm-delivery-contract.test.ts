@@ -102,6 +102,33 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
   }
 });
 
+test("queued drain demotes idle after Enter so later PM rows use C-q", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-submit-order-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const commands: string[] = [];
+    const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      runShell: async (command) => {
+        commands.push(command);
+        return { stdout: "", stderr: "" };
+      },
+    });
+    relay.setDatabase(db);
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = false;
+    db.enqueuePendingPMEvent(0, "freeform-first", "first PM row");
+    db.enqueuePendingPMEvent(1, "freeform-second", "second PM row");
+
+    assert.equal(await relay.drainPMQueue(), 2);
+    const submitKeys = commands
+      .filter((command) => command.includes("tmux send-keys"))
+      .map((command) => command.endsWith(" Enter") ? "Enter" : command.endsWith(" C-q") ? "C-q" : "other")
+      .filter((key) => key !== "other");
+    assert.deepEqual(submitKeys, ["Enter", "C-q"]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("Slack route and numbered-slot paths use shared PM/slot submit boundaries", () => {
   const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   const slackStart = source.indexOf('app.post("/api/slack-route"');

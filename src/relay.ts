@@ -442,6 +442,12 @@ export class TmuxRelay {
         injected: true,
         submit: submitted.submitKey,
       });
+      if (submitted.submitKey === "Enter") {
+        // Enter is authorized only by the idle observation that existed
+        // before this row. It starts a PM turn; until a fresh OMP hook proves
+        // idle again, later rows in this same drain must fail closed to C-q.
+        this.pmBusy = null;
+      }
       injected++;
     }
     return injected;
