@@ -90,8 +90,66 @@ test("full tuple rebind increments once, reads back, and replays idempotently", 
     assert.equal(replay.status, 200);
     assert.equal(db.getSlot(1)?.assignment_epoch, 2);
     const events = db.getEvents(1, 10, "slot_issue_claim_adopted");
-    assert.equal(events.length, 2);
-    assert.equal(JSON.parse(events[0].payload).idempotent, true);
+    assert.equal(events.length, 1);
+    assert.equal(JSON.parse(events[0].payload).idempotent, false);
+  } finally {
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("complete-mode partial expected tuple refuses without mutation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-rebind-partial-route-test-"));
+  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+  const app = new Hono();
+  registerAssignmentRoute(app, db);
+  try {
+    assert.equal(
+      db.assignSlot(1, "issue", "github:repo-1", 7400, "fix/7400", null, null, null, 0, false, null, "rework", "handoff-7400").ok,
+      true,
+    );
+    const current = db.getSlot(1)!;
+    const common = {
+      expected_epoch: current.assignment_epoch,
+      expected_current_repository_id: current.repository_id,
+      expected_current_issue: current.issue,
+      expected_current_pr: current.pr,
+      expected_current_branch: current.branch,
+      expected_current_head_sha: current.head_sha,
+      expected_current_work_kind: current.work_kind,
+      expected_current_handoff_id: current.handoff_id,
+      expected_current_claimed_at: current.claimed_at,
+      repository_id: current.repository_id,
+      issue: current.issue,
+      pr: 7401,
+      branch: "fix/7400-successor",
+      head_sha: HEAD,
+      work_kind: current.work_kind,
+      handoff_id: current.handoff_id,
+      claimed_at: current.claimed_at,
+      task: "rebound",
+    };
+    const headers = new Headers({
+      "content-type": "application/json",
+      [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY,
+    });
+    for (const field of [
+      "expected_current_issue",
+      "expected_current_pr",
+      "expected_current_head_sha",
+    ]) {
+      const partial = { ...common };
+      delete partial[field as keyof typeof partial];
+      const response = await app.request("/slots/1/adopt-issue-claim", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(partial),
+      });
+      assert.equal(response.status, 409, field);
+      const payload = await response.json() as Record<string, unknown>;
+      assert.equal(payload.reason, "observed_tuple_mismatch", field);
+      assert.deepEqual(db.getSlot(1), current, field);
+    }
   } finally {
     db.close();
     rmSync(directory, { recursive: true, force: true });

@@ -124,13 +124,7 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
         error: "expected_epoch is required and must be an integer",
       }, 409);
     }
-    const hasCompleteExpected = [
-      "expected_current_repository_id",
-      "expected_current_branch",
-      "expected_current_work_kind",
-      "expected_current_handoff_id",
-      "expected_current_claimed_at",
-    ].some((field) => hasOwn(body, field));
+    const hasCompleteExpected = COMPLETE_REBIND_EXPECTED_FIELDS.some((field) => hasOwn(body, field));
     if (hasCompleteExpected && !hasEvery(body, COMPLETE_REBIND_EXPECTED_FIELDS)) {
       return c.json({
         success: false,
@@ -178,12 +172,14 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
       if (!result.ok) {
         return c.json({ success: false, ...result }, 409);
       }
-      db.logEvent(slotParse.data, "slot_issue_claim_adopted", null, null, {
-        ...body,
-        rebind: true,
-        assignment_epoch: result.assignment_epoch,
-        idempotent: result.idempotent,
-      });
+      if (!result.idempotent) {
+        db.logEvent(slotParse.data, "slot_issue_claim_adopted", null, null, {
+          ...body,
+          rebind: true,
+          assignment_epoch: result.assignment_epoch,
+          idempotent: false,
+        });
+      }
       return c.json(db.getSlot(slotParse.data));
     }
     if (

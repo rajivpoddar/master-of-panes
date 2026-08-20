@@ -48,6 +48,34 @@ const assignment = {
   expected_epoch: 0,
 };
 
+type SlotReadback = NonNullable<ReturnType<MoPDatabase["getSlot"]>>;
+
+function completeRebindBody(
+  current: SlotReadback,
+  desired: Record<string, unknown> = assignment,
+): Record<string, unknown> {
+  return {
+    expected_epoch: current.assignment_epoch,
+    expected_current_repository_id: current.repository_id,
+    expected_current_issue: current.issue,
+    expected_current_pr: current.pr,
+    expected_current_branch: current.branch,
+    expected_current_head_sha: current.head_sha,
+    expected_current_work_kind: current.work_kind,
+    expected_current_handoff_id: current.handoff_id,
+    expected_current_claimed_at: current.claimed_at,
+    repository_id: desired.repository_id,
+    issue: desired.issue,
+    pr: desired.pr,
+    branch: desired.branch,
+    head_sha: desired.head_sha,
+    work_kind: desired.work_kind ?? current.work_kind ?? null,
+    handoff_id: desired.handoff_id ?? current.handoff_id ?? null,
+    claimed_at: desired.claimed_at ?? current.claimed_at ?? null,
+    task: desired.task ?? current.task,
+  };
+}
+
 function assignmentRequest(
   authority?: string,
   body: Record<string, unknown> = assignment,
@@ -88,13 +116,7 @@ test("issue-claim adoption route is authority-gated and atomic", async () => {
     assert.equal(assigned.status, 200);
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
 
-    const adopt = {
-      ...assignment,
-      expected_epoch: 1,
-      expected_current_pr: null,
-      expected_current_branch_ref: "refs/heads/fix/10-pending",
-      expected_current_head_sha: null,
-    };
+    const adopt = completeRebindBody(db.getSlot(1)!);
     const denied = await app.request(
       "/slots/1/adopt-issue-claim",
       assignmentRequest(undefined, adopt),
@@ -114,7 +136,7 @@ test("issue-claim adoption route is authority-gated and atomic", async () => {
     assert.equal(adopted.pr, assignment.pr);
     assert.equal(adopted.branch, assignment.branch);
     assert.equal(adopted.head_sha, assignment.head_sha);
-    assert.equal(adopted.assignment_epoch, 1);
+    assert.equal(adopted.assignment_epoch, 2);
     assert.equal(db.getEvents(1, 10, "slot_issue_claim_adopted").length, 1);
   });
 });
@@ -135,13 +157,7 @@ test("issue-claim adoption route binds an active-turn claim preserving epoch and
     db.startAgentTurn(1, "turn-a");
     assert.equal(db.getSlot(1)?.active_turn_state, "active");
 
-    const adopt = {
-      ...assignment,
-      expected_epoch: 1,
-      expected_current_pr: null,
-      expected_current_branch_ref: "refs/heads/fix/10-pending",
-      expected_current_head_sha: null,
-    };
+    const adopt = completeRebindBody(db.getSlot(1)!);
     const accepted = await app.request(
       "/slots/1/adopt-issue-claim",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, adopt),
@@ -153,14 +169,14 @@ test("issue-claim adoption route binds an active-turn claim preserving epoch and
     assert.equal(adopted.pr, assignment.pr);
     assert.equal(adopted.branch, assignment.branch);
     assert.equal(adopted.head_sha, assignment.head_sha);
-    assert.equal(adopted.assignment_epoch, 1);
+    assert.equal(adopted.assignment_epoch, 2);
     assert.equal(adopted.active_turn_state, "active");
     assert.equal(adopted.active_turn_id, "turn-a");
     assert.equal(db.getEvents(1, 10, "slot_issue_claim_adopted").length, 1);
   });
 });
 
-test("issue-claim adoption route refuses a different-PR rewrite on a PR-bound tuple", async () => {
+test("issue-claim adoption route refuses a stale successor rewrite", async () => {
   await withAssignmentRoute(async (app, db) => {
     const placeholder = {
       ...assignment,
@@ -175,13 +191,8 @@ test("issue-claim adoption route refuses a different-PR rewrite on a PR-bound tu
     assert.equal(assigned.status, 200);
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
 
-    const bind = {
-      ...assignment,
-      expected_epoch: 1,
-      expected_current_pr: null,
-      expected_current_branch_ref: "refs/heads/fix/10-pending",
-      expected_current_head_sha: null,
-    };
+    const beforeBind = db.getSlot(1)!;
+    const bind = completeRebindBody(beforeBind);
     const bound = await app.request(
       "/slots/1/adopt-issue-claim",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, bind),
@@ -190,24 +201,20 @@ test("issue-claim adoption route refuses a different-PR rewrite on a PR-bound tu
     assert.equal(db.getSlot(1)?.pr, assignment.pr);
 
     const eventsBefore = db.getEvents(1, 10, "slot_issue_claim_adopted").length;
-    const rewrite = {
+    const rewrite = completeRebindBody(beforeBind, {
       ...assignment,
       pr: assignment.pr + 1,
-      expected_epoch: 1,
-      expected_current_pr: assignment.pr,
-      expected_current_branch_ref: `refs/heads/${assignment.branch}`,
-      expected_current_head_sha: assignment.head_sha,
-    };
+    });
     const refused = await app.request(
       "/slots/1/adopt-issue-claim",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, rewrite),
     );
     assert.equal(refused.status, 409);
     const body = await refused.json() as Record<string, unknown>;
-    assert.equal(body.reason, "slot_already_occupied");
+    assert.equal(body.reason, "epoch_mismatch");
     assert.equal(body.conflict, true);
     assert.equal(db.getSlot(1)?.pr, assignment.pr);
-    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 2);
     assert.equal(
       db.getEvents(1, 10, "slot_issue_claim_adopted").length,
       eventsBefore,
@@ -216,13 +223,7 @@ test("issue-claim adoption route refuses a different-PR rewrite on a PR-bound tu
 
     // Re-issued adoption claiming the PR-bound observed tuple with the SAME
     // pr is an idempotent no-op success.
-    const replay = {
-      ...assignment,
-      expected_epoch: 1,
-      expected_current_pr: assignment.pr,
-      expected_current_branch_ref: `refs/heads/${assignment.branch}`,
-      expected_current_head_sha: assignment.head_sha,
-    };
+    const replay = completeRebindBody(db.getSlot(1)!);
     const replayed = await app.request(
       "/slots/1/adopt-issue-claim",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, replay),
@@ -230,9 +231,9 @@ test("issue-claim adoption route refuses a different-PR rewrite on a PR-bound tu
     assert.equal(replayed.status, 200);
     const row = await replayed.json() as Record<string, unknown>;
     assert.equal(row.pr, assignment.pr);
-    assert.equal(row.assignment_epoch, 1);
+    assert.equal(row.assignment_epoch, 2);
     assert.equal(db.getSlot(1)?.pr, assignment.pr);
-    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 2);
   });
 });
 
