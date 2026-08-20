@@ -11,39 +11,10 @@ import * as fs from "node:fs/promises";
 import { execShell, sleep } from "./asyncCommand.js";
 import type { LogManager } from "./logs.js";
 import type { MoPDatabase } from "./db.js";
-import {
-  recentJsonlActivity,
-  type JsonlActivitySignal,
-} from "./jsonlActivity.js";
+import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
-
-/**
- * Resolve the PM session JSONL directory. Claude Code stores per-project
- * session transcripts under `~/.claude/projects/<encoded-cwd>/*.jsonl`.
- *
- * Override via env `MOP_PM_JSONL_DIR` if needed (e.g., PM main project
- * isn't heydonna-app).
- */
-const PM_JSONL_DIR =
-  process.env.MOP_PM_JSONL_DIR ??
-  `${process.env.HOME}/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app`;
-
-/**
- * Threshold (ms) — if PM JSONL has been written within this window, PM is
- * still actively producing tokens / running tools and we MUST NOT drain
- * the queue (Rajiv directive 2026-05-13 14:13 IST thread `1778661820.586119`).
- *
- * Configurable via `MOP_PM_JSONL_IDLE_MS` (default 15s). The drain timer
- * uses this to verify true idle before injecting; if JSONL is fresher
- * than this threshold the timer re-arms instead of draining.
- */
-const PM_JSONL_IDLE_MS: number = (() => {
-  const raw = process.env.MOP_PM_JSONL_IDLE_MS;
-  const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n >= 0 ? n : 15_000;
-})();
 
 const PM_INJECT_ENTER_DELAY_MS: number = (() => {
   const raw = process.env.MOP_PM_INJECT_ENTER_DELAY_MS;
@@ -257,21 +228,13 @@ export class TmuxRelay {
    * for agentic PM loops — inter-tool gaps can exceed 7s without the PM
    * being truly idle, causing premature drains that injected commands
    * into the PM's queued-prompt buffer while the model was still working.
-   * 30s + JSONL-mtime re-verification (see PM_JSONL_IDLE_MS) is the new
-   * idle floor.
+   * The timer now debounces the authoritative OMP Stop observation only.
    */
   private static readonly DRAIN_DEBOUNCE_MS: number = (() => {
     const raw = process.env.MOP_DRAIN_DEBOUNCE_MS;
     const n = raw ? parseInt(raw, 10) : NaN;
     return Number.isFinite(n) && n >= 0 ? n : 30_000;
   })();
-  /**
-   * Bound on re-arms for observed PM JSONL activity. Unknown activity never
-   * drains: accepting a timeout there would turn a missing watcher signal into
-   * false proof that PM is idle.
-   */
-  private static readonly DRAIN_MAX_REARMS = 10;
-  private drainRearmCount = 0;
   private drainGeneration = 0;
   private static readonly CHECK_SLOT_QUEUE_MAX_AGE_MS: number = (() => {
     const raw = process.env.MOP_CHECK_SLOT_QUEUE_MAX_AGE_MS;
@@ -285,7 +248,6 @@ export class TmuxRelay {
   constructor(config: MoPConfig, deps: { runShell?: typeof execShell } = {}) {
     this.pmPaneAddress = config.pmPaneAddress;
     this.runShell = deps.runShell ?? execShell;
-    recentJsonlActivity.watchDirectory(PM_JSONL_DIR);
   }
 
   /** Attach the MoP DB so injectToPM can enqueue when PM is busy. */
@@ -296,9 +258,9 @@ export class TmuxRelay {
   /**
    * Set the PM busy state.
    *   busy=true  → cancel pending drain, mark PM busy.
-   *   busy=false → schedule debounced drain (DRAIN_DEBOUNCE_MS); pmBusy
-   *                stays TRUE until the timer fires. Subsequent busy=true
-   *                or busy=false within the window resets/cancels the timer.
+   *   busy=false → schedule debounced drain (DRAIN_DEBOUNCE_MS); the relay
+   *                remains non-idle/fail-closed until the timer fires.
+   *                Subsequent busy=true or busy=false resets/cancels it.
    *
    * Called by /pm-status HTTP endpoint via UserPromptSubmit (start) + Stop
    * (stop) + SessionStart (stop) hooks fired from the PM project's
@@ -317,7 +279,6 @@ export class TmuxRelay {
         this.drainTimer = null;
         console.log(`[relay-debug] setPMBusy(true) — cancelled pending drain`);
       }
-      this.drainRearmCount = 0;
       this.pmBusy = true;
       return { drained: 0 };
     }
@@ -326,26 +287,14 @@ export class TmuxRelay {
     if (this.drainTimer) {
       clearTimeout(this.drainTimer);
     }
-    this.drainRearmCount = 0;
     this.armDrainTimer(TmuxRelay.DRAIN_DEBOUNCE_MS);
     return { drained: 0 };
   }
 
   /**
-   * Arm the debounced drain timer with optional JSONL-mtime re-verification.
-   *
-   * On timer fire:
-   *   1. Read PM JSONL mtime. If JSONL was written within PM_JSONL_IDLE_MS,
-   *      PM is still actively producing tokens (mid-tool or mid-message).
-   *      Re-arm the timer; do NOT drain.
-   *   2. If re-arm count exceeds DRAIN_MAX_REARMS (PM in a sustained burst),
-   *      drain using the fail-closed C-q submit key.
-   *   3. Else, drain after idle is confirmed and clear pmBusy.
-   *
-   * Rajiv directive 2026-05-13 14:13 IST thread `1778661820.586119`:
-   * "queue up all these notifications and send the last one when pm goes
-   * idle after stop hook fire" — Stop hook alone is not a strong enough
-   * idle signal in agentic loops, so we cross-check JSONL mtime.
+   * Drain after the canonical OMP Stop observation has remained stable for
+   * the debounce window. Legacy Claude JSONL is deliberately not consulted:
+   * it is not an authoritative PM runtime signal for OMP sessions.
    */
   private armDrainTimer(delayMs: number): void {
     const generation = ++this.drainGeneration;
@@ -356,70 +305,28 @@ export class TmuxRelay {
 
   private async runDrainCheck(delayMs: number, generation: number): Promise<void> {
     try {
-      const activity = await recentJsonlActivity.latestActivity(PM_JSONL_DIR);
       if (generation !== this.drainGeneration) return;
 
-      const maxRearmsHit = this.drainRearmCount >= TmuxRelay.DRAIN_MAX_REARMS;
-      const decision = decidePMDrain(
-        activity,
-        Date.now(),
-        PM_JSONL_IDLE_MS,
-        maxRearmsHit,
-      );
-
-      if (decision.action === "rearm") {
-        this.drainRearmCount = Math.min(
-          this.drainRearmCount + 1,
-          TmuxRelay.DRAIN_MAX_REARMS,
-        );
-        const ageText = decision.ageMs === null ? "unknown" : `${Math.round(decision.ageMs)}ms`;
-        console.log(
-          `[relay-debug] drain re-armed — PM JSONL ${decision.reason} (age=${ageText}) ` +
-          `rearm=${this.drainRearmCount}/${TmuxRelay.DRAIN_MAX_REARMS}`
-        );
-        if (this.db) {
-          this.db.logEvent(0, "pm_drain_rearmed", null, null, {
-            jsonl_activity_kind: activity.kind,
-            jsonl_activity_token: activity.token,
-            jsonl_age_ms: decision.ageMs === null ? null : Math.round(decision.ageMs),
-            jsonl_idle_threshold_ms: PM_JSONL_IDLE_MS,
-            rearm_count: this.drainRearmCount,
-            max_rearms: TmuxRelay.DRAIN_MAX_REARMS,
-            reason: decision.reason,
-          });
-        }
-        // Re-arm for another PM_JSONL_IDLE_MS window (shorter than initial
-        // debounce — we already passed the initial Stop debounce).
-        this.armDrainTimer(PM_JSONL_IDLE_MS);
-        return;
-      }
-
-      // Drain.
-      // Unknown watcher state must use C-q rather than pretending idle.
-      this.pmBusy = decision.reason === "max-rearms-hit" ? null : false;
+      // The POST /pm-status stop hook is the authoritative OMP observation.
+      // Only this explicit terminal observation transitions the relay to idle;
+      // absent/unknown observations remain null and select C-q.
+      this.pmBusy = false;
       const n = await this.drainPMQueue();
       this.drainTimer = null;
-      const reason = decision.reason === "max-rearms-hit"
-        ? "max_rearms_hit"
-        : "jsonl_idle_confirmed";
       console.log(
-        `[relay-debug] debounce drain fired (${reason}) after ${delayMs}ms timer, ` +
-        `jsonl_age=${Math.round(decision.ageMs)}ms, drained ${n}`
+        `[relay-debug] debounce drain fired (omp_idle_confirmed) after ${delayMs}ms timer, drained ${n}`
       );
       if (this.db) {
         this.db.logEvent(0, "pm_debounce_drain_fired", null, null, {
           debounce_ms: delayMs,
           drained: n,
-          reason,
-          jsonl_age_ms: Math.round(decision.ageMs),
-          rearm_count: this.drainRearmCount,
+          reason: "omp_idle_confirmed",
         });
       }
-      this.drainRearmCount = 0;
     } catch (error) {
       if (generation !== this.drainGeneration) return;
-      console.error(`[relay-debug] PM JSONL activity check failed: ${String(error)}`);
-      this.armDrainTimer(PM_JSONL_IDLE_MS);
+      this.pmBusy = null;
+      console.error(`[relay-debug] OMP idle drain failed: ${String(error)}`);
     }
   }
 
@@ -496,7 +403,7 @@ export class TmuxRelay {
           fallback = `/${row.event_type} ${row.slot}`;
       }
       const message = row.payload ?? fallback;
-      if (this.db.hasPMQueueDelivery(row.slot, row.event_type, message)) {
+      if (this.db.hasPMQueueDelivery(row.slot, row.event_type, message, row.enqueued_at)) {
         this.db.deletePendingPMEvent(row.slot, row.event_type);
         this.db.logEvent(row.slot, "pm_queue_replay_suppressed", null, null, {
           event_type: row.event_type,

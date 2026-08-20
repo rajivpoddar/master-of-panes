@@ -9,7 +9,7 @@ import { PMCadenceScheduler } from "../src/pmCadence.js";
 import { decidePMSubmitKey, TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
-test("PM submit-key contract is idle-only Enter and busy/unknown C-q", () => {
+test("OMP PM runtime observation is idle-only Enter and busy/unknown C-q", () => {
   assert.equal(decidePMSubmitKey(false), "Enter");
   assert.equal(decidePMSubmitKey(true), "C-q");
   assert.equal(decidePMSubmitKey(null), "C-q");
@@ -61,6 +61,8 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
     (relay as unknown as { pmBusy: boolean | null }).pmBusy = null;
     relay.injectToPM("MoP: heartbeat due", "cadence-heartbeat-test");
     assert.equal(db.getPendingPMEventCount(), 1);
+    const firstOccurrence = db.peekPendingPMEvents()[0]?.enqueued_at;
+    assert.ok(firstOccurrence);
 
     const delivered = await relay.drainPMQueue();
     assert.equal(delivered, 1);
@@ -69,13 +71,19 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
     assert.equal(db.getEvents(0, 10, "pm_queue_delivered").length, 1);
 
     // A restart/re-drain after the durable delivery marker must not send the
-    // same due key again. The pending row is already gone here; recreate the
-    // exact row to exercise the marker-based idempotency boundary.
-    db.enqueuePendingPMEvent(0, "cadence-heartbeat-test", "MoP: heartbeat due");
+    // same occurrence again. Recreate the exact row identity to exercise the
+    // marker-based idempotency boundary.
+    db.enqueuePendingPMEvent(0, "cadence-heartbeat-test", "MoP: heartbeat due", firstOccurrence);
     assert.equal(await relay.drainPMQueue(), 1);
     assert.equal(commands.filter((command) => command.includes("send-keys") && command.includes("C-q")).length, 1);
     assert.equal(db.getPendingPMEventCount(), 0);
     assert.equal(db.getEvents(0, 10, "pm_queue_replay_suppressed").length, 1);
+
+    // A later legitimate occurrence with identical content gets a fresh
+    // enqueue identity and must not be suppressed by the old marker.
+    db.enqueuePendingPMEvent(0, "cadence-heartbeat-test", "MoP: heartbeat due");
+    assert.equal(await relay.drainPMQueue(), 1);
+    assert.equal(commands.filter((command) => command.includes("send-keys") && command.includes("C-q")).length, 2);
 
     const failedDb = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "failed.db") });
     const failedRelay = new TmuxRelay(DEFAULT_CONFIG, {
@@ -102,6 +110,8 @@ test("Slack route and numbered-slot paths use shared PM/slot submit boundaries",
   const slackRoute = source.slice(slackStart, slackEnd);
   assert.match(slackRoute, /relay\.submitToPM\(formatted\)/);
   assert.match(slackRoute, /relay\.sendToSlotAsync\(slotNum, formatted, true, false\)/);
+  assert.match(slackRoute, /PM submit failed; Slack event was not acknowledged/);
+  assert.match(slackRoute, /}, 502\);/);
   assert.doesNotMatch(slackRoute, /tmux\s+(load-buffer|paste-buffer|send-keys)/);
 
   const relay = readFileSync(new URL("../src/relay.ts", import.meta.url), "utf8");
@@ -112,4 +122,9 @@ test("Slack route and numbered-slot paths use shared PM/slot submit boundaries",
   assert.match(sendBody, /submitToPM\(command\)/);
   const numberedBody = sendBody.slice(sendBody.indexOf("const paneAddr"));
   assert.doesNotMatch(numberedBody, /C-q/);
+
+  const drainStart = relay.indexOf("private async runDrainCheck");
+  const drainEnd = relay.indexOf("\n  /**", drainStart);
+  const drainBody = relay.slice(drainStart, drainEnd);
+  assert.doesNotMatch(drainBody, /latestActivity|PM_JSONL|recentJsonlActivity/);
 });

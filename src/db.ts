@@ -1432,15 +1432,16 @@ export class MoPDatabase {
     slot: number,
     eventType: string,
     payload: string | null = null,
+    enqueuedAt?: string,
   ): void {
     const stmt = this.db.prepare(`
       INSERT INTO pm_pending_events (slot, event_type, payload, enqueued_at)
-      VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+      VALUES (?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%f', 'now')))
       ON CONFLICT(slot, event_type) DO UPDATE SET
         payload = excluded.payload,
         enqueued_at = excluded.enqueued_at
     `);
-    stmt.run(slot, eventType, payload);
+    stmt.run(slot, eventType, payload, enqueuedAt ?? null);
   }
 
   deletePendingPMEvent(slot: number, eventType: string): number {
@@ -1537,11 +1538,13 @@ export class MoPDatabase {
   }
 
   /**
-   * A durable event-log marker for a successful PM queue submit. It lets a
-   * restart clean up a row whose delete happened after the observable send,
-   * without introducing a second queue or receipt table.
+   * A durable event-log marker for a successful PM queue submit. When the
+   * selected row's enqueue identity is supplied, replay is scoped to that
+   * occurrence; omitting it is retained for cadence due-key reconciliation.
+   * This lets a restart clean up a row whose delete happened after the
+   * observable send without introducing a second queue or receipt table.
    */
-  hasPMQueueDelivery(slot: number, eventType: string, message: string): boolean {
+  hasPMQueueDelivery(slot: number, eventType: string, message: string, enqueuedAt?: string): boolean {
     const rows = this.db.prepare(`
       SELECT payload
       FROM events
@@ -1551,7 +1554,9 @@ export class MoPDatabase {
     return rows.some((event) => {
       try {
         const payload = JSON.parse(event.payload) as Record<string, unknown>;
-        return payload.event_type === eventType && payload.message === message;
+        return payload.event_type === eventType &&
+          payload.message === message &&
+          (enqueuedAt === undefined || payload.enqueued_at === enqueuedAt);
       } catch {
         return false;
       }

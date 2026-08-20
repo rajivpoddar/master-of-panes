@@ -1944,10 +1944,29 @@ app.post("/api/slack-route", async (c) => {
   // Route every text injection through the shared submit primitives. PM uses
   // its canonical observation-bound key; numbered slots always use Enter.
   const results: string[] = [];
-  for (const pane of targetPanes) {
+  // If PM is one of the targets, submit it first. A failed PM handoff must
+  // produce a non-2xx response before any numbered-slot delivery can be
+  // acknowledged, otherwise the bridge may lose the Slack event.
+  const orderedPanes = [...targetPanes].sort((a, b) => {
+    if (a === "0:0.0") return -1;
+    if (b === "0:0.0") return 1;
+    return 0;
+  });
+  for (const pane of orderedPanes) {
     try {
       if (pane === "0:0.0") {
         const submitted = await relay.submitToPM(formatted);
+        if (!submitted.ok) {
+          return c.json({
+            routed: [...results, `${pane}: failed (submit=${submitted.submitKey})`],
+            mentions,
+            targets: [...targetPanes],
+            success: false,
+            error: "PM submit failed; Slack event was not acknowledged",
+            reason: "pm_submit_failed",
+            submit: submitted.submitKey,
+          }, 502);
+        }
         results.push(`${pane}: ${submitted.ok ? "delivered" : "failed"} (submit=${submitted.submitKey})`);
       } else {
         const match = /0:0\.(\d+)$/.exec(pane);
