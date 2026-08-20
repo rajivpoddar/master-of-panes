@@ -179,11 +179,89 @@ test("paste-success/submit-failure retry submits the existing prompt once", asyn
     });
     restartedRelay.setDatabase(db);
     (restartedRelay as unknown as { pmBusy: boolean | null }).pmBusy = null;
-    assert.equal((await restartedRelay.submitToPM(message)).ok, true);
+    assert.equal((await restartedRelay.submitToPM(message)).ok, false);
     assert.equal(commands.filter((command) => command.includes("paste-buffer")).length, 1);
-    assert.equal(commands.filter((command) => command.includes("send-keys") && command.includes("C-q")).length, 2);
+    assert.equal(commands.filter((command) => command.includes("send-keys") && command.includes("C-q")).length, 1);
     assert.equal(db.getEvents(0, 20, "pm_direct_paste_pending").length, 1);
-    assert.equal(db.getEvents(0, 20, "pm_direct_paste_completed").length, 1);
+    assert.equal(db.getEvents(0, 20, "pm_direct_paste_completed").length, 0);
+    assert.equal(db.getEvents(0, 20, "pm_direct_submit_ambiguous").length, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("concurrent idle/direct inject drains serialize the whole occurrence delivery", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-drain-serialization-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const commands: string[] = [];
+    let firstSubmitStarted!: () => void;
+    let releaseFirstSubmit!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { firstSubmitStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseFirstSubmit = resolve; });
+    let submitCount = 0;
+    const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      runShell: async (command) => {
+        commands.push(command);
+        if (command.endsWith(" Enter")) {
+          submitCount += 1;
+          if (submitCount === 1) {
+            firstSubmitStarted();
+            await release;
+          }
+        }
+        return { stdout: "", stderr: "" };
+      },
+    });
+    relay.setDatabase(db);
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = false;
+
+    assert.equal(relay.injectToPM("concurrent A", "freeform-a"), true);
+    assert.equal(relay.injectToPMDirect("concurrent B"), true);
+    await firstStarted;
+    assert.equal(commands.filter((command) => command.endsWith(" Enter")).length, 1);
+    releaseFirstSubmit();
+    await new Promise((resolve) => setTimeout(resolve, 1_800));
+    assert.equal(db.getEvents(0, 20, "pm_queue_delivered").length, 2);
+    assert.equal(db.getPendingPMEventCount(), 0);
+    assert.deepEqual(
+      commands.filter((command) => command.endsWith(" Enter") || command.endsWith(" C-q"))
+        .map((command) => command.endsWith(" Enter") ? "Enter" : "C-q"),
+      ["Enter", "C-q"],
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("in-flight delivery only removes the selected occurrence, preserving a same-key replacement", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-occurrence-race-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    let releaseSubmit!: () => void;
+    const submitRelease = new Promise<void>((resolve) => { releaseSubmit = resolve; });
+    let submitStarted!: () => void;
+    const started = new Promise<void>((resolve) => { submitStarted = resolve; });
+    const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      runShell: async (command) => {
+        if (command.endsWith(" Enter")) {
+          submitStarted();
+          await submitRelease;
+        }
+        return { stdout: "", stderr: "" };
+      },
+    });
+    relay.setDatabase(db);
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = false;
+    db.enqueuePendingPMEvent(0, "freeform-replaced", "old payload", "2026-08-20T00:00:00.001Z");
+    const draining = relay.drainPMQueue();
+    await started;
+    db.enqueuePendingPMEvent(0, "freeform-replaced", "new payload", "2026-08-20T00:00:00.002Z");
+    releaseSubmit();
+    await draining;
+    assert.deepEqual(db.peekPendingPMEvents().map((row) => [row.payload, row.enqueued_at]), [
+      ["new payload", "2026-08-20T00:00:00.002Z"],
+    ]);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -1444,11 +1444,16 @@ export class MoPDatabase {
     stmt.run(slot, eventType, payload, enqueuedAt ?? null);
   }
 
-  deletePendingPMEvent(slot: number, eventType: string): number {
-    const result = this.db.prepare(`
-      DELETE FROM pm_pending_events
-      WHERE slot = ? AND event_type = ?
-    `).run(slot, eventType);
+  deletePendingPMEvent(slot: number, eventType: string, enqueuedAt?: string): number {
+    const result = enqueuedAt === undefined
+      ? this.db.prepare(`
+          DELETE FROM pm_pending_events
+          WHERE slot = ? AND event_type = ?
+        `).run(slot, eventType)
+      : this.db.prepare(`
+          DELETE FROM pm_pending_events
+          WHERE slot = ? AND event_type = ? AND enqueued_at = ?
+        `).run(slot, eventType, enqueuedAt);
     return result.changes;
   }
 
@@ -1531,7 +1536,7 @@ export class MoPDatabase {
     const selected = new Set(out.map((row) => `${row.slot}\u0000${row.event_type}`));
     for (const row of rows) {
       if (isSlotState(row.event_type) && !selected.has(`${row.slot}\u0000${row.event_type}`)) {
-        this.deletePendingPMEvent(row.slot, row.event_type);
+        this.deletePendingPMEvent(row.slot, row.event_type, row.enqueued_at);
       }
     }
     return out;

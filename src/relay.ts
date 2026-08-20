@@ -242,6 +242,8 @@ export class TmuxRelay {
     return Number.isFinite(n) && n >= 0 ? n : 90_000;
   })();
   private directInjectChain: Promise<unknown> = Promise.resolve();
+  /** Serialize queue selection through post-submit deletion as one operation. */
+  private pmDrainChain: Promise<number> = Promise.resolve(0);
   private directInjectSeq = 0;
   private runShell: typeof execShell;
 
@@ -349,6 +351,13 @@ export class TmuxRelay {
    * Returns the count of rows actually injected.
    */
   async drainPMQueue(): Promise<number> {
+    const run = (): Promise<number> => this.drainPMQueueOnce();
+    const result = this.pmDrainChain.then(run, run);
+    this.pmDrainChain = result.catch(() => 0);
+    return result;
+  }
+
+  private async drainPMQueueOnce(): Promise<number> {
     if (!this.db) return 0;
     const rows = this.db.drainPendingPMEvents();
     let injected = 0;
@@ -359,7 +368,7 @@ export class TmuxRelay {
           reason: "missing-check-slot-payload",
           enqueued_at: row.enqueued_at,
         });
-        this.db.deletePendingPMEvent(row.slot, row.event_type);
+        this.db.deletePendingPMEvent(row.slot, row.event_type, row.enqueued_at);
         continue;
       }
       if (row.event_type === "check-slot") {
@@ -374,7 +383,7 @@ export class TmuxRelay {
             `[relay-debug] dropped queued check-slot ${row.slot} — ${drop.reason}` +
             (drop.latest_reason ? ` (${drop.latest_reason})` : "")
           );
-          this.db.deletePendingPMEvent(row.slot, row.event_type);
+          this.db.deletePendingPMEvent(row.slot, row.event_type, row.enqueued_at);
           continue;
         }
       }
@@ -404,7 +413,7 @@ export class TmuxRelay {
       }
       const message = row.payload ?? fallback;
       if (this.db.hasPMQueueDelivery(row.slot, row.event_type, message, row.enqueued_at)) {
-        this.db.deletePendingPMEvent(row.slot, row.event_type);
+        this.db.deletePendingPMEvent(row.slot, row.event_type, row.enqueued_at);
         this.db.logEvent(row.slot, "pm_queue_replay_suppressed", null, null, {
           event_type: row.event_type,
           message: message.slice(0, 200),
@@ -434,7 +443,7 @@ export class TmuxRelay {
         enqueued_at: row.enqueued_at,
         submit: submitted.submitKey,
       });
-      this.db.deletePendingPMEvent(row.slot, row.event_type);
+      this.db.deletePendingPMEvent(row.slot, row.event_type, row.enqueued_at);
       this.db.logEvent(row.slot, "pm_queue_drained", null, null, {
         event_type: row.event_type,
         message: message.slice(0, 200),
@@ -633,8 +642,8 @@ export class TmuxRelay {
    * Return the most recent unfinished paste, if any.  The existing append-only
    * event log is the delivery machinery's durable recovery boundary: a paste
    * is recorded before its submit key is attempted and a matching completion
-   * supersedes it.  This lets a retry send only the key after a paste-success /
-   * submit-failure, without introducing another queue or receipt store.
+   * supersedes it.  If completion is absent, the outcome is ambiguous and
+   * callers fail closed rather than replaying a potentially accepted key.
    */
   private latestPendingDirectPaste(): { message: string; submitKey: PMSubmitKey } | null {
     if (!this.db) return null;
@@ -671,12 +680,22 @@ export class TmuxRelay {
 
   private async injectDirectNow(message: string, submitKey: PMSubmitKey): Promise<boolean> {
     const pending = this.latestPendingDirectPaste();
-    if (pending && pending.message !== message) {
-      console.warn("[relay] PM paste is awaiting its submit; retaining the exact occurrence for retry");
+    if (pending) {
+      // The existing event log proves that paste happened, but it cannot prove
+      // whether tmux accepted the submit key before a crash/timeout. Replaying
+      // the key could create a second real PM turn, so fail closed until an
+      // authoritative OMP acknowledgement or an operator clears the
+      // ambiguous occurrence. Do not auto-replay diagnostic markers.
+      this.db?.logEvent(0, "pm_direct_submit_ambiguous", null, null, {
+        message: pending.message,
+        submit_key: pending.submitKey,
+        retry_message: message,
+        reason: "paste_recorded_submit_ack_missing",
+      });
+      console.warn("[relay] PM submit outcome ambiguous; refusing automatic replay");
       return false;
     }
-    const effectiveSubmitKey = pending?.submitKey ?? submitKey;
-    const resumeAfterPaste = pending !== null;
+    const effectiveSubmitKey = submitKey;
     try {
       const firstLine = message.split("\n", 1)[0];
       console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""} (submit=${effectiveSubmitKey})`);
@@ -692,15 +711,13 @@ export class TmuxRelay {
         const bufName = `mop-pm-inject-${process.pid}-${seq}`;
         await fs.writeFile(tmpFile, message);
         try {
-          if (!resumeAfterPaste) {
-            await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
-            await this.runShell(`tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
-            this.db?.logEvent(0, "pm_direct_paste_pending", null, null, {
-              message,
-              submit_key: effectiveSubmitKey,
-              sequence: seq,
-            });
-          }
+          await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+          await this.runShell(`tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
+          this.db?.logEvent(0, "pm_direct_paste_pending", null, null, {
+            message,
+            submit_key: effectiveSubmitKey,
+            sequence: seq,
+          });
           await sleep(PM_INJECT_ENTER_DELAY_MS);
           await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
           this.db?.logEvent(0, "pm_direct_paste_completed", null, null, {
@@ -713,13 +730,11 @@ export class TmuxRelay {
           await fs.unlink(tmpFile).catch(() => undefined);
         }
       } else {
-        if (!resumeAfterPaste) {
-          await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
-          this.db?.logEvent(0, "pm_direct_paste_pending", null, null, {
-            message,
-            submit_key: effectiveSubmitKey,
-          });
-        }
+        await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
+        this.db?.logEvent(0, "pm_direct_paste_pending", null, null, {
+          message,
+          submit_key: effectiveSubmitKey,
+        });
         await sleep(PM_INJECT_ENTER_DELAY_MS);
         await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
         this.db?.logEvent(0, "pm_direct_paste_completed", null, null, {
