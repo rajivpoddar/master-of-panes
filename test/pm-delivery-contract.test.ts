@@ -182,9 +182,44 @@ test("paste-success/submit-failure retry submits the existing prompt once", asyn
     assert.equal((await restartedRelay.submitToPM(message)).ok, false);
     assert.equal(commands.filter((command) => command.includes("paste-buffer")).length, 1);
     assert.equal(commands.filter((command) => command.includes("send-keys") && command.includes("C-q")).length, 1);
-    assert.equal(db.getEvents(0, 20, "pm_direct_paste_pending").length, 1);
-    assert.equal(db.getEvents(0, 20, "pm_direct_paste_completed").length, 0);
-    assert.equal(db.getEvents(0, 20, "pm_direct_submit_ambiguous").length, 1);
+    assert.equal(db.getEvents(0, 20, "pm_queue_delivery_started").length, 1);
+    assert.equal(db.getEvents(0, 20, "pm_queue_delivery_deferred").length, 1);
+    assert.equal(db.getPendingPMEventCount(), 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("ambiguous queue occurrence stays fail-closed beyond the event read horizon", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-ambiguous-horizon-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const commands: string[] = [];
+    let submitAttempts = 0;
+    const runShell = async (command: string) => {
+      commands.push(command);
+      if (command.includes("send-keys") && command.includes("C-q") && !command.includes("paste-buffer")) {
+        submitAttempts += 1;
+        if (submitAttempts === 1) throw new Error("synthetic lost submit acknowledgement");
+      }
+      return { stdout: "", stderr: "" };
+    };
+    const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell });
+    relay.setDatabase(db);
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = null;
+    const message = "ambiguous durable occurrence";
+    assert.equal((await relay.submitToPM(message)).ok, false);
+    for (let i = 0; i < 600; i += 1) {
+      db.logEvent(0, "unrelated-diagnostic", null, null, { i });
+    }
+    const restartedRelay = new TmuxRelay(DEFAULT_CONFIG, { runShell });
+    restartedRelay.setDatabase(db);
+    (restartedRelay as unknown as { pmBusy: boolean | null }).pmBusy = null;
+    assert.equal((await restartedRelay.submitToPM(message)).ok, false);
+    // This single-line occurrence has no paste-buffer phase; the durable
+    // started marker still prevents a second submit-key after restart.
+    assert.equal(commands.filter((command) => command.includes("paste-buffer")).length, 0);
+    assert.equal(commands.filter((command) => command.includes("send-keys") && command.includes("C-q")).length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

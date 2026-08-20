@@ -1543,29 +1543,49 @@ export class MoPDatabase {
   }
 
   /**
-   * A durable event-log marker for a successful PM queue submit. When the
-   * selected row's enqueue identity is supplied, replay is scoped to that
-   * occurrence; omitting it is retained for cadence due-key reconciliation.
-   * This lets a restart clean up a row whose delete happened after the
-   * observable send without introducing a second queue or receipt table.
+   * Read the latest durable delivery outcome for one queue occurrence. The
+   * existing append-only event log is the recovery boundary: a started
+   * occurrence with no terminal outcome is ambiguous after a crash and must
+   * not replay its submit key. The query is exact and unbounded by the
+   * diagnostic read horizon, so unrelated event volume cannot make an
+   * ambiguous occurrence replayable.
    */
-  hasPMQueueDelivery(slot: number, eventType: string, message: string, enqueuedAt?: string): boolean {
+  getPMQueueDeliveryState(
+    slot: number,
+    eventType: string,
+    message: string,
+    enqueuedAt?: string,
+  ): "none" | "started" | "deferred" | "ambiguous" | "delivered" {
     const rows = this.db.prepare(`
-      SELECT payload
+      SELECT id, event_type, payload
       FROM events
-      WHERE slot = ? AND event_type = 'pm_queue_delivered'
+      WHERE slot = ?
+        AND event_type IN ('pm_queue_delivery_started', 'pm_queue_delivery_deferred', 'pm_queue_delivered')
+        AND json_extract(payload, '$.event_type') = ?
+        AND json_extract(payload, '$.message') = ?
+        AND (? IS NULL OR json_extract(payload, '$.enqueued_at') = ?)
       ORDER BY id DESC
-    `).all(slot) as Array<{ payload: string }>;
-    return rows.some((event) => {
-      try {
-        const payload = JSON.parse(event.payload) as Record<string, unknown>;
-        return payload.event_type === eventType &&
-          payload.message === message &&
-          (enqueuedAt === undefined || payload.enqueued_at === enqueuedAt);
-      } catch {
-        return false;
-      }
-    });
+      LIMIT 1
+    `).all(slot, eventType, message, enqueuedAt ?? null, enqueuedAt ?? null) as Array<{
+      event_type: string;
+      payload: string;
+    }>;
+    if (rows.length === 0) return "none";
+    const event = rows[0];
+    if (event.event_type === "pm_queue_delivery_started") return "started";
+    if (event.event_type === "pm_queue_delivered") return "delivered";
+    try {
+      const payload = JSON.parse(event.payload) as { ambiguous?: boolean };
+      if (payload.ambiguous === true) return "ambiguous";
+    } catch {
+      // A malformed diagnostic is not evidence of delivery; retryable
+      // deferred remains the conservative interpretation.
+    }
+    return "deferred";
+  }
+
+  hasPMQueueDelivery(slot: number, eventType: string, message: string, enqueuedAt?: string): boolean {
+    return this.getPMQueueDeliveryState(slot, eventType, message, enqueuedAt) === "delivered";
   }
 
   /** Returns count of rows currently queued. */

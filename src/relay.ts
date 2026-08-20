@@ -176,6 +176,25 @@ export function decidePMDrain(
 
 export type PMSubmitKey = "Enter" | "C-q";
 
+export type PMSubmitResult = {
+  ok: boolean;
+  submitKey: PMSubmitKey;
+  /** True when paste succeeded but submit outcome is not authoritative. */
+  ambiguous: boolean;
+};
+
+type PMQueueRow = {
+  slot: number;
+  event_type: string;
+  payload: string | null;
+  enqueued_at: string;
+};
+
+type DirectSubmitResult = {
+  ok: boolean;
+  ambiguous: boolean;
+};
+
 /**
  * Busy-aware PM submit key for automated PM delivery.
  *
@@ -412,7 +431,13 @@ export class TmuxRelay {
           fallback = `/${row.event_type} ${row.slot}`;
       }
       const message = row.payload ?? fallback;
-      if (this.db.hasPMQueueDelivery(row.slot, row.event_type, message, row.enqueued_at)) {
+      const deliveryState = this.db.getPMQueueDeliveryState(
+        row.slot,
+        row.event_type,
+        message,
+        row.enqueued_at,
+      );
+      if (deliveryState === "delivered") {
         this.db.deletePendingPMEvent(row.slot, row.event_type, row.enqueued_at);
         this.db.logEvent(row.slot, "pm_queue_replay_suppressed", null, null, {
           event_type: row.event_type,
@@ -424,38 +449,26 @@ export class TmuxRelay {
         continue;
       }
 
-      const submitted = await this.submitToPM(message);
-      if (!submitted.ok) {
-        // Keep the selected row durable for the next idle/unknown drain.
-        this.db.logEvent(row.slot, "pm_queue_delivery_deferred", null, null, {
+      if (deliveryState === "started") {
+        // A crash after paste/submit but before terminal logging leaves the
+        // exact occurrence ambiguous. Never replay its key automatically.
+        this.db.logEvent(row.slot, "pm_queue_replay_suppressed", null, null, {
           event_type: row.event_type,
           message: message.slice(0, 200),
           enqueued_at: row.enqueued_at,
-          submit: submitted.submitKey,
-          reason: "submit_failed_row_retained",
+          reason: "delivery-attempt-outcome-ambiguous",
         });
         continue;
       }
 
-      this.db.logEvent(row.slot, "pm_queue_delivered", null, null, {
+      const submitted = await this.deliverPMRowNow({
+        slot: row.slot,
         event_type: row.event_type,
-        message,
+        payload: message,
         enqueued_at: row.enqueued_at,
-        submit: submitted.submitKey,
       });
-      this.db.deletePendingPMEvent(row.slot, row.event_type, row.enqueued_at);
-      this.db.logEvent(row.slot, "pm_queue_drained", null, null, {
-        event_type: row.event_type,
-        message: message.slice(0, 200),
-        enqueued_at: row.enqueued_at,
-        injected: true,
-        submit: submitted.submitKey,
-      });
-      if (submitted.submitKey === "Enter") {
-        // Enter is authorized only by the idle observation that existed
-        // before this row. It starts a PM turn; until a fresh OMP hook proves
-        // idle again, later rows in this same drain must fail closed to C-q.
-        this.pmBusy = null;
+      if (!submitted.ok) {
+        continue;
       }
       injected++;
     }
@@ -560,7 +573,7 @@ export class TmuxRelay {
     message: string,
     eventTypeOverride: string | undefined,
     via: string,
-  ): { slot: number; eventType: string; payload: string } {
+  ): PMQueueRow {
     if (!this.db) throw new Error("PM queue database is unavailable");
     const parsed = parseRelayMessage(message);
     const payload = withMopSlotHeader(message, parsed);
@@ -570,13 +583,19 @@ export class TmuxRelay {
     })();
     const eventType = eventTypeOverride ?? parsed?.eventType ?? `freeform-${simpleHash(message)}`;
     this.db.enqueuePendingPMEvent(slot, eventType, payload);
+    const row = this.db.peekPendingPMEvents().find(
+      (candidate) => candidate.slot === slot &&
+        candidate.event_type === eventType &&
+        candidate.payload === payload,
+    );
+    if (!row) throw new Error("PM queue occurrence was not persisted");
     this.db.logEvent(slot, "pm_queue_enqueued", null, null, {
       event_type: eventType,
       via,
       message: payload.slice(0, 200),
     });
     console.log(`[relay-debug] injectToPM queued (${via}) → ${payload.slice(0, 80)}`);
-    return { slot, eventType, payload };
+    return row;
   }
 
   /**
@@ -625,76 +644,110 @@ export class TmuxRelay {
    * selects the key that queues a follow-up in OMP instead of steering the
    * active turn when PM is busy.
    */
-  async submitToPM(message: string): Promise<{ ok: boolean; submitKey: PMSubmitKey }> {
-    const submitKey = decidePMSubmitKey(this.pmBusy);
-    const ok = await this.injectDirectWithSubmitKey(message, submitKey);
-    return { ok, submitKey };
+  async submitToPM(message: string, eventTypeOverride?: string): Promise<PMSubmitResult> {
+    if (!this.db) {
+      const submitKey = decidePMSubmitKey(this.pmBusy);
+      const result = await this.injectDirectWithSubmitKey(message, submitKey);
+      return { ...result, submitKey };
+    }
+    const parsed = parseRelayMessage(message);
+    const eventType = eventTypeOverride ?? parsed?.eventType ?? `freeform-${simpleHash(message)}`;
+    const existing = this.db.peekPendingPMEvents().find(
+      (row) => row.event_type === eventType && row.payload === withMopSlotHeader(message, parsed),
+    );
+    if (existing) {
+      const state = this.db.getPMQueueDeliveryState(
+        existing.slot,
+        existing.event_type,
+        existing.payload ?? "",
+        existing.enqueued_at,
+      );
+      const submitKey = decidePMSubmitKey(this.pmBusy);
+      if (state === "started" || state === "ambiguous") {
+        return { ok: false, submitKey, ambiguous: true };
+      }
+      if (state === "delivered") {
+        this.db.deletePendingPMEvent(existing.slot, existing.event_type, existing.enqueued_at);
+        return { ok: true, submitKey, ambiguous: false };
+      }
+    }
+    const row = this.enqueuePMMessage(message, eventTypeOverride, "submitToPM");
+    return this.deliverPMRow(row);
   }
 
-  private injectDirectWithSubmitKey(message: string, submitKey: PMSubmitKey): Promise<boolean> {
-    const run = (): Promise<boolean> => this.injectDirectNow(message, submitKey);
+  private injectDirectWithSubmitKey(message: string, submitKey: PMSubmitKey): Promise<DirectSubmitResult> {
+    const run = (): Promise<DirectSubmitResult> => this.injectDirectNow(message, submitKey);
     const result = this.directInjectChain.then(run, run);
-    this.directInjectChain = result.catch(() => undefined);
+    this.directInjectChain = result.then(() => undefined, () => undefined);
     return result;
   }
 
-  /**
-   * Return the most recent unfinished paste, if any.  The existing append-only
-   * event log is the delivery machinery's durable recovery boundary: a paste
-   * is recorded before its submit key is attempted and a matching completion
-   * supersedes it.  If completion is absent, the outcome is ambiguous and
-   * callers fail closed rather than replaying a potentially accepted key.
-   */
-  private latestPendingDirectPaste(): { message: string; submitKey: PMSubmitKey } | null {
-    if (!this.db) return null;
-    const latestByIdentity = new Map<string, { eventType: string; message: string; submitKey: PMSubmitKey; id: number }>();
-    for (const event of this.db.getEvents(0, 500)) {
-      if (event.event_type !== "pm_direct_paste_pending" && event.event_type !== "pm_direct_paste_completed") {
-        continue;
-      }
-      try {
-        const payload = JSON.parse(event.payload) as Record<string, unknown>;
-        if (typeof payload.message !== "string") continue;
-        const key = payload.submit_key === "Enter" || payload.submit_key === "C-q"
-          ? payload.submit_key
-          : null;
-        if (!key) continue;
-        const identity = `${payload.message}\u0000${key}`;
-        if (!latestByIdentity.has(identity)) {
-          latestByIdentity.set(identity, {
-            eventType: event.event_type,
-            message: payload.message,
-            submitKey: key,
-            id: event.id,
-          });
-        }
-      } catch {
-        // Ignore malformed diagnostic rows; a valid newer row remains authoritative.
-      }
-    }
-    const pending = [...latestByIdentity.values()]
-      .filter((entry) => entry.eventType === "pm_direct_paste_pending")
-      .sort((a, b) => b.id - a.id)[0];
-    return pending ? { message: pending.message, submitKey: pending.submitKey } : null;
+  private async deliverPMRow(row: PMQueueRow): Promise<PMSubmitResult> {
+    const run = (): Promise<PMSubmitResult> => this.deliverPMRowNow(row);
+    const result = this.pmDrainChain.then(run, run);
+    this.pmDrainChain = result.then(() => 0, () => 0);
+    return result;
   }
 
-  private async injectDirectNow(message: string, submitKey: PMSubmitKey): Promise<boolean> {
-    const pending = this.latestPendingDirectPaste();
-    if (pending) {
-      // The existing event log proves that paste happened, but it cannot prove
-      // whether tmux accepted the submit key before a crash/timeout. Replaying
-      // the key could create a second real PM turn, so fail closed until an
-      // authoritative OMP acknowledgement or an operator clears the
-      // ambiguous occurrence. Do not auto-replay diagnostic markers.
-      this.db?.logEvent(0, "pm_direct_submit_ambiguous", null, null, {
-        message: pending.message,
-        submit_key: pending.submitKey,
-        retry_message: message,
-        reason: "paste_recorded_submit_ack_missing",
-      });
-      console.warn("[relay] PM submit outcome ambiguous; refusing automatic replay");
-      return false;
+  private async deliverPMRowNow(row: PMQueueRow): Promise<PMSubmitResult> {
+    if (!this.db) {
+      const submitKey = decidePMSubmitKey(this.pmBusy);
+      const result = await this.injectDirectWithSubmitKey(row.payload ?? "", submitKey);
+      return { ...result, submitKey };
     }
+    const message = row.payload ?? `/${row.event_type} ${row.slot}`;
+    const state = this.db.getPMQueueDeliveryState(
+      row.slot,
+      row.event_type,
+      message,
+      row.enqueued_at,
+    );
+    const submitKey = decidePMSubmitKey(this.pmBusy);
+    if (state === "delivered" || state === "started" || state === "ambiguous") {
+      return { ok: state === "delivered", submitKey, ambiguous: state !== "delivered" };
+    }
+    this.db.logEvent(row.slot, "pm_queue_delivery_started", null, null, {
+      event_type: row.event_type,
+      message,
+      enqueued_at: row.enqueued_at,
+      submit: submitKey,
+    });
+    const result = await this.injectDirectWithSubmitKey(message, submitKey);
+    if (!result.ok) {
+      this.db.logEvent(row.slot, "pm_queue_delivery_deferred", null, null, {
+        event_type: row.event_type,
+        message,
+        enqueued_at: row.enqueued_at,
+        submit: submitKey,
+        ambiguous: result.ambiguous,
+        reason: result.ambiguous ? "submit-outcome-ambiguous" : "submit-failed-row-retained",
+      });
+      return { ok: false, submitKey, ambiguous: result.ambiguous };
+    }
+    this.db.logEvent(row.slot, "pm_queue_delivered", null, null, {
+      event_type: row.event_type,
+      message,
+      enqueued_at: row.enqueued_at,
+      submit: submitKey,
+    });
+    this.db.deletePendingPMEvent(row.slot, row.event_type, row.enqueued_at);
+    this.db.logEvent(row.slot, "pm_queue_drained", null, null, {
+      event_type: row.event_type,
+      message: message.slice(0, 200),
+      enqueued_at: row.enqueued_at,
+      injected: true,
+      submit: submitKey,
+    });
+    if (submitKey === "Enter") {
+      // Enter starts a PM turn; subsequent rows in this drain fail closed to
+      // C-q until a fresh OMP stop observation proves idle again.
+      this.pmBusy = null;
+    }
+    return { ok: true, submitKey, ambiguous: false };
+  }
+
+  private async injectDirectNow(message: string, submitKey: PMSubmitKey): Promise<DirectSubmitResult> {
+    let pasted = false;
     const effectiveSubmitKey = submitKey;
     try {
       const firstLine = message.split("\n", 1)[0];
@@ -713,41 +766,25 @@ export class TmuxRelay {
         try {
           await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
           await this.runShell(`tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
-          this.db?.logEvent(0, "pm_direct_paste_pending", null, null, {
-            message,
-            submit_key: effectiveSubmitKey,
-            sequence: seq,
-          });
+          pasted = true;
           await sleep(PM_INJECT_ENTER_DELAY_MS);
           await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
-          this.db?.logEvent(0, "pm_direct_paste_completed", null, null, {
-            message,
-            submit_key: effectiveSubmitKey,
-            sequence: seq,
-          });
           await sleep(500);
         } finally {
           await fs.unlink(tmpFile).catch(() => undefined);
         }
       } else {
         await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
-        this.db?.logEvent(0, "pm_direct_paste_pending", null, null, {
-          message,
-          submit_key: effectiveSubmitKey,
-        });
+        pasted = true;
         await sleep(PM_INJECT_ENTER_DELAY_MS);
         await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
-        this.db?.logEvent(0, "pm_direct_paste_completed", null, null, {
-          message,
-          submit_key: effectiveSubmitKey,
-        });
         await sleep(500);
       }
       console.log(`[relay-debug] injectToPM success → ${firstLine} (submit=${effectiveSubmitKey})`);
-      return true;
+      return { ok: true, ambiguous: false };
     } catch (err) {
       console.error(`[relay] Failed to inject into PM pane:`, err);
-      return false;
+      return { ok: false, ambiguous: pasted };
     }
   }
 
