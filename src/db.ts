@@ -1524,9 +1524,38 @@ export class MoPDatabase {
       out.push(slotRows[0]);
     }
 
-    // Delete drained rows.
-    this.db.exec("DELETE FROM pm_pending_events");
+    // Keep selected rows until the relay records a successful submit. Lower-
+    // priority rows are intentionally superseded now; a selected row that
+    // fails delivery must remain durable for the next drain/restart.
+    const selected = new Set(out.map((row) => `${row.slot}\u0000${row.event_type}`));
+    for (const row of rows) {
+      if (!selected.has(`${row.slot}\u0000${row.event_type}`)) {
+        this.deletePendingPMEvent(row.slot, row.event_type);
+      }
+    }
     return out;
+  }
+
+  /**
+   * A durable event-log marker for a successful PM queue submit. It lets a
+   * restart clean up a row whose delete happened after the observable send,
+   * without introducing a second queue or receipt table.
+   */
+  hasPMQueueDelivery(slot: number, eventType: string, message: string): boolean {
+    const rows = this.db.prepare(`
+      SELECT payload
+      FROM events
+      WHERE slot = ? AND event_type = 'pm_queue_delivered'
+      ORDER BY id DESC
+    `).all(slot) as Array<{ payload: string }>;
+    return rows.some((event) => {
+      try {
+        const payload = JSON.parse(event.payload) as Record<string, unknown>;
+        return payload.event_type === eventType && payload.message === message;
+      } catch {
+        return false;
+      }
+    });
   }
 
   /** Returns count of rows currently queued. */

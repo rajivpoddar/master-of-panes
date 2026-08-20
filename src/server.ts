@@ -640,7 +640,7 @@ app.post("/pm-cadence/run", async (c) => {
   if (body.task !== "heartbeat" && body.task !== "morning-brief") {
     return c.json({ success: false, error: "task must be 'heartbeat' or 'morning-brief'" }, 400);
   }
-  const result = pmCadenceScheduler.runManual(body.task);
+  const result = await pmCadenceScheduler.runManual(body.task);
   return c.json({ success: true, result, status: pmCadenceScheduler.getStatus() });
 });
 
@@ -1507,6 +1507,35 @@ app.post("/slots/:slotNum/send", async (c) => {
     if (filePath) {
       // File mode: load-buffer + paste-buffer, chunked when needed. No payload cap.
       const filePayload = await readFile(filePath);
+      if (slotNum === 0) {
+        // PM file deliveries use the same observation-bound submit primitive
+        // as command deliveries. Busy/unknown selects C-q; only a proven idle
+        // observation selects Enter.
+        const submitted = await relay.submitToPM(filePayload.toString("utf8"));
+        if (!submitted.ok) {
+          return c.json({
+            success: false,
+            error: "PM pane file submit failed (tmux send-keys).",
+            reason: "tmux_exec_error",
+            submit: submitted.submitKey,
+          }, 500);
+        }
+        db.logEvent(slotNum, "send_file", null, null, {
+          file: filePath,
+          bytes: filePayload.byteLength,
+          submit: submitted.submitKey,
+          verified: true,
+          verification: "submit_aware_receipt",
+        });
+        return c.json({
+          success: true,
+          mode: "file",
+          slot: slotNum,
+          submit: submitted.submitKey,
+          verified: true,
+          bytes: filePayload.byteLength,
+        });
+      }
       const paste = await pastePayloadWithTmuxBuffer(slotNum, paneAddress, filePayload, {
         source: "file",
         label: filePath,
@@ -1912,17 +1941,24 @@ app.post("/api/slack-route", async (c) => {
     }
   }
 
-  // Send the formatted message to each target pane via tmux
+  // Route every text injection through the shared submit primitives. PM uses
+  // its canonical observation-bound key; numbered slots always use Enter.
   const results: string[] = [];
   for (const pane of targetPanes) {
     try {
-      // Write to temp file and paste (handles multiline + special chars)
-      const tmpFile = `/tmp/slack-route-${Date.now()}.txt`;
-      await writeFile(tmpFile, formatted);
-      await execShell(`tmux load-buffer ${tmpFile} && tmux paste-buffer -t ${pane}`, { timeout: 5000 });
-      await execShell(`tmux send-keys -t ${pane} Enter`, { timeout: 3000 });
-      await unlink(tmpFile).catch(() => undefined);
-      results.push(`${pane}: delivered`);
+      if (pane === "0:0.0") {
+        const submitted = await relay.submitToPM(formatted);
+        results.push(`${pane}: ${submitted.ok ? "delivered" : "failed"} (submit=${submitted.submitKey})`);
+      } else {
+        const match = /0:0\.(\d+)$/.exec(pane);
+        const slotNum = match ? Number(match[1]) : NaN;
+        if (!Number.isInteger(slotNum) || slotNum < 1 || slotNum > 4) {
+          results.push(`${pane}: failed (unsupported pane)`);
+          continue;
+        }
+        const sent = await relay.sendToSlotAsync(slotNum, formatted, true, false);
+        results.push(`${pane}: ${sent ? "delivered" : "failed"} (submit=Enter)`);
+      }
     } catch (e) {
       results.push(`${pane}: failed (${e})`);
     }

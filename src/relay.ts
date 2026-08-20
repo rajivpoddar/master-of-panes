@@ -211,14 +211,16 @@ export type PMSubmitKey = "Enter" | "C-q";
  * idle   → "Enter" (submit normally and start the turn);
  * busy   → "C-q"   (OMP followUp: queues while streaming, so the active
  *                    turn is never steered by an Enter queue-jump);
- * unknown→ "C-q"   (fail closed — pmBusy defaults true until /pm-status
- *                    proves PM idle, so an unknown snapshot selects C-q).
+ * unknown→ "C-q"   (fail closed — startup/unknown observations never
+ *                    authorize Enter).
  *
  * Slots 1-4 never route through this decision: they keep the always-Enter
  * sendToSlot path where steering the active turn is the intended behavior.
  */
-export function decidePMSubmitKey(pmBusy: boolean): PMSubmitKey {
-  return pmBusy ? "C-q" : "Enter";
+export function decidePMSubmitKey(pmBusy: boolean | null | undefined): PMSubmitKey {
+  // Only an explicit idle observation authorizes Enter. Busy, unknown, and
+  // startup all use OMP's follow-up key.
+  return pmBusy === false ? "Enter" : "C-q";
 }
 
 export class TmuxRelay {
@@ -226,11 +228,11 @@ export class TmuxRelay {
   private logManager: LogManager | null = null;
   private db: MoPDatabase | null = null;
   /**
-   * PM busy flag. Default TRUE — assume PM is busy until /pm-status proves
-   * otherwise (this prevents a flood of injects on MoP startup before the
-   * first PM Stop hook lands).
+   * PM busy observation. Startup/unknown is null and remains fail-closed until
+   * the canonical PM status path proves idle or busy.
    */
-  private pmBusy: boolean = true;
+  // null is the startup/unknown observation and remains fail-closed.
+  private pmBusy: boolean | null = null;
 
   /**
    * Debounce timer for busy→idle drain. Claude Code's Stop hook fires after
@@ -337,9 +339,8 @@ export class TmuxRelay {
    *      PM is still actively producing tokens (mid-tool or mid-message).
    *      Re-arm the timer; do NOT drain.
    *   2. If re-arm count exceeds DRAIN_MAX_REARMS (PM in a sustained burst),
-   *      accept the drain — the coalesce layer collapses to one row per slot
-   *      so at most 4 notifications fire.
-   *   3. Else, drain and clear pmBusy.
+   *      drain using the fail-closed C-q submit key.
+   *   3. Else, drain after idle is confirmed and clear pmBusy.
    *
    * Rajiv directive 2026-05-13 14:13 IST thread `1778661820.586119`:
    * "queue up all these notifications and send the last one when pm goes
@@ -394,7 +395,8 @@ export class TmuxRelay {
       }
 
       // Drain.
-      this.pmBusy = false;
+      // Unknown watcher state must use C-q rather than pretending idle.
+      this.pmBusy = decision.reason === "max-rearms-hit" ? null : false;
       const n = await this.drainPMQueue();
       this.drainTimer = null;
       const reason = decision.reason === "max-rearms-hit"
@@ -423,7 +425,12 @@ export class TmuxRelay {
 
   /** Public read of the busy flag (diagnostics). */
   isPMBusy(): boolean {
-    return this.pmBusy;
+    return this.pmBusy !== false;
+  }
+
+  /** True only after the canonical PM status path proves idle. */
+  isPMIdleProven(): boolean {
+    return this.pmBusy === false;
   }
 
   /**
@@ -445,6 +452,7 @@ export class TmuxRelay {
           reason: "missing-check-slot-payload",
           enqueued_at: row.enqueued_at,
         });
+        this.db.deletePendingPMEvent(row.slot, row.event_type);
         continue;
       }
       if (row.event_type === "check-slot") {
@@ -459,6 +467,7 @@ export class TmuxRelay {
             `[relay-debug] dropped queued check-slot ${row.slot} — ${drop.reason}` +
             (drop.latest_reason ? ` (${drop.latest_reason})` : "")
           );
+          this.db.deletePendingPMEvent(row.slot, row.event_type);
           continue;
         }
       }
@@ -487,14 +496,46 @@ export class TmuxRelay {
           fallback = `/${row.event_type} ${row.slot}`;
       }
       const message = row.payload ?? fallback;
-      void this.injectDirect(message);
-      injected++;
+      if (this.db.hasPMQueueDelivery(row.slot, row.event_type, message)) {
+        this.db.deletePendingPMEvent(row.slot, row.event_type);
+        this.db.logEvent(row.slot, "pm_queue_replay_suppressed", null, null, {
+          event_type: row.event_type,
+          message: message.slice(0, 200),
+          enqueued_at: row.enqueued_at,
+          reason: "delivery-marker-already-recorded",
+        });
+        injected++;
+        continue;
+      }
+
+      const submitted = await this.submitToPM(message);
+      if (!submitted.ok) {
+        // Keep the selected row durable for the next idle/unknown drain.
+        this.db.logEvent(row.slot, "pm_queue_delivery_deferred", null, null, {
+          event_type: row.event_type,
+          message: message.slice(0, 200),
+          enqueued_at: row.enqueued_at,
+          submit: submitted.submitKey,
+          reason: "submit_failed_row_retained",
+        });
+        continue;
+      }
+
+      this.db.logEvent(row.slot, "pm_queue_delivered", null, null, {
+        event_type: row.event_type,
+        message,
+        enqueued_at: row.enqueued_at,
+        submit: submitted.submitKey,
+      });
+      this.db.deletePendingPMEvent(row.slot, row.event_type);
       this.db.logEvent(row.slot, "pm_queue_drained", null, null, {
         event_type: row.event_type,
         message: message.slice(0, 200),
         enqueued_at: row.enqueued_at,
         injected: true,
+        submit: submitted.submitKey,
       });
+      injected++;
     }
     return injected;
   }
@@ -565,17 +606,18 @@ export class TmuxRelay {
    * Both excluded paths are PM-internal recovery nudges, not slot-event
    * signals — they must never sit in a queue waiting to drain.
    */
-  injectToPM(message: string): boolean {
-    if (this.pmBusy && this.db) {
+  injectToPM(message: string, eventTypeOverride?: string): boolean {
+    if (this.pmBusy !== false && this.db) {
       const parsed = parseRelayMessage(message);
       if (parsed) {
         const decorated = withMopSlotHeader(message, parsed);
         // Slash-command relay (slot-idle/active/check-slot/blocked) —
         // queue keyed by (slot, event_type). PRIMARY KEY auto-coalesces.
         const payload = decorated;
-        this.db.enqueuePendingPMEvent(parsed.slot, parsed.eventType, payload);
+        const eventType = eventTypeOverride ?? parsed.eventType;
+        this.db.enqueuePendingPMEvent(parsed.slot, eventType, payload);
         this.db.logEvent(parsed.slot, "pm_queue_enqueued", null, null, {
-          event_type: parsed.eventType,
+          event_type: eventType,
           via: "injectToPM",
           payload: "inline",
         });
@@ -594,7 +636,7 @@ export class TmuxRelay {
       const slotMatch = /\bslot\s+(\d+)\b/i.exec(message);
       const slot = slotMatch ? Math.min(4, Math.max(0, parseInt(slotMatch[1], 10))) : 0;
       const synthHash = simpleHash(message);
-      const eventType = `freeform-${synthHash}`;
+      const eventType = eventTypeOverride ?? `freeform-${synthHash}`;
       this.db.enqueuePendingPMEvent(slot, eventType, message);
       this.db.logEvent(slot, "pm_queue_enqueued", null, null, {
         event_type: eventType,
@@ -605,7 +647,7 @@ export class TmuxRelay {
       return true;
     }
     const parsed = parseRelayMessage(message);
-    void this.injectDirect(withMopSlotHeader(message, parsed));
+    void this.submitToPM(withMopSlotHeader(message, parsed));
     return true;
   }
 
@@ -633,24 +675,8 @@ export class TmuxRelay {
         message: decorated.slice(0, 200),
       });
     }
-    void this.injectDirect(decorated);
+    void this.submitToPM(decorated);
     return true;
-  }
-
-  /**
-   * Raw paste-buffer inject into PM pane. Used by injectToPM (for the
-   * not-busy fast path) and drainPMQueue (when replaying queued events).
-   * Bypasses the busy-queue. Do NOT call from outside the relay.
-   * Submits with Enter — these callers only fire when PM is already idle.
-   *
-   * IMPORTANT: Text/paste and the submit key must be separate tmux calls with
-   * a short dwell between them. tmux can accept the operations sequentially
-   * while the target pane is still rendering the inserted prompt; pressing the
-   * submit key in the same shell invocation can leave the message buffered
-   * instead of submitted.
-   */
-  private injectDirect(message: string): Promise<boolean> {
-    return this.injectDirectWithSubmitKey(message, "Enter");
   }
 
   /**
@@ -710,30 +736,6 @@ export class TmuxRelay {
       return true;
     } catch (err) {
       console.error(`[relay] Failed to inject into PM pane:`, err);
-      return false;
-    }
-  }
-
-  /**
-   * Inject a comment line + slash command into the PM pane as ONE message.
-   * Types comment, Shift+Enter (newline without submit), command, then Enter.
-   * This ensures the MoP relay delivers a single combined user message.
-   */
-  private injectCommandToPM(comment: string, command: string): boolean {
-    try {
-      void (async () => {
-        // Type comment + Shift+Enter (newline) + command as one input, then
-        // submit after a short dwell so the target TUI has applied the text.
-        await execShell(
-          `tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(comment)} S-Enter ${shellEscape(command)}`,
-          { timeout: 10_000 }
-        );
-        await sleep(PM_INJECT_ENTER_DELAY_MS);
-        await execShell(`tmux send-keys -t ${this.pmPaneAddress} Enter`, { timeout: 10_000 });
-      })().catch((err) => console.error(`[relay] Failed to inject command into PM pane:`, err));
-      return true;
-    } catch (err) {
-      console.error(`[relay] Failed to inject command into PM pane:`, err);
       return false;
     }
   }
@@ -910,6 +912,12 @@ export class TmuxRelay {
 
   async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false): Promise<boolean> {
     void _force; // v3: every send is unconditional
+    if (slotNum === 0 && !raw) {
+      // Text delivery to PM must use the observation-bound submit key. Raw
+      // key sequences intentionally remain the explicit low-level escape
+      // hatch for callers such as clear/compact recovery.
+      return (await this.submitToPM(command)).ok;
+    }
     const paneAddr = `0:0.${slotNum}`;
     const cooldownKey = `${slotNum}:${command.slice(0, 80)}`;
 

@@ -28,6 +28,7 @@ type PMCadenceRunResult = {
   reason: PMCadenceTriggerReason;
   due_key: string;
   injected: boolean;
+  queued: boolean;
   message: string;
 };
 
@@ -80,6 +81,10 @@ function isMorningBriefWindow(now: Date): boolean {
 
 function configKey(task: PMCadenceTask, key: string): string {
   return `${task.configPrefix}_${key}`;
+}
+
+function cadenceEventType(taskName: PMCadenceTaskName, dueKey: string): string {
+  return `cadence-${taskName}-${dueKey}`;
 }
 
 export class PMCadenceScheduler {
@@ -136,9 +141,9 @@ export class PMCadenceScheduler {
     this.running = true;
     try {
       const results: PMCadenceRunResult[] = [];
-      const heartbeat = this.runIfDue("heartbeat", reason);
+      const heartbeat = await this.runIfDue("heartbeat", reason);
       if (heartbeat) results.push(heartbeat);
-      const morningBrief = this.runIfDue("morning-brief", reason);
+      const morningBrief = await this.runIfDue("morning-brief", reason);
       if (morningBrief) results.push(morningBrief);
       return results;
     } finally {
@@ -146,7 +151,7 @@ export class PMCadenceScheduler {
     }
   }
 
-  runManual(taskName: PMCadenceTaskName): PMCadenceRunResult {
+  async runManual(taskName: PMCadenceTaskName): Promise<PMCadenceRunResult> {
     return this.triggerTask(taskName, "manual", this.currentDueKey(taskName), true);
   }
 
@@ -205,7 +210,7 @@ export class PMCadenceScheduler {
     };
   }
 
-  private runIfDue(taskName: PMCadenceTaskName, reason: PMCadenceTriggerReason): PMCadenceRunResult | null {
+  private async runIfDue(taskName: PMCadenceTaskName, reason: PMCadenceTriggerReason): Promise<PMCadenceRunResult | null> {
     if (this.db.getConfig(CFG_GLOBAL_PAUSED) === "true" || this.isTaskPaused(taskName)) {
       return null;
     }
@@ -219,6 +224,20 @@ export class PMCadenceScheduler {
       return null;
     }
     if (!this.isTaskDue(taskName, now, lastDueKey)) {
+      return null;
+    }
+    const delivered = this.db.hasPMQueueDelivery(
+      0,
+      cadenceEventType(taskName, dueKey),
+      TASKS[taskName].commandDescription,
+    );
+    if (delivered) {
+      this.db.setConfig(configKey(task, "last_due_key"), dueKey);
+      this.db.logEvent(0, "pm_cadence_delivery_reconciled", null, null, {
+        task: taskName,
+        due_key: dueKey,
+        event_type: cadenceEventType(taskName, dueKey),
+      });
       return null;
     }
     return this.triggerTask(taskName, reason, dueKey, false);
@@ -245,22 +264,35 @@ export class PMCadenceScheduler {
     console.log(`[pm-cadence] seeded task=${taskName} reason=${reason} due_key=${dueKey} injected=false`);
   }
 
-  private triggerTask(
+  private async triggerTask(
     taskName: PMCadenceTaskName,
     reason: PMCadenceTriggerReason,
     dueKey: string,
     manual: boolean,
-  ): PMCadenceRunResult {
+  ): Promise<PMCadenceRunResult> {
     const task = TASKS[taskName];
     let message = task.commandDescription;
 
-    // Cadence ticks are normal PM prompts, not slash-command control packets.
-    // Route through the PM-busy queue so they land at an actual turn boundary
-    // instead of being buffered by Claude Code mid-turn.
-    const injected = this.relay.injectToPM(message);
+    const eventType = cadenceEventType(taskName, dueKey);
+    let injected = false;
+    let queued = false;
+
+    if (this.relay.isPMIdleProven()) {
+      // Only the explicit idle observation permits Enter. Await the actual
+      // shared submit result before advancing the due key.
+      const submitted = await this.relay.submitToPM(message);
+      injected = submitted.ok;
+    } else {
+      // Busy/unknown is durable queue work. The stable due-key event type
+      // coalesces retries and survives a MoP restart without duplication.
+      this.relay.injectToPM(message, eventType);
+      queued = true;
+    }
 
     const ts = new Date().toISOString();
-    this.db.setConfig(configKey(task, "last_due_key"), dueKey);
+    if (injected) {
+      this.db.setConfig(configKey(task, "last_due_key"), dueKey);
+    }
     this.db.setConfig(configKey(task, "last_run_ts"), ts);
     this.db.setConfig(configKey(task, "last_run_reason"), reason);
     this.db.setConfig(configKey(task, "last_injected"), injected ? "true" : "false");
@@ -270,13 +302,15 @@ export class PMCadenceScheduler {
       reason,
       due_key: dueKey,
       injected,
+      queued,
       manual,
       message,
-      delivery_mode: "queued-normal-prompt",
+      event_type: eventType,
+      delivery_mode: queued ? "queued-normal-prompt" : "direct-submit",
     });
     console.log(
       `[pm-cadence] triggered task=${taskName} reason=${reason} due_key=${dueKey} ` +
-        `injected=${injected} delivery=queued-normal-prompt`
+        `injected=${injected} queued=${queued}`
     );
 
     return {
@@ -285,6 +319,7 @@ export class PMCadenceScheduler {
       reason,
       due_key: dueKey,
       injected,
+      queued,
       message,
     };
   }
