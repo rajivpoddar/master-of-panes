@@ -542,29 +542,19 @@ export class TmuxRelay {
    * signals — they must never sit in a queue waiting to drain.
    */
   injectToPM(message: string, eventTypeOverride?: string): boolean {
-    if (this.pmBusy !== false && this.db) {
-      const parsed = parseRelayMessage(message);
-      if (parsed) {
-        this.enqueuePMMessage(message, eventTypeOverride, "injectToPM");
-        return true;
-      }
-      // Free-form message (escalation, plan-approval-needed, scheduled-task,
-      // compact warning, queued-clear ack, hourly-ops-audit). Try to extract
-      // slot from "slot N" substring; otherwise key by slot 0 + a synthetic
-      // event type derived from a hash so multiple distinct free-form
-      // messages for the same slot don't collapse onto each other.
-      // Hourly-audit ("MoP: hourly ops audit for <reason>") deliberately
-      // lands here per parseRelayMessage Shape 3 note (R1 fix 4 option b,
-      // 2026-05-26 thread `1779790681.847219`) — each audit payload is a
-      // one-shot exception list whose contents matter individually.
-      this.enqueuePMMessage(message, eventTypeOverride, "injectToPM");
-      return true;
-    }
     if (!this.db) {
       console.error("[relay] PM delivery unavailable: no database for durable fallback");
       return false;
     }
-    this.enqueuePMMessage(message, eventTypeOverride, "injectToPM-idle");
+    // Persist before attempting delivery, then enter the same serialized
+    // boundary regardless of the current observation. Explicit idle selects
+    // Enter; busy/unknown selects C-q. No later Stop hook is required for a
+    // queued occurrence to become a PM turn.
+    this.enqueuePMMessage(
+      message,
+      eventTypeOverride,
+      this.pmBusy === false ? "injectToPM-idle" : "injectToPM",
+    );
     void this.drainPMQueue();
     return true;
   }

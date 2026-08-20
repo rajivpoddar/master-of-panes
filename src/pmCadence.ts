@@ -277,18 +277,13 @@ export class PMCadenceScheduler {
     let injected = false;
     let queued = false;
 
-    if (this.relay.isPMIdleProven()) {
-      // Only the explicit idle observation permits Enter. Await the actual
-      // shared submit result before advancing the due key.
-      const submitted = await this.relay.submitToPM(message, eventType);
-      injected = submitted.ok;
-      queued = !injected;
-    } else {
-      // Busy/unknown is durable queue work. The stable due-key event type
-      // coalesces retries and survives a MoP restart without duplication.
-      this.relay.injectToPM(message, eventType);
-      queued = true;
-    }
+    // submitToPM persists the exact occurrence before entering the shared
+    // serialized boundary. Its observation-bound key is Enter only for an
+    // explicit idle; busy/unknown uses C-q immediately. Awaiting the result
+    // keeps the due key tied to actual delivery rather than enqueueing.
+    const submitted = await this.relay.submitToPM(message, eventType);
+    injected = submitted.ok;
+    queued = !injected;
 
     const ts = new Date().toISOString();
     if (injected) {

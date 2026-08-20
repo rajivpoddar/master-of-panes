@@ -28,7 +28,11 @@ test("queued cadence due key coalesces across scheduler restart and is not marke
         db.enqueuePendingPMEvent(0, eventType ?? "freeform-test", message);
         return true;
       },
-      submitToPM: async () => ({ ok: true, submitKey: "Enter" as const }),
+      submitToPM: async (message: string, eventType?: string) => {
+        queued.push({ message, eventType });
+        db.enqueuePendingPMEvent(0, eventType ?? "freeform-test", message);
+        return { ok: false, submitKey: "C-q" as const, ambiguous: false };
+      },
     } as unknown as TmuxRelay;
 
     const first = await new PMCadenceScheduler(db, relay).runManual("heartbeat");
@@ -67,6 +71,40 @@ test("slot-0 freeform/cadence/ops occurrences are not dropped by state coalescin
   }
 });
 
+test("busy/unknown injects and cadence use immediate C-q without a later Stop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-immediate-followup-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const commands: string[] = [];
+    const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      runShell: async (command) => {
+        commands.push(command);
+        return { stdout: "", stderr: "" };
+      },
+    });
+    relay.setDatabase(db);
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = true;
+    assert.equal(relay.injectToPM("busy alert", "freeform-busy"), true);
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = null;
+    assert.equal(relay.injectToPM("unknown alert", "freeform-unknown"), true);
+
+    const cadence = new PMCadenceScheduler(db, relay);
+    const cadenceResult = await cadence.runManual("heartbeat");
+    assert.equal(cadenceResult.injected, true);
+    assert.equal(cadenceResult.queued, false);
+    assert.equal(db.getConfig("pm_cadence_heartbeat_last_due_key") !== null, true);
+
+    await new Promise((resolve) => setTimeout(resolve, 1_800));
+    const submits = commands.filter((command) => command.includes("tmux send-keys"));
+    assert.equal(submits.filter((command) => command.endsWith(" C-q")).length, 3);
+    assert.equal(submits.some((command) => command.endsWith(" Enter")), false);
+    assert.equal(db.getPendingPMEventCount(), 0);
+    assert.equal(db.getEvents(0, 20, "pm_queue_delivered").length, 3);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("queued PM delivery uses shared submit key, retains failed rows, and records one durable success", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-pm-queue-delivery-"));
   try {
@@ -85,7 +123,10 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
     const firstOccurrence = db.peekPendingPMEvents()[0]?.enqueued_at;
     assert.ok(firstOccurrence);
 
-    const delivered = await relay.drainPMQueue();
+    // injectToPM now enters the shared drain immediately; no later Stop hook
+    // is required to produce the follow-up.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    const delivered = db.getEvents(0, 10, "pm_queue_delivered").length;
     assert.equal(delivered, 1);
     assert.equal(db.getPendingPMEventCount(), 0);
     assert.equal(commands.filter((command) => command.includes("send-keys") && command.includes("C-q")).length, 1);
@@ -116,7 +157,7 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
     failedRelay.setDatabase(failedDb);
     (failedRelay as unknown as { pmBusy: boolean | null }).pmBusy = null;
     failedRelay.injectToPM("queued failure", "freeform-failure");
-    assert.equal(await failedRelay.drainPMQueue(), 0);
+    await new Promise((resolve) => setTimeout(resolve, 900));
     assert.equal(failedDb.getPendingPMEventCount(), 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -354,4 +395,7 @@ test("Slack route and numbered-slot paths use shared PM/slot submit boundaries",
   const drainEnd = relay.indexOf("\n  /**", drainStart);
   const drainBody = relay.slice(drainStart, drainEnd);
   assert.doesNotMatch(drainBody, /latestActivity|PM_JSONL|recentJsonlActivity/);
+
+  const opsAudit = readFileSync(new URL("../src/opsAudit.ts", import.meta.url), "utf8");
+  assert.match(opsAudit, /relay\.injectToPM\(/);
 });
