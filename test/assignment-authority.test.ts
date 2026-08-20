@@ -310,7 +310,7 @@ test("assignment route persists claim metadata and release clears it", async () 
     assert.deepEqual(released, {
       ok: true,
       conflict: false,
-      assignment_epoch: 1,
+      assignment_epoch: 2,
       idempotent: false,
     });
     const free = db.getSlot(1);

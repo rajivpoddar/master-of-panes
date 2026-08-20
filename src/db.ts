@@ -45,6 +45,30 @@ interface ExpectedAssignmentTuple {
   headSha: string | null;
 }
 
+/** Complete occupied identity used by the rebind/release CAS boundary. */
+export interface AssignmentTupleInput {
+  repository_id: string | number | null;
+  issue: number | null;
+  pr: number | null;
+  branch: string | null;
+  head_sha: string | null;
+  work_kind: string | null;
+  handoff_id: string | null;
+  claimed_at: string | null;
+}
+
+export interface AssignmentTuple {
+  repository_id: string;
+  issue: number | null;
+  pr: number | null;
+  branch: string | null;
+  branch_ref: string | null;
+  head_sha: string | null;
+  work_kind: string | null;
+  handoff_id: string | null;
+  claimed_at: string | null;
+}
+
 const ASSIGNMENT_WORK_KINDS = new Set([
   "implementation",
   "rework",
@@ -66,9 +90,9 @@ export function normalizeRepositoryId(value: unknown): string | null {
 }
 
 export function normalizeBranchIdentity(
-  value: string | null
+  value: string | null | undefined
 ): BranchIdentity | null {
-  if (value === null || value.trim() === "") {
+  if (value === null || value === undefined || value.trim() === "") {
     return { branch: null, branchRef: null };
   }
 
@@ -91,6 +115,105 @@ export function normalizeBranchIdentity(
     return null;
   }
   return { branch, branchRef: `refs/heads/${branch}` };
+}
+
+function normalizeAssignmentTuple(
+  value: AssignmentTupleInput,
+): AssignmentTuple | null {
+  const repositoryId = normalizeRepositoryId(value.repository_id);
+  if (!repositoryId) return null;
+
+  const issue = value.issue === null
+    ? null
+    : Number.isInteger(value.issue) && Number(value.issue) > 0
+      ? Number(value.issue)
+      : null;
+  if (value.issue !== null && issue === null) return null;
+
+  const pr = value.pr === null
+    ? null
+    : Number.isInteger(value.pr) && Number(value.pr) > 0
+      ? Number(value.pr)
+      : null;
+  if (value.pr !== null && pr === null) return null;
+
+  const branchIdentity = normalizeBranchIdentity(value.branch);
+  if (!branchIdentity) return null;
+
+  const headSha = value.head_sha === null
+    ? null
+    : typeof value.head_sha === "string" && /^[0-9a-f]{40}$/i.test(value.head_sha)
+      ? value.head_sha
+      : null;
+  if (value.head_sha !== null && headSha === null) return null;
+
+  const workKind = value.work_kind === null
+    ? null
+    : typeof value.work_kind === "string" && ASSIGNMENT_WORK_KINDS.has(value.work_kind.trim())
+      ? value.work_kind.trim()
+      : null;
+  if (value.work_kind !== null && workKind === null) return null;
+
+  const handoffId = value.handoff_id === null
+    ? null
+    : typeof value.handoff_id === "string" && value.handoff_id.trim()
+      ? value.handoff_id.trim()
+      : null;
+  if (value.handoff_id !== null && handoffId === null) return null;
+
+  const claimedAt = value.claimed_at === null
+    ? null
+    : typeof value.claimed_at === "string" && value.claimed_at.trim()
+      ? value.claimed_at.trim()
+      : null;
+  if (value.claimed_at !== null && claimedAt === null) return null;
+
+  if ((workKind === null) !== (handoffId === null)) return null;
+  if (pr !== null && (branchIdentity.branchRef === null || headSha === null)) return null;
+  if (issue === null && pr === null) return null;
+
+  return {
+    repository_id: repositoryId,
+    issue,
+    pr,
+    branch: branchIdentity.branch,
+    branch_ref: branchIdentity.branchRef,
+    head_sha: headSha,
+    work_kind: workKind,
+    handoff_id: handoffId,
+    claimed_at: claimedAt,
+  };
+}
+
+function slotAssignmentTuple(slot: SlotState): AssignmentTuple | null {
+  if (!slot.repository_id) return null;
+  return {
+    repository_id: slot.repository_id,
+    issue: slot.issue,
+    pr: slot.pr,
+    branch: slot.branch,
+    branch_ref: slot.branch_ref,
+    head_sha: slot.head_sha,
+    work_kind: slot.work_kind,
+    handoff_id: slot.handoff_id,
+    claimed_at: slot.claimed_at,
+  };
+}
+
+function assignmentTupleMatches(
+  left: AssignmentTuple | null,
+  right: AssignmentTuple | null,
+): boolean {
+  if (!left || !right) return false;
+  return left.repository_id === right.repository_id
+    && left.issue === right.issue
+    && left.pr === right.pr
+    && left.branch === right.branch
+    && left.branch_ref === right.branch_ref
+    && left.head_sha === right.head_sha
+    && left.work_kind === right.work_kind
+    && left.handoff_id === right.handoff_id
+    && left.claimed_at === right.claimed_at;
 }
 
 export class MoPDatabase {
@@ -514,7 +637,11 @@ export class MoPDatabase {
     this.db.prepare(`UPDATE slots SET ${sets.join(", ")} WHERE slot = ?`).run(...values);
   }
 
-  releaseSlot(slot: number, expectedEpoch?: number): SlotMutationResult {
+  releaseSlot(
+    slot: number,
+    expectedEpoch?: number,
+    expectedTupleInput?: AssignmentTupleInput | null,
+  ): SlotMutationResult {
     if (!Number.isInteger(expectedEpoch)) {
       const current = this.getSlot(slot);
       return {
@@ -525,15 +652,54 @@ export class MoPDatabase {
         reason: "expected_epoch_required",
       };
     }
+    const requiredEpoch = expectedEpoch as number;
+
+    const expectedTuple = expectedTupleInput === undefined || expectedTupleInput === null
+      ? null
+      : normalizeAssignmentTuple(expectedTupleInput);
+    if (expectedTupleInput !== undefined && expectedTupleInput !== null && !expectedTuple) {
+      const current = this.getSlot(slot);
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "observed_tuple_mismatch",
+      };
+    }
 
     return this.db.transaction((): SlotMutationResult => {
       const current = this.getSlot(slot);
       const epoch = current?.assignment_epoch ?? 0;
-      if (!current || epoch !== expectedEpoch) {
+      if (!current) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
       }
+      const currentTuple = slotAssignmentTuple(current);
       if (!current.occupied) {
-        return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
+        // A retry after a committed release observes FREE at exactly E+1.
+        // Any later epoch belongs to another owner and must not be treated as
+        // the prior release's acknowledgement.
+        if (
+          (epoch === requiredEpoch || epoch === requiredEpoch + 1)
+          && currentTuple === null
+          && current.issue === null
+          && current.pr === null
+          && current.branch === null
+          && current.branch_ref === null
+          && current.head_sha === null
+          && current.work_kind === null
+          && current.handoff_id === null
+          && current.claimed_at === null
+        ) {
+          return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
+        }
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      if (epoch !== requiredEpoch) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      if (expectedTuple && !assignmentTupleMatches(currentTuple, expectedTuple)) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
       }
       this.updateAssignmentState(slot, {
         status: "free" as SlotStatus,
@@ -556,8 +722,9 @@ export class MoPDatabase {
         active_turn_id: null,
         active_turn_started_at: null,
         active_turn_state: "inactive",
+        assignment_epoch: epoch + 1,
       });
-      return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: false };
+      return { ok: true, conflict: false, assignment_epoch: epoch + 1, idempotent: false };
     })();
   }
 
@@ -892,6 +1059,150 @@ export class MoPDatabase {
         headSha: expectedCurrentHeadSha,
       },
     );
+  }
+
+  /**
+   * Rebind an occupied assignment through the existing assignment authority.
+   * The expected tuple is checked under the SQLite transaction; a successful
+   * rebind advances the ownership epoch exactly once.  A retry after a lost
+   * response is acknowledged only when the desired tuple is already present at
+   * the next epoch.
+   */
+  rebindSlot(
+    slot: number,
+    expectedEpoch: number,
+    expectedTupleInput: AssignmentTupleInput,
+    desiredTupleInput: AssignmentTupleInput,
+    task?: string | null,
+  ): SlotMutationResult {
+    const currentBeforeValidation = this.getSlot(slot);
+    const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
+    const desiredTuple = normalizeAssignmentTuple(desiredTupleInput);
+    if (!expectedTuple || !desiredTuple) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: currentBeforeValidation?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "observed_tuple_mismatch",
+      };
+    }
+    if (!Number.isInteger(expectedEpoch)) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: currentBeforeValidation?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "expected_epoch_required",
+      };
+    }
+    if (expectedTuple.repository_id !== desiredTuple.repository_id) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: currentBeforeValidation?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "invalid_repository_id",
+      };
+    }
+
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      const currentTuple = current ? slotAssignmentTuple(current) : null;
+      if (!current || !current.occupied) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "slot_not_occupied" };
+      }
+
+      // Exact replay after a committed write, including a client-side lost
+      // response, must not issue a second assignment write.
+      if (
+        epoch === expectedEpoch + 1
+        && assignmentTupleMatches(currentTuple, desiredTuple)
+      ) {
+        return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
+      }
+      if (epoch !== expectedEpoch) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      if (!assignmentTupleMatches(currentTuple, expectedTuple)) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
+      }
+      if (assignmentTupleMatches(currentTuple, desiredTuple)) {
+        return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
+      }
+
+      const owners = this.db.prepare(`
+        SELECT slot, issue, pr, branch_ref
+        FROM slots
+        WHERE occupied = 1
+          AND repository_id = ?
+          AND slot != ?
+          AND (
+            (? IS NOT NULL AND pr = ?)
+            OR (? IS NOT NULL AND issue = ?)
+            OR (? IS NOT NULL AND branch_ref = ?)
+          )
+        ORDER BY slot
+      `).all(
+        desiredTuple.repository_id,
+        slot,
+        desiredTuple.pr, desiredTuple.pr,
+        desiredTuple.issue, desiredTuple.issue,
+        desiredTuple.branch_ref, desiredTuple.branch_ref,
+      ) as Array<{ slot: number; issue: number | null; pr: number | null; branch_ref: string | null }>;
+      if (owners.length > 0) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "target_already_assigned",
+          owner_slots: owners.map((owner) => owner.slot),
+          owner_conflicts: owners.map((owner) => ({
+            slot: owner.slot,
+            matching_fields: [
+              ...(desiredTuple.issue !== null && owner.issue === desiredTuple.issue ? ["issue" as const] : []),
+              ...(desiredTuple.pr !== null && owner.pr === desiredTuple.pr ? ["pr" as const] : []),
+              ...(desiredTuple.branch_ref !== null && owner.branch_ref === desiredTuple.branch_ref ? ["branch_ref" as const] : []),
+            ],
+          })),
+        };
+      }
+
+      try {
+        this.updateAssignmentState(slot, {
+          status: "active" as SlotStatus,
+          occupied: true,
+          task: task ?? current.task,
+          repository_id: desiredTuple.repository_id,
+          issue: desiredTuple.issue,
+          branch: desiredTuple.branch,
+          branch_ref: desiredTuple.branch_ref,
+          pr: desiredTuple.pr,
+          head_sha: desiredTuple.head_sha,
+          assignment_epoch: epoch + 1,
+          assigned_at: current.assigned_at,
+          work_kind: desiredTuple.work_kind,
+          handoff_id: desiredTuple.handoff_id,
+          claimed_at: desiredTuple.claimed_at,
+          dnd: current.dnd,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+          return {
+            ok: false,
+            conflict: true,
+            assignment_epoch: epoch,
+            idempotent: false,
+            reason: "target_already_assigned",
+          };
+        }
+        throw error;
+      }
+
+      return { ok: true, conflict: false, assignment_epoch: epoch + 1, idempotent: false };
+    })();
   }
 
   /**

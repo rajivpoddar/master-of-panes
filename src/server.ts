@@ -884,7 +884,7 @@ app.post("/slots/:slotNum/release", async (c) => {
     return c.json({ error: "Invalid slot number" }, 400);
   }
 
-  let body: { expected_epoch?: unknown } = {};
+  let body: Record<string, unknown> = {};
   try {
     body = await c.req.json();
   } catch {
@@ -894,14 +894,50 @@ app.post("/slots/:slotNum/release", async (c) => {
     return c.json({ success: false, conflict: true, error: "expected_epoch is required and must be an integer" }, 409);
   }
 
-  const result = db.releaseSlot(slotParse.data, body.expected_epoch as number);
+  const expectedTupleFields = [
+    "expected_repository_id",
+    "expected_issue",
+    "expected_pr",
+    "expected_branch",
+    "expected_head_sha",
+    "expected_work_kind",
+    "expected_handoff_id",
+    "expected_claimed_at",
+  ];
+  const hasExpectedTuple = expectedTupleFields.some((field) => Object.prototype.hasOwnProperty.call(body, field));
+  if (hasExpectedTuple && !expectedTupleFields.every((field) => Object.prototype.hasOwnProperty.call(body, field))) {
+    return c.json({
+      success: false,
+      conflict: true,
+      error: "complete expected assignment tuple is required",
+      reason: "observed_tuple_mismatch",
+    }, 409);
+  }
+  const expectedTuple = hasExpectedTuple
+    ? {
+      repository_id: body.expected_repository_id as string | number | null,
+      issue: body.expected_issue as number | null,
+      pr: body.expected_pr as number | null,
+      branch: body.expected_branch as string | null,
+      head_sha: body.expected_head_sha as string | null,
+      work_kind: body.expected_work_kind as string | null,
+      handoff_id: body.expected_handoff_id as string | null,
+      claimed_at: body.expected_claimed_at as string | null,
+    }
+    : undefined;
+
+  const result = db.releaseSlot(
+    slotParse.data,
+    body.expected_epoch as number,
+    expectedTuple,
+  );
   if (!result.ok) {
     return c.json({ success: false, ...result }, 409);
   }
   processor.clearPlanApprovalTimer(slotParse.data);
   db.logEvent(slotParse.data, "slot_released", null, null, { assignment_epoch: result.assignment_epoch, idempotent: result.idempotent });
 
-  return c.json({ success: true, ...result });
+  return c.json({ success: true, ...result, slot: db.getSlot(slotParse.data) });
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────

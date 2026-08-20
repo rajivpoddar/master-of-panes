@@ -31,7 +31,7 @@ test("a stale PM-direction Stop cannot reclaim a released slot", async () => {
     assert.equal(slot?.task, null);
     assert.equal(slot?.issue, null);
     assert.equal(slot?.pr, null);
-    assert.equal(slot?.assignment_epoch, 1);
+    assert.equal(slot?.assignment_epoch, 2);
     const events = db.getEvents(3, 10, "stale_pm_direction_after_release");
     assert.equal(events.length, 1);
   } finally {

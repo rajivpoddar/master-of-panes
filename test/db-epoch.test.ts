@@ -62,12 +62,12 @@ test("same-slot replay is exact, canonical, and mutation-free", () => {
       null,
       null,
       null,
-      1,
+      2,
     );
     assert.deepEqual(successor, {
       ok: true,
       conflict: false,
-      assignment_epoch: 2,
+      assignment_epoch: 3,
       idempotent: false,
     });
   });
@@ -105,7 +105,7 @@ test("assignment metadata is stored and cleared with the occupied tuple", () => 
     assert.deepEqual(db.releaseSlot(1, 1), {
       ok: true,
       conflict: false,
-      assignment_epoch: 1,
+      assignment_epoch: 2,
       idempotent: false,
     });
     const free = db.getSlot(1);
@@ -246,7 +246,7 @@ test("checkout synchronization fails closed on stale epoch, wrong branch, or fre
 
     db.releaseSlot(1, 1);
     assert.equal(
-      db.syncSlotCheckout(1, "fix/10-exact", "a".repeat(40), 1).reason,
+      db.syncSlotCheckout(1, "fix/10-exact", "a".repeat(40), 2).reason,
       "slot_not_occupied",
     );
   });
@@ -265,7 +265,7 @@ test("missing and stale expected epochs fail without mutation", () => {
   });
 });
 
-test("release preserves epoch and hook turn state fails closed on mismatch", () => {
+test("release advances epoch and hook turn state fails closed on mismatch", () => {
   withDatabase((db) => {
     db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", null, null, null, 0);
     db.startAgentTurn(1, "turn-a");
@@ -277,9 +277,9 @@ test("release preserves epoch and hook turn state fails closed on mismatch", () 
     assert.equal(db.getSlot(1)?.active_turn_state, "inactive");
 
     const released = db.releaseSlot(1, 1);
-    assert.equal(released.assignment_epoch, 1);
+    assert.equal(released.assignment_epoch, 2);
     assert.equal(db.getSlot(1)?.occupied, false);
-    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 2);
   });
 });
 
