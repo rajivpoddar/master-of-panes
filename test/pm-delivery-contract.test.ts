@@ -46,6 +46,27 @@ test("queued cadence due key coalesces across scheduler restart and is not marke
   }
 });
 
+test("slot-0 freeform/cadence/ops occurrences are not dropped by state coalescing", () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-occurrence-preservation-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    db.enqueuePendingPMEvent(0, "cadence-heartbeat-2026-08-20:4", "heartbeat");
+    db.enqueuePendingPMEvent(0, "cadence-morning-brief-2026-08-20", "morning brief");
+    db.enqueuePendingPMEvent(0, "freeform-ops-audit-1", "ops audit");
+
+    const drained = db.drainPendingPMEvents();
+    assert.equal(drained.length, 3);
+    assert.deepEqual(new Set(drained.map((row) => row.event_type)), new Set([
+      "cadence-heartbeat-2026-08-20:4",
+      "cadence-morning-brief-2026-08-20",
+      "freeform-ops-audit-1",
+    ]));
+    assert.equal(db.getPendingPMEventCount(), 3);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("queued PM delivery uses shared submit key, retains failed rows, and records one durable success", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-pm-queue-delivery-"));
   try {
@@ -97,6 +118,72 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
     failedRelay.injectToPM("queued failure", "freeform-failure");
     assert.equal(await failedRelay.drainPMQueue(), 0);
     assert.equal(failedDb.getPendingPMEventCount(), 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("automated PM injects are durable before async submit and retain both idle/direct failures", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-durable-inject-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      runShell: async () => { throw new Error("synthetic tmux failure"); },
+    });
+    relay.setDatabase(db);
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = false;
+
+    assert.equal(relay.injectToPM("idle automated alert", "freeform-idle-failure"), true);
+    assert.equal(relay.injectToPMDirect("direct automated alert"), true);
+    assert.equal(db.getPendingPMEventCount(), 2);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(db.getPendingPMEventCount(), 2);
+    assert.equal(db.getEvents(0, 20, "pm_queue_delivery_deferred").length >= 1, true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("paste-success/submit-failure retry submits the existing prompt once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-partial-submit-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const commands: string[] = [];
+    let submitAttempts = 0;
+    const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      runShell: async (command) => {
+        commands.push(command);
+        if (command.includes("send-keys") && command.includes("C-q") && !command.includes("paste-buffer")) {
+          submitAttempts += 1;
+          if (submitAttempts === 1) throw new Error("synthetic submit failure after paste");
+        }
+        return { stdout: "", stderr: "" };
+      },
+    });
+    relay.setDatabase(db);
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = null;
+
+    const message = "partial delivery\nwith one pasted payload";
+    assert.equal((await relay.submitToPM(message)).ok, false);
+    // Recreate the relay against the same DB: the existing event log, not
+    // transient relay memory, must tell the retry to submit only the key.
+    const restartedRelay = new TmuxRelay(DEFAULT_CONFIG, {
+      runShell: async (command) => {
+        commands.push(command);
+        if (command.includes("send-keys") && command.includes("C-q") && !command.includes("paste-buffer")) {
+          submitAttempts += 1;
+          if (submitAttempts === 1) throw new Error("synthetic submit failure after paste");
+        }
+        return { stdout: "", stderr: "" };
+      },
+    });
+    restartedRelay.setDatabase(db);
+    (restartedRelay as unknown as { pmBusy: boolean | null }).pmBusy = null;
+    assert.equal((await restartedRelay.submitToPM(message)).ok, true);
+    assert.equal(commands.filter((command) => command.includes("paste-buffer")).length, 1);
+    assert.equal(commands.filter((command) => command.includes("send-keys") && command.includes("C-q")).length, 2);
+    assert.equal(db.getEvents(0, 20, "pm_direct_paste_pending").length, 1);
+    assert.equal(db.getEvents(0, 20, "pm_direct_paste_completed").length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

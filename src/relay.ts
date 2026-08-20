@@ -505,9 +505,9 @@ export class TmuxRelay {
    * check-slot relays (and any other PM-bound message) while PM is busy
    * (mid-tool/turn). Drain on PM Stop hook via /pm-status.
    *
-   * Coalesce semantics live in the DB layer (PRIMARY KEY (slot, event_type)
-   * means latest enqueue per (slot, event_type) wins via INSERT OR REPLACE,
-   * cross-event-type drop happens in drainPendingPMEvents).
+   * Coalesce semantics live in the DB layer: slot-state transitions share the
+   * (slot, event_type) key and are coalesced by drainPendingPMEvents, while
+   * distinct freeform/cadence/ops event identities remain separate.
    *
    * IMPORTANT EXCLUSIONS (do NOT route through this queue):
    * - PM self-clear is handled by the MoP clear path, which routes `/clear`
@@ -523,18 +523,7 @@ export class TmuxRelay {
     if (this.pmBusy !== false && this.db) {
       const parsed = parseRelayMessage(message);
       if (parsed) {
-        const decorated = withMopSlotHeader(message, parsed);
-        // Slash-command relay (slot-idle/active/check-slot/blocked) —
-        // queue keyed by (slot, event_type). PRIMARY KEY auto-coalesces.
-        const payload = decorated;
-        const eventType = eventTypeOverride ?? parsed.eventType;
-        this.db.enqueuePendingPMEvent(parsed.slot, eventType, payload);
-        this.db.logEvent(parsed.slot, "pm_queue_enqueued", null, null, {
-          event_type: eventType,
-          via: "injectToPM",
-          payload: "inline",
-        });
-        console.log(`[relay-debug] injectToPM queued (PM busy) → ${decorated}`);
+        this.enqueuePMMessage(message, eventTypeOverride, "injectToPM");
         return true;
       }
       // Free-form message (escalation, plan-approval-needed, scheduled-task,
@@ -546,27 +535,46 @@ export class TmuxRelay {
       // lands here per parseRelayMessage Shape 3 note (R1 fix 4 option b,
       // 2026-05-26 thread `1779790681.847219`) — each audit payload is a
       // one-shot exception list whose contents matter individually.
-      const slotMatch = /\bslot\s+(\d+)\b/i.exec(message);
-      const slot = slotMatch ? Math.min(4, Math.max(0, parseInt(slotMatch[1], 10))) : 0;
-      const synthHash = simpleHash(message);
-      const eventType = eventTypeOverride ?? `freeform-${synthHash}`;
-      this.db.enqueuePendingPMEvent(slot, eventType, message);
-      this.db.logEvent(slot, "pm_queue_enqueued", null, null, {
-        event_type: eventType,
-        via: "injectToPM",
-        message: message.slice(0, 200),
-      });
-      console.log(`[relay-debug] injectToPM queued freeform (PM busy) → ${message.slice(0, 80)}`);
+      this.enqueuePMMessage(message, eventTypeOverride, "injectToPM");
       return true;
     }
-    const parsed = parseRelayMessage(message);
-    void this.submitToPM(withMopSlotHeader(message, parsed));
+    if (!this.db) {
+      console.error("[relay] PM delivery unavailable: no database for durable fallback");
+      return false;
+    }
+    this.enqueuePMMessage(message, eventTypeOverride, "injectToPM-idle");
+    void this.drainPMQueue();
     return true;
   }
 
+  private enqueuePMMessage(
+    message: string,
+    eventTypeOverride: string | undefined,
+    via: string,
+  ): { slot: number; eventType: string; payload: string } {
+    if (!this.db) throw new Error("PM queue database is unavailable");
+    const parsed = parseRelayMessage(message);
+    const payload = withMopSlotHeader(message, parsed);
+    const slot = parsed?.slot ?? (() => {
+      const slotMatch = /\bslot\s+(\d+)\b/i.exec(message);
+      return slotMatch ? Math.min(4, Math.max(0, parseInt(slotMatch[1], 10))) : 0;
+    })();
+    const eventType = eventTypeOverride ?? parsed?.eventType ?? `freeform-${simpleHash(message)}`;
+    this.db.enqueuePendingPMEvent(slot, eventType, payload);
+    this.db.logEvent(slot, "pm_queue_enqueued", null, null, {
+      event_type: eventType,
+      via,
+      message: payload.slice(0, 200),
+    });
+    console.log(`[relay-debug] injectToPM queued (${via}) → ${payload.slice(0, 80)}`);
+    return { slot, eventType, payload };
+  }
+
   /**
-   * Inject into PM immediately, bypassing the busy queue. Use only for
-   * low-cost state signals where stale delivery is worse than interrupting PM.
+   * Priority PM signal path. It preserves the exact occurrence in the existing
+   * queue before starting an asynchronous drain; a tmux failure therefore
+   * remains retryable instead of being reported as a successful fire-and-forget
+   * send.
    */
   injectToPMDirect(message: string): boolean {
     const parsed = parseRelayMessage(message);
@@ -588,9 +596,15 @@ export class TmuxRelay {
         message: decorated.slice(0, 200),
       });
     }
-    void this.submitToPM(decorated);
+    if (!this.db) {
+      console.error("[relay] PM direct delivery unavailable: no database for durable fallback");
+      return false;
+    }
+    this.enqueuePMMessage(decorated, parsed?.eventType, "injectToPMDirect");
+    void this.drainPMQueue();
     return true;
   }
+
 
   /**
    * The single MoP relay submit primitive for automated PM delivery
@@ -615,10 +629,57 @@ export class TmuxRelay {
     return result;
   }
 
+  /**
+   * Return the most recent unfinished paste, if any.  The existing append-only
+   * event log is the delivery machinery's durable recovery boundary: a paste
+   * is recorded before its submit key is attempted and a matching completion
+   * supersedes it.  This lets a retry send only the key after a paste-success /
+   * submit-failure, without introducing another queue or receipt store.
+   */
+  private latestPendingDirectPaste(): { message: string; submitKey: PMSubmitKey } | null {
+    if (!this.db) return null;
+    const latestByIdentity = new Map<string, { eventType: string; message: string; submitKey: PMSubmitKey; id: number }>();
+    for (const event of this.db.getEvents(0, 500)) {
+      if (event.event_type !== "pm_direct_paste_pending" && event.event_type !== "pm_direct_paste_completed") {
+        continue;
+      }
+      try {
+        const payload = JSON.parse(event.payload) as Record<string, unknown>;
+        if (typeof payload.message !== "string") continue;
+        const key = payload.submit_key === "Enter" || payload.submit_key === "C-q"
+          ? payload.submit_key
+          : null;
+        if (!key) continue;
+        const identity = `${payload.message}\u0000${key}`;
+        if (!latestByIdentity.has(identity)) {
+          latestByIdentity.set(identity, {
+            eventType: event.event_type,
+            message: payload.message,
+            submitKey: key,
+            id: event.id,
+          });
+        }
+      } catch {
+        // Ignore malformed diagnostic rows; a valid newer row remains authoritative.
+      }
+    }
+    const pending = [...latestByIdentity.values()]
+      .filter((entry) => entry.eventType === "pm_direct_paste_pending")
+      .sort((a, b) => b.id - a.id)[0];
+    return pending ? { message: pending.message, submitKey: pending.submitKey } : null;
+  }
+
   private async injectDirectNow(message: string, submitKey: PMSubmitKey): Promise<boolean> {
+    const pending = this.latestPendingDirectPaste();
+    if (pending && pending.message !== message) {
+      console.warn("[relay] PM paste is awaiting its submit; retaining the exact occurrence for retry");
+      return false;
+    }
+    const effectiveSubmitKey = pending?.submitKey ?? submitKey;
+    const resumeAfterPaste = pending !== null;
     try {
       const firstLine = message.split("\n", 1)[0];
-      console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""} (submit=${submitKey})`);
+      console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""} (submit=${effectiveSubmitKey})`);
       if (message.includes("\n")) {
         // Multi-line payload (e.g., /check-slot N\n<bg-summary>): use
         // load-buffer + paste-buffer + submit — same pattern sendToSlot uses
@@ -631,21 +692,43 @@ export class TmuxRelay {
         const bufName = `mop-pm-inject-${process.pid}-${seq}`;
         await fs.writeFile(tmpFile, message);
         try {
-          await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
-          await this.runShell(`tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
+          if (!resumeAfterPaste) {
+            await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+            await this.runShell(`tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
+            this.db?.logEvent(0, "pm_direct_paste_pending", null, null, {
+              message,
+              submit_key: effectiveSubmitKey,
+              sequence: seq,
+            });
+          }
           await sleep(PM_INJECT_ENTER_DELAY_MS);
-          await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${submitKey}`, { timeout: 10_000 });
+          await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
+          this.db?.logEvent(0, "pm_direct_paste_completed", null, null, {
+            message,
+            submit_key: effectiveSubmitKey,
+            sequence: seq,
+          });
           await sleep(500);
         } finally {
           await fs.unlink(tmpFile).catch(() => undefined);
         }
       } else {
-        await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
+        if (!resumeAfterPaste) {
+          await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
+          this.db?.logEvent(0, "pm_direct_paste_pending", null, null, {
+            message,
+            submit_key: effectiveSubmitKey,
+          });
+        }
         await sleep(PM_INJECT_ENTER_DELAY_MS);
-        await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${submitKey}`, { timeout: 10_000 });
+        await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
+        this.db?.logEvent(0, "pm_direct_paste_completed", null, null, {
+          message,
+          submit_key: effectiveSubmitKey,
+        });
         await sleep(500);
       }
-      console.log(`[relay-debug] injectToPM success → ${firstLine} (submit=${submitKey})`);
+      console.log(`[relay-debug] injectToPM success → ${firstLine} (submit=${effectiveSubmitKey})`);
       return true;
     } catch (err) {
       console.error(`[relay] Failed to inject into PM pane:`, err);

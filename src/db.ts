@@ -1453,9 +1453,9 @@ export class MoPDatabase {
   }
 
   /**
-   * Drain all queued PM-bound events. Returns AT MOST ONE row per slot —
-   * the most-relevant single notification — so PM sees one summary signal
-   * per slot rather than a stream of intermediate state transitions.
+   * Drain all queued PM-bound events. Slot-state transitions are coalesced to
+   * the most relevant winner per slot; freeform/cadence/ops occurrences are
+   * preserved independently because they carry distinct actionable content.
    *
    * Coalesce policy (Rajiv directive 2026-05-13 14:13 IST thread
    * `1778661820.586119`: "send the last one when pm goes idle after stop
@@ -1468,17 +1468,14 @@ export class MoPDatabase {
    *     4. `check-slot`    — periodic 5-min wellness ping
    *     5. `freeform-*`    — escalation comments, plan-approval-needed,
    *                          compact warning, scheduled-task. Free-form
-   *                          rows are ALSO collapsed to one per slot;
-   *                          the most-recently-enqueued wins.
+   *                          rows are retained as individual occurrences.
    *
    *   When a higher-priority signal exists for a slot, all lower-priority
-   *   rows for that slot are dropped. Within a tie (same priority bucket)
-   *   the most-recently-enqueued row wins.
+   *   lower-priority slot-state rows are dropped. Within a tie, the
+   *   most-recently-enqueued slot-state row wins; non-state rows are retained.
    *
-   *   Free-form rows (`freeform-<hash>`) DO NOT mix with slot-state rows —
-   *   they are emitted as a separate notification per slot ONLY IF no
-   *   slot-state signal exists for that slot. This preserves escalation
-   *   visibility when the slot has nothing else queued.
+   *   Free-form/cadence/ops rows do not mix with slot-state coalescing and
+   *   remain queued even when a slot-state winner exists for that slot.
    *
    * Returns the deduped rows. Caller injects each row into PM.
    */
@@ -1489,16 +1486,16 @@ export class MoPDatabase {
       ORDER BY slot ASC, enqueued_at ASC
     `).all() as Array<{ slot: number; event_type: string; payload: string | null; enqueued_at: string }>;
 
-    // Priority: lower number = higher priority. Free-form bucket sits below
-    // slot-state rows; within free-form, most-recent wins.
+    const slotStateTypes = new Set(["slot-blocked", "slot-idle", "slot-active", "check-slot"]);
+    const isSlotState = (eventType: string): boolean => slotStateTypes.has(eventType);
+
+    // Priority: lower number = higher priority among slot-state rows only.
     const priorityOf = (eventType: string): number => {
       if (eventType === "slot-blocked") return 1;
       if (eventType === "slot-idle") return 2;
       if (eventType === "slot-active") return 3;
       if (eventType === "check-slot") return 4;
-      // freeform-<hash> or any other custom event_type — only emit when no
-      // slot-state row exists. Most-recently-enqueued wins within bucket.
-      return 5;
+      return Number.MAX_SAFE_INTEGER;
     };
 
     // Group by slot, pick winner per slot.
@@ -1514,23 +1511,26 @@ export class MoPDatabase {
     const slots = [...bySlot.keys()].sort((a, b) => a - b);
     for (const slot of slots) {
       const slotRows = bySlot.get(slot)!;
-      // Sort: priority ASC (higher prio first), then enqueued_at DESC
-      // (most-recent first within same priority).
-      slotRows.sort((a, b) => {
-        const pa = priorityOf(a.event_type);
-        const pb = priorityOf(b.event_type);
-        if (pa !== pb) return pa - pb;
-        return b.enqueued_at.localeCompare(a.enqueued_at);
-      });
-      out.push(slotRows[0]);
+      const stateRows = slotRows.filter((row) => isSlotState(row.event_type));
+      const otherRows = slotRows.filter((row) => !isSlotState(row.event_type));
+      if (stateRows.length > 0) {
+        stateRows.sort((a, b) => {
+          const pa = priorityOf(a.event_type);
+          const pb = priorityOf(b.event_type);
+          if (pa !== pb) return pa - pb;
+          return b.enqueued_at.localeCompare(a.enqueued_at);
+        });
+        out.push(stateRows[0]);
+      }
+      out.push(...otherRows);
     }
 
-    // Keep selected rows until the relay records a successful submit. Lower-
-    // priority rows are intentionally superseded now; a selected row that
-    // fails delivery must remain durable for the next drain/restart.
+    // Keep selected rows until the relay records a successful submit. Only
+    // superseded slot-state rows are intentionally deleted now; every
+    // freeform/cadence/ops occurrence remains durable for delivery.
     const selected = new Set(out.map((row) => `${row.slot}\u0000${row.event_type}`));
     for (const row of rows) {
-      if (!selected.has(`${row.slot}\u0000${row.event_type}`)) {
+      if (isSlotState(row.event_type) && !selected.has(`${row.slot}\u0000${row.event_type}`)) {
         this.deletePendingPMEvent(row.slot, row.event_type);
       }
     }
