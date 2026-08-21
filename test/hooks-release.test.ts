@@ -39,7 +39,7 @@ test("a stale PM-direction Stop cannot reclaim a released slot", async () => {
   }
 });
 
-test("hook events synchronize exact-branch checkout heads without advancing the epoch", async () => {
+test("hook events bind an initial checkout head but never overwrite a committed head", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-checkout-sync-test-"));
   try {
     execFileSync("git", ["init", "-q", directory]);
@@ -77,9 +77,11 @@ test("hook events synchronize exact-branch checkout heads without advancing the 
       cwd: directory,
       tool_name: "Bash",
     });
-    assert.equal(db.getSlot(1)?.head_sha, secondHead);
+    // A changed checkout head is a rebind intent, not runtime observation.
+    // The hook must leave the committed tuple untouched.
+    assert.equal(db.getSlot(1)?.head_sha, firstHead);
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
-    assert.equal(db.getEvents(1, 10, "slot_checkout_synced").length, 2);
+    assert.equal(db.getEvents(1, 10, "slot_checkout_synced").length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -233,6 +233,13 @@ export class HookProcessor {
       const head = headOutput.trim();
       if (!/^[0-9a-f]{40}$/i.test(head)) return;
 
+      // The registered head is an ownership tuple written by the canonical
+      // assignment/rebind boundary.  Runtime observation may confirm it, but
+      // must not replace it from a stale checkout at the same epoch (for
+      // example, a historical rebind handoff being read before checkout
+      // convergence).  A changed head must go back through rebind_slot.
+      if (slot.head_sha && slot.head_sha !== head) return;
+
       const result = this.db.syncSlotCheckout(
         slotNum,
         branch,
