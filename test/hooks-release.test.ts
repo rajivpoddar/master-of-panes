@@ -39,7 +39,7 @@ test("a stale PM-direction Stop cannot reclaim a released slot", async () => {
   }
 });
 
-test("hook events bind an initial checkout head but never overwrite a committed head", async () => {
+test("hook events advance only to descendants and never overwrite with stale or divergent heads", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-checkout-sync-test-"));
   try {
     execFileSync("git", ["init", "-q", directory]);
@@ -77,11 +77,38 @@ test("hook events bind an initial checkout head but never overwrite a committed 
       cwd: directory,
       tool_name: "Bash",
     });
-    // A changed checkout head is a rebind intent, not runtime observation.
-    // The hook must leave the committed tuple untouched.
-    assert.equal(db.getSlot(1)?.head_sha, firstHead);
+    // A same-branch forward descendant is normal checkout observation.
+    assert.equal(db.getSlot(1)?.head_sha, secondHead);
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
-    assert.equal(db.getEvents(1, 10, "slot_checkout_synced").length, 1);
+    assert.equal(db.getEvents(1, 10, "slot_checkout_synced").length, 2);
+
+    // A stale ancestor after the committed head cannot roll ownership back.
+    execFileSync("git", ["-C", directory, "reset", "-q", "--hard", firstHead]);
+    await processor.process(1, {
+      type: "PostToolUse",
+      session_id: "turn-a",
+      cwd: directory,
+      tool_name: "Read",
+    });
+    assert.equal(db.getSlot(1)?.head_sha, secondHead);
+
+    // A divergent branch is likewise rebind-only and cannot overwrite the
+    // registered tuple from observation.
+    writeFileSync(join(directory, "divergent"), "three\n");
+    execFileSync("git", ["-C", directory, "add", "divergent"]);
+    execFileSync("git", ["-C", directory, "commit", "-q", "-m", "divergent"]);
+    const divergentHead = execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    assert.notEqual(divergentHead, secondHead);
+    await processor.process(1, {
+      type: "PostToolUse",
+      session_id: "turn-a",
+      cwd: directory,
+      tool_name: "Bash",
+    });
+    assert.equal(db.getSlot(1)?.head_sha, secondHead);
+    assert.equal(db.getEvents(1, 10, "slot_checkout_synced").length, 2);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

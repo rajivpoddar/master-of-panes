@@ -234,11 +234,21 @@ export class HookProcessor {
       if (!/^[0-9a-f]{40}$/i.test(head)) return;
 
       // The registered head is an ownership tuple written by the canonical
-      // assignment/rebind boundary.  Runtime observation may confirm it, but
-      // must not replace it from a stale checkout at the same epoch (for
-      // example, a historical rebind handoff being read before checkout
-      // convergence).  A changed head must go back through rebind_slot.
-      if (slot.head_sha && slot.head_sha !== head) return;
+      // assignment/rebind boundary. Runtime observation may advance it only
+      // along the already-validated branch. A stale ancestor or divergent
+      // checkout must go back through rebind_slot instead of overwriting the
+      // committed tuple at the same epoch.
+      if (slot.head_sha && slot.head_sha !== head) {
+        try {
+          await execFileAsync(
+            "git",
+            ["-C", payload.cwd, "merge-base", "--is-ancestor", slot.head_sha, head],
+            { encoding: "utf8", timeout: 1000 },
+          );
+        } catch {
+          return;
+        }
+      }
 
       const result = this.db.syncSlotCheckout(
         slotNum,
