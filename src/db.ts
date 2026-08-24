@@ -76,6 +76,35 @@ const ASSIGNMENT_WORK_KINDS = new Set([
   "review",
 ]);
 
+function payloadReferencesIssueExactly(value: unknown, issueNumber: number): boolean {
+  if (typeof value !== "string") return false;
+  const references = [
+    ...value.matchAll(/#(\d+)\b/g),
+    ...value.matchAll(/\bissue\s*#?\s*(\d+)\b/gi),
+  ];
+  return references.some((match) => Number(match[1]) === issueNumber);
+}
+
+function isCodexReviewerAgentEvent(
+  eventType: string,
+  toolName: string,
+  payload: string,
+  issueNumber: number,
+): boolean {
+  if (eventType !== "PostToolUse" || (toolName !== "Agent" && toolName !== "Task")) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(payload) as { tool_input?: Record<string, unknown> };
+    const input = parsed.tool_input;
+    if (!input || input.subagent_type !== "codex-code-reviewer") return false;
+    return payloadReferencesIssueExactly(input.description, issueNumber)
+      || payloadReferencesIssueExactly(input.prompt, issueNumber);
+  } catch {
+    return false;
+  }
+}
+
 export function normalizeRepositoryId(value: unknown): string | null {
   if (typeof value !== "string" && typeof value !== "number") return null;
   const repositoryId = String(value).trim();
@@ -1893,31 +1922,40 @@ export class MoPDatabase {
   ): { found: boolean; method: string | null; timestamp: string | null; slot: number | null; details: string | null } {
     const issueStr = String(issueNumber);
 
-    // Search for Skill tool calls that match review patterns
-    // Covers: codex-app-code-review, codex-review, zen-code-review, zen-review
+    // Read the small, indexed recent tool-event set, then parse Agent/Task
+    // payloads so reviewer identity and issue binding are exact rather than a
+    // forgeable prose substring. Existing Skill/Bash matching stays intact.
     const stmt = this.db.prepare(`
-      SELECT slot, timestamp, tool_name, payload
+      SELECT slot, timestamp, event_type, tool_name, payload
       FROM events
       WHERE timestamp > strftime('%Y-%m-%dT%H:%M:%f', 'now', '-' || ? || ' minutes')
-        AND (
-          (tool_name = 'Skill' AND (
-            payload LIKE '%codex%review%' OR
-            payload LIKE '%zen%review%'
-          ))
-          OR
-          (tool_name = 'Bash' AND (
-            payload LIKE '%codex exec%' OR
-            payload LIKE '%codex-companion%review%'
-          ))
-        )
-        AND payload LIKE ?
+        AND tool_name IN ('Skill', 'Bash', 'Agent', 'Task')
       ORDER BY timestamp DESC
-      LIMIT 1
     `);
 
-    const row = stmt.get(windowMinutes, `%${issueStr}%`) as {
-      slot: number; timestamp: string; tool_name: string; payload: string;
-    } | undefined;
+    const rows = stmt.all(windowMinutes) as Array<{
+      slot: number;
+      timestamp: string;
+      event_type: string;
+      tool_name: string;
+      payload: string;
+    }>;
+    const row = rows.find((candidate) => {
+      if (candidate.tool_name === "Skill") {
+        return candidate.payload.includes(issueStr)
+          && (/codex.*review/i.test(candidate.payload) || /zen.*review/i.test(candidate.payload));
+      }
+      if (candidate.tool_name === "Bash") {
+        return candidate.payload.includes(issueStr)
+          && (candidate.payload.includes("codex exec") || /codex-companion.*review/i.test(candidate.payload));
+      }
+      return isCodexReviewerAgentEvent(
+        candidate.event_type,
+        candidate.tool_name,
+        candidate.payload,
+        issueNumber,
+      );
+    });
 
     if (!row) {
       return { found: false, method: null, timestamp: null, slot: null, details: null };
@@ -1926,7 +1964,8 @@ export class MoPDatabase {
     // Determine method from the match
     let method = "unknown";
     const payload = row.payload.toLowerCase();
-    if (payload.includes("codex-app")) method = "codex-app";
+    if (row.tool_name === "Agent" || row.tool_name === "Task") method = "codex-agent";
+    else if (payload.includes("codex-app")) method = "codex-app";
     else if (payload.includes("zen")) method = "zen";
     else if (payload.includes("codex exec")) method = "codex-cli";
     else if (payload.includes("codex-companion")) method = "codex-plugin";
