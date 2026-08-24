@@ -9,11 +9,43 @@ import { PMCadenceScheduler } from "../src/pmCadence.js";
 import { decidePMSubmitKey, TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
-test("OMP PM runtime observation is idle-only Enter and busy/unknown C-q", () => {
-  assert.equal(decidePMSubmitKey(false), "Enter");
-  assert.equal(decidePMSubmitKey(true), "C-q");
-  assert.equal(decidePMSubmitKey(null), "C-q");
-  assert.equal(decidePMSubmitKey(undefined), "C-q");
+test("native Claude always uses Enter while OMP remains busy-aware", () => {
+  assert.equal(decidePMSubmitKey(false, "claude"), "Enter");
+  assert.equal(decidePMSubmitKey(true, "claude"), "Enter");
+  assert.equal(decidePMSubmitKey(null, "claude"), "Enter");
+  assert.equal(decidePMSubmitKey(undefined, "claude"), "Enter");
+  assert.equal(decidePMSubmitKey(false, "omp"), "Enter");
+  assert.equal(decidePMSubmitKey(true, "omp"), "C-q");
+  assert.equal(decidePMSubmitKey(null, "omp"), "C-q");
+  assert.equal(decidePMSubmitKey(undefined, "omp"), "C-q");
+});
+
+test("native Claude submits immediately without a PM pending-event row", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-native-claude-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const commands: string[] = [];
+    const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "claude",
+      runShell: async (command) => {
+        commands.push(command);
+        return { stdout: "", stderr: "" };
+      },
+    });
+    relay.setDatabase(db);
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = true;
+
+    const result = await relay.submitToPM("native Claude immediate message");
+
+    assert.equal(result.ok, true);
+    assert.equal(result.submitKey, "Enter");
+    assert.equal(commands.filter((command) => command.endsWith(" Enter")).length, 1);
+    assert.equal(commands.some((command) => command.endsWith(" C-q")), false);
+    assert.equal(db.getPendingPMEventCount(), 0);
+    assert.equal(db.getEvents(0, 20, "pm_queue_enqueued").length, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("queued cadence due key coalesces across scheduler restart and is not marked delivered on enqueue", async () => {
@@ -77,6 +109,7 @@ test("busy/unknown injects and cadence use immediate C-q without a later Stop", 
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
     const commands: string[] = [];
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "omp",
       runShell: async (command) => {
         commands.push(command);
         return { stdout: "", stderr: "" };
@@ -94,7 +127,7 @@ test("busy/unknown injects and cadence use immediate C-q without a later Stop", 
     assert.equal(cadenceResult.queued, false);
     assert.equal(db.getConfig("pm_cadence_heartbeat_last_due_key") !== null, true);
 
-    await new Promise((resolve) => setTimeout(resolve, 1_800));
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
     const submits = commands.filter((command) => command.includes("tmux send-keys"));
     assert.equal(submits.filter((command) => command.endsWith(" C-q")).length, 3);
     assert.equal(submits.some((command) => command.endsWith(" Enter")), false);
@@ -111,6 +144,7 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
     const commands: string[] = [];
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "omp",
       runShell: async (command) => {
         commands.push(command);
         return { stdout: "", stderr: "" };
@@ -125,7 +159,7 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
 
     // injectToPM now enters the shared drain immediately; no later Stop hook
     // is required to produce the follow-up.
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    await new Promise((resolve) => setTimeout(resolve, 1_300));
     const delivered = db.getEvents(0, 10, "pm_queue_delivered").length;
     assert.equal(delivered, 1);
     assert.equal(db.getPendingPMEventCount(), 0);
@@ -149,6 +183,7 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
 
     const failedDb = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "failed.db") });
     const failedRelay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "omp",
       runShell: async (command) => {
         if (command.includes("send-keys") && command.includes("C-q")) throw new Error("synthetic submit failure");
         return { stdout: "", stderr: "" };
@@ -169,6 +204,7 @@ test("automated PM injects are durable before async submit and retain both idle/
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "omp",
       runShell: async () => { throw new Error("synthetic tmux failure"); },
     });
     relay.setDatabase(db);
@@ -192,6 +228,7 @@ test("paste-success/submit-failure retry submits the existing prompt once", asyn
     const commands: string[] = [];
     let submitAttempts = 0;
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "omp",
       runShell: async (command) => {
         commands.push(command);
         if (command.includes("send-keys") && command.includes("C-q") && !command.includes("paste-buffer")) {
@@ -209,6 +246,7 @@ test("paste-success/submit-failure retry submits the existing prompt once", asyn
     // Recreate the relay against the same DB: the existing event log, not
     // transient relay memory, must tell the retry to submit only the key.
     const restartedRelay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "omp",
       runShell: async (command) => {
         commands.push(command);
         if (command.includes("send-keys") && command.includes("C-q") && !command.includes("paste-buffer")) {
@@ -245,7 +283,7 @@ test("ambiguous queue occurrence stays fail-closed beyond the event read horizon
       }
       return { stdout: "", stderr: "" };
     };
-    const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell });
+    const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell, pmRuntime: "omp" });
     relay.setDatabase(db);
     (relay as unknown as { pmBusy: boolean | null }).pmBusy = null;
     const message = "ambiguous durable occurrence";
@@ -253,7 +291,7 @@ test("ambiguous queue occurrence stays fail-closed beyond the event read horizon
     for (let i = 0; i < 600; i += 1) {
       db.logEvent(0, "unrelated-diagnostic", null, null, { i });
     }
-    const restartedRelay = new TmuxRelay(DEFAULT_CONFIG, { runShell });
+    const restartedRelay = new TmuxRelay(DEFAULT_CONFIG, { runShell, pmRuntime: "omp" });
     restartedRelay.setDatabase(db);
     (restartedRelay as unknown as { pmBusy: boolean | null }).pmBusy = null;
     assert.equal((await restartedRelay.submitToPM(message)).ok, false);
@@ -277,6 +315,7 @@ test("concurrent idle/direct inject drains serialize the whole occurrence delive
     const release = new Promise<void>((resolve) => { releaseFirstSubmit = resolve; });
     let submitCount = 0;
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "omp",
       runShell: async (command) => {
         commands.push(command);
         if (command.endsWith(" Enter")) {
@@ -319,6 +358,7 @@ test("in-flight delivery only removes the selected occurrence, preserving a same
     let submitStarted!: () => void;
     const started = new Promise<void>((resolve) => { submitStarted = resolve; });
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "omp",
       runShell: async (command) => {
         if (command.endsWith(" Enter")) {
           submitStarted();
@@ -349,6 +389,7 @@ test("queued drain demotes idle after Enter so later PM rows use C-q", async () 
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
     const commands: string[] = [];
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "omp",
       runShell: async (command) => {
         commands.push(command);
         return { stdout: "", stderr: "" };

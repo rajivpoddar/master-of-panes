@@ -19,7 +19,7 @@ export type SlotActivityState = "active" | "idle" | "unknown";
 const PM_INJECT_ENTER_DELAY_MS: number = (() => {
   const raw = process.env.MOP_PM_INJECT_ENTER_DELAY_MS;
   const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n >= 0 ? n : 250;
+  return Number.isFinite(n) && n >= 0 ? n : 500;
 })();
 
 // v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
@@ -175,6 +175,7 @@ export function decidePMDrain(
 }
 
 export type PMSubmitKey = "Enter" | "C-q";
+export type PMRuntime = "claude" | "omp";
 
 export type PMSubmitResult = {
   ok: boolean;
@@ -196,25 +197,30 @@ type DirectSubmitResult = {
 };
 
 /**
- * Busy-aware PM submit key for automated PM delivery.
+ * Runtime-aware PM submit key for automated PM delivery.
  *
- * idle   → "Enter" (submit normally and start the turn);
- * busy   → "C-q"   (OMP followUp: queues while streaming, so the active
- *                    turn is never steered by an Enter queue-jump);
- * unknown→ "C-q"   (fail closed — startup/unknown observations never
- *                    authorize Enter).
+ * Native Claude always receives Enter after the paste/render dwell. Claude
+ * Code owns its active-turn prompt queue and does not use OMP's C-q binding.
+ * OMP keeps idle → Enter and busy/unknown → C-q.
  *
  * Slots 1-4 never route through this decision: they keep the always-Enter
  * sendToSlot path where steering the active turn is the intended behavior.
  */
-export function decidePMSubmitKey(pmBusy: boolean | null | undefined): PMSubmitKey {
-  // Only an explicit idle observation authorizes Enter. Busy, unknown, and
-  // startup all use OMP's follow-up key.
+export function resolvePMRuntime(value: string | undefined): PMRuntime {
+  return value === "omp" ? "omp" : "claude";
+}
+
+export function decidePMSubmitKey(
+  pmBusy: boolean | null | undefined,
+  runtime: PMRuntime = "claude",
+): PMSubmitKey {
+  if (runtime === "claude") return "Enter";
   return pmBusy === false ? "Enter" : "C-q";
 }
 
 export class TmuxRelay {
   private pmPaneAddress: string;
+  private pmRuntime: PMRuntime;
   private logManager: LogManager | null = null;
   private db: MoPDatabase | null = null;
   /**
@@ -266,8 +272,12 @@ export class TmuxRelay {
   private directInjectSeq = 0;
   private runShell: typeof execShell;
 
-  constructor(config: MoPConfig, deps: { runShell?: typeof execShell } = {}) {
+  constructor(
+    config: MoPConfig,
+    deps: { runShell?: typeof execShell; pmRuntime?: PMRuntime } = {},
+  ) {
     this.pmPaneAddress = config.pmPaneAddress;
+    this.pmRuntime = deps.pmRuntime ?? resolvePMRuntime(process.env.MOP_PM_RUNTIME);
     this.runShell = deps.runShell ?? execShell;
   }
 
@@ -542,6 +552,16 @@ export class TmuxRelay {
    * signals — they must never sit in a queue waiting to drain.
    */
   injectToPM(message: string, eventTypeOverride?: string): boolean {
+    if (this.pmRuntime === "claude") {
+      const parsed = parseRelayMessage(message);
+      const decorated = withMopSlotHeader(message, parsed);
+      void this.injectDirectWithSubmitKey(decorated, "Enter").then((result) => {
+        if (!result.ok) {
+          console.error("[relay] Native-Claude PM inject failed; prompt was not persisted");
+        }
+      });
+      return true;
+    }
     if (!this.db) {
       console.error("[relay] PM delivery unavailable: no database for durable fallback");
       return false;
@@ -597,6 +617,14 @@ export class TmuxRelay {
   injectToPMDirect(message: string): boolean {
     const parsed = parseRelayMessage(message);
     const decorated = withMopSlotHeader(message, parsed);
+    if (this.pmRuntime === "claude") {
+      void this.injectDirectWithSubmitKey(decorated, "Enter").then((result) => {
+        if (!result.ok) {
+          console.error("[relay] Native-Claude direct PM inject failed; prompt was not persisted");
+        }
+      });
+      return true;
+    }
     if (parsed && this.db) {
       if (parsed.eventType === "slot-active") {
         const deleted = this.db.deletePendingPMEvent(parsed.slot, "check-slot");
@@ -635,8 +663,14 @@ export class TmuxRelay {
    * active turn when PM is busy.
    */
   async submitToPM(message: string, eventTypeOverride?: string): Promise<PMSubmitResult> {
+    if (this.pmRuntime === "claude") {
+      const parsed = parseRelayMessage(message);
+      const decorated = withMopSlotHeader(message, parsed);
+      const result = await this.injectDirectWithSubmitKey(decorated, "Enter");
+      return { ...result, submitKey: "Enter" };
+    }
     if (!this.db) {
-      const submitKey = decidePMSubmitKey(this.pmBusy);
+      const submitKey = decidePMSubmitKey(this.pmBusy, this.pmRuntime);
       const result = await this.injectDirectWithSubmitKey(message, submitKey);
       return { ...result, submitKey };
     }
@@ -652,7 +686,7 @@ export class TmuxRelay {
         existing.payload ?? "",
         existing.enqueued_at,
       );
-      const submitKey = decidePMSubmitKey(this.pmBusy);
+      const submitKey = decidePMSubmitKey(this.pmBusy, this.pmRuntime);
       if (state === "started" || state === "ambiguous") {
         return { ok: false, submitKey, ambiguous: true };
       }
@@ -681,7 +715,7 @@ export class TmuxRelay {
 
   private async deliverPMRowNow(row: PMQueueRow): Promise<PMSubmitResult> {
     if (!this.db) {
-      const submitKey = decidePMSubmitKey(this.pmBusy);
+      const submitKey = decidePMSubmitKey(this.pmBusy, this.pmRuntime);
       const result = await this.injectDirectWithSubmitKey(row.payload ?? "", submitKey);
       return { ...result, submitKey };
     }
@@ -692,7 +726,7 @@ export class TmuxRelay {
       message,
       row.enqueued_at,
     );
-    const submitKey = decidePMSubmitKey(this.pmBusy);
+    const submitKey = decidePMSubmitKey(this.pmBusy, this.pmRuntime);
     if (state === "delivered" || state === "started" || state === "ambiguous") {
       return { ok: state === "delivered", submitKey, ambiguous: state !== "delivered" };
     }
