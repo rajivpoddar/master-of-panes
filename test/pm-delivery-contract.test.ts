@@ -3,9 +3,11 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import Database from "better-sqlite3";
 
 import { MoPDatabase } from "../src/db.js";
 import { PMCadenceScheduler } from "../src/pmCadence.js";
+import { P0EscalationWatcher } from "../src/p0EscalationWatch.js";
 import { decidePMSubmitKey, TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
@@ -44,6 +46,106 @@ test("native Claude submits immediately without a PM pending-event row", async (
     assert.equal(db.getPendingPMEventCount(), 0);
     assert.equal(db.getEvents(0, 20, "pm_queue_enqueued").length, 0);
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("native Claude serializes complete paste-delay-Enter sequences", async () => {
+  const commands: string[] = [];
+  let releaseFirstEnter!: () => void;
+  const firstEnterRelease = new Promise<void>((resolve) => { releaseFirstEnter = resolve; });
+  let firstEnterStarted!: () => void;
+  const firstEnter = new Promise<void>((resolve) => { firstEnterStarted = resolve; });
+  let enters = 0;
+  const relay = new TmuxRelay(DEFAULT_CONFIG, {
+    pmRuntime: "claude",
+    runShell: async (command) => {
+      commands.push(command);
+      if (command.endsWith(" Enter")) {
+        enters += 1;
+        if (enters === 1) {
+          firstEnterStarted();
+          await firstEnterRelease;
+        }
+      }
+      return { stdout: "", stderr: "" };
+    },
+  });
+
+  const first = relay.submitToPM("native A");
+  const second = relay.submitToPM("native B");
+  await firstEnter;
+  assert.equal(commands.some((command) => command.includes("native B")), false);
+  releaseFirstEnter();
+  const results = await Promise.all([first, second]);
+
+  assert.deepEqual(results.map((result) => result.ok), [true, true]);
+  const firstPaste = commands.findIndex((command) => command.includes("native A"));
+  const firstSubmit = commands.findIndex((command) => command.endsWith(" Enter"));
+  const secondPaste = commands.findIndex((command) => command.includes("native B"));
+  const secondSubmit = commands.findLastIndex((command) => command.endsWith(" Enter"));
+  assert.equal(firstPaste < firstSubmit && firstSubmit < secondPaste && secondPaste < secondSubmit, true);
+});
+
+test("P0 batch stops after a local native submit failure without pasting the next prompt", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-p0-native-stop-"));
+  const previousDb = process.env.MOP_PM_OPS_DB;
+  const previousDue = process.env.MOP_P0_ESCALATION_DUE_AFTER_MS;
+  try {
+    const pmOpsPath = join(directory, "pm-ops.db");
+    const pmOps = new Database(pmOpsPath);
+    pmOps.exec(`
+      CREATE TABLE obligations (
+        id INTEGER PRIMARY KEY,
+        status TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        target_type TEXT,
+        target_id TEXT,
+        title TEXT,
+        required_action TEXT,
+        evidence_json TEXT,
+        next_review_at TEXT,
+        suppress_until TEXT
+      );
+      INSERT INTO obligations
+        (id, status, kind, created_at, updated_at, title)
+      VALUES
+        (1, 'open', 'p0_escalation', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z', 'A'),
+        (2, 'open', 'p0_escalation', '2026-08-20T00:00:01.000Z', '2026-08-20T00:00:01.000Z', 'B');
+    `);
+    pmOps.close();
+    process.env.MOP_PM_OPS_DB = pmOpsPath;
+    process.env.MOP_P0_ESCALATION_DUE_AFTER_MS = "0";
+
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const submitted: string[] = [];
+    const relay = {
+      injectToPM: (message: string) => {
+        submitted.push(message);
+        return true;
+      },
+      submitToPM: async (message: string) => {
+        submitted.push(message);
+        return { ok: false, submitKey: "Enter" as const, ambiguous: false };
+      },
+    } as unknown as TmuxRelay;
+
+    const result = await new P0EscalationWatcher(db, relay).tick("manual");
+
+    assert.equal(result.due, 1);
+    assert.equal(result.injected, 0);
+    assert.equal(submitted.length, 1);
+    assert.match(submitted[0] ?? "", /obligation #1/);
+    assert.doesNotMatch(submitted[0] ?? "", /obligation #2/);
+    assert.equal(db.getPendingPMEventCount(), 0);
+    assert.equal(db.getEvents(0, 10, "p0_escalation_watch_batch_stopped").length, 1);
+  } finally {
+    if (previousDb === undefined) delete process.env.MOP_PM_OPS_DB;
+    else process.env.MOP_PM_OPS_DB = previousDb;
+    if (previousDue === undefined) delete process.env.MOP_P0_ESCALATION_DUE_AFTER_MS;
+    else process.env.MOP_P0_ESCALATION_DUE_AFTER_MS = previousDue;
     rmSync(directory, { recursive: true, force: true });
   }
 });

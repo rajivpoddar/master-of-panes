@@ -146,13 +146,13 @@ export class P0EscalationWatcher {
     }
     this.running = true;
     try {
-      return this.run(reason);
+      return await this.run(reason);
     } finally {
       this.running = false;
     }
   }
 
-  private run(reason: "scheduled" | "manual" | "boot"): P0WatchResult {
+  private async run(reason: "scheduled" | "manual" | "boot"): Promise<P0WatchResult> {
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
     let rows: P0ObligationRow[] = [];
@@ -201,7 +201,13 @@ export class P0EscalationWatcher {
       }
 
       const message = this.renderPrompt(row);
-      const ok = this.relay.injectToPM(message);
+      // Native Claude delivery is intentionally simple: paste the complete
+      // prompt, wait for rendering, then press Enter. Await that local tmux
+      // sequence before considering the next obligation so two prompts can
+      // never be combined in the pane. This is command ordering, not an
+      // acknowledgement from Claude and not a durable delivery protocol.
+      const submitted = await this.relay.submitToPM(message);
+      const ok = submitted.ok;
       this.db.setConfig(throttleKey, nowIso);
       this.db.logEvent(0, "p0_escalation_watch_prompt", null, null, {
         obligation_id: row.id,
@@ -212,6 +218,13 @@ export class P0EscalationWatcher {
         delivery_mode: "queued-normal-prompt",
       });
       if (ok) injected++;
+      if (!ok) {
+        this.db.logEvent(0, "p0_escalation_watch_batch_stopped", null, null, {
+          obligation_id: row.id,
+          reason: "local-pm-submit-failed",
+        });
+        break;
+      }
     }
 
     this.db.setConfig("p0_escalation_watch_last_run_ts", nowIso);
