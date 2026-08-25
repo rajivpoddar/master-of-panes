@@ -87,17 +87,9 @@ export class P0EscalationWatcher {
   }
 
   start(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => {
-      void this.tick("scheduled");
-    }, this.CHECK_INTERVAL_MS);
-    this.bootTimer = setTimeout(() => {
-      this.bootTimer = null;
-      void this.tick("boot");
-    }, this.BOOT_DELAY_MS);
     console.log(
-      `[p0-escalation-watch] started — interval ${this.CHECK_INTERVAL_MS}ms, ` +
-        `due_after ${this.DUE_AFTER_MS}ms, db=${this.PM_OPS_DB}`
+      `[p0-escalation-watch] retired — 3h heartbeat owns P0 escalation ` +
+        `prompts; diagnostics remain read-only, db=${this.PM_OPS_DB}`
     );
   }
 
@@ -120,6 +112,8 @@ export class P0EscalationWatcher {
     check_interval_ms: number;
     due_after_ms: number;
     resurface_ms: number;
+    automatic_scheduling: false;
+    diagnostics_only: true;
     last_run_ts: string | null;
     last_checked: string | null;
     last_due: string | null;
@@ -133,6 +127,8 @@ export class P0EscalationWatcher {
       check_interval_ms: this.CHECK_INTERVAL_MS,
       due_after_ms: this.DUE_AFTER_MS,
       resurface_ms: this.RESURFACE_MS,
+      automatic_scheduling: false,
+      diagnostics_only: true,
       last_run_ts: this.db.getConfig("p0_escalation_watch_last_run_ts"),
       last_checked: this.db.getConfig("p0_escalation_watch_last_checked"),
       last_due: this.db.getConfig("p0_escalation_watch_last_due"),
@@ -200,31 +196,15 @@ export class P0EscalationWatcher {
         continue;
       }
 
-      const message = this.renderPrompt(row);
-      // Native Claude delivery is intentionally simple: paste the complete
-      // prompt, wait for rendering, then press Enter. Await that local tmux
-      // sequence before considering the next obligation so two prompts can
-      // never be combined in the pane. This is command ordering, not an
-      // acknowledgement from Claude and not a durable delivery protocol.
-      const submitted = await this.relay.submitToPM(message);
-      const ok = submitted.ok;
-      this.db.setConfig(throttleKey, nowIso);
-      this.db.logEvent(0, "p0_escalation_watch_prompt", null, null, {
+      skipped++;
+      this.db.logEvent(0, "p0_escalation_watch_diagnostic", null, null, {
         obligation_id: row.id,
         target_type: row.target_type,
         target_id: row.target_id,
-        injected: ok,
+        injected: false,
         reason,
-        delivery_mode: "queued-normal-prompt",
+        delivery_mode: "retired-heartbeat-owned",
       });
-      if (ok) injected++;
-      if (!ok) {
-        this.db.logEvent(0, "p0_escalation_watch_batch_stopped", null, null, {
-          obligation_id: row.id,
-          reason: "local-pm-submit-failed",
-        });
-        break;
-      }
     }
 
     this.db.setConfig("p0_escalation_watch_last_run_ts", nowIso);
