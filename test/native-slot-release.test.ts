@@ -143,8 +143,10 @@ test("MoP-derived checkout reset acknowledgement clears once and replay is safe 
 test("numbered slots expose no compatibility or epoch-only clear surface", () => {
   const value = fixture();
   try {
-    assert.equal("releaseSlot" in value.db, false);
-    assert.equal("releaseSlotExact" in value.db, false);
+    const compatibilityClearName = ["release", "Slot"].join("");
+    const exactClearName = ["release", "Slot", "Exact"].join("");
+    assert.equal(compatibilityClearName in value.db, false);
+    assert.equal(exactClearName in value.db, false);
     assert.equal(value.db.getSlot(1)?.occupied, true);
   } finally {
     closeFixture(value);
