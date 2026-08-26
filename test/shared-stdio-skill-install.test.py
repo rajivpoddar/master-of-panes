@@ -56,7 +56,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.release = self.root / "release"
-        shutil.copytree(REPO_ROOT / "shared-assets", self.release / "shared-assets")
+        shutil.copytree(REPO_ROOT / "scripts" / "pm" / "shared-assets", self.release / "scripts" / "pm" / "shared-assets")
         self.targets = self.root / "targets"
         self.rollback = self.root / "rollback"
 
@@ -80,7 +80,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
         self.assertEqual(result["status"], "SHARED_ASSETS_INSTALLED")
         self.assertEqual(MODULE.check_shared_assets(release_dir=self.release, target_root=self.targets)["status"], "SHARED_ASSETS_PASS")
         for entry in manifest["entries"]:
-            source = self.release / "shared-assets" / entry["source_path"]
+            source = self.release / "scripts" / "pm" / "shared-assets" / entry["source_path"]
             target = self.targets / entry["canonical_target"].lstrip("/")
             self.assertEqual(source.read_bytes(), target.read_bytes())
             self.assertEqual(stat.S_IMODE(source.stat().st_mode), stat.S_IMODE(target.stat().st_mode))

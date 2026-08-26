@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "master_of_panes_release"
 MANIFEST = "RELEASE_MANIFEST.json"
 ROLLBACK_MANIFEST = "ROLLBACK_MANIFEST.json"
-SHARED_ASSET_MANIFEST = "shared-assets/manifest.json"
+SHARED_ASSET_MANIFEST = "scripts/pm/shared-assets/manifest.json"
 PROTECTED_NAMES = {".git"}
 
 
@@ -245,7 +245,7 @@ def _load_shared_manifest(release_dir: Path) -> dict[str, Any]:
         mode = entry.get("mode")
         if not isinstance(source, str) or not isinstance(target, str) or not isinstance(digest, str):
             raise InstallerError("shared asset entry is incomplete")
-        source_path = release_dir / "shared-assets" / _safe_relative(source)
+        source_path = release_dir / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(source)
         if not source_path.is_file() or source_path.is_symlink():
             raise InstallerError(f"shared asset source is not a regular file: {source}")
         if source in sources:
@@ -306,7 +306,7 @@ def install_shared_assets(
     replaced = 0
     try:
         for index, (entry, target) in enumerate(zip(manifest["entries"], targets)):
-            source = release_dir / "shared-assets" / _safe_relative(entry["source_path"])
+            source = release_dir / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(entry["source_path"])
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(f".{target.name}.shared.{os.getpid()}.{index}.tmp")
             if temporary.exists() or temporary.is_symlink():
