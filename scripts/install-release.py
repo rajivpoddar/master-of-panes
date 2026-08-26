@@ -58,9 +58,11 @@ def _safe_relative(value: str) -> Path:
     return candidate
 
 
-def _run(command: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=True)
+        return subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True, check=True)
     except FileNotFoundError as exc:
         raise InstallerError(f"required command is unavailable: {command[0]}") from exc
     except subprocess.CalledProcessError as exc:
@@ -114,7 +116,14 @@ def _payload_records(root: Path, paths: Iterable[str]) -> list[dict[str, Any]]:
 
 
 def stage_release(
-    *, repo: Path, candidate: str, base: str, patch_id: str, release_root: Path, bun: str = "bun"
+    *,
+    repo: Path,
+    candidate: str,
+    base: str,
+    patch_id: str,
+    release_root: Path,
+    bun: str = "bun",
+    node_bin: str | None = None,
 ) -> dict[str, Any]:
     tree = assert_clean_source(repo, candidate)
     release_root.mkdir(parents=True, exist_ok=True)
@@ -136,6 +145,14 @@ def stage_release(
         _run([bun, "install", "--frozen-lockfile"], cwd=temporary)
         _run([bun, "run", "build"], cwd=temporary)
         node_modules = temporary / "node_modules"
+        if node_bin:
+            node_path = Path(node_bin).resolve(strict=True)
+            npm_bin = node_path.with_name("npm")
+            if not npm_bin.is_file():
+                raise InstallerError(f"matching npm binary is missing beside node: {npm_bin}")
+            environment = dict(os.environ)
+            environment["PATH"] = str(node_path.parent) + os.pathsep + environment.get("PATH", "")
+            _run([str(npm_bin), "rebuild", "better-sqlite3", "--no-audit", "--no-fund"], cwd=temporary, env=environment)
         tracked = _tracked_paths(repo)
         generated = [str(path.relative_to(temporary)) for path in (temporary / "dist").rglob("*") if path.is_file()]
         dependencies = [
@@ -405,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate")
     parser.add_argument("--base")
     parser.add_argument("--patch-id")
+    parser.add_argument("--node-bin")
     parser.add_argument("--release-root", type=Path, required=True)
     parser.add_argument("--current", type=Path, required=True)
     parser.add_argument("--expected-old", type=Path)
@@ -419,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode == "stage":
             if not args.repo or not args.candidate or not args.base or not args.patch_id:
                 raise InstallerError("stage requires --repo, --candidate, --base, and --patch-id")
-            result = stage_release(repo=args.repo, candidate=args.candidate, base=args.base, patch_id=args.patch_id, release_root=args.release_root)
+            result = stage_release(repo=args.repo, candidate=args.candidate, base=args.base, patch_id=args.patch_id, release_root=args.release_root, node_bin=args.node_bin)
         else:
             if not args.candidate:
                 raise InstallerError("activate/check requires --candidate")
