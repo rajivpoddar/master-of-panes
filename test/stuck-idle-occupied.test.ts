@@ -96,7 +96,7 @@ interface Harness {
   setLogMtime: (date: Date | null) => void;
 }
 
-function harness(currentSlot: SlotState): Harness {
+function harness(currentSlot: SlotState, allSlots: SlotState[] = [currentSlot]): Harness {
   let slotReads: SlotState[] = [];
   let logMtime: Date | null = new Date(NOW);
   let nextEventId = 2;
@@ -117,7 +117,7 @@ function harness(currentSlot: SlotState): Harness {
     hasPendingClear: () => false,
     hasRecentSubagentDispatch: () => null,
     getSlot: () => slotReads.shift() ?? currentSlot,
-    getAllSlots: () => [currentSlot],
+    getAllSlots: () => allSlots,
     getEvents: (_slot: number, limit: number, eventType?: string) =>
       events
         .filter((event) => !eventType || event.event_type === eventType)
@@ -169,6 +169,49 @@ function harness(currentSlot: SlotState): Harness {
     },
   };
 }
+
+test("suppresses a gate recommendation for an actively owned PR", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  const gate = installGate({
+    allowed: true,
+    slot: 4,
+    recommendation_kind: "slot_e2e",
+    rework_packet_count: 0,
+    rework_pr_count: 0,
+    ready_pool_size: 1,
+    recommended_obligation_id: 12,
+    recommended_pr: 7468,
+    recommended_issue: 7436,
+    recommended_packet: "packet-7468",
+    recommended_run_id: null,
+    recommended_ci_url: null,
+    recommended_action: "assign slot e2e",
+    recommended_category: "numbered-slot-e2e",
+    slot_dispatch_wedge_id: null,
+    reason: "authoritative_numbered_slot_e2e_boundary_available",
+  });
+  Date.now = () => NOW + 6 * 60_000;
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+  try {
+    const free = freeSlot({ slot: 4, assignment_epoch: 578 });
+    const activeOwner = slot({ slot: 1, pr: 7468, assignment_epoch: 597 });
+    const h = harness(free, [activeOwner, free]);
+    h.events[0] = { ...h.events[0], event_type: "slot_released" };
+    await h.detector.checkIdleFree(free);
+    assert.deepEqual(h.sends, []);
+    const failures = h.events.filter(
+      (event) => event.event_type === "idle_free_assignment_gate_failed",
+    );
+    assert.equal(failures.length, 1);
+    assert.match(JSON.parse(failures[0].payload).error, /occupied PR 7468/);
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+    gate.cleanup();
+  }
+});
 
 test("the idle-occupied nudge carries the terminal LOCAL_CONTINUE directive", async () => {
   const originalNow = Date.now;
@@ -820,6 +863,32 @@ test("does not wake a free slot when the Ready Pool gate is closed", async () =>
     if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
     else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
     gate.cleanup();
+  }
+});
+
+test("fails closed when the deleted external Ready Pool gate is unavailable", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  Date.now = () => NOW + 6 * 60_000;
+  process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = join(
+    tmpdir(),
+    "pm-wait-nudge-deleted-ready-pool-assignment-gate.py",
+  );
+  try {
+    const candidate = freeSlot({ slot: 1 });
+    const h = harness(candidate);
+    h.events[0] = { ...h.events[0], event_type: "slot_released" };
+    await h.detector.checkIdleFree(candidate);
+    assert.deepEqual(h.sends, []);
+    const failures = h.events.filter(
+      (event) => event.event_type === "idle_free_assignment_gate_failed",
+    );
+    assert.equal(failures.length, 1);
+    assert.match(JSON.parse(failures[0].payload).error, /Command failed|var[/]folders/);
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
   }
 });
 

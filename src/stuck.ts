@@ -10,6 +10,8 @@
 
 import { access, appendFile, readFile, unlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execShell } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import type { LogManager } from "./logs.js";
@@ -80,7 +82,7 @@ type IdleOccupiedAnchor = {
 type FreeSlotAssignmentGate = {
   allowed: boolean;
   slot: number;
-  recommendation_kind: "rework" | "todo" | null;
+  recommendation_kind: "slot_e2e" | "rework" | "todo" | null;
   rework_packet_count: number;
   rework_pr_count: number;
   ready_pool_size: number;
@@ -92,6 +94,11 @@ type FreeSlotAssignmentGate = {
   slot_dispatch_wedge_id: number | null;
   reason: string;
 };
+
+const RELEASE_OWNED_FREE_SLOT_ASSIGNMENT_GATE = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../scripts/ready-pool-assignment-gate.py",
+);
 
 function shellEscape(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
@@ -683,7 +690,7 @@ export class StuckDetector {
     occupiedPrs: number[]
   ): Promise<FreeSlotAssignmentGate | null> {
     const gatePath = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE ??
-      "/Users/rajiv/.claude/skills/pm-wait-nudge/scripts/ready-pool-assignment-gate.py";
+      RELEASE_OWNED_FREE_SLOT_ASSIGNMENT_GATE;
     try {
       const { stdout } = await execShell(
         `${shellEscape(gatePath)} --slot ${slotNum}` +
@@ -699,6 +706,13 @@ export class StuckDetector {
         !Number.isInteger(parsed.ready_pool_size)
       ) {
         throw new Error("invalid gate response");
+      }
+      if (
+        parsed.recommended_pr !== null &&
+        parsed.recommended_pr !== undefined &&
+        occupiedPrs.includes(parsed.recommended_pr)
+      ) {
+        throw new Error(`gate recommended occupied PR ${parsed.recommended_pr}`);
       }
       return parsed;
     } catch (error) {
