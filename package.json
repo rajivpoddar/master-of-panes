@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "test:epoch": "/Users/rajiv/.nvm/versions/node/v22.13.1/bin/node --import tsx --test test/db-epoch.test.ts",
+    "test:epoch": "/Users/rajiv/.nvm/versions/node/v22.13.1/bin/node --import tsx --test test/claim-rebind-complete.test.ts",
     "test:idle-occupied": "/Users/rajiv/.nvm/versions/node/v22.13.1/bin/node --import tsx --test test/stuck-idle-occupied.test.ts",
     "test:jsonl-activity": "/Users/rajiv/.nvm/versions/node/v22.13.1/bin/node --import tsx --test test/jsonl-activity.test.ts",
     "test:responsiveness": "/Users/rajiv/.nvm/versions/node/v22.13.1/bin/node --import tsx --test test/responsiveness.test.ts",

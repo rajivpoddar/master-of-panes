@@ -41,8 +41,6 @@ function fixture(): Fixture {
     8101,
     ASSIGNMENT_HEAD,
     0,
-    false,
-    null,
     "implementation",
     "handoff-8100",
   ).ok, true);

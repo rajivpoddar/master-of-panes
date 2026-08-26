@@ -44,7 +44,10 @@ const assignment = {
   issue: 10,
   pr: 20,
   branch: "fix/10",
+  session_id: "session-route-1",
   head_sha: "a".repeat(40),
+  work_kind: "implementation",
+  handoff_id: "handoff-route-default",
   expected_epoch: 0,
 };
 
@@ -271,6 +274,95 @@ test("production assignment route enforces PM authority before mutation", async 
     assert.equal(assigned.head_sha, assignment.head_sha);
     assert.equal(assigned.assignment_epoch, 1);
     assert.equal(db.getEvents(1, 10, "slot_assigned").length, 1);
+  });
+});
+
+test("claim route refuses omitted or null complete fields before mutation", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    for (const field of [
+      "repository_id",
+      "issue",
+      "branch",
+      "session_id",
+      "head_sha",
+      "work_kind",
+      "handoff_id",
+    ]) {
+      const omitted = { ...assignment };
+      delete omitted[field as keyof typeof omitted];
+      const response = await app.request(
+        "/slots/1/assign",
+        assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, omitted),
+      );
+      assert.equal(response.status, 409, field);
+      assert.equal(db.getSlot(1)?.occupied, false);
+    }
+
+    for (const field of ["repository_id", "issue", "branch", "session_id", "work_kind", "handoff_id"]) {
+      const invalid = { ...assignment, [field]: null };
+      const response = await app.request(
+        "/slots/1/assign",
+        assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, invalid),
+      );
+      assert.equal(response.status, 409, `null ${field}`);
+      assert.equal(db.getSlot(1)?.occupied, false);
+    }
+  });
+});
+
+test("claim route requires the exact expected FREE state", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const first = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY),
+    );
+    assert.equal(first.status, 200);
+    const before = db.getSlot(1);
+
+    const occupiedClaim = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        ...assignment,
+        expected_epoch: before!.assignment_epoch,
+      }),
+    );
+    assert.equal(occupiedClaim.status, 409);
+    assert.equal((await occupiedClaim.json() as Record<string, unknown>).reason, "slot_already_occupied");
+    assert.deepEqual(db.getSlot(1), before);
+  });
+});
+
+test("adopt route has no partial expected-tuple fallback", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const assigned = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        ...assignment,
+        pr: null,
+        head_sha: null,
+        branch: "fix/10-pending",
+      }),
+    );
+    assert.equal(assigned.status, 200);
+    const partial = {
+      expected_epoch: 1,
+      expected_current_pr: null,
+      expected_current_branch_ref: "refs/heads/fix/10-pending",
+      expected_current_head_sha: null,
+      repository_id: assignment.repository_id,
+      issue: assignment.issue,
+      pr: assignment.pr,
+      branch: assignment.branch,
+      head_sha: assignment.head_sha,
+    };
+    const refused = await app.request(
+      "/slots/1/adopt-issue-claim",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, partial),
+    );
+    assert.equal(refused.status, 409);
+    assert.equal((await refused.json() as Record<string, unknown>).reason, "observed_tuple_mismatch");
+    assert.equal(db.getSlot(1)?.pr, null);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
   });
 });
 

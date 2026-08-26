@@ -43,12 +43,6 @@ interface BranchIdentity {
   branchRef: string | null;
 }
 
-interface ExpectedAssignmentTuple {
-  pr: number | null;
-  branchRef: string;
-  headSha: string | null;
-}
-
 /** Complete occupied identity used by the rebind/release CAS boundary. */
 export interface AssignmentTupleInput {
   repository_id: string | number | null;
@@ -776,10 +770,9 @@ export class MoPDatabase {
     pr: number | null = null,
     headSha: string | null = null,
     expectedEpoch?: number,
-    allowIssueClaimAdoption = false,
-    expectedCurrentTuple: ExpectedAssignmentTuple | null = null,
     workKind: string | null = null,
     handoffId: string | null = null,
+    requireFree = false,
   ): SlotMutationResult {
     const current = this.getSlot(slot);
     if (!Number.isInteger(expectedEpoch)) {
@@ -842,6 +835,16 @@ export class MoPDatabase {
       if (!current || epoch !== expectedEpoch) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
       }
+      if (requireFree && current.occupied) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_already_occupied",
+          owner_slots: [slot],
+        };
+      }
       const metadataMatches = normalizedWorkKind === null
         ? current.work_kind === null && current.handoff_id === null
         : current.work_kind === normalizedWorkKind
@@ -853,49 +856,6 @@ export class MoPDatabase {
         && current.branch_ref === branchIdentity.branchRef
         && current.head_sha === headSha
         && metadataMatches;
-      const observedTupleMatches = expectedCurrentTuple !== null
-        && current.pr === expectedCurrentTuple.pr
-        && current.branch_ref === expectedCurrentTuple.branchRef
-        && current.head_sha === expectedCurrentTuple.headSha;
-      // A non-idempotent adoption is an issue-only -> PR identity bind: it may
-      // start ONLY from an issue-only claim (pr === null). A PR-bound row can
-      // be re-adopted only idempotently (same PR); a caller supplying a NEW PR
-      // for an already PR-bound observed tuple must fail closed, never rewrite
-      // the PR at unchanged epoch.
-      const issueClaimAdoption = allowIssueClaimAdoption
-        && current.occupied
-        && current.pr === null
-        && observedTupleMatches
-        && current.repository_id === normalizedRepositoryId
-        && current.issue === normalizedIssue
-        && normalizedIssue !== null
-        && normalizedPr !== null
-        && branchIdentity.branchRef !== null
-        && typeof headSha === "string"
-        && /^[0-9a-f]{40}$/i.test(headSha)
-        && !current.dnd;
-      if (allowIssueClaimAdoption && !current.occupied) {
-        return {
-          ok: false,
-          conflict: true,
-          assignment_epoch: epoch,
-          idempotent: false,
-          reason: "slot_not_occupied",
-        };
-      }
-      if (
-        allowIssueClaimAdoption
-        && current.occupied
-        && !observedTupleMatches
-      ) {
-        return {
-          ok: false,
-          conflict: true,
-          assignment_epoch: epoch,
-          idempotent: false,
-          reason: "observed_tuple_mismatch",
-        };
-      }
       if (current.occupied) {
         if (idempotent) {
           return {
@@ -905,16 +865,14 @@ export class MoPDatabase {
             idempotent: true,
           };
         }
-        if (!issueClaimAdoption) {
-          return {
-            ok: false,
-            conflict: true,
-            assignment_epoch: epoch,
-            idempotent: false,
-            reason: "slot_already_occupied",
-            owner_slots: [slot],
-          };
-        }
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_already_occupied",
+          owner_slots: [slot],
+        };
       }
 
       const owners = this.db.prepare(`
@@ -969,25 +927,12 @@ export class MoPDatabase {
       }
 
       const nextEpoch = epoch + 1;
-      // An issue-claim adoption is an identity bind (pr + head onto the same
-      // slot/issue/branch), not a new assignment: the assignment epoch is
-      // preserved so downstream pickup validation sees no tuple drift.
-      const boundEpoch = issueClaimAdoption ? epoch : nextEpoch;
       const assignmentTime = new Date().toISOString();
-      const claimedAt = issueClaimAdoption && current.claimed_at
-        ? current.claimed_at
-        : assignmentTime;
-      const assignmentWorkKind = issueClaimAdoption && normalizedWorkKind === null
-        ? current.work_kind
-        : normalizedWorkKind;
-      const assignmentHandoffId = issueClaimAdoption && normalizedHandoffId === null
-        ? current.handoff_id
-        : normalizedHandoffId;
       try {
         this.updateAssignmentState(slot, {
           status: "active" as SlotStatus,
           occupied: true,
-          session_id: issueClaimAdoption ? current.session_id : sessionId,
+          session_id: sessionId,
           task,
           repository_id: normalizedRepositoryId,
           issue: normalizedIssue,
@@ -995,11 +940,11 @@ export class MoPDatabase {
           branch_ref: branchIdentity.branchRef,
           pr: normalizedPr,
           head_sha: headSha,
-          assignment_epoch: boundEpoch,
+          assignment_epoch: nextEpoch,
           assigned_at: assignmentTime,
-          work_kind: assignmentWorkKind,
-          handoff_id: assignmentHandoffId,
-          claimed_at: claimedAt,
+          work_kind: normalizedWorkKind,
+          handoff_id: normalizedHandoffId,
+          claimed_at: assignmentTime,
           dnd: false,
         });
       } catch (error) {
@@ -1061,42 +1006,10 @@ export class MoPDatabase {
       return {
         ok: true,
         conflict: false,
-        assignment_epoch: boundEpoch,
+        assignment_epoch: nextEpoch,
         idempotent: false,
       };
     })();
-  }
-
-  adoptIssueClaimSlot(
-    slot: number,
-    task: string,
-    repositoryId: string | number | null,
-    issue: number | null,
-    branch: string | null,
-    pr: number | null,
-    headSha: string | null,
-    expectedCurrentPr: number | null,
-    expectedCurrentBranchRef: string,
-    expectedCurrentHeadSha: string | null,
-    expectedEpoch?: number
-  ): SlotMutationResult {
-    return this.assignSlot(
-      slot,
-      task,
-      repositoryId,
-      issue,
-      branch,
-      null,
-      pr,
-      headSha,
-      expectedEpoch,
-      true,
-      {
-        pr: expectedCurrentPr,
-        branchRef: expectedCurrentBranchRef,
-        headSha: expectedCurrentHeadSha,
-      },
-    );
   }
 
   /**
