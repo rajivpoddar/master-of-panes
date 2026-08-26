@@ -136,11 +136,14 @@ def stage_release(
         _run([bun, "install", "--frozen-lockfile"], cwd=temporary)
         _run([bun, "run", "build"], cwd=temporary)
         node_modules = temporary / "node_modules"
-        if node_modules.exists():
-            shutil.rmtree(node_modules)
         tracked = _tracked_paths(repo)
         generated = [str(path.relative_to(temporary)) for path in (temporary / "dist").rglob("*") if path.is_file()]
-        files = _payload_records(temporary, [*tracked, *generated])
+        dependencies = [
+            str(path.relative_to(temporary))
+            for path in node_modules.rglob("*")
+            if path.is_file() or path.is_symlink()
+        ]
+        files = _payload_records(temporary, [*tracked, *generated, *dependencies])
         manifest = {
             "schema": SCHEMA,
             "version": 1,
