@@ -25,6 +25,10 @@ export interface SlotMutationResult {
     | "target_already_assigned"
     | "slot_already_occupied"
     | "slot_not_occupied"
+    | "slot_already_free_unverifiable"
+    | "expected_tuple_required"
+    | "expected_session_required"
+    | "session_mismatch"
     | "branch_mismatch"
     | "observed_tuple_mismatch";
   owner_slots?: number[];
@@ -146,7 +150,7 @@ export function normalizeBranchIdentity(
   return { branch, branchRef: `refs/heads/${branch}` };
 }
 
-function normalizeAssignmentTuple(
+export function normalizeAssignmentTuple(
   value: AssignmentTupleInput,
 ): AssignmentTuple | null {
   const repositoryId = normalizeRepositoryId(value.repository_id);
@@ -214,7 +218,7 @@ function normalizeAssignmentTuple(
   };
 }
 
-function slotAssignmentTuple(slot: SlotState): AssignmentTuple | null {
+export function slotAssignmentTuple(slot: SlotState): AssignmentTuple | null {
   if (!slot.repository_id) return null;
   return {
     repository_id: slot.repository_id,
@@ -229,7 +233,7 @@ function slotAssignmentTuple(slot: SlotState): AssignmentTuple | null {
   };
 }
 
-function assignmentTupleMatches(
+export function assignmentTupleMatches(
   left: AssignmentTuple | null,
   right: AssignmentTuple | null,
 ): boolean {
@@ -733,6 +737,102 @@ export class MoPDatabase {
       if (expectedTuple && !assignmentTupleMatches(currentTuple, expectedTuple)) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
       }
+      this.updateAssignmentState(slot, {
+        status: "free" as SlotStatus,
+        occupied: false,
+        session_id: null,
+        task: null,
+        repository_id: null,
+        issue: null,
+        branch: null,
+        branch_ref: null,
+        pr: null,
+        head_sha: null,
+        assigned_at: null,
+        work_kind: null,
+        handoff_id: null,
+        claimed_at: null,
+        dnd: false,
+        idle: true,
+        activity: null,
+        active_turn_id: null,
+        active_turn_started_at: null,
+        active_turn_state: "inactive",
+        assignment_epoch: epoch + 1,
+      });
+      return { ok: true, conflict: false, assignment_epoch: epoch + 1, idempotent: false };
+    })();
+  }
+
+  /**
+   * Final numbered-slot release CAS. Unlike the compatibility release helper,
+   * this boundary requires the complete owner tuple and owning session in the
+   * same transaction as the clear. It never treats a FREE row as proof of a
+   * prior tuple because that tuple no longer exists in authoritative state.
+   */
+  releaseSlotExact(
+    slot: number,
+    expectedEpoch: number,
+    expectedSessionId: string,
+    expectedTupleInput: AssignmentTupleInput,
+  ): SlotMutationResult {
+    if (!Number.isInteger(expectedEpoch)) {
+      const current = this.getSlot(slot);
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "expected_epoch_required",
+      };
+    }
+    if (typeof expectedSessionId !== "string" || expectedSessionId.trim() === "") {
+      const current = this.getSlot(slot);
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "expected_session_required",
+      };
+    }
+    const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
+    if (!expectedTuple) {
+      const current = this.getSlot(slot);
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "expected_tuple_required",
+      };
+    }
+
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      if (!current) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      if (!current.occupied) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_already_free_unverifiable",
+        };
+      }
+      if (epoch !== expectedEpoch) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      if (current.session_id !== expectedSessionId) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "session_mismatch" };
+      }
+      if (!assignmentTupleMatches(slotAssignmentTuple(current), expectedTuple)) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
+      }
+
       this.updateAssignmentState(slot, {
         status: "free" as SlotStatus,
         occupied: false,

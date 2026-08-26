@@ -982,6 +982,28 @@ export class TmuxRelay {
     return true;
   }
 
+  /** Resolve the owning numbered pane's current Git worktree root. */
+  async getSlotCheckoutPath(slotNum: number): Promise<string | null> {
+    if (!Number.isInteger(slotNum) || slotNum < 1 || slotNum > 4) return null;
+    try {
+      const paneAddr = `0:0.${slotNum}`;
+      const { stdout: panePathOutput } = await this.runShell(
+        `tmux display-message -t ${paneAddr} -p '#{pane_current_path}'`,
+        { timeout: 3_000 },
+      );
+      const panePath = panePathOutput.trim();
+      if (!panePath) return null;
+      const { stdout: checkoutOutput } = await this.runShell(
+        `git -C ${shellEscape(panePath)} rev-parse --show-toplevel`,
+        { timeout: 3_000 },
+      );
+      const checkoutPath = checkoutOutput.trim();
+      return checkoutPath.startsWith("/") ? checkoutPath : null;
+    } catch {
+      return null;
+    }
+  }
+
   async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false): Promise<boolean> {
     void _force; // v3: every send is unconditional
     if (slotNum === 0 && !raw) {

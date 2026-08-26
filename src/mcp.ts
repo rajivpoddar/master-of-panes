@@ -294,23 +294,56 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_release_slot",
-    "Release a slot — mark it free, clear task/issue/branch/session metadata.",
+    "Synchronously reset the exact owning checkout to clean current main, then release the same complete MoP tuple/session/epoch.",
     {
       slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
       expected_epoch: z.number().int().nonnegative().describe("Current MoP assignment epoch"),
+      expected_session_id: z.string().min(1).describe("Current owning MoP session ID"),
+      expected_repository_id: z.union([z.string(), z.number()]).describe("Current repository identity"),
+      expected_issue: z.number().int().positive().nullable(),
+      expected_pr: z.number().int().positive().nullable(),
+      expected_branch: z.string().nullable(),
+      expected_head_sha: z.string().regex(/^[0-9a-f]{40}$/i).nullable(),
+      expected_work_kind: z.string().nullable(),
+      expected_handoff_id: z.string().nullable(),
+      expected_claimed_at: z.string().min(1),
+      intended_main_head: z.string().regex(/^[0-9a-f]{40}$/i).describe("Exact current main head to pull and attest"),
     },
-    async ({ slot, expected_epoch }) => {
-      const result = db.releaseSlot(slot, expected_epoch);
-      if (!result.ok) {
+    async (releaseInput) => {
+      try {
+        const response = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${releaseInput.slot}/release`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(releaseInput),
+        });
+        const releaseResult = await response.json().catch(() => ({
+          success: false,
+          code: "invalid_response",
+          message: `MoP HTTP release returned ${response.status} without JSON.`,
+        }));
+        if (!response.ok || (releaseResult as { success?: boolean }).success !== true) {
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: JSON.stringify(releaseResult, null, 2) }],
+          };
+        }
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(releaseResult, null, 2) }],
+        };
+      } catch (error) {
         return {
           isError: true,
-          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              success: false,
+              code: "release_service_unavailable",
+              message: error instanceof Error ? error.message : String(error),
+              remediation: "Leave the slot occupied, restore the native MoP HTTP surface, and retry from a fresh read.",
+            }, null, 2),
+          }],
         };
       }
-      db.logEvent(slot, "slot_released", null, null, { assignment_epoch: result.assignment_epoch, idempotent: result.idempotent });
-      return {
-        content: [{ type: "text" as const, text: `✓ Slot ${slot} released` }],
-      };
     }
   );
 
@@ -616,7 +649,8 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
   );
 
   // ─── MoP clear helpers ─────────────────────────────────
-  // Clears slot contexts and releases MoP state in one logged command path.
+  // Clears free slot contexts only. Occupied numbered slots must use the
+  // exact acknowledged native release surface above.
   // Rajiv directive 2026-04-03: "we need an MoP command that clears all slots"
   // Rajiv directive 2026-06-09: PM-facing clears use mop_clear_slot for one/all slots.
 
@@ -626,6 +660,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     const cleared = results.filter((r) => r.status.includes("cleared")).length;
     const queued = results.filter((r) => r.status.includes("queued")).length;
     const failed = results.filter((r) => r.status.includes("failed")).length;
+    const refused = results.filter((r) => r.status.includes("refused")).length;
 
     const table = results
       .map((r) => `  ${r.slot} | ${r.name.padEnd(12)} | ${r.status}`)
@@ -635,9 +670,10 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       cleared > 0 ? `${cleared} cleared` : null,
       queued > 0 ? `${queued} queued` : null,
       failed > 0 ? `${failed} failed` : null,
+      refused > 0 ? `${refused} refused` : null,
     ].filter(Boolean).join(", ");
 
-    return `Clear results (${summary}):\n\n${table}\n\nIdle slots cleared immediately. Active slots will receive /clear when they next go idle.`;
+    return `Clear results (${summary}):\n\n${table}\n\nOccupied numbered slots are never released here; use mop_release_slot with exact native inputs.`;
   };
 
   const clearSlotsThroughMop = async (
@@ -694,7 +730,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_clear_all_slots",
-    "Compatibility wrapper for mop_clear_slot(slot: 'all'). Clears ALL slot contexts (0-4 including PM) and releases MoP state. PM should prefer mop_clear_slot for one-slot or all-slot clears. Idle dev slots receive /clear through the MoP send path. Active dev slots are queued for next idle. PM (slot 0) receives /clear through the MoP send path and is acknowledged by SessionStart:clear.",
+    "Compatibility wrapper for mop_clear_slot(slot: 'all'). Clears PM/free pane contexts only; occupied numbered slots are refused and require exact acknowledged mop_release_slot.",
     {
       slots: z.array(z.number().int().min(0).max(4)).optional().describe("Specific slots to clear (default: all 0-4 including PM)."),
     },
@@ -720,7 +756,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_clear_slot",
-    "Clear one slot context or all slot contexts through MoP logging. Slot '0' is PM; slots '1'-'4' are dev/QA panes; 'all' clears 0-4. Idle dev slots receive /clear through the MoP send path. Active dev slots are queued for next idle. PM gets /clear through the MoP send path and is acknowledged by SessionStart:clear.",
+    "Clear PM or free pane contexts. Occupied numbered slots are refused and require exact acknowledged mop_release_slot; this command never clears their MoP ownership.",
     {
       slot: z.string().describe("Slot to clear: '0', '1', '2', '3', '4', 'pm', or 'all'."),
     },

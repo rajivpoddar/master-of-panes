@@ -1563,19 +1563,26 @@ export class HookProcessor {
     }
 
     // ─── Clear Pending Check ───────────────────────────────
-    // If this slot has a pending clear (from a MoP clear command), send /clear now
-    // that the slot is idle, then release it. Similar pattern to exit_pending.
+    // A legacy pending clear may clear only a FREE pane context. Occupied
+    // numbered slots retain ownership and must use exact native release.
     // Rajiv directive 2026-04-04: "if idle trigger immediately or wait till next idle"
     if (this.db.hasPendingClear(slotNum)) {
       try {
+        if (slot.occupied) {
+          this.db.clearPendingClear(slotNum);
+          this.db.logEvent(slotNum, "clear_refused_native_release_required", "Stop", null, {
+            name: slot.name,
+            assignment_epoch: slot.assignment_epoch,
+            reason: "Occupied numbered slots require exact acknowledged native release",
+          });
+          this.relay.injectToPM(
+            `# ⚠️ Slot ${slotNum} remains occupied — use exact native release; legacy queued clear was cancelled`,
+          );
+          return {};
+        }
         const sent = await this.sendClearViaMopSendPath(slotNum, "clear_pending_stop_hook");
         if (!sent) {
           throw new Error("MoP send path failed for queued /clear");
-        }
-
-        // Release slot state (slots 1-4 only)
-        if (slotNum >= 1 && slotNum <= 4) {
-          this.db.releaseSlot(slotNum, slot.assignment_epoch);
         }
 
         this.db.clearPendingClear(slotNum);

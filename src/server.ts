@@ -13,6 +13,8 @@
  */
 
 import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
@@ -32,6 +34,11 @@ import { P0EscalationWatcher } from "./p0EscalationWatch.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
 import { DEFAULT_CONFIG } from "./types.js";
+import {
+  NativeSlotReleaseCoordinator,
+  type CheckoutResetObservation,
+  type NativeSlotReleaseRequest,
+} from "./slotRelease.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 
 // ─── Config ──────────────────────────────────────────────
@@ -53,6 +60,60 @@ const relay = new TmuxRelay(config);
 // Rajiv directive 2026-05-06 11:18 IST.
 relay.setDatabase(db);
 const processor = new HookProcessor(db, relay);
+const releaseResetHelper =
+  process.env.MOP_RELEASE_RESET_HELPER
+  ?? fileURLToPath(new URL("../scripts/release-slot-reset-and-ack.py", import.meta.url));
+
+function resetAndObserveCheckout(
+  checkoutPath: string,
+  intendedMainHead: string,
+): Promise<CheckoutResetObservation> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    execFile(
+      "python3",
+      [
+        releaseResetHelper,
+        "--checkout", checkoutPath,
+        "--intended-main-head", intendedMainHead,
+      ],
+      { timeout: 180_000, maxBuffer: 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          rejectPromise(new Error(`checkout reset helper failed: ${stderr.trim() || error.message}`));
+          return;
+        }
+        try {
+          resolvePromise(JSON.parse(stdout) as CheckoutResetObservation);
+        } catch {
+          rejectPromise(new Error("checkout reset helper returned invalid JSON"));
+        }
+      },
+    );
+  });
+}
+
+async function waitForOwningSlotIdle(slot: number): Promise<boolean> {
+  const timeoutMs = parseInt(process.env.MOP_RELEASE_IDLE_TIMEOUT_MS ?? "120000", 10);
+  const deadline = Date.now() + timeoutMs;
+  // Let the just-delivered prompt reach the slot's hook-derived activity state
+  // before accepting an idle observation.
+  await sleep(500);
+  while (Date.now() < deadline) {
+    const activity = await relay.getSlotActivityState(slot);
+    if (activity === "idle") return true;
+    if (activity === "unknown") return false;
+    await sleep(250);
+  }
+  return false;
+}
+
+const nativeSlotRelease = new NativeSlotReleaseCoordinator({
+  db,
+  resolveOwningCheckout: (slot) => relay.getSlotCheckoutPath(slot),
+  deliverInstruction: (slot, instruction) => relay.sendToSlotAsync(slot, instruction, true, false),
+  owningSlotIsIdle: waitForOwningSlotIdle,
+  resetAndObserveCheckout,
+});
 
 // MoP events are a bounded operational ring, not an audit archive. Prune once
 // after startup and then every six hours so recent-event endpoints stay cheap.
@@ -283,6 +344,19 @@ async function clearSlotsThroughMopHttp(
     const name = slotState?.name ?? `slot-${slotNum}`;
     const isIdle = slotState?.idle ?? true;
 
+    if (slotState?.occupied) {
+      db.clearPendingClear(slotNum);
+      db.logEvent(slotNum, "clear_refused_native_release_required", null, null, {
+        name,
+        assignment_epoch: slotState.assignment_epoch,
+        via: options.source,
+        reason: "Occupied numbered slots require exact acknowledged native release",
+      });
+      results.push({ slot: slotNum, name, status: "refused (occupied; native release required)" });
+      await sleep(500);
+      continue;
+    }
+
     if (isIdle) {
       try {
         const sent = await sendClearViaMopSendPath(slotNum, options.source);
@@ -290,10 +364,6 @@ async function clearSlotsThroughMopHttp(
           throw new Error(sent.error ?? sent.reason ?? `send failed status=${sent.status}`);
         }
 
-        const current = db.getSlot(slotNum);
-        if (!current) throw new Error(`slot ${slotNum} not found`);
-        const released = db.releaseSlot(slotNum, current.assignment_epoch);
-        if (!released.ok) throw new Error(`slot ${slotNum} epoch conflict during clear`);
         db.clearPendingClear(slotNum);
         db.logEvent(slotNum, "slot_cleared", null, null, {
           name,
@@ -877,7 +947,7 @@ app.patch("/slots/:slotNum", async (c) => {
 /** Assign a slot through the guarded PM authority route. */
 registerAssignmentRoute(app, db);
 
-/** Release a slot */
+/** Release a slot only after its owning checkout supplies an exact reset acknowledgement. */
 app.post("/slots/:slotNum/release", async (c) => {
   const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
   if (!slotParse.success) {
@@ -890,31 +960,11 @@ app.post("/slots/:slotNum/release", async (c) => {
   } catch {
     body = {};
   }
-  if (!Number.isInteger(body.expected_epoch)) {
-    return c.json({ success: false, conflict: true, error: "expected_epoch is required and must be an integer" }, 409);
-  }
-
-  const expectedTupleFields = [
-    "expected_repository_id",
-    "expected_issue",
-    "expected_pr",
-    "expected_branch",
-    "expected_head_sha",
-    "expected_work_kind",
-    "expected_handoff_id",
-    "expected_claimed_at",
-  ];
-  const hasExpectedTuple = expectedTupleFields.some((field) => Object.prototype.hasOwnProperty.call(body, field));
-  if (hasExpectedTuple && !expectedTupleFields.every((field) => Object.prototype.hasOwnProperty.call(body, field))) {
-    return c.json({
-      success: false,
-      conflict: true,
-      error: "complete expected assignment tuple is required",
-      reason: "observed_tuple_mismatch",
-    }, 409);
-  }
-  const expectedTuple = hasExpectedTuple
-    ? {
+  const request: NativeSlotReleaseRequest = {
+    slot: slotParse.data,
+    expected_epoch: body.expected_epoch as number,
+    expected_session_id: body.expected_session_id as string,
+    expected_tuple: {
       repository_id: body.expected_repository_id as string | number | null,
       issue: body.expected_issue as number | null,
       pr: body.expected_pr as number | null,
@@ -923,23 +973,19 @@ app.post("/slots/:slotNum/release", async (c) => {
       work_kind: body.expected_work_kind as string | null,
       handoff_id: body.expected_handoff_id as string | null,
       claimed_at: body.expected_claimed_at as string | null,
-    }
-    : undefined;
-
-  const result = db.releaseSlot(
-    slotParse.data,
-    body.expected_epoch as number,
-    expectedTuple,
-  );
-  if (!result.ok) {
-    return c.json({ success: false, ...result }, 409);
+    },
+    intended_main_head: body.intended_main_head as string,
+  };
+  const releaseResult = await nativeSlotRelease.release(request);
+  if (releaseResult.success) {
+    processor.clearPlanApprovalTimer(slotParse.data);
+    db.logEvent(slotParse.data, "slot_released", null, null, {
+      assignment_epoch: releaseResult.assignment_epoch,
+      native_checkout_ack: true,
+    });
+    return c.json(releaseResult);
   }
-  processor.clearPlanApprovalTimer(slotParse.data);
-  if (!result.idempotent) {
-    db.logEvent(slotParse.data, "slot_released", null, null, { assignment_epoch: result.assignment_epoch, idempotent: false });
-  }
-
-  return c.json({ success: true, ...result, slot: db.getSlot(slotParse.data) });
+  return c.json(releaseResult, releaseResult.code === "invalid_request" ? 400 : 409);
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────
