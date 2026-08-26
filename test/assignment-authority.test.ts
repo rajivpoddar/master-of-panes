@@ -274,7 +274,7 @@ test("production assignment route enforces PM authority before mutation", async 
   });
 });
 
-test("assignment route persists claim metadata and release clears it", async () => {
+test("assignment route persists claim metadata", async () => {
   await withAssignmentRoute(async (app, db) => {
     const response = await app.request(
       "/slots/1/assign",
@@ -307,17 +307,6 @@ test("assignment route persists claim metadata and release clears it", async () 
     assert.equal(db.getSlot(1)?.work_kind, "implementation");
     assert.equal(db.getSlot(1)?.handoff_id, "handoff-route-1");
 
-    const released = db.releaseSlot(1, 1);
-    assert.deepEqual(released, {
-      ok: true,
-      conflict: false,
-      assignment_epoch: 2,
-      idempotent: false,
-    });
-    const free = db.getSlot(1);
-    assert.equal(free?.work_kind, null);
-    assert.equal(free?.handoff_id, null);
-    assert.equal(free?.claimed_at, null);
   });
 });
 

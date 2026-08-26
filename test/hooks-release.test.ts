@@ -10,30 +10,40 @@ import { HookProcessor } from "../src/hooks.js";
 import type { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
-test("a stale PM-direction Stop cannot reclaim a released slot", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "mop-release-stop-test-"));
+test("legacy queued clear cannot release an occupied numbered slot", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-queued-clear-refusal-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    db.assignSlot(3, "PR rework", "github:repo-1", 6245, "fix/6245", "turn-a", 6411, "a".repeat(40), 0);
-    db.finishAgentTurn(3, "turn-a");
-    db.releaseSlot(3, 1);
-    assert.equal(db.getSlot(3)?.occupied, false);
+    assert.equal(db.assignSlot(
+      1,
+      "occupied",
+      "github:repo-1",
+      8000,
+      "fix/8000",
+      "session-8000",
+      null,
+      null,
+      0,
+    ).ok, true);
+    db.setPendingClear(1);
+    const notifications: string[] = [];
+    const processor = new HookProcessor(db, {
+      injectToPM: (message: string) => {
+        notifications.push(message);
+        return true;
+      },
+    } as unknown as TmuxRelay);
 
-    const processor = new HookProcessor(db, {} as TmuxRelay);
-    await processor.process(3, {
-      type: "Stop",
-      session_id: "turn-a",
-      transcript: "Work is complete. Need PM direction before the next step.",
-    });
+    await processor.process(1, { type: "Stop", session_id: "session-8000" });
 
-    const slot = db.getSlot(3);
-    assert.equal(slot?.occupied, false);
-    assert.equal(slot?.task, null);
-    assert.equal(slot?.issue, null);
-    assert.equal(slot?.pr, null);
-    assert.equal(slot?.assignment_epoch, 2);
-    const events = db.getEvents(3, 10, "stale_pm_direction_after_release");
-    assert.equal(events.length, 1);
+    const slot = db.getSlot(1)!;
+    assert.equal(slot.occupied, true);
+    assert.equal(slot.assignment_epoch, 1);
+    assert.equal(slot.session_id, "session-8000");
+    assert.equal(db.hasPendingClear(1), false);
+    assert.equal(db.getEvents(1, 5, "clear_refused_native_release_required").length, 1);
+    assert.match(notifications[0], /remains occupied/);
+    db.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

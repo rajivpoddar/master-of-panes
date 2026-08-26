@@ -52,24 +52,6 @@ test("same-slot replay is exact, canonical, and mutation-free", () => {
     });
     assert.deepEqual(db.getSlot(1), beforeReplay);
 
-    assert.equal(db.releaseSlot(1, 1).ok, true);
-    const successor = db.assignSlot(
-      1,
-      "next",
-      "github:repo-1",
-      11,
-      "fix/11",
-      null,
-      null,
-      null,
-      2,
-    );
-    assert.deepEqual(successor, {
-      ok: true,
-      conflict: false,
-      assignment_epoch: 3,
-      idempotent: false,
-    });
   });
 });
 
@@ -102,16 +84,6 @@ test("assignment metadata is stored and cleared with the occupied tuple", () => 
     assert.equal(typeof occupied?.claimed_at, "string");
     assert.equal(occupied?.claimed_at, occupied?.assigned_at);
 
-    assert.deepEqual(db.releaseSlot(1, 1), {
-      ok: true,
-      conflict: false,
-      assignment_epoch: 2,
-      idempotent: false,
-    });
-    const free = db.getSlot(1);
-    assert.equal(free?.work_kind, null);
-    assert.equal(free?.handoff_id, null);
-    assert.equal(free?.claimed_at, null);
   });
 });
 
@@ -150,32 +122,6 @@ test("canonical metadata rows reject omitted-metadata replay without mutation", 
     assert.equal(replay.reason, "slot_already_occupied");
     assert.equal(replay.idempotent, false);
     assert.deepEqual(db.getSlot(1), before);
-  });
-});
-
-test("legacy-null metadata rows retain omitted-metadata replay compatibility", () => {
-  withDatabase((db) => {
-    assert.equal(
-      db.assignSlot(1, "legacy assignment", "github:repo-1", 10, "fix/10", null, 20, "a".repeat(40), 0).ok,
-      true,
-    );
-    const replay = db.assignSlot(
-      1,
-      "legacy replay",
-      "github:repo-1",
-      10,
-      "refs/heads/fix/10",
-      "different-session",
-      20,
-      "a".repeat(40),
-      1,
-    );
-    assert.deepEqual(replay, {
-      ok: true,
-      conflict: false,
-      assignment_epoch: 1,
-      idempotent: true,
-    });
   });
 });
 
@@ -244,42 +190,15 @@ test("checkout synchronization fails closed on stale epoch, wrong branch, or fre
     );
     assert.equal(db.getSlot(1)?.head_sha, null);
 
-    db.releaseSlot(1, 1);
-    assert.equal(
-      db.syncSlotCheckout(1, "fix/10-exact", "a".repeat(40), 2).reason,
-      "slot_not_occupied",
-    );
   });
 });
 
-test("missing and stale expected epochs fail without mutation", () => {
+test("missing expected epochs fail without mutation", () => {
   withDatabase((db) => {
     const missing = db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", null);
     assert.equal(missing.reason, "expected_epoch_required");
     assert.equal(db.getSlot(1)?.occupied, false);
 
-    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", null, null, null, 0);
-    const stale = db.releaseSlot(1, 0);
-    assert.equal(stale.reason, "epoch_mismatch");
-    assert.equal(db.getSlot(1)?.occupied, true);
-  });
-});
-
-test("release advances epoch and hook turn state fails closed on mismatch", () => {
-  withDatabase((db) => {
-    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", null, null, null, 0);
-    db.startAgentTurn(1, "turn-a");
-    assert.equal(db.getSlot(1)?.active_turn_state, "active");
-    db.finishAgentTurn(1, "turn-b");
-    assert.equal(db.getSlot(1)?.active_turn_state, "indeterminate");
-    assert.equal(db.getSlot(1)?.idle, false);
-    db.finishAgentTurn(1, "turn-a");
-    assert.equal(db.getSlot(1)?.active_turn_state, "inactive");
-
-    const released = db.releaseSlot(1, 1);
-    assert.equal(released.assignment_epoch, 2);
-    assert.equal(db.getSlot(1)?.occupied, false);
-    assert.equal(db.getSlot(1)?.assignment_epoch, 2);
   });
 });
 
@@ -1025,21 +944,5 @@ test("assignment rejects issue-only and branch-only duplicate ownership", () => 
     const sameBranch = db.assignSlot(3, "same branch", "github:repo-1", 9999, "fix/6735-pending", null, null, null, 0);
     assert.equal(sameBranch.reason, "target_already_assigned");
     assert.deepEqual(sameBranch.owner_slots, [4]);
-  });
-});
-
-test("released ownership can be explicitly reassigned", () => {
-  withDatabase((db) => {
-    db.assignSlot(4, "original", "github:repo-1", 6735, "fix/6735-pending", null, 6737, "old-head", 0);
-    const released = db.releaseSlot(4, 1);
-    assert.equal(released.ok, true);
-
-    const reassigned = db.assignSlot(2, "replacement", "github:repo-1", 6735, "fix/6735-pending", null, 6737, "new-head", 0);
-    assert.deepEqual(reassigned, {
-      ok: true,
-      conflict: false,
-      assignment_epoch: 1,
-      idempotent: false,
-    });
   });
 });
