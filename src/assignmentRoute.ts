@@ -11,7 +11,7 @@ import {
   type MoPDatabase,
 } from "./db.js";
 
-const assignmentSlotParamSchema = z.coerce.number().int().min(0).max(4);
+const assignmentSlotParamSchema = z.coerce.number().int().min(1).max(4);
 
 const COMPLETE_REBIND_EXPECTED_FIELDS = [
   "expected_current_repository_id",

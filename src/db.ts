@@ -1065,14 +1065,10 @@ export class MoPDatabase {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "slot_not_occupied" };
       }
 
-      // Exact replay after a committed write, including a client-side lost
-      // response, must not issue a second assignment write.
-      if (
-        epoch === expectedEpoch + 1
-        && assignmentTupleMatches(currentTuple, desiredTuple)
-      ) {
-        return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
-      }
+      // There is no durable operation receipt from which to reconstruct the
+      // prior tuple after a lost response. A retry therefore has to present
+      // the same current epoch and complete expected tuple; an E+1 replay is
+      // typed drift rather than an acknowledgement of an unverifiable write.
       if (epoch !== expectedEpoch) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
       }

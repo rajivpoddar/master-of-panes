@@ -40,7 +40,7 @@ function tuple(overrides: Record<string, unknown> = {}): Record<string, unknown>
   };
 }
 
-test("full tuple rebind increments once, reads back, and replays idempotently", async () => {
+test("full tuple rebind increments once and refuses an unverifiable replay", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-rebind-route-test-"));
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
   const app = new Hono();
@@ -87,7 +87,8 @@ test("full tuple rebind increments once, reads back, and replays idempotently", 
     assert.equal(row.claimed_at, current.claimed_at);
 
     const replay = await app.request("/slots/1/adopt-issue-claim", init);
-    assert.equal(replay.status, 200);
+    assert.equal(replay.status, 409);
+    assert.equal((await replay.json() as Record<string, unknown>).reason, "epoch_mismatch");
     assert.equal(db.getSlot(1)?.assignment_epoch, 2);
     const events = db.getEvents(1, 10, "slot_issue_claim_adopted");
     assert.equal(events.length, 1);

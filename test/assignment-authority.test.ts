@@ -104,6 +104,18 @@ test("only the guarded PM transition authority reaches REST assignment", () => {
   assert.equal(isPmTransitionAssignmentRequest("pm-transition"), false);
 });
 
+test("numbered assignment routes reject the slot-0 PM boundary", async () => {
+  await withAssignmentRoute(async (app) => {
+    for (const path of ["/slots/0/assign", "/slots/0/adopt-issue-claim"]) {
+      const response = await app.request(path, assignmentRequest(
+        PM_TRANSITION_ASSIGNMENT_AUTHORITY,
+        assignment,
+      ));
+      assert.equal(response.status, 400, path);
+    }
+  });
+});
+
 test("issue-claim adoption route is authority-gated and atomic", async () => {
   await withAssignmentRoute(async (app, db) => {
     const placeholder = {
