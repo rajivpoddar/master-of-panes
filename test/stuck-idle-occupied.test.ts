@@ -213,6 +213,61 @@ test("suppresses a gate recommendation for an actively owned PR", async () => {
   }
 });
 
+test("fails closed for malformed or missing PR recommendations", async () => {
+  const originalNow = Date.now;
+  const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+  Date.now = () => NOW + 6 * 60_000;
+  const malformed: Array<[string, unknown]> = [
+    ["string", "7468"],
+    ["boolean", true],
+    ["zero", 0],
+    ["negative", -1],
+    ["fractional", 7468.5],
+    ["missing", undefined],
+  ];
+  try {
+    for (const [label, recommendedPr] of malformed) {
+      const result: Record<string, unknown> = {
+        allowed: true,
+        slot: 4,
+        recommendation_kind: "slot_e2e",
+        rework_packet_count: 0,
+        rework_pr_count: 0,
+        ready_pool_size: 0,
+        recommended_obligation_id: 12,
+        recommended_issue: 7436,
+        recommended_packet: "packet-7468",
+        recommended_run_id: null,
+        recommended_ci_url: null,
+        recommended_action: "assign slot e2e",
+        slot_dispatch_wedge_id: null,
+        reason: "authoritative_numbered_slot_e2e_boundary_available",
+      };
+      if (recommendedPr !== undefined) result.recommended_pr = recommendedPr;
+      const gate = installGate(result);
+      process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = gate.path;
+      try {
+        const candidate = freeSlot({ slot: 4 });
+        const h = harness(candidate);
+        h.events[0] = { ...h.events[0], event_type: "slot_released" };
+        await h.detector.checkIdleFree(candidate);
+        assert.deepEqual(h.sends, [], label);
+        const failures = h.events.filter(
+          (event) => event.event_type === "idle_free_assignment_gate_failed",
+        );
+        assert.equal(failures.length, 1, label);
+        assert.match(JSON.parse(failures[0].payload).error, /recommended_pr/, label);
+      } finally {
+        gate.cleanup();
+      }
+    }
+  } finally {
+    Date.now = originalNow;
+    if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
+    else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
+  }
+});
+
 test("the idle-occupied nudge carries the terminal LOCAL_CONTINUE directive", async () => {
   const originalNow = Date.now;
   Date.now = () => NOW;

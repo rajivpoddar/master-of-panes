@@ -104,6 +104,31 @@ function shellEscape(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+function validateGateRecommendation(parsed: FreeSlotAssignmentGate): void {
+  const recommendedPr = parsed.recommended_pr;
+  const hasValidPr =
+    recommendedPr === null ||
+    recommendedPr === undefined ||
+    (typeof recommendedPr === "number" &&
+      Number.isFinite(recommendedPr) &&
+      Number.isInteger(recommendedPr) &&
+      recommendedPr > 0);
+  if (!hasValidPr) {
+    throw new Error("invalid gate response: recommended_pr must be null or a positive integer");
+  }
+
+  const requiresPr =
+    parsed.recommendation_kind !== null &&
+    parsed.recommendation_kind !== undefined &&
+    parsed.recommendation_kind !== "todo";
+  if (
+    requiresPr &&
+    !(typeof recommendedPr === "number" && Number.isInteger(recommendedPr) && recommendedPr > 0)
+  ) {
+    throw new Error("invalid gate response: recommendation kind requires a positive recommended_pr");
+  }
+}
+
 export class StuckDetector {
   private readonly STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes no output
   private readonly IDLE_OCCUPIED_THRESHOLD_MS = 5 * 60 * 1000;
@@ -707,6 +732,7 @@ export class StuckDetector {
       ) {
         throw new Error("invalid gate response");
       }
+      validateGateRecommendation(parsed);
       if (
         parsed.recommended_pr !== null &&
         parsed.recommended_pr !== undefined &&
