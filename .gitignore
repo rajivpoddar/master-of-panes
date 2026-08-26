@@ -9,6 +9,8 @@ node_modules/
 # OS files
 .DS_Store
 Thumbs.db
+__pycache__/
+*.py[cod]
 
 # State files (user-specific)
 # Note: state files are in ~/.claude/tmux-panes/, not in the repo
