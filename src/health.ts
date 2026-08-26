@@ -29,16 +29,19 @@ import type { TmuxRelay } from "./relay.js";
 // Use standalone scripts instead of shell aliases — eliminates .zshrc/OMZ dependency.
 // Scripts are bash, not zsh, so no alias resolution issues.
 // (Rajiv directive 2026-04-03: "use scripts to launch claude on the slots instead of aliases")
-// Absolute paths — scripts live in the main repo, but slots are in separate clones
+// PM remains on the tracked main-repo launcher. Numbered slots use the small,
+// user-local Claude Code wrappers because PM/operator cutovers may replace the
+// tracked OMP launchers independently of the active slot runtime.
 export const SCRIPTS_DIR = "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts";
+export const CLAUDE_SLOT_SCRIPTS_DIR = "/Users/rajiv/.claude/scripts";
 // Health checker: always --continue (crash recovery preserves session/work).
 // Respawn skill: --continue is optional arg (fresh start for atma updates).
 export const RESTART_COMMANDS: Record<number, string> = {
   0: `bash ${SCRIPTS_DIR}/launch-pm.sh --continue`,
-  1: `bash ${SCRIPTS_DIR}/launch-slot-1-omp.sh --continue`,
-  2: `bash ${SCRIPTS_DIR}/launch-slot-2-omp.sh --continue`,
-  3: `bash ${SCRIPTS_DIR}/launch-slot-3-omp.sh --continue`,
-  4: `bash ${SCRIPTS_DIR}/launch-slot-4-omp.sh --continue`,
+  1: `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-1.sh --continue`,
+  2: `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-2.sh --continue`,
+  3: `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-3.sh --continue`,
+  4: `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-4.sh --continue`,
 };
 
 /** Shell command names that indicate Claude Code has exited back to the shell */
