@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -268,22 +269,38 @@ def _default_restart(label: str) -> None:
 
 
 def _default_health(url: str) -> dict[str, Any]:
-    with urllib.request.urlopen(url, timeout=5) as response:
-        body = response.read().decode("utf-8", errors="replace")
-        if response.status != 200:
-            raise InstallerError(f"health status={response.status}")
-        return {"status": response.status, "body": body}
+    last_error: Exception | None = None
+    for attempt in range(15):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                if response.status != 200:
+                    raise InstallerError(f"health status={response.status}")
+                return {"status": response.status, "body": body, "attempt": attempt + 1}
+        except (OSError, InstallerError) as exc:
+            last_error = exc
+            if attempt < 14:
+                time.sleep(1)
+    raise InstallerError(f"health unavailable after bounded retry: {last_error}")
 
 
 def _default_canary(url: str) -> dict[str, Any]:
-    with urllib.request.urlopen(url.rstrip("/") + "/slots", timeout=5) as response:
-        body = response.read().decode("utf-8", errors="replace")
-        if response.status != 200:
-            raise InstallerError(f"slot canary status={response.status}")
-        value = json.loads(body)
-        if not isinstance(value, (list, dict)):
-            raise InstallerError("slot canary is not structured JSON")
-        return {"status": response.status, "slots": value}
+    last_error: Exception | None = None
+    for attempt in range(10):
+        try:
+            with urllib.request.urlopen(url.rstrip("/") + "/slots", timeout=5) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                if response.status != 200:
+                    raise InstallerError(f"slot canary status={response.status}")
+                value = json.loads(body)
+                if not isinstance(value, (list, dict)):
+                    raise InstallerError("slot canary is not structured JSON")
+                return {"status": response.status, "slots": value, "attempt": attempt + 1}
+        except (OSError, ValueError, InstallerError) as exc:
+            last_error = exc
+            if attempt < 9:
+                time.sleep(1)
+    raise InstallerError(f"slot canary unavailable after bounded retry: {last_error}")
 
 
 def delete_after_readiness(targets: list[Path], rollback: dict[str, Any]) -> None:
