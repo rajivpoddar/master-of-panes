@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).parents[1]
+REPO_ROOT = Path(__file__).parents[3]
 MODULE_PATH = REPO_ROOT / "scripts" / "install-release.py"
 SPEC = importlib.util.spec_from_file_location("install_release_stdio", MODULE_PATH)
 assert SPEC and SPEC.loader
