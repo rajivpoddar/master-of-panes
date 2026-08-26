@@ -26,6 +26,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "master_of_panes_release"
 MANIFEST = "RELEASE_MANIFEST.json"
 ROLLBACK_MANIFEST = "ROLLBACK_MANIFEST.json"
+SHARED_ASSET_MANIFEST = "shared-assets/manifest.json"
 PROTECTED_NAMES = {".git"}
 
 
@@ -161,6 +162,14 @@ def stage_release(
             if path.is_file() or path.is_symlink()
         ]
         files = _payload_records(temporary, [*tracked, *generated, *dependencies])
+        shared_metadata: dict[str, Any] | None = None
+        if (temporary / SHARED_ASSET_MANIFEST).is_file():
+            shared = _load_shared_manifest(temporary)
+            shared_metadata = {
+                "manifest": SHARED_ASSET_MANIFEST,
+                "sha256": sha256(temporary / SHARED_ASSET_MANIFEST),
+                "entry_count": len(shared["entries"]),
+            }
         manifest = {
             "schema": SCHEMA,
             "version": 1,
@@ -171,6 +180,8 @@ def stage_release(
             "source_repo": str(repo),
             "files": files,
         }
+        if shared_metadata is not None:
+            manifest["shared_assets"] = shared_metadata
         _write_json(temporary / MANIFEST, manifest)
         os.replace(temporary, release_dir)
         temporary = Path()
@@ -188,6 +199,17 @@ def verify_staged(*, repo: Path, release_dir: Path, candidate: str) -> dict[str,
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("commit") != candidate or manifest.get("tree") != tree:
         raise InstallerError("staged manifest candidate/tree mismatch")
+    shared_manifest_path = release_dir / SHARED_ASSET_MANIFEST
+    if shared_manifest_path.is_file():
+        shared = _load_shared_manifest(release_dir)
+        metadata = manifest.get("shared_assets")
+        expected = {
+            "manifest": SHARED_ASSET_MANIFEST,
+            "sha256": sha256(shared_manifest_path),
+            "entry_count": len(shared["entries"]),
+        }
+        if metadata != expected:
+            raise InstallerError("staged shared asset metadata mismatch")
     for record in manifest.get("files", []):
         path = release_dir / _safe_relative(record["path"])
         if not (path.exists() or path.is_symlink()):
@@ -196,6 +218,139 @@ def verify_staged(*, repo: Path, release_dir: Path, candidate: str) -> dict[str,
         if observed != record:
             raise InstallerError(f"staged digest/mode/link mismatch: {path}")
     return manifest
+
+
+def _load_shared_manifest(release_dir: Path) -> dict[str, Any]:
+    """Validate the deterministic, additive shared-operational mapping."""
+    path = release_dir / SHARED_ASSET_MANIFEST
+    if not path.is_file() or path.is_symlink():
+        raise InstallerError(f"shared asset manifest missing: {path}")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InstallerError(f"shared asset manifest is not valid JSON: {path}") from exc
+    if manifest.get("schema") != "mop_shared_operational_assets" or manifest.get("version") != 1:
+        raise InstallerError("unsupported shared asset manifest schema")
+    entries = manifest.get("entries")
+    if not isinstance(entries, list) or entries != sorted(entries, key=lambda item: item.get("source_path", "")):
+        raise InstallerError("shared asset entries must be a deterministic sorted list")
+    targets: set[str] = set()
+    sources: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise InstallerError("shared asset entry is not an object")
+        source = entry.get("source_path")
+        target = entry.get("canonical_target")
+        digest = entry.get("sha256")
+        mode = entry.get("mode")
+        if not isinstance(source, str) or not isinstance(target, str) or not isinstance(digest, str):
+            raise InstallerError("shared asset entry is incomplete")
+        source_path = release_dir / "shared-assets" / _safe_relative(source)
+        if not source_path.is_file() or source_path.is_symlink():
+            raise InstallerError(f"shared asset source is not a regular file: {source}")
+        if source in sources:
+            raise InstallerError(f"duplicate shared asset source: {source}")
+        sources.add(source)
+        target_path = Path(target)
+        if not target_path.is_absolute() or target_path in {Path("/"), Path.home()} or ".." in target_path.parts:
+            raise InstallerError(f"shared asset target is too broad: {target}")
+        if target in targets:
+            raise InstallerError(f"duplicate shared asset target: {target}")
+        targets.add(target)
+        if not isinstance(mode, int) or mode < 0 or mode > 0o777:
+            raise InstallerError(f"invalid shared asset mode: {target}")
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise InstallerError(f"invalid shared asset digest: {target}")
+        if sha256(source_path) != digest or stat.S_IMODE(source_path.stat().st_mode) != mode:
+            raise InstallerError(f"shared asset source digest/mode mismatch: {source}")
+        if entry.get("dependency_status") != "closed" or entry.get("dependencies") != []:
+            raise InstallerError(f"shared asset dependency closure is unresolved: {source}")
+    inventory = manifest.get("inventory")
+    if not isinstance(inventory, dict) or inventory.get("selected_count") != len(entries):
+        raise InstallerError("shared asset inventory count mismatch")
+    return manifest
+
+
+def _shared_target_path(target: str, target_root: Path | None) -> Path:
+    path = Path(target)
+    if target_root is None:
+        return path
+    if not target_root.is_absolute() or target_root in {Path("/"), Path.home()}:
+        raise InstallerError(f"shared asset target root is too broad: {target_root}")
+    return target_root / path.relative_to("/")
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError as exc:
+        raise InstallerError(f"cannot open directory for fsync: {path}") from exc
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def install_shared_assets(
+    *,
+    release_dir: Path,
+    target_root: Path | None,
+    rollback_bundle: Path,
+    fail_after: int | None = None,
+) -> dict[str, Any]:
+    """Atomically install only manifest-listed files; never prune unlisted files."""
+    manifest = _load_shared_manifest(release_dir)
+    targets = [_shared_target_path(entry["canonical_target"], target_root) for entry in manifest["entries"]]
+    rollback = create_rollback_bundle(targets, rollback_bundle)
+    staged: list[Path] = []
+    replaced = 0
+    try:
+        for index, (entry, target) in enumerate(zip(manifest["entries"], targets)):
+            source = release_dir / "shared-assets" / _safe_relative(entry["source_path"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.shared.{os.getpid()}.{index}.tmp")
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
+            staged.append(temporary)
+            with source.open("rb") as source_handle, temporary.open("xb") as destination:
+                shutil.copyfileobj(source_handle, destination)
+                destination.flush()
+                os.fsync(destination.fileno())
+            os.chmod(temporary, entry["mode"])
+            os.replace(temporary, target)
+            _fsync_directory(target.parent)
+            replaced += 1
+            observed = file_record(target, entry["canonical_target"])
+            expected = {"path": entry["canonical_target"], "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+            if observed != expected:
+                raise InstallerError(f"shared asset target readback mismatch: {target}")
+            if fail_after is not None and replaced >= fail_after:
+                raise InstallerError("injected shared asset installation failure")
+        return {
+            "status": "SHARED_ASSETS_INSTALLED",
+            "count": len(targets),
+            "targets": [str(path) for path in targets],
+            "rollback_bundle": str(rollback_bundle),
+        }
+    except Exception as exc:
+        restore_rollback_bundle(rollback_bundle)
+        raise InstallerError(f"shared asset installation failed and baseline restored: {exc}") from exc
+    finally:
+        for temporary in staged:
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
+
+
+def check_shared_assets(*, release_dir: Path, target_root: Path | None) -> dict[str, Any]:
+    manifest = _load_shared_manifest(release_dir)
+    checked: list[str] = []
+    for entry in manifest["entries"]:
+        target = _shared_target_path(entry["canonical_target"], target_root)
+        expected = {"path": entry["canonical_target"], "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+        if not target.is_file() or target.is_symlink() or file_record(target, entry["canonical_target"]) != expected:
+            raise InstallerError(f"shared asset target parity mismatch: {target}")
+        checked.append(str(target))
+    return {"status": "SHARED_ASSETS_PASS", "count": len(checked), "targets": checked}
 
 
 def _inventory_paths(inventory: Path, disposition: str, installed_roots: list[Path]) -> list[Path]:
@@ -252,6 +407,10 @@ def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
     for entry in manifest["entries"]:
         target = Path(entry["path"])
         if not entry.get("present"):
+            if target.exists() or target.is_symlink():
+                if target.is_dir() and not target.is_symlink():
+                    raise InstallerError(f"cannot remove directory during rollback: {target}")
+                target.unlink()
             continue
         payload = bundle / entry["payload"]
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -417,7 +576,7 @@ def _check_launchd(*, current: Path, service: str) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("stage", "activate", "check"))
+    parser.add_argument("mode", choices=("stage", "activate", "check", "shared-install", "shared-check"))
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--candidate")
     parser.add_argument("--base")
@@ -427,6 +586,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current", type=Path, required=True)
     parser.add_argument("--expected-old", type=Path)
     parser.add_argument("--rollback-bundle", type=Path, required=True)
+    parser.add_argument("--shared-assets-root", type=Path)
     parser.add_argument("--inventory", type=Path)
     parser.add_argument("--installed-root", type=Path, action="append", default=[])
     parser.add_argument("--service", default="com.heydonna.mop-server")
@@ -438,6 +598,18 @@ def main(argv: list[str] | None = None) -> int:
             if not args.repo or not args.candidate or not args.base or not args.patch_id:
                 raise InstallerError("stage requires --repo, --candidate, --base, and --patch-id")
             result = stage_release(repo=args.repo, candidate=args.candidate, base=args.base, patch_id=args.patch_id, release_root=args.release_root, node_bin=args.node_bin)
+        elif args.mode in {"shared-install", "shared-check"}:
+            release_dir = args.release_root / args.candidate if args.candidate else None
+            if release_dir is None:
+                raise InstallerError("shared asset modes require --candidate")
+            if args.mode == "shared-install":
+                result = install_shared_assets(
+                    release_dir=release_dir,
+                    target_root=args.shared_assets_root,
+                    rollback_bundle=args.rollback_bundle,
+                )
+            else:
+                result = check_shared_assets(release_dir=release_dir, target_root=args.shared_assets_root)
         else:
             if not args.candidate:
                 raise InstallerError("activate/check requires --candidate")

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Stdio Send Message"
+  short_description: "Send task messages without renderer IPC"
+  default_prompt: "Use $codex-stdio-send-message to send an exact message to an existing Codex task."
