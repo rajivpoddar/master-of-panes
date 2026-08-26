@@ -122,6 +122,16 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual(self.current.resolve(), self.old.resolve())
         self.assertTrue(self.delete_file.exists())
 
+    def test_delete_target_drift_refuses_cleanup_and_restores(self):
+        def canary():
+            self.delete_file.write_text("changed after capture\n")
+            return {"slots": []}
+
+        with self.assertRaises(module.InstallerError):
+            self.run_activation(canary=canary)
+        self.assertEqual(self.current.resolve(), self.old.resolve())
+        self.assertEqual(self.delete_file.read_text(), "legacy\n")
+
     def test_traversal_and_directory_deletion_refused(self):
         with self.assertRaises(module.InstallerError):
             module._safe_relative("../../etc/passwd")

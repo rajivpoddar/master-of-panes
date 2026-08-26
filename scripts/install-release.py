@@ -286,11 +286,18 @@ def _default_canary(url: str) -> dict[str, Any]:
         return {"status": response.status, "slots": value}
 
 
-def delete_after_readiness(targets: list[Path]) -> None:
+def delete_after_readiness(targets: list[Path], rollback: dict[str, Any]) -> None:
+    by_path = {entry["path"]: entry for entry in rollback["entries"]}
     for target in targets:
         if target.is_dir() and not target.is_symlink():
             raise InstallerError(f"refusing directory deletion: {target}")
         if target.exists() or target.is_symlink():
+            entry = by_path.get(str(target))
+            if not entry or not entry.get("present"):
+                raise InstallerError(f"target appeared after rollback capture: {target}")
+            expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
+            if file_record(target, str(target)) != expected:
+                raise InstallerError(f"DELETE target drifted after rollback capture: {target}")
             target.unlink()
 
 
@@ -315,7 +322,7 @@ def activate(
         restart()
         health_result = health()
         canary_result = canary()
-        delete_after_readiness(delete_targets)
+        delete_after_readiness(delete_targets, rollback)
         return {
             "status": "ACTIVATED",
             "release_dir": str(release_dir),
