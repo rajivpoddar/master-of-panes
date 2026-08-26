@@ -514,6 +514,26 @@ test("full tuple rebind changes PR identity only with exact current tuple", () =
   });
 });
 
+test("full tuple rebind refuses a repository identity change without mutation", () => {
+  withDatabase((db) => {
+    assert.equal(
+      db.assignSlot(1, "claim", "github:repo-1", 10, "fix/10", "session-1", 20, "a".repeat(40), 0, "implementation", "handoff-1").ok,
+      true,
+    );
+    const before = db.getSlot(1)!;
+    const expected = tupleFromSlot(db, 1);
+    const refused = db.rebindSlot(
+      1,
+      before.assignment_epoch,
+      expected,
+      { ...expected, repository_id: "github:repo-2", branch: "fix/10-repo-2" },
+      "repository drift",
+    );
+    assert.equal(refused.reason, "invalid_repository_id");
+    assert.deepEqual(db.getSlot(1), before);
+  });
+});
+
 test("full tuple rebind replay refuses unverifiable E+1 state", () => {
   withDatabase((db) => {
     db.assignSlot(
