@@ -11,9 +11,11 @@ import { DEFAULT_CONFIG } from "../src/types.js";
 function withDatabase(run: (db: MoPDatabase, path: string) => void): void {
   const directory = mkdtempSync(join(tmpdir(), "mop-epoch-test-"));
   const path = join(directory, "mop.db");
+  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: path });
   try {
-    run(new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: path }), path);
+    run(db, path);
   } finally {
+    db.close();
     rmSync(directory, { recursive: true, force: true });
   }
 }
