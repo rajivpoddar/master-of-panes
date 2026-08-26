@@ -34,14 +34,21 @@ import type { TmuxRelay } from "./relay.js";
 // tracked OMP launchers independently of the active slot runtime.
 export const SCRIPTS_DIR = "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts";
 export const CLAUDE_SLOT_SCRIPTS_DIR = "/Users/rajiv/.claude/scripts";
+export const CLAUDE_SLOT_RUNTIME_ENV = [
+  "DEV_SLOT_SPARK_MODEL=ornith-1.5-35b-a3b",
+  "DEV_SLOT_SPARK_MAX_CONTEXT_TOKENS=240000",
+  "DEV_SLOT_SPARK_MAX_OUTPUT_TOKENS=16384",
+  "DEV_SLOT_SPARK_MAX_THINKING_TOKENS=2048",
+  "MAX_THINKING_TOKENS=2048",
+].join(" ");
 // Health checker: always --continue (crash recovery preserves session/work).
 // Respawn skill: --continue is optional arg (fresh start for atma updates).
 export const RESTART_COMMANDS: Record<number, string> = {
   0: `bash ${SCRIPTS_DIR}/launch-pm.sh --continue`,
-  1: `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-1.sh --continue`,
-  2: `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-2.sh --continue`,
-  3: `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-3.sh --continue`,
-  4: `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-4.sh --continue`,
+  1: `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-1.sh --continue`,
+  2: `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-2.sh --continue`,
+  3: `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-3.sh --continue`,
+  4: `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-4.sh --continue`,
 };
 
 /** Shell command names that indicate Claude Code has exited back to the shell */
