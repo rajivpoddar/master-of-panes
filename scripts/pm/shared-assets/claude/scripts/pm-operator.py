@@ -56,7 +56,9 @@ def _assignment(command: str, args: list[str], root: Path) -> int:
         state_index = args.index("--state")
         if state_index + 1 >= len(args):
             raise ValueError("--state requires a path")
-        args = [*args[: state_index + 2], command, *args[state_index + 2 :]]
+        selected_state = args[state_index + 1]
+        remaining = [*args[:state_index], *args[state_index + 2:]]
+        args = ["--state", selected_state, command, *remaining]
     return boundary_main(args)
 
 
