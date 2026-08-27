@@ -4,9 +4,10 @@
   "owner": "master-of-panes",
   "inventory": {
     "source_roots": [
+      "~/.claude/scripts/axiom-activity-report.py",
       "~/.codex/skills/codex-stdio-send-message"
     ],
-    "selected_count": 4,
+    "selected_count": 5,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -17,10 +18,20 @@
         "class": "VCS_METADATA"
       }
     ],
+    "ambiguous": [],
     "dependency_closure": [],
     "command_inventory": []
   },
   "entries": [
+    {
+      "source_path": "claude/scripts/axiom-activity-report.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/axiom-activity-report.py",
+      "sha256": "8b67ea060d935f4be465aa342b0f3fe00e86950ce0ccbb80a58b1e2cc1d94abd",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-report",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
     {
       "source_path": "codex/skills/codex-stdio-send-message/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/codex-stdio-send-message/SKILL.md",
