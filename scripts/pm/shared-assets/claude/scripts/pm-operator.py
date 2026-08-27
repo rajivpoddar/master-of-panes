@@ -19,7 +19,6 @@ from typing import Sequence
 
 
 RELEASE_ROOT_ENV = "HEYDONNA_CONTROL_PLANE_RELEASE_ROOT"
-DEFAULT_RELEASE_ROOT = Path("~/.claude/control-plane/current/heydonna")
 ASSIGNMENT_COMMANDS = {"claim-slot", "rebind-slot", "release-slot"}
 FAMILY2_COMMANDS = {"slot-ready", "pm-review"}
 CAPACITY_COMMANDS = {"capacity-snapshot", "reconcile-capacity"}
@@ -33,10 +32,10 @@ def _package_root() -> Path:
         if not root.is_absolute():
             raise ValueError(f"{RELEASE_ROOT_ENV} must be an absolute path")
         return root.resolve()
-    source = Path(__file__).resolve().parents[3]
-    if (source / "scripts/pm/control_plane/assignment_boundary.py").is_file():
-        return source
-    return DEFAULT_RELEASE_ROOT.expanduser().resolve(strict=True)
+    # The installed launcher is itself the release-owned facade. Never fall
+    # back to the retired ~/.claude/control-plane tree: that would reintroduce
+    # a second local authority and can mask a missing release asset.
+    return Path(__file__).resolve().parent
 
 
 def _blocked(command: str, reason: str) -> int:
