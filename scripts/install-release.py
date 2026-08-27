@@ -127,6 +127,8 @@ def stage_release(
     node_bin: str | None = None,
 ) -> dict[str, Any]:
     tree = assert_clean_source(repo, candidate)
+    if not node_bin:
+        raise InstallerError("stage requires --node-bin for the pinned native runtime rebuild")
     release_root.mkdir(parents=True, exist_ok=True)
     release_dir = release_root / candidate
     if release_dir.exists() or release_dir.is_symlink():
@@ -149,14 +151,13 @@ def stage_release(
         _run([bun, "install", "--frozen-lockfile", "--ignore-scripts"], cwd=temporary)
         _run([bun, "run", "build"], cwd=temporary)
         node_modules = temporary / "node_modules"
-        if node_bin:
-            node_path = Path(node_bin).resolve(strict=True)
-            npm_bin = node_path.with_name("npm")
-            if not npm_bin.is_file():
-                raise InstallerError(f"matching npm binary is missing beside node: {npm_bin}")
-            environment = dict(os.environ)
-            environment["PATH"] = str(node_path.parent) + os.pathsep + environment.get("PATH", "")
-            _run([str(npm_bin), "rebuild", "better-sqlite3", "--no-audit", "--no-fund"], cwd=temporary, env=environment)
+        node_path = Path(node_bin).resolve(strict=True)
+        npm_bin = node_path.with_name("npm")
+        if not npm_bin.is_file():
+            raise InstallerError(f"matching npm binary is missing beside node: {npm_bin}")
+        environment = dict(os.environ)
+        environment["PATH"] = str(node_path.parent) + os.pathsep + environment.get("PATH", "")
+        _run([str(npm_bin), "rebuild", "better-sqlite3", "--no-audit", "--no-fund"], cwd=temporary, env=environment)
         tracked = _tracked_paths(repo)
         generated = [str(path.relative_to(temporary)) for path in (temporary / "dist").rglob("*") if path.is_file()]
         dependencies = [
