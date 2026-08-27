@@ -986,11 +986,13 @@ app.post("/slots/:slotNum/release", async (c) => {
   };
   const releaseResult = await nativeSlotRelease.release(request);
   if (releaseResult.success) {
-    processor.clearPlanApprovalTimer(slotParse.data);
-    db.logEvent(slotParse.data, "slot_released", null, null, {
-      assignment_epoch: releaseResult.assignment_epoch,
-      native_checkout_ack: true,
-    });
+    if (!releaseResult.idempotent) {
+      processor.clearPlanApprovalTimer(slotParse.data);
+      db.logEvent(slotParse.data, "slot_released", null, null, {
+        assignment_epoch: releaseResult.assignment_epoch,
+        native_checkout_ack: true,
+      });
+    }
     return c.json(releaseResult);
   }
   return c.json(releaseResult, releaseResult.code === "invalid_request" ? 400 : 409);
