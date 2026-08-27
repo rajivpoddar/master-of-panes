@@ -77,8 +77,6 @@ export interface SlotState {
   status: SlotStatus;
   /** Whether the slot is occupied */
   occupied: boolean;
-  /** Hook-turn telemetry only; never part of assignment ownership. */
-  session_id: string | null;
   /** Current task description */
   task: string | null;
   /** Immutable repository identity for the current assignment */

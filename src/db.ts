@@ -29,8 +29,6 @@ export interface SlotMutationResult {
     | "slot_not_occupied"
     | "slot_already_free_unverifiable"
     | "expected_tuple_required"
-    | "expected_session_required"
-    | "session_mismatch"
     | "branch_mismatch"
     | "observed_tuple_mismatch"
     | "effect_digest_mismatch"
@@ -886,11 +884,13 @@ export class MoPDatabase {
       if (!assignmentTupleMatches(slotAssignmentTuple(current), expectedTuple)) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
       }
+      if (current.active_turn_id !== null || current.active_turn_state !== "inactive") {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "active_turn" };
+      }
 
       this.updateAssignmentState(slot, {
         status: "free" as SlotStatus,
         occupied: false,
-        session_id: null,
         task: null,
         repository_id: null,
         issue: null,
@@ -910,6 +910,10 @@ export class MoPDatabase {
         active_turn_state: "inactive",
         assignment_epoch: epoch + 1,
       });
+      // Existing SQLite databases retain the retired session_id column. Clear
+      // that legacy telemetry in the same release CAS, but never read it as
+      // assignment authority.
+      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
       if (effect) {
         this.db.prepare(`
           INSERT INTO native_release_effect_receipts (
@@ -975,8 +979,6 @@ export class MoPDatabase {
     repositoryId: string | number | null,
     issue: number | null,
     branch: string | null,
-    /** @deprecated retained only for source compatibility; never persisted or compared. */
-    _legacySessionId: string | null,
     pr: number | null = null,
     headSha: string | null = null,
     expectedEpoch?: number,
@@ -1156,8 +1158,6 @@ export class MoPDatabase {
         this.updateAssignmentState(slot, {
           status: "active" as SlotStatus,
           occupied: true,
-          // Session IDs are hook-turn telemetry, never assignment authority.
-          session_id: null,
           task,
           repository_id: normalizedRepositoryId,
           issue: normalizedIssue,
@@ -1172,6 +1172,8 @@ export class MoPDatabase {
           claimed_at: assignmentTime,
           dnd: false,
         });
+        // Keep the retired column empty without making it part of ownership.
+        this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
       } catch (error) {
         if (
           error instanceof Error
@@ -1299,6 +1301,9 @@ export class MoPDatabase {
       }
       if (!assignmentTupleMatches(currentTuple, expectedTuple)) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
+      }
+      if (current.active_turn_id !== null || current.active_turn_state !== "inactive") {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "active_turn" };
       }
       if (assignmentTupleMatches(currentTuple, desiredTuple)) {
         return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
@@ -1445,6 +1450,7 @@ export class MoPDatabase {
   }
 
   startAgentTurn(slot: number, turnId: string): void {
+    if (typeof turnId !== "string" || turnId.trim() === "") return;
     const now = new Date().toISOString();
     this.updateSlot(slot, {
       active_turn_id: turnId,
@@ -1466,6 +1472,7 @@ export class MoPDatabase {
   finishAgentTurn(slot: number, turnId?: string | null): void {
     const current = this.getSlot(slot);
     if (!current) return;
+    if (typeof turnId !== "string" || turnId.trim() === "") return;
     if (turnId && current.active_turn_id && turnId !== current.active_turn_id) {
       this.updateSlot(slot, {
         active_turn_state: "indeterminate",

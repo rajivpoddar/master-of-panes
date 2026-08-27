@@ -30,7 +30,6 @@ function nativeReleaseAt(
   db: MoPDatabase,
   slot: number,
   expectedEpoch: number,
-  expectedSessionId?: string,
   expectedTuple?: AssignmentTupleInput,
 ) {
   const current = db.getSlot(slot)!;
@@ -109,27 +108,17 @@ function rebindFromLegacyFixture(
 test("same-slot replay is exact, canonical, and mutation-free", () => {
   withDatabase((db) => {
     assert.equal(db.getSlot(1)?.assignment_epoch, 0);
-    const first = db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", "session-1", null, null, 0);
+    const first = db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", null, null, 0);
     assert.deepEqual(first, { ok: true, conflict: false, assignment_epoch: 1, idempotent: false });
     assert.equal(db.getSlot(1)?.branch, "fix/10");
     assert.equal(db.getSlot(1)?.branch_ref, "refs/heads/fix/10");
 
     const beforeReplay = db.getSlot(1);
-    const redelivery = db.assignSlot(
-      1,
-      "renamed task",
-      "github:repo-1",
-      10,
-      "refs/heads/fix/10",
-      "different-session",
-      null,
-      null,
-      1,
-    );
+    const redelivery = db.assignSlot(1, "renamed task", "github:repo-1", 10, "refs/heads/fix/10", null, null, 1, );
     assert.deepEqual(redelivery, { ok: true, conflict: false, assignment_epoch: 1, idempotent: true });
     assert.deepEqual(db.getSlot(1), beforeReplay);
 
-    const next = db.assignSlot(1, "next", "github:repo-1", 11, "fix/11", null, null, null, 1);
+    const next = db.assignSlot(1, "next", "github:repo-1", 11, "fix/11", null, null, 1);
     assert.deepEqual(next, {
       ok: false,
       conflict: true,
@@ -141,17 +130,7 @@ test("same-slot replay is exact, canonical, and mutation-free", () => {
     assert.deepEqual(db.getSlot(1), beforeReplay);
 
     assert.equal(nativeRelease(db, 1).ok, true);
-    const successor = db.assignSlot(
-      1,
-      "next",
-      "github:repo-1",
-      11,
-      "fix/11",
-      null,
-      null,
-      null,
-      2,
-    );
+    const successor = db.assignSlot(1, "next", "github:repo-1", 11, "fix/11", null, null, 2, );
     assert.deepEqual(successor, {
       ok: true,
       conflict: false,
@@ -163,19 +142,7 @@ test("same-slot replay is exact, canonical, and mutation-free", () => {
 
 test("assignment metadata is stored and cleared with the occupied tuple", () => {
   withDatabase((db) => {
-    const assigned = db.assignSlot(
-      1,
-      "metadata assignment",
-      "github:repo-1",
-      10,
-      "fix/10",
-      "session-meta",
-      20,
-      "a".repeat(40),
-      0,
-      "implementation",
-      "handoff-epoch-1",
-    );
+    const assigned = db.assignSlot(1, "metadata assignment", "github:repo-1", 10, "fix/10", 20, "a".repeat(40), 0, "implementation", "handoff-epoch-1", );
     assert.deepEqual(assigned, {
       ok: true,
       conflict: false,
@@ -204,33 +171,11 @@ test("assignment metadata is stored and cleared with the occupied tuple", () => 
 test("canonical metadata rows reject omitted-metadata replay without mutation", () => {
   withDatabase((db) => {
     assert.equal(
-      db.assignSlot(
-        1,
-        "canonical assignment",
-        "github:repo-1",
-        10,
-        "fix/10",
-        "session-canonical",
-        20,
-        "a".repeat(40),
-        0,
-        "rework",
-        "handoff-replay-1",
-      ).ok,
+      db.assignSlot(1, "canonical assignment", "github:repo-1", 10, "fix/10", 20, "a".repeat(40), 0, "rework", "handoff-replay-1", ).ok,
       true,
     );
     const before = db.getSlot(1);
-    const replay = db.assignSlot(
-      1,
-      "legacy replay",
-      "github:repo-1",
-      10,
-      "refs/heads/fix/10",
-      "different-session",
-      20,
-      "a".repeat(40),
-      1,
-    );
+    const replay = db.assignSlot(1, "legacy replay", "github:repo-1", 10, "refs/heads/fix/10", 20, "a".repeat(40), 1, );
     assert.equal(replay.reason, "slot_already_occupied");
     assert.equal(replay.idempotent, false);
     assert.deepEqual(db.getSlot(1), before);
@@ -240,22 +185,10 @@ test("canonical metadata rows reject omitted-metadata replay without mutation", 
 test("null metadata rows remain stable on an explicit null-metadata replay", () => {
   withDatabase((db) => {
     assert.equal(
-      db.assignSlot(1, "legacy assignment", "github:repo-1", 10, "fix/10", null, 20, "a".repeat(40), 0, null, null).ok,
+      db.assignSlot(1, "legacy assignment", "github:repo-1", 10, "fix/10", 20, "a".repeat(40), 0, null, null).ok,
       true,
     );
-    const replay = db.assignSlot(
-      1,
-      "legacy replay",
-      "github:repo-1",
-      10,
-      "refs/heads/fix/10",
-      "different-session",
-      20,
-      "a".repeat(40),
-      1,
-      null,
-      null,
-    );
+    const replay = db.assignSlot(1, "legacy replay", "github:repo-1", 10, "refs/heads/fix/10", 20, "a".repeat(40), 1, null, null, );
     assert.deepEqual(replay, {
       ok: true,
       conflict: false,
@@ -267,21 +200,7 @@ test("null metadata rows remain stable on an explicit null-metadata replay", () 
 
 test("unsupported assignment work kinds fail closed before mutation", () => {
   withDatabase((db) => {
-    const refused = db.assignSlot(
-      1,
-      "invalid kind",
-      "github:repo-1",
-      10,
-      "fix/10",
-      null,
-      20,
-      "a".repeat(40),
-      0,
-      false,
-      null,
-      "debug",
-      "handoff-invalid-1",
-    );
+    const refused = db.assignSlot(1, "invalid kind", "github:repo-1", 10, "fix/10", 20, "a".repeat(40), 0, false, null, "debug", "handoff-invalid-1", );
     assert.deepEqual(refused, {
       ok: false,
       conflict: true,
@@ -295,7 +214,7 @@ test("unsupported assignment work kinds fail closed before mutation", () => {
 
 test("checkout synchronization updates head without changing ownership epoch or turn", () => {
   withDatabase((db) => {
-    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", "session-sync", null, null, 0);
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", null, null, 0);
     db.startAgentTurn(1, "turn-a");
 
     const first = db.syncSlotCheckout(1, "fix/10-exact", "a".repeat(40), 1);
@@ -318,7 +237,7 @@ test("checkout synchronization updates head without changing ownership epoch or 
 
 test("checkout synchronization fails closed on stale epoch, wrong branch, or free slot", () => {
   withDatabase((db) => {
-    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", "session-sync", null, null, 0);
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", null, null, 0);
 
     assert.equal(
       db.syncSlotCheckout(1, "fix/10-exact", "a".repeat(40), 0).reason,
@@ -340,11 +259,11 @@ test("checkout synchronization fails closed on stale epoch, wrong branch, or fre
 
 test("missing and stale expected epochs fail without mutation", () => {
   withDatabase((db) => {
-    const missing = db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", null);
+    const missing = db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10");
     assert.equal(missing.reason, "expected_epoch_required");
     assert.equal(db.getSlot(1)?.occupied, false);
 
-    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", "session-stale", null, null, 0);
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", null, null, 0);
     const stale = nativeReleaseAt(db, 1, 0);
     assert.equal(stale.reason, "epoch_mismatch");
     assert.equal(db.getSlot(1)?.occupied, true);
@@ -353,9 +272,10 @@ test("missing and stale expected epochs fail without mutation", () => {
 
 test("release advances epoch and hook turn state fails closed on mismatch", () => {
   withDatabase((db) => {
-    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", "session-release", null, null, 0);
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", null, null, 0);
     db.startAgentTurn(1, "turn-a");
     assert.equal(db.getSlot(1)?.active_turn_state, "active");
+    assert.equal(nativeRelease(db, 1).reason, "active_turn");
     db.finishAgentTurn(1, "turn-b");
     assert.equal(db.getSlot(1)?.active_turn_state, "indeterminate");
     assert.equal(db.getSlot(1)?.idle, false);
@@ -371,7 +291,7 @@ test("release advances epoch and hook turn state fails closed on mismatch", () =
 
 test("meaningful tool telemetry never synthesizes a turn boundary", () => {
   withDatabase((db) => {
-    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", "session-a", null, null, 0);
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", null, null, 0);
     db.touchMeaningfulWork(1, "session-a");
     let current = db.getSlot(1)!;
     assert.equal(current.active_turn_state, "inactive");
@@ -390,24 +310,27 @@ test("meaningful tool telemetry never synthesizes a turn boundary", () => {
   });
 });
 
+test("hook turn close requires a matching session identity", () => {
+  withDatabase((db) => {
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", null, null, 0);
+    db.startAgentTurn(1, "session-a");
+    db.finishAgentTurn(1, null);
+    assert.equal(db.getSlot(1)?.active_turn_state, "active");
+    db.finishAgentTurn(1, "session-b");
+    assert.equal(db.getSlot(1)?.active_turn_state, "indeterminate");
+    db.finishAgentTurn(1, "session-a");
+    assert.equal(db.getSlot(1)?.active_turn_state, "inactive");
+  });
+});
+
 test("issue claim adoption rebinds the occupied tuple atomically", () => {
   withDatabase((db) => {
     assert.equal(
-      db.assignSlot(
-        1,
-        "placeholder",
-        "github:repo-1",
-        10,
-        "fix/10-pending",
-        "session-a",
-        null,
-        null,
-        0,
-      ).ok,
+      db.assignSlot(1, "placeholder", "github:repo-1", 10, "fix/10-pending", null, null, 0, ).ok,
       true,
     );
 
-    const adopted = rebindFromLegacyFixture(db, 
+    const adopted = rebindFromLegacyFixture(db,
       1,
       "PR #20",
       "github:repo-1",
@@ -434,7 +357,6 @@ test("issue claim adoption rebinds the occupied tuple atomically", () => {
         pr: db.getSlot(1)?.pr,
         branch: db.getSlot(1)?.branch,
         head_sha: db.getSlot(1)?.head_sha,
-        session_id: db.getSlot(1)?.session_id,
         assignment_epoch: db.getSlot(1)?.assignment_epoch,
       },
       {
@@ -444,12 +366,11 @@ test("issue claim adoption rebinds the occupied tuple atomically", () => {
         pr: 20,
         branch: "fix/10-real",
         head_sha: "a".repeat(40),
-        session_id: null,
         assignment_epoch: 2,
       },
     );
     assert.deepEqual(
-      rebindFromLegacyFixture(db, 
+      rebindFromLegacyFixture(db,
         1,
         "ignored replay",
         "github:repo-1",
@@ -475,19 +396,9 @@ test("issue claim adoption rebinds the occupied tuple atomically", () => {
 
 test("full tuple rebind changes PR identity only with exact current tuple", () => {
   withDatabase((db) => {
-    db.assignSlot(
-      1,
-      "placeholder",
-      "github:repo-1",
-      10,
-      "fix/10-pending",
-      "session-a",
-      null,
-      null,
-      0,
-    );
+    db.assignSlot(1, "placeholder", "github:repo-1", 10, "fix/10-pending", null, null, 0, );
     // Legitimate issue-only -> PR identity bind first.
-    const bound = rebindFromLegacyFixture(db, 
+    const bound = rebindFromLegacyFixture(db,
       1,
       "PR #20",
       "github:repo-1",
@@ -510,7 +421,7 @@ test("full tuple rebind changes PR identity only with exact current tuple", () =
     const before = db.getSlot(1);
     // A complete rebind may change the PR identity when its expected tuple
     // and epoch are exact.
-    const rewrite = rebindFromLegacyFixture(db, 
+    const rewrite = rebindFromLegacyFixture(db,
       1,
       "rewrite",
       "github:repo-1",
@@ -538,7 +449,7 @@ test("full tuple rebind changes PR identity only with exact current tuple", () =
 test("full tuple rebind refuses a repository identity change without mutation", () => {
   withDatabase((db) => {
     assert.equal(
-      db.assignSlot(1, "claim", "github:repo-1", 10, "fix/10", "session-1", 20, "a".repeat(40), 0, "implementation", "handoff-1").ok,
+      db.assignSlot(1, "claim", "github:repo-1", 10, "fix/10", 20, "a".repeat(40), 0, "implementation", "handoff-1").ok,
       true,
     );
     const before = db.getSlot(1)!;
@@ -557,19 +468,9 @@ test("full tuple rebind refuses a repository identity change without mutation", 
 
 test("full tuple rebind replay refuses unverifiable E+1 state", () => {
   withDatabase((db) => {
-    db.assignSlot(
-      1,
-      "placeholder",
-      "github:repo-1",
-      10,
-      "fix/10-pending",
-      "session-a",
-      null,
-      null,
-      0,
-    );
+    db.assignSlot(1, "placeholder", "github:repo-1", 10, "fix/10-pending", null, null, 0, );
     assert.equal(
-      rebindFromLegacyFixture(db, 
+      rebindFromLegacyFixture(db,
         1,
         "PR #20",
         "github:repo-1",
@@ -587,7 +488,7 @@ test("full tuple rebind replay refuses unverifiable E+1 state", () => {
     const before = db.getSlot(1);
     // Without a durable receipt, a retry cannot reconstruct the prior
     // expected tuple after the first write and must fail closed.
-    const replay = rebindFromLegacyFixture(db, 
+    const replay = rebindFromLegacyFixture(db,
       1,
       "ignored replay",
       "github:repo-1",
@@ -614,7 +515,7 @@ test("full tuple rebind replay refuses unverifiable E+1 state", () => {
 test("issue claim adoption fails closed on stale, active, or different claims", () => {
   withDatabase((db) => {
     assert.equal(
-      rebindFromLegacyFixture(db, 
+      rebindFromLegacyFixture(db,
         1,
         "free",
         "github:repo-1",
@@ -629,19 +530,9 @@ test("issue claim adoption fails closed on stale, active, or different claims", 
       ).reason,
       "slot_not_occupied",
     );
-    db.assignSlot(
-      1,
-      "placeholder",
-      "github:repo-1",
-      10,
-      "fix/10-pending",
-      null,
-      null,
-      null,
-      0,
-    );
+    db.assignSlot(1, "placeholder", "github:repo-1", 10, "fix/10-pending", null, null, 0, );
     assert.equal(
-      rebindFromLegacyFixture(db, 
+      rebindFromLegacyFixture(db,
         1,
         "stale",
         "github:repo-1",
@@ -672,11 +563,11 @@ test("issue claim adoption fails closed on stale, active, or different claims", 
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
     assert.equal(db.getSlot(1)?.branch, "fix/10-pending");
 
-    // An ACTIVE turn with an exactly matching observed tuple is the wedge
-    // case: the identity bind proceeds while preserving the turn.
+    // An ACTIVE turn cannot cross the rebind CAS. Close the hook turn before
+    // retrying the exact same tuple mutation.
     db.startAgentTurn(1, "turn-a");
     assert.deepEqual(
-      rebindFromLegacyFixture(db, 
+      rebindFromLegacyFixture(db,
         1,
         "active bind",
         "github:repo-1",
@@ -690,21 +581,41 @@ test("issue claim adoption fails closed on stale, active, or different claims", 
         1,
       ),
       {
-        ok: true,
-        conflict: false,
-        assignment_epoch: 2,
+        ok: false,
+        conflict: true,
+        assignment_epoch: 1,
         idempotent: false,
+        reason: "active_turn",
       },
+    );
+    assert.equal(db.getSlot(1)?.pr, null);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    db.finishAgentTurn(1, "turn-a");
+    assert.equal(
+      rebindFromLegacyFixture(db,
+        1,
+        "inactive bind",
+        "github:repo-1",
+        10,
+        "fix/10-real",
+        20,
+        "a".repeat(40),
+        null,
+        "refs/heads/fix/10-pending",
+        null,
+        1,
+      ).ok,
+      true,
     );
     assert.equal(db.getSlot(1)?.pr, 20);
     assert.equal(db.getSlot(1)?.assignment_epoch, 2);
-    assert.equal(db.getSlot(1)?.active_turn_state, "active");
-    assert.equal(db.getSlot(1)?.active_turn_id, "turn-a");
+    assert.equal(db.getSlot(1)?.active_turn_state, "inactive");
+    assert.equal(db.getSlot(1)?.active_turn_id, null);
 
     // After the bind the observed tuple is pr-bound; an attempt that still
     // claims the old issue-only tuple with the current epoch is drift.
     assert.equal(
-      rebindFromLegacyFixture(db, 
+      rebindFromLegacyFixture(db,
         1,
         "stale observation",
         "github:repo-1",
@@ -727,17 +638,7 @@ test("issue claim adoption fails closed on stale, active, or different claims", 
 test("issue claim adoption rejects same-epoch checkout identity drift", () => {
   withDatabase((db) => {
     assert.equal(
-      db.assignSlot(
-        1,
-        "placeholder",
-        "github:repo-1",
-        10,
-        "fix/10-real",
-        null,
-        null,
-        null,
-        0,
-      ).ok,
+      db.assignSlot(1, "placeholder", "github:repo-1", 10, "fix/10-real", null, null, 0, ).ok,
       true,
     );
     assert.equal(
@@ -745,7 +646,7 @@ test("issue claim adoption rejects same-epoch checkout identity drift", () => {
       true,
     );
 
-    const result = rebindFromLegacyFixture(db, 
+    const result = rebindFromLegacyFixture(db,
       1,
       "stale observation",
       "github:repo-1",
@@ -770,17 +671,7 @@ test("active-turn issue claim adoption binds preserving epoch, turn, session, an
     // Issue-only claim already mid-work: pr=null but branch and recorded
     // checkout head are present, exactly the #7208 incident shape.
     assert.equal(
-      db.assignSlot(
-        4,
-        "claim",
-        "heydonna-app",
-        7135,
-        "fix/7135-proper-noun-letter-drop-corruption",
-        "session-s4",
-        null,
-        "be79bc4817cda506798ec87f81543d1a808b8bd6",
-        0,
-      ).ok,
+      db.assignSlot(4, "claim", "heydonna-app", 7135, "fix/7135-proper-noun-letter-drop-corruption", null, "be79bc4817cda506798ec87f81543d1a808b8bd6", 0, ).ok,
       true,
     );
     // Pin the live claim epoch (430 in the incident) and open an active turn.
@@ -793,8 +684,11 @@ test("active-turn issue claim adoption binds preserving epoch, turn, session, an
     db.startAgentTurn(4, "turn-4-active");
     assert.equal(db.getSlot(4)?.assignment_epoch, 430);
     assert.equal(db.getSlot(4)?.active_turn_state, "active");
+    const activeRefusal = rebindFromCurrent(db, 4, { pr: 7208, head_sha: "be79bc4817cda506798ec87f81543d1a808b8bd6" });
+    assert.equal(activeRefusal.reason, "active_turn");
+    db.finishAgentTurn(4, "turn-4-active");
 
-    const adopted = rebindFromLegacyFixture(db, 
+    const adopted = rebindFromLegacyFixture(db,
       4,
       "rework PR #7208",
       "heydonna-app",
@@ -824,7 +718,6 @@ test("active-turn issue claim adoption binds preserving epoch, turn, session, an
         assignment_epoch: db.getSlot(4)?.assignment_epoch,
         active_turn_state: db.getSlot(4)?.active_turn_state,
         active_turn_id: db.getSlot(4)?.active_turn_id,
-        session_id: db.getSlot(4)?.session_id,
         dnd: db.getSlot(4)?.dnd,
       },
       {
@@ -835,9 +728,8 @@ test("active-turn issue claim adoption binds preserving epoch, turn, session, an
         branch_ref: "refs/heads/fix/7135-proper-noun-letter-drop-corruption",
         head_sha: "be79bc4817cda506798ec87f81543d1a808b8bd6",
         assignment_epoch: 431,
-        active_turn_state: "active",
-        active_turn_id: "turn-4-active",
-        session_id: null,
+        active_turn_state: "inactive",
+        active_turn_id: null,
         dnd: false,
       },
     );
@@ -846,17 +738,7 @@ test("active-turn issue claim adoption binds preserving epoch, turn, session, an
 
 test("active-turn adoption fails closed on every observed-tuple drift", () => {
   withDatabase((db) => {
-    db.assignSlot(
-      1,
-      "placeholder",
-      "github:repo-1",
-      10,
-      "fix/10-pending",
-      "session-a",
-      null,
-      null,
-      0,
-    );
+    db.assignSlot(1, "placeholder", "github:repo-1", 10, "fix/10-pending", null, null, 0, );
     db.startAgentTurn(1, "turn-a");
 
     const drifts: Array<{
@@ -914,20 +796,10 @@ test("active-turn adoption fails closed on every observed-tuple drift", () => {
 
 test("issue claim adoption refuses a target already owned by another slot", () => {
   withDatabase((db) => {
-    db.assignSlot(4, "original", "github:repo-1", 20, "fix/20", null, 20, null, 0);
-    db.assignSlot(
-      2,
-      "claim",
-      "github:repo-1",
-      10,
-      "fix/10-pending",
-      "session-b",
-      null,
-      null,
-      0,
-    );
+    db.assignSlot(4, "original", "github:repo-1", 20, "fix/20", 20, null, 0);
+    db.assignSlot(2, "claim", "github:repo-1", 10, "fix/10-pending", null, null, 0, );
 
-    const duplicate = rebindFromLegacyFixture(db, 
+    const duplicate = rebindFromLegacyFixture(db,
       2,
       "bind conflict",
       "github:repo-1",
@@ -959,10 +831,10 @@ test("issue claim adoption refuses a target already owned by another slot", () =
 
 test("assignment rejects a target already owned by another occupied slot", () => {
   withDatabase((db) => {
-    const first = db.assignSlot(4, "original", "github:repo-1", 6735, "fix/6735-pending", null, 6737, "a".repeat(40), 0);
+    const first = db.assignSlot(4, "original", "github:repo-1", 6735, "fix/6735-pending", 6737, "a".repeat(40), 0);
     assert.equal(first.ok, true);
 
-    const duplicate = db.assignSlot(2, "failover", "github:repo-1", 6735, "fix/6735-pending", null, 6737, "new-head", 0);
+    const duplicate = db.assignSlot(2, "failover", "github:repo-1", 6735, "fix/6735-pending", 6737, "new-head", 0);
     assert.deepEqual(duplicate, {
       ok: false,
       conflict: true,
@@ -983,31 +855,11 @@ test("assignment rejects a target already owned by another occupied slot", () =>
 test("repository scope permits the same target identities in another repository", () => {
   withDatabase((db) => {
     assert.equal(
-      db.assignSlot(
-        1,
-        "repo one",
-        "github:repo-1",
-        10,
-        "fix/shared",
-        null,
-        20,
-        null,
-        0,
-      ).ok,
+      db.assignSlot(1, "repo one", "github:repo-1", 10, "fix/shared", 20, null, 0, ).ok,
       true,
     );
     assert.equal(
-      db.assignSlot(
-        2,
-        "repo two",
-        "github:repo-2",
-        10,
-        "refs/heads/fix/shared",
-        null,
-        20,
-        null,
-        0,
-      ).ok,
+      db.assignSlot(2, "repo two", "github:repo-2", 10, "refs/heads/fix/shared", 20, null, 0, ).ok,
       true,
     );
   });
@@ -1015,17 +867,7 @@ test("repository scope permits the same target identities in another repository"
 
 test("partial unique indexes enforce occupied repository identities", () => {
   withDatabase((db, path) => {
-    db.assignSlot(
-      1,
-      "owner",
-      "github:repo-1",
-      10,
-      "fix/10",
-      null,
-      20,
-      null,
-      0,
-    );
+    db.assignSlot(1, "owner", "github:repo-1", 10, "fix/10", 20, null, 0, );
 
     const raw = new Database(path);
     try {
@@ -1138,13 +980,13 @@ test("legacy occupied rows require explicit immutable repository backfill", () =
 
 test("assignment rejects issue-only and branch-only duplicate ownership", () => {
   withDatabase((db) => {
-    db.assignSlot(4, "original", "github:repo-1", 6735, "fix/6735-pending", null, null, null, 0);
+    db.assignSlot(4, "original", "github:repo-1", 6735, "fix/6735-pending", null, null, 0);
 
-    const sameIssue = db.assignSlot(2, "same issue", "github:repo-1", 6735, "different-branch", null, null, null, 0);
+    const sameIssue = db.assignSlot(2, "same issue", "github:repo-1", 6735, "different-branch", null, null, 0);
     assert.equal(sameIssue.reason, "target_already_assigned");
     assert.deepEqual(sameIssue.owner_slots, [4]);
 
-    const sameBranch = db.assignSlot(3, "same branch", "github:repo-1", 9999, "fix/6735-pending", null, null, null, 0);
+    const sameBranch = db.assignSlot(3, "same branch", "github:repo-1", 9999, "fix/6735-pending", null, null, 0);
     assert.equal(sameBranch.reason, "target_already_assigned");
     assert.deepEqual(sameBranch.owner_slots, [4]);
   });
@@ -1152,11 +994,11 @@ test("assignment rejects issue-only and branch-only duplicate ownership", () => 
 
 test("released ownership can be explicitly reassigned", () => {
   withDatabase((db) => {
-    db.assignSlot(4, "original", "github:repo-1", 6735, "fix/6735-pending", "session-original", 6737, "a".repeat(40), 0);
+    db.assignSlot(4, "original", "github:repo-1", 6735, "fix/6735-pending", 6737, "a".repeat(40), 0);
     const released = nativeRelease(db, 4);
     assert.equal(released.ok, true);
 
-    const reassigned = db.assignSlot(2, "replacement", "github:repo-1", 6735, "fix/6735-pending", null, 6737, "new-head", 0);
+    const reassigned = db.assignSlot(2, "replacement", "github:repo-1", 6735, "fix/6735-pending", 6737, "new-head", 0);
     assert.deepEqual(reassigned, {
       ok: true,
       conflict: false,

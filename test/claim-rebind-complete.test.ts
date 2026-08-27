@@ -36,10 +36,7 @@ function tupleFromSlot(db: MoPDatabase, slot: number): AssignmentTupleInput {
 
 test("claim creates a complete occupied tuple at the exact expected epoch", () => {
   withDatabase((db) => {
-    const result = db.assignSlot(
-      1, "claim", "github:repo-1", 10, "fix/10", "session-1", 20, HEAD, 0,
-      "implementation", "handoff-1",
-    );
+    const result = db.assignSlot(1, "claim", "github:repo-1", 10, "fix/10", 20, HEAD, 0, "implementation", "handoff-1", );
     assert.deepEqual(result, {
       ok: true, conflict: false, assignment_epoch: 1, idempotent: false,
     });
@@ -48,7 +45,6 @@ test("claim creates a complete occupied tuple at the exact expected epoch", () =
     assert.equal(slot.repository_id, "github:repo-1");
     assert.equal(slot.issue, 10);
     assert.equal(slot.pr, 20);
-    assert.equal(slot.session_id, null);
     assert.equal(slot.work_kind, "implementation");
     assert.equal(slot.handoff_id, "handoff-1");
     assert.equal(slotAssignmentTuple(slot)?.head_sha, HEAD);
@@ -57,7 +53,7 @@ test("claim creates a complete occupied tuple at the exact expected epoch", () =
 
 test("rebind requires the complete expected tuple and exact epoch", () => {
   withDatabase((db) => {
-    db.assignSlot(1, "claim", "github:repo-1", 10, "fix/10", "session-1", null, null, 0, "implementation", "handoff-1");
+    db.assignSlot(1, "claim", "github:repo-1", 10, "fix/10", null, null, 0, "implementation", "handoff-1");
     const before = db.getSlot(1)!;
     const expected = tupleFromSlot(db, 1);
     const desired: AssignmentTupleInput = {
@@ -88,7 +84,7 @@ test("rebind requires the complete expected tuple and exact epoch", () => {
 
 test("rebind refuses invalid complete tuple values without mutation", () => {
   withDatabase((db) => {
-    db.assignSlot(1, "claim", "github:repo-1", 10, "fix/10", "session-1", null, null, 0, "implementation", "handoff-1");
+    db.assignSlot(1, "claim", "github:repo-1", 10, "fix/10", null, null, 0, "implementation", "handoff-1");
     const expected = tupleFromSlot(db, 1);
     const before = db.getSlot(1);
     const invalidDesired = { ...expected, branch: "", work_kind: "not-a-kind" };

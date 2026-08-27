@@ -1484,7 +1484,7 @@ export class HookProcessor {
           summary: pmDirection.summary,
           reason: pmDirection.reason,
           issue: pmDirection.issue,
-          session_id: payload.session_id ?? slot.session_id,
+          session_id: payload.session_id ?? null,
           assignment_epoch: slot.assignment_epoch,
           action: "ignored_no_ownership_mutation",
         });

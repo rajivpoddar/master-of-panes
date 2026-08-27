@@ -14,17 +14,7 @@ test("legacy queued clear cannot release an occupied numbered slot", async () =>
   const directory = mkdtempSync(join(tmpdir(), "mop-queued-clear-refusal-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    assert.equal(db.assignSlot(
-      1,
-      "occupied",
-      "github:repo-1",
-      8000,
-      "fix/8000",
-      "session-8000",
-      null,
-      null,
-      0,
-    ).ok, true);
+    assert.equal(db.assignSlot(1, "occupied", "github:repo-1", 8000, "fix/8000", null, null, 0, ).ok, true);
     db.setPendingClear(1);
     const notifications: string[] = [];
     const processor = new HookProcessor(db, {
@@ -39,7 +29,6 @@ test("legacy queued clear cannot release an occupied numbered slot", async () =>
     const slot = db.getSlot(1)!;
     assert.equal(slot.occupied, true);
     assert.equal(slot.assignment_epoch, 1);
-    assert.equal(slot.session_id, null);
     assert.equal(db.hasPendingClear(1), false);
     assert.equal(db.getEvents(1, 5, "clear_refused_native_release_required").length, 1);
     assert.match(notifications[0], /remains occupied/);
@@ -64,7 +53,7 @@ test("hook events advance only to descendants and never overwrite with stale or 
     }).trim();
 
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", "turn-a", null, null, 0);
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", null, null, 0);
     const processor = new HookProcessor(db, {} as TmuxRelay);
     await processor.process(1, {
       type: "PostToolUse",
@@ -136,7 +125,7 @@ test("hook checkout synchronization never adopts an unregistered branch", async 
     execFileSync("git", ["-C", directory, "commit", "-q", "-m", "first"]);
 
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", "turn-a", null, null, 0);
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10-exact", null, null, 0);
     const processor = new HookProcessor(db, {} as TmuxRelay);
     await processor.process(1, {
       type: "PostToolUse",
@@ -156,17 +145,7 @@ test("same-session idle_prompt is telemetry only when Stop is missing", async ()
   const directory = mkdtempSync(join(tmpdir(), "mop-idle-prompt-turn-test-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    db.assignSlot(
-      2,
-      "PR rework",
-      "github:repo-1",
-      6847,
-      "fix/6847-scheduler-indexed-measurement",
-      "turn-a",
-      6905,
-      "a".repeat(40),
-      0,
-    );
+    db.assignSlot(2, "PR rework", "github:repo-1", 6847, "fix/6847-scheduler-indexed-measurement", 6905, "a".repeat(40), 0, );
     db.startAgentTurn(2, "turn-a");
 
     const processor = new HookProcessor(db, {} as TmuxRelay);
@@ -191,17 +170,7 @@ test("stale idle_prompt cannot change a newer active turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-stale-idle-prompt-turn-test-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    db.assignSlot(
-      2,
-      "PR rework",
-      "github:repo-1",
-      6847,
-      "fix/6847-scheduler-indexed-measurement",
-      "turn-old",
-      6905,
-      "a".repeat(40),
-      0,
-    );
+    db.assignSlot(2, "PR rework", "github:repo-1", 6847, "fix/6847-scheduler-indexed-measurement", 6905, "a".repeat(40), 0, );
     db.startAgentTurn(2, "turn-new");
 
     const processor = new HookProcessor(db, {} as TmuxRelay);
@@ -225,17 +194,7 @@ test("idle_prompt cannot change an already-indeterminate turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-indeterminate-idle-prompt-test-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    db.assignSlot(
-      2,
-      "PR rework",
-      "github:repo-1",
-      6847,
-      "fix/6847-scheduler-indexed-measurement",
-      "turn-new",
-      6905,
-      "a".repeat(40),
-      0,
-    );
+    db.assignSlot(2, "PR rework", "github:repo-1", 6847, "fix/6847-scheduler-indexed-measurement", 6905, "a".repeat(40), 0, );
     db.startAgentTurn(2, "turn-new");
     db.finishAgentTurn(2, "turn-old");
 
@@ -272,17 +231,7 @@ test("Stop debounce tolerates a four-second promised-action scanner under host p
     );
 
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-    db.assignSlot(
-      1,
-      "issue",
-      "github:repo-1",
-      10,
-      "main",
-      "turn-a",
-      null,
-      "a".repeat(40),
-      0,
-    );
+    db.assignSlot(1, "issue", "github:repo-1", 10, "main", null, "a".repeat(40), 0, );
     const sent: Array<{ slot: number; command: string; force: boolean }> = [];
     const relay = {
       sendToSlot(slot: number, command: string, force: boolean) {

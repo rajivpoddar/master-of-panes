@@ -32,19 +32,7 @@ interface Fixture {
 function fixture(): Fixture {
   const directory = mkdtempSync(join(tmpdir(), "mop-native-release-"));
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
-  assert.equal(db.assignSlot(
-    1,
-    "issue 8100",
-    "github:heydonna-app/heydonna-app",
-    8100,
-    "fix/8100",
-    "session-8100",
-    8101,
-    ASSIGNMENT_HEAD,
-    0,
-    "implementation",
-    "handoff-8100",
-  ).ok, true);
+  assert.equal(db.assignSlot(1, "issue 8100", "github:heydonna-app/heydonna-app", 8100, "fix/8100", 8101, ASSIGNMENT_HEAD, 0, "implementation", "handoff-8100", ).ok, true);
   const current = db.getSlot(1)!;
   const expectedTuple = slotAssignmentTuple(current)!;
   return {
@@ -125,7 +113,6 @@ test("MoP-derived checkout reset acknowledgement clears once and replay is safe 
     const free = value.db.getSlot(1)!;
     assert.equal(free.occupied, false);
     assert.equal(free.assignment_epoch, value.request.expected_epoch + 1);
-    assert.equal(free.session_id, null);
     assert.equal(slotAssignmentTuple(free), null);
 
     const replay = await release.release(value.request);
@@ -238,38 +225,10 @@ test("final CAS catches epoch drift and preserves the replacement owner", async 
   }
 });
 
-test("session telemetry drift does not replace the tuple ownership predicate", async () => {
-  const value = fixture();
-  try {
-    const release = coordinator(value, {
-      observe: async () => {
-        value.db.updateSlot(1, { session_id: "replacement-session" });
-        return exactObservation();
-      },
-    });
-    assert.equal((await release.release(value.request)).code, "released");
-    const occupied = value.db.getSlot(1)!;
-    assert.equal(occupied.occupied, false);
-    assert.equal(occupied.assignment_epoch, value.request.expected_epoch + 1);
-  } finally {
-    closeFixture(value);
-  }
-});
-
 test("releasing one slot does not mutate an unrelated occupied slot", async () => {
   const value = fixture();
   try {
-    assert.equal(value.db.assignSlot(
-      2,
-      "other",
-      "github:other/repo",
-      9000,
-      "fix/9000",
-      "session-9000",
-      null,
-      null,
-      0,
-    ).ok, true);
+    assert.equal(value.db.assignSlot(2, "other", "github:other/repo", 9000, "fix/9000", null, null, 0, ).ok, true);
     const slotTwo = value.db.getSlot(2)!;
     assert.equal((await coordinator(value).release(value.request)).code, "released");
     assert.deepEqual(value.db.getSlot(2), slotTwo);

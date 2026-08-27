@@ -448,7 +448,6 @@ export class NativeSlotReleaseCoordinator {
         || readback.occupied
         || readback.assignment_epoch !== validated.request.expected_epoch + 1
         || slotAssignmentTuple(readback) !== null
-        || readback.session_id !== null
       ) {
         return {
           ...result(

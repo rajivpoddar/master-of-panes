@@ -141,7 +141,6 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
       body.repository_id as string | number,
       body.issue as number,
       body.branch as string,
-      null,
       body.pr as number | null,
       body.head_sha as string | null,
       body.expected_epoch as number,

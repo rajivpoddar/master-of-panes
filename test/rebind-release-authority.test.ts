@@ -47,7 +47,7 @@ test("full tuple rebind increments once and refuses an unverifiable replay", asy
   registerAssignmentRoute(app, db);
   try {
     assert.equal(
-      db.assignSlot(1, "issue", "github:repo-1", 7400, "fix/7400", null, null, null, 0, "rework", "handoff-7400").ok,
+      db.assignSlot(1, "issue", "github:repo-1", 7400, "fix/7400", null, null, 0, "rework", "handoff-7400").ok,
       true,
     );
     const current = db.getSlot(1)!;
@@ -106,7 +106,7 @@ test("complete-mode partial expected tuple refuses without mutation", async () =
   registerAssignmentRoute(app, db);
   try {
     assert.equal(
-      db.assignSlot(1, "issue", "github:repo-1", 7400, "fix/7400", null, null, null, 0, "rework", "handoff-7400").ok,
+      db.assignSlot(1, "issue", "github:repo-1", 7400, "fix/7400", null, null, 0, "rework", "handoff-7400").ok,
       true,
     );
     const current = db.getSlot(1)!;
@@ -159,7 +159,7 @@ test("complete-mode partial expected tuple refuses without mutation", async () =
 
 test("full tuple rebind refuses stale observation and another repository may reuse identities", () => {
   withDatabase((db) => {
-    assert.equal(db.assignSlot(1, "issue", "github:repo-1", 7400, "fix/7400", null, null, null, 0, "rework", "handoff-7400").ok, true);
+    assert.equal(db.assignSlot(1, "issue", "github:repo-1", 7400, "fix/7400", null, null, 0, "rework", "handoff-7400").ok, true);
     const current = db.getSlot(1)!;
     const expected = tuple({ claimed_at: current.claimed_at });
     const desired = { ...expected, issue: 7400, pr: 7401, branch: "fix/7400-successor", head_sha: HEAD };
@@ -177,7 +177,7 @@ test("full tuple rebind refuses stale observation and another repository may reu
     assert.equal(wrongTuple.reason, "observed_tuple_mismatch");
     assert.equal(db.getSlot(1)?.assignment_epoch, current.assignment_epoch);
 
-    assert.equal(db.assignSlot(2, "other repo", "github:repo-2", 7400, "fix/7400-successor", null, 7401, HEAD, 0, "rework", "handoff-other").ok, true);
+    assert.equal(db.assignSlot(2, "other repo", "github:repo-2", 7400, "fix/7400-successor", 7401, HEAD, 0, "rework", "handoff-other").ok, true);
     const conflict = db.rebindSlot(
       1,
       current.assignment_epoch,

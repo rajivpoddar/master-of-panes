@@ -44,7 +44,6 @@ const assignment = {
   issue: 10,
   pr: 20,
   branch: "fix/10",
-  session_id: "session-route-1",
   head_sha: "a".repeat(40),
   work_kind: "implementation",
   handoff_id: "handoff-route-default",
@@ -173,6 +172,14 @@ test("issue-claim adoption route binds an active-turn claim preserving epoch and
     assert.equal(db.getSlot(1)?.active_turn_state, "active");
 
     const adopt = completeRebindBody(db.getSlot(1)!);
+    const refused = await app.request(
+      "/slots/1/adopt-issue-claim",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, adopt),
+    );
+    assert.equal(refused.status, 409);
+    assert.equal((await refused.json() as Record<string, unknown>).reason, "active_turn");
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    db.finishAgentTurn(1, "turn-a");
     const accepted = await app.request(
       "/slots/1/adopt-issue-claim",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, adopt),
@@ -185,8 +192,8 @@ test("issue-claim adoption route binds an active-turn claim preserving epoch and
     assert.equal(adopted.branch, assignment.branch);
     assert.equal(adopted.head_sha, assignment.head_sha);
     assert.equal(adopted.assignment_epoch, 2);
-    assert.equal(adopted.active_turn_state, "active");
-    assert.equal(adopted.active_turn_id, "turn-a");
+    assert.equal(adopted.active_turn_state, "inactive");
+    assert.equal(adopted.active_turn_id, null);
     assert.equal(db.getEvents(1, 10, "slot_issue_claim_adopted").length, 1);
   });
 });
@@ -333,7 +340,6 @@ test("assignment ignores session identity and refuses a FREE slot with an active
     const accepted = await app.request("/slots/1/assign", assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, active));
     assert.equal(accepted.status, 200);
     const row = db.getSlot(1)!;
-    assert.equal(row.session_id, null);
     assert.equal(row.assignment_epoch, 1);
     assert.equal("session_id" in JSON.parse(db.getEvents(1, 1, "slot_assigned")[0].payload), false);
   });

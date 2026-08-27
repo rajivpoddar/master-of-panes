@@ -770,14 +770,13 @@ app.post("/hooks/slot/:slotNum", async (c) => {
   const payload = normalizePayload(payloadParse.data);
 
   // Process the hook event
-  const turnId = payload.session_id ?? `${slotNum}:${Date.now()}`;
-  if (payload.type === "UserPromptSubmit") {
-    db.startAgentTurn(slotNum, turnId);
+  if (payload.type === "UserPromptSubmit" && payload.session_id?.trim()) {
+    db.startAgentTurn(slotNum, payload.session_id);
   } else if (payload.type === "PreToolUse" || payload.type === "PostToolUse") {
     db.touchMeaningfulWork(slotNum, payload.session_id);
   }
   const response = await processor.process(slotNum, payload);
-  if (payload.type === "Stop" || payload.type === "SessionEnd") {
+  if ((payload.type === "Stop" || payload.type === "SessionEnd") && payload.session_id?.trim()) {
     db.finishAgentTurn(slotNum, payload.session_id);
   }
 
