@@ -298,11 +298,10 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_release_slot",
-    "Synchronously reset the exact owning checkout to clean current main, then release the same complete MoP tuple/session/epoch.",
+    "Synchronously reset the exact owning checkout to clean current main, then release the same complete MoP tuple/epoch.",
     {
       slot: z.number().int().min(1).max(4).describe("Slot number (1-4)"),
       expected_epoch: z.number().int().nonnegative().describe("Current MoP assignment epoch"),
-      expected_session_id: z.string().min(1).describe("Current owning MoP session ID"),
       expected_repository_id: z.union([z.string(), z.number()]).describe("Current repository identity"),
       expected_issue: z.number().int().positive().nullable(),
       expected_pr: z.number().int().positive().nullable(),

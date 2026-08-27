@@ -77,7 +77,7 @@ export interface SlotState {
   status: SlotStatus;
   /** Whether the slot is occupied */
   occupied: boolean;
-  /** Claude Code session ID */
+  /** Hook-turn telemetry only; never part of assignment ownership. */
   session_id: string | null;
   /** Current task description */
   task: string | null;

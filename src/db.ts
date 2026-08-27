@@ -25,6 +25,7 @@ export interface SlotMutationResult {
     | "invalid_assignment_metadata"
     | "target_already_assigned"
     | "slot_already_occupied"
+    | "active_turn"
     | "slot_not_occupied"
     | "slot_already_free_unverifiable"
     | "expected_tuple_required"
@@ -62,7 +63,6 @@ export interface AssignmentTupleInput {
 export interface Family2ReleaseDigestInput {
   effect_id: string;
   expected_epoch: number;
-  expected_session_id: string;
   expected_tuple: AssignmentTupleInput;
   intended_main_head: string;
 }
@@ -86,7 +86,6 @@ export interface NativeReleaseEffectReceipt {
   slot: number;
   expected_epoch: number;
   released_epoch: number;
-  expected_session_id: string;
   expected_tuple: AssignmentTupleInput;
   intended_main_head: string;
   created_at: string;
@@ -247,8 +246,6 @@ export function normalizedFamily2ReleaseBody(
     typeof request.effect_id !== "string"
     || request.effect_id.trim() === ""
     || !Number.isInteger(request.expected_epoch)
-    || typeof request.expected_session_id !== "string"
-    || request.expected_session_id.trim() === ""
     || !/^[0-9a-f]{40}$/i.test(request.intended_main_head)
   ) {
     throw new Error("Family-2 release identity is invalid");
@@ -256,7 +253,6 @@ export function normalizedFamily2ReleaseBody(
   return {
     effect_id: request.effect_id,
     expected_epoch: request.expected_epoch,
-    expected_session_id: request.expected_session_id,
     expected_repository_id: tuple.repository_id,
     expected_issue: tuple.issue,
     expected_pr: tuple.pr,
@@ -746,13 +742,12 @@ export class MoPDatabase {
   /**
    * Internal final clear invoked only after NativeSlotReleaseCoordinator has
    * completed delivery and validated the owning pane's reset acknowledgement.
-   * The complete tuple, owning session, and exact epoch are compared in the
-   * same transaction; there is no numbered-slot epoch-only clear operation.
+   * The complete tuple and exact epoch are compared in the same transaction;
+   * hook session telemetry is deliberately not an ownership predicate.
    */
   commitNativeRelease(
     slot: number,
     expectedEpoch: number,
-    expectedSessionId: string,
     expectedTupleInput: AssignmentTupleInput,
     effect?: {
       effect_id: string;
@@ -768,16 +763,6 @@ export class MoPDatabase {
         assignment_epoch: current?.assignment_epoch ?? 0,
         idempotent: false,
         reason: "expected_epoch_required",
-      };
-    }
-    if (typeof expectedSessionId !== "string" || expectedSessionId.trim() === "") {
-      const current = this.getSlot(slot);
-      return {
-        ok: false,
-        conflict: true,
-        assignment_epoch: current?.assignment_epoch ?? 0,
-        idempotent: false,
-        reason: "expected_session_required",
       };
     }
     const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
@@ -812,7 +797,6 @@ export class MoPDatabase {
         computedEffectDigest = computeFamily2ReleaseDigest({
           effect_id: effect.effect_id,
           expected_epoch: expectedEpoch,
-          expected_session_id: expectedSessionId,
           expected_tuple: expectedTupleInput,
           intended_main_head: effect.intended_main_head,
         });
@@ -863,7 +847,6 @@ export class MoPDatabase {
             prior.request_digest.toLowerCase() !== effect.request_digest.toLowerCase()
             || prior.slot !== slot
             || prior.expected_epoch !== expectedEpoch
-            || prior.expected_session_id !== expectedSessionId
             || prior.intended_main_head.toLowerCase() !== effect.intended_main_head.toLowerCase()
             || !sameTuple
           ) {
@@ -899,9 +882,6 @@ export class MoPDatabase {
       }
       if (epoch !== expectedEpoch) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
-      }
-      if (current.session_id !== expectedSessionId) {
-        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "session_mismatch" };
       }
       if (!assignmentTupleMatches(slotAssignmentTuple(current), expectedTuple)) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
@@ -942,7 +922,7 @@ export class MoPDatabase {
           slot,
           expectedEpoch,
           epoch + 1,
-          expectedSessionId,
+          "",
           JSON.stringify({
             repository_id: expectedTuple.repository_id,
             issue: expectedTuple.issue,
@@ -965,7 +945,7 @@ export class MoPDatabase {
     if (typeof effectId !== "string" || effectId.trim() === "") return null;
     const row = this.db.prepare(`
       SELECT effect_id, request_digest, slot, expected_epoch, released_epoch,
-             expected_session_id, expected_tuple, intended_main_head, created_at
+             expected_tuple, intended_main_head, created_at
       FROM native_release_effect_receipts
       WHERE effect_id = ?
     `).get(effectId) as {
@@ -974,7 +954,6 @@ export class MoPDatabase {
       slot: number;
       expected_epoch: number;
       released_epoch: number;
-      expected_session_id: string;
       expected_tuple: string;
       intended_main_head: string;
       created_at: string;
@@ -996,7 +975,8 @@ export class MoPDatabase {
     repositoryId: string | number | null,
     issue: number | null,
     branch: string | null,
-    sessionId: string | null,
+    /** @deprecated retained only for source compatibility; never persisted or compared. */
+    _legacySessionId: string | null,
     pr: number | null = null,
     headSha: string | null = null,
     expectedEpoch?: number,
@@ -1073,6 +1053,20 @@ export class MoPDatabase {
           idempotent: false,
           reason: "slot_already_occupied",
           owner_slots: [slot],
+        };
+      }
+      // Ownership projection can be FREE while a hook-authoritative turn is
+      // still running. Never admit a replacement over that live turn.
+      if (requireFree && !current.occupied && (
+        current.active_turn_id !== null
+        || current.active_turn_state !== "inactive"
+      )) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "active_turn",
         };
       }
       const metadataMatches = normalizedWorkKind === null
@@ -1162,7 +1156,8 @@ export class MoPDatabase {
         this.updateAssignmentState(slot, {
           status: "active" as SlotStatus,
           occupied: true,
-          session_id: sessionId,
+          // Session IDs are hook-turn telemetry, never assignment authority.
+          session_id: null,
           task,
           repository_id: normalizedRepositoryId,
           issue: normalizedIssue,

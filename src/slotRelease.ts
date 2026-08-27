@@ -14,7 +14,6 @@ import type { SlotState } from "./types.js";
 export interface NativeSlotReleaseRequest {
   slot: number;
   expected_epoch: number;
-  expected_session_id: string;
   expected_tuple: AssignmentTupleInput;
   intended_main_head: string;
   /** Immutable Family-2 effect identity; absent for legacy native callers. */
@@ -33,7 +32,6 @@ export interface CheckoutResetObservation {
 
 export interface NativeSlotReleaseAcknowledgement extends CheckoutResetObservation {
   slot: number;
-  session_id: string;
   assignment_epoch: number;
   expected_tuple: AssignmentTupleInput;
 }
@@ -44,7 +42,6 @@ export type NativeSlotReleaseCode =
   | "slot_not_found"
   | "slot_already_free_unverifiable"
   | "epoch_mismatch"
-  | "session_mismatch"
   | "observed_tuple_mismatch"
   | "release_in_progress"
   | "checkout_identity_unavailable"
@@ -75,7 +72,6 @@ export interface NativeSlotReleaseResult {
 }
 
 interface NormalizedReleaseRequest extends NativeSlotReleaseRequest {
-  expected_session_id: string;
   intended_main_head: string;
 }
 
@@ -133,14 +129,12 @@ export class NativeSlotReleaseCoordinator {
       || request.slot < 1
       || request.slot > 4
       || !Number.isInteger(request.expected_epoch)
-      || typeof request.expected_session_id !== "string"
-      || request.expected_session_id.trim() === ""
       || !/^[0-9a-f]{40}$/i.test(request.intended_main_head)
       || !tuple
     ) {
       return result(
         "invalid_request",
-        "A complete release tuple, session, epoch, and intended main head are required.",
+        "A complete release tuple, epoch, and intended main head are required.",
         current,
         "Re-read MoP and supply the exact current release inputs.",
       );
@@ -159,16 +153,15 @@ export class NativeSlotReleaseCoordinator {
     if (current.assignment_epoch !== request.expected_epoch) {
       return result("epoch_mismatch", "Assignment epoch changed before release delivery.", current, "Re-read MoP and retry with fresh state.");
     }
-    if (current.session_id !== request.expected_session_id) {
-      return result("session_mismatch", "Owning session changed before release delivery.", current, "Re-read MoP and retry with the current owning session.");
-    }
     if (!assignmentTupleMatches(slotAssignmentTuple(current), tuple)) {
       return result("observed_tuple_mismatch", "Complete owner tuple changed before release delivery.", current, "Re-read MoP and retry with the current tuple.");
+    }
+    if (current.active_turn_id !== null || current.active_turn_state !== "inactive") {
+      return result("slot_not_idle", "The owning hook turn is still active or indeterminate.", current, "Wait for the authoritative Stop or SessionEnd hook and retry.");
     }
     return {
       request: {
         ...request,
-        expected_session_id: request.expected_session_id.trim(),
         intended_main_head: request.intended_main_head.toLowerCase(),
       },
       tuple,
@@ -213,7 +206,6 @@ export class NativeSlotReleaseCoordinator {
       computedDigest = computeFamily2ReleaseDigest({
         effect_id: request.effect_id,
         expected_epoch: request.expected_epoch,
-        expected_session_id: request.expected_session_id,
         expected_tuple: request.expected_tuple,
         intended_main_head: request.intended_main_head,
       });
@@ -263,7 +255,6 @@ export class NativeSlotReleaseCoordinator {
       && assignmentTupleMatches(expectedTuple, priorTuple)
       && prior.slot === request.slot
       && prior.expected_epoch === request.expected_epoch
-      && prior.expected_session_id === request.expected_session_id
       && prior.request_digest.toLowerCase() === request.request_digest.toLowerCase()
       && prior.intended_main_head.toLowerCase() === request.intended_main_head.toLowerCase();
     if (!same) {
@@ -304,7 +295,6 @@ export class NativeSlotReleaseCoordinator {
         computedDigest = computeFamily2ReleaseDigest({
           effect_id: request.effect_id,
           expected_epoch: request.expected_epoch,
-          expected_session_id: request.expected_session_id,
           expected_tuple: request.expected_tuple,
           intended_main_head: request.intended_main_head,
         });
@@ -402,7 +392,6 @@ export class NativeSlotReleaseCoordinator {
       const acknowledgement: NativeSlotReleaseAcknowledgement = {
         ...observation,
         slot: request.slot,
-        session_id: validated.request.expected_session_id,
         assignment_epoch: validated.request.expected_epoch,
         expected_tuple: validated.request.expected_tuple,
       };
@@ -433,7 +422,6 @@ export class NativeSlotReleaseCoordinator {
       const cleared = this.dependencies.db.commitNativeRelease(
         request.slot,
         validated.request.expected_epoch,
-        validated.request.expected_session_id,
         validated.request.expected_tuple,
         request.effect_id && request.request_digest
           ? {

@@ -48,7 +48,7 @@ test("claim creates a complete occupied tuple at the exact expected epoch", () =
     assert.equal(slot.repository_id, "github:repo-1");
     assert.equal(slot.issue, 10);
     assert.equal(slot.pr, 20);
-    assert.equal(slot.session_id, "session-1");
+    assert.equal(slot.session_id, null);
     assert.equal(slot.work_kind, "implementation");
     assert.equal(slot.handoff_id, "handoff-1");
     assert.equal(slotAssignmentTuple(slot)?.head_sha, HEAD);

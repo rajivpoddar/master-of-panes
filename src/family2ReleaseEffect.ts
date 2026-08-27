@@ -22,7 +22,6 @@ export interface Family2ReleaseEffectRequest {
   slot: number;
   effect_id: string;
   expected_epoch: number;
-  expected_session_id: string;
   expected_tuple: AssignmentTupleInput;
   intended_main_head: string;
 }
@@ -39,8 +38,8 @@ export interface Family2ReleaseEffectReceipt {
   remediation: string;
   release_id: string | null;
   request_digest: string | null;
-  before: { slot: number; assignment_epoch: number; session_id: string; tuple: AssignmentTupleInput } | null;
-  after: { slot: number; assignment_epoch: number; occupied: boolean; session_id: string | null } | null;
+  before: { slot: number; assignment_epoch: number; tuple: AssignmentTupleInput } | null;
+  after: { slot: number; assignment_epoch: number; occupied: boolean } | null;
   idempotent?: boolean;
 }
 
@@ -60,7 +59,7 @@ function tupleFromSlot(slot: Record<string, unknown>): AssignmentTupleInput {
 function validTuple(value: AssignmentTupleInput): boolean { try { return !!value && normalizeAssignmentTuple(value) !== null; } catch { return false; } }
 function sameBinding(a: Family2ReleaseEffectRequest, b: Family2ReleaseEffectRequest): boolean {
   const at = normalizeAssignmentTuple(a.expected_tuple); const bt = normalizeAssignmentTuple(b.expected_tuple);
-  return !!at && !!bt && assignmentTupleMatches(at, bt) && a.slot === b.slot && a.expected_epoch === b.expected_epoch && a.expected_session_id === b.expected_session_id && a.intended_main_head.toLowerCase() === b.intended_main_head.toLowerCase();
+  return !!at && !!bt && assignmentTupleMatches(at, bt) && a.slot === b.slot && a.expected_epoch === b.expected_epoch && a.intended_main_head.toLowerCase() === b.intended_main_head.toLowerCase();
 }
 
 /** Stateless adapter for one already-committed Family-2 release effect. */
@@ -78,8 +77,8 @@ export class Family2ReleaseEffectAdapter {
       if (!response.ok || !isRecord(payload) || payload.success !== true || typeof payload.request_digest !== "string" || typeof payload.released_epoch !== "number") return responseReceipt("effect_receipt_invalid", "Durable release receipt is malformed.", "Stop and reconcile the committed outbox effect before retrying.", { release_id: request.effect_id });
       const receiptTuple = payload.expected_tuple as AssignmentTupleInput;
       const expectedDigest = computeFamily2ReleaseDigest(request);
-      if (payload.effect_id !== request.effect_id || payload.request_digest.toLowerCase() !== expectedDigest || payload.expected_epoch !== request.expected_epoch || payload.slot !== request.slot || payload.expected_session_id !== request.expected_session_id || typeof payload.intended_main_head !== "string" || payload.intended_main_head.toLowerCase() !== request.intended_main_head.toLowerCase() || !assignmentTupleMatches(normalizeAssignmentTuple(receiptTuple), normalizeAssignmentTuple(request.expected_tuple))) return responseReceipt("effect_receipt_conflict", "Durable release receipt conflicts with the immutable effect binding.", "Keep the outbox row and obtain an exact transition reconciliation.", { release_id: request.effect_id, request_digest: expectedDigest });
-      return responseReceipt("released", "The exact release effect was already committed; receipt consumed idempotently.", "Continue with remaining committed effects only.", { release_id: request.effect_id, request_digest: expectedDigest, idempotent: true, after: { slot: request.slot, assignment_epoch: payload.released_epoch, occupied: false, session_id: null } });
+      if (payload.effect_id !== request.effect_id || payload.request_digest.toLowerCase() !== expectedDigest || payload.expected_epoch !== request.expected_epoch || payload.slot !== request.slot || typeof payload.intended_main_head !== "string" || payload.intended_main_head.toLowerCase() !== request.intended_main_head.toLowerCase() || !assignmentTupleMatches(normalizeAssignmentTuple(receiptTuple), normalizeAssignmentTuple(request.expected_tuple))) return responseReceipt("effect_receipt_conflict", "Durable release receipt conflicts with the immutable effect binding.", "Keep the outbox row and obtain an exact transition reconciliation.", { release_id: request.effect_id, request_digest: expectedDigest });
+      return responseReceipt("released", "The exact release effect was already committed; receipt consumed idempotently.", "Continue with remaining committed effects only.", { release_id: request.effect_id, request_digest: expectedDigest, idempotent: true, after: { slot: request.slot, assignment_epoch: payload.released_epoch, occupied: false } });
     } catch (error) {
       return responseReceipt("effect_receipt_invalid", `Release receipt read failed: ${error instanceof Error ? error.message : String(error)}`, "Keep the committed outbox effect retryable and reconcile the exact receipt.", { release_id: request.effect_id });
     }
@@ -90,14 +89,14 @@ export class Family2ReleaseEffectAdapter {
   }
 
   async release(request: Family2ReleaseEffectRequest): Promise<Family2ReleaseEffectReceipt> {
-    if (typeof request.base_url !== "string" || !request.base_url.trim() || !Number.isInteger(request.slot) || request.slot < 1 || request.slot > 4 || typeof request.effect_id !== "string" || !request.effect_id.trim() || !Number.isInteger(request.expected_epoch) || typeof request.expected_session_id !== "string" || !request.expected_session_id.trim() || !/^[0-9a-f]{40}$/i.test(request.intended_main_head) || !validTuple(request.expected_tuple)) return responseReceipt("invalid_request", "Immutable release effect identity and complete tuple are required.", "Retry with the committed Family-2 outbox binding.");
+    if (typeof request.base_url !== "string" || !request.base_url.trim() || !Number.isInteger(request.slot) || request.slot < 1 || request.slot > 4 || typeof request.effect_id !== "string" || !request.effect_id.trim() || !Number.isInteger(request.expected_epoch) || !/^[0-9a-f]{40}$/i.test(request.intended_main_head) || !validTuple(request.expected_tuple)) return responseReceipt("invalid_request", "Immutable release effect identity and complete tuple are required.", "Retry with the committed Family-2 outbox binding.");
     const base = request.base_url.replace(/\/$/, "");
     const prior = await this.receipt(request, base); if (prior) return prior;
     let beforeResponse: Family2ReleaseResponse; let beforePayload: unknown;
     try { beforeResponse = await this.fetch(`${base}/slots/${request.slot}`); beforePayload = await beforeResponse.json(); } catch (error) { return responseReceipt("slot_read_failed", `Authoritative slot read failed: ${error instanceof Error ? error.message : String(error)}`, "Keep the committed effect durable and retry after MoP is healthy."); }
     const before = slotSnapshot(beforePayload); const currentTuple = before ? tupleFromSlot(before) : null; const normalized = currentTuple && normalizeAssignmentTuple(currentTuple);
-    if (!beforeResponse.ok || !before || before.slot !== request.slot || before.occupied !== true || before.active_turn_state !== "inactive" || before.idle !== true || before.assignment_epoch !== request.expected_epoch || before.session_id !== request.expected_session_id || !normalized || !assignmentTupleMatches(normalized, normalizeAssignmentTuple(request.expected_tuple))) return responseReceipt("slot_not_releasable", "Current slot does not match the immutable committed release tuple.", "Leave the slot untouched and reconcile the committed effect before retrying.");
-    const beforeReceipt = { slot: request.slot, assignment_epoch: request.expected_epoch, session_id: request.expected_session_id, tuple: request.expected_tuple };
+    if (!beforeResponse.ok || !before || before.slot !== request.slot || before.occupied !== true || before.active_turn_state !== "inactive" || before.idle !== true || before.assignment_epoch !== request.expected_epoch || !normalized || !assignmentTupleMatches(normalized, normalizeAssignmentTuple(request.expected_tuple))) return responseReceipt("slot_not_releasable", "Current slot does not match the immutable committed release tuple.", "Leave the slot untouched and reconcile the committed effect before retrying.");
+    const beforeReceipt = { slot: request.slot, assignment_epoch: request.expected_epoch, tuple: request.expected_tuple };
     const body = this.body(request); const requestDigest = computeFamily2ReleaseDigest(request);
     let releaseResponse: Family2ReleaseResponse; let releasePayload: unknown;
     try { releaseResponse = await this.fetch(`${base}/slots/${request.slot}/release`, { method: "POST", headers: { "content-type": "application/json", [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY }, body: JSON.stringify({ ...body, request_digest: requestDigest }) }); releasePayload = await releaseResponse.json(); } catch (error) { return responseReceipt("release_failed", `Native release request failed: ${error instanceof Error ? error.message : String(error)}`, "Keep the effect uncertain; reconcile its durable receipt before retry.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt }); }
@@ -106,8 +105,8 @@ export class Family2ReleaseEffectAdapter {
     let afterResponse: Family2ReleaseResponse; let afterPayload: unknown;
     try { afterResponse = await this.fetch(`${base}/slots/${request.slot}`); afterPayload = await afterResponse.json(); } catch (error) { return responseReceipt("free_readback_failed", `FREE readback failed: ${error instanceof Error ? error.message : String(error)}`, "Retry only through durable receipt reconciliation; do not reissue release.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt }); }
     const after = slotSnapshot(afterPayload);
-    if (!afterResponse.ok || !after || after.occupied !== false || after.assignment_epoch !== request.expected_epoch + 1 || after.session_id !== null) return responseReceipt("free_readback_failed", "Native release did not prove FREE epoch+1.", "Reconcile the exact durable receipt before retrying.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt });
-    return responseReceipt("released", "Native release committed and FREE epoch+1 readback verified.", "Consume this effect once and continue with remaining effects.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt, after: { slot: request.slot, assignment_epoch: after.assignment_epoch as number, occupied: false, session_id: null }, idempotent: false });
+    if (!afterResponse.ok || !after || after.occupied !== false || after.assignment_epoch !== request.expected_epoch + 1) return responseReceipt("free_readback_failed", "Native release did not prove FREE epoch+1.", "Reconcile the exact durable receipt before retrying.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt });
+    return responseReceipt("released", "Native release committed and FREE epoch+1 readback verified.", "Consume this effect once and continue with remaining effects.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt, after: { slot: request.slot, assignment_epoch: after.assignment_epoch as number, occupied: false }, idempotent: false });
   }
 }
 

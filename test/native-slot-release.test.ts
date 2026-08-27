@@ -53,7 +53,6 @@ function fixture(): Fixture {
     request: {
       slot: 1,
       expected_epoch: current.assignment_epoch,
-      expected_session_id: current.session_id!,
       expected_tuple: {
         repository_id: expectedTuple.repository_id,
         issue: expectedTuple.issue,
@@ -120,7 +119,6 @@ test("MoP-derived checkout reset acknowledgement clears once and replay is safe 
     assert.equal(first.code, "released");
     assert.equal(first.success, true);
     assert.equal(first.acknowledgement?.checkout_path, CHECKOUT);
-    assert.equal(first.acknowledgement?.session_id, value.request.expected_session_id);
     assert.deepEqual(first.acknowledgement?.expected_tuple, value.request.expected_tuple);
     assert.match(instruction, /Stop work on the current assignment now/);
     assert.match(instruction, /switching your owning checkout .* to branch main, pulling origin\/main/);
@@ -240,7 +238,7 @@ test("final CAS catches epoch drift and preserves the replacement owner", async 
   }
 });
 
-test("final CAS catches owning-session drift without clearing the tuple", async () => {
+test("session telemetry drift does not replace the tuple ownership predicate", async () => {
   const value = fixture();
   try {
     const release = coordinator(value, {
@@ -249,11 +247,10 @@ test("final CAS catches owning-session drift without clearing the tuple", async 
         return exactObservation();
       },
     });
-    assert.equal((await release.release(value.request)).code, "clear_conflict");
+    assert.equal((await release.release(value.request)).code, "released");
     const occupied = value.db.getSlot(1)!;
-    assert.equal(occupied.occupied, true);
-    assert.equal(occupied.assignment_epoch, value.request.expected_epoch);
-    assert.equal(occupied.session_id, "replacement-session");
+    assert.equal(occupied.occupied, false);
+    assert.equal(occupied.assignment_epoch, value.request.expected_epoch + 1);
   } finally {
     closeFixture(value);
   }

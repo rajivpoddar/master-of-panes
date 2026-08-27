@@ -63,7 +63,7 @@ test("authenticated Family-2 route invokes the committed-effect consumer", async
     family2ReleaseEffectAdapter: new Family2ReleaseEffectAdapter(fetch),
     clearPlanApprovalTimer: () => undefined,
   });
-  const payload = { base_url: "http://mop", slot: 4, effect_id: "effect-7525", expected_epoch: 581, expected_session_id: "session-7525", expected_tuple: { repository_id: current.repository_id, issue: current.issue, pr: current.pr, branch: current.branch, head_sha: current.head_sha, work_kind: current.work_kind, handoff_id: current.handoff_id, claimed_at: current.claimed_at }, intended_main_head: "a".repeat(40) };
+  const payload = { base_url: "http://mop", slot: 4, effect_id: "effect-7525", expected_epoch: 581, expected_tuple: { repository_id: current.repository_id, issue: current.issue, pr: current.pr, branch: current.branch, head_sha: current.head_sha, work_kind: current.work_kind, handoff_id: current.handoff_id, claimed_at: current.claimed_at }, intended_main_head: "a".repeat(40) };
   const response = await app.request("http://mop/family2/release-effect", { method: "POST", headers: { [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY, "content-type": "application/json" }, body: JSON.stringify(payload) });
   assert.equal(response.status, 200);
   assert.equal(calls.length, 4);

@@ -40,7 +40,6 @@ const COMPLETE_CLAIM_FIELDS = [
   "issue",
   "pr",
   "branch",
-  "session_id",
   "head_sha",
   "work_kind",
   "handoff_id",
@@ -76,7 +75,6 @@ function completeTuple(
 
 function invalidCompleteClaim(body: Record<string, unknown>): boolean {
   if (!hasEvery(body, COMPLETE_CLAIM_FIELDS)) return true;
-  if (typeof body.session_id !== "string" || body.session_id.trim() === "") return true;
   if (!Number.isInteger(body.issue) || Number(body.issue) <= 0) return true;
   if (typeof body.branch !== "string" || body.branch.trim() === "") return true;
   return normalizeAssignmentTuple({
@@ -132,13 +130,18 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
         reason: "observed_tuple_mismatch",
       }, 409);
     }
+    // Caller-provided session identity is not an assignment field. Strip it
+    // from the durable assignment event as well; only hook endpoints record
+    // session IDs for turn telemetry.
+    const assignmentEvent = { ...body };
+    delete assignmentEvent.session_id;
     const result = db.assignSlot(
       slotParse.data,
       typeof body.task === "string" ? body.task : "",
       body.repository_id as string | number,
       body.issue as number,
       body.branch as string,
-      body.session_id as string,
+      null,
       body.pr as number | null,
       body.head_sha as string | null,
       body.expected_epoch as number,
@@ -152,7 +155,7 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
     }
 
     db.logEvent(slotParse.data, "slot_assigned", null, null, {
-      ...body,
+      ...assignmentEvent,
       assignment_epoch: result.assignment_epoch,
       idempotent: result.idempotent,
     });

@@ -39,7 +39,7 @@ test("legacy queued clear cannot release an occupied numbered slot", async () =>
     const slot = db.getSlot(1)!;
     assert.equal(slot.occupied, true);
     assert.equal(slot.assignment_epoch, 1);
-    assert.equal(slot.session_id, "session-8000");
+    assert.equal(slot.session_id, null);
     assert.equal(db.hasPendingClear(1), false);
     assert.equal(db.getEvents(1, 5, "clear_refused_native_release_required").length, 1);
     assert.match(notifications[0], /remains occupied/);

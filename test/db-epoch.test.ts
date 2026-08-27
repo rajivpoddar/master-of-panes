@@ -34,11 +34,9 @@ function nativeReleaseAt(
   expectedTuple?: AssignmentTupleInput,
 ) {
   const current = db.getSlot(slot)!;
-  assert.equal(typeof (expectedSessionId ?? current.session_id), "string");
   return db.commitNativeRelease(
     slot,
     expectedEpoch,
-    expectedSessionId ?? current.session_id!,
     expectedTuple ?? tupleFromSlot(db, slot),
   );
 }
@@ -446,7 +444,7 @@ test("issue claim adoption rebinds the occupied tuple atomically", () => {
         pr: 20,
         branch: "fix/10-real",
         head_sha: "a".repeat(40),
-        session_id: "session-a",
+        session_id: null,
         assignment_epoch: 2,
       },
     );
@@ -839,7 +837,7 @@ test("active-turn issue claim adoption binds preserving epoch, turn, session, an
         assignment_epoch: 431,
         active_turn_state: "active",
         active_turn_id: "turn-4-active",
-        session_id: "session-s4",
+        session_id: null,
         dnd: false,
       },
     );

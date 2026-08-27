@@ -49,7 +49,6 @@ export function registerFamily2Routes(
     const request: NativeSlotReleaseRequest = {
       slot: slotParse.data,
       expected_epoch: body.expected_epoch as number,
-      expected_session_id: body.expected_session_id as string,
       expected_tuple: {
         repository_id: body.expected_repository_id as string | number | null,
         issue: body.expected_issue as number | null,

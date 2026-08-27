@@ -295,7 +295,6 @@ test("claim route refuses omitted or null complete fields before mutation", asyn
       "repository_id",
       "issue",
       "branch",
-      "session_id",
       "head_sha",
       "work_kind",
       "handoff_id",
@@ -310,7 +309,7 @@ test("claim route refuses omitted or null complete fields before mutation", asyn
       assert.equal(db.getSlot(1)?.occupied, false);
     }
 
-    for (const field of ["repository_id", "issue", "branch", "session_id", "work_kind", "handoff_id"]) {
+    for (const field of ["repository_id", "issue", "branch", "work_kind", "handoff_id"]) {
       const invalid = { ...assignment, [field]: null };
       const response = await app.request(
         "/slots/1/assign",
@@ -319,6 +318,24 @@ test("claim route refuses omitted or null complete fields before mutation", asyn
       assert.equal(response.status, 409, `null ${field}`);
       assert.equal(db.getSlot(1)?.occupied, false);
     }
+  });
+});
+
+test("assignment ignores session identity and refuses a FREE slot with an active hook turn", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const active = { ...assignment, session_id: "caller-must-not-own", expected_epoch: 0 };
+    db.startAgentTurn(1, "hook-session-a");
+    db.updateSlot(1, { occupied: false, repository_id: null, issue: null, branch: null, branch_ref: null, pr: null, head_sha: null });
+    const refused = await app.request("/slots/1/assign", assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, active));
+    assert.equal(refused.status, 409);
+    assert.equal(db.getSlot(1)?.occupied, false);
+    db.finishAgentTurn(1, "hook-session-a");
+    const accepted = await app.request("/slots/1/assign", assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, active));
+    assert.equal(accepted.status, 200);
+    const row = db.getSlot(1)!;
+    assert.equal(row.session_id, null);
+    assert.equal(row.assignment_epoch, 1);
+    assert.equal("session_id" in JSON.parse(db.getEvents(1, 1, "slot_assigned")[0].payload), false);
   });
 });
 
