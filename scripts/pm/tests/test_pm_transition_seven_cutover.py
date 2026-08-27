@@ -101,6 +101,8 @@ class PmTransitionSevenCutoverTests(unittest.TestCase):
                     timeout=5,
                 )
                 self.assertEqual(result.returncode, 0, command)
+            calls = [json.loads(line) for line in recorder.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([call[2] for call in calls], list(RETIRED))
             refused = subprocess.run(
                 ["python3", str(operator), "not-cut-over"],
                 env=env,

@@ -975,6 +975,8 @@ app.post("/slots/:slotNum/release", async (c) => {
       claimed_at: body.expected_claimed_at as string | null,
     },
     intended_main_head: body.intended_main_head as string,
+    effect_id: body.effect_id as string | undefined,
+    request_digest: body.request_digest as string | undefined,
   };
   const releaseResult = await nativeSlotRelease.release(request);
   if (releaseResult.success) {
@@ -986,6 +988,23 @@ app.post("/slots/:slotNum/release", async (c) => {
     return c.json(releaseResult);
   }
   return c.json(releaseResult, releaseResult.code === "invalid_request" ? 400 : 409);
+});
+
+/** Read one durable Family-2 release receipt without mutating slot state. */
+app.get("/slots/:slotNum/release-receipt", (c) => {
+  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
+  if (!slotParse.success) return c.json({ success: false, code: "invalid_request" }, 400);
+  const effectId = c.req.query("effect_id");
+  if (!effectId) return c.json({ success: false, code: "invalid_request" }, 400);
+  try {
+    const receipt = db.getNativeReleaseEffectReceipt(effectId);
+    if (!receipt || receipt.slot !== slotParse.data) {
+      return c.json({ success: false, code: "effect_receipt_not_found" }, 404);
+    }
+    return c.json({ success: true, ...receipt });
+  } catch {
+    return c.json({ success: false, code: "effect_receipt_malformed" }, 500);
+  }
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────

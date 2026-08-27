@@ -16,6 +16,9 @@ export interface NativeSlotReleaseRequest {
   expected_session_id: string;
   expected_tuple: AssignmentTupleInput;
   intended_main_head: string;
+  /** Immutable Family-2 effect identity; absent for legacy native callers. */
+  effect_id?: string;
+  request_digest?: string;
 }
 
 export interface CheckoutResetObservation {
@@ -52,7 +55,9 @@ export type NativeSlotReleaseCode =
   | "wrong_branch"
   | "wrong_head"
   | "clear_conflict"
-  | "free_readback_failed";
+  | "free_readback_failed"
+  | "effect_receipt_conflict"
+  | "effect_receipt_malformed";
 
 export interface NativeSlotReleaseResult {
   success: boolean;
@@ -61,6 +66,9 @@ export interface NativeSlotReleaseResult {
   slot: SlotState | null;
   assignment_epoch: number | null;
   remediation: string | null;
+  effect_id?: string;
+  request_digest?: string;
+  idempotent?: boolean;
   acknowledgement?: NativeSlotReleaseAcknowledgement;
 }
 
@@ -165,7 +173,94 @@ export class NativeSlotReleaseCoordinator {
     };
   }
 
+  private replayDurableEffect(
+    request: NativeSlotReleaseRequest,
+  ): NativeSlotReleaseResult | null {
+    if (request.effect_id === undefined) return null;
+    if (
+      typeof request.effect_id !== "string"
+      || request.effect_id.trim() === ""
+      || typeof request.request_digest !== "string"
+      || !/^[0-9a-f]{64}$/i.test(request.request_digest)
+    ) {
+      return {
+        ...result(
+          "effect_receipt_malformed",
+          "Family-2 release effect identity or request digest is malformed.",
+          this.dependencies.db.getSlot(request.slot),
+          "Preserve the committed outbox row and retry with its immutable effect identity.",
+        ),
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+      };
+    }
+    if (!request.expected_tuple || typeof request.expected_tuple !== "object") {
+      return {
+        ...result(
+          "effect_receipt_malformed",
+          "Family-2 release effect is missing its immutable ownership tuple.",
+          this.dependencies.db.getSlot(request.slot),
+          "Preserve the committed outbox row and retry with its complete immutable tuple.",
+        ),
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+      };
+    }
+    let prior;
+    try {
+      prior = this.dependencies.db.getNativeReleaseEffectReceipt(request.effect_id);
+    } catch {
+      return {
+        ...result(
+          "effect_receipt_malformed",
+          "Durable Family-2 release receipt is malformed.",
+          this.dependencies.db.getSlot(request.slot),
+          "Stop and repair the receipt store before retrying this effect.",
+        ),
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+      };
+    }
+    if (!prior) return null;
+    const expectedTuple = normalizeAssignmentTuple(request.expected_tuple);
+    const priorTuple = normalizeAssignmentTuple(prior.expected_tuple);
+    const same = expectedTuple && priorTuple
+      && assignmentTupleMatches(expectedTuple, priorTuple)
+      && prior.slot === request.slot
+      && prior.expected_epoch === request.expected_epoch
+      && prior.expected_session_id === request.expected_session_id
+      && prior.request_digest.toLowerCase() === request.request_digest.toLowerCase()
+      && prior.intended_main_head.toLowerCase() === request.intended_main_head.toLowerCase();
+    if (!same) {
+      return {
+        ...result(
+          "effect_receipt_conflict",
+          "A durable Family-2 release receipt exists for a conflicting effect binding.",
+          this.dependencies.db.getSlot(request.slot),
+          "Do not reuse the effect identity; reconcile the committed outbox tuple before retrying.",
+        ),
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+      };
+    }
+    return {
+      ...result(
+        "released",
+        "The exact Family-2 release effect was already committed; durable receipt consumed idempotently.",
+        this.dependencies.db.getSlot(request.slot),
+        null,
+        true,
+      ),
+      assignment_epoch: prior.released_epoch,
+      effect_id: request.effect_id,
+      request_digest: request.request_digest,
+      idempotent: true,
+    };
+  }
+
   async release(request: NativeSlotReleaseRequest): Promise<NativeSlotReleaseResult> {
+    const replay = this.replayDurableEffect(request);
+    if (replay) return replay;
     const validated = this.validateInitialRequest(request);
     if ("success" in validated) return validated;
     if (this.inProgressSlots.has(request.slot)) {
@@ -270,6 +365,13 @@ export class NativeSlotReleaseCoordinator {
         validated.request.expected_epoch,
         validated.request.expected_session_id,
         validated.request.expected_tuple,
+        request.effect_id && request.request_digest
+          ? {
+              effect_id: request.effect_id,
+              request_digest: request.request_digest,
+              intended_main_head: validated.request.intended_main_head,
+            }
+          : undefined,
       );
       if (!cleared.ok) {
         return {
@@ -302,6 +404,9 @@ export class NativeSlotReleaseCoordinator {
       }
       return {
         ...result("released", `Slot ${request.slot} reset and released.`, readback, null, true),
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+        idempotent: false,
         acknowledgement,
       };
     } finally {

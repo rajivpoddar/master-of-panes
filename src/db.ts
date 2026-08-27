@@ -30,7 +30,9 @@ export interface SlotMutationResult {
     | "expected_session_required"
     | "session_mismatch"
     | "branch_mismatch"
-    | "observed_tuple_mismatch";
+    | "observed_tuple_mismatch"
+    | "effect_receipt_conflict"
+    | "effect_receipt_malformed";
   owner_slots?: number[];
   owner_conflicts?: Array<{
     slot: number;
@@ -65,6 +67,19 @@ export interface AssignmentTuple {
   work_kind: string | null;
   handoff_id: string | null;
   claimed_at: string | null;
+}
+
+/** Durable receipt for a native release effect committed with the slot clear. */
+export interface NativeReleaseEffectReceipt {
+  effect_id: string;
+  request_digest: string;
+  slot: number;
+  expected_epoch: number;
+  released_epoch: number;
+  expected_session_id: string;
+  expected_tuple: AssignmentTupleInput;
+  intended_main_head: string;
+  created_at: string;
 }
 
 const ASSIGNMENT_WORK_KINDS = new Set([
@@ -400,6 +415,20 @@ export class MoPDatabase {
         ON ops_jobs(kind, status, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_ops_jobs_kind_finished
         ON ops_jobs(kind, finished_at DESC);
+
+      CREATE TABLE IF NOT EXISTS native_release_effect_receipts (
+        effect_id TEXT PRIMARY KEY,
+        request_digest TEXT NOT NULL,
+        slot INTEGER NOT NULL,
+        expected_epoch INTEGER NOT NULL,
+        released_epoch INTEGER NOT NULL,
+        expected_session_id TEXT NOT NULL,
+        expected_tuple TEXT NOT NULL,
+        intended_main_head TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_native_release_receipts_slot_epoch
+        ON native_release_effect_receipts(slot, expected_epoch);
     `);
 
     // Initialize config KV table
@@ -675,6 +704,11 @@ export class MoPDatabase {
     expectedEpoch: number,
     expectedSessionId: string,
     expectedTupleInput: AssignmentTupleInput,
+    effect?: {
+      effect_id: string;
+      request_digest: string;
+      intended_main_head: string;
+    },
   ): SlotMutationResult {
     if (!Number.isInteger(expectedEpoch)) {
       const current = this.getSlot(slot);
@@ -707,8 +741,67 @@ export class MoPDatabase {
         reason: "expected_tuple_required",
       };
     }
+    if (effect && (
+      typeof effect.effect_id !== "string"
+      || effect.effect_id.trim() === ""
+      || !/^[0-9a-f]{64}$/i.test(effect.request_digest)
+      || !/^[0-9a-f]{40}$/i.test(effect.intended_main_head)
+    )) {
+      const current = this.getSlot(slot);
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "effect_receipt_malformed",
+      };
+    }
 
     return this.db.transaction((): SlotMutationResult => {
+      if (effect) {
+        let prior: NativeReleaseEffectReceipt | null;
+        try {
+          prior = this.getNativeReleaseEffectReceipt(effect.effect_id);
+        } catch {
+          const current = this.getSlot(slot);
+          return {
+            ok: false,
+            conflict: true,
+            assignment_epoch: current?.assignment_epoch ?? 0,
+            idempotent: false,
+            reason: "effect_receipt_malformed",
+          };
+        }
+        if (prior) {
+          const sameTuple = assignmentTupleMatches(
+            normalizeAssignmentTuple(prior.expected_tuple),
+            expectedTuple,
+          );
+          const current = this.getSlot(slot);
+          if (
+            prior.request_digest.toLowerCase() !== effect.request_digest.toLowerCase()
+            || prior.slot !== slot
+            || prior.expected_epoch !== expectedEpoch
+            || prior.expected_session_id !== expectedSessionId
+            || prior.intended_main_head.toLowerCase() !== effect.intended_main_head.toLowerCase()
+            || !sameTuple
+          ) {
+            return {
+              ok: false,
+              conflict: true,
+              assignment_epoch: current?.assignment_epoch ?? prior.released_epoch,
+              idempotent: false,
+              reason: "effect_receipt_conflict",
+            };
+          }
+          return {
+            ok: true,
+            conflict: false,
+            assignment_epoch: prior.released_epoch,
+            idempotent: true,
+          };
+        }
+      }
       const current = this.getSlot(slot);
       const epoch = current?.assignment_epoch ?? 0;
       if (!current) {
@@ -756,8 +849,64 @@ export class MoPDatabase {
         active_turn_state: "inactive",
         assignment_epoch: epoch + 1,
       });
+      if (effect) {
+        this.db.prepare(`
+          INSERT INTO native_release_effect_receipts (
+            effect_id, request_digest, slot, expected_epoch, released_epoch,
+            expected_session_id, expected_tuple, intended_main_head
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          effect.effect_id,
+          effect.request_digest.toLowerCase(),
+          slot,
+          expectedEpoch,
+          epoch + 1,
+          expectedSessionId,
+          JSON.stringify({
+            repository_id: expectedTuple.repository_id,
+            issue: expectedTuple.issue,
+            pr: expectedTuple.pr,
+            branch: expectedTuple.branch,
+            head_sha: expectedTuple.head_sha,
+            work_kind: expectedTuple.work_kind,
+            handoff_id: expectedTuple.handoff_id,
+            claimed_at: expectedTuple.claimed_at,
+          }),
+          effect.intended_main_head.toLowerCase(),
+        );
+      }
       return { ok: true, conflict: false, assignment_epoch: epoch + 1, idempotent: false };
     })();
+  }
+
+  /** Read one durable native release receipt by immutable effect identity. */
+  getNativeReleaseEffectReceipt(effectId: string): NativeReleaseEffectReceipt | null {
+    if (typeof effectId !== "string" || effectId.trim() === "") return null;
+    const row = this.db.prepare(`
+      SELECT effect_id, request_digest, slot, expected_epoch, released_epoch,
+             expected_session_id, expected_tuple, intended_main_head, created_at
+      FROM native_release_effect_receipts
+      WHERE effect_id = ?
+    `).get(effectId) as {
+      effect_id: string;
+      request_digest: string;
+      slot: number;
+      expected_epoch: number;
+      released_epoch: number;
+      expected_session_id: string;
+      expected_tuple: string;
+      intended_main_head: string;
+      created_at: string;
+    } | undefined;
+    if (!row) return null;
+    let expectedTuple: AssignmentTupleInput;
+    try {
+      const parsed = JSON.parse(row.expected_tuple) as AssignmentTupleInput;
+      expectedTuple = parsed;
+    } catch (error) {
+      throw new Error(`native release effect receipt ${effectId} has malformed tuple`, { cause: error });
+    }
+    return { ...row, expected_tuple: expectedTuple };
   }
 
   assignSlot(

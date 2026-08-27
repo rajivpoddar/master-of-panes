@@ -51,7 +51,12 @@ def _assignment(command: str, args: list[str], root: Path) -> int:
         str(Path("~/.claude/control-plane-artifacts/kernel/assignment-canary-arm.json").expanduser()),
     )
     if "--state" not in args:
-        args = ["--state", state, *args]
+        args = ["--state", state, command, *args]
+    else:
+        state_index = args.index("--state")
+        if state_index + 1 >= len(args):
+            raise ValueError("--state requires a path")
+        args = [*args[: state_index + 2], command, *args[state_index + 2 :]]
     return boundary_main(args)
 
 

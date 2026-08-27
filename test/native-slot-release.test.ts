@@ -280,6 +280,27 @@ test("releasing one slot does not mutate an unrelated occupied slot", async () =
   }
 });
 
+test("effect-bound release persists an atomic receipt and replays without a second clear", async () => {
+  const value = fixture();
+  try {
+    const request = { ...value.request, effect_id: "family2-effect-8100", request_digest: "c".repeat(64) };
+    let deliveries = 0;
+    const release = coordinator(value, { instruction: () => { deliveries += 1; } });
+    const first = await release.release(request);
+    assert.equal(first.code, "released");
+    assert.equal(first.idempotent, false);
+    const stored = value.db.getNativeReleaseEffectReceipt(request.effect_id);
+    assert.equal(stored?.released_epoch, request.expected_epoch + 1);
+    const replay = await release.release(request);
+    assert.equal(replay.code, "released");
+    assert.equal(replay.idempotent, true);
+    assert.equal(deliveries, 1);
+    assert.equal(value.db.getSlot(1)?.occupied, false);
+  } finally {
+    closeFixture(value);
+  }
+});
+
 test("native adapter derives the checkout from the numbered pane, not caller input", async () => {
   const commands: string[] = [];
   const relay = new TmuxRelay(DEFAULT_CONFIG, {
