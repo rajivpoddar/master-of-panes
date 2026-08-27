@@ -12,6 +12,8 @@ import importlib.util
 import json
 import os
 import sys
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from pathlib import Path
 from typing import Sequence
 
@@ -30,7 +32,7 @@ def _package_root() -> Path:
         root = Path(override)
         if not root.is_absolute():
             raise ValueError(f"{RELEASE_ROOT_ENV} must be an absolute path")
-        return root.resolve(strict=True)
+        return root.resolve()
     source = Path(__file__).resolve().parents[3]
     if (source / "scripts/pm/control_plane/assignment_boundary.py").is_file():
         return source
@@ -42,7 +44,115 @@ def _blocked(command: str, reason: str) -> int:
     return 423
 
 
+def _flag_values(args: list[str]) -> dict[str, str | None]:
+    values: dict[str, str | None] = {}
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if not token.startswith("--"):
+            raise ValueError(f"unexpected argument {token}")
+        name = token[2:].replace("-", "_")
+        if index + 1 >= len(args) or args[index + 1].startswith("--"):
+            values[name] = None
+            index += 1
+            continue
+        values[name] = args[index + 1]
+        index += 2
+    return values
+
+
+def _required(values: dict[str, str | None], names: Sequence[str]) -> None:
+    missing = [name for name in names if values.get(name) in (None, "")]
+    if missing:
+        raise ValueError(f"missing complete MoP fields: {', '.join('--' + name.replace('_', '-') for name in missing)}")
+
+
+def _integer(values: dict[str, str | None], name: str) -> int:
+    raw = values.get(name)
+    try:
+        return int(raw or "")
+    except ValueError as error:
+        raise ValueError(f"--{name.replace('_', '-')} must be an integer") from error
+
+
+def _direct_assignment(command: str, args: list[str]) -> int:
+    """Call the authoritative MoP HTTP surface without local state or fallback writes."""
+    if "--state" in args:
+        raise ValueError("--state is not supported by the stateless MoP facade")
+    values = _flag_values(args)
+    base_url = (values.get("mop_url") or os.environ.get("MOP_URL") or "http://127.0.0.1:3100").rstrip("/")
+    slot = _integer(values, "slot")
+    expected_epoch = _integer(values, "expected_epoch")
+    headers = {
+        "content-type": "application/json",
+        "x-heydonna-assignment-authority": os.environ.get(
+            "MOP_ASSIGNMENT_AUTHORITY", "pm-transition-v1"
+        ),
+    }
+    if command == "claim-slot":
+        _required(values, ("repository_id", "issue", "branch", "session_id", "work_kind", "handoff_id"))
+        body: dict[str, object] = {
+            "task": values.get("task") or "",
+            "repository_id": values["repository_id"],
+            "issue": _integer(values, "issue"),
+            "pr": None if values.get("pr") in (None, "null") else _integer(values, "pr"),
+            "branch": values["branch"],
+            "session_id": values["session_id"],
+            "head_sha": None if values.get("head_sha") in (None, "null") else values["head_sha"],
+            "work_kind": values["work_kind"],
+            "handoff_id": values["handoff_id"],
+            "expected_epoch": expected_epoch,
+        }
+        path = f"/slots/{slot}/assign"
+    elif command == "rebind-slot":
+        expected = tuple(f"expected_current_{name}" for name in (
+            "repository_id", "issue", "pr", "branch", "head_sha", "work_kind", "handoff_id", "claimed_at"
+        ))
+        desired = ("repository_id", "issue", "pr", "branch", "head_sha", "work_kind", "handoff_id", "claimed_at")
+        _required(values, (*expected, *desired))
+        body = {key: (None if value in (None, "null") else value) for key, value in values.items()}
+        body["expected_epoch"] = expected_epoch
+        for key in ("issue", "pr", "expected_current_issue", "expected_current_pr"):
+            if body.get(key) is not None:
+                body[key] = int(str(body[key]))
+        path = f"/slots/{slot}/adopt-issue-claim"
+    elif command == "release-slot":
+        fields = (
+            "expected_session_id", "expected_repository_id", "expected_issue", "expected_pr",
+            "expected_branch", "expected_head_sha", "expected_work_kind", "expected_handoff_id",
+            "expected_claimed_at", "intended_main_head",
+        )
+        _required(values, fields)
+        body = {key: (None if value in (None, "null") else value) for key, value in values.items()}
+        body["expected_epoch"] = expected_epoch
+        for key in ("expected_issue", "expected_pr"):
+            if body.get(key) is not None:
+                body[key] = int(str(body[key]))
+        path = f"/slots/{slot}/release"
+    else:
+        raise ValueError(f"unsupported direct assignment command {command}")
+
+    request = Request(f"{base_url}{path}", method="POST", headers=headers, data=json.dumps(body).encode("utf-8"))
+    try:
+        with urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            print(json.dumps(payload, sort_keys=True))
+            return 0 if payload.get("success", True) is True and payload.get("ok", True) is not False else 1
+    except HTTPError as error:
+        try:
+            payload = json.loads(error.read().decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = {"success": False, "reason": f"http_{error.code}"}
+        print(json.dumps(payload, sort_keys=True))
+        return 1
+    except (URLError, TimeoutError, OSError) as error:
+        print(json.dumps({"success": False, "reason": "mop_unavailable", "error": str(error)}, sort_keys=True))
+        return 1
+
+
 def _assignment(command: str, args: list[str], root: Path) -> int:
+    if not (root / "scripts/pm/control_plane/assignment_boundary.py").is_file():
+        return _direct_assignment(command, args)
     sys.path.insert(0, str(root))
     from scripts.pm.control_plane.assignment_boundary import main as boundary_main
 

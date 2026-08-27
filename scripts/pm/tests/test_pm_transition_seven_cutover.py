@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import http.server
 import json
 import os
 import shutil
+import socketserver
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -123,6 +126,52 @@ class PmTransitionSevenCutoverTests(unittest.TestCase):
             )
             self.assertEqual(refused.returncode, 167)
             self.assertEqual(json.loads(refused.stdout)["reason"], "command_not_cut_over")
+
+    def test_operator_direct_mop_fallback_is_stateless_and_complete(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers["Content-Length"] or "0")
+                requests.append({
+                    "path": self.path,
+                    "authority": self.headers.get("x-heydonna-assignment-authority"),
+                    "body": json.loads(self.rfile.read(length)),
+                })
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"slot": 1, "occupied": True}).encode())
+
+            def log_message(self, *_args: object) -> None:
+                return
+
+        with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            with tempfile.TemporaryDirectory() as directory:
+                missing_root = Path(directory) / "release"
+                env = {
+                    **os.environ,
+                    "HEYDONNA_CONTROL_PLANE_RELEASE_ROOT": str(missing_root),
+                    "MOP_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                }
+                result = subprocess.run(
+                    [
+                        "python3", str(SHARED / "claude/scripts/pm-operator.py"), "claim-slot",
+                        "--slot", "1", "--expected-epoch", "7", "--repository-id", "heydonna-app/heydonna-app",
+                        "--issue", "7518", "--pr", "7518", "--branch", "fix/7518", "--session-id", "session-1",
+                        "--head-sha", "a" * 40, "--work-kind", "coding", "--handoff-id", "handoff-1",
+                    ], env=env, capture_output=True, text=True, timeout=5,
+                )
+            server.shutdown()
+            thread.join(timeout=2)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["path"], "/slots/1/assign")
+        self.assertEqual(requests[0]["authority"], "pm-transition-v1")
+        self.assertEqual(requests[0]["body"]["expected_epoch"], 7)
+        self.assertEqual(requests[0]["body"]["head_sha"], "a" * 40)
 
     def test_scoped_install_preserves_unlisted_files_and_rolls_back(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
