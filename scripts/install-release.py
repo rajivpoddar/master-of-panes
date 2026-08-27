@@ -143,7 +143,10 @@ def stage_release(
         for relative in _tracked_paths(repo):
             safe = _safe_relative(relative)
             _copy_payload(repo / safe, temporary / safe)
-        _run([bun, "install", "--frozen-lockfile"], cwd=temporary)
+        # Native dependencies are rebuilt explicitly below with the pinned
+        # runtime.  Letting Bun run lifecycle scripts here can select the
+        # host Node ABI before that check, producing an unusable release.
+        _run([bun, "install", "--frozen-lockfile", "--ignore-scripts"], cwd=temporary)
         _run([bun, "run", "build"], cwd=temporary)
         node_modules = temporary / "node_modules"
         if node_bin:
