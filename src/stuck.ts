@@ -277,6 +277,22 @@ export class StuckDetector {
   ) {}
 
   /**
+   * Keep independent watchdog phases isolated. A runtime capability mismatch
+   * in one specialized detector (for example an older relay object missing
+   * getSlotActivityState) must be observable and fail closed for that phase,
+   * but must not suppress the later idle-free/idle-occupied safety checks.
+   */
+  private async runPhase(name: string, phase: () => Promise<void>): Promise<void> {
+    try {
+      await phase();
+    } catch (error) {
+      const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      console.error(`[stuck] phase=${name} failed closed: ${detail}`);
+      debugLog(`[stuck] phase=${name} failed closed: ${detail}`);
+    }
+  }
+
+  /**
    * Reset the lastMatchLine tracker for a slot. Called by hooks.ts when
    * SessionStart:compact fires (post-compact recovery). After /compact
    * completes the conversation is cleared and a new genuine overflow
@@ -337,7 +353,7 @@ export class StuckDetector {
       if (slot.slot === 0) continue;
       if (slot.dnd) continue;
       if (!slot.occupied) continue;
-      await this.checkContextOverflow(slot);
+      await this.runPhase(`context-overflow:${slot.slot}`, () => this.checkContextOverflow(slot));
     }
 
     // Phase 1a-API500: API 500 backoff detection colocated with autocompact.
@@ -352,7 +368,7 @@ export class StuckDetector {
       if (slot.slot === 0) continue;
       if (slot.dnd) continue;
       if (!slot.occupied) continue;
-      await this.checkApi500Backoff(slot);
+      await this.runPhase(`api500:${slot.slot}`, () => this.checkApi500Backoff(slot));
     }
 
     // Phase 1b: answer-prompt block detection. Applies to ALL slots, not
@@ -362,7 +378,7 @@ export class StuckDetector {
     for (const slot of slots) {
       if (slot.dnd) continue;
       if (slot.slot === 0) continue; // PM pane — no self-detection
-      await this.detectAnswerPromptBlock(slot);
+      await this.runPhase(`answer-prompt:${slot.slot}`, () => this.detectAnswerPromptBlock(slot));
     }
 
     // Phase 1c: bg-script failure detection. Watches the MoP server log
@@ -370,14 +386,14 @@ export class StuckDetector {
     // consecutive failures (10 min = 2 check-slot cycles) indicate the
     // slot may be hitting resource limits or context exhaustion. Auto-
     // inject /compact directly (deduped, same guards as checkContextOverflow).
-    await this.detectBgScriptFailures();
+    await this.runPhase("bg-script-failure", () => this.detectBgScriptFailures());
 
     // Phase 1d: resume dev slots that remain assigned but sit at a proven idle
     // prompt for more than five minutes. This is intentionally dev-only:
     // slot 0's historical auto-continue path was removed because it flooded
     // the PM input queue. Specialized recovery paths above take precedence.
     for (const slot of slots) {
-      await this.checkIdleOccupied(slot);
+      await this.runPhase(`idle-occupied:${slot.slot}`, () => this.checkIdleOccupied(slot));
     }
 
     // Phase 1e: a free slot cannot ask PM for work on its own. Wake it once
@@ -385,7 +401,7 @@ export class StuckDetector {
     // assignable work exists; the slot then uses the same pm-wait-nudge skill
     // as occupied waits. PM remains the sole assignment writer.
     for (const slot of slots) {
-      await this.checkIdleFree(slot);
+      await this.runPhase(`idle-free:${slot.slot}`, () => this.checkIdleFree(slot));
     }
 
     for (const slot of slots) {
