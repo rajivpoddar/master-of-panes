@@ -379,7 +379,7 @@ test("a matching idle prompt starts a new idle episode after an earlier nudge", 
 
 test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => {
   const originalNow = Date.now;
-  Date.now = () => Date.parse("2026-07-27T02:36:00.000Z");
+  Date.now = () => Date.parse("2026-07-27T02:36:01.000Z");
   try {
     const h = harness(slot());
     h.events.push(
@@ -443,10 +443,10 @@ test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => 
       assignment_epoch: 4,
       idle_anchor: "2026-07-27T02:31:00.000",
       idle_anchor_source: "idle_prompt_turn_finished",
-      idle_age_ms: 300_000,
+      idle_age_ms: 301_000,
       wait_anchor: OLD_IDLE,
       wait_anchor_source: "pm_wait_nudge_carry",
-      wait_age_ms: 720_000,
+      wait_age_ms: 721_000,
       wait_age_minutes: 12,
       urgency: "REMINDER",
       turn_state: "inactive",
@@ -461,7 +461,7 @@ test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => 
 
 test("keeps the original wait start across repeated PM_WAIT nudge turns", async () => {
   const originalNow = Date.now;
-  Date.now = () => Date.parse("2026-07-27T02:42:00.000Z");
+  Date.now = () => Date.parse("2026-07-27T02:42:01.000Z");
   try {
     const h = harness(slot());
     h.events.push(
@@ -575,10 +575,10 @@ test("keeps the original wait start across repeated PM_WAIT nudge turns", async 
       assignment_epoch: 4,
       idle_anchor: "2026-07-27T02:37:00.000",
       idle_anchor_source: "idle_prompt_turn_finished",
-      idle_age_ms: 300_000,
+      idle_age_ms: 301_000,
       wait_anchor: OLD_IDLE,
       wait_anchor_source: "Stop",
-      wait_age_ms: 1_080_000,
+      wait_age_ms: 1_081_000,
       wait_age_minutes: 18,
       urgency: "FOLLOW_UP",
       turn_state: "inactive",
@@ -593,7 +593,7 @@ test("keeps the original wait start across repeated PM_WAIT nudge turns", async 
 
 test("resets wait age when normal work stops before a later PM_WAIT result", async () => {
   const originalNow = Date.now;
-  Date.now = () => Date.parse("2026-07-27T02:36:00.000Z");
+  Date.now = () => Date.parse("2026-07-27T02:36:01.000Z");
   try {
     const h = harness(slot());
     h.events.push(
@@ -670,7 +670,7 @@ test("resets wait age when normal work stops before a later PM_WAIT result", asy
 
 test("resets wait age when the prior nudge turn resumes local work", async () => {
   const originalNow = Date.now;
-  Date.now = () => Date.parse("2026-07-27T02:36:00.000Z");
+  Date.now = () => Date.parse("2026-07-27T02:36:01.000Z");
   try {
     const h = harness(slot());
     h.events.push(
@@ -1280,7 +1280,7 @@ test("escalates a free-slot PM reminder without resetting the release anchor", a
   }
 });
 
-test("nudges a wedged occupied slot whose turn state is stuck active", async () => {
+test("does not nudge an active slot when stale log mtime lacks a hook boundary", async () => {
   const originalNow = Date.now;
   Date.now = () => NOW;
   try {
@@ -1293,13 +1293,36 @@ test("nudges a wedged occupied slot whose turn state is stuck active", async () 
     h.setLogMtime(new Date(Date.parse(OLD_IDLE + "Z")));
     await h.detector.checkIdleOccupied(candidate);
 
-    assert.equal(h.sends.length, 1);
-    assert.match(h.sends[0], /turn_state=wedged/);
+    assert.equal(h.sends.length, 0);
     const wedged = h.events.filter(
       (event) => event.event_type === "idle_occupied_wedge_detected",
     );
-    assert.equal(wedged.length, 1);
-    assert.equal(JSON.parse(wedged[0].payload).log_age_ms, 360_000);
+    assert.equal(wedged.length, 0);
+    assert.equal(h.events.filter(
+      (event) => event.event_type === "idle_occupied_continue_injected",
+    ).length, 0);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("does not nudge an indeterminate slot when stale log mtime lacks a hook boundary", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const candidate = slot({
+      active_turn_state: "indeterminate",
+      idle: false,
+      active_turn_started_at: null,
+    });
+    const h = harness(candidate);
+    h.setLogMtime(new Date(Date.parse(OLD_IDLE + "Z")));
+    await h.detector.checkIdleOccupied(candidate);
+
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.events.filter(
+      (event) => event.event_type === "idle_occupied_continue_injected",
+    ).length, 0);
   } finally {
     Date.now = originalNow;
   }
@@ -1318,6 +1341,71 @@ test("does not nudge an active slot with a fresh JSONL write", async () => {
     h.setLogMtime(new Date(NOW - 1_000));
     await h.detector.checkIdleOccupied(candidate);
     assert.deepEqual(h.sends, []);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("requires strictly more than five minutes and dedupes the idle episode", async () => {
+  const originalNow = Date.now;
+  const baseMs = Date.parse(OLD_IDLE + "Z");
+  try {
+    const candidate = slot();
+    const h = harness(candidate);
+    Date.now = () => baseMs + 5 * 60_000;
+    await h.detector.checkIdleOccupied(candidate);
+    assert.deepEqual(h.sends, []);
+
+    Date.now = () => baseMs + 5 * 60_000 + 1;
+    await h.detector.checkIdleOccupied(candidate);
+    await h.detector.checkIdleOccupied(candidate);
+    assert.equal(h.sends.length, 1);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("a UserPromptSubmit suppresses an old episode until a later Stop starts a new one", async () => {
+  const originalNow = Date.now;
+  const baseMs = Date.parse(OLD_IDLE + "Z");
+  try {
+    const h = harness(slot());
+    Date.now = () => baseMs + 6 * 60_000;
+    await h.detector.checkIdleOccupied(slot());
+    assert.equal(h.sends.length, 1);
+
+    const active = slot({
+      active_turn_state: "active",
+      active_turn_started_at: "2026-07-27T02:30:01.000Z",
+      idle: false,
+    });
+    Date.now = () => baseMs + 7 * 60_000;
+    await h.detector.checkIdleOccupied(active);
+    assert.equal(h.sends.length, 1);
+
+    h.events.push({
+      id: 20,
+      timestamp: "2026-07-27T02:31:00.000",
+      slot: 2,
+      event_type: "UserPromptSubmit",
+      hook_type: "UserPromptSubmit",
+      tool_name: null,
+      payload: JSON.stringify({ session_id: SESSION_ID }),
+      processed: false,
+    }, {
+      id: 21,
+      timestamp: "2026-07-27T02:31:01.000",
+      slot: 2,
+      event_type: "Stop",
+      hook_type: "Stop",
+      tool_name: null,
+      payload: JSON.stringify({ session_id: SESSION_ID }),
+      processed: false,
+    });
+    Date.now = () => baseMs + 13 * 60_000 + 1;
+    await h.detector.checkIdleOccupied(slot());
+    assert.equal(h.sends.length, 2);
+    assert.match(h.sends[1], /wait_started_at=2026-07-27T02:31:01.000/);
   } finally {
     Date.now = originalNow;
   }
@@ -1355,7 +1443,7 @@ test("re-fires the occupied nudge when urgency advances on the same anchor", asy
   }
 });
 
-test("nudges a wedged free slot whose turn state is stuck active", async () => {
+test("does not nudge a free slot when hook state is active despite stale log mtime", async () => {
   const originalNow = Date.now;
   const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
   const gate = installGate({
@@ -1386,12 +1474,11 @@ test("nudges a wedged free slot whose turn state is stuck active", async () => {
     h.setLogMtime(new Date(Date.parse(OLD_IDLE + "Z")));
     await h.detector.checkIdleFree(candidate);
 
-    assert.equal(h.sends.length, 1);
-    assert.match(h.sends[0], /turn_state=wedged/);
+    assert.equal(h.sends.length, 0);
     const wedged = h.events.filter(
       (event) => event.event_type === "idle_free_wedge_detected",
     );
-    assert.equal(wedged.length, 1);
+    assert.equal(wedged.length, 0);
   } finally {
     Date.now = originalNow;
     if (originalGate === undefined) delete process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;

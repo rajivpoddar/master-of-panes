@@ -371,6 +371,27 @@ test("release advances epoch and hook turn state fails closed on mismatch", () =
   });
 });
 
+test("meaningful tool telemetry never synthesizes a turn boundary", () => {
+  withDatabase((db) => {
+    db.assignSlot(1, "issue", "github:repo-1", 10, "fix/10", "session-a", null, null, 0);
+    db.touchMeaningfulWork(1, "session-a");
+    let current = db.getSlot(1)!;
+    assert.equal(current.active_turn_state, "inactive");
+    assert.equal(current.active_turn_id, null);
+    assert.equal(current.active_turn_started_at, null);
+    assert.equal(current.idle, false);
+
+    db.startAgentTurn(1, "turn-a");
+    const startedAt = db.getSlot(1)!.active_turn_started_at;
+    db.touchMeaningfulWork(1, "different-session");
+    current = db.getSlot(1)!;
+    assert.equal(current.active_turn_state, "active");
+    assert.equal(current.active_turn_id, "turn-a");
+    assert.equal(current.active_turn_started_at, startedAt);
+    assert.equal(current.idle, false);
+  });
+});
+
 test("issue claim adoption rebinds the occupied tuple atomically", () => {
   withDatabase((db) => {
     assert.equal(

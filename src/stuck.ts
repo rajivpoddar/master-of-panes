@@ -427,13 +427,13 @@ export class StuckDetector {
     if (!slot.occupied || slot.dnd) return;
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
 
-    const idleState = await this.isIdleOrWedged(slot);
+    const idleState = this.isIdleByHookState(slot);
     if (!idleState.idle) return;
 
     const idleAnchor = this.getIdleOccupiedAnchor(slot);
     if (!idleAnchor) return;
     const idleAgeMs = Date.now() - idleAnchor.timestampMs;
-    if (!Number.isFinite(idleAgeMs) || idleAgeMs < this.IDLE_OCCUPIED_THRESHOLD_MS) return;
+    if (!Number.isFinite(idleAgeMs) || idleAgeMs <= this.IDLE_OCCUPIED_THRESHOLD_MS) return;
     const waitAnchor = this.getIdleOccupiedWaitAnchor(slot, idleAnchor);
     const waitAgeMs = Date.now() - waitAnchor.timestampMs;
     const waitAgeMinutes = Math.max(5, Math.floor(waitAgeMs / 60_000));
@@ -493,7 +493,7 @@ export class StuckDetector {
     // nudge. Do not overwrite or veto it with terminal prompt heuristics: those
     // are runtime-specific and cannot represent Claude and OMP uniformly.
     const current = this.db.getSlot(slot.slot);
-    const currentIdleState = current ? await this.isIdleOrWedged(current) : null;
+    const currentIdleState = current ? this.isIdleByHookState(current) : null;
     if (
       !current?.occupied ||
       current.dnd ||
@@ -504,7 +504,6 @@ export class StuckDetector {
       return;
     }
 
-    const wedgeMarker = idleState.wedged ? " turn_state=wedged" : "";
     const command =
       `Use Skill(pm-wait-nudge) now with slot=${slot.slot} ` +
       `assignment_epoch=${slot.assignment_epoch} pr=${current.pr ?? "unknown"} ` +
@@ -515,18 +514,7 @@ export class StuckDetector {
       "unfinished phase NOW: edits → affected tests → commit → push; do not end " +
       "the turn without a new head, a typed blocker, or a terminal receipt; " +
       "classification-only or \"will continue\" prose is a violation. API timeouts " +
-      "and interrupted local work are not PM waits." +
-      wedgeMarker;
-
-    if (idleState.wedged) {
-      this.db.logEvent(slot.slot, "idle_occupied_wedge_detected", "Stuck", null, {
-        assignment_epoch: slot.assignment_epoch,
-        idle_anchor: idleAnchor.timestamp,
-        log_age_ms: idleState.logAgeMs,
-        turn_state: slot.active_turn_state,
-        active_turn_started_at: slot.active_turn_started_at,
-      });
-    }
+      "and interrupted local work are not PM waits.";
 
     const delivery = await this.sendContinueIfAllowed(
       slot.slot,
@@ -553,7 +541,7 @@ export class StuckDetector {
       wait_age_ms: waitAgeMs,
       wait_age_minutes: waitAgeMinutes,
       urgency,
-      turn_state: idleState.wedged ? "wedged" : "inactive",
+      turn_state: "inactive",
       issue: deliveredSlot.issue,
       pr: deliveredSlot.pr,
       branch: deliveredSlot.branch,
@@ -592,13 +580,13 @@ export class StuckDetector {
     if (slot.occupied || slot.dnd) return;
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
 
-    const idleState = await this.isIdleOrWedged(slot);
+    const idleState = this.isIdleByHookState(slot);
     if (!idleState.idle) return;
 
     const anchor = this.getOrCreateFreeAnchor(slot);
     if (!anchor) return;
     const freeAgeMs = Date.now() - anchor.timestampMs;
-    if (!Number.isFinite(freeAgeMs) || freeAgeMs < this.IDLE_FREE_THRESHOLD_MS) return;
+    if (!Number.isFinite(freeAgeMs) || freeAgeMs <= this.IDLE_FREE_THRESHOLD_MS) return;
     const waitAgeMinutes = Math.max(5, Math.floor(freeAgeMs / 60_000));
     const urgency = this.idleOccupiedUrgency(waitAgeMinutes);
 
@@ -640,7 +628,7 @@ export class StuckDetector {
     // Re-pin the free state after the asynchronous gate so a concurrent PM
     // assignment cannot receive a stale reminder command.
     const current = this.db.getSlot(slot.slot);
-    const currentIdleState = current ? await this.isIdleOrWedged(current) : null;
+    const currentIdleState = current ? this.isIdleByHookState(current) : null;
     if (
       !current ||
       current.occupied ||
@@ -651,7 +639,6 @@ export class StuckDetector {
       return;
     }
 
-    const wedgeMarker = idleState.wedged ? " turn_state=wedged" : "";
     const command =
       `Use Skill(pm-wait-nudge) now with mode=FREE_WAIT_ASSIGNMENT slot=${slot.slot} ` +
       `assignment_epoch=${slot.assignment_epoch} wait_started_at=${anchor.timestamp} ` +
@@ -664,18 +651,7 @@ export class StuckDetector {
       `recommended_issue=${gate.recommended_issue ?? "unknown"} ` +
       `recommended_packet=${gate.recommended_packet ?? "unknown"}. ` +
       "Revalidate that this slot is still free and the recommended obligation is open, " +
-      "then remind PM once; do not assign work or run reconcile-capacity." +
-      wedgeMarker;
-
-    if (idleState.wedged) {
-      this.db.logEvent(slot.slot, "idle_free_wedge_detected", "Stuck", null, {
-        assignment_epoch: slot.assignment_epoch,
-        free_anchor: anchor.timestamp,
-        log_age_ms: idleState.logAgeMs,
-        turn_state: slot.active_turn_state,
-        active_turn_started_at: slot.active_turn_started_at,
-      });
-    }
+      "then remind PM once; do not assign work or run reconcile-capacity.";
 
     const sent = await this.relay.sendToSlotAsync(slot.slot, command, false);
     const payload = {
@@ -686,7 +662,7 @@ export class StuckDetector {
       free_age_ms: freeAgeMs,
       wait_age_minutes: waitAgeMinutes,
       urgency,
-      turn_state: idleState.wedged ? "wedged" : "inactive",
+      turn_state: "inactive",
       recommendation_kind: gate.recommendation_kind,
       rework_packet_count: gate.rework_packet_count,
       rework_pr_count: gate.rework_pr_count,
@@ -759,38 +735,14 @@ export class StuckDetector {
   }
 
   /**
-   * A slot is recoverable by the nudge path when it is either genuinely idle
-   * (inactive turn state) or wedged: the turn state is stuck active with no
-   * turn start recorded, the slot JSONL has produced no writes for the idle
-   * threshold, and the live pane confirms the prompt is idle. Without this
-   * fallback a lost Stop event leaves a slot invisible to every detector.
+   * Hook state is the sole turn-boundary authority. Log mtime, pane prompts,
+   * and missing active_turn_started_at are telemetry only and cannot turn an
+   * active or indeterminate turn into an eligible idle episode.
    */
-  private async isIdleOrWedged(
+  private isIdleByHookState(
     slot: SlotState
-  ): Promise<{ idle: boolean; wedged: boolean; logAgeMs: number | null }> {
-    // active_turn_state is maintained by ordered UserPromptSubmit/work/Stop
-    // hook events. The legacy idle boolean may be stale after an older status
-    // read used terminal prompt heuristics, so it must not veto a completed
-    // turn.
-    if (slot.active_turn_state === "inactive") {
-      return { idle: true, wedged: false, logAgeMs: null };
-    }
-    if (
-      slot.active_turn_state !== "active" &&
-      slot.active_turn_state !== "indeterminate"
-    ) {
-      return { idle: false, wedged: false, logAgeMs: null };
-    }
-    if (slot.active_turn_started_at) {
-      return { idle: false, wedged: false, logAgeMs: null };
-    }
-    const logMtime = await this.logManager.getLogMtime(slot.slot);
-    if (!logMtime) return { idle: false, wedged: false, logAgeMs: null };
-    const logAgeMs = Date.now() - logMtime.getTime();
-    if (!Number.isFinite(logAgeMs) || logAgeMs < this.IDLE_OCCUPIED_THRESHOLD_MS) {
-      return { idle: false, wedged: false, logAgeMs };
-    }
-    return { idle: true, wedged: true, logAgeMs };
+  ): { idle: boolean } {
+    return { idle: slot.active_turn_state === "inactive" };
   }
 
   /**

@@ -1460,12 +1460,9 @@ export class MoPDatabase {
     });
   }
 
-  touchMeaningfulWork(slot: number, turnId?: string | null): void {
-    const current = this.getSlot(slot);
+  touchMeaningfulWork(slot: number, _turnId?: string | null): void {
     const now = new Date().toISOString();
     this.updateSlot(slot, {
-      active_turn_id: turnId ?? current?.active_turn_id ?? null,
-      active_turn_state: "active",
       last_meaningful_work_at: now,
       idle: false,
     });
