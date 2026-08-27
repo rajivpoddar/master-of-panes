@@ -4,11 +4,9 @@
   "owner": "master-of-panes",
   "inventory": {
     "source_roots": [
-      "~/.codex/skills/codex-stdio-send-message",
-      "~/.claude/scripts/pm-operator.py",
-      "~/.claude/scripts/pm-transition.sh"
+      "~/.codex/skills/codex-stdio-send-message"
     ],
-    "selected_count": 6,
+    "selected_count": 4,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -19,118 +17,10 @@
         "class": "VCS_METADATA"
       }
     ],
-    "ambiguous": [],
-    "dependency_closure": [
-      {
-        "owner": "master-of-panes immutable release",
-        "paths": [
-          "scripts/pm/control_plane/assignment_boundary.py",
-          "scripts/pm/control_plane/family2_boundary.py",
-          "scripts/pm/capacity-control.py"
-        ],
-        "status": "existing-release-resolved"
-      },
-      {
-        "owner": "legacy pm-transition runtime dependencies",
-        "paths": [
-          "/Users/rajiv/.claude/scripts/pm-state-replace.sh",
-          "/Users/rajiv/.claude/scripts/pm-ops.py",
-          "/Users/rajiv/.claude/scripts/pm30m-control.py"
-        ],
-        "status": "existing-installed-targets-resolved"
-      }
-    ],
-    "command_inventory": [
-      {
-        "command": "claim-slot",
-        "retired": true,
-        "legacy_callers": [],
-        "reason": "legacy shell has no claim-slot command arm; operator is the only supported entrypoint"
-      },
-      {
-        "command": "rebind-slot",
-        "retired": true,
-        "legacy_callers": [],
-        "reason": "legacy shell has no rebind-slot command arm; operator is the only supported entrypoint"
-      },
-      {
-        "command": "release-slot",
-        "retired": true,
-        "legacy_callers": [],
-        "reason": "legacy shell has no release-slot command arm; operator is the only supported entrypoint"
-      },
-      {
-        "command": "slot-ready",
-        "retired": false,
-        "legacy_callers": [
-          {"path": "/Users/rajiv/.claude/hooks/pm-state-promotion-proof-guard.sh", "line": 72, "kind": "executable"},
-          {"path": "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh", "line": 5608, "kind": "executable"},
-          {"path": "/Users/rajiv/.claude/skills/pr-mark-ready/SKILL.md", "lines": [30, 181, 199, 218, 247, 254, 387, 516, 526, 738], "kind": "instruction"},
-          {"path": "/Users/rajiv/.claude/skills/slot-state-machine/SKILL.md", "lines": [31, 120, 139], "kind": "instruction"}
-        ],
-        "reason": "wrapper Family-2 boundary remains authoritative pending full parity"
-      },
-      {
-        "command": "pm-review",
-        "retired": false,
-        "legacy_callers": [
-          {"path": "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh", "lines": [2694, 5380, 5397, 5412, 5427, 5623, 5750, 6008], "kind": "executable"},
-          {"path": "/Users/rajiv/.codex/automations/heydonna-dev-hourly-activity-review/automation.toml", "line": 5, "kind": "automation"},
-          {"path": "/Users/rajiv/.claude/skills/pr-state-sweep/SKILL.md", "lines": [244, 249], "kind": "instruction"},
-          {"path": "/Users/rajiv/.claude/skills/codex-companion-cap-mechanism/SKILL.md", "line": 171, "kind": "instruction"}
-        ],
-        "reason": "wrapper marker/release/projection contract is not replaced by the thin operator"
-      },
-      {
-        "command": "capacity-snapshot",
-        "retired": false,
-        "legacy_callers": [
-          {"path": "/Users/rajiv/.claude/scripts/pm-transition.sh", "line": 222, "kind": "executable"}
-        ],
-        "reason": "wrapper observation contract remains authoritative"
-      },
-      {
-        "command": "campaign-status",
-        "retired": true,
-        "legacy_callers": [],
-        "reason": "no executable callers found; remaining references are usage/documentation only"
-      },
-      {
-        "command": "reconcile-capacity",
-        "retired": false,
-        "legacy_callers": [
-          {"path": "/Users/rajiv/.claude/scripts/pm-transition.sh", "lines": [12803, 324, 6647, 6661, 7892, 14858], "kind": "executable/self-call"},
-          {"path": "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh", "lines": [209, 4820, 4862, 5780], "kind": "executable"},
-          {"path": "/Users/rajiv/.claude/skills/slot-dispatch-sweep/scripts/sweep.sh", "lines": [759, 863, 901, 1085, 1259, 1276, 1305, 2640, 2644, 2646], "kind": "executable"},
-          {"path": "/Users/rajiv/.claude/skills/pr-state-sweep/tests/sentinel-replace-fixture.sh", "line": 18, "kind": "test-executable"},
-          {"path": "/Users/rajiv/.codex/automations/heydonna-dev-hourly-activity-review/automation.toml", "line": 5, "kind": "automation"},
-          {"path": "/Users/rajiv/.claude/skills/slot-dispatch-sweep/SKILL.md", "lines": [98, 140, 149, 310], "kind": "instruction"},
-          {"path": "/Users/rajiv/.claude/skills/pr-state-sweep/SKILL.md", "lines": [145, 291, 366], "kind": "instruction"},
-          {"path": "/Users/rajiv/.claude/skills/slot-state-machine/SKILL.md", "lines": [39, 49, 228, 291], "kind": "instruction"}
-        ],
-        "reason": "wrapper owns outbox/index/sweep/drain/backlog/event behavior"
-      }
-    ]
+    "dependency_closure": [],
+    "command_inventory": []
   },
   "entries": [
-    {
-      "source_path": "claude/scripts/pm-operator.py",
-      "canonical_target": "/Users/rajiv/.claude/scripts/pm-operator.py",
-      "sha256": "41352803938f10a98ff0420513e41e8208a7b0b25cddfcde0d276a834ce63417",
-      "mode": 493,
-      "ownership_class": "shared-claude-pm-operator",
-      "dependency_status": "closed",
-      "dependencies": []
-    },
-    {
-      "source_path": "claude/scripts/pm-transition.sh",
-      "canonical_target": "/Users/rajiv/.claude/scripts/pm-transition.sh",
-      "sha256": "174b2b7eeb6631452f13f17e4c601c0c342d15c784614c063f2d3773b3a0e770",
-      "mode": 493,
-      "ownership_class": "shared-claude-pm-transition-compatibility",
-      "dependency_status": "closed",
-      "dependencies": []
-    },
     {
       "source_path": "codex/skills/codex-stdio-send-message/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/codex-stdio-send-message/SKILL.md",
