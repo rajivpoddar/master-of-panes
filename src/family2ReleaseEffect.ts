@@ -61,7 +61,7 @@ function sameBinding(a: Family2ReleaseEffectRequest, b: Family2ReleaseEffectRequ
 
 /** Stateless adapter for one already-committed Family-2 release effect. */
 export class Family2ReleaseEffectAdapter {
-  constructor(private readonly fetch: Family2ReleaseFetch = fetch as Family2ReleaseFetch) {}
+  constructor(private readonly fetch: Family2ReleaseFetch = globalThis.fetch as Family2ReleaseFetch) {}
 
   private async receipt(request: Family2ReleaseEffectRequest, base: string): Promise<Family2ReleaseEffectReceipt | null> {
     try {

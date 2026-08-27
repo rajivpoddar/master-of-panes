@@ -15,6 +15,10 @@ function fakeTransport(): { fetch: Family2ReleaseFetch; posts: number[]; reuse: 
   return { fetch, posts, reuse: (value) => { current = value; } };
 }
 
+test("default Family-2 adapter uses the process fetch without startup failure", () => {
+  assert.doesNotThrow(() => new Family2ReleaseEffectAdapter());
+});
+
 test("historical eight-field release body is refused while immutable exact tuple releases once", async () => {
   const transport = fakeTransport(); const adapter = new Family2ReleaseEffectAdapter(transport.fetch); const request = baseRequest();
   const legacy = await adapter.release({ ...request, effect_id: "" }); assert.equal(legacy.code, "invalid_request"); assert.equal(transport.posts.length, 0);
