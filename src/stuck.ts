@@ -808,7 +808,6 @@ export class StuckDetector {
       "Stop",
       "SessionEnd",
       "slot_idle_reconciled_from_pane",
-      "idle_prompt_turn_finished",
     ]) {
       const event = this.db.getEvents(slot.slot, 1, eventType)[0];
       if (!event) continue;
@@ -915,21 +914,18 @@ export class StuckDetector {
    * Preserve the original wait start across detector-generated PM_WAIT turns.
    *
    * A nudge wakes the slot, which runs pm-wait-nudge, reminds PM, and stops.
-   * That Stop/idle-prompt pair is a new idle episode for re-nudge cadence, but
-   * it is not progress on the blocked task. Walk only directly linked nudge
-   * completions whose terminal result is classification=PM_WAIT. Any normal
-   * work turn, LOCAL_CONTINUE result, ownership change, or missing link leaves
-   * the latest idle episode as the new logical wait start.
+   * That authoritative Stop is a new idle episode for re-nudge cadence, but it
+   * is not progress on the blocked task. Walk only directly linked nudge
+   * completions whose terminal Stop result is classification=PM_WAIT. Any
+   * normal work turn, LOCAL_CONTINUE result, ownership change, notification,
+   * or missing link leaves the latest idle episode as the new logical wait
+   * start.
    */
   private getIdleOccupiedWaitAnchor(
     slot: SlotState,
     latestIdleAnchor: IdleOccupiedAnchor
   ): IdleOccupiedAnchor {
     const nudges = this.db.getEvents(slot.slot, 50, "idle_occupied_continue_injected");
-    const idleCompletions = this.db
-      .getEvents(slot.slot, 100, "idle_prompt_turn_finished")
-      .map((event) => ({ event, timestampMs: parseDbTimestampMs(event.timestamp) }))
-      .filter((item) => Number.isFinite(item.timestampMs));
     const stops = this.db
       .getEvents(slot.slot, 200, "Stop")
       .map((event) => ({ event, timestampMs: parseDbTimestampMs(event.timestamp) }))
@@ -959,7 +955,7 @@ export class StuckDetector {
       }
       if (payload.assignment_epoch !== slot.assignment_epoch || !payload.idle_anchor) continue;
 
-      const completion = idleCompletions
+      const completion = stops
         .filter((item) => item.timestampMs > nudgeTimestampMs)
         .sort((a, b) => a.timestampMs - b.timestampMs)[0];
       if (!completion || completion.timestampMs !== episodeTimestampMs) continue;
@@ -968,7 +964,7 @@ export class StuckDetector {
         (item) => item.timestampMs > nudgeTimestampMs && item.timestampMs < completion.timestampMs
       );
       const directStops = stops.filter(
-        (item) => item.timestampMs > nudgeTimestampMs && item.timestampMs < completion.timestampMs
+        (item) => item.timestampMs > nudgeTimestampMs && item.timestampMs <= completion.timestampMs
       );
       if (directPromptStarts.length !== 1 || directStops.length === 0) continue;
 
@@ -983,7 +979,7 @@ export class StuckDetector {
       const promptSessionId = readSessionId(directPromptStarts[0].event.payload, "session_id");
       const completionSessionId = readSessionId(
         completion.event.payload,
-        "notification_session_id"
+        "session_id"
       );
       if (!promptSessionId || promptSessionId !== completionSessionId) continue;
 

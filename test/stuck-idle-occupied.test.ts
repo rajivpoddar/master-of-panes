@@ -330,7 +330,7 @@ test("nudges an occupied idle dev slot once per idle episode", async () => {
   }
 });
 
-test("a matching idle prompt starts a new idle episode after an earlier nudge", async () => {
+test("a notification-derived idle prompt does not start a new idle episode", async () => {
   const originalNow = Date.now;
   Date.now = () => NOW;
   try {
@@ -346,6 +346,7 @@ test("a matching idle prompt starts a new idle episode after an earlier nudge", 
         payload: JSON.stringify({
           assignment_epoch: 4,
           idle_anchor: OLD_IDLE,
+          urgency: "REMINDER",
         }),
         processed: false,
       },
@@ -363,15 +364,11 @@ test("a matching idle prompt starts a new idle episode after an earlier nudge", 
 
     await h.detector.checkIdleOccupied(slot());
 
-    assert.deepEqual(h.sends, [
-      expectedNudge(5, "REMINDER", NEW_IDLE_PROMPT),
-    ]);
-    const latest = h.events.filter(
+    assert.deepEqual(h.sends, []);
+    const nudges = h.events.filter(
       (event) => event.event_type === "idle_occupied_continue_injected",
-    ).at(-1);
-    assert.ok(latest);
-    assert.equal(JSON.parse(latest.payload).idle_anchor, NEW_IDLE_PROMPT);
-    assert.equal(JSON.parse(latest.payload).idle_anchor_source, "idle_prompt_turn_finished");
+    );
+    assert.equal(nudges.length, 1);
   } finally {
     Date.now = originalNow;
   }
@@ -441,9 +438,9 @@ test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => 
     assert.deepEqual(JSON.parse(latest.payload), {
       command: expectedNudge(12, "REMINDER"),
       assignment_epoch: 4,
-      idle_anchor: "2026-07-27T02:31:00.000",
-      idle_anchor_source: "idle_prompt_turn_finished",
-      idle_age_ms: 301_000,
+      idle_anchor: "2026-07-27T02:30:30.000",
+      idle_anchor_source: "Stop",
+      idle_age_ms: 331_000,
       wait_anchor: OLD_IDLE,
       wait_anchor_source: "pm_wait_nudge_carry",
       wait_age_ms: 721_000,
@@ -573,9 +570,9 @@ test("keeps the original wait start across repeated PM_WAIT nudge turns", async 
     assert.deepEqual(JSON.parse(latest.payload), {
       command: expectedNudge(18, "FOLLOW_UP"),
       assignment_epoch: 4,
-      idle_anchor: "2026-07-27T02:37:00.000",
-      idle_anchor_source: "idle_prompt_turn_finished",
-      idle_age_ms: 301_000,
+      idle_anchor: "2026-07-27T02:36:30.000",
+      idle_anchor_source: "Stop",
+      idle_age_ms: 331_000,
       wait_anchor: OLD_IDLE,
       wait_anchor_source: "Stop",
       wait_age_ms: 1_081_000,
@@ -661,7 +658,7 @@ test("resets wait age when normal work stops before a later PM_WAIT result", asy
     await h.detector.checkIdleOccupied(slot());
 
     assert.deepEqual(h.sends, [
-      expectedNudge(5, "REMINDER", "2026-07-27T02:31:00.000"),
+      expectedNudge(5, "REMINDER", "2026-07-27T02:30:30.000"),
     ]);
   } finally {
     Date.now = originalNow;
@@ -714,7 +711,7 @@ test("resets wait age when the prior nudge turn resumes local work", async () =>
     await h.detector.checkIdleOccupied(slot());
 
     assert.deepEqual(h.sends, [
-      expectedNudge(5, "REMINDER", "2026-07-27T02:31:00.000"),
+      expectedNudge(5, "REMINDER", "2026-07-27T02:30:30.000"),
     ]);
   } finally {
     Date.now = originalNow;
@@ -1280,7 +1277,7 @@ test("escalates a free-slot PM reminder without resetting the release anchor", a
   }
 });
 
-test("does not nudge an active slot when stale log mtime lacks a hook boundary", async () => {
+test("UserPromptSubmit plus idle_prompt and tool telemetry cannot nudge active work", async () => {
   const originalNow = Date.now;
   Date.now = () => NOW;
   try {
@@ -1291,6 +1288,38 @@ test("does not nudge an active slot when stale log mtime lacks a hook boundary",
     });
     const h = harness(candidate);
     h.setLogMtime(new Date(Date.parse(OLD_IDLE + "Z")));
+    h.events.push(
+      {
+        id: 10,
+        timestamp: "2026-07-27T02:25:00.000",
+        slot: 2,
+        event_type: "UserPromptSubmit",
+        hook_type: "UserPromptSubmit",
+        tool_name: null,
+        payload: JSON.stringify({ session_id: SESSION_ID }),
+        processed: false,
+      },
+      {
+        id: 11,
+        timestamp: "2026-07-27T02:26:00.000",
+        slot: 2,
+        event_type: "idle_prompt_observed",
+        hook_type: "Notification",
+        tool_name: null,
+        payload: JSON.stringify({ session_id: SESSION_ID, authoritative: false }),
+        processed: false,
+      },
+      {
+        id: 12,
+        timestamp: "2026-07-27T02:29:00.000",
+        slot: 2,
+        event_type: "PostToolUse",
+        hook_type: "PostToolUse",
+        tool_name: "TaskOutput",
+        payload: JSON.stringify({ session_id: SESSION_ID }),
+        processed: false,
+      },
+    );
     await h.detector.checkIdleOccupied(candidate);
 
     assert.equal(h.sends.length, 0);
@@ -1346,20 +1375,23 @@ test("does not nudge an active slot with a fresh JSONL write", async () => {
   }
 });
 
-test("requires strictly more than five minutes and dedupes the idle episode", async () => {
+test("requires strictly more than five minutes for Stop and SessionEnd and dedupes", async () => {
   const originalNow = Date.now;
   const baseMs = Date.parse(OLD_IDLE + "Z");
   try {
-    const candidate = slot();
-    const h = harness(candidate);
-    Date.now = () => baseMs + 5 * 60_000;
-    await h.detector.checkIdleOccupied(candidate);
-    assert.deepEqual(h.sends, []);
+    for (const closeType of ["Stop", "SessionEnd"] as const) {
+      const candidate = slot();
+      const h = harness(candidate);
+      h.events[0] = { ...h.events[0], event_type: closeType, hook_type: closeType };
+      Date.now = () => baseMs + 5 * 60_000;
+      await h.detector.checkIdleOccupied(candidate);
+      assert.deepEqual(h.sends, []);
 
-    Date.now = () => baseMs + 5 * 60_000 + 1;
-    await h.detector.checkIdleOccupied(candidate);
-    await h.detector.checkIdleOccupied(candidate);
-    assert.equal(h.sends.length, 1);
+      Date.now = () => baseMs + 5 * 60_000 + 1;
+      await h.detector.checkIdleOccupied(candidate);
+      await h.detector.checkIdleOccupied(candidate);
+      assert.equal(h.sends.length, 1);
+    }
   } finally {
     Date.now = originalNow;
   }

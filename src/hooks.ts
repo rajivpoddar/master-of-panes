@@ -1872,26 +1872,17 @@ export class HookProcessor {
         });
       }
 
-      // Claude Code can reach an idle prompt without emitting Stop/SessionEnd.
-      // Close only the matching session's turn so stale notifications cannot
-      // make a newer turn eligible for an idle-occupied nudge.
-      if (payload.session_id) {
-        this.db.finishAgentTurn(slotNum, payload.session_id);
-        const finishedSlot = this.db.getSlot(slotNum);
-        this.db.logEvent(
-          slotNum,
-          finishedSlot?.active_turn_state === "inactive"
-            ? "idle_prompt_turn_finished"
-            : "idle_prompt_turn_mismatch",
-          "Notification",
-          null,
-          {
-            notification_session_id: payload.session_id,
-            active_turn_id: finishedSlot?.active_turn_id ?? null,
-            active_turn_state: finishedSlot?.active_turn_state ?? "unknown",
-          },
-        );
-      }
+      // idle_prompt is UI/telemetry only. UserPromptSubmit is the sole turn
+      // opener and Stop/SessionEnd are the sole turn closers; a prompt-shaped
+      // notification must not mutate authoritative turn state, even when its
+      // session ID matches or is stale.
+      const observedSlot = this.db.getSlot(slotNum);
+      this.db.logEvent(slotNum, "idle_prompt_observed", "Notification", null, {
+        notification_session_id: payload.session_id ?? null,
+        active_turn_id: observedSlot?.active_turn_id ?? null,
+        active_turn_state: observedSlot?.active_turn_state ?? "unknown",
+        authoritative: false,
+      });
 
       const currentSlot = this.db.getSlot(slotNum);
       if (currentSlot?.occupied) {

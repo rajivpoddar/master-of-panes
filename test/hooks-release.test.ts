@@ -152,7 +152,7 @@ test("hook checkout synchronization never adopts an unregistered branch", async 
   }
 });
 
-test("same-session idle_prompt finishes an active turn when Stop is missing", async () => {
+test("same-session idle_prompt is telemetry only when Stop is missing", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-idle-prompt-turn-test-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
@@ -177,17 +177,17 @@ test("same-session idle_prompt finishes an active turn when Stop is missing", as
     });
 
     const slot = db.getSlot(2);
-    assert.equal(slot?.active_turn_state, "inactive");
-    assert.equal(slot?.active_turn_id, null);
-    assert.equal(slot?.active_turn_started_at, null);
+    assert.equal(slot?.active_turn_state, "active");
+    assert.equal(slot?.active_turn_id, "turn-a");
+    assert.ok(slot?.active_turn_started_at);
     assert.equal(slot?.idle, true);
-    assert.equal(db.getEvents(2, 10, "idle_prompt_turn_finished").length, 1);
+    assert.equal(db.getEvents(2, 10, "idle_prompt_observed").length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("stale idle_prompt cannot finish a newer active turn", async () => {
+test("stale idle_prompt cannot change a newer active turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-stale-idle-prompt-turn-test-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
@@ -212,10 +212,44 @@ test("stale idle_prompt cannot finish a newer active turn", async () => {
     });
 
     const slot = db.getSlot(2);
+    assert.equal(slot?.active_turn_state, "active");
+    assert.equal(slot?.active_turn_id, "turn-new");
+    assert.equal(slot?.idle, true);
+    assert.equal(db.getEvents(2, 10, "idle_prompt_observed").length, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("idle_prompt cannot change an already-indeterminate turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-indeterminate-idle-prompt-test-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    db.assignSlot(
+      2,
+      "PR rework",
+      "github:repo-1",
+      6847,
+      "fix/6847-scheduler-indexed-measurement",
+      "turn-new",
+      6905,
+      "a".repeat(40),
+      0,
+    );
+    db.startAgentTurn(2, "turn-new");
+    db.finishAgentTurn(2, "turn-old");
+
+    const processor = new HookProcessor(db, {} as TmuxRelay);
+    await processor.process(2, {
+      type: "Notification",
+      notification_type: "idle_prompt",
+      session_id: "turn-old",
+    });
+
+    const slot = db.getSlot(2);
     assert.equal(slot?.active_turn_state, "indeterminate");
     assert.equal(slot?.active_turn_id, "turn-new");
-    assert.equal(slot?.idle, false);
-    assert.equal(db.getEvents(2, 10, "idle_prompt_turn_mismatch").length, 1);
+    assert.equal(db.getEvents(2, 10, "idle_prompt_observed").length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
