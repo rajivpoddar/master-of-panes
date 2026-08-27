@@ -136,7 +136,11 @@ def _direct_assignment(command: str, args: list[str]) -> int:
 
     request = Request(f"{base_url}{path}", method="POST", headers=headers, data=json.dumps(body).encode("utf-8"))
     try:
-        with urlopen(request, timeout=10) as response:
+        # Native release may synchronously wait for pane quiescence and checkout
+        # reset. Keep the client alive through that bounded workflow so a
+        # successful clear is returned as the authoritative terminal result.
+        timeout = 360 if command == "release-slot" else 10
+        with urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
             print(json.dumps(payload, sort_keys=True))
             return 0 if payload.get("success", True) is True and payload.get("ok", True) is not False else 1
