@@ -20,11 +20,9 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { MoPDatabase } from "./db.js";
-import {
-  assignmentIdentityPatchFields,
-  isPmTransitionAssignmentRequest,
-} from "./assignmentAuthority.js";
+import { assignmentIdentityPatchFields } from "./assignmentAuthority.js";
 import { registerAssignmentRoute } from "./assignmentRoute.js";
+import { registerFamily2Routes } from "./family2Routes.js";
 import { TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
@@ -38,12 +36,8 @@ import { DEFAULT_CONFIG } from "./types.js";
 import {
   NativeSlotReleaseCoordinator,
   type CheckoutResetObservation,
-  type NativeSlotReleaseRequest,
 } from "./slotRelease.js";
-import {
-  consumeFamily2ReleaseEffect,
-  Family2ReleaseEffectAdapter,
-} from "./family2ReleaseEffect.js";
+import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 
 // ─── Config ──────────────────────────────────────────────
@@ -953,82 +947,11 @@ app.patch("/slots/:slotNum", async (c) => {
 /** Assign a slot through the guarded PM authority route. */
 registerAssignmentRoute(app, db);
 
-/** Release a slot only after its owning checkout supplies an exact reset acknowledgement. */
-app.post("/slots/:slotNum/release", async (c) => {
-  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
-  if (!slotParse.success) {
-    return c.json({ error: "Invalid slot number" }, 400);
-  }
-
-  let body: Record<string, unknown> = {};
-  try {
-    body = await c.req.json();
-  } catch {
-    body = {};
-  }
-  const request: NativeSlotReleaseRequest = {
-    slot: slotParse.data,
-    expected_epoch: body.expected_epoch as number,
-    expected_session_id: body.expected_session_id as string,
-    expected_tuple: {
-      repository_id: body.expected_repository_id as string | number | null,
-      issue: body.expected_issue as number | null,
-      pr: body.expected_pr as number | null,
-      branch: body.expected_branch as string | null,
-      head_sha: body.expected_head_sha as string | null,
-      work_kind: body.expected_work_kind as string | null,
-      handoff_id: body.expected_handoff_id as string | null,
-      claimed_at: body.expected_claimed_at as string | null,
-    },
-    intended_main_head: body.intended_main_head as string,
-    effect_id: body.effect_id as string | undefined,
-    request_digest: body.request_digest as string | undefined,
-  };
-  const releaseResult = await nativeSlotRelease.release(request);
-  if (releaseResult.success) {
-    if (!releaseResult.idempotent) {
-      processor.clearPlanApprovalTimer(slotParse.data);
-      db.logEvent(slotParse.data, "slot_released", null, null, {
-        assignment_epoch: releaseResult.assignment_epoch,
-        native_checkout_ack: true,
-      });
-    }
-    return c.json(releaseResult);
-  }
-  return c.json(releaseResult, releaseResult.code === "invalid_request" ? 400 : 409);
-});
-
-/** Read one durable Family-2 release receipt without mutating slot state. */
-app.get("/slots/:slotNum/release-receipt", (c) => {
-  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
-  if (!slotParse.success) return c.json({ success: false, code: "invalid_request" }, 400);
-  const effectId = c.req.query("effect_id");
-  if (!effectId) return c.json({ success: false, code: "invalid_request" }, 400);
-  try {
-    const receipt = db.getNativeReleaseEffectReceipt(effectId);
-    if (!receipt || receipt.slot !== slotParse.data) {
-      return c.json({ success: false, code: "effect_receipt_not_found" }, 404);
-    }
-    return c.json({ success: true, ...receipt });
-  } catch {
-    return c.json({ success: false, code: "effect_receipt_malformed" }, 500);
-  }
-});
-
-/** Consume one committed Family-2 release effect through the live MoP boundary. */
-app.post("/family2/release-effect", async (c) => {
-  if (!isPmTransitionAssignmentRequest(c.req.header("x-heydonna-assignment-authority"))) {
-    return c.json({ success: false, code: "assignment_authority_required" }, 403);
-  }
-  let payload: unknown;
-  try {
-    payload = await c.req.json();
-  } catch {
-    return c.json({ success: false, code: "invalid_request" }, 400);
-  }
-  const result = await consumeFamily2ReleaseEffect(payload, family2ReleaseEffectAdapter);
-  const status = result.success ? 200 : result.code === "invalid_request" ? 400 : 409;
-  return c.json(result, status as 200 | 400 | 409);
+registerFamily2Routes(app, {
+  db,
+  nativeSlotRelease,
+  family2ReleaseEffectAdapter,
+  clearPlanApprovalTimer: (slot) => processor.clearPlanApprovalTimer(slot),
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────

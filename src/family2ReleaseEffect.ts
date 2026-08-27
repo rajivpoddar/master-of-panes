@@ -5,6 +5,10 @@ import {
   computeFamily2ReleaseDigest,
   type AssignmentTupleInput,
 } from "./db.js";
+import {
+  PM_TRANSITION_ASSIGNMENT_AUTHORITY,
+  PM_TRANSITION_ASSIGNMENT_HEADER,
+} from "./assignmentAuthority.js";
 
 export interface Family2ReleaseResponse {
   ok: boolean;
@@ -65,7 +69,10 @@ export class Family2ReleaseEffectAdapter {
 
   private async receipt(request: Family2ReleaseEffectRequest, base: string): Promise<Family2ReleaseEffectReceipt | null> {
     try {
-      const response = await this.fetch(`${base}/slots/${request.slot}/release-receipt?effect_id=${encodeURIComponent(request.effect_id)}`);
+      const response = await this.fetch(
+        `${base}/slots/${request.slot}/release-receipt?effect_id=${encodeURIComponent(request.effect_id)}`,
+        { headers: { [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY } },
+      );
       if (response.status === 404) return null;
       const payload = await response.json();
       if (!response.ok || !isRecord(payload) || payload.success !== true || typeof payload.request_digest !== "string" || typeof payload.released_epoch !== "number") return responseReceipt("effect_receipt_invalid", "Durable release receipt is malformed.", "Stop and reconcile the committed outbox effect before retrying.", { release_id: request.effect_id });
@@ -93,7 +100,7 @@ export class Family2ReleaseEffectAdapter {
     const beforeReceipt = { slot: request.slot, assignment_epoch: request.expected_epoch, session_id: request.expected_session_id, tuple: request.expected_tuple };
     const body = this.body(request); const requestDigest = computeFamily2ReleaseDigest(request);
     let releaseResponse: Family2ReleaseResponse; let releasePayload: unknown;
-    try { releaseResponse = await this.fetch(`${base}/slots/${request.slot}/release`, { method: "POST", headers: { "content-type": "application/json", "x-heydonna-assignment-authority": "pm-transition-v1" }, body: JSON.stringify({ ...body, request_digest: requestDigest }) }); releasePayload = await releaseResponse.json(); } catch (error) { return responseReceipt("release_failed", `Native release request failed: ${error instanceof Error ? error.message : String(error)}`, "Keep the effect uncertain; reconcile its durable receipt before retry.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt }); }
+    try { releaseResponse = await this.fetch(`${base}/slots/${request.slot}/release`, { method: "POST", headers: { "content-type": "application/json", [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY }, body: JSON.stringify({ ...body, request_digest: requestDigest }) }); releasePayload = await releaseResponse.json(); } catch (error) { return responseReceipt("release_failed", `Native release request failed: ${error instanceof Error ? error.message : String(error)}`, "Keep the effect uncertain; reconcile its durable receipt before retry.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt }); }
     if (!releaseResponse.ok) return responseReceipt("release_failed", `Native release returned HTTP ${releaseResponse.status}`, "Keep the effect retryable and inspect the typed native refusal.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt });
     if (!isRecord(releasePayload) || releasePayload.success !== true) return responseReceipt("release_response_invalid", "Native release response was malformed or unsuccessful.", "Keep the effect retryable and reconcile the durable receipt.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt });
     let afterResponse: Family2ReleaseResponse; let afterPayload: unknown;

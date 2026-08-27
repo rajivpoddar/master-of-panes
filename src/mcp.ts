@@ -24,6 +24,10 @@ import { MoPDatabase } from "./db.js";
 import { TmuxRelay } from "./relay.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import { execShell, sleep } from "./asyncCommand.js";
+import {
+  PM_TRANSITION_ASSIGNMENT_AUTHORITY,
+  PM_TRANSITION_ASSIGNMENT_HEADER,
+} from "./assignmentAuthority.js";
 import type { MoPConfig } from "./types.js";
 
 function isPmControlCommand(command: string): boolean {
@@ -313,7 +317,10 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       try {
         const response = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${releaseInput.slot}/release`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY,
+          },
           body: JSON.stringify(releaseInput),
         });
         const releaseResult = await response.json().catch(() => ({
