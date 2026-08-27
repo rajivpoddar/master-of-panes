@@ -116,7 +116,7 @@
     {
       "source_path": "claude/scripts/pm-operator.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/pm-operator.py",
-      "sha256": "af81e91db20a4713d52eaf8f81aa36508cc89edd3f0e49ee56217c7c6c5e7a87",
+      "sha256": "9d4b01952ac3e0be99e7b085949c0a46b5ca02a54e8e528d3427b911132bee15",
       "mode": 493,
       "ownership_class": "shared-claude-pm-operator",
       "dependency_status": "closed",

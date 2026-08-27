@@ -53,9 +53,7 @@ def _flag_values(args: list[str]) -> dict[str, str | None]:
             raise ValueError(f"unexpected argument {token}")
         name = token[2:].replace("-", "_")
         if index + 1 >= len(args) or args[index + 1].startswith("--"):
-            values[name] = None
-            index += 1
-            continue
+            raise ValueError(f"--{name.replace('_', '-')} requires a value; use null explicitly when allowed")
         values[name] = args[index + 1]
         index += 2
     return values

@@ -173,10 +173,20 @@ class PmTransitionSevenCutoverTests(unittest.TestCase):
                         "--new-branch", "fix/7518-rebound", "--new-head-sha", "b" * 40,
                     ], env=env, capture_output=True, text=True, timeout=5,
                 )
+                result_missing_value = subprocess.run(
+                    [
+                        "python3", str(SHARED / "claude/scripts/pm-operator.py"), "rebind-slot",
+                        "--slot", "1", "--expected-epoch", "7", "--repository-id", "heydonna-app/heydonna-app",
+                        "--issue", "7518", "--pr", "7518", "--branch", "fix/7518", "--head-sha", "a" * 40,
+                        "--work-kind", "coding", "--handoff-id", "handoff-1", "--claimed-at", "2026-08-26T17:00:00Z",
+                        "--new-pr",
+                    ], env=env, capture_output=True, text=True, timeout=5,
+                )
             server.shutdown()
             thread.join(timeout=2)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result_rebind.returncode, 0)
+        self.assertEqual(result_missing_value.returncode, 20)
         self.assertEqual(len(requests), 2)
         self.assertEqual(requests[0]["path"], "/slots/1/assign")
         self.assertEqual(requests[0]["authority"], "pm-transition-v1")
