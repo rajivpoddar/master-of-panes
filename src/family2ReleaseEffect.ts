@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
 import {
   assignmentTupleMatches,
   normalizeAssignmentTuple,
+  normalizedFamily2ReleaseBody,
+  computeFamily2ReleaseDigest,
   type AssignmentTupleInput,
 } from "./db.js";
 
@@ -52,9 +53,6 @@ function slotSnapshot(value: unknown): Record<string, unknown> | null {
 function tupleFromSlot(slot: Record<string, unknown>): AssignmentTupleInput {
   return { repository_id: (slot.repository_id ?? null) as string | number | null, issue: (slot.issue ?? null) as number | null, pr: (slot.pr ?? null) as number | null, branch: (slot.branch ?? null) as string | null, head_sha: (slot.head_sha ?? null) as string | null, work_kind: (slot.work_kind ?? null) as string | null, handoff_id: (slot.handoff_id ?? null) as string | null, claimed_at: (slot.claimed_at ?? null) as string | null };
 }
-function digest(body: Record<string, unknown>): string {
-  return createHash("sha256").update(JSON.stringify(body)).digest("hex");
-}
 function validTuple(value: AssignmentTupleInput): boolean { try { return !!value && normalizeAssignmentTuple(value) !== null; } catch { return false; } }
 function sameBinding(a: Family2ReleaseEffectRequest, b: Family2ReleaseEffectRequest): boolean {
   const at = normalizeAssignmentTuple(a.expected_tuple); const bt = normalizeAssignmentTuple(b.expected_tuple);
@@ -72,7 +70,7 @@ export class Family2ReleaseEffectAdapter {
       const payload = await response.json();
       if (!response.ok || !isRecord(payload) || payload.success !== true || typeof payload.request_digest !== "string" || typeof payload.released_epoch !== "number") return responseReceipt("effect_receipt_invalid", "Durable release receipt is malformed.", "Stop and reconcile the committed outbox effect before retrying.", { release_id: request.effect_id });
       const receiptTuple = payload.expected_tuple as AssignmentTupleInput;
-      const expectedDigest = digest(this.body(request));
+      const expectedDigest = computeFamily2ReleaseDigest(request);
       if (payload.effect_id !== request.effect_id || payload.request_digest.toLowerCase() !== expectedDigest || payload.expected_epoch !== request.expected_epoch || payload.slot !== request.slot || payload.expected_session_id !== request.expected_session_id || typeof payload.intended_main_head !== "string" || payload.intended_main_head.toLowerCase() !== request.intended_main_head.toLowerCase() || !assignmentTupleMatches(normalizeAssignmentTuple(receiptTuple), normalizeAssignmentTuple(request.expected_tuple))) return responseReceipt("effect_receipt_conflict", "Durable release receipt conflicts with the immutable effect binding.", "Keep the outbox row and obtain an exact transition reconciliation.", { release_id: request.effect_id, request_digest: expectedDigest });
       return responseReceipt("released", "The exact release effect was already committed; receipt consumed idempotently.", "Continue with remaining committed effects only.", { release_id: request.effect_id, request_digest: expectedDigest, idempotent: true, after: { slot: request.slot, assignment_epoch: payload.released_epoch, occupied: false, session_id: null } });
     } catch (error) {
@@ -81,8 +79,7 @@ export class Family2ReleaseEffectAdapter {
   }
 
   private body(request: Family2ReleaseEffectRequest): Record<string, unknown> {
-    const tuple = normalizeAssignmentTuple(request.expected_tuple)!;
-    return { effect_id: request.effect_id, expected_epoch: request.expected_epoch, expected_session_id: request.expected_session_id, expected_repository_id: tuple.repository_id, expected_issue: tuple.issue, expected_pr: tuple.pr, expected_branch: tuple.branch, expected_head_sha: tuple.head_sha, expected_work_kind: tuple.work_kind, expected_handoff_id: tuple.handoff_id, expected_claimed_at: tuple.claimed_at, intended_main_head: request.intended_main_head.toLowerCase() };
+    return normalizedFamily2ReleaseBody(request);
   }
 
   async release(request: Family2ReleaseEffectRequest): Promise<Family2ReleaseEffectReceipt> {
@@ -94,7 +91,7 @@ export class Family2ReleaseEffectAdapter {
     const before = slotSnapshot(beforePayload); const currentTuple = before ? tupleFromSlot(before) : null; const normalized = currentTuple && normalizeAssignmentTuple(currentTuple);
     if (!beforeResponse.ok || !before || before.slot !== request.slot || before.occupied !== true || before.active_turn_state !== "inactive" || before.idle !== true || before.assignment_epoch !== request.expected_epoch || before.session_id !== request.expected_session_id || !normalized || !assignmentTupleMatches(normalized, normalizeAssignmentTuple(request.expected_tuple))) return responseReceipt("slot_not_releasable", "Current slot does not match the immutable committed release tuple.", "Leave the slot untouched and reconcile the committed effect before retrying.");
     const beforeReceipt = { slot: request.slot, assignment_epoch: request.expected_epoch, session_id: request.expected_session_id, tuple: request.expected_tuple };
-    const body = this.body(request); const requestDigest = digest(body);
+    const body = this.body(request); const requestDigest = computeFamily2ReleaseDigest(request);
     let releaseResponse: Family2ReleaseResponse; let releasePayload: unknown;
     try { releaseResponse = await this.fetch(`${base}/slots/${request.slot}/release`, { method: "POST", headers: { "content-type": "application/json", "x-heydonna-assignment-authority": "pm-transition-v1" }, body: JSON.stringify({ ...body, request_digest: requestDigest }) }); releasePayload = await releaseResponse.json(); } catch (error) { return responseReceipt("release_failed", `Native release request failed: ${error instanceof Error ? error.message : String(error)}`, "Keep the effect uncertain; reconcile its durable receipt before retry.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt }); }
     if (!releaseResponse.ok) return responseReceipt("release_failed", `Native release returned HTTP ${releaseResponse.status}`, "Keep the effect retryable and inspect the typed native refusal.", { release_id: request.effect_id, request_digest: requestDigest, before: beforeReceipt });

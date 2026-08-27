@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 
 import {
   assignmentTupleMatches,
+  computeFamily2ReleaseDigest,
   normalizeAssignmentTuple,
   slotAssignmentTuple,
   type AssignmentTuple,
@@ -54,6 +55,7 @@ export type NativeSlotReleaseCode =
   | "dirty_checkout"
   | "wrong_branch"
   | "wrong_head"
+  | "effect_digest_mismatch"
   | "clear_conflict"
   | "free_readback_failed"
   | "effect_receipt_conflict"
@@ -206,6 +208,39 @@ export class NativeSlotReleaseCoordinator {
         request_digest: request.request_digest,
       };
     }
+    let computedDigest: string;
+    try {
+      computedDigest = computeFamily2ReleaseDigest({
+        effect_id: request.effect_id,
+        expected_epoch: request.expected_epoch,
+        expected_session_id: request.expected_session_id,
+        expected_tuple: request.expected_tuple,
+        intended_main_head: request.intended_main_head,
+      });
+    } catch {
+      return {
+        ...result(
+          "effect_receipt_malformed",
+          "Family-2 release effect identity cannot be normalized.",
+          this.dependencies.db.getSlot(request.slot),
+          "Preserve the committed outbox row and retry with its complete immutable tuple.",
+        ),
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+      };
+    }
+    if (computedDigest !== request.request_digest.toLowerCase()) {
+      return {
+        ...result(
+          "effect_digest_mismatch",
+          "Family-2 release digest does not match the normalized ownership tuple.",
+          this.dependencies.db.getSlot(request.slot),
+          "Reject the effect without delivery, reset, or clear; recompute it from the committed tuple.",
+        ),
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+      };
+    }
     let prior;
     try {
       prior = this.dependencies.db.getNativeReleaseEffectReceipt(request.effect_id);
@@ -263,6 +298,41 @@ export class NativeSlotReleaseCoordinator {
     if (replay) return replay;
     const validated = this.validateInitialRequest(request);
     if ("success" in validated) return validated;
+    let computedDigest: string | undefined;
+    if (request.effect_id !== undefined) {
+      try {
+        computedDigest = computeFamily2ReleaseDigest({
+          effect_id: request.effect_id,
+          expected_epoch: request.expected_epoch,
+          expected_session_id: request.expected_session_id,
+          expected_tuple: request.expected_tuple,
+          intended_main_head: request.intended_main_head,
+        });
+      } catch {
+        return {
+          ...result(
+            "effect_receipt_malformed",
+            "Family-2 release effect identity cannot be normalized.",
+            this.dependencies.db.getSlot(request.slot),
+            "Preserve the committed outbox row and retry with its complete immutable tuple.",
+          ),
+          effect_id: request.effect_id,
+          request_digest: request.request_digest,
+        };
+      }
+      if (computedDigest !== request.request_digest?.toLowerCase()) {
+        return {
+          ...result(
+            "effect_digest_mismatch",
+            "Family-2 release digest does not match the normalized ownership tuple.",
+            this.dependencies.db.getSlot(request.slot),
+            "Reject the effect before delivery, reset, or clear; recompute it from the committed tuple.",
+          ),
+          effect_id: request.effect_id,
+          request_digest: request.request_digest,
+        };
+      }
+    }
     if (this.inProgressSlots.has(request.slot)) {
       return result(
         "release_in_progress",
@@ -405,7 +475,7 @@ export class NativeSlotReleaseCoordinator {
       return {
         ...result("released", `Slot ${request.slot} reset and released.`, readback, null, true),
         effect_id: request.effect_id,
-        request_digest: request.request_digest,
+        request_digest: computedDigest ?? request.request_digest,
         idempotent: false,
         acknowledgement,
       };

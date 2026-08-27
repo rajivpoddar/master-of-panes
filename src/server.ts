@@ -22,6 +22,7 @@ import { z } from "zod";
 import { MoPDatabase } from "./db.js";
 import {
   assignmentIdentityPatchFields,
+  isPmTransitionAssignmentRequest,
 } from "./assignmentAuthority.js";
 import { registerAssignmentRoute } from "./assignmentRoute.js";
 import { TmuxRelay } from "./relay.js";
@@ -39,6 +40,10 @@ import {
   type CheckoutResetObservation,
   type NativeSlotReleaseRequest,
 } from "./slotRelease.js";
+import {
+  consumeFamily2ReleaseEffect,
+  Family2ReleaseEffectAdapter,
+} from "./family2ReleaseEffect.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 
 // ─── Config ──────────────────────────────────────────────
@@ -114,6 +119,7 @@ const nativeSlotRelease = new NativeSlotReleaseCoordinator({
   owningSlotIsIdle: waitForOwningSlotIdle,
   resetAndObserveCheckout,
 });
+const family2ReleaseEffectAdapter = new Family2ReleaseEffectAdapter();
 
 // MoP events are a bounded operational ring, not an audit archive. Prune once
 // after startup and then every six hours so recent-event endpoints stay cheap.
@@ -1005,6 +1011,22 @@ app.get("/slots/:slotNum/release-receipt", (c) => {
   } catch {
     return c.json({ success: false, code: "effect_receipt_malformed" }, 500);
   }
+});
+
+/** Consume one committed Family-2 release effect through the live MoP boundary. */
+app.post("/family2/release-effect", async (c) => {
+  if (!isPmTransitionAssignmentRequest(c.req.header("x-heydonna-assignment-authority"))) {
+    return c.json({ success: false, code: "assignment_authority_required" }, 403);
+  }
+  let payload: unknown;
+  try {
+    payload = await c.req.json();
+  } catch {
+    return c.json({ success: false, code: "invalid_request" }, 400);
+  }
+  const result = await consumeFamily2ReleaseEffect(payload, family2ReleaseEffectAdapter);
+  const status = result.success ? 200 : result.code === "invalid_request" ? 400 : 409;
+  return c.json(result, status as 200 | 400 | 409);
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────

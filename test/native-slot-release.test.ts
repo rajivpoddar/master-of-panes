@@ -17,6 +17,7 @@ import {
 } from "../src/slotRelease.js";
 import { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
+import { computeFamily2ReleaseDigest } from "../src/db.js";
 
 const ASSIGNMENT_HEAD = "a".repeat(40);
 const MAIN_HEAD = "b".repeat(40);
@@ -283,7 +284,11 @@ test("releasing one slot does not mutate an unrelated occupied slot", async () =
 test("effect-bound release persists an atomic receipt and replays without a second clear", async () => {
   const value = fixture();
   try {
-    const request = { ...value.request, effect_id: "family2-effect-8100", request_digest: "c".repeat(64) };
+    const request = {
+      ...value.request,
+      effect_id: "family2-effect-8100",
+      request_digest: computeFamily2ReleaseDigest({ effect_id: "family2-effect-8100", ...value.request }),
+    };
     let deliveries = 0;
     const release = coordinator(value, { instruction: () => { deliveries += 1; } });
     const first = await release.release(request);
@@ -296,6 +301,25 @@ test("effect-bound release persists an atomic receipt and replays without a seco
     assert.equal(replay.idempotent, true);
     assert.equal(deliveries, 1);
     assert.equal(value.db.getSlot(1)?.occupied, false);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test("forged Family-2 digest refuses before delivery/reset/clear", async () => {
+  const value = fixture();
+  try {
+    let deliveries = 0;
+    const before = value.db.getSlot(1)!;
+    const result = await coordinator(value, { instruction: () => { deliveries += 1; } }).release({
+      ...value.request,
+      effect_id: "family2-effect-forged",
+      request_digest: "f".repeat(64),
+    });
+    assert.equal(result.code, "effect_digest_mismatch");
+    assert.equal(deliveries, 0);
+    assert.deepEqual(value.db.getSlot(1), before);
+    assert.equal(value.db.getNativeReleaseEffectReceipt("family2-effect-forged"), null);
   } finally {
     closeFixture(value);
   }

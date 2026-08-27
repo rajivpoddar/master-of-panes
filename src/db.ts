@@ -7,6 +7,7 @@
  */
 
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { EventLogEntry, MoPConfig, OpsJobRecord, OpsJobStatus, SlotState, SlotStatus } from "./types.js";
@@ -31,6 +32,7 @@ export interface SlotMutationResult {
     | "session_mismatch"
     | "branch_mismatch"
     | "observed_tuple_mismatch"
+    | "effect_digest_mismatch"
     | "effect_receipt_conflict"
     | "effect_receipt_malformed";
   owner_slots?: number[];
@@ -55,6 +57,14 @@ export interface AssignmentTupleInput {
   work_kind: string | null;
   handoff_id: string | null;
   claimed_at: string | null;
+}
+
+export interface Family2ReleaseDigestInput {
+  effect_id: string;
+  expected_epoch: number;
+  expected_session_id: string;
+  expected_tuple: AssignmentTupleInput;
+  intended_main_head: string;
 }
 
 export interface AssignmentTuple {
@@ -225,6 +235,46 @@ export function normalizeAssignmentTuple(
     handoff_id: handoffId,
     claimed_at: claimedAt,
   };
+}
+
+/** Canonical normalized Family-2 release body shared by adapter and authority. */
+export function normalizedFamily2ReleaseBody(
+  request: Family2ReleaseDigestInput,
+): Record<string, unknown> {
+  const tuple = normalizeAssignmentTuple(request.expected_tuple);
+  if (!tuple) throw new Error("Family-2 release tuple is invalid");
+  if (
+    typeof request.effect_id !== "string"
+    || request.effect_id.trim() === ""
+    || !Number.isInteger(request.expected_epoch)
+    || typeof request.expected_session_id !== "string"
+    || request.expected_session_id.trim() === ""
+    || !/^[0-9a-f]{40}$/i.test(request.intended_main_head)
+  ) {
+    throw new Error("Family-2 release identity is invalid");
+  }
+  return {
+    effect_id: request.effect_id,
+    expected_epoch: request.expected_epoch,
+    expected_session_id: request.expected_session_id,
+    expected_repository_id: tuple.repository_id,
+    expected_issue: tuple.issue,
+    expected_pr: tuple.pr,
+    expected_branch: tuple.branch,
+    expected_head_sha: tuple.head_sha,
+    expected_work_kind: tuple.work_kind,
+    expected_handoff_id: tuple.handoff_id,
+    expected_claimed_at: tuple.claimed_at,
+    intended_main_head: request.intended_main_head.toLowerCase(),
+  };
+}
+
+export function computeFamily2ReleaseDigest(
+  request: Family2ReleaseDigestInput,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify(normalizedFamily2ReleaseBody(request)))
+    .digest("hex");
 }
 
 export function slotAssignmentTuple(slot: SlotState): AssignmentTuple | null {
@@ -756,6 +806,37 @@ export class MoPDatabase {
         reason: "effect_receipt_malformed",
       };
     }
+    let computedEffectDigest: string | undefined;
+    if (effect) {
+      try {
+        computedEffectDigest = computeFamily2ReleaseDigest({
+          effect_id: effect.effect_id,
+          expected_epoch: expectedEpoch,
+          expected_session_id: expectedSessionId,
+          expected_tuple: expectedTupleInput,
+          intended_main_head: effect.intended_main_head,
+        });
+      } catch {
+        const current = this.getSlot(slot);
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: current?.assignment_epoch ?? 0,
+          idempotent: false,
+          reason: "effect_receipt_malformed",
+        };
+      }
+      if (computedEffectDigest !== effect.request_digest.toLowerCase()) {
+        const current = this.getSlot(slot);
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: current?.assignment_epoch ?? 0,
+          idempotent: false,
+          reason: "effect_digest_mismatch",
+        };
+      }
+    }
 
     return this.db.transaction((): SlotMutationResult => {
       if (effect) {
@@ -857,7 +938,7 @@ export class MoPDatabase {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           effect.effect_id,
-          effect.request_digest.toLowerCase(),
+          computedEffectDigest!,
           slot,
           expectedEpoch,
           epoch + 1,
