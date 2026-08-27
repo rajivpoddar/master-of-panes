@@ -19,23 +19,27 @@ from typing import Sequence
 
 
 RELEASE_ROOT_ENV = "HEYDONNA_CONTROL_PLANE_RELEASE_ROOT"
+DEFAULT_RELEASE_ROOT = Path("~/.claude/control-plane/current/heydonna")
 ASSIGNMENT_COMMANDS = {"claim-slot", "rebind-slot", "release-slot"}
 FAMILY2_COMMANDS = {"slot-ready", "pm-review"}
 CAPACITY_COMMANDS = {"capacity-snapshot", "reconcile-capacity"}
 SUPPORTED_COMMANDS = ASSIGNMENT_COMMANDS | FAMILY2_COMMANDS | CAPACITY_COMMANDS
 
 
-def _package_root() -> Path:
+def _package_root(command: str) -> Path:
     override = os.environ.get(RELEASE_ROOT_ENV)
     if override is not None:
         root = Path(override)
         if not root.is_absolute():
             raise ValueError(f"{RELEASE_ROOT_ENV} must be an absolute path")
         return root.resolve()
-    # The installed launcher is itself the release-owned facade. Never fall
-    # back to the retired ~/.claude/control-plane tree: that would reintroduce
-    # a second local authority and can mask a missing release asset.
-    return Path(__file__).resolve().parent
+    if command in ASSIGNMENT_COMMANDS:
+        # The installed assignment facade is release-owned and must not fall
+        # back to the retired local assignment database/kernel.
+        return Path(__file__).resolve().parent
+    # Family-2 and capacity commands still consume their already-versioned
+    # immutable kernels until their direct MoP/GitHub replacements land.
+    return DEFAULT_RELEASE_ROOT.expanduser().resolve(strict=True)
 
 
 def _blocked(command: str, reason: str) -> int:
@@ -211,7 +215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     command, args = values[0], values[1:]
     if command not in SUPPORTED_COMMANDS:
         return _blocked(command, "command_not_cut_over")
-    root = _package_root()
+    root = _package_root(command)
     if command in ASSIGNMENT_COMMANDS:
         return _assignment(command, args, root)
     if command in FAMILY2_COMMANDS:
