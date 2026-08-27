@@ -105,12 +105,16 @@ def _direct_assignment(command: str, args: list[str]) -> int:
         }
         path = f"/slots/{slot}/assign"
     elif command == "rebind-slot":
-        expected = tuple(f"expected_current_{name}" for name in (
-            "repository_id", "issue", "pr", "branch", "head_sha", "work_kind", "handoff_id", "claimed_at"
-        ))
-        desired = ("repository_id", "issue", "pr", "branch", "head_sha", "work_kind", "handoff_id", "claimed_at")
-        _required(values, (*expected, *desired))
-        body = {key: (None if value in (None, "null") else value) for key, value in values.items()}
+        current_fields = ("repository_id", "issue", "pr", "branch", "head_sha", "work_kind", "handoff_id", "claimed_at")
+        _required(values, current_fields)
+        body = {}
+        for name in current_fields:
+            raw = values[name]
+            expected_value = None if raw in (None, "null") else raw
+            desired_raw = values.get(f"new_{name}", raw)
+            desired_value = None if desired_raw in (None, "null") else desired_raw
+            body[f"expected_current_{name}"] = expected_value
+            body[name] = desired_value
         body["expected_epoch"] = expected_epoch
         for key in ("issue", "pr", "expected_current_issue", "expected_current_pr"):
             if body.get(key) is not None:

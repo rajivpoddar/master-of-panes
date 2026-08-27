@@ -164,14 +164,29 @@ class PmTransitionSevenCutoverTests(unittest.TestCase):
                         "--head-sha", "a" * 40, "--work-kind", "coding", "--handoff-id", "handoff-1",
                     ], env=env, capture_output=True, text=True, timeout=5,
                 )
+                result_rebind = subprocess.run(
+                    [
+                        "python3", str(SHARED / "claude/scripts/pm-operator.py"), "rebind-slot",
+                        "--slot", "1", "--expected-epoch", "7", "--repository-id", "heydonna-app/heydonna-app",
+                        "--issue", "7518", "--pr", "7518", "--branch", "fix/7518", "--head-sha", "a" * 40,
+                        "--work-kind", "coding", "--handoff-id", "handoff-1", "--claimed-at", "2026-08-26T17:00:00Z",
+                        "--new-branch", "fix/7518-rebound", "--new-head-sha", "b" * 40,
+                    ], env=env, capture_output=True, text=True, timeout=5,
+                )
             server.shutdown()
             thread.join(timeout=2)
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(len(requests), 1)
+        self.assertEqual(result_rebind.returncode, 0)
+        self.assertEqual(len(requests), 2)
         self.assertEqual(requests[0]["path"], "/slots/1/assign")
         self.assertEqual(requests[0]["authority"], "pm-transition-v1")
         self.assertEqual(requests[0]["body"]["expected_epoch"], 7)
         self.assertEqual(requests[0]["body"]["head_sha"], "a" * 40)
+        self.assertEqual(requests[1]["path"], "/slots/1/adopt-issue-claim")
+        self.assertEqual(requests[1]["body"]["expected_current_branch"], "fix/7518")
+        self.assertEqual(requests[1]["body"]["branch"], "fix/7518-rebound")
+        self.assertEqual(requests[1]["body"]["expected_current_head_sha"], "a" * 40)
+        self.assertEqual(requests[1]["body"]["head_sha"], "b" * 40)
 
     def test_scoped_install_preserves_unlisted_files_and_rolls_back(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
