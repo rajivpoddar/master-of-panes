@@ -90,6 +90,12 @@
         "reason": "wrapper observation contract remains authoritative"
       },
       {
+        "command": "campaign-status",
+        "retired": true,
+        "legacy_callers": [],
+        "reason": "no executable callers found; remaining references are usage/documentation only"
+      },
+      {
         "command": "reconcile-capacity",
         "retired": false,
         "legacy_callers": [
@@ -119,7 +125,7 @@
     {
       "source_path": "claude/scripts/pm-transition.sh",
       "canonical_target": "/Users/rajiv/.claude/scripts/pm-transition.sh",
-      "sha256": "229082c52b46346b04cd11050a2daa6d4a0847cd3e3f818c03574b52756ee774",
+      "sha256": "174b2b7eeb6631452f13f17e4c601c0c342d15c784614c063f2d3773b3a0e770",
       "mode": 493,
       "ownership_class": "shared-claude-pm-transition-compatibility",
       "dependency_status": "closed",

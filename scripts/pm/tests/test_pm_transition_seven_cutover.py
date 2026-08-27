@@ -20,6 +20,7 @@ SPEC.loader.exec_module(INSTALLER)
 
 RETIRED = ("claim-slot", "rebind-slot", "release-slot")
 LEGACY = ("slot-ready", "pm-review", "capacity-snapshot", "reconcile-capacity")
+RETIRED_UNUSED = ("campaign-status",)
 
 
 class PmTransitionSevenCutoverTests(unittest.TestCase):
@@ -28,13 +29,16 @@ class PmTransitionSevenCutoverTests(unittest.TestCase):
         inventory = manifest["inventory"]["command_inventory"]
         self.assertEqual(manifest["inventory"]["selected_count"], 6)
         by_command = {item["command"]: item for item in inventory}
-        self.assertEqual(set(by_command), set(RETIRED + LEGACY))
+        self.assertEqual(set(by_command), set(RETIRED + LEGACY + RETIRED_UNUSED))
         for command in RETIRED:
             self.assertTrue(by_command[command]["retired"])
             self.assertEqual(by_command[command]["legacy_callers"], [])
         for command in LEGACY:
             self.assertFalse(by_command[command]["retired"])
             self.assertTrue(by_command[command]["legacy_callers"])
+        for command in RETIRED_UNUSED:
+            self.assertTrue(by_command[command]["retired"])
+            self.assertEqual(by_command[command]["legacy_callers"], [])
 
     def test_red_broad_guard_would_strand_wrapper_owned_commands(self) -> None:
         old_guard = "slot-ready|pm-review|capacity-snapshot|reconcile-capacity)"
@@ -58,6 +62,12 @@ class PmTransitionSevenCutoverTests(unittest.TestCase):
             self.assertEqual(result.returncode, 167, command)
             self.assertIn("reason=pm_operator_required", result.stderr, command)
             self.assertIn("replacement=/Users/rajiv/.claude/scripts/pm-operator.py", result.stderr, command)
+
+    def test_unused_campaign_status_arm_is_removed(self) -> None:
+        shell = SHARED / "claude/scripts/pm-transition.sh"
+        result = subprocess.run(["bash", str(shell), "campaign-status"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unknown command 'campaign-status'", result.stderr)
 
     def test_operator_delegation_and_unknown_refusal_remain_available(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

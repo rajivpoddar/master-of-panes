@@ -223,7 +223,6 @@ Usage:
   pm-transition.sh reconcile-capacity [--dry-run] [--slots 1,2,3,4]
   pm-transition.sh campaign-lock --prs N,N[,N...] --reason TEXT [--ttl-min N]
   pm-transition.sh campaign-unlock --reason TEXT
-  pm-transition.sh campaign-status
   pm-transition.sh cleanup-start --pr N
   pm-transition.sh cleanup --pr N [--retro-path PATH | --retro-trivial]
 
@@ -15221,7 +15220,6 @@ case "$COMMAND" in
   reconcile-capacity) cmd_reconcile_capacity "$@" ;;
   campaign-lock) cmd_campaign_lock "$@" ;;
   campaign-unlock) cmd_campaign_unlock "$@" ;;
-  campaign-status) cmd_campaign_status "$@" ;;
   cleanup-start) cmd_cleanup_start "$@" ;;
   cleanup) cmd_cleanup "$@" ;;
   *)
