@@ -108,11 +108,22 @@ def _direct_assignment(command: str, args: list[str]) -> int:
     elif command == "rebind-slot":
         current_fields = ("repository_id", "issue", "pr", "branch", "head_sha", "work_kind", "handoff_id", "claimed_at")
         _required(values, current_fields)
+        allowed_new_fields = {
+            "new_repository_id", "new_issue", "new_pr", "new_branch", "new_head_sha",
+            "new_work_kind", "new_handoff_id",
+        }
+        unexpected_new_fields = sorted(
+            key for key in values if key.startswith("new_") and key not in allowed_new_fields
+        )
+        if unexpected_new_fields:
+            raise ValueError(f"unsupported rebind fields: {', '.join('--' + key.replace('_', '-') for key in unexpected_new_fields)}")
+        if ("new_work_kind" in values) != ("new_handoff_id" in values):
+            raise ValueError("--new-work-kind and --new-handoff-id must be supplied together")
         body = {}
         for name in current_fields:
             raw = values[name]
             expected_value = None if raw in (None, "null") else raw
-            desired_raw = values.get(f"new_{name}", raw)
+            desired_raw = raw if name == "claimed_at" else values.get(f"new_{name}", raw)
             desired_value = None if desired_raw in (None, "null") else desired_raw
             body[f"expected_current_{name}"] = expected_value
             body[name] = desired_value
