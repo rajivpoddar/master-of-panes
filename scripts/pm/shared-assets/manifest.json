@@ -39,7 +39,7 @@
     {
       "source_path": "claude/scripts/launch-dev-slot-claude.sh",
       "canonical_target": "/Users/rajiv/.claude/scripts/launch-dev-slot-claude.sh",
-      "sha256": "c6199021b373f8b4b86649e64d21463eb7120f211d0611230ce9ae5816e5bcd2",
+      "sha256": "f67a616a3da89b0660827877de2aeec160a22bb25a88da534f14e36ce949a666",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
       "dependency_status": "closed",
