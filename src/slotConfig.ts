@@ -26,6 +26,7 @@ export function devSlots(slotCount = DEFAULT_DEV_SLOT_COUNT): number[] {
 
 export type SlotRuntimeIdentity = {
   slot: number;
+  name: string;
   checkoutPath: string;
   jsonlPath: string;
   launchScript: string;
@@ -42,11 +43,21 @@ export type SlotRuntimeIdentity = {
   envPath: string;
 };
 
+export const DEV_SLOT_NAMES: Readonly<Record<number, string>> = Object.freeze({
+  1: "Rohini",
+  2: "Hasta",
+  3: "Ashwini",
+  4: "Chitra",
+  5: "Revati",
+  6: "Pushya",
+});
+
 /** Explicit per-slot identities; values are configuration, not a state store. */
 export const SLOT_RUNTIME_IDENTITIES: Readonly<Record<number, SlotRuntimeIdentity>> =
   Object.freeze(Object.fromEntries(
     DEV_SLOT_NUMBERS.map((slot) => [slot, {
       slot,
+      name: DEV_SLOT_NAMES[slot],
       checkoutPath: `/Users/rajiv/Downloads/projects/heydonna-app-300${slot}`,
       jsonlPath: `/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-300${slot}`,
       launchScript: `/Users/rajiv/.claude/scripts/launch-slot-${slot}.sh`,

@@ -10,17 +10,45 @@ case "$SLOT_NUMBER" in
   2) SLOT_NAME="Hasta" ;;
   3) SLOT_NAME="Ashwini" ;;
   4) SLOT_NAME="Chitra" ;;
-  5) SLOT_NAME="S5" ;;
-  6) SLOT_NAME="S6" ;;
+  5) SLOT_NAME="Revati" ;;
+  6) SLOT_NAME="Pushya" ;;
   *) echo "Usage: launch-dev-slot-claude.sh <1|2|3|4|5|6> [claude args...]" >&2; exit 2 ;;
 esac
 
 SLOT_CLONE="/Users/rajiv/Downloads/projects/heydonna-app-300${SLOT_NUMBER}"
 SPARK_MODEL="${DEV_SLOT_SPARK_MODEL:-ornith-1.5-35b-a3b}"
 SPARK_BASE_URL="${DEV_SLOT_SPARK_BASE_URL:-${ORNITH15_SPARK_BASE_URL:-${QWEN38_SPARK_BASE_URL:-http://192.168.68.113:30000}}}"
-SPARK_KEY_FILE="${DEV_SLOT_SPARK_API_KEY_FILE:-${ORNITH15_SPARK_API_KEY_FILE:-${QWEN38_SPARK_API_KEY_FILE:-/Users/rajiv/.config/heydonna/qwen38-spark-api-key}}}"
+SPARK_KEY_FILE="${DEV_SLOT_SPARK_API_KEY_FILE:-${ORNITH15_SPARK_API_KEY_FILE:-${QWEN38_SPARK_API_KEY_FILE:-/Users/rajiv/.config/ornith15/api-key}}}"
 CLAUDE_BIN="${CLAUDE_SLOT_BIN:-/opt/homebrew/bin/claude}"
 SKILL_SYNC="${CLAUDE_SLOT_SKILL_SYNC:-/Users/rajiv/.claude/scripts/sync-dev-slot-skill-allowlist.mjs}"
+DEV_SLOT_RULES="${CLAUDE_DEV_SLOT_RULES:-/Users/rajiv/.claude/dev-slot-rules}"
+PROJECT_RULES="${CLAUDE_PROJECT_RULES:-/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules}"
+
+case "$SLOT_NUMBER" in
+  1) IDENTITY_RULE="22-slot-rohini.md" ;;
+  2) IDENTITY_RULE="22-slot-hasta.md" ;;
+  3) IDENTITY_RULE="22-slot-ashwini.md" ;;
+  4) IDENTITY_RULE="22-slot-chitra.md" ;;
+  5) IDENTITY_RULE="22-slot-revati.md" ;;
+  6) IDENTITY_RULE="22-slot-pushya.md" ;;
+esac
+
+repair_rule_link() {
+  local source="$1" destination="$2" current=""
+  if [[ ! -f "$source" ]]; then
+    echo "ERROR: canonical slot rule missing: $source" >&2
+    exit 1
+  fi
+  if [[ -L "$destination" ]]; then
+    current="$(readlink "$destination")"
+    [[ "$current" == "$source" ]] && return 0
+    rm -f "$destination"
+  elif [[ -e "$destination" ]]; then
+    echo "ERROR: refusing to replace non-symlink slot rule: $destination" >&2
+    exit 1
+  fi
+  ln -s "$source" "$destination"
+}
 
 if [[ ! -d "$SLOT_CLONE" ]]; then
   echo "ERROR: slot checkout missing: $SLOT_CLONE" >&2
@@ -40,6 +68,11 @@ if [[ ! -x "$SKILL_SYNC" ]]; then
   exit 70
 fi
 
+mkdir -p "$SLOT_CLONE/.claude/rules"
+repair_rule_link "$DEV_SLOT_RULES/20-buddhi-dev.md" "$SLOT_CLONE/.claude/rules/20-buddhi-dev.md"
+repair_rule_link "$DEV_SLOT_RULES/$IDENTITY_RULE" "$SLOT_CLONE/.claude/rules/$IDENTITY_RULE"
+repair_rule_link "$PROJECT_RULES/21-lessons.md" "$SLOT_CLONE/.claude/rules/21-lessons.md"
+
 "$SKILL_SYNC"
 
 export SLOT_NUMBER
@@ -47,6 +80,7 @@ export SLOT_NAME
 export AGENT_BROWSER_SESSION="slot${SLOT_NUMBER}"
 export AGENT_BROWSER_PROFILE="/Users/rajiv/.agent-browser/profiles/admin-slot${SLOT_NUMBER}"
 export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS="1"
+export CLAUDE_CODE_SUBAGENT_MODEL="$SPARK_MODEL"
 export API_TIMEOUT_MS="${DEV_SLOT_SPARK_API_TIMEOUT_MS:-600000}"
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${DEV_SLOT_SPARK_MAX_CONTEXT_TOKENS:-240000}"
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${DEV_SLOT_SPARK_MAX_OUTPUT_TOKENS:-16384}"

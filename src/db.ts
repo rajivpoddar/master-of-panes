@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { EventLogEntry, MoPConfig, OpsJobRecord, OpsJobStatus, SlotState, SlotStatus } from "./types.js";
-import { devSlots, PM_SLOT } from "./slotConfig.js";
+import { devSlots, PM_SLOT, runtimeIdentity } from "./slotConfig.js";
 
 export interface SlotMutationResult {
   ok: boolean;
@@ -481,12 +481,18 @@ export class MoPDatabase {
 
     // Seed slot rows if they don't exist
     const insertSlot = this.db.prepare(`
-      INSERT OR IGNORE INTO slots (slot, address)
-      VALUES (?, ?)
+      INSERT OR IGNORE INTO slots (slot, address, name)
+      VALUES (?, ?, ?)
+    `);
+    const fillMissingSlotName = this.db.prepare(`
+      UPDATE slots SET name = ?
+      WHERE slot = ? AND (name IS NULL OR trim(name) = '')
     `);
 
     for (const i of devSlots(this.config.slotCount)) {
-      insertSlot.run(i, `0:0.${i}`);
+      const name = runtimeIdentity(i)?.name ?? null;
+      insertSlot.run(i, `0:0.${i}`, name);
+      if (name) fillMissingSlotName.run(name, i);
     }
   }
 

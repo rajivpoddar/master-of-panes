@@ -10,6 +10,7 @@ import { PM_TRANSITION_ASSIGNMENT_AUTHORITY, PM_TRANSITION_ASSIGNMENT_HEADER } f
 import { DEFAULT_CONFIG } from "../src/types.js";
 import {
   DEFAULT_DEV_SLOT_COUNT,
+  DEV_SLOT_NAMES,
   DEV_SLOT_NUMBERS,
   RUNTIME_SLOT_NUMBERS,
   SLOT_RUNTIME_IDENTITIES,
@@ -48,6 +49,7 @@ test("S5/S6 runtime identities are isolated and launchable without provisioning 
   }
   for (const slot of [5, 6]) {
     const identity = SLOT_RUNTIME_IDENTITIES[slot];
+    assert.equal(identity.name, slot === 5 ? "Revati" : "Pushya");
     assert.equal(identity.checkoutPath, `/Users/rajiv/Downloads/projects/heydonna-app-300${slot}`);
     assert.equal(identity.convexDeployment, `heydonna-slot-${slot}`);
     assert.equal(identity.convexProject, `heydonna-slot-${slot}`);
@@ -72,6 +74,24 @@ test("versioned S5/S6 launch mappings are explicit and preserve the existing lau
     assert.equal(entry?.canonical_target, `/Users/rajiv/.claude/scripts/launch-slot-${slot}.sh`);
     assert.equal(entry?.mode, 493);
   }
+  for (const name of ["pushya", "revati"]) {
+    const entry = manifest.entries.find((item) => item.source_path === `claude/dev-slot-rules/22-slot-${name}.md`);
+    assert.ok(entry);
+    assert.equal(entry?.canonical_target, `/Users/rajiv/.claude/dev-slot-rules/22-slot-${name}.md`);
+    assert.equal(entry?.mode, 420);
+  }
+
+  const launcher = readFileSync(
+    new URL("../scripts/pm/shared-assets/claude/scripts/launch-dev-slot-claude.sh", import.meta.url),
+    "utf8",
+  );
+  assert.match(launcher, /5\) SLOT_NAME="Revati"/);
+  assert.match(launcher, /6\) SLOT_NAME="Pushya"/);
+  assert.match(launcher, /CLAUDE_CODE_SUBAGENT_MODEL="\$SPARK_MODEL"/);
+  assert.match(launcher, /\.config\/ornith15\/api-key/);
+  assert.match(launcher, /20-buddhi-dev\.md/);
+  assert.match(launcher, /22-slot-revati\.md/);
+  assert.match(launcher, /22-slot-pushya\.md/);
 });
 
 test("six-slot DB initialization adds S5/S6 without rewriting existing state", () => {
@@ -89,10 +109,23 @@ test("six-slot DB initialization adds S5/S6 without rewriting existing state", (
     assert.deepEqual(db.getAllSlots().map((slot) => slot.slot), [1, 2, 3, 4, 5, 6]);
     assert.equal(db.getSlot(5)?.occupied, false);
     assert.equal(db.getSlot(6)?.occupied, false);
+    assert.equal(db.getSlot(5)?.name, "Revati");
+    assert.equal(db.getSlot(6)?.name, "Pushya");
   } finally {
     db.close();
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("all six slots have stable human names", () => {
+  assert.deepEqual(DEV_SLOT_NAMES, {
+    1: "Rohini",
+    2: "Hasta",
+    3: "Ashwini",
+    4: "Chitra",
+    5: "Revati",
+    6: "Pushya",
+  });
 });
 
 test("configured bounds reject invalid migration counts while production stays fixed at six", () => {

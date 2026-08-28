@@ -4,6 +4,8 @@
   "owner": "master-of-panes",
   "inventory": {
     "source_roots": [
+      "~/.claude/dev-slot-rules/22-slot-pushya.md",
+      "~/.claude/dev-slot-rules/22-slot-revati.md",
       "~/.claude/scripts/axiom-activity-report.py",
       "~/.claude/scripts/launch-dev-slot-claude.sh",
       "~/.claude/scripts/launch-slot-5.sh",
@@ -11,7 +13,7 @@
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "~/.codex/skills/codex-stdio-send-message"
     ],
-    "selected_count": 9,
+    "selected_count": 11,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -28,6 +30,24 @@
   },
   "entries": [
     {
+      "source_path": "claude/dev-slot-rules/22-slot-pushya.md",
+      "canonical_target": "/Users/rajiv/.claude/dev-slot-rules/22-slot-pushya.md",
+      "sha256": "a05ca46c1b5e03230392739a4d09700da50e4ff1938e8f5d104cc752bde56d80",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/dev-slot-rules/22-slot-revati.md",
+      "canonical_target": "/Users/rajiv/.claude/dev-slot-rules/22-slot-revati.md",
+      "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/axiom-activity-report.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/axiom-activity-report.py",
       "sha256": "8b67ea060d935f4be465aa342b0f3fe00e86950ce0ccbb80a58b1e2cc1d94abd",
@@ -39,7 +59,7 @@
     {
       "source_path": "claude/scripts/launch-dev-slot-claude.sh",
       "canonical_target": "/Users/rajiv/.claude/scripts/launch-dev-slot-claude.sh",
-      "sha256": "60ef70bdd531be3d0f23ded69dfd227df5049365340f915a42b6fac5b1c28d03",
+      "sha256": "0e86b28a0314f76e0541c0b83052c020319c99ffd33c716591a386e8b6da2136",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
       "dependency_status": "closed",
