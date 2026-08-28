@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from unittest import mock
 from pathlib import Path
 
 import pytest
@@ -159,3 +160,46 @@ def test_production_rollback_restores_old_sender_with_validator_compatibility_ta
         assert safe.returncode == 0
         unsafe = subprocess.run(["bash", str(runnable), "Please split this transcript into sections"], env=env, capture_output=True, text=True)
         assert unsafe.returncode == 23
+
+
+def test_compatibility_replace_failure_does_not_restore_dependent_sender() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        release = root / "release"
+        shutil.copytree(SHARED, release / "scripts/pm/shared-assets")
+        targets = root / "targets"
+        sender_target = targets / "Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh"
+        sender_target.parent.mkdir(parents=True)
+        sender_target.write_text("candidate-sender\n", encoding="utf-8")
+        sender_target.chmod(0o755)
+        INSTALLER.install_shared_assets(release_dir=release, target_root=targets, rollback_bundle=root / "rollback")
+        candidate_sender = sender_target.read_bytes()
+        compatibility = targets / "Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py"
+        real_replace = INSTALLER.os.replace
+
+        def fail_compatibility(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+            if Path(destination) == compatibility:
+                raise OSError("injected compatibility replace failure")
+            real_replace(source, destination)
+
+        with mock.patch.object(INSTALLER.os, "replace", side_effect=fail_compatibility):
+            with pytest.raises(OSError, match="injected compatibility replace failure"):
+                INSTALLER.restore_rollback_bundle(root / "rollback")
+        assert sender_target.read_bytes() == candidate_sender
+        assert not compatibility.exists()
+        assert not list(targets.rglob("*.rollback.*.tmp"))
+
+
+def test_compatibility_preimage_drift_refuses_before_install() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        release = root / "release"
+        shutil.copytree(SHARED, release / "scripts/pm/shared-assets")
+        targets = root / "targets"
+        compatibility = targets / "Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py"
+        compatibility.parent.mkdir(parents=True)
+        compatibility.write_text("unexpected drift\n", encoding="utf-8")
+        with pytest.raises(INSTALLER.InstallerError, match="rollback compatibility target drift"):
+            INSTALLER.install_shared_assets(release_dir=release, target_root=targets, rollback_bundle=root / "rollback")
+        assert not (targets / "Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh").exists()
+        assert not (root / "rollback").exists()

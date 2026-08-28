@@ -312,6 +312,15 @@ def _shared_target_path(target: str, target_root: Path | None) -> Path:
     return target_root / path.relative_to("/")
 
 
+def _validate_compatibility_preimage(target: Path, entry: dict[str, Any]) -> None:
+    """Only an absent or exact validator may be replaced during rollback."""
+    if not (target.exists() or target.is_symlink()):
+        return
+    expected = {"path": str(target), "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+    if target.is_dir() or target.is_symlink() or file_record(target, str(target)) != expected:
+        raise InstallerError(f"rollback compatibility target drift: {target}")
+
+
 def _fsync_directory(path: Path) -> None:
     try:
         descriptor = os.open(path, os.O_RDONLY)
@@ -333,6 +342,8 @@ def install_shared_assets(
     """Atomically install only manifest-listed files; never prune unlisted files."""
     manifest = _load_shared_manifest(release_dir)
     targets = [_shared_target_path(entry["canonical_target"], target_root) for entry in manifest["entries"]]
+    for entry in manifest.get("rollback_compatibility", []):
+        _validate_compatibility_preimage(_shared_target_path(entry["canonical_target"], target_root), entry)
     rollback = create_rollback_bundle(targets, rollback_bundle)
     compatibility = manifest.get("rollback_compatibility", [])
     if compatibility:
@@ -460,6 +471,37 @@ def create_rollback_bundle(targets: list[Path], bundle: Path) -> dict[str, Any]:
 
 def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
     manifest = json.loads((bundle / ROLLBACK_MANIFEST).read_text(encoding="utf-8"))
+    staged_compatibility: list[tuple[dict[str, Any], Path, Path]] = []
+    try:
+        compatibility_entries = manifest.get("compatibility_entries", [])
+        for index, entry in enumerate(compatibility_entries):
+            target = Path(entry["path"])
+            _validate_compatibility_preimage(target, entry)
+            payload = bundle / entry["payload"]
+            expected_payload = {"path": str(target), "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+            if not payload.is_file() or payload.is_symlink() or file_record(payload, str(target)) != expected_payload:
+                raise InstallerError(f"rollback compatibility payload mismatch: {target}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.rollback.{os.getpid()}.{index}.tmp")
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
+            _copy_payload(payload, temporary)
+            os.chmod(temporary, entry["mode"])
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            if file_record(temporary, str(target)) != expected_payload:
+                raise InstallerError(f"rollback compatibility staging mismatch: {target}")
+            staged_compatibility.append((entry, target, temporary))
+        for entry, target, temporary in staged_compatibility:
+            os.replace(temporary, target)
+            _fsync_directory(target.parent)
+            expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
+            if file_record(target, entry["path"]) != expected:
+                raise InstallerError(f"rollback compatibility verification failed: {target}")
+    finally:
+        for _, _, temporary in staged_compatibility:
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
     for entry in manifest["entries"]:
         target = Path(entry["path"])
         if not entry.get("present"):
@@ -480,28 +522,6 @@ def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
         expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
         if file_record(target, entry["path"]) != expected:
             raise InstallerError(f"rollback verification failed: {target}")
-    for entry in manifest.get("compatibility_entries", []):
-        target = Path(entry["path"])
-        if target.is_dir() and not target.is_symlink():
-            raise InstallerError(f"cannot restore over directory: {target}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        payload = bundle / entry["payload"]
-        temporary = target.with_name(f".{target.name}.rollback.{os.getpid()}.tmp")
-        if temporary.exists() or temporary.is_symlink():
-            temporary.unlink()
-        try:
-            _copy_payload(payload, temporary)
-            os.chmod(temporary, entry["mode"])
-            with temporary.open("rb") as handle:
-                os.fsync(handle.fileno())
-            os.replace(temporary, target)
-            _fsync_directory(target.parent)
-        finally:
-            if temporary.exists() or temporary.is_symlink():
-                temporary.unlink()
-        expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
-        if file_record(target, entry["path"]) != expected:
-            raise InstallerError(f"rollback compatibility verification failed: {target}")
     return manifest
 
 
