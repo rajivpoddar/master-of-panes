@@ -44,7 +44,8 @@
       "source_path": "claude/skills/slack-message/scripts/block-unsupported-transcript-split.py",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py",
       "sha256": "61a13f6113390e4da1c94876b0cc80e8c86ddb17664624c22d3b3dc59a71d859",
-      "mode": 493
+      "mode": 493,
+      "preimage_modes": [420, 493]
     }
   ],
   "entries": [

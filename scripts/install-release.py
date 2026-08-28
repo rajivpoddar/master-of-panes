@@ -293,6 +293,15 @@ def _load_shared_manifest(release_dir: Path) -> dict[str, Any]:
         compatibility_targets.add(target)
         if not isinstance(mode, int) or mode < 0 or mode > 0o777:
             raise InstallerError(f"invalid rollback compatibility mode: {target}")
+        preimage_modes = entry.get("preimage_modes", [mode])
+        if (
+            not isinstance(preimage_modes, list)
+            or not preimage_modes
+            or any(not isinstance(value, int) or value < 0 or value > 0o777 for value in preimage_modes)
+            or sorted(set(preimage_modes)) != preimage_modes
+            or mode not in preimage_modes
+        ):
+            raise InstallerError(f"invalid rollback compatibility preimage modes: {target}")
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise InstallerError(f"invalid rollback compatibility digest: {target}")
         if sha256(source_path) != digest or stat.S_IMODE(source_path.stat().st_mode) != mode:
@@ -316,8 +325,17 @@ def _validate_compatibility_preimage(target: Path, entry: dict[str, Any]) -> Non
     """Only an absent or exact validator may be replaced during rollback."""
     if not (target.exists() or target.is_symlink()):
         return
-    expected = {"path": str(target), "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
-    if target.is_dir() or target.is_symlink() or file_record(target, str(target)) != expected:
+    if target.is_dir() or target.is_symlink():
+        raise InstallerError(f"rollback compatibility target drift: {target}")
+    record = file_record(target, str(target))
+    preimage_modes = entry.get("preimage_modes", [entry["mode"]])
+    expected = {"path": str(target), "kind": "file", "sha256": entry["sha256"]}
+    if (
+        record.get("path") != expected["path"]
+        or record.get("kind") != expected["kind"]
+        or record.get("sha256") != expected["sha256"]
+        or record.get("mode") not in preimage_modes
+    ):
         raise InstallerError(f"rollback compatibility target drift: {target}")
 
 
@@ -363,6 +381,7 @@ def install_shared_assets(
                     "path": str(_shared_target_path(entry["canonical_target"], target_root)),
                     "kind": "file",
                     "mode": entry["mode"],
+                    "preimage_modes": entry.get("preimage_modes", [entry["mode"]]),
                     "sha256": entry["sha256"],
                     "payload": str(payload.relative_to(rollback_bundle)),
                 }

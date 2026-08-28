@@ -203,3 +203,61 @@ def test_compatibility_preimage_drift_refuses_before_install() -> None:
             INSTALLER.install_shared_assets(release_dir=release, target_root=targets, rollback_bundle=root / "rollback")
         assert not (targets / "Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh").exists()
         assert not (root / "rollback").exists()
+
+
+def test_exact_live_compatibility_preimage_mode_0644_is_admitted() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        release = root / "release"
+        shutil.copytree(SHARED, release / "scripts/pm/shared-assets")
+        targets = root / "targets"
+        compatibility = targets / "Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py"
+        compatibility.parent.mkdir(parents=True)
+        compatibility.write_bytes(VALIDATOR.read_bytes())
+        compatibility.chmod(0o644)
+        rollback = root / "rollback"
+
+        result = INSTALLER.install_shared_assets(
+            release_dir=release, target_root=targets, rollback_bundle=rollback
+        )
+
+        assert result["status"] == "SHARED_ASSETS_INSTALLED"
+        assert compatibility.read_bytes() == VALIDATOR.read_bytes()
+        assert stat.S_IMODE(compatibility.stat().st_mode) == 0o644
+        rollback_manifest = json.loads((rollback / "ROLLBACK_MANIFEST.json").read_text(encoding="utf-8"))
+        assert rollback_manifest["compatibility_entries"][0]["preimage_modes"] == [0o644, 0o755]
+
+
+def test_compatibility_symlink_preimage_refuses_before_install() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        release = root / "release"
+        shutil.copytree(SHARED, release / "scripts/pm/shared-assets")
+        targets = root / "targets"
+        compatibility = targets / "Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py"
+        compatibility.parent.mkdir(parents=True)
+        compatibility.symlink_to(VALIDATOR)
+
+        with pytest.raises(INSTALLER.InstallerError, match="rollback compatibility target drift"):
+            INSTALLER.install_shared_assets(
+                release_dir=release, target_root=targets, rollback_bundle=root / "rollback"
+            )
+        assert not (targets / "Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh").exists()
+        assert not (root / "rollback").exists()
+
+
+def test_compatibility_directory_preimage_refuses_before_install() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        release = root / "release"
+        shutil.copytree(SHARED, release / "scripts/pm/shared-assets")
+        targets = root / "targets"
+        compatibility = targets / "Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py"
+        compatibility.mkdir(parents=True)
+
+        with pytest.raises(INSTALLER.InstallerError, match="rollback compatibility target drift"):
+            INSTALLER.install_shared_assets(
+                release_dir=release, target_root=targets, rollback_bundle=root / "rollback"
+            )
+        assert not (targets / "Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh").exists()
+        assert not (root / "rollback").exists()
