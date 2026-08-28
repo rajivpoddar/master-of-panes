@@ -92,6 +92,12 @@ test("versioned S5/S6 launch mappings are explicit and preserve the existing lau
   assert.match(launcher, /20-buddhi-dev\.md/);
   assert.match(launcher, /22-slot-revati\.md/);
   assert.match(launcher, /22-slot-pushya\.md/);
+  const firstPreflight = launcher.indexOf("preflight_rule_link \"$DEV_SLOT_RULES/20-buddhi-dev.md\"");
+  const lastPreflight = launcher.indexOf("preflight_rule_link \"$PROJECT_RULES/21-lessons.md\"");
+  const firstMutation = launcher.indexOf("repair_rule_link \"$DEV_SLOT_RULES/20-buddhi-dev.md\"");
+  assert.ok(firstPreflight >= 0);
+  assert.ok(lastPreflight > firstPreflight);
+  assert.ok(firstMutation > lastPreflight);
 });
 
 test("six-slot DB initialization adds S5/S6 without rewriting existing state", () => {

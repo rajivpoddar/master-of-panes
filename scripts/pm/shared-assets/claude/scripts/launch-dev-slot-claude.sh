@@ -35,10 +35,6 @@ esac
 
 repair_rule_link() {
   local source="$1" destination="$2" current=""
-  if [[ ! -f "$source" ]]; then
-    echo "ERROR: canonical slot rule missing: $source" >&2
-    exit 1
-  fi
   if [[ -L "$destination" ]]; then
     current="$(readlink "$destination")"
     [[ "$current" == "$source" ]] && return 0
@@ -48,6 +44,18 @@ repair_rule_link() {
     exit 1
   fi
   ln -s "$source" "$destination"
+}
+
+preflight_rule_link() {
+  local source="$1" destination="$2"
+  if [[ ! -f "$source" ]]; then
+    echo "ERROR: canonical slot rule missing: $source" >&2
+    exit 1
+  fi
+  if [[ -e "$destination" && ! -L "$destination" ]]; then
+    echo "ERROR: refusing to replace non-symlink slot rule: $destination" >&2
+    exit 1
+  fi
 }
 
 if [[ ! -d "$SLOT_CLONE" ]]; then
@@ -69,6 +77,9 @@ if [[ ! -x "$SKILL_SYNC" ]]; then
 fi
 
 mkdir -p "$SLOT_CLONE/.claude/rules"
+preflight_rule_link "$DEV_SLOT_RULES/20-buddhi-dev.md" "$SLOT_CLONE/.claude/rules/20-buddhi-dev.md"
+preflight_rule_link "$DEV_SLOT_RULES/$IDENTITY_RULE" "$SLOT_CLONE/.claude/rules/$IDENTITY_RULE"
+preflight_rule_link "$PROJECT_RULES/21-lessons.md" "$SLOT_CLONE/.claude/rules/21-lessons.md"
 repair_rule_link "$DEV_SLOT_RULES/20-buddhi-dev.md" "$SLOT_CLONE/.claude/rules/20-buddhi-dev.md"
 repair_rule_link "$DEV_SLOT_RULES/$IDENTITY_RULE" "$SLOT_CLONE/.claude/rules/$IDENTITY_RULE"
 repair_rule_link "$PROJECT_RULES/21-lessons.md" "$SLOT_CLONE/.claude/rules/21-lessons.md"
