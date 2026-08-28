@@ -81,16 +81,28 @@ class FreshSlotSessionTest(unittest.TestCase):
             "22222222-2222-4222-8222-222222222222",
         ])
 
-    def test_explicit_resume_does_not_get_fresh_identity(self) -> None:
-        result = self.run_launcher("--continue")
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_explicit_resume_preserves_args_independent_of_order(self) -> None:
+        for args in (("--continue", "--session-id", "11111111-1111-4111-8111-111111111111"),
+                     ("--session-id", "22222222-2222-4222-8222-222222222222", "--continue")):
+            result = self.run_launcher(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
             "--model", "ornith-1.5-35b-a3b", "--effort", "low",
             "--permission-mode", "bypassPermissions", "--continue",
+            "--session-id", "11111111-1111-4111-8111-111111111111",
+            "--model", "ornith-1.5-35b-a3b", "--effort", "low",
+            "--permission-mode", "bypassPermissions", "--session-id",
+            "22222222-2222-4222-8222-222222222222", "--continue",
         ])
 
     def test_fresh_launch_rejects_fixed_session_id(self) -> None:
         result = self.run_launcher("--session-id", "11111111-1111-4111-8111-111111111111")
+        self.assertEqual(result.returncode, 78)
+        self.assertIn("caller-supplied session ID", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_fresh_launch_rejects_equals_form_fixed_session_id(self) -> None:
+        result = self.run_launcher("--session-id=11111111-1111-4111-8111-111111111111")
         self.assertEqual(result.returncode, 78)
         self.assertIn("caller-supplied session ID", result.stderr)
         self.assertFalse(self.log.exists())

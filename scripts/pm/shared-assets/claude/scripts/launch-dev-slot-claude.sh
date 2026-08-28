@@ -67,14 +67,19 @@ for arg in "$@"; do
     --continue|-c|--resume|-r|--from-pr|--teleport|--fork-session)
       fresh_session=0
       ;;
-    --session-id)
-      if [[ "$fresh_session" -eq 1 ]]; then
-        echo "ERROR: fresh slot launch refuses a caller-supplied session ID; use explicit --resume/--continue for an authorized continuation" >&2
-        exit 78
-      fi
-      ;;
   esac
 done
+
+if [[ "$fresh_session" -eq 1 ]]; then
+  for arg in "$@"; do
+    case "$arg" in
+      --session-id|--session-id=*)
+        echo "ERROR: fresh slot launch refuses a caller-supplied session ID; use explicit --resume/--continue for an authorized continuation" >&2
+        exit 78
+        ;;
+    esac
+  done
+fi
 
 if [[ "$fresh_session" -eq 1 ]]; then
   session_id="$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]')"
