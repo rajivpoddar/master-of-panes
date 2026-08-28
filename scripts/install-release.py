@@ -485,11 +485,20 @@ def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
         if target.is_dir() and not target.is_symlink():
             raise InstallerError(f"cannot restore over directory: {target}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() or target.is_symlink():
-            target.unlink()
         payload = bundle / entry["payload"]
-        _copy_payload(payload, target)
-        os.chmod(target, entry["mode"])
+        temporary = target.with_name(f".{target.name}.rollback.{os.getpid()}.tmp")
+        if temporary.exists() or temporary.is_symlink():
+            temporary.unlink()
+        try:
+            _copy_payload(payload, temporary)
+            os.chmod(temporary, entry["mode"])
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            _fsync_directory(target.parent)
+        finally:
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
         expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
         if file_record(target, entry["path"]) != expected:
             raise InstallerError(f"rollback compatibility verification failed: {target}")
