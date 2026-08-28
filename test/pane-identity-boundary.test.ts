@@ -36,21 +36,44 @@ test("pane identity accepts the exact slot checkout and refuses S4/S5 aliasing",
   const exact = await verifyPaneIdentity(4, async (command) => {
     seen.push(command);
     if (command.startsWith("tmux display-message")) {
-      return { stdout: "%42\t/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
+      return { stdout: "%42|/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
     }
     return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
   });
   assert.equal(exact.ok, true);
   assert.equal(seen.length, 2);
   assert.match(seen[0], /0:0\.4/);
+  assert.match(seen[0], /#\{pane_id\}\|#\{pane_current_path\}/);
+  assert.doesNotMatch(seen[0], /#\{pane_id\}\\t#\{pane_current_path\}/);
   if (exact.ok) assert.equal(exact.snapshot.paneId, "%42");
 
   const refused = await verifyPaneIdentity(4, async () => ({
-    stdout: "%43\t/Users/rajiv/Downloads/projects/heydonna-app-3005\n",
+    stdout: "%43|/Users/rajiv/Downloads/projects/heydonna-app-3005\n",
     stderr: "",
   }));
   assert.equal(refused.ok, false);
   if (!refused.ok) assert.equal(refused.reason, "checkout_mismatch");
+});
+
+test("launchd tmux formatting remains parseable and old underscore output fails closed", async () => {
+  const commands: string[] = [];
+  const exact = await verifyPaneIdentity(1, async (command) => {
+    commands.push(command);
+    if (command.startsWith("tmux display-message")) {
+      return { stdout: "%715|/Users/rajiv/Downloads/projects/heydonna-app-3001\n", stderr: "" };
+    }
+    return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3001\n", stderr: "" };
+  });
+  assert.equal(exact.ok, true);
+  assert.equal(commands.length, 2);
+
+  const oldFormat = await verifyPaneIdentity(1, async (command) => {
+    commands.push(command);
+    return { stdout: "%715_/Users/rajiv/Downloads/projects/heydonna-app-3001\n", stderr: "" };
+  });
+  assert.equal(oldFormat.ok, false);
+  if (!oldFormat.ok) assert.equal(oldFormat.reason, "pane_unavailable");
+  assert.equal(commands.length, 3);
 });
 
 test("pane identity fails closed when tmux is unavailable or slot is unknown", async () => {
@@ -70,7 +93,7 @@ test("relay refuses a mismatched S4 target before any pane delivery", async () =
     runShell: async (command) => {
       commands.push(command);
       if (command.startsWith("tmux display-message")) {
-        return { stdout: "%42\t/Users/rajiv/Downloads/projects/heydonna-app-3005\n", stderr: "" };
+        return { stdout: "%42|/Users/rajiv/Downloads/projects/heydonna-app-3005\n", stderr: "" };
       }
       return { stdout: "", stderr: "" };
     },
@@ -85,7 +108,7 @@ test("pane delivery pins retries to the verified immutable pane id", async () =>
     runShell: async (command) => {
       commands.push(command);
       if (command.startsWith("tmux display-message")) {
-        return { stdout: "%42\t/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
+        return { stdout: "%42|/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
       }
       if (command.startsWith("git -C")) {
         return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
@@ -107,7 +130,7 @@ test("destroyed verified pane fails without numeric-address fallback or retry re
     runShell: async (command) => {
       commands.push(command);
       if (command.startsWith("tmux display-message")) {
-        return { stdout: "%42\t/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
+        return { stdout: "%42|/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
       }
       if (command.startsWith("git -C")) {
         return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };

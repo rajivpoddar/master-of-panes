@@ -81,10 +81,13 @@ export async function verifyPaneIdentity(
   const address = paneAddress(slot);
   try {
     const result = await runShell(
-      `tmux display-message -t ${address} -p '#{pane_id}\t#{pane_current_path}'`,
+      // A literal tab is rendered as an underscore by tmux under the
+      // launchd environment used by the service.  Use a stable delimiter
+      // so the immutable pane id/path probe is environment-independent.
+      `tmux display-message -t ${address} -p '#{pane_id}|#{pane_current_path}'`,
       { timeout: 3_000 },
     );
-    const identityFields = result.stdout.trimEnd().split(/\r?\n/, 1)[0]?.split("\t", 2) ?? [];
+    const identityFields = result.stdout.trimEnd().split(/\r?\n/, 1)[0]?.split("|", 2) ?? [];
     const paneId = identityFields[0]?.trim() ?? "";
     const panePath = identityFields[1]?.trim() ?? "";
     if (!panePath || !/^%\d+$/.test(paneId)) {
