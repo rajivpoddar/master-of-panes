@@ -122,6 +122,7 @@ test("numeric drift with zero or multiple checkout matches fails closed before e
   await run(
     "%717|/Users/rajiv/Downloads/projects/heydonna-app-3004\n%718|/Users/rajiv/Downloads/projects/heydonna-app-3004\n",
   );
+  await run("%717|/Users/rajiv/Downloads/projects/heydonna-app-3004\nmalformed\n");
 });
 
 test("pane identity fails closed when tmux is unavailable or slot is unknown", async () => {

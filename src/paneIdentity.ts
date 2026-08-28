@@ -117,9 +117,15 @@ export async function verifyPaneIdentity(
       { timeout: 3_000 },
     );
     const matches: PaneIdentitySnapshot[] = [];
-    for (const line of listed.stdout.trimEnd().split(/\r?\n/).filter(Boolean)) {
+    const lines = listed.stdout.trimEnd().split(/\r?\n/).filter(Boolean);
+    if (lines.length === 0) {
+      return { ok: false, reason: "pane_unavailable", detail: `pane ${address} returned no enumerable immutable panes` };
+    }
+    for (const line of lines) {
       const candidate = parsePaneIdentityLine(line);
-      if (!candidate) continue;
+      if (!candidate) {
+        return { ok: false, reason: "pane_unavailable", detail: `pane ${address} enumeration contained malformed identity` };
+      }
       try {
         const checkout = await runShell(
           `git -C ${shellEscape(candidate.panePath)} rev-parse --show-toplevel`,
