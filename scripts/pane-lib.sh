@@ -9,7 +9,7 @@ PANE_STATE_DIR="$HOME/.claude/tmux-panes"
 _PANE_LOCK_DIR=""
 
 # Config defaults — overridden by load_config() if config.json exists.
-NUM_DEV_PANES=4
+NUM_DEV_PANES=6
 MANAGER_PANE="0:0.0"
 
 # Newline-separated list of dev pane addresses (bash 3.x safe, no arrays).
@@ -54,21 +54,25 @@ load_config() {
 
   # Build default dev pane list if config didn't provide one
   if [ -z "$_DEV_PANE_LIST" ] || [ "$NUM_DEV_PANES" -eq 0 ]; then
-    NUM_DEV_PANES=4
+    NUM_DEV_PANES=6
     _DEV_PANE_LIST="0:0.1
 0:0.2
 0:0.3
-0:0.4"
+0:0.4
+0:0.5
+0:0.6"
   fi
 
   # Validate NUM_DEV_PANES
   if ! [[ "$NUM_DEV_PANES" =~ ^[0-9]+$ ]] || [ "$NUM_DEV_PANES" -lt 1 ] || [ "$NUM_DEV_PANES" -gt 99 ]; then
-    echo "WARNING: Invalid dev pane count '$NUM_DEV_PANES'. Using default: 4" >&2
-    NUM_DEV_PANES=4
+    echo "WARNING: Invalid dev pane count '$NUM_DEV_PANES'. Using default: 6" >&2
+    NUM_DEV_PANES=6
     _DEV_PANE_LIST="0:0.1
 0:0.2
 0:0.3
-0:0.4"
+0:0.4
+0:0.5
+0:0.6"
   fi
 
   # Validate each dev pane address contains a dot (session:window.pane format)

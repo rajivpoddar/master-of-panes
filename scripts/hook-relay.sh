@@ -7,7 +7,7 @@
 # from the cwd field, and POSTs to the MoP HTTP server.
 #
 # Slot detection: Each slot runs in /Users/rajiv/Downloads/projects/heydonna-app-300N
-# where N is the slot number (1-4). The PM pane (heydonna-app, no suffix) is slot 0.
+# where N is the slot number (1-6). The PM pane (heydonna-app, no suffix) is slot 0.
 #
 # Usage: hook-relay.sh <hook_type>
 #   hook_type: UserPromptSubmit | Stop | PostToolUse | PreToolUse | Notification
@@ -30,7 +30,7 @@ except Exception:
 
 # Determine slot number from cwd: heydonna-app-300N → N, or heydonna-app (no suffix) → 0
 cwd = data.get('cwd', '')
-m = re.search(r'heydonna-app-300([1-4])', cwd)
+m = re.search(r'heydonna-app-300([1-6])', cwd)
 if m:
     slot = m.group(1)
 elif re.search(r'heydonna-app(?!-300)', cwd):

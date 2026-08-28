@@ -10,6 +10,7 @@ import {
   type MoPDatabase,
 } from "./db.js";
 import type { SlotState } from "./types.js";
+import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
 
 export interface NativeSlotReleaseRequest {
   slot: number;
@@ -127,7 +128,7 @@ export class NativeSlotReleaseCoordinator {
     if (
       !Number.isInteger(request.slot)
       || request.slot < 1
-      || request.slot > 4
+      || request.slot > DEFAULT_DEV_SLOT_COUNT
       || !Number.isInteger(request.expected_epoch)
       || !/^[0-9a-f]{40}$/i.test(request.intended_main_head)
       || !tuple

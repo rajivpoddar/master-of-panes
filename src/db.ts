@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { EventLogEntry, MoPConfig, OpsJobRecord, OpsJobStatus, SlotState, SlotStatus } from "./types.js";
+import { devSlots, PM_SLOT } from "./slotConfig.js";
 
 export interface SlotMutationResult {
   ok: boolean;
@@ -484,7 +485,7 @@ export class MoPDatabase {
       VALUES (?, ?)
     `);
 
-    for (let i = 1; i <= 4; i++) {
+    for (const i of devSlots(this.config.slotCount)) {
       insertSlot.run(i, `0:0.${i}`);
     }
   }
@@ -1527,7 +1528,7 @@ export class MoPDatabase {
     this.setConfig("exit_pending", enabled ? "true" : "false");
     if (enabled) {
       // Reset all slot exit-cycled tracking when enabling
-      for (let i = 0; i <= 4; i++) {
+      for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
         this.setConfig(`exit_cycled_${i}`, "false");
       }
     }
@@ -1540,7 +1541,7 @@ export class MoPDatabase {
   getExitStatus(): { pending: boolean; cycled: Record<number, boolean> } {
     const pending = this.getExitPending();
     const cycled: Record<number, boolean> = {};
-    for (let i = 0; i <= 4; i++) {
+    for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
       cycled[i] = this.getConfig(`exit_cycled_${i}`) === "true";
     }
     return { pending, cycled };
@@ -1575,7 +1576,7 @@ export class MoPDatabase {
    */
   getClearPendingStatus(): Record<number, boolean> {
     const status: Record<number, boolean> = {};
-    for (let i = 0; i <= 4; i++) {
+    for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
       status[i] = this.hasPendingClear(i);
     }
     return status;
@@ -1585,7 +1586,7 @@ export class MoPDatabase {
    * Clear all pending clear flags.
    */
   clearAllPendingClears(): void {
-    for (let i = 0; i <= 4; i++) {
+    for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
       this.clearPendingClear(i);
     }
   }

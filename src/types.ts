@@ -67,7 +67,7 @@ export interface HookResponse {
 export type SlotStatus = "free" | "active" | "dnd";
 
 export interface SlotState {
-  /** Slot number (1-4) */
+  /** Slot number (1-6) */
   slot: number;
   /** Tmux pane address */
   address: string;
@@ -184,7 +184,7 @@ export interface MoPConfig {
   dbPath: string;
   /** PM tmux pane address */
   pmPaneAddress: string;
-  /** Number of dev slots */
+  /** Number of dev slots (1..6; slot 0 is the PM boundary). */
   slotCount: number;
   /**
    * Immutable repository identity used only to backfill occupied rows created
@@ -198,6 +198,6 @@ export const DEFAULT_CONFIG: MoPConfig = {
   mcpTransport: "stdio",
   dbPath: "./data/mop.db",
   pmPaneAddress: "0:0.0",
-  slotCount: 4,
+  slotCount: 6,
   legacyRepositoryId: null,
 };

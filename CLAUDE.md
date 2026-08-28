@@ -51,13 +51,13 @@ master-of-panes/
 {
   "panes": {
     "manager": "0:0.0",
-    "dev": ["0:0.1", "0:0.2", "0:0.3", "0:0.4"]
+    "dev": ["0:0.1", "0:0.2", "0:0.3", "0:0.4", "0:0.5", "0:0.6"]
   },
   "state_dir": "~/.claude/tmux-panes"
 }
 ```
 
-If no config exists, defaults are used (4 dev panes at `0:0.1`-`0:0.4`, manager at `0:0.0`). All scripts read config via `load_config()` in `pane-lib.sh`.
+If no config exists, defaults are used (6 dev panes at `0:0.1`-`0:0.6`, manager at `0:0.0`). All scripts read config via `load_config()` in `pane-lib.sh`.
 
 ## State File Format
 
@@ -88,7 +88,7 @@ Extract the generic parts, remove heydonna-specific references (issue labels, br
 
 ### tmux Pane Addressing
 - Configurable via `config.json` (`panes.manager` and `panes.dev[]`)
-- Default layout: session 0, window 0, panes 0-4
+- Default layout: session 0, window 0, panes 0-6
 - Pane 0 (0:0.0) = PM/orchestrator
 - Panes 1-N (0:0.1 through 0:0.N) = dev panes
 - Address format: `session:window.pane`

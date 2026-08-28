@@ -12,6 +12,7 @@ import { execShell, sleep } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 import type { HookPayload, HookResponse, SlotState } from "./types.js";
+import { isValidDevSlot } from "./slotConfig.js";
 
 const execFileAsync = promisify(execFile);
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
@@ -206,7 +207,7 @@ export class HookProcessor {
    * unrelated checkout.
    */
   private async syncObservedCheckout(slotNum: number, payload: HookPayload): Promise<void> {
-    if (slotNum < 1 || slotNum > 4 || !payload.cwd) return;
+    if (!isValidDevSlot(slotNum) || !payload.cwd) return;
     if (!["PostToolUse", "SessionStart", "Stop"].includes(payload.type)) return;
     const slot = this.db.getSlot(slotNum);
     if (!slot?.occupied || !slot.branch) return;
@@ -1554,7 +1555,7 @@ export class HookProcessor {
           "# ✅ All slots have cycled — exit_pending auto-cleared",
         );
         this.db.logEvent(slotNum, "exit_pending_complete", "Stop", null, {
-          reason: "All slots (0-4) have cycled — flag cleared",
+          reason: "All slots (0-6) have cycled — flag cleared",
         });
       }
 

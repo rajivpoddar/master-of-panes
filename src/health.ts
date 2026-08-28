@@ -21,6 +21,7 @@ import { execShell } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import { recentJsonlActivity } from "./jsonlActivity.js";
 import type { TmuxRelay } from "./relay.js";
+import { DEV_SLOT_NUMBERS, RUNTIME_SLOT_NUMBERS, SLOT_RUNTIME_IDENTITIES } from "./slotConfig.js";
 
 // ─── Restart Commands ──────────────────────────────────────
 // These are shell aliases defined in ~/.zshrc. Since tmux panes
@@ -45,10 +46,10 @@ export const CLAUDE_SLOT_RUNTIME_ENV = [
 // Respawn skill: --continue is optional arg (fresh start for atma updates).
 export const RESTART_COMMANDS: Record<number, string> = {
   0: `bash ${SCRIPTS_DIR}/launch-pm.sh --continue`,
-  1: `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-1.sh --continue`,
-  2: `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-2.sh --continue`,
-  3: `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-3.sh --continue`,
-  4: `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-4.sh --continue`,
+  ...Object.fromEntries(DEV_SLOT_NUMBERS.map((slot) => [
+    slot,
+    `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${SLOT_RUNTIME_IDENTITIES[slot].launchScript} --continue`,
+  ])),
 };
 
 /** Shell command names that indicate Claude Code has exited back to the shell */
@@ -60,18 +61,12 @@ export const AGENT_COMMANDS = new Set(["claude", "omp"]);
 
 const SLOT_JSONL_DIRS: Record<number, string> = {
   0: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app",
-  1: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-3001",
-  2: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-3002",
-  3: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-3003",
-  4: "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-3004",
+  ...Object.fromEntries(DEV_SLOT_NUMBERS.map((slot) => [slot, SLOT_RUNTIME_IDENTITIES[slot].jsonlPath])),
 };
 
 const SLOT_CWDS: Record<number, string> = {
   0: "/Users/rajiv/Downloads/projects/heydonna-app",
-  1: "/Users/rajiv/Downloads/projects/heydonna-app-3001",
-  2: "/Users/rajiv/Downloads/projects/heydonna-app-3002",
-  3: "/Users/rajiv/Downloads/projects/heydonna-app-3003",
-  4: "/Users/rajiv/Downloads/projects/heydonna-app-3004",
+  ...Object.fromEntries(DEV_SLOT_NUMBERS.map((slot) => [slot, SLOT_RUNTIME_IDENTITIES[slot].checkoutPath])),
 };
 
 type PaneProbe = {
@@ -408,11 +403,10 @@ export class ProcessHealthChecker {
   // ─── Main Check Loop ──────────────────────────────────
 
   /**
-   * Check all slots (0-4) for dead processes and restart if needed.
+   * Check all slots (0-6) for dead processes and restart if needed.
    *
    * Slot 0 = PM (claude-pm)
-   * Slots 1-3 = Dev (claude-dev-N)
-   * Slot 4 = QA (claude-qa)
+   * Slots 1-6 = isolated dev runtimes.
    */
   async checkAll(): Promise<void> {
     const now = Date.now();
@@ -421,7 +415,7 @@ export class ProcessHealthChecker {
     // Prevents false "process dead" alerts during MoP restart
     if (now - this.startTime < 30_000) return;
 
-    for (let slot = 0; slot <= 4; slot++) {
+    for (const slot of RUNTIME_SLOT_NUMBERS) {
       // Skip if on cooldown (recently restarted)
       const lastTime = this.lastRestart.get(slot);
       if (lastTime && now - lastTime < this.RESTART_COOLDOWN_MS) continue;
@@ -531,7 +525,7 @@ export class ProcessHealthChecker {
     const status = this.db.getExitStatus();
 
     // Check all slots including PM (slot 0) — MoP triggers exit for all panes
-    for (let slot = 0; slot <= 4; slot++) {
+    for (const slot of RUNTIME_SLOT_NUMBERS) {
       // Already cycled — skip
       if (status.cycled[slot]) continue;
 
@@ -578,7 +572,7 @@ export class ProcessHealthChecker {
       this.relay.injectToPM("# ✅ All slots have cycled — exit_pending auto-cleared");
       this.db.logEvent(0, "exit_pending_complete", null, null, {
         source: "health_check",
-        reason: "All slots (0-4) have cycled — flag cleared",
+        reason: "All slots (0-6) have cycled — flag cleared",
       });
     }
   }

@@ -74,7 +74,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
     def test_manifest_is_deterministic_and_source_parity_is_exact(self) -> None:
         manifest = MODULE._load_shared_manifest(self.release)
         self.assertEqual(manifest["entries"], sorted(manifest["entries"], key=lambda item: item["source_path"]))
-        self.assertEqual(manifest["inventory"]["selected_count"], 5)
+        self.assertEqual(manifest["inventory"]["selected_count"], 9)
         self.assertEqual(manifest["inventory"]["ambiguous"], [])
         result = self.install()
         self.assertEqual(result["status"], "SHARED_ASSETS_INSTALLED")

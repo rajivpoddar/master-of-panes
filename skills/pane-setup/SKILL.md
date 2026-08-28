@@ -20,7 +20,7 @@ This is the tmux pane where the PM or orchestrator session runs. Store as `panes
 
 ### Question 2: Dev panes
 
-Ask: "Which panes are dev panes? Provide as comma-separated tmux addresses. (default: 0:0.1,0:0.2,0:0.3,0:0.4)"
+Ask: "Which panes are dev panes? Provide as comma-separated tmux addresses. (default: 0:0.1,0:0.2,0:0.3,0:0.4,0:0.5,0:0.6)"
 
 These are the panes where Claude Code dev sessions run. Each address is in `session:window.pane` format. Store as `panes.dev` (an array).
 

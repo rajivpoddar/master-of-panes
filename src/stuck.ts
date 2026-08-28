@@ -17,6 +17,7 @@ import type { MoPDatabase } from "./db.js";
 import type { LogManager } from "./logs.js";
 import type { TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
+import { isValidDevSlot } from "./slotConfig.js";
 
 function debugLog(line: string): void {
   void appendFile(
@@ -439,7 +440,7 @@ export class StuckDetector {
     // lives in the launchd EnvironmentVariables
     // (com.heydonna.mop-server.plist).
     if (process.env.MOP_PM_WAIT_NUDGES_DISABLED === "1") return;
-    if (slot.slot < 1 || slot.slot > 4) return;
+    if (!isValidDevSlot(slot.slot)) return;
     if (!slot.occupied || slot.dnd) return;
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
 
@@ -592,7 +593,7 @@ export class StuckDetector {
    */
   async checkIdleFree(slot: SlotState): Promise<void> {
     if (process.env.MOP_PM_WAIT_NUDGES_DISABLED === "1") return;
-    if (slot.slot < 1 || slot.slot > 4) return;
+    if (!isValidDevSlot(slot.slot)) return;
     if (slot.occupied || slot.dnd) return;
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
 

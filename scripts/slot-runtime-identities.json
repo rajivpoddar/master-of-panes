@@ -1,0 +1,13 @@
+{
+  "schema": "mop_numbered_slot_runtime_identities",
+  "version": 1,
+  "dev_slot_count": 6,
+  "slots": [
+    {"slot":1,"checkout":"/Users/rajiv/Downloads/projects/heydonna-app-3001","convex_deployment":"heydonna-slot-1","app_port":3001,"browser_session":"slot1","browser_profile":"/Users/rajiv/.agent-browser/profiles/admin-slot1","modal_suffix":"-slot1","env_path":"/Users/rajiv/Downloads/projects/heydonna-app-3001/.env.local","launch_script":"/Users/rajiv/.claude/scripts/launch-slot-1.sh"},
+    {"slot":2,"checkout":"/Users/rajiv/Downloads/projects/heydonna-app-3002","convex_deployment":"heydonna-slot-2","app_port":3002,"browser_session":"slot2","browser_profile":"/Users/rajiv/.agent-browser/profiles/admin-slot2","modal_suffix":"-slot2","env_path":"/Users/rajiv/Downloads/projects/heydonna-app-3002/.env.local","launch_script":"/Users/rajiv/.claude/scripts/launch-slot-2.sh"},
+    {"slot":3,"checkout":"/Users/rajiv/Downloads/projects/heydonna-app-3003","convex_deployment":"heydonna-slot-3","app_port":3003,"browser_session":"slot3","browser_profile":"/Users/rajiv/.agent-browser/profiles/admin-slot3","modal_suffix":"-slot3","env_path":"/Users/rajiv/Downloads/projects/heydonna-app-3003/.env.local","launch_script":"/Users/rajiv/.claude/scripts/launch-slot-3.sh"},
+    {"slot":4,"checkout":"/Users/rajiv/Downloads/projects/heydonna-app-3004","convex_deployment":"heydonna-slot-4","app_port":3004,"browser_session":"slot4","browser_profile":"/Users/rajiv/.agent-browser/profiles/admin-slot4","modal_suffix":"-slot4","env_path":"/Users/rajiv/Downloads/projects/heydonna-app-3004/.env.local","launch_script":"/Users/rajiv/.claude/scripts/launch-slot-4.sh"},
+    {"slot":5,"checkout":"/Users/rajiv/Downloads/projects/heydonna-app-3005","convex_deployment":"heydonna-slot-5","app_port":3005,"browser_session":"slot5","browser_profile":"/Users/rajiv/.agent-browser/profiles/admin-slot5","modal_suffix":"-slot5","env_path":"/Users/rajiv/Downloads/projects/heydonna-app-3005/.env.local","launch_script":"/Users/rajiv/.claude/scripts/launch-slot-5.sh"},
+    {"slot":6,"checkout":"/Users/rajiv/Downloads/projects/heydonna-app-3006","convex_deployment":"heydonna-slot-6","app_port":3006,"browser_session":"slot6","browser_profile":"/Users/rajiv/.agent-browser/profiles/admin-slot6","modal_suffix":"-slot6","env_path":"/Users/rajiv/Downloads/projects/heydonna-app-3006/.env.local","launch_script":"/Users/rajiv/.claude/scripts/launch-slot-6.sh"}
+  ]
+}

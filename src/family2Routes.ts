@@ -11,8 +11,9 @@ import {
   Family2ReleaseEffectAdapter,
 } from "./family2ReleaseEffect.js";
 import type { NativeSlotReleaseCoordinator, NativeSlotReleaseRequest } from "./slotRelease.js";
+import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
 
-const slotParamSchema = z.coerce.number().int().min(1).max(4);
+const slotParamSchema = z.coerce.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT);
 
 export interface Family2RouteDependencies {
   db: MoPDatabase;

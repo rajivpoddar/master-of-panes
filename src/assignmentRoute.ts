@@ -10,8 +10,9 @@ import {
   type AssignmentTupleInput,
   type MoPDatabase,
 } from "./db.js";
+import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
 
-const assignmentSlotParamSchema = z.coerce.number().int().min(1).max(4);
+const assignmentSlotParamSchema = z.coerce.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT);
 
 const COMPLETE_REBIND_EXPECTED_FIELDS = [
   "expected_current_repository_id",

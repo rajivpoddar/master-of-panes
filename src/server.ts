@@ -39,6 +39,7 @@ import {
 } from "./slotRelease.js";
 import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import type { HookPayload, MoPConfig } from "./types.js";
+import { DEFAULT_DEV_SLOT_COUNT, configuredDevSlotCount, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -46,6 +47,7 @@ const config: MoPConfig = {
   ...DEFAULT_CONFIG,
   httpPort: parseInt(process.env.MOP_PORT ?? "3100", 10),
   dbPath: process.env.MOP_DB_PATH ?? DEFAULT_CONFIG.dbPath,
+  slotCount: configuredDevSlotCount(),
   legacyRepositoryId:
     process.env.MOP_LEGACY_REPOSITORY_ID
     ?? DEFAULT_CONFIG.legacyRepositoryId,
@@ -223,9 +225,11 @@ const PM_CLEAR_CONFIRMED_AT_KEY = "pm_clear_confirmed_at";
 
 function normalizeClearTarget(raw: string): number[] | null {
   const normalized = raw.trim().toLowerCase();
-  if (normalized === "all") return [0, 1, 2, 3, 4];
-  if (normalized === "pm") return [0];
-  if (/^[0-4]$/.test(normalized)) return [Number(normalized)];
+  if (normalized === "all") return [PM_SLOT, ...devSlots(config.slotCount)];
+  if (normalized === "pm") return [PM_SLOT];
+  if (/^\d+$/.test(normalized) && isValidRuntimeSlot(Number(normalized), config.slotCount)) {
+    return [Number(normalized)];
+  }
   return null;
 }
 
@@ -324,7 +328,7 @@ async function clearSlotsThroughMopHttp(
   options: { clearExistingPendingForTargets: boolean; source: string; terminalOnly: boolean },
 ): Promise<ClearSlotResult[]> {
   const normalizedTargets = Array.from(new Set(targetSlots))
-    .filter((slot) => slot >= 0 && slot <= 4);
+    .filter((slot) => isValidRuntimeSlot(slot, config.slotCount));
   const results: ClearSlotResult[] = [];
 
   if (options.clearExistingPendingForTargets) {
@@ -508,7 +512,7 @@ const hookPayloadSchema = z.object({
   compact_summary: z.string().optional(),
 }).passthrough(); // Accept additional unknown fields gracefully
 
-const slotParamSchema = z.coerce.number().int().min(0).max(4);
+const slotParamSchema = z.coerce.number().int().min(0).max(DEFAULT_DEV_SLOT_COUNT);
 
 // ─── Normalize Payload ───────────────────────────────────
 
@@ -809,7 +813,7 @@ app.get("/slots/:slotNum", (c) => {
 app.post("/slots/:slotNum/clear", async (c) => {
   const targetSlots = normalizeClearTarget(c.req.param("slotNum"));
   if (!targetSlots) {
-    return c.json({ error: "slotNum must be 0, 1, 2, 3, 4, pm, or all" }, 400);
+    return c.json({ error: "slotNum must be an integer from 0 through 6, pm, or all" }, 400);
   }
 
   let body: { source?: string; clear_existing_pending?: boolean; terminal_only?: boolean } = {};
@@ -839,7 +843,7 @@ app.post("/clear", async (c) => {
 
   const targetSlots = normalizeClearTarget(body.slot ?? "all");
   if (!targetSlots) {
-    return c.json({ error: "slot must be 0, 1, 2, 3, 4, pm, or all" }, 400);
+    return c.json({ error: "slot must be an integer from 0 through 6, pm, or all" }, 400);
   }
 
   const source = body.source ?? "http_clear_endpoint";
@@ -1466,7 +1470,7 @@ app.post("/slots/:slotNum/send", async (c) => {
   // delivery by passing force:true (the new default).
   // (Rajiv directive 2026-05-05 21:31 IST — "should never return success
   // if message was not sent.")
-  if (!force && slotNum >= 1 && slotNum <= 4) {
+  if (!force && isValidDevSlot(slotNum, config.slotCount)) {
     let active = false;
     try {
       active = await relay.isSlotActive(slotNum);
@@ -1982,7 +1986,7 @@ app.post("/api/slack-route", async (c) => {
       } else {
         const match = /0:0\.(\d+)$/.exec(pane);
         const slotNum = match ? Number(match[1]) : NaN;
-        if (!Number.isInteger(slotNum) || slotNum < 1 || slotNum > 4) {
+        if (!isValidDevSlot(slotNum, config.slotCount)) {
           results.push(`${pane}: failed (unsupported pane)`);
           continue;
         }

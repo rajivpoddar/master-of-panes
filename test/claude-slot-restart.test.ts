@@ -8,7 +8,7 @@ import {
 
 test("numbered slot auto-restarts use the persistent Claude Code launchers", () => {
   assert.equal(CLAUDE_SLOT_SCRIPTS_DIR, "/Users/rajiv/.claude/scripts");
-  for (const slot of [1, 2, 3, 4]) {
+  for (const slot of [1, 2, 3, 4, 5, 6]) {
     assert.equal(
       RESTART_COMMANDS[slot],
       `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-slot-${slot}.sh --continue`,

@@ -5,9 +5,13 @@
   "inventory": {
     "source_roots": [
       "~/.claude/scripts/axiom-activity-report.py",
+      "~/.claude/scripts/launch-dev-slot-claude.sh",
+      "~/.claude/scripts/launch-slot-5.sh",
+      "~/.claude/scripts/launch-slot-6.sh",
+      "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "~/.codex/skills/codex-stdio-send-message"
     ],
-    "selected_count": 5,
+    "selected_count": 9,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -29,6 +33,42 @@
       "sha256": "8b67ea060d935f4be465aa342b0f3fe00e86950ce0ccbb80a58b1e2cc1d94abd",
       "mode": 493,
       "ownership_class": "shared-claude-pm-report",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/launch-dev-slot-claude.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/launch-dev-slot-claude.sh",
+      "sha256": "c6199021b373f8b4b86649e64d21463eb7120f211d0611230ce9ae5816e5bcd2",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-launcher",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/launch-slot-5.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/launch-slot-5.sh",
+      "sha256": "a88e96f7b97c16b6802191539f66aed9cee3bc0f0111cc10d1f2c1c8f4042cc0",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-launcher",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/launch-slot-6.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/launch-slot-6.sh",
+      "sha256": "06736385f59282077d8977d51cecf68b907d71c4f396efe2e043a18c28c19515",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-launcher",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/sync-dev-slot-skill-allowlist.mjs",
+      "canonical_target": "/Users/rajiv/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
+      "sha256": "fe7e3f4a8f65e36e06e4f99a75f2b599ed6d409cf23ad3a7e98ec927225c7d56",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-launcher-dependency",
       "dependency_status": "closed",
       "dependencies": []
     },

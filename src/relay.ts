@@ -13,6 +13,7 @@ import type { LogManager } from "./logs.js";
 import type { MoPDatabase } from "./db.js";
 import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
+import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
@@ -74,7 +75,7 @@ function parseRelayMessage(message: string): { eventType: string; slot: number }
   const slash = /^\/(slot-idle|slot-active|check-slot|slot-blocked)\s+(\d+)\b/.exec(firstLine);
   if (slash) {
     const slot = parseInt(slash[2], 10);
-    if (!Number.isFinite(slot) || slot < 0 || slot > 4) return null;
+    if (!isValidRuntimeSlot(slot)) return null;
     return { eventType: slash[1], slot };
   }
 
@@ -82,7 +83,7 @@ function parseRelayMessage(message: string): { eventType: string; slot: number }
   const mopCheck = /^MoP:\s+check\s+slot\s+(\d+)\b/i.exec(firstLine);
   if (mopCheck) {
     const slot = parseInt(mopCheck[1], 10);
-    if (!Number.isFinite(slot) || slot < 0 || slot > 4) return null;
+    if (!isValidRuntimeSlot(slot)) return null;
     return { eventType: "check-slot", slot };
   }
 
@@ -90,7 +91,7 @@ function parseRelayMessage(message: string): { eventType: string; slot: number }
   const mopSlot = /^MoP:\s+slot\s+(\d+)\s+(idle|active|blocked)\b/i.exec(firstLine);
   if (mopSlot) {
     const slot = parseInt(mopSlot[1], 10);
-    if (!Number.isFinite(slot) || slot < 0 || slot > 4) return null;
+    if (!isValidRuntimeSlot(slot)) return null;
     return { eventType: `slot-${mopSlot[2].toLowerCase()}`, slot };
   }
 
@@ -203,7 +204,7 @@ type DirectSubmitResult = {
  * Code owns its active-turn prompt queue and does not use OMP's C-q binding.
  * OMP keeps idle → Enter and busy/unknown → C-q.
  *
- * Slots 1-4 never route through this decision: they keep the always-Enter
+ * Numbered slots never route through this decision: they keep the always-Enter
  * sendToSlot path where steering the active turn is the intended behavior.
  */
 export function resolvePMRuntime(value: string | undefined): PMRuntime {
@@ -589,7 +590,7 @@ export class TmuxRelay {
     const payload = withMopSlotHeader(message, parsed);
     const slot = parsed?.slot ?? (() => {
       const slotMatch = /\bslot\s+(\d+)\b/i.exec(message);
-      return slotMatch ? Math.min(4, Math.max(0, parseInt(slotMatch[1], 10))) : 0;
+      return slotMatch ? Math.min(DEFAULT_DEV_SLOT_COUNT, Math.max(0, parseInt(slotMatch[1], 10))) : 0;
     })();
     const eventType = eventTypeOverride ?? parsed?.eventType ?? `freeform-${simpleHash(message)}`;
     this.db.enqueuePendingPMEvent(slot, eventType, payload);
@@ -984,7 +985,7 @@ export class TmuxRelay {
 
   /** Resolve the owning numbered pane's current Git worktree root. */
   async getSlotCheckoutPath(slotNum: number): Promise<string | null> {
-    if (!Number.isInteger(slotNum) || slotNum < 1 || slotNum > 4) return null;
+    if (!isValidDevSlot(slotNum)) return null;
     try {
       const paneAddr = `0:0.${slotNum}`;
       const { stdout: panePathOutput } = await this.runShell(

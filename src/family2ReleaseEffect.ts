@@ -5,6 +5,7 @@ import {
   computeFamily2ReleaseDigest,
   type AssignmentTupleInput,
 } from "./db.js";
+import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
 import {
   PM_TRANSITION_ASSIGNMENT_AUTHORITY,
   PM_TRANSITION_ASSIGNMENT_HEADER,
@@ -89,7 +90,7 @@ export class Family2ReleaseEffectAdapter {
   }
 
   async release(request: Family2ReleaseEffectRequest): Promise<Family2ReleaseEffectReceipt> {
-    if (typeof request.base_url !== "string" || !request.base_url.trim() || !Number.isInteger(request.slot) || request.slot < 1 || request.slot > 4 || typeof request.effect_id !== "string" || !request.effect_id.trim() || !Number.isInteger(request.expected_epoch) || !/^[0-9a-f]{40}$/i.test(request.intended_main_head) || !validTuple(request.expected_tuple)) return responseReceipt("invalid_request", "Immutable release effect identity and complete tuple are required.", "Retry with the committed Family-2 outbox binding.");
+    if (typeof request.base_url !== "string" || !request.base_url.trim() || !Number.isInteger(request.slot) || request.slot < 1 || request.slot > DEFAULT_DEV_SLOT_COUNT || typeof request.effect_id !== "string" || !request.effect_id.trim() || !Number.isInteger(request.expected_epoch) || !/^[0-9a-f]{40}$/i.test(request.intended_main_head) || !validTuple(request.expected_tuple)) return responseReceipt("invalid_request", "Immutable release effect identity and complete tuple are required.", "Retry with the committed Family-2 outbox binding.");
     const base = request.base_url.replace(/\/$/, "");
     const prior = await this.receipt(request, base); if (prior) return prior;
     let beforeResponse: Family2ReleaseResponse; let beforePayload: unknown;

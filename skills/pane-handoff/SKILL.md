@@ -10,7 +10,7 @@ Full-workflow handoff of a GitHub issue to a tmux dev pane. Extracts the issue, 
 
 ## Arguments
 
-`<pane> <issue>` — pane number (1-4) and GitHub issue number.
+`<pane> <issue>` — pane number (1-6) and GitHub issue number.
 
 Example: `/master-of-panes:pane-handoff 4 1284`
 

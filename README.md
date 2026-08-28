@@ -51,11 +51,11 @@ claude --plugin-dir /path/to/master-of-panes
 
 ```bash
 # 1. Create a tmux session with panes
-scripts/create-layout.sh claude 4    # 1 manager + 4 dev panes
+scripts/create-layout.sh claude 6    # 1 manager + 6 dev panes
 
 # 2. Start Claude Code in each pane
 # Manager pane (0:0.0): claude
-# Dev panes (0:0.1-0:0.4): claude in each
+# Dev panes (0:0.1-0:0.6): claude in each
 
 # 3. In the manager pane, run setup
 /master-of-panes:pane-setup
@@ -71,10 +71,10 @@ On first use, run the setup command to configure your tmux layout:
 
 This creates `~/.claude/tmux-panes/config.json` with your settings:
 - Manager pane address (default: `0:0.0`)
-- Dev pane addresses (default: `0:0.1` through `0:0.4`)
+- Dev pane addresses (default: `0:0.1` through `0:0.6`)
 - State directory (default: `~/.claude/tmux-panes`)
 
-If you skip setup, the plugin works with defaults (4 dev panes at `0:0.1` through `0:0.4`).
+If you skip setup, the plugin works with defaults (6 dev panes at `0:0.1` through `0:0.6`).
 
 ## Pane Layout (Default)
 
@@ -85,6 +85,8 @@ If you skip setup, the plugin works with defaults (4 dev panes at `0:0.1` throug
 | `0:0.2` | Dev pane 2            |
 | `0:0.3` | Dev pane 3            |
 | `0:0.4` | Dev pane 4            |
+| `0:0.5` | Dev pane 5            |
+| `0:0.6` | Dev pane 6            |
 
 Custom layouts are configured via `/master-of-panes:pane-setup`.
 
