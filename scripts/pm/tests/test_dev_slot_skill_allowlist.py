@@ -58,6 +58,7 @@ def test_dev_slot_skill_sync_enables_review_lifecycle_and_browser_toolkit(
         "proofshot",
         "heydonna-agent-browser",
         "playwright-testmatch-override-qa-only",
+        "respawn",
         "agent-browser",
         "agent-browser-login",
         "agent-browser-project-creation",

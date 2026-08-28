@@ -12,10 +12,17 @@
       "~/.claude/scripts/launch-dev-slot-claude.sh",
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
+      "~/.claude/scripts/mop-slot-respawn.sh",
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
+      "~/Downloads/projects/heydonna-app-3001/.claude/skills/respawn",
+      "~/Downloads/projects/heydonna-app-3002/.claude/skills/respawn",
+      "~/Downloads/projects/heydonna-app-3003/.claude/skills/respawn",
+      "~/Downloads/projects/heydonna-app-3004/.claude/skills/respawn",
+      "~/Downloads/projects/heydonna-app-3005/.claude/skills/respawn",
+      "~/Downloads/projects/heydonna-app-3006/.claude/skills/respawn",
       "~/.codex/skills/codex-stdio-send-message"
     ],
-    "selected_count": 13,
+    "selected_count": 26,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -104,11 +111,128 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/mop-slot-respawn.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/mop-slot-respawn.sh",
+      "sha256": "8dcb35b708f730c98901e629ef5c5f506d8cba2dbee020dbe7ac9b06bcf2b75e",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-respawn-client",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "canonical_target": "/Users/rajiv/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
-      "sha256": "c56fcf76685c10c8351c4e6f06877a93eb287c721f3eeabd8f562a520fcab840",
+      "sha256": "3e28684422c2dc19e51b5a979fcb5e354b2c1c5a814dc055b5047f11d8640f46",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot1/respawn/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3001/.claude/skills/respawn/SKILL.md",
+      "sha256": "efb56efe58e0e805e40bf6c2da0224fe3e3a252dca90b44eb5c9a3c0867ce341",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot1/respawn/scripts/respawn.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3001/.claude/skills/respawn/scripts/respawn.sh",
+      "sha256": "304e715d621e2a67fe0ee40d64e483b060db6405a28065b3314ef03a5ad55cda",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-skill-wrapper",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot2/respawn/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3002/.claude/skills/respawn/SKILL.md",
+      "sha256": "efb56efe58e0e805e40bf6c2da0224fe3e3a252dca90b44eb5c9a3c0867ce341",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot2/respawn/scripts/respawn.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3002/.claude/skills/respawn/scripts/respawn.sh",
+      "sha256": "304e715d621e2a67fe0ee40d64e483b060db6405a28065b3314ef03a5ad55cda",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-skill-wrapper",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot3/respawn/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3003/.claude/skills/respawn/SKILL.md",
+      "sha256": "efb56efe58e0e805e40bf6c2da0224fe3e3a252dca90b44eb5c9a3c0867ce341",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot3/respawn/scripts/respawn.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3003/.claude/skills/respawn/scripts/respawn.sh",
+      "sha256": "304e715d621e2a67fe0ee40d64e483b060db6405a28065b3314ef03a5ad55cda",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-skill-wrapper",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot4/respawn/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3004/.claude/skills/respawn/SKILL.md",
+      "sha256": "efb56efe58e0e805e40bf6c2da0224fe3e3a252dca90b44eb5c9a3c0867ce341",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot4/respawn/scripts/respawn.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3004/.claude/skills/respawn/scripts/respawn.sh",
+      "sha256": "304e715d621e2a67fe0ee40d64e483b060db6405a28065b3314ef03a5ad55cda",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-skill-wrapper",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot5/respawn/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3005/.claude/skills/respawn/SKILL.md",
+      "sha256": "efb56efe58e0e805e40bf6c2da0224fe3e3a252dca90b44eb5c9a3c0867ce341",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot5/respawn/scripts/respawn.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3005/.claude/skills/respawn/scripts/respawn.sh",
+      "sha256": "304e715d621e2a67fe0ee40d64e483b060db6405a28065b3314ef03a5ad55cda",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-skill-wrapper",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot6/respawn/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3006/.claude/skills/respawn/SKILL.md",
+      "sha256": "efb56efe58e0e805e40bf6c2da0224fe3e3a252dca90b44eb5c9a3c0867ce341",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/slot-skills/slot6/respawn/scripts/respawn.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3006/.claude/skills/respawn/scripts/respawn.sh",
+      "sha256": "304e715d621e2a67fe0ee40d64e483b060db6405a28065b3314ef03a5ad55cda",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-skill-wrapper",
       "dependency_status": "closed",
       "dependencies": []
     },

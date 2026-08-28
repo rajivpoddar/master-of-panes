@@ -6,6 +6,7 @@ import path from "node:path";
 const allowlist = new Set([
   "message-pm",
   "pm-wait-nudge",
+  "respawn",
   "slot-boot",
   "codex-app-plan-review",
   "codex-plan-review",
