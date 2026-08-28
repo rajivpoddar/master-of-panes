@@ -1032,6 +1032,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   // Mark as PM-initiated to suppress crash notifications.
   healthChecker.markPmInitiatedRespawn(slotNum);
   recordStep("marked_pm_initiated");
+  let respawnCompleted = false;
 
   try {
     // Step 1: Inject /exit into the Claude Code session.
@@ -1133,10 +1134,18 @@ app.post("/slots/:slotNum/respawn", async (c) => {
         recordStep("continue_inject_failed", String(err));
       }
     }
+    respawnCompleted = true;
   } finally {
-    // Always clear the flag — restore normal crash detection.
-    healthChecker.clearPmInitiatedRespawn(slotNum);
-    recordStep("cleared_pm_initiated");
+    if (respawnCompleted) {
+      // Seed the health-check cooldown before clearing the fence. Otherwise a
+      // tick racing the post-launch shell/readback transition can launch the
+      // same slot a second time and bypass the controlled respawn receipt.
+      healthChecker.completePmInitiatedRespawn(slotNum);
+      recordStep("completed_pm_initiated_with_cooldown");
+    } else {
+      healthChecker.clearPmInitiatedRespawn(slotNum);
+      recordStep("cleared_pm_initiated_after_failure");
+    }
   }
 
   db.logEvent(slotNum, "slot_respawned", null, null, {

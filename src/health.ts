@@ -140,9 +140,30 @@ export class ProcessHealthChecker {
     this.pmInitiatedRespawns.delete(slotNum);
   }
 
+  /**
+   * Finish a successful PM-initiated respawn.
+   *
+   * The controlled route has already launched Claude through the configured
+   * slot launcher at this point. Seed the normal restart cooldown before
+   * removing its fence so the next health tick cannot mistake a transient
+   * shell/readback state for a second crash and launch the slot again.
+   */
+  completePmInitiatedRespawn(slotNum: number): void {
+    this.lastRestart.set(slotNum, Date.now());
+    this.unresponsiveStates.delete(slotNum);
+    this.pmInitiatedRespawns.delete(slotNum);
+  }
+
   /** Check if a slot is currently being respawned by PM. */
   isPmInitiatedRespawn(slotNum: number): boolean {
     return this.pmInitiatedRespawns.has(slotNum);
+  }
+
+  /** True when a controlled respawn owns the slot or just completed. */
+  private isRestartSuppressed(slotNum: number, now = Date.now()): boolean {
+    if (this.pmInitiatedRespawns.has(slotNum)) return true;
+    const lastTime = this.lastRestart.get(slotNum);
+    return lastTime !== undefined && now - lastTime < this.RESTART_COOLDOWN_MS;
   }
 
   /** Public getter for pane's current command (used by respawn orchestration). */
@@ -252,6 +273,10 @@ export class ProcessHealthChecker {
       return false;
     }
     const paneTarget = identity.snapshot.paneId;
+    // Effect-edge fence: verifyPaneIdentity() yields. A controlled respawn can
+    // begin or finish while that lookup is in flight, so re-check immediately
+    // before the launcher command is sent to the pane.
+    if (this.isRestartSuppressed(slotNum)) return false;
     try {
       // Send restart command to the pane's shell.
       // Uses standalone bash scripts (not aliases) — no .zshrc/OMZ dependency.
@@ -441,9 +466,8 @@ export class ProcessHealthChecker {
     if (now - this.startTime < 30_000) return;
 
     for (const slot of RUNTIME_SLOT_NUMBERS) {
-      // Skip if on cooldown (recently restarted)
-      const lastTime = this.lastRestart.get(slot);
-      if (lastTime && now - lastTime < this.RESTART_COOLDOWN_MS) continue;
+      // Skip controlled or recently completed respawns.
+      if (this.isRestartSuppressed(slot, now)) continue;
 
       // DND does NOT skip health checks — Claude must run on all slots always.
       // DND only means "don't assign new work" — NOT "don't keep alive."
@@ -465,6 +489,10 @@ export class ProcessHealthChecker {
         this.unresponsiveStates.delete(slot);
         continue;
       }
+
+      // getPaneCommand() yields. Re-check before emitting death/restart effects
+      // so an in-flight health iteration cannot race a controlled /exit.
+      if (this.isRestartSuppressed(slot)) continue;
 
       this.unresponsiveStates.delete(slot);
 
