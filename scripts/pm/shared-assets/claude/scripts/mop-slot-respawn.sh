@@ -59,7 +59,7 @@ for _attempt in \$(seq 1 60); do
     cat "\$receipt" >&2
     printf '\n' >&2
     rm -f "\$receipt"
-    [[ "\$status" == "409" ]] || exit 1
+    exit 1
   fi
   sleep 0.5
 done

@@ -117,3 +117,71 @@ def test_runner_waits_for_idle_then_posts_one_controlled_respawn() -> None:
         server.server_close()
         log.unlink(missing_ok=True)
         lock.rmdir() if lock.exists() else None
+
+
+def test_runner_treats_a_conflicting_respawn_as_a_terminal_refusal() -> None:
+    requests: list[tuple[str, str, bytes]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            requests.append(("GET", self.path, b""))
+            body = b'{"idle":true,"active_turn_state":"inactive"}'
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("content-length", "0"))
+            payload = self.rfile.read(length)
+            requests.append(("POST", self.path, payload))
+            body = b'{"error":"respawn already in progress"}'
+            self.send_response(409)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    lock = Path("/tmp/mop-slot-respawn-1.lock")
+    log = Path("/tmp/mop-slot-respawn-1.log")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp) / "heydonna-app-3001"
+            checkout.mkdir()
+            env = dict(os.environ)
+            env["MOP_BASE_URL"] = f"http://127.0.0.1:{server.server_port}"
+            result = subprocess.run(
+                ["bash", str(RUNNER)],
+                cwd=checkout,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == 0
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and (
+                lock.exists() or not log.exists() or "status=409" not in log.read_text()
+            ):
+                time.sleep(0.05)
+
+        time.sleep(0.6)
+        assert requests.count(("GET", "/slots/1", b"")) == 1
+        assert requests.count(
+            ("POST", "/slots/1/respawn", b'{"continue_session":true}')
+        ) == 1
+        assert "MOP_RESPAWN_REFUSED slot=1 status=409" in log.read_text(encoding="utf-8")
+        assert not lock.exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        log.unlink(missing_ok=True)
+        lock.rmdir() if lock.exists() else None
