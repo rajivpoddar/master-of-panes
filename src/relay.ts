@@ -14,6 +14,7 @@ import type { MoPDatabase } from "./db.js";
 import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
+import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
@@ -987,13 +988,9 @@ export class TmuxRelay {
   async getSlotCheckoutPath(slotNum: number): Promise<string | null> {
     if (!isValidDevSlot(slotNum)) return null;
     try {
-      const paneAddr = `0:0.${slotNum}`;
-      const { stdout: panePathOutput } = await this.runShell(
-        `tmux display-message -t ${paneAddr} -p '#{pane_current_path}'`,
-        { timeout: 3_000 },
-      );
-      const panePath = panePathOutput.trim();
-      if (!panePath) return null;
+      const identity = await verifyPaneIdentity(slotNum, this.runShell);
+      if (!identity.ok) return null;
+      const panePath = identity.snapshot.currentPath;
       const { stdout: checkoutOutput } = await this.runShell(
         `git -C ${shellEscape(panePath)} rev-parse --show-toplevel`,
         { timeout: 3_000 },
@@ -1013,7 +1010,19 @@ export class TmuxRelay {
       // hatch for callers such as clear/compact recovery.
       return (await this.submitToPM(command)).ok;
     }
-    const paneAddr = `0:0.${slotNum}`;
+    const identity = await verifyPaneIdentity(slotNum, this.runShell);
+    if (!identity.ok) {
+      console.warn(`[relay] refusing pane delivery for slot ${slotNum}: ${identity.detail}`);
+      if (this.db) {
+        this.db.logEvent(slotNum, "send_rejected_pane_identity", null, null, {
+          reason: identity.reason,
+          detail: identity.detail,
+          address: paneAddress(slotNum),
+        });
+      }
+      return false;
+    }
+    const paneAddr = identity.snapshot.address;
     const cooldownKey = `${slotNum}:${command.slice(0, 80)}`;
 
     // Per-(slot, command) cooldown — defensive layer against tight retry

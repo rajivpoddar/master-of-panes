@@ -44,6 +44,10 @@ done
 # Tiled layout for even distribution
 tmux select-layout -t "$WINDOW" tiled
 
+# Do not expose a partially-created or aliased layout. Every downstream pane
+# effect relies on the numeric address being a stable manager+dev identity.
+validate_layout_shape "$WINDOW" "$NUM_PANES"
+
 # List created panes
 echo ""
 echo "Created layout:"

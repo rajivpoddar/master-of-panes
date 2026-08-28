@@ -212,6 +212,38 @@ pane_exists() {
   tmux display-message -p -t "$1" '#{pane_id}' &>/dev/null
 }
 
+# Verify that the tmux window has exactly one manager pane plus the numbered
+# dev panes. Numeric addresses are only safe when the complete shape is known;
+# refuse before any caller targets a pane if insertion/reuse produced an alias.
+# Usage: validate_layout_shape <session:window> [dev_count]
+validate_layout_shape() {
+  local window="$1"
+  local dev_count="${2:-$NUM_DEV_PANES}"
+  if ! [[ "$dev_count" =~ ^[1-6]$ ]]; then
+    echo "ERROR: layout dev count must be between 1 and 6; got '$dev_count'" >&2
+    return 2
+  fi
+  local expected_count=$((dev_count + 1))
+  local panes
+  panes=$(tmux list-panes -t "$window" -F '#{pane_index}' 2>/dev/null) || {
+    echo "ERROR: cannot read pane layout for $window" >&2
+    return 1
+  }
+  local actual_count
+  actual_count=$(printf '%s\n' "$panes" | sed '/^$/d' | wc -l | tr -d ' ')
+  if [ "$actual_count" -ne "$expected_count" ]; then
+    echo "ERROR: expected $expected_count unique panes in $window; got $actual_count" >&2
+    return 1
+  fi
+  local index
+  for index in $(seq 0 "$dev_count"); do
+    if ! printf '%s\n' "$panes" | grep -qx "$index"; then
+      echo "ERROR: pane $window.$index is missing from the authoritative layout" >&2
+      return 1
+    fi
+  done
+}
+
 # Ensure state directory and a pane's state file exist.
 # Uses mktemp + mv to prevent torn writes from concurrent startup.
 ensure_pane_state() {

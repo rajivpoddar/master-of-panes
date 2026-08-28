@@ -283,14 +283,19 @@ test("forged Family-2 digest refuses before delivery/reset/clear", async () => {
 
 test("native adapter derives the checkout from the numbered pane, not caller input", async () => {
   const commands: string[] = [];
+  let gitCalls = 0;
   const relay = new TmuxRelay(DEFAULT_CONFIG, {
     runShell: async (command) => {
       commands.push(command);
       if (command.startsWith("tmux display-message")) {
-        return { stdout: "/tmp/pane/subdirectory\n", stderr: "" };
+        return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3001\n", stderr: "" };
       }
       if (command.startsWith("git -C")) {
-        return { stdout: `${CHECKOUT}\n`, stderr: "" };
+        gitCalls += 1;
+        return {
+          stdout: `${gitCalls === 1 ? "/Users/rajiv/Downloads/projects/heydonna-app-3001" : CHECKOUT}\n`,
+          stderr: "",
+        };
       }
       throw new Error(`unexpected command: ${command}`);
     },

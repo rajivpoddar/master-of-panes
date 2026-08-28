@@ -22,6 +22,7 @@ import type { MoPDatabase } from "./db.js";
 import { recentJsonlActivity } from "./jsonlActivity.js";
 import type { TmuxRelay } from "./relay.js";
 import { DEV_SLOT_NUMBERS, RUNTIME_SLOT_NUMBERS, SLOT_RUNTIME_IDENTITIES } from "./slotConfig.js";
+import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 
 // ─── Restart Commands ──────────────────────────────────────
 // These are shell aliases defined in ~/.zshrc. Since tmux panes
@@ -156,10 +157,15 @@ export class ProcessHealthChecker {
    * Returns "claude" when Claude Code is running, "zsh" when it's dead.
    */
   private async getPaneCommand(slotNum: number): Promise<string | null> {
-    const paneAddress = `0:0.${slotNum}`;
+    const address = paneAddress(slotNum);
+    const identity = await verifyPaneIdentity(slotNum);
+    if (!identity.ok) {
+      console.warn(`[health] pane identity unavailable for slot ${slotNum}: ${identity.detail}`);
+      return null;
+    }
     try {
       const result = await execShell(
-        `tmux display-message -t ${paneAddress} -p '#{pane_current_command}'`,
+        `tmux display-message -t ${address} -p '#{pane_current_command}'`,
         { timeout: 5_000 },
       );
       const stdout = result.stdout.trim();
@@ -240,13 +246,18 @@ export class ProcessHealthChecker {
     const launchCmd = typedLaunchCommandForPane(slotNum);
     if (!launchCmd) return false;
 
-    const paneAddress = `0:0.${slotNum}`;
+    const address = paneAddress(slotNum);
+    const identity = await verifyPaneIdentity(slotNum);
+    if (!identity.ok) {
+      console.warn(`[health] refusing restart for slot ${slotNum}: ${identity.detail}`);
+      return false;
+    }
     try {
       // Send restart command to the pane's shell.
       // Uses standalone bash scripts (not aliases) — no .zshrc/OMZ dependency.
       // Scripts resolve the atma template vars directly via sed.
       await execShell(
-        `tmux send-keys -t ${paneAddress} ${shellEscape(launchCmd)} Enter`,
+        `tmux send-keys -t ${address} ${shellEscape(launchCmd)} Enter`,
         { timeout: 10_000 },
       );
       return true;
@@ -261,10 +272,15 @@ export class ProcessHealthChecker {
     const cwd = SLOT_CWDS[slotNum];
     if (!launchCmd || !cwd) return false;
 
-    const paneAddress = `0:0.${slotNum}`;
+    const address = paneAddress(slotNum);
+    const identity = await verifyPaneIdentity(slotNum);
+    if (!identity.ok) {
+      console.warn(`[health] refusing force-respawn for slot ${slotNum}: ${identity.detail}`);
+      return false;
+    }
     try {
       await execShell(
-        `tmux respawn-pane -k -t ${paneAddress} -c ${shellEscape(cwd)} ${shellEscape(launchCmd)}`,
+        `tmux respawn-pane -k -t ${address} -c ${shellEscape(cwd)} ${shellEscape(launchCmd)}`,
         { timeout: 10_000 },
       );
       this.lastForceRespawn.set(slotNum, Date.now());
@@ -338,7 +354,16 @@ export class ProcessHealthChecker {
 
     if (state.unchangedChecks === this.UNRESPONSIVE_PROBE_CHECKS) {
       try {
-        await execShell(`tmux send-keys -t 0:0.${slotNum} C-l`, { timeout: 5_000 });
+        const identity = await verifyPaneIdentity(slotNum);
+        if (!identity.ok) {
+          this.db.logEvent(slotNum, "pane_unresponsive_probe_failed", null, null, {
+            unchanged_checks: state.unchangedChecks,
+            reason: "pane_identity_mismatch",
+            detail: identity.detail,
+          });
+          return;
+        }
+        await execShell(`tmux send-keys -t ${identity.snapshot.address} C-l`, { timeout: 5_000 });
         state.probeSentAt = Date.now();
         this.unresponsiveStates.set(slotNum, state);
         this.db.logEvent(slotNum, "pane_unresponsive_probe_sent", null, null, {
@@ -599,10 +624,14 @@ export class ProcessHealthChecker {
         return;
       }
 
-      const paneAddress = `0:0.${slotNum}`;
       try {
+        const identity = await verifyPaneIdentity(slotNum);
+        if (!identity.ok) {
+          console.warn(`[health] refusing continue injection for slot ${slotNum}: ${identity.detail}`);
+          return;
+        }
         await execShell(
-          `tmux send-keys -t ${paneAddress} 'continue' Enter`,
+          `tmux send-keys -t ${identity.snapshot.address} 'continue' Enter`,
           { timeout: 10_000 },
         );
         console.log(`[health] Sent "continue" to slot ${slotNum} after restart`);

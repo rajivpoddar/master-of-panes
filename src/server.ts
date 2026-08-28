@@ -40,6 +40,7 @@ import {
 import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
+import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -992,11 +993,19 @@ app.post("/slots/:slotNum/respawn", async (c) => {
       error: `Invalid model '${model}'. Expected one of: opus, sonnet, kimi, kimi26, glm, gpt55`,
     }, 400);
   }
-  const paneAddress = `0:0.${slotNum}`;
+  const paneTarget = paneAddress(slotNum);
   const restartCmd = RESTART_COMMANDS[slotNum];
 
   if (!restartCmd) {
     return c.json({ error: `No restart command configured for slot ${slotNum}` }, 500);
+  }
+
+  const identity = await verifyPaneIdentity(slotNum);
+  if (!identity.ok) {
+    return c.json({
+      error: `Refused respawn for slot ${slotNum}: ${identity.detail}`,
+      reason: "pane_identity_mismatch",
+    }, 409);
   }
 
   // Guard: don't allow concurrent respawns on the same slot.
@@ -1025,7 +1034,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   try {
     // Step 1: Inject /exit into the Claude Code session.
     try {
-      await execShell(`tmux send-keys -t ${paneAddress} "/exit" Enter`, { timeout: 5_000 });
+      await execShell(`tmux send-keys -t ${paneTarget} "/exit" Enter`, { timeout: 5_000 });
       recordStep("sent_exit");
     } catch (err) {
       healthChecker.clearPmInitiatedRespawn(slotNum);
@@ -1068,7 +1077,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     const launchCmd = parts.join(" ");
     try {
       await execShell(
-        `tmux send-keys -t ${paneAddress} '${launchCmd}' Enter`,
+        `tmux send-keys -t ${paneTarget} '${launchCmd}' Enter`,
         { timeout: 10_000 },
       );
       recordStep("sent_launch_cmd", launchCmd);
@@ -1113,7 +1122,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     if (continueSession && bootCommand === "claude") {
       try {
         await execShell(
-          `tmux send-keys -t ${paneAddress} 'continue' && tmux send-keys -t ${paneAddress} Enter`,
+          `tmux send-keys -t ${paneTarget} 'continue' && tmux send-keys -t ${paneTarget} Enter`,
           { timeout: 5_000 },
         );
         recordStep("sent_continue");
@@ -1362,10 +1371,24 @@ app.post("/slots/:slotNum/send", async (c) => {
     slotNum === 0 &&
     body.allow_pm_clear === true &&
     command === "/clear";
-  const paneAddress = `0:0.${slotNum}`;
+  const paneTarget = paneAddress(slotNum);
 
   if (!command && !filePath) {
     return c.json({ error: "Missing 'command' or 'file' field" }, 400);
+  }
+
+  const identity = await verifyPaneIdentity(slotNum);
+  if (!identity.ok) {
+    db.logEvent(slotNum, "send_rejected_pane_identity", null, null, {
+      reason: identity.reason,
+      detail: identity.detail,
+      address: paneTarget,
+    });
+    return c.json({
+      success: false,
+      error: `Refused pane delivery for slot ${slotNum}: ${identity.detail}`,
+      reason: "pane_identity_mismatch",
+    }, 409);
   }
 
   const messageSlotWrapper = command ? parseMessageSlotWrapper(command) : null;
@@ -1435,16 +1458,16 @@ app.post("/slots/:slotNum/send", async (c) => {
   // ── GATE 1: pane existence ─────────────────────────────
   // tmux can have a dead/detached session. Catching this up-front prevents
   // false-success where send-keys silently fails. (Rajiv directive 2026-05-05)
-  if (!(await paneExists(paneAddress))) {
+  if (!(await paneExists(paneTarget))) {
     db.logEvent(slotNum, "send_error", null, null, {
       error: "pane does not exist",
       command: command.slice(0, 100),
-      paneAddress,
+      paneAddress: paneTarget,
     });
     return c.json(
       {
         success: false,
-        error: `Pane ${paneAddress} does not exist (tmux session detached, or slot not booted). Run /slot-boot ${slotNum} or check tmux session.`,
+        error: `Pane ${paneTarget} does not exist (tmux session detached, or slot not booted). Run /slot-boot ${slotNum} or check tmux session.`,
         reason: "pane_not_found",
       },
       404,
@@ -1519,7 +1542,7 @@ app.post("/slots/:slotNum/send", async (c) => {
   }
 
   // Capture pane snapshot before send, for post-send delivery verification.
-  const preSnapshot = (await capturePaneSnapshot(paneAddress)) ?? "";
+  const preSnapshot = (await capturePaneSnapshot(paneTarget)) ?? "";
 
   try {
     if (filePath) {
@@ -1554,13 +1577,13 @@ app.post("/slots/:slotNum/send", async (c) => {
           bytes: filePayload.byteLength,
         });
       }
-      const paste = await pastePayloadWithTmuxBuffer(slotNum, paneAddress, filePayload, {
+      const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, filePayload, {
         source: "file",
         label: filePath,
       });
       // Verify pane content actually changed.
       await sleep(600);
-      const verify = await deliveryConfirmed(paneAddress, preSnapshot);
+      const verify = await deliveryConfirmed(paneTarget, preSnapshot);
       if (!verify.ok) {
         db.logEvent(slotNum, "send_unverified", null, null, {
           file: filePath,
@@ -1584,7 +1607,7 @@ app.post("/slots/:slotNum/send", async (c) => {
       // Command mode: detect INSERT/NORMAL, then always paste through tmux buffer.
       let output = "";
       try {
-        const result = await execShell(`tmux capture-pane -t ${paneAddress} -p | tail -5`, { timeout: 5000 });
+        const result = await execShell(`tmux capture-pane -t ${paneTarget} -p | tail -5`, { timeout: 5000 });
         output = result.stdout;
       } catch { output = ""; }
 
@@ -1592,7 +1615,7 @@ app.post("/slots/:slotNum/send", async (c) => {
       const isNormal = /NORMAL/.test(output);
 
       if (isNormal) {
-        await execShell(`tmux send-keys -t ${paneAddress} i`, { timeout: 5000 });
+        await execShell(`tmux send-keys -t ${paneTarget} i`, { timeout: 5000 });
         await sleep(300);
       }
 
@@ -1652,14 +1675,14 @@ app.post("/slots/:slotNum/send", async (c) => {
       }
 
       const commandPayload = Buffer.from(command, "utf8");
-      const paste = await pastePayloadWithTmuxBuffer(slotNum, paneAddress, commandPayload, {
+      const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, commandPayload, {
         source: "command",
         label: command.slice(0, 200),
       });
 
       // Post-send verification.
       await sleep(500);
-      const verify = await deliveryConfirmed(paneAddress, preSnapshot);
+      const verify = await deliveryConfirmed(paneTarget, preSnapshot);
       if (!verify.ok) {
         db.logEvent(slotNum, "send_unverified", null, null, {
           command: command.slice(0, 200),
@@ -1724,8 +1747,17 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
   const option = body.option || "2";
   const comment = body.comment || "";
   // skipCodexCheck removed — Codex gate is mandatory, no bypass. (Rajiv directive 2026-03-20)
-  const paneAddress = `0:0.${slotNum}`;
+  const paneTarget = paneAddress(slotNum);
   const MAX_RETRIES = 3;
+
+  const identity = await verifyPaneIdentity(slotNum);
+  if (!identity.ok) {
+    return c.json({
+      success: false,
+      error: `Refused plan approval for slot ${slotNum}: ${identity.detail}`,
+      reason: "pane_identity_mismatch",
+    }, 409);
+  }
 
   // ── MoP Plan Review Verification (approvals only) ──────────
   // Constitutional Principle #1: Every plan approval must be backed by a real Codex review.
@@ -1858,12 +1890,12 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
     try {
       // Send the option (2 = approve, 4 = comment)
       if (option === "4" && comment) {
-        await execShell(`tmux send-keys -t ${paneAddress} -l '4' && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+        await execShell(`tmux send-keys -t ${paneTarget} -l '4' && tmux send-keys -t ${paneTarget} Enter`, { timeout: 5000 });
         await sleep(1000);
         const escaped = comment.replace(/'/g, "'\\''");
-        await execShell(`tmux send-keys -t ${paneAddress} -l '${escaped}' && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+        await execShell(`tmux send-keys -t ${paneTarget} -l '${escaped}' && tmux send-keys -t ${paneTarget} Enter`, { timeout: 5000 });
       } else {
-        await execShell(`tmux send-keys -t ${paneAddress} -l '${option}' && tmux send-keys -t ${paneAddress} Enter`, { timeout: 5000 });
+        await execShell(`tmux send-keys -t ${paneTarget} -l '${option}' && tmux send-keys -t ${paneTarget} Enter`, { timeout: 5000 });
       }
 
       // Wait longer for the approval to process — slot needs time to
