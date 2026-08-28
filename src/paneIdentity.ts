@@ -23,10 +23,6 @@ export function paneAddress(slot: number): string {
   return `0:0.${slot}`;
 }
 
-function paneWindowTarget(): string {
-  return "0:0";
-}
-
 function shellEscape(value: string): string {
   return `'${value.replace(/'/g, "'\\\\''")}'`;
 }
@@ -117,7 +113,7 @@ export async function verifyPaneIdentity(
     // slot by its expected checkout in the fixed MoP window, then pin all
     // subsequent effects to the one immutable tmux pane id returned here.
     const listed = await runShell(
-      `tmux list-panes -t ${paneWindowTarget()} -F '#{pane_id}|#{pane_current_path}'`,
+      `tmux list-panes -t ${address.slice(0, address.lastIndexOf("."))} -F '#{pane_id}|#{pane_current_path}'`,
       { timeout: 3_000 },
     );
     const matches: PaneIdentitySnapshot[] = [];
