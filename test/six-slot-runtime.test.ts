@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,7 +10,6 @@ import { PM_TRANSITION_ASSIGNMENT_AUTHORITY, PM_TRANSITION_ASSIGNMENT_HEADER } f
 import { DEFAULT_CONFIG } from "../src/types.js";
 import {
   DEFAULT_DEV_SLOT_COUNT,
-  configuredDevSlotCount,
   DEV_SLOT_NUMBERS,
   RUNTIME_SLOT_NUMBERS,
   SLOT_RUNTIME_IDENTITIES,
@@ -19,7 +18,7 @@ import {
   isValidRuntimeSlot,
 } from "../src/slotConfig.js";
 import { RESTART_COMMANDS } from "../src/health.js";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 test("the canonical bound enumerates PM plus six isolated dev slots", () => {
   assert.equal(DEFAULT_CONFIG.slotCount, 6);
@@ -35,10 +34,24 @@ test("the canonical bound enumerates PM plus six isolated dev slots", () => {
 });
 
 test("S5/S6 runtime identities are isolated and launchable without provisioning them", () => {
+  const legacyBindings = {
+    1: ["dev:uncommon-buffalo-66", "heydonna-slot-1"],
+    2: ["dev:optimistic-camel-445", "heydonna"],
+    3: ["dev:handsome-finch-141", "heydonna-slot-3"],
+    4: ["dev:knowing-orca-670", "heydonna-slot-4"],
+  } as const;
+  for (const slot of [1, 2, 3, 4] as const) {
+    assert.equal(SLOT_RUNTIME_IDENTITIES[slot].provisioning, "preserve-live");
+    assert.equal(SLOT_RUNTIME_IDENTITIES[slot].convexDeployment, undefined);
+    assert.equal(SLOT_RUNTIME_IDENTITIES[slot].legacyConvexDeployment, legacyBindings[slot][0]);
+    assert.equal(SLOT_RUNTIME_IDENTITIES[slot].legacyConvexProject, legacyBindings[slot][1]);
+  }
   for (const slot of [5, 6]) {
     const identity = SLOT_RUNTIME_IDENTITIES[slot];
     assert.equal(identity.checkoutPath, `/Users/rajiv/Downloads/projects/heydonna-app-300${slot}`);
     assert.equal(identity.convexDeployment, `heydonna-slot-${slot}`);
+    assert.equal(identity.convexProject, `heydonna-slot-${slot}`);
+    assert.equal(identity.provisioning, "create-isolated");
     assert.equal(identity.appPort, 3000 + slot);
     assert.equal(identity.browserSession, `slot${slot}`);
     assert.equal(identity.modalSuffix, `-slot${slot}`);
@@ -82,13 +95,29 @@ test("six-slot DB initialization adds S5/S6 without rewriting existing state", (
   }
 });
 
-test("configured bounds reject invalid slot counts instead of silently truncating", () => {
+test("configured bounds reject invalid migration counts while production stays fixed at six", () => {
   assert.throws(() => devSlots(0));
   assert.throws(() => devSlots(7));
   assert.equal(DEFAULT_DEV_SLOT_COUNT, 6);
-  assert.equal(configuredDevSlotCount(undefined), 6);
-  assert.equal(configuredDevSlotCount("5"), 5);
-  assert.throws(() => configuredDevSlotCount("7"));
+});
+
+test("pane configuration refuses seven before any tmux operation", () => {
+  const home = mkdtempSync(join(tmpdir(), "mop-seven-pane-home-"));
+  const paneState = join(home, ".claude", "tmux-panes");
+  mkdirSync(paneState, { recursive: true });
+  writeFileSync(join(paneState, "config.json"), JSON.stringify({ panes: {
+    manager: "0:0.0",
+    dev: ["0:0.1", "0:0.2", "0:0.3", "0:0.4", "0:0.5", "0:0.6", "0:0.7"],
+  } }));
+  try {
+    const result = spawnSync("/bin/bash", ["-c", `source ${JSON.stringify(join(process.cwd(), "scripts/pane-lib.sh"))}; load_config`], {
+      env: { ...process.env, HOME: home }, encoding: "utf8",
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /between 1 and 6/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("assignment HTTP accepts S6 and refuses S7 before mutation", async () => {

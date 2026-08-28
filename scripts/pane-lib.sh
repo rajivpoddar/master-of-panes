@@ -63,16 +63,14 @@ load_config() {
 0:0.6"
   fi
 
-  # Validate NUM_DEV_PANES
-  if ! [[ "$NUM_DEV_PANES" =~ ^[0-9]+$ ]] || [ "$NUM_DEV_PANES" -lt 1 ] || [ "$NUM_DEV_PANES" -gt 99 ]; then
-    echo "WARNING: Invalid dev pane count '$NUM_DEV_PANES'. Using default: 6" >&2
-    NUM_DEV_PANES=6
-    _DEV_PANE_LIST="0:0.1
-0:0.2
-0:0.3
-0:0.4
-0:0.5
-0:0.6"
+  # Validate against the same fixed six-slot production boundary. Refuse the
+  # entire pane operation on an invalid configured count so pane 7 can never
+  # reach tmux through a partially accepted configuration.
+  if ! [[ "$NUM_DEV_PANES" =~ ^[0-9]+$ ]] || [ "$NUM_DEV_PANES" -lt 1 ] || [ "$NUM_DEV_PANES" -gt 6 ]; then
+    echo "ERROR: dev pane count must be between 1 and 6; got '$NUM_DEV_PANES'" >&2
+    NUM_DEV_PANES=0
+    _DEV_PANE_LIST=""
+    return 2
   fi
 
   # Validate each dev pane address contains a dot (session:window.pane format)

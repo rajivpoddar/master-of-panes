@@ -39,7 +39,7 @@ import {
 } from "./slotRelease.js";
 import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import type { HookPayload, MoPConfig } from "./types.js";
-import { DEFAULT_DEV_SLOT_COUNT, configuredDevSlotCount, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
+import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -47,7 +47,10 @@ const config: MoPConfig = {
   ...DEFAULT_CONFIG,
   httpPort: parseInt(process.env.MOP_PORT ?? "3100", 10),
   dbPath: process.env.MOP_DB_PATH ?? DEFAULT_CONFIG.dbPath,
-  slotCount: configuredDevSlotCount(),
+  // Production is intentionally fixed at six numbered dev slots. Migration
+  // fixtures may still open older four-slot databases; no runtime env knob can
+  // make health, hooks, or routes disagree with this bound.
+  slotCount: DEFAULT_DEV_SLOT_COUNT,
   legacyRepositoryId:
     process.env.MOP_LEGACY_REPOSITORY_ID
     ?? DEFAULT_CONFIG.legacyRepositoryId,

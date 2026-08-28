@@ -24,21 +24,17 @@ export function devSlots(slotCount = DEFAULT_DEV_SLOT_COUNT): number[] {
   return Array.from({ length: slotCount }, (_, index) => index + 1);
 }
 
-export function configuredDevSlotCount(raw = process.env.MOP_SLOT_COUNT): number {
-  if (raw === undefined || raw.trim() === "") return DEFAULT_DEV_SLOT_COUNT;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > DEFAULT_DEV_SLOT_COUNT) {
-    throw new Error(`MOP_SLOT_COUNT must be an integer from 1 through ${DEFAULT_DEV_SLOT_COUNT}`);
-  }
-  return parsed;
-}
-
 export type SlotRuntimeIdentity = {
   slot: number;
   checkoutPath: string;
   jsonlPath: string;
   launchScript: string;
-  convexDeployment: string;
+  /** Read-only verified legacy bindings are preserved; only S5/S6 are provisioned. */
+  legacyConvexDeployment?: string;
+  legacyConvexProject?: string;
+  convexDeployment?: string;
+  convexProject?: string;
+  provisioning: "preserve-live" | "create-isolated";
   appPort: number;
   browserSession: string;
   browserProfile: string;
@@ -54,7 +50,11 @@ export const SLOT_RUNTIME_IDENTITIES: Readonly<Record<number, SlotRuntimeIdentit
       checkoutPath: `/Users/rajiv/Downloads/projects/heydonna-app-300${slot}`,
       jsonlPath: `/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app-300${slot}`,
       launchScript: `/Users/rajiv/.claude/scripts/launch-slot-${slot}.sh`,
-      convexDeployment: `heydonna-slot-${slot}`,
+      ...(slot === 1 ? { legacyConvexDeployment: "dev:uncommon-buffalo-66", legacyConvexProject: "heydonna-slot-1", provisioning: "preserve-live" as const } :
+        slot === 2 ? { legacyConvexDeployment: "dev:optimistic-camel-445", legacyConvexProject: "heydonna", provisioning: "preserve-live" as const } :
+        slot === 3 ? { legacyConvexDeployment: "dev:handsome-finch-141", legacyConvexProject: "heydonna-slot-3", provisioning: "preserve-live" as const } :
+        slot === 4 ? { legacyConvexDeployment: "dev:knowing-orca-670", legacyConvexProject: "heydonna-slot-4", provisioning: "preserve-live" as const } :
+        { convexDeployment: `heydonna-slot-${slot}`, convexProject: `heydonna-slot-${slot}`, provisioning: "create-isolated" as const }),
       appPort: 3000 + slot,
       browserSession: `slot${slot}`,
       browserProfile: `/Users/rajiv/.agent-browser/profiles/admin-slot${slot}`,
