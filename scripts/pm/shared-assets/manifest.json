@@ -6,6 +6,8 @@
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
+      "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/hooks/hooks.json",
+      "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
       "~/.claude/scripts/axiom-activity-report.py",
       "~/.claude/scripts/launch-dev-slot-claude.sh",
       "~/.claude/scripts/launch-slot-5.sh",
@@ -13,7 +15,7 @@
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "~/.codex/skills/codex-stdio-send-message"
     ],
-    "selected_count": 11,
+    "selected_count": 13,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -44,6 +46,24 @@
       "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/plugins/master-of-panes/hooks/hooks.json",
+      "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/hooks/hooks.json",
+      "sha256": "da42104532b561373925564f54f187d3df3c6157b025df5bd525d1f56480caff",
+      "mode": 420,
+      "ownership_class": "shared-claude-mop-plugin-hook-config",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/plugins/master-of-panes/scripts/hook-relay.sh",
+      "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
+      "sha256": "b9056135eac4182753ee0616f1a0538cb8f3f49e78a1bb1faba74ed9fa5a75f6",
+      "mode": 493,
+      "ownership_class": "shared-claude-mop-plugin-hook-relay",
       "dependency_status": "closed",
       "dependencies": []
     },
