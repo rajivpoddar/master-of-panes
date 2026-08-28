@@ -37,6 +37,7 @@ PM_OPS_DB = Path(
         ),
     )
 )
+SLOT_IDENTITY_MANIFEST = Path(__file__).with_name("slot-runtime-identities.json")
 WORKFLOW_FILES = ("ci.yml", "e2e.yml")
 # Canonical statusCheckRollup workflowName values for the two paid lanes
 # (workflow display names; file basenames are accepted as aliases).
@@ -50,6 +51,20 @@ READY_POOL_BLOCKING_LABELS = {
     "status:dependency-blocked",
     "status:pm-blocked",
 }
+
+
+def configured_slot_numbers() -> tuple[int, ...]:
+    """Read the release-owned numbered-slot bound; fail closed if malformed."""
+    try:
+        manifest = json.loads(SLOT_IDENTITY_MANIFEST.read_text(encoding="utf-8"))
+        count = manifest["dev_slot_count"]
+        slots = tuple(int(item["slot"]) for item in manifest["slots"])
+    except (OSError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("slot identity manifest unavailable or malformed") from exc
+    expected = tuple(range(1, count + 1)) if isinstance(count, int) else ()
+    if count != 6 or slots != expected:
+        raise RuntimeError("slot identity manifest must enumerate exactly slots 1 through 6")
+    return slots
 
 
 def positive_int(value: Any) -> int:
@@ -634,7 +649,7 @@ def inspect_gate(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--slot", type=int, required=True, choices=range(1, 5))
+    parser.add_argument("--slot", type=int, required=True, choices=configured_slot_numbers())
     parser.add_argument("--exclude-pr", action="append", default=[], type=int)
     parser.add_argument("--exclude-issue", action="append", default=[], type=int)
     args = parser.parse_args()

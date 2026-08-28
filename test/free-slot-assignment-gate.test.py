@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import importlib.util
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).parents[1]
@@ -142,6 +144,30 @@ class FreeSlotAssignmentGateTests(unittest.TestCase):
         path = ROOT / "scripts" / "ready-pool-assignment-gate.py"
         self.assertTrue(path.is_file())
         self.assertTrue(stat.S_IMODE(path.stat().st_mode) & 0o111)
+
+    def test_slot_six_reaches_admission_and_slot_seven_refuses_before_effects(self) -> None:
+        calls: list[int] = []
+        original = gate.inspect_gate
+
+        def record(slot: int, *args: object, **kwargs: object) -> dict[str, object]:
+            calls.append(slot)
+            return original(slot, *args, **kwargs)
+
+        with patch.object(gate, "github_ci_failure_candidates", return_value=([], None)), \
+             patch.object(gate, "github_slot_e2e_candidates", return_value=([], None)), \
+             patch.object(gate, "github_todo_candidates", return_value=([], None)), \
+             patch.object(gate, "inspect_gate", side_effect=record), \
+             patch.object(sys, "argv", ["ready-pool-assignment-gate.py", "--slot", "6"]):
+            self.assertEqual(gate.main(), 0)
+        self.assertEqual(calls, [6])
+
+        calls.clear()
+        with patch.object(gate, "inspect_gate", side_effect=record), \
+             patch.object(sys, "argv", ["ready-pool-assignment-gate.py", "--slot", "7"]):
+            with self.assertRaises(SystemExit) as refused:
+                gate.main()
+        self.assertEqual(refused.exception.code, 2)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
