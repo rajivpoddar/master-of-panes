@@ -52,7 +52,7 @@ test("pane identity accepts the exact slot checkout and refuses S4/S5 aliasing",
     stderr: "",
   }));
   assert.equal(refused.ok, false);
-  if (!refused.ok) assert.equal(refused.reason, "checkout_mismatch");
+  if (!refused.ok) assert.equal(refused.reason, "pane_unavailable");
 });
 
 test("launchd tmux formatting remains parseable and old underscore output fails closed", async () => {
@@ -73,7 +73,55 @@ test("launchd tmux formatting remains parseable and old underscore output fails 
   });
   assert.equal(oldFormat.ok, false);
   if (!oldFormat.ok) assert.equal(oldFormat.reason, "pane_unavailable");
-  assert.equal(commands.length, 3);
+  assert.equal(commands.length, 4);
+  assert.match(commands[3], /tmux list-panes -t 0:0/);
+});
+
+test("numeric address drift resolves exactly one matching immutable pane id", async () => {
+  const commands: string[] = [];
+  const resolved = await verifyPaneIdentity(4, async (command) => {
+    commands.push(command);
+    if (command.startsWith("tmux display-message")) {
+      return { stdout: "%721|/Users/rajiv/Downloads/projects/heydonna-app-3005\n", stderr: "" };
+    }
+    if (command.startsWith("tmux list-panes")) {
+      return {
+        stdout:
+          "%721|/Users/rajiv/Downloads/projects/heydonna-app-3005\n%717|/Users/rajiv/Downloads/projects/heydonna-app-3004\n",
+        stderr: "",
+      };
+    }
+    if (command.includes("3005")) return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3005\n", stderr: "" };
+    return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
+  });
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) {
+    assert.equal(resolved.snapshot.address, "0:0.4");
+    assert.equal(resolved.snapshot.paneId, "%717");
+    assert.equal(resolved.snapshot.currentPath, "/Users/rajiv/Downloads/projects/heydonna-app-3004");
+  }
+  assert.equal(commands.some((command) => command.includes("send-keys") || command.includes("paste-buffer")), false);
+});
+
+test("numeric drift with zero or multiple checkout matches fails closed before effects", async () => {
+  const run = async (listed: string) => {
+    const commands: string[] = [];
+    const result = await verifyPaneIdentity(4, async (command) => {
+      commands.push(command);
+      if (command.startsWith("tmux display-message")) {
+        return { stdout: "%721|/Users/rajiv/Downloads/projects/heydonna-app-3005\n", stderr: "" };
+      }
+      if (command.startsWith("tmux list-panes")) return { stdout: listed, stderr: "" };
+      return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3005\n", stderr: "" };
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, "pane_unavailable");
+    assert.equal(commands.some((command) => command.includes("send-keys") || command.includes("paste-buffer")), false);
+  };
+  await run("%721|/Users/rajiv/Downloads/projects/heydonna-app-3005\n");
+  await run(
+    "%717|/Users/rajiv/Downloads/projects/heydonna-app-3004\n%718|/Users/rajiv/Downloads/projects/heydonna-app-3004\n",
+  );
 });
 
 test("pane identity fails closed when tmux is unavailable or slot is unknown", async () => {

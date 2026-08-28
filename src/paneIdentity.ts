@@ -23,8 +23,20 @@ export function paneAddress(slot: number): string {
   return `0:0.${slot}`;
 }
 
+function paneWindowTarget(): string {
+  return "0:0";
+}
+
 function shellEscape(value: string): string {
   return `'${value.replace(/'/g, "'\\\\''")}'`;
+}
+
+function parsePaneIdentityLine(line: string): { paneId: string; panePath: string } | null {
+  const fields = line.trim().split("|", 2);
+  const paneId = fields[0]?.trim() ?? "";
+  const panePath = fields[1]?.trim() ?? "";
+  if (!panePath || !/^%\d+$/.test(paneId)) return null;
+  return { paneId, panePath };
 }
 
 export function expectedCheckoutPath(slot: number): string | null {
@@ -87,17 +99,50 @@ export async function verifyPaneIdentity(
       `tmux display-message -t ${address} -p '#{pane_id}|#{pane_current_path}'`,
       { timeout: 3_000 },
     );
-    const identityFields = result.stdout.trimEnd().split(/\r?\n/, 1)[0]?.split("|", 2) ?? [];
-    const paneId = identityFields[0]?.trim() ?? "";
-    const panePath = identityFields[1]?.trim() ?? "";
-    if (!panePath || !/^%\d+$/.test(paneId)) {
-      return { ok: false, reason: "pane_unavailable", detail: `pane ${address} returned an invalid immutable identity` };
+    const direct = parsePaneIdentityLine(result.stdout.trimEnd().split(/\r?\n/, 1)[0] ?? "");
+    if (direct) {
+      try {
+        const checkout = await runShell(
+          `git -C ${shellEscape(direct.panePath)} rev-parse --show-toplevel`,
+          { timeout: 3_000 },
+        );
+        const validated = validatePaneIdentity(slot, checkout.stdout, direct.paneId);
+        if (validated.ok) return validated;
+      } catch {
+        // The address may have been rebound; continue with the read-only scan.
+      }
     }
-    const checkout = await runShell(
-      `git -C ${shellEscape(panePath)} rev-parse --show-toplevel`,
+
+    // Numeric pane addresses can be rebound by layout changes. Resolve the
+    // slot by its expected checkout in the fixed MoP window, then pin all
+    // subsequent effects to the one immutable tmux pane id returned here.
+    const listed = await runShell(
+      `tmux list-panes -t ${paneWindowTarget()} -F '#{pane_id}|#{pane_current_path}'`,
       { timeout: 3_000 },
     );
-    return validatePaneIdentity(slot, checkout.stdout, paneId);
+    const matches: PaneIdentitySnapshot[] = [];
+    for (const line of listed.stdout.trimEnd().split(/\r?\n/).filter(Boolean)) {
+      const candidate = parsePaneIdentityLine(line);
+      if (!candidate) continue;
+      try {
+        const checkout = await runShell(
+          `git -C ${shellEscape(candidate.panePath)} rev-parse --show-toplevel`,
+          { timeout: 3_000 },
+        );
+        const validated = validatePaneIdentity(slot, checkout.stdout, candidate.paneId);
+        if (validated.ok) matches.push(validated.snapshot);
+      } catch {
+        // A pane disappearing or leaving its checkout is not a match.
+      }
+    }
+    if (matches.length === 1) {
+      return { ok: true, snapshot: { ...matches[0], address } };
+    }
+    return {
+      ok: false,
+      reason: "pane_unavailable",
+      detail: `pane ${address} expected exactly one matching immutable checkout, found ${matches.length}`,
+    };
   } catch (error) {
     return {
       ok: false,
