@@ -157,15 +157,15 @@ export class ProcessHealthChecker {
    * Returns "claude" when Claude Code is running, "zsh" when it's dead.
    */
   private async getPaneCommand(slotNum: number): Promise<string | null> {
-    const address = paneAddress(slotNum);
     const identity = await verifyPaneIdentity(slotNum);
     if (!identity.ok) {
       console.warn(`[health] pane identity unavailable for slot ${slotNum}: ${identity.detail}`);
       return null;
     }
+    const paneTarget = identity.snapshot.paneId;
     try {
       const result = await execShell(
-        `tmux display-message -t ${address} -p '#{pane_current_command}'`,
+        `tmux display-message -t ${paneTarget} -p '#{pane_current_command}'`,
         { timeout: 5_000 },
       );
       const stdout = result.stdout.trim();
@@ -174,7 +174,7 @@ export class ProcessHealthChecker {
 
       if (SHELL_COMMANDS.has(stdout)) {
         const pidResult = await execShell(
-          `tmux display-message -t ${paneAddress} -p '#{pane_pid}'`,
+          `tmux display-message -t ${paneTarget} -p '#{pane_pid}'`,
           { timeout: 5_000 },
         );
         const panePid = pidResult.stdout.trim();
@@ -246,18 +246,18 @@ export class ProcessHealthChecker {
     const launchCmd = typedLaunchCommandForPane(slotNum);
     if (!launchCmd) return false;
 
-    const address = paneAddress(slotNum);
     const identity = await verifyPaneIdentity(slotNum);
     if (!identity.ok) {
       console.warn(`[health] refusing restart for slot ${slotNum}: ${identity.detail}`);
       return false;
     }
+    const paneTarget = identity.snapshot.paneId;
     try {
       // Send restart command to the pane's shell.
       // Uses standalone bash scripts (not aliases) — no .zshrc/OMZ dependency.
       // Scripts resolve the atma template vars directly via sed.
       await execShell(
-        `tmux send-keys -t ${address} ${shellEscape(launchCmd)} Enter`,
+        `tmux send-keys -t ${paneTarget} ${shellEscape(launchCmd)} Enter`,
         { timeout: 10_000 },
       );
       return true;
@@ -272,15 +272,15 @@ export class ProcessHealthChecker {
     const cwd = SLOT_CWDS[slotNum];
     if (!launchCmd || !cwd) return false;
 
-    const address = paneAddress(slotNum);
     const identity = await verifyPaneIdentity(slotNum);
     if (!identity.ok) {
       console.warn(`[health] refusing force-respawn for slot ${slotNum}: ${identity.detail}`);
       return false;
     }
+    const paneTarget = identity.snapshot.paneId;
     try {
       await execShell(
-        `tmux respawn-pane -k -t ${address} -c ${shellEscape(cwd)} ${shellEscape(launchCmd)}`,
+        `tmux respawn-pane -k -t ${paneTarget} -c ${shellEscape(cwd)} ${shellEscape(launchCmd)}`,
         { timeout: 10_000 },
       );
       this.lastForceRespawn.set(slotNum, Date.now());
@@ -363,7 +363,7 @@ export class ProcessHealthChecker {
           });
           return;
         }
-        await execShell(`tmux send-keys -t ${identity.snapshot.address} C-l`, { timeout: 5_000 });
+        await execShell(`tmux send-keys -t ${identity.snapshot.paneId} C-l`, { timeout: 5_000 });
         state.probeSentAt = Date.now();
         this.unresponsiveStates.set(slotNum, state);
         this.db.logEvent(slotNum, "pane_unresponsive_probe_sent", null, null, {
@@ -631,7 +631,7 @@ export class ProcessHealthChecker {
           return;
         }
         await execShell(
-          `tmux send-keys -t ${identity.snapshot.address} 'continue' Enter`,
+          `tmux send-keys -t ${identity.snapshot.paneId} 'continue' Enter`,
           { timeout: 10_000 },
         );
         console.log(`[health] Sent "continue" to slot ${slotNum} after restart`);

@@ -1022,7 +1022,10 @@ export class TmuxRelay {
       }
       return false;
     }
-    const paneAddr = identity.snapshot.address;
+    // Pin every retry to the immutable pane id captured by the identity probe.
+    // Never re-resolve the numeric address after verification: tmux can reindex
+    // it if a pane is inserted or destroyed.
+    const paneTarget = identity.snapshot.paneId;
     const cooldownKey = `${slotNum}:${command.slice(0, 80)}`;
 
     // Per-(slot, command) cooldown — defensive layer against tight retry
@@ -1049,8 +1052,8 @@ export class TmuxRelay {
         if (raw) {
           // Raw: tmux interprets key names (Escape, C-c, BTab, etc.).
           // Do NOT pass -l (literal) flag — that would type the name as text.
-          await execShell(
-            `tmux send-keys -t ${paneAddr} ${shellEscape(command)}`,
+          await this.runShell(
+            `tmux send-keys -t ${paneTarget} ${shellEscape(command)}`,
             { timeout: 5_000 }
           );
         } else {
@@ -1060,19 +1063,19 @@ export class TmuxRelay {
           const bufName = `mop-send-${slotNum}`;
           await fs.writeFile(tmpFile, command);
           try {
-            await execShell(
+            await this.runShell(
               `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
               { timeout: 3_000 }
             );
-            await execShell(
-              `tmux paste-buffer -b ${bufName} -t ${paneAddr} -d`,
+            await this.runShell(
+              `tmux paste-buffer -b ${bufName} -t ${paneTarget} -d`,
               { timeout: 3_000 }
             );
             // Small breathing room so the TUI registers the paste before Enter.
             // Matches the 0.3s that injectDirect uses for PM pane sends.
             await sleep(300);
-            await execShell(
-              `tmux send-keys -t ${paneAddr} Enter`,
+            await this.runShell(
+              `tmux send-keys -t ${paneTarget} Enter`,
               { timeout: 3_000 }
             );
           } finally {

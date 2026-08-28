@@ -288,7 +288,7 @@ test("native adapter derives the checkout from the numbered pane, not caller inp
     runShell: async (command) => {
       commands.push(command);
       if (command.startsWith("tmux display-message")) {
-        return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3001\n", stderr: "" };
+        return { stdout: "%11\t/Users/rajiv/Downloads/projects/heydonna-app-3001\n", stderr: "" };
       }
       if (command.startsWith("git -C")) {
         gitCalls += 1;

@@ -7,6 +7,8 @@ import { runtimeIdentity } from "./slotConfig.js";
 export type PaneIdentitySnapshot = {
   slot: number;
   address: string;
+  /** Immutable tmux pane identity captured by the same probe as currentPath. */
+  paneId: string;
   currentPath: string;
   expectedPath: string;
 };
@@ -33,7 +35,11 @@ export function expectedCheckoutPath(slot: number): string | null {
 export function validatePaneIdentity(
   slot: number,
   currentPath: string,
+  paneId: string,
 ): PaneIdentityResult {
+  if (!/^%\d+$/.test(paneId)) {
+    return { ok: false, reason: "pane_unavailable", detail: `pane ${paneAddress(slot)} returned no immutable pane id` };
+  }
   const expectedPath = expectedCheckoutPath(slot);
   if (!expectedPath) {
     return { ok: false, reason: "unknown_slot", detail: `no runtime identity is configured for slot ${slot}` };
@@ -53,6 +59,7 @@ export function validatePaneIdentity(
     snapshot: {
       slot,
       address: paneAddress(slot),
+      paneId,
       currentPath: normalizedCurrent,
       expectedPath: normalizedExpected,
     },
@@ -74,18 +81,20 @@ export async function verifyPaneIdentity(
   const address = paneAddress(slot);
   try {
     const result = await runShell(
-      `tmux display-message -t ${address} -p '#{pane_current_path}'`,
+      `tmux display-message -t ${address} -p '#{pane_id}\t#{pane_current_path}'`,
       { timeout: 3_000 },
     );
-    if (!result.stdout.trim()) {
-      return { ok: false, reason: "pane_unavailable", detail: `pane ${address} returned no current path` };
+    const identityFields = result.stdout.trimEnd().split(/\r?\n/, 1)[0]?.split("\t", 2) ?? [];
+    const paneId = identityFields[0]?.trim() ?? "";
+    const panePath = identityFields[1]?.trim() ?? "";
+    if (!panePath || !/^%\d+$/.test(paneId)) {
+      return { ok: false, reason: "pane_unavailable", detail: `pane ${address} returned an invalid immutable identity` };
     }
-    const panePath = result.stdout.trim();
     const checkout = await runShell(
       `git -C ${shellEscape(panePath)} rev-parse --show-toplevel`,
       { timeout: 3_000 },
     );
-    return validatePaneIdentity(slot, checkout.stdout);
+    return validatePaneIdentity(slot, checkout.stdout, paneId);
   } catch (error) {
     return {
       ok: false,

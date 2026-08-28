@@ -993,7 +993,6 @@ app.post("/slots/:slotNum/respawn", async (c) => {
       error: `Invalid model '${model}'. Expected one of: opus, sonnet, kimi, kimi26, glm, gpt55`,
     }, 400);
   }
-  const paneTarget = paneAddress(slotNum);
   const restartCmd = RESTART_COMMANDS[slotNum];
 
   if (!restartCmd) {
@@ -1007,6 +1006,9 @@ app.post("/slots/:slotNum/respawn", async (c) => {
       reason: "pane_identity_mismatch",
     }, 409);
   }
+  // Keep the verified immutable pane id for every respawn step. The numeric
+  // slot address is only a lookup key and may be rebound by tmux reindexing.
+  const paneTarget = identity.snapshot.paneId;
 
   // Guard: don't allow concurrent respawns on the same slot.
   if (healthChecker.isPmInitiatedRespawn(slotNum)) {
@@ -1371,8 +1373,6 @@ app.post("/slots/:slotNum/send", async (c) => {
     slotNum === 0 &&
     body.allow_pm_clear === true &&
     command === "/clear";
-  const paneTarget = paneAddress(slotNum);
-
   if (!command && !filePath) {
     return c.json({ error: "Missing 'command' or 'file' field" }, 400);
   }
@@ -1382,7 +1382,7 @@ app.post("/slots/:slotNum/send", async (c) => {
     db.logEvent(slotNum, "send_rejected_pane_identity", null, null, {
       reason: identity.reason,
       detail: identity.detail,
-      address: paneTarget,
+      address: paneAddress(slotNum),
     });
     return c.json({
       success: false,
@@ -1390,6 +1390,9 @@ app.post("/slots/:slotNum/send", async (c) => {
       reason: "pane_identity_mismatch",
     }, 409);
   }
+  // Pin all sends, pastes, retries, and post-send reads in this request to
+  // the pane id captured by the one identity probe.
+  const paneTarget = identity.snapshot.paneId;
 
   const messageSlotWrapper = command ? parseMessageSlotWrapper(command) : null;
   if (messageSlotWrapper) {
@@ -1747,7 +1750,6 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
   const option = body.option || "2";
   const comment = body.comment || "";
   // skipCodexCheck removed — Codex gate is mandatory, no bypass. (Rajiv directive 2026-03-20)
-  const paneTarget = paneAddress(slotNum);
   const MAX_RETRIES = 3;
 
   const identity = await verifyPaneIdentity(slotNum);
@@ -1758,6 +1760,7 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
       reason: "pane_identity_mismatch",
     }, 409);
   }
+  const paneTarget = identity.snapshot.paneId;
 
   // ── MoP Plan Review Verification (approvals only) ──────────
   // Constitutional Principle #1: Every plan approval must be backed by a real Codex review.
