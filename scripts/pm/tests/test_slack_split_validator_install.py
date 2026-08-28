@@ -118,3 +118,44 @@ def test_late_failure_restores_existing_caller_bytes_and_mode() -> None:
             )
         assert target.read_bytes() == before
         assert stat.S_IMODE(target.stat().st_mode) == before_mode
+
+
+def test_production_rollback_restores_old_sender_with_validator_compatibility_target() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        release = root / "release"
+        shutil.copytree(SHARED, release / "scripts/pm/shared-assets")
+        targets = root / "targets"
+        old_sender_target = targets / "Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh"
+        old_sender_target.parent.mkdir(parents=True)
+        old_sender_target.write_bytes(Path("/Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh").read_bytes())
+        old_sender_target.chmod(0o755)
+        rollback = root / "rollback"
+        INSTALLER.install_shared_assets(release_dir=release, target_root=targets, rollback_bundle=rollback)
+        INSTALLER.restore_rollback_bundle(rollback)
+
+        compatibility = targets / "Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py"
+        assert compatibility.read_bytes() == VALIDATOR.read_bytes()
+        assert stat.S_IMODE(compatibility.stat().st_mode) == 0o755
+        assert old_sender_target.read_bytes() == Path("/Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh").read_bytes()
+
+        runnable = root / "rolled-back-slack-send.sh"
+        runnable.write_text(
+            old_sender_target.read_text(encoding="utf-8").replace(
+                "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py",
+                str(compatibility),
+                1,
+            ),
+            encoding="utf-8",
+        )
+        runnable.chmod(0o755)
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        fake_curl = fake_bin / "curl"
+        fake_curl.write_text("#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"ts\":\"T\",\"channel\":\"C\"}'\n", encoding="utf-8")
+        fake_curl.chmod(0o755)
+        env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}", "SLACK_BOT_TOKEN": "test-token"}
+        safe = subprocess.run(["bash", str(runnable), "safe status"], env=env, capture_output=True, text=True)
+        assert safe.returncode == 0
+        unsafe = subprocess.run(["bash", str(runnable), "Please split this transcript into sections"], env=env, capture_output=True, text=True)
+        assert unsafe.returncode == 23

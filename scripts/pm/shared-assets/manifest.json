@@ -39,6 +39,14 @@
     "dependency_closure": [],
     "command_inventory": []
   },
+  "rollback_compatibility": [
+    {
+      "source_path": "claude/skills/slack-message/scripts/block-unsupported-transcript-split.py",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py",
+      "sha256": "61a13f6113390e4da1c94876b0cc80e8c86ddb17664624c22d3b3dc59a71d859",
+      "mode": 493
+    }
+  ],
   "entries": [
     {
       "source_path": "claude/dev-slot-rules/22-slot-pushya.md",

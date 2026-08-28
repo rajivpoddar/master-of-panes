@@ -269,6 +269,34 @@ def _load_shared_manifest(release_dir: Path) -> dict[str, Any]:
             raise InstallerError(f"shared asset source digest/mode mismatch: {source}")
         if entry.get("dependency_status") != "closed" or entry.get("dependencies") != []:
             raise InstallerError(f"shared asset dependency closure is unresolved: {source}")
+    compatibility = manifest.get("rollback_compatibility", [])
+    if not isinstance(compatibility, list):
+        raise InstallerError("rollback compatibility entries must be a list")
+    compatibility_targets: set[str] = set()
+    for entry in compatibility:
+        if not isinstance(entry, dict):
+            raise InstallerError("rollback compatibility entry is not an object")
+        source = entry.get("source_path")
+        target = entry.get("canonical_target")
+        digest = entry.get("sha256")
+        mode = entry.get("mode")
+        if not isinstance(source, str) or not isinstance(target, str) or not isinstance(digest, str):
+            raise InstallerError("rollback compatibility entry is incomplete")
+        source_path = release_dir / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(source)
+        if not source_path.is_file() or source_path.is_symlink():
+            raise InstallerError(f"rollback compatibility source is not a regular file: {source}")
+        target_path = Path(target)
+        if not target_path.is_absolute() or target_path in {Path("/"), Path.home()} or ".." in target_path.parts:
+            raise InstallerError(f"rollback compatibility target is too broad: {target}")
+        if target in targets or target in compatibility_targets:
+            raise InstallerError(f"duplicate shared asset target: {target}")
+        compatibility_targets.add(target)
+        if not isinstance(mode, int) or mode < 0 or mode > 0o777:
+            raise InstallerError(f"invalid rollback compatibility mode: {target}")
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise InstallerError(f"invalid rollback compatibility digest: {target}")
+        if sha256(source_path) != digest or stat.S_IMODE(source_path.stat().st_mode) != mode:
+            raise InstallerError(f"rollback compatibility source digest/mode mismatch: {source}")
     inventory = manifest.get("inventory")
     if not isinstance(inventory, dict) or inventory.get("selected_count") != len(entries):
         raise InstallerError("shared asset inventory count mismatch")
@@ -306,6 +334,30 @@ def install_shared_assets(
     manifest = _load_shared_manifest(release_dir)
     targets = [_shared_target_path(entry["canonical_target"], target_root) for entry in manifest["entries"]]
     rollback = create_rollback_bundle(targets, rollback_bundle)
+    compatibility = manifest.get("rollback_compatibility", [])
+    if compatibility:
+        rollback_manifest_path = rollback_bundle / ROLLBACK_MANIFEST
+        rollback_manifest = json.loads(rollback_manifest_path.read_text(encoding="utf-8"))
+        compatibility_records: list[dict[str, Any]] = []
+        compatibility_root = rollback_bundle / "compatibility"
+        compatibility_root.mkdir(mode=0o700)
+        for index, entry in enumerate(compatibility):
+            source = release_dir / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(entry["source_path"])
+            payload = compatibility_root / f"{index:04d}"
+            _copy_payload(source, payload)
+            os.chmod(payload, entry["mode"])
+            _fsync_directory(compatibility_root)
+            compatibility_records.append(
+                {
+                    "path": str(_shared_target_path(entry["canonical_target"], target_root)),
+                    "kind": "file",
+                    "mode": entry["mode"],
+                    "sha256": entry["sha256"],
+                    "payload": str(payload.relative_to(rollback_bundle)),
+                }
+            )
+        rollback_manifest["compatibility_entries"] = compatibility_records
+        _write_json(rollback_manifest_path, rollback_manifest)
     staged: list[Path] = []
     replaced = 0
     try:
@@ -428,6 +480,19 @@ def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
         expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
         if file_record(target, entry["path"]) != expected:
             raise InstallerError(f"rollback verification failed: {target}")
+    for entry in manifest.get("compatibility_entries", []):
+        target = Path(entry["path"])
+        if target.is_dir() and not target.is_symlink():
+            raise InstallerError(f"cannot restore over directory: {target}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            target.unlink()
+        payload = bundle / entry["payload"]
+        _copy_payload(payload, target)
+        os.chmod(target, entry["mode"])
+        expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
+        if file_record(target, entry["path"]) != expected:
+            raise InstallerError(f"rollback compatibility verification failed: {target}")
     return manifest
 
 
