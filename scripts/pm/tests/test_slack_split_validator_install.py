@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).parents[3]
 SHARED = ROOT / "scripts" / "pm" / "shared-assets"
@@ -94,3 +96,25 @@ def test_manifest_import_and_colocated_sender_preserve_safe_gate() -> None:
         assert unsafe.returncode == 23
         assert "UNSUPPORTED_TRANSCRIPT_SPLIT_BLOCKED" in unsafe.stderr
 
+
+def test_late_failure_restores_existing_caller_bytes_and_mode() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        release = root / "release"
+        shutil.copytree(SHARED, release / "scripts/pm/shared-assets")
+        targets = root / "targets"
+        target = targets / "Users/rajiv/.claude/skills/slack-message/scripts/block-unsupported-transcript-split.py"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"previous-validator\n")
+        target.chmod(0o640)
+        before = target.read_bytes()
+        before_mode = stat.S_IMODE(target.stat().st_mode)
+        with pytest.raises(INSTALLER.InstallerError):
+            INSTALLER.install_shared_assets(
+                release_dir=release,
+                target_root=targets,
+                rollback_bundle=root / "rollback",
+                fail_after=1,
+            )
+        assert target.read_bytes() == before
+        assert stat.S_IMODE(target.stat().st_mode) == before_mode
