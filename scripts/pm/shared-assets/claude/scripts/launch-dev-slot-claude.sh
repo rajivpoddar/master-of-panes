@@ -5,6 +5,34 @@ set -euo pipefail
 SLOT_NUMBER="${1:-}"
 shift || true
 
+SPARK_PROFILE="${DEV_SLOT_SPARK_PROFILE:-ornith}"
+CLAUDE_ARGS=()
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --spark-profile)
+      if [[ "$#" -lt 2 ]]; then
+        echo "ERROR: --spark-profile requires ornith or ling-mia" >&2
+        exit 2
+      fi
+      SPARK_PROFILE="$2"
+      shift 2
+      ;;
+    --spark-profile=*)
+      SPARK_PROFILE="${1#*=}"
+      shift
+      ;;
+    *)
+      CLAUDE_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+if [[ "${#CLAUDE_ARGS[@]}" -gt 0 ]]; then
+  set -- "${CLAUDE_ARGS[@]}"
+else
+  set --
+fi
+
 case "$SLOT_NUMBER" in
   1) SLOT_NAME="Rohini" ;;
   2) SLOT_NAME="Hasta" ;;
@@ -16,9 +44,22 @@ case "$SLOT_NUMBER" in
 esac
 
 SLOT_CLONE="/Users/rajiv/Downloads/projects/heydonna-app-300${SLOT_NUMBER}"
-SPARK_MODEL="${DEV_SLOT_SPARK_MODEL:-ornith-1.5-35b-a3b}"
-SPARK_BASE_URL="${DEV_SLOT_SPARK_BASE_URL:-${ORNITH15_SPARK_BASE_URL:-${QWEN38_SPARK_BASE_URL:-http://192.168.68.113:30000}}}"
-SPARK_KEY_FILE="${DEV_SLOT_SPARK_API_KEY_FILE:-${ORNITH15_SPARK_API_KEY_FILE:-${QWEN38_SPARK_API_KEY_FILE:-/Users/rajiv/.config/ornith15/api-key}}}"
+case "$SPARK_PROFILE" in
+  ornith)
+    SPARK_MODEL="${DEV_SLOT_SPARK_MODEL:-ornith-1.5-35b-a3b}"
+    SPARK_BASE_URL="${DEV_SLOT_SPARK_BASE_URL:-${ORNITH15_SPARK_BASE_URL:-${QWEN38_SPARK_BASE_URL:-http://192.168.68.113:30000}}}"
+    SPARK_KEY_FILE="${DEV_SLOT_SPARK_API_KEY_FILE:-${ORNITH15_SPARK_API_KEY_FILE:-${QWEN38_SPARK_API_KEY_FILE:-/Users/rajiv/.config/ornith15/api-key}}}"
+    ;;
+  ling-mia)
+    SPARK_MODEL="${LING_MIA_SPARK_MODEL:-auto}"
+    SPARK_BASE_URL="${LING_MIA_SPARK_BASE_URL:-http://192.168.68.113:30000}"
+    SPARK_KEY_FILE="${LING_MIA_SPARK_API_KEY_FILE:-${DEV_SLOT_SPARK_API_KEY_FILE:-/Users/rajiv/.config/ornith15/api-key}}"
+    ;;
+  *)
+    echo "ERROR: unsupported Spark profile '$SPARK_PROFILE'; expected ornith or ling-mia" >&2
+    exit 2
+    ;;
+esac
 CLAUDE_BIN="${CLAUDE_SLOT_BIN:-/opt/homebrew/bin/claude}"
 SKILL_SYNC="${CLAUDE_SLOT_SKILL_SYNC:-/Users/rajiv/.claude/scripts/sync-dev-slot-skill-allowlist.mjs}"
 DEV_SLOT_RULES="${CLAUDE_DEV_SLOT_RULES:-/Users/rajiv/.claude/dev-slot-rules}"
@@ -88,6 +129,7 @@ repair_rule_link "$PROJECT_RULES/21-lessons.md" "$SLOT_CLONE/.claude/rules/21-le
 
 export SLOT_NUMBER
 export SLOT_NAME
+export DEV_SLOT_SPARK_PROFILE="$SPARK_PROFILE"
 export AGENT_BROWSER_SESSION="slot${SLOT_NUMBER}"
 export AGENT_BROWSER_PROFILE="/Users/rajiv/.agent-browser/profiles/admin-slot${SLOT_NUMBER}"
 export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS="1"

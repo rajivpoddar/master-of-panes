@@ -22,6 +22,7 @@ class FreshSlotSessionTest(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.log = self.root / "claude-argv.log"
+        self.env_log = self.root / "claude-env.log"
         self.uuid_count = self.root / "uuid-count"
         (self.bin / "uuidgen").write_text(
             "#!/bin/sh\n"
@@ -35,7 +36,10 @@ class FreshSlotSessionTest(unittest.TestCase):
             encoding="utf-8",
         )
         (self.bin / "claude").write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$CLAUDE_ARGV_LOG\"\n",
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$@\" >> \"$CLAUDE_ARGV_LOG\"\n"
+            "printf 'profile=%s model=%s base=%s\\n' \"${DEV_SLOT_SPARK_PROFILE:-}\" "
+            "\"${ANTHROPIC_DEFAULT_SONNET_MODEL:-}\" \"${ANTHROPIC_BASE_URL:-}\" >> \"$CLAUDE_ENV_LOG\"\n",
             encoding="utf-8",
         )
         self.sync = self.root / "sync.sh"
@@ -49,6 +53,7 @@ class FreshSlotSessionTest(unittest.TestCase):
             "PATH": f"{self.bin}:{os.environ.get('PATH', '')}",
             "UUID_COUNT": str(self.uuid_count),
             "CLAUDE_ARGV_LOG": str(self.log),
+            "CLAUDE_ENV_LOG": str(self.env_log),
             "CLAUDE_SLOT_BIN": str(self.bin / "claude"),
             "CLAUDE_SLOT_SKILL_SYNC": str(self.sync),
             "DEV_SLOT_SPARK_API_KEY_FILE": str(self.key),
@@ -94,6 +99,24 @@ class FreshSlotSessionTest(unittest.TestCase):
             "--permission-mode", "bypassPermissions", "--session-id",
             "22222222-2222-4222-8222-222222222222", "--continue",
         ])
+
+    def test_ling_mia_profile_selects_anthropic_endpoint_without_leaking_launcher_arg(self) -> None:
+        result = self.run_launcher("--continue", "--spark-profile", "ling-mia")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
+            "--model", "auto", "--effort", "low",
+            "--permission-mode", "bypassPermissions", "--continue",
+        ])
+        self.assertEqual(
+            self.env_log.read_text(encoding="utf-8").strip(),
+            "profile=ling-mia model=auto base=http://192.168.68.113:30000",
+        )
+
+    def test_unknown_spark_profile_fails_before_claude_launch(self) -> None:
+        result = self.run_launcher("--spark-profile=unknown")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unsupported Spark profile", result.stderr)
+        self.assertFalse(self.log.exists())
 
     def test_fresh_launch_rejects_fixed_session_id(self) -> None:
         result = self.run_launcher("--session-id", "11111111-1111-4111-8111-111111111111")
