@@ -7,6 +7,7 @@
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/hooks/hooks.json",
+      "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
       "~/.claude/scripts/axiom-activity-report.py",
       "~/.claude/scripts/launch-dev-slot-claude.sh",
@@ -24,7 +25,7 @@
       "~/Downloads/projects/heydonna-app-3006/.claude/skills/respawn",
       "~/.codex/skills/codex-stdio-send-message"
     ],
-    "selected_count": 28,
+    "selected_count": 36,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -64,6 +65,78 @@
       "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/plugins/master-of-panes/1.0.0/dist/assignmentAuthority.js",
+      "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/assignmentAuthority.js",
+      "sha256": "37b7d70d3509b0a27a39fbcc18e5f31b14ed957ccec21c0f818836b3983bacec",
+      "mode": 420,
+      "ownership_class": "shared-claude-mop-mcp-runtime",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/plugins/master-of-panes/1.0.0/dist/asyncCommand.js",
+      "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/asyncCommand.js",
+      "sha256": "5d4d58ae93809ee00f2366496be1e73394e8861c73c80857275df5bd23b0b5e1",
+      "mode": 420,
+      "ownership_class": "shared-claude-mop-mcp-runtime",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/plugins/master-of-panes/1.0.0/dist/db.js",
+      "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/db.js",
+      "sha256": "8b7996fd6b64dfc168b81f7ddbc4bc8567e0001957c2842e8d63bb779342ecbd",
+      "mode": 420,
+      "ownership_class": "shared-claude-mop-mcp-runtime",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/plugins/master-of-panes/1.0.0/dist/mcp.js",
+      "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/mcp.js",
+      "sha256": "e4e98ff5e3aeb1ac87060489af7b44cae9ca2a85092f2a6ef007ae04d83dabcc",
+      "mode": 420,
+      "ownership_class": "shared-claude-mop-mcp-schema",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/plugins/master-of-panes/1.0.0/dist/paneIdentity.js",
+      "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/paneIdentity.js",
+      "sha256": "bea7fa5b921c3bd56a8ab36d2b6f37f053ea74f3403349e67b1d5b43ee367d9a",
+      "mode": 420,
+      "ownership_class": "shared-claude-mop-mcp-runtime",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/plugins/master-of-panes/1.0.0/dist/relay.js",
+      "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/relay.js",
+      "sha256": "b870e3c27f267cc4395c6a988fc47e32dec4339de4ac04c6ff72d4f9be8efcb1",
+      "mode": 420,
+      "ownership_class": "shared-claude-mop-mcp-runtime",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/plugins/master-of-panes/1.0.0/dist/slotConfig.js",
+      "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/slotConfig.js",
+      "sha256": "96baa0147015fa6bec9e47cf0ec8938b5205436a3df3e1602497f54abd512982",
+      "mode": 420,
+      "ownership_class": "shared-claude-mop-mcp-runtime",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/plugins/master-of-panes/1.0.0/dist/types.js",
+      "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/types.js",
+      "sha256": "a17df685a9218086bb6dac0dbea8e4dc98846e2c89d6fb2a7a55ce6b4efa3947",
+      "mode": 420,
+      "ownership_class": "shared-claude-mop-mcp-runtime",
       "dependency_status": "closed",
       "dependencies": []
     },
