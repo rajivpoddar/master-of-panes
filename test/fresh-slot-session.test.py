@@ -78,10 +78,10 @@ class FreshSlotSessionTest(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         argv = self.log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(argv, [
-            "--model", "ornith-1.5-35b-a3b", "--effort", "low",
+            "--model", "auto", "--effort", "low",
             "--permission-mode", "bypassPermissions", "--session-id",
             "11111111-1111-4111-8111-111111111111",
-            "--model", "ornith-1.5-35b-a3b", "--effort", "low",
+            "--model", "auto", "--effort", "low",
             "--permission-mode", "bypassPermissions", "--session-id",
             "22222222-2222-4222-8222-222222222222",
         ])
@@ -92,10 +92,10 @@ class FreshSlotSessionTest(unittest.TestCase):
             result = self.run_launcher(*args)
             self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
-            "--model", "ornith-1.5-35b-a3b", "--effort", "low",
+            "--model", "auto", "--effort", "low",
             "--permission-mode", "bypassPermissions", "--continue",
             "--session-id", "11111111-1111-4111-8111-111111111111",
-            "--model", "ornith-1.5-35b-a3b", "--effort", "low",
+            "--model", "auto", "--effort", "low",
             "--permission-mode", "bypassPermissions", "--session-id",
             "22222222-2222-4222-8222-222222222222", "--continue",
         ])
@@ -110,6 +110,18 @@ class FreshSlotSessionTest(unittest.TestCase):
         self.assertEqual(
             self.env_log.read_text(encoding="utf-8").strip(),
             "profile=ling-mia model=auto base=http://192.168.68.113:30000",
+        )
+
+    def test_ornith_profile_remains_available_for_rollback(self) -> None:
+        result = self.run_launcher("--continue", "--spark-profile", "ornith")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
+            "--model", "ornith-1.5-35b-a3b", "--effort", "low",
+            "--permission-mode", "bypassPermissions", "--continue",
+        ])
+        self.assertEqual(
+            self.env_log.read_text(encoding="utf-8").strip(),
+            "profile=ornith model=ornith-1.5-35b-a3b base=http://192.168.68.113:30000",
         )
 
     def test_unknown_spark_profile_fails_before_claude_launch(self) -> None:
