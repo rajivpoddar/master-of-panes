@@ -5,7 +5,7 @@ set -euo pipefail
 SLOT_NUMBER="${1:-}"
 shift || true
 
-SPARK_PROFILE="${DEV_SLOT_SPARK_PROFILE:-ling-mia}"
+SPARK_PROFILE="${DEV_SLOT_SPARK_PROFILE:-ornith}"
 CLAUDE_ARGS=()
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
