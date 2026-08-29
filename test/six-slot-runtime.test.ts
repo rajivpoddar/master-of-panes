@@ -182,7 +182,8 @@ test("assignment HTTP accepts S6 and refuses S7 before mutation", async () => {
     };
     const accepted = await app.request("/slots/6/assign", { method: "POST", headers, body: JSON.stringify(body) });
     assert.equal(accepted.status, 200);
-    assert.equal(db.getSlot(6)?.pr, 600);
+    assert.equal(db.getSlot(6)?.issue, 600);
+    assert.equal(db.getSlot(6)?.pr, null);
     const refused = await app.request("/slots/7/assign", { method: "POST", headers, body: JSON.stringify(body) });
     assert.equal(refused.status, 400);
     assert.equal(db.getSlot(7), undefined);

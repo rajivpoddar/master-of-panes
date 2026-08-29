@@ -136,7 +136,7 @@ test("issue-claim adoption route is authority-gated and atomic", async () => {
       assignmentRequest(undefined, adopt),
     );
     assert.equal(denied.status, 403);
-    assert.equal(db.getSlot(1)?.branch, "fix/10-pending");
+    assert.equal(db.getSlot(1)?.branch, null);
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
 
     const accepted = await app.request(
@@ -259,7 +259,7 @@ test("issue-claim adoption route refuses a stale successor rewrite", async () =>
   });
 });
 
-test("production assignment route enforces PM authority before mutation", async () => {
+test("production assignment route accepts the minimal issue contract", async () => {
   await withAssignmentRoute(async (app, db) => {
     const initial = db.getSlot(1);
 
@@ -281,71 +281,54 @@ test("production assignment route enforces PM authority before mutation", async 
 
     const authorized = await app.request(
       "/slots/1/assign",
-      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY),
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        issue: assignment.issue,
+        task: assignment.task,
+      }),
     );
     assert.equal(authorized.status, 200);
     const assigned = await authorized.json() as Record<string, unknown>;
     assert.equal(assigned.occupied, true);
-    assert.equal(assigned.repository_id, assignment.repository_id);
+    assert.equal(assigned.repository_id, "heydonna-app/heydonna-app");
     assert.equal(assigned.issue, assignment.issue);
-    assert.equal(assigned.pr, assignment.pr);
-    assert.equal(assigned.branch_ref, `refs/heads/${assignment.branch}`);
-    assert.equal(assigned.head_sha, assignment.head_sha);
+    assert.equal(assigned.pr, null);
+    assert.equal(assigned.branch, null);
+    assert.equal(assigned.head_sha, null);
     assert.equal(assigned.assignment_epoch, 1);
     assert.equal(db.getEvents(1, 10, "slot_assigned").length, 1);
   });
 });
 
-test("claim route refuses omitted or null complete fields before mutation", async () => {
+test("claim route requires only a positive issue", async () => {
   await withAssignmentRoute(async (app, db) => {
-    for (const field of [
-      "repository_id",
-      "issue",
-      "branch",
-      "head_sha",
-      "work_kind",
-      "handoff_id",
-    ]) {
-      const omitted = { ...assignment };
-      delete omitted[field as keyof typeof omitted];
+    for (const body of [{}, { issue: null }, { issue: 0 }]) {
       const response = await app.request(
         "/slots/1/assign",
-        assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, omitted),
+        assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body),
       );
-      assert.equal(response.status, 409, field);
-      assert.equal(db.getSlot(1)?.occupied, false);
-    }
-
-    for (const field of ["repository_id", "issue", "branch", "work_kind", "handoff_id"]) {
-      const invalid = { ...assignment, [field]: null };
-      const response = await app.request(
-        "/slots/1/assign",
-        assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, invalid),
-      );
-      assert.equal(response.status, 409, `null ${field}`);
+      assert.equal(response.status, 409);
+      assert.equal((await response.json() as Record<string, unknown>).reason, "invalid_issue");
       assert.equal(db.getSlot(1)?.occupied, false);
     }
   });
 });
 
-test("assignment ignores session identity and refuses a FREE slot with an active hook turn", async () => {
+test("assignment ignores stale turn and tuple telemetry", async () => {
   await withAssignmentRoute(async (app, db) => {
     const active = { ...assignment, session_id: "caller-must-not-own", expected_epoch: 0 };
     db.startAgentTurn(1, "hook-session-a");
     db.updateSlot(1, { occupied: false, repository_id: null, issue: null, branch: null, branch_ref: null, pr: null, head_sha: null });
-    const refused = await app.request("/slots/1/assign", assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, active));
-    assert.equal(refused.status, 409);
-    assert.equal(db.getSlot(1)?.occupied, false);
-    db.finishAgentTurn(1, "hook-session-a");
     const accepted = await app.request("/slots/1/assign", assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, active));
     assert.equal(accepted.status, 200);
     const row = db.getSlot(1)!;
     assert.equal(row.assignment_epoch, 1);
+    assert.equal(row.active_turn_state, "inactive");
+    assert.equal(row.active_turn_id, null);
     assert.equal("session_id" in JSON.parse(db.getEvents(1, 1, "slot_assigned")[0].payload), false);
   });
 });
 
-test("claim route requires the exact expected FREE state", async () => {
+test("claim route overwrites the selected slot without caller epoch", async () => {
   await withAssignmentRoute(async (app, db) => {
     const first = await app.request(
       "/slots/1/assign",
@@ -358,12 +341,13 @@ test("claim route requires the exact expected FREE state", async () => {
       "/slots/1/assign",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
         ...assignment,
-        expected_epoch: before!.assignment_epoch,
+        issue: assignment.issue + 1,
+        expected_epoch: 999,
       }),
     );
-    assert.equal(occupiedClaim.status, 409);
-    assert.equal((await occupiedClaim.json() as Record<string, unknown>).reason, "slot_already_occupied");
-    assert.deepEqual(db.getSlot(1), before);
+    assert.equal(occupiedClaim.status, 200);
+    assert.equal(db.getSlot(1)?.issue, assignment.issue + 1);
+    assert.equal(db.getSlot(1)?.assignment_epoch, before!.assignment_epoch + 1);
   });
 });
 
@@ -401,7 +385,7 @@ test("adopt route has no partial expected-tuple fallback", async () => {
   });
 });
 
-test("assignment route persists claim metadata", async () => {
+test("assignment route rejects only a duplicate issue on another slot", async () => {
   await withAssignmentRoute(async (app, db) => {
     const response = await app.request(
       "/slots/1/assign",
@@ -413,26 +397,25 @@ test("assignment route persists claim metadata", async () => {
     );
     assert.equal(response.status, 200);
     const assigned = await response.json() as Record<string, unknown>;
-    assert.equal(assigned.work_kind, "implementation");
-    assert.equal(assigned.handoff_id, "handoff-route-1");
+    assert.equal(assigned.work_kind, null);
+    assert.equal(assigned.handoff_id, null);
     assert.equal(typeof assigned.claimed_at, "string");
     assert.notEqual(assigned.claimed_at, "");
     assert.equal(assigned.claimed_at, assigned.assigned_at);
-    assert.equal(db.getSlot(1)?.work_kind, "implementation");
-    assert.equal(db.getSlot(1)?.handoff_id, "handoff-route-1");
+    assert.equal(db.getSlot(1)?.work_kind, null);
+    assert.equal(db.getSlot(1)?.handoff_id, null);
 
-    const omittedMetadataReplay = await app.request(
-      "/slots/1/assign",
+    const duplicate = await app.request(
+      "/slots/2/assign",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
-        ...assignment,
-        expected_epoch: 1,
+        issue: assignment.issue,
       }),
     );
-    assert.equal(omittedMetadataReplay.status, 409);
-    const replayBody = await omittedMetadataReplay.json() as Record<string, unknown>;
-    assert.equal(replayBody.reason, "slot_already_occupied");
-    assert.equal(db.getSlot(1)?.work_kind, "implementation");
-    assert.equal(db.getSlot(1)?.handoff_id, "handoff-route-1");
+    assert.equal(duplicate.status, 409);
+    const duplicateBody = await duplicate.json() as Record<string, unknown>;
+    assert.equal(duplicateBody.reason, "target_already_assigned");
+    assert.deepEqual(duplicateBody.owner_slots, [1]);
+    assert.equal(db.getSlot(2)?.occupied, false);
 
   });
 });

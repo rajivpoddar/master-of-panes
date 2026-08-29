@@ -21,6 +21,8 @@ export interface SlotMutationResult {
   reason?:
     | "expected_epoch_required"
     | "epoch_mismatch"
+    | "invalid_issue"
+    | "invalid_slot"
     | "invalid_repository_id"
     | "invalid_branch_ref"
     | "invalid_assignment_metadata"
@@ -1241,6 +1243,112 @@ export class MoPDatabase {
         ok: true,
         conflict: false,
         assignment_epoch: nextEpoch,
+        idempotent: false,
+      };
+    })();
+  }
+
+  /**
+   * Assign one GitHub issue to a numbered slot with the minimum PM contract.
+   *
+   * Epochs and the extended owner tuple remain internal telemetry.  They are
+   * deliberately not caller preconditions: the only assignment conflict is
+   * the same issue already being owned by another slot.
+   */
+  assignIssueToSlot(
+    slot: number,
+    issue: number,
+    task: string,
+    repositoryId: string | number,
+  ): SlotMutationResult {
+    const normalizedIssue = Number.isInteger(issue) && issue > 0 ? issue : null;
+    const normalizedRepositoryId = normalizeRepositoryId(repositoryId);
+    const current = this.getSlot(slot);
+    if (normalizedIssue === null) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "invalid_issue",
+      };
+    }
+    if (!normalizedRepositoryId) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "invalid_repository_id",
+      };
+    }
+
+    return this.db.transaction((): SlotMutationResult => {
+      const before = this.getSlot(slot);
+      const epoch = before?.assignment_epoch ?? 0;
+      if (!before) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "invalid_slot",
+        };
+      }
+
+      const duplicate = this.db.prepare(`
+        SELECT slot FROM slots
+        WHERE occupied = 1 AND issue = ? AND slot != ?
+        ORDER BY slot LIMIT 1
+      `).get(normalizedIssue, slot) as { slot: number } | undefined;
+      if (duplicate) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "target_already_assigned",
+          owner_slots: [duplicate.slot],
+        };
+      }
+
+      if (before.occupied && before.issue === normalizedIssue) {
+        return {
+          ok: true,
+          conflict: false,
+          assignment_epoch: epoch,
+          idempotent: true,
+        };
+      }
+
+      const assignedAt = new Date().toISOString();
+      this.updateAssignmentState(slot, {
+        status: "active" as SlotStatus,
+        occupied: true,
+        task,
+        repository_id: normalizedRepositoryId,
+        issue: normalizedIssue,
+        branch: null,
+        branch_ref: null,
+        pr: null,
+        head_sha: null,
+        assignment_epoch: epoch + 1,
+        assigned_at: assignedAt,
+        work_kind: null,
+        handoff_id: null,
+        claimed_at: assignedAt,
+        dnd: false,
+        idle: false,
+        activity: null,
+        active_turn_id: null,
+        active_turn_started_at: null,
+        active_turn_state: "inactive",
+      });
+      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      return {
+        ok: true,
+        conflict: false,
+        assignment_epoch: epoch + 1,
         idempotent: false,
       };
     })();

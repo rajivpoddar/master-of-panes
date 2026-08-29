@@ -6,7 +6,6 @@ import {
   PM_TRANSITION_ASSIGNMENT_HEADER,
 } from "./assignmentAuthority.js";
 import {
-  normalizeAssignmentTuple,
   type AssignmentTupleInput,
   type MoPDatabase,
 } from "./db.js";
@@ -34,16 +33,6 @@ const COMPLETE_REBIND_DESIRED_FIELDS = [
   "work_kind",
   "handoff_id",
   "claimed_at",
-] as const;
-
-const COMPLETE_CLAIM_FIELDS = [
-  "repository_id",
-  "issue",
-  "pr",
-  "branch",
-  "head_sha",
-  "work_kind",
-  "handoff_id",
 ] as const;
 
 function hasOwn(body: Record<string, unknown>, key: string): boolean {
@@ -74,22 +63,6 @@ function completeTuple(
   };
 }
 
-function invalidCompleteClaim(body: Record<string, unknown>): boolean {
-  if (!hasEvery(body, COMPLETE_CLAIM_FIELDS)) return true;
-  if (!Number.isInteger(body.issue) || Number(body.issue) <= 0) return true;
-  if (typeof body.branch !== "string" || body.branch.trim() === "") return true;
-  return normalizeAssignmentTuple({
-    repository_id: body.repository_id as string | number | null,
-    issue: body.issue as number | null,
-    pr: body.pr as number | null,
-    branch: body.branch as string | null,
-    head_sha: body.head_sha as string | null,
-    work_kind: body.work_kind as string | null,
-    handoff_id: body.handoff_id as string | null,
-    claimed_at: null,
-  }) === null;
-}
-
 export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
   app.post("/slots/:slotNum/assign", async (c) => {
     const slotParse = assignmentSlotParamSchema.safeParse(c.req.param("slotNum"));
@@ -108,46 +81,22 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
     }
 
     const body = await c.req.json();
-    if (!isRecord(body)) {
+    if (!isRecord(body) || !Number.isInteger(body.issue) || Number(body.issue) <= 0) {
       return c.json({
         success: false,
         conflict: true,
-        error: "complete claim tuple is required",
-        reason: "observed_tuple_mismatch",
+        error: "positive issue is required",
+        reason: "invalid_issue",
       }, 409);
     }
-    if (!Number.isInteger(body.expected_epoch)) {
-      return c.json({
-        success: false,
-        conflict: true,
-        error: "expected_epoch is required and must be an integer",
-      }, 409);
-    }
-    if (invalidCompleteClaim(body)) {
-      return c.json({
-        success: false,
-        conflict: true,
-        error: "complete claim tuple is required",
-        reason: "observed_tuple_mismatch",
-      }, 409);
-    }
-    // Caller-provided session identity is not an assignment field. Strip it
-    // from the durable assignment event as well; only hook endpoints record
-    // session IDs for turn telemetry.
-    const assignmentEvent = { ...body };
-    delete assignmentEvent.session_id;
-    const result = db.assignSlot(
+    const repositoryId = (
+      typeof body.repository_id === "string" || typeof body.repository_id === "number"
+    ) ? body.repository_id : (process.env.MOP_LEGACY_REPOSITORY_ID ?? "heydonna-app/heydonna-app");
+    const result = db.assignIssueToSlot(
       slotParse.data,
-      typeof body.task === "string" ? body.task : "",
-      body.repository_id as string | number,
       body.issue as number,
-      body.branch as string,
-      body.pr as number | null,
-      body.head_sha as string | null,
-      body.expected_epoch as number,
-      body.work_kind as string,
-      body.handoff_id as string,
-      true,
+      typeof body.task === "string" ? body.task : "",
+      repositoryId,
     );
 
     if (!result.ok) {
@@ -155,7 +104,7 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
     }
 
     db.logEvent(slotParse.data, "slot_assigned", null, null, {
-      ...assignmentEvent,
+      issue: body.issue,
       assignment_epoch: result.assignment_epoch,
       idempotent: result.idempotent,
     });
