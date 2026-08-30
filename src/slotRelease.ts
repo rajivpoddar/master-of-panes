@@ -516,6 +516,27 @@ export class NativeSlotReleaseCoordinator {
         );
       }
 
+      // The pane activity probe can observe an idle prompt before the Stop
+      // hook has finished its authoritative finishAgentTurn update. Re-read
+      // the complete owner state before touching the checkout; otherwise a
+      // successful reset can race the final CAS and leave the owner occupied
+      // after the release turn has already terminalized.
+      const postDelivery = this.dependencies.db.getSlot(request.slot);
+      if (
+        !postDelivery
+        || postDelivery.assignment_epoch !== validated.request.expected_epoch
+        || !assignmentTupleMatches(slotAssignmentTuple(postDelivery), validated.tuple)
+        || postDelivery.active_turn_id !== null
+        || postDelivery.active_turn_state !== "inactive"
+      ) {
+        return result(
+          "slot_not_idle",
+          "The owning slot activity probe raced the authoritative Stop-hook turn close.",
+          postDelivery,
+          "Leave the slot occupied and retry from a fresh exact owner read after the turn is inactive.",
+        );
+      }
+
       let observation: CheckoutResetObservation;
       try {
         observation = await this.dependencies.resetAndObserveCheckout(

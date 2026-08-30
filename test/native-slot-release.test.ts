@@ -154,6 +154,34 @@ test("MoP-derived checkout reset acknowledgement clears once and replay is safe 
   }
 });
 
+test("pane activity race refuses before checkout reset until the Stop hook closes", async () => {
+  const value = fixture();
+  try {
+    let resetCalled = false;
+    const release = new NativeSlotReleaseCoordinator({
+      db: value.db,
+      resolveOwningCheckout: async () => CHECKOUT,
+      deliverInstruction: async () => true,
+      owningSlotIsIdle: async () => {
+        // is-active.sh can report idle before /hooks/slot finishes its
+        // finishAgentTurn update. This is the production ordering race.
+        value.db.startAgentTurn(1, "stop-hook-race");
+        return true;
+      },
+      resetAndObserveCheckout: async () => {
+        resetCalled = true;
+        return exactObservation();
+      },
+    });
+    const result = await release.release(value.request);
+    assert.equal(result.code, "slot_not_idle");
+    assert.equal(resetCalled, false);
+    assert.equal(value.db.getSlot(1)?.occupied, true);
+  } finally {
+    closeFixture(value);
+  }
+});
+
 test("numbered slots expose no compatibility or epoch-only clear surface", () => {
   const value = fixture();
   try {
