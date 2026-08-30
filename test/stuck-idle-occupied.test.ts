@@ -102,6 +102,7 @@ function harness(
   currentSlot: SlotState,
   allSlots: SlotState[] = [currentSlot],
   releaseIntentActive = false,
+  claimReleaseIntentResult: boolean | null = null,
 ): Harness {
   let slotReads: SlotState[] = [];
   let logMtime: Date | null = new Date(NOW);
@@ -122,6 +123,8 @@ function harness(
     getExitPending: () => false,
     hasPendingClear: () => false,
     hasActiveNativeReleaseIntent: () => releaseIntentActive,
+    claimNativeReleaseIntent: () => claimReleaseIntentResult ?? true,
+    clearNativeReleaseIntent: () => undefined,
     hasRecentSubagentDispatch: () => null,
     getSlot: () => slotReads.shift() ?? currentSlot,
     getAllSlots: () => allSlots,
@@ -311,6 +314,28 @@ test("suppresses a stale terminal continuation while the exact release intent is
     assert.equal(
       h.events.some((event) => event.event_type === "idle_occupied_continue_injected"),
       false,
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("suppresses a stale continuation when release claims after the initial guard", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    // The first hasActive check is clear, then the competing release wins the
+    // shared SQLite claim immediately before relay delivery.
+    const h = harness(slot(), [slot()], false, false);
+    await h.detector.checkIdleOccupied(slot());
+    assert.deepEqual(h.sends, []);
+    assert.equal(
+      h.events.some((event) => event.event_type === "idle_occupied_continue_injected"),
+      false,
+    );
+    assert.equal(
+      JSON.parse(h.events.at(-1)?.payload ?? "{}").reason,
+      "release_in_progress",
     );
   } finally {
     Date.now = originalNow;

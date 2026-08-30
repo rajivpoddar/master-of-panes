@@ -814,17 +814,55 @@ export class StuckDetector {
       );
       return { sent: false, reason, slot: current };
     }
+    // The slot-missing branch above returns; this assertion keeps the
+    // authoritative state narrowed for the lease transaction below.
+    if (!current) {
+      return { sent: false, reason: "slot_missing", slot: null };
+    }
 
-    const sent = await this.relay.sendToSlotAsync(
-      slotNum,
-      command,
-      false
-    );
-    return {
-      sent,
-      reason: sent ? "sent" : "send_failed",
-      slot: current,
-    };
+    // Claim the same durable per-slot lease used by native release before the
+    // first asynchronous relay operation. This closes the race where a
+    // release claims between the read above and pane delivery. A failed claim
+    // is fail-closed; the competing release (or an invalidated owner) wins.
+    const tuple = slotAssignmentTuple(current);
+    const claimReleaseIntent = this.db.claimNativeReleaseIntent;
+    const claimedNudgeIntent = tuple
+      ? typeof claimReleaseIntent === "function"
+        ? claimReleaseIntent.call(this.db, slotNum, current.assignment_epoch, tuple)
+        : true
+      : false;
+    if (!claimedNudgeIntent) {
+      const latest = this.db.getSlot(slotNum) ?? current;
+      const competingRelease = this.hasActiveReleaseIntent(latest);
+      const failedReason: ContinueDeliveryResult["reason"] = competingRelease
+        || latest.assignment_epoch === current.assignment_epoch
+        ? "release_in_progress"
+        : "identity_changed";
+      this.db.logEvent(slotNum, "continue_suppressed_slot_state", "Stuck", null, {
+        command,
+        reason: failedReason,
+        occupied: latest.occupied,
+        dnd: latest.dnd,
+        expected_assignment_epoch: expected?.assignment_epoch ?? null,
+        observed_assignment_epoch: latest.assignment_epoch,
+      });
+      return { sent: false, reason: failedReason, slot: latest };
+    }
+
+    try {
+      const sent = await this.relay.sendToSlotAsync(
+        slotNum,
+        command,
+        false
+      );
+      return {
+        sent,
+        reason: sent ? "sent" : "send_failed",
+        slot: current,
+      };
+    } finally {
+      this.db.clearNativeReleaseIntent?.(slotNum, current.assignment_epoch, tuple!);
+    }
   }
 
   private getIdleOccupiedAnchor(
