@@ -11,7 +11,7 @@ while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --spark-profile)
       if [[ "$#" -lt 2 ]]; then
-        echo "ERROR: --spark-profile requires ornith or ling-mia" >&2
+        echo "ERROR: --spark-profile requires ornith, ornstein, or ling-mia" >&2
         exit 2
       fi
       SPARK_PROFILE="$2"
@@ -50,13 +50,18 @@ case "$SPARK_PROFILE" in
     SPARK_BASE_URL="${DEV_SLOT_SPARK_BASE_URL:-${ORNITH15_SPARK_BASE_URL:-${QWEN38_SPARK_BASE_URL:-http://192.168.68.113:30000}}}"
     SPARK_KEY_FILE="${DEV_SLOT_SPARK_API_KEY_FILE:-${ORNITH15_SPARK_API_KEY_FILE:-${QWEN38_SPARK_API_KEY_FILE:-/Users/rajiv/.config/ornith15/api-key}}}"
     ;;
+  ornstein)
+    SPARK_MODEL="${ORNSTEIN_SPARK_MODEL:-ornstein3.8-27b}"
+    SPARK_BASE_URL="${ORNSTEIN_SPARK_BASE_URL:-http://192.168.68.113:30000}"
+    SPARK_KEY_FILE="${ORNSTEIN_SPARK_API_KEY_FILE:-${DEV_SLOT_SPARK_API_KEY_FILE:-/Users/rajiv/.config/ornith15/api-key}}"
+    ;;
   ling-mia)
-    SPARK_MODEL="${LING_MIA_SPARK_MODEL:-auto}"
+    SPARK_MODEL="${LING_MIA_SPARK_MODEL:-ling-3.0-flash}"
     SPARK_BASE_URL="${LING_MIA_SPARK_BASE_URL:-http://192.168.68.113:30000}"
     SPARK_KEY_FILE="${LING_MIA_SPARK_API_KEY_FILE:-${DEV_SLOT_SPARK_API_KEY_FILE:-/Users/rajiv/.config/ornith15/api-key}}"
     ;;
   *)
-    echo "ERROR: unsupported Spark profile '$SPARK_PROFILE'; expected ornith or ling-mia" >&2
+    echo "ERROR: unsupported Spark profile '$SPARK_PROFILE'; expected ornith, ornstein, or ling-mia" >&2
     exit 2
     ;;
 esac

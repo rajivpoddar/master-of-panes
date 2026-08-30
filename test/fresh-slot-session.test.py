@@ -104,12 +104,24 @@ class FreshSlotSessionTest(unittest.TestCase):
         result = self.run_launcher("--continue", "--spark-profile", "ling-mia")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
-            "--model", "auto", "--effort", "low",
+            "--model", "ling-3.0-flash", "--effort", "low",
             "--permission-mode", "bypassPermissions", "--continue",
         ])
         self.assertEqual(
             self.env_log.read_text(encoding="utf-8").strip(),
-            "profile=ling-mia model=auto base=http://192.168.68.113:30000",
+            "profile=ling-mia model=ling-3.0-flash base=http://192.168.68.113:30000",
+        )
+
+    def test_ornstein_profile_selects_anthropic_endpoint_without_leaking_launcher_arg(self) -> None:
+        result = self.run_launcher("--spark-profile=ornstein", "--continue")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
+            "--model", "ornstein3.8-27b", "--effort", "low",
+            "--permission-mode", "bypassPermissions", "--continue",
+        ])
+        self.assertEqual(
+            self.env_log.read_text(encoding="utf-8").strip(),
+            "profile=ornstein model=ornstein3.8-27b base=http://192.168.68.113:30000",
         )
 
     def test_unknown_spark_profile_fails_before_claude_launch(self) -> None:
