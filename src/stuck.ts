@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execShell } from "./asyncCommand.js";
-import type { MoPDatabase } from "./db.js";
+import { slotAssignmentTuple, type MoPDatabase } from "./db.js";
 import type { LogManager } from "./logs.js";
 import type { TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
@@ -68,7 +68,7 @@ function parseDbTimestampMs(timestamp: string): number {
 
 type ContinueDeliveryResult = {
   sent: boolean;
-  reason: "sent" | "send_failed" | "slot_missing" | "released" | "dnd" | "identity_changed";
+  reason: "sent" | "send_failed" | "slot_missing" | "released" | "dnd" | "identity_changed" | "release_in_progress";
   slot: SlotState | null;
 };
 
@@ -443,6 +443,7 @@ export class StuckDetector {
     if (!isValidDevSlot(slot.slot)) return;
     if (!slot.occupied || slot.dnd) return;
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
+    if (this.hasActiveReleaseIntent(slot)) return;
 
     const idleState = this.isIdleByHookState(slot);
     if (!idleState.idle) return;
@@ -542,7 +543,8 @@ export class StuckDetector {
       command
     );
     if (delivery.reason === "dnd" || delivery.reason === "released" ||
-        delivery.reason === "slot_missing" || delivery.reason === "identity_changed") {
+        delivery.reason === "slot_missing" || delivery.reason === "identity_changed" ||
+        delivery.reason === "release_in_progress") {
       return;
     }
     const sent = delivery.sent;
@@ -762,6 +764,13 @@ export class StuckDetector {
     return { idle: slot.active_turn_state === "inactive" };
   }
 
+  private hasActiveReleaseIntent(slot: SlotState): boolean {
+    const tuple = slotAssignmentTuple(slot);
+    return tuple
+      ? Boolean(this.db.hasActiveNativeReleaseIntent?.(slot.slot, slot.assignment_epoch, tuple))
+      : false;
+  }
+
   /**
    * Final guard for detector-owned continuation nudges. The relay intentionally
    * supports unconditional recovery sends, so every stuck-detector path must
@@ -780,6 +789,8 @@ export class StuckDetector {
       reason = "released";
     } else if (current.dnd) {
       reason = "dnd";
+    } else if (this.hasActiveReleaseIntent(current)) {
+      reason = "release_in_progress";
     } else if (
       expected &&
       (current.assignment_epoch !== expected.assignment_epoch ||
@@ -1425,7 +1436,8 @@ export class StuckDetector {
       delivery.reason === "dnd" ||
       delivery.reason === "released" ||
       delivery.reason === "slot_missing" ||
-      delivery.reason === "identity_changed"
+      delivery.reason === "identity_changed" ||
+      delivery.reason === "release_in_progress"
     ) {
       const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} SKIPPED (reason=${delivery.reason} occupied=${!!delivery.slot?.occupied} dnd=${!!delivery.slot?.dnd}) retry=${state.retry_count}`;
       debugLog(msg);

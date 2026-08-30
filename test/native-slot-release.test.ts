@@ -144,11 +144,124 @@ test("MoP-derived checkout reset acknowledgement clears once and replay is safe 
     assert.equal(free.occupied, false);
     assert.equal(free.assignment_epoch, value.request.expected_epoch + 1);
     assert.equal(slotAssignmentTuple(free), null);
+    assert.equal(
+      value.db.hasActiveNativeReleaseIntent(
+        value.request.slot,
+        value.request.expected_epoch,
+        value.request.expected_tuple,
+      ),
+      false,
+    );
 
     const replay = await release.release(value.request);
     assert.equal(replay.code, "slot_already_free_unverifiable");
     assert.equal(replay.success, false);
     assert.equal(value.db.getSlot(1)?.assignment_epoch, value.request.expected_epoch + 1);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test("release intent is exact-owner, short-lived, and visible before pane delivery", async () => {
+  const value = fixture();
+  const originalNow = Date.now;
+  let now = 10_000;
+  Date.now = () => now;
+  try {
+    assert.equal(
+      value.db.claimNativeReleaseIntent(
+        value.request.slot,
+        value.request.expected_epoch,
+        value.request.expected_tuple,
+        100,
+      ),
+      true,
+    );
+    assert.equal(
+      value.db.claimNativeReleaseIntent(
+        value.request.slot,
+        value.request.expected_epoch,
+        value.request.expected_tuple,
+        100,
+      ),
+      false,
+    );
+    assert.equal(
+      value.db.hasActiveNativeReleaseIntent(
+        value.request.slot,
+        value.request.expected_epoch,
+        value.request.expected_tuple,
+      ),
+      true,
+    );
+    assert.equal(
+      value.db.hasActiveNativeReleaseIntent(
+        value.request.slot,
+        value.request.expected_epoch + 1,
+        value.request.expected_tuple,
+      ),
+      false,
+    );
+    now += 101;
+    assert.equal(
+      value.db.hasActiveNativeReleaseIntent(
+        value.request.slot,
+        value.request.expected_epoch,
+        value.request.expected_tuple,
+      ),
+      false,
+    );
+    assert.equal(
+      value.db.claimNativeReleaseIntent(
+        value.request.slot,
+        value.request.expected_epoch,
+        value.request.expected_tuple,
+        100,
+      ),
+      true,
+    );
+    value.db.clearNativeReleaseIntent(
+      value.request.slot,
+      value.request.expected_epoch,
+      value.request.expected_tuple,
+    );
+    assert.equal(
+      value.db.hasActiveNativeReleaseIntent(
+        value.request.slot,
+        value.request.expected_epoch,
+        value.request.expected_tuple,
+      ),
+      false,
+    );
+  } finally {
+    Date.now = originalNow;
+    closeFixture(value);
+  }
+});
+
+test("pane-mediated release claims before delivery and releases the claim after completion", async () => {
+  const value = fixture();
+  try {
+    let visibleDuringDelivery = false;
+    const release = coordinator(value, {
+      instruction: () => {
+        visibleDuringDelivery = value.db.hasActiveNativeReleaseIntent(
+          value.request.slot,
+          value.request.expected_epoch,
+          value.request.expected_tuple,
+        );
+      },
+    });
+    assert.equal((await release.release(value.request)).code, "released");
+    assert.equal(visibleDuringDelivery, true);
+    assert.equal(
+      value.db.hasActiveNativeReleaseIntent(
+        value.request.slot,
+        value.request.expected_epoch,
+        value.request.expected_tuple,
+      ),
+      false,
+    );
   } finally {
     closeFixture(value);
   }

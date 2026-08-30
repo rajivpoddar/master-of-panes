@@ -42,8 +42,10 @@ function slot(overrides: Partial<SlotState> = {}): SlotState {
     occupied: true,
     session_id: "session-2",
     task: "issue 7000",
+    repository_id: "github:heydonna-app/heydonna-app",
     issue: 7000,
     branch: "fix/7000",
+    branch_ref: "refs/heads/fix/7000",
     pr: 7001,
     head_sha: "a".repeat(40),
     assignment_epoch: 4,
@@ -96,7 +98,11 @@ interface Harness {
   setLogMtime: (date: Date | null) => void;
 }
 
-function harness(currentSlot: SlotState, allSlots: SlotState[] = [currentSlot]): Harness {
+function harness(
+  currentSlot: SlotState,
+  allSlots: SlotState[] = [currentSlot],
+  releaseIntentActive = false,
+): Harness {
   let slotReads: SlotState[] = [];
   let logMtime: Date | null = new Date(NOW);
   let nextEventId = 2;
@@ -115,6 +121,7 @@ function harness(currentSlot: SlotState, allSlots: SlotState[] = [currentSlot]):
   const db = {
     getExitPending: () => false,
     hasPendingClear: () => false,
+    hasActiveNativeReleaseIntent: () => releaseIntentActive,
     hasRecentSubagentDispatch: () => null,
     getSlot: () => slotReads.shift() ?? currentSlot,
     getAllSlots: () => allSlots,
@@ -289,6 +296,22 @@ test("the idle-occupied nudge carries the terminal LOCAL_CONTINUE directive", as
       /classification-only or "will continue" prose is a violation/,
     );
     assert.doesNotMatch(h.sends[0], /resume the existing work now/);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("suppresses a stale terminal continuation while the exact release intent is active", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const h = harness(slot(), [slot()], true);
+    await h.detector.checkIdleOccupied(slot());
+    assert.deepEqual(h.sends, []);
+    assert.equal(
+      h.events.some((event) => event.event_type === "idle_occupied_continue_injected"),
+      false,
+    );
   } finally {
     Date.now = originalNow;
   }

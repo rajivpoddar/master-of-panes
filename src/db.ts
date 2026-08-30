@@ -347,6 +347,13 @@ export function assignmentTupleMatches(
     && left.claimed_at === right.claimed_at;
 }
 
+export interface NativeReleaseIntent {
+  slot: number;
+  expected_epoch: number;
+  expected_tuple: AssignmentTuple;
+  expires_at: number;
+}
+
 export class MoPDatabase {
   private db: Database.Database;
 
@@ -1902,6 +1909,116 @@ export class MoPDatabase {
     for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
       this.clearPendingClear(i);
     }
+  }
+
+  // ─── Native release intent ─────────────────────────────
+
+  /**
+   * Claim one exact owner/epoch while the pane-mediated native release is in
+   * flight. StuckDetector reads this same SQLite row before delivering a
+   * continuation nudge, so a stale terminal continuation cannot race the
+   * release's checkout/reset sequence. The short lease is deliberately
+   * recoverable: a crashed/abandoned release expires and normal nudges resume.
+   */
+  claimNativeReleaseIntent(
+    slot: number,
+    expectedEpoch: number,
+    expectedTupleInput: AssignmentTupleInput,
+    ttlMs = 120_000,
+  ): boolean {
+    const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
+    if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return false;
+    const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : 120_000;
+    const key = `native_release_intent_${slot}`;
+    return this.db.transaction((): boolean => {
+      const current = this.getSlot(slot);
+      if (
+        !current
+        || !current.occupied
+        || current.assignment_epoch !== expectedEpoch
+        || current.active_turn_id !== null
+        || current.active_turn_state !== "inactive"
+        || !assignmentTupleMatches(slotAssignmentTuple(current), expectedTuple)
+      ) return false;
+
+      const now = Date.now();
+      const raw = this.getConfig(key);
+      if (raw) {
+        try {
+          const prior = JSON.parse(raw) as NativeReleaseIntent;
+          if (Number.isFinite(prior.expires_at) && prior.expires_at > now) {
+            // A live lease belongs to the release already in flight. Even if
+            // the tuple matches, a second caller must not enter the pane
+            // delivery/reset sequence concurrently.
+            return false;
+          }
+        } catch {
+          // A malformed/expired intent is safe to replace only after the
+          // exact current owner tuple above has been revalidated.
+        }
+      }
+      this.setConfig(key, JSON.stringify({
+        slot,
+        expected_epoch: expectedEpoch,
+        expected_tuple: expectedTuple,
+        expires_at: now + ttl,
+      } satisfies NativeReleaseIntent));
+      return true;
+    })();
+  }
+
+  /**
+   * Return true only for an unexpired intent bound to the exact current
+   * owner/epoch. Expired or malformed intents are deleted atomically so they
+   * cannot permanently suppress a future legitimate nudge.
+   */
+  hasActiveNativeReleaseIntent(
+    slot: number,
+    expectedEpoch: number,
+    expectedTupleInput: AssignmentTupleInput,
+  ): boolean {
+    const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
+    if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return false;
+    const key = `native_release_intent_${slot}`;
+    return this.db.transaction((): boolean => {
+      const raw = this.getConfig(key);
+      if (!raw) return false;
+      try {
+        const prior = JSON.parse(raw) as NativeReleaseIntent;
+        if (!Number.isFinite(prior.expires_at) || prior.expires_at <= Date.now()) {
+          this.setConfig(key, "");
+          return false;
+        }
+        return prior.expected_epoch === expectedEpoch
+          && assignmentTupleMatches(prior.expected_tuple, expectedTuple);
+      } catch {
+        this.setConfig(key, "");
+        return false;
+      }
+    })();
+  }
+
+  /** Clear only the matching intent; a replacement owner can never clear it. */
+  clearNativeReleaseIntent(
+    slot: number,
+    expectedEpoch: number,
+    expectedTupleInput: AssignmentTupleInput,
+  ): void {
+    const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
+    if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return;
+    const key = `native_release_intent_${slot}`;
+    this.db.transaction(() => {
+      const raw = this.getConfig(key);
+      if (!raw) return;
+      try {
+        const prior = JSON.parse(raw) as NativeReleaseIntent;
+        if (prior.expected_epoch === expectedEpoch && assignmentTupleMatches(prior.expected_tuple, expectedTuple)) {
+          this.setConfig(key, "");
+        }
+      } catch {
+        this.setConfig(key, "");
+      }
+    })();
   }
 
   // ─── PM Pending Events Queue ─────────────────────────────

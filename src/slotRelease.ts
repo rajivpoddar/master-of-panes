@@ -485,8 +485,25 @@ export class NativeSlotReleaseCoordinator {
       );
     }
     this.inProgressSlots.add(request.slot);
+    let claimedReleaseIntent = false;
 
     try {
+      // Claim the exact owner/epoch before any pane instruction. StuckDetector
+      // reads this durable short lease and suppresses only a matching stale
+      // continuation while the release/reset sequence is in flight.
+      if (!this.dependencies.db.claimNativeReleaseIntent(
+        request.slot,
+        validated.request.expected_epoch,
+        validated.request.expected_tuple,
+      )) {
+        return result(
+          "release_in_progress",
+          `Slot ${request.slot} already has a conflicting or invalid release intent.`,
+          this.dependencies.db.getSlot(request.slot),
+          "Leave the owner untouched and retry after the current release intent expires or completes.",
+        );
+      }
+      claimedReleaseIntent = true;
       const checkoutPathRaw = await this.dependencies.resolveOwningCheckout(request.slot);
       if (!checkoutPathRaw) {
         return result(
@@ -641,6 +658,13 @@ export class NativeSlotReleaseCoordinator {
         acknowledgement,
       };
     } finally {
+      if (claimedReleaseIntent) {
+        this.dependencies.db.clearNativeReleaseIntent(
+          request.slot,
+          validated.request.expected_epoch,
+          validated.request.expected_tuple,
+        );
+      }
       this.inProgressSlots.delete(request.slot);
     }
   }
