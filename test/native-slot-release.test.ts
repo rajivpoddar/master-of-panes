@@ -352,6 +352,20 @@ test("no-pane release refuses DND, active turns, dirty checkouts, and tuple/task
   }
 });
 
+test("no-pane release accepts only the explicit quiescent waiting activity", async () => {
+  const value = fixture();
+  try {
+    value.db.updateSlot(1, { activity: "waiting_for_pm_direction" });
+    const request = noPaneRequest(value);
+    const result = await coordinator(value).releaseWithoutPane(request);
+    assert.equal(result.code, "released");
+    assert.equal(value.db.getSlot(1)?.occupied, false);
+    assert.equal(value.db.getSlot(1)?.assignment_epoch, request.expected_epoch + 1);
+  } finally {
+    closeFixture(value);
+  }
+});
+
 test("forged Family-2 digest refuses before delivery/reset/clear", async () => {
   const value = fixture();
   try {

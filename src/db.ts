@@ -1093,7 +1093,7 @@ export class MoPDatabase {
       if (live.active_turn_id !== null || live.active_turn_state !== "inactive") {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "active_turn" };
       }
-      if (!live.idle || live.activity !== null) {
+      if (!live.idle || (live.activity !== null && live.activity !== "waiting_for_pm_direction")) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "productive_work" };
       }
 
