@@ -36,7 +36,10 @@ export interface SlotMutationResult {
     | "observed_tuple_mismatch"
     | "effect_digest_mismatch"
     | "effect_receipt_conflict"
-    | "effect_receipt_malformed";
+    | "effect_receipt_malformed"
+    | "dnd_active"
+    | "task_mismatch"
+    | "productive_work";
   owner_slots?: number[];
   owner_conflicts?: Array<{
     slot: number;
@@ -66,6 +69,14 @@ export interface Family2ReleaseDigestInput {
   expected_epoch: number;
   expected_tuple: AssignmentTupleInput;
   intended_main_head: string;
+}
+
+export interface NoPaneReleaseDigestInput {
+  effect_id: string;
+  expected_epoch: number;
+  expected_tuple: AssignmentTupleInput;
+  expected_task: string;
+  checkout_path: string;
 }
 
 export interface AssignmentTuple {
@@ -271,6 +282,37 @@ export function computeFamily2ReleaseDigest(
 ): string {
   return createHash("sha256")
     .update(JSON.stringify(normalizedFamily2ReleaseBody(request)))
+    .digest("hex");
+}
+
+/** Digest for the explicit no-pane release effect.  It uses the existing
+ * native release receipt table; task and checkout identity are part of this
+ * narrower effect's binding rather than assignment ownership columns. */
+export function computeNoPaneReleaseDigest(
+  request: NoPaneReleaseDigestInput,
+): string {
+  const tuple = normalizeAssignmentTuple(request.expected_tuple);
+  if (!tuple || typeof request.effect_id !== "string" || !request.effect_id.trim()
+    || !Number.isInteger(request.expected_epoch)
+    || typeof request.expected_task !== "string" || !request.expected_task.trim()
+    || typeof request.checkout_path !== "string" || !request.checkout_path.trim()) {
+    throw new Error("no-pane release identity is invalid");
+  }
+  return createHash("sha256")
+    .update(JSON.stringify({
+      checkout_path: request.checkout_path,
+      effect_id: request.effect_id,
+      expected_epoch: request.expected_epoch,
+      expected_handoff_id: tuple.handoff_id,
+      expected_head_sha: tuple.head_sha,
+      expected_issue: tuple.issue,
+      expected_pr: tuple.pr,
+      expected_repository_id: tuple.repository_id,
+      expected_task: request.expected_task.trim(),
+      expected_work_kind: tuple.work_kind,
+      expected_branch: tuple.branch,
+      expected_claimed_at: tuple.claimed_at,
+    }))
     .digest("hex");
 }
 
@@ -949,6 +991,163 @@ export class MoPDatabase {
           effect.intended_main_head.toLowerCase(),
         );
       }
+      return { ok: true, conflict: false, assignment_epoch: epoch + 1, idempotent: false };
+    })();
+  }
+
+  /**
+   * Final no-pane release CAS for a stale completed lease.  This intentionally
+   * shares the native release receipt table and transaction but has no relay,
+   * reset, or pane side effect.  Task, DND, idle, activity, and hook-turn
+   * predicates are rechecked inside the transaction.
+   */
+  commitNativeNoPaneRelease(
+    slot: number,
+    expectedEpoch: number,
+    expectedTupleInput: AssignmentTupleInput,
+    expectedTask: string,
+    effect: { effect_id: string; request_digest: string; checkout_path: string },
+  ): SlotMutationResult {
+    const current = this.getSlot(slot);
+    const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
+    if (!Number.isInteger(expectedEpoch) || !expectedTuple
+      || typeof expectedTask !== "string" || !expectedTask.trim()
+      || !effect || typeof effect.effect_id !== "string" || !effect.effect_id.trim()
+      || !/^[0-9a-f]{64}$/i.test(effect.request_digest)
+      || typeof effect.checkout_path !== "string" || !effect.checkout_path.trim()) {
+      return {
+        ok: false, conflict: true, assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false, reason: "expected_tuple_required",
+      };
+    }
+    let computedEffectDigest: string;
+    try {
+      computedEffectDigest = computeNoPaneReleaseDigest({
+        effect_id: effect.effect_id,
+        expected_epoch: expectedEpoch,
+        expected_tuple: expectedTupleInput,
+        expected_task: expectedTask,
+        checkout_path: effect.checkout_path,
+      });
+    } catch {
+      return {
+        ok: false, conflict: true, assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false, reason: "effect_receipt_malformed",
+      };
+    }
+    if (computedEffectDigest !== effect.request_digest.toLowerCase()) {
+      return {
+        ok: false, conflict: true, assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false, reason: "effect_digest_mismatch",
+      };
+    }
+
+    return this.db.transaction((): SlotMutationResult => {
+      let prior: NativeReleaseEffectReceipt | null;
+      try {
+        prior = this.getNativeReleaseEffectReceipt(effect.effect_id);
+      } catch {
+        return {
+          ok: false, conflict: true, assignment_epoch: this.getSlot(slot)?.assignment_epoch ?? 0,
+          idempotent: false, reason: "effect_receipt_malformed",
+        };
+      }
+      if (prior) {
+        const priorTuple = normalizeAssignmentTuple(prior.expected_tuple);
+        const priorValue = prior.expected_tuple as AssignmentTupleInput & { task?: unknown };
+        const same = prior.slot === slot
+          && prior.expected_epoch === expectedEpoch
+          && prior.request_digest.toLowerCase() === effect.request_digest.toLowerCase()
+          && prior.intended_main_head === ""
+          && assignmentTupleMatches(priorTuple, expectedTuple)
+          && priorValue.task === expectedTask.trim();
+        if (!same) {
+          return {
+            ok: false, conflict: true,
+            assignment_epoch: this.getSlot(slot)?.assignment_epoch ?? prior.released_epoch,
+            idempotent: false, reason: "effect_receipt_conflict",
+          };
+        }
+        return {
+          ok: true, conflict: false, assignment_epoch: prior.released_epoch, idempotent: true,
+        };
+      }
+
+      const live = this.getSlot(slot);
+      const epoch = live?.assignment_epoch ?? 0;
+      if (!live || !live.occupied) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "slot_already_free_unverifiable" };
+      }
+      if (epoch !== expectedEpoch) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      if (!assignmentTupleMatches(slotAssignmentTuple(live), expectedTuple)) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
+      }
+      if (live.task !== expectedTask.trim()) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "task_mismatch" };
+      }
+      if (live.dnd) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "dnd_active" };
+      }
+      if (live.active_turn_id !== null || live.active_turn_state !== "inactive") {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "active_turn" };
+      }
+      if (!live.idle || live.activity !== null) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "productive_work" };
+      }
+
+      this.updateAssignmentState(slot, {
+        status: "free" as SlotStatus,
+        occupied: false,
+        task: null,
+        repository_id: null,
+        issue: null,
+        branch: null,
+        branch_ref: null,
+        pr: null,
+        head_sha: null,
+        assigned_at: null,
+        work_kind: null,
+        handoff_id: null,
+        claimed_at: null,
+        dnd: false,
+        idle: true,
+        activity: null,
+        active_turn_id: null,
+        active_turn_started_at: null,
+        active_turn_state: "inactive",
+        assignment_epoch: epoch + 1,
+      });
+      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      this.db.prepare(`
+        INSERT INTO native_release_effect_receipts (
+          effect_id, request_digest, slot, expected_epoch, released_epoch,
+          expected_session_id, expected_tuple, intended_main_head
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        effect.effect_id,
+        computedEffectDigest,
+        slot,
+        expectedEpoch,
+        epoch + 1,
+        "",
+        JSON.stringify({
+          ...expectedTuple,
+          task: expectedTask.trim(),
+          checkout_path: effect.checkout_path,
+        }),
+        "",
+      );
+      this.logEvent(slot, "slot_released_no_pane", null, null, {
+        assignment_epoch: expectedEpoch,
+        released_epoch: epoch + 1,
+        expected_tuple: { ...expectedTuple, task: expectedTask.trim() },
+        effect_id: effect.effect_id,
+        request_digest: computedEffectDigest,
+        checkout_path: effect.checkout_path,
+        delivery: "none",
+      });
       return { ok: true, conflict: false, assignment_epoch: epoch + 1, idempotent: false };
     })();
   }

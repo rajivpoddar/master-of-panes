@@ -14,6 +14,8 @@
 
 import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { lstatSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Hono } from "hono";
@@ -35,6 +37,7 @@ import { execShell, execShellOk, sleep } from "./asyncCommand.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import {
   NativeSlotReleaseCoordinator,
+  type CheckoutReadOnlyObservation,
   type CheckoutResetObservation,
 } from "./slotRelease.js";
 import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
@@ -97,6 +100,45 @@ function resetAndObserveCheckout(
   });
 }
 
+function readOnlyGit(checkoutPath: string, args: string[]): Promise<string> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    execFile("git", ["-C", checkoutPath, ...args], { timeout: 30_000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        rejectPromise(new Error(stderr.trim() || error.message));
+        return;
+      }
+      resolvePromise(stdout);
+    });
+  });
+}
+
+async function observeCheckout(checkoutPath: string): Promise<CheckoutReadOnlyObservation> {
+  const resolved = resolve(checkoutPath);
+  try {
+    const stat = lstatSync(resolved);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      return { checkout_path: resolved, clean: false, unpushed_commits: [], error: "checkout is not a regular directory" };
+    }
+    const status = await readOnlyGit(resolved, ["status", "--porcelain", "--untracked-files=all"]);
+    const unpushed = (await readOnlyGit(resolved, ["rev-list", "@{upstream}..HEAD"]))
+      .split("\n")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    return {
+      checkout_path: resolved,
+      clean: status.trim() === "" && unpushed.length === 0,
+      unpushed_commits: unpushed,
+    };
+  } catch (error) {
+    return {
+      checkout_path: resolved,
+      clean: false,
+      unpushed_commits: [],
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 async function waitForOwningSlotIdle(slot: number): Promise<boolean> {
   const timeoutMs = parseInt(process.env.MOP_RELEASE_IDLE_TIMEOUT_MS ?? "120000", 10);
   const deadline = Date.now() + timeoutMs;
@@ -118,6 +160,7 @@ const nativeSlotRelease = new NativeSlotReleaseCoordinator({
   deliverInstruction: (slot, instruction) => relay.sendToSlotAsync(slot, instruction, true, false),
   owningSlotIsIdle: waitForOwningSlotIdle,
   resetAndObserveCheckout,
+  observeCheckout,
 });
 const family2ReleaseEffectAdapter = new Family2ReleaseEffectAdapter();
 

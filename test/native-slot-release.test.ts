@@ -12,12 +12,15 @@ import {
 } from "../src/db.js";
 import {
   NativeSlotReleaseCoordinator,
+  type NativeSlotNoPaneReleaseRequest,
+  type CheckoutReadOnlyObservation,
   type CheckoutResetObservation,
   type NativeSlotReleaseRequest,
 } from "../src/slotRelease.js";
 import { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 import { computeFamily2ReleaseDigest } from "../src/db.js";
+import { computeNoPaneReleaseDigest } from "../src/db.js";
 
 const ASSIGNMENT_HEAD = "a".repeat(40);
 const MAIN_HEAD = "b".repeat(40);
@@ -81,6 +84,7 @@ interface AdapterOptions {
   delivered?: boolean;
   idle?: boolean;
   observe?: () => Promise<CheckoutResetObservation>;
+  observeReadOnly?: () => Promise<CheckoutReadOnlyObservation>;
   instruction?: (value: string) => void;
 }
 
@@ -95,7 +99,33 @@ function coordinator(value: Fixture, options: AdapterOptions = {}): NativeSlotRe
     },
     owningSlotIsIdle: async () => options.idle !== false,
     resetAndObserveCheckout: options.observe ?? (async () => exactObservation()),
+    observeCheckout: options.observeReadOnly ?? (async (): Promise<CheckoutReadOnlyObservation> => ({
+      checkout_path: CHECKOUT,
+      clean: true,
+      unpushed_commits: [],
+    })),
   });
+}
+
+function noPaneRequest(value: Fixture): NativeSlotNoPaneReleaseRequest {
+  const expectedTuple = value.request.expected_tuple;
+  const request = {
+    slot: value.request.slot,
+    expected_epoch: value.request.expected_epoch,
+    expected_tuple: expectedTuple,
+    expected_task: "issue 8100",
+    checkout_path: CHECKOUT,
+    effect_id: "no-pane-release-test-effect",
+    request_digest: "",
+  } satisfies NativeSlotNoPaneReleaseRequest;
+  request.request_digest = computeNoPaneReleaseDigest({
+    effect_id: request.effect_id,
+    expected_epoch: request.expected_epoch,
+    expected_tuple: request.expected_tuple,
+    expected_task: request.expected_task,
+    checkout_path: request.checkout_path,
+  });
+  return request;
 }
 
 test("MoP-derived checkout reset acknowledgement clears once and replay is safe typed drift", async () => {
@@ -262,6 +292,66 @@ test("effect-bound release persists an atomic receipt and replays without a seco
   }
 });
 
+test("no-pane release clears one exact stale lease, audits it, and replays from the receipt", async () => {
+  const value = fixture();
+  try {
+    let resolveCalls = 0;
+    let readOnlyCalls = 0;
+    const request = noPaneRequest(value);
+    const first = await coordinator(value, {
+      resolveCheckout: async () => { resolveCalls += 1; return CHECKOUT; },
+      observeReadOnly: async () => {
+        readOnlyCalls += 1;
+        return { checkout_path: CHECKOUT, clean: true, unpushed_commits: [] };
+      },
+    }).releaseWithoutPane(request);
+    assert.equal(first.code, "released");
+    assert.equal(first.success, true);
+    assert.equal(first.idempotent, false);
+    assert.equal(resolveCalls, 1);
+    assert.equal(readOnlyCalls, 1);
+    assert.equal(value.db.getSlot(1)?.occupied, false);
+    assert.equal(value.db.getSlot(1)?.assignment_epoch, request.expected_epoch + 1);
+    assert.equal(value.db.getEvents(1, 10).some((event) => event.event_type === "slot_released_no_pane"), true);
+
+    const replay = await coordinator(value, {
+      resolveCheckout: async () => { throw new Error("replay must not resolve checkout"); },
+      observeReadOnly: async () => { throw new Error("replay must not inspect checkout"); },
+    }).releaseWithoutPane(request);
+    assert.equal(replay.code, "released");
+    assert.equal(replay.success, true);
+    assert.equal(replay.idempotent, true);
+    assert.equal(value.db.getSlot(1)?.assignment_epoch, request.expected_epoch + 1);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test("no-pane release refuses DND, active turns, dirty checkouts, and tuple/task drift before clear", async (t) => {
+  const cases: Array<{ name: string; mutate: (db: MoPDatabase) => void; observe?: () => Promise<CheckoutReadOnlyObservation>; code: string }> = [
+    { name: "DND", mutate: (db) => db.updateSlot(1, { dnd: true }), code: "dnd_active" },
+    { name: "active hook turn", mutate: (db) => db.updateSlot(1, { active_turn_id: "turn", active_turn_state: "active" }), code: "active_turn" },
+    { name: "productive activity", mutate: (db) => db.updateSlot(1, { activity: "working" }), code: "productive_work" },
+    { name: "task drift", mutate: (db) => db.updateSlot(1, { task: "different task" }), code: "task_mismatch" },
+    { name: "dirty checkout", mutate: () => {}, observe: async () => ({ checkout_path: CHECKOUT, clean: false, unpushed_commits: ["commit"] }), code: "checkout_not_clean" },
+  ];
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      const value = fixture();
+      try {
+        testCase.mutate(value.db);
+        const before = value.db.getSlot(1)!;
+        const result = await coordinator(value, { observeReadOnly: testCase.observe }).releaseWithoutPane(noPaneRequest(value));
+        assert.equal(result.code, testCase.code);
+        assert.deepEqual(value.db.getSlot(1), before);
+        assert.equal(value.db.getNativeReleaseEffectReceipt("no-pane-release-test-effect"), null);
+      } finally {
+        closeFixture(value);
+      }
+    });
+  }
+});
+
 test("forged Family-2 digest refuses before delivery/reset/clear", async () => {
   const value = fixture();
   try {
@@ -288,7 +378,7 @@ test("native adapter derives the checkout from the numbered pane, not caller inp
     runShell: async (command) => {
       commands.push(command);
       if (command.startsWith("tmux display-message")) {
-        return { stdout: "%11\t/Users/rajiv/Downloads/projects/heydonna-app-3001\n", stderr: "" };
+        return { stdout: "%11|/Users/rajiv/Downloads/projects/heydonna-app-3001\n", stderr: "" };
       }
       if (command.startsWith("git -C")) {
         gitCalls += 1;

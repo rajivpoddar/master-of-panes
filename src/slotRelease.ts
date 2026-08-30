@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import {
   assignmentTupleMatches,
   computeFamily2ReleaseDigest,
+  computeNoPaneReleaseDigest,
   normalizeAssignmentTuple,
   slotAssignmentTuple,
   type AssignmentTuple,
@@ -20,6 +21,23 @@ export interface NativeSlotReleaseRequest {
   /** Immutable Family-2 effect identity; absent for legacy native callers. */
   effect_id?: string;
   request_digest?: string;
+}
+
+export interface NativeSlotNoPaneReleaseRequest {
+  slot: number;
+  expected_epoch: number;
+  expected_tuple: AssignmentTupleInput;
+  expected_task: string;
+  checkout_path: string;
+  effect_id: string;
+  request_digest: string;
+}
+
+export interface CheckoutReadOnlyObservation {
+  checkout_path: string;
+  clean: boolean;
+  unpushed_commits: string[];
+  error?: string | null;
 }
 
 export interface CheckoutResetObservation {
@@ -42,6 +60,7 @@ export type NativeSlotReleaseCode =
   | "invalid_request"
   | "slot_not_found"
   | "slot_already_free_unverifiable"
+  | "active_turn"
   | "epoch_mismatch"
   | "observed_tuple_mismatch"
   | "release_in_progress"
@@ -57,7 +76,11 @@ export type NativeSlotReleaseCode =
   | "clear_conflict"
   | "free_readback_failed"
   | "effect_receipt_conflict"
-  | "effect_receipt_malformed";
+  | "effect_receipt_malformed"
+  | "dnd_active"
+  | "task_mismatch"
+  | "productive_work"
+  | "checkout_not_clean";
 
 export interface NativeSlotReleaseResult {
   success: boolean;
@@ -85,6 +108,7 @@ export interface NativeSlotReleaseDependencies {
     checkoutPath: string,
     intendedMainHead: string,
   ) => Promise<CheckoutResetObservation>;
+  observeCheckout: (checkoutPath: string) => Promise<CheckoutReadOnlyObservation>;
 }
 
 function result(
@@ -119,6 +143,134 @@ export class NativeSlotReleaseCoordinator {
   private readonly inProgressSlots = new Set<number>();
 
   constructor(private readonly dependencies: NativeSlotReleaseDependencies) {}
+
+  async releaseWithoutPane(
+    request: NativeSlotNoPaneReleaseRequest,
+  ): Promise<NativeSlotReleaseResult> {
+    const current = this.dependencies.db.getSlot(request.slot);
+    const tuple = normalizeAssignmentTuple(request.expected_tuple);
+    if (
+      !Number.isInteger(request.slot)
+      || request.slot < 1
+      || request.slot > DEFAULT_DEV_SLOT_COUNT
+      || !Number.isInteger(request.expected_epoch)
+      || !tuple
+      || typeof request.expected_task !== "string"
+      || !request.expected_task.trim()
+      || typeof request.checkout_path !== "string"
+      || !request.checkout_path.startsWith("/")
+      || typeof request.effect_id !== "string"
+      || !request.effect_id.trim()
+      || !/^[0-9a-f]{64}$/i.test(request.request_digest)
+    ) {
+      return result("invalid_request", "A complete no-pane release identity is required.", current, "Re-read the exact owner and checkout state.");
+    }
+    let computedDigest: string;
+    try {
+      computedDigest = computeNoPaneReleaseDigest({
+        effect_id: request.effect_id,
+        expected_epoch: request.expected_epoch,
+        expected_tuple: request.expected_tuple,
+        expected_task: request.expected_task,
+        checkout_path: resolve(request.checkout_path),
+      });
+    } catch {
+      return result("invalid_request", "The no-pane release identity is invalid.", current, "Recompute the effect from one exact tuple snapshot.");
+    }
+      if (computedDigest !== request.request_digest.toLowerCase()) {
+      return {
+        ...result("effect_digest_mismatch", "The no-pane release digest does not match its exact owner binding.", current, "Do not retry with a changed tuple."),
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+      };
+    }
+    // A lost response must be reconciled from the durable native receipt before
+    // consulting pane/checkout state again.  The committed effect is already
+    // the authority; a replay must never require a second precondition read or
+    // issue another mutation after the original CAS succeeded.
+    let priorReceipt;
+    try {
+      priorReceipt = this.dependencies.db.getNativeReleaseEffectReceipt(request.effect_id);
+    } catch {
+      return result("effect_receipt_malformed", "The no-pane release receipt is malformed.", current, "Stop and inspect the native release receipt.");
+    }
+    if (priorReceipt) {
+      const priorTuple = normalizeAssignmentTuple(priorReceipt.expected_tuple);
+      const priorValue = priorReceipt.expected_tuple as AssignmentTupleInput & { task?: unknown; checkout_path?: unknown };
+      const same = priorReceipt.slot === request.slot
+        && priorReceipt.expected_epoch === request.expected_epoch
+        && priorReceipt.request_digest.toLowerCase() === request.request_digest.toLowerCase()
+        && priorReceipt.intended_main_head === ""
+        && assignmentTupleMatches(priorTuple, tuple)
+        && priorValue.task === request.expected_task.trim()
+        && priorValue.checkout_path === resolve(request.checkout_path);
+      if (!same) {
+        return result("effect_receipt_conflict", "The no-pane release effect receipt does not match the request.", current, "Do not retry with a changed identity.");
+      }
+      return {
+        ...result("released", `Slot ${request.slot} no-pane release already committed.`, current, null, true),
+        assignment_epoch: priorReceipt.released_epoch,
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+        idempotent: true,
+      };
+    }
+    if (this.inProgressSlots.has(request.slot)) {
+      return result("release_in_progress", `Slot ${request.slot} already has an in-process no-pane release request.`, current, "Wait for the existing request to finish and re-read MoP.");
+    }
+    this.inProgressSlots.add(request.slot);
+    try {
+      const ownerCheckoutRaw = await this.dependencies.resolveOwningCheckout(request.slot);
+      if (!ownerCheckoutRaw || resolve(ownerCheckoutRaw) !== resolve(request.checkout_path)) {
+        return result("checkout_identity_unavailable", "The requested checkout is not the owning pane checkout.", this.dependencies.db.getSlot(request.slot), "Leave the slot occupied and re-read the pane-derived checkout identity.");
+      }
+      const observed = await this.dependencies.observeCheckout(resolve(ownerCheckoutRaw));
+      if (
+        !observed
+        || observed.checkout_path !== resolve(ownerCheckoutRaw)
+        || !observed.clean
+        || !Array.isArray(observed.unpushed_commits)
+        || observed.unpushed_commits.length !== 0
+      ) {
+        return result("checkout_not_clean", "The owning checkout is dirty or has unpushed commits.", this.dependencies.db.getSlot(request.slot), "Preserve the owner and repair the checkout before release.");
+      }
+      const committed = this.dependencies.db.commitNativeNoPaneRelease(
+        request.slot,
+        request.expected_epoch,
+        request.expected_tuple,
+        request.expected_task,
+        {
+          effect_id: request.effect_id,
+          request_digest: request.request_digest,
+          checkout_path: resolve(request.checkout_path),
+        },
+      );
+      if (!committed.ok) {
+        const code = committed.reason === "dnd_active"
+          || committed.reason === "active_turn"
+          || committed.reason === "task_mismatch"
+          || committed.reason === "productive_work"
+          || committed.reason === "epoch_mismatch"
+          || committed.reason === "observed_tuple_mismatch"
+          || committed.reason === "slot_already_free_unverifiable"
+          ? committed.reason
+          : "clear_conflict";
+        return result(code, `No-pane release refused: ${committed.reason ?? "unknown"}.`, this.dependencies.db.getSlot(request.slot), "Leave the owner untouched and re-read the exact tuple.");
+      }
+      const readback = this.dependencies.db.getSlot(request.slot);
+      if (!readback || readback.occupied || readback.assignment_epoch !== request.expected_epoch + 1 || slotAssignmentTuple(readback) !== null || readback.task !== null) {
+        return result("free_readback_failed", "No-pane release readback did not prove the exact FREE postcondition.", readback, "Stop and inspect MoP before any further mutation.");
+      }
+      return {
+        ...result("released", `Slot ${request.slot} released without pane delivery.`, readback, null, true),
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+        idempotent: committed.idempotent,
+      };
+    } finally {
+      this.inProgressSlots.delete(request.slot);
+    }
+  }
 
   private validateInitialRequest(
     request: NativeSlotReleaseRequest,
