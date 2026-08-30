@@ -103,6 +103,9 @@ export interface NativeReleaseEffectReceipt {
   created_at: string;
 }
 
+/** Covers the complete bounded pane-release sequence (idle wait + reset). */
+export const NATIVE_RELEASE_INTENT_TTL_MS = 10 * 60 * 1000;
+
 const ASSIGNMENT_WORK_KINDS = new Set([
   "implementation",
   "rework",
@@ -1924,14 +1927,14 @@ export class MoPDatabase {
     slot: number,
     expectedEpoch: number,
     expectedTupleInput: AssignmentTupleInput,
-    // The checkout reset boundary is allowed to run for 180s. Keep the
-    // coordination lease above that maximum so a release cannot be overtaken
-    // by a stale nudge while its reset is still in flight.
-    ttlMs = 300_000,
+    // The release path may spend up to 120s proving idle and 180s resetting
+    // the checkout, plus bounded pane-delivery overhead. Keep the lease above
+    // that complete critical section so a stale nudge cannot overtake it.
+    ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
   ): boolean {
     const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
     if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return false;
-    const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : 300_000;
+    const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : NATIVE_RELEASE_INTENT_TTL_MS;
     const key = `native_release_intent_${slot}`;
     return this.db.transaction((): boolean => {
       const current = this.getSlot(slot);
