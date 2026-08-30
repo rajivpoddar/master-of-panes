@@ -827,19 +827,31 @@ export class StuckDetector {
     // is fail-closed; the competing release (or an invalidated owner) wins.
     const tuple = slotAssignmentTuple(current);
     const claimReleaseIntent = this.db.claimNativeReleaseIntent;
-    const claimedNudgeIntent = tuple
-      ? typeof claimReleaseIntent === "function"
-        ? claimReleaseIntent.call(
-          this.db,
-          slotNum,
-          current.assignment_epoch,
-          tuple,
-          undefined,
-          allowActiveTurn,
-        )
-        : true
-      : false;
-    if (!claimedNudgeIntent) {
+    const claimReleaseIntentWithToken = this.db.claimNativeReleaseIntentWithToken;
+    let nudgeLeaseToken: string | null = null;
+    if (tuple && typeof claimReleaseIntentWithToken === "function") {
+      nudgeLeaseToken = claimReleaseIntentWithToken.call(
+        this.db,
+        slotNum,
+        current.assignment_epoch,
+        tuple,
+        undefined,
+        allowActiveTurn,
+      );
+    } else if (tuple && typeof claimReleaseIntent === "function") {
+      // Compatibility for lightweight detector fakes that predate tokens.
+      nudgeLeaseToken = claimReleaseIntent.call(
+        this.db,
+        slotNum,
+        current.assignment_epoch,
+        tuple,
+        undefined,
+        allowActiveTurn,
+      ) ? "__legacy__" : null;
+    } else if (tuple) {
+      nudgeLeaseToken = "__legacy__";
+    }
+    if (!nudgeLeaseToken) {
       const latest = this.db.getSlot(slotNum) ?? current;
       const competingRelease = this.hasActiveReleaseIntent(latest);
       const failedReason: ContinueDeliveryResult["reason"] = competingRelease
@@ -869,7 +881,12 @@ export class StuckDetector {
         slot: current,
       };
     } finally {
-      this.db.clearNativeReleaseIntent?.(slotNum, current.assignment_epoch, tuple!);
+      this.db.clearNativeReleaseIntent?.(
+        slotNum,
+        current.assignment_epoch,
+        tuple!,
+        nudgeLeaseToken === "__legacy__" ? undefined : nudgeLeaseToken,
+      );
     }
   }
 

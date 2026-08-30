@@ -7,7 +7,7 @@
  */
 
 import Database from "better-sqlite3";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { EventLogEntry, MoPConfig, OpsJobRecord, OpsJobStatus, SlotState, SlotStatus } from "./types.js";
@@ -355,6 +355,7 @@ export interface NativeReleaseIntent {
   expected_epoch: number;
   expected_tuple: AssignmentTuple;
   expires_at: number;
+  token: string;
 }
 
 export class MoPDatabase {
@@ -1933,11 +1934,28 @@ export class MoPDatabase {
     ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
     allowActiveTurn = false,
   ): boolean {
+    return this.claimNativeReleaseIntentWithToken(
+      slot,
+      expectedEpoch,
+      expectedTupleInput,
+      ttlMs,
+      allowActiveTurn,
+    ) !== null;
+  }
+
+  /** Claim and return the unique generation used to fence cleanup. */
+  claimNativeReleaseIntentWithToken(
+    slot: number,
+    expectedEpoch: number,
+    expectedTupleInput: AssignmentTupleInput,
+    ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
+    allowActiveTurn = false,
+  ): string | null {
     const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
-    if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return false;
+    if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return null;
     const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : NATIVE_RELEASE_INTENT_TTL_MS;
     const key = `native_release_intent_${slot}`;
-    return this.db.transaction((): boolean => {
+    return this.db.transaction((): string | null => {
       const current = this.getSlot(slot);
       if (
         !current
@@ -1946,7 +1964,7 @@ export class MoPDatabase {
         || (!allowActiveTurn && current.active_turn_id !== null)
         || (!allowActiveTurn && current.active_turn_state !== "inactive")
         || !assignmentTupleMatches(slotAssignmentTuple(current), expectedTuple)
-      ) return false;
+      ) return null;
 
       const now = Date.now();
       const raw = this.getConfig(key);
@@ -1957,20 +1975,22 @@ export class MoPDatabase {
             // A live lease belongs to the release already in flight. Even if
             // the tuple matches, a second caller must not enter the pane
             // delivery/reset sequence concurrently.
-            return false;
+            return null;
           }
         } catch {
           // A malformed/expired intent is safe to replace only after the
           // exact current owner tuple above has been revalidated.
         }
       }
+      const token = randomUUID();
       this.setConfig(key, JSON.stringify({
         slot,
         expected_epoch: expectedEpoch,
         expected_tuple: expectedTuple,
         expires_at: now + ttl,
+        token,
       } satisfies NativeReleaseIntent));
-      return true;
+      return token;
     })();
   }
 
@@ -2010,6 +2030,7 @@ export class MoPDatabase {
     slot: number,
     expectedEpoch: number,
     expectedTupleInput: AssignmentTupleInput,
+    token?: string,
   ): void {
     const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
     if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return;
@@ -2019,7 +2040,11 @@ export class MoPDatabase {
       if (!raw) return;
       try {
         const prior = JSON.parse(raw) as NativeReleaseIntent;
-        if (prior.expected_epoch === expectedEpoch && assignmentTupleMatches(prior.expected_tuple, expectedTuple)) {
+        if (
+          prior.expected_epoch === expectedEpoch
+          && assignmentTupleMatches(prior.expected_tuple, expectedTuple)
+          && (token === undefined || prior.token === token)
+        ) {
           this.setConfig(key, "");
         }
       } catch {
