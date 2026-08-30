@@ -1924,11 +1924,14 @@ export class MoPDatabase {
     slot: number,
     expectedEpoch: number,
     expectedTupleInput: AssignmentTupleInput,
-    ttlMs = 120_000,
+    // The checkout reset boundary is allowed to run for 180s. Keep the
+    // coordination lease above that maximum so a release cannot be overtaken
+    // by a stale nudge while its reset is still in flight.
+    ttlMs = 300_000,
   ): boolean {
     const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
     if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return false;
-    const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : 120_000;
+    const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : 300_000;
     const key = `native_release_intent_${slot}`;
     return this.db.transaction((): boolean => {
       const current = this.getSlot(slot);
