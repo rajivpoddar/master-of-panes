@@ -780,6 +780,7 @@ export class StuckDetector {
     slotNum: number,
     expected?: { assignment_epoch?: number; assigned_at?: string | null },
     command = "continue your work or remind pm if blocked",
+    allowActiveTurn = false,
   ): Promise<ContinueDeliveryResult> {
     const current = this.db.getSlot(slotNum) ?? null;
     let reason: ContinueDeliveryResult["reason"] | null = null;
@@ -828,7 +829,14 @@ export class StuckDetector {
     const claimReleaseIntent = this.db.claimNativeReleaseIntent;
     const claimedNudgeIntent = tuple
       ? typeof claimReleaseIntent === "function"
-        ? claimReleaseIntent.call(this.db, slotNum, current.assignment_epoch, tuple)
+        ? claimReleaseIntent.call(
+          this.db,
+          slotNum,
+          current.assignment_epoch,
+          tuple,
+          undefined,
+          allowActiveTurn,
+        )
         : true
       : false;
     if (!claimedNudgeIntent) {
@@ -1469,7 +1477,12 @@ export class StuckDetector {
 
     // 8. Window expired and under cap — inject the guarded continuation.
     // The final helper re-reads DND/ownership at the delivery boundary.
-    const delivery = await this.sendContinueIfAllowed(slotNum);
+    const delivery = await this.sendContinueIfAllowed(
+      slotNum,
+      undefined,
+      "continue your work or remind pm if blocked",
+      true,
+    );
     if (
       delivery.reason === "dnd" ||
       delivery.reason === "released" ||

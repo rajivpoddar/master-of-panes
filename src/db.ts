@@ -1931,6 +1931,7 @@ export class MoPDatabase {
     // the checkout, plus bounded pane-delivery overhead. Keep the lease above
     // that complete critical section so a stale nudge cannot overtake it.
     ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
+    allowActiveTurn = false,
   ): boolean {
     const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
     if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return false;
@@ -1942,8 +1943,8 @@ export class MoPDatabase {
         !current
         || !current.occupied
         || current.assignment_epoch !== expectedEpoch
-        || current.active_turn_id !== null
-        || current.active_turn_state !== "inactive"
+        || (!allowActiveTurn && current.active_turn_id !== null)
+        || (!allowActiveTurn && current.active_turn_state !== "inactive")
         || !assignmentTupleMatches(slotAssignmentTuple(current), expectedTuple)
       ) return false;
 
