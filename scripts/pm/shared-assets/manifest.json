@@ -18,7 +18,6 @@
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
       "~/.claude/scripts/mop-slot-respawn.sh",
-      "~/Downloads/projects/heydonna-app/scripts/pm/control-plane/sakshi-heartbeat.py",
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "~/.claude/skills/slack-message/scripts/block-unsupported-transcript-split.py",
       "~/.claude/skills/slack-message/scripts/slack-send.sh",
@@ -32,7 +31,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 47,
+    "selected_count": 46,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -243,15 +242,6 @@
       "sha256": "996927262a5c37a639f84493330938c4d6cb73319cf36094c23a795aaa90bbbb",
       "mode": 493,
       "ownership_class": "shared-claude-slot-respawn-client",
-      "dependency_status": "closed",
-      "dependencies": []
-    },
-    {
-      "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py",
-      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/control-plane/sakshi-heartbeat.py",
-      "sha256": "e04914828b8d115a15aeefbe07869af89c58af0bb1c26da3acd6e964d51e6ac3",
-      "mode": 493,
-      "ownership_class": "shared-claude-sakshi-heartbeat-producer",
       "dependency_status": "closed",
       "dependencies": []
     },
