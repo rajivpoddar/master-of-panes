@@ -67,6 +67,7 @@ export function registerFamily2Routes(
       intended_main_head: body.intended_main_head as string,
       effect_id: body.effect_id as string | undefined,
       request_digest: body.request_digest as string | undefined,
+      release_mode: body.release_mode as NativeSlotReleaseRequest["release_mode"],
     };
     const releaseResult = await nativeSlotRelease.release(request);
     if (releaseResult.success) {

@@ -124,10 +124,14 @@ async function observeCheckout(checkoutPath: string): Promise<CheckoutReadOnlyOb
       .split("\n")
       .map((value) => value.trim())
       .filter(Boolean);
+    const branch = (await readOnlyGit(resolved, ["branch", "--show-current"])).trim() || null;
+    const head = (await readOnlyGit(resolved, ["rev-parse", "HEAD"])).trim().toLowerCase() || null;
     return {
       checkout_path: resolved,
       clean: status.trim() === "" && unpushed.length === 0,
       unpushed_commits: unpushed,
+      branch,
+      head,
     };
   } catch (error) {
     return {

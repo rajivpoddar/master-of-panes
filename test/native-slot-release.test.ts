@@ -59,6 +59,34 @@ function fixture(): Fixture {
   };
 }
 
+function legacyIssueOnlyFixture(): Fixture {
+  const directory = mkdtempSync(join(tmpdir(), "mop-native-release-legacy-"));
+  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+  assert.equal(db.assignSlot(4, "legacy issue-only task", "github:heydonna-app/heydonna-app", 7554, null, null, null, 0).ok, true);
+  db.updateSlot(4, { idle: true, activity: "waiting_for_pm_direction" });
+  const current = db.getSlot(4)!;
+  const expectedTuple = slotAssignmentTuple(current)!;
+  return {
+    db,
+    directory,
+    request: {
+      slot: 4,
+      expected_epoch: current.assignment_epoch,
+      expected_tuple: {
+        repository_id: expectedTuple.repository_id,
+        issue: expectedTuple.issue,
+        pr: expectedTuple.pr,
+        branch: expectedTuple.branch,
+        head_sha: expectedTuple.head_sha,
+        work_kind: expectedTuple.work_kind,
+        handoff_id: expectedTuple.handoff_id,
+        claimed_at: expectedTuple.claimed_at,
+      },
+      intended_main_head: MAIN_HEAD,
+    },
+  };
+}
+
 function closeFixture(value: Fixture): void {
   value.db.close();
   rmSync(value.directory, { recursive: true, force: true });
@@ -125,6 +153,18 @@ function noPaneRequest(value: Fixture): NativeSlotNoPaneReleaseRequest {
     expected_task: request.expected_task,
     checkout_path: request.checkout_path,
   });
+  return request;
+}
+
+function quiescentRequest(value: Fixture): NativeSlotReleaseRequest {
+  const effect_id = "quiescent-legacy-release-7554";
+  const request = {
+    ...value.request,
+    effect_id,
+    release_mode: "quiescent_legacy_issue_only" as const,
+    request_digest: "",
+  };
+  request.request_digest = computeFamily2ReleaseDigest(request);
   return request;
 }
 
@@ -264,6 +304,97 @@ test("pane-mediated release claims before delivery and releases the claim after 
     );
   } finally {
     closeFixture(value);
+  }
+});
+
+test("issue-only legacy release requires explicit quiescent mode before pane effects", async () => {
+  const value = legacyIssueOnlyFixture();
+  try {
+    let deliveries = 0;
+    let resets = 0;
+    const result = await coordinator(value, {
+      instruction: () => { deliveries += 1; },
+      observe: async () => { resets += 1; return exactObservation(); },
+    }).release(value.request);
+    assert.equal(result.code, "quiescent_release_required");
+    assert.equal(deliveries, 0);
+    assert.equal(resets, 0);
+    assert.equal(value.db.getSlot(4)?.occupied, true);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test("quiescent issue-only release attests clean main without pane delivery and replays safely", async () => {
+  const value = legacyIssueOnlyFixture();
+  try {
+    let deliveries = 0;
+    let resets = 0;
+    let observations = 0;
+    let intentVisible = false;
+    const request = quiescentRequest(value);
+    const release = coordinator(value, {
+      instruction: () => { deliveries += 1; },
+      observe: async () => { resets += 1; return exactObservation(); },
+      observeReadOnly: async () => {
+        observations += 1;
+        intentVisible = value.db.hasActiveNativeReleaseIntent(
+          request.slot,
+          request.expected_epoch,
+          request.expected_tuple,
+        );
+        return { checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: MAIN_HEAD };
+      },
+    });
+    const first = await release.release(request);
+    assert.equal(first.code, "released");
+    assert.equal(first.success, true);
+    assert.equal(first.idempotent, false);
+    assert.equal(deliveries, 0);
+    assert.equal(resets, 0);
+    assert.equal(observations, 1);
+    assert.equal(intentVisible, true);
+    assert.equal(value.db.getSlot(4)?.occupied, false);
+    assert.equal(value.db.getSlot(4)?.assignment_epoch, request.expected_epoch + 1);
+    assert.equal(slotAssignmentTuple(value.db.getSlot(4)!), null);
+    assert.equal(value.db.getSlot(4)?.task, null);
+
+    const replay = await release.release(request);
+    assert.equal(replay.code, "released");
+    assert.equal(replay.success, true);
+    assert.equal(replay.idempotent, true);
+    assert.equal(deliveries, 0);
+    assert.equal(resets, 0);
+    assert.equal(observations, 1);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test("quiescent release preserves DND, active-turn, productive, and checkout attestation fences", async (t) => {
+  const cases: Array<{ name: string; mutate: (db: MoPDatabase) => void; observe?: () => Promise<CheckoutReadOnlyObservation>; code: string }> = [
+    { name: "DND", mutate: (db) => db.updateSlot(4, { dnd: true }), code: "dnd_active" },
+    { name: "active turn", mutate: (db) => db.updateSlot(4, { active_turn_id: "turn", active_turn_state: "active" }), code: "slot_not_idle" },
+    { name: "productive activity", mutate: (db) => db.updateSlot(4, { activity: "working" }), code: "productive_work" },
+    { name: "dirty checkout", mutate: () => {}, observe: async () => ({ checkout_path: CHECKOUT, clean: false, unpushed_commits: ["commit"], branch: "main", head: MAIN_HEAD }), code: "quiescent_attestation_failed" },
+    { name: "wrong branch", mutate: () => {}, observe: async () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "fix/old", head: MAIN_HEAD }), code: "quiescent_attestation_failed" },
+    { name: "wrong head", mutate: () => {}, observe: async () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: "c".repeat(40) }), code: "quiescent_attestation_failed" },
+  ];
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      const value = legacyIssueOnlyFixture();
+      try {
+        testCase.mutate(value.db);
+        const before = value.db.getSlot(4)!;
+        const result = await coordinator(value, {
+          observeReadOnly: testCase.observe ?? (async () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: MAIN_HEAD })),
+        }).release(quiescentRequest(value));
+        assert.equal(result.code, testCase.code);
+        assert.deepEqual(value.db.getSlot(4), before);
+      } finally {
+        closeFixture(value);
+      }
+    });
   }
 });
 

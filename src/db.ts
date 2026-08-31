@@ -813,6 +813,7 @@ export class MoPDatabase {
       effect_id: string;
       request_digest: string;
       intended_main_head: string;
+      quiescent?: boolean;
     },
   ): SlotMutationResult {
     if (!Number.isInteger(expectedEpoch)) {
@@ -948,6 +949,14 @@ export class MoPDatabase {
       }
       if (current.active_turn_id !== null || current.active_turn_state !== "inactive") {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "active_turn" };
+      }
+      if (effect?.quiescent) {
+        if (current.dnd) {
+          return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "dnd_active" };
+        }
+        if (!current.idle || (current.activity !== null && current.activity !== "waiting_for_pm_direction")) {
+          return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "productive_work" };
+        }
       }
 
       this.updateAssignmentState(slot, {

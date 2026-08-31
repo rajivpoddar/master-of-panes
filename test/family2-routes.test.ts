@@ -110,3 +110,43 @@ test("authenticated no-pane route forwards the complete explicit release identit
   assert.equal((requestBody as any).checkout_path, body.checkout_path);
   assert.equal("session_id" in (requestBody as any), false);
 });
+
+test("authenticated release route forwards the explicit quiescent legacy mode", async () => {
+  let requestBody: any;
+  const app = new Hono();
+  registerFamily2Routes(app, {
+    db: {} as any,
+    nativeSlotRelease: {
+      release: async (request: unknown) => {
+        requestBody = request;
+        return { success: false, code: "quiescent_attestation_failed", idempotent: false, assignment_epoch: 614 };
+      },
+    } as any,
+    family2ReleaseEffectAdapter: {} as any,
+    clearPlanApprovalTimer: () => undefined,
+  });
+  const body = {
+    expected_epoch: 614,
+    expected_repository_id: "992731533",
+    expected_issue: 7554,
+    expected_pr: null,
+    expected_branch: null,
+    expected_head_sha: null,
+    expected_work_kind: null,
+    expected_handoff_id: null,
+    expected_claimed_at: "2026-08-31T19:23:34.589Z",
+    intended_main_head: "b".repeat(40),
+    effect_id: "quiescent-release:4:614",
+    request_digest: "a".repeat(64),
+    release_mode: "quiescent_legacy_issue_only",
+  };
+  const response = await app.request("http://mop/slots/4/release", {
+    method: "POST",
+    headers: { [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  assert.equal(response.status, 409);
+  assert.equal(requestBody.release_mode, body.release_mode);
+  assert.equal(requestBody.expected_epoch, body.expected_epoch);
+  assert.equal(requestBody.expected_tuple.issue, body.expected_issue);
+});

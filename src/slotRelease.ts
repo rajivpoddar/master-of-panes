@@ -13,6 +13,8 @@ import {
 import type { SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
 
+export const QUIESCENT_LEGACY_RELEASE_MODE = "quiescent_legacy_issue_only" as const;
+
 export interface NativeSlotReleaseRequest {
   slot: number;
   expected_epoch: number;
@@ -21,6 +23,8 @@ export interface NativeSlotReleaseRequest {
   /** Immutable Family-2 effect identity; absent for legacy native callers. */
   effect_id?: string;
   request_digest?: string;
+  /** Explicit no-pane path for quiescent issue-only legacy ownership. */
+  release_mode?: "quiescent_legacy_issue_only";
 }
 
 export interface NativeSlotNoPaneReleaseRequest {
@@ -37,6 +41,8 @@ export interface CheckoutReadOnlyObservation {
   checkout_path: string;
   clean: boolean;
   unpushed_commits: string[];
+  branch?: string | null;
+  head?: string | null;
   error?: string | null;
 }
 
@@ -80,7 +86,9 @@ export type NativeSlotReleaseCode =
   | "dnd_active"
   | "task_mismatch"
   | "productive_work"
-  | "checkout_not_clean";
+  | "checkout_not_clean"
+  | "quiescent_release_required"
+  | "quiescent_attestation_failed";
 
 export interface NativeSlotReleaseResult {
   success: boolean;
@@ -309,8 +317,15 @@ export class NativeSlotReleaseCoordinator {
     if (!assignmentTupleMatches(slotAssignmentTuple(current), tuple)) {
       return result("observed_tuple_mismatch", "Complete owner tuple changed before release delivery.", current, "Re-read MoP and retry with the current tuple.");
     }
+    if (current.dnd) {
+      return result("dnd_active", "The slot is in DND and cannot be released.", current, "Leave the owner untouched and retry after DND is cleared.");
+    }
     if (current.active_turn_id !== null || current.active_turn_state !== "inactive") {
       return result("slot_not_idle", "The owning hook turn is still active or indeterminate.", current, "Wait for the authoritative Stop or SessionEnd hook and retry.");
+    }
+    if (request.release_mode === QUIESCENT_LEGACY_RELEASE_MODE
+      && (!current.idle || (current.activity !== null && current.activity !== "waiting_for_pm_direction"))) {
+      return result("productive_work", "The quiescent legacy release requires an idle, non-productive slot.", current, "Leave the owner untouched and retry only after the slot is quiescent.");
     }
     return {
       request: {
@@ -438,6 +453,26 @@ export class NativeSlotReleaseCoordinator {
   }
 
   async release(request: NativeSlotReleaseRequest): Promise<NativeSlotReleaseResult> {
+    const requestedTuple = normalizeAssignmentTuple(request.expected_tuple);
+    const issueOnlyLegacyTuple = Boolean(
+      requestedTuple
+      && requestedTuple.issue !== null
+      && requestedTuple.pr === null
+      && requestedTuple.branch === null
+      && requestedTuple.head_sha === null
+      && requestedTuple.work_kind === null
+      && requestedTuple.handoff_id === null,
+    );
+    if (request.release_mode !== undefined && request.release_mode !== QUIESCENT_LEGACY_RELEASE_MODE) {
+      return result("invalid_request", "The native release mode is unsupported.", this.dependencies.db.getSlot(request.slot), "Use the explicit quiescent legacy mode only for an issue-only tuple.");
+    }
+    if (request.release_mode === undefined && issueOnlyLegacyTuple) {
+      return result("quiescent_release_required", "An issue-only legacy owner requires the explicit quiescent release mode.", this.dependencies.db.getSlot(request.slot), "Re-read the exact owner and retry with release_mode=quiescent_legacy_issue_only.");
+    }
+    if (request.release_mode === QUIESCENT_LEGACY_RELEASE_MODE
+      && (!issueOnlyLegacyTuple || typeof request.effect_id !== "string" || request.effect_id.trim() === "")) {
+      return result("invalid_request", "Quiescent legacy release requires one issue-only tuple and durable effect identity.", this.dependencies.db.getSlot(request.slot), "Supply the exact issue-only owner tuple and immutable effect identity.");
+    }
     const replay = this.replayDurableEffect(request);
     if (replay) return replay;
     const validated = this.validateInitialRequest(request);
@@ -514,6 +549,72 @@ export class NativeSlotReleaseCoordinator {
         );
       }
       const checkoutPath = resolve(checkoutPathRaw);
+      if (request.release_mode === QUIESCENT_LEGACY_RELEASE_MODE) {
+        let observation: CheckoutReadOnlyObservation;
+        try {
+          observation = await this.dependencies.observeCheckout(checkoutPath);
+        } catch (error) {
+          observation = {
+            checkout_path: checkoutPath,
+            clean: false,
+            unpushed_commits: [],
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        const attested = Boolean(
+          observation
+          && observation.checkout_path === checkoutPath
+          && observation.clean
+          && Array.isArray(observation.unpushed_commits)
+          && observation.unpushed_commits.length === 0
+          && observation.error == null
+          && observation.branch === "main"
+          && typeof observation.head === "string"
+          && observation.head.toLowerCase() === validated.request.intended_main_head,
+        );
+        if (!attested) {
+          return result(
+            "quiescent_attestation_failed",
+            "Quiescent release requires a clean main checkout at the intended head.",
+            this.dependencies.db.getSlot(request.slot),
+            "Leave the slot occupied and retry only after a fresh read-only main checkout attestation.",
+          );
+        }
+        const cleared = this.dependencies.db.commitNativeRelease(
+          request.slot,
+          validated.request.expected_epoch,
+          validated.request.expected_tuple,
+          request.effect_id && request.request_digest
+            ? {
+                effect_id: request.effect_id,
+                request_digest: request.request_digest,
+                intended_main_head: validated.request.intended_main_head,
+                quiescent: true,
+              }
+            : undefined,
+        );
+        if (!cleared.ok) {
+          const code = cleared.reason === "dnd_active"
+            || cleared.reason === "active_turn"
+            || cleared.reason === "productive_work"
+            || cleared.reason === "epoch_mismatch"
+            || cleared.reason === "observed_tuple_mismatch"
+            || cleared.reason === "slot_already_free_unverifiable"
+            ? cleared.reason
+            : "clear_conflict";
+          return result(code, `Quiescent release refused: ${cleared.reason ?? "unknown"}.`, this.dependencies.db.getSlot(request.slot), "Leave the owner untouched and re-read the exact tuple.");
+        }
+        const readback = this.dependencies.db.getSlot(request.slot);
+        if (!readback || readback.occupied || readback.assignment_epoch !== request.expected_epoch + 1 || slotAssignmentTuple(readback) !== null || readback.task !== null) {
+          return result("free_readback_failed", "Quiescent release readback did not prove the exact FREE postcondition.", readback, "Stop and inspect MoP before any further mutation.");
+        }
+        return {
+          ...result("released", `Slot ${request.slot} released without pane delivery.`, readback, null, true),
+          effect_id: request.effect_id,
+          request_digest: computedDigest ?? request.request_digest,
+          idempotent: cleared.idempotent,
+        };
+      }
       const instruction = buildLiteralResetInstruction(validated.request, checkoutPath);
       const delivered = await this.dependencies.deliverInstruction(request.slot, instruction);
       if (!delivered) {
