@@ -23,9 +23,11 @@
       "~/Downloads/projects/heydonna-app-3004/.claude/skills/respawn",
       "~/Downloads/projects/heydonna-app-3005/.claude/skills/respawn",
       "~/Downloads/projects/heydonna-app-3006/.claude/skills/respawn",
-      "~/.codex/skills/codex-stdio-send-message"
+      "~/.codex/skills/codex-stdio-send-message",
+      "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
+      "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 40,
+    "selected_count": 42,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -335,6 +337,24 @@
       "sha256": "304e715d621e2a67fe0ee40d64e483b060db6405a28065b3314ef03a5ad55cda",
       "mode": 493,
       "ownership_class": "shared-claude-slot-skill-wrapper",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/automations/heydonna-3h-ready-pool-reconciliation/prompt.template",
+      "canonical_target": "/Users/rajiv/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt",
+      "sha256": "43d4b556dea01f999991259de55d1bc2f53f38f06887a98c7dc3a6aa2c54f38e",
+      "mode": 420,
+      "ownership_class": "shared-codex-automation-prompt-template",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
+      "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
+      "sha256": "2c360d37ddf75f74df68bc5f42b2ba72c107b29aa080fe96711a439721eb9f6c",
+      "mode": 420,
+      "ownership_class": "shared-codex-monitor",
       "dependency_status": "closed",
       "dependencies": []
     },
