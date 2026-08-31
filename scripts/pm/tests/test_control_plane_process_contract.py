@@ -45,6 +45,7 @@ def test_verified_control_plane_routes_to_one_mop_candidate_owner() -> None:
 def test_approval_belongs_to_cto_and_pm_gets_only_post_deploy_terminal() -> None:
     contract = _text("codex/skills/_shared/release-conveyor-contract.md")
     skill = _text("codex/skills/heydonna-control-plane-repair/SKILL.md")
+    wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
     assert "\"owner\": \"CTO_DECISIONS\"" in contract
     assert "publish_rollout_verify_and_notify_pm" in contract
     assert "CTO Decisions performs" in skill
@@ -52,6 +53,11 @@ def test_approval_belongs_to_cto_and_pm_gets_only_post_deploy_terminal() -> None
     assert "MoP stops" in skill
     assert "never deploys after approval" in skill
     assert "The packet is an actionable CTO review wake" in skill
+    assert "CTO_INLINE_APPROVE" in wake
+    assert "approved bounded control-plane publication/install/activation" in wake
+    assert "must not wait, poll, investigate broadly" in wake
+    assert "Never implement or continuously monitor" in wake
+    assert "Never implement, deploy, or monitor any bounded control-plane repair" not in wake
 
 
 def test_canonical_asset_manifest_has_exact_source_digests_and_modes() -> None:

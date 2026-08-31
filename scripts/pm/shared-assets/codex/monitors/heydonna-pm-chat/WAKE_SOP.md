@@ -105,12 +105,18 @@ release-only edge.
 
 The CTO decisions task must remain continuously responsive to Rajiv and PM
 decision/status messages. It is a fast verification, decision, routing, and
-receipt-consumption surface — never a long-running execution surface.
+receipt-consumption surface. The sole execution exception is the exact,
+approved bounded control-plane publication/install/activation/restart/
+live-readback/rollback sequence, which CTO Decisions owns and completes
+event-driven without waiting, polling, broad investigation, or monitoring.
 
 - Any task that can outlive one bounded wake pass must be handed off immediately
   to one of the existing execution tasks below. This includes implementation,
-  repair, deployment, test or review runs, CI investigation, browser/service
-  configuration, monitoring, waiting, repeated verification, and follow-up.
+  repair, test or review runs, CI investigation, browser/service configuration,
+  monitoring, waiting, repeated verification, and follow-up. The exception is
+  the exact approved bounded control-plane publication/install/activation/
+  restart/live-readback/rollback sequence, which CTO Decisions executes and
+  terminates in the same event-driven handoff; it is not ongoing monitoring.
 - Existing execution tasks are reusable worker capacity, not single-purpose
   silos. Prefer the closest affinity, but they may accept other bounded work
   when the exact tuple, authority, scope, proof, rollback, and terminal return
@@ -1133,18 +1139,24 @@ process launch or packet path.
 - Never execute or monitor a rescue or hotfix in the CTO decisions task.
   Forward it once to dedicated rescues task
   `019f942b-63ea-7953-b2ea-c4786c850b87` and return without polling.
-- Never implement, deploy, or monitor any bounded control-plane repair in CTO
-  decisions or PM. After ownership and scope verification, CTO sends one
+- Never implement or continuously monitor a bounded control-plane repair in
+  CTO decisions or PM. After ownership and scope verification, CTO sends one
   exact brief to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628`; MoP returns
-  its candidate for one CTO inline review. CTO alone publishes, rolls out,
-  restarts when required, verifies, and informs PM after approval.
+  its candidate for one CTO inline review. The exact `CTO_INLINE_APPROVE`
+  exception lets CTO Decisions publish, install/activate, restart when
+  required, live-read back, roll back if necessary, and inform PM in one
+  bounded event-driven sequence; it must not wait, poll, investigate broadly,
+  or keep monitoring after the terminal readback.
 - Never route a PM Operator or `pm-transition` cutover change to superseded task
   `01a03c74-fc97-7a62-bb47-001ac7fb0710` or the generic control-plane task. Use
   only `01a04154-c9c1-7bc1-8f7b-009a87bc7628`.
-- Never keep any implementation, test, review, investigation, deployment,
-  browser/service configuration, monitor, wait, or repeated-verification task
-  in the CTO decisions task. Route it to one of the three reusable execution
-  tasks and return after exact-tuple handoff acceptance.
+- Never keep any implementation, test, review, investigation, browser/service
+  configuration, monitor, wait, or repeated-verification task in the CTO
+  decisions task. The sole exception is the exact approved bounded
+  control-plane publication/install/activation/restart/live-readback/rollback
+  sequence, which CTO Decisions executes to a terminal readback rather than
+  delegating or monitoring indefinitely. Route all other work to one of the
+  reusable execution tasks and return after exact-tuple handoff acceptance.
 - Never poll GitHub in any task. Only a single bounded snapshot at wake
   consumption or terminal action is permitted; further state must arrive by
   event or receipt.
