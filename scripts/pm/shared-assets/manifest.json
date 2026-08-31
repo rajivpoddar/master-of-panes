@@ -183,15 +183,6 @@
       "dependencies": []
     },
     {
-      "source_path": "claude/scripts/ci/required-ci-jobs.json",
-      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
-      "sha256": "39cf06aacfa5e1df53b1fe791a34c2e3eb0c8028c183e77adf07d7d533ef33a1",
-      "mode": 420,
-      "ownership_class": "shared-claude-ci-failure-triage-contract",
-      "dependency_status": "closed",
-      "dependencies": []
-    },
-    {
       "source_path": "claude/scripts/ci/publish-ci-verdict.py",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
       "sha256": "0377c424f10dfc252cd3157123a52abc1f653d7741afe903d87adbb67d54e705",
@@ -201,9 +192,18 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/ci/required-ci-jobs.json",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
+      "sha256": "39cf06aacfa5e1df53b1fe791a34c2e3eb0c8028c183e77adf07d7d533ef33a1",
+      "mode": 420,
+      "ownership_class": "shared-claude-ci-failure-triage-contract",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/ci/rerun-after-local-proof.sh",
       "canonical_target": "/Users/rajiv/.claude/control-plane/current/claude/scripts/ci/rerun-after-local-proof.sh",
-      "sha256": "848b0b0a6dd373a8796b37bd310f0b383815aa9c443298e284a71a1eeacff322",
+      "sha256": "610d8408e306d446a104cbcff9786c9f8dc10defb6cb42438d3c60046f22f923",
       "mode": 493,
       "ownership_class": "shared-claude-ci-rerun-consumer",
       "dependency_status": "closed",

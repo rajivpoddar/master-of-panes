@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
-import re
+import json
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -55,6 +57,82 @@ def run_snapshot(**overrides: object) -> dict:
 
 
 class CiVerdictProducerConsumerTests(unittest.TestCase):
+    def consumer_script(self) -> str:
+        wrapper = WRAPPER.read_text(encoding="utf-8")
+        start = wrapper.index('  python3 - "$comments_file"')
+        start = wrapper.index("<<'PY'\n", start) + len("<<'PY'\n")
+        end = wrapper.index("\nPY\n", start)
+        return wrapper[start:end]
+
+    def consumer_accepts(self, verdict: dict, *, duplicate: bool = False) -> bool:
+        marker = f"ci-failure-investigation:run={RUN_ID} attempt=1 head={HEAD}"
+        body = f"{marker}\n<!-- ci-verdict: {json.dumps(verdict, sort_keys=True)} -->"
+        comments = [
+            {"body": body},
+            *([{"body": body}] if duplicate else []),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            comments_path = Path(directory) / "comments.json"
+            comments_path.write_text(json.dumps(comments), encoding="utf-8")
+            process = subprocess.run(
+                [
+                    "python3", "-", str(comments_path), str(RUN_ID), "1", HEAD,
+                    "7591", "", "local", "", "",
+                ],
+                input=self.consumer_script(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        return process.returncode == 0
+
+    def test_consumer_requires_current_attempt_test_authorization(self) -> None:
+        verdict = {
+            "schema_version": 3,
+            "run_id": RUN_ID,
+            "attempt": 1,
+            "run_attempt": 1,
+            "pr": 7591,
+            "sha": HEAD,
+            "current_for_pr": True,
+            "classification": "test",
+            "requested_owner_action": "rerun-after-proof",
+            "local_repro_result": "passed",
+            "fast_fingerprint": {"signature": "shared harness"},
+            "rerun_authorization": {
+                "action": "rerun-after-proof",
+                "run_id": str(RUN_ID),
+                "attempt": 1,
+                "head_sha": HEAD,
+                "single_use": True,
+            },
+        }
+        self.assertTrue(self.consumer_accepts(verdict))
+        cases = {
+            "missing run_attempt": {**verdict, "run_attempt": None},
+            "stale run_attempt": {**verdict, "run_attempt": 2},
+            "missing authorization": {key: value for key, value in verdict.items() if key != "rerun_authorization"},
+            "malformed authorization": {**verdict, "rerun_authorization": "CTO rerun"},
+            "wrong authorization head": {
+                **verdict,
+                "rerun_authorization": {**verdict["rerun_authorization"], "head_sha": "0" * 40},
+            },
+            "wrong authorization run": {
+                **verdict,
+                "rerun_authorization": {**verdict["rerun_authorization"], "run_id": "1"},
+            },
+            "wrong authorization attempt": {
+                **verdict,
+                "rerun_authorization": {**verdict["rerun_authorization"], "attempt": 2},
+            },
+            "wrong verdict head": {**verdict, "sha": "0" * 40},
+            "wrong verdict run": {**verdict, "run_id": 1},
+        }
+        for name, invalid in cases.items():
+            with self.subTest(name=name):
+                self.assertFalse(self.consumer_accepts(invalid))
+        self.assertFalse(self.consumer_accepts(verdict, duplicate=True))
+
     def test_producer_binds_exact_latest_attempt_workflow_and_rerun_action(self) -> None:
         verdict = MODULE.verdict_from_investigation(
             investigation_packet(),
@@ -129,15 +207,8 @@ class CiVerdictProducerConsumerTests(unittest.TestCase):
             run=run_snapshot(),
             pull={"head": {"sha": HEAD}},
         )
-        comment = MODULE.render_comment("shared harness report", verdict, RUN_ID, 1, HEAD)
-        self.assertIn(f"ci-failure-investigation:run={RUN_ID} attempt=1 head={HEAD}", comment)
-        wrapper = WRAPPER.read_text(encoding="utf-8")
-        self.assertIn("run_attempt_missing_or_malformed", wrapper)
-        self.assertIn("matching_comments = [", wrapper)
-        self.assertIn("if len(matching_comments) > 1:", wrapper)
-        self.assertIn('if "run_attempt" in verdict', wrapper)
-        self.assertIn('authorization.get("action") != "rerun-after-proof"', wrapper)
-        self.assertNotRegex(wrapper, r"run_attempt=1")
+        self.assertTrue(self.consumer_accepts(verdict))
+        self.assertFalse(self.consumer_accepts(verdict, duplicate=True))
 
 
 if __name__ == "__main__":

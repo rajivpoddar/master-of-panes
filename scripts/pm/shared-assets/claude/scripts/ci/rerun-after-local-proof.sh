@@ -217,6 +217,30 @@ def exact_tuple(verdict, require_schema3=False):
             return False
     return True
 
+def current_attempt_test_authorization(verdict):
+    # The package-owned producer emits schema-3 test verdicts.  Unlike legacy
+    # admission classes, this class is only rerunnable when the durable
+    # current-attempt binding and single-use authorization are both present.
+    # Keep this predicate narrow so legacy classes retain their established
+    # guards while an unbound producer verdict cannot authorize a rerun.
+    if verdict.get("schema_version") != 3 or verdict.get("classification") != "test":
+        return False
+    run_attempt = verdict.get("run_attempt")
+    if isinstance(run_attempt, bool) or str(run_attempt) != attempt:
+        return False
+    authorization = verdict.get("rerun_authorization")
+    if not isinstance(authorization, dict) or set(authorization) != {
+        "action", "run_id", "attempt", "head_sha", "single_use"
+    }:
+        return False
+    return (
+        authorization.get("action") == "rerun-after-proof"
+        and str(authorization.get("run_id")) == run_id
+        and str(authorization.get("attempt")) == attempt
+        and authorization.get("head_sha") == head
+        and authorization.get("single_use") is True
+    )
+
 def no_causal_or_breaker(verdict, fingerprint):
     return verdict.get("causal_fingerprint") in (None, "", {}, []) and not fingerprint.get("circuit_breaker")
 
@@ -480,6 +504,13 @@ for comment in reversed(matching_comments):
         and verdict.get("requested_owner_action") == "rerun-after-proof"
         and verdict.get("local_repro_result") in {"passed", "skipped", "impossible"}
         and not fingerprint.get("circuit_breaker")
+        and (
+            not (
+                verdict.get("schema_version") == 3
+                and verdict.get("classification") == "test"
+            )
+            or current_attempt_test_authorization(verdict)
+        )
     )
     # Verdict-lifecycle admission (incident
     # control-plane:repair-dispatch-chain:verdict-lifecycle): a pending
