@@ -249,7 +249,7 @@
     {
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/control-plane/sakshi-heartbeat.py",
-      "sha256": "009b0528193d59f5449d4da5e8acd30bc100676849a89848355713ecb351d540",
+      "sha256": "e04914828b8d115a15aeefbe07869af89c58af0bb1c26da3acd6e964d51e6ac3",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
       "dependency_status": "closed",

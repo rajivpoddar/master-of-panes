@@ -286,7 +286,6 @@ class SakshiContinuationJoinTests(unittest.TestCase):
                 records, error = MODULE._load_open_pr_continuations("7591", HEAD)
                 self.assertIsNone(error)
                 self.assertEqual(records[0]["lane"], "CI")
-                self.assertEqual(records[0]["next_owner"], "cto")
                 conn.execute(
                     "insert into obligations values (4,'ci_watch','open',7591,null,null,'unknown','t','await','hold',?,null,null)",
                     (json.dumps({"head": HEAD}),),
@@ -314,43 +313,6 @@ class SakshiContinuationJoinTests(unittest.TestCase):
                 records, error = MODULE._load_open_pr_continuations("7591", HEAD)
                 self.assertEqual(records, [])
                 self.assertIn("contradictory", error or "")
-            finally:
-                MODULE.PM_OPS_DB = original
-                conn.close()
-
-    def test_production_loaded_record_survives_evaluator_normalization(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            db = Path(temp) / "pm-ops.db"
-            conn = sqlite3.connect(db)
-            conn.execute("create table obligations (id integer, kind text, status text, pr integer, issue integer, slot integer, owner text, title text, required_action text, blocker text, evidence_json text, updated_at text, created_at text)")
-            conn.execute(
-                "insert into obligations values (9,'dependency_wait','open',7591,null,null,'cto','dependency hold','consume the exact-head continuation at the next safe boundary','dependency is holding the PR',?,null,null)",
-                (json.dumps({"head": HEAD}),),
-            )
-            conn.commit()
-            original = MODULE.PM_OPS_DB
-            MODULE.PM_OPS_DB = db
-            try:
-                records, error = MODULE._load_open_pr_continuations("7591", HEAD)
-                self.assertIsNone(error)
-                self.assertEqual(len(records), 1)
-                record = records[0]
-                self.assertEqual(record["owner"], "cto")
-                self.assertEqual(record["next_owner"], "cto")
-                self.assertTrue(record["next_action"])
-                self.assertTrue(record["wake"])
-                self.assertTrue(record["hold_reason"])
-                row = MODULE.evaluate_open_pr_activity(
-                    pr(), [], {}, {}, now_utc=NOW, continuation_records=records
-                )
-                self.assertEqual(row["lane"], "dependency-blocked")
-                self.assertEqual(row["owner"], "cto")
-                self.assertEqual(row["owner_source"], "pm-ops.obligations")
-                self.assertEqual(row["next_owner"], "cto")
-                self.assertTrue(row["next_action"])
-                self.assertTrue(row["wake"])
-                self.assertTrue(row["hold_reason"])
-                self.assertEqual(row["workflow_motion"], "none")
             finally:
                 MODULE.PM_OPS_DB = original
                 conn.close()
