@@ -19,6 +19,20 @@ CTO Decisions performs causal diagnosis and classifies the issue as
 `PRODUCT`, `CONTROL_PLANE`, `MIXED`, or `UNKNOWN`; only a verified bounded
 `CONTROL_PLANE` brief is sent to the implementation task.
 
+## Open-PR ownership
+
+For open PRs, PM has exactly two operational responsibilities: launch and
+return one bounded CI/E2E failure investigation bound to the exact failed
+PR/head/run, and assign a CTO-authorized rework, reproduction, or
+production-shaped proof packet to a compatible numbered slot. When an
+investigation proves that repro or rework is needed, PM returns the exact
+packet to CTO Decisions and assigns a slot only after CTO selects and
+authorizes that boundary. CTO/release ownership covers every other PR action,
+including exact-head CI/E2E admission/arming, capture, labels/state,
+workflow-terminal disposition, reruns/retries, rescue/release, sync,
+integration, release gates, and merge. PM reports evidence/status for those
+actions but does not execute them.
+
 ## Normative process
 
 1. CTO Decisions sends one exact implementation brief to the MoP task.

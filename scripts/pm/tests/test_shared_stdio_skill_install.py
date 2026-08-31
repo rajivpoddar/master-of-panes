@@ -94,9 +94,20 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
         block = re.search(r"```json\n(\{.*?\})\n```", contract, flags=re.DOTALL)
         self.assertIsNotNone(block)
         matrix = json.loads(block.group(1))
-        self.assertEqual(matrix["version"], 2)
+        self.assertEqual(matrix["version"], 3)
         scenarios = matrix["scenarios"]
-        self.assertEqual(len(scenarios), 7)
+        self.assertEqual(len(scenarios), 13)
+        self.assertEqual(scenarios["ci_failure_investigation"]["owner"], "PM")
+        self.assertEqual(scenarios["cto_routed_rework_or_repro_slot_assignment"]["owner"], "PM")
+        for scenario in (
+            "code_ready_without_admission",
+            "capture_decision_or_dispatch",
+            "pr_label_or_state_transition",
+            "rerun_or_retry_decision",
+            "rescue_or_release_routing",
+            "sync_integration_and_merge",
+        ):
+            self.assertEqual(scenarios[scenario]["owner"], "CTO_DECISIONS")
         candidate = scenarios["control_plane_candidate"]
         self.assertEqual(candidate["owner"], "MOP_IMPLEMENTATION_TASK_01a04154")
         self.assertEqual(candidate["action"], "return_candidate_to_cto_inline")

@@ -23,14 +23,19 @@ Apply the normative ownership and motion matrix in
 `/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md`. Slots are
 for executable implementation, reproduction, or production-shaped proof
 only; CI, capture, review, decisions, and external waits are off-slot. PM
-executes routine free-compatible-slot refill and code/proof-ready exact-head
-CI/E2E admission. The CTO/release owner consumes workflow terminals through
-causal routing or a head-pinned merge. Every nonterminal wake includes
+has exactly two open-PR responsibilities: one bounded exact failed-PR/head/run
+CI/E2E investigation, and the minimal slot/session/packet mechanics for a
+CTO-authorized rework, reproduction, or production-shaped proof assignment.
+The CTO/release owner owns all other PR actions, including exact-head CI/E2E
+admission/arming, capture, labels/state, workflow terminals, reruns/retries,
+rescue/release, sync/integration, release gates, and head-pinned merge. PM
+reports evidence/status for those actions only. Every nonterminal wake includes
 `next_action`, `next_owner`, and `wake`; labels, holds, relays, watching, and
 queue receipts are not motion. Code-ready without admission, a CI/capture
 terminal, and a free compatible slot with executable drain work are hard
-actionable wakes. This monitor/SOP remains read-only and routes action; it
-never mutates GitHub, MoP, workflows, or product state.
+actionable wakes routed to CTO, except that PM may assign a slot only after an
+explicit CTO-routed rework/repro packet. This monitor/SOP remains read-only
+and routes action; it never mutates GitHub, MoP, workflows, or product state.
 
 The receiving CTO wake must execute or durably delegate the next transition in
 that same wake; reporting or watching without a bounded owner/action/wake is
@@ -510,8 +515,8 @@ CTO/Abhijit escalates product decisions and blockers to Rajiv by default:
 Rajiv granted standing authority to decide the recurring classes below
 automatically (DM `1786120874` + subsequent direction "yes and yes"): only
 genuinely new product/architecture/data-model/release-policy choices reach
-Rajiv. Do not nudge Rajiv for these — decide, direct PM with the exact
-transition, and record the receipt in the wake ledger:
+Rajiv. Do not nudge Rajiv for these — decide, route the exact transition to
+its owner, and record the receipt in the wake ledger:
 
 1. **CI-fire seals for verified rescue heads** — when a rescue head is
    code-complete with verified evidence (planner/QA/rescue receipts, tests
@@ -519,8 +524,9 @@ transition, and record the receipt in the wake ledger:
    gap (`mop_fable_agent_event_missing` family), choose **recorded override on
    the sealed packet**, scoped strictly to CI-fire admission (never merge
    authority). Bind the override to PR + full 40-char head + reason +
-   evidence, then direct PM to fire label-gated real CI+E2E (test + E2E
-   Smoke, not the exemption shell). Always pair with the bounded REPAIR of the
+   evidence, then CTO fires label-gated real CI+E2E (test + E2E Smoke, not the
+   exemption shell). PM only reports the evidence and does not arm, relabel,
+   retry, or capture the PR. Always pair with the bounded REPAIR of the
    missing-event recording so future rescues do not need overrides.
 2. **Stale repair closure** — when a control-plane/repair obligation's fix has
    landed on main with parity (and replay where applicable), close/resolve it
@@ -680,12 +686,14 @@ heartbeat must not manufacture workflow, capture, slot, source, label, or
 merge effects merely to make the report green; the CTO wake consumes each gap
 and acts through the matrix below.
 
-### Numbered-slot assignment (Rajiv 2026-08-29)
+### CTO-routed rework/repro numbered-slot assignment (PM-only assignment responsibility)
 
-Assignment is deliberately simple. Before assigning, check the selected
-slot's current session age. If it is older than six hours, clear that session
-once and prove a fresh context boundary; if the clear fails, stop the
-assignment. Otherwise PM performs exactly three operations:
+Assignment is deliberately simple and is permitted only after CTO Decisions
+selects and authorizes the exact rework, reproduction, or production-shaped
+proof packet. Before assigning, PM checks the selected slot's current session
+age. If it is older than six hours, clear that session once and prove a fresh
+context boundary; if the clear fails, stop the assignment. Otherwise PM
+performs exactly three operations:
 
 1. Assign the issue in MoP with one curl:
    `POST /slots/<slot>/assign` with header
@@ -724,9 +732,9 @@ waits.
 - Preserve the exact checkout, dirty/unpushed work, packet identity, and causal
   proof. Transfer the PR/fix continuation once to the existing rescues task;
   reproduction already completed in the slot must not be repeated.
-- After durable rescue acceptance, PM releases the stuck slot at the exact epoch
-  through the Python/degraded ownership path, clears only its slot projections,
-  and immediately refills it with the highest-priority eligible packet. Do not
+- After durable rescue acceptance, CTO Decisions owns release and rescue
+  routing. PM may perform only a subsequent CTO-authorized rework/repro slot
+  assignment, with the exact packet and minimal slot mechanics below. Do not
   release before the rescue owner has the complete state handoff.
 - The old slot stops work after handoff. Never run slot and rescue implementations
   concurrently, redeliver the packet, or discard dirty state. A true repro that
@@ -987,15 +995,18 @@ processed-wake ledger.
 - Reserve `control_plane_only` for orchestration outside the app CI harness—such
   as admission state, receipts, budgets, serialization, or deployment wrappers—
   that does not change which app/E2E producer runs or what that producer proves.
-- After the slot returns a new exact head and focused proof, use the normal
-  functionality-review, admission, capture, and strict-replay sequence.
+- After the slot returns a new exact head and focused proof, CTO/release
+  ownership applies the normal functionality-review, admission, capture, and
+  strict-replay sequence. PM only returns the slot packet and does not execute
+  those PR transitions.
 
 ## CTO wave admission and stale `ci-head` recovery (Rajiv 2026-08-24)
 
-PM transition/control-plane machinery is for PM-owned work. A CTO-directed PR
-review, release, or CI wave must not invoke `pm-transition`, Family-2, numbered
-slot ownership, MoP assignment, or a PM parked-target/assignment-owner check.
-Those PM-side records cannot block or authorize a CTO wave.
+PM failure reporting and CTO-authorized rework/repro slot assignment are the
+only PM operational responsibilities on an open PR. A CTO-directed PR review,
+release, or CI wave must not invoke `pm-transition`, Family-2, numbered-slot
+ownership, MoP assignment, or a PM parked-target/assignment-owner check. Those
+PM-side records cannot block or authorize a CTO wave.
 
 For a CTO wave, the dedicated review task supplies the exact-head functionality
 verdict and the merge task owns admission. After reverifying OPEN, non-draft,
@@ -1009,11 +1020,11 @@ current head, and let the sanctioned label gate emit exactly one genuine CI +
 E2E pair. This is the normal CTO-wave boundary, not a degraded PM transition or
 a control-plane repair.
 
-For PM-owned admission outside a CTO wave, keep using the canonical PM
-transition and its control-plane rules. Never use the CTO-wave boundary to
-clear a real product blocker, unresolved review risk, capture requirement,
-visual-QA/privacy/release hold, or an active exact-head workflow. Never mutate
-numbered slots or MoP, raw-edit unrelated labels, directly dispatch workflows,
+For ordinary open-PR admission outside a CTO wave, CTO/release ownership uses
+the canonical exact-head admission and control-plane rules. Never use a PM
+report or slot assignment to clear a real product blocker, unresolved review
+risk, capture requirement, visual-QA/privacy/release hold, or an active
+exact-head workflow. PM does not mutate PR labels/state, dispatch workflows,
 reconstruct proof packets, rerun, merge, or bypass any substantive gate.
 
 **Docs-only exemption (Rajiv 2026-08-24):** an exact-head PR whose complete
@@ -1032,7 +1043,7 @@ product/runtime diffs.
 | Exact-head merge-ready handoff with all gates satisfied | `MERGE_READY` | `heydonna-cto-merge-ready-sweep` | `EXECUTE_NOW`. Forward the exact tuple once to dedicated merge task `01a0324b-68e0-7491-988f-e7e1549f16f7`; do not merge, wait, or emit a portfolio sweep in this task. The merge task emits exactly one sweep only after verified merge success. |
 | Premature or contradictory merge-ready claim | `MERGE_READY_INVALID` | `heydonna-pr-review`, then `heydonna-cto-merge-ready-sweep` | `PM_CORRECTION`. Name the single missing or stale gate and require canonical promotion; do not raw-edit labels, merge, or emit a portfolio sweep. |
 | Exact-head CTO review requested | `CTO_PR_REVIEW` | `heydonna-pr-review` | `EXECUTE_NOW` for read-only review. Return approve/revise/block and the one terminal next transition. |
-| PM-owned bounded PR rescue requested after a verified review/rework cap | `CTO_RESCUE` | hand off to rescues task `019f942b-63ea-7953-b2ea-c4786c850b87`, which uses `heydonna-cto-rescue-pr` | `EXECUTE_NOW` only when the durable handoff assigns the exact PR/head and bounded contract to CTO rescue. Forward once and return; the rescues task sends the digest-bound patch/evidence packet to CTO decisions task `01a03236-2e61-71f3-a6a8-3dc24d8c8917` for independent review, without pushing, merging, or posting it directly to PM. |
+| CTO-routed bounded PR rescue requested after a verified review/rework cap | `CTO_RESCUE` | hand off to rescues task `019f942b-63ea-7953-b2ea-c4786c850b87`, which uses `heydonna-cto-rescue-pr` | `EXECUTE_NOW` only when the durable handoff assigns the exact PR/head and bounded contract to CTO rescue. Forward once and return; the rescues task sends the digest-bound patch/evidence packet to CTO decisions task `01a03236-2e61-71f3-a6a8-3dc24d8c8917` for independent review, without pushing, merging, or posting it directly to PM. PM may assign a numbered slot only when CTO explicitly routes a rework/repro packet. |
 | Rajiv explicitly authorizes Codex to repair and push one exact PR head | `CTO_DIRECT_RESCUE` | hand off to rescues task `019f942b-63ea-7953-b2ea-c4786c850b87`, which uses `heydonna-cto-direct-rescue-pr` | `EXECUTE_NOW`. Forward the exact source tuple once and return. The rescues task preserves the exact source head, uses a detached worktree, pushes non-force, and returns the exact new head and proof. Direct rescue is never inferred from `CTO_RESCUE_REQUIRED` alone. |
 | Rajiv explicitly authorizes an urgent P0 ship/hotfix | `CTO_HOTFIX` | hand off to rescues task `019f942b-63ea-7953-b2ea-c4786c850b87`, which uses `heydonna-cto-hotfix` | `EXECUTE_NOW`. Forward once and return; the rescues task stays within the named incident and release boundary and must not broaden the hotfix. |
 | Genuine required CI or E2E failure on the exact current `main` commit | `MAIN_RED_P0` | send to PR-merges, or to the existing rescues task if PR-merges is occupied; use `heydonna-cto-hotfix` for product/test scope or `heydonna-cto-direct-control-plane-repair` for proven allowed control-plane-only scope | `EXECUTE_NOW` under Rajiv's standing 2026-08-22 authority. Verify the exact push run/job once, hand off immediately through `$codex-stdio-send-message`, and return after accepted delivery. The task owns causal repro, smallest fix, focused proof, safe direct publication, and event-driven replacement CI/E2E. A confirmed infrastructure failure must receive one unchanged-head retry after causal proof, duplicate-active check, and the concrete health/eligibility condition clears. If both existing owners are blocked, escalate the exact ownerless P0 to Rajiv. No task creation, PM/slot ceremony, pre-classification rerun, polling, or unrelated scope. |
@@ -1042,12 +1053,12 @@ product/runtime diffs.
 | Any verified bounded control-plane defect or stabilization | `CONTROL_PLANE_REPAIR` | PM reports the first literal blocker/tuple to CTO; CTO diagnoses and sends one exact brief to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628` | `EXECUTE_NOW` after verifying bounded non-product scope and no duplicate owner. MoP returns candidate-only for exactly one CTO inline review; BLOCK returns rework to the same task; APPROVE makes CTO sole publisher/rollout/live verifier/PM notifier. PM has zero review/approval/retry role; never use a numbered slot. |
 | PM Operator, direct MoP/GitHub command adapter, executable caller cutover, or `pm-transition` retirement change | `PM_OPERATOR_CUTOVER` | CTO sends one exact brief to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628` | `EXECUTE_NOW` under Rajiv's current directive. MoP prepares and returns one candidate-only packet for CTO inline review; it does not publish or deploy. CTO alone publishes, rolls out, verifies, and notifies PM after approval. Preserve the exact baseline, migrate one reachable family at a time, and never route this work to PM, the retired generic repair route, or a numbered slot. |
 | Legacy or explicit `CTO_DIRECT_CONTROL_PLANE_REPAIR` label for a bounded control-plane defect | `CTO_DIRECT_CONTROL_PLANE_REPAIR` | normalize to the same CTO/MoP candidate-only contract above | `EXECUTE_NOW`; MoP prepares one candidate for exactly one CTO inline functionality review. A block returns to MoP; an approval is published and rolled out only by CTO Decisions. |
-| Numbered slot held by a control-plane repair (occupied-inactive or free-standby, off-slot repair running) | `CONTROL_PLANE_REPAIR_SLOT_HOLD` | exact-slot verification; then CTO Decisions applies the shared native bypass contract | `CTO_CORRECTION` only after one typed high-level refusal. Verify the exact slot log first (inactive turn, no active process, clean exact-head checkout, incident binding). For a full release/refill, use direct MoP `curl` with exact slot/identity/epoch and canonical authority header/payload, record response/readback, then complete-set GitHub labels, then exactly one literal `message-slot` packet; stop on failure and preserve substantive blockers. The repair stays off-slot and may not delay refill; no PM mutation, second owner, raw workflow, or numbered-slot repair work is allowed. |
-| Slot/PR ownership or transition mismatch | `SLOT_TRANSITION` | exact-slot verification; `codex-slot-rescue` only when explicitly authorized | Usually `PM_CORRECTION`. Preserve productive work. Direct PM to one canonical transition only after reading the exact slot log and live tuple. |
-| Occupied slot reports repeated same-head "in progress"/LOCAL_CONTINUE with no commit (PM JSONL slot deliveries + MoP nudge corroboration) | `SLOT_FALSE_PROGRESS` | verify the exact slot log tail, live MoP row/epoch, and checkout head; confirm no active canonical assignment/reconcile command | `PM_CORRECTION`. Direct PM to force terminalization now: commit + push the current work to a new head (affected proof, phase-a/planner/CI at the new head) or name a typed blocker; if no shippable commit within the 30m SLA, park/block the issue/PR preserving the partial patch, release the slot, and assign the next highest eligible rework. Failure: the slot remains at the same head with only "will continue" hold updates past the SLA. |
+| Numbered slot held by a control-plane repair (occupied-inactive or free-standby, off-slot repair running) | `CONTROL_PLANE_REPAIR_SLOT_HOLD` | exact-slot verification; then CTO Decisions applies the shared native bypass contract | `CTO_CORRECTION` only after one typed high-level refusal. CTO owns release/refill and uses direct MoP `curl` with exact slot/identity/epoch and canonical authority header/payload, records response/readback, then performs complete-set GitHub labels and exactly one literal `message-slot` packet when applicable; stop on failure and preserve substantive blockers. The repair stays off-slot; PM has no release, refill, label, or message ownership here. |
+| Slot/PR ownership or transition mismatch | `SLOT_TRANSITION` | exact-slot verification; CTO selects the safe boundary; PM slot assignment only for an explicit rework/repro packet | Usually `CTO_CORRECTION`. Preserve productive work. PM does not choose or execute a release, rescue, sync, or state transition. |
+| Occupied slot reports repeated same-head "in progress"/LOCAL_CONTINUE with no commit (PM JSONL slot deliveries + MoP nudge corroboration) | `SLOT_FALSE_PROGRESS` | verify the exact slot log tail, live MoP row/epoch, and checkout head; confirm no active canonical assignment/reconcile command | `CTO_CORRECTION`. CTO routes the exact terminalization, rescue, release, or rework boundary. PM may only assign a numbered slot after CTO explicitly authorizes a rework/repro packet; PM does not force terminalization, release, or choose the next work. |
 | PM checkout is on a feature branch instead of main (PM JSONL/logs show the PM clone at `fix/...` while doing PM-owned work) | `PM_CHECKOUT_BRANCH` | verify PM clone branch: `git -C /Users/rajiv/Downloads/projects/heydonna-app rev-parse --abbrev-ref HEAD`; exclude disposable worktrees and slot clones | `PM_CORRECTION`. Remind PM to return to main: `git checkout main && git pull --ff-only origin main`, then rerun the affected-test/review through the dedicated background agent or a disposable worktree / the owning slot's clone. |
 | Save-suppression production-debug heartbeat while the incident is open | `SAVE_SUPPRESSION_PROD_DEBUG` | consume one exact window/receipt; continue the existing rescues/hotfix owner through the emission, transport, query, and durable-transition boundary | `EXECUTE_NOW` for every material delta. A second consecutive nonzero packet with no new causal fields is `SAVE_SUPPRESSION_TELEMETRY_EMIT_GAP` and must be returned to the same owner immediately for the smallest main observability correction or typed external blocker. New escape/error/loss signatures are immediately material. Never create a second investigator, poll Axiom, act on customer files, infer loss from counts, or close on a clean/quiet window. Closure requires build-bound production evidence joining suppression to handoff/sweep/admission after the deployed fix. |
-| Three-hour heartbeat proves an open PR has no genuine exact-head capture, CI/E2E, or active numbered reproduction/integration proof | `OPEN_PR_ACTIVITY_GAP` | verify one bounded live PR/head/run/job and MoP owner snapshot, then select the existing safe lane | `EXECUTE_NOW`. If a canonical capture or genuine CI/E2E boundary is already authorized and safe, send the exact tuple once to PR-merges. If the missing boundary requires production-shaped reproduction/integration proof, direct PM to assign one eligible numbered slot to the exact PR without duplicating a live owner. If a job has remained queued with zero steps/no runner for at least 15 minutes, apply `CI_E2E_RUNNER_STUCK` or the equivalent capture recovery through the release owner. A concrete product/security/data-safety blocker may remain held only with its exact evidence, owner, and executable wake condition; passive dependency labels or process defects are not a fourth lane. Post the material action or typed blocker to the originating PM/heartbeat thread, record it once, and return without polling. |
+| Three-hour heartbeat proves an open PR has no genuine exact-head capture, CI/E2E, or active numbered reproduction/integration proof | `OPEN_PR_ACTIVITY_GAP` | verify one bounded live PR/head/run/job and MoP owner snapshot, then route the safe lane to CTO | `EXECUTE_NOW`. CTO owns capture/CI/E2E admission and any release edge. If the missing boundary requires production-shaped reproduction/integration proof, CTO sends PM one exact rework/repro packet and PM may assign one eligible numbered slot without duplicating a live owner. If a job has remained queued with zero steps/no runner for at least 15 minutes, CTO applies the equivalent capture recovery through the release owner. A concrete product/security/data-safety blocker may remain held only with its exact evidence, owner, and executable wake condition; passive dependency labels or process defects are not a fourth lane. Post the material action or typed blocker to the originating PM/heartbeat thread, record it once, and return without polling. |
 | Raw terminal-bad PR CI/E2E alert, PM report not yet complete | `CI_FAILURE_REPORT_PENDING` | no CTO investigation or reviewer; await the one PM-launched Sonnet 5 report | `VERIFY_ONLY`. Record/deduplicate the exact PR/head/run/attempt and stop. Do not raw-relay, consume logs, dispatch a slot, block/relabel, rerun, capture, or invoke Codex review. |
 | Completed PM/Sonnet 5 PR CI/E2E investigation report | `CI_FAILURE_REPORT_COMPLETE` | send the exact report once to PR-merges task `01a0324b-68e0-7491-988f-e7e1549f16f7` for evidence verification, with no Codex review step | `EXECUTE_NOW`. PR-merges verifies the report without re-consuming the failed log: confirmed infra gets one unchanged-head retry after duplicate/eligibility checks; verified fixture miss gets canonical exact-head capture; production-shaped repro requirement returns to PM for a numbered slot; otherwise route the smallest bounded off-slot rescue/hold through the existing release owner. Preserve any valid green leg and single-flight ownership. |
 | Exact-head CI/E2E queued at least 15m with no runner binding and a proven repeated runner/JIT control-plane loop | `CI_E2E_RUNNER_STUCK` | merge task executes the stuck-run degraded recovery; rescues is the one fallback owner | `EXECUTE_NOW`. Cancel only the proven stuck queued run, merge current main non-force when behind, run focused conflict proof, push a descendant, and emit one label-gated exact-head pair. If already current-main-bound, use the canonical one-time fresh-run recovery. Repair the runner defect separately; never wait for that repair, raw-dispatch, duplicate the old job, or create a second release owner. |
@@ -1099,7 +1110,7 @@ implementation begins.
 
 Rescue is not one generic action:
 
-- `CTO_RESCUE` is a bounded, PM-routed rescue that returns a patch and evidence
+- `CTO_RESCUE` is a bounded, CTO-routed rescue that returns a patch and evidence
   to CTO decisions task `01a03236-2e61-71f3-a6a8-3dc24d8c8917` for independent
   review without pushing or replying directly to PM.
 - `CTO_DIRECT_RESCUE` may push only after explicit Rajiv authorization for the

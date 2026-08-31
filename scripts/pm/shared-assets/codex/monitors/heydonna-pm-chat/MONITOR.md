@@ -64,6 +64,20 @@ live verifier, and single PM notifier. The monitor never performs these
 actions and never routes bounded repairs to a second owner. The candidate
 handoff uses renderer-free stdio and is not a PM review or ledger-only route.
 
+### Open-PR ownership (Rajiv current directive)
+
+For open PRs, PM has exactly two operational responsibilities: launch and
+return one bounded CI/E2E failure investigation bound to the exact failed
+PR/head/run, and perform the minimal slot/session/packet mechanics for a
+CTO-authorized rework, reproduction, or production-shaped proof packet. A
+conclusive investigation returns its exact packet to CTO Decisions; PM does
+not arm CI/E2E, decide or dispatch capture, edit PR labels/state, rerun or
+retry, route rescue/release, make sync/integration decisions, apply release
+gates, or merge. PM reports evidence/status for those CTO-owned actions only.
+The monitor therefore routes every other actionable open-PR row to CTO, while
+retaining PM slot assignment only after an explicit CTO-routed rework/repro
+authorization.
+
 Treat the following as hard actionable wakes: code/proof-ready with no
 exact-head CI/E2E admission for 10 minutes; a CI or capture terminal awaiting
 its next release boundary; and a free compatible slot with executable open-PR

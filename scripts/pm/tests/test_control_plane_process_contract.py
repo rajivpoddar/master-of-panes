@@ -60,6 +60,43 @@ def test_approval_belongs_to_cto_and_pm_gets_only_post_deploy_terminal() -> None
     assert "Never implement, deploy, or monitor any bounded control-plane repair" not in wake
 
 
+def test_open_pr_ownership_has_only_two_pm_responsibilities() -> None:
+    contract = _text("codex/skills/_shared/release-conveyor-contract.md")
+    monitor = _text("codex/monitors/heydonna-pm-chat/MONITOR.md")
+    wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
+    skill = _text("codex/skills/heydonna-control-plane-repair/SKILL.md")
+    combined = "\n".join((contract, monitor, wake, skill))
+
+    assert "ci_failure_investigation" in contract
+    assert "cto_routed_rework_or_repro_slot_assignment" in contract
+    assert "PM has exactly two operational responsibilities" in combined
+    assert "one bounded CI/E2E failure investigation" in combined
+    assert "CTO-authorized rework" in combined
+    for scenario in (
+        "code_ready_without_admission",
+        "capture_decision_or_dispatch",
+        "pr_label_or_state_transition",
+        "workflow_terminal",
+        "rerun_or_retry_decision",
+        "rescue_or_release_routing",
+        "sync_integration_and_merge",
+    ):
+        assert f'"{scenario}"' in contract
+    assert '"code_ready_without_admission": {"owner": "CTO_DECISIONS"' in contract
+    assert '"capture_decision_or_dispatch": {"owner": "CTO_DECISIONS"' in contract
+    assert '"pr_label_or_state_transition": {"owner": "CTO_DECISIONS"' in contract
+    assert '"rerun_or_retry_decision": {"owner": "CTO_DECISIONS"' in contract
+    assert '"rescue_or_release_routing": {"owner": "CTO_DECISIONS"' in contract
+    assert '"sync_integration_and_merge": {"owner": "CTO_DECISIONS"' in contract
+    assert "PM owns routine free-slot refill" not in combined
+    assert "PM performs routine free-compatible-slot refill" not in combined
+    assert "PM owns" not in combined
+    assert "direct PM to fire label-gated" not in combined
+    assert "PM releases the stuck slot" not in combined
+    assert "PM slot assignment only after an explicit CTO-routed rework/repro" in combined
+    assert "PM may assign a numbered slot only when CTO explicitly routes" in combined
+
+
 def test_canonical_asset_manifest_has_exact_source_digests_and_modes() -> None:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     expected = {

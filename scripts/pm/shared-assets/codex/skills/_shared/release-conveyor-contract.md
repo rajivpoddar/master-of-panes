@@ -9,12 +9,18 @@ they must not define competing ownership or state machines.
 - A numbered slot owns only work executable now: implementation,
   reproduction, or production-shaped proof. CI, capture, review, decisions,
   and external waits are off-slot.
-- PM owns routine free-slot refill and exact-head CI/E2E admission for ordinary
-  code/proof-ready work. PM also reports the first literal control-plane
-  blocker and exact tuple to CTO Decisions, but has zero review, approval,
-  deployment, retry, marker, or admission authority for repairs.
-- The CTO/release owner owns workflow terminals through causal routing or a
-  head-pinned merge. Every nonterminal state names `next_action`,
+- For an open PR, PM has exactly two operational responsibilities: launch and
+  return one bounded CI/E2E failure investigation tied to the exact failed
+  PR/head/run, and perform the minimal numbered-slot/session/packet mechanics
+  for a CTO-authorized rework, reproduction, or production-shaped proof
+  packet. A conclusive investigation returns its exact packet to CTO; PM does
+  not relabel, arm, capture, retry, rescue, release, sync, or merge the PR.
+- CTO/release ownership covers every other open-PR action: exact-head
+  CI/E2E admission/arming, capture decisions and dispatch, PR label/state
+  edges, control-plane bypasses, workflow-terminal disposition, rerun/retry
+  decisions, rescue/release routing, sync/integration, release gates, and
+  head-pinned merge. PM may report evidence and status for these actions, but
+  does not execute them. Every nonterminal state names `next_action`,
   `next_owner`, and `wake`.
 - A control-plane failure is escalated immediately and the smallest safe
   degraded product path may proceed. Repair the control plane separately; it
@@ -105,10 +111,16 @@ control-plane repair follows the PM-report -> CTO-diagnosis -> MoP-candidate
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "scenarios": {
-    "code_ready_without_admission": {"owner": "PM", "action": "admit_exact_head_ci_e2e", "wake": "10m"},
-    "free_compatible_slot_with_executable_drain": {"owner": "PM", "action": "refill_compatible_slot", "wake": "immediate"},
+    "ci_failure_investigation": {"owner": "PM", "action": "launch_one_exact_failed_pr_head_run_investigation", "wake": "terminal_or_block"},
+    "cto_routed_rework_or_repro_slot_assignment": {"owner": "PM", "action": "assign_one_compatible_numbered_slot_after_cto_authorization", "wake": "assignment_terminal"},
+    "code_ready_without_admission": {"owner": "CTO_DECISIONS", "action": "admit_exact_head_ci_e2e", "wake": "10m"},
+    "capture_decision_or_dispatch": {"owner": "CTO_DECISIONS", "action": "decide_or_dispatch_capture", "wake": "terminal"},
+    "pr_label_or_state_transition": {"owner": "CTO_DECISIONS", "action": "journaled_complete_set_label_state_edge", "wake": "terminal"},
+    "rerun_or_retry_decision": {"owner": "CTO_DECISIONS", "action": "authorize_one_exact_head_retry", "wake": "terminal"},
+    "rescue_or_release_routing": {"owner": "CTO_DECISIONS", "action": "route_guarded_rescue_or_release", "wake": "terminal"},
+    "sync_integration_and_merge": {"owner": "CTO_DECISIONS", "action": "sync_release_and_head_pinned_merge", "wake": "terminal"},
     "workflow_terminal": {"owner": "CTO_RELEASE_OWNER", "action": "route_first_causal_or_head_pinned_merge", "wake": "terminal"},
     "control_plane_candidate": {"owner": "MOP_IMPLEMENTATION_TASK_01a04154", "action": "return_candidate_to_cto_inline", "wake": "cto_inline_review"},
     "control_plane_block": {"owner": "MOP_IMPLEMENTATION_TASK_01a04154", "action": "return_bounded_rework_to_same_mop_task", "wake": "cto_inline_review"},
