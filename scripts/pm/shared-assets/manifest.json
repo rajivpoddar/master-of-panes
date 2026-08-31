@@ -18,6 +18,8 @@
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
       "~/.claude/scripts/mop-slot-respawn.sh",
+      "~/.claude/control_plane/runtime_observation.py",
+      "~/.claude/scripts/sakshi-heartbeat.py",
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "~/.claude/skills/slack-message/scripts/block-unsupported-transcript-split.py",
       "~/.claude/skills/slack-message/scripts/slack-send.sh",
@@ -31,7 +33,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 46,
+    "selected_count": 48,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -56,6 +58,15 @@
     }
   ],
   "entries": [
+    {
+      "source_path": "claude/control_plane/runtime_observation.py",
+      "canonical_target": "/Users/rajiv/.claude/control_plane/runtime_observation.py",
+      "sha256": "33e7e0447d92fef778b75bca2dfea074ad1f8d1e7f27fe25c601f67ad01c7344",
+      "mode": 420,
+      "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
     {
       "source_path": "claude/dev-slot-rules/22-slot-pushya.md",
       "canonical_target": "/Users/rajiv/.claude/dev-slot-rules/22-slot-pushya.md",
@@ -242,6 +253,15 @@
       "sha256": "996927262a5c37a639f84493330938c4d6cb73319cf36094c23a795aaa90bbbb",
       "mode": 493,
       "ownership_class": "shared-claude-slot-respawn-client",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py",
+      "sha256": "cfd0d029a0082ecc20ec6b0df4aa38f53f164348c5e3c3c3d2f9b8f8f73d57a7",
+      "mode": 493,
+      "ownership_class": "shared-claude-sakshi-heartbeat-producer",
       "dependency_status": "closed",
       "dependencies": []
     },
