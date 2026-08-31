@@ -987,6 +987,7 @@ def _load_open_pr_continuations(
                 "next_action": action,
                 "wake": action,
                 "hold_reason": blocker or "none",
+                "next_owner": owner,
                 "head": head,
             }
         )
