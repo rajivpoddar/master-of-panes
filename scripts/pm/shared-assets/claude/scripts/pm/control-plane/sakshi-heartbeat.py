@@ -956,28 +956,34 @@ def _load_open_pr_continuations(
         return [], "authority: durable continuation response is not a list"
 
     matches: list[dict[str, Any]] = []
+    row_errors: list[str] = []
     for row in rows:
         if not isinstance(row, dict):
-            return [], "row: durable continuation row is malformed"
+            row_errors.append("row: durable continuation row is malformed")
+            continue
         bound_head, error = _continuation_head(row)
         if error:
-            return [], "row: " + error
+            row_errors.append("row: " + error)
+            continue
         if bound_head != head:
             if bound_head is None:
-                return [], "row: durable continuation has no exact head binding"
+                row_errors.append("row: durable continuation has no exact head binding")
             continue
         kind = str(row.get("kind") or "").strip()
         lane = CONTINUATION_KIND_LANES.get(kind)
         if not lane:
-            return [], f"row: unsupported exact-head continuation kind: {kind or 'missing'}"
+            row_errors.append(f"row: unsupported exact-head continuation kind: {kind or 'missing'}")
+            continue
         row_id = str(row.get("id") or "").strip()
         if not row_id or str(row.get("pr") or "").strip() != pr_number:
-            return [], "row: exact-head continuation has incomplete row identity"
+            row_errors.append("row: exact-head continuation has incomplete row identity")
+            continue
         owner = _concrete_motion_token(row.get("owner"))
         action = _concrete_motion_text(row.get("required_action"))
         blocker = str(row.get("blocker") or "").strip()
         if not owner or not action:
-            return [], "row: exact-head continuation has missing or placeholder owner/action"
+            row_errors.append("row: exact-head continuation has missing or placeholder owner/action")
+            continue
         matches.append(
             {
                 "id": row_id,
@@ -997,6 +1003,8 @@ def _load_open_pr_continuations(
     }
     if len(signatures) > 1:
         return [], "row: contradictory exact-head durable continuation records"
+    if not matches and row_errors:
+        return [], row_errors[0]
     return matches[:1], None
 
 
@@ -1514,6 +1522,7 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
             })
             motion_states["PROCESS_LIMBO"] += 1
             continue
+        normalized_pr = {**pr, "head_sha": head, "headRefName": branch}
         continuations, continuation_error = _load_open_pr_continuations(number, head)
         if continuation_error:
             if not continuation_error.startswith("row:"):
@@ -1528,12 +1537,31 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                     "counts": counts,
                     "motion_states": motion_states,
                 }
-            row = _malformed_continuation_row(number, branch, head, continuation_error)
-            row["missing_predicates"] = list(row.get("reasons") or [])
+            # A malformed/headless sibling is diagnostic, not authoritative.
+            # Give exact-head live workflow/slot evidence one chance to win;
+            # only an otherwise-unbound PR becomes the row-local limbo row.
+            live_row = evaluate_open_pr_activity(
+                normalized_pr,
+                exact_runs,
+                jobs_by_run,
+                slots,
+                now_utc=now_utc,
+                continuation_records=[],
+            )
+            if str(live_row.get("motion_state") or "").endswith("_IN_PROGRESS"):
+                row = live_row
+            else:
+                row = _malformed_continuation_row(number, branch, head, continuation_error)
+            for lane, enabled in row.get("lanes", {}).items():
+                if enabled:
+                    counts[lane] += 1
+            motion_state = row.get("motion_state")
+            if motion_state in motion_states:
+                motion_states[motion_state] += 1
+            if motion_state == "PROCESS_LIMBO":
+                row["missing_predicates"] = list(row.get("reasons") or [])
             rows.append(row)
-            motion_states["PROCESS_LIMBO"] += 1
             continue
-        normalized_pr = {**pr, "head_sha": head, "headRefName": branch}
         row = evaluate_open_pr_activity(
             normalized_pr,
             exact_runs,

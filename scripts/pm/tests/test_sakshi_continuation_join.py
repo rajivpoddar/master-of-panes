@@ -195,6 +195,51 @@ class SakshiContinuationJoinTests(unittest.TestCase):
             [],
         )
 
+    def test_headless_newest_sibling_does_not_hide_valid_exact_head_continuation(self) -> None:
+        headless = {
+            "id": "15931",
+            "kind": "slot_assignment",
+            "pr": "7591",
+            "issue": "7554",
+            "slot": "4",
+            "owner": "cto",
+            "required_action": "assign the exact-head repro packet",
+            "blocker": "",
+            "evidence_json": "{}",
+        }
+        exact = continuation("ci_watch")
+        exact["id"] = "15905"
+        exact["pr"] = "7591"
+        with mock.patch.object(
+            MODULE,
+            "run_cmd",
+            return_value=MODULE.CmdResult(True, json.dumps([headless, exact]), "", 0),
+        ):
+            records, error = MODULE._load_open_pr_continuations("7591", HEAD)
+        self.assertIsNone(error)
+        self.assertEqual([record["id"] for record in records], ["15905"])
+
+    def test_headless_sibling_cannot_hide_executing_exact_head_lane(self) -> None:
+        headless_error = "row: durable continuation has no exact head binding"
+        runs, jobs = running_run("CI")
+        with mock.patch.object(
+            MODULE,
+            "_audit_gh_json",
+            side_effect=[
+                ([pr()], None),
+                ({"workflow_runs": runs}, None),
+                ({"jobs": jobs["33397393224"]}, None),
+            ],
+        ), mock.patch.object(
+            MODULE,
+            "_load_open_pr_continuations",
+            return_value=([], headless_error),
+        ):
+            audit = MODULE.collect_open_pr_activity_audit({})
+        self.assertTrue(audit["ok"])
+        self.assertEqual(audit["rows"][0]["motion_state"], "CI_IN_PROGRESS")
+        self.assertEqual(audit["rows"][0]["workflow_motion"], "CI")
+
     def test_unreadable_ledger_remains_an_audit_wide_refusal(self) -> None:
         with mock.patch.object(
             MODULE,
@@ -360,6 +405,18 @@ class SakshiContinuationJoinTests(unittest.TestCase):
                 )
                 conn.commit()
                 records, error = MODULE._load_open_pr_continuations("7591", HEAD)
+                self.assertIsNone(error)
+                self.assertEqual(records[0]["lane"], "CI")
+                conn.execute("delete from obligations where id=4")
+                conn.commit()
+                conn.execute("delete from obligations where id=1")
+                conn.commit()
+                conn.execute(
+                    "insert into obligations values (4,'ci_watch','open',7591,null,null,'unknown','t','await','hold',?,null,null)",
+                    (json.dumps({"head": HEAD}),),
+                )
+                conn.commit()
+                records, error = MODULE._load_open_pr_continuations("7591", HEAD)
                 self.assertEqual(records, [])
                 self.assertIn("placeholder", error or "")
                 conn.execute("delete from obligations where id=4")
@@ -372,6 +429,11 @@ class SakshiContinuationJoinTests(unittest.TestCase):
                 self.assertEqual(records, [])
                 self.assertIn("exact head", error or "")
                 conn.execute("delete from obligations where id=3")
+                conn.commit()
+                conn.execute(
+                    "insert into obligations values (1,'ci_watch','open',7591,null,null,'cto','t','await','hold',?,null,null)",
+                    (json.dumps({"head": HEAD}),),
+                )
                 conn.commit()
                 conn.execute(
                     "insert into obligations values (2,'dependency_wait','open',7591,null,null,'pm','t','await','hold',?,null,null)",

@@ -139,6 +139,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
             r'''
             import json
             import importlib.util
+            import sqlite3
             import sys
             from pathlib import Path
 
@@ -154,33 +155,48 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
             if module.RuntimeObservationAdapter.__module__ != "pm_operator.control_plane.runtime_observation":
                 raise AssertionError("installed target did not load the canonical observation authority")
             head = "f109414c02cc296510103fe2c090ce964e9b9dfb"
-            pr = {
-                "number": 7591,
-                "head": {"sha": head, "ref": "fix/7591"},
-                "headRefOid": head,
-                "headRefName": "fix/7591",
-            }
-            continuation = {
-                "id": "15912",
-                "kind": "dependency_wait",
-                "owner": "cto",
-                "required_action": "consume the exact-head continuation at the next safe boundary",
-                "blocker": "dependency is holding the PR",
-                "evidence_json": json.dumps({"head": head}),
-                "lane": "dependency-blocked",
-                "next_action": "consume the exact-head continuation at the next safe boundary",
-                "wake": "consume the exact-head continuation at the next safe boundary",
-                "hold_reason": "dependency is holding the PR",
-                "next_owner": "cto",
-                "head": head,
-            }
+            prs = []
+            for number in range(7591, 7602):
+                current_head = head if number == 7591 else f"{number:040x}"
+                prs.append({
+                    "number": number,
+                    "head": {"sha": current_head, "ref": f"fix/{number}"},
+                    "headRefOid": current_head,
+                    "headRefName": f"fix/{number}",
+                })
+            db_path = Path(output_json).with_suffix(".db")
+            connection = sqlite3.connect(db_path)
+            connection.execute("create table obligations (id integer, kind text, status text, pr integer, issue integer, slot integer, owner text, title text, required_action text, blocker text, evidence_json text, updated_at text, created_at text)")
+            connection.executemany(
+                "insert into obligations values (?, ?, 'open', 7591, 7554, 4, 'cto', ?, ?, ?, ?, null, null)",
+                [
+                    (
+                        "15931",
+                        "slot_assignment",
+                        "headless sibling",
+                        "assign the exact-head repro packet",
+                        "",
+                        "{}",
+                    ),
+                    (
+                        "15905",
+                        "dependency_wait",
+                        "exact continuation",
+                        "consume the exact-head continuation at the next safe boundary",
+                        "dependency is holding the PR",
+                        json.dumps({"head": head}),
+                    ),
+                ],
+            )
+            connection.commit()
+            connection.close()
             def audit_json(args, *, timeout=20):
                 del timeout
                 if args[0].endswith("/pulls"):
-                    return [pr], None
+                    return prs, None
                 return {"workflow_runs": []}, None
             module._audit_gh_json = audit_json
-            module._load_open_pr_continuations = lambda number, current_head: ([continuation], None)
+            module.PM_OPS_DB = db_path
             module.collect_mop = lambda: {
                 "health": {"ok": True, "json": {}},
                 "ready": {"ok": True, "json": {}},
@@ -223,11 +239,13 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
                 raise SystemExit(result)
             artifact = json.loads(Path(output_json).read_text(encoding="utf-8"))
             audit = artifact["open_pr_activity_audit"]
-            if audit["open_pr_count"] != 1 or len(audit["rows"]) != 1:
+            if audit["open_pr_count"] != 11 or len(audit["rows"]) != 11:
                 raise AssertionError(audit)
-            row = audit["rows"][0]
+            row = next(row for row in audit["rows"] if row["pr"] == "7591")
             if row["lane"] != "dependency-blocked" or row["owner_source"] != "pm-ops.obligations":
                 raise AssertionError(row)
+            if any("malformed durable continuation" in str(item.get("hold_reason")) for item in audit["rows"]):
+                raise AssertionError(audit)
             rendered = Path(output_text).read_text(encoding="utf-8")
             for field in ("workflow_motion=", "owner_source=", "hold_reason=", "next_action=", "next_owner=", "wake="):
                 if field not in rendered:
