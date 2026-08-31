@@ -715,10 +715,11 @@ idle_occupied_continue injections corroborate but are not required.
   assignment/reconcile command is in flight for that slot.
 - Wake once per slot/epoch/PR with fingerprint
   `pr-slot-transition:false-progress:<slot>:<epoch>:<pr_or_issue>`, binding the
-  required correction: PM must force terminalization (commit + push new head,
-  affected proof, phase-a/CI at the new head) or park/release and reassign the
-  next eligible rework within an SLA; a "will continue" hold update is not
-  progress.
+  required correction: route the exact stall to CTO Decisions. CTO selects the
+  terminalization, rescue, release, or rework boundary; PM may perform only a
+  subsequent exact CTO-authorized rework/repro/proof slot assignment. PM does
+  not commit/push terminalization, run phase-a/CI, park/release, choose the
+  next work, or admit CI; a "will continue" hold update is not progress.
 
 ## Verification boundary
 

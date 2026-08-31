@@ -93,6 +93,10 @@ def test_open_pr_ownership_has_only_two_pm_responsibilities() -> None:
     assert "PM owns" not in combined
     assert "direct PM to fire label-gated" not in combined
     assert "PM releases the stuck slot" not in combined
+    assert "PM must force terminalization" not in monitor
+    assert "PM does\n  not commit/push terminalization" in monitor
+    assert "park/release" in monitor
+    assert "choose the\n  next work" in monitor
     assert "PM slot assignment only after an explicit CTO-routed rework/repro" in combined
     assert "PM may assign a numbered slot only when CTO explicitly routes" in combined
     assert RETIRED_GENERIC_TASK not in _text("codex/monitors/heydonna-issue-triage/WAKE_SOP.md")
