@@ -95,6 +95,7 @@ def test_open_pr_ownership_has_only_two_pm_responsibilities() -> None:
     assert "PM releases the stuck slot" not in combined
     assert "PM slot assignment only after an explicit CTO-routed rework/repro" in combined
     assert "PM may assign a numbered slot only when CTO explicitly routes" in combined
+    assert RETIRED_GENERIC_TASK not in _text("codex/monitors/heydonna-issue-triage/WAKE_SOP.md")
 
 
 def test_canonical_asset_manifest_has_exact_source_digests_and_modes() -> None:
@@ -104,6 +105,7 @@ def test_canonical_asset_manifest_has_exact_source_digests_and_modes() -> None:
         "codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
         "codex/skills/_shared/release-conveyor-contract.md",
         "codex/skills/heydonna-control-plane-repair/SKILL.md",
+        "codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
     }
     entries = {entry["source_path"]: entry for entry in manifest["entries"]}
     assert expected <= entries.keys()
