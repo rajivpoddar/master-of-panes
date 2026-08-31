@@ -94,26 +94,26 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
         block = re.search(r"```json\n(\{.*?\})\n```", contract, flags=re.DOTALL)
         self.assertIsNotNone(block)
         matrix = json.loads(block.group(1))
-        self.assertEqual(matrix["version"], 1)
+        self.assertEqual(matrix["version"], 2)
         scenarios = matrix["scenarios"]
-        self.assertEqual(len(scenarios), 5)
-        refusal = scenarios["control_plane_refusal"]
-        self.assertEqual(refusal["owner"], "CTO")
-        self.assertEqual(refusal["pm_input"], "first_literal_blocker_exact_pr_full_head_current_labels")
-        self.assertEqual(refusal["fence"], "fresh_exact_head_duplicate_run_safety")
-        self.assertEqual(refusal["action"], "execute_or_durable_delegate_one_journaled_idempotent_label_edge")
-        self.assertEqual(refusal["edge"], "preserve_unrelated_labels_stop_after_one_edge")
-        self.assertEqual(refusal["wake"], "immediate")
-        self.assertEqual(refusal["terminal"], "execute_or_durable_delegate_or_name_concrete_harm")
+        self.assertEqual(len(scenarios), 7)
+        candidate = scenarios["control_plane_candidate"]
+        self.assertEqual(candidate["owner"], "MOP_IMPLEMENTATION_TASK_01a04154")
+        self.assertEqual(candidate["action"], "return_candidate_to_cto_inline")
+        self.assertEqual(candidate["wake"], "cto_inline_review")
+        block = scenarios["control_plane_block"]
+        self.assertEqual(block["owner"], "MOP_IMPLEMENTATION_TASK_01a04154")
+        self.assertEqual(block["action"], "return_bounded_rework_to_same_mop_task")
+        approval = scenarios["control_plane_approval"]
+        self.assertEqual(approval["owner"], "CTO_DECISIONS")
+        self.assertEqual(approval["action"], "publish_rollout_verify_and_notify_pm")
         self.assertNotIn("at most 15 minutes", contract)
         self.assertIn("PM does not retry", contract)
-        self.assertIn("marker shapes", contract)
-        self.assertIn("The sole narrow exception is the CTO-authorized fallback", skill)
-        self.assertIn("one journaled, idempotent GitHub label edge", skill)
-        self.assertNotIn("never hand-edit target state labels", skill)
-        self.assertIn("one candidate for exactly one CTO inline functionality review", wake_sop)
-        self.assertIn("no second review or acknowledgement ceremony", wake_sop)
-        self.assertNotIn("without a candidate-roundtrip", wake_sop)
+        self.assertIn("Journal the literal pre/post label sets", contract)
+        self.assertIn("candidate packet directly to CTO Decisions", skill)
+        self.assertIn("one candidate-only packet for CTO inline review", wake_sop)
+        self.assertIn("approval is published and rolled out only by CTO Decisions", wake_sop)
+        self.assertNotIn("same execution owner continues through", wake_sop)
 
     def test_unlisted_file_preserved_and_late_failure_restores_absent_baseline(self) -> None:
         unlisted = self.targets / "Users" / "rajiv" / ".codex" / "unlisted.txt"

@@ -48,6 +48,22 @@ MoP, workflows, slots, or product state. Every report row keeps these fields
 separate: `workflow_motion`, `owner_source`, and `hold_reason`; absence of a
 running workflow is not evidence that the owner is unknown.
 
+### Control-plane repair routing (Rajiv current directive)
+
+This monitor only detects and routes. PM reports the first literal
+control-plane blocker and exact tuple to CTO Decisions; PM does not diagnose,
+review, approve, deploy, retry, create markers, or admit repairs. CTO Decisions
+classifies the issue and sends one verified bounded `CONTROL_PLANE` brief to
+Master of Panes task `01a04154-c9c1-7bc1-8f7b-009a87bc7628`, the sole
+implementation owner for control-plane and PM Operator scopes. MoP returns one
+clean exact-main candidate packet through renderer-free stdio and cannot
+publish, install, activate, restart, deploy, or notify PM. CTO Decisions
+performs exactly one inline review; a block returns rework to the same MoP
+task, while approval makes CTO Decisions the sole publisher, rollout owner,
+live verifier, and single PM notifier. The monitor never performs these
+actions and never routes bounded repairs to a second owner. The candidate
+handoff uses renderer-free stdio and is not a PM review or ledger-only route.
+
 Treat the following as hard actionable wakes: code/proof-ready with no
 exact-head CI/E2E admission for 10 minutes; a CI or capture terminal awaiting
 its next release boundary; and a free compatible slot with executable open-PR
