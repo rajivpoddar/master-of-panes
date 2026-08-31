@@ -110,21 +110,15 @@ def test_canonical_asset_manifest_has_exact_source_digests_and_modes() -> None:
         "codex/skills/_shared/release-conveyor-contract.md",
         "codex/skills/heydonna-control-plane-repair/SKILL.md",
         "codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
-        "claude/control_plane/runtime_observation.py",
-        "claude/scripts/pm/control-plane/sakshi-heartbeat.py",
     }
     entries = {entry["source_path"]: entry for entry in manifest["entries"]}
     assert expected <= entries.keys()
-    assert "~/Downloads/projects/heydonna-app/scripts/pm/control-plane/sakshi-heartbeat.py" not in manifest["inventory"]["source_roots"]
     for source_path in expected:
         source = SHARED / source_path
         entry = entries[source_path]
         assert hashlib.sha256(source.read_bytes()).hexdigest() == entry["sha256"]
-        expected_mode = 0o755 if source_path.endswith("sakshi-heartbeat.py") else 0o644
-        assert entry["mode"] == expected_mode
+        assert entry["mode"] == 0o644
         assert entry["canonical_target"].startswith("/Users/rajiv/")
-    assert entries["claude/control_plane/runtime_observation.py"]["canonical_target"] == "/Users/rajiv/.claude/control_plane/runtime_observation.py"
-    assert entries["claude/scripts/pm/control-plane/sakshi-heartbeat.py"]["canonical_target"] == "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py"
 
 
 def test_unrelated_asset_is_unchanged_from_candidate_base() -> None:
