@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Hono } from "hono";
+import Database from "better-sqlite3";
 
 import {
   assignmentIdentityPatchFields,
@@ -16,7 +17,7 @@ import { MoPDatabase } from "../src/db.js";
 import type { MoPConfig } from "../src/types.js";
 
 async function withAssignmentRoute(
-  run: (app: Hono, db: MoPDatabase) => Promise<void>,
+  run: (app: Hono, db: MoPDatabase, directory: string) => Promise<void>,
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "mop-assignment-route-"));
   const config: MoPConfig = {
@@ -31,7 +32,7 @@ async function withAssignmentRoute(
   const app = new Hono();
   registerAssignmentRoute(app, db);
   try {
-    await run(app, db);
+    await run(app, db, directory);
   } finally {
     db.close();
     rmSync(directory, { recursive: true, force: true });
@@ -118,10 +119,9 @@ test("numbered assignment routes reject the slot-0 PM boundary", async () => {
 test("issue-claim adoption route is authority-gated and atomic", async () => {
   await withAssignmentRoute(async (app, db) => {
     const placeholder = {
-      ...assignment,
-      pr: null,
-      branch: "fix/10-pending",
-      head_sha: null,
+      repository_id: assignment.repository_id,
+      issue: assignment.issue,
+      task: "route authority fixture",
     };
     const assigned = await app.request(
       "/slots/1/assign",
@@ -137,6 +137,7 @@ test("issue-claim adoption route is authority-gated and atomic", async () => {
     );
     assert.equal(denied.status, 403);
     assert.equal(db.getSlot(1)?.branch, null);
+    assert.equal(db.getSlot(1)?.head_sha, null);
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
 
     const accepted = await app.request(
@@ -158,10 +159,9 @@ test("issue-claim adoption route is authority-gated and atomic", async () => {
 test("issue-claim adoption route binds an active-turn claim preserving epoch and turn", async () => {
   await withAssignmentRoute(async (app, db) => {
     const placeholder = {
-      ...assignment,
-      pr: null,
-      branch: "fix/10-pending",
-      head_sha: null,
+      repository_id: assignment.repository_id,
+      issue: assignment.issue,
+      task: "route authority fixture",
     };
     const assigned = await app.request(
       "/slots/1/assign",
@@ -201,10 +201,9 @@ test("issue-claim adoption route binds an active-turn claim preserving epoch and
 test("issue-claim adoption route refuses a stale successor rewrite", async () => {
   await withAssignmentRoute(async (app, db) => {
     const placeholder = {
-      ...assignment,
-      pr: null,
-      branch: "fix/10-pending",
-      head_sha: null,
+      repository_id: assignment.repository_id,
+      issue: assignment.issue,
+      task: "route authority fixture",
     };
     const assigned = await app.request(
       "/slots/1/assign",
@@ -315,7 +314,11 @@ test("claim route requires only a positive issue", async () => {
 
 test("assignment ignores stale turn and tuple telemetry", async () => {
   await withAssignmentRoute(async (app, db) => {
-    const active = { ...assignment, session_id: "caller-must-not-own", expected_epoch: 0 };
+    const active = {
+      issue: assignment.issue,
+      task: assignment.task,
+      session_id: "caller-must-not-own",
+    };
     db.startAgentTurn(1, "hook-session-a");
     db.updateSlot(1, { occupied: false, repository_id: null, issue: null, branch: null, branch_ref: null, pr: null, head_sha: null });
     const accepted = await app.request("/slots/1/assign", assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, active));
@@ -332,7 +335,10 @@ test("claim route overwrites the selected slot without caller epoch", async () =
   await withAssignmentRoute(async (app, db) => {
     const first = await app.request(
       "/slots/1/assign",
-      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY),
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        issue: assignment.issue,
+        task: assignment.task,
+      }),
     );
     assert.equal(first.status, 200);
     const before = db.getSlot(1);
@@ -340,9 +346,8 @@ test("claim route overwrites the selected slot without caller epoch", async () =
     const occupiedClaim = await app.request(
       "/slots/1/assign",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
-        ...assignment,
         issue: assignment.issue + 1,
-        expected_epoch: 999,
+        task: "replaced issue-only claim",
       }),
     );
     assert.equal(occupiedClaim.status, 200);
@@ -356,10 +361,9 @@ test("adopt route has no partial expected-tuple fallback", async () => {
     const assigned = await app.request(
       "/slots/1/assign",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
-        ...assignment,
-        pr: null,
-        head_sha: null,
-        branch: "fix/10-pending",
+        repository_id: assignment.repository_id,
+        issue: assignment.issue,
+        task: "route authority fixture",
       }),
     );
     assert.equal(assigned.status, 200);
@@ -390,9 +394,9 @@ test("assignment route rejects only a duplicate issue on another slot", async ()
     const response = await app.request(
       "/slots/1/assign",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
-        ...assignment,
-        work_kind: "implementation",
-        handoff_id: "handoff-route-1",
+        repository_id: assignment.repository_id,
+        issue: assignment.issue,
+        task: assignment.task,
       }),
     );
     assert.equal(response.status, 200);
@@ -417,6 +421,76 @@ test("assignment route rejects only a duplicate issue on another slot", async ()
     assert.deepEqual(duplicateBody.owner_slots, [1]);
     assert.equal(db.getSlot(2)?.occupied, false);
 
+  });
+});
+
+test("complete assignment atomically persists the exact epoch and owner tuple", async () => {
+  await withAssignmentRoute(async (app, db, directory) => {
+    const raw = new Database(join(directory, "mop.db"));
+    try {
+      raw.prepare("UPDATE slots SET assignment_epoch = 613 WHERE slot = 4").run();
+    } finally {
+      raw.close();
+    }
+    const body = {
+      task: "repro PR #7591 #3787 save-admission",
+      repository_id: 992731533,
+      issue: 7554,
+      pr: 7591,
+      branch: "codex/cloudflare-clerk-build-binding",
+      head_sha: "f109414c02cc296510103fe2c090ce964e9b9dfb",
+      work_kind: "repro",
+      handoff_id: "repro-7591-s4-f109414c0-f27748d8",
+      expected_epoch: 613,
+    };
+    const response = await app.request(
+      "/slots/4/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body),
+    );
+    assert.equal(response.status, 200);
+    const row = await response.json() as Record<string, unknown>;
+    assert.equal(row.assignment_epoch, 614);
+    assert.equal(row.repository_id, "992731533");
+    assert.equal(row.issue, 7554);
+    assert.equal(row.pr, 7591);
+    assert.equal(row.branch, body.branch);
+    assert.equal(row.head_sha, body.head_sha);
+    assert.equal(row.work_kind, body.work_kind);
+    assert.equal(row.handoff_id, body.handoff_id);
+    assert.equal(row.task, body.task);
+    assert.equal(db.getEvents(4, 10, "slot_assigned").length, 1);
+
+    // A response-loss retry with the consumed epoch cannot create a second
+    // assignment or event; the CAS refuses the stale request.
+    const replay = await app.request(
+      "/slots/4/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body),
+    );
+    assert.equal(replay.status, 409);
+    assert.equal((await replay.json() as Record<string, unknown>).reason, "epoch_mismatch");
+    assert.equal(db.getSlot(4)?.assignment_epoch, 614);
+    assert.equal(db.getEvents(4, 10, "slot_assigned").length, 1);
+  });
+});
+
+test("complete assignment refuses partial identity instead of downgrading it", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const response = await app.request(
+      "/slots/4/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        issue: 7554,
+        task: "incomplete complete claim",
+        expected_epoch: 0,
+        repository_id: 992731533,
+        pr: 7591,
+        branch: "codex/cloudflare-clerk-build-binding",
+        // head_sha, work_kind, and handoff_id are intentionally absent.
+      }),
+    );
+    assert.equal(response.status, 409);
+    assert.equal((await response.json() as Record<string, unknown>).reason, "observed_tuple_mismatch");
+    assert.equal(db.getSlot(4)?.occupied, false);
+    assert.equal(db.getEvents(4, 10, "slot_assigned").length, 0);
   });
 });
 
