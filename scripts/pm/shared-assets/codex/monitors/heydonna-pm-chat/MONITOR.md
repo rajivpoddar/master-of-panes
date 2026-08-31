@@ -95,9 +95,9 @@ PR, full head, and current labels immediately; do not retry marker shapes,
 owner tuples, projected metadata, review receipts, or alternate commands. The
 receiving CTO wake must either execute/delegate the safe manual edge in that
 same wake or record concrete data-loss, security/privacy, or irreversible harm
-as the reason motion is unsafe. A guarded CTO label edge is one fresh-fenced,
-journaled, idempotent edge preserving unrelated labels; this monitor only
-reports/routes it and never performs the mutation.
+as the reason motion is unsafe. Any degraded/manual bypass uses the shared
+`Native bypass contract (CTO-only, after one high-level refusal)`: this monitor
+only reports/routes it and never performs the mutation.
 
 ## Primary source
 

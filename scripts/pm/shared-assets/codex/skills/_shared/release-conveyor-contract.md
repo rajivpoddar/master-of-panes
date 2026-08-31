@@ -54,10 +54,9 @@ workflow dispatch, or unguarded label mutation is authorized by this contract.
 ## Immediate edge and retirement boundary
 
 After one fresh exact-head, duplicate/run, and safety fence, CTO Decisions may
-make one smallest guarded GitHub label edge needed to emit or resume the
-canonical release event. Journal the literal pre/post label sets and edge
-identity, preserve unrelated labels, make it idempotent, and stop after the
-edge. This does not bypass CI/E2E or head-pinned merge guards.
+use the native bypass contract below for one smallest guarded operational edge
+needed to emit or resume the canonical release event. It does not bypass
+CI/E2E or head-pinned merge guards.
 
 On a control-plane refusal, PM returns the first literal blocker and exact PR,
 full head, and current labels once. PM does not retry alternate commands or
@@ -69,6 +68,38 @@ overrides, PM review receipts, or approval ceremony only after the kept thin
 fences are proven: exact current head, duplicate/single-flight journal, real
 non-skipped `pull_request` CI/E2E, and head-pinned merge guard. Compatibility
 shims expire after zero callers and complete-set parity with rollback ready.
+
+## Native bypass contract (CTO-only, after one high-level refusal)
+
+The high-level typed/control-plane path is attempted once. A literal refusal or
+proven unavailability is the trigger; do not retry it, vary marker/owner/
+receipt shapes, invoke another wrapper, or wait for the repair. CTO Decisions
+fresh-fences the exact head or slot, active/duplicate owner, current blockers,
+and idempotent edge identity before any primitive. Only the primitives needed
+by the blocked transition are allowed.
+
+- Release/ownership/status movement uses one direct GitHub complete-set label
+  edit. Bind PR and full head where applicable, journal literal pre/post label
+  sets and exact edge identity, preserve unrelated labels, reconcile response
+  loss, and stop after that one idempotent edge. It performs no MoP or
+  `message-slot` mutation.
+- Slot assign/release/rebind/controlled respawn uses the direct MoP HTTP API
+  through `curl`, with the endpoint's exact slot and current identity/epoch,
+  canonical authority header and payload, HTTP response, and readback recorded.
+  Do not call a broken wrapper or alternate command. If assignment/refill also
+  requires product ownership projection, perform one complete-set GitHub
+  label reconciliation after the MoP readback, then deliver exactly one
+  literal `message-slot` continuation packet. The order is MoP -> GitHub ->
+  message-slot; failure at any step stops before later effects.
+- No raw `workflow_dispatch`, blind rerun, CI/E2E/capture/review/merge or
+  product-gate bypass, second message, renderer-mediated task message,
+  numbered-slot repair work, or polling is permitted. Preserve substantive
+  blockers and unrelated state.
+
+Every degraded/manual/bypass route names this section as its sole primitive
+authority. A bypass restores only the blocked operational edge; the durable
+control-plane repair follows the PM-report -> CTO-diagnosis -> MoP-candidate
+-> CTO-review -> CTO-deploy process above.
 
 ## Normative motion matrix
 

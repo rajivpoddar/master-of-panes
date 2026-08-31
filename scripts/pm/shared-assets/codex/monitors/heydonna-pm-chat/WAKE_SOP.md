@@ -93,11 +93,13 @@ edge in that same wake or names the concrete data-loss, security/privacy, or
 irreversible harm that makes motion unsafe.
 
 After that fence, CTO has standing authority for one smallest guarded GitHub
-label edge needed to emit/resume the canonical release event. The edge journals
-literal pre/post labels and edge identity, preserves unrelated labels, is
-idempotent/replay-safe, excludes workflow dispatch and blind reruns unless
-separately authorized, and stops after one edge. Exact-head CI/E2E and
-head-pinned merge guards remain mandatory.
+label edge needed to emit/resume the canonical release event. This release-only
+bypass is governed exclusively by the `Native bypass contract (CTO-only, after
+one high-level refusal)` in the shared release-conveyor contract: journal
+literal pre/post labels and edge identity, preserve unrelated labels, reconcile
+response loss, and stop after one edge. Exact-head CI/E2E and head-pinned merge
+guards remain mandatory; no MoP or message-slot mutation is part of this
+release-only edge.
 
 ## Responsiveness and delegation invariant
 
@@ -698,6 +700,13 @@ its prior projection. If MoP reports
 `target_already_assigned`, leave the duplicate issue alone and choose different
 work. Otherwise continue through labels and message delivery without ceremony.
 
+When this ordinary path is used as a degraded/manual bypass after one typed
+refusal, it is governed exclusively by the shared native bypass contract:
+direct MoP `curl` with the endpoint's exact slot/identity/epoch, canonical
+authority header and payload, recorded HTTP response/readback, then one
+complete-set GitHub label reconciliation, then exactly one literal
+`message-slot` packet. A primitive failure stops subsequent effects.
+
 ### Stuck numbered-slot -> rescue-lane transfer (Rajiv 2026-08-25)
 
 A numbered slot is stuck when its product work cannot advance because the slot's
@@ -1027,7 +1036,7 @@ product/runtime diffs.
 | Any verified bounded control-plane defect or stabilization | `CONTROL_PLANE_REPAIR` | PM reports the first literal blocker/tuple to CTO; CTO diagnoses and sends one exact brief to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628` | `EXECUTE_NOW` after verifying bounded non-product scope and no duplicate owner. MoP returns candidate-only for exactly one CTO inline review; BLOCK returns rework to the same task; APPROVE makes CTO sole publisher/rollout/live verifier/PM notifier. PM has zero review/approval/retry role; never use a numbered slot. |
 | PM Operator, direct MoP/GitHub command adapter, executable caller cutover, or `pm-transition` retirement change | `PM_OPERATOR_CUTOVER` | CTO sends one exact brief to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628` | `EXECUTE_NOW` under Rajiv's current directive. MoP prepares and returns one candidate-only packet for CTO inline review; it does not publish or deploy. CTO alone publishes, rolls out, verifies, and notifies PM after approval. Preserve the exact baseline, migrate one reachable family at a time, and never route this work to PM, the retired generic repair route, or a numbered slot. |
 | Legacy or explicit `CTO_DIRECT_CONTROL_PLANE_REPAIR` label for a bounded control-plane defect | `CTO_DIRECT_CONTROL_PLANE_REPAIR` | normalize to the same CTO/MoP candidate-only contract above | `EXECUTE_NOW`; MoP prepares one candidate for exactly one CTO inline functionality review. A block returns to MoP; an approval is published and rolled out only by CTO Decisions. |
-| Numbered slot held by a control-plane repair (occupied-inactive or free-standby, off-slot repair running) | `CONTROL_PLANE_REPAIR_SLOT_HOLD` | exact-slot verification; then direct PM to execute the release/refill tuple | `PM_CORRECTION` (no CTO decision needed; the invariant is standing). Verify the exact slot log first (inactive turn, no active process, clean exact-head checkout, incident binding). CTO directs but does not mutate the numbered slot. PM first attempts the canonical typed path once; on a control-plane refusal PM uses the standing degraded exact-tuple path: (1) exact-epoch MoP release; (2) complete-set GitHub blocker/ownership-label reconciliation preserving the real blocker; (3) exact-epoch MoP assignment of the highest eligible work; (4) complete-set GitHub ownership labels; (5) exactly one literal message-slot packet; (6) terminal MoP/GitHub read-back plus async pickup evidence/obligation. The repair itself stays off-slot and may not delay refill. Failure: the slot remains idle/held while work is eligible, CTO performs the numbered-slot mutation, or the repair occupies a numbered slot. |
+| Numbered slot held by a control-plane repair (occupied-inactive or free-standby, off-slot repair running) | `CONTROL_PLANE_REPAIR_SLOT_HOLD` | exact-slot verification; then CTO Decisions applies the shared native bypass contract | `CTO_CORRECTION` only after one typed high-level refusal. Verify the exact slot log first (inactive turn, no active process, clean exact-head checkout, incident binding). For a full release/refill, use direct MoP `curl` with exact slot/identity/epoch and canonical authority header/payload, record response/readback, then complete-set GitHub labels, then exactly one literal `message-slot` packet; stop on failure and preserve substantive blockers. The repair stays off-slot and may not delay refill; no PM mutation, second owner, raw workflow, or numbered-slot repair work is allowed. |
 | Slot/PR ownership or transition mismatch | `SLOT_TRANSITION` | exact-slot verification; `codex-slot-rescue` only when explicitly authorized | Usually `PM_CORRECTION`. Preserve productive work. Direct PM to one canonical transition only after reading the exact slot log and live tuple. |
 | Occupied slot reports repeated same-head "in progress"/LOCAL_CONTINUE with no commit (PM JSONL slot deliveries + MoP nudge corroboration) | `SLOT_FALSE_PROGRESS` | verify the exact slot log tail, live MoP row/epoch, and checkout head; confirm no active canonical assignment/reconcile command | `PM_CORRECTION`. Direct PM to force terminalization now: commit + push the current work to a new head (affected proof, phase-a/planner/CI at the new head) or name a typed blocker; if no shippable commit within the 30m SLA, park/block the issue/PR preserving the partial patch, release the slot, and assign the next highest eligible rework. Failure: the slot remains at the same head with only "will continue" hold updates past the SLA. |
 | PM checkout is on a feature branch instead of main (PM JSONL/logs show the PM clone at `fix/...` while doing PM-owned work) | `PM_CHECKOUT_BRANCH` | verify PM clone branch: `git -C /Users/rajiv/Downloads/projects/heydonna-app rev-parse --abbrev-ref HEAD`; exclude disposable worktrees and slot clones | `PM_CORRECTION`. Remind PM to return to main: `git checkout main && git pull --ff-only origin main`, then rerun the affected-test/review through the dedicated background agent or a disposable worktree / the owning slot's clone. |

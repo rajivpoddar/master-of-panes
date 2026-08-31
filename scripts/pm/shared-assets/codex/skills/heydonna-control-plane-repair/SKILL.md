@@ -71,7 +71,17 @@ inline decision.
   failures. Preserve head-pinned merge and duplicate/single-flight guards.
 - A direct manual edge, if separately authorized by CTO, remains one fresh-
   fenced, journaled, idempotent edge preserving unrelated state. This skill
-  only specifies the candidate; it does not execute that edge.
+  only specifies the candidate; it does not execute that edge. Use the
+  `Native bypass contract (CTO-only, after one high-level refusal)` in the
+  shared release-conveyor contract as the sole authority for any such edge.
+
+The bypass is not a second repair path: one high-level refusal triggers one
+fresh-fenced native primitive sequence. Release-only work is one direct
+complete-set GitHub label edge with literal pre/post journaling. Slot
+assign/release/rebind/refill work is direct MoP `curl`, then complete-set
+GitHub labels, then exactly one literal `message-slot` delivery; a failure
+stops later effects. No raw workflow dispatch, blind rerun, gate bypass,
+second message, or polling is permitted.
 
 ## Candidate contract
 

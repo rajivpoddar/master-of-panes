@@ -91,3 +91,21 @@ def test_cto_return_transport_is_explicit() -> None:
     assert "$codex-stdio-send-message" in wake
     assert "PM may provide the initial" in wake
     assert "blocker/context only" in wake
+
+
+def test_native_bypass_contract_is_single_fenced_and_ordered() -> None:
+    contract = _text("codex/skills/_shared/release-conveyor-contract.md")
+    wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
+    skill = _text("codex/skills/heydonna-control-plane-repair/SKILL.md")
+    assert "high-level typed/control-plane path is attempted once" in contract
+    assert "do not retry it" in contract
+    assert "one direct GitHub complete-set label" in contract
+    assert "It performs no MoP or" in contract
+    assert "MoP -> GitHub ->" in contract
+    assert "failure at any step stops before later effects" in contract
+    assert "exactly one" in contract
+    assert "literal `message-slot` continuation packet" in contract
+    assert "raw `workflow_dispatch`" in contract
+    assert "blind rerun" in contract
+    assert "shared native bypass contract" in wake
+    assert "Native bypass contract (CTO-only, after one high-level refusal)" in skill
