@@ -110,6 +110,7 @@ def test_canonical_asset_manifest_has_exact_source_digests_and_modes() -> None:
         "codex/skills/_shared/release-conveyor-contract.md",
         "codex/skills/heydonna-control-plane-repair/SKILL.md",
         "codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
+        "claude/scripts/pm/control-plane/sakshi-heartbeat.py",
     }
     entries = {entry["source_path"]: entry for entry in manifest["entries"]}
     assert expected <= entries.keys()
@@ -117,7 +118,8 @@ def test_canonical_asset_manifest_has_exact_source_digests_and_modes() -> None:
         source = SHARED / source_path
         entry = entries[source_path]
         assert hashlib.sha256(source.read_bytes()).hexdigest() == entry["sha256"]
-        assert entry["mode"] == 0o644
+        expected_mode = 0o755 if source_path.endswith("sakshi-heartbeat.py") else 0o644
+        assert entry["mode"] == expected_mode
         assert entry["canonical_target"].startswith("/Users/rajiv/")
 
 
