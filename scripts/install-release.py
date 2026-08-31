@@ -28,6 +28,12 @@ MANIFEST = "RELEASE_MANIFEST.json"
 ROLLBACK_MANIFEST = "ROLLBACK_MANIFEST.json"
 SHARED_ASSET_MANIFEST = "scripts/pm/shared-assets/manifest.json"
 PROTECTED_NAMES = {".git"}
+# These files are part of the running service contract, not optional payload.
+# Keep the list deliberately narrow so release packaging remains additive.
+REQUIRED_RUNTIME_FILES = {
+    "dist/server.js": 0o644,
+    "scripts/release-slot-reset-and-ack.py": 0o755,
+}
 
 
 class InstallerError(RuntimeError):
@@ -116,6 +122,22 @@ def _payload_records(root: Path, paths: Iterable[str]) -> list[dict[str, Any]]:
     return records
 
 
+def _verify_required_runtime_files(root: Path, records: Iterable[dict[str, Any]] | None = None) -> None:
+    """Refuse a release that cannot service the running MoP contract."""
+    indexed = {record.get("path"): record for record in records or []}
+    for relative, expected_mode in REQUIRED_RUNTIME_FILES.items():
+        path = root / _safe_relative(relative)
+        if not path.is_file() or path.is_symlink():
+            raise InstallerError(f"required runtime file is missing or unsafe: {path}")
+        observed = file_record(path, relative)
+        if observed["mode"] != expected_mode:
+            raise InstallerError(
+                f"required runtime file mode mismatch: {path} expected={oct(expected_mode)} actual={oct(observed['mode'])}"
+            )
+        if records is not None and indexed.get(relative) != observed:
+            raise InstallerError(f"required runtime file is absent from release manifest: {path}")
+
+
 def stage_release(
     *,
     repo: Path,
@@ -165,6 +187,7 @@ def stage_release(
             for path in node_modules.rglob("*")
             if path.is_file() or path.is_symlink()
         ]
+        _verify_required_runtime_files(temporary)
         files = _payload_records(temporary, [*tracked, *generated, *dependencies])
         shared_metadata: dict[str, Any] | None = None
         if (temporary / SHARED_ASSET_MANIFEST).is_file():
@@ -203,6 +226,7 @@ def verify_staged(*, repo: Path, release_dir: Path, candidate: str) -> dict[str,
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("commit") != candidate or manifest.get("tree") != tree:
         raise InstallerError("staged manifest candidate/tree mismatch")
+    _verify_required_runtime_files(release_dir, manifest.get("files", []))
     shared_manifest_path = release_dir / SHARED_ASSET_MANIFEST
     if shared_manifest_path.is_file():
         shared = _load_shared_manifest(release_dir)
@@ -547,8 +571,12 @@ def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
 def atomic_switch(current: Path, release_dir: Path, expected_old: Path) -> None:
     if not current.is_symlink():
         raise InstallerError(f"current release is not a symlink: {current}")
-    observed = current.resolve(strict=True)
-    if observed != expected_old.resolve(strict=True):
+    try:
+        observed = current.resolve(strict=True)
+        expected = expected_old.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise InstallerError(f"current release target is missing: {current}") from exc
+    if observed != expected:
         raise InstallerError(f"current release drift: expected={expected_old} actual={observed}")
     temporary = current.with_name(f".{current.name}.switch.{os.getpid()}")
     if temporary.exists() or temporary.is_symlink():
@@ -627,6 +655,7 @@ def activate(
 ) -> dict[str, Any]:
     if not release_dir.is_dir() or release_dir.is_symlink():
         raise InstallerError(f"release is not an immutable directory: {release_dir}")
+    _verify_required_runtime_files(release_dir)
     rollback = create_rollback_bundle(delete_targets, rollback_bundle)
     switched = False
     try:

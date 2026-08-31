@@ -27,6 +27,15 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.new.mkdir(parents=True)
         (self.old / "server.js").write_text("old\n")
         (self.new / "server.js").write_text("new\n")
+        for release in (self.old, self.new):
+            server = release / "dist" / "server.js"
+            server.parent.mkdir(parents=True)
+            server.write_text("server\n")
+            server.chmod(0o644)
+            helper = release / "scripts" / "release-slot-reset-and-ack.py"
+            helper.parent.mkdir(parents=True)
+            helper.write_text("#!/usr/bin/env python3\n")
+            helper.chmod(0o755)
         self.current.parent.mkdir(exist_ok=True)
         os.symlink(self.old, self.current)
         self.delete_file = self.root / "legacy" / "planner.py"
@@ -145,6 +154,29 @@ class ReleaseInstallerTests(unittest.TestCase):
         manifest = module.create_rollback_bundle([absent], self.bundle)
         self.assertFalse(manifest["entries"][0]["present"])
         self.assertEqual(stat.S_IMODE(self.bundle.stat().st_mode), 0o700)
+
+    def test_activation_refuses_release_missing_required_helper_before_switch(self):
+        helper = self.new / "scripts" / "release-slot-reset-and-ack.py"
+        helper.unlink()
+        with self.assertRaisesRegex(module.InstallerError, "required runtime file"):
+            self.run_activation()
+        self.assertEqual(self.current.resolve(), self.old.resolve())
+        self.assertEqual(self.restart_count, 0)
+
+    def test_activation_refuses_release_missing_server_before_switch(self):
+        (self.new / "dist" / "server.js").unlink()
+        with self.assertRaisesRegex(module.InstallerError, "required runtime file"):
+            self.run_activation()
+        self.assertEqual(self.current.resolve(), self.old.resolve())
+        self.assertEqual(self.restart_count, 0)
+
+    def test_atomic_switch_refuses_dangling_expected_release(self):
+        missing = self.root / "releases" / "missing"
+        dangling = self.root / "dangling-current"
+        os.symlink(missing, dangling)
+        with self.assertRaisesRegex(module.InstallerError, "current release"):
+            module.atomic_switch(dangling, self.new, missing)
+        self.assertEqual(os.readlink(dangling), str(missing))
 
 
 if __name__ == "__main__":
