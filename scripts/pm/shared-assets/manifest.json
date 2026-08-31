@@ -10,6 +10,8 @@
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
       "~/.claude/scripts/axiom-activity-report.py",
+      "~/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
+      "~/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
       "~/.claude/scripts/launch-dev-slot-claude.sh",
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
@@ -27,7 +29,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 42,
+    "selected_count": 44,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -166,6 +168,24 @@
       "sha256": "8b67ea060d935f4be465aa342b0f3fe00e86950ce0ccbb80a58b1e2cc1d94abd",
       "mode": 493,
       "ownership_class": "shared-claude-pm-report",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/ci/ci-fast-triage.py",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
+      "sha256": "752ccd77cc632bec2fbdeb360822ad4adb0ea3f9cef5ca94a68e5174e0875b54",
+      "mode": 493,
+      "ownership_class": "shared-claude-ci-failure-triage",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/ci/required-ci-jobs.json",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
+      "sha256": "39cf06aacfa5e1df53b1fe791a34c2e3eb0c8028c183e77adf07d7d533ef33a1",
+      "mode": 420,
+      "ownership_class": "shared-claude-ci-failure-triage-contract",
       "dependency_status": "closed",
       "dependencies": []
     },

@@ -1,0 +1,4 @@
+{
+  "CI": "test",
+  "E2E Smoke Tests": "e2e"
+}
