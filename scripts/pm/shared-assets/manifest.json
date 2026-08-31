@@ -25,7 +25,7 @@
       "~/Downloads/projects/heydonna-app-3006/.claude/skills/respawn",
       "~/.codex/skills/codex-stdio-send-message"
     ],
-    "selected_count": 36,
+    "selected_count": 40,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -339,6 +339,33 @@
       "dependencies": []
     },
     {
+      "source_path": "codex/monitors/heydonna-pm-chat/MONITOR.md",
+      "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-pm-chat/MONITOR.md",
+      "sha256": "f2be945e51614d075c2be690802c31b6011a6b4f5b085dc88fc04d209079e81d",
+      "mode": 420,
+      "ownership_class": "shared-codex-monitor",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
+      "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
+      "sha256": "8bc8ac6d6ad691331d4440524b7f7929f6648fcc041c018651957d8bae9a2316",
+      "mode": 420,
+      "ownership_class": "shared-codex-monitor",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/skills/_shared/release-conveyor-contract.md",
+      "canonical_target": "/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md",
+      "sha256": "613153b54cafc620dcb74d438ccad69e6afa6ba135c2c9b18229fff7ee8e3810",
+      "mode": 420,
+      "ownership_class": "shared-codex-contract",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "codex/skills/codex-stdio-send-message/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/codex-stdio-send-message/SKILL.md",
       "sha256": "e3b511fce25ee8f2096f4ee2d0bba9ead237d30fff2cd52bd4a7bb66dcf52609",
@@ -371,6 +398,15 @@
       "sha256": "081d3eec3bd7f64a1799adf3772ad0df1a70ffe1ec07f7a82f721db3cf6d45b6",
       "mode": 420,
       "ownership_class": "shared-codex-skill-test",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/skills/heydonna-control-plane-repair/SKILL.md",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-control-plane-repair/SKILL.md",
+      "sha256": "1ac1f29a481bfcfdec429f145cffbef7eeceb570b41db443ecff0a1c42dc9e08",
+      "mode": 420,
+      "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",
       "dependencies": []
     }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -74,7 +75,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
     def test_manifest_is_deterministic_and_source_parity_is_exact(self) -> None:
         manifest = MODULE._load_shared_manifest(self.release)
         self.assertEqual(manifest["entries"], sorted(manifest["entries"], key=lambda item: item["source_path"]))
-        self.assertEqual(manifest["inventory"]["selected_count"], 36)
+        self.assertEqual(manifest["inventory"]["selected_count"], 40)
         self.assertEqual(manifest["inventory"]["ambiguous"], [])
         result = self.install()
         self.assertEqual(result["status"], "SHARED_ASSETS_INSTALLED")
@@ -84,6 +85,35 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
             target = self.targets / entry["canonical_target"].lstrip("/")
             self.assertEqual(source.read_bytes(), target.read_bytes())
             self.assertEqual(stat.S_IMODE(source.stat().st_mode), stat.S_IMODE(target.stat().st_mode))
+
+    def test_release_conveyor_matrix_has_guarded_control_plane_refusal(self) -> None:
+        shared = self.release / "scripts" / "pm" / "shared-assets"
+        contract = (shared / "codex" / "skills" / "_shared" / "release-conveyor-contract.md").read_text(encoding="utf-8")
+        skill = (shared / "codex" / "skills" / "heydonna-control-plane-repair" / "SKILL.md").read_text(encoding="utf-8")
+        wake_sop = (shared / "codex" / "monitors" / "heydonna-pm-chat" / "WAKE_SOP.md").read_text(encoding="utf-8")
+        block = re.search(r"```json\n(\{.*?\})\n```", contract, flags=re.DOTALL)
+        self.assertIsNotNone(block)
+        matrix = json.loads(block.group(1))
+        self.assertEqual(matrix["version"], 1)
+        scenarios = matrix["scenarios"]
+        self.assertEqual(len(scenarios), 5)
+        refusal = scenarios["control_plane_refusal"]
+        self.assertEqual(refusal["owner"], "CTO")
+        self.assertEqual(refusal["pm_input"], "first_literal_blocker_exact_pr_full_head_current_labels")
+        self.assertEqual(refusal["fence"], "fresh_exact_head_duplicate_run_safety")
+        self.assertEqual(refusal["action"], "execute_or_durable_delegate_one_journaled_idempotent_label_edge")
+        self.assertEqual(refusal["edge"], "preserve_unrelated_labels_stop_after_one_edge")
+        self.assertEqual(refusal["wake"], "immediate")
+        self.assertEqual(refusal["terminal"], "execute_or_durable_delegate_or_name_concrete_harm")
+        self.assertNotIn("at most 15 minutes", contract)
+        self.assertIn("PM does not retry", contract)
+        self.assertIn("marker shapes", contract)
+        self.assertIn("The sole narrow exception is the CTO-authorized fallback", skill)
+        self.assertIn("one journaled, idempotent GitHub label edge", skill)
+        self.assertNotIn("never hand-edit target state labels", skill)
+        self.assertIn("one candidate for exactly one CTO inline functionality review", wake_sop)
+        self.assertIn("no second review or acknowledgement ceremony", wake_sop)
+        self.assertNotIn("without a candidate-roundtrip", wake_sop)
 
     def test_unlisted_file_preserved_and_late_failure_restores_absent_baseline(self) -> None:
         unlisted = self.targets / "Users" / "rajiv" / ".codex" / "unlisted.txt"
