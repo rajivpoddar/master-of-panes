@@ -29,6 +29,8 @@ type PreparedCadenceOccurrence = {
   task: PMCadenceTaskName;
   due_key: string;
   event_type: string;
+  message: string;
+  message_bytes: number;
   message_sha256: string;
 };
 
@@ -497,14 +499,29 @@ export class PMCadenceScheduler {
       try {
         const payload = JSON.parse(event.payload) as Partial<PreparedCadenceOccurrence>;
         if (payload.task === taskName && payload.due_key === dueKey && payload.event_type === eventType) {
-          if (typeof payload.message_sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(payload.message_sha256)) {
+          const message = payload.message;
+          const messageBytes = payload.message_bytes;
+          const messageDigest = payload.message_sha256;
+          if (
+            typeof message !== "string" ||
+            message.length === 0 ||
+            typeof messageBytes !== "number" ||
+            !Number.isSafeInteger(messageBytes) ||
+            messageBytes < 0 ||
+            typeof messageDigest !== "string" ||
+            !/^[0-9a-f]{64}$/i.test(messageDigest) ||
+            Buffer.byteLength(message, "utf8") !== messageBytes ||
+            messageSha256(message) !== messageDigest.toLowerCase()
+          ) {
             return "malformed";
           }
           return {
             task: taskName,
             due_key: dueKey,
             event_type: eventType,
-            message_sha256: payload.message_sha256.toLowerCase(),
+            message,
+            message_bytes: messageBytes,
+            message_sha256: messageDigest.toLowerCase(),
           };
         }
       } catch {

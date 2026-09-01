@@ -146,7 +146,7 @@ test("restart reconciles one delivered heartbeat occurrence without rerunning th
   const directory = mkdtempSync(join(tmpdir(), "mop-heartbeat-restart-reconcile-"));
   try {
     const db = heartbeatDb(directory);
-    const launchPrompt = "canonical composed launch prompt";
+    const launchPrompt = "canonical composed launch prompt ✓ 日本語";
     let producerCalls = 0;
     let submissions = 0;
     const first = new PMCadenceScheduler(db, {
@@ -172,8 +172,14 @@ test("restart reconciles one delivered heartbeat occurrence without rerunning th
     assert.equal(db.getConfig("pm_cadence_heartbeat_last_due_key"), null);
     const prepared = db.getEvents(0, 20, "pm_cadence_occurrence_prepared")[0];
     assert.ok(prepared);
-    const preparedPayload = JSON.parse(prepared.payload) as { message?: string; message_sha256?: string };
+    const preparedPayload = JSON.parse(prepared.payload) as {
+      message?: string;
+      message_bytes?: number;
+      message_sha256?: string;
+    };
     assert.equal(preparedPayload.message, firstResult.message);
+    assert.equal(preparedPayload.message_bytes, Buffer.byteLength(firstResult.message, "utf8"));
+    assert.ok((preparedPayload.message_bytes ?? 0) > firstResult.message.length);
     assert.equal(preparedPayload.message_sha256, createHash("sha256").update(firstResult.message, "utf8").digest("hex"));
 
     let restartProducerCalls = 0;
@@ -246,6 +252,121 @@ for (const receipt of [
       assert.equal(submissions, 1);
       assert.equal(db.getConfig("pm_cadence_heartbeat_last_due_key"), null);
       assert.equal(db.getEvents(0, 20, "pm_cadence_delivery_reconciled").length, 0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const markerCase of [
+  {
+    name: "message differs while borrowing the delivered digest and wrong byte count",
+    mutate: (marker: Record<string, unknown>, validMessage: string, validBytes: number, validDigest: string) => {
+      marker.message = "forged occurrence payload";
+      marker.message_bytes = validBytes + 1;
+      marker.message_sha256 = validDigest;
+    },
+  },
+  {
+    name: "missing message",
+    mutate: (marker: Record<string, unknown>) => { delete marker.message; },
+  },
+  {
+    name: "non-string message",
+    mutate: (marker: Record<string, unknown>) => { marker.message = 42; },
+  },
+  {
+    name: "empty message",
+    mutate: (marker: Record<string, unknown>) => { marker.message = ""; },
+  },
+  {
+    name: "missing message bytes",
+    mutate: (marker: Record<string, unknown>) => { delete marker.message_bytes; },
+  },
+  {
+    name: "non-integer message bytes",
+    mutate: (marker: Record<string, unknown>, _validMessage: string, validBytes: number) => { marker.message_bytes = validBytes + 0.5; },
+  },
+  {
+    name: "negative message bytes",
+    mutate: (marker: Record<string, unknown>) => { marker.message_bytes = -1; },
+  },
+  {
+    name: "wrong message bytes",
+    mutate: (marker: Record<string, unknown>, _validMessage: string, validBytes: number) => { marker.message_bytes = validBytes + 1; },
+  },
+  {
+    name: "missing digest",
+    mutate: (marker: Record<string, unknown>) => { delete marker.message_sha256; },
+  },
+  {
+    name: "malformed digest",
+    mutate: (marker: Record<string, unknown>) => { marker.message_sha256 = "not-a-digest"; },
+  },
+  {
+    name: "wrong digest",
+    mutate: (marker: Record<string, unknown>) => { marker.message_sha256 = "0".repeat(64); },
+  },
+] as const) {
+  test(`prepared cadence marker rejects ${markerCase.name}`, async () => {
+    const directory = mkdtempSync(join(tmpdir(), "mop-heartbeat-marker-validation-"));
+    try {
+      const db = heartbeatDb(directory);
+      const composedMessage = "canonical composed launch prompt ✓ 日本語";
+      let producerCalls = 0;
+      let submissions = 0;
+      const first = new PMCadenceScheduler(db, {
+        submitToPM: async (message: string, eventType?: string) => {
+          submissions += 1;
+          db.logEvent(0, "pm_queue_delivered", null, null, { event_type: eventType, message });
+          return { ok: false, ambiguous: true };
+        },
+      } as never, {
+        heartbeatPreflight: async () => {
+          producerCalls += 1;
+          return { ok: true, stage: "ready-pool-audit", returncode: 0, output: "", error: null, launch_prompt: composedMessage };
+        },
+      });
+      const firstResult = await first.runManual("heartbeat");
+      const validBytes = Buffer.byteLength(firstResult.message, "utf8");
+      const validDigest = createHash("sha256").update(firstResult.message, "utf8").digest("hex");
+      const marker: Record<string, unknown> = {
+        task: "heartbeat",
+        due_key: firstResult.due_key,
+        event_type: `cadence-heartbeat-${firstResult.due_key}`,
+        message: firstResult.message,
+        message_bytes: validBytes,
+        message_sha256: validDigest,
+      };
+      markerCase.mutate(marker, firstResult.message, validBytes, validDigest);
+      db.logEvent(0, "pm_cadence_occurrence_prepared", null, null, marker);
+
+      let restartProducerCalls = 0;
+      let restartSubmissions = 0;
+      const fresh = new PMCadenceScheduler(db, {
+        submitToPM: async () => {
+          restartSubmissions += 1;
+          return { ok: true };
+        },
+      } as never, {
+        heartbeatPreflight: async () => {
+          restartProducerCalls += 1;
+          return { ok: true, stage: "ready-pool-audit", returncode: 0, output: "", error: null, launch_prompt: "must not run" };
+        },
+      });
+      const result = await (fresh as unknown as {
+        runIfDue: (task: "heartbeat", reason: "scheduled") => Promise<PMCadenceRunResult | null>;
+      }).runIfDue("heartbeat", "scheduled");
+
+      assert.ok(result);
+      assert.equal(result.triggered, false);
+      assert.match(result.message, /HEARTBEAT_OCCURRENCE_RECONCILIATION_FAILED/);
+      assert.equal(producerCalls, 1);
+      assert.equal(submissions, 1);
+      assert.equal(restartProducerCalls, 0);
+      assert.equal(restartSubmissions, 0);
+      assert.equal(db.getConfig("pm_cadence_heartbeat_last_due_key"), null);
+      assert.equal(db.getEvents(0, 30, "pm_cadence_delivery_reconciled").length, 0);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
