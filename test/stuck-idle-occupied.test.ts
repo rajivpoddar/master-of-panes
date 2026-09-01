@@ -1832,6 +1832,14 @@ test("Unicode control and format terminal session IDs fail closed", async () => 
   const originalNow = Date.now;
   try {
     for (const terminal of [
+      { type: "Stop" as const, session_id: "\u0009valid-session" },
+      { type: "SessionEnd" as const, session_id: "valid-session\u000A" },
+      { type: "Stop" as const, session_id: "\uFEFFvalid-session" },
+      { type: "SessionEnd" as const, session_id: "valid-session\uFEFF" },
+      { type: "Stop" as const, session_id: "\u2028ordinary-session\u2029" },
+      { type: "SessionEnd" as const, session_id: "valid-session\u2028" },
+      { type: "Stop" as const, session_id: "\u2029valid-session" },
+      { type: "SessionEnd" as const, session_id: "valid-session\u2029" },
       { type: "Stop" as const, session_id: "valid-session\u0085" },
       { type: "SessionEnd" as const, session_id: "valid-session\u200B" },
     ]) {
@@ -1906,7 +1914,7 @@ test("Unicode control and format opener session IDs fail closed", async () => {
     db.updateSlot(2, { idle: true, active_turn_id: null, active_turn_state: "inactive" });
     await processor.process(2, {
       type: "SessionStart",
-      session_id: "opener-session\u200B",
+      session_id: "\u2028opener-session\u2029",
       source: "startup",
     });
     db.logEvent(2, "slot_idle_reconciled_from_pane", "Timer", null, {
@@ -1924,6 +1932,86 @@ test("Unicode control and format opener session IDs fail closed", async () => {
     assert.equal(sends.length, 0);
     assert.equal(db.getEvents(2, 20, "idle_occupied_continue_injected").length, 0);
     assert.equal(db.getEvents(2, 20, "idle_occupied_suppressed_missing_hook_session").length, 1);
+  } finally {
+    Date.now = originalNow;
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("raw session validation prevents PM_WAIT identity aliasing and trims permitted spaces", async () => {
+  const originalNow = Date.now;
+  const initialNow = originalNow();
+  const directory = mkdtempSync(join(tmpdir(), "mop-session-parser-boundary-"));
+  const db = new MoPDatabase({
+    ...DEFAULT_CONFIG,
+    dbPath: join(directory, "mop.db"),
+  });
+  const sends: string[] = [];
+  const relay = {
+    sendToSlotAsync: async (
+      _slot: number,
+      command: string,
+      _force = false,
+      _raw = false,
+      beforeFirstEffect?: () => boolean,
+    ) => {
+      if (beforeFirstEffect && !beforeFirstEffect()) return false;
+      sends.push(command);
+      return true;
+    },
+  } as unknown as TmuxRelay;
+  const processor = new HookProcessor(db, relay);
+  try {
+    assert.equal(
+      db.assignSlot(2, "issue 7000", "github:heydonna-app/heydonna-app", 7000, "main", 7001, "a".repeat(40), 0).ok,
+      true,
+    );
+    db.updateSlot(2, { idle: true, active_turn_id: null, active_turn_state: "inactive" });
+    await processor.process(2, {
+      type: "SessionStart",
+      session_id: "  ordinary-session  ",
+      source: "startup",
+    });
+    db.logEvent(2, "slot_idle_reconciled_from_pane", "Timer", null, {
+      reason: "production-shaped idle reconciliation",
+    });
+    db.updateSlot(2, { idle: true, active_turn_id: null, active_turn_state: "inactive" });
+
+    Date.now = () => initialNow + 30 * 60_000;
+    await new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(initialNow) } as unknown as LogManager,
+      relay,
+    ).checkIdleOccupied(db.getSlot(2)!);
+    assert.equal(sends.length, 1);
+
+    // The malformed opener would become ordinary-session after trim under the
+    // old parser, incorrectly carrying the first PM_WAIT/HOLD wait anchor.
+    await processor.process(2, {
+      type: "UserPromptSubmit",
+      session_id: "\u2028ordinary-session\u2029",
+    });
+    await processor.process(2, {
+      type: "Stop",
+      session_id: "ordinary-session",
+      transcript: "PM_WAIT_NUDGE_RESULT classification=HOLD action=reminded_pm",
+    });
+    processor.cancelPendingIdleTimer(2);
+
+    Date.now = () => initialNow + 60 * 60_000;
+    await new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(initialNow) } as unknown as LogManager,
+      relay,
+    ).checkIdleOccupied(db.getSlot(2)!);
+    assert.equal(sends.length, 2);
+
+    const nudges = db.getEvents(2, 10, "idle_occupied_continue_injected");
+    assert.equal(nudges.length, 2);
+    const first = JSON.parse(nudges[1].payload) as { wait_anchor?: string };
+    const second = JSON.parse(nudges[0].payload) as { wait_anchor?: string };
+    assert.notEqual(second.wait_anchor, first.wait_anchor);
   } finally {
     Date.now = originalNow;
     db.close();

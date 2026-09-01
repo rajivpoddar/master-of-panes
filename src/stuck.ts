@@ -81,8 +81,12 @@ function parseHookSessionId(rawPayload: string): string | null {
     const value = JSON.parse(rawPayload) as { session_id?: unknown };
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     if (typeof value.session_id !== "string") return null;
+    // Validate the raw identity before trimming. ECMAScript trim removes
+    // some line/format characters, so checking only the trimmed value would
+    // let a malformed identity alias a permitted session ID.
+    if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value.session_id)) return null;
     const sessionId = value.session_id.trim();
-    return sessionId.length > 0 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(sessionId)
+    return sessionId.length > 0
       ? sessionId
       : null;
   } catch {
