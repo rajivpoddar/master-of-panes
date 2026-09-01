@@ -81,6 +81,11 @@ export interface NoPaneReleaseDigestInput {
   checkout_path: string;
 }
 
+export interface PMQueueDeliveryObservation {
+  state: "none" | "started" | "deferred" | "ambiguous" | "delivered" | "malformed";
+  message_sha256: string | null;
+}
+
 export interface AssignmentTuple {
   repository_id: string;
   issue: number | null;
@@ -2328,6 +2333,51 @@ export class MoPDatabase {
       // deferred remains the conservative interpretation.
     }
     return "deferred";
+  }
+
+  /**
+   * Read one cadence occurrence by its immutable event identity without
+   * reconstructing or comparing against the scheduler's static command text.
+   * The message digest is derived from the durable delivery event so cadence
+   * recovery can bind it to the pre-delivery occurrence marker.
+   */
+  getPMQueueDeliveryForOccurrence(
+    slot: number,
+    eventType: string,
+  ): PMQueueDeliveryObservation {
+    const rows = this.db.prepare(`
+      SELECT event_type, payload
+      FROM events
+      WHERE slot = ?
+        AND event_type IN ('pm_queue_delivery_started', 'pm_queue_delivery_deferred', 'pm_queue_delivered')
+      ORDER BY id DESC
+      LIMIT 200000
+    `).all(slot) as Array<{ event_type: string; payload: string }>;
+    for (const row of rows) {
+      try {
+        const occurrence = JSON.parse(row.payload) as { event_type?: unknown };
+        if (occurrence.event_type !== eventType) continue;
+        const payload = occurrence as { message?: unknown; ambiguous?: unknown };
+        if (typeof payload.message !== "string") {
+          return { state: "malformed", message_sha256: null };
+        }
+        const message_sha256 = createHash("sha256").update(payload.message, "utf8").digest("hex");
+        if (row.event_type === "pm_queue_delivered") {
+          return { state: "delivered", message_sha256 };
+        }
+        if (row.event_type === "pm_queue_delivery_started") {
+          return { state: "started", message_sha256 };
+        }
+        return {
+          state: payload.ambiguous === true ? "ambiguous" : "deferred",
+          message_sha256,
+        };
+      } catch {
+        // A malformed event cannot prove delivery; continue looking for a
+        // newer well-formed occurrence marker.
+      }
+    }
+    return { state: "none", message_sha256: null };
   }
 
   hasPMQueueDelivery(slot: number, eventType: string, message: string, enqueuedAt?: string): boolean {

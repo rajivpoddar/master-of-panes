@@ -11,6 +11,7 @@ import { MoPDatabase } from "../src/db.js";
 import {
   PMCadenceScheduler,
   type HeartbeatPreflightResult,
+  type PMCadenceRunResult,
 } from "../src/pmCadence.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
@@ -136,6 +137,154 @@ test("a successful canonical preflight delivers the exact emitted prompt once", 
     assert.equal(deliveries.length, 1);
     assert.match(deliveries[0] ?? "", /canonical heartbeat prompt$/);
     assert.notEqual(db.getConfig("pm_cadence_heartbeat_last_due_key"), null);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("restart reconciles one delivered heartbeat occurrence without rerunning the producer", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-heartbeat-restart-reconcile-"));
+  try {
+    const db = heartbeatDb(directory);
+    const launchPrompt = "canonical composed launch prompt";
+    let producerCalls = 0;
+    let submissions = 0;
+    const first = new PMCadenceScheduler(db, {
+      submitToPM: async (message: string, eventType?: string) => {
+        submissions += 1;
+        db.logEvent(0, "pm_queue_delivered", null, null, {
+          event_type: eventType,
+          message,
+        });
+        return { ok: false, ambiguous: true };
+      },
+    } as never, {
+      heartbeatPreflight: async () => {
+        producerCalls += 1;
+        return { ok: true, stage: "ready-pool-audit", returncode: 0, output: "", error: null, launch_prompt: launchPrompt };
+      },
+    });
+
+    const firstResult = await first.runManual("heartbeat");
+    assert.equal(firstResult.queued, true);
+    assert.equal(producerCalls, 1);
+    assert.equal(submissions, 1);
+    assert.equal(db.getConfig("pm_cadence_heartbeat_last_due_key"), null);
+    const prepared = db.getEvents(0, 20, "pm_cadence_occurrence_prepared")[0];
+    assert.ok(prepared);
+    const preparedPayload = JSON.parse(prepared.payload) as { message?: string; message_sha256?: string };
+    assert.equal(preparedPayload.message, firstResult.message);
+    assert.equal(preparedPayload.message_sha256, createHash("sha256").update(firstResult.message, "utf8").digest("hex"));
+
+    let restartProducerCalls = 0;
+    let restartSubmissions = 0;
+    const fresh = new PMCadenceScheduler(db, {
+      submitToPM: async () => {
+        restartSubmissions += 1;
+        return { ok: true };
+      },
+    } as never, {
+      heartbeatPreflight: async () => {
+        restartProducerCalls += 1;
+        return { ok: true, stage: "ready-pool-audit", returncode: 0, output: "", error: null, launch_prompt: "must not regenerate" };
+      },
+    });
+    db.setConfig("pm_cadence_morning_brief_paused", "true");
+    const reconcile = await fresh.tick("scheduled");
+
+    assert.deepEqual(reconcile, []);
+    assert.equal(restartProducerCalls, 0);
+    assert.equal(restartSubmissions, 0);
+    assert.equal(db.getConfig("pm_cadence_heartbeat_last_due_key"), firstResult.due_key);
+    assert.equal(db.getEvents(0, 20, "pm_cadence_delivery_reconciled").length, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+for (const receipt of [
+  { name: "missing", write: (_db: MoPDatabase, _eventType: string) => undefined },
+  { name: "payload mismatch", write: (db: MoPDatabase, eventType: string) => db.logEvent(0, "pm_queue_delivered", null, null, { event_type: eventType, message: "wrong composed payload" }) },
+  { name: "malformed", write: (db: MoPDatabase, eventType: string) => db.logEvent(0, "pm_queue_delivered", null, null, { event_type: eventType, message: 42 }) },
+] as const) {
+  test(`cadence ${receipt.name} receipt does not reconcile or resubmit`, async () => {
+    const directory = mkdtempSync(join(tmpdir(), `mop-heartbeat-${receipt.name.replace(/\s+/g, "-")}-`));
+    try {
+      const db = heartbeatDb(directory);
+      let submissions = 0;
+      const first = new PMCadenceScheduler(db, {
+        submitToPM: async () => {
+          submissions += 1;
+          return { ok: false, ambiguous: true };
+        },
+      } as never, {
+        heartbeatPreflight: async () => ({ ok: true, stage: "ready-pool-audit", returncode: 0, output: "", error: null, launch_prompt: "prepared" }),
+      });
+      const firstResult = await first.runManual("heartbeat");
+      assert.equal(submissions, 1);
+      receipt.write(db, `cadence-heartbeat-${firstResult.due_key}`);
+
+      let restartProducerCalls = 0;
+      const fresh = new PMCadenceScheduler(db, {
+        submitToPM: async () => {
+          submissions += 1;
+          return { ok: true };
+        },
+      } as never, {
+        heartbeatPreflight: async () => {
+          restartProducerCalls += 1;
+          return { ok: true, stage: "ready-pool-audit", returncode: 0, output: "", error: null, launch_prompt: "must not run" };
+        },
+      });
+      const result = await (fresh as unknown as {
+        runIfDue: (task: "heartbeat", reason: "scheduled") => Promise<PMCadenceRunResult | null>;
+      }).runIfDue("heartbeat", "scheduled");
+      assert.ok(result);
+      assert.equal(result.triggered, false);
+      assert.match(result.message, /RECONCILIATION_FAILED/);
+      assert.equal(restartProducerCalls, 0);
+      assert.equal(submissions, 1);
+      assert.equal(db.getConfig("pm_cadence_heartbeat_last_due_key"), null);
+      assert.equal(db.getEvents(0, 20, "pm_cadence_delivery_reconciled").length, 0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("different cadence and unrelated PM deliveries cannot reconcile the current bucket", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-heartbeat-unrelated-receipts-"));
+  try {
+    const db = heartbeatDb(directory);
+    let producerCalls = 0;
+    let submissions = 0;
+    const scheduler = new PMCadenceScheduler(db, {
+      submitToPM: async () => {
+        submissions += 1;
+        return { ok: true };
+      },
+    } as never, {
+      heartbeatPreflight: async () => {
+        producerCalls += 1;
+        return { ok: true, stage: "ready-pool-audit", returncode: 0, output: "", error: null, launch_prompt: "must not run on boot seed" };
+      },
+    });
+    const currentDueKey = (scheduler as unknown as { currentDueKey: (task: "heartbeat") => string }).currentDueKey("heartbeat");
+    db.logEvent(0, "pm_queue_delivered", null, null, {
+      event_type: "cadence-heartbeat-previous-bucket",
+      message: "a different cadence occurrence",
+    });
+    db.logEvent(0, "pm_queue_delivered", null, null, {
+      event_type: "freeform-unrelated",
+      message: "unrelated PM delivery",
+    });
+
+    const result = await scheduler.tick("scheduled");
+    assert.deepEqual(result, []);
+    assert.equal(producerCalls, 0);
+    assert.equal(submissions, 0);
+    assert.equal(db.getConfig("pm_cadence_heartbeat_last_due_key"), currentDueKey);
+    assert.equal(db.getEvents(0, 20, "pm_cadence_delivery_reconciled").length, 0);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

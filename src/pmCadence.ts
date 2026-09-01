@@ -11,6 +11,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 
@@ -22,6 +23,13 @@ type PMCadenceTask = {
   label: string;
   configPrefix: string;
   commandDescription: string;
+};
+
+type PreparedCadenceOccurrence = {
+  task: PMCadenceTaskName;
+  due_key: string;
+  event_type: string;
+  message_sha256: string;
 };
 
 export type HeartbeatPreflightStage = "dry-run" | "launch-prompt" | "ready-pool-audit";
@@ -161,6 +169,10 @@ function isMorningBriefWindow(now: Date): boolean {
 
 function configKey(task: PMCadenceTask, key: string): string {
   return `${task.configPrefix}_${key}`;
+}
+
+function messageSha256(message: string): string {
+  return createHash("sha256").update(message, "utf8").digest("hex");
 }
 
 function cadenceEventType(taskName: PMCadenceTaskName, dueKey: string): string {
@@ -305,25 +317,38 @@ export class PMCadenceScheduler {
     const now = new Date();
     const dueKey = this.currentDueKey(taskName, now);
     const lastDueKey = this.db.getConfig(configKey(task, "last_due_key"));
-    if (lastDueKey === null && reason !== "manual" && taskName === "heartbeat") {
-      this.seedCurrentBucket(taskName, reason, dueKey);
-      return null;
-    }
     if (!this.isTaskDue(taskName, now, lastDueKey)) {
       return null;
     }
-    const delivered = this.db.hasPMQueueDelivery(
-      0,
-      cadenceEventType(taskName, dueKey),
-      TASKS[taskName].commandDescription,
-    );
-    if (delivered) {
-      this.db.setConfig(configKey(task, "last_due_key"), dueKey);
-      this.db.logEvent(0, "pm_cadence_delivery_reconciled", null, null, {
-        task: taskName,
-        due_key: dueKey,
-        event_type: cadenceEventType(taskName, dueKey),
-      });
+    const eventType = cadenceEventType(taskName, dueKey);
+    const prepared = this.findPreparedOccurrence(taskName, dueKey, eventType);
+    const delivery = this.db.getPMQueueDeliveryForOccurrence(0, eventType);
+    if (prepared || delivery.state !== "none") {
+      const expectedMessageSha256 = prepared === null || prepared === "malformed"
+        ? null
+        : prepared.message_sha256;
+      if (prepared !== "malformed" && delivery.state === "delivered" && delivery.message_sha256 === expectedMessageSha256) {
+        this.db.setConfig(configKey(task, "last_due_key"), dueKey);
+        this.db.logEvent(0, "pm_cadence_delivery_reconciled", null, null, {
+          task: taskName,
+          due_key: dueKey,
+          event_type: eventType,
+          message_sha256: expectedMessageSha256,
+        });
+        return null;
+      }
+      return this.cadenceReconciliationFailure(
+        taskName,
+        reason,
+        dueKey,
+        eventType,
+        expectedMessageSha256,
+        delivery.state,
+        delivery.message_sha256,
+      );
+    }
+    if (lastDueKey === null && reason !== "manual" && taskName === "heartbeat") {
+      this.seedCurrentBucket(taskName, reason, dueKey);
       return null;
     }
     return this.triggerTask(taskName, reason, dueKey, false);
@@ -405,6 +430,16 @@ export class PMCadenceScheduler {
       message = `${task.commandDescription}\n\n${result.launch_prompt ?? result.output}`;
     }
 
+    const preparedMessageSha256 = messageSha256(message);
+    this.db.logEvent(0, "pm_cadence_occurrence_prepared", null, null, {
+      task: taskName,
+      due_key: dueKey,
+      event_type: eventType,
+      message,
+      message_sha256: preparedMessageSha256,
+      message_bytes: Buffer.byteLength(message, "utf8"),
+    });
+
     // submitToPM persists the exact occurrence before entering the shared
     // serialized boundary. Its observation-bound key is Enter only for an
     // explicit idle; busy/unknown uses C-q immediately. Awaiting the result
@@ -450,6 +485,69 @@ export class PMCadenceScheduler {
       preflight,
       preflight_stage: preflightStage,
       preflight_error: preflightError,
+    };
+  }
+
+  private findPreparedOccurrence(
+    taskName: PMCadenceTaskName,
+    dueKey: string,
+    eventType: string,
+  ): PreparedCadenceOccurrence | "malformed" | null {
+    for (const event of this.db.getEvents(0, 200_000, "pm_cadence_occurrence_prepared")) {
+      try {
+        const payload = JSON.parse(event.payload) as Partial<PreparedCadenceOccurrence>;
+        if (payload.task === taskName && payload.due_key === dueKey && payload.event_type === eventType) {
+          if (typeof payload.message_sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(payload.message_sha256)) {
+            return "malformed";
+          }
+          return {
+            task: taskName,
+            due_key: dueKey,
+            event_type: eventType,
+            message_sha256: payload.message_sha256.toLowerCase(),
+          };
+        }
+      } catch {
+        // A malformed marker is not evidence of a delivered wake.
+      }
+    }
+    return null;
+  }
+
+  private cadenceReconciliationFailure(
+    taskName: PMCadenceTaskName,
+    reason: PMCadenceTriggerReason,
+    dueKey: string,
+    eventType: string,
+    preparedMessageSha256: string | null,
+    deliveryState: string,
+    deliveryMessageSha256: string | null,
+  ): PMCadenceRunResult {
+    const mismatch = deliveryState === "delivered"
+      && deliveryMessageSha256 !== preparedMessageSha256;
+    const message = `HEARTBEAT_OCCURRENCE_RECONCILIATION_FAILED due_key=${dueKey} `
+      + `state=${deliveryState} mismatch=${mismatch ? "payload_digest" : "delivery"}; no delivery attempted`;
+    this.db.logEvent(0, "pm_cadence_reconciliation_failed", null, null, {
+      task: taskName,
+      reason,
+      due_key: dueKey,
+      event_type: eventType,
+      expected_message_sha256: preparedMessageSha256,
+      observed_delivery_state: deliveryState,
+      observed_message_sha256: deliveryMessageSha256,
+      healthy: false,
+    });
+    return {
+      task: taskName,
+      triggered: false,
+      reason,
+      due_key: dueKey,
+      injected: false,
+      queued: false,
+      message,
+      preflight: "not-run",
+      preflight_stage: null,
+      preflight_error: message,
     };
   }
 
