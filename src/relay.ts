@@ -1002,7 +1002,13 @@ export class TmuxRelay {
     }
   }
 
-  async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false): Promise<boolean> {
+  async sendToSlotAsync(
+    slotNum: number,
+    command: string,
+    _force = false,
+    raw = false,
+    beforeFirstEffect?: () => boolean,
+  ): Promise<boolean> {
     void _force; // v3: every send is unconditional
     if (slotNum === 0 && !raw) {
       // Text delivery to PM must use the observation-bound submit key. Raw
@@ -1047,11 +1053,17 @@ export class TmuxRelay {
     }
 
     let lastErr: unknown = null;
+    // Once the caller's synchronous fence commits, retries must not invoke it
+    // again or create a second ownership transition. The existing relay retry
+    // behavior remains unchanged after this one-shot edge.
+    let effectEdgePassed = false;
     for (let attempt = 0; attempt <= TmuxRelay.SEND_MAX_RETRIES; attempt++) {
       try {
         if (raw) {
           // Raw: tmux interprets key names (Escape, C-c, BTab, etc.).
           // Do NOT pass -l (literal) flag — that would type the name as text.
+          if (!effectEdgePassed && beforeFirstEffect && !beforeFirstEffect()) return false;
+          effectEdgePassed = true;
           await this.runShell(
             `tmux send-keys -t ${paneTarget} ${shellEscape(command)}`,
             { timeout: 5_000 }
@@ -1063,6 +1075,12 @@ export class TmuxRelay {
           const bufName = `mop-send-${slotNum}`;
           await fs.writeFile(tmpFile, command);
           try {
+            // This callback is the last synchronous application edge before
+            // the first pane mutation. It intentionally follows all async
+            // identity/cooldown/buffer preparation so a release can replace an
+            // unstarted nudge without any tmux effect.
+            if (!effectEdgePassed && beforeFirstEffect && !beforeFirstEffect()) return false;
+            effectEdgePassed = true;
             await this.runShell(
               `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
               { timeout: 3_000 }

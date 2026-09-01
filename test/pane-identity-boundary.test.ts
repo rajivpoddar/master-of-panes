@@ -195,6 +195,55 @@ test("destroyed verified pane fails without numeric-address fallback or retry re
   assert.equal(mutations.some((command) => command.includes("0:0.4")), false);
 });
 
+test("nudge effect fence runs after buffer preparation and before the first pane mutation", async () => {
+  const refusedCommands: string[] = [];
+  let refusedFenceCalls = 0;
+  const refused = new TmuxRelay(DEFAULT_CONFIG, {
+    runShell: async (command) => {
+      refusedCommands.push(command);
+      if (command.startsWith("tmux display-message")) {
+        return { stdout: "%42|/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
+      }
+      return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
+    },
+  });
+  assert.equal(
+    await refused.sendToSlotAsync(4, "continue your work", false, false, () => {
+      refusedFenceCalls += 1;
+      return false;
+    }),
+    false,
+  );
+  assert.equal(refusedFenceCalls, 1);
+  assert.equal(refusedCommands.some((command) => /load-buffer|paste-buffer|send-keys/.test(command)), false);
+
+  const acceptedCommands: string[] = [];
+  let acceptedFenceCalls = 0;
+  const accepted = new TmuxRelay(DEFAULT_CONFIG, {
+    runShell: async (command) => {
+      acceptedCommands.push(command);
+      if (command.startsWith("tmux display-message")) {
+        return { stdout: "%42|/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
+      }
+      if (command.startsWith("git -C")) {
+        return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3004\n", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    },
+  });
+  assert.equal(
+    await accepted.sendToSlotAsync(4, "continue your work", false, false, () => {
+      acceptedFenceCalls += 1;
+      return true;
+    }),
+    true,
+  );
+  assert.equal(acceptedFenceCalls, 1);
+  assert.equal(acceptedCommands.filter((command) => command.includes("tmux load-buffer")).length, 1);
+  assert.equal(acceptedCommands.filter((command) => command.includes("tmux paste-buffer")).length, 1);
+  assert.equal(acceptedCommands.filter((command) => command.includes("tmux send-keys") && command.includes(" Enter")).length, 1);
+});
+
 test("pane mutation surfaces use pane ids after verification", () => {
   const sources = ["../src/server.ts", "../src/health.ts", "../src/relay.ts"]
     .map((file) => readFileSync(new URL(file, import.meta.url), "utf8"));

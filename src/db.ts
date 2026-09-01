@@ -28,6 +28,8 @@ export interface SlotMutationResult {
     | "invalid_assignment_metadata"
     | "target_already_assigned"
     | "slot_already_occupied"
+    | "slot_not_free"
+    | "dnd_active"
     | "active_turn"
     | "slot_not_occupied"
     | "slot_already_free_unverifiable"
@@ -1521,9 +1523,12 @@ export class MoPDatabase {
 
       const duplicate = this.db.prepare(`
         SELECT slot FROM slots
-        WHERE occupied = 1 AND issue = ? AND slot != ?
+        WHERE occupied = 1
+          AND repository_id = ?
+          AND issue = ?
+          AND slot != ?
         ORDER BY slot LIMIT 1
-      `).get(normalizedIssue, slot) as { slot: number } | undefined;
+      `).get(normalizedRepositoryId, normalizedIssue, slot) as { slot: number } | undefined;
       if (duplicate) {
         return {
           ok: false,
@@ -1541,6 +1546,51 @@ export class MoPDatabase {
           conflict: false,
           assignment_epoch: epoch,
           idempotent: true,
+        };
+      }
+
+      // Issue-only assignment is a free-slot operation. Hook-authoritative
+      // activity is checked in the same SQLite transaction as ownership so a
+      // stale PM projection cannot overwrite productive work.
+      if (before.occupied) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_already_occupied",
+          owner_slots: [slot],
+        };
+      }
+      if (before.dnd) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "dnd_active",
+        };
+      }
+      if (
+        before.idle !== true
+        || before.active_turn_id !== null
+        || before.active_turn_state !== "inactive"
+      ) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "active_turn",
+        };
+      }
+      if (before.status !== "free") {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_not_free",
         };
       }
 

@@ -171,7 +171,14 @@ function harness(
     getSlotActivityState: async () => {
       throw new Error("nudge path must not inspect terminal prompt state");
     },
-    sendToSlotAsync: async (_slot: number, command: string) => {
+    sendToSlotAsync: async (
+      _slot: number,
+      command: string,
+      _force = false,
+      _raw = false,
+      beforeFirstEffect?: () => boolean,
+    ) => {
+      if (beforeFirstEffect && !beforeFirstEffect()) return false;
       sends.push(command);
       return true;
     },

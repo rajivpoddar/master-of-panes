@@ -870,26 +870,25 @@ export class StuckDetector {
     }
 
     try {
-      // The release coordinator may replace an unstarted nudge lease while
-      // it claims the same owner tuple. Marking here is the synchronous edge:
-      // if release wins before it, do not enter the pane effect at all. If a
-      // nudge wins this edge, release refuses instead of racing its turn.
-      if (nudgeLeaseToken !== "__legacy__" && typeof this.db.markNativeReleaseIntentStarted === "function") {
-        const started = this.db.markNativeReleaseIntentStarted(
+      // The relay owns the final pane-effect edge. It invokes this callback
+      // synchronously after its async identity/cooldown/buffer preparation and
+      // immediately before the first tmux mutation, so release can replace an
+      // unstarted nudge without leaving a started marker behind.
+      const beforeFirstEffect = nudgeLeaseToken !== "__legacy__"
+        && typeof this.db.markNativeReleaseIntentStarted === "function"
+        ? () => this.db.markNativeReleaseIntentStarted(
           slotNum,
           current.assignment_epoch,
           tuple!,
           nudgeLeaseToken,
-        );
-        if (!started) {
-          const latest = this.db.getSlot(slotNum) ?? current;
-          return { sent: false, reason: "release_in_progress", slot: latest };
-        }
-      }
+        )
+        : undefined;
       const sent = await this.relay.sendToSlotAsync(
         slotNum,
         command,
-        false
+        false,
+        false,
+        beforeFirstEffect,
       );
       return {
         sent,
