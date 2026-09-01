@@ -1,0 +1,4 @@
+interface:
+  display_name: "HeyDonna Slack Postback"
+  short_description: "Read Slack blocks and post complete plain-text PM replies."
+  default_prompt: "Read full Block Kit content from the active HeyDonna Slack thread, then post the complete requested CTO or PM follow-up as Abhijit CTO through Slack REST using SLACK_CTO_BOT_TOKEN and the bundled identity guard. Require auth.test and stored-message author U0BNFGX2UAX, never Slack MCP, and preserve the source thread with thread_ts."

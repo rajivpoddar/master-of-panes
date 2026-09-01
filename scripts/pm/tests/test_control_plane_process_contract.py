@@ -168,6 +168,48 @@ def test_slack_backed_wake_reconciles_latest_thread_before_processing() -> None:
     assert "not an authority\n   escalation" in wake
 
 
+def test_slack_postback_is_a_managed_global_codex_skill() -> None:
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    entries = {entry["source_path"]: entry for entry in manifest["entries"]}
+    files = {
+        "codex/skills/heydonna-slack-postback/SKILL.md": (
+            "/Users/rajiv/.codex/skills/heydonna-slack-postback/SKILL.md",
+            0o644,
+        ),
+        "codex/skills/heydonna-slack-postback/agents/openai.yaml": (
+            "/Users/rajiv/.codex/skills/heydonna-slack-postback/agents/openai.yaml",
+            0o644,
+        ),
+        "codex/skills/heydonna-slack-postback/scripts/cto_slack_rest.py": (
+            "/Users/rajiv/.codex/skills/heydonna-slack-postback/scripts/cto_slack_rest.py",
+            0o755,
+        ),
+        "codex/skills/heydonna-slack-postback/scripts/render_slack_blocks.py": (
+            "/Users/rajiv/.codex/skills/heydonna-slack-postback/scripts/render_slack_blocks.py",
+            0o755,
+        ),
+        "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py": (
+            "/Users/rajiv/.codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py",
+            0o644,
+        ),
+    }
+
+    for source_path, (target, mode) in files.items():
+        source = SHARED / source_path
+        entry = entries[source_path]
+        assert entry["canonical_target"] == target
+        assert entry["mode"] == mode
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == entry["sha256"]
+
+    skill = _text("codex/skills/heydonna-slack-postback/SKILL.md")
+    wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
+    global_root = "/Users/rajiv/.codex/skills/heydonna-slack-postback"
+    assert global_root in skill
+    assert f"{global_root}/scripts/cto_slack_rest.py" in wake
+    assert ".agents/skills/heydonna-slack-postback" not in skill
+    assert ".agents/skills/heydonna-slack-postback" not in wake
+
+
 def test_native_bypass_contract_is_single_fenced_and_ordered() -> None:
     contract = _text("codex/skills/_shared/release-conveyor-contract.md")
     wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")

@@ -504,7 +504,7 @@ Slack reply. This is a single bounded admission snapshot, not polling.
 Every Slack reply produced from a wake must preserve the source thread:
 
 - Send every CTO Slack reply through the existing guarded postback script:
-  `/Users/rajiv/Downloads/projects/heydonna-app/.agents/skills/heydonna-slack-postback/scripts/cto_slack_rest.py`.
+  `/Users/rajiv/.codex/skills/heydonna-slack-postback/scripts/cto_slack_rest.py`.
   Follow the complete `heydonna-slack-postback` skill contract. The script must
   authenticate with `SLACK_CTO_BOT_TOKEN`, prove `user_id=U0BNFGX2UAX`, post
   the complete reply in top-level `text`, and read back the exact stored author,
