@@ -94,7 +94,7 @@ function assignmentRequest(
   };
 }
 
-test("only the guarded PM transition authority reaches REST assignment", () => {
+test("legacy release-only authority helper remains narrowly defined", () => {
   assert.equal(
     isPmTransitionAssignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY),
     true,
@@ -102,6 +102,12 @@ test("only the guarded PM transition authority reaches REST assignment", () => {
   assert.equal(isPmTransitionAssignmentRequest(undefined), false);
   assert.equal(isPmTransitionAssignmentRequest("mop"), false);
   assert.equal(isPmTransitionAssignmentRequest("pm-transition"), false);
+});
+
+test("assignment routes have no caller-authority gate", () => {
+  const source = readFileSync(new URL("../src/assignmentRoute.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /assignment_authority_required/);
+  assert.doesNotMatch(source, /PM_TRANSITION_ASSIGNMENT_(?:HEADER|AUTHORITY)/);
 });
 
 test("numbered assignment routes reject the slot-0 PM boundary", async () => {
@@ -116,7 +122,7 @@ test("numbered assignment routes reject the slot-0 PM boundary", async () => {
   });
 });
 
-test("issue-claim adoption route is authority-gated and atomic", async () => {
+test("issue-claim adoption route is headerless and atomic", async () => {
   await withAssignmentRoute(async (app, db) => {
     const placeholder = {
       repository_id: assignment.repository_id,
@@ -131,18 +137,9 @@ test("issue-claim adoption route is authority-gated and atomic", async () => {
     assert.equal(db.getSlot(1)?.assignment_epoch, 1);
 
     const adopt = completeRebindBody(db.getSlot(1)!);
-    const denied = await app.request(
-      "/slots/1/adopt-issue-claim",
-      assignmentRequest(undefined, adopt),
-    );
-    assert.equal(denied.status, 403);
-    assert.equal(db.getSlot(1)?.branch, null);
-    assert.equal(db.getSlot(1)?.head_sha, null);
-    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
-
     const accepted = await app.request(
       "/slots/1/adopt-issue-claim",
-      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, adopt),
+      assignmentRequest(undefined, adopt),
     );
     assert.equal(accepted.status, 200);
     const adopted = await accepted.json() as Record<string, unknown>;
@@ -258,43 +255,38 @@ test("issue-claim adoption route refuses a stale successor rewrite", async () =>
   });
 });
 
-test("production assignment route accepts the minimal issue contract", async () => {
+test("production assignment route accepts the minimal issue contract without caller authority", async () => {
   await withAssignmentRoute(async (app, db) => {
-    const initial = db.getSlot(1);
-
-    for (const authority of [undefined, "wrong-authority"]) {
+    for (const [slot, authority] of [[1, undefined], [2, "wrong-authority"]] as const) {
       const response = await app.request(
-        "/slots/1/assign",
-        assignmentRequest(authority),
+        `/slots/${slot}/assign`,
+        assignmentRequest(authority, { issue: assignment.issue + slot, task: assignment.task }),
       );
-      assert.equal(response.status, 403);
-      assert.deepEqual(await response.json(), {
-        success: false,
-        conflict: true,
-        error: "assignment authority is required",
-        reason: "assignment_authority_required",
-      });
-      assert.deepEqual(db.getSlot(1), initial);
-      assert.equal(db.getEvents(1, 10, "slot_assigned").length, 0);
+      assert.equal(response.status, 200, `slot ${slot}`);
+      assert.equal((await response.json() as Record<string, unknown>).occupied, true);
+      assert.equal(db.getEvents(slot, 10, "slot_assigned").length, 1);
     }
+  });
+});
 
-    const authorized = await app.request(
+test("headerless assignment still reaches the transactional duplicate guard", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const first = await app.request(
       "/slots/1/assign",
-      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
-        issue: assignment.issue,
-        task: assignment.task,
-      }),
+      assignmentRequest(undefined, { issue: 7777, task: "headerless owner" }),
     );
-    assert.equal(authorized.status, 200);
-    const assigned = await authorized.json() as Record<string, unknown>;
-    assert.equal(assigned.occupied, true);
-    assert.equal(assigned.repository_id, "heydonna-app/heydonna-app");
-    assert.equal(assigned.issue, assignment.issue);
-    assert.equal(assigned.pr, null);
-    assert.equal(assigned.branch, null);
-    assert.equal(assigned.head_sha, null);
-    assert.equal(assigned.assignment_epoch, 1);
-    assert.equal(db.getEvents(1, 10, "slot_assigned").length, 1);
+    assert.equal(first.status, 200);
+
+    const duplicate = await app.request(
+      "/slots/2/assign",
+      assignmentRequest(undefined, { issue: 7777, task: "headerless duplicate" }),
+    );
+    assert.equal(duplicate.status, 409);
+    const body = await duplicate.json() as Record<string, unknown>;
+    assert.equal(body.reason, "target_already_assigned");
+    assert.deepEqual(body.owner_slots, [1]);
+    assert.equal(db.getSlot(2)?.occupied, false);
+    assert.equal(db.getEvents(2, 10, "slot_assigned").length, 0);
   });
 });
 
@@ -445,7 +437,7 @@ test("complete assignment atomically persists the exact epoch and owner tuple", 
     };
     const response = await app.request(
       "/slots/4/assign",
-      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body),
+      assignmentRequest(undefined, body),
     );
     assert.equal(response.status, 200);
     const row = await response.json() as Record<string, unknown>;
@@ -464,7 +456,7 @@ test("complete assignment atomically persists the exact epoch and owner tuple", 
     // assignment or event; the CAS refuses the stale request.
     const replay = await app.request(
       "/slots/4/assign",
-      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body),
+      assignmentRequest(undefined, body),
     );
     assert.equal(replay.status, 409);
     assert.equal((await replay.json() as Record<string, unknown>).reason, "epoch_mismatch");

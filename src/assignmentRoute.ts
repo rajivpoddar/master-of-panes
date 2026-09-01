@@ -2,10 +2,6 @@ import type { Hono } from "hono";
 import { z } from "zod";
 
 import {
-  isPmTransitionAssignmentRequest,
-  PM_TRANSITION_ASSIGNMENT_HEADER,
-} from "./assignmentAuthority.js";
-import {
   normalizeBranchIdentity,
   normalizeRepositoryId,
   type AssignmentTupleInput,
@@ -116,17 +112,6 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
     if (!slotParse.success) {
       return c.json({ error: "Invalid slot number" }, 400);
     }
-    if (!isPmTransitionAssignmentRequest(
-      c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER)
-    )) {
-      return c.json({
-        success: false,
-        conflict: true,
-        error: "assignment authority is required",
-        reason: "assignment_authority_required",
-      }, 403);
-    }
-
     const body = await c.req.json();
     if (!isRecord(body) || !Number.isInteger(body.issue) || Number(body.issue) <= 0) {
       return c.json({
@@ -230,17 +215,6 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
     if (!slotParse.success) {
       return c.json({ error: "Invalid slot number" }, 400);
     }
-    if (!isPmTransitionAssignmentRequest(
-      c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER)
-    )) {
-      return c.json({
-        success: false,
-        conflict: true,
-        error: "assignment authority is required",
-        reason: "assignment_authority_required",
-      }, 403);
-    }
-
     const body = await c.req.json();
     if (!isRecord(body)) {
       return c.json({
