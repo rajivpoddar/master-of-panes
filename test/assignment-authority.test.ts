@@ -357,41 +357,54 @@ test("issue-only claim refuses an occupied slot without mutating its owner", asy
   });
 });
 
-test("issue-only idempotency is bound to the normalized repository", async () => {
-  await withAssignmentRoute(async (_app, db) => {
-    const first = db.assignIssueToSlot(1, 7343, "repo-one issue", "github:repo-1");
-    assert.equal(first.ok, true);
-    assert.equal(first.idempotent, false);
-    db.logEvent(1, "slot_assigned", null, null, {
-      issue: 7343,
-      assignment_epoch: first.assignment_epoch,
-    });
+test("REST issue-only replay logs one event and binds idempotency to repository", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const first = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        issue: 7343,
+        repository_id: "github:repo-1",
+        task: "repo-one issue",
+      }),
+    );
+    assert.equal(first.status, 200);
+    const firstBody = await first.json() as Record<string, unknown>;
+    assert.equal(firstBody.occupied, true);
+    assert.equal(firstBody.repository_id, "github:repo-1");
+    assert.equal(firstBody.issue, 7343);
+    assert.equal(firstBody.assignment_epoch, 1);
+    assert.equal(db.getEvents(1, 10, "slot_assigned").length, 1);
 
     const before = db.getSlot(1);
     assert.ok(before);
     const eventsBefore = db.getEvents(1, 10, "slot_assigned");
 
-    const sameRepositoryReplay = db.assignIssueToSlot(
-      1,
-      7343,
-      "same issue replay",
-      "github:repo-1",
+    const sameRepositoryReplay = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        issue: 7343,
+        repository_id: "github:repo-1",
+        task: "same issue replay",
+      }),
     );
-    assert.equal(sameRepositoryReplay.ok, true);
-    assert.equal(sameRepositoryReplay.idempotent, true);
-    assert.equal(sameRepositoryReplay.assignment_epoch, before.assignment_epoch);
+    assert.equal(sameRepositoryReplay.status, 200);
+    const replayBody = await sameRepositoryReplay.json() as Record<string, unknown>;
+    assert.equal(replayBody.assignment_epoch, before.assignment_epoch);
     assert.deepEqual(db.getSlot(1), before);
     assert.equal(db.getEvents(1, 10, "slot_assigned").length, eventsBefore.length);
 
-    const differentRepository = db.assignIssueToSlot(
-      1,
-      7343,
-      "same issue in another repository",
-      "github:repo-2",
+    const differentRepository = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        issue: 7343,
+        repository_id: "github:repo-2",
+        task: "same issue in another repository",
+      }),
     );
-    assert.equal(differentRepository.ok, false);
-    assert.equal(differentRepository.reason, "slot_already_occupied");
-    assert.equal(differentRepository.assignment_epoch, before.assignment_epoch);
+    assert.equal(differentRepository.status, 409);
+    const differentRepositoryBody = await differentRepository.json() as Record<string, unknown>;
+    assert.equal(differentRepositoryBody.reason, "slot_already_occupied");
+    assert.equal(differentRepositoryBody.assignment_epoch, before.assignment_epoch);
     assert.deepEqual(db.getSlot(1), before);
     assert.equal(db.getEvents(1, 10, "slot_assigned").length, eventsBefore.length);
   });

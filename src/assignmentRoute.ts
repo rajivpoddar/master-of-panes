@@ -177,20 +177,22 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
       return c.json({ success: false, ...result }, 409);
     }
 
-    db.logEvent(slotParse.data, "slot_assigned", null, null, {
-      issue: body.issue,
-      assignment_epoch: result.assignment_epoch,
-      idempotent: result.idempotent,
-      assignment_mode: completeRequested ? "complete" : "issue-only",
-      ...(completeRequested ? {
-        repository_id: body.repository_id,
-        pr: body.pr,
-        branch: body.branch,
-        head_sha: body.head_sha,
-        work_kind: body.work_kind,
-        handoff_id: body.handoff_id,
-      } : {}),
-    });
+    if (!result.idempotent) {
+      db.logEvent(slotParse.data, "slot_assigned", null, null, {
+        issue: body.issue,
+        assignment_epoch: result.assignment_epoch,
+        idempotent: false,
+        assignment_mode: completeRequested ? "complete" : "issue-only",
+        ...(completeRequested ? {
+          repository_id: body.repository_id,
+          pr: body.pr,
+          branch: body.branch,
+          head_sha: body.head_sha,
+          work_kind: body.work_kind,
+          handoff_id: body.handoff_id,
+        } : {}),
+      });
+    }
 
     const updated = db.getSlot(slotParse.data);
     const expectedBranch = completeRequested && typeof body.branch === "string"
