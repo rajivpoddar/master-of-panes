@@ -78,7 +78,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasCompleteAssignmentValues(body: Record<string, unknown>): boolean {
   return normalizeRepositoryId(body.repository_id) !== null
     && Number.isInteger(body.issue) && Number(body.issue) > 0
-    && Number.isInteger(body.pr) && Number(body.pr) > 0
+    // A complete issue-only claim deliberately carries an explicit null PR.
+    // Omitting pr still fails the complete-field presence check, while a
+    // PR-bearing claim must remain a positive integer.
+    && (body.pr === null || (Number.isInteger(body.pr) && Number(body.pr) > 0))
     && typeof body.branch === "string"
     && normalizeBranchIdentity(body.branch) !== null
     && typeof body.head_sha === "string"

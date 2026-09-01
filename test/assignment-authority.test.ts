@@ -473,6 +473,80 @@ test("complete assignment atomically persists the exact epoch and owner tuple", 
   });
 });
 
+test("complete issue-only assignment persists the exact branch/head tuple with null PR", async () => {
+  await withAssignmentRoute(async (app, db, directory) => {
+    const raw = new Database(join(directory, "mop.db"));
+    try {
+      raw.prepare("UPDATE slots SET assignment_epoch = 619 WHERE slot = 4").run();
+    } finally {
+      raw.close();
+    }
+    const body = {
+      task: "S4 PR #7554 direct-evidence retention",
+      repository_id: 992731533,
+      issue: 7554,
+      pr: null,
+      branch: "fix/7554-sc-direct-evidence-retention",
+      head_sha: "5513e0cd659fec8a22afd93a18465e12d56e87d0",
+      work_kind: "repro",
+      handoff_id: "repro-7554-s4-5513e0cd",
+      expected_epoch: 619,
+    };
+    const response = await app.request(
+      "/slots/4/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body),
+    );
+    assert.equal(response.status, 200);
+    const row = await response.json() as Record<string, unknown>;
+    assert.equal(row.assignment_epoch, 620);
+    assert.equal(row.repository_id, "992731533");
+    assert.equal(row.issue, body.issue);
+    assert.equal(row.pr, null);
+    assert.equal(row.branch, body.branch);
+    assert.equal(row.head_sha, body.head_sha);
+    assert.equal(row.work_kind, body.work_kind);
+    assert.equal(row.handoff_id, body.handoff_id);
+    assert.equal(row.task, body.task);
+    assert.equal(db.getEvents(4, 10, "slot_assigned").length, 1);
+
+    // A lost response cannot be replayed against the consumed epoch or create
+    // a second assignment/event.
+    const replay = await app.request(
+      "/slots/4/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body),
+    );
+    assert.equal(replay.status, 409);
+    assert.equal((await replay.json() as Record<string, unknown>).reason, "epoch_mismatch");
+    assert.equal(db.getSlot(4)?.assignment_epoch, 620);
+    assert.equal(db.getEvents(4, 10, "slot_assigned").length, 1);
+  });
+});
+
+test("complete issue-only assignment requires explicit nullable PR field", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const complete = {
+      task: "issue-only complete claim",
+      repository_id: 992731533,
+      issue: 7554,
+      branch: "fix/7554-sc-direct-evidence-retention",
+      head_sha: "5513e0cd659fec8a22afd93a18465e12d56e87d0",
+      work_kind: "repro",
+      handoff_id: "repro-7554-s4-missing-pr",
+      expected_epoch: 0,
+    };
+    for (const body of [complete, { ...complete, pr: 0 }, { ...complete, pr: "7591" }]) {
+      const response = await app.request(
+        "/slots/4/assign",
+        assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body),
+      );
+      assert.equal(response.status, 409);
+      assert.equal((await response.json() as Record<string, unknown>).reason, "observed_tuple_mismatch");
+      assert.equal(db.getSlot(4)?.occupied, false);
+      assert.equal(db.getEvents(4, 10, "slot_assigned").length, 0);
+    }
+  });
+});
+
 test("complete assignment refuses partial identity instead of downgrading it", async () => {
   await withAssignmentRoute(async (app, db) => {
     const response = await app.request(
