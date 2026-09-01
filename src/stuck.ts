@@ -13,7 +13,11 @@ import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execShell } from "./asyncCommand.js";
-import { slotAssignmentTuple, type MoPDatabase } from "./db.js";
+import {
+  assignmentTupleMatches,
+  slotAssignmentTuple,
+  type MoPDatabase,
+} from "./db.js";
 import type { LogManager } from "./logs.js";
 import type { TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
@@ -484,9 +488,18 @@ export class StuckDetector {
       const event = this.db.getEvents(slot.slot, 1, eventType)[0];
       if (event && parseDbTimestampMs(event.timestamp) >= idleAnchor.timestampMs) return;
     }
+    const sessionId = this.getIdleOccupiedSessionId(slot, idleAnchor);
+    if (!sessionId) {
+      this.db.logEvent(slot.slot, "idle_occupied_suppressed_missing_hook_session", "Stuck", null, {
+        assignment_epoch: slot.assignment_epoch,
+        idle_anchor: idleAnchor.timestamp,
+        idle_anchor_source: idleAnchor.source,
+        reason: "idle anchor has no authoritative hook session identity",
+      });
+      return;
+    }
 
     const prior = this.db.getEvents(slot.slot, 1, "idle_occupied_continue_injected")[0];
-    const sessionId = (slot as SlotState & { session_id?: string | null }).session_id ?? null;
     if (prior) {
       try {
         const payload = JSON.parse(prior.payload) as {
@@ -497,8 +510,7 @@ export class StuckDetector {
           urgency?: IdleOccupiedUrgency;
         };
         const priorWaitAnchor = payload.wait_anchor ?? payload.idle_anchor;
-        const sessionMatches = !Object.prototype.hasOwnProperty.call(payload, "session_id") ||
-          payload.session_id === sessionId;
+        const sessionMatches = payload.session_id === sessionId;
         // A PM_WAIT/HOLD completion advances the hook Stop timestamp, but it
         // does not advance the actionable wait episode. Deduplicate against
         // the carried wait anchor rather than the moving idle anchor, and do
@@ -548,6 +560,9 @@ export class StuckDetector {
       {
         assignment_epoch: slot.assignment_epoch,
         assigned_at: slot.assigned_at,
+        session_id: sessionId,
+        idle_anchor: idleAnchor.timestamp,
+        wait_anchor: waitAnchor.timestamp,
       },
       command
     );
@@ -788,7 +803,13 @@ export class StuckDetector {
    */
   private async sendContinueIfAllowed(
     slotNum: number,
-    expected?: { assignment_epoch?: number; assigned_at?: string | null },
+    expected?: {
+      assignment_epoch?: number;
+      assigned_at?: string | null;
+      session_id?: string;
+      idle_anchor?: string;
+      wait_anchor?: string;
+    },
     command = "continue your work or remind pm if blocked",
     allowActiveTurn = false,
   ): Promise<ContinueDeliveryResult> {
@@ -880,19 +901,61 @@ export class StuckDetector {
     }
 
     try {
+      let effectFenceReason: ContinueDeliveryResult["reason"] | null = null;
+
       // The relay owns the final pane-effect edge. It invokes this callback
       // synchronously after its async identity/cooldown/buffer preparation and
       // immediately before the first tmux mutation, so release can replace an
       // unstarted nudge without leaving a started marker behind.
-      const beforeFirstEffect = nudgeLeaseToken !== "__legacy__"
-        && typeof this.db.markNativeReleaseIntentStarted === "function"
-        ? () => this.db.markNativeReleaseIntentStarted(
-          slotNum,
-          current.assignment_epoch,
-          tuple!,
-          nudgeLeaseToken,
-        )
-        : undefined;
+      const beforeFirstEffect = expected?.session_id || expected?.idle_anchor
+        ? () => {
+          const latest = this.db.getSlot(slotNum);
+          const latestIdleState = latest ? this.isIdleByHookState(latest) : null;
+          const latestTuple = latest ? slotAssignmentTuple(latest) : null;
+          const latestAnchor = latest ? this.getIdleOccupiedAnchor(latest) : null;
+          const latestSessionId = latest && latestAnchor
+            ? this.getIdleOccupiedSessionId(latest, latestAnchor)
+            : null;
+          const latestWaitAnchor = latest && latestAnchor
+            ? this.getIdleOccupiedWaitAnchor(latest, latestAnchor)
+            : null;
+          const exactIdentity = Boolean(
+            latest?.occupied
+            && !latest.dnd
+            && latestIdleState?.idle
+            && latest.active_turn_id === null
+            && latest.active_turn_state === "inactive"
+            && expected.assignment_epoch === latest.assignment_epoch
+            && expected.assigned_at === latest.assigned_at
+            && assignmentTupleMatches(latestTuple, tuple)
+            && latestAnchor?.timestamp === expected.idle_anchor
+            && latestSessionId === expected.session_id
+            && latestWaitAnchor?.timestamp === expected.wait_anchor
+          );
+          if (!exactIdentity) {
+            effectFenceReason = "identity_changed";
+            return false;
+          }
+          if (nudgeLeaseToken !== "__legacy__"
+              && typeof this.db.markNativeReleaseIntentStarted === "function") {
+            return this.db.markNativeReleaseIntentStarted(
+              slotNum,
+              current.assignment_epoch,
+              tuple!,
+              nudgeLeaseToken,
+            );
+          }
+          return true;
+        }
+        : nudgeLeaseToken !== "__legacy__"
+          && typeof this.db.markNativeReleaseIntentStarted === "function"
+          ? () => this.db.markNativeReleaseIntentStarted(
+            slotNum,
+            current.assignment_epoch,
+            tuple!,
+            nudgeLeaseToken,
+          )
+          : undefined;
       const sent = await this.relay.sendToSlotAsync(
         slotNum,
         command,
@@ -902,7 +965,7 @@ export class StuckDetector {
       );
       return {
         sent,
-        reason: sent ? "sent" : "send_failed",
+        reason: effectFenceReason ?? (sent ? "sent" : "send_failed"),
         slot: current,
       };
     } finally {
@@ -942,6 +1005,51 @@ export class StuckDetector {
       timestampMs: assignedMs,
       source: "assigned_at",
     };
+  }
+
+  /**
+   * Return the Claude session that created the authoritative idle anchor.
+   * Assignment.session_id is retired telemetry and is intentionally cleared;
+   * hook event payloads are the durable source for this identity instead.
+   */
+  private getIdleOccupiedSessionId(
+    slot: SlotState,
+    anchor: IdleOccupiedAnchor,
+  ): string | null {
+    const assignedMs = slot.assigned_at ? parseDbTimestampMs(slot.assigned_at) : NaN;
+    const readSession = (payload: string): string | null => {
+      try {
+        const value = JSON.parse(payload) as { session_id?: unknown };
+        return typeof value.session_id === "string" && value.session_id.trim() !== ""
+          ? value.session_id
+          : null;
+      } catch {
+        return null;
+      }
+    };
+
+    if (anchor.source !== "assigned_at") {
+      const anchorEvent = this.db
+        .getEvents(slot.slot, 100, anchor.source)
+        .find((event) => parseDbTimestampMs(event.timestamp) === anchor.timestampMs);
+      const directSessionId = anchorEvent ? readSession(anchorEvent.payload) : null;
+      if (directSessionId) return directSessionId;
+    }
+
+    // Reconciliation/legacy anchors do not always carry a payload. Recover the
+    // session from the latest production hook in the same assignment epoch,
+    // bounded before the anchor. If that chain is incomplete, fail closed.
+    const chain = this.db
+      .getEvents(slot.slot, 300)
+      .filter((event) => {
+        const timestampMs = parseDbTimestampMs(event.timestamp);
+        return Number.isFinite(timestampMs)
+          && timestampMs <= anchor.timestampMs
+          && (!Number.isFinite(assignedMs) || timestampMs >= assignedMs)
+          && (event.event_type === "UserPromptSubmit" || event.event_type === "SessionStart");
+      })
+      .sort((left, right) => parseDbTimestampMs(right.timestamp) - parseDbTimestampMs(left.timestamp));
+    return chain.length > 0 ? readSession(chain[0].payload) : null;
   }
 
   private getIdleFreeAnchor(

@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { MoPDatabase } from "../src/db.js";
+import { MoPDatabase } from "../src/db.js";
+import { HookProcessor } from "../src/hooks.js";
 import type { LogManager } from "../src/logs.js";
 import type { TmuxRelay } from "../src/relay.js";
 import { StuckDetector } from "../src/stuck.js";
-import type { EventLogEntry, SlotState } from "../src/types.js";
+import { DEFAULT_CONFIG, type EventLogEntry, type SlotState } from "../src/types.js";
 
 const NOW = Date.parse("2026-07-27T02:30:00.000Z");
 const OLD_IDLE = "2026-07-27T02:24:00.000";
@@ -117,7 +118,7 @@ function harness(
     event_type: "Stop",
     hook_type: "Stop",
     tool_name: null,
-    payload: "{}",
+    payload: JSON.stringify({ session_id: SESSION_ID }),
     processed: false,
   }];
 
@@ -431,6 +432,7 @@ test("a notification-derived idle prompt does not start a new idle episode", asy
         payload: JSON.stringify({
           assignment_epoch: 4,
           idle_anchor: OLD_IDLE,
+          session_id: SESSION_ID,
           urgency: "REMINDER",
         }),
         processed: false,
@@ -475,6 +477,7 @@ test("does not re-fire after a nudge turn ends in HOLD", async () => {
         payload: JSON.stringify({
           assignment_epoch: 4,
           idle_anchor: OLD_IDLE,
+          session_id: SESSION_ID,
         }),
         processed: false,
       },
@@ -541,6 +544,7 @@ test("keeps the original wait start without repeating PM_WAIT nudges", async () 
         payload: JSON.stringify({
           assignment_epoch: 4,
           idle_anchor: OLD_IDLE,
+          session_id: SESSION_ID,
           wait_anchor: OLD_IDLE,
           wait_anchor_source: "Stop",
         }),
@@ -590,6 +594,7 @@ test("keeps the original wait start without repeating PM_WAIT nudges", async () 
           assignment_epoch: 4,
           idle_anchor: "2026-07-27T02:31:00.000",
           wait_anchor: OLD_IDLE,
+          session_id: SESSION_ID,
           wait_anchor_source: "Stop",
         }),
         processed: false,
@@ -657,6 +662,7 @@ test("resets wait age when normal work stops before a later PM_WAIT result", asy
         payload: JSON.stringify({
           assignment_epoch: 4,
           idle_anchor: OLD_IDLE,
+          session_id: SESSION_ID,
         }),
         processed: false,
       },
@@ -734,6 +740,7 @@ test("resets wait age when the prior nudge turn resumes local work", async () =>
         payload: JSON.stringify({
           assignment_epoch: 4,
           idle_anchor: OLD_IDLE,
+          session_id: SESSION_ID,
         }),
         processed: false,
       },
@@ -745,6 +752,7 @@ test("resets wait age when the prior nudge turn resumes local work", async () =>
         hook_type: "Stop",
         tool_name: null,
         payload: JSON.stringify({
+          session_id: SESSION_ID,
           transcript: "PM_WAIT_NUDGE_RESULT classification=LOCAL_CONTINUE action=resumed waiting=6m urgency=REMINDER",
         }),
         processed: false,
@@ -1511,6 +1519,7 @@ test("does not re-fire the occupied nudge when urgency advances on the same wait
       payload: JSON.stringify({
         command: expectedNudge(6, "REMINDER"),
         assignment_epoch: 4,
+        session_id: SESSION_ID,
         idle_anchor: OLD_IDLE,
         wait_anchor: OLD_IDLE,
         urgency: "REMINDER",
@@ -1533,6 +1542,7 @@ test("binds occupied nudge deduplication to the current session", async () => {
   try {
     const candidate = slot({ session_id: "session-3" });
     const h = harness(candidate);
+    h.events[0].payload = JSON.stringify({ session_id: "session-3" });
     h.events.push({
       id: 50,
       timestamp: "2026-07-27T02:26:00.000",
@@ -1555,6 +1565,136 @@ test("binds occupied nudge deduplication to the current session", async () => {
     assert.equal(h.sends.length, 1);
   } finally {
     Date.now = originalNow;
+  }
+});
+
+test("uses production hook sessions for carried PM_WAIT deduplication", async () => {
+  const originalNow = Date.now;
+  const directory = mkdtempSync(join(tmpdir(), "mop-hook-session-dedup-"));
+  const db = new MoPDatabase({
+    ...DEFAULT_CONFIG,
+    dbPath: join(directory, "mop.db"),
+  });
+  const sends: string[] = [];
+  let replaceSessionBeforeEffect: string | null = null;
+  const relay = {
+    sendToSlotAsync: async (
+      _slot: number,
+      command: string,
+      _force = false,
+      _raw = false,
+      beforeFirstEffect?: () => boolean,
+    ) => {
+      if (replaceSessionBeforeEffect) {
+        const replacementSession = replaceSessionBeforeEffect;
+        replaceSessionBeforeEffect = null;
+        db.logEvent(2, "Stop", "Stop", null, {
+          type: "Stop",
+          session_id: replacementSession,
+        });
+        db.updateSlot(2, {
+          last_activity: new Date().toISOString(),
+          idle: true,
+          active_turn_id: null,
+          active_turn_state: "inactive",
+        });
+      }
+      if (beforeFirstEffect && !beforeFirstEffect()) return false;
+      sends.push(command);
+      return true;
+    },
+  } as unknown as TmuxRelay;
+  const processor = new HookProcessor(db, relay);
+  try {
+    assert.equal(
+      db.assignSlot(2, "issue 7000", "github:heydonna-app/heydonna-app", 7000, "main", 7001, "a".repeat(40), 0).ok,
+      true,
+    );
+    db.updateSlot(2, { idle: true, active_turn_id: null, active_turn_state: "inactive" });
+
+    await processor.process(2, {
+      type: "UserPromptSubmit",
+      session_id: "hook-session-1",
+    });
+    await processor.process(2, {
+      type: "Stop",
+      session_id: "hook-session-1",
+      transcript: "PM_WAIT_NUDGE_RESULT classification=HOLD action=reminded_pm",
+    });
+    processor.cancelPendingIdleTimer(2);
+
+    const firstNow = Date.now();
+    Date.now = () => firstNow + 30 * 60_000;
+    const firstDetector = new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(firstNow) } as unknown as LogManager,
+      relay,
+    );
+    await firstDetector.checkIdleOccupied(db.getSlot(2)!);
+    assert.equal(sends.length, 1);
+
+    // The carried PM_WAIT anchor is unchanged, so a second detector cycle in
+    // the same hook session must be a durable zero-effect replay.
+    await new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(firstNow) } as unknown as LogManager,
+      relay,
+    ).checkIdleOccupied(db.getSlot(2)!);
+    assert.equal(sends.length, 1);
+
+    Date.now = () => firstNow;
+    await processor.process(2, {
+      type: "UserPromptSubmit",
+      session_id: "hook-session-2",
+    });
+    await processor.process(2, {
+      type: "Stop",
+      session_id: "hook-session-2",
+      transcript: "PM_WAIT_NUDGE_RESULT classification=HOLD action=reminded_pm",
+    });
+    processor.cancelPendingIdleTimer(2);
+
+    Date.now = () => firstNow + 30 * 60_000;
+    await new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(firstNow) } as unknown as LogManager,
+      relay,
+    ).checkIdleOccupied(db.getSlot(2)!);
+    assert.equal(sends.length, 2);
+
+    const nudges = db.getEvents(2, 10, "idle_occupied_continue_injected");
+    assert.deepEqual(
+      nudges.map((event) => JSON.parse(event.payload).session_id).sort(),
+      ["hook-session-1", "hook-session-2"],
+    );
+
+    // A new idle episode is eligible, but a session transition during relay
+    // preparation must fail the final authoritative hook-session/anchor fence
+    // before any pane effect is accepted.
+    Date.now = () => firstNow;
+    await processor.process(2, {
+      type: "UserPromptSubmit",
+      session_id: "hook-session-2b",
+    });
+    await processor.process(2, {
+      type: "Stop",
+      session_id: "hook-session-2b",
+      transcript: "PM_WAIT_NUDGE_RESULT classification=HOLD action=reminded_pm",
+    });
+    processor.cancelPendingIdleTimer(2);
+    replaceSessionBeforeEffect = "hook-session-3";
+    Date.now = () => firstNow + 30 * 60_000;
+    await new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(firstNow) } as unknown as LogManager,
+      relay,
+    ).checkIdleOccupied(db.getSlot(2)!);
+    assert.equal(sends.length, 2);
+    assert.equal(db.getEvents(2, 10, "idle_occupied_continue_injected").length, 2);
+  } finally {
+    Date.now = originalNow;
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
