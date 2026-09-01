@@ -20,6 +20,7 @@
       "~/.claude/scripts/mop-slot-respawn.sh",
       "~/.claude/control_plane/runtime_observation.py",
       "~/.claude/scripts/sakshi-heartbeat.py",
+      "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "~/.claude/skills/slack-message/scripts/block-unsupported-transcript-split.py",
       "~/.claude/skills/slack-message/scripts/slack-send.sh",
@@ -33,7 +34,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 48,
+    "selected_count": 49,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -262,6 +263,18 @@
       "sha256": "18848718df161667ed3462bcec45d4fb632beba4f1a6dc5692c867c4bb36726d",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/qa-visual-proof-gate.py",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
+      "additional_targets": [
+        "/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py"
+      ],
+      "sha256": "2eec2507ede84df92e55f5d46dbd2530db2ea5a7c03c7b15dbf304811b03abb4",
+      "mode": 493,
+      "ownership_class": "shared-claude-qa-visual-proof-gate",
       "dependency_status": "closed",
       "dependencies": []
     },

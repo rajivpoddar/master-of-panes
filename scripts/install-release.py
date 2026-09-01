@@ -269,9 +269,16 @@ def _load_shared_manifest(release_dir: Path) -> dict[str, Any]:
             raise InstallerError("shared asset entry is not an object")
         source = entry.get("source_path")
         target = entry.get("canonical_target")
+        additional_targets = entry.get("additional_targets", [])
         digest = entry.get("sha256")
         mode = entry.get("mode")
-        if not isinstance(source, str) or not isinstance(target, str) or not isinstance(digest, str):
+        if (
+            not isinstance(source, str)
+            or not isinstance(target, str)
+            or not isinstance(additional_targets, list)
+            or not all(isinstance(value, str) for value in additional_targets)
+            or not isinstance(digest, str)
+        ):
             raise InstallerError("shared asset entry is incomplete")
         source_path = release_dir / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(source)
         if not source_path.is_file() or source_path.is_symlink():
@@ -279,12 +286,13 @@ def _load_shared_manifest(release_dir: Path) -> dict[str, Any]:
         if source in sources:
             raise InstallerError(f"duplicate shared asset source: {source}")
         sources.add(source)
-        target_path = Path(target)
-        if not target_path.is_absolute() or target_path in {Path("/"), Path.home()} or ".." in target_path.parts:
-            raise InstallerError(f"shared asset target is too broad: {target}")
-        if target in targets:
-            raise InstallerError(f"duplicate shared asset target: {target}")
-        targets.add(target)
+        for target_value in [target, *additional_targets]:
+            target_path = Path(target_value)
+            if not target_path.is_absolute() or target_path in {Path("/"), Path.home()} or ".." in target_path.parts:
+                raise InstallerError(f"shared asset target is too broad: {target_value}")
+            if target_value in targets:
+                raise InstallerError(f"duplicate shared asset target: {target_value}")
+            targets.add(target_value)
         if not isinstance(mode, int) or mode < 0 or mode > 0o777:
             raise InstallerError(f"invalid shared asset mode: {target}")
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
@@ -345,6 +353,11 @@ def _shared_target_path(target: str, target_root: Path | None) -> Path:
     return target_root / path.relative_to("/")
 
 
+def _shared_entry_targets(entry: dict[str, Any]) -> list[str]:
+    """Return the one source payload's explicitly mapped canonical targets."""
+    return [entry["canonical_target"], *entry.get("additional_targets", [])]
+
+
 def _validate_compatibility_preimage(target: Path, entry: dict[str, Any]) -> None:
     """Only an absent or exact validator may be replaced during rollback."""
     if not (target.exists() or target.is_symlink()):
@@ -383,7 +396,12 @@ def install_shared_assets(
 ) -> dict[str, Any]:
     """Atomically install only manifest-listed files; never prune unlisted files."""
     manifest = _load_shared_manifest(release_dir)
-    targets = [_shared_target_path(entry["canonical_target"], target_root) for entry in manifest["entries"]]
+    target_records = [
+        (entry, target_name, _shared_target_path(target_name, target_root))
+        for entry in manifest["entries"]
+        for target_name in _shared_entry_targets(entry)
+    ]
+    targets = [target for _, _, target in target_records]
     for entry in manifest.get("rollback_compatibility", []):
         _validate_compatibility_preimage(_shared_target_path(entry["canonical_target"], target_root), entry)
     rollback = create_rollback_bundle(targets, rollback_bundle)
@@ -415,7 +433,7 @@ def install_shared_assets(
     staged: list[Path] = []
     replaced = 0
     try:
-        for index, (entry, target) in enumerate(zip(manifest["entries"], targets)):
+        for index, (entry, target_name, target) in enumerate(target_records):
             source = release_dir / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(entry["source_path"])
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(f".{target.name}.shared.{os.getpid()}.{index}.tmp")
@@ -430,8 +448,8 @@ def install_shared_assets(
             os.replace(temporary, target)
             _fsync_directory(target.parent)
             replaced += 1
-            observed = file_record(target, entry["canonical_target"])
-            expected = {"path": entry["canonical_target"], "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+            observed = file_record(target, target_name)
+            expected = {"path": target_name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
             if observed != expected:
                 raise InstallerError(f"shared asset target readback mismatch: {target}")
             if fail_after is not None and replaced >= fail_after:
@@ -455,11 +473,12 @@ def check_shared_assets(*, release_dir: Path, target_root: Path | None) -> dict[
     manifest = _load_shared_manifest(release_dir)
     checked: list[str] = []
     for entry in manifest["entries"]:
-        target = _shared_target_path(entry["canonical_target"], target_root)
-        expected = {"path": entry["canonical_target"], "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
-        if not target.is_file() or target.is_symlink() or file_record(target, entry["canonical_target"]) != expected:
-            raise InstallerError(f"shared asset target parity mismatch: {target}")
-        checked.append(str(target))
+        for target_name in _shared_entry_targets(entry):
+            target = _shared_target_path(target_name, target_root)
+            expected = {"path": target_name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+            if not target.is_file() or target.is_symlink() or file_record(target, target_name) != expected:
+                raise InstallerError(f"shared asset target parity mismatch: {target}")
+            checked.append(str(target))
     return {"status": "SHARED_ASSETS_PASS", "count": len(checked), "targets": checked}
 
 
