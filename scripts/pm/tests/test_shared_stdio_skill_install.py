@@ -75,7 +75,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
     def test_manifest_is_deterministic_and_source_parity_is_exact(self) -> None:
         manifest = MODULE._load_shared_manifest(self.release)
         self.assertEqual(manifest["entries"], sorted(manifest["entries"], key=lambda item: item["source_path"]))
-        self.assertEqual(manifest["inventory"]["selected_count"], 59)
+        self.assertEqual(manifest["inventory"]["selected_count"], 63)
         self.assertEqual(manifest["inventory"]["ambiguous"], [])
         result = self.install()
         self.assertEqual(result["status"], "SHARED_ASSETS_INSTALLED")
@@ -155,7 +155,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
             module = importlib.util.module_from_spec(spec)
             sys.modules["sakshi_target"] = module
             spec.loader.exec_module(module)
-            if module.RuntimeObservationAdapter.__module__ != "pm_operator.control_plane.runtime_observation":
+            if module.RuntimeObservationAdapter.__module__ != "control_plane.runtime_observation":
                 raise AssertionError("installed target did not load the canonical observation authority")
             head = "f109414c02cc296510103fe2c090ce964e9b9dfb"
             prs = []

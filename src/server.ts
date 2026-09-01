@@ -25,6 +25,7 @@ import { MoPDatabase } from "./db.js";
 import { assignmentIdentityPatchFields } from "./assignmentAuthority.js";
 import { registerAssignmentRoute } from "./assignmentRoute.js";
 import { registerFamily2Routes } from "./family2Routes.js";
+import { registerSessionClearRoute } from "./sessionClearRoute.js";
 import { TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
@@ -824,6 +825,10 @@ app.post("/hooks/slot/:slotNum", async (c) => {
 
   const payload = normalizePayload(payloadParse.data);
 
+  if (payload.type === "SessionStart" && payload.session_id?.trim()) {
+    db.recordSessionStart(slotNum, payload.session_id);
+  }
+
   // Process the hook event
   if (payload.type === "UserPromptSubmit" && payload.session_id?.trim()) {
     db.startAgentTurn(slotNum, payload.session_id);
@@ -1006,6 +1011,13 @@ registerFamily2Routes(app, {
   nativeSlotRelease,
   family2ReleaseEffectAdapter,
   clearPlanApprovalTimer: (slot) => processor.clearPlanApprovalTimer(slot),
+});
+
+registerSessionClearRoute(app, {
+  db,
+  resolveCheckout: (slot) => relay.getSlotCheckoutPath(slot),
+  observeCheckout,
+  deliverClear: (slot, beforeEffect) => relay.sendClearOnce(slot, beforeEffect),
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────

@@ -1133,6 +1133,53 @@ export class TmuxRelay {
   }
 
   /**
+   * Deliver the free-session /clear exactly once. This deliberately does not
+   * call sendToSlotAsync: the general relay retries after failures, while a
+   * session clear must retain its durable intent and reconcile only through a
+   * fresh SessionStart. The fence runs after pane identity preparation and
+   * immediately before the one combined tmux mutation boundary. All
+   * application-level preparation must finish before that fence: once it
+   * passes, there is no timer, filesystem write, or separate tmux await that
+   * can let a newly-active session receive the clear.
+   */
+  async sendClearOnce(
+    slotNum: number,
+    beforeEffect: () => Promise<boolean>,
+  ): Promise<{ ok: boolean; effect_started: boolean; reason?: string }> {
+    const identity = await verifyPaneIdentity(slotNum, this.runShell);
+    if (!identity.ok) return { ok: false, effect_started: false, reason: identity.detail };
+    const paneTarget = identity.snapshot.paneId;
+    const tmpFile = `/tmp/mop-clear-${slotNum}-${Date.now()}-${process.pid}.txt`;
+    const bufName = `mop-clear-${slotNum}`;
+    let effectStarted = false;
+    try {
+      await fs.writeFile(tmpFile, "/clear");
+      if (!(await beforeEffect())) {
+        return { ok: false, effect_started: false, reason: "session-clear effect fence refused" };
+      }
+      effectStarted = true;
+      // Keep load, paste, and Enter in one non-retrying shell boundary. There
+      // is intentionally no application-level await between the final fence
+      // above and the first pane effect.
+      await this.runShell(
+        `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)} && `
+        + `tmux paste-buffer -b ${bufName} -t ${paneTarget} -d && `
+        + `tmux send-keys -t ${paneTarget} Enter`,
+        { timeout: 10_000 },
+      );
+      return { ok: true, effect_started: true };
+    } catch (error) {
+      return {
+        ok: false,
+        effect_started: effectStarted,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      await fs.unlink(tmpFile).catch(() => undefined);
+    }
+  }
+
+  /**
    * Check if a slot is currently active (processing).
    * is-active.sh communicates via exit codes: 0=ACTIVE, 1=IDLE, 2=ERROR.
    * Existing boolean callers retain their historical behavior; watchdogs that

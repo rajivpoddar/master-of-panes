@@ -285,6 +285,7 @@ def analyze_session(
         "active": observation.active,
         "mop_occupied": observation.occupied,
         "mop_idle": observation.idle,
+        "mop_dnd": observation.dnd,
         "checkout_clean": observation.checkout_clean,
         "checkout_head": observation.checkout_head,
         "handoff_ready": observation.handoff_ready,
@@ -392,6 +393,7 @@ def update_omp_effective_starts(
             occupied=row.get("mop_occupied"),
             idle=row.get("mop_idle"),
             active=row.get("active"),
+            dnd=row.get("mop_dnd") if isinstance(row.get("mop_dnd"), bool) else row.get("dnd") if isinstance(row.get("dnd"), bool) else None,
             is_pm=str(row.get("id") or "") == "pm",
             now=now_utc,
         )

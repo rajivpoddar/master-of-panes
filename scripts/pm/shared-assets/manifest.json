@@ -10,6 +10,7 @@
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
       "~/.claude/scripts/axiom-activity-report.py",
+      "~/.claude/scripts/backlog-triage.py",
       "~/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
       "~/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
       "~/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
@@ -21,9 +22,12 @@
       "~/.claude/scripts/launch-slot-4.sh",
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
+      "~/.claude/scripts/heartbeat-session-age-clear.py",
       "~/.claude/scripts/mop-slot-respawn.sh",
+      "~/.claude/scripts/mop-clear-slot.sh",
       "~/.claude/control_plane/runtime_observation.py",
       "~/.claude/scripts/sakshi-heartbeat.py",
+      "~/.claude/scripts/sakshi-heartbeat.sh",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
       "~/.claude/skills/qa-brief/SKILL.md",
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
@@ -39,7 +43,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 59,
+    "selected_count": 63,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -67,7 +71,7 @@
     {
       "source_path": "claude/control_plane/runtime_observation.py",
       "canonical_target": "/Users/rajiv/.claude/control_plane/runtime_observation.py",
-      "sha256": "33e7e0447d92fef778b75bca2dfea074ad1f8d1e7f27fe25c601f67ad01c7344",
+      "sha256": "f93f9daeaf2e44b4f8263c71be3de5fe04ebd2cede8d36291250bb4d49452746",
       "mode": 420,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
       "dependency_status": "closed",
@@ -191,6 +195,15 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/backlog-triage.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/backlog-triage.py",
+      "sha256": "f34ec1f0c64f168a579883015fbaec330174b39bebc48d46d02e6baf489f6a8d",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-ready-pool-readonly-client",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/ci/ci-fast-triage.py",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
       "sha256": "752ccd77cc632bec2fbdeb360822ad4adb0ea3f9cef5ca94a68e5174e0875b54",
@@ -223,6 +236,15 @@
       "sha256": "610d8408e306d446a104cbcff9786c9f8dc10defb6cb42438d3c60046f22f923",
       "mode": 493,
       "ownership_class": "shared-claude-ci-rerun-consumer",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/heartbeat-session-age-clear.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/heartbeat-session-age-clear.py",
+      "sha256": "fe12032177d925015314d1ed122090cec1eb3f5c49e3e776242f1d1d4fc9bd75",
+      "mode": 493,
+      "ownership_class": "shared-claude-mop-session-clear-client",
       "dependency_status": "closed",
       "dependencies": []
     },
@@ -290,6 +312,15 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/mop-clear-slot.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/mop-clear-slot.sh",
+      "sha256": "b92f30666a6b26e8eec70b8235d2b03efbdae0d992df2e57a586b7537d40c151",
+      "mode": 493,
+      "ownership_class": "shared-claude-mop-release-client",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/mop-slot-respawn.sh",
       "canonical_target": "/Users/rajiv/.claude/scripts/mop-slot-respawn.sh",
       "sha256": "996927262a5c37a639f84493330938c4d6cb73319cf36094c23a795aaa90bbbb",
@@ -301,7 +332,7 @@
     {
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py",
-      "sha256": "18848718df161667ed3462bcec45d4fb632beba4f1a6dc5692c867c4bb36726d",
+      "sha256": "24c34aa067cb47c6dfbfd93b28598b345deb4418f6660b58d037fb91591cfa71",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
       "dependency_status": "closed",
@@ -324,6 +355,15 @@
         "preimage_sha256": "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a",
         "mode": 493
       },
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/sakshi-heartbeat.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.sh",
+      "sha256": "a5399af82a929d5bd317a2ac9b2b6535ff29c78a7dc9f30fb8b5d14a6f6f4666",
+      "mode": 493,
+      "ownership_class": "shared-claude-sakshi-heartbeat-launcher",
       "dependency_status": "closed",
       "dependencies": []
     },

@@ -39,7 +39,9 @@ export interface SlotMutationResult {
     | "effect_receipt_malformed"
     | "dnd_active"
     | "task_mismatch"
-    | "productive_work";
+    | "productive_work"
+    | "session_clear_in_progress"
+    | "session_clear_intent_malformed";
   owner_slots?: number[];
   owner_conflicts?: Array<{
     slot: number;
@@ -77,6 +79,17 @@ export interface NoPaneReleaseDigestInput {
   expected_tuple: AssignmentTupleInput;
   expected_task: string;
   checkout_path: string;
+}
+
+export interface SessionClearIntent {
+  token: string;
+  slot: number;
+  expected_epoch: number;
+  expected_session_id: string;
+  expected_session_started_at: string;
+  created_at: string;
+  delivery_started?: boolean;
+  delivery_started_at?: string;
 }
 
 export interface AssignmentTuple {
@@ -405,6 +418,7 @@ export class MoPDatabase {
         status TEXT NOT NULL DEFAULT 'free',
         occupied INTEGER NOT NULL DEFAULT 0,
         session_id TEXT,
+        session_started_at TEXT,
         task TEXT,
         repository_id TEXT,
         issue INTEGER,
@@ -453,6 +467,9 @@ export class MoPDatabase {
     }
     if (!columns.some((c) => c.name === "active_turn_state")) {
       this.db.exec("ALTER TABLE slots ADD COLUMN active_turn_state TEXT NOT NULL DEFAULT 'inactive'");
+    }
+    if (!columns.some((c) => c.name === "session_started_at")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN session_started_at TEXT");
     }
     if (!columns.some((c) => c.name === "last_meaningful_work_at")) {
       this.db.exec("ALTER TABLE slots ADD COLUMN last_meaningful_work_at TEXT");
@@ -755,9 +772,27 @@ export class MoPDatabase {
     })) as unknown as SlotState[];
   }
 
+  /** Record the hook-provided session identity used by the explicit clear API. */
+  recordSessionStart(slot: number, sessionId: string, startedAt = new Date().toISOString()): void {
+    if (!Number.isInteger(slot) || slot < 1 || slot > this.config.slotCount) return;
+    if (typeof sessionId !== "string" || sessionId.trim() === "") return;
+    this.updateSlot(slot, {
+      session_id: sessionId.trim(),
+      session_started_at: startedAt,
+    });
+  }
+
+  /** Clear only the exact session identity after a successful direct reset. */
+  clearSessionIdentity(slot: number, sessionId: string): boolean {
+    const current = this.getSlot(slot);
+    if (!current || current.session_id !== sessionId) return false;
+    this.updateSlot(slot, { session_id: null, session_started_at: null });
+    return true;
+  }
+
   updateSlot(slot: number, updates: Partial<SlotState>): void {
     const allowedFields = [
-      "name", "session_id", "task", "last_activity", "dnd", "idle", "activity",
+      "name", "session_id", "session_started_at", "task", "last_activity", "dnd", "idle", "activity",
       "active_turn_id", "active_turn_started_at", "active_turn_state", "last_meaningful_work_at",
     ];
     this.updateSlotFields(slot, updates, allowedFields);
@@ -768,7 +803,7 @@ export class MoPDatabase {
     updates: Partial<SlotState>
   ): void {
     this.updateSlotFields(slot, updates, [
-      "status", "occupied", "session_id", "task", "repository_id", "issue",
+      "status", "occupied", "session_id", "session_started_at", "task", "repository_id", "issue",
       "branch", "branch_ref", "pr", "head_sha", "assignment_epoch",
       "assigned_at", "work_kind", "handoff_id", "claimed_at", "dnd", "idle", "activity", "active_turn_id",
       "active_turn_started_at", "active_turn_state",
@@ -981,10 +1016,9 @@ export class MoPDatabase {
         active_turn_state: "inactive",
         assignment_epoch: epoch + 1,
       });
-      // Existing SQLite databases retain the retired session_id column. Clear
-      // that legacy telemetry in the same release CAS, but never read it as
-      // assignment authority.
-      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      // Clear runtime session telemetry in the same release CAS; it is never
+      // read as assignment authority.
+      this.db.prepare("UPDATE slots SET session_id = NULL, session_started_at = NULL WHERE slot = ?").run(slot);
       if (effect) {
         this.db.prepare(`
           INSERT INTO native_release_effect_receipts (
@@ -1139,7 +1173,7 @@ export class MoPDatabase {
         active_turn_state: "inactive",
         assignment_epoch: epoch + 1,
       });
-      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      this.db.prepare("UPDATE slots SET session_id = NULL, session_started_at = NULL WHERE slot = ?").run(slot);
       this.db.prepare(`
         INSERT INTO native_release_effect_receipts (
           effect_id, request_digest, slot, expected_epoch, released_epoch,
@@ -1275,6 +1309,15 @@ export class MoPDatabase {
       if (!current || epoch !== expectedEpoch) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
       }
+      if (requireFree && !current.occupied && this.getSessionClearIntent(slot)) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "session_clear_in_progress",
+        };
+      }
       if (requireFree && current.occupied) {
         return {
           ok: false,
@@ -1400,8 +1443,8 @@ export class MoPDatabase {
           claimed_at: assignmentTime,
           dnd: false,
         });
-        // Keep the retired column empty without making it part of ownership.
-        this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+        // Keep runtime session telemetry empty without making it part of ownership.
+        this.db.prepare("UPDATE slots SET session_id = NULL, session_started_at = NULL WHERE slot = ?").run(slot);
       } catch (error) {
         if (
           error instanceof Error
@@ -1515,6 +1558,16 @@ export class MoPDatabase {
         };
       }
 
+      if (!before.occupied && this.hasSessionClearIntent(slot)) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "session_clear_in_progress",
+        };
+      }
+
       const duplicate = this.db.prepare(`
         SELECT slot FROM slots
         WHERE occupied = 1 AND issue = ? AND slot != ?
@@ -1563,7 +1616,7 @@ export class MoPDatabase {
         active_turn_started_at: null,
         active_turn_state: "inactive",
       });
-      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      this.db.prepare("UPDATE slots SET session_id = NULL, session_started_at = NULL WHERE slot = ?").run(slot);
       return {
         ok: true,
         conflict: false,
@@ -1913,6 +1966,137 @@ export class MoPDatabase {
       status[i] = this.hasPendingClear(i);
     }
     return status;
+  }
+
+  getSessionClearIntent(slot: number): SessionClearIntent | null {
+    const raw = this.getConfig(`session_clear_intent_${slot}`);
+    if (!raw) return null;
+    try {
+      const value = JSON.parse(raw) as SessionClearIntent;
+      if (
+        value.slot !== slot
+        || typeof value.token !== "string"
+        || !Number.isInteger(value.expected_epoch)
+        || typeof value.expected_session_id !== "string"
+        || typeof value.expected_session_started_at !== "string"
+        || (value.delivery_started !== undefined && typeof value.delivery_started !== "boolean")
+        || (value.delivery_started_at !== undefined && typeof value.delivery_started_at !== "string")
+      ) return null;
+      return value;
+    } catch {
+      return null;
+    }
+  }
+
+  hasSessionClearIntent(slot: number): boolean {
+    const raw = this.getConfig(`session_clear_intent_${slot}`);
+    return raw !== null && raw.trim() !== "";
+  }
+
+  claimSessionClearIntent(
+    slot: number,
+    expectedEpoch: number,
+    expectedSessionId: string,
+    expectedSessionStartedAt: string,
+    token: string,
+  ): SlotMutationResult {
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      if (!current || epoch !== expectedEpoch) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      if (this.hasSessionClearIntent(slot)) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "session_clear_in_progress" };
+      }
+      if (current.occupied) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "slot_already_occupied" };
+      }
+      if (current.dnd) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "dnd_active" };
+      }
+      if (current.active_turn_id !== null || current.active_turn_state !== "inactive") {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "active_turn" };
+      }
+      if (!current.idle) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "productive_work" };
+      }
+      if (
+        current.session_id !== expectedSessionId
+        || current.session_started_at !== expectedSessionStartedAt
+      ) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
+      }
+      const intent: SessionClearIntent = {
+        token,
+        slot,
+        expected_epoch: expectedEpoch,
+        expected_session_id: expectedSessionId,
+        expected_session_started_at: expectedSessionStartedAt,
+        created_at: new Date().toISOString(),
+      };
+      this.setConfig(`session_clear_intent_${slot}`, JSON.stringify(intent));
+      return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: false };
+    })();
+  }
+
+  clearSessionClearIntent(slot: number, token: string): boolean {
+    const current = this.getSessionClearIntent(slot);
+    if (!current || current.token !== token) return false;
+    this.setConfig(`session_clear_intent_${slot}`, "");
+    return true;
+  }
+
+  /**
+   * Persist the one-shot clear delivery marker under the same free-session
+   * fence used to claim the intent. Once marked, a caller must reconcile by
+   * observing the next SessionStart rather than attempting another pane send.
+   */
+  markSessionClearDeliveryStarted(
+    slot: number,
+    expectedEpoch: number,
+    expectedSessionId: string,
+    expectedSessionStartedAt: string,
+    token: string,
+  ): SlotMutationResult {
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      const intent = this.getSessionClearIntent(slot);
+      if (!intent) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "session_clear_intent_malformed" };
+      }
+      if (
+        intent.token !== token
+        || intent.expected_epoch !== expectedEpoch
+        || intent.expected_session_id !== expectedSessionId
+        || intent.expected_session_started_at !== expectedSessionStartedAt
+      ) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
+      }
+      if (intent.delivery_started) {
+        return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
+      }
+      if (
+        !current
+        || current.occupied
+        || current.dnd
+        || !current.idle
+        || current.active_turn_id !== null
+        || current.active_turn_state !== "inactive"
+        || epoch !== expectedEpoch
+        || current.session_id !== expectedSessionId
+        || current.session_started_at !== expectedSessionStartedAt
+      ) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
+      }
+      this.setConfig(`session_clear_intent_${slot}`, JSON.stringify({
+        ...intent,
+        delivery_started: true,
+        delivery_started_at: new Date().toISOString(),
+      } satisfies SessionClearIntent));
+      return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: false };
+    })();
   }
 
   /**

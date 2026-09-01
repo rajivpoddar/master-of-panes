@@ -77,6 +77,10 @@ export interface SlotState {
   status: SlotStatus;
   /** Whether the slot is occupied */
   occupied: boolean;
+  /** Current Claude session identity, when the hook has supplied one. */
+  session_id: string | null;
+  /** Timestamp of the most recent SessionStart hook. */
+  session_started_at: string | null;
   /** Current task description */
   task: string | null;
   /** Immutable repository identity for the current assignment */
