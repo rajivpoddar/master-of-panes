@@ -18,18 +18,25 @@ SPEC.loader.exec_module(INSTALLER)
 def test_shared_manifest_contains_versioned_stdio_and_axiom_assets() -> None:
     manifest = INSTALLER._load_shared_manifest(ROOT)
     entries = manifest["entries"]
-    assert manifest["inventory"]["selected_count"] == 9
+    by_path = {item["source_path"]: item for item in entries}
+    assert manifest["inventory"]["selected_count"] == len(entries)
     assert manifest["inventory"]["command_inventory"] == []
-    assert len(entries) == 9
-    assert entries[0]["source_path"] == "claude/scripts/axiom-activity-report.py"
-    assert entries[0]["canonical_target"] == "/Users/rajiv/.claude/scripts/axiom-activity-report.py"
-    assert entries[0]["mode"] == 493
-    assert entries[0]["sha256"] == "8b67ea060d935f4be465aa342b0f3fe00e86950ce0ccbb80a58b1e2cc1d94abd"
-    assert entries[1]["source_path"] == "claude/scripts/launch-dev-slot-claude.sh"
-    assert entries[2]["source_path"] == "claude/scripts/launch-slot-5.sh"
-    assert entries[3]["source_path"] == "claude/scripts/launch-slot-6.sh"
-    assert entries[4]["source_path"] == "claude/scripts/sync-dev-slot-skill-allowlist.mjs"
-    assert all(item["source_path"].startswith("codex/skills/codex-stdio-send-message/") for item in entries[5:])
+    axiom = by_path["claude/scripts/axiom-activity-report.py"]
+    assert axiom["canonical_target"] == "/Users/rajiv/.claude/scripts/axiom-activity-report.py"
+    assert axiom["mode"] == 493
+    assert axiom["sha256"] == "8b67ea060d935f4be465aa342b0f3fe00e86950ce0ccbb80a58b1e2cc1d94abd"
+    assert "claude/scripts/launch-dev-slot-claude.sh" in by_path
+    for slot in range(1, 7):
+        launcher = by_path[f"claude/scripts/launch-slot-{slot}.sh"]
+        assert launcher["canonical_target"] == f"/Users/rajiv/.claude/scripts/launch-slot-{slot}.sh"
+        assert launcher["mode"] == 493
+    assert "claude/scripts/sync-dev-slot-skill-allowlist.mjs" in by_path
+    assert {
+        "codex/skills/codex-stdio-send-message/SKILL.md",
+        "codex/skills/codex-stdio-send-message/agents/openai.yaml",
+        "codex/skills/codex-stdio-send-message/scripts/send_message.py",
+        "codex/skills/codex-stdio-send-message/scripts/test_send_message.py",
+    } <= by_path.keys()
     assert all("claude/scripts/pm-operator.py" not in item["source_path"] for item in entries)
     assert all("claude/scripts/pm-transition.sh" not in item["source_path"] for item in entries)
 

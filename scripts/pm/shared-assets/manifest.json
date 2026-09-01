@@ -15,6 +15,10 @@
       "~/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
       "~/.claude/control-plane/current/claude/scripts/ci/rerun-after-local-proof.sh",
       "~/.claude/scripts/launch-dev-slot-claude.sh",
+      "~/.claude/scripts/launch-slot-1.sh",
+      "~/.claude/scripts/launch-slot-2.sh",
+      "~/.claude/scripts/launch-slot-3.sh",
+      "~/.claude/scripts/launch-slot-4.sh",
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
       "~/.claude/scripts/mop-slot-respawn.sh",
@@ -34,7 +38,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 54,
+    "selected_count": 58,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -224,7 +228,43 @@
     {
       "source_path": "claude/scripts/launch-dev-slot-claude.sh",
       "canonical_target": "/Users/rajiv/.claude/scripts/launch-dev-slot-claude.sh",
-      "sha256": "29b3b389e1c63576d4552da9e093afedcb440d8a763aebce5b1a9b7d3f454eb9",
+      "sha256": "e6da71cf83edc748e43513904596abad8452173bd27d3d8acbd422397b275d7e",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-launcher",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/launch-slot-1.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/launch-slot-1.sh",
+      "sha256": "4f8d1739b137aeed4f59c869d66323f02984d730fadaa477aaa71f935c9e293b",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-launcher",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/launch-slot-2.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/launch-slot-2.sh",
+      "sha256": "833c04288a26889818009e085d2e10a819392b3eab2aa0e193470e386aafbc34",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-launcher",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/launch-slot-3.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/launch-slot-3.sh",
+      "sha256": "ca3cc9340b6c62b9df05cecbd2aa2f0113aea506d3266a95032feb41a0c89705",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-launcher",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/launch-slot-4.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/launch-slot-4.sh",
+      "sha256": "3fdd5e7e782cf21e9c366ae9249e354f86235770bb6214d7c874b037020eb55b",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
       "dependency_status": "closed",
@@ -233,7 +273,7 @@
     {
       "source_path": "claude/scripts/launch-slot-5.sh",
       "canonical_target": "/Users/rajiv/.claude/scripts/launch-slot-5.sh",
-      "sha256": "a88e96f7b97c16b6802191539f66aed9cee3bc0f0111cc10d1f2c1c8f4042cc0",
+      "sha256": "978a99d547a4ef154e71e28683b54f16ccb79f2176b8a6cb8690571bfedf6a14",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
       "dependency_status": "closed",
@@ -242,7 +282,7 @@
     {
       "source_path": "claude/scripts/launch-slot-6.sh",
       "canonical_target": "/Users/rajiv/.claude/scripts/launch-slot-6.sh",
-      "sha256": "06736385f59282077d8977d51cecf68b907d71c4f396efe2e043a18c28c19515",
+      "sha256": "9a6e819090bda972e9fcecef8d60b032f9018825ad6635d07b7dabcb240c88ad",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
       "dependency_status": "closed",

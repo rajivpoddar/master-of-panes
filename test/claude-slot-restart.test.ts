@@ -20,7 +20,7 @@ test("numbered slot auto-restarts use the persistent Claude Code launchers", () 
 test("numbered slot auto-restarts preserve the Ornith context/output contract", () => {
   assert.match(CLAUDE_SLOT_RUNTIME_ENV, /DEV_SLOT_SPARK_MODEL=ornith-1\.5-35b-a3b/);
   assert.match(CLAUDE_SLOT_RUNTIME_ENV, /DEV_SLOT_SPARK_MAX_CONTEXT_TOKENS=240000/);
-  assert.match(CLAUDE_SLOT_RUNTIME_ENV, /DEV_SLOT_SPARK_MAX_OUTPUT_TOKENS=16384/);
+  assert.match(CLAUDE_SLOT_RUNTIME_ENV, /DEV_SLOT_SPARK_MAX_OUTPUT_TOKENS=32000/);
   assert.match(CLAUDE_SLOT_RUNTIME_ENV, /DEV_SLOT_SPARK_MAX_THINKING_TOKENS=2048/);
   assert.match(CLAUDE_SLOT_RUNTIME_ENV, /MAX_THINKING_TOKENS=2048/);
   assert.doesNotMatch(CLAUDE_SLOT_RUNTIME_ENV, /MAX_OUTPUT_TOKENS=2048(?:\s|$)/);

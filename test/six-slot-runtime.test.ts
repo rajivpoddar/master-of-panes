@@ -64,15 +64,26 @@ test("S5/S6 runtime identities are isolated and launchable without provisioning 
   assert.notEqual(SLOT_RUNTIME_IDENTITIES[5].appPort, SLOT_RUNTIME_IDENTITIES[6].appPort);
 });
 
-test("versioned S5/S6 launch mappings are explicit and preserve the existing launcher library", () => {
+test("all six versioned launch wrappers default to Ornith and preserve the shared launcher library", () => {
   const manifest = JSON.parse(readFileSync(new URL("../scripts/pm/shared-assets/manifest.json", import.meta.url), "utf8")) as {
     entries: Array<{ source_path: string; canonical_target: string; mode: number }>;
   };
-  for (const slot of [5, 6]) {
+  for (const slot of [1, 2, 3, 4, 5, 6]) {
     const entry = manifest.entries.find((item) => item.source_path === `claude/scripts/launch-slot-${slot}.sh`);
     assert.ok(entry);
     assert.equal(entry?.canonical_target, `/Users/rajiv/.claude/scripts/launch-slot-${slot}.sh`);
     assert.equal(entry?.mode, 493);
+
+    const wrapper = readFileSync(
+      new URL(`../scripts/pm/shared-assets/claude/scripts/launch-slot-${slot}.sh`, import.meta.url),
+      "utf8",
+    );
+    assert.match(wrapper, /set -euo pipefail/);
+    assert.match(wrapper, /DEV_SLOT_SPARK_PROFILE="\$\{DEV_SLOT_SPARK_PROFILE:-ornith\}"/);
+    assert.match(
+      wrapper,
+      new RegExp(`exec /Users/rajiv/\\.claude/scripts/launch-dev-slot-claude\\.sh ${slot} "\\$@"`),
+    );
   }
   for (const name of ["pushya", "revati"]) {
     const entry = manifest.entries.find((item) => item.source_path === `claude/dev-slot-rules/22-slot-${name}.md`);
@@ -88,6 +99,12 @@ test("versioned S5/S6 launch mappings are explicit and preserve the existing lau
   assert.match(launcher, /5\) SLOT_NAME="Revati"/);
   assert.match(launcher, /6\) SLOT_NAME="Pushya"/);
   assert.match(launcher, /CLAUDE_CODE_SUBAGENT_MODEL="\$SPARK_MODEL"/);
+  assert.match(launcher, /SPARK_PROFILE="\$\{DEV_SLOT_SPARK_PROFILE:-ornith\}"/);
+  assert.match(launcher, /CLAUDE_CODE_MAX_CONTEXT_TOKENS="\$\{DEV_SLOT_SPARK_MAX_CONTEXT_TOKENS:-240000\}"/);
+  assert.match(launcher, /CLAUDE_CODE_MAX_OUTPUT_TOKENS="\$\{DEV_SLOT_SPARK_MAX_OUTPUT_TOKENS:-32000\}"/);
+  assert.match(launcher, /MAX_THINKING_TOKENS="\$\{DEV_SLOT_SPARK_MAX_THINKING_TOKENS:-2048\}"/);
+  assert.match(launcher, /ANTHROPIC_BASE_URL="\$SPARK_BASE_URL"/);
+  assert.match(launcher, /ANTHROPIC_DEFAULT_SONNET_MODEL="\$SPARK_MODEL"/);
   assert.match(launcher, /\.config\/ornith15\/api-key/);
   assert.match(launcher, /20-buddhi-dev\.md/);
   assert.match(launcher, /22-slot-revati\.md/);
