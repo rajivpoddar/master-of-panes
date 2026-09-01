@@ -6,10 +6,6 @@ import {
   PM_TRANSITION_ASSIGNMENT_HEADER,
 } from "./assignmentAuthority.js";
 import type { MoPDatabase } from "./db.js";
-import {
-  consumeFamily2ReleaseEffect,
-  Family2ReleaseEffectAdapter,
-} from "./family2ReleaseEffect.js";
 import type {
   NativeSlotNoPaneReleaseRequest,
   NativeSlotReleaseCoordinator,
@@ -22,8 +18,6 @@ const slotParamSchema = z.coerce.number().int().min(1).max(DEFAULT_DEV_SLOT_COUN
 export interface Family2RouteDependencies {
   db: MoPDatabase;
   nativeSlotRelease: NativeSlotReleaseCoordinator;
-  family2ReleaseEffectAdapter: Family2ReleaseEffectAdapter;
-  clearPlanApprovalTimer: (slot: number) => void;
 }
 
 function authorized(authority: string | undefined): boolean {
@@ -35,7 +29,7 @@ export function registerFamily2Routes(
   app: Hono,
   dependencies: Family2RouteDependencies,
 ): void {
-  const { db, nativeSlotRelease, family2ReleaseEffectAdapter } = dependencies;
+  const { db, nativeSlotRelease } = dependencies;
 
   app.post("/slots/:slotNum/release", async (c) => {
     // Authenticate before path/body processing, delivery/reset, or any DB use.
@@ -72,7 +66,6 @@ export function registerFamily2Routes(
     const releaseResult = await nativeSlotRelease.release(request);
     if (releaseResult.success) {
       if (!releaseResult.idempotent) {
-        dependencies.clearPlanApprovalTimer(slotParse.data);
         db.logEvent(slotParse.data, "slot_released", null, null, {
           assignment_epoch: releaseResult.assignment_epoch,
           native_checkout_ack: true,
@@ -117,9 +110,6 @@ export function registerFamily2Routes(
       request_digest: body.request_digest as string,
     };
     const releaseResult = await nativeSlotRelease.releaseWithoutPane(request);
-    if (releaseResult.success && !releaseResult.idempotent) {
-      dependencies.clearPlanApprovalTimer(slotParse.data);
-    }
     return c.json(
       releaseResult,
       releaseResult.code === "invalid_request" ? 400 : releaseResult.success ? 200 : 409,
@@ -146,19 +136,4 @@ export function registerFamily2Routes(
     }
   });
 
-  /** Consume one committed Family-2 release effect through the live MoP boundary. */
-  app.post("/family2/release-effect", async (c) => {
-    if (!authorized(c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER))) {
-      return c.json({ success: false, code: "assignment_authority_required" }, 403);
-    }
-    let payload: unknown;
-    try {
-      payload = await c.req.json();
-    } catch {
-      return c.json({ success: false, code: "invalid_request" }, 400);
-    }
-    const result = await consumeFamily2ReleaseEffect(payload, family2ReleaseEffectAdapter);
-    const status = result.success ? 200 : result.code === "invalid_request" ? 400 : 409;
-    return c.json(result, status as 200 | 400 | 409);
-  });
 }

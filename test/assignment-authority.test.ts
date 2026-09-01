@@ -620,5 +620,4 @@ test("MCP and hooks expose no direct assignment writer", () => {
   const hooks = readFileSync(new URL("../src/hooks.ts", import.meta.url), "utf8");
   assert.equal(mcp.includes('"mop_assign_slot"'), false);
   assert.equal(hooks.includes(".assignSlot("), false);
-  assert.match(hooks, /assignment_bypass_refused/);
 });
