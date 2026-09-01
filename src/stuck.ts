@@ -870,6 +870,22 @@ export class StuckDetector {
     }
 
     try {
+      // The release coordinator may replace an unstarted nudge lease while
+      // it claims the same owner tuple. Marking here is the synchronous edge:
+      // if release wins before it, do not enter the pane effect at all. If a
+      // nudge wins this edge, release refuses instead of racing its turn.
+      if (nudgeLeaseToken !== "__legacy__" && typeof this.db.markNativeReleaseIntentStarted === "function") {
+        const started = this.db.markNativeReleaseIntentStarted(
+          slotNum,
+          current.assignment_epoch,
+          tuple!,
+          nudgeLeaseToken,
+        );
+        if (!started) {
+          const latest = this.db.getSlot(slotNum) ?? current;
+          return { sent: false, reason: "release_in_progress", slot: latest };
+        }
+      }
       const sent = await this.relay.sendToSlotAsync(
         slotNum,
         command,

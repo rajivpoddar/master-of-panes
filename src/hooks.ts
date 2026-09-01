@@ -9,7 +9,7 @@ import { execFile } from "node:child_process";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { execShell, sleep } from "./asyncCommand.js";
-import type { MoPDatabase } from "./db.js";
+import { slotAssignmentTuple, type MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 import type { HookPayload, HookResponse, SlotState } from "./types.js";
 import { isValidDevSlot } from "./slotConfig.js";
@@ -396,6 +396,19 @@ export class HookProcessor {
       return;
     }
 
+    const currentSlot = this.db.getSlot(slotNum);
+    if (currentSlot?.occupied) {
+      const tuple = slotAssignmentTuple(currentSlot);
+      if (tuple && this.db.hasActiveNativeReleaseIntent(
+        slotNum,
+        currentSlot.assignment_epoch,
+        tuple,
+      )) {
+        this.stopPmWaitReminder(slotNum, "native-release-in-progress");
+        return;
+      }
+    }
+
     const existing = this.pmWaitReminderTimers.get(slotNum);
     if (existing) {
       if (!reset) return;
@@ -441,6 +454,21 @@ export class HookProcessor {
       HookProcessor.PM_WAIT_ACTIVITIES.has(slot.activity);
     if (!slot || !slot.occupied || (!slot.idle && !waitingForPm)) {
       this.stopPmWaitReminder(slotNum, "slot-no-longer-waiting");
+      return false;
+    }
+    const tuple = slotAssignmentTuple(slot);
+    if (tuple && this.db.hasActiveNativeReleaseIntent(
+      slotNum,
+      slot.assignment_epoch,
+      tuple,
+    )) {
+      this.stopPmWaitReminder(slotNum, "native-release-in-progress");
+      this.db.logEvent(slotNum, "slot_idle_pm_wait_reminder_suppressed_native_release", "Timer", null, {
+        reason: "native-release-in-progress",
+        assignment_epoch: slot.assignment_epoch,
+        issue: slot.issue,
+        branch: slot.branch,
+      });
       return false;
     }
     const pollMonitorReason = this.getPollMonitorSkipReason(slot);

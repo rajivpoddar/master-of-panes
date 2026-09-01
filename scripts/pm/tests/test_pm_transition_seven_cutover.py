@@ -46,6 +46,14 @@ def test_retired_pm_payloads_are_absent_from_mop_source() -> None:
     assert not (SHARED / "claude/scripts/pm-transition.sh").exists()
 
 
+def test_pm_assignment_caller_uses_the_supported_mop_issue_route() -> None:
+    wake_sop = (SHARED / "codex/monitors/heydonna-pm-chat/WAKE_SOP.md").read_text(encoding="utf-8")
+    assert "canonical caller is the already-supported MoP REST route" in wake_sop
+    assert "POST /slots/<slot>/assign" in wake_sop
+    assert "x-heydonna-assignment-authority: pm-transition-v1" in wake_sop
+    assert "do not invoke `pm-operator`, `pm-transition`, or a replacement CLI" in wake_sop
+
+
 def test_manifest_is_sorted_and_matches_committed_json() -> None:
     parsed = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     paths = [item["source_path"] for item in parsed["entries"]]

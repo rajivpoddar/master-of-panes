@@ -103,7 +103,9 @@ function harness(
   allSlots: SlotState[] = [currentSlot],
   releaseIntentActive = false,
   claimReleaseIntentResult: boolean | null = null,
+  releaseWinsBeforeNudgeEffect = false,
 ): Harness {
+  let releaseInFlight = releaseIntentActive;
   let slotReads: SlotState[] = [];
   let logMtime: Date | null = new Date(NOW);
   let nextEventId = 2;
@@ -122,7 +124,7 @@ function harness(
   const db = {
     getExitPending: () => false,
     hasPendingClear: () => false,
-    hasActiveNativeReleaseIntent: () => releaseIntentActive,
+    hasActiveNativeReleaseIntent: () => releaseInFlight,
     claimNativeReleaseIntent: () => claimReleaseIntentResult ?? true,
     clearNativeReleaseIntent: () => undefined,
     hasRecentSubagentDispatch: () => null,
@@ -152,6 +154,17 @@ function harness(
       });
       return nextEventId - 1;
     },
+    ...(releaseWinsBeforeNudgeEffect ? {
+      claimNativeReleaseIntentWithToken: () => {
+        if (releaseInFlight) return null;
+        releaseInFlight = false;
+        return "nudge-token";
+      },
+      markNativeReleaseIntentStarted: () => {
+        releaseInFlight = true;
+        return false;
+      },
+    } : {}),
   } as unknown as MoPDatabase;
 
   const relay = {
@@ -336,6 +349,22 @@ test("suppresses a stale continuation when release claims after the initial guar
     assert.equal(
       JSON.parse(h.events.at(-1)?.payload ?? "{}").reason,
       "release_in_progress",
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("release wins before a PM-wait nudge crosses its pane effect edge", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const h = harness(slot(), [slot()], false, null, true);
+    await h.detector.checkIdleOccupied(slot());
+    assert.deepEqual(h.sends, []);
+    assert.equal(
+      h.events.some((event) => event.event_type === "idle_occupied_continue_injected"),
+      false,
     );
   } finally {
     Date.now = originalNow;

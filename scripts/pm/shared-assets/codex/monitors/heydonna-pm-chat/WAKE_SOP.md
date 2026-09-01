@@ -744,10 +744,12 @@ and acts through the matrix below.
 
 Assignment is deliberately simple and is permitted only after CTO Decisions
 selects and authorizes the exact rework, reproduction, or production-shaped
-proof packet. Before assigning, PM checks the selected slot's current session
-age. If it is older than six hours, clear that session once and prove a fresh
-context boundary; if the clear fails, stop the assignment. Otherwise PM
-performs exactly three operations:
+proof packet. The canonical caller is the already-supported MoP REST route
+below; do not invoke `pm-operator`, `pm-transition`, or a replacement CLI.
+Before assigning, PM checks the selected slot's current session age. If it is
+older than six hours, use the supported direct MoP session boundary once and
+prove a fresh context boundary; if the clear fails, stop the assignment.
+Otherwise PM performs exactly three operations:
 
 1. Assign the issue in MoP with one curl:
    `POST /slots/<slot>/assign` with header

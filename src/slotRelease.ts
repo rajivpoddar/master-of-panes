@@ -530,6 +530,9 @@ export class NativeSlotReleaseCoordinator {
         request.slot,
         validated.request.expected_epoch,
         validated.request.expected_tuple,
+        undefined,
+        false,
+        "release",
       );
       if (!releaseIntentToken) {
         return result(

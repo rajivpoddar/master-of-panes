@@ -356,6 +356,10 @@ export interface NativeReleaseIntent {
   expected_tuple: AssignmentTuple;
   expires_at: number;
   token: string;
+  /** One shared per-slot lease: release wins before a nudge starts. */
+  kind?: "nudge" | "release";
+  /** Set synchronously at the nudge's pane-effect edge. */
+  started_at?: number | null;
 }
 
 export class MoPDatabase {
@@ -1942,6 +1946,7 @@ export class MoPDatabase {
     // that complete critical section so a stale nudge cannot overtake it.
     ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
     allowActiveTurn = false,
+    kind: "nudge" | "release" = "nudge",
   ): boolean {
     return this.claimNativeReleaseIntentWithToken(
       slot,
@@ -1949,6 +1954,7 @@ export class MoPDatabase {
       expectedTupleInput,
       ttlMs,
       allowActiveTurn,
+      kind,
     ) !== null;
   }
 
@@ -1959,6 +1965,7 @@ export class MoPDatabase {
     expectedTupleInput: AssignmentTupleInput,
     ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
     allowActiveTurn = false,
+    kind: "nudge" | "release" = "nudge",
   ): string | null {
     const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
     if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return null;
@@ -1981,10 +1988,13 @@ export class MoPDatabase {
         try {
           const prior = JSON.parse(raw) as NativeReleaseIntent;
           if (Number.isFinite(prior.expires_at) && prior.expires_at > now) {
-            // A live lease belongs to the release already in flight. Even if
-            // the tuple matches, a second caller must not enter the pane
-            // delivery/reset sequence concurrently.
-            return null;
+            // Release has priority over a nudge that has not crossed its
+            // pane-effect edge. Once a nudge is marked started, release must
+            // refuse rather than race an already-running product turn.
+            const priorKind = prior.kind ?? "nudge";
+            if (kind !== "release" || priorKind !== "nudge" || prior.started_at != null) {
+              return null;
+            }
           }
         } catch {
           // A malformed/expired intent is safe to replace only after the
@@ -1998,8 +2008,45 @@ export class MoPDatabase {
         expected_tuple: expectedTuple,
         expires_at: now + ttl,
         token,
+        kind,
+        started_at: null,
       } satisfies NativeReleaseIntent));
       return token;
+    })();
+  }
+
+  /**
+   * Commit the nudge lease at its pane-effect edge. A release can replace an
+   * unstarted nudge, but never one that has already crossed this boundary.
+   */
+  markNativeReleaseIntentStarted(
+    slot: number,
+    expectedEpoch: number,
+    expectedTupleInput: AssignmentTupleInput,
+    token: string,
+  ): boolean {
+    const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
+    if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple || !token) return false;
+    const key = `native_release_intent_${slot}`;
+    return this.db.transaction((): boolean => {
+      const raw = this.getConfig(key);
+      if (!raw) return false;
+      try {
+        const prior = JSON.parse(raw) as NativeReleaseIntent;
+        if (
+          prior.token !== token
+          || (prior.kind ?? "nudge") !== "nudge"
+          || prior.expected_epoch !== expectedEpoch
+          || !assignmentTupleMatches(prior.expected_tuple, expectedTuple)
+          || !Number.isFinite(prior.expires_at)
+          || prior.expires_at <= Date.now()
+        ) return false;
+        if (prior.started_at != null) return true;
+        this.setConfig(key, JSON.stringify({ ...prior, started_at: Date.now() } satisfies NativeReleaseIntent));
+        return true;
+      } catch {
+        return false;
+      }
     })();
   }
 

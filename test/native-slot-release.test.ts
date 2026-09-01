@@ -18,6 +18,7 @@ import {
   type NativeSlotReleaseRequest,
 } from "../src/slotRelease.js";
 import { TmuxRelay } from "../src/relay.js";
+import { HookProcessor } from "../src/hooks.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 import { computeFamily2ReleaseDigest } from "../src/db.js";
 import { computeNoPaneReleaseDigest } from "../src/db.js";
@@ -275,6 +276,108 @@ test("release intent is exact-owner, short-lived, and visible before pane delive
     );
   } finally {
     Date.now = originalNow;
+    closeFixture(value);
+  }
+});
+
+test("release takes an unstarted wait-nudge lease, while a started nudge blocks release", () => {
+  const value = fixture();
+  try {
+    const tuple = value.request.expected_tuple;
+    const nudgeToken = value.db.claimNativeReleaseIntentWithToken(
+      value.request.slot,
+      value.request.expected_epoch,
+      tuple,
+    );
+    assert.ok(nudgeToken);
+
+    const releaseToken = value.db.claimNativeReleaseIntentWithToken(
+      value.request.slot,
+      value.request.expected_epoch,
+      tuple,
+      undefined,
+      false,
+      "release",
+    );
+    assert.ok(releaseToken);
+    assert.equal(
+      value.db.markNativeReleaseIntentStarted(
+        value.request.slot,
+        value.request.expected_epoch,
+        tuple,
+        nudgeToken,
+      ),
+    false);
+    value.db.clearNativeReleaseIntent(
+      value.request.slot,
+      value.request.expected_epoch,
+      tuple,
+      releaseToken,
+    );
+
+    const startedNudgeToken = value.db.claimNativeReleaseIntentWithToken(
+      value.request.slot,
+      value.request.expected_epoch,
+      tuple,
+    );
+    assert.ok(startedNudgeToken);
+    assert.equal(
+      value.db.markNativeReleaseIntentStarted(
+        value.request.slot,
+        value.request.expected_epoch,
+        tuple,
+        startedNudgeToken,
+      ),
+      true,
+    );
+    assert.equal(
+      value.db.claimNativeReleaseIntentWithToken(
+        value.request.slot,
+        value.request.expected_epoch,
+        tuple,
+        undefined,
+        false,
+        "release",
+      ),
+      null,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test("a native release intent suppresses a terminal PM-wait reminder before it can reopen a turn", async () => {
+  const value = fixture();
+  try {
+    value.db.updateSlot(1, {
+      idle: true,
+      activity: "waiting_for_pm_direction",
+    });
+    let pmReminders = 0;
+    const processor = new HookProcessor(value.db, {
+      injectToPMDirect: () => {
+        pmReminders += 1;
+        return true;
+      },
+    } as unknown as TmuxRelay);
+    let releaseInstructionDelivered = false;
+    const release = coordinator(value, {
+      instruction: () => {
+        releaseInstructionDelivered = true;
+        assert.equal((processor as any).sendPmWaitReminder(1), false);
+      },
+    });
+
+    const result = await release.release(value.request);
+    assert.equal(releaseInstructionDelivered, true);
+    assert.equal(result.code, "released");
+    assert.equal(pmReminders, 0);
+    assert.equal(value.db.getSlot(1)?.occupied, false);
+    assert.equal(
+      value.db.getEvents(1, 10, "slot_idle_pm_wait_reminder_suppressed_native_release").length,
+      1,
+    );
+  } finally {
     closeFixture(value);
   }
 });
