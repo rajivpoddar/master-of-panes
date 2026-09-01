@@ -357,6 +357,46 @@ test("issue-only claim refuses an occupied slot without mutating its owner", asy
   });
 });
 
+test("issue-only idempotency is bound to the normalized repository", async () => {
+  await withAssignmentRoute(async (_app, db) => {
+    const first = db.assignIssueToSlot(1, 7343, "repo-one issue", "github:repo-1");
+    assert.equal(first.ok, true);
+    assert.equal(first.idempotent, false);
+    db.logEvent(1, "slot_assigned", null, null, {
+      issue: 7343,
+      assignment_epoch: first.assignment_epoch,
+    });
+
+    const before = db.getSlot(1);
+    assert.ok(before);
+    const eventsBefore = db.getEvents(1, 10, "slot_assigned");
+
+    const sameRepositoryReplay = db.assignIssueToSlot(
+      1,
+      7343,
+      "same issue replay",
+      "github:repo-1",
+    );
+    assert.equal(sameRepositoryReplay.ok, true);
+    assert.equal(sameRepositoryReplay.idempotent, true);
+    assert.equal(sameRepositoryReplay.assignment_epoch, before.assignment_epoch);
+    assert.deepEqual(db.getSlot(1), before);
+    assert.equal(db.getEvents(1, 10, "slot_assigned").length, eventsBefore.length);
+
+    const differentRepository = db.assignIssueToSlot(
+      1,
+      7343,
+      "same issue in another repository",
+      "github:repo-2",
+    );
+    assert.equal(differentRepository.ok, false);
+    assert.equal(differentRepository.reason, "slot_already_occupied");
+    assert.equal(differentRepository.assignment_epoch, before.assignment_epoch);
+    assert.deepEqual(db.getSlot(1), before);
+    assert.equal(db.getEvents(1, 10, "slot_assigned").length, eventsBefore.length);
+  });
+});
+
 test("issue-only claim requires a free inactive non-DND hook boundary", async () => {
   await withAssignmentRoute(async (app, db) => {
     const cases: Array<{ name: string; updates: Record<string, unknown>; reason: string }> = [

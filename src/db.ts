@@ -1540,7 +1540,11 @@ export class MoPDatabase {
         };
       }
 
-      if (before.occupied && before.issue === normalizedIssue) {
+      if (
+        before.occupied
+        && before.repository_id === normalizedRepositoryId
+        && before.issue === normalizedIssue
+      ) {
         return {
           ok: true,
           conflict: false,
