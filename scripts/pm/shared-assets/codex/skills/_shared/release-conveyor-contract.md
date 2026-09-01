@@ -31,30 +31,32 @@ they must not define competing ownership or state machines.
 1. CTO Decisions performs causal diagnosis and classifies the issue as
    `PRODUCT`, `CONTROL_PLANE`, `MIXED`, or `UNKNOWN`. Only a verified bounded
    `CONTROL_PLANE` repair proceeds.
-2. CTO sends one exact implementation brief to Master of Panes task
-   `01a04154-c9c1-7bc1-8f7b-009a87bc7628`, the sole implementation owner for
-   bounded control-plane and PM Operator work. The scopes remain distinct, but
-   no duplicate owner is created.
-3. MoP uses a clean exact-current-main worktree, makes the smallest change,
-   proves RED/GREEN and fail-closed negatives, and returns an immutable
-   candidate packet with base/parent/candidate/tree/stable-patch/path,
-   rollback, and no-mutation inventory. MoP does not publish, install,
-   activate, restart, deploy, use a slot, or inform PM.
-4. MoP sends the candidate directly to CTO Decisions through renderer-free
-   stdio. The packet is an actionable CTO review wake, not a ledger-only
-   record.
-5. CTO Decisions performs exactly one functionality-first inline review bound
-   to the exact tuple. A block returns one bounded correction to the same MoP
-   task. No PM review, PM marker, PM companion, or second reviewer is used.
-6. On approval, CTO Decisions alone re-fences current main, publishes by
-   ordinary non-force fast-forward, stages/activates the immutable release,
-   restarts the affected service when required, verifies readiness/parity and
-   rollback, then informs PM once with the landed tuple and exact next action.
-   MoP never deploys after approval.
+2. CTO sends one exact implementation brief to the task matching the repair
+   affinity. Shared release/control-plane work outside MoP affinity goes to CP
+   Repairs task `01a0324b-68e0-7491-988f-e7da9abd26ab`. Master of Panes and PM
+   Operator work goes to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628`.
+   Exactly one task owns implementation and rollout for the repair.
+3. The implementation task uses a clean exact-current-main worktree, makes the
+   smallest change, proves RED/GREEN and fail-closed negatives, and returns an
+   immutable candidate packet with base/parent/candidate/tree/stable-patch/path,
+   rollout, rollback, and no-mutation inventory to CTO Decisions through
+   renderer-free stdio. It does not use a numbered product slot or inform PM.
+4. CTO Decisions sends that exact candidate once to PR Reviews task
+   `01a03265-4b66-7672-bbc2-4a38fb1005b5`. PR Reviews performs the single
+   functionality-first independent review and returns `APPROVE`, `REVISE`, or
+   `BLOCK` to CTO Decisions. CTO Decisions does not perform the review.
+5. `REVISE` or `BLOCK` sends one bounded correction back to the same
+   implementation task. `APPROVE` sends approval back to that same task for
+   non-force publication, installation/activation, required service restart,
+   live readiness/parity proof, and rollback verification.
+6. The implementation task returns one rollout terminal to CTO Decisions.
+   CTO Decisions verifies the terminal tuple and informs PM once with the
+   landed tuple and exact next action. CTO Decisions never implements,
+   reviews, publishes, installs, deploys, restarts, monitors, or waits.
 
 An approval may carry across one conflict-free replay only when semantics,
 stable patch ID, and path set remain identical. Conflict or semantic drift
-requires a fresh inline decision. No polling, numbered-slot capacity, raw
+requires a fresh independent review. No polling, numbered-slot capacity, raw
 workflow dispatch, or unguarded label mutation is authorized by this contract.
 
 ## Immediate edge and retirement boundary
@@ -104,8 +106,9 @@ by the blocked transition are allowed.
 
 Every degraded/manual/bypass route names this section as its sole primitive
 authority. A bypass restores only the blocked operational edge; the durable
-control-plane repair follows the PM-report -> CTO-diagnosis -> MoP-candidate
--> CTO-review -> CTO-deploy process above.
+control-plane repair follows the PM-report -> CTO-diagnosis -> affinity-owner
+candidate -> PR-Reviews verdict -> same-owner rollout -> CTO-to-PM terminal
+process above.
 
 ## Normative motion matrix
 
@@ -122,9 +125,9 @@ control-plane repair follows the PM-report -> CTO-diagnosis -> MoP-candidate
     "rescue_or_release_routing": {"owner": "CTO_DECISIONS", "action": "route_guarded_rescue_or_release", "wake": "terminal"},
     "sync_integration_and_merge": {"owner": "CTO_DECISIONS", "action": "sync_release_and_head_pinned_merge", "wake": "terminal"},
     "workflow_terminal": {"owner": "CTO_RELEASE_OWNER", "action": "route_first_causal_or_head_pinned_merge", "wake": "terminal"},
-    "control_plane_candidate": {"owner": "MOP_IMPLEMENTATION_TASK_01a04154", "action": "return_candidate_to_cto_inline", "wake": "cto_inline_review"},
-    "control_plane_block": {"owner": "MOP_IMPLEMENTATION_TASK_01a04154", "action": "return_bounded_rework_to_same_mop_task", "wake": "cto_inline_review"},
-    "control_plane_approval": {"owner": "CTO_DECISIONS", "action": "publish_rollout_verify_and_notify_pm", "wake": "terminal"},
+    "control_plane_candidate": {"owner": "CTO_DECISIONS", "action": "route_exact_candidate_to_pr_reviews", "wake": "review_terminal"},
+    "control_plane_block": {"owner": "CTO_DECISIONS", "action": "return_bounded_rework_to_same_implementation_owner", "wake": "corrected_candidate"},
+    "control_plane_approval": {"owner": "CTO_DECISIONS", "action": "return_approval_to_same_implementation_owner", "wake": "rollout_terminal"},
     "control_plane_refusal": {"owner": "CTO_DECISIONS", "action": "execute_or_durable_delegate_one_guarded_edge_or_record_harm", "wake": "immediate"}
   }
 }

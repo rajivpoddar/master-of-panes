@@ -64,22 +64,27 @@ admission role. CTO decisions performs the causal diagnosis and classifies the
 scope as `PRODUCT`, `CONTROL_PLANE`, `MIXED`, or `UNKNOWN`; only a verified
 bounded `CONTROL_PLANE` brief proceeds.
 
-CTO decisions sends one exact implementation brief to Master of Panes task
-`01a04154-c9c1-7bc1-8f7b-009a87bc7628`, which is the sole implementation owner
-for bounded control-plane work and PM Operator work. That task creates a clean
+CTO decisions sends one exact implementation brief to the matching existing
+execution task. Shared release/control-plane work outside MoP affinity goes to
+CP Repairs task `01a0324b-68e0-7491-988f-e7da9abd26ab`; Master of Panes, PM
+Operator, and `pm-transition` work goes to MoP task
+`01a04154-c9c1-7bc1-8f7b-009a87bc7628`. The selected task creates a clean
 current-main candidate, focused RED/GREEN and negative proof, rollout and
 rollback plan, no-mutation inventory, and exact base/parent/candidate/tree/
-stable-patch/path tuple. It returns that candidate directly to CTO decisions
-through `$codex-stdio-send-message`; it does not publish, install, activate,
-restart, deploy, inform PM, or use a numbered slot.
+stable-patch/path tuple, then returns it directly to CTO decisions through
+`$codex-stdio-send-message`. It does not use a numbered product slot or inform
+PM.
 
-CTO decisions performs exactly one functionality-first inline review for the
-immutable candidate. A `CTO_INLINE_BLOCK` returns one bounded correction to the
-same Master of Panes task. A `CTO_INLINE_APPROVE` makes CTO decisions the sole
-publisher, installer, activator, service restarter when required, live verifier,
-and PM notifier. CTO decisions re-fences current main, publishes non-force,
-performs the scoped rollout, verifies readiness and rollback, then sends PM one
-post-deployment terminal with the landed tuple, proof, and exact next action.
+CTO decisions sends that immutable candidate once to PR Reviews task
+`01a03265-4b66-7672-bbc2-4a38fb1005b5`. PR Reviews performs the single
+functionality-first independent review and returns `APPROVE`, `REVISE`, or
+`BLOCK` to CTO decisions. A negative verdict returns one bounded correction to
+the same implementation task. Approval returns to that same task for non-force
+publication, installation/activation, required service restart, live proof,
+and rollback verification. The implementation task returns one rollout
+terminal; CTO decisions verifies the tuple and sends PM one terminal with the
+landed tuple, proof, and exact next action. CTO decisions does not implement,
+review, publish, install, deploy, restart, monitor, or wait.
 
 Progress updates and queue receipts do not replace these boundaries. A main
 advance permits one conflict-free replay only when paths and stable patch
@@ -110,29 +115,30 @@ release-only edge.
 
 The CTO decisions task must remain continuously responsive to Rajiv and PM
 decision/status messages. It is a fast verification, decision, routing, and
-receipt-consumption surface. The sole execution exception is the exact,
-approved bounded control-plane publication/install/activation/restart/
-live-readback/rollback sequence, which CTO Decisions owns and completes
-event-driven without waiting, polling, broad investigation, or monitoring.
+receipt-consumption surface. It does not execute implementation, review,
+publication, installation, activation, restart, investigation, monitoring, or
+waiting work.
 
 - Any task that can outlive one bounded wake pass must be handed off immediately
   to one of the existing execution tasks below. This includes implementation,
   repair, test or review runs, CI investigation, browser/service configuration,
-  monitoring, waiting, repeated verification, and follow-up. The exception is
-  the exact approved bounded control-plane publication/install/activation/
-  restart/live-readback/rollback sequence, which CTO Decisions executes and
-  terminates in the same event-driven handoff; it is not ongoing monitoring.
+  publication, deployment, restart, monitoring, waiting, repeated verification,
+  and follow-up.
 - Existing execution tasks are reusable worker capacity, not single-purpose
   silos. Prefer the closest affinity, but they may accept other bounded work
   when the exact tuple, authority, scope, proof, rollback, and terminal return
   contract are explicit:
   - rescues task `019f942b-63ea-7953-b2ea-c4786c850b87` — default for PR
     rescue, hotfix, product implementation, tests, review, and investigation;
+  - CP Repairs task `01a0324b-68e0-7491-988f-e7da9abd26ab` — default for
+    bounded shared release/control-plane repair work outside MoP affinity,
+    including candidate implementation and approved rollout;
   - Master of Panes implementation task
     `01a04154-c9c1-7bc1-8f7b-009a87bc7628` — sole owner for every verified
-    bounded `control_plane_only` repair and every PM Operator or `pm-transition`
-    implementation, caller migration, installation, cutover, and retirement
-    change; its scopes remain distinct but never create duplicate ownership;
+    MoP-affine repair and every PM Operator or `pm-transition` implementation,
+    caller migration, installation, cutover, and retirement change;
+  - PR Reviews task `01a03265-4b66-7672-bbc2-4a38fb1005b5` — sole independent
+    functionality-review owner for immutable control-plane candidates;
   - merge task `01a0324b-68e0-7491-988f-e7e1549f16f7` — default for exact-head
     merge execution and related bounded release verification.
 - Before handoff, verify the target does not already own conflicting work. Send
@@ -182,29 +188,32 @@ event-driven without waiting, polling, broad investigation, or monitoring.
   forbid `codex_app` tools. The delegated task must not send that result
   only to Slack or treat a PM acknowledgement as completion. Product/PR work
   may still have an explicit candidate-review boundary. Bounded control-plane
-  work has exactly that candidate boundary: MoP returns only a candidate
-  packet, CTO Decisions reviews it once, and CTO Decisions owns all
-  post-approval publication/rollout/verification and the single PM terminal.
+  work has exactly that boundary: the implementation owner returns a candidate,
+  CTO Decisions routes it once to PR Reviews, and the same implementation owner
+  performs approved publication/rollout/verification before returning a
+  terminal. CTO Decisions alone sends the final PM notification.
 - **Control-plane ownership invariant (Rajiv current directive):** CTO decisions
-  owns diagnosis, classification, inline review, publication, rollout, live
-  verification, and the single post-deployment PM notification. Master of Panes
-  task `01a04154-c9c1-7bc1-8f7b-009a87bc7628` is the sole implementation owner
-  for bounded control-plane and PM Operator work. It returns candidate packets
-  only; it never publishes, installs, activates, restarts, deploys, or informs
-  PM. CTO decisions sends any `CTO_INLINE_BLOCK` rework to that same task and
-  performs all post-approval release actions. PM may provide the initial
+  owns diagnosis, classification, routing, verdict consumption, and the single
+  post-deployment PM notification. CP Repairs task
+  `01a0324b-68e0-7491-988f-e7da9abd26ab` owns shared release/control-plane work
+  outside MoP affinity. Master of Panes task
+  `01a04154-c9c1-7bc1-8f7b-009a87bc7628` owns MoP/PM Operator work. PR Reviews
+  task `01a03265-4b66-7672-bbc2-4a38fb1005b5` owns the single independent
+  functionality review. A negative verdict returns to the same implementation
+  owner; approval returns to that owner for rollout. PM may provide the initial
   blocker/context only; it has zero review, approval, retry, or marker role.
   Never use a numbered product slot or duplicate owner for control-plane work.
 - **MoP restart-after-repair invariant (Rajiv 2026-08-27):** every approved
   Master of Panes repair must restart the canonical MoP service after the
   immutable release is activated. Staging the artifact or changing the
   `current` pointer is not live proof. Before declaring rollout complete,
-  require timestamped readback of the new child PID/start time, exact release
+  the MoP implementation owner must provide timestamped readback of the new
+  child PID/start time, exact release
   pointer and working directory, expected Node runtime/ABI, listener bind, and
   HTTP 200 `/health`. A rollback must atomically restore the prior release,
   restart MoP again, and pass the same bounded readiness checks. The restart
-  requirement does not authorize publication, activation, or a live-slot/nudge
-  canary; those remain separately gated by the exact candidate verdict.
+  requirement is activated only by the exact candidate approval and does not
+  authorize a live-slot/nudge canary.
 - **PM Operator ownership invariant (Rajiv 2026-08-27):** every future change
   to the PM Operator package/runtime, direct MoP/GitHub adapters, executable
   caller migrations, `pm-transition.sh` command arms, or final hot-path
@@ -212,7 +221,8 @@ event-driven without waiting, polling, broad investigation, or monitoring.
   created from the MoP project directory. The prior PM Operator task
   `01a03c74-fc97-7a62-bb47-001ac7fb0710` is superseded and must receive no new
   work. The Master of Panes task above is the sole implementation owner for
-  these changes and returns only a candidate packet to CTO Decisions.
+  these changes. It returns a candidate packet to CTO Decisions, then performs
+  the approved rollout only after CTO Decisions returns the PR Reviews verdict.
   Stop the superseded owner before transferring its exact landed/installed
   baseline and next family, preserving single-flight.
 - Every handoff prompt must name that return task explicitly and require the
@@ -582,12 +592,14 @@ its owner, and record the receipt in the wake ledger:
    are closed.
 4. **Bounded control-plane REPAIR** — PM reports the first literal blocker and
    exact tuple. CTO decisions diagnoses and verifies bounded `CONTROL_PLANE`
-   scope, then sends one exact implementation brief to Master of Panes task
-   `01a04154-c9c1-7bc1-8f7b-009a87bc7628`. That task returns one immutable
-   candidate packet for exactly one CTO inline review and does not publish or
-   deploy. A block returns rework to the same task. On approval, CTO decisions
-   alone publishes, rolls out, restarts when required, verifies, and informs PM
-   once. Do not hold a numbered slot.
+   scope, then sends one exact implementation brief to CP Repairs task
+   `01a0324b-68e0-7491-988f-e7da9abd26ab` or, for MoP/PM Operator affinity, to
+   Master of Panes task `01a04154-c9c1-7bc1-8f7b-009a87bc7628`. That task
+   returns one immutable candidate. CTO decisions routes it once to PR Reviews
+   task `01a03265-4b66-7672-bbc2-4a38fb1005b5`. A negative verdict returns
+   rework to the same implementation owner; approval returns to that owner for
+   publication, rollout, required restart, and live verification. CTO decisions
+   informs PM only after the rollout terminal. Do not hold a numbered slot.
 5. **CTO rescue and hotfix execution** — forward the exact verified tuple once
    to dedicated rescues task `019f942b-63ea-7953-b2ea-c4786c850b87`.
    This includes `CTO_RESCUE`, `CTO_DIRECT_RESCUE`, `CTO_HOTFIX`, their
@@ -1098,9 +1110,9 @@ product/runtime diffs.
 | Issue-only rescue/rescope circuit breaker with no exact PR patch | `CTO_ISSUE_RESCUE` | decision analysis; use rescue skill only after an exact patch exists | Usually `RAJIV_DECISION`. Verify the issue, original directive, failure mode, and artifacts; recommend `final_verified_patch`, `split_and_reimplement`, or `override_with_evidence`. After Rajiv chooses, require the canonical typed rescope transition and successor issue when applicable. |
 | Product, architecture, privacy, data-model, UX, or release-policy decision | `CTO_PRODUCT_DECISION` | product/architecture decision analysis | `RAJIV_DECISION` unless Rajiv's choice is already durable. State intended capability, production failure mode, runtime control point, options, recommendation, rollout/rollback, acceptance criteria, and downstream PM transition. Never treat this as a routine operational correction. |
 | CTO product decision already made but not consumed | `CTO_DECISION_CONSUMPTION` | verify decision, then exact PM transition | `PM_CORRECTION`. Quote the durable choice and require one canonical consumption transition; do not reopen the decision. |
-| Any verified bounded control-plane defect or stabilization | `CONTROL_PLANE_REPAIR` | PM reports the first literal blocker/tuple to CTO; CTO diagnoses and sends one exact brief to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628` | `EXECUTE_NOW` after verifying bounded non-product scope and no duplicate owner. MoP returns candidate-only for exactly one CTO inline review; BLOCK returns rework to the same task; APPROVE makes CTO sole publisher/rollout/live verifier/PM notifier. PM has zero review/approval/retry role; never use a numbered slot. |
-| PM Operator, direct MoP/GitHub command adapter, executable caller cutover, or `pm-transition` retirement change | `PM_OPERATOR_CUTOVER` | CTO sends one exact brief to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628` | `EXECUTE_NOW` under Rajiv's current directive. MoP prepares and returns one candidate-only packet for CTO inline review; it does not publish or deploy. CTO alone publishes, rolls out, verifies, and notifies PM after approval. Preserve the exact baseline, migrate one reachable family at a time, and never route this work to PM, the retired generic repair route, or a numbered slot. |
-| Legacy or explicit `CTO_DIRECT_CONTROL_PLANE_REPAIR` label for a bounded control-plane defect | `CTO_DIRECT_CONTROL_PLANE_REPAIR` | normalize to the same CTO/MoP candidate-only contract above | `EXECUTE_NOW`; MoP prepares one candidate for exactly one CTO inline functionality review. A block returns to MoP; an approval is published and rolled out only by CTO Decisions. |
+| Any verified bounded control-plane defect or stabilization | `CONTROL_PLANE_REPAIR` | PM reports the first literal blocker/tuple to CTO; CTO diagnoses and sends one exact brief to CP Repairs task `01a0324b-68e0-7491-988f-e7da9abd26ab`, or to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628` when the change is MoP-affine | `EXECUTE_NOW` after verifying bounded non-product scope and no duplicate owner. The implementation owner returns a candidate; CTO routes it once to PR Reviews task `01a03265-4b66-7672-bbc2-4a38fb1005b5`; a negative verdict returns rework to the same owner and approval returns rollout to that owner. CTO only consumes terminals and notifies PM. Never use a numbered slot. |
+| PM Operator, direct MoP/GitHub command adapter, executable caller cutover, or `pm-transition` retirement change | `PM_OPERATOR_CUTOVER` | CTO sends one exact brief to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628` | `EXECUTE_NOW` under Rajiv's current directive. MoP prepares and returns one candidate for PR Reviews. After CTO returns an approval, MoP publishes, rolls out, verifies, and returns the terminal. Preserve the exact baseline, migrate one reachable family at a time, and never route this work to PM or a numbered slot. |
+| Legacy or explicit `CTO_DIRECT_CONTROL_PLANE_REPAIR` label for a bounded control-plane defect | `CTO_DIRECT_CONTROL_PLANE_REPAIR` | normalize to the same delegated affinity-owner and PR Reviews contract above | `EXECUTE_NOW`; the selected implementation owner prepares one candidate, PR Reviews supplies the single verdict, and the same implementation owner performs approved rollout. CTO Decisions only routes and consumes terminals. |
 | Numbered slot held by a control-plane repair (occupied-inactive or free-standby, off-slot repair running) | `CONTROL_PLANE_REPAIR_SLOT_HOLD` | exact-slot verification; then CTO Decisions applies the shared native bypass contract | `CTO_CORRECTION` only after one typed high-level refusal. CTO owns release/refill and uses direct MoP `curl` with exact slot/identity/epoch and canonical authority header/payload, records response/readback, then performs complete-set GitHub labels and exactly one literal `message-slot` packet when applicable; stop on failure and preserve substantive blockers. The repair stays off-slot; PM has no release, refill, label, or message ownership here. |
 | Slot/PR ownership or transition mismatch | `SLOT_TRANSITION` | exact-slot verification; CTO selects the safe boundary; PM slot assignment only for an explicit rework/repro packet | Usually `CTO_CORRECTION`. Preserve productive work. PM does not choose or execute a release, rescue, sync, or state transition. |
 | Occupied slot reports repeated same-head "in progress"/LOCAL_CONTINUE with no commit (PM JSONL slot deliveries + MoP nudge corroboration) | `SLOT_FALSE_PROGRESS` | verify the exact slot log tail, live MoP row/epoch, and checkout head; confirm no active canonical assignment/reconcile command | `CTO_CORRECTION`. CTO routes the exact terminalization, rescue, release, or rework boundary. PM may only assign a numbered slot after CTO explicitly authorizes a rework/repro packet; PM does not force terminalization, release, or choose the next work. |
@@ -1200,15 +1212,14 @@ process launch or packet path.
   `019f942b-63ea-7953-b2ea-c4786c850b87` and return without polling.
 - Never implement or continuously monitor a bounded control-plane repair in
   CTO decisions or PM. After ownership and scope verification, CTO sends one
-  exact brief to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628`; MoP returns
-  its candidate for one CTO inline review. The exact `CTO_INLINE_APPROVE`
-  exception lets CTO Decisions publish, install/activate, restart when
-  required, live-read back, roll back if necessary, and inform PM in one
-  bounded event-driven sequence; it must not wait, poll, investigate broadly,
-  or keep monitoring after the terminal readback.
+  exact brief to CP Repairs or MoP by affinity; that task returns its candidate,
+  CTO routes it once to PR Reviews, and the same implementation task receives
+  rework or approval. Only that task publishes, installs/activates, restarts
+  when required, live-reads back, and rolls back if necessary. CTO Decisions
+  verifies the returned terminal and informs PM; it does not wait or poll.
 - Never route a PM Operator or `pm-transition` cutover change to superseded task
-  `01a03c74-fc97-7a62-bb47-001ac7fb0710` or the generic control-plane task. Use
-  only `01a04154-c9c1-7bc1-8f7b-009a87bc7628`.
+  `01a03c74-fc97-7a62-bb47-001ac7fb0710` or CP Repairs. Use only
+  `01a04154-c9c1-7bc1-8f7b-009a87bc7628` for that affinity.
 - Never keep any implementation, test, review, investigation, browser/service
   configuration, monitor, wait, or repeated-verification task in the CTO
   decisions task. The sole exception is the exact approved bounded

@@ -10,7 +10,8 @@ SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 MANIFEST = SHARED / "manifest.json"
 NEW_TASK = "01a04154-c9c1-7bc1-8f7b-009a87bc7628"
 CTO_TASK = "01a03236-2e61-71f3-a6a8-3dc24d8c8917"
-RETIRED_GENERIC_TASK = "01a0324b-68e0-7491-988f-e7da9abd26ab"
+CP_REPAIRS_TASK = "01a0324b-68e0-7491-988f-e7da9abd26ab"
+PR_REVIEWS_TASK = "01a03265-4b66-7672-bbc2-4a38fb1005b5"
 
 
 def _text(relative: str) -> str:
@@ -27,37 +28,35 @@ def test_process_routes_pm_report_to_cto_diagnosis() -> None:
     assert "CTO decisions performs the causal diagnosis" in wake
 
 
-def test_verified_control_plane_routes_to_one_mop_candidate_owner() -> None:
+def test_verified_control_plane_routes_by_affinity_then_to_pr_reviews() -> None:
     texts = [
-        _text("codex/monitors/heydonna-pm-chat/MONITOR.md"),
         _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md"),
         _text("codex/skills/_shared/release-conveyor-contract.md"),
         _text("codex/skills/heydonna-control-plane-repair/SKILL.md"),
     ]
     combined = "\n".join(texts)
     assert NEW_TASK in combined
-    assert "candidate-only" in combined
-    assert "exactly one inline review" in combined
-    assert "BLOCK returns rework to the same" in combined
-    assert RETIRED_GENERIC_TASK not in combined
+    assert CP_REPAIRS_TASK in combined
+    assert PR_REVIEWS_TASK in combined
+    assert "same implementation task" in combined
+    assert "functionality-first independent review" in combined
+    assert "CTO Decisions does not perform the review" in combined
+    assert "CTO_INLINE_APPROVE" not in combined
 
 
-def test_approval_belongs_to_cto_and_pm_gets_only_post_deploy_terminal() -> None:
+def test_approval_returns_rollout_to_same_owner_and_cto_only_notifies_pm() -> None:
     contract = _text("codex/skills/_shared/release-conveyor-contract.md")
     skill = _text("codex/skills/heydonna-control-plane-repair/SKILL.md")
     wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
     assert "\"owner\": \"CTO_DECISIONS\"" in contract
-    assert "publish_rollout_verify_and_notify_pm" in contract
-    assert "CTO Decisions performs" in skill
-    assert "single PM notification" in skill
-    assert "MoP stops" in skill
-    assert "never deploys after approval" in skill
-    assert "The packet is an actionable CTO review wake" in skill
-    assert "CTO_INLINE_APPROVE" in wake
-    assert "approved bounded control-plane publication/install/activation" in wake
-    assert "must not wait, poll, investigate broadly" in wake
+    assert "return_approval_to_same_implementation_owner" in contract
+    assert "approval back to that same task" in skill
+    assert "never investigates deeply, implements, reviews, publishes" in skill
+    assert "PR Reviews" in skill
+    assert "same implementation task" in wake
+    assert "CTO decisions does not implement" in wake
     assert "Never implement or continuously monitor" in wake
-    assert "Never implement, deploy, or monitor any bounded control-plane repair" not in wake
+    assert "CTO_INLINE_APPROVE" not in wake
 
 
 def test_open_pr_ownership_has_only_two_pm_responsibilities() -> None:
@@ -99,7 +98,8 @@ def test_open_pr_ownership_has_only_two_pm_responsibilities() -> None:
     assert "choose the\n  next work" in monitor
     assert "PM slot assignment only after an explicit CTO-routed rework/repro" in combined
     assert "PM may assign a numbered slot only when CTO explicitly routes" in combined
-    assert RETIRED_GENERIC_TASK not in _text("codex/monitors/heydonna-issue-triage/WAKE_SOP.md")
+    assert CP_REPAIRS_TASK in skill
+    assert PR_REVIEWS_TASK in skill
 
 
 def test_canonical_asset_manifest_has_exact_source_digests_and_modes() -> None:
@@ -225,4 +225,4 @@ def test_native_bypass_contract_is_single_fenced_and_ordered() -> None:
     assert "raw `workflow_dispatch`" in contract
     assert "blind rerun" in contract
     assert "shared native bypass contract" in wake
-    assert "Native bypass contract (CTO-only, after one high-level refusal)" in skill
+    assert "No direct CTO implementation, review, publication" in skill

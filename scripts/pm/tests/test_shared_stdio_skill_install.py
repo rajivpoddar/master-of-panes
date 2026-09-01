@@ -109,23 +109,26 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
         ):
             self.assertEqual(scenarios[scenario]["owner"], "CTO_DECISIONS")
         candidate = scenarios["control_plane_candidate"]
-        self.assertEqual(candidate["owner"], "MOP_IMPLEMENTATION_TASK_01a04154")
-        self.assertEqual(candidate["action"], "return_candidate_to_cto_inline")
-        self.assertEqual(candidate["wake"], "cto_inline_review")
+        self.assertEqual(candidate["owner"], "CTO_DECISIONS")
+        self.assertEqual(candidate["action"], "route_exact_candidate_to_pr_reviews")
+        self.assertEqual(candidate["wake"], "review_terminal")
         block = scenarios["control_plane_block"]
-        self.assertEqual(block["owner"], "MOP_IMPLEMENTATION_TASK_01a04154")
-        self.assertEqual(block["action"], "return_bounded_rework_to_same_mop_task")
+        self.assertEqual(block["owner"], "CTO_DECISIONS")
+        self.assertEqual(block["action"], "return_bounded_rework_to_same_implementation_owner")
+        self.assertEqual(block["wake"], "corrected_candidate")
         approval = scenarios["control_plane_approval"]
         self.assertEqual(approval["owner"], "CTO_DECISIONS")
-        self.assertEqual(approval["action"], "publish_rollout_verify_and_notify_pm")
+        self.assertEqual(approval["action"], "return_approval_to_same_implementation_owner")
+        self.assertEqual(approval["wake"], "rollout_terminal")
         self.assertNotIn("at most 15 minutes", contract)
         self.assertIn("PM does not retry", contract)
         self.assertIn("journal", contract)
         self.assertIn("literal pre/post label", contract)
-        self.assertIn("candidate packet directly to CTO Decisions", skill)
-        self.assertIn("one candidate-only packet for CTO inline review", wake_sop)
-        self.assertIn("approval is published and rolled out only by CTO Decisions", wake_sop)
-        self.assertNotIn("same execution owner continues through", wake_sop)
+        self.assertIn("immutable candidate packet to CTO Decisions", skill)
+        self.assertIn("functionality-first independent review", wake_sop)
+        self.assertIn("same implementation owner", wake_sop)
+        self.assertIn("CTO decisions does not implement", wake_sop)
+        self.assertNotIn("CTO_INLINE_APPROVE", wake_sop)
 
     def test_installed_heartbeat_target_runs_continuation_join_at_supported_boundary(self) -> None:
         self.install()

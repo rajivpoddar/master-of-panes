@@ -451,7 +451,7 @@
     {
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
       "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
-      "sha256": "585af5ae6538c0ed45816d6d178ac53dcd446630cd531a04518fcd54bcd21775",
+      "sha256": "e57f3b80a826cec9ff11c44f3a20a9a2e9d9cd486bc011fadb14dc4a89c947f4",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
       "dependency_status": "closed",
@@ -460,7 +460,7 @@
     {
       "source_path": "codex/skills/_shared/release-conveyor-contract.md",
       "canonical_target": "/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md",
-      "sha256": "1c055706eb599519ef55a7da47365b15b3a928e04860d59203728fe1ac614dc9",
+      "sha256": "a5f6bd7a9cfcfa8f504e3c7f3a9b5c96ab692ce983da510b3310bbea68165bbd",
       "mode": 420,
       "ownership_class": "shared-codex-contract",
       "dependency_status": "closed",
@@ -505,7 +505,7 @@
     {
       "source_path": "codex/skills/heydonna-control-plane-repair/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-control-plane-repair/SKILL.md",
-      "sha256": "91b56a014e1cb22b77036e8604229b94195fa10ec84007f4a1e3e8e73441c16e",
+      "sha256": "7e906a29dad36f5ab29b6a1654996ee6183d082ab144b0872f6aacc1f06512d7",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",
