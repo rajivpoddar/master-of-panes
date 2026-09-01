@@ -26,13 +26,6 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-if __package__:
-    from .runtime_observation import RuntimeObservationAdapter, parse_timestamp
-else:  # direct installed-script execution
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from control_plane.runtime_observation import RuntimeObservationAdapter, parse_timestamp
-
-
 IST = ZoneInfo("Asia/Kolkata")
 OMP_SESSIONS_ROOT = Path(
     os.environ.get("HEYDONNA_OMP_SESSIONS_ROOT", str(Path.home() / ".omp/sessions"))
@@ -49,7 +42,6 @@ PR_STATE_SWEEP = Path(
         "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh",
     )
 )
-SLACK_SEND = Path("/Users/rajiv/.claude/scripts/slack-send.sh")
 READY_POOL_AUTHORITY = [
     "gh", "issue", "list", "--repo", "heydonna-app/heydonna-app", "--state", "open",
     "--label", "status:todo", "--limit", "1000", "--json", "number,title,body,labels",
@@ -57,9 +49,7 @@ READY_POOL_AUTHORITY = [
 READY_POOL_AUDIT_DIR = Path(
     os.environ.get("READY_POOL_AUDIT_DIR", "/tmp")
 )
-LEGACY_READY_POOL_COMMAND = "/Users/rajiv/.claude/scripts/backlog-triage.py audit-ready-pool"
-SUPPORTED_READY_POOL_COMMAND = "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py --ready-pool-audit"
-
+SLACK_SEND = Path("/Users/rajiv/.claude/scripts/slack-send.sh")
 AXIOM_API_URL = "https://api.axiom.co/v1/datasets/_apl?format=legacy"
 AXIOM_DATASET = "heydonna-logs"
 AXIOM_PROD_FILTER = (
@@ -122,26 +112,24 @@ CONTINUATION_KIND_LANES = {
 }
 
 
-def _default_heartbeat_skill() -> Path:
-    """Resolve the canonical heartbeat skill for launch-prompt generation.
-
-    Prefer the installed skill target (deploy verifies source/install parity)
-    so the installed runtime and the generated prompt stay consistent even if
-    the live checkout is behind the pushed main. Fall back to the tracked
-    source path in a fresh checkout.
-    """
-
-    installed = PROJECT_ROOT / ".claude/skills/heartbeat-tasks/SKILL.md"
-    if installed.is_file():
-        return installed
-    return PROJECT_ROOT / "scripts/pm/control-plane/skills/heartbeat-tasks/SKILL.md"
-
-
-HEARTBEAT_SKILL = Path(
-    os.environ.get("HEYDONNA_HEARTBEAT_SKILL") or _default_heartbeat_skill()
-)
 OUT_JSON = Path("/tmp/sakshi-heartbeat.json")
 OUT_TEXT = Path("/tmp/sakshi-heartbeat.txt")
+
+
+def _load_runtime_observation() -> tuple[Any, Any]:
+    """Load the observation adapter only for commands that inspect runtime state.
+
+    Prompt generation is intentionally independent of optional observation
+    providers so the scheduled caller can always obtain the canonical,
+    read-only launch contract and then fail closed on a provider error.
+    """
+
+    if __package__:
+        from .runtime_observation import RuntimeObservationAdapter, parse_timestamp
+    else:  # direct installed-script execution
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from control_plane.runtime_observation import RuntimeObservationAdapter, parse_timestamp
+    return RuntimeObservationAdapter, parse_timestamp
 
 CONTROL_PLANE_HOURS = 3
 CONTROL_PLANE_PENDING_LIMIT = 8
@@ -224,6 +212,7 @@ def fmt_age(seconds: float | int | None) -> str:
 def latest_omp_session(slot_id: str) -> tuple[Path, datetime, datetime] | None:
     """Compatibility wrapper over the canonical OMP observation adapter."""
 
+    RuntimeObservationAdapter, _ = _load_runtime_observation()
     return RuntimeObservationAdapter(omp_sessions_root=OMP_SESSIONS_ROOT).latest_omp_session(slot_id)
 
 
@@ -234,6 +223,7 @@ def analyze_session(
     mop_row: dict[str, Any] | None = None,
     mop_events: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    RuntimeObservationAdapter, _ = _load_runtime_observation()
     is_omp_session = entry["id"] in {"pm", "1", "2", "3", "4", "5", "6"}
     omp_dir = OMP_SESSIONS_ROOT / f"heydonna-slot{entry['id']}"
     if entry["id"] == "pm":
@@ -363,6 +353,7 @@ def apply_clear_policy(sessions: list[dict[str, Any]], slots: dict[str, dict[str
 def update_omp_effective_starts(
     sessions: list[dict[str, Any]], mop: dict[str, Any], now_utc: datetime
 ) -> None:
+    RuntimeObservationAdapter, parse_timestamp = _load_runtime_observation()
     adapter = RuntimeObservationAdapter(
         omp_sessions_root=OMP_SESSIONS_ROOT,
     )
@@ -2882,20 +2873,33 @@ def validate(data: dict[str, Any]) -> list[str]:
     return errors
 
 
-def launch_prompt() -> str:
-    """Emit the canonical heartbeat background-agent prompt from the skill."""
+CANONICAL_LAUNCH_PROMPT = """You are the HeyDonna heartbeat background agent.
 
-    text = HEARTBEAT_SKILL.read_text(encoding="utf-8")
-    # The installed heartbeat skill may still contain the retired PM Operator
-    # subcommand.  Keep the prompt source intact while routing this one step
-    # through the supported Sakshi adapter, which emits the same artifact and
-    # preserves read-only/fail-closed semantics.
-    text = text.replace(LEGACY_READY_POOL_COMMAND, SUPPORTED_READY_POOL_COMMAND)
-    marker = "Use this EXACT prompt when launching the agent"
-    start = text.index(marker)
-    fence = text.index("```", start)
-    end = text.index("```", fence + 3)
-    return text[fence + 3 : end].strip() + "\n"
+Run these canonical read-only producer commands in order:
+1. `python3 /Users/rajiv/.claude/scripts/sakshi-heartbeat.py --dry-run`
+2. `python3 /Users/rajiv/.claude/scripts/sakshi-heartbeat.py --ready-pool-audit`
+
+If either command exits nonzero, stop immediately. Report UNKNOWN/NOT_CLEAR with
+the command and exit status; do not launch or continue an apparently healthy
+wake. Read the producer's bounded JSON/text artifacts only after both commands
+succeed.
+
+Report PM and S1-S6 session-age rows, MoP health and slot observations, exact
+open-PR motion evidence, and Ready Pool audit status. Session-age due state is
+report-only: do not perform any ownership, checkout, issue, label, pane, or
+capacity action. Preserve the producer's typed UNKNOWN and partial results.
+
+Do not create work, change files, select or operate a slot, alter an issue or
+label, send a message, or claim a clean/healthy result when any required source
+is unavailable, stale, contradictory, or incomplete. Produce one concise
+evidence report for the caller after the two successful read-only commands.
+"""
+
+
+def launch_prompt() -> str:
+    """Emit the self-contained read-only heartbeat background-agent prompt."""
+
+    return CANONICAL_LAUNCH_PROMPT
 
 
 def send_slack(report: str) -> CmdResult:
@@ -2909,7 +2913,7 @@ def main() -> int:
     parser.add_argument(
         "--launch-prompt",
         action="store_true",
-        help="print the canonical heartbeat background-agent prompt from the heartbeat-tasks skill and exit",
+        help="print the canonical read-only heartbeat background-agent prompt and exit",
     )
     parser.add_argument(
         "--ready-pool-audit",

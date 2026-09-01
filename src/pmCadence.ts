@@ -10,6 +10,7 @@
  * config keys so restarts do not double-fire within the same cadence bucket.
  */
 
+import { execFile } from "node:child_process";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 
@@ -23,7 +24,19 @@ type PMCadenceTask = {
   commandDescription: string;
 };
 
-type PMCadenceRunResult = {
+export type HeartbeatPreflightStage = "dry-run" | "launch-prompt" | "ready-pool-audit";
+
+export type HeartbeatPreflightResult = {
+  ok: boolean;
+  stage: HeartbeatPreflightStage;
+  returncode: number;
+  output: string;
+  error: string | null;
+};
+
+export type HeartbeatPreflightRunner = () => Promise<HeartbeatPreflightResult & { launch_prompt?: string }>;
+
+export type PMCadenceRunResult = {
   task: PMCadenceTaskName;
   triggered: boolean;
   reason: PMCadenceTriggerReason;
@@ -31,7 +44,71 @@ type PMCadenceRunResult = {
   injected: boolean;
   queued: boolean;
   message: string;
+  preflight: "not-run" | "passed" | "failed";
+  preflight_stage: HeartbeatPreflightStage | null;
+  preflight_error: string | null;
 };
+
+const CANONICAL_HEARTBEAT_PRODUCER = "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py";
+const HEARTBEAT_PREFLIGHT_STAGES: Array<{
+  stage: HeartbeatPreflightStage;
+  args: string[];
+}> = [
+  { stage: "dry-run", args: ["--dry-run"] },
+  { stage: "launch-prompt", args: ["--launch-prompt"] },
+  { stage: "ready-pool-audit", args: ["--ready-pool-audit"] },
+];
+
+function runHeartbeatProducerStage(
+  stage: HeartbeatPreflightStage,
+  args: string[],
+): Promise<HeartbeatPreflightResult> {
+  return new Promise((resolve) => {
+    execFile(
+      "python3",
+      [CANONICAL_HEARTBEAT_PRODUCER, ...args],
+      { timeout: 180_000, maxBuffer: 2 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        const returncode = error && typeof error.code === "number" ? error.code : error ? 1 : 0;
+        resolve({
+          ok: !error,
+          stage,
+          returncode,
+          output: stdout,
+          error: error ? (stderr.trim() || error.message).slice(0, 500) : null,
+        });
+      },
+    );
+  });
+}
+
+export async function runCanonicalHeartbeatPreflight(): Promise<HeartbeatPreflightResult & { launch_prompt: string }> {
+  let launchPrompt = "";
+  for (const { stage, args } of HEARTBEAT_PREFLIGHT_STAGES) {
+    const result = await runHeartbeatProducerStage(stage, args);
+    if (!result.ok) return { ...result, launch_prompt: "" };
+    if (stage === "launch-prompt") {
+      launchPrompt = result.output;
+      if (!launchPrompt.trim()) {
+        return {
+          ...result,
+          ok: false,
+          returncode: 2,
+          error: "canonical launch prompt was empty",
+          launch_prompt: "",
+        };
+      }
+    }
+  }
+  return {
+    ok: true,
+    stage: "ready-pool-audit",
+    returncode: 0,
+    output: "",
+    error: null,
+    launch_prompt: launchPrompt,
+  };
+}
 
 const HEARTBEAT_TASK: PMCadenceTask = {
   name: "heartbeat",
@@ -39,10 +116,9 @@ const HEARTBEAT_TASK: PMCadenceTask = {
   configPrefix: "pm_cadence_heartbeat",
   commandDescription:
     "MoP: 3h heartbeat due\n\n" +
-    "Run the canonical read-only probe directly: /Users/rajiv/.claude/scripts/sakshi-heartbeat.py --dry-run. " +
-    "Run /Users/rajiv/.claude/scripts/sakshi-heartbeat.py --launch-prompt and use its output verbatim for the background agent with run_in_background=true; " +
-    "then run /Users/rajiv/.claude/scripts/sakshi-heartbeat.py --ready-pool-audit. " +
-    "Session-age clear_due is report-only here; do not invoke any clear, assignment, or alternate helper path.",
+    "The canonical read-only Sakshi producer preflight must pass before launch. " +
+    "Use the exact launch prompt appended by MoP; any nonzero producer result is UNKNOWN/NOT_CLEAR and stops this wake. " +
+    "Session-age clear_due is report-only here.",
 };
 
 const MORNING_BRIEF_TASK: PMCadenceTask = {
@@ -97,6 +173,7 @@ export class PMCadenceScheduler {
   private timer: NodeJS.Timeout | null = null;
   private bootCatchupTimer: NodeJS.Timeout | null = null;
   private running: boolean = false;
+  private readonly heartbeatPreflight: HeartbeatPreflightRunner | null;
 
   private readonly CHECK_INTERVAL_MS: number = parseInt(
     process.env.MOP_PM_CADENCE_CHECK_INTERVAL_MS ?? `${60 * 1000}`,
@@ -107,9 +184,14 @@ export class PMCadenceScheduler {
     10
   );
 
-  constructor(db: MoPDatabase, relay: TmuxRelay) {
+  constructor(
+    db: MoPDatabase,
+    relay: TmuxRelay,
+    options: { heartbeatPreflight?: HeartbeatPreflightRunner | null } = {},
+  ) {
     this.db = db;
     this.relay = relay;
+    this.heartbeatPreflight = options.heartbeatPreflight ?? null;
   }
 
   start(): void {
@@ -280,6 +362,48 @@ export class PMCadenceScheduler {
     const eventType = cadenceEventType(taskName, dueKey);
     let injected = false;
     let queued = false;
+    let preflight: PMCadenceRunResult["preflight"] = "not-run";
+    let preflightStage: HeartbeatPreflightStage | null = null;
+    let preflightError: string | null = null;
+
+    if (taskName === "heartbeat" && this.heartbeatPreflight) {
+      const result = await this.heartbeatPreflight();
+      preflightStage = result.stage;
+      if (!result.ok) {
+        preflight = "failed";
+        preflightError = result.error ?? `producer exited ${result.returncode}`;
+        const failure = `HEARTBEAT_PREFLIGHT_FAILED stage=${result.stage} ` +
+          `exit=${result.returncode}: ${preflightError}`;
+        const ts = new Date().toISOString();
+        this.db.setConfig(configKey(task, "last_run_ts"), ts);
+        this.db.setConfig(configKey(task, "last_run_reason"), `preflight-failed:${result.stage}`);
+        this.db.setConfig(configKey(task, "last_injected"), "false");
+        this.db.logEvent(0, "pm_cadence_preflight_failed", null, null, {
+          task: taskName,
+          reason,
+          due_key: dueKey,
+          stage: result.stage,
+          returncode: result.returncode,
+          error: preflightError,
+          healthy: false,
+        });
+        console.error(`[pm-cadence] ${failure}`);
+        return {
+          task: taskName,
+          triggered: false,
+          reason,
+          due_key: dueKey,
+          injected: false,
+          queued: false,
+          message: failure,
+          preflight,
+          preflight_stage: preflightStage,
+          preflight_error: preflightError,
+        };
+      }
+      preflight = "passed";
+      message = `${task.commandDescription}\n\n${result.launch_prompt ?? result.output}`;
+    }
 
     // submitToPM persists the exact occurrence before entering the shared
     // serialized boundary. Its observation-bound key is Enter only for an
@@ -307,6 +431,8 @@ export class PMCadenceScheduler {
       message,
       event_type: eventType,
       delivery_mode: queued ? "queued-normal-prompt" : "direct-submit",
+      preflight,
+      preflight_stage: preflightStage,
     });
     console.log(
       `[pm-cadence] triggered task=${taskName} reason=${reason} due_key=${dueKey} ` +
@@ -321,6 +447,9 @@ export class PMCadenceScheduler {
       injected,
       queued,
       message,
+      preflight,
+      preflight_stage: preflightStage,
+      preflight_error: preflightError,
     };
   }
 
