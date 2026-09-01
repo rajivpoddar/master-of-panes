@@ -25,6 +25,7 @@
       "~/.claude/control_plane/runtime_observation.py",
       "~/.claude/scripts/sakshi-heartbeat.py",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
+      "~/.claude/skills/qa-brief/SKILL.md",
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "~/.claude/skills/slack-message/scripts/block-unsupported-transcript-split.py",
       "~/.claude/skills/slack-message/scripts/slack-send.sh",
@@ -38,7 +39,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 58,
+    "selected_count": 59,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -332,6 +333,22 @@
       "sha256": "3e28684422c2dc19e51b5a979fcb5e354b2c1c5a814dc055b5047f11d8640f46",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/qa-brief/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/qa-brief/SKILL.md",
+      "sha256": "d4117f2aae3a718837109351d43b779d172b2d558dd406fcd6423943311abfd0",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-brief-contract",
+      "source_authority": {
+        "repository": "rajivpoddar/master-of-panes",
+        "commit": "2bc454d9603dff1c2c485bd2cd51e92d005a7c6",
+        "path": "scripts/pm/shared-assets/claude/skills/qa-brief/SKILL.md",
+        "preimage_sha256": "35ae97de2400777884006c9473480442b18c784061847af6f2413158822bb9c5",
+        "preimage_mode": 420
+      },
       "dependency_status": "closed",
       "dependencies": []
     },
