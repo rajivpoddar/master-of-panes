@@ -64,13 +64,6 @@ ALLOWED_ARTIFACT_KINDS = {
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_PNG_BYTES = 25 * 1024 * 1024
 MAX_ACTIONS_ARCHIVE_BYTES = 100 * 1024 * 1024
-EXPECTED_CHANGE_SCOPE_RULES_SHA256 = "bb572ca70c1c464267b92732a69cfca762c151ca05a5a7340da76a2c75191834"
-ALLOWED_CHANGE_SCOPE_SCOPES = {
-    "control_plane_only",
-    "mixed",
-    "editor_product",
-    "product",
-}
 
 
 def load_module(name: str, path: Path) -> Any:
@@ -249,13 +242,22 @@ def resolve_pr_issue_from_metadata(pr: dict[str, Any]) -> int:
     raise RuntimeError("cannot resolve implementation issue from read-only PR metadata")
 
 
+EXPECTED_CHANGE_SCOPE_RULES_SHA256 = "7d8faef03ce3e039ea6d036c238ace251d8d839c76742a017aa98bfd8c9851c8"
+ALLOWED_CHANGE_SCOPE_SCOPES = {
+    "control_plane_only",
+    "mixed",
+    "editor_product",
+    "product",
+}
+
+
 def validate_change_scope(scope: Any, *, expected_head: str) -> dict[str, Any]:
     """Validate the co-deployed exact-head classifier before any issue lookup.
 
-    The classifier is an authority boundary, not a hint.  A missing, stale,
+    The classifier is an authority boundary, not a hint. A missing, stale,
     malformed, empty, or rules-drifted result cannot grant the non-UI
-    exemption.  The rules digest is pinned to the app-origin source release
-    that supplied this gate, so an unreviewed classifier change fails closed.
+    exemption. The rules digest is pinned to the authoritative app-origin
+    classifier release that supplies this gate.
     """
     if not isinstance(scope, dict):
         raise RuntimeError("change_scope returned a non-object result")
@@ -263,11 +265,16 @@ def validate_change_scope(scope: Any, *, expected_head: str) -> dict[str, Any]:
         raise RuntimeError("change_scope schema is unsupported")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
         raise RuntimeError("live PR head is malformed")
-    if scope.get("head") != expected_head:
-        raise RuntimeError(
-            f"change_scope head mismatch expected={expected_head} "
-            f"actual={scope.get('head') or 'missing'}"
-        )
+    # The authoritative classifier binds the head through its required
+    # ``--expected-head`` input and does not duplicate it in its JSON output.
+    # If a producer does emit the optional field, it must still agree exactly.
+    if "head" in scope:
+        observed_head = scope["head"]
+        if not isinstance(observed_head, str) or observed_head != expected_head:
+            raise RuntimeError(
+                f"change_scope head mismatch expected={expected_head} "
+                f"actual={observed_head or 'missing'}"
+            )
     if scope.get("rules_sha256") != EXPECTED_CHANGE_SCOPE_RULES_SHA256:
         raise RuntimeError("change_scope rules digest mismatch")
     changed_files = scope.get("changed_files")

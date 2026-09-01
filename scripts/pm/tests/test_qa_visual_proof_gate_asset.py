@@ -16,7 +16,10 @@ SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 SOURCE = SHARED / "claude" / "scripts" / "qa-visual-proof-gate.py"
 MANIFEST = SHARED / "manifest.json"
 HEAD = "f026a0094573fc10e9613d3dde1351d7724c103b"
-RULES_SHA256 = "bb572ca70c1c464267b92732a69cfca762c151ca05a5a7340da76a2c75191834"
+RULES_SHA256 = "7d8faef03ce3e039ea6d036c238ace251d8d839c76742a017aa98bfd8c9851c8"
+APP_ORIGIN_COMMIT = "a9edd8a9f3bd2c70375073f67d1d41e9ab3c4f1a"
+APP_ORIGIN_BLOB = "2bde63420e0070debb048c94d6f2513785638c3e"
+APP_ORIGIN_PREIMAGE_SHA256 = "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a"
 APP_TARGET = "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py"
 INSTALLED_TARGET = "/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py"
 
@@ -68,6 +71,14 @@ def test_manifest_has_one_versioned_payload_and_two_existing_targets() -> None:
     assert entry["additional_targets"] == [INSTALLED_TARGET]
     assert entry["mode"] == 0o755
     assert entry["sha256"] == hashlib.sha256(SOURCE.read_bytes()).hexdigest()
+    assert entry["source_authority"] == {
+        "repository": "heydonna-app/heydonna-app",
+        "commit": APP_ORIGIN_COMMIT,
+        "path": "scripts/pm/qa-visual-proof-gate.py",
+        "blob_sha": APP_ORIGIN_BLOB,
+        "preimage_sha256": APP_ORIGIN_PREIMAGE_SHA256,
+        "mode": 0o755,
+    }
     assert SOURCE.read_text(encoding="utf-8").count("def validate_change_scope") == 1
 
 
@@ -90,6 +101,18 @@ def test_non_ui_live_path_classifies_before_issue_resolution(monkeypatch: pytest
     assert result["ok"] is True
     assert result["reason"] == "non_ui_change"
     assert not any(command[:3] == ["gh", "issue", "view"] for command in calls)
+    classifier_calls = [command for command in calls if command[0] == "python3"]
+    assert len(classifier_calls) == 1
+    assert classifier_calls[0][classifier_calls[0].index("--expected-head") + 1] == HEAD
+
+
+def test_current_classifier_shape_uses_invocation_head_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gate_scope = _scope(ui_changed=False)
+    gate_scope.pop("head")
+    gate = _load_gate(monkeypatch, tmp_path)
+    assert gate.validate_change_scope(gate_scope, expected_head=HEAD) == gate_scope
 
 
 def test_ui_live_path_still_resolves_issue_after_classifier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -141,7 +164,9 @@ def test_ui_without_issue_metadata_remains_fail_closed(monkeypatch: pytest.Monke
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
+        ("schema_version", None, "schema is unsupported"),
         ("head", "a" * 40, "head mismatch"),
+        ("head", None, "head mismatch"),
         ("rules_sha256", "b" * 64, "rules digest mismatch"),
         ("changed_files", [], "empty or malformed"),
         ("scope", "unknown", "scope is unknown"),

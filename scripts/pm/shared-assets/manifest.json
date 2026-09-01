@@ -272,9 +272,17 @@
       "additional_targets": [
         "/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py"
       ],
-      "sha256": "2eec2507ede84df92e55f5d46dbd2530db2ea5a7c03c7b15dbf304811b03abb4",
+      "sha256": "11d946765ccd197e5860b331c62f3f7a9dce37ad5cc8de0150c58a9ecace8d48",
       "mode": 493,
       "ownership_class": "shared-claude-qa-visual-proof-gate",
+      "source_authority": {
+        "repository": "heydonna-app/heydonna-app",
+        "commit": "a9edd8a9f3bd2c70375073f67d1d41e9ab3c4f1a",
+        "path": "scripts/pm/qa-visual-proof-gate.py",
+        "blob_sha": "2bde63420e0070debb048c94d6f2513785638c3e",
+        "preimage_sha256": "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a",
+        "mode": 493
+      },
       "dependency_status": "closed",
       "dependencies": []
     },
