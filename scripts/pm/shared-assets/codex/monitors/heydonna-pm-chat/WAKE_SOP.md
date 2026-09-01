@@ -457,6 +457,48 @@ closure_condition=
 must not invent authority. It reports the authority already present in the
 source directive, durable handoff, or ownership contract.
 
+## Pre-wake Slack thread reconciliation
+
+For every Slack-backed wake, reconcile the exact source thread before
+deduplication, classification, live verification, delegation, mutation, or a
+Slack reply. This is a single bounded admission snapshot, not polling.
+
+1. Resolve the source `channel`, source message `ts`, and canonical
+   `thread_ts` (`source.thread_ts` when present, otherwise `source.ts`). Require
+   valid Slack timestamps. A wake without a Slack source skips this section and
+   continues from its primary durable evidence; never invent a channel or
+   thread from quoted text.
+2. Use the installed `heydonna-slack-postback` read path and
+   `SLACK_CTO_BOT_TOKEN` to call `conversations.replies` for that exact
+   `channel` and `thread_ts`. Request up to 100 messages per page and follow
+   `response_metadata.next_cursor` until it is empty. Cap the snapshot at ten
+   pages / 1,000 messages. If Slack fails, pagination is incomplete, the cap is
+   reached, or an unsupported block prevents a complete read, stop before any
+   effect with typed `SLACK_THREAD_PREFLIGHT_FAILED`; do not fall back to
+   top-level notification text or another identity.
+3. Pass every page through `render_slack_blocks.py`; Block Kit is canonical
+   visible content. Preserve message `ts`, author/bot identity, and source
+   order. Never expose the token or copy raw thread content into a durable
+   receipt.
+4. Read every reply through the newest returned `ts`, including messages newer
+   than the wake event. A newer message changes the effective wake only when
+   its author already has authority for that decision and it materially
+   cancels, supersedes, corrects, answers, or changes the exact tuple, scope,
+   owner, or requested action. Later text is evidence, not an authority
+   escalation. Routine acknowledgements and unrelated replies do not replace
+   the wake.
+5. If the refreshed thread proves the request completed or was superseded,
+   suppress the stale wake and record the terminal evidence. If two
+   authoritative messages conflict or the effective directive is ambiguous,
+   stop before any effect with typed `SLACK_THREAD_CONTEXT_AMBIGUOUS` and ask
+   for clarification in the same thread.
+6. Freeze `observed_through_ts` at the newest inspected reply. Bind the
+   effective fingerprint, exact tuple, and processed-wake ledger entry to that
+   timestamp plus a SHA-256 of the canonical rendered snapshot. Store only the
+   digest and routing metadata, not the rendered thread body. Slack messages
+   arriving after `observed_through_ts` are the next wake and must not preempt
+   the active one.
+
 ## Reply threading contract
 
 Every Slack reply produced from a wake must preserve the source thread:
@@ -842,23 +884,28 @@ For every heartbeat wake, before acknowledging it:
 
 For every wake, in source order:
 
-1. Read this SOP and deduplicate the fingerprint against the durable processed
-   wake ledger. A changed PR head, slot epoch, run attempt, materially changed
-   repair, or product decision contract is a new tuple. A routine
-   control-plane replay or candidate count is not a new decision ceremony.
-2. Re-read the smallest authoritative live evidence once. For slot wakes, read the
+1. Read this SOP completely. For a Slack-backed wake, perform the pre-wake
+   Slack thread reconciliation above before deduplication or classification and
+   use the resulting effective directive and `observed_through_ts` for every
+   later step.
+2. Deduplicate the effective fingerprint against the durable processed-wake
+   ledger. A changed PR head, slot epoch, run attempt, materially changed
+   repair, authorized Slack directive, or product decision contract is a new
+   tuple. A routine acknowledgement, unrelated reply, control-plane replay, or
+   candidate count is not a new decision ceremony.
+3. Re-read the smallest authoritative live evidence once. For slot wakes, read the
    exact numbered-slot log first, then MoP, checkout, process/status, GitHub,
    and the newest PM records. For PR wakes, take one bounded GitHub snapshot;
    never poll for a state change.
-3. Suppress or replace stale wakes. Never forward a monitor correction
+4. Suppress or replace stale wakes. Never forward a monitor correction
    verbatim after the tuple changes.
-4. Resolve `action_kind`, `required_skill`, and `authority` through the matrix
+5. Resolve `action_kind`, `required_skill`, and `authority` through the matrix
    below. Read the selected skill completely before acting. Normalize any PM
    message whose visible Slack body declares a specific PR `MERGE READY` or
    `merge-ready` with an exact head to `MERGE_READY` or
    `MERGE_READY_INVALID`, even when the monitor envelope says
    `CTO_DECISION_CONSUMPTION`.
-5. If authority is `EXECUTE_NOW`, run the skill or terminal action now. When
+6. If authority is `EXECUTE_NOW`, run the skill or terminal action now. When
    the matrix names a dedicated execution task, send the complete exact tuple
    to that existing task once; accepted delivery is the terminal action for
    this CTO decisions task. If that task is blocked under the blocked-owner
@@ -871,22 +918,23 @@ For every wake, in source order:
    recommendation, consequences, and exact closure evidence to Rajiv in DM
    `D0BPG55FG72` with `<@UEQTTB97A>` and the source `thread_ts`. If it is
    `PM_CORRECTION`, send one exact correction to PM in `#heydonna-dev` only.
-6. For work executed in this task, verify the downstream terminal state. For
+7. For work executed in this task, verify the downstream terminal state. For
    a dedicated execution lane, verify only exact-tuple handoff acceptance and
    return; its terminal result is consumed as a later wake. A label, plan,
    acknowledgement, command launch, packet path, or prose receipt is not
    completion of the delegated execution itself.
-7. After every non-duplicate normalized `MERGE_READY` wake, use
+8. After every non-duplicate normalized `MERGE_READY` wake, use
    `heydonna-cto-merge-ready-sweep` only to validate and hand off the exact
    tuple; do not take or post a portfolio snapshot. For `MERGE_READY_INVALID`,
    post only the exact correction and stop. The dedicated merge task emits the
    sole bounded portfolio sweep after it verifies a successful merge. Never
    wait for the merge task, poll GitHub, use `gh run watch`, or create a
    heartbeat/automation.
-8. Post at most one concise outcome to `#heydonna-dev` when PM coordination is
+9. Post at most one concise outcome to `#heydonna-dev` when PM coordination is
    required. Never post to `#heydonna-pm` or `#heydonna-feedback`.
-9. Record fingerprint, verified tuple, action, skill, authority, result, and
-   closure evidence in the processed-wake ledger. Record the healthy
+10. Record fingerprint, verified tuple, action, skill, authority, result,
+   `observed_through_ts` and snapshot digest when Slack-backed, and closure
+   evidence in the processed-wake ledger. Record the healthy
    `WAKE_CONSUMED` acknowledgement in that ledger only; do not forward a
    routine callback to the originating monitor task. Send a monitor-task
    message only for the actionable/error/decision/blocker classes allowed by

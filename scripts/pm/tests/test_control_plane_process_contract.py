@@ -148,6 +148,26 @@ def test_cto_return_transport_is_explicit() -> None:
     assert "blocker/context only" in wake
 
 
+def test_slack_backed_wake_reconciles_latest_thread_before_processing() -> None:
+    wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
+    preflight = wake.index("## Pre-wake Slack thread reconciliation")
+    consumption = wake.index("## Consumption sequence")
+    sequence = wake[consumption:]
+
+    assert preflight < consumption
+    assert "before\ndeduplication, classification, live verification, delegation, mutation" in wake
+    assert "conversations.replies" in wake
+    assert "response_metadata.next_cursor" in wake
+    assert "ten\n   pages / 1,000 messages" in wake
+    assert "render_slack_blocks.py" in wake
+    assert "SLACK_THREAD_PREFLIGHT_FAILED" in wake
+    assert "SLACK_THREAD_CONTEXT_AMBIGUOUS" in wake
+    assert "observed_through_ts" in wake
+    assert "messages\n   arriving after `observed_through_ts` are the next wake" in wake
+    assert sequence.index("perform the pre-wake") < sequence.index("Deduplicate the effective fingerprint")
+    assert "not an authority\n   escalation" in wake
+
+
 def test_native_bypass_contract_is_single_fenced_and_ordered() -> None:
     contract = _text("codex/skills/_shared/release-conveyor-contract.md")
     wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")

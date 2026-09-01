@@ -451,7 +451,7 @@
     {
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
       "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
-      "sha256": "05584bc5cb6ad6599b0f133f1437377d81d82341d3c2fb32811fc0b2d95b0e14",
+      "sha256": "3860e6f2c7e0c73530b64f448e75390b5871dc8171d511c4ae2673251305c603",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
       "dependency_status": "closed",
