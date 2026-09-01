@@ -105,6 +105,10 @@ test("manual diagnostics remain read-only and heartbeat ownership is readable", 
     const heartbeat = cadence.getStatus().tasks.find((task) => task.task === "heartbeat");
     assert.ok(heartbeat);
     assert.equal(heartbeat.label, "3h heartbeat");
-    assert.equal(heartbeat.command.includes("heartbeat-tasks"), true);
+    assert.equal(heartbeat.command.includes("/Users/rajiv/.claude/scripts/sakshi-heartbeat.py --dry-run"), true);
+    assert.equal(heartbeat.command.includes("/Users/rajiv/.claude/scripts/sakshi-heartbeat.py --launch-prompt"), true);
+    assert.equal(heartbeat.command.includes("/Users/rajiv/.claude/scripts/sakshi-heartbeat.py --ready-pool-audit"), true);
+    assert.equal(heartbeat.command.includes("heartbeat-tasks"), false);
+    assert.equal(heartbeat.command.includes("pm-operator"), false);
   });
 });

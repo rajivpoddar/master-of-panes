@@ -25,7 +25,7 @@ U4. The run cannot finish while any open issue has zero or multiple `status:*` l
 
 Pinned snapshot and audit:
 5. Pin one snapshot containing every open status:todo issue, every open pm-blocked:dependency issue, every intake issue, every open issue with zero or multiple `status:*` labels, and every full-surface backlog promotion candidate. Do not rebuild or substitute the snapshot during the run.
-6. Run pm-operator backlog-report but treat it as a detector rather than the source of truth. Read complete live state for every pinned issue you may mutate.
+6. Run `/Users/rajiv/.claude/scripts/sakshi-heartbeat.py --ready-pool-audit` as the deterministic read-only Ready Pool detector, but treat its output as a detector rather than the source of truth. Read complete live state for every pinned issue you may mutate.
 
 Mandatory Ready Pool repair loop:
 7. Audit every pinned Todo exactly once. Every Todo must have exactly one status, exactly one canonical P0/P1/P2/P3 label, a valid Issue Contract Ledger, and complete Ready Pool metadata: priority, lane, bounded ac_summary, claimable_slot_type, blockers, work_type, branch_slug, required_validation, owner, next_action, wake_condition, and disposition. Repair every missing, stale, or contradictory field directly in the issue body and labels during this run.

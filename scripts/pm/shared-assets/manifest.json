@@ -481,7 +481,7 @@
     {
       "source_path": "codex/automations/heydonna-3h-ready-pool-reconciliation/prompt.template",
       "canonical_target": "/Users/rajiv/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt",
-      "sha256": "43d4b556dea01f999991259de55d1bc2f53f38f06887a98c7dc3a6aa2c54f38e",
+      "sha256": "8262ceb2ff8ac76dcd8424d6f28cbaeda92e1d02b184901d046699d1bfdf8d3f",
       "mode": 420,
       "ownership_class": "shared-codex-automation-prompt-template",
       "dependency_status": "closed",

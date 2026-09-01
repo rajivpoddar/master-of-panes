@@ -2,7 +2,8 @@
  * MoP PM Cadence Scheduler
  *
  * Owns PM scheduled cadence that used to be split across launchd scripts:
- * - 3h heartbeat: queues a normal PM prompt to invoke Skill(heartbeat-tasks)
+ * - 3h heartbeat: queues a normal PM prompt to run the canonical Sakshi
+ *   Python producer directly
  * - daily morning brief: queues a normal PM prompt to invoke Skill(morning-brief)
  *
  * launchd remains the MoP watchdog only. These ticks are persisted in MoP DB
@@ -38,7 +39,10 @@ const HEARTBEAT_TASK: PMCadenceTask = {
   configPrefix: "pm_cadence_heartbeat",
   commandDescription:
     "MoP: 3h heartbeat due\n\n" +
-    "Invoke Skill(heartbeat-tasks) now. Launch its background agent with run_in_background=true, then return to normal PM event processing. Do not run /heartbeat-tasks inline.",
+    "Run the canonical read-only probe directly: /Users/rajiv/.claude/scripts/sakshi-heartbeat.py --dry-run. " +
+    "Run /Users/rajiv/.claude/scripts/sakshi-heartbeat.py --launch-prompt and use its output verbatim for the background agent with run_in_background=true; " +
+    "then run /Users/rajiv/.claude/scripts/sakshi-heartbeat.py --ready-pool-audit. " +
+    "Session-age clear_due is report-only here; do not invoke any clear, assignment, or alternate helper path.",
 };
 
 const MORNING_BRIEF_TASK: PMCadenceTask = {
