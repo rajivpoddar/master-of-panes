@@ -28,6 +28,7 @@ export interface SlotMutationResult {
     | "invalid_assignment_metadata"
     | "target_already_assigned"
     | "slot_already_occupied"
+    | "stale_projection"
     | "active_turn"
     | "slot_not_occupied"
     | "slot_already_free_unverifiable"
@@ -1470,9 +1471,10 @@ export class MoPDatabase {
   /**
    * Assign one GitHub issue to a numbered slot with the minimum PM contract.
    *
-   * Epochs and the extended owner tuple remain internal telemetry.  They are
-   * deliberately not caller preconditions: the only assignment conflict is
-   * the same issue already being owned by another slot.
+   * Issue-only assignment is intentionally narrow: it can claim only a
+   * genuinely free, hook-quiescent slot.  A replay of the same normalized
+   * repository/issue is an idempotent no-op; it may not overwrite a different
+   * owner or a slot whose projection/turn state is stale.
    */
   assignIssueToSlot(
     slot: number,
@@ -1515,11 +1517,64 @@ export class MoPDatabase {
         };
       }
 
+      const sameTargetReplay = before.occupied
+        && normalizeRepositoryId(before.repository_id) === normalizedRepositoryId
+        && before.issue === normalizedIssue;
+      if (sameTargetReplay) {
+        return {
+          ok: true,
+          conflict: false,
+          assignment_epoch: epoch,
+          idempotent: true,
+        };
+      }
+
+      if (before.occupied) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_already_occupied",
+        };
+      }
+
+      if (before.dnd || before.status === "dnd") {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "dnd_active",
+        };
+      }
+      if (before.status !== "free") {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "stale_projection",
+        };
+      }
+      if (before.active_turn_id !== null || before.active_turn_state !== "inactive") {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "active_turn",
+        };
+      }
+
       const duplicate = this.db.prepare(`
         SELECT slot FROM slots
-        WHERE occupied = 1 AND issue = ? AND slot != ?
+        WHERE occupied = 1
+          AND repository_id = ?
+          AND issue = ?
+          AND slot != ?
         ORDER BY slot LIMIT 1
-      `).get(normalizedIssue, slot) as { slot: number } | undefined;
+      `).get(normalizedRepositoryId, normalizedIssue, slot) as { slot: number } | undefined;
       if (duplicate) {
         return {
           ok: false,
@@ -1528,15 +1583,6 @@ export class MoPDatabase {
           idempotent: false,
           reason: "target_already_assigned",
           owner_slots: [duplicate.slot],
-        };
-      }
-
-      if (before.occupied && before.issue === normalizedIssue) {
-        return {
-          ok: true,
-          conflict: false,
-          assignment_epoch: epoch,
-          idempotent: true,
         };
       }
 

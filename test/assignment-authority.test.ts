@@ -290,6 +290,62 @@ test("headerless assignment still reaches the transactional duplicate guard", as
   });
 });
 
+test("issue-only exact replay is idempotent and does not append an event", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const request = assignmentRequest(undefined, { issue: 7788, task: "same target" });
+    const first = await app.request("/slots/1/assign", request);
+    assert.equal(first.status, 200);
+    const beforeReplay = db.getSlot(1);
+    const replay = await app.request("/slots/1/assign", assignmentRequest(undefined, { issue: 7788, task: "replayed target" }));
+    assert.equal(replay.status, 200);
+    assert.equal((await replay.json() as Record<string, unknown>).assignment_epoch, beforeReplay?.assignment_epoch);
+    assert.deepEqual(db.getSlot(1), beforeReplay);
+    assert.equal(db.getEvents(1, 10, "slot_assigned").length, 1);
+  });
+});
+
+test("issue-only duplicate detection is scoped by normalized repository", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const first = await app.request("/slots/1/assign", assignmentRequest(undefined, {
+      repository_id: "github:repo-scope-a",
+      issue: 7799,
+      task: "repo A",
+    }));
+    assert.equal(first.status, 200);
+
+    const sameRepository = await app.request("/slots/2/assign", assignmentRequest(undefined, {
+      repository_id: "github:repo-scope-a",
+      issue: 7799,
+      task: "duplicate repo A",
+    }));
+    assert.equal(sameRepository.status, 409);
+    assert.equal((await sameRepository.json() as Record<string, unknown>).reason, "target_already_assigned");
+
+    const differentRepository = await app.request("/slots/2/assign", assignmentRequest(undefined, {
+      repository_id: "github:repo-scope-b",
+      issue: 7799,
+      task: "repo B",
+    }));
+    assert.equal(differentRepository.status, 200);
+    assert.equal(db.getSlot(2)?.repository_id, "github:repo-scope-b");
+    assert.equal(db.getEvents(2, 10, "slot_assigned").length, 1);
+  });
+});
+
+test("concurrent same-repository issue claims commit one owner and one conflict", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const requests = [1, 2].map((slot) => app.request(`/slots/${slot}/assign`, assignmentRequest(undefined, {
+      repository_id: "github:repo-concurrent",
+      issue: 7800,
+      task: `concurrent ${slot}`,
+    })));
+    const responses = await Promise.all(requests);
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409]);
+    assert.equal(db.getAllSlots().filter((slot) => slot.occupied && slot.repository_id === "github:repo-concurrent" && slot.issue === 7800).length, 1);
+    assert.equal(db.getEvents(1, 10, "slot_assigned").length + db.getEvents(2, 10, "slot_assigned").length, 1);
+  });
+});
+
 test("claim route requires only a positive issue", async () => {
   await withAssignmentRoute(async (app, db) => {
     for (const body of [{}, { issue: null }, { issue: 0 }]) {
@@ -304,30 +360,60 @@ test("claim route requires only a positive issue", async () => {
   });
 });
 
-test("assignment ignores stale turn and tuple telemetry", async () => {
-  await withAssignmentRoute(async (app, db) => {
-    const active = {
-      issue: assignment.issue,
-      task: assignment.task,
-      session_id: "caller-must-not-own",
-    };
-    db.startAgentTurn(1, "hook-session-a");
-    db.updateSlot(1, { occupied: false, repository_id: null, issue: null, branch: null, branch_ref: null, pr: null, head_sha: null });
-    const accepted = await app.request("/slots/1/assign", assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, active));
-    assert.equal(accepted.status, 200);
-    const row = db.getSlot(1)!;
-    assert.equal(row.assignment_epoch, 1);
-    assert.equal(row.active_turn_state, "inactive");
-    assert.equal(row.active_turn_id, null);
-    assert.equal("session_id" in JSON.parse(db.getEvents(1, 1, "slot_assigned")[0].payload), false);
-  });
+test("issue-only assignment refuses stale, DND, active, and indeterminate targets", async () => {
+  for (const scenario of [
+    {
+      name: "DND",
+      prepare: (db: MoPDatabase) => db.updateSlot(1, { dnd: true }),
+      reason: "dnd_active",
+    },
+    {
+      name: "active turn",
+      prepare: (db: MoPDatabase) => db.startAgentTurn(1, "hook-session-a"),
+      reason: "active_turn",
+    },
+    {
+      name: "indeterminate turn",
+      prepare: (db: MoPDatabase) => {
+        db.startAgentTurn(1, "hook-session-a");
+        db.updateSlot(1, { active_turn_id: null, active_turn_state: "indeterminate" });
+      },
+      reason: "active_turn",
+    },
+    {
+      name: "stale projection",
+      prepare: (db: MoPDatabase, directory?: string) => {
+        assert.ok(directory);
+        const raw = new Database(join(directory!, "mop.db"));
+        try {
+          raw.prepare("UPDATE slots SET status = 'active' WHERE slot = 1").run();
+        } finally {
+          raw.close();
+        }
+      },
+      reason: "stale_projection",
+    },
+  ] as const) {
+    await withAssignmentRoute(async (app, db, directory) => {
+      scenario.prepare(db, directory);
+      const before = db.getSlot(1);
+      const response = await app.request("/slots/1/assign", assignmentRequest(undefined, {
+        issue: assignment.issue,
+        task: scenario.name,
+      }));
+      assert.equal(response.status, 409, scenario.name);
+      assert.equal((await response.json() as Record<string, unknown>).reason, scenario.reason);
+      assert.deepEqual(db.getSlot(1), before, `${scenario.name} must not mutate the slot`);
+      assert.equal(db.getEvents(1, 10, "slot_assigned").length, 0);
+    });
+  }
 });
 
-test("claim route overwrites the selected slot without caller epoch", async () => {
+test("issue-only assignment never overwrites an occupied different target", async () => {
   await withAssignmentRoute(async (app, db) => {
     const first = await app.request(
       "/slots/1/assign",
-      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+      assignmentRequest(undefined, {
         issue: assignment.issue,
         task: assignment.task,
       }),
@@ -337,14 +423,15 @@ test("claim route overwrites the selected slot without caller epoch", async () =
 
     const occupiedClaim = await app.request(
       "/slots/1/assign",
-      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+      assignmentRequest(undefined, {
         issue: assignment.issue + 1,
         task: "replaced issue-only claim",
       }),
     );
-    assert.equal(occupiedClaim.status, 200);
-    assert.equal(db.getSlot(1)?.issue, assignment.issue + 1);
-    assert.equal(db.getSlot(1)?.assignment_epoch, before!.assignment_epoch + 1);
+    assert.equal(occupiedClaim.status, 409);
+    assert.equal((await occupiedClaim.json() as Record<string, unknown>).reason, "slot_already_occupied");
+    assert.deepEqual(db.getSlot(1), before);
+    assert.equal(db.getEvents(1, 10, "slot_assigned").length, 1);
   });
 });
 
@@ -404,6 +491,7 @@ test("assignment route rejects only a duplicate issue on another slot", async ()
     const duplicate = await app.request(
       "/slots/2/assign",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        repository_id: assignment.repository_id,
         issue: assignment.issue,
       }),
     );
