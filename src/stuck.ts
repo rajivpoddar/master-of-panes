@@ -13,7 +13,11 @@ import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execShell } from "./asyncCommand.js";
-import { slotAssignmentTuple, type MoPDatabase } from "./db.js";
+import {
+  assignmentTupleMatches,
+  slotAssignmentTuple,
+  type MoPDatabase,
+} from "./db.js";
 import type { LogManager } from "./logs.js";
 import type { TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
@@ -66,6 +70,30 @@ function parseDbTimestampMs(timestamp: string): number {
   return new Date(timestamp + "Z").getTime();
 }
 
+/**
+ * Read the session identity carried by a production hook event. Session IDs
+ * are used as an authoritative idle-anchor boundary, so Unicode controls,
+ * format characters, and line separators must fail closed rather than become
+ * visually indistinguishable identities.
+ */
+function parseHookSessionId(rawPayload: string): string | null {
+  try {
+    const value = JSON.parse(rawPayload) as { session_id?: unknown };
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    if (typeof value.session_id !== "string") return null;
+    // Validate the raw identity before trimming. ECMAScript trim removes
+    // some line/format characters, so checking only the trimmed value would
+    // let a malformed identity alias a permitted session ID.
+    if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value.session_id)) return null;
+    const sessionId = value.session_id.trim();
+    return sessionId.length > 0
+      ? sessionId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 type ContinueDeliveryResult = {
   sent: boolean;
   reason: "sent" | "send_failed" | "slot_missing" | "released" | "dnd" | "identity_changed" | "release_in_progress";
@@ -78,6 +106,7 @@ type IdleOccupiedAnchor = {
   timestamp: string;
   timestampMs: number;
   source: string;
+  eventId?: number;
 };
 
 type FreeSlotAssignmentGate = {
@@ -484,6 +513,16 @@ export class StuckDetector {
       const event = this.db.getEvents(slot.slot, 1, eventType)[0];
       if (event && parseDbTimestampMs(event.timestamp) >= idleAnchor.timestampMs) return;
     }
+    const sessionId = this.resolveIdleOccupiedHookSession(slot, idleAnchor);
+    if (!sessionId) {
+      this.db.logEvent(slot.slot, "idle_occupied_suppressed_missing_hook_session", "Stuck", null, {
+        assignment_epoch: slot.assignment_epoch,
+        idle_anchor: idleAnchor.timestamp,
+        idle_anchor_source: idleAnchor.source,
+        reason: "idle anchor has no authoritative hook session identity",
+      });
+      return;
+    }
 
     const prior = this.db.getEvents(slot.slot, 1, "idle_occupied_continue_injected")[0];
     if (prior) {
@@ -491,13 +530,20 @@ export class StuckDetector {
         const payload = JSON.parse(prior.payload) as {
           assignment_epoch?: number;
           idle_anchor?: string;
+          session_id?: string | null;
+          wait_anchor?: string;
           urgency?: IdleOccupiedUrgency;
         };
+        const priorWaitAnchor = payload.wait_anchor ?? payload.idle_anchor;
+        const sessionMatches = payload.session_id === sessionId;
+        // A PM_WAIT/HOLD completion advances the hook Stop timestamp, but it
+        // does not advance the actionable wait episode. Deduplicate against
+        // the carried wait anchor rather than the moving idle anchor, and do
+        // not treat an urgency tier as a new delivery opportunity.
         if (
           payload.assignment_epoch === slot.assignment_epoch &&
-          payload.idle_anchor === idleAnchor.timestamp &&
-          this.idleOccupiedUrgencyRank(payload.urgency) >=
-            this.idleOccupiedUrgencyRank(urgency)
+          priorWaitAnchor === waitAnchor.timestamp &&
+          sessionMatches
         ) {
           return;
         }
@@ -539,6 +585,9 @@ export class StuckDetector {
       {
         assignment_epoch: slot.assignment_epoch,
         assigned_at: slot.assigned_at,
+        session_id: sessionId,
+        idle_anchor: idleAnchor.timestamp,
+        wait_anchor: waitAnchor.timestamp,
       },
       command
     );
@@ -552,6 +601,7 @@ export class StuckDetector {
     const payload = {
       command,
       assignment_epoch: slot.assignment_epoch,
+      session_id: sessionId,
       idle_anchor: idleAnchor.timestamp,
       idle_anchor_source: idleAnchor.source,
       idle_age_ms: idleAgeMs,
@@ -778,7 +828,13 @@ export class StuckDetector {
    */
   private async sendContinueIfAllowed(
     slotNum: number,
-    expected?: { assignment_epoch?: number; assigned_at?: string | null },
+    expected?: {
+      assignment_epoch?: number;
+      assigned_at?: string | null;
+      session_id?: string;
+      idle_anchor?: string;
+      wait_anchor?: string;
+    },
     command = "continue your work or remind pm if blocked",
     allowActiveTurn = false,
   ): Promise<ContinueDeliveryResult> {
@@ -870,19 +926,61 @@ export class StuckDetector {
     }
 
     try {
+      let effectFenceReason: ContinueDeliveryResult["reason"] | null = null;
+
       // The relay owns the final pane-effect edge. It invokes this callback
       // synchronously after its async identity/cooldown/buffer preparation and
       // immediately before the first tmux mutation, so release can replace an
       // unstarted nudge without leaving a started marker behind.
-      const beforeFirstEffect = nudgeLeaseToken !== "__legacy__"
-        && typeof this.db.markNativeReleaseIntentStarted === "function"
-        ? () => this.db.markNativeReleaseIntentStarted(
-          slotNum,
-          current.assignment_epoch,
-          tuple!,
-          nudgeLeaseToken,
-        )
-        : undefined;
+      const beforeFirstEffect = expected?.session_id || expected?.idle_anchor
+        ? () => {
+          const latest = this.db.getSlot(slotNum);
+          const latestIdleState = latest ? this.isIdleByHookState(latest) : null;
+          const latestTuple = latest ? slotAssignmentTuple(latest) : null;
+          const latestAnchor = latest ? this.getIdleOccupiedAnchor(latest) : null;
+          const latestSessionId = latest && latestAnchor
+            ? this.resolveIdleOccupiedHookSession(latest, latestAnchor)
+            : null;
+          const latestWaitAnchor = latest && latestAnchor
+            ? this.getIdleOccupiedWaitAnchor(latest, latestAnchor)
+            : null;
+          const exactIdentity = Boolean(
+            latest?.occupied
+            && !latest.dnd
+            && latestIdleState?.idle
+            && latest.active_turn_id === null
+            && latest.active_turn_state === "inactive"
+            && expected.assignment_epoch === latest.assignment_epoch
+            && expected.assigned_at === latest.assigned_at
+            && assignmentTupleMatches(latestTuple, tuple)
+            && latestAnchor?.timestamp === expected.idle_anchor
+            && latestSessionId === expected.session_id
+            && latestWaitAnchor?.timestamp === expected.wait_anchor
+          );
+          if (!exactIdentity) {
+            effectFenceReason = "identity_changed";
+            return false;
+          }
+          if (nudgeLeaseToken !== "__legacy__"
+              && typeof this.db.markNativeReleaseIntentStarted === "function") {
+            return this.db.markNativeReleaseIntentStarted(
+              slotNum,
+              current.assignment_epoch,
+              tuple!,
+              nudgeLeaseToken,
+            );
+          }
+          return true;
+        }
+        : nudgeLeaseToken !== "__legacy__"
+          && typeof this.db.markNativeReleaseIntentStarted === "function"
+          ? () => this.db.markNativeReleaseIntentStarted(
+            slotNum,
+            current.assignment_epoch,
+            tuple!,
+            nudgeLeaseToken,
+          )
+          : undefined;
       const sent = await this.relay.sendToSlotAsync(
         slotNum,
         command,
@@ -892,7 +990,7 @@ export class StuckDetector {
       );
       return {
         sent,
-        reason: sent ? "sent" : "send_failed",
+        reason: effectFenceReason ?? (sent ? "sent" : "send_failed"),
         slot: current,
       };
     } finally {
@@ -909,7 +1007,7 @@ export class StuckDetector {
     slot: SlotState
   ): IdleOccupiedAnchor | null {
     const assignedMs = slot.assigned_at ? parseDbTimestampMs(slot.assigned_at) : NaN;
-    const candidates: Array<{ timestamp: string; timestampMs: number; source: string }> = [];
+    const candidates: IdleOccupiedAnchor[] = [];
     for (const eventType of [
       "Stop",
       "SessionEnd",
@@ -920,10 +1018,12 @@ export class StuckDetector {
       const timestampMs = parseDbTimestampMs(event.timestamp);
       if (!Number.isFinite(timestampMs)) continue;
       if (Number.isFinite(assignedMs) && timestampMs < assignedMs) continue;
-      candidates.push({ timestamp: event.timestamp, timestampMs, source: eventType });
+      candidates.push({ timestamp: event.timestamp, timestampMs, source: eventType, eventId: event.id });
     }
     if (candidates.length > 0) {
-      candidates.sort((a, b) => b.timestampMs - a.timestampMs);
+      candidates.sort((a, b) =>
+        b.timestampMs - a.timestampMs || (b.eventId ?? 0) - (a.eventId ?? 0)
+      );
       return candidates[0];
     }
     if (!slot.assigned_at || !Number.isFinite(assignedMs)) return null;
@@ -932,6 +1032,59 @@ export class StuckDetector {
       timestampMs: assignedMs,
       source: "assigned_at",
     };
+  }
+
+  /**
+   * Return the Claude session that created the authoritative idle anchor.
+   * Assignment.session_id is retired telemetry and is intentionally cleared;
+   * hook event payloads are the durable source for this identity instead.
+   */
+  private resolveIdleOccupiedHookSession(
+    slot: SlotState,
+    anchor: IdleOccupiedAnchor,
+  ): string | null {
+    const assignedMs = slot.assigned_at ? parseDbTimestampMs(slot.assigned_at) : NaN;
+
+    const events = this.db.getEvents(slot.slot, 300);
+    const anchorEvent = anchor.eventId !== undefined
+      ? events.find((event) => event.id === anchor.eventId)
+      : events.find((event) =>
+        event.event_type === anchor.source
+        && parseDbTimestampMs(event.timestamp) === anchor.timestampMs
+      );
+    const isAfterAnchor = (event: typeof events[number]): boolean => {
+      if (anchor.eventId !== undefined) return event.id > anchor.eventId;
+      return parseDbTimestampMs(event.timestamp) > anchor.timestampMs;
+    };
+    const openerEvents = events
+      .filter((event) => event.event_type === "UserPromptSubmit" || event.event_type === "SessionStart")
+      .sort((left, right) => right.id - left.id);
+
+    // A later opener starts a newer hook-session generation even when Claude
+    // has not yet emitted a terminal hook. The older idle anchor cannot be
+    // reused, and an ambiguous opener is fail-closed as well.
+    if (openerEvents.some(isAfterAnchor)) return null;
+
+    // Stop and SessionEnd are authoritative terminal anchors only when their
+    // own payload carries a valid session identity. Never borrow an older
+    // opener for a malformed or tokenless terminal event.
+    if (anchor.source === "Stop" || anchor.source === "SessionEnd") {
+      return anchorEvent ? parseHookSessionId(anchorEvent.payload) : null;
+    }
+
+    // Reconciliation/assigned-at anchors do not always carry a payload.
+    // Recover only from the latest production opener bounded before the
+    // anchor. These are the explicitly supported fallback anchor classes.
+    const chain = events
+      .filter((event) => {
+        const timestampMs = parseDbTimestampMs(event.timestamp);
+        return Number.isFinite(timestampMs)
+          && timestampMs <= anchor.timestampMs
+          && (!Number.isFinite(assignedMs) || timestampMs >= assignedMs)
+          && (event.event_type === "UserPromptSubmit" || event.event_type === "SessionStart");
+      })
+      .sort((left, right) => right.id - left.id);
+    return chain.length > 0 ? parseHookSessionId(chain[0].payload) : null;
   }
 
   private getIdleFreeAnchor(
@@ -1074,30 +1227,16 @@ export class StuckDetector {
       );
       if (directPromptStarts.length !== 1 || directStops.length === 0) continue;
 
-      const readSessionId = (rawPayload: string, field: string): string | null => {
-        try {
-          const value = JSON.parse(rawPayload) as Record<string, unknown>;
-          return typeof value[field] === "string" ? value[field] : null;
-        } catch {
-          return null;
-        }
-      };
-      const promptSessionId = readSessionId(directPromptStarts[0].event.payload, "session_id");
-      const completionSessionId = readSessionId(
-        completion.event.payload,
-        "session_id"
-      );
+      const promptSessionId = parseHookSessionId(directPromptStarts[0].event.payload);
+      const completionSessionId = parseHookSessionId(completion.event.payload);
       if (!promptSessionId || promptSessionId !== completionSessionId) continue;
 
       const endedAsPmWait = directStops.every((item) => {
         try {
-          const stopPayload = JSON.parse(item.event.payload) as {
-            session_id?: unknown;
-            transcript?: unknown;
-          };
-          return stopPayload.session_id === promptSessionId &&
+          const stopPayload = JSON.parse(item.event.payload) as { transcript?: unknown };
+          return parseHookSessionId(item.event.payload) === promptSessionId &&
             typeof stopPayload.transcript === "string" &&
-            /PM_WAIT_NUDGE_RESULT\s+classification=PM_WAIT\b/.test(stopPayload.transcript);
+            /PM_WAIT_NUDGE_RESULT\s+classification=(?:PM_WAIT|HOLD)\b/.test(stopPayload.transcript);
         } catch {
           return false;
         }
