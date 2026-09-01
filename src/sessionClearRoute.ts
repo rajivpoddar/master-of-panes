@@ -27,7 +27,7 @@ export interface SessionClearRouteDependencies {
   db: Pick<MoPDatabase, "getSlot" | "getSessionClearIntent" | "hasSessionClearIntent" | "claimSessionClearIntent" | "markSessionClearDeliveryStarted" | "clearSessionClearIntent" | "logEvent">;
   resolveCheckout: (slot: number) => Promise<string | null>;
   observeCheckout: (path: string) => Promise<CheckoutReadOnlyObservation>;
-  deliverClear: (slot: number, beforeEffect: () => Promise<boolean>) => Promise<{ ok: boolean; effect_started: boolean; reason?: string }>;
+  deliverClear: (slot: number, beforeEffect: () => Promise<boolean>, finalEffectFence: () => boolean) => Promise<{ ok: boolean; effect_started: boolean; reason?: string }>;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => number;
 }
@@ -238,7 +238,7 @@ export function registerSessionClearRoute(
       const delivered = await dependencies.deliverClear(slot, async () => {
         const fence = await readFreshFence();
         return fence.ok;
-      });
+      }, () => slotFenceMatches(dependencies.db.getSlot(slot), request));
       if (!delivered.ok) {
         if (!delivered.effect_started) dependencies.db.clearSessionClearIntent(slot, request.request_token);
         return c.json(failure(

@@ -25,7 +25,7 @@ test("clear delivery runs the exact fence once before pane mutation", async () =
   const runner = makeRunner();
   const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: runner.runShell });
   let fences = 0;
-  const result = await relay.sendClearOnce(5, async () => { fences += 1; return false; });
+  const result = await relay.sendClearOnce(5, async () => { fences += 1; return false; }, () => true);
   assert.equal(result.ok, false);
   assert.equal(result.effect_started, false);
   assert.equal(fences, 1);
@@ -37,7 +37,7 @@ test("clear delivery runs the exact fence once before pane mutation", async () =
 test("paste failure is ambiguous with one pane attempt and no retry", async () => {
   const runner = makeRunner("paste");
   const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: runner.runShell });
-  const result = await relay.sendClearOnce(5, async () => true);
+  const result = await relay.sendClearOnce(5, async () => true, () => true);
   assert.equal(result.ok, false);
   assert.equal(result.effect_started, true);
   assert.equal(runner.calls.filter((call) => call.includes("load-buffer")).length, 1);
@@ -47,7 +47,7 @@ test("paste failure is ambiguous with one pane attempt and no retry", async () =
 test("Enter failure is ambiguous with one submission and no retry", async () => {
   const runner = makeRunner("enter");
   const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: runner.runShell });
-  const result = await relay.sendClearOnce(5, async () => true);
+  const result = await relay.sendClearOnce(5, async () => true, () => true);
   assert.equal(result.ok, false);
   assert.equal(result.effect_started, true);
   assert.equal(runner.calls.filter((call) => call.includes("load-buffer")).length, 1);
@@ -68,7 +68,7 @@ test("final fence has no file write, timer, or separate pane await before submis
     await pausedFence;
     phases.push("fence-passed");
     return true;
-  });
+  }, () => true);
   await fenceObserved;
   assert.deepEqual(phases, ["final-fence"]);
   assert.equal(runner.calls.filter((call) => call.includes("load-buffer")).length, 0);
@@ -80,4 +80,33 @@ test("final fence has no file write, timer, or separate pane await before submis
   assert.equal(runner.calls.filter((call) => call.includes("paste-buffer")).length, 1);
   assert.equal(runner.calls.filter((call) => call.includes("send-keys")).length, 1);
   assert.match(runner.calls.find((call) => call.includes("load-buffer")) ?? "", /&&/);
+});
+
+test("synchronous final fence rejects drift queued after asynchronous fence", async () => {
+  const driftKinds = ["active", "dnd", "free", "epoch", "session"] as const;
+  for (const driftKind of driftKinds) {
+    const runner = makeRunner();
+    const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: runner.runShell });
+    let state = "exact";
+    const pending = relay.sendClearOnce(5, async () => {
+      queueMicrotask(() => { state = driftKind; });
+      return true;
+    }, () => state === "exact");
+    const result = await pending;
+    assert.equal(result.ok, false, driftKind);
+    assert.equal(result.effect_started, false, driftKind);
+    assert.equal(runner.calls.filter((call) => call.includes("load-buffer")).length, 0, driftKind);
+    assert.equal(runner.calls.filter((call) => call.includes("paste-buffer")).length, 0, driftKind);
+    assert.equal(runner.calls.filter((call) => call.includes("send-keys")).length, 0, driftKind);
+  }
+});
+
+test("unchanged synchronous final fence submits one combined clear", async () => {
+  const runner = makeRunner();
+  const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: runner.runShell });
+  const result = await relay.sendClearOnce(5, async () => true, () => true);
+  assert.deepEqual(result, { ok: true, effect_started: true });
+  assert.equal(runner.calls.filter((call) => call.includes("load-buffer")).length, 1);
+  assert.equal(runner.calls.filter((call) => call.includes("paste-buffer")).length, 1);
+  assert.equal(runner.calls.filter((call) => call.includes("send-keys")).length, 1);
 });

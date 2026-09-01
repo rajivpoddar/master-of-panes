@@ -1017,7 +1017,7 @@ registerSessionClearRoute(app, {
   db,
   resolveCheckout: (slot) => relay.getSlotCheckoutPath(slot),
   observeCheckout,
-  deliverClear: (slot, beforeEffect) => relay.sendClearOnce(slot, beforeEffect),
+  deliverClear: (slot, beforeEffect, finalEffectFence) => relay.sendClearOnce(slot, beforeEffect, finalEffectFence),
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────

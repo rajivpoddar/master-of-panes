@@ -1145,6 +1145,7 @@ export class TmuxRelay {
   async sendClearOnce(
     slotNum: number,
     beforeEffect: () => Promise<boolean>,
+    finalEffectFence: () => boolean,
   ): Promise<{ ok: boolean; effect_started: boolean; reason?: string }> {
     const identity = await verifyPaneIdentity(slotNum, this.runShell);
     if (!identity.ok) return { ok: false, effect_started: false, reason: identity.detail };
@@ -1156,6 +1157,9 @@ export class TmuxRelay {
       await fs.writeFile(tmpFile, "/clear");
       if (!(await beforeEffect())) {
         return { ok: false, effect_started: false, reason: "session-clear effect fence refused" };
+      }
+      if (!finalEffectFence()) {
+        return { ok: false, effect_started: false, reason: "session-clear synchronous effect fence refused" };
       }
       effectStarted = true;
       // Keep load, paste, and Enter in one non-retrying shell boundary. There
