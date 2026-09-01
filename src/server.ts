@@ -347,6 +347,13 @@ app.post("/restart", (c) => {
   setTimeout(() => process.exit(0), 100);
   return c.json({ status: "restarting" });
 });
+
+/** Get all slot statuses for read-only registry and readiness consumers. */
+app.get("/slots", (c) => {
+  const slots = db.getAllSlots();
+  return c.json({ slots });
+});
+
 /** Get a single slot's status */
 app.get("/slots/:slotNum", (c) => {
   const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
