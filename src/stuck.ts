@@ -82,6 +82,7 @@ type IdleOccupiedAnchor = {
   timestamp: string;
   timestampMs: number;
   source: string;
+  eventId?: number;
 };
 
 type FreeSlotAssignmentGate = {
@@ -488,7 +489,7 @@ export class StuckDetector {
       const event = this.db.getEvents(slot.slot, 1, eventType)[0];
       if (event && parseDbTimestampMs(event.timestamp) >= idleAnchor.timestampMs) return;
     }
-    const sessionId = this.getIdleOccupiedSessionId(slot, idleAnchor);
+    const sessionId = this.resolveIdleOccupiedHookSession(slot, idleAnchor);
     if (!sessionId) {
       this.db.logEvent(slot.slot, "idle_occupied_suppressed_missing_hook_session", "Stuck", null, {
         assignment_epoch: slot.assignment_epoch,
@@ -914,7 +915,7 @@ export class StuckDetector {
           const latestTuple = latest ? slotAssignmentTuple(latest) : null;
           const latestAnchor = latest ? this.getIdleOccupiedAnchor(latest) : null;
           const latestSessionId = latest && latestAnchor
-            ? this.getIdleOccupiedSessionId(latest, latestAnchor)
+            ? this.resolveIdleOccupiedHookSession(latest, latestAnchor)
             : null;
           const latestWaitAnchor = latest && latestAnchor
             ? this.getIdleOccupiedWaitAnchor(latest, latestAnchor)
@@ -982,7 +983,7 @@ export class StuckDetector {
     slot: SlotState
   ): IdleOccupiedAnchor | null {
     const assignedMs = slot.assigned_at ? parseDbTimestampMs(slot.assigned_at) : NaN;
-    const candidates: Array<{ timestamp: string; timestampMs: number; source: string }> = [];
+    const candidates: IdleOccupiedAnchor[] = [];
     for (const eventType of [
       "Stop",
       "SessionEnd",
@@ -993,10 +994,12 @@ export class StuckDetector {
       const timestampMs = parseDbTimestampMs(event.timestamp);
       if (!Number.isFinite(timestampMs)) continue;
       if (Number.isFinite(assignedMs) && timestampMs < assignedMs) continue;
-      candidates.push({ timestamp: event.timestamp, timestampMs, source: eventType });
+      candidates.push({ timestamp: event.timestamp, timestampMs, source: eventType, eventId: event.id });
     }
     if (candidates.length > 0) {
-      candidates.sort((a, b) => b.timestampMs - a.timestampMs);
+      candidates.sort((a, b) =>
+        b.timestampMs - a.timestampMs || (b.eventId ?? 0) - (a.eventId ?? 0)
+      );
       return candidates[0];
     }
     if (!slot.assigned_at || !Number.isFinite(assignedMs)) return null;
@@ -1012,7 +1015,7 @@ export class StuckDetector {
    * Assignment.session_id is retired telemetry and is intentionally cleared;
    * hook event payloads are the durable source for this identity instead.
    */
-  private getIdleOccupiedSessionId(
+  private resolveIdleOccupiedHookSession(
     slot: SlotState,
     anchor: IdleOccupiedAnchor,
   ): string | null {
@@ -1020,27 +1023,47 @@ export class StuckDetector {
     const readSession = (payload: string): string | null => {
       try {
         const value = JSON.parse(payload) as { session_id?: unknown };
-        return typeof value.session_id === "string" && value.session_id.trim() !== ""
-          ? value.session_id
+        return typeof value.session_id === "string"
+          && value.session_id.trim() !== ""
+          && !/[\u0000-\u001f\u007f]/.test(value.session_id)
+          ? value.session_id.trim()
           : null;
       } catch {
         return null;
       }
     };
 
-    if (anchor.source !== "assigned_at") {
-      const anchorEvent = this.db
-        .getEvents(slot.slot, 100, anchor.source)
-        .find((event) => parseDbTimestampMs(event.timestamp) === anchor.timestampMs);
-      const directSessionId = anchorEvent ? readSession(anchorEvent.payload) : null;
-      if (directSessionId) return directSessionId;
+    const events = this.db.getEvents(slot.slot, 300);
+    const anchorEvent = anchor.eventId !== undefined
+      ? events.find((event) => event.id === anchor.eventId)
+      : events.find((event) =>
+        event.event_type === anchor.source
+        && parseDbTimestampMs(event.timestamp) === anchor.timestampMs
+      );
+    const isAfterAnchor = (event: typeof events[number]): boolean => {
+      if (anchor.eventId !== undefined) return event.id > anchor.eventId;
+      return parseDbTimestampMs(event.timestamp) > anchor.timestampMs;
+    };
+    const openerEvents = events
+      .filter((event) => event.event_type === "UserPromptSubmit" || event.event_type === "SessionStart")
+      .sort((left, right) => right.id - left.id);
+
+    // A later opener starts a newer hook-session generation even when Claude
+    // has not yet emitted a terminal hook. The older idle anchor cannot be
+    // reused, and an ambiguous opener is fail-closed as well.
+    if (openerEvents.some(isAfterAnchor)) return null;
+
+    // Stop and SessionEnd are authoritative terminal anchors only when their
+    // own payload carries a valid session identity. Never borrow an older
+    // opener for a malformed or tokenless terminal event.
+    if (anchor.source === "Stop" || anchor.source === "SessionEnd") {
+      return anchorEvent ? readSession(anchorEvent.payload) : null;
     }
 
-    // Reconciliation/legacy anchors do not always carry a payload. Recover the
-    // session from the latest production hook in the same assignment epoch,
-    // bounded before the anchor. If that chain is incomplete, fail closed.
-    const chain = this.db
-      .getEvents(slot.slot, 300)
+    // Reconciliation/assigned-at anchors do not always carry a payload.
+    // Recover only from the latest production opener bounded before the
+    // anchor. These are the explicitly supported fallback anchor classes.
+    const chain = events
       .filter((event) => {
         const timestampMs = parseDbTimestampMs(event.timestamp);
         return Number.isFinite(timestampMs)
@@ -1048,7 +1071,7 @@ export class StuckDetector {
           && (!Number.isFinite(assignedMs) || timestampMs >= assignedMs)
           && (event.event_type === "UserPromptSubmit" || event.event_type === "SessionStart");
       })
-      .sort((left, right) => parseDbTimestampMs(right.timestamp) - parseDbTimestampMs(left.timestamp));
+      .sort((left, right) => right.id - left.id);
     return chain.length > 0 ? readSession(chain[0].payload) : null;
   }
 
