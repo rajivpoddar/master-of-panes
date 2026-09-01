@@ -70,6 +70,26 @@ function parseDbTimestampMs(timestamp: string): number {
   return new Date(timestamp + "Z").getTime();
 }
 
+/**
+ * Read the session identity carried by a production hook event. Session IDs
+ * are used as an authoritative idle-anchor boundary, so Unicode controls,
+ * format characters, and line separators must fail closed rather than become
+ * visually indistinguishable identities.
+ */
+function parseHookSessionId(rawPayload: string): string | null {
+  try {
+    const value = JSON.parse(rawPayload) as { session_id?: unknown };
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    if (typeof value.session_id !== "string") return null;
+    const sessionId = value.session_id.trim();
+    return sessionId.length > 0 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(sessionId)
+      ? sessionId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 type ContinueDeliveryResult = {
   sent: boolean;
   reason: "sent" | "send_failed" | "slot_missing" | "released" | "dnd" | "identity_changed" | "release_in_progress";
@@ -1020,18 +1040,6 @@ export class StuckDetector {
     anchor: IdleOccupiedAnchor,
   ): string | null {
     const assignedMs = slot.assigned_at ? parseDbTimestampMs(slot.assigned_at) : NaN;
-    const readSession = (payload: string): string | null => {
-      try {
-        const value = JSON.parse(payload) as { session_id?: unknown };
-        return typeof value.session_id === "string"
-          && value.session_id.trim() !== ""
-          && !/[\u0000-\u001f\u007f]/.test(value.session_id)
-          ? value.session_id.trim()
-          : null;
-      } catch {
-        return null;
-      }
-    };
 
     const events = this.db.getEvents(slot.slot, 300);
     const anchorEvent = anchor.eventId !== undefined
@@ -1057,7 +1065,7 @@ export class StuckDetector {
     // own payload carries a valid session identity. Never borrow an older
     // opener for a malformed or tokenless terminal event.
     if (anchor.source === "Stop" || anchor.source === "SessionEnd") {
-      return anchorEvent ? readSession(anchorEvent.payload) : null;
+      return anchorEvent ? parseHookSessionId(anchorEvent.payload) : null;
     }
 
     // Reconciliation/assigned-at anchors do not always carry a payload.
@@ -1072,7 +1080,7 @@ export class StuckDetector {
           && (event.event_type === "UserPromptSubmit" || event.event_type === "SessionStart");
       })
       .sort((left, right) => right.id - left.id);
-    return chain.length > 0 ? readSession(chain[0].payload) : null;
+    return chain.length > 0 ? parseHookSessionId(chain[0].payload) : null;
   }
 
   private getIdleFreeAnchor(
@@ -1215,28 +1223,14 @@ export class StuckDetector {
       );
       if (directPromptStarts.length !== 1 || directStops.length === 0) continue;
 
-      const readSessionId = (rawPayload: string, field: string): string | null => {
-        try {
-          const value = JSON.parse(rawPayload) as Record<string, unknown>;
-          return typeof value[field] === "string" ? value[field] : null;
-        } catch {
-          return null;
-        }
-      };
-      const promptSessionId = readSessionId(directPromptStarts[0].event.payload, "session_id");
-      const completionSessionId = readSessionId(
-        completion.event.payload,
-        "session_id"
-      );
+      const promptSessionId = parseHookSessionId(directPromptStarts[0].event.payload);
+      const completionSessionId = parseHookSessionId(completion.event.payload);
       if (!promptSessionId || promptSessionId !== completionSessionId) continue;
 
       const endedAsPmWait = directStops.every((item) => {
         try {
-          const stopPayload = JSON.parse(item.event.payload) as {
-            session_id?: unknown;
-            transcript?: unknown;
-          };
-          return stopPayload.session_id === promptSessionId &&
+          const stopPayload = JSON.parse(item.event.payload) as { transcript?: unknown };
+          return parseHookSessionId(item.event.payload) === promptSessionId &&
             typeof stopPayload.transcript === "string" &&
             /PM_WAIT_NUDGE_RESULT\s+classification=(?:PM_WAIT|HOLD)\b/.test(stopPayload.transcript);
         } catch {

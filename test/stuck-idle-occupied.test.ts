@@ -1828,6 +1828,109 @@ test("terminal anchors with missing or malformed sessions never borrow an older 
   }
 });
 
+test("Unicode control and format terminal session IDs fail closed", async () => {
+  const originalNow = Date.now;
+  try {
+    for (const terminal of [
+      { type: "Stop" as const, session_id: "valid-session\u0085" },
+      { type: "SessionEnd" as const, session_id: "valid-session\u200B" },
+    ]) {
+      const initialNow = originalNow();
+      const directory = mkdtempSync(join(tmpdir(), "mop-unicode-terminal-session-"));
+      const db = new MoPDatabase({
+        ...DEFAULT_CONFIG,
+        dbPath: join(directory, "mop.db"),
+      });
+      const sends: string[] = [];
+      const relay = {
+        sendToSlotAsync: async () => {
+          sends.push("unexpected");
+          return true;
+        },
+      } as unknown as TmuxRelay;
+      const processor = new HookProcessor(db, relay);
+      try {
+        assert.equal(
+          db.assignSlot(2, "issue 7000", "github:heydonna-app/heydonna-app", 7000, "main", 7001, "a".repeat(40), 0).ok,
+          true,
+        );
+        db.updateSlot(2, { idle: true, active_turn_id: null, active_turn_state: "inactive" });
+        await processor.process(2, {
+          type: "UserPromptSubmit",
+          session_id: "valid-session",
+        });
+        await processor.process(2, terminal as never);
+        processor.cancelPendingIdleTimer(2);
+
+        Date.now = () => initialNow + 30 * 60_000;
+        await new StuckDetector(
+          db,
+          { getLogMtime: async () => new Date(initialNow) } as unknown as LogManager,
+          relay,
+        ).checkIdleOccupied(db.getSlot(2)!);
+
+        assert.equal(sends.length, 0);
+        assert.equal(db.getEvents(2, 20, "idle_occupied_continue_injected").length, 0);
+        assert.equal(db.getEvents(2, 20, "idle_occupied_suppressed_missing_hook_session").length, 1);
+      } finally {
+        db.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("Unicode control and format opener session IDs fail closed", async () => {
+  const originalNow = Date.now;
+  const initialNow = originalNow();
+  const directory = mkdtempSync(join(tmpdir(), "mop-unicode-opener-session-"));
+  const db = new MoPDatabase({
+    ...DEFAULT_CONFIG,
+    dbPath: join(directory, "mop.db"),
+  });
+  const sends: string[] = [];
+  const relay = {
+    sendToSlotAsync: async () => {
+      sends.push("unexpected");
+      return true;
+    },
+  } as unknown as TmuxRelay;
+  const processor = new HookProcessor(db, relay);
+  try {
+    assert.equal(
+      db.assignSlot(2, "issue 7000", "github:heydonna-app/heydonna-app", 7000, "main", 7001, "a".repeat(40), 0).ok,
+      true,
+    );
+    db.updateSlot(2, { idle: true, active_turn_id: null, active_turn_state: "inactive" });
+    await processor.process(2, {
+      type: "SessionStart",
+      session_id: "opener-session\u200B",
+      source: "startup",
+    });
+    db.logEvent(2, "slot_idle_reconciled_from_pane", "Timer", null, {
+      reason: "production-shaped idle reconciliation",
+    });
+    db.updateSlot(2, { idle: true, active_turn_id: null, active_turn_state: "inactive" });
+
+    Date.now = () => initialNow + 30 * 60_000;
+    await new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(initialNow) } as unknown as LogManager,
+      relay,
+    ).checkIdleOccupied(db.getSlot(2)!);
+
+    assert.equal(sends.length, 0);
+    assert.equal(db.getEvents(2, 20, "idle_occupied_continue_injected").length, 0);
+    assert.equal(db.getEvents(2, 20, "idle_occupied_suppressed_missing_hook_session").length, 1);
+  } finally {
+    Date.now = originalNow;
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("does not nudge a free slot when hook state is active despite stale log mtime", async () => {
   const originalNow = Date.now;
   const originalGate = process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE;
