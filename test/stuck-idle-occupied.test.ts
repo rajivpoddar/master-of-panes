@@ -396,6 +396,7 @@ test("nudges an occupied idle dev slot once per idle episode", async () => {
     assert.deepEqual(JSON.parse(injected[0].payload), {
       command: expectedNudge(6, "REMINDER"),
       assignment_epoch: 4,
+      session_id: SESSION_ID,
       idle_anchor: OLD_IDLE,
       idle_anchor_source: "Stop",
       idle_age_ms: 360_000,
@@ -458,7 +459,7 @@ test("a notification-derived idle prompt does not start a new idle episode", asy
   }
 });
 
-test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => {
+test("does not re-fire after a nudge turn ends in HOLD", async () => {
   const originalNow = Date.now;
   Date.now = () => Date.parse("2026-07-27T02:36:01.000Z");
   try {
@@ -496,7 +497,7 @@ test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => 
         tool_name: null,
         payload: JSON.stringify({
           session_id: SESSION_ID,
-          transcript: "PM_WAIT_NUDGE_RESULT classification=PM_WAIT action=reminded_pm waiting=6m urgency=REMINDER",
+          transcript: "PM_WAIT_NUDGE_RESULT classification=HOLD action=reminded_pm waiting=6m urgency=REMINDER",
         }),
         processed: false,
       },
@@ -514,33 +515,17 @@ test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => 
 
     await h.detector.checkIdleOccupied(slot());
 
-    assert.deepEqual(h.sends, [expectedNudge(12, "REMINDER")]);
-    const latest = h.events.filter(
+    assert.deepEqual(h.sends, []);
+    const nudges = h.events.filter(
       (event) => event.event_type === "idle_occupied_continue_injected",
-    ).at(-1);
-    assert.ok(latest);
-    assert.deepEqual(JSON.parse(latest.payload), {
-      command: expectedNudge(12, "REMINDER"),
-      assignment_epoch: 4,
-      idle_anchor: "2026-07-27T02:30:30.000",
-      idle_anchor_source: "Stop",
-      idle_age_ms: 331_000,
-      wait_anchor: OLD_IDLE,
-      wait_anchor_source: "pm_wait_nudge_carry",
-      wait_age_ms: 721_000,
-      wait_age_minutes: 12,
-      urgency: "REMINDER",
-      turn_state: "inactive",
-      issue: 7000,
-      pr: 7001,
-      branch: "fix/7000",
-    });
+    ).length;
+    assert.equal(nudges, 1);
   } finally {
     Date.now = originalNow;
   }
 });
 
-test("keeps the original wait start across repeated PM_WAIT nudge turns", async () => {
+test("keeps the original wait start without repeating PM_WAIT nudges", async () => {
   const originalNow = Date.now;
   Date.now = () => Date.parse("2026-07-27T02:42:01.000Z");
   try {
@@ -646,27 +631,11 @@ test("keeps the original wait start across repeated PM_WAIT nudge turns", async 
 
     await h.detector.checkIdleOccupied(slot());
 
-    assert.deepEqual(h.sends, [expectedNudge(18, "FOLLOW_UP")]);
-    const latest = h.events.filter(
+    assert.deepEqual(h.sends, []);
+    const nudges = h.events.filter(
       (event) => event.event_type === "idle_occupied_continue_injected",
-    ).at(-1);
-    assert.ok(latest);
-    assert.deepEqual(JSON.parse(latest.payload), {
-      command: expectedNudge(18, "FOLLOW_UP"),
-      assignment_epoch: 4,
-      idle_anchor: "2026-07-27T02:36:30.000",
-      idle_anchor_source: "Stop",
-      idle_age_ms: 331_000,
-      wait_anchor: OLD_IDLE,
-      wait_anchor_source: "Stop",
-      wait_age_ms: 1_081_000,
-      wait_age_minutes: 18,
-      urgency: "FOLLOW_UP",
-      turn_state: "inactive",
-      issue: 7000,
-      pr: 7001,
-      branch: "fix/7000",
-    });
+    ).length;
+    assert.equal(nudges, 2);
   } finally {
     Date.now = originalNow;
   }
@@ -1527,7 +1496,7 @@ test("a UserPromptSubmit suppresses an old episode until a later Stop starts a n
   }
 });
 
-test("re-fires the occupied nudge when urgency advances on the same anchor", async () => {
+test("does not re-fire the occupied nudge when urgency advances on the same wait episode", async () => {
   const originalNow = Date.now;
   Date.now = () => NOW;
   try {
@@ -1552,8 +1521,38 @@ test("re-fires the occupied nudge when urgency advances on the same anchor", asy
     Date.now = () => Date.parse(OLD_IDLE + "Z") + 30 * 60_000;
     await h.detector.checkIdleOccupied(slot());
 
+    assert.equal(h.sends.length, 0);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("binds occupied nudge deduplication to the current session", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const candidate = slot({ session_id: "session-3" });
+    const h = harness(candidate);
+    h.events.push({
+      id: 50,
+      timestamp: "2026-07-27T02:26:00.000",
+      slot: 2,
+      event_type: "idle_occupied_continue_injected",
+      hook_type: "Stuck",
+      tool_name: null,
+      payload: JSON.stringify({
+        assignment_epoch: 4,
+        session_id: SESSION_ID,
+        idle_anchor: OLD_IDLE,
+        wait_anchor: OLD_IDLE,
+        urgency: "REMINDER",
+      }),
+      processed: false,
+    });
+
+    await h.detector.checkIdleOccupied(candidate);
+
     assert.equal(h.sends.length, 1);
-    assert.match(h.sends[0], /urgency=URGENT/);
   } finally {
     Date.now = originalNow;
   }

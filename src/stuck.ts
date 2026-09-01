@@ -486,18 +486,27 @@ export class StuckDetector {
     }
 
     const prior = this.db.getEvents(slot.slot, 1, "idle_occupied_continue_injected")[0];
+    const sessionId = (slot as SlotState & { session_id?: string | null }).session_id ?? null;
     if (prior) {
       try {
         const payload = JSON.parse(prior.payload) as {
           assignment_epoch?: number;
           idle_anchor?: string;
+          session_id?: string | null;
+          wait_anchor?: string;
           urgency?: IdleOccupiedUrgency;
         };
+        const priorWaitAnchor = payload.wait_anchor ?? payload.idle_anchor;
+        const sessionMatches = !Object.prototype.hasOwnProperty.call(payload, "session_id") ||
+          payload.session_id === sessionId;
+        // A PM_WAIT/HOLD completion advances the hook Stop timestamp, but it
+        // does not advance the actionable wait episode. Deduplicate against
+        // the carried wait anchor rather than the moving idle anchor, and do
+        // not treat an urgency tier as a new delivery opportunity.
         if (
           payload.assignment_epoch === slot.assignment_epoch &&
-          payload.idle_anchor === idleAnchor.timestamp &&
-          this.idleOccupiedUrgencyRank(payload.urgency) >=
-            this.idleOccupiedUrgencyRank(urgency)
+          priorWaitAnchor === waitAnchor.timestamp &&
+          sessionMatches
         ) {
           return;
         }
@@ -552,6 +561,7 @@ export class StuckDetector {
     const payload = {
       command,
       assignment_epoch: slot.assignment_epoch,
+      session_id: sessionId,
       idle_anchor: idleAnchor.timestamp,
       idle_anchor_source: idleAnchor.source,
       idle_age_ms: idleAgeMs,
@@ -1097,7 +1107,7 @@ export class StuckDetector {
           };
           return stopPayload.session_id === promptSessionId &&
             typeof stopPayload.transcript === "string" &&
-            /PM_WAIT_NUDGE_RESULT\s+classification=PM_WAIT\b/.test(stopPayload.transcript);
+            /PM_WAIT_NUDGE_RESULT\s+classification=(?:PM_WAIT|HOLD)\b/.test(stopPayload.transcript);
         } catch {
           return false;
         }
