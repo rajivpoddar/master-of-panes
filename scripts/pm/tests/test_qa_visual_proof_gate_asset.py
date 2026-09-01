@@ -6,6 +6,7 @@ import importlib.util
 import json
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 SOURCE = SHARED / "claude" / "scripts" / "qa-visual-proof-gate.py"
 MANIFEST = SHARED / "manifest.json"
 HEAD = "f026a0094573fc10e9613d3dde1351d7724c103b"
-RULES_SHA256 = "7d8faef03ce3e039ea6d036c238ace251d8d839c76742a017aa98bfd8c9851c8"
+RULES_SHA256 = "bb572ca70c1c464267b92732a69cfca762c151ca05a5a7340da76a2c75191834"
 APP_ORIGIN_COMMIT = "a9edd8a9f3bd2c70375073f67d1d41e9ab3c4f1a"
 APP_ORIGIN_BLOB = "2bde63420e0070debb048c94d6f2513785638c3e"
 APP_ORIGIN_PREIMAGE_SHA256 = "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a"
@@ -106,13 +107,29 @@ def test_non_ui_live_path_classifies_before_issue_resolution(monkeypatch: pytest
     assert classifier_calls[0][classifier_calls[0].index("--expected-head") + 1] == HEAD
 
 
-def test_current_classifier_shape_uses_invocation_head_binding(
+def test_authoritative_classifier_output_for_exact_7589_head_is_consumable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    gate_scope = _scope(ui_changed=False)
-    gate_scope.pop("head")
+    classifier = Path("/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/change_scope.py")
+    rules = classifier.with_name("change-scope-rules.json")
+    completed = subprocess.run(
+        [
+            "python3", str(classifier), "--rules", str(rules),
+            "--repo", "heydonna-app/heydonna-app",
+            "--path", "scripts/ci/observability.py",
+            "--expected-head", HEAD,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    scope = json.loads(completed.stdout)
+    assert scope["head"] == HEAD
+    assert scope["rules_sha256"] == RULES_SHA256
     gate = _load_gate(monkeypatch, tmp_path)
-    assert gate.validate_change_scope(gate_scope, expected_head=HEAD) == gate_scope
+    validated = gate.validate_change_scope(scope, expected_head=HEAD)
+    assert validated["ui_changed"] is False
 
 
 def test_ui_live_path_still_resolves_issue_after_classifier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
