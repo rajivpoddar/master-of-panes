@@ -64,6 +64,15 @@ merge. The hourly open-PR audit checks only continuity (terminal emitted,
 consumed, and next edge recorded); it may repair one missed wake once and then
 fails loudly with `TERMINAL_CONTINUITY_BREACH`. It is not the normal mover.
 
+The executable producer/parser/router is the manifest-mapped
+`/Users/rajiv/.claude/scripts/pm-terminal-continuity.py`. It validates and
+routes each envelope before the immediate CTO wake, reserving the durable key
+`terminal_type + pr + full_head + source_receipt` first. Exact replays and
+response-loss (`reserved`) outcomes suppress another wake; changed head or
+terminal type is a new key. `hourly-repair` is permitted once only for an
+emitted key with neither a CTO-consumption nor next-edge receipt; uncertain
+delivery is never replayed automatically.
+
 ## Routine PM message suppression
 
 Routine PM acknowledgements and progress receipts are ledger-only, not CTO

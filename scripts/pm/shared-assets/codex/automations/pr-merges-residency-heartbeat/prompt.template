@@ -1,5 +1,17 @@
 Invoke `$heydonna-open-pr-status` exactly once for this hourly tick.
 
+PM terminal completion is executable, not prose-only: validate and emit each
+bounded envelope through `/Users/rajiv/.claude/scripts/pm-terminal-continuity.py`
+`route` (terminal_type, PR, full head, source receipt, evidence, next action,
+next owner, and wake). The adapter reserves the exact continuity key before
+the single CTO wake; exact replay and response-loss are fail-closed, while a
+changed head or terminal type is a new key. Use
+`/Users/rajiv/.claude/scripts/pm-merges-automation-update.py` to render the
+supported `automation_update` payload from this template and the active TOML;
+preserve scheduler-owned id, kind, name, status, rrule, target, and dynamic
+timestamps. This is the terminal continuity boundary; never edit the live TOML
+directly.
+
 This is a receipt-continuity backstop, not the normal release mover. Enumerate
 every OPEN PR at its exact full head and verify that each row ends in exactly
 one of `CI_E2E_IN_PROGRESS`, `CAPTURE_IN_PROGRESS`, `REPRO_REWORK_IN_PROGRESS`,

@@ -87,6 +87,17 @@ terminal type plus exact PR/head/source receipt. Routine acknowledgement and
 progress remain suppressed. PM terminals never perform CTO-owned CI/E2E
 admission, capture, integration, or merge.
 
+The executable PM boundary is the manifest-mapped
+`/Users/rajiv/.claude/scripts/pm-terminal-continuity.py`. The PM completion
+adapter validates and routes each envelope through `route` before the
+single immediate CTO wake. The monitor parses/routes only validated envelopes
+and records the exact continuity key
+`terminal_type+pr+full_head+source_receipt`; it reserves delivery before wake,
+binds CTO consumption and next-edge receipts, and treats response loss as
+uncertain (no resend). A changed head or terminal type is a new key. The
+hourly task may invoke `hourly-repair` once only when the emitted key has no
+bound consumption or next-edge receipt.
+
 Treat the following as hard actionable wakes: code/proof-ready with no
 exact-head CI/E2E admission for 10 minutes; a CI or capture terminal awaiting
 its next release boundary; and a free compatible slot with executable open-PR

@@ -23,6 +23,16 @@ or durably delegating the mapped next edge in the same wake. The hourly audit
 is only a continuity backstop and must never become a release dependency or a
 fifth open-PR state.
 
+The executable PM terminal producer/parser/router is the shared,
+manifest-mapped `/Users/rajiv/.claude/scripts/pm-terminal-continuity.py`.
+It atomically reserves `terminal_type + PR + full head + source_receipt`,
+binds CTO consumption and next-edge receipts, suppresses exact replay and
+uncertain response-loss, and permits one hourly repair only for an emitted
+terminal lacking continuation. The active PR-Merges scheduler prompt is
+updated only through the supported
+`/Users/rajiv/.claude/scripts/pm-merges-automation-update.py` payload path,
+which preserves scheduler-owned metadata and dynamic timestamps.
+
 ## Task affinity
 
 - CP Repairs `01a0324b-68e0-7491-988f-e7da9abd26ab`: shared release and

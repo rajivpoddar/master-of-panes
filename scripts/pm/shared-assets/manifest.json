@@ -22,6 +22,8 @@
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
       "~/.claude/scripts/mop-slot-respawn.sh",
+      "~/.claude/scripts/pm-merges-automation-update.py",
+      "~/.claude/scripts/pm-terminal-continuity.py",
       "~/.claude/control_plane/runtime_observation.py",
       "~/.claude/scripts/sakshi-heartbeat.py",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
@@ -39,7 +41,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 61,
+    "selected_count": 63,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -299,6 +301,24 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/pm-merges-automation-update.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm-merges-automation-update.py",
+      "sha256": "20705a3ba5f039a6c1e6d2a851ee68132104ec4d09b2f0412ece4a9e0a99d35a",
+      "mode": 493,
+      "ownership_class": "shared-codex-automation-adapter",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/pm-terminal-continuity.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm-terminal-continuity.py",
+      "sha256": "7063455d7ce4245c419218a3b9ac2ea9ec7d33b64be74b318fa69b4210b11633",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-terminal-continuity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py",
       "sha256": "18848718df161667ed3462bcec45d4fb632beba4f1a6dc5692c867c4bb36726d",
@@ -490,7 +510,7 @@
     {
       "source_path": "codex/automations/pr-merges-residency-heartbeat/prompt.template",
       "canonical_target": "/Users/rajiv/.codex/automations/templates/pr-merges-residency-heartbeat.prompt",
-      "sha256": "7f1f59c1ba7c3633c6598bd38ebeb0fc4e9c54d94cd93a439770d737f8a00001",
+      "sha256": "251c9a0f11af074378d83133563dfb301c2752516549665134b75f4d01c19cd5",
       "mode": 420,
       "ownership_class": "shared-codex-automation-prompt-template",
       "dependency_status": "closed",
@@ -508,7 +528,7 @@
     {
       "source_path": "codex/monitors/heydonna-pm-chat/MONITOR.md",
       "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-pm-chat/MONITOR.md",
-      "sha256": "0b6e6c66d376a72b2c8ee93dfc08c5dec1b32018c89201f86f9060cfc7511c9a",
+      "sha256": "f0676505d72852867a2f9720bb5a59cc94d4953f59d24e48d22dc1fe081c9a48",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
       "dependency_status": "closed",
@@ -517,7 +537,7 @@
     {
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
       "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
-      "sha256": "0c02ccfc744b64877f573caefb68ea7f5df620d334f19cde5a3765f6b6074b4f",
+      "sha256": "4b935007010ef2ccca561a8cc12276856cd0223423faffd568a57db9b677e714",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
       "dependency_status": "closed",
@@ -526,7 +546,7 @@
     {
       "source_path": "codex/skills/_shared/release-conveyor-contract.md",
       "canonical_target": "/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md",
-      "sha256": "b20f73095a1e37580c081f8748e4ba80d44c3e1274919b17ed7225fb3ef2a848",
+      "sha256": "9f516020d10f33a144989f87379f0d853964d5b785d30a5c55e73748401db1ab",
       "mode": 420,
       "ownership_class": "shared-codex-contract",
       "dependency_status": "closed",
@@ -571,7 +591,7 @@
     {
       "source_path": "codex/skills/heydonna-control-plane-repair/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-control-plane-repair/SKILL.md",
-      "sha256": "2eecc9edd34ff64b9821d808e5da65a6758c52fbd7d739fcbeaf5d4ff8479320",
+      "sha256": "d1d6093a53a791120f51ef7810832312a0b5057b63ba7150534248a09d722d04",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",
@@ -580,7 +600,7 @@
     {
       "source_path": "codex/skills/heydonna-open-pr-status/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",
-      "sha256": "25abae20717dbb1322c190eebd71ff209dbe53d3ea347618aef4da4ec0935a74",
+      "sha256": "e4cd334f88e06f61ce3fd5fae1957a83e5a58c786d657c2c4eb7429ca646d45b",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",
