@@ -65,13 +65,32 @@ class PMTerminalContinuityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def effect(self, *, body: str = '{"receipt":"wake-1"}', rc: int = 0) -> Path:
+        path = Path(self.temp.name) / f"effect-{len(list(Path(self.temp.name).glob('effect-*')))}.py"
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "payload = sys.stdin.read()\n"
+            f"open({str(path.with_suffix('.seen'))!r}, 'a').write(payload + '\\n')\n"
+            f"print({body!r})\n"
+            f"raise SystemExit({rc})\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return path
+
     def test_all_six_terminal_types_emit_and_route_once(self) -> None:
         for index, terminal_type in enumerate(sorted(MODULE.TERMINAL_TYPES)):
-            result = self.call("route", envelope(terminal_type=terminal_type, receipt=f"source-{index}"))
+            value = envelope(terminal_type=terminal_type, receipt=f"source-{index}")
+            result = self.call("route", value)
             self.assertEqual(result["status"], "EMITTED")
             self.assertEqual(result["route"], "CTO_DECISIONS")
-            duplicate = self.call("route", envelope(terminal_type=terminal_type, receipt=f"source-{index}"))
+            effect = self.effect(body=f'{{"receipt":"wake-{index}"}}')
+            delivered = self.call("deliver", value, "--effect-command", str(effect))
+            self.assertEqual(delivered["status"], "DELIVERED")
+            duplicate = self.call("route", value)
             self.assertEqual(duplicate["status"], "DUPLICATE_SUPPRESSED")
+            self.assertEqual(len(effect.with_suffix(".seen").read_text().splitlines()), 1)
 
     def test_response_loss_is_durable_and_changed_key_is_distinct(self) -> None:
         first = envelope()
@@ -87,6 +106,8 @@ class PMTerminalContinuityTests(unittest.TestCase):
         self.assertEqual(repair["status"], "UNCERTAIN_SUPPRESSED")
         changed_head = self.call("emit", envelope(head="b" * 40))
         self.assertEqual(changed_head["status"], "EMITTED")
+        changed_type = self.call("emit", envelope(terminal_type="TYPED_BLOCKER"))
+        self.assertEqual(changed_type["status"], "EMITTED")
 
     def test_route_parses_and_wakes_cto_once(self) -> None:
         value = envelope(receipt="route-1")
@@ -103,6 +124,62 @@ class PMTerminalContinuityTests(unittest.TestCase):
         self.assertEqual(consumed["status"], "BOUND")
         edge = self.call("edge", value, "--receipt", "edge-1")
         self.assertEqual(edge["status"], "BOUND")
+
+    def test_complete_then_monitor_delivery_is_effect_started_and_delivered_once(self) -> None:
+        value = envelope(receipt="complete-1")
+        reserved = self.call("complete", value)
+        self.assertEqual(reserved["status"], "RESERVED")
+        effect = self.effect()
+        delivered = self.call("deliver", value, "--effect-command", str(effect))
+        self.assertEqual(delivered["status"], "DELIVERED")
+        replay = self.call("deliver", value, "--effect-command", str(effect))
+        self.assertEqual(replay["status"], "DELIVERED_REPLAY_SUPPRESSED")
+        self.assertEqual(len(effect.with_suffix(".seen").read_text().splitlines()), 1)
+        state = json.loads(self.state.read_text())
+        record = state["records"][delivered["key"]]
+        self.assertEqual(record["status"], "delivered")
+        self.assertTrue(record["delivery_generation"])
+
+    def test_crash_before_send_leaves_effect_start_and_never_replays(self) -> None:
+        value = envelope(receipt="crash-1")
+        self.call("complete", value)
+        effect = self.effect()
+        crashed = subprocess.run(
+            [sys.executable, str(CONTINUITY), "deliver", "--effect-command", str(effect), "--crash-before-send"],
+            input=json.dumps(value), text=True, capture_output=True, env=self.env,
+        )
+        self.assertEqual(crashed.returncode, 86)
+        replay = self.call("deliver", value, "--effect-command", str(effect))
+        self.assertEqual(replay["status"], "AMBIGUOUS_SUPPRESSED")
+        self.assertFalse(effect.with_suffix(".seen").exists())
+
+    def test_accepted_send_response_loss_is_ambiguous_and_not_replayed(self) -> None:
+        value = envelope(receipt="loss-1")
+        self.call("complete", value)
+        effect = self.effect(body="not-json", rc=1)
+        first = self.call("deliver", value, "--effect-command", str(effect))
+        self.assertEqual(first["status"], "AMBIGUOUS_SUPPRESSED")
+        replay = self.call("deliver", value, "--effect-command", str(effect))
+        self.assertEqual(replay["status"], "AMBIGUOUS_SUPPRESSED")
+        self.assertEqual(len(effect.with_suffix(".seen").read_text().splitlines()), 1)
+
+    def test_hourly_repair_repairs_missing_edge_after_consumption_once(self) -> None:
+        value = envelope(receipt="repair-edge")
+        self.call("emit", value)
+        self.call("consume", value, "--receipt", "cto-1")
+        first = self.call("hourly-repair", value)
+        self.assertEqual(first["status"], "HOURLY_REPAIR")
+        self.assertEqual(first["repair_kind"], "missing_consumption_or_edge")
+        second = self.call("hourly-repair", value)
+        self.assertEqual(second["status"], "REPAIR_ALREADY_USED")
+
+    def test_monitor_refuses_missing_effect_command_without_second_wake(self) -> None:
+        value = envelope(receipt="missing-effect")
+        self.call("complete", value)
+        first = self.call("deliver", value)
+        self.assertEqual(first["status"], "AMBIGUOUS_SUPPRESSED")
+        second = self.call("deliver", value)
+        self.assertEqual(second["status"], "AMBIGUOUS_SUPPRESSED")
 
     def test_hourly_repair_is_exactly_once_only_without_continuation(self) -> None:
         value = envelope()
@@ -129,11 +206,17 @@ class PMTerminalContinuityTests(unittest.TestCase):
             'name = "PR Merges hourly open-PR audit"\nstatus = "ACTIVE"\n'
             'rrule = "FREQ=HOURLY;INTERVAL=1;BYMINUTE=12"\n'
             'target_thread_id = "01a0324b-68e0-7491-988f-e7e1549f16f7"\n'
+            'notification_policy = "failed_runs_only"\n'
+            'prompt = "prior prompt"\n'
             'created_at = 1\nupdated_at = 2\n', encoding="utf-8"
         )
         payload = AUTOMATION_MODULE.render(config, PROMPT)
         self.assertEqual(payload["mode"], "update")
         self.assertIn("terminal continuity", payload["prompt"].lower())
+        self.assertEqual(payload["notificationPolicy"], "failed_runs_only")
+        self.assertEqual(payload["rollback_preimage"]["metadata"]["created_at"], 1)
+        self.assertEqual(payload["rollback_preimage"]["prompt"], "prior prompt")
+        self.assertEqual(len(payload["rollback_preimage"]["prompt_sha256"]), 64)
         self.assertEqual(payload["preserve"][:6], ["id", "kind", "name", "status", "rrule", "targetThreadId"])
         self.assertEqual(tomllib.loads(config.read_text())["created_at"], 1)
 

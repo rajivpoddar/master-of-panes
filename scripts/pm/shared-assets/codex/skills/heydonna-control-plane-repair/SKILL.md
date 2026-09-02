@@ -25,13 +25,17 @@ fifth open-PR state.
 
 The executable PM terminal producer/parser/router is the shared,
 manifest-mapped `/Users/rajiv/.claude/scripts/pm-terminal-continuity.py`.
-It atomically reserves `terminal_type + PR + full head + source_receipt`,
-binds CTO consumption and next-edge receipts, suppresses exact replay and
-uncertain response-loss, and permits one hourly repair only for an emitted
-terminal lacking continuation. The active PR-Merges scheduler prompt is
+The PM completion boundary calls `complete`; the monitor calls `deliver`.
+`deliver` durably records `effect-start` before the CTO wake and commits
+`delivered` only from an authoritative receipt. Crash, timeout, nonzero,
+malformed, or response-loss outcomes are permanent `ambiguous` records and
+cannot replay. It binds CTO consumption and next-edge receipts to the exact
+key and permits one hourly repair only for a non-ambiguous emitted terminal
+lacking consumption or edge. The active PR-Merges scheduler prompt is
 updated only through the supported
 `/Users/rajiv/.claude/scripts/pm-merges-automation-update.py` payload path,
-which preserves scheduler-owned metadata and dynamic timestamps.
+which preserves scheduler-owned metadata, notification policy, dynamic
+timestamps, and the complete prior prompt/metadata rollback preimage.
 
 ## Task affinity
 

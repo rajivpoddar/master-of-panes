@@ -1,24 +1,28 @@
 Invoke `$heydonna-open-pr-status` exactly once for this hourly tick.
 
-PM terminal completion is executable, not prose-only: validate and emit each
-bounded envelope through `/Users/rajiv/.claude/scripts/pm-terminal-continuity.py`
-`route` (terminal_type, PR, full head, source receipt, evidence, next action,
-next owner, and wake). The adapter reserves the exact continuity key before
-the single CTO wake; exact replay and response-loss are fail-closed, while a
-changed head or terminal type is a new key. Use
+PM terminal completion is executable, not prose-only: validate each bounded
+envelope through `/Users/rajiv/.claude/scripts/pm-terminal-continuity.py`
+`complete`, then have the monitor invoke `deliver` through the existing CTO
+wake transport. `complete` reserves the exact continuity key; `deliver`
+durably records `effect-start` before the first wake effect and commits
+`delivered` only from an authoritative receipt. Crash, timeout, nonzero,
+malformed, or response-loss outcomes are permanent `ambiguous` records and
+never replay. A changed head or terminal type is a new key. Use
 `/Users/rajiv/.claude/scripts/pm-merges-automation-update.py` to render the
 supported `automation_update` payload from this template and the active TOML;
-preserve scheduler-owned id, kind, name, status, rrule, target, and dynamic
-timestamps. This is the terminal continuity boundary; never edit the live TOML
-directly.
+preserve scheduler-owned id, kind, name, status, rrule, target, notification
+policy, and dynamic timestamps, with the complete prior prompt/metadata as the
+rollback preimage. This is the terminal continuity boundary; never edit the
+live TOML directly.
 
 This is a receipt-continuity backstop, not the normal release mover. Enumerate
 every OPEN PR at its exact full head and verify that each row ends in exactly
 one of `CI_E2E_IN_PROGRESS`, `CAPTURE_IN_PROGRESS`, `REPRO_REWORK_IN_PROGRESS`,
 or `REPRO_REWORK_QUEUED`. There is no ACTION_REQUIRED terminal. PM-owned
 terminal envelopes already wake CTO immediately; only when a durable PM
-terminal lacks a CTO-consumption/next-edge receipt may this tick replay or
-repair that one missed wake, once, and then fail loudly with
+terminal lacks a CTO-consumption or next-edge receipt may this tick repair that
+one missed continuity once (never an ambiguous delivery), and then fail loudly
+with
 `TERMINAL_CONTINUITY_BREACH` if continuity remains broken. Do not use this
 audit as a substitute for the mapped same-wake edge.
 

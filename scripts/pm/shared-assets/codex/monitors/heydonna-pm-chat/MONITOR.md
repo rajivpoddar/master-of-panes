@@ -88,15 +88,18 @@ progress remain suppressed. PM terminals never perform CTO-owned CI/E2E
 admission, capture, integration, or merge.
 
 The executable PM boundary is the manifest-mapped
-`/Users/rajiv/.claude/scripts/pm-terminal-continuity.py`. The PM completion
-adapter validates and routes each envelope through `route` before the
-single immediate CTO wake. The monitor parses/routes only validated envelopes
-and records the exact continuity key
-`terminal_type+pr+full_head+source_receipt`; it reserves delivery before wake,
-binds CTO consumption and next-edge receipts, and treats response loss as
-uncertain (no resend). A changed head or terminal type is a new key. The
-hourly task may invoke `hourly-repair` once only when the emitted key has no
-bound consumption or next-edge receipt.
+`/Users/rajiv/.claude/scripts/pm-terminal-continuity.py`. A PM completion
+adapter invokes `complete` with the validated envelope; the monitor invokes
+`deliver` for the reserved key and its existing wake transport. `deliver`
+durably records `effect-start` immediately before the first wake effect and
+then commits `delivered` only from an authoritative receipt. Crash, timeout,
+nonzero, malformed, or response-loss outcomes become permanent
+`ambiguous` records and are never replayed. The monitor records the exact
+continuity key `terminal_type+pr+full_head+source_receipt`, binds CTO
+consumption and next-edge receipts, and treats changed head or terminal type
+as a new key. The hourly task may invoke `hourly-repair` once only when the
+emitted key lacks consumption or next-edge continuity; it must not replay an
+ambiguous or effect-start delivery.
 
 Treat the following as hard actionable wakes: code/proof-ready with no
 exact-head CI/E2E admission for 10 minutes; a CI or capture terminal awaiting

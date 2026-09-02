@@ -37,12 +37,15 @@ they must not define competing ownership or state machines.
   integration, or merge. CTO consumes the envelope and executes or durably
   delegates its mapped next edge in the same wake.
 - The manifest-mapped runtime
-  `/Users/rajiv/.claude/scripts/pm-terminal-continuity.py` is the producer,
-  parser, and router for these envelopes. It reserves the exact
-  `terminal_type:pr:full_head:source_receipt` key before waking CTO, binds
-  consumption and the next-edge receipt, suppresses exact replay and
-  uncertain response-loss, and permits one hourly repair only when an emitted
-  key has no continuation receipt. The scheduler prompt is updated through
+  `/Users/rajiv/.claude/scripts/pm-terminal-continuity.py` is the executable PM
+  completion producer and monitor router. `complete` reserves the exact
+  `terminal_type:pr:full_head:source_receipt` key; `deliver` durably records
+  `effect-start` before the CTO wake and commits `delivered` only from an
+  authoritative receipt. Crash, timeout, malformed, nonzero, and response-loss
+  outcomes become permanent `ambiguous` records and cannot replay. Consumption
+  and the next-edge receipt are bound to the same key. One hourly repair is
+  allowed only for a non-ambiguous emitted key missing consumption or edge.
+  The scheduler prompt is updated through
   `/Users/rajiv/.claude/scripts/pm-merges-automation-update.py`; live TOML
   metadata remains scheduler-owned and is never edited directly.
 - A control-plane failure is escalated immediately and the smallest safe

@@ -9,6 +9,7 @@ automation_update boundary; scheduler-owned timestamps remain untouched.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tomllib
@@ -36,6 +37,23 @@ def render(automation_path: Path, prompt_path: Path) -> dict[str, object]:
             raise ValueError(f"automation_metadata_mismatch:{key}")
     if not prompt.strip() or "pm-terminal-continuity.py" not in prompt:
         raise ValueError("prompt_empty")
+    notification_policy = config.get("notification_policy", config.get("notificationPolicy"))
+    if notification_policy not in (None, "failed_runs_only"):
+        raise ValueError("automation_notification_policy_invalid")
+    prior_prompt = config.get("prompt")
+    if not isinstance(prior_prompt, str) or not prior_prompt.strip():
+        raise ValueError("automation_prior_prompt_missing")
+    metadata = {
+        "id": config["id"],
+        "kind": config["kind"],
+        "name": config["name"],
+        "status": config["status"],
+        "rrule": config["rrule"],
+        "targetThreadId": config["target_thread_id"],
+        "notificationPolicy": notification_policy,
+        "created_at": config.get("created_at"),
+        "updated_at": config.get("updated_at"),
+    }
     return {
         "mode": "update",
         "kind": "heartbeat",
@@ -44,8 +62,15 @@ def render(automation_path: Path, prompt_path: Path) -> dict[str, object]:
         "status": REQUIRED["status"],
         "rrule": REQUIRED["rrule"],
         "targetThreadId": REQUIRED["target_thread_id"],
+        "notificationPolicy": notification_policy,
         "prompt": prompt,
         "preserve": ["id", "kind", "name", "status", "rrule", "targetThreadId", "created_at", "updated_at"],
+        "rollback_preimage": {
+            "automation_path": str(automation_path),
+            "metadata": metadata,
+            "prompt": prior_prompt,
+            "prompt_sha256": hashlib.sha256(prior_prompt.encode("utf-8")).hexdigest(),
+        },
     }
 
 

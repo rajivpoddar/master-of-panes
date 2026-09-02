@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import tempfile
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -133,13 +134,113 @@ def emit(envelope: Mapping[str, Any], *, response_lost: bool = False) -> dict[st
             return {"status": "DUPLICATE_SUPPRESSED", "key": key, "wake": False}
         store.state["records"][key] = {
             "envelope_digest": digest,
-            "status": "reserved" if response_lost else "emitted",
+            "status": "ambiguous" if response_lost else "reserved",
             "repair_count": 0,
             "consumption_receipt": None,
             "next_edge_receipt": None,
+            "delivery_receipt": None,
+            "delivery_generation": None,
+            "delivery_started_at": None,
+            "reservation_uncertain": response_lost,
         }
         store.save()
     return {"status": "UNCERTAIN" if response_lost else "EMITTED", "key": key, "wake": not response_lost}
+
+
+def _start_delivery(envelope: Mapping[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    """Reserve the real monitor effect before invoking its wake transport.
+
+    The effect-start write is the crash fence: once it is durable, a later
+    invocation can never replay the wake, even if the transport accepted it
+    and the process died before receiving a response.
+    """
+    value = validate_envelope(envelope)
+    key = _key(value)
+    with ContinuityStore(_state_path()) as store:
+        record = store.state["records"].get(key)
+        if record is None or record.get("envelope_digest") != _digest(value):
+            raise ValueError("terminal_not_reserved")
+        status = record.get("status")
+        if record.get("reservation_uncertain"):
+            return "ambiguous", dict(record)
+        if status in {"effect-start", "ambiguous", "delivered", "consumed", "edge_bound", "repaired"}:
+            return status, dict(record)
+        if status not in {"reserved", "emitted"}:
+            raise ValueError("delivery_phase_invalid")
+        generation = hashlib.sha256(
+            f"{key}:{os.getpid()}:{os.times().elapsed}".encode()
+        ).hexdigest()
+        record["status"] = "effect-start"
+        record["delivery_generation"] = generation
+        record["delivery_started_at"] = os.times().elapsed
+        store.save()
+        return "started", dict(record)
+
+
+def _mark_delivery(envelope: Mapping[str, Any], *, status: str, receipt: str | None = None) -> None:
+    value = validate_envelope(envelope)
+    key = _key(value)
+    with ContinuityStore(_state_path()) as store:
+        record = store.state["records"].get(key)
+        if record is None or record.get("envelope_digest") != _digest(value):
+            raise ValueError("terminal_not_reserved")
+        if record.get("status") not in {"effect-start", "ambiguous"}:
+            return
+        record["status"] = status
+        if receipt is not None:
+            record["delivery_receipt"] = receipt
+        store.save()
+
+
+def deliver(
+    envelope: Mapping[str, Any],
+    *,
+    effect_command: str | None = None,
+    timeout_seconds: float = 30.0,
+    crash_before_send: bool = False,
+) -> dict[str, Any]:
+    """Run the monitor's one wake effect behind durable start/ambiguity fences.
+
+    ``effect_command`` is the existing monitor delivery adapter (argv is never
+    shell-expanded); it receives the validated envelope on stdin and must emit
+    exactly ``{"receipt": "..."}``. Any transport, timeout, malformed response,
+    or response-loss outcome becomes permanently ambiguous and is not replayed.
+    """
+    value = validate_envelope(envelope)
+    key = _key(value)
+    status, record = _start_delivery(value)
+    if status == "started":
+        if crash_before_send:
+            os._exit(86)
+        command = effect_command or os.environ.get("PM_CTO_WAKE_EFFECT_COMMAND")
+        if not command:
+            _mark_delivery(value, status="ambiguous")
+            return {"status": "AMBIGUOUS_SUPPRESSED", "key": key, "reason": "effect_command_missing"}
+        try:
+            completed = subprocess.run(
+                [command],
+                input=json.dumps(value, sort_keys=True, separators=(",", ":")),
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise ValueError("effect_nonzero")
+            response = json.loads(completed.stdout)
+            receipt = response.get("receipt") if isinstance(response, Mapping) else None
+            if not isinstance(receipt, str) or not receipt.strip() or len(receipt) > MAX_TEXT:
+                raise ValueError("effect_receipt_invalid")
+        except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            _mark_delivery(value, status="ambiguous")
+            return {"status": "AMBIGUOUS_SUPPRESSED", "key": key}
+        _mark_delivery(value, status="delivered", receipt=receipt)
+        return {"status": "DELIVERED", "key": key, "wake": True, "receipt": receipt}
+    if status == "delivered":
+        return {"status": "DELIVERED_REPLAY_SUPPRESSED", "key": key, "wake": False}
+    if status in {"effect-start", "ambiguous"}:
+        return {"status": "AMBIGUOUS_SUPPRESSED", "key": key, "wake": False}
+    return {"status": "DELIVERY_ALREADY_COMMITTED", "key": key, "wake": False}
 
 
 def transition(envelope: Mapping[str, Any], kind: str, receipt: str) -> dict[str, Any]:
@@ -176,19 +277,19 @@ def hourly_repair(envelope: Mapping[str, Any]) -> dict[str, Any]:
         record = store.state["records"].get(key)
         if record is None or record.get("envelope_digest") != _digest(value):
             raise ValueError("terminal_not_emitted")
-        if record.get("consumption_receipt") or record.get("next_edge_receipt"):
+        if record.get("next_edge_receipt"):
             return {"status": "CONTINUITY_PRESENT", "key": key, "wake": False}
         # A lost response is an uncertain delivery, not an emitted terminal
         # eligible for replay.  Keep it fail-closed until a human/CTO receipt
         # reconciles the exact key; never turn uncertainty into a second wake.
-        if record.get("status") == "reserved":
+        if record.get("reservation_uncertain") or record.get("status") in {"effect-start", "ambiguous"}:
             return {"status": "UNCERTAIN_SUPPRESSED", "key": key, "wake": False}
         if record.get("repair_count", 0) >= 1:
             return {"status": "REPAIR_ALREADY_USED", "key": key, "wake": False}
         record["repair_count"] = 1
-        record["status"] = "repaired"
+        record["status"] = "repair-due"
         store.save()
-    return {"status": "HOURLY_REPAIR", "key": key, "wake": True}
+    return {"status": "HOURLY_REPAIR", "key": key, "wake": True, "repair_kind": "missing_consumption_or_edge"}
 
 
 def _read_stdin() -> dict[str, Any]:
@@ -201,16 +302,28 @@ def _read_stdin() -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("emit", "route", "consume", "edge", "hourly-repair"))
+    parser.add_argument("command", choices=("complete", "emit", "route", "deliver", "consume", "edge", "hourly-repair"))
     parser.add_argument("--receipt")
     parser.add_argument("--response-lost", action="store_true")
+    parser.add_argument("--effect-command")
+    parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    parser.add_argument("--crash-before-send", action="store_true")
     args = parser.parse_args(argv)
     try:
         envelope = _read_stdin()
-        if args.command in {"emit", "route"}:
+        if args.command in {"complete", "emit", "route"}:
             result = emit(envelope, response_lost=args.response_lost)
+            if args.command == "complete":
+                result["status"] = "RESERVED"
             if args.command == "route" and result.get("status") == "EMITTED":
                 result["route"] = "CTO_DECISIONS"
+        elif args.command == "deliver":
+            result = deliver(
+                envelope,
+                effect_command=args.effect_command,
+                timeout_seconds=args.timeout_seconds,
+                crash_before_send=args.crash_before_send,
+            )
         elif args.command in {"consume", "edge"}:
             if not args.receipt:
                 raise ValueError("receipt_required")
