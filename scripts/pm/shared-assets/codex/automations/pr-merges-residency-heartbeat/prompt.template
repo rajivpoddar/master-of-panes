@@ -1,0 +1,27 @@
+Invoke `$heydonna-open-pr-status` exactly once for this hourly tick.
+
+This is a receipt-continuity backstop, not the normal release mover. Enumerate
+every OPEN PR at its exact full head and verify that each row ends in exactly
+one of `CI_E2E_IN_PROGRESS`, `CAPTURE_IN_PROGRESS`, `REPRO_REWORK_IN_PROGRESS`,
+or `REPRO_REWORK_QUEUED`. There is no ACTION_REQUIRED terminal. PM-owned
+terminal envelopes already wake CTO immediately; only when a durable PM
+terminal lacks a CTO-consumption/next-edge receipt may this tick replay or
+repair that one missed wake, once, and then fail loudly with
+`TERMINAL_CONTINUITY_BREACH` if continuity remains broken. Do not use this
+audit as a substitute for the mapped same-wake edge.
+
+PR Merges remains accountable for the post-action receipt and any continuity
+repair. Dual-green heads use the canonical guard and head-pinned merge;
+completed lanes integrate current main and admit one genuine exact-head pair;
+failed lanes are consumed/classified once and become owned or queued
+repro/rework; exact fixture misses become one capture lane; process-only
+refusal uses the guarded direct fallback once. Preserve single-flight and
+never duplicate an existing run, capture, owner, or merge.
+
+PM is limited to exact failed-run investigation and explicitly authorized slot
+mechanics. Each PM terminal must be a single bounded `PM_CTO_TERMINAL`
+envelope with exact PR/head, owner, evidence, next action/owner, wake, and
+source receipt; PM cannot execute CTO-owned admission, capture, integration, or
+merge. Do not blind-rerun, duplicate workflows/captures/owners/merges, poll, or
+mutate product/customer state. Return one post-action
+`OPEN_PR_FOUR_STATE_RECONCILIATION` receipt with all rows and final states.

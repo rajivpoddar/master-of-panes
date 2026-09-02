@@ -15,6 +15,14 @@ Canonical control-plane source is
 App product code, app tests, workflow definitions, capture fixtures, strict-
 replay harnesses, and other app-owned surfaces remain outside this skill.
 
+PM-owned open-PR terminals are delivered as one bounded `PM_CTO_TERMINAL`
+envelope (exact PR/head, owner, evidence, next action/owner, wake, and source
+receipt) to the canonical PM thread. The PM-to-CTO monitor wakes once for the
+terminal tuple; routine progress is suppressed. CTO consumes it by executing
+or durably delegating the mapped next edge in the same wake. The hourly audit
+is only a continuity backstop and must never become a release dependency or a
+fifth open-PR state.
+
 ## Task affinity
 
 - CP Repairs `01a0324b-68e0-7491-988f-e7da9abd26ab`: shared release and

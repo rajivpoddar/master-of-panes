@@ -22,6 +22,20 @@ they must not define competing ownership or state machines.
   head-pinned merge. PM may report evidence and status for these actions, but
   does not execute them. Every nonterminal state names `next_action`,
   `next_owner`, and `wake`.
+- Every PM-owned terminal emits exactly one bounded `PM_CTO_TERMINAL` envelope
+  in the canonical PM Slack thread. The envelope is not prose, a `PM_WAIT`, a
+  label projection, or an hourly-audit dependency. It contains
+  `terminal_type`, `pr`, full `head`, optional `run_or_capture`, `owner`,
+  `evidence_summary`, `next_action`, `next_owner`, `wake`, and
+  `source_receipt`. Supported terminal types are
+  `FAILED_RUN_INVESTIGATION`, `NUMBERED_PROOF`, `REWORK_REVIEW_CANDIDATE`,
+  `CAPTURE_TERMINAL`, `ASSIGNMENT_TERMINAL`, and `TYPED_BLOCKER`. The monitor
+  wakes CTO immediately for one material envelope, deduplicated by terminal
+  type plus exact PR/head/source receipt. A duplicate envelope produces zero
+  additional wake.
+- PM terminal emission never performs a CTO-owned CI/E2E admission, capture,
+  integration, or merge. CTO consumes the envelope and executes or durably
+  delegates its mapped next edge in the same wake.
 - A control-plane failure is escalated immediately and the smallest safe
   degraded product path may proceed. Repair the control plane separately; it
   is not a customer-lane dependency unless waiting creates concrete harm.
@@ -114,7 +128,7 @@ process above.
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "scenarios": {
     "ci_failure_investigation": {"owner": "PM", "action": "launch_one_exact_failed_pr_head_run_investigation", "wake": "terminal_or_block"},
     "cto_routed_rework_or_repro_slot_assignment": {"owner": "PM", "action": "assign_one_compatible_numbered_slot_after_cto_authorization", "wake": "assignment_terminal"},
@@ -128,7 +142,9 @@ process above.
     "control_plane_candidate": {"owner": "CTO_DECISIONS", "action": "route_exact_candidate_to_pr_reviews", "wake": "review_terminal"},
     "control_plane_block": {"owner": "CTO_DECISIONS", "action": "return_bounded_rework_to_same_implementation_owner", "wake": "corrected_candidate"},
     "control_plane_approval": {"owner": "CTO_DECISIONS", "action": "return_approval_to_same_implementation_owner", "wake": "rollout_terminal"},
-    "control_plane_refusal": {"owner": "CTO_DECISIONS", "action": "execute_or_durable_delegate_one_guarded_edge_or_record_harm", "wake": "immediate"}
+    "control_plane_refusal": {"owner": "CTO_DECISIONS", "action": "execute_or_durable_delegate_one_guarded_edge_or_record_harm", "wake": "immediate"},
+    "pm_terminal_envelope": {"owner": "PM", "action": "emit_one_bounded_terminal_to_canonical_pm_thread", "wake": "immediate_cto_once", "dedup": "terminal_type+pr+full_head+source_receipt", "fields": ["terminal_type", "pr", "head", "run_or_capture", "owner", "evidence_summary", "next_action", "next_owner", "wake", "source_receipt"], "terminal_types": ["FAILED_RUN_INVESTIGATION", "NUMBERED_PROOF", "REWORK_REVIEW_CANDIDATE", "CAPTURE_TERMINAL", "ASSIGNMENT_TERMINAL", "TYPED_BLOCKER"], "cto_next_edge": "execute_or_durable_delegate_mapped_edge_same_wake"},
+    "terminal_continuity_backstop": {"owner": "PR_MERGES", "action": "repair_one_missing_cto_consumption_or_next_edge", "wake": "hourly_backstop_once", "not_primary_mover": true}
   }
 }
 ```

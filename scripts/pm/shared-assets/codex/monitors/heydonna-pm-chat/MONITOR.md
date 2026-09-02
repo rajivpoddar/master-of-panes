@@ -76,7 +76,16 @@ retry, route rescue/release, make sync/integration decisions, apply release
 gates, or merge. PM reports evidence/status for those CTO-owned actions only.
 The monitor therefore routes every other actionable open-PR row to CTO, while
 retaining PM slot assignment only after an explicit CTO-routed rework/repro
-authorization.
+authorization. A PM terminal is a material handoff: it is emitted once as a
+bounded `PM_CTO_TERMINAL` envelope in the canonical PM Slack thread with
+`terminal_type`, `pr`, full `head`, optional `run_or_capture`, `owner`,
+`evidence_summary`, `next_action`, `next_owner`, `wake`, and `source_receipt`.
+The supported terminal types are `FAILED_RUN_INVESTIGATION`, `NUMBERED_PROOF`,
+`REWORK_REVIEW_CANDIDATE`, `CAPTURE_TERMINAL`, `ASSIGNMENT_TERMINAL`, and
+`TYPED_BLOCKER`. Route each first envelope immediately to CTO; deduplicate by
+terminal type plus exact PR/head/source receipt. Routine acknowledgement and
+progress remain suppressed. PM terminals never perform CTO-owned CI/E2E
+admission, capture, integration, or merge.
 
 Treat the following as hard actionable wakes: code/proof-ready with no
 exact-head CI/E2E admission for 10 minutes; a CI or capture terminal awaiting
@@ -89,20 +98,21 @@ report `open_pr_activity_gaps=0`.
 
 ### Normalized open-PR motion
 
-For each open PR at its exact current head, classify exactly one of
-`CI_IN_PROGRESS`, `CAPTURE_IN_PROGRESS`, `REPRO_OR_PROOF_IN_PROGRESS`,
-`REWORK_IN_PROGRESS`, `REWORK_BLOCKED`, `DEPENDENCY_BLOCKED`, or
-`PROCESS_LIMBO`. Active states require live exact-head execution evidence;
-blocked states require a current blocker class, one owner, and a
-machine-observable wake, otherwise the state is `PROCESS_LIMBO`.
+For each open PR at its exact current head, classify exactly one of the four
+valid states: `CI_E2E_IN_PROGRESS`, `CAPTURE_IN_PROGRESS`,
+`REPRO_REWORK_IN_PROGRESS`, or `REPRO_REWORK_QUEUED`. `ACTION_REQUIRED`,
+`PROCESS_LIMBO`, `UNKNOWN`, and owner-only/label-only holds are internal
+diagnostics, never stable output. An invalid row must execute or durably route
+its smallest next edge in the same wake; if no safe edge can be established,
+emit a typed `OPEN_PR_FOUR_STATE_INVARIANT_BREACH` naming the attempted edge
+and concrete blocker rather than inventing a fifth state.
 
 Keep `workflow_motion`, `owner_source`, and `hold_reason` separate. Absence of
-a running workflow never implies `owner=unknown`. Every nonterminal row names
-`next_action`, `next_owner`, and `wake`. Limbo and UNKNOWN rows are
-exceptions-first, make Actions needed NOT_CLEAR, and include PR, branch, full
-head, last meaningful exact-head run, claimed owner, missing predicate,
-smallest executable boundary, and wake. Only a verified zero-gap enumeration
-may clear Actions needed.
+a running workflow never implies `owner=unknown`. Every row names
+`next_action`, `next_owner`, and `wake`; a durable exact PM terminal owner is
+used even when no workflow is running. The hourly audit only checks continuity
+of PM terminal -> CTO consumption/next-edge receipts and may repair one missed
+wake once. It is not the normal mover and cannot create `ACTION_REQUIRED`.
 
 On any control-plane refusal, route the first literal blocker with the exact
 PR, full head, and current labels immediately; do not retry marker shapes,

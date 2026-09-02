@@ -41,6 +41,29 @@ The receiving CTO wake must execute or durably delegate the next transition in
 that same wake; reporting or watching without a bounded owner/action/wake is
 not a terminal.
 
+### PM terminal -> CTO next edge
+
+Every PM-owned terminal for an OPEN PR is delivered as exactly one bounded
+`PM_CTO_TERMINAL` envelope in the canonical PM Slack thread. It is
+non-suppressible and immediately material to CTO; prose, `PM_WAIT`, labels, or
+an owner/queue receipt alone are not terminals. The envelope contains
+`terminal_type`, PR number, full exact head, optional run/capture identity,
+owner, bounded evidence summary, `next_action`, `next_owner`, `wake`, and a
+durable `source_receipt`. Supported terminal types are
+`FAILED_RUN_INVESTIGATION`, `NUMBERED_PROOF`, `REWORK_REVIEW_CANDIDATE`,
+`CAPTURE_TERMINAL`, `ASSIGNMENT_TERMINAL`, and `TYPED_BLOCKER`.
+
+The monitor wakes CTO once per terminal type + exact PR/head/source receipt;
+duplicate delivery is suppressed. CTO consumes the envelope and, in that same
+wake, executes or durably delegates the mapped edge: failed investigation to
+causal routing; numbered proof to admission/rework; candidate to review or
+correction; capture terminal to exact-head CI/E2E; assignment to next-boundary
+verification; typed blocker to the safe degraded edge or a concrete harm
+record. PM never executes CTO-owned CI/E2E admission, capture, integration, or
+merge. The hourly open-PR audit checks only continuity (terminal emitted,
+consumed, and next edge recorded); it may repair one missed wake once and then
+fails loudly with `TERMINAL_CONTINUITY_BREACH`. It is not the normal mover.
+
 ## Routine PM message suppression
 
 Routine PM acknowledgements and progress receipts are ledger-only, not CTO

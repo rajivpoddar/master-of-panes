@@ -75,7 +75,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
     def test_manifest_is_deterministic_and_source_parity_is_exact(self) -> None:
         manifest = MODULE._load_shared_manifest(self.release)
         self.assertEqual(manifest["entries"], sorted(manifest["entries"], key=lambda item: item["source_path"]))
-        self.assertEqual(manifest["inventory"]["selected_count"], 59)
+        self.assertEqual(manifest["inventory"]["selected_count"], 61)
         self.assertEqual(manifest["inventory"]["ambiguous"], [])
         result = self.install()
         self.assertEqual(result["status"], "SHARED_ASSETS_INSTALLED")
@@ -94,9 +94,9 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
         block = re.search(r"```json\n(\{.*?\})\n```", contract, flags=re.DOTALL)
         self.assertIsNotNone(block)
         matrix = json.loads(block.group(1))
-        self.assertEqual(matrix["version"], 3)
+        self.assertEqual(matrix["version"], 4)
         scenarios = matrix["scenarios"]
-        self.assertEqual(len(scenarios), 13)
+        self.assertEqual(len(scenarios), 15)
         self.assertEqual(scenarios["ci_failure_investigation"]["owner"], "PM")
         self.assertEqual(scenarios["cto_routed_rework_or_repro_slot_assignment"]["owner"], "PM")
         for scenario in (
@@ -120,6 +120,17 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
         self.assertEqual(approval["owner"], "CTO_DECISIONS")
         self.assertEqual(approval["action"], "return_approval_to_same_implementation_owner")
         self.assertEqual(approval["wake"], "rollout_terminal")
+        terminal = scenarios["pm_terminal_envelope"]
+        self.assertEqual(terminal["owner"], "PM")
+        self.assertEqual(terminal["wake"], "immediate_cto_once")
+        self.assertEqual(terminal["dedup"], "terminal_type+pr+full_head+source_receipt")
+        self.assertEqual(
+            terminal["fields"],
+            ["terminal_type", "pr", "head", "run_or_capture", "owner", "evidence_summary", "next_action", "next_owner", "wake", "source_receipt"],
+        )
+        self.assertEqual(len(terminal["terminal_types"]), 6)
+        backstop = scenarios["terminal_continuity_backstop"]
+        self.assertTrue(backstop["not_primary_mover"])
         self.assertNotIn("at most 15 minutes", contract)
         self.assertIn("PM does not retry", contract)
         self.assertIn("journal", contract)
