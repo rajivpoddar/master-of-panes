@@ -119,6 +119,12 @@ function isNudgeWaitTerminal(transcript: string, slot: SlotState): boolean {
   ) {
     return true;
   }
+  if (
+    normalized ===
+    `Final: PM_WAIT — terminal idle. Slot ${slotNumber} CTO-parked under WIP freeze; no re-nudge; wake only on a fresh CTO-authorized packet. No PM action required.`
+  ) {
+    return true;
+  }
 
   // HOLD transcripts identify the assigned work by issue rather than slot.
   // Keep the whole observed envelope bounded so substantive prose cannot be

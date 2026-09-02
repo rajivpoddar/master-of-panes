@@ -1794,6 +1794,11 @@ test("carries production-shaped FULLY IDLE, no-action, and HOLD PM_WAIT terminal
       terminal: "No slot action remains; slot 4 is idle awaiting the next CTO-selected assign packet.",
     },
     {
+      slot: 4,
+      issue: 7435,
+      terminal: "Final: PM_WAIT — terminal idle. Slot 4 CTO-parked under WIP freeze; no re-nudge; wake only on a fresh CTO-authorized packet. No PM action required.",
+    },
+    {
       slot: 6,
       issue: 7600,
       terminal: "Delivered.\n\nTerminal status — #7600 HOLD (PM_WAIT):\n- No work continues: implementation paused pending Rajiv's B2 decision.",
@@ -1828,6 +1833,17 @@ test("requires slot-bound exact envelopes before carrying natural-language wait 
         "No slot action remains; slot 4 is idle awaiting the next CTO-selected assign packet. More substantive work is complete.",
         '"No slot action remains; slot 4 is idle awaiting the next CTO-selected assign packet."',
         "No slot action remains; slot 9 is idle awaiting the next CTO-selected assign packet.",
+      ],
+    },
+    {
+      slot: 4,
+      issue: 7435,
+      terminal: "Final: PM_WAIT — terminal idle. Slot 4 CTO-parked under WIP freeze; no re-nudge; wake only on a fresh CTO-authorized packet. No PM action required.",
+      negatives: [
+        "Implemented and committed substantive work. Final: PM_WAIT — terminal idle. Slot 4 CTO-parked under WIP freeze; no re-nudge; wake only on a fresh CTO-authorized packet. No PM action required.",
+        "Final: PM_WAIT — terminal idle. Slot 4 CTO-parked under WIP freeze; no re-nudge; wake only on a fresh CTO-authorized packet. No PM action required. More substantive work is complete.",
+        '"Final: PM_WAIT — terminal idle. Slot 4 CTO-parked under WIP freeze; no re-nudge; wake only on a fresh CTO-authorized packet. No PM action required."',
+        "Final: PM_WAIT — terminal idle. Slot 3 CTO-parked under WIP freeze; no re-nudge; wake only on a fresh CTO-authorized packet. No PM action required.",
       ],
     },
     {
