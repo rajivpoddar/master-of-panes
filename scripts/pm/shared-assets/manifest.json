@@ -24,6 +24,7 @@
       "~/.claude/scripts/mop-slot-respawn.sh",
       "~/.claude/scripts/pm-merges-automation-update.py",
       "~/.claude/scripts/pm-terminal-continuity.py",
+      "~/.claude/scripts/pm-terminal-wake.py",
       "~/.claude/control_plane/runtime_observation.py",
       "~/.claude/scripts/sakshi-heartbeat.py",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
@@ -41,7 +42,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 63,
+    "selected_count": 64,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -312,9 +313,18 @@
     {
       "source_path": "claude/scripts/pm-terminal-continuity.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/pm-terminal-continuity.py",
-      "sha256": "777f31f704381cbf3d9623fd9a54f3805e0e82cff2a6e675c943e932a81032fe",
+      "sha256": "5492dd8c9c6311e48633849876725f4894c6468bd73586bf82ace7007044ee35",
       "mode": 493,
       "ownership_class": "shared-claude-pm-terminal-continuity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/pm-terminal-wake.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm-terminal-wake.py",
+      "sha256": "7746204f7f0bf9b0c825e249c5b714bc20f59b7dd57da12b7bc06371c55b4054",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-terminal-wake-adapter",
       "dependency_status": "closed",
       "dependencies": []
     },
@@ -600,7 +610,7 @@
     {
       "source_path": "codex/skills/heydonna-open-pr-status/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",
-      "sha256": "e4cd334f88e06f61ce3fd5fae1957a83e5a58c786d657c2c4eb7429ca646d45b",
+      "sha256": "3628322b1a60bc0096acb6e030b32682a45a4198f0c94a28f0993d17357bf28d",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",

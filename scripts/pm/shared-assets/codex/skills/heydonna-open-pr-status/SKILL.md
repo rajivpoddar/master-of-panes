@@ -80,10 +80,16 @@ mechanics, but the envelope cannot execute CTO-owned CI/E2E admission, capture,
 integration, or merge.
 
 Use the manifest-mapped executable
-`/Users/rajiv/.claude/scripts/pm-terminal-continuity.py route` as the producer,
-parser, and immediate CTO router. It reserves the exact terminal-type/PR/full-
+`/Users/rajiv/.claude/scripts/pm-terminal-continuity.py complete` as the PM
+completion producer and require a successful `RESERVED` or exact
+`DUPLICATE_SUPPRESSED` result before claiming the terminal is recorded. The
+monitor then invokes `deliver`, whose manifest-mapped
+`/Users/rajiv/.claude/scripts/pm-terminal-wake.py` adapter performs the single
+CTO task handoff. Completion reserves the exact terminal-type/PR/full-
 head/source-receipt key before waking CTO; response-loss and exact replay are
-fail-closed, while changed head or terminal type creates a distinct key.
+fail-closed, while changed head or terminal type creates a distinct key. A
+nonzero or malformed completion result stops the PM transition and cannot be
+reported as a healthy terminal.
 
 The receiving CTO wake executes or durably delegates the mapped next edge in
 that same wake. The mapping is: failed-run investigation -> classify and route

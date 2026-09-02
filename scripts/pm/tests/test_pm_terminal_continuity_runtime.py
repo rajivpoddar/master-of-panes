@@ -14,10 +14,12 @@ from pathlib import Path
 ROOT = Path(__file__).parents[3]
 SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 CONTINUITY = SHARED / "claude" / "scripts" / "pm-terminal-continuity.py"
+WAKE_ADAPTER = SHARED / "claude" / "scripts" / "pm-terminal-wake.py"
 AUTOMATION = SHARED / "claude" / "scripts" / "pm-merges-automation-update.py"
 PROMPT = SHARED / "codex" / "automations" / "pr-merges-residency-heartbeat" / "prompt.template"
 MONITOR = SHARED / "codex" / "monitors" / "heydonna-pm-chat" / "MONITOR.md"
 SOP = SHARED / "codex" / "monitors" / "heydonna-pm-chat" / "WAKE_SOP.md"
+OPEN_PR = SHARED / "codex" / "skills" / "heydonna-open-pr-status" / "SKILL.md"
 
 
 def load(path: Path, name: str):
@@ -52,7 +54,11 @@ class PMTerminalContinuityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.state = Path(self.temp.name) / "continuity.json"
-        self.env = {**os.environ, "PM_TERMINAL_CONTINUITY_STATE": str(self.state)}
+        self.env = {
+            **os.environ,
+            "PM_TERMINAL_CONTINUITY_STATE": str(self.state),
+            "PM_CTO_WAKE_EFFECT_COMMAND": str(Path(self.temp.name) / "missing-wake-adapter"),
+        }
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -79,16 +85,30 @@ class PMTerminalContinuityTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def test_all_six_terminal_types_emit_and_route_once(self) -> None:
+    def stdio_helper(self, *, body: str, rc: int = 0, sleep_seconds: float = 0.0) -> Path:
+        path = Path(self.temp.name) / "fake-stdio-helper.py"
+        seen = path.with_suffix(".seen")
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys, time\n"
+            f"time.sleep({sleep_seconds!r})\n"
+            f"open({str(seen)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            f"print({body!r})\n"
+            f"raise SystemExit({rc})\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return path
+
+    def test_all_six_terminal_types_complete_and_deliver_once(self) -> None:
         for index, terminal_type in enumerate(sorted(MODULE.TERMINAL_TYPES)):
             value = envelope(terminal_type=terminal_type, receipt=f"source-{index}")
-            result = self.call("route", value)
-            self.assertEqual(result["status"], "EMITTED")
-            self.assertEqual(result["route"], "CTO_DECISIONS")
+            result = self.call("complete", value)
+            self.assertEqual(result["status"], "RESERVED")
             effect = self.effect(body=f'{{"receipt":"wake-{index}"}}')
             delivered = self.call("deliver", value, "--effect-command", str(effect))
             self.assertEqual(delivered["status"], "DELIVERED")
-            duplicate = self.call("route", value)
+            duplicate = self.call("complete", value)
             self.assertEqual(duplicate["status"], "DUPLICATE_SUPPRESSED")
             self.assertEqual(len(effect.with_suffix(".seen").read_text().splitlines()), 1)
 
@@ -117,13 +137,71 @@ class PMTerminalContinuityTests(unittest.TestCase):
         duplicate = self.call("route", value)
         self.assertEqual(duplicate["status"], "DUPLICATE_SUPPRESSED")
 
+    def test_complete_preserves_duplicate_terminal_result(self) -> None:
+        value = envelope(receipt="complete-duplicate")
+        self.assertEqual(self.call("complete", value)["status"], "RESERVED")
+        self.assertEqual(self.call("complete", value)["status"], "DUPLICATE_SUPPRESSED")
+
+    def test_manifest_wake_adapter_hands_off_exact_envelope_once(self) -> None:
+        value = envelope(receipt="adapter-1")
+        helper = self.stdio_helper(
+            body='{"status":"delivered","queuedSubmissionId":"queued-1","startAccepted":true}'
+        )
+        self.env["PM_CTO_STDIO_HELPER"] = str(helper)
+        self.call("complete", value)
+        delivered = self.call("deliver", value, "--effect-command", str(WAKE_ADAPTER))
+        self.assertEqual(delivered["status"], "DELIVERED")
+        self.assertEqual(delivered["receipt"], "queued-1")
+        args = json.loads(helper.with_suffix(".seen").read_text().splitlines()[0])
+        self.assertEqual(args[args.index("--thread-id") + 1], "01a03236-2e61-71f3-a6a8-3dc24d8c8917")
+        self.assertEqual(args[args.index("--dedup-key") + 1], delivered["key"])
+        self.assertIn('"terminal_type":"FAILED_RUN_INVESTIGATION"', args[args.index("--message") + 1])
+        replay = self.call("deliver", value, "--effect-command", str(WAKE_ADAPTER))
+        self.assertEqual(replay["status"], "DELIVERED_REPLAY_SUPPRESSED")
+        self.assertEqual(len(helper.with_suffix(".seen").read_text().splitlines()), 1)
+
+    def test_wake_adapter_failures_are_ambiguous_and_never_replayed(self) -> None:
+        cases = (
+            ("nonzero", '{"status":"delivered","queuedSubmissionId":"queued-1","startAccepted":true}', 7, 0.0),
+            ("malformed", "not-json", 0, 0.0),
+            ("timeout", '{"status":"delivered","queuedSubmissionId":"queued-1","startAccepted":true}', 0, 1.0),
+        )
+        for name, body, rc, sleep_seconds in cases:
+            with self.subTest(name=name):
+                self.temp.cleanup()
+                self.temp = tempfile.TemporaryDirectory()
+                self.state = Path(self.temp.name) / "continuity.json"
+                self.env["PM_TERMINAL_CONTINUITY_STATE"] = str(self.state)
+                helper = self.stdio_helper(body=body, rc=rc, sleep_seconds=sleep_seconds)
+                self.env["PM_CTO_STDIO_HELPER"] = str(helper)
+                value = envelope(receipt=f"adapter-{name}")
+                self.call("complete", value)
+                first = self.call(
+                    "deliver", value, "--effect-command", str(WAKE_ADAPTER), "--timeout-seconds", "0.05"
+                )
+                self.assertEqual(first["status"], "AMBIGUOUS_SUPPRESSED")
+                second = self.call("deliver", value, "--effect-command", str(WAKE_ADAPTER))
+                self.assertEqual(second["status"], "AMBIGUOUS_SUPPRESSED")
+
     def test_consumption_and_next_edge_bind_exact_key(self) -> None:
         value = envelope()
-        self.call("emit", value)
+        self.call("complete", value)
+        self.call("deliver", value, "--effect-command", str(self.effect()))
         consumed = self.call("consume", value, "--receipt", "cto-1")
         self.assertEqual(consumed["status"], "BOUND")
         edge = self.call("edge", value, "--receipt", "edge-1")
         self.assertEqual(edge["status"], "BOUND")
+
+    def test_consume_and_edge_refuse_before_authoritative_delivery(self) -> None:
+        value = envelope(receipt="phase-gate")
+        self.call("complete", value)
+        for command in ("consume", "edge"):
+            result = subprocess.run(
+                [sys.executable, str(CONTINUITY), command, "--receipt", "r-1"],
+                input=json.dumps(value), text=True, capture_output=True, env=self.env,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(json.loads(result.stdout)["error_class"], "delivery_not_confirmed")
 
     def test_complete_then_monitor_delivery_is_effect_started_and_delivered_once(self) -> None:
         value = envelope(receipt="complete-1")
@@ -165,7 +243,8 @@ class PMTerminalContinuityTests(unittest.TestCase):
 
     def test_hourly_repair_repairs_missing_edge_after_consumption_once(self) -> None:
         value = envelope(receipt="repair-edge")
-        self.call("emit", value)
+        self.call("complete", value)
+        self.call("deliver", value, "--effect-command", str(self.effect()))
         self.call("consume", value, "--receipt", "cto-1")
         first = self.call("hourly-repair", value)
         self.assertEqual(first["status"], "HOURLY_REPAIR")
@@ -183,7 +262,9 @@ class PMTerminalContinuityTests(unittest.TestCase):
 
     def test_hourly_repair_is_exactly_once_only_without_continuation(self) -> None:
         value = envelope()
-        self.call("emit", value)
+        self.call("complete", value)
+        self.call("deliver", value, "--effect-command", str(self.effect()))
+        self.call("consume", value, "--receipt", "cto-1")
         first = self.call("hourly-repair", value)
         self.assertEqual(first["status"], "HOURLY_REPAIR")
         second = self.call("hourly-repair", value)
@@ -224,6 +305,10 @@ class PMTerminalContinuityTests(unittest.TestCase):
         for text in (MONITOR.read_text(), SOP.read_text(), PROMPT.read_text()):
             self.assertIn("pm-terminal-continuity.py", text)
         self.assertIn("pm-merges-automation-update.py", PROMPT.read_text())
+        open_pr_text = OPEN_PR.read_text()
+        self.assertIn("pm-terminal-continuity.py complete", open_pr_text)
+        self.assertNotIn("pm-terminal-continuity.py route", open_pr_text)
+        self.assertIn("pm-terminal-wake.py", open_pr_text)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ TERMINAL_TYPES = {
 }
 HEAD_RE = re.compile(r"^[0-9a-f]{40}$")
 MAX_TEXT = 2000
+DEFAULT_WAKE_EFFECT = Path(__file__).with_name("pm-terminal-wake.py")
 
 
 def _state_path() -> Path:
@@ -212,7 +213,11 @@ def deliver(
     if status == "started":
         if crash_before_send:
             os._exit(86)
-        command = effect_command or os.environ.get("PM_CTO_WAKE_EFFECT_COMMAND")
+        command = (
+            effect_command
+            or os.environ.get("PM_CTO_WAKE_EFFECT_COMMAND")
+            or str(DEFAULT_WAKE_EFFECT)
+        )
         if not command:
             _mark_delivery(value, status="ambiguous")
             return {"status": "AMBIGUOUS_SUPPRESSED", "key": key, "reason": "effect_command_missing"}
@@ -231,9 +236,9 @@ def deliver(
             receipt = response.get("receipt") if isinstance(response, Mapping) else None
             if not isinstance(receipt, str) or not receipt.strip() or len(receipt) > MAX_TEXT:
                 raise ValueError("effect_receipt_invalid")
-        except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
             _mark_delivery(value, status="ambiguous")
-            return {"status": "AMBIGUOUS_SUPPRESSED", "key": key}
+            return {"status": "AMBIGUOUS_SUPPRESSED", "key": key, "reason": str(exc)}
         _mark_delivery(value, status="delivered", receipt=receipt)
         return {"status": "DELIVERED", "key": key, "wake": True, "receipt": receipt}
     if status == "delivered":
@@ -253,11 +258,15 @@ def transition(envelope: Mapping[str, Any], kind: str, receipt: str) -> dict[str
         if record is None or record.get("envelope_digest") != _digest(value):
             raise ValueError("terminal_not_reserved")
         if kind == "consume":
+            if record.get("status") != "delivered" or not record.get("delivery_receipt"):
+                raise ValueError("delivery_not_confirmed")
             if record.get("consumption_receipt") not in (None, receipt):
                 raise ValueError("consumption_conflict")
             record["consumption_receipt"] = receipt
             record["status"] = "consumed"
         elif kind == "edge":
+            if record.get("status") != "consumed" or not record.get("delivery_receipt"):
+                raise ValueError("delivery_not_confirmed")
             if not record.get("consumption_receipt"):
                 raise ValueError("consumption_missing")
             if record.get("next_edge_receipt") not in (None, receipt):
@@ -313,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
         envelope = _read_stdin()
         if args.command in {"complete", "emit", "route"}:
             result = emit(envelope, response_lost=args.response_lost)
-            if args.command == "complete":
+            if args.command == "complete" and result.get("status") == "EMITTED":
                 result["status"] = "RESERVED"
             if args.command == "route" and result.get("status") == "EMITTED":
                 result["route"] = "CTO_DECISIONS"
