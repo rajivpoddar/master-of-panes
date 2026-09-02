@@ -100,14 +100,34 @@ function parseHookSessionId(rawPayload: string): string | null {
  * fixed markers distinguish a PM_WAIT/HOLD terminal from substantive work
  * without treating arbitrary Stop prose as a carry signal.
  */
-function isNudgeWaitTerminal(transcript: string): boolean {
+function isNudgeWaitTerminal(transcript: string, slot: SlotState): boolean {
   const normalized = transcript.replace(/\s+/g, " ").trim();
-  return (
-    /PM_WAIT_NUDGE_RESULT\s+classification=(?:PM_WAIT|HOLD)\b/.test(normalized) ||
-    /\bSlot \d+ FULLY IDLE\s+[—-]\s+awaiting next eligible assignment\.$/i.test(normalized) ||
-    /\bNo slot action remains;\s*slot \d+ is idle awaiting the next CTO-selected assign packet\.$/i.test(normalized) ||
-    /\bTerminal status\s+[—-]\s+#\d+\s+HOLD\s+\(PM_WAIT\):.*\bNo work continues:/i.test(normalized)
-  );
+  if (/PM_WAIT_NUDGE_RESULT\s+classification=(?:PM_WAIT|HOLD)\b/.test(normalized)) {
+    return true;
+  }
+
+  const slotNumber = slot.slot;
+  if (
+    normalized ===
+    `Delivered. Slot ${slotNumber} FULLY IDLE — awaiting next eligible assignment.`
+  ) {
+    return true;
+  }
+  if (
+    normalized ===
+    `No slot action remains; slot ${slotNumber} is idle awaiting the next CTO-selected assign packet.`
+  ) {
+    return true;
+  }
+
+  // HOLD transcripts identify the assigned work by issue rather than slot.
+  // Keep the whole observed envelope bounded so substantive prose cannot be
+  // wrapped around the marker and accidentally carry the old wait anchor.
+  if (slot.issue === null) return false;
+  const issue = slot.issue;
+  return new RegExp(
+    `^(?:Delivered\\. )?Terminal status — #${issue} HOLD \\(PM_WAIT\\): - No work continues: [^.?!]+\\.$`,
+  ).test(normalized);
 }
 
 type ContinueDeliveryResult = {
@@ -1271,7 +1291,7 @@ export class StuckDetector {
           const stopPayload = JSON.parse(item.event.payload) as { transcript?: unknown };
           return parseHookSessionId(item.event.payload) === promptSessionId &&
             typeof stopPayload.transcript === "string" &&
-            isNudgeWaitTerminal(stopPayload.transcript);
+            isNudgeWaitTerminal(stopPayload.transcript, slot);
         } catch {
           return false;
         }

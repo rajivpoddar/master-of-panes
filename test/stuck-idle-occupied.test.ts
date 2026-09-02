@@ -1698,81 +1698,158 @@ test("uses production hook sessions for carried PM_WAIT deduplication", async ()
   }
 });
 
-test("carries production-shaped FULLY IDLE and HOLD PM_WAIT nudge terminals", async () => {
+async function runProductionNudgeTerminal(
+  slotNumber: number,
+  issue: number,
+  terminal: string,
+): Promise<{ sendCount: number; injectionCount: number }> {
   const originalNow = Date.now;
-  const terminalTranscripts = [
-    "Delivered. Slot 2 FULLY IDLE — awaiting next eligible assignment.",
-    "Delivered.\n\nTerminal status — #7600 HOLD (PM_WAIT):\n- No work continues: implementation paused pending Rajiv's B2 decision.",
-  ];
+  const initialNow = originalNow();
+  const directory = mkdtempSync(join(tmpdir(), "mop-production-nudge-carry-"));
+  const db = new MoPDatabase({
+    ...DEFAULT_CONFIG,
+    dbPath: join(directory, "mop.db"),
+  });
+  const sends: string[] = [];
+  const relay = {
+    sendToSlotAsync: async (
+      _slot: number,
+      command: string,
+      _force = false,
+      _raw = false,
+      beforeFirstEffect?: () => boolean,
+    ) => {
+      if (beforeFirstEffect && !beforeFirstEffect()) return false;
+      sends.push(command);
+      return true;
+    },
+  } as unknown as TmuxRelay;
+  const processor = new HookProcessor(db, relay);
 
   try {
-    for (const terminal of terminalTranscripts) {
-      const initialNow = originalNow();
-      const directory = mkdtempSync(join(tmpdir(), "mop-production-nudge-carry-"));
-      const db = new MoPDatabase({
-        ...DEFAULT_CONFIG,
-        dbPath: join(directory, "mop.db"),
-      });
-      const sends: string[] = [];
-      const relay = {
-        sendToSlotAsync: async (
-          _slot: number,
-          command: string,
-          _force = false,
-          _raw = false,
-          beforeFirstEffect?: () => boolean,
-        ) => {
-          if (beforeFirstEffect && !beforeFirstEffect()) return false;
-          sends.push(command);
-          return true;
-        },
-      } as unknown as TmuxRelay;
-      const processor = new HookProcessor(db, relay);
+    assert.equal(
+      db.assignSlot(
+        slotNumber,
+        `issue ${issue}`,
+        "github:heydonna-app/heydonna-app",
+        issue,
+        "main",
+        issue + 1,
+        "a".repeat(40),
+        0,
+      ).ok,
+      true,
+    );
+    db.updateSlot(slotNumber, { idle: true, active_turn_id: null, active_turn_state: "inactive" });
+    await processor.process(slotNumber, { type: "UserPromptSubmit", session_id: "production-session" });
+    await processor.process(slotNumber, {
+      type: "Stop",
+      session_id: "production-session",
+      transcript: "Initial productive turn is complete.",
+    });
+    processor.cancelPendingIdleTimer(slotNumber);
 
-      try {
-        assert.equal(
-          db.assignSlot(2, "issue 7000", "github:heydonna-app/heydonna-app", 7000, "main", 7001, "a".repeat(40), 0).ok,
-          true,
-        );
-        db.updateSlot(2, { idle: true, active_turn_id: null, active_turn_state: "inactive" });
-        await processor.process(2, { type: "UserPromptSubmit", session_id: "production-session" });
-        await processor.process(2, {
-          type: "Stop",
-          session_id: "production-session",
-          transcript: "Initial productive turn is complete.",
-        });
-        processor.cancelPendingIdleTimer(2);
+    Date.now = () => initialNow + 30 * 60_000;
+    await new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(initialNow) } as unknown as LogManager,
+      relay,
+    ).checkIdleOccupied(db.getSlot(slotNumber)!);
+    assert.equal(sends.length, 1);
 
-        Date.now = () => initialNow + 30 * 60_000;
-        await new StuckDetector(
-          db,
-          { getLogMtime: async () => new Date(initialNow) } as unknown as LogManager,
-          relay,
-        ).checkIdleOccupied(db.getSlot(2)!);
-        assert.equal(sends.length, 1);
+    // Let the production-shaped hook records land after the durable nudge
+    // event; SQLite timestamps have millisecond precision.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await processor.process(slotNumber, { type: "UserPromptSubmit", session_id: "production-session" });
+    await processor.process(slotNumber, { type: "Stop", session_id: "production-session", transcript: terminal });
+    processor.cancelPendingIdleTimer(slotNumber);
 
-        // Let the production-shaped hook records land after the durable nudge
-        // event; SQLite timestamps have millisecond precision.
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        await processor.process(2, { type: "UserPromptSubmit", session_id: "production-session" });
-        await processor.process(2, { type: "Stop", session_id: "production-session", transcript: terminal });
-        processor.cancelPendingIdleTimer(2);
-
-        Date.now = () => initialNow + 60 * 60_000;
-        await new StuckDetector(
-          db,
-          { getLogMtime: async () => new Date(initialNow) } as unknown as LogManager,
-          relay,
-        ).checkIdleOccupied(db.getSlot(2)!);
-        assert.equal(sends.length, 1, terminal);
-        assert.equal(db.getEvents(2, 20, "idle_occupied_continue_injected").length, 1, terminal);
-      } finally {
-        db.close();
-        rmSync(directory, { recursive: true, force: true });
-      }
-    }
+    Date.now = () => initialNow + 60 * 60_000;
+    await new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(initialNow) } as unknown as LogManager,
+      relay,
+    ).checkIdleOccupied(db.getSlot(slotNumber)!);
+    return {
+      sendCount: sends.length,
+      injectionCount: db.getEvents(slotNumber, 20, "idle_occupied_continue_injected").length,
+    };
   } finally {
     Date.now = originalNow;
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("carries production-shaped FULLY IDLE, no-action, and HOLD PM_WAIT terminals", async () => {
+  const cases = [
+    {
+      slot: 2,
+      issue: 7000,
+      terminal: "Delivered. Slot 2 FULLY IDLE — awaiting next eligible assignment.",
+    },
+    {
+      slot: 4,
+      issue: 7435,
+      terminal: "No slot action remains; slot 4 is idle awaiting the next CTO-selected assign packet.",
+    },
+    {
+      slot: 6,
+      issue: 7600,
+      terminal: "Delivered.\n\nTerminal status — #7600 HOLD (PM_WAIT):\n- No work continues: implementation paused pending Rajiv's B2 decision.",
+    },
+  ];
+
+  for (const candidate of cases) {
+    const result = await runProductionNudgeTerminal(candidate.slot, candidate.issue, candidate.terminal);
+    assert.deepEqual(result, { sendCount: 1, injectionCount: 1 }, candidate.terminal);
+  }
+});
+
+test("requires slot-bound exact envelopes before carrying natural-language wait terminals", async () => {
+  const cases = [
+    {
+      slot: 2,
+      issue: 7000,
+      terminal: "Delivered. Slot 2 FULLY IDLE — awaiting next eligible assignment.",
+      negatives: [
+        "Implemented and committed substantive work. Slot 2 FULLY IDLE — awaiting next eligible assignment.",
+        "Delivered. Slot 2 FULLY IDLE — awaiting next eligible assignment. More substantive work is complete.",
+        '"Delivered. Slot 2 FULLY IDLE — awaiting next eligible assignment."',
+        "Delivered. Slot 9 FULLY IDLE — awaiting next eligible assignment.",
+      ],
+    },
+    {
+      slot: 4,
+      issue: 7435,
+      terminal: "No slot action remains; slot 4 is idle awaiting the next CTO-selected assign packet.",
+      negatives: [
+        "Implemented and committed substantive work. No slot action remains; slot 4 is idle awaiting the next CTO-selected assign packet.",
+        "No slot action remains; slot 4 is idle awaiting the next CTO-selected assign packet. More substantive work is complete.",
+        '"No slot action remains; slot 4 is idle awaiting the next CTO-selected assign packet."',
+        "No slot action remains; slot 9 is idle awaiting the next CTO-selected assign packet.",
+      ],
+    },
+    {
+      slot: 6,
+      issue: 7600,
+      terminal: "Delivered.\n\nTerminal status — #7600 HOLD (PM_WAIT):\n- No work continues: implementation paused pending Rajiv's B2 decision.",
+      negatives: [
+        "Implemented and committed substantive work. Delivered. Terminal status — #7600 HOLD (PM_WAIT): - No work continues: implementation paused pending Rajiv's B2 decision.",
+        "Delivered. Terminal status — #7600 HOLD (PM_WAIT): - No work continues: implementation paused pending Rajiv's B2 decision. More substantive work is complete.",
+        '"Delivered. Terminal status — #7600 HOLD (PM_WAIT): - No work continues: implementation paused pending Rajiv\'s B2 decision."',
+        "Delivered. Terminal status — #7601 HOLD (PM_WAIT): - No work continues: implementation paused pending Rajiv's B2 decision.",
+      ],
+    },
+  ];
+
+  for (const candidate of cases) {
+    const positive = await runProductionNudgeTerminal(candidate.slot, candidate.issue, candidate.terminal);
+    assert.deepEqual(positive, { sendCount: 1, injectionCount: 1 }, candidate.terminal);
+    for (const terminal of candidate.negatives) {
+      const result = await runProductionNudgeTerminal(candidate.slot, candidate.issue, terminal);
+      assert.deepEqual(result, { sendCount: 2, injectionCount: 2 }, terminal);
+    }
   }
 });
 
