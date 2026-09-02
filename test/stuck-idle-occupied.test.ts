@@ -1698,6 +1698,84 @@ test("uses production hook sessions for carried PM_WAIT deduplication", async ()
   }
 });
 
+test("carries production-shaped FULLY IDLE and HOLD PM_WAIT nudge terminals", async () => {
+  const originalNow = Date.now;
+  const terminalTranscripts = [
+    "Delivered. Slot 2 FULLY IDLE — awaiting next eligible assignment.",
+    "Delivered.\n\nTerminal status — #7600 HOLD (PM_WAIT):\n- No work continues: implementation paused pending Rajiv's B2 decision.",
+  ];
+
+  try {
+    for (const terminal of terminalTranscripts) {
+      const initialNow = originalNow();
+      const directory = mkdtempSync(join(tmpdir(), "mop-production-nudge-carry-"));
+      const db = new MoPDatabase({
+        ...DEFAULT_CONFIG,
+        dbPath: join(directory, "mop.db"),
+      });
+      const sends: string[] = [];
+      const relay = {
+        sendToSlotAsync: async (
+          _slot: number,
+          command: string,
+          _force = false,
+          _raw = false,
+          beforeFirstEffect?: () => boolean,
+        ) => {
+          if (beforeFirstEffect && !beforeFirstEffect()) return false;
+          sends.push(command);
+          return true;
+        },
+      } as unknown as TmuxRelay;
+      const processor = new HookProcessor(db, relay);
+
+      try {
+        assert.equal(
+          db.assignSlot(2, "issue 7000", "github:heydonna-app/heydonna-app", 7000, "main", 7001, "a".repeat(40), 0).ok,
+          true,
+        );
+        db.updateSlot(2, { idle: true, active_turn_id: null, active_turn_state: "inactive" });
+        await processor.process(2, { type: "UserPromptSubmit", session_id: "production-session" });
+        await processor.process(2, {
+          type: "Stop",
+          session_id: "production-session",
+          transcript: "Initial productive turn is complete.",
+        });
+        processor.cancelPendingIdleTimer(2);
+
+        Date.now = () => initialNow + 30 * 60_000;
+        await new StuckDetector(
+          db,
+          { getLogMtime: async () => new Date(initialNow) } as unknown as LogManager,
+          relay,
+        ).checkIdleOccupied(db.getSlot(2)!);
+        assert.equal(sends.length, 1);
+
+        // Let the production-shaped hook records land after the durable nudge
+        // event; SQLite timestamps have millisecond precision.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        await processor.process(2, { type: "UserPromptSubmit", session_id: "production-session" });
+        await processor.process(2, { type: "Stop", session_id: "production-session", transcript: terminal });
+        processor.cancelPendingIdleTimer(2);
+
+        Date.now = () => initialNow + 60 * 60_000;
+        await new StuckDetector(
+          db,
+          { getLogMtime: async () => new Date(initialNow) } as unknown as LogManager,
+          relay,
+        ).checkIdleOccupied(db.getSlot(2)!);
+        assert.equal(sends.length, 1, terminal);
+        assert.equal(db.getEvents(2, 20, "idle_occupied_continue_injected").length, 1, terminal);
+      } finally {
+        db.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("a newer inactive hook session invalidates a paused stale nudge", async () => {
   const originalNow = Date.now;
   const initialNow = originalNow();

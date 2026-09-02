@@ -94,6 +94,22 @@ function parseHookSessionId(rawPayload: string): string | null {
   }
 }
 
+/**
+ * Recognize only the bounded terminal forms emitted by the nudge workflow.
+ * The causal nudge -> opener -> Stop chain is required by the caller; these
+ * fixed markers distinguish a PM_WAIT/HOLD terminal from substantive work
+ * without treating arbitrary Stop prose as a carry signal.
+ */
+function isNudgeWaitTerminal(transcript: string): boolean {
+  const normalized = transcript.replace(/\s+/g, " ").trim();
+  return (
+    /PM_WAIT_NUDGE_RESULT\s+classification=(?:PM_WAIT|HOLD)\b/.test(normalized) ||
+    /\bSlot \d+ FULLY IDLE\s+[—-]\s+awaiting next eligible assignment\.$/i.test(normalized) ||
+    /\bNo slot action remains;\s*slot \d+ is idle awaiting the next CTO-selected assign packet\.$/i.test(normalized) ||
+    /\bTerminal status\s+[—-]\s+#\d+\s+HOLD\s+\(PM_WAIT\):.*\bNo work continues:/i.test(normalized)
+  );
+}
+
 type ContinueDeliveryResult = {
   sent: boolean;
   reason: "sent" | "send_failed" | "slot_missing" | "released" | "dnd" | "identity_changed" | "release_in_progress";
@@ -1215,17 +1231,36 @@ export class StuckDetector {
       if (payload.assignment_epoch !== slot.assignment_epoch || !payload.idle_anchor) continue;
 
       const completion = stops
-        .filter((item) => item.timestampMs > nudgeTimestampMs)
-        .sort((a, b) => a.timestampMs - b.timestampMs)[0];
-      if (!completion || completion.timestampMs !== episodeTimestampMs) continue;
+        .filter((item) =>
+          item.timestampMs > nudgeTimestampMs ||
+          (item.timestampMs === nudgeTimestampMs && item.event.id > nudge.id)
+        )
+        // Claude can emit matching terminal hooks in parallel. Bind the
+        // causal chain to the latest terminal anchor, then require every
+        // intervening Stop to be the same-session nudge terminal below.
+        .sort((a, b) => a.timestampMs - b.timestampMs || a.event.id - b.event.id)
+        .at(-1);
+      if (!completion || completion.timestampMs !== episodeTimestampMs) {
+        continue;
+      }
 
       const directPromptStarts = promptStarts.filter(
-        (item) => item.timestampMs > nudgeTimestampMs && item.timestampMs < completion.timestampMs
+        (item) =>
+          (item.timestampMs > nudgeTimestampMs ||
+            (item.timestampMs === nudgeTimestampMs && item.event.id > nudge.id)) &&
+          (item.timestampMs < completion.timestampMs ||
+            (item.timestampMs === completion.timestampMs && item.event.id < completion.event.id))
       );
       const directStops = stops.filter(
-        (item) => item.timestampMs > nudgeTimestampMs && item.timestampMs <= completion.timestampMs
+        (item) =>
+          (item.timestampMs > nudgeTimestampMs ||
+            (item.timestampMs === nudgeTimestampMs && item.event.id > nudge.id)) &&
+          (item.timestampMs < completion.timestampMs ||
+            (item.timestampMs === completion.timestampMs && item.event.id <= completion.event.id))
       );
-      if (directPromptStarts.length !== 1 || directStops.length === 0) continue;
+      if (directPromptStarts.length !== 1 || directStops.length === 0) {
+        continue;
+      }
 
       const promptSessionId = parseHookSessionId(directPromptStarts[0].event.payload);
       const completionSessionId = parseHookSessionId(completion.event.payload);
@@ -1236,12 +1271,15 @@ export class StuckDetector {
           const stopPayload = JSON.parse(item.event.payload) as { transcript?: unknown };
           return parseHookSessionId(item.event.payload) === promptSessionId &&
             typeof stopPayload.transcript === "string" &&
-            /PM_WAIT_NUDGE_RESULT\s+classification=(?:PM_WAIT|HOLD)\b/.test(stopPayload.transcript);
+            isNudgeWaitTerminal(stopPayload.transcript);
         } catch {
           return false;
         }
       });
-      if (!endedAsPmWait) continue;
+      if (!endedAsPmWait) {
+        continue;
+      }
+
 
       const priorWaitTimestamp = payload.wait_anchor ?? payload.idle_anchor;
       const priorWaitTimestampMs = parseDbTimestampMs(priorWaitTimestamp);
