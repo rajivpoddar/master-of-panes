@@ -22,12 +22,14 @@
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
       "~/.claude/scripts/mop-slot-respawn.sh",
+      "~/.claude/scripts/pm-cleanup-pr.py",
       "~/.claude/scripts/pm-merges-automation-update.py",
       "~/.claude/scripts/pm-terminal-continuity.py",
       "~/.claude/scripts/pm-terminal-wake.py",
       "~/.claude/control_plane/runtime_observation.py",
       "~/.claude/scripts/sakshi-heartbeat.py",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
+      "~/.claude/skills/pm-cleanup-pr/SKILL.md",
       "~/.claude/skills/qa-brief/SKILL.md",
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "~/.claude/skills/slack-message/scripts/block-unsupported-transcript-split.py",
@@ -42,7 +44,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 66,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -302,6 +304,15 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/pm-cleanup-pr.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm-cleanup-pr.py",
+      "sha256": "46a2b2e9d2004be8e46413f6674f785bbad98f2411db8986afa934e3602c1963",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-merged-cleanup-caller",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/pm-merges-automation-update.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/pm-merges-automation-update.py",
       "sha256": "510a4994cc78c97e9189624cf56f313bd62c3694173a1c82b9ec25e1ae50f4d0",
@@ -363,6 +374,15 @@
       "sha256": "3e28684422c2dc19e51b5a979fcb5e354b2c1c5a814dc055b5047f11d8640f46",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/pm-cleanup-pr/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/pm-cleanup-pr/SKILL.md",
+      "sha256": "56dda9d1f57f3e5b8df2fc54bfb15c36e07a4c1fcb3655834a1af780bc0fe2f3",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-merged-cleanup-skill",
       "dependency_status": "closed",
       "dependencies": []
     },
