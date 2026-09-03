@@ -79,6 +79,10 @@ export interface SlotState {
   occupied: boolean;
   /** Current task description */
   task: string | null;
+  /** Current top-level session identity retained for session-age fencing */
+  session_id: string | null;
+  /** Durable start of the current hook session generation */
+  session_started_at: string | null;
   /** Immutable repository identity for the current assignment */
   repository_id: string | null;
   /** GitHub issue number */

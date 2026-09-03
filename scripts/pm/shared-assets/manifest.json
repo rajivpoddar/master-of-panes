@@ -71,7 +71,7 @@
     {
       "source_path": "claude/control_plane/runtime_observation.py",
       "canonical_target": "/Users/rajiv/.claude/control_plane/runtime_observation.py",
-      "sha256": "55f3028672293db219db515f4257487a803ed1f47a06d4c19c2c7ca81e4c4278",
+      "sha256": "b4bb0946d3afa02e255602ba3e798cce8ba12bfea2f7bc620a44a72aa5fe445c",
       "mode": 420,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
       "dependency_status": "closed",
@@ -233,7 +233,7 @@
     {
       "source_path": "claude/scripts/heartbeat-session-age-clear.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/heartbeat-session-age-clear.py",
-      "sha256": "caeed7ef552a12fe0696496ce6b647ada57089d161143acf6777e48fd02746e8",
+      "sha256": "609361192865286a03314f52703fb5e21c6b833be763817e8f0eed7487933ad0",
       "mode": 493,
       "ownership_class": "shared-claude-mop-session-age-client",
       "dependency_status": "closed",

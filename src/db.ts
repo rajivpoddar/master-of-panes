@@ -103,6 +103,33 @@ export interface NativeReleaseEffectReceipt {
   created_at: string;
 }
 
+export type SessionClearEffectStatus = "reserved" | "started" | "completed" | "ambiguous";
+
+export interface SessionClearEffectInput {
+  request_token: string;
+  request_digest: string;
+  slot: number;
+  expected_epoch: number;
+  expected_session_id: string;
+  expected_session_started_at: string;
+  pane_id: string;
+  checkout_path: string;
+  checkout_branch: string;
+  checkout_head: string;
+}
+
+export interface SessionClearEffectReceipt extends SessionClearEffectInput {
+  status: SessionClearEffectStatus;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface SessionClearStartResult {
+  receipt: SessionClearEffectReceipt;
+  started: boolean;
+}
+
 /** Covers the complete bounded pane-release sequence (idle wait + reset). */
 export const NATIVE_RELEASE_INTENT_TTL_MS = 10 * 60 * 1000;
 
@@ -405,6 +432,7 @@ export class MoPDatabase {
         status TEXT NOT NULL DEFAULT 'free',
         occupied INTEGER NOT NULL DEFAULT 0,
         session_id TEXT,
+        session_started_at TEXT,
         task TEXT,
         repository_id TEXT,
         issue INTEGER,
@@ -450,6 +478,9 @@ export class MoPDatabase {
     }
     if (!columns.some((c) => c.name === "active_turn_started_at")) {
       this.db.exec("ALTER TABLE slots ADD COLUMN active_turn_started_at TEXT");
+    }
+    if (!columns.some((c) => c.name === "session_started_at")) {
+      this.db.exec("ALTER TABLE slots ADD COLUMN session_started_at TEXT");
     }
     if (!columns.some((c) => c.name === "active_turn_state")) {
       this.db.exec("ALTER TABLE slots ADD COLUMN active_turn_state TEXT NOT NULL DEFAULT 'inactive'");
@@ -529,6 +560,25 @@ export class MoPDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_native_release_receipts_slot_epoch
         ON native_release_effect_receipts(slot, expected_epoch);
+
+      CREATE TABLE IF NOT EXISTS session_clear_effect_receipts (
+        request_token TEXT PRIMARY KEY,
+        request_digest TEXT NOT NULL,
+        slot INTEGER NOT NULL,
+        expected_epoch INTEGER NOT NULL,
+        expected_session_id TEXT NOT NULL,
+        expected_session_started_at TEXT NOT NULL,
+        pane_id TEXT NOT NULL,
+        checkout_path TEXT NOT NULL,
+        checkout_branch TEXT NOT NULL,
+        checkout_head TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('reserved', 'started', 'completed', 'ambiguous')),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+        started_at TEXT,
+        finished_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_clear_receipts_slot_epoch
+        ON session_clear_effect_receipts(slot, expected_epoch);
     `);
 
     // Initialize config KV table
@@ -757,7 +807,7 @@ export class MoPDatabase {
 
   updateSlot(slot: number, updates: Partial<SlotState>): void {
     const allowedFields = [
-      "name", "session_id", "task", "last_activity", "dnd", "idle", "activity",
+      "name", "session_id", "session_started_at", "task", "last_activity", "dnd", "idle", "activity",
       "active_turn_id", "active_turn_started_at", "active_turn_state", "last_meaningful_work_at",
     ];
     this.updateSlotFields(slot, updates, allowedFields);
@@ -984,7 +1034,7 @@ export class MoPDatabase {
       // Existing SQLite databases retain the retired session_id column. Clear
       // that legacy telemetry in the same release CAS, but never read it as
       // assignment authority.
-      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      this.db.prepare("UPDATE slots SET session_id = NULL, session_started_at = NULL WHERE slot = ?").run(slot);
       if (effect) {
         this.db.prepare(`
           INSERT INTO native_release_effect_receipts (
@@ -1139,7 +1189,7 @@ export class MoPDatabase {
         active_turn_state: "inactive",
         assignment_epoch: epoch + 1,
       });
-      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      this.db.prepare("UPDATE slots SET session_id = NULL, session_started_at = NULL WHERE slot = ?").run(slot);
       this.db.prepare(`
         INSERT INTO native_release_effect_receipts (
           effect_id, request_digest, slot, expected_epoch, released_epoch,
@@ -1401,7 +1451,7 @@ export class MoPDatabase {
           dnd: false,
         });
         // Keep the retired column empty without making it part of ownership.
-        this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      this.db.prepare("UPDATE slots SET session_id = NULL, session_started_at = NULL WHERE slot = ?").run(slot);
       } catch (error) {
         if (
           error instanceof Error
@@ -1563,7 +1613,7 @@ export class MoPDatabase {
         active_turn_started_at: null,
         active_turn_state: "inactive",
       });
-      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      this.db.prepare("UPDATE slots SET session_id = NULL, session_started_at = NULL WHERE slot = ?").run(slot);
       return {
         ok: true,
         conflict: false,
@@ -1786,8 +1836,17 @@ export class MoPDatabase {
   startAgentTurn(slot: number, turnId: string): void {
     if (typeof turnId !== "string" || turnId.trim() === "") return;
     const now = new Date().toISOString();
+    const current = this.getSlot(slot);
+    const sessionStartedAt = current?.session_id === turnId && current.session_started_at
+      ? current.session_started_at
+      : now;
     this.updateSlot(slot, {
+      // Keep the current top-level session bound while it is alive and while
+      // its free/idle age is being observed. Assignment/release CAS clears
+      // both fields when ownership changes.
+      session_id: turnId,
       active_turn_id: turnId,
+      session_started_at: sessionStartedAt,
       active_turn_started_at: now,
       active_turn_state: "active",
       last_meaningful_work_at: now,
@@ -1820,6 +1879,98 @@ export class MoPDatabase {
       active_turn_state: "inactive",
       idle: true,
     });
+  }
+
+  private readSessionClearEffect(requestToken: string): SessionClearEffectReceipt | null {
+    const row = this.db.prepare(`
+      SELECT request_token, request_digest, slot, expected_epoch,
+             expected_session_id, expected_session_started_at, pane_id,
+             checkout_path, checkout_branch, checkout_head, status,
+             created_at, started_at, finished_at
+      FROM session_clear_effect_receipts
+      WHERE request_token = ?
+    `).get(requestToken) as SessionClearEffectReceipt | undefined;
+    return row ?? null;
+  }
+
+  getSessionClearEffect(requestToken: string): SessionClearEffectReceipt | null {
+    if (typeof requestToken !== "string" || requestToken.trim() === "") return null;
+    return this.readSessionClearEffect(requestToken);
+  }
+
+  reserveSessionClearEffect(input: SessionClearEffectInput): SessionClearEffectReceipt | null {
+    return this.db.transaction((): SessionClearEffectReceipt | null => {
+      const prior = this.readSessionClearEffect(input.request_token);
+      if (prior) {
+        return prior.request_digest === input.request_digest ? prior : null;
+      }
+      this.db.prepare(`
+        INSERT INTO session_clear_effect_receipts (
+          request_token, request_digest, slot, expected_epoch,
+          expected_session_id, expected_session_started_at, pane_id,
+          checkout_path, checkout_branch, checkout_head, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved')
+      `).run(
+        input.request_token,
+        input.request_digest,
+        input.slot,
+        input.expected_epoch,
+        input.expected_session_id,
+        input.expected_session_started_at,
+        input.pane_id,
+        input.checkout_path,
+        input.checkout_branch,
+        input.checkout_head,
+      );
+      return this.readSessionClearEffect(input.request_token);
+    })();
+  }
+
+  /** Atomically bind the reservation to the final DB fence immediately before pane delivery. */
+  startSessionClearEffect(input: SessionClearEffectInput): SessionClearStartResult | null {
+    return this.db.transaction((): SessionClearStartResult | null => {
+      const prior = this.readSessionClearEffect(input.request_token);
+      if (!prior || prior.request_digest !== input.request_digest) return null;
+      if (prior.status !== "reserved") return { receipt: prior, started: false };
+      const current = this.getSlot(input.slot);
+      if (
+        !current
+        || current.assignment_epoch !== input.expected_epoch
+        || current.session_id !== input.expected_session_id
+        || current.session_started_at !== input.expected_session_started_at
+        || current.occupied
+        || current.dnd
+        || !current.idle
+        || current.active_turn_id !== null
+        || current.active_turn_state !== "inactive"
+      ) return { receipt: prior, started: false };
+      const changed = this.db.prepare(`
+        UPDATE session_clear_effect_receipts
+        SET status = 'started', started_at = strftime('%Y-%m-%dT%H:%M:%f', 'now')
+        WHERE request_token = ? AND request_digest = ? AND status = 'reserved'
+      `).run(input.request_token, input.request_digest);
+      const receipt = this.readSessionClearEffect(input.request_token);
+      return receipt ? { receipt, started: changed.changes === 1 } : null;
+    })();
+  }
+
+  finishSessionClearEffect(
+    requestToken: string,
+    requestDigest: string,
+    status: "completed" | "ambiguous",
+  ): SessionClearEffectReceipt | null {
+    return this.db.transaction((): SessionClearEffectReceipt | null => {
+      const prior = this.readSessionClearEffect(requestToken);
+      if (!prior || prior.request_digest !== requestDigest) return null;
+      if (prior.status === "completed" || prior.status === "ambiguous") return prior;
+      if (prior.status !== "started") return prior;
+      this.db.prepare(`
+        UPDATE session_clear_effect_receipts
+        SET status = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%f', 'now')
+        WHERE request_token = ? AND request_digest = ? AND status = 'started'
+      `).run(status, requestToken, requestDigest);
+      return this.readSessionClearEffect(requestToken);
+    })();
   }
 
   // ─── Config (KV Store) ──────────────────────────────────

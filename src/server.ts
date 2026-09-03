@@ -44,6 +44,7 @@ import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { registerSessionClearRoute } from "./sessionClearRoute.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -859,6 +860,8 @@ app.get("/slots/:slotNum", (c) => {
 
   return c.json(slot);
 });
+
+registerSessionClearRoute(app, { db, relay, observeCheckout });
 
 /** Clear one slot, PM, or all slots through MoP logging. */
 app.post("/slots/:slotNum/clear", async (c) => {

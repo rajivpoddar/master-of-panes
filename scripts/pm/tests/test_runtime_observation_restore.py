@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import http.server
@@ -89,7 +90,7 @@ class RuntimeObservationRestoreTests(unittest.TestCase):
                 row = adapter.observe_slot(
                     label,
                     mop_row={
-                        "occupied": label != "pm",
+                        "occupied": False,
                         "idle": True,
                         "dnd": False,
                         "active_turn_id": None,
@@ -113,6 +114,72 @@ class RuntimeObservationRestoreTests(unittest.TestCase):
             self.assertIsNotNone(missing.error)
             self.assertIsNone(missing.active)
             self.assertFalse(missing.clear_due)
+
+    def test_omp_s5_and_s6_are_observed_and_clear_due_matches_helper_state(self) -> None:
+        runtime = load_module("runtime_observation_omp_restore", RUNTIME)
+        now = runtime.parse_timestamp("2026-09-03T07:00:00Z")
+        assert now is not None
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for slot in ("5", "6"):
+                directory = root / f"heydonna-slot{slot}"
+                directory.mkdir()
+                (directory / f"session-{slot}.jsonl").write_text(
+                    json.dumps({
+                        "type": "session",
+                        "sessionId": f"omp-session-{slot}",
+                        "timestamp": "2026-09-02T00:00:00Z",
+                    }) + "\n",
+                    encoding="utf-8",
+                )
+            adapter = runtime.RuntimeObservationAdapter(
+                omp_sessions_root=root,
+                runtime_source="omp",
+            )
+            for slot in ("5", "6"):
+                row = adapter.observe_slot(
+                    slot,
+                    mop_row={
+                        "occupied": False,
+                        "idle": True,
+                        "dnd": False,
+                        "active_turn_id": None,
+                        "active_turn_state": "inactive",
+                    },
+                    now=now,
+                )
+                self.assertEqual(row.session_id, f"omp-session-{slot}")
+                self.assertEqual(row.source, "omp_top_level")
+                self.assertFalse(row.active)
+                self.assertTrue(row.idle)
+                self.assertTrue(row.clear_due)
+
+                # The fields Sakshi emits for clear_due are the same exact
+                # free/idle tuple consumed by the one-shot helper fence.
+                helper_args = argparse.Namespace(
+                    expected_epoch=0,
+                    expected_session_id=row.session_id,
+                    expected_session_started_at=row.session_start.isoformat() if row.session_start else "",
+                )
+                helper_observation = {
+                    "assignment_epoch": row.assignment_epoch or 0,
+                    "session_id": row.session_id,
+                    "session_started_at": row.session_start.isoformat() if row.session_start else "",
+                    "occupied": row.occupied,
+                    "dnd": row.dnd,
+                    "idle": row.idle,
+                    "active_turn_id": row.active_turn_id,
+                    "active_turn_state": row.active_turn_state,
+                }
+                self.assertEqual(adapter.clear_due_for(
+                    row.effective_start,
+                    occupied=helper_observation["occupied"],
+                    idle=helper_observation["idle"],
+                    active=row.active,
+                    now=now,
+                ), True)
+                client = load_module("heartbeat_session_age_clear_omp", CLEAR)
+                self.assertEqual(client._fence(helper_args, helper_observation), (True, None))
 
     def test_session_age_dry_run_uses_authenticated_stub_and_has_zero_effect(self) -> None:
         client = load_module("heartbeat_session_age_clear_restore", CLEAR)

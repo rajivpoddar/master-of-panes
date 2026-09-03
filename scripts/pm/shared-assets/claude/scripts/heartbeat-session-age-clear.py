@@ -61,13 +61,12 @@ def request_json(
     path: str,
     method: str,
     body: dict[str, object] | None,
-    authority: str,
     capability: str,
 ) -> tuple[int, dict[str, object]]:
     data = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(f"{base_url.rstrip('/')}{path}", data=data, method=method)
     request.add_header("Accept", "application/json")
-    request.add_header(AUTHORITY_HEADER, authority)
+    request.add_header(AUTHORITY_HEADER, DEFAULT_AUTHORITY)
     request.add_header(CAPABILITY_HEADER, capability)
     if data is not None:
         request.add_header("Content-Type", "application/json")
@@ -97,7 +96,6 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--checkout-head", required=True)
     result.add_argument("--request-token", required=True)
     result.add_argument("--base-url", default=os.environ.get("MOP_BASE_URL", DEFAULT_BASE_URL))
-    result.add_argument("--authority", default=os.environ.get("MOP_DIRECT_CLIENT_AUTHORITY", DEFAULT_AUTHORITY))
     result.add_argument("--execute", action="store_true", help="request the explicit session-clear route after all fences")
     result.add_argument("--dry-run", action="store_true", help="report the exact fence without an effect")
     return result
@@ -176,7 +174,7 @@ def main() -> int:
     if not endpoint_is_exact_loopback(args.base_url):
         print(json.dumps({"success": False, "effect": False, "code": "MOP_ENDPOINT_NOT_LOCAL"}, sort_keys=True))
         return 2
-    if len(capability) < 32:
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", capability):
         print(json.dumps({"success": False, "effect": False, "code": "MOP_CAPABILITY_MISSING"}, sort_keys=True))
         return 2
     status, observed = request_json(
@@ -184,7 +182,6 @@ def main() -> int:
         f"/slots/{args.slot}",
         "GET",
         None,
-        args.authority,
         capability,
     )
     if status != 200:
@@ -218,7 +215,6 @@ def main() -> int:
         SESSION_CLEAR_PATH.format(slot=args.slot),
         "POST",
         body,
-        args.authority,
         capability,
     )
     print(json.dumps(response, sort_keys=True))

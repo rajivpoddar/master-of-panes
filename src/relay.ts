@@ -14,7 +14,7 @@ import type { MoPDatabase } from "./db.js";
 import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
-import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { paneAddress, verifyPaneIdentity, type PaneIdentitySnapshot } from "./paneIdentity.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
@@ -1002,7 +1002,18 @@ export class TmuxRelay {
     }
   }
 
-  async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false): Promise<boolean> {
+  async sendToSlotAsync(
+    slotNum: number,
+    command: string,
+    _force = false,
+    raw = false,
+    options: {
+      noRetry?: boolean;
+      /** Last awaited read-only preparation; its result is fenced synchronously below. */
+      prepareBeforeFirstEffect?: (identity: PaneIdentitySnapshot) => Promise<PaneIdentitySnapshot | null>;
+      beforeFirstEffect?: (identity: PaneIdentitySnapshot) => boolean;
+    } = {},
+  ): Promise<boolean> {
     void _force; // v3: every send is unconditional
     if (slotNum === 0 && !raw) {
       // Text delivery to PM must use the observation-bound submit key. Raw
@@ -1047,11 +1058,13 @@ export class TmuxRelay {
     }
 
     let lastErr: unknown = null;
-    for (let attempt = 0; attempt <= TmuxRelay.SEND_MAX_RETRIES; attempt++) {
+    const maxAttempts = options.noRetry ? 1 : TmuxRelay.SEND_MAX_RETRIES + 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         if (raw) {
           // Raw: tmux interprets key names (Escape, C-c, BTab, etc.).
           // Do NOT pass -l (literal) flag — that would type the name as text.
+          if (options.beforeFirstEffect && !options.beforeFirstEffect(identity.snapshot)) return false;
           await this.runShell(
             `tmux send-keys -t ${paneTarget} ${shellEscape(command)}`,
             { timeout: 5_000 }
@@ -1063,19 +1076,27 @@ export class TmuxRelay {
           const bufName = `mop-send-${slotNum}`;
           await fs.writeFile(tmpFile, command);
           try {
+            let effectIdentity = identity.snapshot;
+            if (options.prepareBeforeFirstEffect) {
+              const prepared = await options.prepareBeforeFirstEffect(effectIdentity);
+              if (!prepared) return false;
+              effectIdentity = prepared;
+            }
+            if (options.beforeFirstEffect && !options.beforeFirstEffect(effectIdentity)) return false;
+            const effectPaneTarget = effectIdentity.paneId;
             await this.runShell(
               `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
               { timeout: 3_000 }
             );
             await this.runShell(
-              `tmux paste-buffer -b ${bufName} -t ${paneTarget} -d`,
+              `tmux paste-buffer -b ${bufName} -t ${effectPaneTarget} -d`,
               { timeout: 3_000 }
             );
             // Small breathing room so the TUI registers the paste before Enter.
             // Matches the 0.3s that injectDirect uses for PM pane sends.
             await sleep(300);
             await this.runShell(
-              `tmux send-keys -t ${paneTarget} Enter`,
+              `tmux send-keys -t ${effectPaneTarget} Enter`,
               { timeout: 3_000 }
             );
           } finally {

@@ -281,13 +281,16 @@ class RuntimeObservationAdapter:
     ) -> bool:
         if effective_start is None or active is not False:
             return False
-        if not is_pm and (occupied is not True or idle is not True):
+        # Numbered-slot session expiry is actionable only for a free, idle
+        # session.  Keep the observation contract identical to the one-shot
+        # clear client; an occupied slot is never a clear candidate.
+        if not is_pm and (occupied is not False or idle is not True):
             return False
         return (now.astimezone(timezone.utc) - effective_start).total_seconds() > threshold_hours * 3600
 
-    def latest_omp_session(self, slot: str) -> tuple[Path, datetime, datetime] | None:
+    def latest_omp_session(self, slot: str) -> tuple[Path, datetime, datetime, str] | None:
         session_dir = self.omp_sessions_root / ("heydonna-pm" if slot == "pm" else f"heydonna-slot{slot}")
-        candidates: list[tuple[datetime, datetime, float, Path]] = []
+        candidates: list[tuple[datetime, datetime, float, Path, str]] = []
         try:
             paths = list(session_dir.glob("*.jsonl"))
         except OSError:
@@ -296,17 +299,17 @@ class RuntimeObservationAdapter:
             if not path.is_file():
                 continue
             _records, start, latest, _session_id = _session_records(path)
-            if start is None or latest is None:
+            if start is None or latest is None or not _session_id:
                 continue
             try:
                 mtime = path.stat().st_mtime
             except OSError:
                 continue
-            candidates.append((start, latest, mtime, path))
+            candidates.append((start, latest, mtime, path, _session_id))
         if not candidates:
             return None
-        start, latest, _mtime, path = max(candidates, key=lambda item: (item[0], item[2]))
-        return path, start, latest
+        start, latest, _mtime, path, session_id = max(candidates, key=lambda item: (item[0], item[2]))
+        return path, start, latest, session_id
 
     @staticmethod
     def _claude_project_name(project_dir: Path) -> str:
@@ -378,7 +381,7 @@ class RuntimeObservationAdapter:
         row = dict(mop_row or {})
         runtime_source, project_dir = self._runtime_identity(slot)
         session: tuple[Any, ...] | None = None
-        if runtime_source == "omp" and slot in {"pm", "1", "2", "3", "4"}:
+        if runtime_source == "omp" and slot in {"pm", "1", "2", "3", "4", "5", "6"}:
             session = self.latest_omp_session(slot)
         elif runtime_source == "claude" and project_dir is not None:
             session = self.latest_claude_session(project_dir, now=now)
