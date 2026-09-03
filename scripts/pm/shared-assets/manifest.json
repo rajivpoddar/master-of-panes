@@ -14,6 +14,7 @@
       "~/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
       "~/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
       "~/.claude/control-plane/current/claude/scripts/ci/rerun-after-local-proof.sh",
+      "~/.claude/scripts/heartbeat-session-age-clear.py",
       "~/.claude/scripts/launch-dev-slot-claude.sh",
       "~/.claude/scripts/launch-slot-1.sh",
       "~/.claude/scripts/launch-slot-2.sh",
@@ -42,7 +43,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 65,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -70,7 +71,7 @@
     {
       "source_path": "claude/control_plane/runtime_observation.py",
       "canonical_target": "/Users/rajiv/.claude/control_plane/runtime_observation.py",
-      "sha256": "33e7e0447d92fef778b75bca2dfea074ad1f8d1e7f27fe25c601f67ad01c7344",
+      "sha256": "55f3028672293db219db515f4257487a803ed1f47a06d4c19c2c7ca81e4c4278",
       "mode": 420,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
       "dependency_status": "closed",
@@ -226,6 +227,15 @@
       "sha256": "610d8408e306d446a104cbcff9786c9f8dc10defb6cb42438d3c60046f22f923",
       "mode": 493,
       "ownership_class": "shared-claude-ci-rerun-consumer",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/heartbeat-session-age-clear.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/heartbeat-session-age-clear.py",
+      "sha256": "caeed7ef552a12fe0696496ce6b647ada57089d161143acf6777e48fd02746e8",
+      "mode": 493,
+      "ownership_class": "shared-claude-mop-session-age-client",
       "dependency_status": "closed",
       "dependencies": []
     },
