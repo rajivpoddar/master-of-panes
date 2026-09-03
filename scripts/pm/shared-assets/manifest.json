@@ -70,7 +70,7 @@
     {
       "source_path": "claude/control_plane/runtime_observation.py",
       "canonical_target": "/Users/rajiv/.claude/control_plane/runtime_observation.py",
-      "sha256": "33e7e0447d92fef778b75bca2dfea074ad1f8d1e7f27fe25c601f67ad01c7344",
+      "sha256": "ec00e3d27372044944ff94fae58cb01585b23a2cc3308c77328d5dba6e6f46c8",
       "mode": 420,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
       "dependency_status": "closed",
@@ -331,7 +331,7 @@
     {
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py",
-      "sha256": "18848718df161667ed3462bcec45d4fb632beba4f1a6dc5692c867c4bb36726d",
+      "sha256": "145f733099d16f71f981310da7bffcbcb4178e48196486bb4086f12911530bc9",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
       "dependency_status": "closed",

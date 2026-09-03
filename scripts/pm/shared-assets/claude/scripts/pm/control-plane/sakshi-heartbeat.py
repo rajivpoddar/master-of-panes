@@ -1259,14 +1259,27 @@ def evaluate_open_pr_activity(
             continue
         slot_pr = str(slot.get("pr") or slot.get("pull_request") or "")
         slot_head = str(slot.get("head_sha") or slot.get("headSha") or "")
-        if slot_pr == number and slot_head == head:
+        slot_branch = str(
+            slot.get("branch") or slot.get("branchRef") or slot.get("branch_ref") or ""
+        ).removeprefix("refs/heads/")
+        # A genuinely-active numbered slot reworking a PR normally sits on a LOCAL
+        # head that is AHEAD of the pushed PR head (mid-rework, not yet pushed).
+        # Exact-head equality alone therefore misses in-progress repro/rework and
+        # mis-reports the PR as PROCESS_LIMBO (Rajiv directive 2026-09-03: fix the
+        # script — an actively-reworking slot is NOT limbo). Match on the same PR
+        # plus (exact head OR same branch); the `active` gate below still requires a
+        # live turn, so this never counts a stale idle claim.
+        slot_on_pr = slot_pr == number and (
+            slot_head == head or (bool(slot_branch) and slot_branch == branch)
+        )
+        if slot_on_pr:
             owner = str(slot.get("owner") or slot.get("name") or f"S{slot_id}")
         active_state = str(slot.get("active_turn_state") or slot.get("state") or "").lower()
         active = bool(slot.get("occupied")) and (
             active_state in {"active", "running", "working", "in_progress"}
             and bool(str(slot.get("active_turn_id") or "").strip())
         )
-        if active and slot_pr == number and slot_head == head:
+        if active and slot_on_pr:
             kind = _numbered_motion_kind(slot)
             active_numbered_owners.append((kind, owner))
 
