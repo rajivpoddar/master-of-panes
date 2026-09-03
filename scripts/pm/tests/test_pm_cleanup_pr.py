@@ -122,6 +122,15 @@ class FakeExternal(MODULE.External):
         return {"ok": True, "ts": "1789000000.000001", "channel": MODULE.SLACK_CHANNEL}
 
 
+class ProductionShapeExternal(FakeExternal):
+    def read_pr(self, request):
+        return {**self.pr, "labels": [{"name": label, "color": "ededed"} for label in self.pr["labels"]] + [{"name": "customer-visible"}]}
+
+    def read_issue(self, request):
+        self.issue_reads += 1
+        return {**self.issue, "labels": [{"name": label} for label in self.issue["labels"]]}
+
+
 def mapping_file(path: Path) -> None:
     path.write_text(json.dumps({"assignment-generation": {
         "status": "parent_created", "repository_id": REQUEST["repository"], "issue": REQUEST["issue"],
@@ -151,6 +160,40 @@ def test_merged_tuple_preserves_unrelated_labels_and_replies_once(tmp_path: Path
     replay = MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
     assert replay["idempotent"] is True
     assert len(external.effects) == 9
+
+
+def test_production_gh_label_objects_are_decoded_for_pr_and_issue(tmp_path: Path):
+    mapping = tmp_path / "mapping.json"
+    receipt = tmp_path / "receipt.json"
+    mapping_file(mapping)
+    external = ProductionShapeExternal()
+    result = MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
+    assert result["success"] is True
+    assert set(external.pr["labels"]) == {"customer-visible", "pm-state:closed-clean", "priority:P1"}
+    assert set(external.issue["labels"]) == {"status:done", "team:frontend"}
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        [{"name": "valid"}, "mixed"],
+        [{"name": "valid"}, {"name": ""}],
+        [{"name": 42}],
+        [{"label": "missing-name"}],
+        [None],
+        [""],
+    ],
+)
+def test_malformed_or_mixed_github_label_objects_fail_before_effect(tmp_path: Path, labels):
+    mapping = tmp_path / "mapping.json"
+    receipt = tmp_path / "receipt.json"
+    mapping_file(mapping)
+    external = FakeExternal()
+    external.pr["labels"] = labels
+    with pytest.raises(MODULE.CleanupError, match="github_labels_invalid"):
+        MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
+    assert external.effects == []
+    assert not receipt.exists()
 
 
 def test_stale_head_and_nonmerged_pr_fail_before_effect(tmp_path: Path):

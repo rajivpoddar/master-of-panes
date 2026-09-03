@@ -151,9 +151,20 @@ def _validate_request(value: Any) -> dict[str, Any]:
 
 
 def _labels(value: Any) -> list[str]:
-    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+    if not isinstance(value, list):
         raise CleanupError("github_labels_invalid")
-    return list(dict.fromkeys(value))
+    if all(isinstance(item, str) and item for item in value):
+        names = value
+    elif all(isinstance(item, dict) for item in value):
+        names = []
+        for item in value:
+            name = item.get("name")
+            if not isinstance(name, str) or not name:
+                raise CleanupError("github_labels_invalid")
+            names.append(name)
+    else:
+        raise CleanupError("github_labels_invalid")
+    return list(dict.fromkeys(names))
 
 
 def _is_stale_label(label: str) -> bool:
