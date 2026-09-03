@@ -21,6 +21,7 @@
       "~/.claude/scripts/launch-slot-4.sh",
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
+      "~/.claude/scripts/message-pm.sh",
       "~/.claude/scripts/mop-slot-respawn.sh",
       "~/.claude/scripts/pm-merges-automation-update.py",
       "~/.claude/scripts/pm-terminal-continuity.py",
@@ -29,6 +30,9 @@
       "~/.claude/scripts/sakshi-heartbeat.py",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
       "~/.claude/skills/qa-brief/SKILL.md",
+      "~/.claude/skills/message-pm/SKILL.md",
+      "~/.claude/skills/pm-wait-nudge/SKILL.md",
+      "~/.claude/skills/pm-nudge-processing/SKILL.md",
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "~/.claude/skills/slack-message/scripts/block-unsupported-transcript-split.py",
       "~/.claude/skills/slack-message/scripts/slack-send.sh",
@@ -42,7 +46,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 68,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -293,6 +297,15 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/message-pm.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/message-pm.sh",
+      "sha256": "ba32afdbabeda4b92887fcfd91083ef22c2c2a8fd53252ed4fdc78755382d4ab",
+      "mode": 493,
+      "ownership_class": "shared-claude-message-pm-direct-client",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/mop-slot-respawn.sh",
       "canonical_target": "/Users/rajiv/.claude/scripts/mop-slot-respawn.sh",
       "sha256": "996927262a5c37a639f84493330938c4d6cb73319cf36094c23a795aaa90bbbb",
@@ -363,6 +376,33 @@
       "sha256": "3e28684422c2dc19e51b5a979fcb5e354b2c1c5a814dc055b5047f11d8640f46",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/message-pm/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/message-pm/SKILL.md",
+      "sha256": "e7406ec2c7553de278d1b4aad94301600f4d8a42113eeae4b36c91a3b448ec63",
+      "mode": 420,
+      "ownership_class": "shared-claude-message-pm-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/pm-nudge-processing/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/pm-nudge-processing/SKILL.md",
+      "sha256": "481732b6267c85659a2d7bf46fdd0b528b8c63df53c71a5cb476c9df5769ec85",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-nudge-processing-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/pm-wait-nudge/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/pm-wait-nudge/SKILL.md",
+      "sha256": "a974aa6b906a4440cfb240e7070bec8f473b60125019938cedb0949bb8fb307b",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-wait-nudge-skill",
       "dependency_status": "closed",
       "dependencies": []
     },
