@@ -44,7 +44,7 @@ import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
-import { registerSessionClearRoute } from "./sessionClearRoute.js";
+import { registerRetiredClearRefusals, registerSessionClearRoute } from "./sessionClearRoute.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -862,52 +862,7 @@ app.get("/slots/:slotNum", (c) => {
 });
 
 registerSessionClearRoute(app, { db, relay, observeCheckout });
-
-/** Clear one slot, PM, or all slots through MoP logging. */
-app.post("/slots/:slotNum/clear", async (c) => {
-  const targetSlots = normalizeClearTarget(c.req.param("slotNum"));
-  if (!targetSlots) {
-    return c.json({ error: "slotNum must be an integer from 0 through 6, pm, or all" }, 400);
-  }
-
-  let body: { source?: string; clear_existing_pending?: boolean; terminal_only?: boolean } = {};
-  try {
-    body = await c.req.json();
-  } catch {
-    body = {};
-  }
-
-  const source = body.source ?? "http_clear_endpoint";
-  const results = await clearSlotsThroughMopHttp(targetSlots, {
-    clearExistingPendingForTargets: body.clear_existing_pending ?? false,
-    source,
-    terminalOnly: body.terminal_only ?? false,
-  });
-  return c.json({ ok: true, source, results });
-});
-
-/** Clear endpoint that accepts {slot:"pm"|"all"|"0"..}. */
-app.post("/clear", async (c) => {
-  let body: { slot?: string; source?: string; clear_existing_pending?: boolean; terminal_only?: boolean } = {};
-  try {
-    body = await c.req.json();
-  } catch {
-    body = {};
-  }
-
-  const targetSlots = normalizeClearTarget(body.slot ?? "all");
-  if (!targetSlots) {
-    return c.json({ error: "slot must be an integer from 0 through 6, pm, or all" }, 400);
-  }
-
-  const source = body.source ?? "http_clear_endpoint";
-  const results = await clearSlotsThroughMopHttp(targetSlots, {
-    clearExistingPendingForTargets: body.clear_existing_pending ?? false,
-    source,
-    terminalOnly: body.terminal_only ?? false,
-  });
-  return c.json({ ok: true, source, results });
-});
+registerRetiredClearRefusals(app);
 
 /** Get event log (optionally filtered by slot) */
 app.get("/events", (c) => {

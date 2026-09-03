@@ -266,6 +266,11 @@ def analyze_session(
         "source": observation.source,
         "jsonl": observation.session_path,
         "present": observation.session_path is not None,
+        # Numbered-slot clear consumers must receive the exact MoP identity;
+        # OMP identity remains diagnostic evidence only.
+        "session_id": observation.session_id,
+        "session_started_at": observation.session_started_at.isoformat() if observation.session_started_at else None,
+        "runtime_session_id": observation.runtime_session_id,
         "first_timestamp": observation.session_start.isoformat() if observation.session_start else None,
         "last_timestamp": observation.latest_record.isoformat() if observation.latest_record else None,
         "last_clear": observation.clear_event_at.isoformat() if observation.clear_event_at else None,
@@ -379,7 +384,11 @@ def update_omp_effective_starts(
         if not clear:
             continue
         clear_timestamp, event_type = clear
-        session_timestamp = parse_ts(row.get("omp_latest_record")) or parse_ts(row.get("omp_session_start"))
+        # For numbered slots, keep the DB UserPromptSubmit identity/start as
+        # the only clear authority. OMP timestamps remain observational.
+        session_timestamp = parse_ts(row.get("session_started_at"))
+        if str(row.get("id") or "") == "pm":
+            session_timestamp = parse_ts(row.get("omp_latest_record")) or parse_ts(row.get("omp_session_start"))
         effective = max((value for value in (session_timestamp, clear_timestamp) if value), default=None)
         row["last_clear"] = clear_timestamp.isoformat()
         row["clear_event_type"] = event_type
@@ -392,6 +401,8 @@ def update_omp_effective_starts(
             occupied=row.get("mop_occupied"),
             idle=row.get("mop_idle"),
             active=row.get("active"),
+            session_id=row.get("session_id"),
+            session_started_at=session_timestamp,
             is_pm=str(row.get("id") or "") == "pm",
             now=now_utc,
         )
@@ -2767,7 +2778,7 @@ def build_report(data: dict[str, Any]) -> str:
             continue
         target = "pm" if row["id"] == "pm" else row["id"]
         actions.append(
-            f"Session-age clear due for {row['label']} {row['age']}: hourly ops should invoke Skill(session-age-clear) for slot \"{target}\" ({row.get('clear_reason')})."
+            f"Session-age clear due for {row['label']} {row['age']}: hourly ops should invoke /Users/rajiv/.claude/scripts/heartbeat-session-age-clear.py for slot \"{target}\" using the exact emitted session_id/session_started_at tuple ({row.get('clear_reason')})."
         )
     if pr.get("ok") and pr.get("drift"):
         actions.append("Resolve PM label drift rows before reporting affected PRs as clean.")

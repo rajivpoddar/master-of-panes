@@ -55,12 +55,12 @@ function hasLocalCapability(authority: string | undefined, capability: string | 
     && equalSecret(capability, configured);
 }
 
-function responseForReceipt(receipt: SessionClearEffectReceipt): Response {
+function responseForReceipt(receipt: SessionClearEffectReceipt, idempotent = true): Response {
   if (receipt.status === "completed") {
     return new Response(JSON.stringify({
       success: true,
-      effect: false,
-      idempotent: true,
+      effect: !idempotent,
+      idempotent,
       status: receipt.status,
       request_token: receipt.request_token,
     }), { status: 200, headers: { "content-type": "application/json" } });
@@ -224,6 +224,19 @@ export function registerSessionClearRoute(
     if (terminal.status === "ambiguous" || !sent) return responseForReceipt(terminal);
     if (terminal.status === "started" && !startedByThisRequest) return responseForReceipt(terminal);
     const completed = db.finishSessionClearEffect(request.request_token, digest, "completed");
-    return completed ? responseForReceipt(completed) : failure("session_clear_receipt_missing", 503);
+    return completed
+      ? responseForReceipt(completed, false)
+      : failure("session_clear_receipt_missing", 503);
   });
+}
+
+/** Keep retired broad clear aliases effect-free and body-free. */
+export function registerRetiredClearRefusals(app: Hono): void {
+  const response = () => new Response(JSON.stringify({
+    success: false,
+    effect: false,
+    code: "session_clear_exact_route_required",
+  }), { status: 410, headers: { "content-type": "application/json" } });
+  app.post("/slots/:slotNum/clear", response);
+  app.post("/clear", response);
 }

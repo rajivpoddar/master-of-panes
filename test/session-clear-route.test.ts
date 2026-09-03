@@ -6,7 +6,7 @@ import test from "node:test";
 import { Hono } from "hono";
 
 import { MoPDatabase } from "../src/db.js";
-import { registerSessionClearRoute } from "../src/sessionClearRoute.js";
+import { registerRetiredClearRefusals, registerSessionClearRoute } from "../src/sessionClearRoute.js";
 import type { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
@@ -110,7 +110,10 @@ test("session clear is authenticated, final-fenced, durable, and replay-safe", a
       jsonRequest(body(current.session_started_at, "clear-1")),
     );
     assert.equal(first.status, 200);
-    assert.equal((await first.json()).success, true);
+    const firstResult = await first.json();
+    assert.equal(firstResult.success, true);
+    assert.equal(firstResult.effect, true);
+    assert.equal(firstResult.idempotent, false);
     assert.equal(paneEffects, 1);
     assert.equal(db.getSessionClearEffect("clear-1")?.status, "completed");
 
@@ -137,6 +140,24 @@ test("session clear is authenticated, final-fenced, durable, and replay-safe", a
     if (previousCapability === undefined) delete process.env.MOP_LOCAL_CAPABILITY;
     else process.env.MOP_LOCAL_CAPABILITY = previousCapability;
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("broad clear aliases refuse before parsing and cannot reach pane delivery", async () => {
+  const app = new Hono();
+  registerRetiredClearRefusals(app);
+  for (const path of ["/clear", "/slots/1/clear"]) {
+    const response = await app.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not-json",
+    });
+    assert.equal(response.status, 410);
+    assert.deepEqual(await response.json(), {
+      success: false,
+      effect: false,
+      code: "session_clear_exact_route_required",
+    });
   }
 });
 

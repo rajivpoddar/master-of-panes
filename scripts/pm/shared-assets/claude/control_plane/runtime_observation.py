@@ -171,7 +171,9 @@ class RuntimeObservation:
     source: str
     session_path: str | None
     session_id: str | None
+    runtime_session_id: str | None
     session_start: datetime | None
+    session_started_at: datetime | None
     latest_record: datetime | None
     effective_start: datetime | None
     occupied: bool | None
@@ -275,6 +277,8 @@ class RuntimeObservationAdapter:
         occupied: bool | None,
         idle: bool | None,
         active: bool | None,
+        session_id: str | None = None,
+        session_started_at: datetime | None = None,
         is_pm: bool = False,
         now: datetime,
         threshold_hours: float = SESSION_AGE_THRESHOLD_HOURS,
@@ -284,7 +288,12 @@ class RuntimeObservationAdapter:
         # Numbered-slot session expiry is actionable only for a free, idle
         # session.  Keep the observation contract identical to the one-shot
         # clear client; an occupied slot is never a clear candidate.
-        if not is_pm and (occupied is not False or idle is not True):
+        if not is_pm and (
+            occupied is not False
+            or idle is not True
+            or not session_id
+            or session_started_at is None
+        ):
             return False
         return (now.astimezone(timezone.utc) - effective_start).total_seconds() > threshold_hours * 3600
 
@@ -394,7 +403,18 @@ class RuntimeObservationAdapter:
             records, session_start, latest_record, session_id = _session_records(path)
         clear = self._successful_clear(slot, mop_events)
         clear_at, clear_type = clear if clear else (None, None)
-        age_start = session_start if runtime_source == "claude" else latest_record
+        runtime_session_id = session_id
+        if slot == "pm":
+            authoritative_session_id = runtime_session_id
+            authoritative_session_started_at = session_start
+            age_start = session_start
+        else:
+            # Transcript identity/timing is activity evidence only. Clear
+            # requests must use the exact MoP identity recorded at the
+            # UserPromptSubmit boundary; those timestamps are not aliases.
+            authoritative_session_id = _text(row.get("session_id"))
+            authoritative_session_started_at = parse_timestamp(row.get("session_started_at"))
+            age_start = authoritative_session_started_at if authoritative_session_id else None
         effective = max((value for value in (age_start, clear_at) if value), default=None)
         activity = (
             _active_omp_evidence(records, session_start=session_start, now=now)
@@ -436,8 +456,10 @@ class RuntimeObservationAdapter:
             slot=slot,
             source=f"{runtime_source}_top_level" if runtime_source else "unknown",
             session_path=str(path) if path else None,
-            session_id=session_id,
+            session_id=authoritative_session_id,
+            runtime_session_id=runtime_session_id,
             session_start=session_start,
+            session_started_at=authoritative_session_started_at,
             latest_record=latest_record,
             effective_start=effective,
             occupied=occupied,
@@ -466,6 +488,8 @@ class RuntimeObservationAdapter:
                 occupied=occupied,
                 idle=idle,
                 active=active,
+                session_id=authoritative_session_id,
+                session_started_at=authoritative_session_started_at,
                 is_pm=slot == "pm",
                 now=now,
             ),
