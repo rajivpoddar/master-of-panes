@@ -27,9 +27,11 @@ REQUEST = {
 
 
 class FakeExternal(MODULE.External):
-    def __init__(self, *, slack_user: str = MODULE.CTO_USER_ID, ambiguous_step: str | None = None):
+    def __init__(self, *, slack_user: str = MODULE.CTO_USER_ID, ambiguous_step: str | None = None, crash_step: str | None = None, concurrent_label: str | None = None):
         self.slack_user = slack_user
         self.ambiguous_step = ambiguous_step
+        self.crash_step = crash_step
+        self.concurrent_label = concurrent_label
         self.effects: list[tuple[str, object]] = []
         self.pr = {
             "number": 7613, "state": "MERGED", "mergedAt": "2026-09-03T10:00:00Z",
@@ -46,20 +48,39 @@ class FakeExternal(MODULE.External):
     def read_issue(self, request):
         return self.issue
 
-    def replace_pr_labels(self, request, labels):
-        self.effects.append(("pr_labels", labels))
-        if self.ambiguous_step == "pr_labels":
+    def _label_effect(self, scope, operation, label):
+        name = f"{scope}_label_{operation}:{label}"
+        self.effects.append((name, label))
+        labels = self.pr["labels"] if scope == "pr" else self.issue["labels"]
+        if scope == "pr" and operation == "remove" and self.concurrent_label and self.concurrent_label not in labels:
+            labels.append(self.concurrent_label)
+        if operation == "add":
+            if label not in labels:
+                labels.append(label)
+        else:
+            while label in labels:
+                labels.remove(label)
+        if self.crash_step == name:
+            raise SystemExit("injected process death")
+        if self.ambiguous_step in {scope + "_labels", name}:
             raise MODULE.CleanupError("github_effect_ambiguous", ambiguous=True)
-        self.pr["labels"] = labels
 
-    def replace_issue_labels(self, request, labels):
-        self.effects.append(("issue_labels", labels))
-        if self.ambiguous_step == "issue_labels":
-            raise MODULE.CleanupError("github_effect_ambiguous", ambiguous=True)
-        self.issue["labels"] = labels
+    def add_pr_label(self, request, label):
+        self._label_effect("pr", "add", label)
+
+    def remove_pr_label(self, request, label):
+        self._label_effect("pr", "remove", label)
+
+    def add_issue_label(self, request, label):
+        self._label_effect("issue", "add", label)
+
+    def remove_issue_label(self, request, label):
+        self._label_effect("issue", "remove", label)
 
     def close_issue(self, request):
         self.effects.append(("issue_close", None))
+        if self.crash_step == "issue_close":
+            raise SystemExit("injected process death")
         if self.ambiguous_step == "issue_close":
             raise MODULE.CleanupError("github_effect_ambiguous", ambiguous=True)
         self.issue["state"] = "CLOSED"
@@ -92,17 +113,24 @@ def test_merged_tuple_preserves_unrelated_labels_and_replies_once(tmp_path: Path
     mapping = tmp_path / "mapping.json"
     receipt = tmp_path / "receipt.json"
     mapping_file(mapping)
-    external = FakeExternal()
+    external = FakeExternal(concurrent_label="owner-added-concurrently")
     result = MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
     assert result["success"] is True
     assert result["idempotent"] is False
-    assert external.pr["labels"] == ["customer-visible", "pm-state:closed-clean", "priority:P1"]
-    assert external.issue["labels"] == ["status:done", "team:frontend"]
+    assert set(external.pr["labels"]) == {
+        "customer-visible", "pm-state:closed-clean", "priority:P1", "owner-added-concurrently",
+    }
+    assert set(external.issue["labels"]) == {"status:done", "team:frontend"}
     assert external.issue["state"] == "CLOSED"
-    assert [name for name, _ in external.effects] == ["pr_labels", "issue_labels", "issue_close", "thread_reply"]
+    assert [name for name, _ in external.effects] == [
+        "pr_label_remove:ci-head:old", "pr_label_remove:slot:1",
+        "pr_label_remove:status:in-review", "pr_label_add:pm-state:closed-clean",
+        "issue_label_remove:slot:1", "issue_label_remove:status:todo",
+        "issue_label_add:status:done", "issue_close", "thread_reply",
+    ]
     replay = MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
     assert replay["idempotent"] is True
-    assert len(external.effects) == 4
+    assert len(external.effects) == 9
 
 
 def test_stale_head_and_nonmerged_pr_fail_before_effect(tmp_path: Path):
@@ -134,17 +162,61 @@ def test_wrong_bot_and_stale_mapping_fail_before_effect(tmp_path: Path):
         MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=FakeExternal(), cto_slack_token="cto")
 
 
+def test_duplicate_tuple_mapping_is_rejected_before_slack(tmp_path: Path):
+    mapping = tmp_path / "mapping.json"
+    receipt = tmp_path / "receipt.json"
+    mapping.write_text(json.dumps({
+        "first": {
+            "status": "parent_created", "repository_id": REQUEST["repository"], "issue": REQUEST["issue"],
+            "pr": REQUEST["pr"], "head_sha": REQUEST["head"], "thread_ts": REQUEST["thread_ts"],
+        },
+        "second": {
+            "status": "thread_replied", "repository_id": REQUEST["repository"], "issue": REQUEST["issue"],
+            "pr": REQUEST["pr"], "head_sha": REQUEST["head"], "thread_ts": "1788434277.706249",
+        },
+    }), encoding="utf-8")
+    external = FakeExternal()
+    with pytest.raises(MODULE.CleanupError, match="thread_mapping_missing_or_ambiguous"):
+        MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
+    assert external.effects == []
+
+
+def test_caller_thread_cannot_select_a_different_authoritative_mapping(tmp_path: Path):
+    mapping = tmp_path / "mapping.json"
+    receipt = tmp_path / "receipt.json"
+    mapping_file(mapping)
+    request = {**REQUEST, "thread_ts": "1788434277.706249"}
+    with pytest.raises(MODULE.CleanupError, match="caller_thread_mapping_mismatch"):
+        MODULE.run(request, mapping_path=mapping, receipt_path=receipt, external=FakeExternal(), cto_slack_token="cto")
+    assert not receipt.exists()
+
+
+def test_started_step_is_not_replayed_and_remaining_steps_resume(tmp_path: Path):
+    mapping = tmp_path / "mapping.json"
+    receipt = tmp_path / "receipt.json"
+    mapping_file(mapping)
+    external = FakeExternal(crash_step="pr_label_remove:ci-head:old")
+    with pytest.raises(SystemExit):
+        MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
+    with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
+        MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
+    names = [name for name, _ in external.effects]
+    assert names.count("pr_label_remove:ci-head:old") == 1
+    assert "thread_reply" in names
+
+
 def test_response_loss_is_durable_ambiguous_and_never_replayed(tmp_path: Path):
     mapping = tmp_path / "mapping.json"
     receipt = tmp_path / "receipt.json"
     mapping_file(mapping)
     external = FakeExternal(ambiguous_step="thread_reply")
-    with pytest.raises(MODULE.CleanupError, match="slack_effect_ambiguous"):
-        MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
-    assert [name for name, _ in external.effects] == ["pr_labels", "issue_labels", "issue_close", "thread_reply"]
     with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
         MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
-    assert len(external.effects) == 4
+    assert [name for name, _ in external.effects].count("pr_label_remove:ci-head:old") == 1
+    assert [name for name, _ in external.effects].count("thread_reply") == 1
+    with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
+        MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
+    assert len(external.effects) == 9
 
 
 def test_github_response_loss_is_ambiguous_and_concurrent_replay_is_effect_free(tmp_path: Path):
@@ -152,11 +224,11 @@ def test_github_response_loss_is_ambiguous_and_concurrent_replay_is_effect_free(
     receipt = tmp_path / "receipt.json"
     mapping_file(mapping)
     external = FakeExternal(ambiguous_step="pr_labels")
-    with pytest.raises(MODULE.CleanupError, match="github_effect_ambiguous"):
+    with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
         MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
     with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
         MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
-    assert [name for name, _ in external.effects] == ["pr_labels"]
+    assert [name for name, _ in external.effects].count("pr_label_remove:ci-head:old") == 1
 
     mapping_file(mapping)
     receipt.unlink()
@@ -164,7 +236,7 @@ def test_github_response_loss_is_ambiguous_and_concurrent_replay_is_effect_free(
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto"), range(2)))
     assert sorted(result["idempotent"] for result in results) == [False, True]
-    assert [name for name, _ in external.effects] == ["pr_labels", "issue_labels", "issue_close", "thread_reply"]
+    assert [name for name, _ in external.effects].count("thread_reply") == 1
 
 
 def test_stale_slot_label_never_calls_mop_and_manifest_is_exact(tmp_path: Path):

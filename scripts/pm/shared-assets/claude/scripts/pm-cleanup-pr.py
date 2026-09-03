@@ -119,16 +119,18 @@ def _validate_request(value: Any) -> dict[str, Any]:
     import re
     if re.fullmatch(HEAD_RE, head) is None or re.fullmatch(HEAD_RE, merge_commit) is None:
         raise CleanupError("head_or_merge_commit_invalid")
-    thread_ts = _required_string(value.get("thread_ts"), "thread_mapping_invalid")
-    if "\n" in thread_ts or "\r" in thread_ts:
-        raise CleanupError("thread_mapping_invalid")
+    caller_thread_ts = value.get("thread_ts")
+    if caller_thread_ts is not None:
+        caller_thread_ts = _required_string(caller_thread_ts, "thread_mapping_invalid")
+        if "\n" in caller_thread_ts or "\r" in caller_thread_ts:
+            raise CleanupError("thread_mapping_invalid")
     return {
         "repository": repository,
         "pr": pr,
         "issue": issue,
         "head": head.lower(),
         "merge_commit": merge_commit.lower(),
-        "thread_ts": thread_ts,
+        "_caller_thread_ts": caller_thread_ts,
     }
 
 
@@ -142,10 +144,6 @@ def _is_stale_label(label: str) -> bool:
     return label.startswith(STALE_LABEL_PREFIXES)
 
 
-def _terminal_labels(current: list[str], terminal: str) -> list[str]:
-    return sorted({label for label in current if not _is_stale_label(label)} | {terminal})
-
-
 def _mapping_matches(mapping: dict[str, Any], request: dict[str, Any]) -> bool:
     repo = mapping.get("repository_id", mapping.get("repository"))
     return (
@@ -154,7 +152,6 @@ def _mapping_matches(mapping: dict[str, Any], request: dict[str, Any]) -> bool:
         and mapping.get("pr") == request["pr"]
         and str(mapping.get("head_sha", mapping.get("head", ""))).lower() == request["head"]
         and isinstance(mapping.get("thread_ts"), str)
-        and mapping["thread_ts"] == request["thread_ts"]
         and mapping.get("status") in {"parent_created", "thread_replied"}
     )
 
@@ -192,17 +189,29 @@ class External:
     def read_issue(self, request: dict[str, Any]) -> dict[str, Any]:
         return self._gh(["issue", "view", str(request["issue"]), "--repo", request["repository"], "--json", "number,state,labels"])
 
-    def replace_pr_labels(self, request: dict[str, Any], labels: list[str]) -> None:
+    def add_pr_label(self, request: dict[str, Any], label: str) -> None:
         self._gh([
             "api", f"repos/{request['repository']}/issues/{request['pr']}/labels",
-            "--method", "PUT", "--input", "-",
-        ], input_bytes=_json_bytes({"labels": labels}))
+            "--method", "POST", "--input", "-",
+        ], input_bytes=_json_bytes({"labels": [label]}))
 
-    def replace_issue_labels(self, request: dict[str, Any], labels: list[str]) -> None:
+    def remove_pr_label(self, request: dict[str, Any], label: str) -> None:
+        self._gh([
+            "api", f"repos/{request['repository']}/issues/{request['pr']}/labels/{quote(label, safe='')}",
+            "--method", "DELETE",
+        ])
+
+    def add_issue_label(self, request: dict[str, Any], label: str) -> None:
         self._gh([
             "api", f"repos/{request['repository']}/issues/{request['issue']}/labels",
-            "--method", "PUT", "--input", "-",
-        ], input_bytes=_json_bytes({"labels": labels}))
+            "--method", "POST", "--input", "-",
+        ], input_bytes=_json_bytes({"labels": [label]}))
+
+    def remove_issue_label(self, request: dict[str, Any], label: str) -> None:
+        self._gh([
+            "api", f"repos/{request['repository']}/issues/{request['issue']}/labels/{quote(label, safe='')}",
+            "--method", "DELETE",
+        ])
 
     def close_issue(self, request: dict[str, Any]) -> None:
         self._gh([
@@ -262,19 +271,24 @@ def _validate_auth_and_thread(external: External, token: str, mapping: dict[str,
     auth = external.slack_auth(token)
     if auth.get("ok") is not True or auth.get("user_id") != CTO_USER_ID:
         raise CleanupError("slack_identity_mismatch")
-    readback = external.slack_replies(token, request["thread_ts"])
+    thread_ts = _required_string(mapping.get("thread_ts"), "thread_mapping_invalid")
+    if "\n" in thread_ts or "\r" in thread_ts:
+        raise CleanupError("thread_mapping_invalid")
+    if request.get("_caller_thread_ts") not in (None, thread_ts):
+        raise CleanupError("caller_thread_mapping_mismatch")
+    readback = external.slack_replies(token, thread_ts)
     if readback.get("ok") is not True:
         raise CleanupError("transition_thread_readback_failed")
     messages = readback.get("messages")
     if not isinstance(messages, list) or not any(
         isinstance(item, dict)
-        and item.get("ts") == request["thread_ts"]
+        and item.get("ts") == thread_ts
         and item.get("user") == CTO_USER_ID
         and item.get("channel", SLACK_CHANNEL) == SLACK_CHANNEL
         for item in messages
     ):
         raise CleanupError("transition_thread_identity_mismatch")
-    if mapping.get("thread_ts") != request["thread_ts"] or not text:
+    if not text:
         raise CleanupError("transition_thread_mapping_invalid")
 
 
@@ -286,6 +300,40 @@ def _transition_text(request: dict[str, Any]) -> str:
     )
 
 
+def _cleanup_identity(request: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: request[key]
+        for key in ("repository", "pr", "issue", "head", "merge_commit")
+    }
+
+
+def _cleanup_key(request: dict[str, Any], thread_ts: str | None = None) -> str:
+    identity = _cleanup_identity(request)
+    if thread_ts is not None:
+        identity["thread_ts"] = thread_ts
+    return "mop-cleanup:" + hashlib.sha256(_json_bytes(identity)).hexdigest()
+
+
+def _label_plan(scope: str, labels: list[str], terminal: str) -> list[dict[str, str]]:
+    plan: list[dict[str, str]] = []
+    for label in sorted(labels):
+        if _is_stale_label(label) and label != terminal:
+            plan.append({
+                "name": f"{scope}_label_remove:{label}",
+                "scope": scope,
+                "operation": "remove",
+                "label": label,
+            })
+    if terminal not in labels:
+        plan.append({
+            "name": f"{scope}_label_add:{terminal}",
+            "scope": scope,
+            "operation": "add",
+            "label": terminal,
+        })
+    return plan
+
+
 def run(
     raw_request: Any,
     *,
@@ -294,7 +342,11 @@ def run(
     external: External | None = None,
     cto_slack_token: str | None = None,
 ) -> dict[str, Any]:
-    request = _validate_request(raw_request)
+    supplied = _validate_request(raw_request)
+    caller_thread_ts = supplied.get("_caller_thread_ts")
+    request = _cleanup_identity(supplied)
+    if caller_thread_ts is not None:
+        request["_caller_thread_ts"] = caller_thread_ts
     mapping_file = mapping_path or Path(os.environ.get("MOP_TRANSITION_RECEIPT_PATH", str(DEFAULT_MAPPING))).expanduser()
     receipt_file = receipt_path or Path(os.environ.get("MOP_CLEANUP_RECEIPT_PATH", str(DEFAULT_RECEIPT))).expanduser()
     ext = external or External()
@@ -302,79 +354,157 @@ def run(
         receipts = _load_json(receipt_file, {})
         if not isinstance(receipts, dict):
             raise CleanupError("cleanup_receipt_invalid", ambiguous=True)
-        key = "mop-cleanup:" + hashlib.sha256(_json_bytes(request)).hexdigest()
+        key = _cleanup_key(request)
         prior = receipts.get(key)
+        mapping = None
+        thread_ts = None
+        if not isinstance(prior, dict):
+            mapping = resolve_thread_mapping(mapping_file, request)
+            thread_ts = _required_string(mapping.get("thread_ts"), "thread_mapping_invalid")
+            if caller_thread_ts not in (None, thread_ts):
+                raise CleanupError("caller_thread_mapping_mismatch")
+            legacy_key = _cleanup_key(request, thread_ts)
+            legacy_prior = receipts.get(legacy_key)
+            if isinstance(legacy_prior, dict):
+                key = legacy_key
+                prior = legacy_prior
         if isinstance(prior, dict):
+            stored_thread_ts = _required_string(prior.get("thread_ts"), "thread_mapping_invalid")
+            if caller_thread_ts not in (None, stored_thread_ts):
+                raise CleanupError("caller_thread_mapping_mismatch")
+            prior_request = prior.get("request")
+            if not isinstance(prior_request, dict) or any(
+                prior_request.get(field) != request[field]
+                for field in ("repository", "pr", "issue", "head", "merge_commit")
+            ):
+                raise CleanupError("cleanup_receipt_request_mismatch", ambiguous=True)
             if prior.get("status") == "completed":
-                return {"success": True, "status": "completed", "idempotent": True, "cleanup_key": key}
-            if prior.get("status") in {"effect_started", "ambiguous"}:
-                raise CleanupError("cleanup_ambiguous", ambiguous=True)
-        mapping = resolve_thread_mapping(mapping_file, request)
-        pr = ext.read_pr(request)
-        pr_labels = _validate_merged_snapshot(request, pr)
-        issue = ext.read_issue(request)
-        issue_labels = _validate_issue_snapshot(request, issue)
-        text = _transition_text(request)
-        _validate_auth_and_thread(ext, cto_slack_token or os.environ.get("SLACK_CTO_BOT_TOKEN", ""), mapping, request, text)
-        receipt: dict[str, Any] = {"status": "prepared", "request": request, "thread_ts": request["thread_ts"], "steps": {}}
-        receipts[key] = receipt
-        _write_json(receipt_file, receipts)
+                return {
+                    "success": True, "status": "completed", "idempotent": True,
+                    "cleanup_key": key, "thread_ts": stored_thread_ts,
+                }
 
-        desired_pr = _terminal_labels(pr_labels, "pm-state:closed-clean")
-        desired_issue = _terminal_labels(issue_labels, "status:done")
-
-        def effect(name: str, action: Any, readback: Any) -> None:
-            step = receipt["steps"].get(name)
-            if isinstance(step, dict) and step.get("status") == "completed":
-                return
-            if isinstance(step, dict) and step.get("status") in {"started", "ambiguous"}:
-                receipt["status"] = "ambiguous"
-                receipts[key] = receipt
-                _write_json(receipt_file, receipts)
-                raise CleanupError("cleanup_ambiguous", ambiguous=True)
-            receipt["status"] = "effect_started"
-            receipt["steps"][name] = {"status": "started"}
+        token = cto_slack_token or os.environ.get("SLACK_CTO_BOT_TOKEN", "")
+        if isinstance(prior, dict):
+            receipt = prior
+            thread_ts = stored_thread_ts
+            text = _transition_text(request)
+            plan = receipt.get("plan")
+            if not isinstance(plan, list):
+                raise CleanupError("cleanup_receipt_plan_missing", ambiguous=True)
+            if not isinstance(receipt.get("steps"), dict):
+                raise CleanupError("cleanup_receipt_steps_invalid", ambiguous=True)
+            if not isinstance(receipt.get("ambiguous_steps"), list):
+                raise CleanupError("cleanup_receipt_ambiguity_invalid", ambiguous=True)
+        else:
+            assert mapping is not None
+            assert thread_ts is not None
+            pr_labels = _validate_merged_snapshot(request, ext.read_pr(request))
+            issue_labels = _validate_issue_snapshot(request, ext.read_issue(request))
+            text = _transition_text(request)
+            _validate_auth_and_thread(ext, token, mapping, request, text)
+            plan = (
+                _label_plan("pr", pr_labels, "pm-state:closed-clean")
+                + _label_plan("issue", issue_labels, "status:done")
+                + [
+                    {"name": "issue_close", "scope": "issue", "operation": "close", "label": ""},
+                    {"name": "thread_reply", "scope": "slack", "operation": "reply", "label": ""},
+                ]
+            )
+            receipt = {
+                "status": "prepared",
+                "request": _cleanup_identity(request),
+                "thread_ts": thread_ts,
+                "payload_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "plan": plan,
+                "steps": {},
+                "ambiguous_steps": [],
+            }
             receipts[key] = receipt
             _write_json(receipt_file, receipts)
+
+        def persist() -> None:
+            receipts[key] = receipt
+            _write_json(receipt_file, receipts)
+
+        def label_readback(scope: str, operation: str, label: str) -> bool:
+            if scope == "pr":
+                labels = _validate_merged_snapshot(request, ext.read_pr(request))
+            else:
+                labels = _validate_issue_snapshot(request, ext.read_issue(request))
+            return (label in labels) if operation == "add" else (label not in labels)
+
+        def run_step(step_spec: dict[str, str]) -> None:
+            name = step_spec["name"]
+            step = receipt.setdefault("steps", {}).get(name)
+            if isinstance(step, dict) and step.get("status") == "completed":
+                return
+            if isinstance(step, dict) and step.get("status") in {"effect_started", "ambiguous"}:
+                receipt["status"] = "ambiguous"
+                ambiguous_steps = receipt.setdefault("ambiguous_steps", [])
+                if name not in ambiguous_steps:
+                    ambiguous_steps.append(name)
+                persist()
+                return
+
+            receipt["status"] = "processing"
+            receipt["steps"][name] = {"status": "reserved"}
+            persist()
+            receipt["steps"][name] = {"status": "effect_started"}
+            persist()
             try:
-                action()
-                if not readback():
+                scope = step_spec["scope"]
+                operation = step_spec["operation"]
+                label = step_spec["label"]
+                if scope == "pr" and operation == "add":
+                    ext.add_pr_label(request, label)
+                    verified = label_readback(scope, operation, label)
+                elif scope == "pr" and operation == "remove":
+                    ext.remove_pr_label(request, label)
+                    verified = label_readback(scope, operation, label)
+                elif scope == "issue" and operation == "add":
+                    ext.add_issue_label(request, label)
+                    verified = label_readback(scope, operation, label)
+                elif scope == "issue" and operation == "remove":
+                    ext.remove_issue_label(request, label)
+                    verified = label_readback(scope, operation, label)
+                elif name == "issue_close":
+                    ext.close_issue(request)
+                    verified = str(ext.read_issue(request).get("state", "")).upper() == "CLOSED"
+                elif name == "thread_reply":
+                    ext.slack_post(token, thread_ts, text)
+                    verified = _thread_reply_readback(ext, token, thread_ts, text)
+                else:
+                    raise CleanupError(f"cleanup_unknown_step:{name}")
+                if not verified:
                     raise CleanupError(f"{name}_readback_mismatch", ambiguous=True)
             except CleanupError as exc:
                 receipt["status"] = "ambiguous"
-                receipt["steps"][name] = {"status": "ambiguous"}
-                receipts[key] = receipt
-                _write_json(receipt_file, receipts)
-                raise exc
+                receipt["steps"][name] = {"status": "ambiguous", "error": exc.reason}
+                ambiguous_steps = receipt.setdefault("ambiguous_steps", [])
+                if name not in ambiguous_steps:
+                    ambiguous_steps.append(name)
+                persist()
+                return
             receipt["steps"][name] = {"status": "completed"}
-            receipts[key] = receipt
-            _write_json(receipt_file, receipts)
+            persist()
 
-        effect(
-            "pr_labels",
-            lambda: ext.replace_pr_labels(request, desired_pr),
-            lambda: desired_pr == _validate_merged_snapshot(request, ext.read_pr(request)),
-        )
-        effect(
-            "issue_labels",
-            lambda: ext.replace_issue_labels(request, desired_issue),
-            lambda: desired_issue == _validate_issue_snapshot(request, ext.read_issue(request)),
-        )
-        effect(
-            "issue_close",
-            lambda: ext.close_issue(request),
-            lambda: str(ext.read_issue(request).get("state", "")).upper() == "CLOSED",
-        )
-        token = cto_slack_token or os.environ.get("SLACK_CTO_BOT_TOKEN", "")
-        effect(
-            "thread_reply",
-            lambda: ext.slack_post(token, request["thread_ts"], text),
-            lambda: _thread_reply_readback(ext, token, request["thread_ts"], text),
-        )
+        for step_spec in plan:
+            if not isinstance(step_spec, dict) or not all(key in step_spec for key in ("name", "scope", "operation", "label")):
+                raise CleanupError("cleanup_receipt_plan_invalid", ambiguous=True)
+            run_step(step_spec)
+
+        ambiguous_steps = receipt.get("ambiguous_steps") or []
+        if ambiguous_steps:
+            receipt["status"] = "ambiguous"
+            persist()
+            raise CleanupError("cleanup_ambiguous", ambiguous=True)
         receipt["status"] = "completed"
-        receipts[key] = receipt
-        _write_json(receipt_file, receipts)
-        return {"success": True, "status": "completed", "idempotent": False, "cleanup_key": key, "thread_ts": request["thread_ts"]}
+        persist()
+        return {
+            "success": True, "status": "completed", "idempotent": False,
+            "cleanup_key": key, "thread_ts": thread_ts,
+        }
 
 
 def _thread_reply_readback(external: External, token: str, thread_ts: str, text: str) -> bool:
