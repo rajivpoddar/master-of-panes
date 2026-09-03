@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { MoPDatabase } from "../src/db.js";
 import { registerRetiredClearRefusals, registerSessionClearRoute } from "../src/sessionClearRoute.js";
 import { isClearBearingCommand } from "../src/clearCommand.js";
-import type { TmuxRelay } from "../src/relay.js";
+import { TmuxRelay, type TmuxRelay as TmuxRelayType } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
 const CAPABILITY = "a".repeat(64);
@@ -18,6 +18,13 @@ const PANE = {
   paneId: "%101",
   currentPath: "/fixture/checkout",
   expectedPath: "/fixture/checkout",
+};
+const PM_PANE = {
+  slot: 0,
+  address: "0:0.0",
+  paneId: "%100",
+  currentPath: "/Users/rajiv/Downloads/projects/heydonna-app",
+  expectedPath: "/Users/rajiv/Downloads/projects/heydonna-app",
 };
 
 function headers(auth = true): Headers {
@@ -30,7 +37,7 @@ function headers(auth = true): Headers {
 }
 
 async function setupRoute(
-  relay: TmuxRelay,
+  relay: TmuxRelayType,
   db: MoPDatabase,
 ): Promise<Hono> {
   const app = new Hono();
@@ -188,6 +195,144 @@ test("PM session clear uses the same exact free-idle session authority", async (
     assert.equal(replay.status, 200);
     assert.equal((await replay.json()).idempotent, true);
     assert.equal(paneEffects, 1);
+    db.close();
+  } finally {
+    if (previousCapability === undefined) delete process.env.MOP_LOCAL_CAPABILITY;
+    else process.env.MOP_LOCAL_CAPABILITY = previousCapability;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("PM clear uses the real relay final fence and starts the receipt before tmux", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-real-relay-clear-"));
+  const previousCapability = process.env.MOP_LOCAL_CAPABILITY;
+  process.env.MOP_LOCAL_CAPABILITY = CAPABILITY;
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    db.startAgentTurn(0, "pm-session");
+    db.finishAgentTurn(0, "pm-session");
+    db.updateSlot(0, { session_started_at: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() });
+    const current = db.getSlot(0);
+    assert.ok(current?.session_started_at);
+
+    let loadCount = 0;
+    let pasteCount = 0;
+    let enterCount = 0;
+    const runShell = async (command: string) => {
+      if (command.startsWith("tmux display-message")) {
+        return { stdout: `${PM_PANE.paneId}|${PM_PANE.currentPath}\n`, stderr: "" };
+      }
+      if (command.startsWith("git -C")) {
+        return { stdout: `${PM_PANE.currentPath}\n`, stderr: "" };
+      }
+      if (command.startsWith("tmux load-buffer")) {
+        loadCount += 1;
+        assert.equal(db.getSessionClearEffect("pm-real")?.status, "started");
+      } else if (command.startsWith("tmux paste-buffer")) {
+        pasteCount += 1;
+      } else if (command.startsWith("tmux send-keys")) {
+        enterCount += 1;
+      }
+      return { stdout: "", stderr: "" };
+    };
+    const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell });
+    const app = new Hono();
+    registerSessionClearRoute(app, {
+      db,
+      relay,
+      verifyPane: async () => ({ ok: true, snapshot: PM_PANE }),
+      observeCheckout: async () => ({
+        checkout_path: PM_PANE.currentPath,
+        clean: true,
+        unpushed_commits: [],
+        branch: "main",
+        head: "b".repeat(40),
+      }),
+    });
+
+    const first = await app.request(
+      "/slots/pm/session/clear",
+      jsonRequest({
+        ...body(current.session_started_at, "pm-real"),
+        expected_session_id: "pm-session",
+        checkout_path: PM_PANE.currentPath,
+      }),
+    );
+    assert.equal(first.status, 200);
+    assert.equal((await first.json()).effect, true);
+    assert.equal(loadCount, 1);
+    assert.equal(pasteCount, 1);
+    assert.equal(enterCount, 1);
+    assert.equal(db.getSessionClearEffect("pm-real")?.status, "completed");
+    db.close();
+  } finally {
+    if (previousCapability === undefined) delete process.env.MOP_LOCAL_CAPABILITY;
+    else process.env.MOP_LOCAL_CAPABILITY = previousCapability;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("PM clear real relay preserves permanent ambiguity after a post-start error", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-real-relay-ambiguous-"));
+  const previousCapability = process.env.MOP_LOCAL_CAPABILITY;
+  process.env.MOP_LOCAL_CAPABILITY = CAPABILITY;
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    db.startAgentTurn(0, "pm-session");
+    db.finishAgentTurn(0, "pm-session");
+    db.updateSlot(0, { session_started_at: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() });
+    const current = db.getSlot(0);
+    assert.ok(current?.session_started_at);
+    let paneEffects = 0;
+    const runShell = async (command: string) => {
+      if (command.startsWith("tmux display-message")) {
+        return { stdout: `${PM_PANE.paneId}|${PM_PANE.currentPath}\n`, stderr: "" };
+      }
+      if (command.startsWith("git -C")) {
+        return { stdout: `${PM_PANE.currentPath}\n`, stderr: "" };
+      }
+      if (command.startsWith("tmux load-buffer") || command.startsWith("tmux paste-buffer")) {
+        paneEffects += 1;
+      }
+      if (command.startsWith("tmux paste-buffer")) throw new Error("response lost after pane effect");
+      return { stdout: "", stderr: "" };
+    };
+    const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell });
+    const app = new Hono();
+    registerSessionClearRoute(app, {
+      db,
+      relay,
+      verifyPane: async () => ({ ok: true, snapshot: PM_PANE }),
+      observeCheckout: async () => ({
+        checkout_path: PM_PANE.currentPath,
+        clean: true,
+        unpushed_commits: [],
+        branch: "main",
+        head: "b".repeat(40),
+      }),
+    });
+    const request = jsonRequest({
+      ...body(current.session_started_at, "pm-ambiguous-real"),
+      expected_session_id: "pm-session",
+      checkout_path: PM_PANE.currentPath,
+    });
+    const first = await app.request("/slots/pm/session/clear", request);
+    assert.equal(first.status, 503);
+    assert.equal((await first.json()).code, "session_clear_effect_ambiguous");
+    assert.equal(db.getSessionClearEffect("pm-ambiguous-real")?.status, "ambiguous");
+    assert.equal(paneEffects, 2);
+
+    const replay = await app.request(
+      "/slots/pm/session/clear",
+      jsonRequest({
+        ...body(current.session_started_at, "pm-ambiguous-real"),
+        expected_session_id: "pm-session",
+        checkout_path: PM_PANE.currentPath,
+      }),
+    );
+    assert.equal(replay.status, 503);
+    assert.equal((await replay.json()).code, "session_clear_effect_ambiguous");
+    assert.equal(paneEffects, 2);
     db.close();
   } finally {
     if (previousCapability === undefined) delete process.env.MOP_LOCAL_CAPABILITY;

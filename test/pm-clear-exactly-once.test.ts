@@ -38,6 +38,37 @@ test("repeated PM Stop events never resend an already-latched clear", async () =
   }
 });
 
+test("ordinary PM Stop only finishes the PM session and never enters slot lifecycle", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-stop-observation-only-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    db.startAgentTurn(0, "pm-turn");
+    const processor = new HookProcessor(db, {} as TmuxRelay);
+
+    await processor.process(0, { type: "UserPromptSubmit", session_id: "pm-turn" });
+    await processor.process(0, { type: "Stop", session_id: "pm-turn" });
+    db.finishAgentTurn(0, "pm-turn");
+
+    const slot = db.getSlot(0)!;
+    assert.equal(slot.active_turn_id, null);
+    assert.equal(slot.active_turn_state, "inactive");
+    assert.equal(slot.idle, true);
+    assert.equal(db.getEvents(0, 10, "pm_stop_observed").length, 1);
+    for (const eventType of [
+      "slot_idle_debounce_started",
+      "slot_active_debounce_started",
+      "slot_idle_notified",
+      "slot_active_notified",
+      "auto_released_post_pr",
+    ]) {
+      assert.equal(db.getEvents(0, 10, eventType).length, 0, eventType);
+    }
+    db.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("PM status Stop cannot contain a pending-clear resend path", () => {
   const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   const hooks = readFileSync(new URL("../src/hooks.ts", import.meta.url), "utf8");

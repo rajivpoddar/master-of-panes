@@ -1401,6 +1401,18 @@ export class HookProcessor {
       return {};
     }
 
+    // PM Stop is an observation boundary only. server.ts performs the
+    // authoritative finishAgentTurn transition around this processor call;
+    // PM must not enter numbered-slot debounce, release, or PM-notification
+    // handling after that observation.
+    if (slotNum === 0) {
+      this.db.logEvent(0, "pm_stop_observed", "Stop", null, {
+        authoritative_lifecycle: "session_finish_only",
+        numbered_slot_lifecycle: false,
+      });
+      return {};
+    }
+
     const slot = this.db.getSlot(slotNum);
     if (!slot) return {};
 
@@ -1596,6 +1608,10 @@ export class HookProcessor {
   // ─── PostToolUse Hook ──────────────────────────────────
 
   private async handlePostToolUse(slotNum: number, payload: HookPayload, wasIdle?: boolean): Promise<HookResponse> {
+    // Slot 0 is an observation-only PM session. Do not let prompt/tool
+    // telemetry enter the numbered-slot debounce or PM notification paths.
+    if (slotNum === 0) return {};
+
     // ─── Active Notification (idle → active transition) ──────
     // First PostToolUse after a Stop means the slot became active.
     // Notify PM so they know not to send new work to this slot.
@@ -1810,6 +1826,16 @@ export class HookProcessor {
       dnd: slot?.dnd,
       task: slot?.task,
     });
+
+    // Keep the PM notification as telemetry, but never route slot 0 through
+    // numbered-slot idle/active debounce or PM notification effects.
+    if (slotNum === 0) {
+      this.db.logEvent(0, "pm_notification_observed", "Notification", null, {
+        notification_type: notifType,
+        numbered_slot_lifecycle: false,
+      });
+      return {};
+    }
 
     if (notifType === "idle_prompt") {
       const hadPendingActive = this.cancelPendingActiveTimer(slotNum);

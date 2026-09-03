@@ -815,6 +815,77 @@ export class TmuxRelay {
   }
 
   /**
+   * Deliver a PM command with a caller-owned final fence.
+   *
+   * The normal PM submit path intentionally retains its queue/busy semantics
+   * for notifications.  Exact-effect callers such as session clear must not
+   * enter that path: they need the same immutable pane identity and
+   * reserved-to-started callback used by numbered-slot delivery, with no
+   * retry after the first tmux command can have started.
+   */
+  private async sendPMWithOptionsOnceAsync(
+    command: string,
+    options: {
+      prepareBeforeFirstEffect?: (identity: PaneIdentitySnapshot) => Promise<PaneIdentitySnapshot | null>;
+      beforeFirstEffect?: (identity: PaneIdentitySnapshot) => boolean;
+    },
+  ): Promise<boolean> {
+    const identity = await verifyPaneIdentity(0, this.runShell);
+    if (!identity.ok) {
+      console.warn(`[relay] refusing pane delivery for PM: ${identity.detail}`);
+      if (this.db) {
+        this.db.logEvent(0, "send_rejected_pane_identity", null, null, {
+          reason: identity.reason,
+          detail: identity.detail,
+          address: paneAddress(0),
+        });
+      }
+      return false;
+    }
+
+    const seq = ++this.directInjectSeq;
+    const tmpFile = `/tmp/mop-send-0-${Date.now()}-${process.pid}-${seq}.txt`;
+    const bufName = `mop-send-0-${process.pid}-${seq}`;
+    try {
+      await fs.writeFile(tmpFile, command);
+      let effectIdentity = identity.snapshot;
+      if (options.prepareBeforeFirstEffect) {
+        const prepared = await options.prepareBeforeFirstEffect(effectIdentity);
+        if (!prepared) return false;
+        effectIdentity = prepared;
+      }
+      if (options.beforeFirstEffect && !options.beforeFirstEffect(effectIdentity)) return false;
+
+      // Keep this callback-to-effect boundary synchronous: the caller's
+      // receipt is started before the first tmux command, and this is the
+      // first awaited operation after that transition.
+      const paneTarget = effectIdentity.paneId;
+      await this.runShell(
+        `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
+        { timeout: 3_000 },
+      );
+      await this.runShell(
+        `tmux paste-buffer -b ${bufName} -t ${paneTarget} -d`,
+        { timeout: 3_000 },
+      );
+      await sleep(300);
+      await this.runShell(
+        `tmux send-keys -t ${paneTarget} Enter`,
+        { timeout: 3_000 },
+      );
+      return true;
+    } catch (err) {
+      // A failure after the synchronous callback is deliberately only a
+      // boolean here. The session-clear route observes its started receipt
+      // and records permanent ambiguity, so this method must never retry.
+      console.error(`[relay] Failed to deliver exact PM command:`, err);
+      return false;
+    } finally {
+      await fs.unlink(tmpFile).catch(() => undefined);
+    }
+  }
+
+  /**
    * Notify PM that a slot went idle.
    * Sends: # comment line, then /slot-idle N slash command.
    */
@@ -1019,6 +1090,9 @@ export class TmuxRelay {
       // Text delivery to PM must use the observation-bound submit key. Raw
       // key sequences intentionally remain the explicit low-level escape
       // hatch for callers such as clear/compact recovery.
+      if (options.prepareBeforeFirstEffect || options.beforeFirstEffect) {
+        return this.sendPMWithOptionsOnceAsync(command, options);
+      }
       return (await this.submitToPM(command)).ok;
     }
     const identity = await verifyPaneIdentity(slotNum, this.runShell);

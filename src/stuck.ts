@@ -394,6 +394,7 @@ export class StuckDetector {
     // slot 0's historical auto-continue path was removed because it flooded
     // the PM input queue. Specialized recovery paths above take precedence.
     for (const slot of slots) {
+      if (slot.slot === 0) continue;
       await this.runPhase(`idle-occupied:${slot.slot}`, () => this.checkIdleOccupied(slot));
     }
 
@@ -402,6 +403,7 @@ export class StuckDetector {
     // assignable work exists; the slot then uses the same pm-wait-nudge skill
     // as occupied waits. PM remains the sole assignment writer.
     for (const slot of slots) {
+      if (slot.slot === 0) continue;
       await this.runPhase(`idle-free:${slot.slot}`, () => this.checkIdleFree(slot));
     }
 
