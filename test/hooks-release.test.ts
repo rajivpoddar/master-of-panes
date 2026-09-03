@@ -10,7 +10,7 @@ import { HookProcessor } from "../src/hooks.js";
 import type { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
-test("legacy queued clear cannot release an occupied numbered slot", async () => {
+test("legacy queued clear is consumed once without execution, then normal Stop proceeds", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-queued-clear-refusal-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
@@ -30,8 +30,9 @@ test("legacy queued clear cannot release an occupied numbered slot", async () =>
     assert.equal(slot.occupied, true);
     assert.equal(slot.assignment_epoch, 1);
     assert.equal(db.hasPendingClear(1), false);
-    assert.equal(db.getEvents(1, 5, "clear_refused_native_release_required").length, 1);
-    assert.match(notifications[0], /remains occupied/);
+    assert.equal(db.getEvents(1, 5, "clear_pending_retired").length, 1);
+    assert.equal(db.getEvents(1, 5, "slot_idle_debounce_started").length, 1);
+    assert.deepEqual(notifications, []);
     db.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });

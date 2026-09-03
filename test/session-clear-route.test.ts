@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import { Hono } from "hono";
 
 import { MoPDatabase } from "../src/db.js";
 import { registerRetiredClearRefusals, registerSessionClearRoute } from "../src/sessionClearRoute.js";
+import { isClearBearingCommand } from "../src/clearCommand.js";
 import type { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
@@ -159,6 +160,48 @@ test("broad clear aliases refuse before parsing and cannot reach pane delivery",
       code: "session_clear_exact_route_required",
     });
   }
+});
+
+test("direct send clear spellings are classified before pane delivery", () => {
+  for (const command of [
+    "/clear",
+    "  / clear  ",
+    "clear --force",
+    "/session/clear",
+    "session clear",
+    "/clear-session",
+    "reset",
+    "session-reset --now",
+    "session clear --force",
+    "/session/clear --force",
+  ]) {
+    assert.equal(isClearBearingCommand(command), true, command);
+  }
+  for (const command of ["clear the deployment status", "please clear this text", "status update"]) {
+    assert.equal(isClearBearingCommand(command), false, command);
+  }
+
+  const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const sendStart = source.indexOf('app.post("/slots/:slotNum/send"');
+  const guard = source.indexOf("isClearBearingCommand(rawCommand)", sendStart);
+  const paneCheck = source.indexOf("verifyPaneIdentity(slotNum)", sendStart);
+  assert.ok(sendStart >= 0 && guard > sendStart && guard < paneCheck);
+  assert.doesNotMatch(source.slice(sendStart, paneCheck), /allowPmClear/);
+});
+
+test("file-backed clear payloads are classified before pane delivery", () => {
+  const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const sendStart = source.indexOf('app.post("/slots/:slotNum/send"');
+  const payloadGuard = source.indexOf('filePayload.toString("utf8")', sendStart);
+  const paneCheck = source.indexOf("paneExists(paneTarget)", sendStart);
+  const wrapperLog = source.indexOf('"send_converted_message_slot_wrapper"', sendStart);
+  const fileRead = source.indexOf("filePayload = await readFile(filePath)", sendStart);
+  const identityCheck = source.indexOf("verifyPaneIdentity(slotNum)", sendStart);
+  assert.ok(sendStart >= 0 && fileRead > sendStart && fileRead < identityCheck);
+  assert.ok(payloadGuard > fileRead && payloadGuard < paneCheck);
+  assert.ok(wrapperLog > payloadGuard);
+  assert.match(source, /const payload = filePayload;/);
+  assert.equal((source.match(/readFile\(filePath\)/g) ?? []).length, 1);
 });
 
 test("an effect-start response loss becomes permanent ambiguity and cannot redeliver", async () => {

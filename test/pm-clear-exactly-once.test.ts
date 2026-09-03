@@ -40,6 +40,7 @@ test("repeated PM Stop events never resend an already-latched clear", async () =
 
 test("PM status Stop cannot contain a pending-clear resend path", () => {
   const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const hooks = readFileSync(new URL("../src/hooks.ts", import.meta.url), "utf8");
   const start = source.indexOf('app.post("/pm-status"');
   const end = source.indexOf('app.get("/pm-status"', start);
   assert.notEqual(start, -1);
@@ -49,4 +50,6 @@ test("PM status Stop cannot contain a pending-clear resend path", () => {
   assert.doesNotMatch(route, /sendClearViaMopSendPath/);
   assert.doesNotMatch(route, /clear_pending_pm_retry_sent/);
   assert.match(route, /clear_pending_duplicate_suppressed/);
+  assert.doesNotMatch(hooks, /sendClearViaMopSendPath/);
+  assert.match(hooks, /clear_pending_retired/);
 });

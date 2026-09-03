@@ -45,6 +45,7 @@ import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { registerRetiredClearRefusals, registerSessionClearRoute } from "./sessionClearRoute.js";
+import { isClearBearingCommand } from "./clearCommand.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -264,6 +265,10 @@ const app = new Hono();
 
 type ClearSlotResult = { slot: number; name: string; status: string };
 
+function refuseLegacyClearDelivery(): { success: false; status: 410; reason: string } {
+  return { success: false, status: 410, reason: "session_clear_exact_route_required" };
+}
+
 const PM_CLEAR_RECENT_SUPPRESS_MS = parseInt(
   process.env.MOP_PM_CLEAR_RECENT_SUPPRESS_MS ?? `${10 * 60 * 1000}`,
   10,
@@ -343,38 +348,6 @@ function reconcileStalePmClearRequest(source: string): boolean {
   return true;
 }
 
-async function sendClearViaMopSendPath(
-  slotNum: number,
-  source: string,
-): Promise<{ success: boolean; status: number; reason?: string; error?: string }> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slotNum}/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        command: "/clear",
-        force: true,
-        allow_pm_clear: slotNum === 0,
-        source,
-      }),
-    });
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    return {
-      success: res.ok && data.success === true,
-      status: res.status,
-      reason: typeof data.reason === "string" ? data.reason : undefined,
-      error: typeof data.error === "string" ? data.error : undefined,
-    };
-  } catch (err) {
-    return {
-      success: false,
-      status: 0,
-      reason: "mop_send_path_error",
-      error: String(err),
-    };
-  }
-}
-
 async function clearSlotsThroughMopHttp(
   targetSlots: number[],
   options: { clearExistingPendingForTargets: boolean; source: string; terminalOnly: boolean },
@@ -415,9 +388,9 @@ async function clearSlotsThroughMopHttp(
 
     if (isIdle) {
       try {
-        const sent = await sendClearViaMopSendPath(slotNum, options.source);
+        const sent = refuseLegacyClearDelivery();
         if (!sent.success) {
-          throw new Error(sent.error ?? sent.reason ?? `send failed status=${sent.status}`);
+          throw new Error(sent.reason ?? `send failed status=${sent.status}`);
         }
 
         db.clearPendingClear(slotNum);
@@ -494,10 +467,10 @@ async function clearSlotsThroughMopHttp(
       const requestedAt = new Date().toISOString();
       db.setConfig(PM_CLEAR_REQUESTED_AT_KEY, requestedAt);
 
-      const sent = await sendClearViaMopSendPath(0, options.source);
+      const sent = refuseLegacyClearDelivery();
       if (!sent.success) {
         db.clearPendingClear(0);
-        throw new Error(sent.error ?? sent.reason ?? `send failed status=${sent.status}`);
+        throw new Error(sent.reason ?? `send failed status=${sent.status}`);
       }
 
       db.logEvent(0, "clear_pending_queued", null, null, {
@@ -1380,33 +1353,22 @@ app.post("/slots/:slotNum/send", async (c) => {
 
   const slotNum = slotParse.data;
   const body = await c.req.json().catch(() => ({}));
-  let command = body.command?.trim() || "";
-  let filePath = body.file || "";
+  const rawCommand = typeof body.command === "string" ? body.command : "";
+  if (isClearBearingCommand(rawCommand)) {
+    return c.json({
+      success: false,
+      effect: false,
+      code: "session_clear_exact_route_required",
+    }, 410);
+  }
+  let command = rawCommand.trim();
+  let filePath = typeof body.file === "string" ? body.file : "";
+  let filePayload: Buffer | null = null;
+  let convertedMessageSlotWrapper = false;
   const force = body.force === true;
-  const allowPmClear =
-    slotNum === 0 &&
-    body.allow_pm_clear === true &&
-    command === "/clear";
   if (!command && !filePath) {
     return c.json({ error: "Missing 'command' or 'file' field" }, 400);
   }
-
-  const identity = await verifyPaneIdentity(slotNum);
-  if (!identity.ok) {
-    db.logEvent(slotNum, "send_rejected_pane_identity", null, null, {
-      reason: identity.reason,
-      detail: identity.detail,
-      address: paneAddress(slotNum),
-    });
-    return c.json({
-      success: false,
-      error: `Refused pane delivery for slot ${slotNum}: ${identity.detail}`,
-      reason: "pane_identity_mismatch",
-    }, 409);
-  }
-  // Pin all sends, pastes, retries, and post-send reads in this request to
-  // the pane id captured by the one identity probe.
-  const paneTarget = identity.snapshot.paneId;
 
   const messageSlotWrapper = command ? parseMessageSlotWrapper(command) : null;
   if (messageSlotWrapper) {
@@ -1441,15 +1403,59 @@ app.post("/slots/:slotNum/send", async (c) => {
     }
     filePath = messageSlotWrapper.file;
     command = "";
+    convertedMessageSlotWrapper = true;
+  }
+
+  // File-backed delivery becomes a pane command at the effect edge. Read and
+  // classify the exact bytes that will be delivered before any pane existence,
+  // snapshot, or tmux effect; never let file or wrapper transport bypass the
+  // exact session-clear authority.
+  if (filePath) {
+    try {
+      filePayload = await readFile(filePath);
+    } catch {
+      return c.json({
+        success: false,
+        effect: false,
+        code: "file_read_failed",
+        reason: "file_read_failed",
+      }, 400);
+    }
+    if (isClearBearingCommand(filePayload.toString("utf8"))) {
+      return c.json({
+        success: false,
+        effect: false,
+        code: "session_clear_exact_route_required",
+      }, 410);
+    }
+  }
+  if (convertedMessageSlotWrapper) {
     db.logEvent(slotNum, "send_converted_message_slot_wrapper", null, null, {
       file: filePath,
       reason: "message_slot_wrapper_file_transport",
     });
   }
 
+  const identity = await verifyPaneIdentity(slotNum);
+  if (!identity.ok) {
+    db.logEvent(slotNum, "send_rejected_pane_identity", null, null, {
+      reason: identity.reason,
+      detail: identity.detail,
+      address: paneAddress(slotNum),
+    });
+    return c.json({
+      success: false,
+      error: `Refused pane delivery for slot ${slotNum}: ${identity.detail}`,
+      reason: "pane_identity_mismatch",
+    }, 409);
+  }
+  // Pin all sends, pastes, retries, and post-send reads in this request to
+  // the pane id captured by the one identity probe.
+  const paneTarget = identity.snapshot.paneId;
+
   // Slot 0 is PM. Dev slots may send PM status text, but must not be able to
   // execute PM-pane slash commands such as /exit, /clear, or /compact.
-  if (slotNum === 0 && isPmControlCommand(command) && !allowPmClear) {
+  if (slotNum === 0 && isPmControlCommand(command)) {
     db.logEvent(slotNum, "send_rejected_pm_control_command", null, null, {
       command: command.slice(0, 200),
       force,
@@ -1464,14 +1470,6 @@ app.post("/slots/:slotNum/send", async (c) => {
       403,
     );
   }
-  if (allowPmClear) {
-    db.logEvent(slotNum, "send_allowed_pm_clear_control_command", null, null, {
-      command,
-      force,
-      via: body.source ?? "unknown",
-    });
-  }
-
   // ── GATE 1: pane existence ─────────────────────────────
   // tmux can have a dead/detached session. Catching this up-front prevents
   // false-success where send-keys silently fails. (Rajiv directive 2026-05-05)
@@ -1564,12 +1562,20 @@ app.post("/slots/:slotNum/send", async (c) => {
   try {
     if (filePath) {
       // File mode: load-buffer + paste-buffer, chunked when needed. No payload cap.
-      const filePayload = await readFile(filePath);
+      if (!filePayload) {
+        return c.json({
+          success: false,
+          effect: false,
+          code: "file_read_failed",
+          reason: "file_read_failed",
+        }, 500);
+      }
+      const payload = filePayload;
       if (slotNum === 0) {
         // PM file deliveries use the same observation-bound submit primitive
         // as command deliveries. Busy/unknown selects C-q; only a proven idle
         // observation selects Enter.
-        const submitted = await relay.submitToPM(filePayload.toString("utf8"));
+        const submitted = await relay.submitToPM(payload.toString("utf8"));
         if (!submitted.ok) {
           return c.json({
             success: false,
@@ -1580,7 +1586,7 @@ app.post("/slots/:slotNum/send", async (c) => {
         }
         db.logEvent(slotNum, "send_file", null, null, {
           file: filePath,
-          bytes: filePayload.byteLength,
+          bytes: payload.byteLength,
           submit: submitted.submitKey,
           verified: true,
           verification: "submit_aware_receipt",
@@ -1591,10 +1597,10 @@ app.post("/slots/:slotNum/send", async (c) => {
           slot: slotNum,
           submit: submitted.submitKey,
           verified: true,
-          bytes: filePayload.byteLength,
+          bytes: payload.byteLength,
         });
       }
-      const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, filePayload, {
+      const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, payload, {
         source: "file",
         label: filePath,
       });

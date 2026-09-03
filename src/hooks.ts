@@ -501,26 +501,6 @@ export class HookProcessor {
     this.pmWaitStartedAt.delete(slotNum);
   }
 
-  private async sendClearViaMopSendPath(slotNum: number, source: string): Promise<boolean> {
-    try {
-      const port = parseInt(process.env.MOP_PORT ?? "3100", 10);
-      const res = await fetch(`http://127.0.0.1:${port}/slots/${slotNum}/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          command: "/clear",
-          force: true,
-          allow_pm_clear: slotNum === 0,
-          source,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-      return res.ok && data.success === true;
-    } catch {
-      return false;
-    }
-  }
-
   private detectPmDirectionRequest(transcript?: string): { summary: string; reason: string; issue: number | null } | null {
     const text = (transcript ?? "").trim();
     if (!text) return null;
@@ -1563,50 +1543,17 @@ export class HookProcessor {
     }
 
     // ─── Clear Pending Check ───────────────────────────────
-    // A legacy pending clear may clear only a FREE pane context. Occupied
-    // numbered slots retain ownership and must use exact native release.
-    // Rajiv directive 2026-04-04: "if idle trigger immediately or wait till next idle"
+    // The legacy latch is no longer an execution authority. Consume it once
+    // so old rows cannot suppress every later lifecycle event, then continue
+    // through the ordinary Stop path without sending /clear or releasing.
     if (this.db.hasPendingClear(slotNum)) {
-      try {
-        if (slot.occupied) {
-          this.db.clearPendingClear(slotNum);
-          this.db.logEvent(slotNum, "clear_refused_native_release_required", "Stop", null, {
-            name: slot.name,
-            assignment_epoch: slot.assignment_epoch,
-            reason: "Occupied numbered slots require exact acknowledged native release",
-          });
-          this.relay.injectToPM(
-            `# ⚠️ Slot ${slotNum} remains occupied — use exact native release; legacy queued clear was cancelled`,
-          );
-          return {};
-        }
-        const sent = await this.sendClearViaMopSendPath(slotNum, "clear_pending_stop_hook");
-        if (!sent) {
-          throw new Error("MoP send path failed for queued /clear");
-        }
-
-        this.db.clearPendingClear(slotNum);
-        this.db.logEvent(slotNum, "clear_pending_executed", "Stop", null, {
-          name: slot.name,
-          reason: "Slot went idle — executing queued /clear from MoP clear command",
-        });
-
-        this.relay.injectToPM(
-          `# 🧹 Slot ${slotNum} (${slot.name ?? "unnamed"}) cleared (was queued, now idle)`,
-        );
-
-        // Check if all pending clears are done
-        const pendingStatus = this.db.getClearPendingStatus();
-        const allDone = Object.values(pendingStatus).every((v) => !v);
-        if (allDone) {
-          this.relay.injectToPM("# ✅ All queued slot clears completed");
-        }
-      } catch (err) {
-        this.db.logEvent(slotNum, "clear_pending_failed", "Stop", null, {
-          error: String(err),
-        });
-      }
-      return {};
+      this.db.clearPendingClear(slotNum);
+      this.db.logEvent(slotNum, "clear_pending_retired", "Stop", null, {
+        name: slot.name,
+        assignment_epoch: slot.assignment_epoch,
+        via: "hook_stop",
+        reason: "legacy pending-clear latch consumed without execution; use authenticated exact session-clear route",
+      });
     }
 
     // Normal idle flow — debounced notification to PM.
