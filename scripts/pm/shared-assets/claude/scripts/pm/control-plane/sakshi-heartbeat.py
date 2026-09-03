@@ -121,6 +121,15 @@ CONTINUATION_KIND_LANES = {
     "followup": "rework-blocked",
 }
 
+ISSUE_CREATE_FLAG_RE = re.compile(r"^post-issue-create-sweep-(?P<issue>[0-9]+)\.flag$")
+ISSUE_CREATE_UNKNOWN_FLAG_RE = re.compile(r"^post-issue-create-sweep-unknown-(?P<epoch>[0-9]+)\.flag$")
+ISSUE_CREATE_RECEIPT_RE = re.compile(r"^mop-issue-create-[A-Za-z0-9._-]+\.json$")
+ISSUE_CREATE_RECEIPT_SCHEMA = "mop_issue_create_effect_v1"
+ISSUE_CREATE_PENDING_STATUSES = frozenset({"reserved", "effect_started", "ambiguous"})
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+ISSUE_CREATE_FIELD_RE = re.compile(r"^(ISSUE|CREATED_AT|SWEEP_REQUIRED):[ \t]*(.*)$")
+ISSUE_VALUE_RE = re.compile(r"^#(?P<issue>[1-9][0-9]*)$")
+
 
 def _default_heartbeat_skill() -> Path:
     """Resolve the canonical heartbeat skill for launch-prompt generation.
@@ -2015,16 +2024,82 @@ def collect_cc_reports() -> dict[str, Any]:
     return {"count": len(reports), "paths": [str(p) for p in reports[:20]]}
 
 
-def collect_post_issue_latches() -> dict[str, Any]:
-    patterns = [
-        "/tmp/*post*issue*latch*",
-        "/tmp/*pending*issue*",
-        "/tmp/mop-*issue*",
-    ]
-    matches: list[str] = []
-    for pattern in patterns:
-        matches.extend(str(p) for p in Path("/tmp").glob(Path(pattern).name))
-    return {"count": len(sorted(set(matches))), "paths": sorted(set(matches))[:20]}
+def _regular_file_without_symlink(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _parse_issue_create_flag(path: Path) -> tuple[str, str, str] | None:
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    fields: dict[str, str] = {}
+    for raw_line in raw_lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = ISSUE_CREATE_FIELD_RE.fullmatch(line)
+        if match is None or match.group(1) in fields:
+            return None
+        fields[match.group(1)] = match.group(2).strip()
+    if set(fields) != {"ISSUE", "CREATED_AT", "SWEEP_REQUIRED"}:
+        return None
+    issue_match = ISSUE_VALUE_RE.fullmatch(fields["ISSUE"])
+    if issue_match is None or parse_timestamp(fields["CREATED_AT"]) is None:
+        return None
+    if fields["SWEEP_REQUIRED"] != "yes":
+        return None
+    return issue_match.group("issue"), fields["CREATED_AT"], fields["SWEEP_REQUIRED"]
+
+
+def _valid_issue_create_flag(path: Path) -> bool:
+    match = ISSUE_CREATE_FLAG_RE.fullmatch(path.name)
+    unknown_match = ISSUE_CREATE_UNKNOWN_FLAG_RE.fullmatch(path.name)
+    if (match is None and unknown_match is None) or not _regular_file_without_symlink(path):
+        return False
+    parsed = _parse_issue_create_flag(path)
+    if parsed is None:
+        return False
+    issue, _, _ = parsed
+    return match is None or issue == match.group("issue")
+
+
+def _valid_issue_create_receipt(path: Path) -> bool:
+    if ISSUE_CREATE_RECEIPT_RE.fullmatch(path.name) is None or not _regular_file_without_symlink(path):
+        return False
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(value, dict)
+        and value.get("schema") == ISSUE_CREATE_RECEIPT_SCHEMA
+        and value.get("effect") == "issue_create"
+        and value.get("status") in ISSUE_CREATE_PENDING_STATUSES
+        and isinstance(value.get("effect_id"), str)
+        and bool(value["effect_id"].strip())
+        and isinstance(value.get("request_digest"), str)
+        and SHA256_RE.fullmatch(value["request_digest"].lower()) is not None
+        and isinstance(value.get("issue"), int)
+        and value["issue"] > 0
+    )
+
+
+def collect_post_issue_latches(root: Path = Path("/tmp")) -> dict[str, Any]:
+    matches = {
+        str(path)
+        for path in root.glob("post-issue-create-sweep-*.flag")
+        if _valid_issue_create_flag(path) and not path.with_name(f"{path.name}.resolved").exists()
+    }
+    matches.update(
+        str(path)
+        for path in root.glob("mop-issue-create-*.json")
+        if _valid_issue_create_receipt(path)
+    )
+    return {"count": len(matches), "paths": sorted(matches)[:20]}
 
 
 def summarize_mop(mop: dict[str, Any], slots: dict[str, dict[str, Any]]) -> str:
