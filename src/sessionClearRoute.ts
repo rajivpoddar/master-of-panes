@@ -10,7 +10,7 @@ import {
 } from "./db.js";
 import type { CheckoutReadOnlyObservation } from "./slotRelease.js";
 import type { TmuxRelay } from "./relay.js";
-import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
+import { DEFAULT_DEV_SLOT_COUNT, PM_SLOT } from "./slotConfig.js";
 import { verifyPaneIdentity } from "./paneIdentity.js";
 
 export const SESSION_CLEAR_AUTHORITY = "mop-release-assign-v1";
@@ -24,7 +24,13 @@ export interface SessionClearRouteDependencies {
   verifyPane?: typeof verifyPaneIdentity;
 }
 
-const slotParamSchema = z.coerce.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT);
+// PM is an explicit session boundary, not an alias for a numbered slot. Keep
+// the public spelling stable while using slot 0 internally for the existing
+// PM pane/DB row.
+const slotParamSchema = z.union([
+  z.literal("pm"),
+  z.coerce.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT),
+]);
 const requestSchema = z.object({
   expected_epoch: z.number().int().nonnegative(),
   expected_session_id: z.string().min(1).max(255).refine((value) => !/[\u0000-\u001f\u007f]/.test(value)),
@@ -115,7 +121,7 @@ export function registerSessionClearRoute(
     const parsed = requestSchema.safeParse(body);
     if (!parsed.success) return failure("invalid_request", 400);
     const request = parsed.data;
-    const slot = slotParse.data;
+    const slot = slotParse.data === "pm" ? PM_SLOT : slotParse.data;
     const digest = requestDigest(slot, request);
     const sessionStartedMs = Date.parse(request.expected_session_started_at);
     if (!Number.isFinite(sessionStartedMs) || Date.now() - sessionStartedMs <= 6 * 60 * 60 * 1000) {

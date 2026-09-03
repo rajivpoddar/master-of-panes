@@ -23,6 +23,7 @@
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
       "~/.claude/scripts/mop-slot-respawn.sh",
+      "~/.claude/scripts/mop-clear-slot.sh",
       "~/.claude/scripts/pm-merges-automation-update.py",
       "~/.claude/scripts/pm-terminal-continuity.py",
       "~/.claude/scripts/pm-terminal-wake.py",
@@ -43,7 +44,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 65,
+    "selected_count": 66,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -71,7 +72,7 @@
     {
       "source_path": "claude/control_plane/runtime_observation.py",
       "canonical_target": "/Users/rajiv/.claude/control_plane/runtime_observation.py",
-      "sha256": "d741ec3e1618500bbf3f8bc0fecec0b3c822afef008aa62da758dcc4fd37cbdb",
+      "sha256": "025ad850f52be3d38837224e810a02b4b6ea56e9475c811070260936a26d37fd",
       "mode": 420,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
       "dependency_status": "closed",
@@ -233,7 +234,7 @@
     {
       "source_path": "claude/scripts/heartbeat-session-age-clear.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/heartbeat-session-age-clear.py",
-      "sha256": "609361192865286a03314f52703fb5e21c6b833be763817e8f0eed7487933ad0",
+      "sha256": "7d99760a5c4eae1b9521f98639eef193ef92a9cf18456eb7d5d09486b66ebfcd",
       "mode": 493,
       "ownership_class": "shared-claude-mop-session-age-client",
       "dependency_status": "closed",
@@ -303,6 +304,15 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/mop-clear-slot.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/mop-clear-slot.sh",
+      "sha256": "2dd6a7280c6f49433759a5e9e2cc3dffa32ef75c9c2f436d918e8535f1d2a532",
+      "mode": 493,
+      "ownership_class": "shared-claude-mop-session-age-caller",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/mop-slot-respawn.sh",
       "canonical_target": "/Users/rajiv/.claude/scripts/mop-slot-respawn.sh",
       "sha256": "996927262a5c37a639f84493330938c4d6cb73319cf36094c23a795aaa90bbbb",
@@ -341,7 +351,7 @@
     {
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py",
-      "sha256": "c65a67e439947a9b3a0ecd054f97e9b1771a35b3e8e13670b18da88609ae1f35",
+      "sha256": "5c059a005fd092fe24cafa7b6c5987f4b5cebcaa4463e18bb5c92e72db3347ad",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
       "dependency_status": "closed",

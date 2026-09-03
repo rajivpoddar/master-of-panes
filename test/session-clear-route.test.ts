@@ -144,6 +144,58 @@ test("session clear is authenticated, final-fenced, durable, and replay-safe", a
   }
 });
 
+test("PM session clear uses the same exact free-idle session authority", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-session-clear-route-"));
+  const previousCapability = process.env.MOP_LOCAL_CAPABILITY;
+  process.env.MOP_LOCAL_CAPABILITY = CAPABILITY;
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    db.startAgentTurn(0, "pm-session");
+    db.finishAgentTurn(0, "pm-session");
+    db.updateSlot(0, { session_started_at: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() });
+    const current = db.getSlot(0);
+    assert.ok(current?.session_started_at);
+    let paneEffects = 0;
+    const relay = {
+      sendToSlotAsync: async (
+        _slot: number,
+        _command: string,
+        _force?: boolean,
+        _raw?: boolean,
+        options?: { beforeFirstEffect?: (pane: typeof PANE) => boolean },
+      ) => {
+        if (options?.beforeFirstEffect?.(PANE)) paneEffects += 1;
+        return paneEffects === 1;
+      },
+    } as unknown as TmuxRelay;
+    const app = await setupRoute(relay, db);
+    const pmBody = body(current.session_started_at, "pm-clear-1");
+    pmBody.expected_session_id = "pm-session";
+    const request = jsonRequest(pmBody);
+    const first = await app.request("/slots/pm/session/clear", request);
+    assert.equal(first.status, 200);
+    assert.deepEqual(await first.json(), {
+      success: true,
+      effect: true,
+      idempotent: false,
+      status: "completed",
+      request_token: "pm-clear-1",
+    });
+    assert.equal(paneEffects, 1);
+    const replayBody = body(current.session_started_at, "pm-clear-1");
+    replayBody.expected_session_id = "pm-session";
+    const replay = await app.request("/slots/pm/session/clear", jsonRequest(replayBody));
+    assert.equal(replay.status, 200);
+    assert.equal((await replay.json()).idempotent, true);
+    assert.equal(paneEffects, 1);
+    db.close();
+  } finally {
+    if (previousCapability === undefined) delete process.env.MOP_LOCAL_CAPABILITY;
+    else process.env.MOP_LOCAL_CAPABILITY = previousCapability;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("broad clear aliases refuse before parsing and cannot reach pane delivery", async () => {
   const app = new Hono();
   registerRetiredClearRefusals(app);

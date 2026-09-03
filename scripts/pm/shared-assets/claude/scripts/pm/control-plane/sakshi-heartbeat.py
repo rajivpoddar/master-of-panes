@@ -2778,7 +2778,7 @@ def build_report(data: dict[str, Any]) -> str:
             continue
         target = "pm" if row["id"] == "pm" else row["id"]
         actions.append(
-            f"Session-age clear due for {row['label']} {row['age']}: hourly ops should invoke /Users/rajiv/.claude/scripts/heartbeat-session-age-clear.py for slot \"{target}\" using the exact emitted session_id/session_started_at tuple ({row.get('clear_reason')})."
+            f"Session-age clear due for {row['label']} {row['age']}: hourly ops should invoke /Users/rajiv/.claude/scripts/mop-clear-slot.sh --slot {target} using the exact emitted assignment_epoch/session_id/session_started_at tuple ({row.get('clear_reason')})."
         )
     if pr.get("ok") and pr.get("drift"):
         actions.append("Resolve PM label drift rows before reporting affected PRs as clean.")

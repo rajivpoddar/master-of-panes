@@ -86,7 +86,7 @@ def request_json(
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--slot", type=int, required=True)
+    result.add_argument("--slot", required=True, help="numbered slot 1-6 or the PM boundary 'pm'")
     result.add_argument("--expected-epoch", type=int, required=True)
     result.add_argument("--expected-session-id", required=True)
     result.add_argument("--expected-session-started-at", required=True)
@@ -165,7 +165,11 @@ def _fence(args: argparse.Namespace, observed: dict[str, object]) -> tuple[bool,
 def main() -> int:
     args = parser().parse_args()
     capability = os.environ.get("MOP_LOCAL_CAPABILITY", "")
-    if args.slot < 1 or args.slot > 6 or args.expected_age_seconds <= 6 * 60 * 60:
+    slot_path = str(args.slot).lower()
+    if slot_path != "pm" and (not slot_path.isdigit() or int(slot_path) < 1 or int(slot_path) > 6):
+        print(json.dumps({"success": False, "effect": False, "code": "invalid_session_clear_request"}, sort_keys=True))
+        return 2
+    if args.expected_age_seconds <= 6 * 60 * 60:
         print(json.dumps({"success": False, "effect": False, "code": "invalid_session_clear_request"}, sort_keys=True))
         return 2
     if not SHA_RE.fullmatch(args.checkout_head):
@@ -179,7 +183,9 @@ def main() -> int:
         return 2
     status, observed = request_json(
         args.base_url,
-        f"/slots/{args.slot}",
+        # The legacy numeric projection remains the read spelling; the PM
+        # write is explicitly named /slots/pm/session/clear below.
+        f"/slots/{0 if slot_path == 'pm' else slot_path}",
         "GET",
         None,
         capability,
@@ -212,7 +218,7 @@ def main() -> int:
         return 0
     response_status, response = request_json(
         args.base_url,
-        SESSION_CLEAR_PATH.format(slot=args.slot),
+        SESSION_CLEAR_PATH.format(slot=slot_path),
         "POST",
         body,
         capability,

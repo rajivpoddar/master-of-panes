@@ -285,10 +285,9 @@ class RuntimeObservationAdapter:
     ) -> bool:
         if effective_start is None or active is not False:
             return False
-        # Numbered-slot session expiry is actionable only for a free, idle
-        # session.  Keep the observation contract identical to the one-shot
-        # clear client; an occupied slot is never a clear candidate.
-        if not is_pm and (
+        # Every clear candidate, including PM, must be the same authoritative
+        # free/idle DB session tuple consumed by the one-shot client.
+        if (
             occupied is not False
             or idle is not True
             or not session_id
@@ -404,17 +403,12 @@ class RuntimeObservationAdapter:
         clear = self._successful_clear(slot, mop_events)
         clear_at, clear_type = clear if clear else (None, None)
         runtime_session_id = session_id
-        if slot == "pm":
-            authoritative_session_id = runtime_session_id
-            authoritative_session_started_at = session_start
-            age_start = session_start
-        else:
-            # Transcript identity/timing is activity evidence only. Clear
-            # requests must use the exact MoP identity recorded at the
-            # UserPromptSubmit boundary; those timestamps are not aliases.
-            authoritative_session_id = _text(row.get("session_id"))
-            authoritative_session_started_at = parse_timestamp(row.get("session_started_at"))
-            age_start = authoritative_session_started_at if authoritative_session_id else None
+        # Transcript identity/timing is activity evidence only. Clear requests
+        # must use the exact MoP identity recorded at the UserPromptSubmit
+        # boundary; OMP/Claude timestamps are never aliases for it.
+        authoritative_session_id = _text(row.get("session_id"))
+        authoritative_session_started_at = parse_timestamp(row.get("session_started_at"))
+        age_start = authoritative_session_started_at if authoritative_session_id else None
         effective = max((value for value in (age_start, clear_at) if value), default=None)
         activity = (
             _active_omp_evidence(records, session_start=session_start, now=now)

@@ -20,6 +20,7 @@ ROOT = Path(__file__).parents[3]
 SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 RUNTIME = SHARED / "claude" / "control_plane" / "runtime_observation.py"
 CLEAR = SHARED / "claude" / "scripts" / "heartbeat-session-age-clear.py"
+CALLER = SHARED / "claude" / "scripts" / "mop-clear-slot.sh"
 SAKSHI = SHARED / "claude" / "scripts" / "pm" / "control-plane" / "sakshi-heartbeat.py"
 MANIFEST = SHARED / "manifest.json"
 
@@ -46,6 +47,10 @@ class RuntimeObservationRestoreTests(unittest.TestCase):
                 "/Users/rajiv/.claude/scripts/heartbeat-session-age-clear.py",
                 0o755,
             ),
+            "claude/scripts/mop-clear-slot.sh": (
+                "/Users/rajiv/.claude/scripts/mop-clear-slot.sh",
+                0o755,
+            ),
             "claude/scripts/pm/control-plane/sakshi-heartbeat.py": (
                 "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py",
                 0o755,
@@ -64,7 +69,9 @@ class RuntimeObservationRestoreTests(unittest.TestCase):
         self.assertNotIn("pm_operator", runtime_text)
         self.assertNotIn("pm_operator", client_text)
         self.assertNotIn("pm-operator", client_text)
-        self.assertIn("/Users/rajiv/.claude/scripts/heartbeat-session-age-clear.py", SAKSHI.read_text(encoding="utf-8"))
+        sakshi_text = SAKSHI.read_text(encoding="utf-8")
+        self.assertIn("/Users/rajiv/.claude/scripts/mop-clear-slot.sh --slot", sakshi_text)
+        self.assertIn("heartbeat-session-age-clear.py", CALLER.read_text(encoding="utf-8"))
 
     def test_pm_and_six_slot_rows_are_fresh_and_missing_evidence_degrades(self) -> None:
         runtime = load_module("runtime_observation_restore", RUNTIME)
@@ -288,6 +295,17 @@ class RuntimeObservationRestoreTests(unittest.TestCase):
                 "authority": "mop-release-assign-v1",
                 "capability": "c" * 64,
             }])
+            pm_argv = list(argv)
+            pm_argv[pm_argv.index("2")] = "pm"
+            output = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"MOP_LOCAL_CAPABILITY": "c" * 64}, clear=False),
+                mock.patch.object(client, "_checkout_observation", return_value=(True, {"checkout_clean": True, "unpushed_commits": []})),
+                mock.patch.object(sys, "argv", pm_argv),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(client.main(), 0)
+            self.assertEqual(requests[-1]["path"], "/slots/0")
         finally:
             server.shutdown()
             server.server_close()
@@ -320,6 +338,49 @@ class RuntimeObservationRestoreTests(unittest.TestCase):
                 mock.patch.object(sys, "argv", common + ["--base-url", base_url]),
             ):
                 self.assertEqual(client.main(), 2, base_url)
+
+    def test_pm_helper_uses_db_identity_for_read_and_explicit_pm_clear_route(self) -> None:
+        client = load_module("heartbeat_session_age_clear_pm_route", CLEAR)
+        calls = []
+
+        def fake_request_json(base_url, path, method, body, capability):
+            calls.append((base_url, path, method, body, capability))
+            if method == "GET":
+                return 200, {
+                    "assignment_epoch": 0,
+                    "session_id": "pm-session",
+                    "session_started_at": "2026-09-02T00:00:00+00:00",
+                    "occupied": False,
+                    "dnd": False,
+                    "idle": True,
+                    "active_turn_id": None,
+                    "active_turn_state": "inactive",
+                }
+            return 200, {"success": True, "effect": True, "idempotent": False}
+
+        argv = [
+            str(CLEAR), "--slot", "pm", "--expected-epoch", "0",
+            "--expected-session-id", "pm-session",
+            "--expected-session-started-at", "2026-09-02T00:00:00+00:00",
+            "--expected-age-seconds", str(7 * 60 * 60),
+            "--checkout-path", "/fixture/checkout", "--checkout-branch", "main",
+            "--checkout-head", "a" * 40, "--request-token", "pm-request",
+            "--base-url", "http://127.0.0.1:3310", "--execute",
+        ]
+        with (
+            mock.patch.dict(os.environ, {"MOP_LOCAL_CAPABILITY": "d" * 64}, clear=False),
+            mock.patch.object(client, "request_json", side_effect=fake_request_json),
+            mock.patch.object(client, "_checkout_observation", return_value=(True, {"checkout_clean": True, "unpushed_commits": []})),
+            mock.patch.object(sys, "argv", argv),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(client.main(), 0)
+        self.assertEqual([call[1:3] for call in calls], [
+            ("/slots/0", "GET"),
+            ("/slots/pm/session/clear", "POST"),
+        ])
+        self.assertEqual(calls[1][3]["expected_session_id"], "pm-session")
+        self.assertEqual(calls[1][4], "d" * 64)
 
 
 if __name__ == "__main__":

@@ -594,6 +594,7 @@ export class MoPDatabase {
       WHERE slot = ? AND (name IS NULL OR trim(name) = '')
     `);
 
+    insertSlot.run(PM_SLOT, this.config.pmPaneAddress, "PM");
     for (const i of devSlots(this.config.slotCount)) {
       const name = runtimeIdentity(i)?.name ?? null;
       insertSlot.run(i, `0:0.${i}`, name);
