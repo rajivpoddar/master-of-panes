@@ -127,10 +127,16 @@ class PMCommunicationRestoreTests(unittest.TestCase):
         self.assertIn("LOCAL_CONTINUE", wait)
         self.assertIn("PM_WAIT", wait)
         self.assertIn("message-pm", wait)
-        self.assertIn("existing supported PM assignment path exactly once", processing)
+        self.assertIn("POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign", processing)
+        self.assertIn("x-heydonna-assignment-authority: pm-transition-v1", processing)
+        for field in ("expected_epoch", "repository_id", "issue", "pr", "branch", "head_sha", "work_kind", "handoff_id", "task"):
+            self.assertIn(f"`{field}`", processing)
+        self.assertEqual(processing.count("POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign"), 1)
+        self.assertIn("PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch", processing)
+        self.assertIn("readback_mismatch", processing)
         for skill in (wait, processing):
             self.assertNotIn("/pm/nudge/assign", skill)
-            self.assertNotIn("pm-transition", skill)
+            self.assertNotIn("pm-transition.sh", skill)
             self.assertNotIn("PM Operator", skill)
 
     def test_manifest_has_exact_four_new_assets_and_preserves_protected_scope(self) -> None:
