@@ -122,35 +122,40 @@ class PMCommunicationRestoreTests(unittest.TestCase):
         message = (SKILL_ROOT / "message-pm/SKILL.md").read_text(encoding="utf-8")
         wait = (SKILL_ROOT / "pm-wait-nudge/SKILL.md").read_text(encoding="utf-8")
         processing = (SKILL_ROOT / "pm-nudge-processing/SKILL.md").read_text(encoding="utf-8")
+        direct_assign = (SKILL_ROOT / "direct-assign/SKILL.md").read_text(encoding="utf-8")
+        direct_release = (SKILL_ROOT / "direct-release/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("message-pm.sh", message)
         self.assertIn("exactly once", message)
         self.assertIn("LOCAL_CONTINUE", wait)
         self.assertIn("PM_WAIT", wait)
         self.assertIn("message-pm", wait)
-        self.assertIn("POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign", processing)
-        self.assertIn("x-heydonna-assignment-authority: pm-transition-v1", processing)
-        for field in ("expected_epoch", "repository_id", "issue", "pr", "branch", "head_sha", "work_kind", "handoff_id", "task"):
-            self.assertIn(f"`{field}`", processing)
-        self.assertEqual(processing.count("POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign"), 1)
+        self.assertIn("exactly one `POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign`", processing)
         self.assertIn("PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch", processing)
-        self.assertIn("readback_mismatch", processing)
+        self.assertIn("exactly one `POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign`", direct_assign)
+        self.assertIn("exactly one empty `POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release`", direct_release)
+        for ceremony in ("pm-transition-v1", "expected_epoch", "effect_id", "request_digest"):
+            self.assertNotIn(ceremony, processing)
+            self.assertNotIn(ceremony, direct_assign)
+            self.assertNotIn(ceremony, direct_release)
         for skill in (wait, processing):
             self.assertNotIn("/pm/nudge/assign", skill)
             self.assertNotIn("pm-transition.sh", skill)
             self.assertNotIn("PM Operator", skill)
 
-    def test_manifest_has_exact_four_new_assets_and_preserves_protected_scope(self) -> None:
+    def test_manifest_has_restored_pm_and_direct_lifecycle_assets_and_preserves_protected_scope(self) -> None:
         manifest = json.loads((ROOT / "scripts/pm/shared-assets/manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["inventory"]["selected_count"], 68)
+        self.assertEqual(manifest["inventory"]["selected_count"], 70)
         self.assertEqual(manifest["entries"], sorted(manifest["entries"], key=lambda item: item["source_path"]))
-        self.assertEqual(len(manifest["entries"]), 68)
-        self.assertEqual(len({entry["canonical_target"] for entry in manifest["entries"]}), 68)
+        self.assertEqual(len(manifest["entries"]), 70)
+        self.assertEqual(len({entry["canonical_target"] for entry in manifest["entries"]}), 70)
         for entry in manifest["entries"]:
             source = ASSET_ROOT / entry["source_path"]
             self.assertTrue(source.is_file(), entry["source_path"])
             self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), entry["sha256"], entry["source_path"])
             self.assertEqual(stat.S_IMODE(source.stat().st_mode), entry["mode"], entry["source_path"])
         expected = {
+            "claude/skills/direct-assign/SKILL.md": ("/Users/rajiv/.claude/skills/direct-assign/SKILL.md", 420),
+            "claude/skills/direct-release/SKILL.md": ("/Users/rajiv/.claude/skills/direct-release/SKILL.md", 420),
             "claude/scripts/message-pm.sh": ("/Users/rajiv/.claude/scripts/message-pm.sh", 493),
             "claude/skills/message-pm/SKILL.md": ("/Users/rajiv/.claude/skills/message-pm/SKILL.md", 420),
             "claude/skills/pm-nudge-processing/SKILL.md": ("/Users/rajiv/.claude/skills/pm-nudge-processing/SKILL.md", 420),

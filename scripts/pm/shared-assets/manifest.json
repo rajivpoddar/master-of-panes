@@ -29,6 +29,8 @@
       "~/.claude/control_plane/runtime_observation.py",
       "~/.claude/scripts/sakshi-heartbeat.py",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
+      "~/.claude/skills/direct-assign/SKILL.md",
+      "~/.claude/skills/direct-release/SKILL.md",
       "~/.claude/skills/qa-brief/SKILL.md",
       "~/.claude/skills/message-pm/SKILL.md",
       "~/.claude/skills/pm-wait-nudge/SKILL.md",
@@ -46,7 +48,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 68,
+    "selected_count": 70,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -128,7 +130,7 @@
     {
       "source_path": "claude/plugins/master-of-panes/1.0.0/dist/mcp.js",
       "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/mcp.js",
-      "sha256": "e4e98ff5e3aeb1ac87060489af7b44cae9ca2a85092f2a6ef007ae04d83dabcc",
+      "sha256": "dc7cbcbc4b9717d426c3ff085d9717f790ea063373aef3394b3a0e4cb39c52ca",
       "mode": 420,
       "ownership_class": "shared-claude-mop-mcp-schema",
       "dependency_status": "closed",
@@ -380,6 +382,24 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/skills/direct-assign/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/direct-assign/SKILL.md",
+      "sha256": "4e0b2ee3cb5ec197a77eb9026a51eb15d6bef79ca3a2ac7958e3388d1db0246d",
+      "mode": 420,
+      "ownership_class": "shared-claude-direct-assignment-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/direct-release/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/direct-release/SKILL.md",
+      "sha256": "c0b09fa18147b9014b0643b3cba7c7b7a755913bbbc869c586e8f027b6aeb209",
+      "mode": 420,
+      "ownership_class": "shared-claude-direct-release-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/skills/message-pm/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/message-pm/SKILL.md",
       "sha256": "e7406ec2c7553de278d1b4aad94301600f4d8a42113eeae4b36c91a3b448ec63",
@@ -391,7 +411,7 @@
     {
       "source_path": "claude/skills/pm-nudge-processing/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/pm-nudge-processing/SKILL.md",
-      "sha256": "8953a0cf33e4ca913fd4bb47deef6021e4a0780251f50da254bd2eb30faffff8",
+      "sha256": "26b1cf6bdf066ed3744f27237b838280c021d4f0fe34fd35b3e3fc307ad3e456",
       "mode": 420,
       "ownership_class": "shared-claude-pm-nudge-processing-skill",
       "dependency_status": "closed",

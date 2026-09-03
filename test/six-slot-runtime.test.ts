@@ -6,7 +6,6 @@ import test from "node:test";
 import { Hono } from "hono";
 import { MoPDatabase } from "../src/db.js";
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
-import { PM_TRANSITION_ASSIGNMENT_AUTHORITY, PM_TRANSITION_ASSIGNMENT_HEADER } from "../src/assignmentAuthority.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 import {
   DEFAULT_DEV_SLOT_COUNT,
@@ -193,15 +192,12 @@ test("assignment HTTP accepts S6 and refuses S7 before mutation", async () => {
       handoff_id: "s6-bound",
       expected_epoch: 0,
     };
-    const headers = {
-      "content-type": "application/json",
-      [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY,
-    };
+    const headers = { "content-type": "application/json" };
     const accepted = await app.request("/slots/6/assign", { method: "POST", headers, body: JSON.stringify(body) });
     assert.equal(accepted.status, 200);
     assert.equal(db.getSlot(6)?.issue, 600);
-    assert.equal(db.getSlot(6)?.pr, 600);
-    assert.equal(db.getSlot(6)?.head_sha, "a".repeat(40));
+    assert.equal(db.getSlot(6)?.pr, null);
+    assert.equal(db.getSlot(6)?.head_sha, null);
     const refused = await app.request("/slots/7/assign", { method: "POST", headers, body: JSON.stringify(body) });
     assert.equal(refused.status, 400);
     assert.equal(db.getSlot(7), undefined);

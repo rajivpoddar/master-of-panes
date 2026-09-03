@@ -13,10 +13,6 @@
  */
 
 import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { lstatSync } from "node:fs";
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
@@ -35,12 +31,6 @@ import { P0EscalationWatcher } from "./p0EscalationWatch.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
 import { DEFAULT_CONFIG } from "./types.js";
-import {
-  NativeSlotReleaseCoordinator,
-  type CheckoutReadOnlyObservation,
-  type CheckoutResetObservation,
-} from "./slotRelease.js";
-import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
@@ -68,105 +58,6 @@ const relay = new TmuxRelay(config);
 // Rajiv directive 2026-05-06 11:18 IST.
 relay.setDatabase(db);
 const processor = new HookProcessor(db, relay);
-const releaseResetHelper =
-  process.env.MOP_RELEASE_RESET_HELPER
-  ?? fileURLToPath(new URL("../scripts/release-slot-reset-and-ack.py", import.meta.url));
-
-function resetAndObserveCheckout(
-  checkoutPath: string,
-  intendedMainHead: string,
-): Promise<CheckoutResetObservation> {
-  return new Promise((resolvePromise, rejectPromise) => {
-    execFile(
-      "python3",
-      [
-        releaseResetHelper,
-        "--checkout", checkoutPath,
-        "--intended-main-head", intendedMainHead,
-      ],
-      { timeout: 180_000, maxBuffer: 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error) {
-          rejectPromise(new Error(`checkout reset helper failed: ${stderr.trim() || error.message}`));
-          return;
-        }
-        try {
-          resolvePromise(JSON.parse(stdout) as CheckoutResetObservation);
-        } catch {
-          rejectPromise(new Error("checkout reset helper returned invalid JSON"));
-        }
-      },
-    );
-  });
-}
-
-function readOnlyGit(checkoutPath: string, args: string[]): Promise<string> {
-  return new Promise((resolvePromise, rejectPromise) => {
-    execFile("git", ["-C", checkoutPath, ...args], { timeout: 30_000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        rejectPromise(new Error(stderr.trim() || error.message));
-        return;
-      }
-      resolvePromise(stdout);
-    });
-  });
-}
-
-async function observeCheckout(checkoutPath: string): Promise<CheckoutReadOnlyObservation> {
-  const resolved = resolve(checkoutPath);
-  try {
-    const stat = lstatSync(resolved);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      return { checkout_path: resolved, clean: false, unpushed_commits: [], error: "checkout is not a regular directory" };
-    }
-    const status = await readOnlyGit(resolved, ["status", "--porcelain", "--untracked-files=all"]);
-    const unpushed = (await readOnlyGit(resolved, ["rev-list", "@{upstream}..HEAD"]))
-      .split("\n")
-      .map((value) => value.trim())
-      .filter(Boolean);
-    const branch = (await readOnlyGit(resolved, ["branch", "--show-current"])).trim() || null;
-    const head = (await readOnlyGit(resolved, ["rev-parse", "HEAD"])).trim().toLowerCase() || null;
-    return {
-      checkout_path: resolved,
-      clean: status.trim() === "" && unpushed.length === 0,
-      unpushed_commits: unpushed,
-      branch,
-      head,
-    };
-  } catch (error) {
-    return {
-      checkout_path: resolved,
-      clean: false,
-      unpushed_commits: [],
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
-async function waitForOwningSlotIdle(slot: number): Promise<boolean> {
-  const timeoutMs = parseInt(process.env.MOP_RELEASE_IDLE_TIMEOUT_MS ?? "120000", 10);
-  const deadline = Date.now() + timeoutMs;
-  // Let the just-delivered prompt reach the slot's hook-derived activity state
-  // before accepting an idle observation.
-  await sleep(500);
-  while (Date.now() < deadline) {
-    const activity = await relay.getSlotActivityState(slot);
-    if (activity === "idle") return true;
-    if (activity === "unknown") return false;
-    await sleep(250);
-  }
-  return false;
-}
-
-const nativeSlotRelease = new NativeSlotReleaseCoordinator({
-  db,
-  resolveOwningCheckout: (slot) => relay.getSlotCheckoutPath(slot),
-  deliverInstruction: (slot, instruction) => relay.sendToSlotAsync(slot, instruction, true, false),
-  owningSlotIsIdle: waitForOwningSlotIdle,
-  resetAndObserveCheckout,
-  observeCheckout,
-});
-const family2ReleaseEffectAdapter = new Family2ReleaseEffectAdapter();
 
 // MoP events are a bounded operational ring, not an audit archive. Prune once
 // after startup and then every six hours so recent-event endpoints stay cheap.
@@ -405,7 +296,7 @@ async function clearSlotsThroughMopHttp(
         name,
         assignment_epoch: slotState.assignment_epoch,
         via: options.source,
-        reason: "Occupied numbered slots require exact acknowledged native release",
+        reason: "Occupied numbered slots require mop_release_slot",
       });
       results.push({ slot: slotNum, name, status: "refused (occupied; native release required)" });
       await sleep(500);
@@ -978,7 +869,7 @@ app.patch("/slots/:slotNum", async (c) => {
     return c.json({
       success: false,
       conflict: true,
-      error: "assignment identity must use the guarded assign/release endpoints",
+      error: "assignment identity must use the direct assign/release endpoints",
       reason: "assignment_identity_patch_refused",
       identity_fields: identityFields,
     }, 409);
@@ -998,13 +889,11 @@ app.patch("/slots/:slotNum", async (c) => {
   return c.json(updated);
 });
 
-/** Assign a slot through the guarded PM authority route. */
+/** Assign a slot through the direct MoP route. */
 registerAssignmentRoute(app, db);
 
 registerFamily2Routes(app, {
   db,
-  nativeSlotRelease,
-  family2ReleaseEffectAdapter,
   clearPlanApprovalTimer: (slot) => processor.clearPlanApprovalTimer(slot),
 });
 

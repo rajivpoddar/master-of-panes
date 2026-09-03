@@ -11,6 +11,7 @@
  * - mop_slot_history: Get recent events for a slot
  * - mop_recent_activity: Get all events in last N minutes
  * - mop_send_to_slot: Send a command to a slot
+ * - mop_assign_slot: Assign a free slot to one issue
  * - mop_release_slot: Release a slot (mark free)
  * - mop_set_dnd: Set/clear DND on a slot
  * - mop_capture_output: Capture live tmux output from a slot + busy/idle status
@@ -23,7 +24,6 @@ import { MoPDatabase } from "./db.js";
 import { TmuxRelay } from "./relay.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import { execShell, sleep } from "./asyncCommand.js";
-import { PM_TRANSITION_ASSIGNMENT_AUTHORITY, PM_TRANSITION_ASSIGNMENT_HEADER, } from "./assignmentAuthority.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidRuntimeSlot } from "./slotConfig.js";
 function isPmControlCommand(command) {
     return command.trim().startsWith("/");
@@ -246,28 +246,54 @@ export async function startMcpServer(config) {
             ],
         };
     });
-    // ─── mop_release_slot ──────────────────────────────────
-    server.tool("mop_release_slot", "Synchronously reset the exact owning checkout to clean current main, then release the same complete MoP tuple/epoch.", {
+    // ─── mop_assign_slot ───────────────────────────────────
+    server.tool("mop_assign_slot", "Assign one currently free numbered slot to an issue with one direct MoP call.", {
         slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
-        expected_epoch: z.number().int().nonnegative().describe("Current MoP assignment epoch"),
-        expected_repository_id: z.union([z.string(), z.number()]).describe("Current repository identity"),
-        expected_issue: z.number().int().positive().nullable(),
-        expected_pr: z.number().int().positive().nullable(),
-        expected_branch: z.string().nullable(),
-        expected_head_sha: z.string().regex(/^[0-9a-f]{40}$/i).nullable(),
-        expected_work_kind: z.string().nullable(),
-        expected_handoff_id: z.string().nullable(),
-        expected_claimed_at: z.string().min(1),
-        intended_main_head: z.string().regex(/^[0-9a-f]{40}$/i).describe("Exact current main head to pull and attest"),
-    }, async (releaseInput) => {
+        issue: z.number().int().positive().describe("GitHub issue number"),
+        task: z.string().min(1).describe("Complete PM-authored task message"),
+        repository_id: z.union([z.string(), z.number()]).optional().describe("Repository identity; defaults to HeyDonna"),
+    }, async ({ slot, issue, task, repository_id }) => {
         try {
-            const response = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${releaseInput.slot}/release`, {
+            const response = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slot}/assign`, {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY,
-                },
-                body: JSON.stringify(releaseInput),
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ issue, task, ...(repository_id === undefined ? {} : { repository_id }) }),
+            });
+            const result = await response.json().catch(() => ({
+                success: false,
+                reason: "invalid_response",
+            }));
+            if (!response.ok) {
+                return {
+                    isError: true,
+                    content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+                };
+            }
+            return {
+                content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            };
+        }
+        catch (error) {
+            return {
+                isError: true,
+                content: [{
+                        type: "text",
+                        text: JSON.stringify({
+                            success: false,
+                            reason: "assignment_service_unavailable",
+                            message: error instanceof Error ? error.message : String(error),
+                        }, null, 2),
+                    }],
+            };
+        }
+    });
+    // ─── mop_release_slot ──────────────────────────────────
+    server.tool("mop_release_slot", "Release one idle, inactive, non-DND numbered slot with one direct MoP call.", {
+        slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
+    }, async ({ slot }) => {
+        try {
+            const response = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slot}/release`, {
+                method: "POST",
             });
             const releaseResult = await response.json().catch(() => ({
                 success: false,
@@ -293,7 +319,6 @@ export async function startMcpServer(config) {
                             success: false,
                             code: "release_service_unavailable",
                             message: error instanceof Error ? error.message : String(error),
-                            remediation: "Leave the slot occupied, restore the native MoP HTTP surface, and retry from a fresh read.",
                         }, null, 2),
                     }],
             };
@@ -556,7 +581,7 @@ export async function startMcpServer(config) {
             failed > 0 ? `${failed} failed` : null,
             refused > 0 ? `${refused} refused` : null,
         ].filter(Boolean).join(", ");
-        return `Clear results (${summary}):\n\n${table}\n\nOccupied numbered slots are never released here; use mop_release_slot with exact native inputs.`;
+        return `Clear results (${summary}):\n\n${table}\n\nOccupied numbered slots are never released here; use mop_release_slot.`;
     };
     const clearSlotsThroughMop = async (targetSlots, options) => {
         const normalizedTargets = Array.from(new Set(targetSlots))
@@ -602,7 +627,7 @@ export async function startMcpServer(config) {
         }
         return results;
     };
-    server.tool("mop_clear_all_slots", "Compatibility wrapper for mop_clear_slot(slot: 'all'). Clears PM/free pane contexts only; occupied numbered slots are refused and require exact acknowledged mop_release_slot.", {
+    server.tool("mop_clear_all_slots", "Compatibility wrapper for mop_clear_slot(slot: 'all'). Clears PM/free pane contexts only; occupied numbered slots are refused and require mop_release_slot.", {
         slots: z.array(z.number().int().min(0).max(DEFAULT_DEV_SLOT_COUNT)).optional().describe("Specific slots to clear (default: all 0-6 including PM)."),
     }, async ({ slots: specificSlots }) => {
         const targetSlots = specificSlots ?? [0, ...Array.from({ length: config.slotCount }, (_, index) => index + 1)]; // Always include PM by default
@@ -620,7 +645,7 @@ export async function startMcpServer(config) {
         };
     });
     // ─── mop_clear_slot ────────────────────────────────────
-    server.tool("mop_clear_slot", "Clear PM or free pane contexts. Occupied numbered slots are refused and require exact acknowledged mop_release_slot; this command never clears their MoP ownership.", {
+    server.tool("mop_clear_slot", "Clear PM or free pane contexts. Occupied numbered slots are refused and require mop_release_slot; this command never clears their MoP ownership.", {
         slot: z.string().describe("Slot to clear: '0' through '6', 'pm', or 'all'."),
     }, async ({ slot }) => {
         const normalizedSlot = slot.trim().toLowerCase();

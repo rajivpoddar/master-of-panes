@@ -426,12 +426,12 @@ test("pane activity race refuses before checkout reset until the Stop hook close
   }
 });
 
-test("numbered slots expose no compatibility or epoch-only clear surface", () => {
+test("numbered slots expose the simple direct release surface", () => {
   const value = fixture();
   try {
     const compatibilityClearName = ["release", "Slot"].join("");
     const exactClearName = ["release", "Slot", "Exact"].join("");
-    assert.equal(compatibilityClearName in value.db, false);
+    assert.equal(compatibilityClearName in value.db, true);
     assert.equal(exactClearName in value.db, false);
     assert.equal(value.db.getSlot(1)?.occupied, true);
   } finally {

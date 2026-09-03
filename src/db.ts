@@ -1515,6 +1515,35 @@ export class MoPDatabase {
         };
       }
 
+      if (before.occupied) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_already_occupied",
+          owner_slots: [slot],
+        };
+      }
+      if (before.dnd) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "dnd_active",
+        };
+      }
+      if (before.active_turn_id !== null || before.active_turn_state !== "inactive") {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "active_turn",
+        };
+      }
+
       const duplicate = this.db.prepare(`
         SELECT slot FROM slots
         WHERE occupied = 1 AND issue = ? AND slot != ?
@@ -1528,15 +1557,6 @@ export class MoPDatabase {
           idempotent: false,
           reason: "target_already_assigned",
           owner_slots: [duplicate.slot],
-        };
-      }
-
-      if (before.occupied && before.issue === normalizedIssue) {
-        return {
-          ok: true,
-          conflict: false,
-          assignment_epoch: epoch,
-          idempotent: true,
         };
       }
 
@@ -1562,6 +1582,91 @@ export class MoPDatabase {
         active_turn_id: null,
         active_turn_started_at: null,
         active_turn_state: "inactive",
+      });
+      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      return {
+        ok: true,
+        conflict: false,
+        assignment_epoch: epoch + 1,
+        idempotent: false,
+      };
+    })();
+  }
+
+  /**
+   * Release one quiescent numbered slot with no caller-owned tuple, receipt,
+   * checkout reset, or acknowledgement protocol.
+   */
+  releaseSlot(slot: number): SlotMutationResult {
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      if (!current) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "invalid_slot",
+        };
+      }
+      if (!current.occupied) {
+        return {
+          ok: true,
+          conflict: false,
+          assignment_epoch: epoch,
+          idempotent: true,
+        };
+      }
+      if (current.dnd) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "dnd_active",
+        };
+      }
+      if (current.active_turn_id !== null || current.active_turn_state !== "inactive") {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "active_turn",
+        };
+      }
+      if (!current.idle || (current.activity !== null && current.activity !== "waiting_for_pm_direction")) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "productive_work",
+        };
+      }
+
+      this.updateAssignmentState(slot, {
+        status: "free" as SlotStatus,
+        occupied: false,
+        task: null,
+        repository_id: null,
+        issue: null,
+        branch: null,
+        branch_ref: null,
+        pr: null,
+        head_sha: null,
+        assigned_at: null,
+        work_kind: null,
+        handoff_id: null,
+        claimed_at: null,
+        dnd: false,
+        idle: true,
+        activity: null,
+        active_turn_id: null,
+        active_turn_started_at: null,
+        active_turn_state: "inactive",
+        assignment_epoch: epoch + 1,
       });
       this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
       return {
