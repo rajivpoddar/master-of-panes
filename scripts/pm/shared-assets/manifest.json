@@ -306,7 +306,7 @@
     {
       "source_path": "claude/scripts/pm-cleanup-pr.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/pm-cleanup-pr.py",
-      "sha256": "65af421c5344441b051ab40bc57639c4611a7aaa9d6fcddba4c3f54494d48b8b",
+      "sha256": "9cff11e15c4a55da19ec9a7873177d463d37e1438e0bf510239ff77dc64dc598",
       "mode": 493,
       "ownership_class": "shared-claude-pm-merged-cleanup-caller",
       "dependency_status": "closed",

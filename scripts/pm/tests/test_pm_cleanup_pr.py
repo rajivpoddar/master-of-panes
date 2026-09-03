@@ -220,6 +220,10 @@ def test_issue_close_requires_completed_reason_before_terminal_reply(tmp_path: P
         MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
     assert [name for name, _ in external.effects].count("issue_close") == 1
     assert "thread_reply" not in [name for name, _ in external.effects]
+    receipt_state = json.loads(receipt.read_text(encoding="utf-8"))
+    cleanup_receipt = next(iter(receipt_state.values()))
+    assert "thread_reply" not in cleanup_receipt["steps"]
+    assert "thread_reply" not in cleanup_receipt["ambiguous_steps"]
     with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
         MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
     assert "thread_reply" not in [name for name, _ in external.effects]

@@ -436,7 +436,12 @@ def run(
 
         def run_step(step_spec: dict[str, str]) -> None:
             name = step_spec["name"]
-            step = receipt.setdefault("steps", {}).get(name)
+            steps = receipt["steps"]
+            if name == "thread_reply":
+                close_step = steps.get("issue_close")
+                if not isinstance(close_step, dict) or close_step.get("status") != "completed":
+                    return
+            step = steps.get(name)
             if isinstance(step, dict) and step.get("status") == "completed":
                 return
             if isinstance(step, dict) and step.get("status") in {"effect_started", "ambiguous"}:
@@ -476,9 +481,6 @@ def run(
                         and str(issue_readback.get("stateReason", "")).upper() == "COMPLETED"
                     )
                 elif name == "thread_reply":
-                    close_step = receipt["steps"].get("issue_close")
-                    if not isinstance(close_step, dict) or close_step.get("status") != "completed":
-                        return
                     ext.slack_post(token, thread_ts, text)
                     verified = _thread_reply_readback(ext, token, thread_ts, text)
                 else:
