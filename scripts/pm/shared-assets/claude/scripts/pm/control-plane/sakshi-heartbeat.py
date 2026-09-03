@@ -127,8 +127,13 @@ ISSUE_CREATE_RECEIPT_RE = re.compile(r"^mop-issue-create-[A-Za-z0-9._-]+\.json$"
 ISSUE_CREATE_RECEIPT_SCHEMA = "mop_issue_create_effect_v1"
 ISSUE_CREATE_PENDING_STATUSES = frozenset({"reserved", "effect_started", "ambiguous"})
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-ISSUE_CREATE_FIELD_RE = re.compile(r"^(ISSUE|CREATED_AT|SWEEP_REQUIRED):[ \t]*(.*)$")
+ISSUE_CREATE_FIELD_RE = re.compile(
+    r"^(ISSUE|CREATED_AT|SWEEP_REQUIRED|REQUIRED_TRANSITION|SOURCE_CMD_SHA|RATIONALE|NEXT):[ \t]*(.*)$"
+)
 ISSUE_VALUE_RE = re.compile(r"^#(?P<issue>[1-9][0-9]*)$")
+ISSUE_CREATE_OPTIONAL_FIELDS = frozenset(
+    {"REQUIRED_TRANSITION", "SOURCE_CMD_SHA", "RATIONALE", "NEXT"}
+)
 
 
 def _default_heartbeat_skill() -> Path:
@@ -2045,13 +2050,25 @@ def _parse_issue_create_flag(path: Path) -> tuple[str, str, str] | None:
         if match is None or match.group(1) in fields:
             return None
         fields[match.group(1)] = match.group(2).strip()
-    if set(fields) != {"ISSUE", "CREATED_AT", "SWEEP_REQUIRED"}:
+    required_fields = {"ISSUE", "CREATED_AT", "SWEEP_REQUIRED"}
+    if not required_fields.issubset(fields) or not (set(fields) - required_fields).issubset(
+        ISSUE_CREATE_OPTIONAL_FIELDS
+    ):
         return None
     issue_match = ISSUE_VALUE_RE.fullmatch(fields["ISSUE"])
     if issue_match is None or parse_timestamp(fields["CREATED_AT"]) is None:
         return None
     if fields["SWEEP_REQUIRED"] != "yes":
         return None
+    if "REQUIRED_TRANSITION" in fields and fields["REQUIRED_TRANSITION"] != (
+        "ASSIGNED_TO_FREE_SLOT | QUEUED_IN_PM_OPS (per CP #17)"
+    ):
+        return None
+    if "SOURCE_CMD_SHA" in fields and SHA256_RE.fullmatch(fields["SOURCE_CMD_SHA"]) is None:
+        return None
+    for field in ("RATIONALE", "NEXT"):
+        if field in fields and not fields[field]:
+            return None
     return issue_match.group("issue"), fields["CREATED_AT"], fields["SWEEP_REQUIRED"]
 
 

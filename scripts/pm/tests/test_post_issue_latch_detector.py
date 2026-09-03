@@ -111,6 +111,24 @@ class PostIssueLatchDetectorTests(unittest.TestCase):
             result = MODULE.collect_post_issue_latches(root)
             self.assertEqual(result, {"count": 1, "paths": [str(numeric)]})
 
+    def test_installed_writer_optional_fields_remain_actionable(self) -> None:
+        import tempfile
+
+        contents = (
+            "ISSUE: #7609\n"
+            "CREATED_AT: 2026-09-03T12:55:00Z\n"
+            "SWEEP_REQUIRED: yes\n"
+            "REQUIRED_TRANSITION: ASSIGNED_TO_FREE_SLOT | QUEUED_IN_PM_OPS (per CP #17)\n"
+            f"SOURCE_CMD_SHA: {'a' * 64}\n"
+            "RATIONALE: Rajiv directive 2026-05-27 11:48 IST — newly filed status:todo issue must not remain unrouted.\n"
+            "NEXT: invoke Skill(slot-dispatch-sweep) OR upsert PM ops QUEUED/BLOCKED proof and sync.\n"
+        )
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            flag = root / "post-issue-create-sweep-7609.flag"
+            flag.write_text(contents, encoding="utf-8")
+            self.assertEqual(MODULE.collect_post_issue_latches(root), {"count": 1, "paths": [str(flag)]})
+
     def test_legacy_flags_require_exact_fields_timestamp_and_filename_binding(self) -> None:
         import tempfile
 
@@ -120,6 +138,7 @@ class PostIssueLatchDetectorTests(unittest.TestCase):
             "post-issue-create-sweep-7607.flag": "ISSUE: #7607\nISSUE: #7607\nCREATED_AT: 2026-09-03T12:55:00Z\nSWEEP_REQUIRED: yes\n",
             "post-issue-create-sweep-7606.flag": "ISSUE: #7606\nCREATED_AT: 2026-09-03T12:55:00Z\nSWEEP_REQUIRED: no\n",
             "post-issue-create-sweep-7605.flag": "ISSUE: #7605\nCREATED_AT: 2026-09-03T12:55:00Z\nSWEEP_REQUIRED: yes\nEXTRA: no\n",
+            "post-issue-create-sweep-7603.flag": "ISSUE: #7603\nCREATED_AT: 2026-09-03T12:55:00Z\nSWEEP_REQUIRED: yes\nSOURCE_CMD_SHA: not-a-sha\n",
             "post-issue-create-sweep-7604.flag": "ISSUE: #7604\nCREATED_AT: 2026-09-03T12:55:00Z\n",
         }
         with tempfile.TemporaryDirectory() as raw_root:
