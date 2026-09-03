@@ -5,6 +5,19 @@ description: Route one bounded HeyDonna control-plane defect from CTO Decisions 
 
 # HeyDonna Control-Plane Repair
 
+## Rajiv product/process decision gate
+
+Diagnose freely. Before any mutation, distinguish mechanical execution of an
+existing Rajiv-approved rule from a decision. A product decision changes
+customer behavior, scope, priority, data, or acceptance criteria. A process
+decision changes, waives, overrides, or chooses among Ready Pool, slot,
+PR-conveyor, review, CI/capture/rerun, merge/rollout, monitor, or automation
+paths. For either decision, stop before mutation and DM Rajiv in
+`D0BPG55FG72` as Abhijit CTO with the source, evidence, one recommendation,
+exact question, and immediate effect. Resume only after explicit approval;
+material drift requires a new approval. No permit, receipt, or new service is
+required.
+
 This is a delegation and lifecycle contract. CTO Decisions classifies and
 routes; it never investigates deeply, implements, reviews, publishes, deploys,
 installs, activates, restarts, rolls back, monitors, or waits.

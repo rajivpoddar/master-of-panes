@@ -27,9 +27,17 @@ the invoking task's checkout containing an ignored `.agents/` directory.
 - Slack mentions must use the user ID (`<@U0ALEAYCAUT>`, `<@U0BNFGX2UAX>`,
   `<@UEQTTB97A>`), never the user name (`@dhurva_pm`, `@abhijit_cto`,
   `@rajiv`). Display names are not reliable Slack routing targets.
-- CTO product decisions and blockers escalate to Rajiv in DM channel
+- CTO product and process decisions and blockers escalate to Rajiv in DM channel
   `D0BPG55FG72` using `SLACK_CTO_BOT_TOKEN`, with `<@UEQTTB97A>` and the source
   `thread_ts` when replying to an existing message.
+- A process decision is any change, waiver, override, exception, or
+  discretionary choice affecting Ready Pool order/admission, slot
+  assignment/reassignment/release, PR-conveyor states or sequencing, review
+  ownership, CI/capture/rerun, merge/rollout, monitors, or automation. PM sends
+  the recommendation to CTO in `#heydonna-dev`; CTO alone sends Rajiv the DM.
+- The decision DM contains the source, evidence, one recommendation, exact
+  question, and immediate effect. Do not perform the proposed mutation before
+  explicit Rajiv approval. Material drift requires a new approval.
 - If the user says "post this back", "same thread", "the thread", "ask Dhruv there", or similar, reply in the existing thread with `thread_ts`; do not create a new channel post.
 - If no active thread can be resolved from the current task context, read/search recent `#heydonna-dev` Slack context. If the intended thread is still ambiguous, ask a concise clarification before writing.
 
