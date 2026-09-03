@@ -306,7 +306,7 @@
     {
       "source_path": "claude/scripts/pm-cleanup-pr.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/pm-cleanup-pr.py",
-      "sha256": "9cff11e15c4a55da19ec9a7873177d463d37e1438e0bf510239ff77dc64dc598",
+      "sha256": "834fcde4c8291bca5b61e202df48a4ce2fc884924acf61c7887c24e042b986bb",
       "mode": 493,
       "ownership_class": "shared-claude-pm-merged-cleanup-caller",
       "dependency_status": "closed",
@@ -380,7 +380,7 @@
     {
       "source_path": "claude/skills/pm-cleanup-pr/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/pm-cleanup-pr/SKILL.md",
-      "sha256": "56dda9d1f57f3e5b8df2fc54bfb15c36e07a4c1fcb3655834a1af780bc0fe2f3",
+      "sha256": "d5e5a519c7526ed67d53d9d67297f83d23c4945ff4e52d15ab08cf1519f9c583",
       "mode": 420,
       "ownership_class": "shared-claude-pm-merged-cleanup-skill",
       "dependency_status": "closed",

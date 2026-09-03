@@ -25,6 +25,15 @@ REQUEST = {
     "thread_ts": "1788434276.706249",
 }
 
+ISSUELESS_REQUEST = {
+    "cleanup_mode": "merged_pr_issue_less",
+    "repository": "heydonna-app/heydonna-app",
+    "pr": 7626,
+    "issue": None,
+    "head": "d7f04ce21a7276c0f01220d349e84c0a4f28db37",
+    "merge_commit": "7dc6320bf9e022d8458fd24f4b1301c9b250b95b",
+}
+
 
 class FakeExternal(MODULE.External):
     def __init__(self, *, slack_user: str = MODULE.CTO_USER_ID, ambiguous_step: str | None = None, crash_step: str | None = None, concurrent_label: str | None = None, close_reason: str | None = "COMPLETED"):
@@ -34,6 +43,8 @@ class FakeExternal(MODULE.External):
         self.concurrent_label = concurrent_label
         self.close_reason = close_reason
         self.effects: list[tuple[str, object]] = []
+        self.issue_reads = 0
+        self.slack_calls = 0
         self.pr = {
             "number": 7613, "state": "MERGED", "mergedAt": "2026-09-03T10:00:00Z",
             "mergeCommit": {"oid": REQUEST["merge_commit"]}, "headRefOid": REQUEST["head"],
@@ -47,6 +58,7 @@ class FakeExternal(MODULE.External):
         return self.pr
 
     def read_issue(self, request):
+        self.issue_reads += 1
         return self.issue
 
     def _label_effect(self, scope, operation, label):
@@ -91,14 +103,17 @@ class FakeExternal(MODULE.External):
             self.issue["stateReason"] = self.close_reason
 
     def slack_auth(self, token):
+        self.slack_calls += 1
         return {"ok": True, "user_id": self.slack_user}
 
     def slack_replies(self, token, thread_ts):
+        self.slack_calls += 1
         messages = [{"ts": REQUEST["thread_ts"], "user": MODULE.CTO_USER_ID, "channel": MODULE.SLACK_CHANNEL, "text": "canonical parent"}]
         messages.extend({"ts": f"reply-{i}", "user": MODULE.CTO_USER_ID, "thread_ts": thread_ts, "channel": MODULE.SLACK_CHANNEL, "text": text} for i, text in enumerate(self.reply_texts))
         return {"ok": True, "messages": messages}
 
     def slack_post(self, token, thread_ts, text):
+        self.slack_calls += 1
         self.effects.append(("thread_reply", text))
         if self.ambiguous_step == "thread_reply":
             self.reply_texts.append(text)
@@ -276,3 +291,101 @@ def test_stale_slot_label_never_calls_mop_and_manifest_is_exact(tmp_path: Path):
     assert entries["claude/skills/pm-cleanup-pr/SKILL.md"]["canonical_target"] == "/Users/rajiv/.claude/skills/pm-cleanup-pr/SKILL.md"
     assert entries["claude/scripts/pm-cleanup-pr.py"]["mode"] == 0o755
     assert entries["claude/skills/pm-cleanup-pr/SKILL.md"]["mode"] == 0o644
+
+
+def test_issue_less_merged_pr_cleanup_preserves_labels_and_skips_issue_slack(tmp_path: Path):
+    receipt = tmp_path / "receipt.json"
+    external = FakeExternal(concurrent_label="owner-added-concurrently")
+    external.pr.update({
+        "number": 7626,
+        "mergeCommit": {"oid": ISSUELESS_REQUEST["merge_commit"]},
+        "headRefOid": ISSUELESS_REQUEST["head"],
+        "closingIssuesReferences": [],
+    })
+    result = MODULE.run(ISSUELESS_REQUEST, receipt_path=receipt, external=external)
+    assert result["success"] is True
+    assert result["idempotent"] is False
+    assert set(external.pr["labels"]) == {
+        "customer-visible", "priority:P1", "owner-added-concurrently", "pm-state:closed-clean",
+    }
+    assert external.issue_reads == 0
+    assert external.slack_calls == 0
+    assert [name for name, _ in external.effects] == [
+        "pr_label_remove:ci-head:old", "pr_label_remove:slot:1",
+        "pr_label_remove:status:in-review", "pr_label_add:pm-state:closed-clean",
+    ]
+    replay = MODULE.run(ISSUELESS_REQUEST, receipt_path=receipt, external=external)
+    assert replay["idempotent"] is True
+    assert len(external.effects) == 4
+
+
+def test_issue_less_cleanup_rejects_linked_issue_before_effect(tmp_path: Path):
+    receipt = tmp_path / "receipt.json"
+    external = FakeExternal()
+    external.pr.update({
+        "number": 7626,
+        "mergeCommit": {"oid": ISSUELESS_REQUEST["merge_commit"]},
+        "headRefOid": ISSUELESS_REQUEST["head"],
+    })
+    with pytest.raises(MODULE.CleanupError, match="issue_less_linked_issue_present"):
+        MODULE.run(ISSUELESS_REQUEST, receipt_path=receipt, external=external)
+    assert external.effects == []
+    assert external.issue_reads == 0
+    assert external.slack_calls == 0
+    assert not receipt.exists()
+
+
+@pytest.mark.parametrize("field", ["headRefOid", "mergeCommit"])
+def test_issue_less_cleanup_rejects_stale_merge_tuple(tmp_path: Path, field: str):
+    receipt = tmp_path / "receipt.json"
+    external = FakeExternal()
+    external.pr.update({
+        "number": 7626,
+        "mergeCommit": {"oid": ISSUELESS_REQUEST["merge_commit"]},
+        "headRefOid": ISSUELESS_REQUEST["head"],
+        "closingIssuesReferences": [],
+    })
+    if field == "headRefOid":
+        external.pr[field] = "0" * 40
+    else:
+        external.pr[field] = {"oid": "0" * 40}
+    with pytest.raises(MODULE.CleanupError, match="(pr_head_mismatch|merge_commit_mismatch)"):
+        MODULE.run(ISSUELESS_REQUEST, receipt_path=receipt, external=external)
+    assert external.effects == []
+
+
+def test_issue_less_response_loss_is_permanently_ambiguous(tmp_path: Path):
+    receipt = tmp_path / "receipt.json"
+    external = FakeExternal(ambiguous_step="pr_label_remove:ci-head:old")
+    external.pr.update({
+        "number": 7626,
+        "mergeCommit": {"oid": ISSUELESS_REQUEST["merge_commit"]},
+        "headRefOid": ISSUELESS_REQUEST["head"],
+        "closingIssuesReferences": [],
+    })
+    with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
+        MODULE.run(ISSUELESS_REQUEST, receipt_path=receipt, external=external)
+    with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
+        MODULE.run(ISSUELESS_REQUEST, receipt_path=receipt, external=external)
+    assert [name for name, _ in external.effects].count("pr_label_remove:ci-head:old") == 1
+    assert external.issue_reads == 0
+    assert external.slack_calls == 0
+
+
+def test_issue_less_process_death_resumes_remaining_steps_without_redelivery(tmp_path: Path):
+    receipt = tmp_path / "receipt.json"
+    external = FakeExternal(crash_step="pr_label_remove:ci-head:old")
+    external.pr.update({
+        "number": 7626,
+        "mergeCommit": {"oid": ISSUELESS_REQUEST["merge_commit"]},
+        "headRefOid": ISSUELESS_REQUEST["head"],
+        "closingIssuesReferences": [],
+    })
+    with pytest.raises(SystemExit):
+        MODULE.run(ISSUELESS_REQUEST, receipt_path=receipt, external=external)
+    with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
+        MODULE.run(ISSUELESS_REQUEST, receipt_path=receipt, external=external)
+    assert [name for name, _ in external.effects].count("pr_label_remove:ci-head:old") == 1
+    assert [name for name, _ in external.effects].count("pr_label_remove:slot:1") == 1
+    assert external.issue_reads == 0
+    assert external.slack_calls == 0
