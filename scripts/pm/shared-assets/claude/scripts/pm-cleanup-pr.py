@@ -187,7 +187,7 @@ class External:
         return self._gh(["pr", "view", str(request["pr"]), "--repo", request["repository"], "--json", "number,state,mergedAt,mergeCommit,headRefOid,closingIssuesReferences,labels"])
 
     def read_issue(self, request: dict[str, Any]) -> dict[str, Any]:
-        return self._gh(["issue", "view", str(request["issue"]), "--repo", request["repository"], "--json", "number,state,labels"])
+        return self._gh(["issue", "view", str(request["issue"]), "--repo", request["repository"], "--json", "number,state,stateReason,labels"])
 
     def add_pr_label(self, request: dict[str, Any], label: str) -> None:
         self._gh([
@@ -470,8 +470,15 @@ def run(
                     verified = label_readback(scope, operation, label)
                 elif name == "issue_close":
                     ext.close_issue(request)
-                    verified = str(ext.read_issue(request).get("state", "")).upper() == "CLOSED"
+                    issue_readback = ext.read_issue(request)
+                    verified = (
+                        str(issue_readback.get("state", "")).upper() == "CLOSED"
+                        and str(issue_readback.get("stateReason", "")).upper() == "COMPLETED"
+                    )
                 elif name == "thread_reply":
+                    close_step = receipt["steps"].get("issue_close")
+                    if not isinstance(close_step, dict) or close_step.get("status") != "completed":
+                        return
                     ext.slack_post(token, thread_ts, text)
                     verified = _thread_reply_readback(ext, token, thread_ts, text)
                 else:

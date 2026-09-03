@@ -27,11 +27,12 @@ REQUEST = {
 
 
 class FakeExternal(MODULE.External):
-    def __init__(self, *, slack_user: str = MODULE.CTO_USER_ID, ambiguous_step: str | None = None, crash_step: str | None = None, concurrent_label: str | None = None):
+    def __init__(self, *, slack_user: str = MODULE.CTO_USER_ID, ambiguous_step: str | None = None, crash_step: str | None = None, concurrent_label: str | None = None, close_reason: str | None = "COMPLETED"):
         self.slack_user = slack_user
         self.ambiguous_step = ambiguous_step
         self.crash_step = crash_step
         self.concurrent_label = concurrent_label
+        self.close_reason = close_reason
         self.effects: list[tuple[str, object]] = []
         self.pr = {
             "number": 7613, "state": "MERGED", "mergedAt": "2026-09-03T10:00:00Z",
@@ -39,7 +40,7 @@ class FakeExternal(MODULE.External):
             "closingIssuesReferences": [{"number": 7609}],
             "labels": ["slot:1", "status:in-review", "ci-head:old", "customer-visible", "priority:P1"],
         }
-        self.issue = {"number": 7609, "state": "OPEN", "labels": ["status:todo", "slot:1", "team:frontend"]}
+        self.issue = {"number": 7609, "state": "OPEN", "stateReason": None, "labels": ["status:todo", "slot:1", "team:frontend"]}
         self.reply_texts: list[str] = []
 
     def read_pr(self, request):
@@ -84,6 +85,10 @@ class FakeExternal(MODULE.External):
         if self.ambiguous_step == "issue_close":
             raise MODULE.CleanupError("github_effect_ambiguous", ambiguous=True)
         self.issue["state"] = "CLOSED"
+        if self.close_reason is None:
+            self.issue.pop("stateReason", None)
+        else:
+            self.issue["stateReason"] = self.close_reason
 
     def slack_auth(self, token):
         return {"ok": True, "user_id": self.slack_user}
@@ -203,6 +208,21 @@ def test_started_step_is_not_replayed_and_remaining_steps_resume(tmp_path: Path)
     names = [name for name, _ in external.effects]
     assert names.count("pr_label_remove:ci-head:old") == 1
     assert "thread_reply" in names
+
+
+@pytest.mark.parametrize("close_reason", ["NOT_PLANNED", None])
+def test_issue_close_requires_completed_reason_before_terminal_reply(tmp_path: Path, close_reason: str | None):
+    mapping = tmp_path / "mapping.json"
+    receipt = tmp_path / "receipt.json"
+    mapping_file(mapping)
+    external = FakeExternal(close_reason=close_reason)
+    with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
+        MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
+    assert [name for name, _ in external.effects].count("issue_close") == 1
+    assert "thread_reply" not in [name for name, _ in external.effects]
+    with pytest.raises(MODULE.CleanupError, match="cleanup_ambiguous"):
+        MODULE.run(REQUEST, mapping_path=mapping, receipt_path=receipt, external=external, cto_slack_token="cto")
+    assert "thread_reply" not in [name for name, _ in external.effects]
 
 
 def test_response_loss_is_durable_ambiguous_and_never_replayed(tmp_path: Path):
