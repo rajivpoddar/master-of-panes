@@ -282,6 +282,27 @@ class SakshiContinuationJoinTests(unittest.TestCase):
             for field in ("workflow_motion", "owner_source", "hold_reason", "next_action", "next_owner", "wake"):
                 self.assertTrue(row[field], field)
 
+    def test_branch_only_slot_owner_requires_active_identity(self) -> None:
+        local_head = "a" * 40
+        cases = (
+            ({"occupied": True, "active_turn_state": "active", "active_turn_id": "turn-1"}, "REWORK_IN_PROGRESS", "S2", "slot"),
+            ({"occupied": False, "active_turn_state": "active", "active_turn_id": "turn-1"}, "PROCESS_LIMBO", "unowned", "none"),
+            ({"occupied": True, "active_turn_state": "idle", "active_turn_id": ""}, "PROCESS_LIMBO", "unowned", "none"),
+            ({"occupied": True, "active_turn_state": "active", "active_turn_id": ""}, "PROCESS_LIMBO", "unowned", "none"),
+        )
+        for state, motion, owner, owner_source in cases:
+            with self.subTest(state=state):
+                row = self.evaluate(slots={"2": {
+                    "pr": "7591",
+                    "branch": "refs/heads/fix/7591",
+                    "head_sha": local_head,
+                    "task": "implementation fix",
+                    **state,
+                }})
+                self.assertEqual(row["motion_state"], motion)
+                self.assertEqual(row["owner"], owner)
+                self.assertEqual(row["owner_source"], owner_source)
+
     def test_durable_ci_or_capture_ownership_does_not_claim_workflow_motion(self) -> None:
         for kind in ("ci_watch", "capture_release"):
             row = self.evaluate(records=[continuation(kind)])

@@ -1272,16 +1272,15 @@ def evaluate_open_pr_activity(
         slot_on_pr = slot_pr == number and (
             slot_head == head or (bool(slot_branch) and slot_branch == branch)
         )
-        if slot_on_pr:
-            owner = str(slot.get("owner") or slot.get("name") or f"S{slot_id}")
         active_state = str(slot.get("active_turn_state") or slot.get("state") or "").lower()
         active = bool(slot.get("occupied")) and (
             active_state in {"active", "running", "working", "in_progress"}
             and bool(str(slot.get("active_turn_id") or "").strip())
         )
         if active and slot_on_pr:
+            active_owner = str(slot.get("owner") or slot.get("name") or f"S{slot_id}")
             kind = _numbered_motion_kind(slot)
-            active_numbered_owners.append((kind, owner))
+            active_numbered_owners.append((kind, active_owner))
 
     if len(active_numbered_owners) == 1:
         numbered_kind, owner = active_numbered_owners[0]
