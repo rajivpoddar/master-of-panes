@@ -28,6 +28,24 @@ Labels, prose, and MoP projections are readback, not transition authority.
 PM is limited to one failed-run investigation and explicitly authorized slot
 assignment mechanics; PR Merges owns release transitions.
 
+## PM code-review visual contract
+
+For every UI-changing PR, read the current linked issue body and require its
+current visual acceptance contract before issuing a readiness-bearing review
+status. Each deterministic visual criterion must identify its stable AC ID,
+route/state, expected observable, and evidence binding. Missing, malformed,
+stale, head-mismatched, or body-mismatched visual evidence is never a PASS.
+
+Code review may finish with the typed terminal
+`APPROVE_CODE_PENDING_QA_VISUAL_PROOF` when the code review itself is sound but
+the visual proof is not yet complete. If the assigned slot cannot provide the
+required browser/auth capability, return `QA_CAPABILITY_BLOCKED` and route only
+the proof step to a provisioned owner; never waive screenshots, call them out
+of scope, or substitute component tests. PM may carry the code verdict and
+evidence reference, but cannot trigger paid CI/E2E or turn either terminal
+into a readiness-bearing PASS. Non-UI PRs with no visual contract retain the
+ordinary review path.
+
 ## Transition contract
 
 1. Preserve `CAPTURE_IN_PROGRESS` only for an accepted exact-head capture that

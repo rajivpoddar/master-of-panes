@@ -29,6 +29,7 @@
       "~/.claude/scripts/sakshi-heartbeat.py",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
       "~/.claude/skills/qa-brief/SKILL.md",
+      "~/.claude/skills/pm-code-review/SKILL.md",
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "~/.claude/skills/slack-message/scripts/block-unsupported-transcript-split.py",
       "~/.claude/skills/slack-message/scripts/slack-send.sh",
@@ -42,7 +43,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 66,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -367,6 +368,15 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/skills/pm-code-review/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/pm-code-review/SKILL.md",
+      "sha256": "694576187a98b735ca8bd7c92c460c0fee5ee656dd5fc47a3a5e50c88c5e0372",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-review-prompt",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/skills/qa-brief/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/qa-brief/SKILL.md",
       "sha256": "d4117f2aae3a718837109351d43b779d172b2d558dd406fcd6423943311abfd0",
@@ -608,9 +618,18 @@
       "dependencies": []
     },
     {
+      "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
+      "sha256": "2bd76ec6b90e19e9361defe3896ad3579b87ed1458260a7610990cb6b19943b9",
+      "mode": 420,
+      "ownership_class": "shared-codex-cto-paid-admission-prompt",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "codex/skills/heydonna-open-pr-status/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",
-      "sha256": "3628322b1a60bc0096acb6e030b32682a45a4198f0c94a28f0993d17357bf28d",
+      "sha256": "bf04decbb29d9cd82899d449e57c074ded52c21640a2024b95aded2a2528b621",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",
