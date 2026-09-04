@@ -130,7 +130,8 @@ class SakshiContinuationJoinTests(unittest.TestCase):
             audit = MODULE.collect_open_pr_activity_audit({})
         self.assertTrue(audit["ok"])
         self.assertEqual(audit["open_pr_activity_gaps"], 1)
-        self.assertEqual(audit["rows"][0]["lane"], "true limbo")
+        self.assertEqual(audit["rows"][0]["motion_state"], "UNKNOWN")
+        self.assertEqual(audit["rows"][0]["lane"], "unknown")
         self.assertIn("missing", audit["rows"][0]["hold_reason"])
 
     def test_collection_refuses_duplicate_open_pr_identity(self) -> None:
@@ -173,8 +174,8 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         self.assertEqual(len(audit["rows"]), 2)
         rows = {row["pr"]: row for row in audit["rows"]}
         malformed = rows["7594"]
-        self.assertEqual(malformed["motion_state"], "PROCESS_LIMBO")
-        self.assertEqual(malformed["lane"], "true limbo")
+        self.assertEqual(malformed["motion_state"], "UNKNOWN")
+        self.assertEqual(malformed["lane"], "unknown")
         self.assertEqual(malformed["owner"], "CTO")
         self.assertEqual(malformed["next_owner"], "CTO")
         self.assertEqual(malformed["workflow_motion"], "none")
@@ -237,8 +238,8 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         ):
             audit = MODULE.collect_open_pr_activity_audit({})
         self.assertTrue(audit["ok"])
-        self.assertEqual(audit["rows"][0]["motion_state"], "CI_IN_PROGRESS")
-        self.assertEqual(audit["rows"][0]["workflow_motion"], "CI")
+        self.assertEqual(audit["rows"][0]["motion_state"], "CI_E2E_IN_PROGRESS")
+        self.assertEqual(audit["rows"][0]["workflow_motion"], "CI:active")
 
     def test_unreadable_ledger_remains_an_audit_wide_refusal(self) -> None:
         with mock.patch.object(
@@ -276,7 +277,7 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         ]
         self.assertEqual(
             [row["lane"] for row in rows],
-            ["CI", "capture", "repro/proof", "rework", "rework-blocked", "dependency-blocked", "true limbo"],
+            ["CI", "capture", "repro/rework", "repro/rework", "rework-blocked", "dependency-blocked", "true limbo"],
         )
         for row in rows:
             for field in ("workflow_motion", "owner_source", "hold_reason", "next_action", "next_owner", "wake"):
