@@ -1,16 +1,16 @@
 ---
 name: codex-stdio-send-message
-description: Send and start one exact message in an existing Codex Desktop task through app-server stdio. Use when a task-to-task handoff must run without renderer-mediated `codex_app` messaging.
+description: Queue one exact message in an existing Codex Desktop task through app-server stdio. Use when a task-to-task handoff must run without renderer-mediated `codex_app` messaging.
 ---
 
 # Codex Stdio Send Message
 
 Use the bundled helper for an explicitly authorized task-to-task delivery when
 renderer-mediated Codex app tools are unsafe or have stalled. The helper queues
-the user-visible message with `thread/queue/add`, then starts that exact queued
-submission with `thread/queue/start`. It does not create, inspect, interrupt, or
-wait for a task. A successful queue/add is durable delegation ownership: never
-create a second owner for that dedup key.
+the user-visible message once with `thread/queue/add` and stops. It does not
+start, resume, create, inspect, interrupt, or wait for a task. A successful
+queue/add is durable delegation ownership: never create a second owner for that
+dedup key.
 
 ## Required tuple
 
@@ -38,27 +38,16 @@ Do not create a message file unless the current task authorizes filesystem
 writes.
 
 The helper launches the Codex Desktop app-server over stdio, performs the
-required initialization handshake, queues exactly once, and starts the returned
-submission ID exactly once. It never calls renderer-mediated `codex_app` tools.
+required initialization handshake, and queues exactly once. It never calls
+renderer-mediated `codex_app` tools.
 
 ## Interpret the receipt
 
-- `status=delivered`, exit 0: app-server accepted both the queued submission and
-  the targeted start request. Report `threadId`, `queuedSubmissionId`,
-  `clientUserMessageId`, and `startAccepted`. This proves start acceptance, not
-  recipient completion.
-- `status=queued_for_task_consumption`, exit 0: queue/add succeeded and the
-  exact start response was JSON-RPC `-32600` with
-  `resume the thread before starting a queued message`. The submission is
-  durable and owns this dedup key for task consumption, but it was not
-  synchronously started. Preserve `queuedSubmissionId`; do not retry queue/add,
-  queue/start, or create another owner. This proves durable acceptance, not
-  recipient completion.
-- `status=queued`, exit 5: queueing succeeded but starting that exact submission
-  failed for another error or became uncertain. Do not retry, change the
-  deduplication key, or use another transport; report the queued submission for
-  reconciliation. This is distinct from the resume-required durable-consumption
-  status above.
+- `status=queued_for_task_consumption`, exit 0: `thread/queue/add` succeeded.
+  The submission is durable and owns this dedup key for task consumption.
+  Report `threadId`, `queuedSubmissionId`, and `clientUserMessageId`; do not
+  retry queue/add or create another owner. This proves durable acceptance, not
+  recipient start or completion.
 - `status=unavailable`, exit 2: app-server definitely rejected the request or
   failed before queue submission. Report the exact error and stop unless the
   user authorized another transport.

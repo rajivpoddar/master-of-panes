@@ -49,6 +49,8 @@ FAKE_APP_SERVER = textwrap.dedent(
                         "id": request_id,
                         "error": {"code": -32000, "message": "queue unavailable"},
                     }
+                elif mode == "uncertain":
+                    continue
                 else:
                     response = {
                         "jsonrpc": "2.0",
@@ -60,33 +62,6 @@ FAKE_APP_SERVER = textwrap.dedent(
                             }
                         },
                     }
-            elif method == "thread/queue/start":
-                if mode == "resume":
-                    response = {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "error": {
-                            "code": -32600,
-                            "message": "resume the thread before starting a queued message",
-                        },
-                    }
-                elif mode == "resume-wrong-code":
-                    response = {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "error": {
-                            "code": -32000,
-                            "message": "resume the thread before starting a queued message",
-                        },
-                    }
-                elif mode == "start-fail":
-                    response = {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "error": {"code": -32001, "message": "start unavailable"},
-                    }
-                else:
-                    response = {"jsonrpc": "2.0", "id": request_id, "result": {}}
             else:
                 response = {"jsonrpc": "2.0", "id": request_id, "result": {}}
             print(json.dumps(response), flush=True)
@@ -94,7 +69,7 @@ FAKE_APP_SERVER = textwrap.dedent(
 ).lstrip()
 
 
-class QueueStartBoundaryTests(unittest.TestCase):
+class QueueOnlyBoundaryTests(unittest.TestCase):
     def run_helper(self, mode: str) -> tuple[int, dict, list[str]]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -113,6 +88,8 @@ class QueueStartBoundaryTests(unittest.TestCase):
                 "hello",
                 "--codex-bin",
                 str(fake_bin),
+                "--timeout-seconds",
+                "1",
             ]
             with patch.dict(
                 os.environ,
@@ -124,14 +101,14 @@ class QueueStartBoundaryTests(unittest.TestCase):
             methods = log_path.read_text(encoding="utf-8").splitlines()
             return return_code, receipt, methods
 
-    def test_resume_required_is_queued_for_task_consumption(self) -> None:
-        return_code, receipt, methods = self.run_helper("resume")
+    def test_queue_success_is_durable_without_start_request(self) -> None:
+        return_code, receipt, methods = self.run_helper("success")
 
         self.assertEqual(return_code, 0)
         self.assertEqual(receipt["status"], "queued_for_task_consumption")
         self.assertTrue(receipt["queueAccepted"])
         self.assertEqual(receipt["executionOwnership"], "queued")
-        self.assertFalse(receipt["startAccepted"])
+        self.assertNotIn("startAccepted", receipt)
         self.assertEqual(receipt["queuedSubmissionId"], "queued-1")
         self.assertEqual(
             receipt["clientUserMessageId"],
@@ -139,30 +116,8 @@ class QueueStartBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(
             methods,
-            ["initialize", "initialized", "thread/queue/add", "thread/queue/start"],
+            ["initialize", "initialized", "thread/queue/add"],
         )
-
-    def test_other_start_error_remains_failed_after_durable_queue(self) -> None:
-        return_code, receipt, methods = self.run_helper("start-fail")
-
-        self.assertEqual(return_code, 5)
-        self.assertEqual(receipt["status"], "queued")
-        self.assertNotIn("executionOwnership", receipt)
-        self.assertEqual(methods.count("thread/queue/add"), 1)
-        self.assertEqual(methods.count("thread/queue/start"), 1)
-
-    def test_resume_message_with_other_code_is_not_special_cased(self) -> None:
-        return_code, receipt, _ = self.run_helper("resume-wrong-code")
-
-        self.assertEqual(return_code, 5)
-        self.assertEqual(receipt["status"], "queued")
-
-    def test_synchronous_start_remains_delivered(self) -> None:
-        return_code, receipt, _ = self.run_helper("success")
-
-        self.assertEqual(return_code, 0)
-        self.assertEqual(receipt["status"], "delivered")
-        self.assertTrue(receipt["startAccepted"])
 
     def test_queue_add_failure_has_no_execution_ownership(self) -> None:
         return_code, receipt, methods = self.run_helper("queue-fail")
@@ -170,6 +125,13 @@ class QueueStartBoundaryTests(unittest.TestCase):
         self.assertEqual(return_code, 2)
         self.assertEqual(receipt["status"], "unavailable")
         self.assertNotIn("thread/queue/start", methods)
+
+    def test_queue_response_timeout_is_uncertain_without_start_request(self) -> None:
+        return_code, receipt, methods = self.run_helper("uncertain")
+
+        self.assertEqual(return_code, 3)
+        self.assertEqual(receipt["status"], "uncertain")
+        self.assertEqual(methods, ["initialize", "initialized", "thread/queue/add"])
 
 
 if __name__ == "__main__":
