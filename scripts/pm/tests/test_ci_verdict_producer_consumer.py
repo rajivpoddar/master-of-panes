@@ -140,6 +140,12 @@ class CiVerdictProducerConsumerTests(unittest.TestCase):
                 "local_repro_result": "impossible", "followup_issue": "#4",
                 "fast_fingerprint": {},
             },
+            "cto-info": {
+                "schema_version": 3, "verdict": "GREY", "severity": "GREY", "classification": "e2e-test-fail",
+                "terminal_state": "closed-informational", "disposition": "no-rerun-required",
+                "rerunnable": True, "requested_owner_action": "proof-authorized-rerun", "blocking_for_merge": True,
+                "required_check_failure": True, "fast_fingerprint": {}, "local_repro_result": "not-applicable",
+            },
         }
         for attempt in (1, 2, 3):
             for name, base in cases.items():
@@ -152,6 +158,11 @@ class CiVerdictProducerConsumerTests(unittest.TestCase):
                     if name == "runner-death":
                         verdict["schema_version"] = 3
                         verdict["mode"] = "nonlocal"
+                    if name == "cto-info":
+                        verdict["rerun_authorization"] = {
+                            "action": "rerun-after-proof", "run_id": str(RUN_ID),
+                            "attempt": attempt, "head_sha": HEAD, "single_use": True,
+                        }
                     if name == "pool-stall":
                         verdict["fast_fingerprint"]["category"] = "runner-unavailable"
                     verdict["rerun_authorization"] = verdict.get("rerun_authorization") or {
@@ -163,9 +174,53 @@ class CiVerdictProducerConsumerTests(unittest.TestCase):
                             verdict,
                             attempt=attempt,
                             mode=base.get("mode", "local"),
-                            comment=None,
+                            comment={"authorAssociation": "OWNER"} if name == "cto-info" else None,
                         )
                     )
+
+    def test_cto_informational_authorization_is_structured_and_fail_closed(self) -> None:
+        verdict = {
+            "schema_version": 3,
+            "run_id": RUN_ID,
+            "attempt": 2,
+            "run_attempt": 2,
+            "pr": 7591,
+            "sha": HEAD,
+            "current_for_pr": True,
+            "verdict": "GREY",
+            "severity": "GREY",
+            "classification": "e2e-test-fail",
+            "terminal_state": "closed-informational",
+            "disposition": "no-rerun-required",
+            "rerunnable": True,
+            "requested_owner_action": "proof-authorized-rerun",
+            "blocking_for_merge": True,
+            "required_check_failure": True,
+            "local_repro_result": "not-applicable",
+            "fast_fingerprint": {},
+            "rerun_authorization": {
+                "action": "rerun-after-proof",
+                "run_id": str(RUN_ID),
+                "attempt": 2,
+                "head_sha": HEAD,
+                "single_use": True,
+            },
+        }
+        self.assertTrue(self.consumer_accepts(verdict, attempt=2, comment={"authorAssociation": "OWNER"}))
+        negatives = {
+            "wrong run": {**verdict, "run_id": RUN_ID + 1},
+            "wrong head": {**verdict, "sha": "0" * 40},
+            "wrong attempt": {**verdict, "attempt": 3},
+            "string authorization": {**verdict, "rerun_authorization": "CTO authorized once"},
+            "quarantine": {**verdict, "quarantine_blocked": True},
+            "circuit breaker": {**verdict, "fast_fingerprint": {"circuit_breaker": True}},
+        }
+        for name, invalid in negatives.items():
+            with self.subTest(name=name):
+                self.assertFalse(self.consumer_accepts(invalid, attempt=2, comment={"authorAssociation": "OWNER"}))
+        self.assertFalse(self.consumer_accepts(verdict, attempt=2, duplicate=True, comment={"authorAssociation": "OWNER"}))
+        self.assertFalse(self.consumer_accepts(verdict, attempt=2, comment={"authorAssociation": "CONTRIBUTOR"}))
+        self.assertFalse(self.consumer_accepts(verdict, attempt=2, comment={"authorAssociation": "OWNER", "isMinimized": True}))
 
     def test_consumer_requires_current_attempt_test_authorization(self) -> None:
         verdict = {

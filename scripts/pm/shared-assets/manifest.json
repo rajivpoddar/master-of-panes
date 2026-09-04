@@ -248,7 +248,7 @@
     {
       "source_path": "claude/scripts/ci/rerun-after-local-proof.sh",
       "canonical_target": "/Users/rajiv/.claude/control-plane/current/claude/scripts/ci/rerun-after-local-proof.sh",
-      "sha256": "fbda4714751e3a0e3201b46853a9ff2e5a097bf93f0fcc65f916af0e3e35dd5b",
+      "sha256": "dd20d8bf81ff82cee3899abf69bec4a525eadc1f855e3619f18bcd0f6a7dfe80",
       "mode": 493,
       "ownership_class": "shared-claude-ci-rerun-consumer",
       "dependency_status": "closed",

@@ -625,14 +625,12 @@ for comment in reversed(matching_comments):
         and verdict.get("classification") in {
             "e2e-test-fail", "timeout-or-wall-budget", "save-contract-fail-stop",
         }
-        and isinstance(verdict.get("rerun_authorization"), str)
-        and len(str(verdict.get("rerun_authorization") or "")) >= 20
-        and re.search(r"\bCTO\b", str(verdict.get("rerun_authorization") or ""), re.I)
-        and re.search(
-            r"\b(?:exactly[ _-]?one|one[ _-]?time|single|ONE)\b",
-            str(verdict.get("rerun_authorization") or ""),
-            re.I,
-        )
+        and isinstance(verdict.get("rerun_authorization"), dict)
+        and verdict.get("rerun_authorization", {}).get("action") == "rerun-after-proof"
+        and str(verdict.get("rerun_authorization", {}).get("run_id")) == run_id
+        and str(verdict.get("rerun_authorization", {}).get("attempt")) == attempt
+        and verdict.get("rerun_authorization", {}).get("head_sha") == head
+        and verdict.get("rerun_authorization", {}).get("single_use") is True
         and verdict.get("blocking_for_merge") is True
         and verdict.get("required_check_failure") is True
         and not fingerprint.get("circuit_breaker")
