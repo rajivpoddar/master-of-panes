@@ -133,6 +133,7 @@ function validateGateRecommendation(parsed: FreeSlotAssignmentGate): void {
 export class StuckDetector {
   private readonly STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes no output
   private readonly IDLE_OCCUPIED_THRESHOLD_MS = 5 * 60 * 1000;
+  private readonly IDLE_OCCUPIED_WAIT_INTERVAL_MS = 30 * 60 * 1000;
   private readonly IDLE_FREE_THRESHOLD_MS = 5 * 60 * 1000;
   // How many recent release events per type are walked to find the newest
   // non-idempotent free-episode start. Idempotent replays are skipped; if no
@@ -454,8 +455,10 @@ export class StuckDetector {
     if (!Number.isFinite(idleAgeMs) || idleAgeMs <= this.IDLE_OCCUPIED_THRESHOLD_MS) return;
     const waitAnchor = this.getIdleOccupiedWaitAnchor(slot, idleAnchor);
     const waitAgeMs = Date.now() - waitAnchor.timestampMs;
+    if (!Number.isFinite(waitAgeMs) || waitAgeMs < this.IDLE_OCCUPIED_WAIT_INTERVAL_MS) return;
     const waitAgeMinutes = Math.max(5, Math.floor(waitAgeMs / 60_000));
-    const waitAgeBucket = Math.max(5, Math.floor(waitAgeMinutes / 5) * 5);
+    const waitIntervalMinutes = this.IDLE_OCCUPIED_WAIT_INTERVAL_MS / 60_000;
+    const waitAgeBucket = Math.floor(waitAgeMinutes / waitIntervalMinutes) * waitIntervalMinutes;
     const urgency = this.idleOccupiedUrgency(waitAgeMinutes);
     const releaseRequired = waitAgeMinutes >= 20;
 
@@ -498,7 +501,7 @@ export class StuckDetector {
         };
         const priorWaitAge = payload.wait_age_minutes;
         const priorWaitBucket = typeof priorWaitAge === "number" && Number.isFinite(priorWaitAge)
-          ? Math.max(5, Math.floor(priorWaitAge / 5) * 5)
+          ? Math.floor(priorWaitAge / waitIntervalMinutes) * waitIntervalMinutes
           : null;
         if (
           payload.assignment_epoch === slot.assignment_epoch &&

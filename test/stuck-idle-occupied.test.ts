@@ -24,12 +24,15 @@ function expectedNudge(
     "Use Skill(pm-wait-nudge) now with slot=2 assignment_epoch=4 pr=7001 " +
     "issue=7000 branch=fix/7000 head=" + "a".repeat(40) +
     ` wait_started_at=${idleAnchor} wait_age_minutes=${waitAgeMinutes} ` +
-    `urgency=${urgency}. Classify PM_WAIT vs LOCAL_CONTINUE. If ` +
+    `urgency=${urgency}${waitAgeMinutes >= 30 ? " release_required=true action=RELEASE_REQUIRED" : ""}. Classify PM_WAIT vs LOCAL_CONTINUE. If ` +
     "LOCAL_CONTINUE, continue the exact unfinished phase NOW: edits → " +
     "affected tests → commit → push; do not end the turn without a new " +
     "head, a typed blocker, or a terminal receipt; classification-only or " +
     "\"will continue\" prose is a violation. API timeouts and interrupted " +
-    "local work are not PM waits."
+    "local work are not PM waits." +
+    (waitAgeMinutes >= 30
+      ? " This is a release-required PM_WAIT: after classification, PM must use pm-nudge-processing to re-read the exact idle inactive non-DND lease, release it once, then consider one eligible Ready Pool assignment."
+      : "")
   );
 }
 
@@ -280,7 +283,7 @@ test("fails closed for malformed or missing PR recommendations", async () => {
 
 test("the idle-occupied nudge carries the terminal LOCAL_CONTINUE directive", async () => {
   const originalNow = Date.now;
-  Date.now = () => NOW;
+  Date.now = () => Date.parse(OLD_IDLE + "Z") + 30 * 60_000;
   try {
     const h = harness(slot());
     await h.detector.checkIdleOccupied(slot());
@@ -322,7 +325,7 @@ test("suppresses a stale terminal continuation while the exact release intent is
 
 test("suppresses a stale continuation when release claims after the initial guard", async () => {
   const originalNow = Date.now;
-  Date.now = () => NOW;
+  Date.now = () => Date.parse(OLD_IDLE + "Z") + 30 * 60_000;
   try {
     // The first hasActive check is clear, then the competing release wins the
     // shared SQLite claim immediately before relay delivery.
@@ -344,30 +347,30 @@ test("suppresses a stale continuation when release claims after the initial guar
 
 test("nudges an occupied idle dev slot once per idle episode", async () => {
   const originalNow = Date.now;
-  Date.now = () => NOW;
+  Date.now = () => Date.parse(OLD_IDLE + "Z") + 30 * 60_000;
   try {
     const h = harness(slot());
     await h.detector.checkIdleOccupied(slot());
     await h.detector.checkIdleOccupied(slot());
 
     assert.deepEqual(h.sends, [
-      expectedNudge(6, "REMINDER"),
+      expectedNudge(30, "URGENT"),
     ]);
     const injected = h.events.filter(
       (event) => event.event_type === "idle_occupied_continue_injected",
     );
     assert.equal(injected.length, 1);
     assert.deepEqual(JSON.parse(injected[0].payload), {
-      command: expectedNudge(6, "REMINDER"),
+      command: expectedNudge(30, "URGENT"),
       assignment_epoch: 4,
       idle_anchor: OLD_IDLE,
       idle_anchor_source: "Stop",
-      idle_age_ms: 360_000,
+      idle_age_ms: 1_800_000,
       wait_anchor: OLD_IDLE,
       wait_anchor_source: "Stop",
-      wait_age_ms: 360_000,
-      wait_age_minutes: 6,
-      urgency: "REMINDER",
+      wait_age_ms: 1_800_000,
+      wait_age_minutes: 30,
+      urgency: "URGENT",
       turn_state: "inactive",
       issue: 7000,
       pr: 7001,
@@ -424,7 +427,7 @@ test("a notification-derived idle prompt does not start a new idle episode", asy
 
 test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => {
   const originalNow = Date.now;
-  Date.now = () => Date.parse("2026-07-27T02:36:01.000Z");
+  Date.now = () => Date.parse("2026-07-27T03:00:01.000Z");
   try {
     const h = harness(slot());
     h.events.push(
@@ -478,22 +481,22 @@ test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => 
 
     await h.detector.checkIdleOccupied(slot());
 
-    assert.deepEqual(h.sends, [expectedNudge(12, "REMINDER")]);
+    assert.deepEqual(h.sends, [expectedNudge(36, "URGENT")]);
     const latest = h.events.filter(
       (event) => event.event_type === "idle_occupied_continue_injected",
     ).at(-1);
     assert.ok(latest);
     assert.deepEqual(JSON.parse(latest.payload), {
-      command: expectedNudge(12, "REMINDER"),
+      command: expectedNudge(36, "URGENT"),
       assignment_epoch: 4,
       idle_anchor: "2026-07-27T02:30:30.000",
       idle_anchor_source: "Stop",
-      idle_age_ms: 331_000,
+      idle_age_ms: 1_771_000,
       wait_anchor: OLD_IDLE,
       wait_anchor_source: "pm_wait_nudge_carry",
-      wait_age_ms: 721_000,
-      wait_age_minutes: 12,
-      urgency: "REMINDER",
+      wait_age_ms: 2_161_000,
+      wait_age_minutes: 36,
+      urgency: "URGENT",
       turn_state: "inactive",
       issue: 7000,
       pr: 7001,
@@ -506,7 +509,7 @@ test("keeps cumulative wait age when a nudge turn ends in PM_WAIT", async () => 
 
 test("keeps the original wait start across repeated PM_WAIT nudge turns", async () => {
   const originalNow = Date.now;
-  Date.now = () => Date.parse("2026-07-27T02:42:01.000Z");
+  Date.now = () => Date.parse("2026-07-27T03:00:01.000Z");
   try {
     const h = harness(slot());
     h.events.push(
@@ -610,22 +613,22 @@ test("keeps the original wait start across repeated PM_WAIT nudge turns", async 
 
     await h.detector.checkIdleOccupied(slot());
 
-    assert.deepEqual(h.sends, [expectedNudge(18, "FOLLOW_UP")]);
+    assert.deepEqual(h.sends, [expectedNudge(36, "URGENT")]);
     const latest = h.events.filter(
       (event) => event.event_type === "idle_occupied_continue_injected",
     ).at(-1);
     assert.ok(latest);
     assert.deepEqual(JSON.parse(latest.payload), {
-      command: expectedNudge(18, "FOLLOW_UP"),
+      command: expectedNudge(36, "URGENT"),
       assignment_epoch: 4,
       idle_anchor: "2026-07-27T02:36:30.000",
       idle_anchor_source: "Stop",
-      idle_age_ms: 331_000,
+      idle_age_ms: 1_411_000,
       wait_anchor: OLD_IDLE,
       wait_anchor_source: "Stop",
-      wait_age_ms: 1_081_000,
-      wait_age_minutes: 18,
-      urgency: "FOLLOW_UP",
+      wait_age_ms: 2_161_000,
+      wait_age_minutes: 36,
+      urgency: "URGENT",
       turn_state: "inactive",
       issue: 7000,
       pr: 7001,
@@ -638,7 +641,7 @@ test("keeps the original wait start across repeated PM_WAIT nudge turns", async 
 
 test("resets wait age when normal work stops before a later PM_WAIT result", async () => {
   const originalNow = Date.now;
-  Date.now = () => Date.parse("2026-07-27T02:36:01.000Z");
+  Date.now = () => Date.parse("2026-07-27T03:00:31.000Z");
   try {
     const h = harness(slot());
     h.events.push(
@@ -706,7 +709,7 @@ test("resets wait age when normal work stops before a later PM_WAIT result", asy
     await h.detector.checkIdleOccupied(slot());
 
     assert.deepEqual(h.sends, [
-      expectedNudge(5, "REMINDER", "2026-07-27T02:30:30.000"),
+      expectedNudge(30, "URGENT", "2026-07-27T02:30:30.000"),
     ]);
   } finally {
     Date.now = originalNow;
@@ -715,7 +718,7 @@ test("resets wait age when normal work stops before a later PM_WAIT result", asy
 
 test("resets wait age when the prior nudge turn resumes local work", async () => {
   const originalNow = Date.now;
-  Date.now = () => Date.parse("2026-07-27T02:36:01.000Z");
+  Date.now = () => Date.parse("2026-07-27T03:00:31.000Z");
   try {
     const h = harness(slot());
     h.events.push(
@@ -759,7 +762,7 @@ test("resets wait age when the prior nudge turn resumes local work", async () =>
     await h.detector.checkIdleOccupied(slot());
 
     assert.deepEqual(h.sends, [
-      expectedNudge(5, "REMINDER", "2026-07-27T02:30:30.000"),
+      expectedNudge(30, "URGENT", "2026-07-27T02:30:30.000"),
     ]);
   } finally {
     Date.now = originalNow;
@@ -770,7 +773,6 @@ test("raises urgency with the occupied idle age", async () => {
   const originalNow = Date.now;
   try {
     const cases = [
-      { minutes: 15, urgency: "FOLLOW_UP" },
       { minutes: 30, urgency: "URGENT" },
       { minutes: 60, urgency: "ESCALATION" },
     ];
@@ -787,21 +789,34 @@ test("raises urgency with the occupied idle age", async () => {
   }
 });
 
-test("repeats occupied wait nudges by five-minute bucket and marks release due", async () => {
+test("injects occupied wait nudges at thirty-minute boundaries and marks release due", async () => {
   const originalNow = Date.now;
   try {
     const h = harness(slot());
-    for (const minutes of [6, 10, 15, 20, 25]) {
+    for (const minutes of [29]) {
       Date.now = () => Date.parse(OLD_IDLE + "Z") + minutes * 60_000;
       await h.detector.checkIdleOccupied(slot());
     }
 
-    assert.equal(h.sends.length, 5);
-    assert.match(h.sends[0], /wait_age_minutes=6 urgency=REMINDER\./);
-    assert.match(h.sends[1], /wait_age_minutes=10 urgency=REMINDER\./);
-    assert.match(h.sends[2], /wait_age_minutes=15 urgency=FOLLOW_UP\./);
-    assert.match(h.sends[3], /wait_age_minutes=20 urgency=FOLLOW_UP release_required=true action=RELEASE_REQUIRED\./);
-    assert.match(h.sends[4], /wait_age_minutes=25 urgency=FOLLOW_UP release_required=true action=RELEASE_REQUIRED\./);
+    assert.equal(h.sends.length, 0);
+
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 30 * 60_000;
+    await h.detector.checkIdleOccupied(slot());
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0], /wait_age_minutes=30/);
+    assert.match(h.sends[0], /release_required=true action=RELEASE_REQUIRED\./);
+
+    for (const minutes of [31, 45, 59]) {
+      Date.now = () => Date.parse(OLD_IDLE + "Z") + minutes * 60_000;
+      await h.detector.checkIdleOccupied(slot());
+    }
+    assert.equal(h.sends.length, 1);
+
+    Date.now = () => Date.parse(OLD_IDLE + "Z") + 60 * 60_000;
+    await h.detector.checkIdleOccupied(slot());
+    assert.equal(h.sends.length, 2);
+    assert.match(h.sends[1], /wait_age_minutes=60/);
+    assert.match(h.sends[1], /release_required=true action=RELEASE_REQUIRED\./);
   } finally {
     Date.now = originalNow;
   }
@@ -809,12 +824,12 @@ test("repeats occupied wait nudges by five-minute bucket and marks release due",
 
 test("uses authoritative inactive turn state when the legacy idle flag is stale", async () => {
   const originalNow = Date.now;
-  Date.now = () => NOW;
+  Date.now = () => Date.parse(OLD_IDLE + "Z") + 30 * 60_000;
   try {
     const candidate = slot({ idle: false, active_turn_state: "inactive" });
     const h = harness(candidate);
     await h.detector.checkIdleOccupied(candidate);
-    assert.deepEqual(h.sends, [expectedNudge(6, "REMINDER")]);
+    assert.deepEqual(h.sends, [expectedNudge(30, "URGENT")]);
   } finally {
     Date.now = originalNow;
   }
@@ -864,7 +879,7 @@ test("requires current ownership and an inactive turn", async () => {
 
 test("suppresses continuation when DND is enabled at the delivery boundary", async () => {
   const originalNow = Date.now;
-  Date.now = () => NOW;
+  Date.now = () => Date.parse(OLD_IDLE + "Z") + 30 * 60_000;
   try {
     const initial = slot();
     const h = harness(initial);
@@ -1443,7 +1458,7 @@ test("does not nudge an active slot with a fresh JSONL write", async () => {
   }
 });
 
-test("requires strictly more than five minutes for Stop and SessionEnd and dedupes", async () => {
+test("requires thirty minutes for Stop and SessionEnd and dedupes", async () => {
   const originalNow = Date.now;
   const baseMs = Date.parse(OLD_IDLE + "Z");
   try {
@@ -1451,11 +1466,11 @@ test("requires strictly more than five minutes for Stop and SessionEnd and dedup
       const candidate = slot();
       const h = harness(candidate);
       h.events[0] = { ...h.events[0], event_type: closeType, hook_type: closeType };
-      Date.now = () => baseMs + 5 * 60_000;
+      Date.now = () => baseMs + 29 * 60_000 + 59_999;
       await h.detector.checkIdleOccupied(candidate);
       assert.deepEqual(h.sends, []);
 
-      Date.now = () => baseMs + 5 * 60_000 + 1;
+      Date.now = () => baseMs + 30 * 60_000;
       await h.detector.checkIdleOccupied(candidate);
       await h.detector.checkIdleOccupied(candidate);
       assert.equal(h.sends.length, 1);
@@ -1470,7 +1485,7 @@ test("a UserPromptSubmit suppresses an old episode until a later Stop starts a n
   const baseMs = Date.parse(OLD_IDLE + "Z");
   try {
     const h = harness(slot());
-    Date.now = () => baseMs + 6 * 60_000;
+    Date.now = () => baseMs + 30 * 60_000;
     await h.detector.checkIdleOccupied(slot());
     assert.equal(h.sends.length, 1);
 
@@ -1479,7 +1494,7 @@ test("a UserPromptSubmit suppresses an old episode until a later Stop starts a n
       active_turn_started_at: "2026-07-27T02:30:01.000Z",
       idle: false,
     });
-    Date.now = () => baseMs + 7 * 60_000;
+    Date.now = () => baseMs + 31 * 60_000;
     await h.detector.checkIdleOccupied(active);
     assert.equal(h.sends.length, 1);
 
@@ -1502,7 +1517,7 @@ test("a UserPromptSubmit suppresses an old episode until a later Stop starts a n
       payload: JSON.stringify({ session_id: SESSION_ID }),
       processed: false,
     });
-    Date.now = () => baseMs + 13 * 60_000 + 1;
+    Date.now = () => baseMs + 61 * 60_000 + 1;
     await h.detector.checkIdleOccupied(slot());
     assert.equal(h.sends.length, 2);
     assert.match(h.sends[1], /wait_started_at=2026-07-27T02:31:01.000/);
