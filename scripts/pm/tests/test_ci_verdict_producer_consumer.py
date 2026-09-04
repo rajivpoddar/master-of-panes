@@ -84,20 +84,20 @@ class CiVerdictProducerConsumerTests(unittest.TestCase):
         end = wrapper.index("\nPY\n", start)
         return wrapper[start:end]
 
-    def consumer_accepts(self, verdict: dict, *, duplicate: bool = False) -> bool:
-        marker = f"ci-failure-investigation:run={RUN_ID} attempt=1 head={HEAD}"
+    def consumer_accepts(self, verdict: dict, *, duplicate: bool = False, attempt: int = 1, mode: str = "local", comment: dict | None = None) -> bool:
+        marker = f"ci-failure-investigation:run={RUN_ID} attempt={attempt} head={HEAD}"
         body = f"{marker}\n<!-- ci-verdict: {json.dumps(verdict, sort_keys=True)} -->"
         comments = [
-            {"body": body},
-            *([{"body": body}] if duplicate else []),
+            {"body": body, **(comment or {})},
+            *([{"body": body, **(comment or {})}] if duplicate else []),
         ]
         with tempfile.TemporaryDirectory() as directory:
             comments_path = Path(directory) / "comments.json"
             comments_path.write_text(json.dumps(comments), encoding="utf-8")
             process = subprocess.run(
                 [
-                    "python3", "-", str(comments_path), str(RUN_ID), "1", HEAD,
-                    "7591", "", "local", "", "",
+                    "python3", "-", str(comments_path), str(RUN_ID), str(attempt), HEAD,
+                    "7591", "", mode, "", "",
                 ],
                 input=self.consumer_script(),
                 text=True,
@@ -105,6 +105,67 @@ class CiVerdictProducerConsumerTests(unittest.TestCase):
                 check=False,
             )
         return process.returncode == 0
+
+    def test_classified_retries_accept_any_positive_current_attempt(self) -> None:
+        cases = {
+            "runner-death": {
+                "verdict": "GREY", "severity": "GREY", "classification": "runner-death-mid-step",
+                "requested_owner_action": "rerun-after-proof", "blocking_for_merge": True,
+                "required_check_failure": True, "terminal_blockers": [{"reason": "self-hosted runner lost communication", "step": "test"}],
+                "fast_fingerprint": {"signature": "self-hosted runner lost communication"},
+                "local_repro_result": "not-applicable", "followup_issue": "#1", "mode": "nonlocal",
+            },
+            "pool-stall": {
+                "verdict": "GREY", "severity": "GREY", "classification": "runner-death-mid-step",
+                "requested_owner_action": "rerun-after-proof", "blocking_for_merge": True,
+                "required_check_failure": True, "terminal_blockers": [],
+                "fast_fingerprint": {"category": "runner-unavailable", "signature": "job not acquired by Runner of type self-hosted even after multiple attempts"},
+                "local_repro_result": "not-applicable", "followup_issue": "#2",
+            },
+            "apt-lock": {
+                "verdict": "GREY", "severity": "GREY", "classification": "setup-step-failure",
+                "requested_owner_action": "rerun-after-proof", "blocking_for_merge": True,
+                "required_check_failure": True, "local_repro_result": "not-applicable",
+                "fast_fingerprint": {"category": "setup-step-failure-apt-lock"},
+            },
+            "setup-infra": {
+                "verdict": "GREY", "severity": "GREY", "classification": "setup-step-failure",
+                "cancellation_phase": "setup", "requested_owner_action": "rerun-after-proof",
+                "blocking_for_merge": True, "local_repro_result": "impossible", "followup_issue": "#3",
+                "fast_fingerprint": {"signature": "Convex start_push returned HTTP 408"},
+            },
+            "base-rearm": {
+                "verdict": "YELLOW", "severity": "YELLOW", "classification": "e2e-test-fail",
+                "requested_owner_action": "sanctioned-canonical-rearm", "blocking_for_merge": True,
+                "local_repro_result": "impossible", "followup_issue": "#4",
+                "fast_fingerprint": {},
+            },
+        }
+        for attempt in (1, 2, 3):
+            for name, base in cases.items():
+                with self.subTest(attempt=attempt, name=name):
+                    verdict = {
+                        "run_id": RUN_ID, "attempt": attempt, "run_attempt": attempt,
+                        "pr": 7591, "sha": HEAD, "current_for_pr": True,
+                        **base,
+                    }
+                    if name == "runner-death":
+                        verdict["schema_version"] = 3
+                        verdict["mode"] = "nonlocal"
+                    if name == "pool-stall":
+                        verdict["fast_fingerprint"]["category"] = "runner-unavailable"
+                    verdict["rerun_authorization"] = verdict.get("rerun_authorization") or {
+                        "action": "rerun-after-proof", "run_id": str(RUN_ID),
+                        "attempt": attempt, "head_sha": HEAD, "single_use": True,
+                    }
+                    self.assertTrue(
+                        self.consumer_accepts(
+                            verdict,
+                            attempt=attempt,
+                            mode=base.get("mode", "local"),
+                            comment=None,
+                        )
+                    )
 
     def test_consumer_requires_current_attempt_test_authorization(self) -> None:
         verdict = {

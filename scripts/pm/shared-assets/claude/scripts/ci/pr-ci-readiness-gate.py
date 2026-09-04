@@ -48,7 +48,8 @@ DEFAULT_MIN_HEAD_AGE_MINUTES = 5
 # is optional ceremony and may remain a diagnostic warning but must not block
 # CI start. Functional-red same-head start stays refused (the owning slot
 # reproduces locally and pushes a descendant head); infra/runner/flake
-# same-head reruns stay capped at one via the off-slot rerun wrapper.
+# same-head reruns remain causally classified and exact-run bound via the
+# off-slot rerun wrapper.
 CI_START_SAFETY_REASON_PREFIXES = (
     "head_drift",
     "pr_not_open",
@@ -4404,8 +4405,8 @@ def required_actions(reasons: list[str]) -> list[str]:
                 "Current-head CI/E2E is red; do not re-trigger through the label. "
                 "Product/uncertain classes route to block + assign-rework (the slot "
                 "reproduces and fixes the failed surface, then a descendant head "
-                "starts one fresh wave). Infra/flake/shared classes route to at most "
-                "one same-head rerun through .claude/scripts/ci/rerun-after-local-proof.sh "
+                "starts one fresh wave). Infra/flake/shared classes route through "
+                "classified same-head reruns via .claude/scripts/ci/rerun-after-local-proof.sh "
                 "--pr <PR> --run <RUN_ID>; no sealed local-preflight proof is required."
             )
         elif reason in {"current_head_ci_or_e2e_partial_existing_runs", "current_head_ci_or_e2e_skipped_existing_runs"}:
@@ -4795,7 +4796,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         # is NEVER re-triggered through the label. The owning slot reproduces
         # the failed surface locally, implements a correction, and pushes a
         # descendant head before the next wave. Infra/runner/flake same-head
-        # reruns are capped at one and run off-slot through the rerun wrapper
+        # reruns run off-slot through the rerun wrapper after causal
+        # classification; no numeric attempt ceiling applies
         # (gh run rerun), not a label toggle. Sealed local-preflight proof
         # envelopes and their one-shot override packets no longer admit at
         # this boundary (Rajiv 1786812200.371389).
@@ -4810,8 +4812,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             # and uncertain classes are owned by the slot (block +
             # assign-rework with the exact failed-run packet; a descendant
             # head then starts one fresh wave), while infra/flake/shared
-            # classes get at most one same-head rerun off-slot through the
-            # rerun wrapper. No sealed proof is required at this boundary.
+            # classes get same-head reruns off-slot through the rerun wrapper.
+            # No sealed proof is required at this boundary.
             reasons.append(
                 "current_head_ci_or_e2e_failed_use_rerun_not_label_trigger "
                 f"run={ci_verdict.get('run_id') if ci_verdict else (workflows.get('bad_run_id') or 'unknown')} "
@@ -4820,7 +4822,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     elif not control_plane_only and workflows["state"] == "cancelled":
         # Release-policy simplification: a same-head cancelled wave is not
         # re-triggered through the label. The rerun wrapper (off-slot,
-        # infra/runner/flake one-rerun cap) is the only same-head path;
+        # infra/runner/flake causal classification) is the only same-head path;
         # sealed local-preflight override packets no longer admit (Rajiv
         # 1786812200.371389).
         reasons.append("current_head_ci_or_e2e_cancelled_requires_investigation")

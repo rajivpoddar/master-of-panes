@@ -444,7 +444,6 @@ for comment in reversed(matching_comments):
     runner_death = (
         common_grey
         and verdict.get("classification") == "runner-death-mid-step"
-        and str(verdict.get("attempt")) == "1"
         and verdict.get("requested_owner_action") == "rerun-after-proof"
         and runner_signature(fingerprint.get("signature"))
         and only_runner_communication_loss(verdict.get("terminal_blockers"))
@@ -460,8 +459,9 @@ for comment in reversed(matching_comments):
     # signature "The job was not acquired by Runner of type self-hosted even
     # after multiple attempts", terminal_blockers [] or a not-acquired reason,
     # requested_owner_action rerun-after-proof, numeric followup). Mirrors
-    # runner_death: common_grey, classification, attempt 1, rerun-after-proof,
-    # numeric followup, blocking_for_merge, required_check_failure, no circuit
+    # runner_death: common_grey, classification, current attempt binding,
+    # rerun-after-proof, numeric followup, blocking_for_merge,
+    # required_check_failure, no circuit
     # breaker. The lost-communication runner_death admission above stays
     # unchanged; the pool-stall class does not require the
     # only_runner_communication_loss terminal-blocker shape because the
@@ -469,7 +469,6 @@ for comment in reversed(matching_comments):
     pool_stall_runner_unavailable = (
         common_grey
         and verdict.get("classification") == "runner-death-mid-step"
-        and str(verdict.get("attempt")) == "1"
         and verdict.get("requested_owner_action") == "rerun-after-proof"
         and (
             fingerprint.get("category") in {"runner-unavailable", "environment-contract"}
@@ -496,7 +495,6 @@ for comment in reversed(matching_comments):
         and verdict.get("local_repro_result") == "not-applicable"
         and verdict.get("requested_owner_action") == "rerun-after-proof"
         and verdict.get("blocking_for_merge") is True
-        and str(verdict.get("attempt")) == "1"
         and not fingerprint.get("circuit_breaker")
     )
     ordinary_canonical = (
@@ -549,7 +547,6 @@ for comment in reversed(matching_comments):
         and verdict.get("local_repro_result") == "impossible"
         and verdict.get("requested_owner_action") == "rerun-after-proof"
         and verdict.get("blocking_for_merge") is True
-        and str(verdict.get("attempt")) == "1"
         and numeric_followup(verdict)
         and not fingerprint.get("circuit_breaker")
     )
@@ -599,7 +596,6 @@ for comment in reversed(matching_comments):
         and verdict.get("local_repro_result") in {"impossible", "not-applicable"}
         and verdict.get("requested_owner_action") == "sanctioned-canonical-rearm"
         and verdict.get("blocking_for_merge") is True
-        and str(verdict.get("attempt")) == "1"
         and numeric_followup(verdict)
         and not fingerprint.get("circuit_breaker")
     )
@@ -614,12 +610,12 @@ for comment in reversed(matching_comments):
     # rerun_authorization binding the CTO decision). The wrapper consumes the
     # class only when every bound holds: schema-3 exact tuple, trusted comment
     # author (typed classification provenance), no circuit breaker, required
-    # failure with blocking_for_merge, first attempt, and a non-empty CTO
-    # one-rerun authorization. Product-regression verdicts (classification
-    # outside the non-causal family set), missing authorization, second
-    # retry, stale head, unknown class, and altered proof all stay fail-closed
+    # failure with blocking_for_merge, and a non-empty CTO authorization.
+    # Product-regression verdicts (classification outside the non-causal family
+    # set), missing authorization, stale head, unknown class, and altered proof
+    # all stay fail-closed
     # through the unchanged outer wrapper gates (proof validation, live
-    # run/attempt binding, workflow allowlist, budget, lease).
+    # run/attempt binding, workflow allowlist, lease).
     cto_authorized_informational_rerun = (
         exact_tuple(verdict, require_schema3=True)
         and verdict.get("terminal_state") == "closed-informational"
@@ -639,7 +635,6 @@ for comment in reversed(matching_comments):
         )
         and verdict.get("blocking_for_merge") is True
         and verdict.get("required_check_failure") is True
-        and str(verdict.get("attempt")) == "1"
         and not fingerprint.get("circuit_breaker")
         and no_causal_or_breaker(verdict, fingerprint)
         and trusted_author(comment)
@@ -714,7 +709,7 @@ raise SystemExit(1)
 PY
 }
 
-# CI run-count, churn, and spend budgets are retired from this shared rerun
+# Spend and run-count accounting is not consulted by this shared rerun
 # consumer. Exact-head, causal-classification, stale-head, active-duplicate,
 # cleanup, and single-flight fences below remain the safety controls.
 
@@ -781,8 +776,8 @@ fi
 
 # Sealed local-preflight envelopes are retired (Rajiv 1786812200.371389):
 # the wrapper's raw verdict classification is authoritative for the at-most-
-# one same-head infra/flake/shared retry. When a proof file exists it is
-# still validated and carried as an optional diagnostic.
+# classified same-head infra/flake/shared retries remain causally gated. When a
+# proof file exists it is still validated and carried as an optional diagnostic.
 if [ -n "$proof" ]; then
   proof_ok "$proof" "$head" "$REPO" "$rebind_checkout" \
     || die "invalid_or_stale_or_unbound_local_proof proof=$proof head=$head"

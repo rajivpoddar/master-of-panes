@@ -214,7 +214,7 @@
       "additional_targets": [
         "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/pr-ci-readiness-gate.py"
       ],
-      "sha256": "398881ce0cd6ab80105d29a9d64469719cdfbb4584583c68bba17d368d142b50",
+      "sha256": "13d5bb4b25fda536723d6bdc74447a0625632fbd87b9960f80cae7efe4162ece",
       "mode": 493,
       "ownership_class": "shared-claude-ci-readiness-gate",
       "source_authority": {
@@ -248,7 +248,7 @@
     {
       "source_path": "claude/scripts/ci/rerun-after-local-proof.sh",
       "canonical_target": "/Users/rajiv/.claude/control-plane/current/claude/scripts/ci/rerun-after-local-proof.sh",
-      "sha256": "468f99652adead59ae39343edcef1d472caf1ebfa14046c4fd0cd611df2d6832",
+      "sha256": "fbda4714751e3a0e3201b46853a9ff2e5a097bf93f0fcc65f916af0e3e35dd5b",
       "mode": 493,
       "ownership_class": "shared-claude-ci-rerun-consumer",
       "dependency_status": "closed",
