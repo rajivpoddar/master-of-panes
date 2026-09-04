@@ -139,6 +139,19 @@ class PMCommunicationRestoreTests(unittest.TestCase):
         self.assertIn("never classify it as `STALE` or `IGNORED`", processing)
         self.assertIn("current slot tuple rather than the", processing)
         self.assertIn("Reconcile issue, PR, epoch, owner", processing)
+        self.assertIn("Drift\nfrom the carried notice is expected reconciliation input, not itself a blocker", processing)
+        for branch in (
+            "free with eligible Ready Pool work",
+            "free without eligible work",
+            "occupied with a fresh current episode that is not due",
+            "occupied with the same current due episode",
+            "active, productive, DND, or otherwise unsafe current authority",
+            "malformed, unavailable, or uncertain current authority",
+            "any refusal or uncertain effect response",
+        ):
+            self.assertIn(branch, processing)
+        self.assertIn("Choose exactly one branch from the fresh state", processing)
+        self.assertIn("A changed or ineligible\ncurrent state is not silently dropped", processing)
         self.assertIn("Derive release\neligibility exclusively from the current assignment epoch", processing)
         self.assertIn("current\n`assigned_at`/current wait anchor", processing)
         self.assertIn("never use the\nnotice's carried wait age to authorize release", processing)

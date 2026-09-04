@@ -8,9 +8,24 @@ description: Process one PM release or free-slot notice through existing MoP pat
 Re-read the current slot and Ready Pool before every action. Every PM wait/free
 notice is a wake signal: never classify it as `STALE` or `IGNORED`, and never
 discard it because its snapshot changed. Reconcile issue, PR, epoch, owner,
-wait age, assignment, and free/occupied state from the current readback. A changed,
-ineligible, active, productive, DND, or uncertain readback returns a typed
-`PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch` and makes no POST.
+wait age, assignment, and free/occupied state from the current readback. Drift
+from the carried notice is expected reconciliation input, not itself a blocker.
+Choose exactly one branch from the fresh state:
+
+| Fresh current state | One permitted result |
+| --- | --- |
+| free with eligible Ready Pool work | select `repro`, then `rework`, then `new_issue`, and execute the existing direct-assign contract once |
+| free without eligible work | return the typed no-eligible-work blocker with no POST |
+| occupied with a fresh current episode that is not due | preserve the slot and return `PM_NUDGE_RECONCILIATION_PROCESSED reason=current_wait_not_due` with no POST |
+| occupied with the same current due episode | invoke the existing direct-release flow once, then reconcile free state for assignment |
+| active, productive, DND, or otherwise unsafe current authority | return `PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch` with no POST |
+| malformed, unavailable, or uncertain current authority | return a typed current-state blocker with no POST |
+| any refusal or uncertain effect response | return its typed blocker and never retry or replay the stale action |
+
+Notice fields and notice age never remain authority. A changed or ineligible
+current state is not silently dropped: use the matching branch above. Only an
+unsafe or uncertain current authority returns the typed
+`PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch` blocker.
 
 For an occupied PM_WAIT notice, use the notice only as a wake signal and use
 the current slot tuple rather than the notice snapshot. Derive release
