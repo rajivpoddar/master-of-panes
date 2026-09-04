@@ -23,6 +23,25 @@ function request(issue: number, task: string): RequestInit {
   };
 }
 
+function completeRequest(overrides: Record<string, unknown> = {}): RequestInit {
+  return {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      expected_epoch: 0,
+      issue: 7616,
+      repository_id: "github:heydonna-app/heydonna-app",
+      pr: 7624,
+      branch: "fix/7624-proof",
+      head_sha: "a".repeat(40),
+      work_kind: "repro",
+      handoff_id: "handoff-7624",
+      task: "REPRODUCTION\nexact full-head evidence",
+      ...overrides,
+    }),
+  };
+}
+
 async function withRoute(
   deliver: (slot: number, task: string) => Promise<boolean>,
   run: (app: Hono, db: MoPDatabase) => Promise<void>,
@@ -93,6 +112,38 @@ test("delivery failure is explicit and never retried", async () => {
     assert.equal(result.reason, "assignment_delivery_failed");
     assert.equal((result.slot as Record<string, unknown>).occupied, true);
     assert.equal(deliveryCount, 1);
+  });
+});
+
+test("PR-bound assignment writes the complete slot identity consumed by the heartbeat", async () => {
+  const deliveries: string[] = [];
+  await withRoute(async (_slot, task) => {
+    deliveries.push(task);
+    return true;
+  }, async (app, db) => {
+    const response = await app.request("/slots/1/assign", completeRequest());
+    assert.equal(response.status, 200);
+    const result = await response.json() as Record<string, unknown>;
+    assert.equal(result.assignment_epoch, 1);
+    assert.equal(result.pr, 7624);
+    assert.equal(result.head_sha, "a".repeat(40));
+    assert.equal(result.branch, "fix/7624-proof");
+    assert.equal(result.branch_ref, "refs/heads/fix/7624-proof");
+    assert.equal(result.work_kind, "repro");
+    assert.equal(result.handoff_id, "handoff-7624");
+    assert.deepEqual(deliveries, ["REPRODUCTION\nexact full-head evidence"]);
+    assert.equal(db.getSlot(1)?.assignment_epoch, 1);
+    assert.equal(db.getSlot(1)?.pr, 7624);
+    assert.equal(db.getSlot(1)?.head_sha, "a".repeat(40));
+  });
+});
+
+test("a partial PR identity cannot fall back to a headless assignment", async () => {
+  await withRoute(async () => true, async (app, db) => {
+    const response = await app.request("/slots/1/assign", completeRequest({ head_sha: undefined }));
+    assert.equal(response.status, 400);
+    assert.equal((await response.json() as Record<string, unknown>).reason, "invalid_assignment_metadata");
+    assert.equal(db.getSlot(1)?.occupied, false);
   });
 });
 

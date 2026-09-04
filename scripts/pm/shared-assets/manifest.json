@@ -393,7 +393,7 @@
     {
       "source_path": "claude/skills/direct-assign/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/direct-assign/SKILL.md",
-      "sha256": "9b6f0c5f8e39e07cd83e4706f268e212c6239eea435d5b148d78ea3d5f8232e1",
+      "sha256": "bff619f299351989f0ef95556b30cf66952ebac58e9db2f4e9e09db0f7ea8f79",
       "mode": 420,
       "ownership_class": "shared-claude-direct-assignment-skill",
       "dependency_status": "closed",

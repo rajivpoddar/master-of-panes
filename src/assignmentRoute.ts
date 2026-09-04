@@ -8,8 +8,58 @@ export type AssignmentDelivery = (slot: number, task: string) => Promise<boolean
 
 const assignmentSlotParamSchema = z.coerce.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT);
 
+const completeAssignmentDiscriminators = [
+  "expected_epoch",
+  "pr",
+  "branch",
+  "head_sha",
+  "work_kind",
+  "handoff_id",
+] as const;
+
+const completeAssignmentFields = [
+  "expected_epoch",
+  "repository_id",
+  "issue",
+  "pr",
+  "branch",
+  "head_sha",
+  "work_kind",
+  "handoff_id",
+  "task",
+] as const;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOwn(body: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(body, key);
+}
+
+function hasCompleteAssignmentMetadata(body: Record<string, unknown>): boolean {
+  return completeAssignmentDiscriminators.some((field) => hasOwn(body, field));
+}
+
+function isCompleteAssignment(body: Record<string, unknown>): boolean {
+  return completeAssignmentFields.every((field) => hasOwn(body, field))
+    && Number.isInteger(body.expected_epoch)
+    && Number(body.expected_epoch) >= 0
+    && (typeof body.repository_id === "string" || typeof body.repository_id === "number")
+    && Number.isInteger(body.issue)
+    && Number(body.issue) > 0
+    && Number.isInteger(body.pr)
+    && Number(body.pr) > 0
+    && typeof body.branch === "string"
+    && body.branch.trim() !== ""
+    && typeof body.head_sha === "string"
+    && /^[0-9a-f]{40}$/i.test(body.head_sha)
+    && typeof body.work_kind === "string"
+    && body.work_kind.trim() !== ""
+    && typeof body.handoff_id === "string"
+    && body.handoff_id.trim() !== ""
+    && typeof body.task === "string"
+    && body.task.trim() !== "";
 }
 
 /** Assign one free numbered slot with the minimum PM-authored contract. */
@@ -36,15 +86,38 @@ export function registerAssignmentRoute(
     }
     const task = body.task;
 
+    // Keep the historical issue-only contract for new_issue work. PR-bound
+    // repro/rework producers must use the existing epoch/CAS assignment
+    // boundary so the slot readback carries the exact PR/head/branch/work
+    // identity consumed by the heartbeat.
+    const completeRequested = hasCompleteAssignmentMetadata(body);
+    if (completeRequested && !isCompleteAssignment(body)) {
+      return c.json({ success: false, reason: "invalid_assignment_metadata" }, 400);
+    }
+
     const repositoryId = (
       typeof body.repository_id === "string" || typeof body.repository_id === "number"
     ) ? body.repository_id : (process.env.MOP_LEGACY_REPOSITORY_ID ?? "heydonna-app/heydonna-app");
-    const result = db.assignIssueToSlot(
-      slotParse.data,
-      Number(body.issue),
-      task,
-      repositoryId,
-    );
+    const result = completeRequested
+      ? db.assignSlot(
+        slotParse.data,
+        task,
+        repositoryId,
+        Number(body.issue),
+        body.branch as string,
+        Number(body.pr),
+        body.head_sha as string,
+        Number(body.expected_epoch),
+        body.work_kind as string,
+        body.handoff_id as string,
+        true,
+      )
+      : db.assignIssueToSlot(
+        slotParse.data,
+        Number(body.issue),
+        task,
+        repositoryId,
+      );
     if (!result.ok) {
       return c.json({ success: false, reason: result.reason }, 409);
     }

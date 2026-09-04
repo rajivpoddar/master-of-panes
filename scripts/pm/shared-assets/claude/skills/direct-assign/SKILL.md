@@ -17,6 +17,20 @@ POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign
 JSON {issue, repository_id, task}
 ```
 
+For an existing PR (`repro` or `rework`), use the complete form—not the
+issue-only form—so MoP writes an exact heartbeat-consumable slot record:
+
+```text
+JSON {expected_epoch, issue, repository_id, pr, branch, head_sha, work_kind, handoff_id, task}
+```
+
+`expected_epoch`, `pr`, and `head_sha` are the freshly read values; `branch`,
+`work_kind`, and `handoff_id` must describe that same PR assignment. MoP
+refuses a partial or stale tuple. The assigned slot is the owner identity and
+the literal task must retain the exact evidence and handoff context; callers
+must not substitute generic ownership prose. A `new_issue` has no PR/head yet
+and retains the issue-only form above until a PR-bound assignment exists.
+
 The `task` is the complete literal PM-authored message for the selected work.
 Accept success only from an occupied slot readback with
 `delivery_verified=true`; MoP performs the one delivery to that pinned slot.
