@@ -1751,6 +1751,9 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
             # A malformed/headless sibling is diagnostic, not authoritative.
             # Give exact-head live workflow/slot evidence one chance to win;
             # only an otherwise-unbound PR becomes the row-local limbo row.
+            # Contradictory exact-head durable authority is different: it is a
+            # current authority conflict and must remain fail-closed even when
+            # GitHub happens to look merge-ready.
             live_row = evaluate_open_pr_activity(
                 normalized_pr,
                 exact_runs,
@@ -1759,7 +1762,17 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 now_utc=now_utc,
                 continuation_records=[],
             )
-            if str(live_row.get("motion_state") or "").endswith("_IN_PROGRESS"):
+            live_authoritative_states = {
+                "MERGE_READY",
+                "CI_E2E_IN_PROGRESS",
+                "CAPTURE_IN_PROGRESS",
+                "REPRO_REWORK_IN_PROGRESS",
+                "REPRO_REWORK_QUEUED",
+            }
+            if (
+                continuation_error != "row: contradictory exact-head durable continuation records"
+                and live_row.get("motion_state") in live_authoritative_states
+            ):
                 row = live_row
             else:
                 row = _malformed_continuation_row(number, branch, head, continuation_error)

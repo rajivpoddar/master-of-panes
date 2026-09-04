@@ -242,6 +242,77 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         self.assertEqual(audit["rows"][0]["motion_state"], "CI_E2E_IN_PROGRESS")
         self.assertEqual(audit["rows"][0]["workflow_motion"], "CI:active")
 
+    def test_unsupported_legacy_sibling_cannot_hide_exact_head_merge_ready(self) -> None:
+        # This is the production writer's current unsupported kind; the row
+        # is malformed for the continuation consumer but not authority over
+        # exact-head GitHub evidence.
+        headless_error = "row: unsupported exact-head continuation kind: candidate_rework"
+        runs = [
+            {
+                "id": 333,
+                "head_sha": HEAD,
+                "workflowName": workflow,
+                "event": "pull_request",
+                "status": "completed",
+                "conclusion": "success",
+                "created_at": "2026-09-01T00:00:00Z",
+                "run_attempt": 1,
+            }
+            for workflow in ("CI", "E2E Smoke Tests")
+        ]
+        with mock.patch.object(
+            MODULE,
+            "_audit_gh_json",
+            side_effect=[
+                ([{**pr(), "labels": [{"name": "merge-ready"}]}], None),
+                ({"workflow_runs": runs}, None),
+                ({"jobs": []}, None),
+                ({"jobs": []}, None),
+            ],
+        ), mock.patch.object(
+            MODULE,
+            "_load_open_pr_continuations",
+            return_value=([], headless_error),
+        ):
+            audit = MODULE.collect_open_pr_activity_audit({})
+        self.assertTrue(audit["ok"])
+        self.assertEqual(audit["rows"][0]["motion_state"], "MERGE_READY")
+        self.assertEqual(audit["rows"][0]["lane"], "merge-ready")
+
+    def test_contradictory_exact_head_authority_remains_unknown(self) -> None:
+        runs = [
+            {
+                "id": 334,
+                "head_sha": HEAD,
+                "workflowName": workflow,
+                "event": "pull_request",
+                "status": "completed",
+                "conclusion": "success",
+                "created_at": "2026-09-01T00:00:00Z",
+                "run_attempt": 1,
+            }
+            for workflow in ("CI", "E2E Smoke Tests")
+        ]
+        contradiction = "row: contradictory exact-head durable continuation records"
+        with mock.patch.object(
+            MODULE,
+            "_audit_gh_json",
+            side_effect=[
+                ([{**pr(), "labels": [{"name": "merge-ready"}]}], None),
+                ({"workflow_runs": runs}, None),
+                ({"jobs": []}, None),
+                ({"jobs": []}, None),
+            ],
+        ), mock.patch.object(
+            MODULE,
+            "_load_open_pr_continuations",
+            return_value=([], contradiction),
+        ):
+            audit = MODULE.collect_open_pr_activity_audit({})
+        self.assertTrue(audit["ok"])
+        self.assertEqual(audit["rows"][0]["motion_state"], "UNKNOWN")
+        self.assertIn("contradictory", audit["rows"][0]["hold_reason"])
+
     def test_unreadable_ledger_remains_an_audit_wide_refusal(self) -> None:
         with mock.patch.object(
             MODULE,

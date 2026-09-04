@@ -346,7 +346,7 @@
     {
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py",
-      "sha256": "84b080c5ee645dbdf83bb4b1a6653f7020f63bbd5a999c7bfefe1cf0bacfa1ff",
+      "sha256": "41cc519b665b6ab42f253c00a62faca10d06674c98ca1814bc4520f067c485a2",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
       "dependency_status": "closed",
