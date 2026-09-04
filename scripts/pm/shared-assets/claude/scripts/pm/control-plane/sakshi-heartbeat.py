@@ -77,24 +77,30 @@ OPEN_PR_AUDIT_WORKFLOWS = {"CI", "E2E Smoke Tests"}
 OPEN_PR_AUDIT_CAPTURE_WORKFLOW_MARKERS = ("capture", "llm proxy")
 OPEN_PR_AUDIT_ACTIVE_WORDS = re.compile(r"\b(repro|reproduction|integration|proof|capture|e2e|ci|test)\b", re.I)
 OPEN_PR_MOTION_STATES = (
-    "CI_IN_PROGRESS",
+    "MERGE_READY",
+    "CI_E2E_IN_PROGRESS",
     "CAPTURE_IN_PROGRESS",
-    "REPRO_OR_PROOF_IN_PROGRESS",
-    "REWORK_IN_PROGRESS",
-    "REWORK_BLOCKED",
-    "DEPENDENCY_BLOCKED",
+    "REPRO_REWORK_IN_PROGRESS",
+    "REPRO_REWORK_QUEUED",
     "PROCESS_LIMBO",
+    "UNKNOWN",
 )
 OPEN_PR_CONCRETE_TOKEN = re.compile(r"^[^\s]{2,}$")
 OPEN_PR_HEAD = re.compile(r"^[0-9a-f]{40}$")
 OPEN_PR_LANES = (
+    "merge-ready",
     "CI",
     "capture",
+    "repro/rework",
+    "repro/rework-queued",
+    # Keep the older lane labels in the serialized audit for consumers that
+    # still render them; motion_state is the authoritative classifier.
     "repro/proof",
     "rework",
     "rework-blocked",
     "dependency-blocked",
     "true limbo",
+    "unknown",
 )
 CONTINUATION_HEAD_KEYS = (
     "head",
@@ -108,8 +114,9 @@ CONTINUATION_KIND_LANES = {
     "pr_admission": "CI",
     "capture_release": "capture",
     "capture_recovery": "capture",
-    "pr_qa_pending": "repro/proof",
-    "slot_ready_pending": "repro/proof",
+    # A parked QA/proof wait is not an executing or queued repro/rework lane.
+    "pr_qa_pending": "dependency-blocked",
+    "slot_ready_pending": "dependency-blocked",
     "slot_retask": "rework",
     "slot_rework": "rework",
     "dependency_wait": "dependency-blocked",
@@ -1018,11 +1025,11 @@ def _malformed_continuation_row(
         number=number,
         branch=branch,
         head=head,
-        motion_state="PROCESS_LIMBO",
+        motion_state="UNKNOWN",
         lanes={"capture": False, "ci_e2e": False, "numbered_reproduction": False},
         reasons=[f"malformed durable continuation: {reason}"],
         owner="CTO",
-        lane="true limbo",
+        lane="unknown",
         workflow_motion="none",
         owner_source="pm-ops.obligations malformed",
         hold_reason=f"malformed durable continuation: {reason}",
@@ -1030,7 +1037,7 @@ def _malformed_continuation_row(
         next_owner="CTO",
         next_boundary="repair or reconcile the exact-head durable continuation record",
         wake="CTO consumes this exact-head ledger repair row",
-        status="blocked",
+        status="unknown",
     )
 
 
@@ -1068,12 +1075,12 @@ def _continuation_motion_metadata(
         return None
     lane = record["lane"]
     state_by_lane = {
-        "CI": "CI_IN_PROGRESS",
+        "CI": "CI_E2E_IN_PROGRESS",
         "capture": "CAPTURE_IN_PROGRESS",
-        "repro/proof": "REPRO_OR_PROOF_IN_PROGRESS",
-        "rework": "REWORK_IN_PROGRESS",
-        "rework-blocked": "REWORK_BLOCKED",
-        "dependency-blocked": "DEPENDENCY_BLOCKED",
+        "repro/proof": "REPRO_REWORK_QUEUED",
+        "rework": "REPRO_REWORK_QUEUED",
+        "rework-blocked": "PROCESS_LIMBO",
+        "dependency-blocked": "PROCESS_LIMBO",
     }
     if lane not in state_by_lane:
         return None
@@ -1141,13 +1148,13 @@ def _motion_result(
     if motion_state not in OPEN_PR_MOTION_STATES:
         raise ValueError(f"unsupported open-PR motion state: {motion_state}")
     resolved_lane = lane or {
-        "CI_IN_PROGRESS": "CI",
+        "MERGE_READY": "merge-ready",
+        "CI_E2E_IN_PROGRESS": "CI",
         "CAPTURE_IN_PROGRESS": "capture",
-        "REPRO_OR_PROOF_IN_PROGRESS": "repro/proof",
-        "REWORK_IN_PROGRESS": "rework",
-        "REWORK_BLOCKED": "rework-blocked",
-        "DEPENDENCY_BLOCKED": "dependency-blocked",
+        "REPRO_REWORK_IN_PROGRESS": "repro/rework",
+        "REPRO_REWORK_QUEUED": "repro/rework-queued",
         "PROCESS_LIMBO": "true limbo",
+        "UNKNOWN": "unknown",
     }[motion_state]
     if resolved_lane not in OPEN_PR_LANES:
         raise ValueError(f"unsupported open-PR lane: {resolved_lane}")
@@ -1155,8 +1162,13 @@ def _motion_result(
         "pr": number,
         "branch": branch,
         "head": head,
-        "gap": motion_state == "PROCESS_LIMBO",
-        "status": status or ("active" if motion_state.endswith("_IN_PROGRESS") else "gap"),
+        "gap": motion_state in {"PROCESS_LIMBO", "UNKNOWN"},
+        "status": status or (
+            "active" if motion_state.endswith("_IN_PROGRESS")
+            else "unknown" if motion_state == "UNKNOWN"
+            else "ready" if motion_state == "MERGE_READY"
+            else "gap"
+        ),
         "motion_state": motion_state,
         "lanes": lanes,
         "reasons": list(dict.fromkeys(reasons)),
@@ -1171,6 +1183,106 @@ def _motion_result(
         "wake": wake,
         "last_exact": last_exact,
     }
+
+
+def _open_pr_label_names(pr: dict[str, Any]) -> tuple[set[str] | None, str | None]:
+    """Decode the production GitHub label object shape without guessing."""
+
+    if "labels" not in pr:
+        return set(), None
+    raw_labels = pr.get("labels")
+    if not isinstance(raw_labels, list):
+        return None, "open PR labels are not a list"
+    names: set[str] = set()
+    for label in raw_labels:
+        if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+            return None, "open PR label entry is malformed"
+        name = label["name"].strip()
+        if not name:
+            return None, "open PR label name is empty"
+        names.add(name)
+    return names, None
+
+
+def _merge_ready_is_authoritative(pr: dict[str, Any]) -> tuple[bool, str | None]:
+    """Recognize the existing merge-ready contract, independent of mergeability."""
+
+    labels, error = _open_pr_label_names(pr)
+    if error:
+        return False, error
+    assert labels is not None
+    if pr.get("isDraft") is True or pr.get("draft") is True:
+        return False, "merge-ready PR is still a draft"
+    # The canonical label is the stored review/proof completion marker.  A
+    # test/injected PR may expose the same authority as an explicit boolean;
+    # mergeable_state is deliberately not consulted because a current-main
+    # barrier does not invalidate exact-head readiness.
+    if "merge-ready" not in labels and pr.get("merge_ready") is not True:
+        return False, "merge-ready review/proof contract is absent"
+    return True, None
+
+
+def _workflow_phase(
+    run: dict[str, Any], jobs: list[dict[str, Any]]
+) -> str | None:
+    """Return active, queued, green, or no authoritative phase for one run."""
+
+    if any(_job_is_genuinely_executing(job) for job in jobs):
+        return "active"
+    run_status = str(run.get("status") or "").lower()
+    if run_status in {"queued", "requested", "waiting"}:
+        return "queued"
+    if run_status == "completed" and str(run.get("conclusion") or "").lower() == "success":
+        return "green"
+    return None
+
+
+def _run_attempt(run: dict[str, Any]) -> int | None:
+    """Return one positive GitHub run-attempt number, or None if malformed."""
+
+    raw = run.get("run_attempt", run.get("runAttempt", run.get("attempt")))
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        attempt = int(raw.strip())
+        return attempt if attempt > 0 else None
+    return None
+
+
+def _latest_required_workflow_runs(
+    runs: list[dict[str, Any]], head: str
+) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """Select one authoritative latest run/attempt for each required workflow."""
+
+    grouped: dict[str, list[tuple[dict[str, Any], datetime, int, int]]] = {}
+    for run in runs:
+        workflow = str(run.get("workflowName") or run.get("name") or "")
+        if workflow not in OPEN_PR_AUDIT_WORKFLOWS or not _run_matches_exact_head(run, head):
+            continue
+        created = parse_ts(run.get("created_at") or run.get("createdAt"))
+        attempt = _run_attempt(run)
+        raw_id = run.get("id", run.get("databaseId"))
+        run_id = str(raw_id or "").strip()
+        if created is None or attempt is None or not run_id.isdigit() or int(run_id) <= 0:
+            return {}, f"malformed exact-head {workflow} chronology or attempt identity"
+        grouped.setdefault(workflow, []).append((run, created, attempt, int(run_id)))
+
+    selected: dict[str, dict[str, Any]] = {}
+    for workflow, candidates in grouped.items():
+        latest_created = max(created for _, created, _, _ in candidates)
+        newest_runs = [candidate for candidate in candidates if candidate[1] == latest_created]
+        if len({candidate[3] for candidate in newest_runs}) > 1:
+            return {}, f"ambiguous exact-head {workflow} chronology or attempt identity"
+        latest_run_id = max(candidate[3] for candidate in newest_runs)
+        same_run = [candidate for candidate in newest_runs if candidate[3] == latest_run_id]
+        latest_attempt = max(candidate[2] for candidate in same_run)
+        latest_attempt_rows = [candidate for candidate in same_run if candidate[2] == latest_attempt]
+        if len(latest_attempt_rows) != 1:
+            return {}, f"ambiguous exact-head {workflow} chronology or attempt identity"
+        selected[workflow] = latest_attempt_rows[0][0]
+    return selected, None
 
 
 def evaluate_open_pr_activity(
@@ -1198,11 +1310,25 @@ def evaluate_open_pr_activity(
             number=number or "?",
             branch=branch,
             head=head,
-            motion_state="PROCESS_LIMBO",
+            motion_state="UNKNOWN",
             status="unknown",
             lanes={"capture": False, "ci_e2e": False, "numbered_reproduction": False},
             reasons=["missing exact open-PR head or branch binding"],
             next_boundary="re-read open PR metadata with an exact 40-character head",
+            wake="re-read exact-head open-PR metadata",
+        )
+
+    labels, label_error = _open_pr_label_names(pr)
+    if label_error:
+        return _motion_result(
+            number=number,
+            branch=branch,
+            head=head,
+            motion_state="UNKNOWN",
+            status="unknown",
+            lanes={"capture": False, "ci_e2e": False, "numbered_reproduction": False},
+            reasons=[label_error],
+            next_boundary="re-read open PR labels from GitHub",
             wake="re-read exact-head open-PR metadata",
         )
 
@@ -1219,22 +1345,53 @@ def evaluate_open_pr_activity(
 
     capture = False
     ci_e2e = False
+    ci_e2e_green: set[str] = set()
+    latest_required_runs, run_selection_error = _latest_required_workflow_runs(runs, head)
+    if run_selection_error:
+        return _motion_result(
+            number=number,
+            branch=branch,
+            head=head,
+            motion_state="UNKNOWN",
+            lanes={"capture": False, "ci_e2e": False, "numbered_reproduction": False},
+            reasons=[run_selection_error],
+            next_boundary="re-read exact-head workflow chronology and attempt evidence",
+            wake="re-read exact-head workflow evidence",
+        )
+    latest_required_keys = {
+        (workflow, str(run.get("id") or run.get("databaseId") or ""), _run_attempt(run))
+        for workflow, run in latest_required_runs.items()
+    }
+    latest_required_phases: dict[str, str | None] = {}
     active_workflow_motion: list[str] = []
+    live_workflow_runs: dict[str, set[str]] = {}
     last_exact: dict[str, Any] | None = None
     for run in runs:
         workflow = str(run.get("workflowName") or run.get("name") or "")
         is_capture_workflow = any(marker in workflow.lower() for marker in OPEN_PR_AUDIT_CAPTURE_WORKFLOW_MARKERS)
         if not _run_matches_exact_head(run, head, allow_capture_dispatch=is_capture_workflow):
             continue
+        if workflow in OPEN_PR_AUDIT_WORKFLOWS and (
+            workflow,
+            str(run.get("id") or run.get("databaseId") or ""),
+            _run_attempt(run),
+        ) not in latest_required_keys:
+            continue
         run_id = str(run.get("databaseId") or run.get("id") or "")
         jobs = jobs_by_run.get(run_id, [])
-        executing = any(_job_is_genuinely_executing(job) for job in jobs)
-        if executing and workflow in OPEN_PR_AUDIT_WORKFLOWS:
+        phase = _workflow_phase(run, jobs)
+        if workflow in OPEN_PR_AUDIT_WORKFLOWS:
+            latest_required_phases[workflow] = phase
+        if workflow in OPEN_PR_AUDIT_WORKFLOWS and phase in {"active", "queued"}:
             ci_e2e = True
-            active_workflow_motion.append(workflow)
-        if executing and is_capture_workflow:
+            live_workflow_runs.setdefault(workflow, set()).add(run_id or "missing-run-id")
+            active_workflow_motion.append(f"{workflow}:{phase}")
+        if workflow in OPEN_PR_AUDIT_WORKFLOWS and phase == "green":
+            ci_e2e_green.add(workflow)
+        if is_capture_workflow and phase in {"active", "queued"}:
             capture = True
-            active_workflow_motion.append(workflow)
+            live_workflow_runs.setdefault(workflow, set()).add(run_id or "missing-run-id")
+            active_workflow_motion.append(f"{workflow}:{phase}")
         if jobs:
             latest = dict(run)
             latest_job = max(
@@ -1276,6 +1433,29 @@ def evaluate_open_pr_activity(
         numbered_kind = "ambiguous"
         owner = ",".join(sorted({active_owner for _, active_owner in active_numbered_owners}))
 
+    if any(len(run_ids) > 1 for run_ids in live_workflow_runs.values()):
+        return _motion_result(
+            number=number,
+            branch=branch,
+            head=head,
+            motion_state="UNKNOWN",
+            lanes={
+                "capture": capture,
+                "ci_e2e": ci_e2e,
+                "numbered_reproduction": False,
+            },
+            reasons=["ambiguous multiple active or queued exact-head runs"],
+            owner=owner,
+            owner_source="workflow",
+            workflow_motion=",".join(dict.fromkeys(active_workflow_motion)) or "ambiguous",
+            hold_reason="ambiguous multiple active or queued exact-head runs",
+            next_action="reconcile one exact-head workflow run per lane",
+            next_owner="CTO",
+            next_boundary="reconcile exact-head workflow evidence",
+            wake="re-read exact-head workflow evidence",
+            last_exact=last_exact,
+        )
+
     lanes = {
         "capture": capture,
         "ci_e2e": ci_e2e,
@@ -1285,9 +1465,8 @@ def evaluate_open_pr_activity(
         state
         for state, enabled in (
             ("CAPTURE_IN_PROGRESS", capture),
-            ("CI_IN_PROGRESS", ci_e2e),
-            ("REPRO_OR_PROOF_IN_PROGRESS", numbered_kind == "repro"),
-            ("REWORK_IN_PROGRESS", numbered_kind == "rework"),
+            ("CI_E2E_IN_PROGRESS", ci_e2e),
+            ("REPRO_REWORK_IN_PROGRESS", numbered_kind in {"repro", "rework"}),
         )
         if enabled
     ]
@@ -1296,7 +1475,7 @@ def evaluate_open_pr_activity(
             number=number,
             branch=branch,
             head=head,
-            motion_state="PROCESS_LIMBO",
+            motion_state="UNKNOWN",
             lanes={key: bool(value) for key, value in lanes.items()},
             reasons=["multiple incompatible exact-head active lanes"],
             owner=owner,
@@ -1347,7 +1526,39 @@ def evaluate_open_pr_activity(
             status="blocked",
         )
 
+    merge_ready, merge_ready_error = _merge_ready_is_authoritative(pr)
+    latest_required_failures = [
+        f"{workflow} latest exact-head run is terminal non-success"
+        for workflow in sorted(OPEN_PR_AUDIT_WORKFLOWS)
+        if workflow in latest_required_phases
+        and latest_required_phases[workflow] not in {"active", "queued", "green"}
+    ]
+    if merge_ready and ci_e2e_green == OPEN_PR_AUDIT_WORKFLOWS and not latest_required_failures:
+        return _motion_result(
+            number=number,
+            branch=branch,
+            head=head,
+            motion_state="MERGE_READY",
+            lanes={key: bool(value) for key, value in lanes.items()},
+            reasons=[],
+            owner=owner,
+            owner_source="github exact-head CI/E2E and merge-ready contract",
+            workflow_motion=",".join(f"{workflow}:green" for workflow in sorted(ci_e2e_green)),
+            hold_reason="none",
+            next_action="merge at exact head after any current-main barrier clears",
+            next_owner="CTO",
+            next_boundary="head-pinned merge",
+            wake="CTO consumes the exact-head merge-ready row",
+            last_exact=last_exact,
+        )
+
     reasons = ["no genuinely executing exact-head lane"]
+    reasons.extend(latest_required_failures)
+    if merge_ready_error and "merge-ready" in (labels or set()):
+        reasons.append(merge_ready_error)
+    elif merge_ready and ci_e2e_green != OPEN_PR_AUDIT_WORKFLOWS:
+        missing = sorted(OPEN_PR_AUDIT_WORKFLOWS - ci_e2e_green)
+        reasons.append("merge-ready contract lacks exact-head green " + "+".join(missing))
     for run in runs:
         workflow = str(run.get("workflowName") or run.get("name") or "")
         is_capture_workflow = any(marker in workflow.lower() for marker in OPEN_PR_AUDIT_CAPTURE_WORKFLOW_MARKERS)
@@ -1414,13 +1625,13 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "pr": "?",
                 "gap": True,
                 "status": "unknown",
-                "motion_state": "PROCESS_LIMBO",
+                "motion_state": "UNKNOWN",
                 "reasons": ["malformed open PR row"],
                 "missing_predicates": ["open PR identity"],
                 "next_boundary": "re-read open PR metadata",
                 "wake": "re-read open PR metadata",
                 "owner": "unowned",
-                "lane": "true limbo",
+                "lane": "unknown",
                 "workflow_motion": "none",
                 "owner_source": "none",
                 "hold_reason": "malformed open PR row",
@@ -1428,7 +1639,7 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "next_owner": "CTO",
             }
             rows.append(row)
-            motion_states["PROCESS_LIMBO"] += 1
+            motion_states["UNKNOWN"] += 1
             continue
         identity, identity_error = _exact_open_pr_identity(pr)
         if identity_error:
@@ -1438,14 +1649,14 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "head": "",
                 "gap": True,
                 "status": "unknown",
-                "motion_state": "PROCESS_LIMBO",
+                "motion_state": "UNKNOWN",
                 "lanes": {"capture": False, "ci_e2e": False, "numbered_reproduction": False},
                 "reasons": [identity_error],
                 "missing_predicates": [identity_error],
                 "next_boundary": "re-read unambiguous open PR metadata",
                 "wake": "re-read unambiguous open PR metadata",
                 "owner": "unowned",
-                "lane": "true limbo",
+                "lane": "unknown",
                 "workflow_motion": "none",
                 "owner_source": "none",
                 "hold_reason": identity_error,
@@ -1453,14 +1664,14 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "next_owner": "CTO",
             }
             rows.append(row)
-            motion_states["PROCESS_LIMBO"] += 1
+            motion_states["UNKNOWN"] += 1
             continue
         assert identity is not None
         number, head, branch = identity
         runs, run_error = _audit_gh_json(
             [
-            f"repos/{OPEN_PR_AUDIT_REPOSITORY}/actions/runs",
-                "--method", "GET", "-f", "per_page=100",
+                f"repos/{OPEN_PR_AUDIT_REPOSITORY}/actions/runs",
+                "--method", "GET", "-f", f"head_sha={head}", "-f", "per_page=100",
             ]
         )
         if run_error or not isinstance(runs, dict) or not isinstance(runs.get("workflow_runs"), list):
@@ -1470,13 +1681,13 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "head": head,
                 "gap": True,
                 "status": "unknown",
-                "motion_state": "PROCESS_LIMBO",
+                "motion_state": "UNKNOWN",
                 "reasons": ["exact-head workflow run read unavailable"],
                 "missing_predicates": ["workflow run evidence"],
                 "next_boundary": "re-read exact-head workflow evidence",
                 "wake": "re-read exact-head workflow evidence",
                 "owner": "unowned",
-                "lane": "true limbo",
+                "lane": "unknown",
                 "workflow_motion": "none",
                 "owner_source": "none",
                 "hold_reason": "exact-head workflow run read unavailable",
@@ -1484,7 +1695,7 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "next_owner": "CTO",
             }
             rows.append(row)
-            motion_states["PROCESS_LIMBO"] += 1
+            motion_states["UNKNOWN"] += 1
             continue
         exact_runs = [run for run in runs["workflow_runs"] if isinstance(run, dict) and str(run.get("head_sha") or "") == head]
         jobs_by_run: dict[str, list[dict[str, Any]]] = {}
@@ -1506,21 +1717,21 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "head": head,
                 "gap": True,
                 "status": "unknown",
-                "motion_state": "PROCESS_LIMBO",
+                "motion_state": "UNKNOWN",
                 "lanes": {"capture": False, "ci_e2e": False, "numbered_reproduction": False},
                 "reasons": ["exact-head job evidence unavailable: " + "; ".join(jobs_errors)],
                 "missing_predicates": ["workflow job evidence"],
                 "next_boundary": "re-read exact-head workflow job evidence",
                 "wake": "re-read exact-head workflow job evidence",
                 "owner": "unowned",
-                "lane": "true limbo",
+                "lane": "unknown",
                 "workflow_motion": "none",
                 "owner_source": "none",
                 "hold_reason": "exact-head job evidence unavailable",
                 "next_action": "re-read exact-head workflow job evidence",
                 "next_owner": "CTO",
             })
-            motion_states["PROCESS_LIMBO"] += 1
+            motion_states["UNKNOWN"] += 1
             continue
         normalized_pr = {**pr, "head_sha": head, "headRefName": branch}
         continuations, continuation_error = _load_open_pr_continuations(number, head)
@@ -2637,8 +2848,8 @@ def open_pr_activity_action_lines(audit: Any) -> list[str]:
     if not gaps:
         return []
     actions = [
-        f"OPEN_PR_ACTIVITY_AUDIT is NOT_CLEAR: {len(gaps)} open PR(s) are PROCESS_LIMBO; "
-        "route each exact-head row through its stated next boundary and wake."
+        f"OPEN_PR_ACTIVITY_AUDIT is NOT_CLEAR: {len(gaps)} open PR(s) need exact-head "
+        "reconciliation; route each row through its stated next boundary and wake."
     ]
     for row in gaps:
         actions.append(
