@@ -13,6 +13,9 @@
       "~/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
       "~/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
       "~/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
+      "~/Downloads/projects/heydonna-app/.claude/scripts/pr-ci-readiness-gate.py",
+      "~/Downloads/projects/heydonna-app/.claude/scripts/control_plane_issue_policy.py",
+      "~/Downloads/projects/heydonna-app/.claude/scripts/hourly-ops-review-prompt.txt",
       "~/.claude/control-plane/current/claude/scripts/ci/rerun-after-local-proof.sh",
       "~/.claude/scripts/launch-dev-slot-claude.sh",
       "~/.claude/scripts/launch-slot-1.sh",
@@ -42,7 +45,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 67,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -63,7 +66,10 @@
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py",
       "sha256": "61a13f6113390e4da1c94876b0cc80e8c86ddb17664624c22d3b3dc59a71d859",
       "mode": 493,
-      "preimage_modes": [420, 493]
+      "preimage_modes": [
+        420,
+        493
+      ]
     }
   ],
   "entries": [
@@ -203,6 +209,25 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/ci/pr-ci-readiness-gate.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/pr-ci-readiness-gate.py",
+      "additional_targets": [
+        "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/pr-ci-readiness-gate.py"
+      ],
+      "sha256": "398881ce0cd6ab80105d29a9d64469719cdfbb4584583c68bba17d368d142b50",
+      "mode": 493,
+      "ownership_class": "shared-claude-ci-readiness-gate",
+      "source_authority": {
+        "repository": "heydonna-app/heydonna-app",
+        "commit": "986ec4dc3ad8b735560d4f4ba89b44f0aad5fc7f",
+        "path": "scripts/pm/control-plane/pr-ci-readiness-gate.py",
+        "preimage_sha256": "73e5da3463b3b6745640521c7fcec88e1bacc30ea3358d8e87b404843274b615",
+        "mode": 493
+      },
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/ci/publish-ci-verdict.py",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
       "sha256": "0377c424f10dfc252cd3157123a52abc1f653d7741afe903d87adbb67d54e705",
@@ -226,6 +251,39 @@
       "sha256": "468f99652adead59ae39343edcef1d472caf1ebfa14046c4fd0cd611df2d6832",
       "mode": 493,
       "ownership_class": "shared-claude-ci-rerun-consumer",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/control_plane_issue_policy.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/control_plane_issue_policy.py",
+      "additional_targets": [
+        "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/control_plane_issue_policy.py"
+      ],
+      "sha256": "e53b0624360dee3b32adc7acfc35ed0c3a7e8c0c4a48bb5a02c576bef388018d",
+      "mode": 420,
+      "ownership_class": "shared-claude-ci-readiness-dependency",
+      "source_authority": {
+        "repository": "heydonna-app/heydonna-app",
+        "commit": "986ec4dc3ad8b735560d4f4ba89b44f0aad5fc7f",
+        "path": "scripts/pm/control-plane/control_plane_issue_policy.py",
+        "mode": 420
+      },
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/hourly-ops-review-prompt.txt",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/hourly-ops-review-prompt.txt",
+      "sha256": "d3c8a21ded95c63b5cc65914936bc771aa222c58fc6c9d90dcad7b119e562d13",
+      "mode": 420,
+      "ownership_class": "shared-claude-ci-ops-prompt",
+      "source_authority": {
+        "repository": "heydonna-app/heydonna-app",
+        "path": ".claude/scripts/hourly-ops-review-prompt.txt",
+        "preimage_sha256": "0f5f59270bcf35c01c8c482c56dbd183853e41e8cb40d6d87c7a421bc5528b8a",
+        "mode": 420
+      },
       "dependency_status": "closed",
       "dependencies": []
     },
