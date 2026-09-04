@@ -5,12 +5,24 @@ description: Process one PM release or free-slot notice through existing MoP pat
 
 ## Execution contract
 
-Re-read the current slot and Ready Pool before every action. A changed,
+Re-read the current slot and Ready Pool before every action. Every PM wait/free
+notice is a wake signal: never classify it as `STALE` or `IGNORED`, and never
+discard it because its snapshot changed. Reconcile issue, PR, epoch, owner,
+wait age, assignment, and free/occupied state from the current readback. A changed,
 ineligible, active, productive, DND, or uncertain readback returns a typed
 `PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch` and makes no POST.
 
-For an occupied PM_WAIT notice whose carried wait age is at least 20 minutes,
-first invoke `Skill(direct-release)` exactly once. That full contract delivers
+For an occupied PM_WAIT notice, use the notice only as a wake signal and use
+the current slot tuple rather than the notice snapshot. Derive release
+eligibility exclusively from the current assignment epoch, current
+`assigned_at`/current wait anchor, and current episode age; never use the
+notice's carried wait age to authorize release. If the notice epoch or episode
+is old and the fresh current episode is not yet due, preserve the current slot,
+make no release POST, and return
+`PM_NUDGE_RECONCILIATION_PROCESSED reason=current_wait_not_due`.
+This is a processed reconciliation result, never `STALE` or `IGNORED`. When
+the fresh current episode age is at least 20 minutes, first invoke
+`Skill(direct-release)` exactly once. That full contract delivers
 the exact `Switch to main and pull the latest origin/main.` instruction once,
 waits for natural completion, re-reads the same complete assignment at the
 same epoch, requires inactive/idle/non-DND state and a clean checkout exactly

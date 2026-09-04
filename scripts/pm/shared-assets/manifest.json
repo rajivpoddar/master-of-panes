@@ -411,7 +411,7 @@
     {
       "source_path": "claude/skills/pm-nudge-processing/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/pm-nudge-processing/SKILL.md",
-      "sha256": "637477b92d040f025027f9d634e1b5217f38dfb0cae71f212c780459e07df4c4",
+      "sha256": "56239706a4e7abd6b659a9a666ffad80b4820f391a8f8a584116517937c287d7",
       "mode": 420,
       "ownership_class": "shared-claude-pm-nudge-processing-skill",
       "dependency_status": "closed",
