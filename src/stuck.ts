@@ -455,7 +455,9 @@ export class StuckDetector {
     const waitAnchor = this.getIdleOccupiedWaitAnchor(slot, idleAnchor);
     const waitAgeMs = Date.now() - waitAnchor.timestampMs;
     const waitAgeMinutes = Math.max(5, Math.floor(waitAgeMs / 60_000));
+    const waitAgeBucket = Math.max(5, Math.floor(waitAgeMinutes / 5) * 5);
     const urgency = this.idleOccupiedUrgency(waitAgeMinutes);
+    const releaseRequired = waitAgeMinutes >= 20;
 
     const activeSubagent = this.db.hasRecentSubagentDispatch(
       slot.slot,
@@ -491,13 +493,20 @@ export class StuckDetector {
         const payload = JSON.parse(prior.payload) as {
           assignment_epoch?: number;
           idle_anchor?: string;
+          wait_age_minutes?: number;
           urgency?: IdleOccupiedUrgency;
         };
+        const priorWaitAge = payload.wait_age_minutes;
+        const priorWaitBucket = typeof priorWaitAge === "number" && Number.isFinite(priorWaitAge)
+          ? Math.max(5, Math.floor(priorWaitAge / 5) * 5)
+          : null;
         if (
           payload.assignment_epoch === slot.assignment_epoch &&
           payload.idle_anchor === idleAnchor.timestamp &&
-          this.idleOccupiedUrgencyRank(payload.urgency) >=
-            this.idleOccupiedUrgencyRank(urgency)
+          (priorWaitBucket === waitAgeBucket ||
+            (priorWaitBucket === null &&
+              this.idleOccupiedUrgencyRank(payload.urgency) >=
+                this.idleOccupiedUrgencyRank(urgency)))
         ) {
           return;
         }
@@ -527,12 +536,18 @@ export class StuckDetector {
       `assignment_epoch=${slot.assignment_epoch} pr=${current.pr ?? "unknown"} ` +
       `issue=${current.issue ?? "unknown"} branch=${current.branch ?? "unknown"} ` +
       `head=${current.head_sha ?? "unknown"} wait_started_at=${waitAnchor.timestamp} ` +
-      `wait_age_minutes=${waitAgeMinutes} urgency=${urgency}. ` +
+      `wait_age_minutes=${waitAgeMinutes} urgency=${urgency}` +
+      (releaseRequired ? " release_required=true action=RELEASE_REQUIRED. " : ". ") +
       "Classify PM_WAIT vs LOCAL_CONTINUE. If LOCAL_CONTINUE, continue the exact " +
       "unfinished phase NOW: edits → affected tests → commit → push; do not end " +
       "the turn without a new head, a typed blocker, or a terminal receipt; " +
       "classification-only or \"will continue\" prose is a violation. API timeouts " +
-      "and interrupted local work are not PM waits.";
+      "and interrupted local work are not PM waits." +
+      (releaseRequired
+        ? " This is a release-required PM_WAIT: after classification, PM must use " +
+          "pm-nudge-processing to re-read the exact idle inactive non-DND lease, " +
+          "release it once, then consider one eligible Ready Pool assignment."
+        : "");
 
     const delivery = await this.sendContinueIfAllowed(
       slot.slot,

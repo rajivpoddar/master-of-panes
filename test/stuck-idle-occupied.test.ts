@@ -787,6 +787,26 @@ test("raises urgency with the occupied idle age", async () => {
   }
 });
 
+test("repeats occupied wait nudges by five-minute bucket and marks release due", async () => {
+  const originalNow = Date.now;
+  try {
+    const h = harness(slot());
+    for (const minutes of [6, 10, 15, 20, 25]) {
+      Date.now = () => Date.parse(OLD_IDLE + "Z") + minutes * 60_000;
+      await h.detector.checkIdleOccupied(slot());
+    }
+
+    assert.equal(h.sends.length, 5);
+    assert.match(h.sends[0], /wait_age_minutes=6 urgency=REMINDER\./);
+    assert.match(h.sends[1], /wait_age_minutes=10 urgency=REMINDER\./);
+    assert.match(h.sends[2], /wait_age_minutes=15 urgency=FOLLOW_UP\./);
+    assert.match(h.sends[3], /wait_age_minutes=20 urgency=FOLLOW_UP release_required=true action=RELEASE_REQUIRED\./);
+    assert.match(h.sends[4], /wait_age_minutes=25 urgency=FOLLOW_UP release_required=true action=RELEASE_REQUIRED\./);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("uses authoritative inactive turn state when the legacy idle flag is stale", async () => {
   const originalNow = Date.now;
   Date.now = () => NOW;

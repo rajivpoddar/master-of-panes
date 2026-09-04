@@ -411,7 +411,7 @@
     {
       "source_path": "claude/skills/pm-nudge-processing/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/pm-nudge-processing/SKILL.md",
-      "sha256": "823d9bcd15237b04859ba147866b030fb14da19a84f25a93d7dcb544ee6cbc3c",
+      "sha256": "9e4878da1280789d91735db3f8d041476d47d7fa75ce278688edf6681045661e",
       "mode": 420,
       "ownership_class": "shared-claude-pm-nudge-processing-skill",
       "dependency_status": "closed",
@@ -420,7 +420,7 @@
     {
       "source_path": "claude/skills/pm-wait-nudge/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/pm-wait-nudge/SKILL.md",
-      "sha256": "ded49c40932ac5bb05d4fa10de4d947fbce7bf70460e876c082c21d498a781f3",
+      "sha256": "15f316bcbe6bcc29452fa53cfc35050a91a23f2583ff8917275fcba577508f1d",
       "mode": 420,
       "ownership_class": "shared-claude-pm-wait-nudge-skill",
       "dependency_status": "closed",
