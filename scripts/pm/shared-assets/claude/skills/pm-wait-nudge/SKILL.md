@@ -11,7 +11,14 @@ reassignment, release choice, exception, or conveyor-policy change, PM sends one
 evidence-bound recommendation to Abhijit CTO in `#heydonna-dev` and stops before
 mutation. CTO alone DMs Rajiv and waits for explicit approval.
 
-Read the already-injected numbered-slot notice. If it is `LOCAL_CONTINUE`, continue local work, do not notify PM, and finish with:
+Read the already-injected numbered-slot notice as a wake signal, not as an
+authoritative state snapshot. Never classify a PM wait or free-slot notice as
+`STALE` or `IGNORED`. PM must re-read the named slot and current Ready Pool in
+`pm-nudge-processing`; changes in issue, PR, epoch, owner, wait age,
+assignment, or free/occupied state change the action to match current
+readback.
+
+If it is `LOCAL_CONTINUE`, continue local work, do not notify PM, and finish with:
 
 `PM_WAIT_NUDGE_RESULT classification=LOCAL_CONTINUE action=continued`
 
@@ -19,4 +26,4 @@ If it is `PM_WAIT` before the release boundary, send PM one concise status/block
 
 `PM_WAIT_NUDGE_RESULT classification=PM_WAIT action=reminded_pm waiting=<wait_age_minutes> urgency=<urgency>`
 
-If it is an idle/free assignment notice, send PM one concise free-slot and ready-work notice through `message-pm` exactly once. Do not assign, release, clear, reserve, or message a numbered slot from this skill.
+If it is an idle/free assignment notice, send PM one concise free-slot and ready-work notice through `message-pm` exactly once. Do not assign, release, clear, reserve, or message a numbered slot from this skill; the processor must reconcile the current state before acting.
