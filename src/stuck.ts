@@ -779,7 +779,7 @@ export class StuckDetector {
   private isIdleByHookState(
     slot: SlotState
   ): { idle: boolean } {
-    return { idle: slot.active_turn_state === "inactive" };
+    return { idle: slot.active_turn_state === "inactive" && slot.idle === true };
   }
 
   private hasActiveReleaseIntent(slot: SlotState): boolean {
@@ -893,6 +893,20 @@ export class StuckDetector {
         command,
         false
       );
+      if (sent && !allowActiveTurn && typeof this.db.openPromptDelivery === "function") {
+        const opened = this.db.openPromptDelivery(
+          slotNum,
+          current.assignment_epoch,
+          current.assigned_at,
+        );
+        if (!opened) {
+          return {
+            sent: false,
+            reason: "identity_changed",
+            slot: this.db.getSlot(slotNum) ?? current,
+          };
+        }
+      }
       return {
         sent,
         reason: sent ? "sent" : "send_failed",

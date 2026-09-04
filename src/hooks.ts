@@ -1263,10 +1263,11 @@ export class HookProcessor {
     );
     await this.syncObservedCheckout(slotNum, payload);
 
-    // Capture pre-update idle state for idle→active transition detection.
-    // Must read BEFORE updateSlot clears the idle flag, otherwise
-    // handlePostToolUse never sees the transition. (Bug fix 2026-03-16)
-    const wasIdle = this.db.getSlot(slotNum)?.idle ?? false;
+    // Capture the authoritative prompt-open state before processing. Only the
+    // explicit UserPromptSubmit opener may feed idle→active transition work.
+    const wasIdle = payload.type === "UserPromptSubmit"
+      ? this.db.getSlot(slotNum)?.idle ?? false
+      : false;
 
     const isIdlePromptNotification =
       payload.type === "Notification" &&
@@ -1275,15 +1276,20 @@ export class HookProcessor {
       payload.type === "Notification" &&
       payload.notification_type === "permission_prompt";
 
-    // Update last_activity and mark busy/idle from runtime state.
-    // SessionStart / PreCompact / PostCompact don't change idle flag — they're
-    // lifecycle events that don't reflect work-in-progress state.
+    // UserPromptSubmit and Stop/SessionEnd are the lifecycle boundaries. Tool
+    // hooks only refresh telemetry; they must not infer a new turn or change
+    // the authoritative idle flag.
     const lifecycleEvents = new Set([
       "SessionStart",
       "PreCompact",
       "PostCompact",
     ]);
-    if (!lifecycleEvents.has(payload.type)) {
+    const isToolTelemetry = payload.type === "PreToolUse" || payload.type === "PostToolUse";
+    if (isToolTelemetry) {
+      this.db.updateSlot(slotNum, {
+        last_activity: new Date().toISOString(),
+      });
+    } else if (!lifecycleEvents.has(payload.type)) {
       const idle = payload.type === "Stop" || isIdlePromptNotification || isPermissionPromptNotification;
       this.db.updateSlot(slotNum, {
         last_activity: new Date().toISOString(),

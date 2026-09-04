@@ -1900,11 +1900,54 @@ export class MoPDatabase {
     });
   }
 
+  /**
+   * Open the authoritative turn boundary for a prompt MoP has delivered to
+   * an occupied slot when the producer's UserPromptSubmit hook is delayed or
+   * absent. The assignment generation and assigned_at timestamp fence this
+   * fallback so a released or reassigned slot can never be marked active by a
+   * stale delivery. The later UserPromptSubmit, when present, supplies the
+   * real session identity through startAgentTurn.
+   */
+  openPromptDelivery(
+    slot: number,
+    expectedEpoch: number,
+    expectedAssignedAt: string | null,
+  ): boolean {
+    return this.db.transaction(() => {
+      const current = this.getSlot(slot);
+      if (
+        !current
+        || !current.occupied
+        || current.assignment_epoch !== expectedEpoch
+        || current.assigned_at !== expectedAssignedAt
+      ) {
+        return false;
+      }
+      // A real UserPromptSubmit may win the race while the pane delivery is
+      // completing. It already opened this exact generation, so the delivery
+      // is safely reconciled without overwriting its session identity.
+      if (current.active_turn_state === "active" && !current.idle) return true;
+      if (
+        current.active_turn_id !== null
+        || current.active_turn_state !== "inactive"
+        || !current.idle
+      ) return false;
+      const now = new Date().toISOString();
+      this.updateSlot(slot, {
+        active_turn_id: null,
+        active_turn_started_at: now,
+        active_turn_state: "active",
+        last_meaningful_work_at: now,
+        idle: false,
+      });
+      return true;
+    })();
+  }
+
   touchMeaningfulWork(slot: number, _turnId?: string | null): void {
     const now = new Date().toISOString();
     this.updateSlot(slot, {
       last_meaningful_work_at: now,
-      idle: false,
     });
   }
 

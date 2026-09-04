@@ -297,7 +297,7 @@ test("meaningful tool telemetry never synthesizes a turn boundary", () => {
     assert.equal(current.active_turn_state, "inactive");
     assert.equal(current.active_turn_id, null);
     assert.equal(current.active_turn_started_at, null);
-    assert.equal(current.idle, false);
+    assert.equal(current.idle, true);
 
     db.startAgentTurn(1, "turn-a");
     const startedAt = db.getSlot(1)!.active_turn_started_at;

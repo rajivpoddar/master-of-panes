@@ -822,14 +822,14 @@ test("injects occupied wait nudges at thirty-minute boundaries and marks release
   }
 });
 
-test("uses authoritative inactive turn state when the legacy idle flag is stale", async () => {
+test("refuses a non-idle slot even when legacy turn state is inactive", async () => {
   const originalNow = Date.now;
   Date.now = () => Date.parse(OLD_IDLE + "Z") + 30 * 60_000;
   try {
     const candidate = slot({ idle: false, active_turn_state: "inactive" });
     const h = harness(candidate);
     await h.detector.checkIdleOccupied(candidate);
-    assert.deepEqual(h.sends, [expectedNudge(30, "URGENT")]);
+    assert.deepEqual(h.sends, []);
   } finally {
     Date.now = originalNow;
   }
