@@ -384,7 +384,7 @@
     {
       "source_path": "claude/skills/direct-assign/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/direct-assign/SKILL.md",
-      "sha256": "77305c64ec27767bac1d025b5dc07117a96dad500cbfaf35e1caa172222dfa64",
+      "sha256": "9b6f0c5f8e39e07cd83e4706f268e212c6239eea435d5b148d78ea3d5f8232e1",
       "mode": 420,
       "ownership_class": "shared-claude-direct-assignment-skill",
       "dependency_status": "closed",
@@ -393,7 +393,7 @@
     {
       "source_path": "claude/skills/direct-release/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/direct-release/SKILL.md",
-      "sha256": "70c808c174a419b1cc0f8354bb9f8af9dee17ca9afbd0542dc834656a63cd2d6",
+      "sha256": "569b99b726c53d258002e1255a6e2569cbeb126c6dc5ea40c6b869703cce25ed",
       "mode": 420,
       "ownership_class": "shared-claude-direct-release-skill",
       "dependency_status": "closed",
@@ -411,7 +411,7 @@
     {
       "source_path": "claude/skills/pm-nudge-processing/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/pm-nudge-processing/SKILL.md",
-      "sha256": "9e4878da1280789d91735db3f8d041476d47d7fa75ce278688edf6681045661e",
+      "sha256": "a424bf79d8ca453257e7825b76b3b3e28b260c6fe64230a73cdfc94b1e1ef8be",
       "mode": 420,
       "ownership_class": "shared-claude-pm-nudge-processing-skill",
       "dependency_status": "closed",

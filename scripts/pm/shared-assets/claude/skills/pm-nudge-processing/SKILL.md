@@ -1,19 +1,41 @@
 ---
 name: pm-nudge-processing
-description: Process one PM free-slot or held-slot release notice through existing paths.
+description: Process one PM release or free-slot notice through existing MoP paths.
 ---
 
-## Rajiv decision gate
+## Execution contract
 
-Treat the notice as mechanical only when the existing Rajiv-approved Ready Pool
-and slot policy select exactly one assignment without PM discretion. Multiple
-eligible targets, a priority or owner choice, or any policy exception/change is
-a process decision. In that case send one evidence-bound recommendation to
-Abhijit CTO in `#heydonna-dev` and stop without assigning; CTO must DM Rajiv and
-wait for explicit approval. PM never asks Rajiv directly.
+Re-read the current slot and Ready Pool before every action. A changed,
+ineligible, active, productive, DND, or uncertain readback returns a typed
+`PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch` and makes no POST.
 
-For one `release_required=true` / `action=RELEASE_REQUIRED` notice, re-read the current slot immediately before acting. Require the same occupied slot and assignment epoch, `active_turn_state=inactive`, `idle=true`, and `dnd=false`. If the lease is active, productive, DND-protected, missing, or changed, return `PM_RELEASE_BLOCKED reason=current_state_mismatch` and make no POST. Otherwise make exactly one empty `POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release`. Accept only HTTP 200 with a returned slot projection showing `occupied=false`; a refusal, non-200, malformed response, or uncertain response is `PM_RELEASE_BLOCKED` with the server reason and must not be retried. Re-read the current Ready Pool only after confirmed release. If its normal policy selects exactly one eligible target, continue with one assignment POST as below; otherwise return its typed no-eligible/state-changed blocker and make no assignment call.
+For an occupied PM_WAIT notice whose carried wait age is at least 20 minutes,
+first invoke the existing direct-release boundary exactly once:
 
-For one free-slot notice, re-read the current slot and Ready Pool immediately before acting. If the selected work and slot are no longer eligible, return `PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch` and do not assign. Otherwise make exactly one `POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign` with JSON `issue`, `repository_id`, and the complete PM-authored `task` message.
+```text
+POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release
+```
 
-If MoP refuses the assignment, return `PM_ASSIGNMENT_BLOCKED` with its reason and do not retry. Do not add a capability, authority header, tuple/epoch fence, reservation, receipt, acknowledgement, or second assignment path. Never clear, relabel, trigger workflows, or post Slack from this instruction surface; release-required notices use only the existing direct release route above.
+Require the authoritative `occupied=false` readback with an advanced epoch.
+Do not release an active/productive/DND or changed lease, and never retry an
+error or uncertain release result.
+
+After a confirmed release, or for a free-slot notice, select exactly one
+eligible Ready Pool item in priority order: `repro`, `rework`, then `new_issue`.
+Use its complete literal task message and execute the existing direct-assign
+contract once. That request is `{issue, repository_id, task}` and its success
+must include occupied readback plus `delivery_verified=true`.
+
+`repro` binds existing issue/PR, exact head, failing evidence, a bounded
+reproduction command or question, and terminal evidence; it is never general
+implementation. `rework` binds the existing PR/branch/exact head and existing
+rework-handoff correction scope; it never creates a new PR. `new_issue` uses the
+full current dev-handoff template and issue/workflow contract.
+
+For a successful `new_issue`, PM posts exactly one top-level `#heydonna-dev`
+transition parent containing issue, slot, assignment summary, and CTO mention,
+then uses its `thread_ts` for later PR transitions. Repro/rework reuse their
+existing PR transition thread and never create a duplicate parent. A missing
+or mismatched current state, no eligible work, route refusal, or uncertain
+response is one typed blocker with no retry, second assignment, second pane
+send, or alternate control plane.
