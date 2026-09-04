@@ -1005,6 +1005,58 @@ export class TmuxRelay {
     }
   }
 
+  /**
+   * Assignment-only text delivery boundary.
+   *
+   * Native assignment has already committed the slot before it calls this
+   * method, so an uncertain or failed pane submission must be surfaced to the
+   * route instead of being retried. Keep the retrying sendToSlotAsync path
+   * unchanged for all other callers.
+   */
+  async sendToSlotOnceAsync(slotNum: number, command: string): Promise<boolean> {
+    if (!isValidDevSlot(slotNum)) return false;
+
+    const identity = await verifyPaneIdentity(slotNum, this.runShell);
+    if (!identity.ok) {
+      console.warn(`[relay] refusing one-shot assignment delivery for slot ${slotNum}: ${identity.detail}`);
+      if (this.db) {
+        this.db.logEvent(slotNum, "assignment_delivery_rejected_pane_identity", null, null, {
+          reason: identity.reason,
+          detail: identity.detail,
+          address: paneAddress(slotNum),
+        });
+      }
+      return false;
+    }
+
+    const paneTarget = identity.snapshot.paneId;
+    const sequence = ++this.directInjectSeq;
+    const tmpFile = `/tmp/mop-assignment-${slotNum}-${process.pid}-${sequence}.txt`;
+    const bufName = `mop-assignment-${slotNum}-${process.pid}-${sequence}`;
+    try {
+      await fs.writeFile(tmpFile, command);
+      await this.runShell(
+        `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
+        { timeout: 3_000 },
+      );
+      await this.runShell(
+        `tmux paste-buffer -b ${bufName} -t ${paneTarget} -d`,
+        { timeout: 3_000 },
+      );
+      await sleep(300);
+      await this.runShell(
+        `tmux send-keys -t ${paneTarget} Enter`,
+        { timeout: 3_000 },
+      );
+      return true;
+    } catch (error) {
+      console.warn(`[relay] one-shot assignment delivery failed for slot ${slotNum}:`, error);
+      return false;
+    } finally {
+      await fs.unlink(tmpFile).catch(() => undefined);
+    }
+  }
+
   async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false): Promise<boolean> {
     void _force; // v3: every send is unconditional
     if (slotNum === 0 && !raw) {

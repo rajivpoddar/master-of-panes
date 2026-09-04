@@ -555,9 +555,9 @@ test("Slack route and numbered-slot paths use shared PM/slot submit boundaries",
   const sendStart = relay.indexOf("async sendToSlotAsync");
   const sendEnd = relay.indexOf("\n  /**", sendStart);
   const sendBody = relay.slice(sendStart, sendEnd);
-  assert.match(sendBody, /tmux send-keys -t \$\{paneAddr\} Enter/);
+  assert.match(sendBody, /tmux send-keys -t \$\{paneTarget\} Enter/);
   assert.match(sendBody, /submitToPM\(command\)/);
-  const numberedBody = sendBody.slice(sendBody.indexOf("const paneAddr"));
+  const numberedBody = sendBody.slice(sendBody.indexOf("const paneTarget"));
   assert.doesNotMatch(numberedBody, /C-q/);
 
   const drainStart = relay.indexOf("private async runDrainCheck");
