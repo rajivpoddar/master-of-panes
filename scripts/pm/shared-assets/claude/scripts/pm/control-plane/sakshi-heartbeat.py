@@ -1237,6 +1237,54 @@ def _workflow_phase(
     return None
 
 
+def _run_attempt(run: dict[str, Any]) -> int | None:
+    """Return one positive GitHub run-attempt number, or None if malformed."""
+
+    raw = run.get("run_attempt", run.get("runAttempt", run.get("attempt")))
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        attempt = int(raw.strip())
+        return attempt if attempt > 0 else None
+    return None
+
+
+def _latest_required_workflow_runs(
+    runs: list[dict[str, Any]], head: str
+) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """Select one authoritative latest run/attempt for each required workflow."""
+
+    grouped: dict[str, list[tuple[dict[str, Any], datetime, int, int]]] = {}
+    for run in runs:
+        workflow = str(run.get("workflowName") or run.get("name") or "")
+        if workflow not in OPEN_PR_AUDIT_WORKFLOWS or not _run_matches_exact_head(run, head):
+            continue
+        created = parse_ts(run.get("created_at") or run.get("createdAt"))
+        attempt = _run_attempt(run)
+        raw_id = run.get("id", run.get("databaseId"))
+        run_id = str(raw_id or "").strip()
+        if created is None or attempt is None or not run_id.isdigit() or int(run_id) <= 0:
+            return {}, f"malformed exact-head {workflow} chronology or attempt identity"
+        grouped.setdefault(workflow, []).append((run, created, attempt, int(run_id)))
+
+    selected: dict[str, dict[str, Any]] = {}
+    for workflow, candidates in grouped.items():
+        latest_created = max(created for _, created, _, _ in candidates)
+        newest_runs = [candidate for candidate in candidates if candidate[1] == latest_created]
+        if len({candidate[3] for candidate in newest_runs}) > 1:
+            return {}, f"ambiguous exact-head {workflow} chronology or attempt identity"
+        latest_run_id = max(candidate[3] for candidate in newest_runs)
+        same_run = [candidate for candidate in newest_runs if candidate[3] == latest_run_id]
+        latest_attempt = max(candidate[2] for candidate in same_run)
+        latest_attempt_rows = [candidate for candidate in same_run if candidate[2] == latest_attempt]
+        if len(latest_attempt_rows) != 1:
+            return {}, f"ambiguous exact-head {workflow} chronology or attempt identity"
+        selected[workflow] = latest_attempt_rows[0][0]
+    return selected, None
+
+
 def evaluate_open_pr_activity(
     pr: dict[str, Any],
     runs: list[dict[str, Any]],
@@ -1298,6 +1346,23 @@ def evaluate_open_pr_activity(
     capture = False
     ci_e2e = False
     ci_e2e_green: set[str] = set()
+    latest_required_runs, run_selection_error = _latest_required_workflow_runs(runs, head)
+    if run_selection_error:
+        return _motion_result(
+            number=number,
+            branch=branch,
+            head=head,
+            motion_state="UNKNOWN",
+            lanes={"capture": False, "ci_e2e": False, "numbered_reproduction": False},
+            reasons=[run_selection_error],
+            next_boundary="re-read exact-head workflow chronology and attempt evidence",
+            wake="re-read exact-head workflow evidence",
+        )
+    latest_required_keys = {
+        (workflow, str(run.get("id") or run.get("databaseId") or ""), _run_attempt(run))
+        for workflow, run in latest_required_runs.items()
+    }
+    latest_required_phases: dict[str, str | None] = {}
     active_workflow_motion: list[str] = []
     live_workflow_runs: dict[str, set[str]] = {}
     last_exact: dict[str, Any] | None = None
@@ -1306,9 +1371,17 @@ def evaluate_open_pr_activity(
         is_capture_workflow = any(marker in workflow.lower() for marker in OPEN_PR_AUDIT_CAPTURE_WORKFLOW_MARKERS)
         if not _run_matches_exact_head(run, head, allow_capture_dispatch=is_capture_workflow):
             continue
+        if workflow in OPEN_PR_AUDIT_WORKFLOWS and (
+            workflow,
+            str(run.get("id") or run.get("databaseId") or ""),
+            _run_attempt(run),
+        ) not in latest_required_keys:
+            continue
         run_id = str(run.get("databaseId") or run.get("id") or "")
         jobs = jobs_by_run.get(run_id, [])
         phase = _workflow_phase(run, jobs)
+        if workflow in OPEN_PR_AUDIT_WORKFLOWS:
+            latest_required_phases[workflow] = phase
         if workflow in OPEN_PR_AUDIT_WORKFLOWS and phase in {"active", "queued"}:
             ci_e2e = True
             live_workflow_runs.setdefault(workflow, set()).add(run_id or "missing-run-id")
@@ -1454,7 +1527,13 @@ def evaluate_open_pr_activity(
         )
 
     merge_ready, merge_ready_error = _merge_ready_is_authoritative(pr)
-    if merge_ready and ci_e2e_green == OPEN_PR_AUDIT_WORKFLOWS:
+    latest_required_failures = [
+        f"{workflow} latest exact-head run is terminal non-success"
+        for workflow in sorted(OPEN_PR_AUDIT_WORKFLOWS)
+        if workflow in latest_required_phases
+        and latest_required_phases[workflow] not in {"active", "queued", "green"}
+    ]
+    if merge_ready and ci_e2e_green == OPEN_PR_AUDIT_WORKFLOWS and not latest_required_failures:
         return _motion_result(
             number=number,
             branch=branch,
@@ -1474,6 +1553,7 @@ def evaluate_open_pr_activity(
         )
 
     reasons = ["no genuinely executing exact-head lane"]
+    reasons.extend(latest_required_failures)
     if merge_ready_error and "merge-ready" in (labels or set()):
         reasons.append(merge_ready_error)
     elif merge_ready and ci_e2e_green != OPEN_PR_AUDIT_WORKFLOWS:

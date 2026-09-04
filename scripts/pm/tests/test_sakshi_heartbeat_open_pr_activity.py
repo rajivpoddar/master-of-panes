@@ -41,7 +41,8 @@ def open_pr(*, labels: list[str] | None = None, head: str = HEAD) -> dict:
 
 
 def run(workflow: str, *, status: str = "completed", conclusion: str | None = "success",
-        event: str = "pull_request", run_id: int = 1, head: str = HEAD) -> dict:
+        event: str = "pull_request", run_id: int = 1, head: str = HEAD,
+        created_at: str = "2026-09-04T00:00:00Z", run_attempt: int | str = 1) -> dict:
     return {
         "id": run_id,
         "head_sha": head,
@@ -49,7 +50,8 @@ def run(workflow: str, *, status: str = "completed", conclusion: str | None = "s
         "event": event,
         "status": status,
         "conclusion": conclusion,
-        "created_at": "2026-09-04T00:00:00Z",
+        "created_at": created_at,
+        "run_attempt": run_attempt,
     }
 
 
@@ -101,6 +103,48 @@ class SakshiOpenPrActivityTests(unittest.TestCase):
         self.assertFalse(row["gap"])
         self.assertIn("CI:green", row["workflow_motion"])
         self.assertIn("E2E Smoke Tests:green", row["workflow_motion"])
+
+    def test_newer_terminal_failure_or_cancellation_overrides_older_green(self):
+        for conclusion in ("failure", "cancelled", "timed_out"):
+            runs = [
+                run("CI", run_id=100, created_at="2026-09-04T00:00:00Z"),
+                run("CI", run_id=101, conclusion=conclusion, created_at="2026-09-04T01:00:00Z"),
+                run("E2E Smoke Tests", run_id=102, created_at="2026-09-04T00:00:00Z"),
+                run("E2E Smoke Tests", run_id=103, conclusion=conclusion, created_at="2026-09-04T01:00:00Z"),
+            ]
+            row = self.evaluate(pr=open_pr(labels=["merge-ready"]), runs=runs,
+                                jobs={str(item["id"]): [] for item in runs})
+            self.assertEqual(row["motion_state"], "PROCESS_LIMBO")
+            self.assertTrue(row["gap"])
+            self.assertIn("latest exact-head run is terminal non-success", " ".join(row["reasons"]))
+
+    def test_latest_successful_attempt_is_authoritative_for_same_run(self):
+        runs = [
+            run("CI", run_id=110, run_attempt=1, conclusion="success"),
+            run("CI", run_id=110, run_attempt=2, conclusion="failure"),
+            run("E2E Smoke Tests", run_id=111),
+        ]
+        row = self.evaluate(pr=open_pr(labels=["merge-ready"]), runs=runs,
+                            jobs={"110": [], "111": []})
+        self.assertEqual(row["motion_state"], "PROCESS_LIMBO")
+        self.assertTrue(row["gap"])
+
+    def test_latest_attempt_success_keeps_merge_ready(self):
+        runs = [
+            run("CI", run_id=120, run_attempt=1, conclusion="failure"),
+            run("CI", run_id=120, run_attempt=2, conclusion="success"),
+            run("E2E Smoke Tests", run_id=121),
+        ]
+        row = self.evaluate(pr=open_pr(labels=["merge-ready"]), runs=runs,
+                            jobs={"120": [], "121": []})
+        self.assertEqual(row["motion_state"], "MERGE_READY")
+
+    def test_malformed_latest_run_ordering_is_unknown(self):
+        malformed = run("CI", run_id=130)
+        malformed.pop("created_at")
+        row = self.evaluate(runs=[malformed, run("E2E Smoke Tests", run_id=131)])
+        self.assertEqual(row["motion_state"], "UNKNOWN")
+        self.assertTrue(row["gap"])
 
     def test_active_and_queued_ci_are_non_limbo_and_distinguish_phase(self):
         active = run("CI", status="in_progress", conclusion=None, run_id=20)

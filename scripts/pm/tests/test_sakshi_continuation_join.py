@@ -50,6 +50,7 @@ def running_run(workflow: str, event: str = "pull_request") -> tuple[list[dict],
         "status": "in_progress",
         "conclusion": None,
         "created_at": "2026-09-01T00:00:00Z",
+        "run_attempt": 1,
     }
     job = {
         "id": 991,
@@ -371,6 +372,7 @@ class SakshiContinuationJoinTests(unittest.TestCase):
             "status": "completed",
             "conclusion": "failure",
             "created_at": "2026-09-01T00:00:00Z",
+            "run_attempt": 1,
         }]
         row = self.evaluate(runs=runs, jobs={"33397393224": []})
         self.assertEqual(row["lane"], "true limbo")
