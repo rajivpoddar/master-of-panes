@@ -1,17 +1,45 @@
 ---
 name: direct-assign
-description: Assign one free numbered slot through Master of Panes.
+description: Assign one mechanically selected task to one free numbered slot.
 ---
 
-## Rajiv decision gate
+## Execution contract
 
-This skill may execute only a mechanically determined assignment under an
-existing Rajiv-approved slot policy. If more than one eligible target exists,
-the caller selects a different priority/owner, or the assignment would change,
-waive, or override slot or Ready Pool policy, stop before the POST. Send one
-evidence-bound recommendation to Abhijit CTO in `#heydonna-dev`; CTO must DM
-Rajiv and wait for explicit approval. PM never asks Rajiv directly.
+Classify the selected Ready Pool work as exactly one of `repro`, `rework`, or
+`new_issue` before making any request. Read the current slot and Ready Pool
+immediately before acting; if the slot or selection changed, return
+`PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch` and make no POST.
 
-Read the current slot and Ready Pool once. If the slot is not free or the work is no longer eligible, stop without changing anything. Otherwise make exactly one `POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign` with JSON `issue`, `repository_id`, and the complete PM-authored `task` message.
+Make exactly one request to the existing native boundary:
 
-If MoP refuses, report its reason and stop. Do not add an authority header, caller epoch or tuple, capability, reservation, receipt, acknowledgement, label change, checkout mutation, pane send, fallback, or retry.
+```text
+POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign
+JSON {issue, repository_id, task}
+```
+
+The `task` is the complete literal PM-authored message for the selected work.
+Accept success only from an occupied slot readback with
+`delivery_verified=true`; MoP performs the one delivery to that pinned slot.
+Never send a second message-slot request, retry an error or uncertain response,
+or treat an assignment without verified delivery as success.
+
+## Message shapes
+
+- `repro`: bind the existing issue and PR, repository, exact head, failing
+  evidence, bounded reproduction command or question, and terminal evidence.
+  This is reproduction/proof only and must not become general implementation.
+- `rework`: bind the existing PR, branch, exact head, correction scope, and
+  existing rework-handoff template. Do not create a new PR.
+- `new_issue`: use the complete current dev-handoff template, including the
+  issue contract and required workflow chain.
+
+After successful `new_issue` assignment, post exactly one new top-level
+`#heydonna-dev` transition parent containing the issue, slot, assignment
+summary, and CTO mention. Record its `thread_ts`; all later PR transitions for
+that assignment reply in that thread. For `repro` and `rework`, reuse the
+existing authoritative PR transition thread when present and never create a
+new-issue parent. A missing or ambiguous thread mapping is a typed blocker and
+must not cause another assignment or delivery.
+
+If MoP refuses, return its reason and stop. Do not change labels, slots, or
+worktrees and do not invoke an alternate assignment authority.

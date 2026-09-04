@@ -890,7 +890,7 @@ app.patch("/slots/:slotNum", async (c) => {
 });
 
 /** Assign a slot through the direct MoP route. */
-registerAssignmentRoute(app, db);
+registerAssignmentRoute(app, db, (slot, task) => relay.sendToSlotAsync(slot, task, true, false));
 
 registerFamily2Routes(app, {
   db,

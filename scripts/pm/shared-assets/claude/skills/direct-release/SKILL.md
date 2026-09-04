@@ -3,15 +3,25 @@ name: direct-release
 description: Release one quiescent numbered slot through Master of Panes.
 ---
 
-## Rajiv decision gate
+## Execution contract
 
-This skill may execute only a mechanically required release under an existing
-Rajiv-approved slot policy. A discretionary release, park, drain, reassignment,
-force, exception, or change to slot policy is a process decision: stop before
-the POST and send one evidence-bound recommendation to Abhijit CTO in
-`#heydonna-dev`. CTO must DM Rajiv and wait for explicit approval. PM never asks
-Rajiv directly.
+Use this only for an already-authorized, mechanically required release. Read
+the current slot once. If it is active, productive, DND, changed, or no longer
+the same held assignment, return `PM_RELEASE_BLOCKED reason=current_state_mismatch`
+with no POST.
 
-Read the current slot once. If it is active, productive, or DND, stop without changing anything. Otherwise make exactly one empty `POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release`.
+In the assigned checkout, first:
 
-If MoP refuses, report its reason and stop. Do not add an authority header, caller epoch or tuple, capability, reset instruction, checkout mutation, reservation, receipt, acknowledgement, fallback, or retry.
+```text
+Switch to main and pull the latest origin/main.
+```
+
+Then invoke the existing direct release boundary exactly once:
+
+```text
+POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release
+```
+
+Accept only the route's authoritative free-slot readback. On refusal, error,
+or uncertain response return its typed reason and stop. Never retry, reset,
+force, stash, alter ownership, send pane input, or use another release path.
