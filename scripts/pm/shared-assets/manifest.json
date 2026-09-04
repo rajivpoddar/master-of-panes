@@ -625,7 +625,7 @@
     {
       "source_path": "codex/skills/codex-stdio-send-message/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/codex-stdio-send-message/SKILL.md",
-      "sha256": "e3b511fce25ee8f2096f4ee2d0bba9ead237d30fff2cd52bd4a7bb66dcf52609",
+      "sha256": "ee0310d41f4f19726fb266a86c245d5c5cce0641bae090bccb5dddd2569f622b",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",
@@ -643,7 +643,7 @@
     {
       "source_path": "codex/skills/codex-stdio-send-message/scripts/send_message.py",
       "canonical_target": "/Users/rajiv/.codex/skills/codex-stdio-send-message/scripts/send_message.py",
-      "sha256": "6e1daaa1ae7b6c727a3148dd1cb00963b686a550abfee9ffe52e72fdf081a7f1",
+      "sha256": "1f4433eea43d62fd9c183968b13432857af6dc4dc7e36e4ce05a84671cf54874",
       "mode": 493,
       "ownership_class": "shared-codex-skill-executable",
       "dependency_status": "closed",
@@ -652,7 +652,7 @@
     {
       "source_path": "codex/skills/codex-stdio-send-message/scripts/test_send_message.py",
       "canonical_target": "/Users/rajiv/.codex/skills/codex-stdio-send-message/scripts/test_send_message.py",
-      "sha256": "081d3eec3bd7f64a1799adf3772ad0df1a70ffe1ec07f7a82f721db3cf6d45b6",
+      "sha256": "aaddd00616c1fc7055a847cfc7dbb2d73fa74aeb731d510b5c893cf17a1bbe6e",
       "mode": 420,
       "ownership_class": "shared-codex-skill-test",
       "dependency_status": "closed",

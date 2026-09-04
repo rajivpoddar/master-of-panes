@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Queue and start one exact message in an existing Codex Desktop task over stdio."""
+"""Queue one exact message in an existing Codex Desktop task over stdio."""
 
 from __future__ import annotations
 
@@ -30,17 +30,9 @@ class RpcError(RuntimeError):
         self.message = message
         super().__init__(f"app-server-rpc-error code={code} message={message}")
 
-    @property
-    def is_resume_required(self) -> bool:
-        return (
-            self.code == -32600
-            and self.message == "resume the thread before starting a queued message"
-        )
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Queue and start one exact message in an existing Codex Desktop task."
+        description="Queue one exact message in an existing Codex Desktop task."
     )
     parser.add_argument("--thread-id", required=True)
     parser.add_argument("--dedup-key", required=True)
@@ -128,7 +120,6 @@ def main() -> int:
     args = parse_args()
     process: subprocess.Popen[str] | None = None
     queue_attempted = False
-    queued_submission_id: str | None = None
     selector: selectors.BaseSelector | None = None
     try:
         if not TASK_ID_RE.fullmatch(args.thread_id):
@@ -204,27 +195,14 @@ def main() -> int:
             raise RuntimeError("queue-response-missing-submission-id")
         if returned_client_id != client_message_id:
             raise RuntimeError("queue-response-mismatched-client-message-id")
-        queued_submission_id = submission_id
-        write_json(
-            process.stdin,
-            {
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "thread/queue/start",
-                "params": {
-                    "threadId": args.thread_id,
-                    "queuedSubmissionId": queued_submission_id,
-                },
-            },
-        )
-        read_response(process, selector, 3, args.timeout_seconds)
         emit(
             {
-                "status": "delivered",
+                "status": "queued_for_task_consumption",
                 "threadId": args.thread_id,
-                "queuedSubmissionId": queued_submission_id,
+                "queuedSubmissionId": submission_id,
                 "clientUserMessageId": client_message_id,
-                "startAccepted": True,
+                "queueAccepted": True,
+                "executionOwnership": "queued",
             }
         )
         return 0
@@ -232,45 +210,9 @@ def main() -> int:
         emit({"status": "invalid", "error": str(error)})
         return 4
     except RpcError as error:
-        if queued_submission_id is not None and error.is_resume_required:
-            emit(
-                {
-                    "status": "queued_for_task_consumption",
-                    "threadId": args.thread_id,
-                    "queuedSubmissionId": queued_submission_id,
-                    "clientUserMessageId": client_message_id,
-                    "queueAccepted": True,
-                    "executionOwnership": "queued",
-                    "startAccepted": False,
-                    "error": str(error),
-                }
-            )
-            return 0
-        if queued_submission_id is not None:
-            emit(
-                {
-                    "status": "queued",
-                    "threadId": args.thread_id,
-                    "queuedSubmissionId": queued_submission_id,
-                    "clientUserMessageId": client_message_id,
-                    "error": str(error),
-                }
-            )
-            return 5
         emit({"status": "unavailable", "error": str(error)})
         return 2
     except (BrokenPipeError, OSError, RuntimeError, TimeoutError) as error:
-        if queued_submission_id is not None:
-            emit(
-                {
-                    "status": "queued",
-                    "threadId": args.thread_id,
-                    "queuedSubmissionId": queued_submission_id,
-                    "clientUserMessageId": client_message_id,
-                    "error": str(error),
-                }
-            )
-            return 5
         status = "uncertain" if queue_attempted else "unavailable"
         emit({"status": status, "error": str(error)})
         return 3 if queue_attempted else 2

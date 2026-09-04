@@ -41,10 +41,6 @@ FAKE_CODEX = textwrap.dedent(
             continue
         elif method == "thread/queue/add":
             response = {"jsonrpc": "2.0", "id": request_id, "result": {"queuedSubmission": {"id": "q-1", "clientUserMessageId": request["params"]["clientUserMessageId"]}}}
-        elif method == "thread/queue/start" and mode == "resume":
-            response = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32600, "message": "resume the thread before starting a queued message"}}
-        elif method == "thread/queue/start" and mode == "queued":
-            response = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": "start unavailable"}}
         else:
             response = {"jsonrpc": "2.0", "id": request_id, "result": {}}
         print(json.dumps(response), flush=True)
@@ -289,7 +285,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
             self.assertFalse(target.exists() or target.is_symlink())
         self.assertFalse(list(self.targets.rglob("*.shared.*.tmp")))
 
-    def test_mapped_target_invocation_preserves_delivery_states_without_retry(self) -> None:
+    def test_mapped_target_invocation_queues_once_without_start_or_retry(self) -> None:
         self.install()
         target = self.targets / "Users" / "rajiv" / ".codex" / "skills" / "codex-stdio-send-message" / "scripts" / "send_message.py"
         fake = self.root / "fake-codex"
@@ -297,9 +293,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
         fake.chmod(0o755)
         common = ["python3", str(target), "--thread-id", "thread-1", "--dedup-key", "event-1", "--message", "hello", "--codex-bin", str(fake), "--timeout-seconds", "1"]
         expected = {
-            "success": (0, "delivered"),
-            "resume": (0, "queued_for_task_consumption"),
-            "queued": (5, "queued"),
+            "success": (0, "queued_for_task_consumption"),
             "queue-fail": (2, "unavailable"),
             "uncertain": (3, "uncertain"),
         }
@@ -308,7 +302,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
             self.assertEqual(result.returncode, code, mode)
             receipt = json.loads(result.stdout)
             self.assertEqual(receipt["status"], status, mode)
-            if status in {"delivered", "queued_for_task_consumption", "queued"}:
+            if status == "queued_for_task_consumption":
                 self.assertEqual(receipt["queuedSubmissionId"], "q-1")
 
 
