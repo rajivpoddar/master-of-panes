@@ -48,7 +48,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 70,
+    "selected_count": 71,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -97,6 +97,15 @@
       "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/block-ci-rerun-without-local-proof.sh",
+      "canonical_target": "/Users/rajiv/.claude/hooks/block-ci-rerun-without-local-proof.sh",
+      "sha256": "52da3ba2145728f7938a506cf6022634d68598650d86412fe458f8d1f76a88ef",
+      "mode": 493,
+      "ownership_class": "shared-claude-ci-rerun-guard-hook",
       "dependency_status": "closed",
       "dependencies": []
     },

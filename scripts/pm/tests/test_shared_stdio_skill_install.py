@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -71,7 +72,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
     def test_manifest_is_deterministic_and_source_parity_is_exact(self) -> None:
         manifest = MODULE._load_shared_manifest(self.release)
         self.assertEqual(manifest["entries"], sorted(manifest["entries"], key=lambda item: item["source_path"]))
-        self.assertEqual(manifest["inventory"]["selected_count"], 70)
+        self.assertEqual(manifest["inventory"]["selected_count"], 71)
         self.assertEqual(manifest["inventory"]["ambiguous"], [])
         result = self.install()
         self.assertEqual(result["status"], "SHARED_ASSETS_INSTALLED")
@@ -81,6 +82,58 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
             target = self.targets / entry["canonical_target"].lstrip("/")
             self.assertEqual(source.read_bytes(), target.read_bytes())
             self.assertEqual(stat.S_IMODE(source.stat().st_mode), stat.S_IMODE(target.stat().st_mode))
+
+    def test_block_ci_rerun_guard_is_manifest_bound_and_preserves_command_matrix(self) -> None:
+        relative = "scripts/pm/shared-assets/claude/hooks/block-ci-rerun-without-local-proof.sh"
+        parent_probe = subprocess.run(
+            ["git", "cat-file", "-e", f"HEAD^:{relative}"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(parent_probe.returncode, 0)
+
+        manifest = json.loads((REPO_ROOT / "scripts" / "pm" / "shared-assets" / "manifest.json").read_text())
+        entries = {entry["source_path"]: entry for entry in manifest["entries"]}
+        entry = entries["claude/hooks/block-ci-rerun-without-local-proof.sh"]
+        source = REPO_ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "hooks" / "block-ci-rerun-without-local-proof.sh"
+        installed = Path(entry["canonical_target"])
+        self.assertEqual(entry["canonical_target"], "/Users/rajiv/.claude/hooks/block-ci-rerun-without-local-proof.sh")
+        self.assertEqual(entry["mode"], 0o755)
+        self.assertEqual(entry["ownership_class"], "shared-claude-ci-rerun-guard-hook")
+        self.assertEqual(entry["dependency_status"], "closed")
+        self.assertEqual(entry["dependencies"], [])
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), "52da3ba2145728f7938a506cf6022634d68598650d86412fe458f8d1f76a88ef")
+        self.assertEqual(entry["sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+        self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o755)
+        self.assertTrue(installed.is_file())
+        self.assertEqual(source.read_bytes(), installed.read_bytes())
+
+        def invoke(command: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [str(source)],
+                input=json.dumps({"tool_input": {"command": command}}),
+                text=True,
+                capture_output=True,
+            )
+
+        for command in (
+            "gh pr edit 7626 --add-label pm-blocked:ci",
+            "gh issue edit 7609 --remove-label pm-blocked:dependency",
+            "gh pr view 7626 --json labels",
+        ):
+            with self.subTest(allowed=command):
+                self.assertEqual(invoke(command).returncode, 0)
+
+        for command in (
+            "gh run rerun 123",
+            "gh workflow run ci.yml",
+            "gh pr edit 7626 --add-label pm-state:qa-passed-awaiting-ci",
+            "gh api repos/heydonna-app/heydonna-app/issues/7609 -X PATCH -f labels[]=pm-state:qa-passed-awaiting-ci",
+            "/Users/rajiv/.claude/scripts/pm-state-replace.sh 7626 qa-passed-awaiting-ci",
+        ):
+            with self.subTest(blocked=command):
+                self.assertEqual(invoke(command).returncode, 2)
 
     def test_release_conveyor_matrix_has_guarded_control_plane_refusal(self) -> None:
         shared = self.release / "scripts" / "pm" / "shared-assets"
