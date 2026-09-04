@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,7 +7,9 @@ import { Hono } from "hono";
 
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
 import { MoPDatabase } from "../src/db.js";
+import { TmuxRelay } from "../src/relay.js";
 import type { MoPConfig } from "../src/types.js";
+import { DEFAULT_CONFIG } from "../src/types.js";
 
 function request(issue: number, task: string): RequestInit {
   return {
@@ -92,4 +94,74 @@ test("delivery failure is explicit and never retried", async () => {
     assert.equal((result.slot as Record<string, unknown>).occupied, true);
     assert.equal(deliveryCount, 1);
   });
+});
+
+test("assignment auto-delivery uses the real one-shot relay boundary", async () => {
+  const serverSource = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  assert.match(serverSource, /registerAssignmentRoute\(app, db, \(slot, task\) => relay\.sendToSlotOnceAsync\(slot, task\)\)/);
+  assert.doesNotMatch(serverSource, /registerAssignmentRoute\(app, db, \(slot, task\) => relay\.sendToSlotAsync/);
+
+  const failureModes = ["identity", "load", "paste", "submit", "none"] as const;
+  for (const failure of failureModes) {
+    const directory = mkdtempSync(join(tmpdir(), "mop-assignment-one-shot-"));
+    const config: MoPConfig = {
+      ...DEFAULT_CONFIG,
+      httpPort: 0,
+      dbPath: join(directory, "mop.db"),
+    };
+    const commands: string[] = [];
+    const loadedBytes: Buffer[] = [];
+    let expectedTask = "";
+    const relay = new TmuxRelay(config, {
+      runShell: async (command) => {
+        commands.push(command);
+        if (failure === "identity" && command.startsWith("tmux display-message")) {
+          throw new Error("identity unavailable");
+        }
+        if (command.startsWith("tmux display-message")) {
+          return { stdout: "%42|/Users/rajiv/Downloads/projects/heydonna-app-3001\n", stderr: "" };
+        }
+        if (command.startsWith("git -C")) {
+          return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app-3001\n", stderr: "" };
+        }
+        if (command.includes("tmux load-buffer")) {
+          const filePath = /'([^']+)'$/.exec(command)?.[1];
+          if (filePath) loadedBytes.push(readFileSync(filePath));
+          if (failure === "load") throw new Error("load failed");
+        }
+        if (failure === "paste" && command.includes("tmux paste-buffer")) throw new Error("paste failed");
+        if (failure === "submit" && command.includes("tmux send-keys") && command.endsWith(" Enter")) {
+          throw new Error("submit failed");
+        }
+        return { stdout: "", stderr: "" };
+      },
+    });
+    const db = new MoPDatabase(config);
+    const app = new Hono();
+    registerAssignmentRoute(app, db, (slot, task) => relay.sendToSlotOnceAsync(slot, task));
+    try {
+      const task = "ASSIGNMENT CANARY\nexact multiline bytes";
+      expectedTask = task;
+      const response = await app.request("/slots/1/assign", request(7616, task));
+      const expectedStatus = failure === "none" ? 200 : 502;
+      assert.equal(response.status, expectedStatus, failure);
+      const loadCount = commands.filter((command) => command.includes("tmux load-buffer")).length;
+      const pasteCount = commands.filter((command) => command.includes("tmux paste-buffer")).length;
+      const submitCount = commands.filter((command) => command.includes("tmux send-keys") && command.endsWith(" Enter")).length;
+      assert.ok(loadCount <= 1, `${failure}: load count ${loadCount}`);
+      assert.ok(pasteCount <= 1, `${failure}: paste count ${pasteCount}`);
+      assert.ok(submitCount <= 1, `${failure}: submit count ${submitCount}`);
+      if (failure === "none") {
+        assert.equal(loadCount, 1);
+        assert.equal(pasteCount, 1);
+        assert.equal(submitCount, 1);
+        assert.deepEqual(loadedBytes, [Buffer.from(expectedTask)]);
+        assert.ok(commands.some((command) => command.includes("tmux paste-buffer") && command.includes("-t %42")));
+        assert.ok(commands.some((command) => command.includes("tmux send-keys -t %42 Enter")));
+      }
+    } finally {
+      db.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
 });

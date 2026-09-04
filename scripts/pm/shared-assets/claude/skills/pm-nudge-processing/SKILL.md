@@ -10,15 +10,21 @@ ineligible, active, productive, DND, or uncertain readback returns a typed
 `PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch` and makes no POST.
 
 For an occupied PM_WAIT notice whose carried wait age is at least 20 minutes,
-first invoke the existing direct-release boundary exactly once:
+first invoke `Skill(direct-release)` exactly once. That full contract delivers
+the exact `Switch to main and pull the latest origin/main.` instruction once,
+waits for natural completion, re-reads the same complete assignment at the
+same epoch, requires inactive/idle/non-DND state and a clean checkout exactly
+at current `origin/main`, then owns the one existing release call:
 
 ```text
 POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release
 ```
 
 Require the authoritative `occupied=false` readback with an advanced epoch.
-Do not release an active/productive/DND or changed lease, and never retry an
-error or uncertain release result.
+Do not duplicate the release call here, release an active/productive/DND or
+changed lease, or retry an error or uncertain release result. If any part of
+the direct-release contract refuses, return its typed current-state blocker
+and do not select replacement work.
 
 After a confirmed release, or for a free-slot notice, select exactly one
 eligible Ready Pool item in priority order: `repro`, `rework`, then `new_issue`.

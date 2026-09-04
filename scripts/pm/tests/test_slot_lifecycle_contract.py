@@ -28,15 +28,30 @@ def test_direct_assign_contract_covers_three_shapes_and_single_native_edge():
 def test_direct_release_contract_is_one_existing_release_call():
     text = _text("direct-release")
     assert "Switch to main and pull the latest origin/main." in text
+    assert "exactly once through" in text
+    assert "message-slot/direct-send path" in text
+    assert "same slot" in text
+    assert "pinned epoch" in text
+    assert "complete assignment tuple" in text
+    assert "clean" in text
+    assert "checkout" in text
+    assert "no unpushed work" in text
+    assert "HEAD` equal to the current" in text
     assert "POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release" in text
     assert "exactly once" in text
     for forbidden in ("reset", "force", "retry"):
         assert forbidden in text
+    assert "send another pane message" in text
+    assert "Never send pane input" not in text
 
 
 def test_nudge_contract_releases_first_and_prioritizes_work():
     text = _text("pm-nudge-processing")
     assert "at least 20 minutes" in text
+    assert "Skill(direct-release)" in text
+    assert "exact `Switch to main and pull the latest origin/main.` instruction once" in text
+    assert "same complete assignment" in text
+    assert "same epoch" in text
     assert "occupied=false" in text
     assert "repro`, `rework`, then `new_issue" in text
     assert text.count("POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release") == 1
