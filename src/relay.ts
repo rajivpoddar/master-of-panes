@@ -800,7 +800,10 @@ export class TmuxRelay {
           await fs.unlink(tmpFile).catch(() => undefined);
         }
       } else {
-        await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
+        // `message` is one literal key argument. Terminate tmux option
+        // parsing so an option-leading PM message (for example
+        // "--slot 2 --body") is delivered as text rather than a flag.
+        await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} -- ${shellEscape(message)}`, { timeout: 10_000 });
         pasted = true;
         await sleep(PM_INJECT_ENTER_DELAY_MS);
         await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });

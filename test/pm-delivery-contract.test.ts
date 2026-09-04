@@ -50,6 +50,32 @@ test("native Claude submits immediately without a PM pending-event row", async (
   }
 });
 
+test("PM freeform single-line messages terminate tmux option parsing", async () => {
+  const commands: string[] = [];
+  let resolveComplete!: () => void;
+  const complete = new Promise<void>((resolve) => { resolveComplete = resolve; });
+  const relay = new TmuxRelay(DEFAULT_CONFIG, {
+    pmRuntime: "claude",
+    runShell: async (command) => {
+      commands.push(command);
+      if (commands.length === 4) resolveComplete();
+      return { stdout: "", stderr: "" };
+    },
+  });
+
+  assert.equal(relay.injectToPM("--slot 2 --body"), true);
+  assert.equal(relay.injectToPM("-n literal"), true);
+  await complete;
+
+  assert.deepEqual(
+    commands.filter((command) => command.includes("tmux send-keys") && !command.endsWith(" Enter")),
+    [
+      "tmux send-keys -t 0:0.0 -- '--slot 2 --body'",
+      "tmux send-keys -t 0:0.0 -- '-n literal'",
+    ],
+  );
+});
+
 test("native Claude serializes complete paste-delay-Enter sequences", async () => {
   const commands: string[] = [];
   let releaseFirstEnter!: () => void;
