@@ -92,6 +92,46 @@ class SakshiContinuationJoinTests(unittest.TestCase):
             continuation_records=records or [],
         )
 
+    def test_workflow_runs_are_scoped_to_each_validated_full_head(self) -> None:
+        exact_runs, exact_jobs = running_run("CI")
+        unrelated_runs = [
+            {
+                "id": 40000000000 + index,
+                "head_sha": "a" * 40,
+                "workflowName": "CI",
+                "event": "pull_request",
+                "status": "completed",
+                "conclusion": "success",
+            }
+            for index in range(101)
+        ]
+        calls: list[list[str]] = []
+
+        def audit(args: list[str]):
+            calls.append(args)
+            endpoint = args[0]
+            if endpoint.endswith("/pulls"):
+                return [pr()], None
+            if endpoint.endswith("/actions/runs"):
+                if f"head_sha={HEAD}" not in args:
+                    return {"workflow_runs": unrelated_runs}, None
+                return {"workflow_runs": exact_runs}, None
+            if "/actions/runs/" in endpoint and endpoint.endswith("/jobs"):
+                return {"jobs": exact_jobs[str(exact_runs[0]["id"])]}, None
+            raise AssertionError(f"unexpected GitHub audit endpoint: {args}")
+
+        with mock.patch.object(MODULE, "_audit_gh_json", side_effect=audit), mock.patch.object(
+            MODULE, "_load_open_pr_continuations", return_value=([], None)
+        ):
+            result = MODULE.collect_open_pr_activity_audit({})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["open_pr_activity_gaps"], 0)
+        self.assertEqual(result["rows"][0]["motion_state"], "CI_IN_PROGRESS")
+        run_calls = [call for call in calls if call[0].endswith("/actions/runs")]
+        self.assertEqual(len(run_calls), 1)
+        self.assertIn(f"head_sha={HEAD}", run_calls[0])
+
     def test_source_joins_durable_records_instead_of_pr_synthetic_owner_fields(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
         self.assertNotIn("_blocked_motion_metadata", source)

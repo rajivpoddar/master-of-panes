@@ -1486,7 +1486,7 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
         runs, run_error = _audit_gh_json(
             [
             f"repos/{OPEN_PR_AUDIT_REPOSITORY}/actions/runs",
-                "--method", "GET", "-f", "per_page=100",
+                "--method", "GET", "-f", f"head_sha={head}", "-f", "per_page=100",
             ]
         )
         if run_error or not isinstance(runs, dict) or not isinstance(runs.get("workflow_runs"), list):
