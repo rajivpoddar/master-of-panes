@@ -714,72 +714,9 @@ raise SystemExit(1)
 PY
 }
 
-# CI run/churn/budget caps are retired from rerun ADMISSION (Rajiv directive
-# C0ALZJHGE49 thread 1786947023.747929, ts 1786947050.707089): the production
-# budget gate call is removed, so budget debt can never refuse a rerun. The
-# two helpers below are retained byte-identical ONLY as legacy no-call compat
-# anchors for duplicate rerun-wrapper test harnesses living under
-# scripts/ci/tests (an app_ci-classified path outside this control-plane
-# tuple's allowed scope). Nothing in production invokes them.
-guarded_first_attempt_budget_override_ok() {
-  local out="$1" run_id="$2" bad_ids bad_id attempt
-  bad_ids="$(python3 - "$out" "$run_id" <<'PY'
-import json
-import re
-import sys
-
-try:
-    data = json.loads(sys.argv[1])
-except (TypeError, ValueError):
-    raise SystemExit(1)
-
-reasons = data.get("reasons") or []
-if len(reasons) != 1 or not re.fullmatch(
-    r"current_head_bad_run_budget_exceeded count=\d+ max=\d+",
-    str(reasons[0]),
-):
-    raise SystemExit(1)
-
-bad = [
-    row for row in (data.get("rows") or [])
-    if row.get("stale_head") is False
-    and row.get("budget_consumed") is True
-    and row.get("status") == "completed"
-    and row.get("conclusion") in {
-        "failure", "cancelled", "timed_out", "action_required"
-    }
-]
-ids = [str(row.get("run_id") or "") for row in bad]
-if sys.argv[2] not in ids or not ids:
-    raise SystemExit(1)
-print("\n".join(ids))
-PY
-  )" || return 1
-
-  # This helper is reached only after exact-head proof and the canonical
-  # current-attempt verdict have passed above. Permit one guarded first retry,
-  # but stop the loop if any budgeted failure has already consumed a rerun.
-  while IFS= read -r bad_id; do
-    [[ "$bad_id" =~ ^[0-9]+$ ]] || return 1
-    attempt="$(gh api "repos/${REPO}/actions/runs/${bad_id}" --jq '.run_attempt' 2>/dev/null || true)"
-    [ "$attempt" = "1" ] || return 1
-  done <<<"$bad_ids"
-}
-
-budget_ok() {
-  local pr="$1" run_id="$2" out status reasons
-  [ -x "$CI_BUDGET" ] || return 0
-  out="$(python3 "$CI_BUDGET" --pr "$pr" --repo "$REPO" --mode rerun --json 2>/dev/null || true)"
-  status="$(python3 -c 'import json,sys; d=json.loads(sys.stdin.read() or "{}"); print(d.get("status","degraded"))' <<<"$out" 2>/dev/null || echo degraded)"
-  if [ "$status" = "blocked" ]; then
-    if guarded_first_attempt_budget_override_ok "$out" "$run_id"; then
-      echo "RERUN_AFTER_LOCAL_PROOF_WARN reason=guarded_first_attempt_current_head_bad_run_override pr=$pr run=$run_id" >&2
-      return 0
-    fi
-    reasons="$(python3 -c 'import json,sys; d=json.loads(sys.stdin.read() or "{}"); print(",".join(d.get("reasons") or ["unknown"]))' <<<"$out" 2>/dev/null || echo unknown)"
-    die "ci_budget_exceeded pr=$pr reasons=$reasons"
-  fi
-}
+# CI run-count, churn, and spend budgets are retired from this shared rerun
+# consumer. Exact-head, causal-classification, stale-head, active-duplicate,
+# cleanup, and single-flight fences below remain the safety controls.
 
 pr=""
 run_id=""

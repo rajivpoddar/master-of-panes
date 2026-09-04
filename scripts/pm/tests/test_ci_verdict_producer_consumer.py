@@ -57,6 +57,26 @@ def run_snapshot(**overrides: object) -> dict:
 
 
 class CiVerdictProducerConsumerTests(unittest.TestCase):
+    def test_rerun_consumer_has_no_spend_budget_gate_or_counter(self) -> None:
+        wrapper = WRAPPER.read_text(encoding="utf-8")
+        for retired in (
+            "CI_BUDGET",
+            "budget_ok(",
+            "guarded_first_attempt_budget_override_ok",
+            "current_head_bad_run_budget_exceeded",
+            "ci_budget_exceeded",
+            "max_total_runs",
+            "max_current_bad_runs",
+            "max_expensive_runs",
+            "window-hours",
+            "estimated_min_cost",
+        ):
+            self.assertNotIn(retired, wrapper)
+        self.assertIn("current_head_ci_already_running", wrapper)
+        self.assertIn("rerun_already_claimed", wrapper)
+        self.assertIn("run_head_mismatch", wrapper)
+        self.assertIn('args=(run rerun "$run_id" --repo "$REPO")', wrapper)
+
     def consumer_script(self) -> str:
         wrapper = WRAPPER.read_text(encoding="utf-8")
         start = wrapper.index('  python3 - "$comments_file"')
