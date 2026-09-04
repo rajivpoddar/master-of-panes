@@ -29,8 +29,20 @@ and do not select replacement work.
 After a confirmed release, or for a free-slot notice, select exactly one
 eligible Ready Pool item in priority order: `repro`, `rework`, then `new_issue`.
 Use its complete literal task message and execute the existing direct-assign
-contract once. That request is `{issue, repository_id, task}` and its success
-must include occupied readback plus `delivery_verified=true`.
+contract once. For `repro` and `rework`, send the freshly read complete PR
+identity so the native route writes a heartbeat-consumable slot record:
+
+```text
+POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/assign
+JSON {expected_epoch, issue, repository_id, pr, branch, head_sha, work_kind, handoff_id, task}
+```
+
+The request must contain one matching full 40-hex head, branch, work kind,
+handoff, and expected epoch; a partial or stale tuple is a typed zero-effect
+refusal. Success must include occupied readback, `delivery_verified=true`, the
+same PR/head/branch/work identity, and the returned assignment epoch. For
+`new_issue`, there is no PR/head yet, so retain the issue-only
+`{issue, repository_id, task}` form.
 
 `repro` binds existing issue/PR, exact head, failing evidence, a bounded
 reproduction command or question, and terminal evidence; it is never general

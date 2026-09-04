@@ -138,6 +138,16 @@ test("PR-bound assignment writes the complete slot identity consumed by the hear
   });
 });
 
+test("PM nudge processing names the complete PR tuple and not the legacy body", () => {
+  const processing = readFileSync(
+    new URL("../scripts/pm/shared-assets/claude/skills/pm-nudge-processing/SKILL.md", import.meta.url),
+    "utf8",
+  );
+  assert.match(processing, /For `repro` and `rework`, send the freshly read complete PR\s+identity/);
+  assert.match(processing, /JSON \{expected_epoch, issue, repository_id, pr, branch, head_sha, work_kind, handoff_id, task\}/);
+  assert.doesNotMatch(processing, /For `repro` and `rework`[\s\S]{0,500}That request is \{issue, repository_id, task\}/);
+});
+
 test("a partial PR identity cannot fall back to a headless assignment", async () => {
   await withRoute(async () => true, async (app, db) => {
     const response = await app.request("/slots/1/assign", completeRequest({ head_sha: undefined }));
