@@ -28,6 +28,7 @@
       "~/.claude/scripts/pm-terminal-wake.py",
       "~/.claude/control_plane/runtime_observation.py",
       "~/.claude/scripts/sakshi-heartbeat.py",
+      "~/.claude/scripts/pr-ci-readiness-gate.py",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
       "~/.claude/skills/direct-assign/SKILL.md",
       "~/.claude/skills/direct-release/SKILL.md",
@@ -48,7 +49,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 75,
+    "selected_count": 76,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -200,6 +201,15 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/pr-ci-readiness-gate.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/pr-ci-readiness-gate.py",
+      "sha256": "7dceab86419f53dba997c27273b46da0a9d6b4f4cdfbbc471d31d53dcf74c12a",
+      "mode": 493,
+      "ownership_class": "shared-claude-cto-admission-readiness-gate",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/axiom-activity-report.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/axiom-activity-report.py",
       "sha256": "8b67ea060d935f4be465aa342b0f3fe00e86950ce0ccbb80a58b1e2cc1d94abd",
@@ -238,7 +248,7 @@
     {
       "source_path": "claude/scripts/ci/heydonna-cto-label-gated-ci.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/ci/heydonna-cto-label-gated-ci.py",
-      "sha256": "1a843fba5fe7e76b41634d54c3866b0470f8c974b430d5fbfcbb83ecc787c187",
+      "sha256": "f955e4e9cb92e74e2b40b9a07baee3beb2c852c57459e7e04a59f5e07501f43f",
       "mode": 493,
       "ownership_class": "shared-claude-cto-paid-admission",
       "dependency_status": "closed",

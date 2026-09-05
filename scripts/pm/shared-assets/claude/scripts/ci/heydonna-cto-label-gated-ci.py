@@ -28,7 +28,7 @@ REPO = "heydonna-app/heydonna-app"
 # The readiness gate is a shared installed control-plane dependency.  Calling
 # the app-checkout sibling lets its resolver select an older visual gate.
 READINESS_GATE = Path("/Users/rajiv/.claude/scripts/pr-ci-readiness-gate.py")
-READINESS_GATE_SHA256 = "13d5bb4b25fda536723d6bdc74447a0625632fbd87b9960f80cae7efe4162ece"
+READINESS_GATE_SHA256 = "7dceab86419f53dba997c27273b46da0a9d6b4f4cdfbbc471d31d53dcf74c12a"
 VISUAL_GATE = Path("/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py")
 VISUAL_GATE_SHA256 = "b9bbb10da4adc35c50e1820da1ccb3e87dd4e0468b823783360efe1314e82271"
 ISSUE_CONTRACT_VALIDATOR = Path("/Users/rajiv/.claude/scripts/validate-issue-contract-ledger.py")

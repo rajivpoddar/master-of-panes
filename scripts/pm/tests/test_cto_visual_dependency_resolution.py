@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ VALIDATOR = ROOT / "scripts/pm/shared-assets/claude/scripts/validate-issue-contr
 CLASSIFIER = ROOT / "scripts/pm/shared-assets/claude/scripts/ci/change_scope.py"
 RULES = ROOT / "scripts/pm/shared-assets/claude/scripts/ci/change-scope-rules.json"
 ADAPTER = ROOT / "scripts/pm/shared-assets/claude/scripts/ci/heydonna-cto-label-gated-ci.py"
+READINESS = ROOT / "scripts/pm/shared-assets/claude/pr-ci-readiness-gate.py"
 
 HEAD = "4604bc0d154f8fc8519be4c5547095d271bdd75f"
 PR = 7639
@@ -251,6 +253,59 @@ def _load_adapter():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_readiness(path: Path, monkeypatch):
+    policy = types.ModuleType("control_plane_issue_policy")
+    policy.validate_live_followup_issue = lambda *args, **kwargs: []
+    monkeypatch.setitem(sys.modules, "control_plane_issue_policy", policy)
+    spec = importlib.util.spec_from_file_location("packaged_readiness", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_packaged_readiness_uses_canonical_classifier_and_repo_root(tmp_path: Path, monkeypatch) -> None:
+    runtime = tmp_path / "runtime" / ".claude" / "scripts"
+    runtime.mkdir(parents=True)
+    readiness = runtime / "pr-ci-readiness-gate.py"
+    shutil.copy2(READINESS, readiness)
+    classifier = runtime / "ci" / "change_scope.py"
+    classifier.parent.mkdir()
+    classifier.write_text(
+        "import json, sys\n"
+        "head = sys.argv[sys.argv.index('--expected-head') + 1]\n"
+        "print(json.dumps({'head': head, 'rules_sha256': '1' * 64}))\n",
+        encoding="utf-8",
+    )
+    classifier.chmod(classifier.stat().st_mode | stat.S_IXUSR)
+    repo_root = runtime / "repo"
+    repo_root.mkdir()
+    module = _load_readiness(readiness, monkeypatch)
+    module.CANONICAL_CHANGE_SCOPE = classifier
+    module.CANONICAL_REPO_ROOT = repo_root
+
+    result = module.exact_head_change_scope(PR, HEAD, "heydonna-app/heydonna-app")
+
+    assert result["head"] == HEAD
+    assert result["classifier_sha256"] == hashlib.sha256(classifier.read_bytes()).hexdigest()
+
+
+def test_packaged_readiness_missing_classifier_or_repo_root_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    readiness = tmp_path / "pr-ci-readiness-gate.py"
+    shutil.copy2(READINESS, readiness)
+    module = _load_readiness(readiness, monkeypatch)
+    module.CANONICAL_CHANGE_SCOPE = tmp_path / "missing-change_scope.py"
+    with pytest.raises(FileNotFoundError, match="repository change_scope.py is unavailable"):
+        module.change_scope_script()
+
+    classifier = tmp_path / "change_scope.py"
+    classifier.write_text("print('{}')\n", encoding="utf-8")
+    module.CANONICAL_CHANGE_SCOPE = classifier
+    module.CANONICAL_REPO_ROOT = tmp_path / "missing-repo"
+    with pytest.raises(FileNotFoundError, match="canonical repository root is unavailable"):
+        module.exact_head_change_scope(PR, HEAD, "heydonna-app/heydonna-app")
 
 
 def test_headless_readiness_gate_error_is_not_reported_as_head_drift(monkeypatch) -> None:
