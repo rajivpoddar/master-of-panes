@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -42,6 +43,8 @@ class ObligationHeadProducerTests(unittest.TestCase):
         self.assertIn("REFUSE ci_rework obligation", ci_skill)
         self.assertIn('--evidence "head_sha=${HEAD_SHA}"', ci_skill)
         self.assertIn('CURRENT_PR_HEAD="<fresh exact current PR head from the supported readback>"', ci_skill)
+        self.assertIn('GENERIC_RUN_ID="<failed-run id from the immutable producer packet>"', ci_skill)
+        self.assertIn('target_type == "ci-run" and target_id == expected_run_id', ci_skill)
         self.assertIn("superseded_by_accepted_slot_rework", ci_skill)
         self.assertIn("superseded_by_newer_exact_head_slot_rework", ci_skill)
         self.assertIn("(kind,target_type,target_id,pr,issue)", ci_skill)
@@ -224,6 +227,27 @@ class ObligationHeadProducerTests(unittest.TestCase):
                     "--print-id",
                 ]
 
+            skill_text = (
+                ROOT / "scripts/pm/shared-assets/claude/skills/ci-failure-investigation/SKILL.md"
+            ).read_text()
+            scanner_match = re.search(
+                r"ROW_SCAN=.*?<<'PYEOF'\n(.*?)\nPYEOF",
+                skill_text,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(scanner_match)
+            scanner = scanner_match.group(1)
+
+            def scan(head: str, run_id: str) -> dict[str, object]:
+                result = subprocess.run(
+                    ["python3", "-c", scanner, str(db), "7629", head, "", run_id],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return json.loads(result.stdout)
+
             # The actual writer key is (kind, target_type, target_id, pr,
             # issue), not dedupe_group. First retain a generic failed-run
             # ci_rework row, then add the accepted nonexecuting slot row. The
@@ -239,9 +263,9 @@ class ObligationHeadProducerTests(unittest.TestCase):
                 "--severity",
                 "high",
                 "--target-type",
-                "pr",
+                "ci-run",
                 "--target-id",
-                "7629",
+                "33968407703",
                 "--pr",
                 "7629",
                 "--owner",
@@ -259,16 +283,32 @@ class ObligationHeadProducerTests(unittest.TestCase):
                 "--print-id",
             ]
             generic_id = int(run(generic))
+            # A different required run/head for the same PR is retained as
+            # history and must not be selected by the accepted transition.
+            unrelated = generic.copy()
+            unrelated = [
+                ("old-run-339" if value == "33968407703" else value)
+                for value in unrelated
+            ]
+            unrelated[unrelated.index(f"head_sha={HEAD}")] = f"head_sha={OTHER_HEAD}"
+            run(unrelated)
             slot = slot_command(HEAD)
             first_slot_id = int(run(slot))
             second_slot_id = int(run(slot))
             self.assertEqual(first_slot_id, second_slot_id)
+
+            scanned = scan(HEAD, "33968407703")
+            self.assertEqual([row["id"] for row in scanned["ci_rework"]], [generic_id])
+            self.assertEqual([row["id"] for row in scanned["slot_rework"]], [first_slot_id])
+            self.assertEqual(scanned["key_mismatch"], [])
+            self.assertEqual(scanned["older_slot_rework"], [])
 
             reader.PM_OPS_DB = db
             records, error = reader._load_open_pr_continuations("7629", HEAD)
             self.assertEqual(records, [])
             self.assertIn("contradict", error or "")
 
+            scanner_ci_id = scanned["ci_rework"][0]["id"]
             run(
                 [
                     "python3",
@@ -277,7 +317,7 @@ class ObligationHeadProducerTests(unittest.TestCase):
                     "--kind",
                     "ci_rework",
                     "--id",
-                    str(generic_id),
+                    str(scanner_ci_id),
                     "--reason",
                     "superseded_by_accepted_slot_rework",
                     "--external-state",
@@ -337,6 +377,9 @@ class ObligationHeadProducerTests(unittest.TestCase):
                 )
             )
             self.assertNotEqual(later_id, first_slot_id)
+            later_scanned = scan(later_head, "33968407703")
+            self.assertEqual(later_scanned["ci_rework"], [])
+            self.assertEqual([row["id"] for row in later_scanned["slot_rework"]], [later_id])
             records, error = reader._load_open_pr_continuations("7629", later_head)
             self.assertIsNone(error)
             self.assertEqual(records[0]["head"], later_head)

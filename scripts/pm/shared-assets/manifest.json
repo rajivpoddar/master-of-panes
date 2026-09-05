@@ -381,7 +381,7 @@
     {
       "source_path": "claude/skills/ci-failure-investigation/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/ci-failure-investigation/SKILL.md",
-      "sha256": "915321258f47aa5dfb7a75fdc4bfae0b471ee7f66dc2371b0ecd45d2a513c3d9",
+      "sha256": "8a3f59ba53ae19987fb0e83f17c02ccf5a38e51f8c36a8260e284289388407a8",
       "mode": 420,
       "ownership_class": "shared-claude-pm-obligation-producer-instruction",
       "dependency_status": "closed",

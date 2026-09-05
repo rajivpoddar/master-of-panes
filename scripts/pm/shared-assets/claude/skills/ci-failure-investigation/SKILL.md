@@ -261,6 +261,7 @@ and a fresh exact current-head re-fence; labels, prose, and a PM-only
 ```bash
 NEXT_STEP_HEAD="<full head from the accepted CTO receipt>"
 CURRENT_PR_HEAD="<fresh exact current PR head from the supported readback>"
+GENERIC_RUN_ID="<failed-run id from the immutable producer packet>"
 NEXT_OWNER="<owner named by the accepted CTO receipt>"
 NEXT_ACTION="<literal executable next action from the accepted receipt>"
 NEXT_WAKE="<literal wake condition from the accepted receipt>"
@@ -297,22 +298,21 @@ malformed and unrelated historical rows.
 
 ```bash
 PM_OPS_DB="${PM_OPS_DB:-/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db}"
-ROW_SCAN="$(python3 - "$PM_OPS_DB" "<PR>" "$NEXT_STEP_HEAD" "$NEXT_ISSUE" <<'PYEOF'
+ROW_SCAN="$(python3 - "$PM_OPS_DB" "<PR>" "$NEXT_STEP_HEAD" "$NEXT_ISSUE" "$GENERIC_RUN_ID" <<'PYEOF'
 import json
 import re
 import sqlite3
 import sys
 
-db, pr, current_head, expected_issue = sys.argv[1:]
+db, pr, current_head, expected_issue, expected_run_id = sys.argv[1:]
 expected_issue = int(expected_issue) if expected_issue else None
 head_keys = {"head", "head_sha", "headRefOid", "current_head", "current_head_sha"}
 con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 rows = con.execute(
     """SELECT id, kind, target_type, target_id, pr, issue, evidence_json
        FROM obligations
-       WHERE status='open' AND pr=?
-         AND target_type='pr' AND target_id=? AND pr=?""",
-    (int(pr), pr, int(pr)),
+       WHERE status='open' AND pr=?""",
+    (int(pr),),
 ).fetchall()
 con.close()
 
@@ -343,20 +343,36 @@ for row in rows:
     if kind not in ("ci_rework", "slot_rework"):
         continue
     head = row_head(raw)
-    item = {"id": int(row_id), "head": head, "issue": issue}
+    item = {
+        "id": int(row_id),
+        "head": head,
+        "issue": issue,
+        "target_type": target_type,
+        "target_id": target_id,
+    }
     if head is None:
         if kind == "slot_rework":
             result["malformed_slot_rework"].append(item)
         continue
-    if issue != expected_issue:
+    if kind == "ci_rework":
+        expected_ci_key = issue == expected_issue and (
+            (target_type == "ci-run" and target_id == expected_run_id)
+            or (target_type == "pr" and target_id == pr)
+        )
+        if head == current_head.lower():
+            if expected_ci_key:
+                result["ci_rework"].append(item)
+            else:
+                result["key_mismatch"].append(item)
+        continue
+    expected_slot_key = issue == expected_issue and target_type == "pr" and target_id == pr
+    if not expected_slot_key:
         if head == current_head.lower() or kind == "slot_rework":
             result["key_mismatch"].append(item)
         continue
-    if kind == "ci_rework" and head == current_head.lower():
-        result["ci_rework"].append(item)
-    elif kind == "slot_rework" and head == current_head.lower():
+    if head == current_head.lower():
         result["slot_rework"].append(item)
-    elif kind == "slot_rework":
+    else:
         result["older_slot_rework"].append(item)
 
 if (
