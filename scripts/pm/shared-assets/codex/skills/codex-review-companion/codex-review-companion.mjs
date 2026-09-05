@@ -356,6 +356,7 @@ function validPlanMarker(text, issue) {
     markerFieldFromText(text, "TYPE") === "plan-review" &&
     markerFieldFromText(text, "ISSUE") === `#${issue}` &&
     /^[0-9a-f]{7,40}$/i.test(markerFieldFromText(text, "HEAD_SHA")) &&
+    /^\d+$/.test(markerFieldFromText(text, "TIMESTAMP")) &&
     markerFieldFromText(text, "VERDICT") !== "" &&
     !text.includes("REVIEW_PROVENANCE_MODE: carry-forward")
   );
@@ -372,9 +373,7 @@ function historyFiles(directory, issue) {
 function importRetainedPlanMarkers(args, repositoryDirectory) {
   const legacyRoot =
     process.env.CODEX_REVIEW_LEGACY_DIR || "/tmp/codex-review-companion";
-  const candidates = historyFiles(legacyRoot, args.issue).filter((file) =>
-    path.basename(file).startsWith(`plan-issue-${args.issue}-`),
-  );
+  const candidates = historyFiles(legacyRoot, args.issue);
   for (const source of candidates) {
     const text = fs.readFileSync(source, "utf8");
     if (!validPlanMarker(text, args.issue)) {
@@ -384,6 +383,36 @@ function importRetainedPlanMarkers(args, repositoryDirectory) {
     const target = path.join(repositoryDirectory, `${digest}.md`);
     if (!fs.existsSync(target)) atomicWrite(target, text);
   }
+}
+
+function openBlockerClasses(text) {
+  const classes = [];
+  let currentClass = null;
+  for (const line of String(text).split("\n")) {
+    if (line.startsWith("BLOCKER_CLASS:")) {
+      currentClass = line.slice("BLOCKER_CLASS:".length).trim();
+    } else if (line.startsWith("BLOCKER_STATUS:")) {
+      if (currentClass && line.slice("BLOCKER_STATUS:".length).trim() === "OPEN") {
+        classes.push(currentClass);
+      }
+      currentClass = null;
+    }
+  }
+  return classes;
+}
+
+function repeatedOpenBlockerClass(records, issue) {
+  const counts = new Map();
+  for (const file of records) {
+    const text = fs.readFileSync(file, "utf8");
+    if (!validPlanMarker(text, issue)) {
+      throw new Error(`PLAN_REVIEW_HISTORY_RECORD_INVALID: ${file}`);
+    }
+    for (const blockerClass of openBlockerClasses(text)) {
+      counts.set(blockerClass, (counts.get(blockerClass) || 0) + 1);
+    }
+  }
+  return [...counts.entries()].find(([, count]) => count >= 2)?.[0] || null;
 }
 
 function completedPlanRecords(directory, issue) {
@@ -443,6 +472,52 @@ function releasePlanReviewReservation(args) {
   delete args._planReviewReservation;
 }
 
+function reservePlanReviewOverride(args, runner = sh) {
+  try {
+    const key = planHistoryKey(args, runner);
+    return withPlanHistoryLock((root) => {
+      const directory = path.join(root, key);
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      importRetainedPlanMarkers(args, directory);
+      const completed = completedPlanRecords(directory, args.issue);
+      const reservations = liveReservationFiles(directory);
+      if (reservations.length) {
+        return {
+          ok: false,
+          message: "PLAN_REVIEW_HISTORY_OVERRIDE_RESERVATION_CONFLICT",
+        };
+      }
+      const reservation = path.join(
+        directory,
+        `${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}.reservation.json`,
+      );
+      atomicWrite(
+        reservation,
+        JSON.stringify(
+          {
+            issue: String(args.issue),
+            review_type: "plan",
+            head: args._currentHead || null,
+            pid: process.pid,
+            started_at: new Date().toISOString(),
+            authorized_override: true,
+            completed_rounds: completed.length,
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      args._planReviewReservation = reservation;
+      return { ok: true };
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      message: `PLAN_REVIEW_HISTORY_UNAVAILABLE: ${error.message}`,
+    };
+  }
+}
+
 function runReviewBudget(args, runner = sh, { publish = false } = {}) {
   if (args.reviewType !== "plan") {
     return {
@@ -465,6 +540,7 @@ function runReviewBudget(args, runner = sh, { publish = false } = {}) {
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
       importRetainedPlanMarkers(args, directory);
       const completed = completedPlanRecords(directory, args.issue);
+      const repeatedClass = repeatedOpenBlockerClass(completed, args.issue);
       if (publish) {
         if (
           !args._planReviewReservation ||
@@ -501,16 +577,22 @@ function runReviewBudget(args, runner = sh, { publish = false } = {}) {
       const reservations = liveReservationFiles(directory);
       const rounds = completed.length;
       const reserved = reservations.length;
+      const repeatedBlocker = Boolean(repeatedClass);
+      const capped = repeatedBlocker || rounds + reserved >= PLAN_REVIEW_CAP;
       const baseBudget = {
-        decision: rounds + reserved >= PLAN_REVIEW_CAP ? "rescue_required" : "allowed",
+        decision: capped ? "rescue_required" : "allowed",
         current_head_unreviewed_types: [],
         cap_consumed_by_current_head_pass: [],
-        review_type_caps: rounds + reserved >= PLAN_REVIEW_CAP ? ["plan"] : [],
-        hard_cap_types: rounds + reserved >= PLAN_REVIEW_CAP ? ["plan"] : [],
+        review_type_caps: capped ? ["plan"] : [],
+        hard_cap_types: capped ? ["plan"] : [],
         blocking_round_counts_48h: { plan: rounds },
-        cap_reasons: rounds + reserved >= PLAN_REVIEW_CAP ? ["plan_review_round_cap"] : [],
+        cap_reasons: repeatedBlocker
+          ? [`same_blocker_class:${repeatedClass}`]
+          : capped
+            ? ["plan_review_round_cap"]
+            : [],
       };
-      if (rounds + reserved >= PLAN_REVIEW_CAP) {
+      if (capped) {
         return { ok: true, budget: baseBudget };
       }
       const reservation = path.join(
@@ -606,6 +688,10 @@ function reviewBudgetPreflight(args, runner = sh) {
   if (caps.includes(args.reviewType)) {
     const overrideAdmission = exactHeadOverrideReviewAdmission(args, runner);
     if (overrideAdmission.allowed) {
+      const reservation = reservePlanReviewOverride(args, runner);
+      if (!reservation.ok) {
+        return { allowed: false, message: reservation.message };
+      }
       return {
         allowed: true,
         budget,
