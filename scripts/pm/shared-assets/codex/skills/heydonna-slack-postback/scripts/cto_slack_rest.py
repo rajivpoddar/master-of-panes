@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -73,6 +75,63 @@ def normalize_whitespace_escapes(text: str) -> str:
     return "".join(normalized).replace("\r\n", "\n").replace("\r", "\n")
 
 
+_PROTECTED_SPANS = (
+    re.compile(r"```[\s\S]*?```"),
+    re.compile(r"`[^`\n]*`"),
+    re.compile(r"<[^>\n]*>"),
+    re.compile(r"(?i)https?://[^\s<>]+"),
+    re.compile(r"(?i)\bwww\.[^\s<>]+"),
+    re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"),
+    re.compile(r"(?<!\w)(?:~|/|\./|\.\./)[^\s<>]+"),
+    re.compile(r"(?<![A-Za-z0-9])(?:[0-9A-Fa-f]{8,}|[0-9A-Fa-f]{8}-[0-9A-Fa-f-]{5,})(?![A-Za-z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])(?:v?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?)(?![A-Za-z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])\d{1,4}[-/]\d{1,2}[-/]\d{1,4}(?:[T ]\d{1,2}:\d{2}(?::\d{2})?)?(?![A-Za-z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])\d{1,2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?(?![A-Za-z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])\d+\.\d+(?![A-Za-z0-9])"),
+)
+_PROSE_NUMBER_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9])((?:body|run|head|published|[a-z][a-z-]{3,}))(\d[0-9A-Fa-f]{2,})(?![A-Za-z0-9])"
+)
+
+
+def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def normalize_prose_number_spacing(text: str) -> str:
+    """Separate long prose prefixes from attached numeric/hash identifiers.
+
+    Slack markup, code, links, paths, addresses, hashes, versions, dates, times,
+    decimals, and short identifiers are protected. The conservative rule only
+    handles lowercase prose prefixes of at least four letters followed by a
+    multi-character numeric/hex suffix, making the operation idempotent.
+    """
+    protected: list[tuple[int, int]] = []
+    for pattern in _PROTECTED_SPANS:
+        protected.extend(match.span() for match in pattern.finditer(text))
+    protected = _merge_ranges(protected)
+
+    def transform(segment: str) -> str:
+        return _PROSE_NUMBER_TOKEN.sub(r"\1 \2", segment)
+
+    output: list[str] = []
+    cursor = 0
+    for start, end in protected:
+        if cursor < start:
+            output.append(transform(text[cursor:start]))
+        output.append(text[start:end])
+        cursor = end
+    if cursor < len(text):
+        output.append(transform(text[cursor:]))
+    return "".join(output)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--channel", required=True)
@@ -94,6 +153,7 @@ def main() -> int:
     text = read_text(args)
     if not args.preserve_literal_escapes:
         text = normalize_whitespace_escapes(text)
+    text = normalize_prose_number_spacing(text)
     if not text.strip():
         raise SystemExit("Slack message text is empty")
 
@@ -152,7 +212,7 @@ def main() -> int:
                 "ts": posted_ts,
                 "auth_user_id": auth_user_id,
                 "stored_user": stored_user,
-                "text_sha256": __import__("hashlib").sha256(text.encode("utf-8")).hexdigest(),
+                "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             },
             sort_keys=True,
         )
