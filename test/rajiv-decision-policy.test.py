@@ -21,7 +21,10 @@ CTO_SKILLS = (
     "codex/skills/heydonna-open-pr-status/SKILL.md",
 )
 
+CTO_ADMISSION_SKILL = "codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
+
 CHANGED_ASSETS = PM_SKILLS + CTO_SKILLS + (
+    CTO_ADMISSION_SKILL,
     "codex/skills/heydonna-slack-postback/SKILL.md",
     "codex/skills/_shared/release-conveyor-contract.md",
 )
@@ -66,6 +69,12 @@ class RajivDecisionPolicyTest(unittest.TestCase):
         self.assertIn("routine scheduling", contract)
         self.assertIn("choosing among eligible actions is not a process-policy change", contract)
         self.assertNotIn("stop before mutation and dm rajiv", contract)
+
+    def test_cto_admission_skill_has_no_obsolete_approval_gate(self) -> None:
+        text = (ASSETS / CTO_ADMISSION_SKILL).read_text(encoding="utf-8")
+        self.assertIn("Only CTO/PR Merges may use this prompt", text)
+        self.assertNotIn("Rajiv product/process decision gate", text)
+        self.assertNotIn("wait for explicit approval", " ".join(text.split()).lower())
 
     def test_slack_skill_routes_only_material_decisions(self) -> None:
         text = (ASSETS / "codex/skills/heydonna-slack-postback/SKILL.md").read_text(

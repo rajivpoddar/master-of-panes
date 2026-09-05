@@ -677,6 +677,15 @@
       "dependencies": []
     },
     {
+      "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
+      "sha256": "2bd76ec6b90e19e9361defe3896ad3579b87ed1458260a7610990cb6b19943b9",
+      "mode": 420,
+      "ownership_class": "shared-codex-skill",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "codex/skills/heydonna-open-pr-status/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",
       "sha256": "ae6eb12839342fab3ed92be7419b83897527f2c9b5810c84a1adfe999e14356a",
