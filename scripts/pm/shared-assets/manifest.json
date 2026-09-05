@@ -565,7 +565,7 @@
     {
       "source_path": "codex/skills/codex-review-companion/codex-review-companion.mjs",
       "canonical_target": "/Users/rajiv/.claude/skills/codex-review-companion/codex-review-companion.mjs",
-      "sha256": "a7f7897de0937b524be13f0893776ce5bed239cc12d370165a69b0690d1edbbd",
+      "sha256": "ca99844e88fa4ac0b1d1ba94756eefe855c8d543f3d968156764dbbfb08a0597",
       "mode": 493,
       "ownership_class": "shared-codex-skill-executable",
       "dependency_status": "closed",

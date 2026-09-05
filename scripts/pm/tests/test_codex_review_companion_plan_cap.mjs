@@ -88,6 +88,14 @@ function completeOne(fixture, issue, head, blockerClass = "same-blocker", pr = n
 
 {
   const fixture = freshFixture();
+  fs.writeFileSync(
+    path.join(fixture.legacy, "plan-issue-999-unrelated.md"),
+    "not a plan marker for another issue\n",
+  );
+  fs.writeFileSync(
+    path.join(fixture.legacy, "plan-issue-442-wrong-type.md"),
+    "TYPE: code-review\nISSUE: #442\nnot a plan marker\n",
+  );
   const retained = marker(442, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "REVISE", "PROOF", 7585);
   fs.writeFileSync(path.join(fixture.legacy, "plan-pr-7585-issue-442-a.md"), retained);
   fs.writeFileSync(path.join(fixture.legacy, "plan-pr-7585-issue-442-b.md"), retained);
@@ -95,6 +103,49 @@ function completeOne(fixture, issue, head, blockerClass = "same-blocker", pr = n
   assert.equal(imported.ok, true);
   assert.equal(imported.budget.blocking_round_counts_48h.plan, 1);
   releasePlanReviewReservation(args(442, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+}
+
+{
+  const fixture = freshFixture();
+  fs.writeFileSync(
+    path.join(fixture.legacy, "plan-pr-7585-issue-442-malformed.md"),
+    "TYPE: plan-review\nISSUE: #442\nmissing provenance and completed identity\n",
+  );
+  const rejected = runReviewBudget(
+    args(442, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+    runner,
+  );
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.message, /PLAN_REVIEW_HISTORY_UNAVAILABLE/);
+}
+
+{
+  const fixture = freshFixture();
+  const duplicateClasses = marker(
+    442,
+    "abababababababababababababababababababab",
+    "REVISE",
+    "AUTH",
+  ).replace(
+    "BLOCKER_STATUS: OPEN\n--- Review Output ---",
+    "BLOCKER_STATUS: OPEN\nBLOCKER_ID: AUTH-002\nBLOCKER_CLASS: AUTH\nBLOCKER_STATUS: OPEN\n--- Review Output ---",
+  );
+  const admission = runReviewBudget(
+    args(442, "abababababababababababababababababababab"),
+    runner,
+  );
+  assert.equal(admission.ok, true);
+  const canonical = path.join(fixture.root, "duplicate-classes.md");
+  fs.writeFileSync(canonical, duplicateClasses);
+  admission._canonicalMarkerPath = canonical;
+  assert.equal(publishReviewHistory(admission, runner).ok, true);
+  const afterOneRound = runReviewBudget(
+    args(442, "bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc"),
+    runner,
+  );
+  assert.equal(afterOneRound.ok, true);
+  assert.equal(afterOneRound.budget.decision, "allowed");
+  releasePlanReviewReservation(afterOneRound);
 }
 
 {

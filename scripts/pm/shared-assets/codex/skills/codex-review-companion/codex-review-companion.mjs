@@ -370,12 +370,32 @@ function historyFiles(directory, issue) {
     .map((entry) => path.join(directory, entry.name));
 }
 
+function legacyPlanMarkerMatchesScope(source, args, text) {
+  const name = path.basename(source);
+  const issue = String(args.issue);
+  const escapedIssue = issue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const filenameMatches = new RegExp(
+    `^plan-(?:pr-[0-9]+-)?issue-${escapedIssue}(?:-|\\.|$)`,
+  ).test(name);
+  if (!filenameMatches) return false;
+
+  // Filename identity selects the bounded legacy record set before strict
+  // validation. Explicit type/issue fields can exclude a mismatched review;
+  // missing fields stay relevant and therefore fail closed below.
+  const type = markerFieldFromText(text, "TYPE");
+  if (type && type !== "plan-review") return false;
+  const markerIssue = markerFieldFromText(text, "ISSUE");
+  if (markerIssue && markerIssue !== `#${issue}`) return false;
+  return true;
+}
+
 function importRetainedPlanMarkers(args, repositoryDirectory) {
   const legacyRoot =
     process.env.CODEX_REVIEW_LEGACY_DIR || "/tmp/codex-review-companion";
   const candidates = historyFiles(legacyRoot, args.issue);
   for (const source of candidates) {
     const text = fs.readFileSync(source, "utf8");
+    if (!legacyPlanMarkerMatchesScope(source, args, text)) continue;
     if (!validPlanMarker(text, args.issue)) {
       throw new Error(`PLAN_REVIEW_HISTORY_MARKER_INVALID: ${source}`);
     }
@@ -408,7 +428,7 @@ function repeatedOpenBlockerClass(records, issue) {
     if (!validPlanMarker(text, issue)) {
       throw new Error(`PLAN_REVIEW_HISTORY_RECORD_INVALID: ${file}`);
     }
-    for (const blockerClass of openBlockerClasses(text)) {
+    for (const blockerClass of new Set(openBlockerClasses(text))) {
       counts.set(blockerClass, (counts.get(blockerClass) || 0) + 1);
     }
   }
