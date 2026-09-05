@@ -16,6 +16,7 @@ python3 - "$STATUS_JSON" "$HOOK_INPUT" <<'PYEOF'
 import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
 
 # These obligation kinds are executable PM/CTO handoffs even when older
@@ -113,6 +114,73 @@ def current_turn_started_at() -> str | None:
         return None
     return latest
 
+
+PM_AGE_DUE_SECONDS = 6 * 60 * 60
+
+
+def parse_ts(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def current_session_age():
+    session_id = hook_input.get("session_id")
+    transcript_path = hook_input.get("transcript_path")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None, None, "current_session_identity_unavailable"
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return session_id, None, "current_session_age_unavailable"
+    started_at = None
+    try:
+        with open(transcript_path, encoding="utf-8", errors="replace") as transcript:
+            for raw in transcript:
+                try:
+                    entry = json.loads(raw)
+                except Exception:
+                    continue
+                if entry.get("isSidechain") is True:
+                    continue
+                started_at = parse_ts(entry.get("timestamp"))
+                if started_at is not None:
+                    break
+    except OSError:
+        return session_id, None, "current_session_age_unavailable"
+    if started_at is None:
+        return session_id, None, "current_session_age_unavailable"
+    age_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+    if age_seconds < 0:
+        return session_id, None, "current_session_age_unavailable"
+    return session_id, age_seconds, None
+
+
+def pm_self_clear_decision(row, evidence):
+    if not isinstance(evidence, dict):
+        return False, "pm_self_clear_evidence_unavailable"
+    current_session_id, age_seconds, age_reason = current_session_age()
+    recorded_session_id = evidence.get("session_id")
+    if not isinstance(recorded_session_id, str) or not recorded_session_id:
+        return False, "pm_self_clear_evidence_unavailable"
+    if parse_ts(evidence.get("session_started_at")) is None:
+        return False, "pm_self_clear_evidence_unavailable"
+    if not current_session_id:
+        return False, "current_session_identity_unavailable"
+    if recorded_session_id != current_session_id:
+        return False, "current_session_mismatch"
+    if age_reason or age_seconds is None:
+        return False, age_reason or "current_session_age_unavailable"
+    if hook_input.get("stop_hook_active") is True:
+        return False, "stop_hook_active"
+    if age_seconds <= PM_AGE_DUE_SECONDS:
+        return False, "current_session_not_due"
+    return True, "pm_self_clear_pending"
+
 db_path = status.get("db") or (
     "/Users/rajiv/.claude/projects/"
     "-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db"
@@ -120,6 +188,7 @@ db_path = status.get("db") or (
 p0_actions = []
 due_actions = []
 continuation_actions = []
+deferred_pm_self_clear = []
 resolved_this_turn = False
 turn_started_at = current_turn_started_at()
 
@@ -194,6 +263,11 @@ try:
             evidence = json.loads(row["evidence_json"] or "{}")
         except Exception:
             evidence = {}
+        if row["kind"] == "pm-self-clear":
+            actionable, pm_reason = pm_self_clear_decision(row, evidence)
+            if not actionable:
+                deferred_pm_self_clear.append(f"obligation:{row['id']}:{pm_reason}")
+                continue
         explicitly_actionable = evidence.get("pm_stop_actionable") in (1, True)
         derived_actionable = row["kind"] in DERIVED_EXECUTABLE_KINDS
         if not explicitly_actionable and not derived_actionable:
@@ -244,6 +318,12 @@ elif due_actions and not resolved_this_turn:
     )
 
 if not hard:
+    if deferred_pm_self_clear:
+        print(json.dumps({
+            "kind": "pm-self-clear",
+            "status": "deferred",
+            "reason": ",".join(deferred_pm_self_clear),
+        }, sort_keys=True))
     sys.exit(0)
 
 message = "[PM_OPS_ACTION_REQUIRED] " + "; ".join(hard)

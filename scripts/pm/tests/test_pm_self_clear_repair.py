@@ -164,23 +164,88 @@ class PmSelfClearRepairTests(unittest.TestCase):
         self.assertEqual(payload["results"]["pm"]["status"], "blocked")
         self.assertIn("pm_ops_unavailable", payload["read_errors"]["pm"])
 
-    def make_obligation(self) -> None:
+    def make_obligation(self, *, session_id: str = "pm-session-1", age_seconds: float = 7 * 60 * 60) -> None:
+        start = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        evidence = json.dumps({
+            "producer": "heartbeat-session-age-clear",
+            "session_id": session_id,
+            "session_started_at": start.isoformat().replace("+00:00", "Z"),
+            "age_seconds": age_seconds,
+            "threshold_seconds": 6 * 60 * 60,
+        })
         with closing(sqlite3.connect(self.db)) as connection:
             connection.execute(SCHEMA.replace("CREATE TABLE obligations", "CREATE TABLE IF NOT EXISTS obligations"))
-            connection.execute("INSERT INTO obligations(id,created_at,updated_at,status,kind,severity,target_type,target_id,owner,title,required_action,horizon,evidence_json) VALUES (15606,'now','now','open','pm-self-clear','high','session','pm-dhruva','pm','PM self-clear context','At next safe Stop boundary','heartbeat','{}')")
+            connection.execute("INSERT INTO obligations(id,created_at,updated_at,status,kind,severity,target_type,target_id,owner,title,required_action,horizon,evidence_json) VALUES (15606,'now','now','open','pm-self-clear','high','session','pm-dhruva','pm','PM self-clear context','At next safe Stop boundary','heartbeat',?)", (evidence,))
             connection.commit()
 
     def test_stop_consumer_surfaces_same_open_obligation_without_pm_operator(self) -> None:
-        self.make_obligation()
-        result = subprocess.run(["python3", str(STOP_HOOK)], input="{}", text=True, capture_output=True, env={**os.environ, "PM_OPS_DB": str(self.db)})
+        self.make_obligation(session_id="current", age_seconds=6 * 60 * 60 + 1)
+        transcript = self.pm_dir / "current.jsonl"
+        self.write_session(age_seconds=6 * 60 * 60 + 1, session_id="current")
+        result = subprocess.run(["python3", str(STOP_HOOK)], input=json.dumps({
+            "session_id": "current",
+            "transcript_path": str(transcript),
+            "stop_hook_active": False,
+        }), text=True, capture_output=True, env={**os.environ, "PM_OPS_DB": str(self.db)})
         self.assertEqual(result.returncode, 0)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["decision"], "block")
         self.assertEqual(payload["obligation_id"], 15606)
         self.assertNotIn("pm-operator", result.stdout)
 
+    def test_stop_consumer_defers_old_row_for_fresh_session(self) -> None:
+        self.make_obligation(session_id="old-session")
+        transcript = self.pm_dir / "fresh-session.jsonl"
+        self.write_session(age_seconds=60, session_id="fresh-session")
+        result = subprocess.run(["python3", str(STOP_HOOK)], input=json.dumps({
+            "session_id": "fresh-session",
+            "transcript_path": str(transcript),
+            "stop_hook_active": False,
+        }), text=True, capture_output=True, env={**os.environ, "PM_OPS_DB": str(self.db)})
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "deferred")
+        self.assertEqual(payload["reason"], "current_session_mismatch")
+
+    def test_stop_consumer_defers_unknown_identity_and_recursive_feedback(self) -> None:
+        self.make_obligation(session_id="current", age_seconds=7 * 60 * 60)
+        unknown = subprocess.run(["python3", str(STOP_HOOK)], input="{}", text=True, capture_output=True, env={**os.environ, "PM_OPS_DB": str(self.db)})
+        self.assertEqual(json.loads(unknown.stdout)["reason"], "current_session_identity_unavailable")
+
+        age_unknown = subprocess.run(["python3", str(STOP_HOOK)], input=json.dumps({
+            "session_id": "current",
+        }), text=True, capture_output=True, env={**os.environ, "PM_OPS_DB": str(self.db)})
+        self.assertEqual(json.loads(age_unknown.stdout)["reason"], "current_session_age_unavailable")
+
+        transcript = self.pm_dir / "current.jsonl"
+        self.write_session(age_seconds=7 * 60 * 60, session_id="current")
+        recursive = subprocess.run(["python3", str(STOP_HOOK)], input=json.dumps({
+            "session_id": "current",
+            "transcript_path": str(transcript),
+            "stop_hook_active": True,
+        }), text=True, capture_output=True, env={**os.environ, "PM_OPS_DB": str(self.db)})
+        payload = json.loads(recursive.stdout)
+        self.assertEqual(payload["status"], "deferred")
+        self.assertEqual(payload["reason"], "stop_hook_active")
+
+    def test_stop_consumer_same_session_not_due(self) -> None:
+        self.make_obligation(session_id="current", age_seconds=6 * 60 * 60 - 30)
+        transcript = self.pm_dir / "current.jsonl"
+        self.write_session(age_seconds=6 * 60 * 60 - 30, session_id="current")
+        result = subprocess.run(["python3", str(STOP_HOOK)], input=json.dumps({
+            "session_id": "current",
+            "transcript_path": str(transcript),
+            "stop_hook_active": False,
+        }), text=True, capture_output=True, env={**os.environ, "PM_OPS_DB": str(self.db)})
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "not_due")
+        self.assertEqual(payload["reason"], "current_session_not_due")
+
     def test_validator_includes_pm_self_clear_in_existing_stop_surface(self) -> None:
-        self.make_obligation()
+        self.make_obligation(session_id="current", age_seconds=7 * 60 * 60)
+        transcript = self.pm_dir / "current.jsonl"
+        self.write_session(age_seconds=7 * 60 * 60, session_id="current")
         status = self.root / "status.py"
         status.write_text(textwrap.dedent(f"""
             #!/usr/bin/env python3
@@ -188,11 +253,57 @@ class PmSelfClearRepairTests(unittest.TestCase):
             print(json.dumps({{"db": {str(self.db)!r}}}))
         """).lstrip())
         status.chmod(0o755)
-        result = subprocess.run(["bash", str(VALIDATOR)], input="{{}}", text=True, capture_output=True, env={**os.environ, "PM_OPS": str(status)})
+        result = subprocess.run(["bash", str(VALIDATOR)], input=json.dumps({
+            "session_id": "current",
+            "transcript_path": str(transcript),
+            "stop_hook_active": False,
+        }), text=True, capture_output=True, env={**os.environ, "PM_OPS": str(status)})
         self.assertEqual(result.returncode, 0)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["decision"], "block")
         self.assertIn("obligation:15606", payload["message"])
+
+    def test_validator_defers_old_row_for_fresh_session(self) -> None:
+        self.make_obligation(session_id="old-session")
+        transcript = self.pm_dir / "fresh-session.jsonl"
+        self.write_session(age_seconds=60, session_id="fresh-session")
+        status = self.root / "status.py"
+        status.write_text(textwrap.dedent(f"""
+            #!/usr/bin/env python3
+            import json
+            print(json.dumps({{"db": {str(self.db)!r}}}))
+        """).lstrip())
+        status.chmod(0o755)
+        result = subprocess.run(["bash", str(VALIDATOR)], input=json.dumps({
+            "session_id": "fresh-session",
+            "transcript_path": str(transcript),
+            "stop_hook_active": False,
+        }), text=True, capture_output=True, env={**os.environ, "PM_OPS": str(status)})
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "deferred")
+        self.assertIn("current_session_mismatch", payload["reason"])
+
+    def test_validator_defers_recursive_stop_feedback(self) -> None:
+        self.make_obligation(session_id="current", age_seconds=7 * 60 * 60)
+        transcript = self.pm_dir / "current.jsonl"
+        self.write_session(age_seconds=7 * 60 * 60, session_id="current")
+        status = self.root / "status.py"
+        status.write_text(textwrap.dedent(f"""
+            #!/usr/bin/env python3
+            import json
+            print(json.dumps({{"db": {str(self.db)!r}}}))
+        """).lstrip())
+        status.chmod(0o755)
+        result = subprocess.run(["bash", str(VALIDATOR)], input=json.dumps({
+            "session_id": "current",
+            "transcript_path": str(transcript),
+            "stop_hook_active": True,
+        }), text=True, capture_output=True, env={**os.environ, "PM_OPS": str(status)})
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "deferred")
+        self.assertIn("stop_hook_active", payload["reason"])
 
 
 if __name__ == "__main__":
