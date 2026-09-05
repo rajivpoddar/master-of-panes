@@ -172,9 +172,9 @@ def test_non_ui_gate_result_through_actual_adapter_preserves_issue_body(tmp_path
     adapter = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(adapter)
     adapter.VISUAL_GATE = gate
-    adapter.VISUAL_GATE_SHA256 = hashlib.sha256(gate.read_bytes()).hexdigest()
     adapter.ISSUE_CONTRACT_VALIDATOR = validator
-    adapter.ISSUE_CONTRACT_VALIDATOR_SHA256 = hashlib.sha256(validator.read_bytes()).hexdigest()
+    assert adapter.VISUAL_GATE_SHA256 == "b9bbb10da4adc35c50e1820da1ccb3e87dd4e0468b823783360efe1314e82271"
+    assert hashlib.sha256(gate.read_bytes()).hexdigest() == adapter.VISUAL_GATE_SHA256
     monkeypatch.setenv("PATH", f"{gh.parent}:{os.environ['PATH']}")
 
     adapter._visual_proof(argparse.Namespace(pr=PR, head=HEAD, gh=str(gh)), hashlib.sha256(body.encode()).hexdigest())
