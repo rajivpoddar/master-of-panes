@@ -218,6 +218,15 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/ci/heydonna-cto-label-gated-ci.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/heydonna-cto-label-gated-ci.py",
+      "sha256": "0850405275f2533782b99e35cad8b4d6b5427883d21559240495f59cf4a2124f",
+      "mode": 493,
+      "ownership_class": "shared-claude-cto-paid-admission",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/ci/publish-ci-verdict.py",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
       "sha256": "0377c424f10dfc252cd3157123a52abc1f653d7741afe903d87adbb67d54e705",
