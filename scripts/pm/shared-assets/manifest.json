@@ -42,7 +42,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 69,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -67,6 +67,42 @@
     }
   ],
   "entries": [
+    {
+      "source_path": "claude/agents/codex-code-reviewer.md",
+      "canonical_target": "/Users/rajiv/.claude/agents/codex-code-reviewer.md",
+      "sha256": "ffcf43eaaad84fb16e1a9cb35b645b0e55c4a092f6d83eccc7f03c563b7ba612",
+      "mode": 420,
+      "ownership_class": "shared-claude-review-prompt",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/agents/codex-plan-reviewer.md",
+      "canonical_target": "/Users/rajiv/.claude/agents/codex-plan-reviewer.md",
+      "sha256": "3b459554ad2d540795f09325d32afb7311d91ab68a90ca1075e962f954c31783",
+      "mode": 420,
+      "ownership_class": "shared-claude-review-prompt",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/agents/feature-dev-code-architect.md",
+      "canonical_target": "/Users/rajiv/.claude/agents/feature-dev-code-architect.md",
+      "sha256": "dd5630107d9828eba42cbeba4cda7ecf46f5342480b1cf9e058b7e2ea6788d4f",
+      "mode": 420,
+      "ownership_class": "shared-claude-review-prompt",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/agents/plan-agent.md",
+      "canonical_target": "/Users/rajiv/.claude/agents/plan-agent.md",
+      "sha256": "123608d3f98d8ca0cfb0bf6c9b96c254b4b92b57dc7b20a85eb838534d761ba8",
+      "mode": 420,
+      "ownership_class": "shared-claude-review-prompt",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
     {
       "source_path": "claude/control_plane/runtime_observation.py",
       "canonical_target": "/Users/rajiv/.claude/control_plane/runtime_observation.py",
@@ -181,6 +217,23 @@
       "sha256": "b9056135eac4182753ee0616f1a0538cb8f3f49e78a1bb1faba74ed9fa5a75f6",
       "mode": 493,
       "ownership_class": "shared-claude-mop-plugin-hook-relay",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/rules/32-canonical-capture-contract.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules/32-canonical-capture-contract.md",
+      "additional_targets": [
+        "/Users/rajiv/Downloads/projects/heydonna-app-3001/.claude/rules/32-canonical-capture-contract.md",
+        "/Users/rajiv/Downloads/projects/heydonna-app-3002/.claude/rules/32-canonical-capture-contract.md",
+        "/Users/rajiv/Downloads/projects/heydonna-app-3003/.claude/rules/32-canonical-capture-contract.md",
+        "/Users/rajiv/Downloads/projects/heydonna-app-3004/.claude/rules/32-canonical-capture-contract.md",
+        "/Users/rajiv/Downloads/projects/heydonna-app-3005/.claude/rules/32-canonical-capture-contract.md",
+        "/Users/rajiv/Downloads/projects/heydonna-app-3006/.claude/rules/32-canonical-capture-contract.md"
+      ],
+      "sha256": "499589772178591e0bc6742f3a4274b799a0bdc425e90f45d9b8314e2227a73b",
+      "mode": 420,
+      "ownership_class": "shared-capture-contract-rule",
       "dependency_status": "closed",
       "dependencies": []
     },
