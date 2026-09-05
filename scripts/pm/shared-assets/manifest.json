@@ -10,6 +10,8 @@
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
       "~/.claude/scripts/axiom-activity-report.py",
+      "~/Downloads/projects/heydonna-app/.claude/hooks/pm-ops-sync-stop-validator.sh",
+      "~/Downloads/projects/heydonna-app/.claude/hooks/pm-self-clear-stop.sh",
       "~/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
       "~/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
       "~/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
@@ -21,6 +23,7 @@
       "~/.claude/scripts/launch-slot-4.sh",
       "~/.claude/scripts/launch-slot-5.sh",
       "~/.claude/scripts/launch-slot-6.sh",
+      "~/Downloads/projects/heydonna-app/.claude/scripts/heartbeat-session-age-clear.py",
       "~/.claude/scripts/mop-slot-respawn.sh",
       "~/.claude/scripts/pm-merges-automation-update.py",
       "~/.claude/scripts/pm-terminal-continuity.py",
@@ -42,7 +45,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 67,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -91,6 +94,24 @@
       "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-ops-sync-stop-validator.sh",
+      "sha256": "e0e5fe2de034a38ecfdc96869f6e214c268ec84c85fb81ff2a0f4f142f875bbd",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-stop-obligation-validator",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/pm-self-clear-stop.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-self-clear-stop.sh",
+      "sha256": "0c498f7887e626ff873b4ff544ff898feab5a235222e7341de743e27e0940a1d",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-self-clear-stop-consumer",
       "dependency_status": "closed",
       "dependencies": []
     },
@@ -226,6 +247,15 @@
       "sha256": "610d8408e306d446a104cbcff9786c9f8dc10defb6cb42438d3c60046f22f923",
       "mode": 493,
       "ownership_class": "shared-claude-ci-rerun-consumer",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/heartbeat-session-age-clear.py",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/heartbeat-session-age-clear.py",
+      "sha256": "ec05ee1de9fd1bed8afcda226c684185d3a3984ba7524378ef127e9740110d5f",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-session-age-producer",
       "dependency_status": "closed",
       "dependencies": []
     },
