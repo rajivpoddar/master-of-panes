@@ -93,7 +93,7 @@ _PROTECTED_SPANS = (
     re.compile(r"(?<![A-Za-z0-9])\d+\.\d+(?![A-Za-z0-9])"),
 )
 _PROSE_NUMBER_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9])((?:body|run|head|published))(\d[0-9A-Fa-f]{2,})(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9_-])((?:body|run|head|published))(\d[0-9A-Fa-f]{2,})(?![A-Za-z0-9_-])"
 )
 
 

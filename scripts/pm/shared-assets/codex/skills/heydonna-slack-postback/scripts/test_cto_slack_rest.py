@@ -162,6 +162,10 @@ class ProseNumberSpacingTest(unittest.TestCase):
             "feature/body11350",
             "release20260905.json",
             "python311",
+            "last_run339",
+            "run339_result",
+            "run339-fix",
+            "head6038f0df_backup",
         ]
         results = [invoke(value) for value in values]
         self.assertEqual([payload["text"] for payload in posted_payloads], values)
