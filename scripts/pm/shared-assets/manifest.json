@@ -25,6 +25,9 @@
       "~/.claude/scripts/pm-merges-automation-update.py",
       "~/.claude/scripts/pm-terminal-continuity.py",
       "~/.claude/scripts/pm-terminal-wake.py",
+      "~/.claude/skills/ci-failure-investigation/SKILL.md",
+      "~/Downloads/projects/heydonna-app/.claude/hooks/pm-context-injector.sh",
+      "~/Downloads/projects/heydonna-app/.claude/skills/pm-idle-notification/SKILL.md",
       "~/.claude/control_plane/runtime_observation.py",
       "~/.claude/scripts/sakshi-heartbeat.py",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
@@ -42,7 +45,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 67,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -91,6 +94,15 @@
       "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/pm-context-injector.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-context-injector.sh",
+      "sha256": "97016cdfea5e8aa82a7953cc7719f38eb7beda5431e4d48c94bbd4febacc26d1",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-obligation-producer",
       "dependency_status": "closed",
       "dependencies": []
     },
@@ -363,6 +375,24 @@
       "sha256": "3e28684422c2dc19e51b5a979fcb5e354b2c1c5a814dc055b5047f11d8640f46",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/ci-failure-investigation/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/ci-failure-investigation/SKILL.md",
+      "sha256": "240c141ccbd4ef581b4aefb2778da9bcafe83e3a6b5ba05f8972c8e14d5b0709",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-obligation-producer-instruction",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/pm-idle-notification/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pm-idle-notification/SKILL.md",
+      "sha256": "3ee49e91a7f0b0fa2a88c654b2db89ec8c1908799866da9aacc8b06b1afa61c8",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-continuation-producer-instruction",
       "dependency_status": "closed",
       "dependencies": []
     },
