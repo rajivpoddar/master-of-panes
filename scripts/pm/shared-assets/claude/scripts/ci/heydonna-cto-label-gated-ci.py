@@ -25,7 +25,9 @@ from typing import Any, Iterator
 HEAD_RE = re.compile(r"^[0-9a-f]{40}$")
 RUN_RE = re.compile(r"^[0-9]+$")
 REPO = "heydonna-app/heydonna-app"
-READINESS_GATE = Path("/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/pr-ci-readiness-gate.py")
+# The readiness gate is a shared installed control-plane dependency.  Calling
+# the app-checkout sibling lets its resolver select an older visual gate.
+READINESS_GATE = Path("/Users/rajiv/.claude/scripts/pr-ci-readiness-gate.py")
 READINESS_GATE_SHA256 = "13d5bb4b25fda536723d6bdc74447a0625632fbd87b9960f80cae7efe4162ece"
 VISUAL_GATE = Path("/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py")
 VISUAL_GATE_SHA256 = "b9bbb10da4adc35c50e1820da1ccb3e87dd4e0468b823783360efe1314e82271"
@@ -122,8 +124,16 @@ def _gate(args: argparse.Namespace, *, reentry: bool) -> dict[str, Any]:
     _trusted_asset(READINESS_GATE, READINESS_GATE_SHA256, "readiness_gate")
     result = _run([sys.executable, str(READINESS_GATE), "--pr", str(args.pr), "--repo", REPO, "--expect-head", args.head, "--source", "cto-direct", "--json"], env=_clean_env(), timeout=120)
     payload = _decode(result.stdout, "readiness_gate")
-    if not isinstance(payload, dict) or payload.get("headRefOid") != args.head:
+    if not isinstance(payload, dict):
+        raise Refusal("readiness_gate_malformed")
+    reported_head = payload.get("headRefOid")
+    if reported_head is not None and reported_head != args.head:
         raise Refusal("readiness_head_drift")
+    if reported_head is None:
+        if result.returncode != 0 or payload.get("ok") is not True:
+            reason = payload.get("reason") or payload.get("error") or "readiness_gate_failed"
+            raise Refusal(f"readiness_gate_error:{reason}")
+        raise Refusal("readiness_gate_output_missing_head")
     artifacts = payload.get("artifacts")
     workflows = artifacts.get("workflows") if isinstance(artifacts, dict) else None
     if not isinstance(workflows, dict) or workflows.get("state") not in {"not_started", "in_progress", "green", "failed", "cancelled", "partial", "unknown"}:

@@ -238,7 +238,7 @@
     {
       "source_path": "claude/scripts/ci/heydonna-cto-label-gated-ci.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/ci/heydonna-cto-label-gated-ci.py",
-      "sha256": "70782f76a20087bb46424b01530698cbe6fcd341ef10e26dcc36ba2ee1ef981b",
+      "sha256": "1a843fba5fe7e76b41634d54c3866b0470f8c974b430d5fbfcbb83ecc787c187",
       "mode": 493,
       "ownership_class": "shared-claude-cto-paid-admission",
       "dependency_status": "closed",

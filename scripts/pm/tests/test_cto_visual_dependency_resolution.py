@@ -238,6 +238,73 @@ def test_missing_issue_validator_fails_closed_after_root_resolution(tmp_path: Pa
 
 def test_adapter_pins_canonical_gate_and_validator() -> None:
     text = ADAPTER.read_text(encoding="utf-8")
+    assert 'Path("/Users/rajiv/.claude/scripts/pr-ci-readiness-gate.py")' in text
+    assert "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/pr-ci-readiness-gate.py" not in text
     assert 'Path("/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py")' in text
     assert 'Path("/Users/rajiv/.claude/scripts/validate-issue-contract-ledger.py")' in text
     assert "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/qa-visual-proof-gate.py" not in text
+
+
+def _load_adapter():
+    spec = importlib.util.spec_from_file_location("adapter_readiness", ADAPTER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_headless_readiness_gate_error_is_not_reported_as_head_drift(monkeypatch) -> None:
+    adapter = _load_adapter()
+    captured: list[list[str]] = []
+    monkeypatch.setattr(adapter, "_trusted_asset", lambda *args: None)
+    monkeypatch.setattr(
+        adapter,
+        "_run",
+        lambda command, **kwargs: (captured.append(command) or subprocess.CompletedProcess(
+            command,
+            1,
+            json.dumps({"schema": "heydonna_pr_ci_readiness_gate", "version": 2, "ok": False, "reason": "gate_error", "errors": ["invalid JSON"]}),
+            "",
+        )),
+    )
+    with pytest.raises(adapter.Refusal, match=r"readiness_gate_error:gate_error"):
+        adapter._gate(argparse.Namespace(pr=PR, head=HEAD), reentry=False)
+    assert captured and str(adapter.READINESS_GATE) == "/Users/rajiv/.claude/scripts/pr-ci-readiness-gate.py"
+
+
+def test_canonical_readiness_child_positive_uses_exact_head_and_inventory(tmp_path: Path, monkeypatch) -> None:
+    adapter = _load_adapter()
+    child = tmp_path / "pr-ci-readiness-gate.py"
+    child.write_text(
+        "import json\n"
+        "print(json.dumps({\"headRefOid\": " + repr(HEAD) + ", \"ok\": True, \"artifacts\": {"
+        "\"workflows\": {\"state\": \"green\"}, \"change_scope\": {"
+        "\"head\": " + repr(HEAD) + ", \"ci_required\": True, \"e2e_required\": True, "
+        "\"control_plane_only\": False}}}))\n",
+        encoding="utf-8",
+    )
+    child.chmod(child.stat().st_mode | stat.S_IXUSR)
+    adapter.READINESS_GATE = child
+    adapter.READINESS_GATE_SHA256 = hashlib.sha256(child.read_bytes()).hexdigest()
+    payload = adapter._gate(argparse.Namespace(pr=PR, head=HEAD), reentry=False)
+    assert payload["headRefOid"] == HEAD
+    assert payload["artifacts"]["workflows"]["state"] == "green"
+
+
+def test_readiness_gate_malformed_child_is_distinct_and_head_mismatch_remains_drift(monkeypatch) -> None:
+    adapter = _load_adapter()
+    monkeypatch.setattr(adapter, "_trusted_asset", lambda *args: None)
+    malformed = subprocess.CompletedProcess(["readiness"], 1, "not-json", "")
+    monkeypatch.setattr(adapter, "_run", lambda *args, **kwargs: malformed)
+    with pytest.raises(adapter.Refusal, match="readiness_gate_malformed"):
+        adapter._gate(argparse.Namespace(pr=PR, head=HEAD), reentry=False)
+
+    mismatch = subprocess.CompletedProcess(
+        ["readiness"],
+        0,
+        json.dumps({"headRefOid": "0" * 40, "ok": True}),
+        "",
+    )
+    monkeypatch.setattr(adapter, "_run", lambda *args, **kwargs: mismatch)
+    with pytest.raises(adapter.Refusal, match="readiness_head_drift"):
+        adapter._gate(argparse.Namespace(pr=PR, head=HEAD), reentry=False)
