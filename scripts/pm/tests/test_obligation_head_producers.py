@@ -41,6 +41,10 @@ class ObligationHeadProducerTests(unittest.TestCase):
 
         self.assertIn("REFUSE ci_rework obligation", ci_skill)
         self.assertIn('--evidence "head_sha=${HEAD_SHA}"', ci_skill)
+        self.assertIn('CURRENT_PR_HEAD="<fresh exact current PR head from the supported readback>"', ci_skill)
+        self.assertIn("superseded_by_accepted_slot_rework", ci_skill)
+        self.assertIn("superseded_by_newer_exact_head_slot_rework", ci_skill)
+        self.assertIn("(kind,target_type,target_id,pr,issue)", ci_skill)
         self.assertIn("CI_EVENT_HEAD", context_hook)
         self.assertIn('head_sha=$CI_EVENT_HEAD', context_hook)
         self.assertIn("head_status=missing_or_conflicting", context_hook)
@@ -169,12 +173,69 @@ class ObligationHeadProducerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="slot-rework-producer-") as tmp:
             db = Path(tmp) / "pm-ops.db"
             env = {**os.environ, "PM_OPS_DB": str(db)}
-            command = [
+
+            def run(command: list[str]) -> str:
+                result = subprocess.run(command, env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result.stdout.strip()
+
+            def slot_command(
+                head: str,
+                *,
+                owner: str = "rescues",
+                action: str = "Dispatch the accepted local reproduction packet once.",
+                wake: str = "next healthy numbered-slot capacity",
+                receipt: str = "cto-7629-rework-v1",
+            ) -> list[str]:
+                return [
+                    "python3",
+                    str(WRITER),
+                    "obligation-upsert",
+                    "--kind",
+                    "slot_rework",
+                    "--severity",
+                    "high",
+                    "--target-type",
+                    "pr",
+                    "--target-id",
+                    "7629",
+                    "--pr",
+                    "7629",
+                    "--owner",
+                    owner,
+                    "--title",
+                    "Accepted exact-head rework for PR #7629",
+                    "--action",
+                    action,
+                    "--blocker",
+                    f"accepted CTO next-step receipt={receipt}",
+                    "--dedupe-group",
+                    f"slot_rework:7629:{head}:{receipt}",
+                    "--evidence",
+                    f"head_sha={head}",
+                    "--evidence",
+                    f"owner={owner}",
+                    "--evidence",
+                    f"action={action}",
+                    "--evidence",
+                    f"wake={wake}",
+                    "--evidence",
+                    f"source_receipt={receipt}",
+                    "--print-id",
+                ]
+
+            # The actual writer key is (kind, target_type, target_id, pr,
+            # issue), not dedupe_group. First retain a generic failed-run
+            # ci_rework row, then add the accepted nonexecuting slot row. The
+            # installed reader correctly refuses the contradictory open lanes
+            # until the accepted transition resolves only that exact generic
+            # row.
+            generic = [
                 "python3",
                 str(WRITER),
                 "obligation-upsert",
                 "--kind",
-                "slot_rework",
+                "ci_rework",
                 "--severity",
                 "high",
                 "--target-type",
@@ -184,31 +245,45 @@ class ObligationHeadProducerTests(unittest.TestCase):
                 "--pr",
                 "7629",
                 "--owner",
-                "rescues",
+                "pm",
                 "--title",
-                "Accepted exact-head rework for PR #7629",
+                "CI rework for PR #7629",
                 "--action",
-                "Dispatch the accepted local reproduction packet once.",
+                "Await the exact-head PM investigation report.",
                 "--blocker",
-                "accepted CTO next-step receipt=cto-7629-rework-v1",
-                "--dedupe-group",
-                f"slot_rework:7629:{HEAD}:cto-7629-rework-v1",
+                "current-head evidence required",
+                "--evidence",
+                "run=33968407703",
                 "--evidence",
                 f"head_sha={HEAD}",
-                "--evidence",
-                "owner=rescues",
-                "--evidence",
-                "action=Dispatch the accepted local reproduction packet once.",
-                "--evidence",
-                "wake=next healthy numbered-slot capacity",
-                "--evidence",
-                "source_receipt=cto-7629-rework-v1",
+                "--print-id",
             ]
-            for _ in range(2):
-                result = subprocess.run(command, env=env, text=True, capture_output=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
+            generic_id = int(run(generic))
+            slot = slot_command(HEAD)
+            first_slot_id = int(run(slot))
+            second_slot_id = int(run(slot))
+            self.assertEqual(first_slot_id, second_slot_id)
 
             reader.PM_OPS_DB = db
+            records, error = reader._load_open_pr_continuations("7629", HEAD)
+            self.assertEqual(records, [])
+            self.assertIn("contradict", error or "")
+
+            run(
+                [
+                    "python3",
+                    str(WRITER),
+                    "obligation-resolve",
+                    "--kind",
+                    "ci_rework",
+                    "--id",
+                    str(generic_id),
+                    "--reason",
+                    "superseded_by_accepted_slot_rework",
+                    "--external-state",
+                    "accepted_nonexecuting_queue:cto-7629-rework-v1",
+                ]
+            )
             records, error = reader._load_open_pr_continuations("7629", HEAD)
             self.assertIsNone(error)
             self.assertEqual(records[0]["lane"], "rework")
@@ -219,18 +294,74 @@ class ObligationHeadProducerTests(unittest.TestCase):
             self.assertEqual(metadata["owner"], "rescues")
 
             with sqlite3.connect(db) as connection:
+                generic_row = connection.execute(
+                    "select status, evidence_json, resolved_reason from obligations where id=?",
+                    (generic_id,),
+                ).fetchone()
+                self.assertEqual(generic_row[0], "resolved")
+                self.assertIn(HEAD, generic_row[1])
+                self.assertEqual(generic_row[2], "superseded_by_accepted_slot_rework")
                 count = connection.execute(
                     "select count(*) from obligations where status='open' and kind='slot_rework'"
                 ).fetchone()[0]
             self.assertEqual(count, 1)
 
+            # A later independently accepted head must not rewrite either the
+            # failed-run row or the prior slot receipt. Resolve the old slot
+            # row by its exact ID, then let the same writer key insert the new
+            # open slot row with the later receipt.
+            later_head = "f109414c02cc296510103fe2c090ce964e9b9dfb"
+            run(
+                [
+                    "python3",
+                    str(WRITER),
+                    "obligation-resolve",
+                    "--kind",
+                    "slot_rework",
+                    "--id",
+                    str(first_slot_id),
+                    "--reason",
+                    "superseded_by_newer_exact_head_slot_rework",
+                    "--external-state",
+                    "accepted_nonexecuting_queue:cto-7629-rework-v2",
+                ]
+            )
+            later_id = int(
+                run(
+                    slot_command(
+                        later_head,
+                        action="Dispatch the newer accepted reproduction packet once.",
+                        wake="next healthy numbered-slot capacity after head refresh",
+                        receipt="cto-7629-rework-v2",
+                    )
+                )
+            )
+            self.assertNotEqual(later_id, first_slot_id)
+            records, error = reader._load_open_pr_continuations("7629", later_head)
+            self.assertIsNone(error)
+            self.assertEqual(records[0]["head"], later_head)
+            self.assertEqual(records[0]["owner"], "rescues")
+            old_records, old_error = reader._load_open_pr_continuations("7629", HEAD)
+            self.assertEqual(old_records, [])
+            self.assertIsNone(old_error)
+
+            with sqlite3.connect(db) as connection:
+                history = connection.execute(
+                    """select id, status, evidence_json, resolved_reason
+                       from obligations where kind='slot_rework' and pr=7629 order by id"""
+                ).fetchall()
+            self.assertEqual(len(history), 2)
+            self.assertEqual(history[0][0], first_slot_id)
+            self.assertEqual(history[0][1], "resolved")
+            self.assertIn(HEAD, history[0][2])
+            self.assertEqual(history[1][0], later_id)
+            self.assertEqual(history[1][1], "open")
+            self.assertIn(later_head, history[1][2])
+
             # Missing, wrong, or placeholder owner/head evidence never becomes
             # a queued reader result; these are separate retained rows.
-            bad = command.copy()
-            bad[bad.index("7629", bad.index("--target-id") + 1)] = "7585"
-            bad[bad.index("7629", bad.index("--pr") + 1)] = "7585"
-            bad[bad.index("--owner") + 1] = "unknown"
-            bad.extend(("--evidence", "head_sha=not-a-head"))
+            bad = slot_command(HEAD, owner="unknown")
+            bad.extend(("--target-id", "7585", "--pr", "7585", "--evidence", "head_sha=not-a-head"))
             result = subprocess.run(bad, env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             records, error = reader._load_open_pr_continuations("7585", HEAD)

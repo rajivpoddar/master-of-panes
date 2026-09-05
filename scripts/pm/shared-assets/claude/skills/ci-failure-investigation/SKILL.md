@@ -255,49 +255,200 @@ fi
 `PROCESS_LIMBO` to the open-PR reader. Do not rename it. Only after a real
 CTO-owned next-step receipt has been accepted, create the reader-supported
 `slot_rework` queue row below. Every placeholder must come from that receipt
-and the same immutable run/head packet; labels, prose, and a PM-only
+and a fresh exact current-head re-fence; labels, prose, and a PM-only
 "accepted" message are not sufficient.
 
 ```bash
-NEXT_STEP_HEAD="<same validated full head from the failed-run packet>"
+NEXT_STEP_HEAD="<full head from the accepted CTO receipt>"
+CURRENT_PR_HEAD="<fresh exact current PR head from the supported readback>"
 NEXT_OWNER="<owner named by the accepted CTO receipt>"
 NEXT_ACTION="<literal executable next action from the accepted receipt>"
 NEXT_WAKE="<literal wake condition from the accepted receipt>"
 SOURCE_RECEIPT="<accepted CTO next-step receipt key>"
+NEXT_ISSUE="<exact issue key from the accepted receipt, or empty only when the writer key has no issue>"
 
 if ! [[ "$NEXT_STEP_HEAD" =~ ^[0-9a-f]{40}$ ]] \
-   || [ "$NEXT_STEP_HEAD" != "$HEAD_SHA" ] \
+   || ! [[ "$CURRENT_PR_HEAD" =~ ^[0-9a-f]{40}$ ]] \
+   || [ "$NEXT_STEP_HEAD" != "$CURRENT_PR_HEAD" ] \
    || [ -z "$NEXT_OWNER" ] || [ -z "$NEXT_ACTION" ] \
    || [ -z "$NEXT_WAKE" ] || [ -z "$SOURCE_RECEIPT" ]; then
-  echo "REFUSE slot_rework obligation: accepted exact-head owner/action/wake receipt is incomplete or drifted" >&2
+  echo "REFUSE slot_rework obligation: accepted current-head owner/action/wake receipt is incomplete or drifted" >&2
   exit 1
 fi
-
-python3 /Users/rajiv/.claude/scripts/pm-ops.py obligation-upsert \
-  --kind slot_rework \
-  --severity high \
-  --target-type pr \
-  --target-id "<PR>" \
-  --pr "<PR>" \
-  --owner "$NEXT_OWNER" \
-  --title "Accepted exact-head rework for PR #<PR>" \
-  --action "$NEXT_ACTION" \
-  --blocker "accepted CTO next-step receipt=${SOURCE_RECEIPT}" \
-  --dedupe-group "slot_rework:<PR>:${NEXT_STEP_HEAD}:${SOURCE_RECEIPT}" \
-  --evidence "head_sha=${NEXT_STEP_HEAD}" \
-  --evidence "owner=${NEXT_OWNER}" \
-  --evidence "action=${NEXT_ACTION}" \
-  --evidence "wake=${NEXT_WAKE}" \
-  --evidence "source_receipt=${SOURCE_RECEIPT}" \
-  --print-id
 ```
 
-This is one non-executing queue receipt; it does not assign a slot, start a
-workflow, or resolve the generic failure row. If the current PR head or the
-accepted receipt changes, stop and reconcile the row rather than rebinding it.
+This is one non-executing queue receipt; it does not assign a slot or start a
+workflow. The generic `ci_rework` row is diagnostic/report history, not proof
+that CI or the product is resolved. Because the installed reader rejects
+contradictory open continuation lanes, complete the accepted transition only
+through the existing exact-row writer commands below. Do not use
+`--dedupe-group` as row identity: the writer key is
+`(kind,target_type,target_id,pr,issue)`.
+
+Before changing an existing row, bind the accepted receipt to the current
+writer key and scan the open rows read-only. Use the actual PM ledger path
+(`PM_OPS_DB` when set, otherwise the canonical path), the exact PR, and the
+accepted full head and the exact issue component of the writer key. The scan must return at most one exact-head `ci_rework`, at
+most one exact-head `slot_rework`, and at most one older valid-head
+`slot_rework` for that same writer key. A conflicting/malformed current
+`slot_rework`, multiple candidates, a changed target key, or a changed current
+head is a drift blocker: stop without resolving or rebinding any row. Preserve
+malformed and unrelated historical rows.
+
+```bash
+PM_OPS_DB="${PM_OPS_DB:-/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db}"
+ROW_SCAN="$(python3 - "$PM_OPS_DB" "<PR>" "$NEXT_STEP_HEAD" "$NEXT_ISSUE" <<'PYEOF'
+import json
+import re
+import sqlite3
+import sys
+
+db, pr, current_head, expected_issue = sys.argv[1:]
+expected_issue = int(expected_issue) if expected_issue else None
+head_keys = {"head", "head_sha", "headRefOid", "current_head", "current_head_sha"}
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+rows = con.execute(
+    """SELECT id, kind, target_type, target_id, pr, issue, evidence_json
+       FROM obligations
+       WHERE status='open' AND pr=?
+         AND target_type='pr' AND target_id=? AND pr=?""",
+    (int(pr), pr, int(pr)),
+).fetchall()
+con.close()
+
+def row_head(raw):
+    try:
+        evidence = json.loads(raw or "{}")
+    except Exception:
+        return None
+    values = []
+    for key, value in evidence.items():
+        if key in head_keys and value is not None:
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value, re.I):
+                return None
+            values.append(value.lower())
+    if not values or len(set(values)) != 1:
+        return None
+    return values[0]
+
+result = {
+    "ci_rework": [],
+    "slot_rework": [],
+    "older_slot_rework": [],
+    "malformed_slot_rework": [],
+    "key_mismatch": [],
+}
+for row in rows:
+    row_id, kind, target_type, target_id, row_pr, issue, raw = row
+    if kind not in ("ci_rework", "slot_rework"):
+        continue
+    head = row_head(raw)
+    item = {"id": int(row_id), "head": head, "issue": issue}
+    if head is None:
+        if kind == "slot_rework":
+            result["malformed_slot_rework"].append(item)
+        continue
+    if issue != expected_issue:
+        if head == current_head.lower() or kind == "slot_rework":
+            result["key_mismatch"].append(item)
+        continue
+    if kind == "ci_rework" and head == current_head.lower():
+        result["ci_rework"].append(item)
+    elif kind == "slot_rework" and head == current_head.lower():
+        result["slot_rework"].append(item)
+    elif kind == "slot_rework":
+        result["older_slot_rework"].append(item)
+
+if (
+    len(result["ci_rework"]) > 1
+    or len(result["slot_rework"]) > 1
+    or len(result["older_slot_rework"]) > 1
+    or result["malformed_slot_rework"]
+    or result["key_mismatch"]
+):
+    raise SystemExit("ambiguous open continuation rows")
+print(json.dumps(result, sort_keys=True))
+PYEOF
+)" || {
+  echo "REFUSE accepted rework transition: current writer-key rows are missing, malformed, conflicting, or ambiguous" >&2
+  exit 1
+}
+
+# If a prior slot_rework row is for an older accepted head, resolve only that
+# exact row before upsert. This preserves its evidence and lets the writer
+# insert the later head instead of overwriting the old row. A missing later
+# accepted receipt, changed head, or changed (kind,target_type,target_id,pr,issue)
+# key is not a reason to sweep rows; stop and obtain a fresh receipt.
+OLDER_SLOT_ID="$(python3 - "$ROW_SCAN" <<'PYEOF'
+import json, sys
+rows = json.loads(sys.argv[1])["older_slot_rework"]
+print(rows[0]["id"] if rows else "")
+PYEOF
+)"
+if [ -n "$OLDER_SLOT_ID" ]; then
+  python3 /Users/rajiv/.claude/scripts/pm-ops.py obligation-resolve \
+    --kind slot_rework \
+    --id "$OLDER_SLOT_ID" \
+    --reason superseded_by_newer_exact_head_slot_rework \
+    --external-state "accepted_nonexecuting_queue:${SOURCE_RECEIPT}"
+fi
+
+# The upsert is idempotent for the accepted writer key. It must carry the
+# independently accepted head/owner/action/wake/source receipt, and never
+# reuse an old failed-run head. If the accepted receipt names an issue, pass
+# that same issue to both the scan and this command; otherwise omit --issue.
+SLOT_REWORK_ARGS=(
+  --kind slot_rework
+  --severity high
+  --target-type pr
+  --target-id "<PR>"
+  --pr "<PR>"
+  --owner "$NEXT_OWNER"
+  --title "Accepted exact-head rework for PR #<PR>"
+  --action "$NEXT_ACTION"
+  --blocker "accepted CTO next-step receipt=${SOURCE_RECEIPT}"
+  --dedupe-group "slot_rework:<PR>:${NEXT_STEP_HEAD}:${SOURCE_RECEIPT}"
+  --evidence "head_sha=${NEXT_STEP_HEAD}"
+  --evidence "owner=${NEXT_OWNER}"
+  --evidence "action=${NEXT_ACTION}"
+  --evidence "wake=${NEXT_WAKE}"
+  --evidence "source_receipt=${SOURCE_RECEIPT}"
+  --print-id
+)
+if [ -n "$NEXT_ISSUE" ]; then
+  SLOT_REWORK_ARGS+=(--issue "$NEXT_ISSUE")
+fi
+python3 /Users/rajiv/.claude/scripts/pm-ops.py obligation-upsert \
+  "${SLOT_REWORK_ARGS[@]}"
+
+# Only after the accepted slot_rework row exists, resolve the exact current
+# head ci_rework row if the read-only scan found one. This is a typed
+# supersession receipt, not a claim that the red CI/product obligation passed;
+# the accepted slot_rework row remains the sole open, nonexecuting next step.
+CURRENT_CI_ID="$(python3 - "$ROW_SCAN" <<'PYEOF'
+import json, sys
+rows = json.loads(sys.argv[1])["ci_rework"]
+print(rows[0]["id"] if rows else "")
+PYEOF
+)"
+if [ -n "$CURRENT_CI_ID" ]; then
+  python3 /Users/rajiv/.claude/scripts/pm-ops.py obligation-resolve \
+    --kind ci_rework \
+    --id "$CURRENT_CI_ID" \
+    --reason superseded_by_accepted_slot_rework \
+    --external-state "accepted_nonexecuting_queue:${SOURCE_RECEIPT}"
+fi
 
 python3 /Users/rajiv/.claude/scripts/pm-ops.py sync --write --no-live --reason ci-rework-pending
 ```
+
+If the current exact-head `ci_rework` row is absent, do not create or resolve
+one merely to make the reader green. If the accepted receipt names a later
+head, the old `slot_rework` row is resolved only by its exact ID and its old
+head/evidence remain in history; the new accepted row is then inserted under
+the same writer key. Repeated execution with the same head and receipt is an
+idempotent upsert. Any command failure is a literal boundary: do not retry or
+fall back to a target-wide resolve.
 
 ## Report-delivery terminal
 
