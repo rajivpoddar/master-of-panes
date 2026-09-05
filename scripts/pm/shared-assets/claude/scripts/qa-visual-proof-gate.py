@@ -661,25 +661,19 @@ def live_evaluate(args: argparse.Namespace) -> dict[str, Any]:
     )
     scope = validate_change_scope(scope, expected_head=head)
     ui_changed = scope["ui_changed"]
-    if ui_changed:
-        issue = resolve_pr_issue_from_metadata(pr_data)
-        issue_data = json.loads(
-            run(["gh", "issue", "view", str(issue), "--repo", args.repo, "--json", "number,body,state"])
-        )
-        result = evaluate(
-            pr=int(args.pr), issue=int(issue), head=head,
-            issue_body=str(issue_data.get("body") or ""),
-            ui_changed=True,
-            comments=list(pr_data.get("comments") or []), repo=args.repo,
-            verify_remote=not args.skip_artifact_availability,
-        )
-    else:
-        result = evaluate(
-            pr=int(args.pr), issue=0, head=head,
-            issue_body="", ui_changed=False,
-            comments=list(pr_data.get("comments") or []), repo=args.repo,
-            verify_remote=not args.skip_artifact_availability,
-        )
+    issue = resolve_pr_issue_from_metadata(pr_data)
+    issue_data = json.loads(
+        run(["gh", "issue", "view", str(issue), "--repo", args.repo, "--json", "number,body,state"])
+    )
+    if issue_data.get("number") != issue or not isinstance(issue_data.get("body"), str):
+        raise RuntimeError("linked issue readback malformed")
+    result = evaluate(
+        pr=int(args.pr), issue=int(issue), head=head,
+        issue_body=issue_data["body"],
+        ui_changed=ui_changed,
+        comments=list(pr_data.get("comments") or []), repo=args.repo,
+        verify_remote=not args.skip_artifact_availability,
+    )
     result["change_scope"] = scope
     return result
 

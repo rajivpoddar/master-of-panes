@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import argparse
 import json
 import os
 import shutil
@@ -8,6 +10,8 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -44,8 +48,44 @@ def _body() -> str:
 """
 
 
-def _fake_gh(path: Path, body: str) -> None:
+def _fake_gh(
+    path: Path,
+    body: str,
+    *,
+    changed_path: str = "app/page.tsx",
+    pr_head: str = HEAD,
+    api_head: str | None = None,
+    include_receipt: bool = True,
+    receipt_body: str | None = None,
+) -> None:
     body_json = json.dumps(body)
+    receipt_body = body if receipt_body is None else receipt_body
+    receipt = {
+        "schema": "heydonna_qa_visual_proof",
+        "version": 1,
+        "pr": PR,
+        "issue": ISSUE,
+        "head_sha": HEAD,
+        "issue_body_sha256": hashlib.sha256(receipt_body.encode()).hexdigest(),
+        "verdict": "pass",
+        "scenarios": [{
+            "ac_id": "AC-1",
+            "artifact_kind": "local_tmp",
+            "artifact_url": "/tmp/visual-proof.png",
+            "sha256": "0" * 64,
+            "viewport": "1440x900",
+            "state": "passed",
+            "captured_at": "2026-09-05T00:00:00Z",
+        }],
+    }
+    comments_json = json.dumps(
+        [{"body": "<!-- qa-visual-proof: " + json.dumps(receipt, sort_keys=True) + " -->"}]
+        if include_receipt
+        else []
+    )
+    issue_number = ISSUE
+    issue_body_json = body_json
+    api_head = pr_head if api_head is None else api_head
     script = f"""#!/usr/bin/env python3
 import json
 import sys
@@ -57,33 +97,26 @@ if args[:2] == ["pr", "view"]:
         "title": "visual gate fixture",
         "body": "",
         "state": "OPEN",
-        "headRefOid": "{HEAD}",
+        "headRefOid": "{pr_head}",
         "headRefName": "fix/{PR}-visual-gate",
-        "closingIssuesReferences": [{{"number": {ISSUE}}}],
-        "comments": [{{"body": "<!-- qa-visual-proof: " + json.dumps({{
-            "pr": {PR}, "issue": {ISSUE}, "head_sha": "{HEAD}",
-            "issue_body_sha256": hashlib.sha256({body_json}.encode()).hexdigest(),
-            "verdict": "pass",
-            "scenarios": [{{"ac_id": "AC-1", "artifact_kind": "local_tmp", "artifact_url": "/tmp/visual-proof.png"}}]
-        }}, sort_keys=True) + " -->"}}]
+        "closingIssuesReferences": [{{"number": {issue_number}}}],
+        "comments": {comments_json}
     }}))
 elif args[:2] == ["issue", "view"]:
-    print(json.dumps({{"number": {ISSUE}, "body": {body_json}, "state": "OPEN"}}))
+    print(json.dumps({{"number": {issue_number}, "body": {issue_body_json}, "state": "OPEN"}}))
 elif args[:1] == ["api"] and "files?per_page=100" in " ".join(args):
-    print("app/page.tsx")
+    print("{changed_path}")
 elif args[:1] == ["api"] and "pulls/{PR}" in " ".join(args):
-    print("{HEAD}")
+    print("{api_head}")
 else:
     print("unexpected read-only gh invocation", file=sys.stderr)
     raise SystemExit(2)
 """
-    # Keep the fixture self-contained; hashlib is used by the generated script.
-    script = "import hashlib\n" + script
     path.write_text(script, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def _layout(tmp_path: Path, body: str) -> tuple[Path, Path]:
+def _layout(tmp_path: Path, body: str, **gh_kwargs: object) -> tuple[Path, Path]:
     runtime = tmp_path / "runtime"
     scripts = runtime / ".claude" / "scripts"
     (scripts / "ci").mkdir(parents=True)
@@ -94,7 +127,7 @@ def _layout(tmp_path: Path, body: str) -> tuple[Path, Path]:
     shutil.copy2(RULES, scripts / "ci" / "change-scope-rules.json")
     gh = tmp_path / "bin" / "gh"
     gh.parent.mkdir()
-    _fake_gh(gh, body)
+    _fake_gh(gh, body, **gh_kwargs)
     return runtime, gh
 
 
@@ -124,8 +157,55 @@ def test_real_gate_resolves_canonical_installed_layout_without_retired_resolver(
     assert payload["ok"] is True
     assert payload["issue"] == ISSUE
     assert payload["head_sha"] == HEAD
+    assert payload["issue_body_sha256"] == hashlib.sha256(body.encode()).hexdigest()
     assert payload["reason"] == "durable_screenshot_receipt_valid"
     assert not (runtime / "scripts" / "pm" / "resolve_pr_issue.py").exists()
+
+
+def test_non_ui_gate_result_through_actual_adapter_preserves_issue_body(tmp_path: Path, monkeypatch) -> None:
+    body = _body()
+    runtime, gh = _layout(tmp_path, body, changed_path="scripts/pm/control-plane/example.py")
+    gate = runtime / ".claude" / "scripts" / "qa-visual-proof-gate.py"
+    validator = runtime / ".claude" / "scripts" / "validate-issue-contract-ledger.py"
+    spec = importlib.util.spec_from_file_location("adapter", ADAPTER)
+    assert spec and spec.loader
+    adapter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(adapter)
+    adapter.VISUAL_GATE = gate
+    adapter.VISUAL_GATE_SHA256 = hashlib.sha256(gate.read_bytes()).hexdigest()
+    adapter.ISSUE_CONTRACT_VALIDATOR = validator
+    adapter.ISSUE_CONTRACT_VALIDATOR_SHA256 = hashlib.sha256(validator.read_bytes()).hexdigest()
+    monkeypatch.setenv("PATH", f"{gh.parent}:{os.environ['PATH']}")
+
+    adapter._visual_proof(argparse.Namespace(pr=PR, head=HEAD, gh=str(gh)), hashlib.sha256(body.encode()).hexdigest())
+
+
+def test_stale_head_fails_closed_before_classification(tmp_path: Path) -> None:
+    body = _body()
+    runtime, gh = _layout(tmp_path, body, pr_head="0" * 40)
+    result = _run_gate(runtime / ".claude" / "scripts" / "qa-visual-proof-gate.py", gh, tmp_path)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["reason"] == "gate_error"
+    assert any("head mismatch" in error for error in payload["errors"])
+
+
+@pytest.mark.parametrize(
+    "include_receipt,receipt_body,expected_reason",
+    [(False, None, "durable_screenshot_receipt_missing"), (True, "different body", "durable_screenshot_receipt_invalid")],
+)
+def test_ui_missing_or_wrong_body_receipt_refuses(
+    tmp_path: Path, include_receipt: bool, receipt_body: str | None, expected_reason: str
+) -> None:
+    body = _body()
+    runtime, gh = _layout(tmp_path, body, include_receipt=include_receipt, receipt_body=receipt_body)
+    result = _run_gate(runtime / ".claude" / "scripts" / "qa-visual-proof-gate.py", gh, tmp_path)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["reason"] == expected_reason
 
 
 def test_missing_classifier_fails_closed_before_any_effect(tmp_path: Path) -> None:

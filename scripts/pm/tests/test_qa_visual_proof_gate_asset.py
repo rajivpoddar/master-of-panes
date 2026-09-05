@@ -95,13 +95,17 @@ def test_non_ui_live_path_classifies_before_issue_resolution(monkeypatch: pytest
             return json.dumps(pr)
         if command[0] == "python3":
             return json.dumps(_scope(ui_changed=False))
+        if command[:3] == ["gh", "issue", "view"]:
+            return json.dumps({"number": 7589, "body": "## What to Build\n", "state": "OPEN"})
         raise AssertionError(f"unexpected effect before non-UI decision: {command}")
 
     monkeypatch.setattr(gate, "run", fake_run)
     result = gate.live_evaluate(_args())
     assert result["ok"] is True
     assert result["reason"] == "non_ui_change"
-    assert not any(command[:3] == ["gh", "issue", "view"] for command in calls)
+    assert result["issue"] == 7589
+    assert result["issue_body_sha256"] == hashlib.sha256("## What to Build\n".encode()).hexdigest()
+    assert any(command[:3] == ["gh", "issue", "view"] for command in calls)
     classifier_calls = [command for command in calls if command[0] == "python3"]
     assert len(classifier_calls) == 1
     assert classifier_calls[0][classifier_calls[0].index("--expected-head") + 1] == HEAD
