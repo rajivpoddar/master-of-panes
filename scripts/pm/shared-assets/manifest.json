@@ -42,7 +42,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 65,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -559,6 +559,15 @@
       "sha256": "f530309da812f833be0dfb2bb12144a6efe6b50a98b8d16d1fa8d76ac12d7616",
       "mode": 420,
       "ownership_class": "shared-codex-contract",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/skills/codex-review-companion/codex-review-companion.mjs",
+      "canonical_target": "/Users/rajiv/.claude/skills/codex-review-companion/codex-review-companion.mjs",
+      "sha256": "916af5f5505c5f8e56d905ba03c10a1792a51f2f84740d43de606a02153abb51",
+      "mode": 493,
+      "ownership_class": "shared-codex-skill-executable",
       "dependency_status": "closed",
       "dependencies": []
     },
