@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "control_plane_only": [
+    ".agents/**",
+    ".claude/**",
+    "docs/**",
+    "scripts/pm/**",
+    "AGENTS.md",
+    "*.md",
+    "benchmarks/pm-ops/**"
+  ],
+  "control_plane_ci": [
+    "scripts/ci/ci-fast-triage.py",
+    "scripts/ci/notify-companion-select.sh",
+    "scripts/ci/pre-merge-current-head-ci-guard.sh",
+    "scripts/ci/promotion-current-head-ci-guard.sh",
+    "scripts/ci/publish-ci-verdict.py",
+    "scripts/ci/resolve-rerun-head.sh",
+    "scripts/ci/slot-clone-lease.sh",
+    "scripts/ci/validate-ci-action-packet.py",
+    "scripts/ci/test_notify_slack_companion.sh",
+    "scripts/ci/tests/test_ci_fast_triage.py",
+    "scripts/ci/tests/test_pre_merge_current_head_ci_guard.sh",
+    "scripts/ci/tests/test_promotion_current_head_ci_guard.sh",
+    "scripts/ci/tests/test_publish_ci_verdict.py",
+    "scripts/ci/tests/test_resolve_rerun_head.sh",
+    "scripts/ci/tests/test_slot_clone_lease.sh",
+    "scripts/ci/tests/test_validate_ci_action_packet.py"
+  ],
+  "app_ci": [
+    ".github/**",
+    "scripts/ci/**"
+  ],
+  "app_test_fixture": [
+    "__tests__/**",
+    "tests/**"
+  ],
+  "convex_runtime": [
+    "convex/**",
+    "lib/**",
+    "emails/**",
+    "types/**",
+    "package.json",
+    "bun.lock",
+    "convex.json",
+    "tsconfig*.json"
+  ],
+  "control_plane_legacy": [
+    "scripts/axiom-activity-report.py",
+    "scripts/tests/test_axiom_report_queries.py"
+  ],
+  "editor_product": [
+    "app/(pages)/dashboard/editor/**",
+    "components/editor/**",
+    "hooks/use-audio-highlighting.ts",
+    "hooks/use-transcript-cache.ts",
+    "hooks/use-transcript-data*.ts",
+    "hooks/use-transcript-editor.ts",
+    "hooks/use-transcript-save.ts",
+    "lib/editor/**",
+    "lib/utils/position-build-utils.ts",
+    "lib/utils/word-diff.ts",
+    "lib/workers/position-rebuild.worker.ts",
+    "lib/workers/position-rebuild-handler.ts",
+    "lib/workers/reconciliation.worker.ts"
+  ],
+  "ui_product": [
+    "app/*.css",
+    "app/*.tsx",
+    "app/**/*.css",
+    "app/**/*.tsx",
+    "components/*.css",
+    "components/*.ts",
+    "components/*.tsx",
+    "components/**/*.css",
+    "components/**/*.ts",
+    "components/**/*.tsx",
+    "hooks/*.ts",
+    "hooks/*.tsx",
+    "hooks/**/*.ts",
+    "hooks/**/*.tsx",
+    "lib/editor/**",
+    "styles/**",
+    "tailwind.config.*"
+  ]
+}

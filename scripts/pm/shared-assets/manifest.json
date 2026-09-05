@@ -48,7 +48,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 71,
+    "selected_count": 75,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -209,11 +209,38 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/ci/change-scope-rules.json",
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/change-scope-rules.json",
+      "sha256": "bb572ca70c1c464267b92732a69cfca762c151ca05a5a7340da76a2c75191834",
+      "mode": 420,
+      "ownership_class": "shared-claude-cto-admission-classifier-rules",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/ci/change_scope.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/change_scope.py",
+      "sha256": "7d8faef03ce3e039ea6d036c238ace251d8d839c76742a017aa98bfd8c9851c8",
+      "mode": 493,
+      "ownership_class": "shared-claude-cto-admission-classifier",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/ci/ci-fast-triage.py",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
       "sha256": "752ccd77cc632bec2fbdeb360822ad4adb0ea3f9cef5ca94a68e5174e0875b54",
       "mode": 493,
       "ownership_class": "shared-claude-ci-failure-triage",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/ci/heydonna-cto-label-gated-ci.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/heydonna-cto-label-gated-ci.py",
+      "sha256": "3c2a19d6c1d75c3772d397c6614f4b35cf80eec0685916b158fd88cd74af1973",
+      "mode": 493,
+      "ownership_class": "shared-claude-cto-paid-admission",
       "dependency_status": "closed",
       "dependencies": []
     },
@@ -387,6 +414,15 @@
       "sha256": "3e28684422c2dc19e51b5a979fcb5e354b2c1c5a814dc055b5047f11d8640f46",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/validate-issue-contract-ledger.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/validate-issue-contract-ledger.py",
+      "sha256": "3f503e12287ab82d81486f59f1f4acec9c01a6381e39998037c7271f300de4db",
+      "mode": 493,
+      "ownership_class": "shared-claude-cto-issue-contract-validator",
       "dependency_status": "closed",
       "dependencies": []
     },
