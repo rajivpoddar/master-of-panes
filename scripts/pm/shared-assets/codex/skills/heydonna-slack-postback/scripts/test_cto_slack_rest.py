@@ -53,6 +53,7 @@ class ProseNumberSpacingTest(unittest.TestCase):
         text = (
             "`body11350` ```run33945611843``` <@U123> <date^123^2026-09-05> "
             "https://example.test/body11350 user@example.com /tmp/body11350 "
+            "scripts/run339.py feature/body11350 release20260905.json python311 "
             "abc123456789 550e8400-e29b-41d4-a716-446655440000 1.23 2026-09-05 12:30"
         )
         self.assertEqual(normalize_prose_number_spacing(text), text)
@@ -74,8 +75,9 @@ class ProseNumberSpacingTest(unittest.TestCase):
                 return None
 
             def read(self) -> bytes:
+                posted_text = posted_payloads[-1]["text"]
                 return json.dumps(
-                    {"ok": True, "messages": [{"ts": "123.456", "user": cto_slack_rest.EXPECTED_USER_ID, "text": "body 11350"}]}
+                    {"ok": True, "messages": [{"ts": "123.456", "user": cto_slack_rest.EXPECTED_USER_ID, "text": posted_text}]}
                 ).encode()
 
         def invoke(argv: list[str], stdin: io.StringIO | None = None) -> dict:
@@ -111,6 +113,61 @@ class ProseNumberSpacingTest(unittest.TestCase):
         self.assertEqual(
             [result["text_sha256"] for result in results],
             [hashlib.sha256(b"body 11350").hexdigest()] * 3,
+        )
+
+    def test_writer_preserves_ambiguous_tokens_in_payload_and_hash(self) -> None:
+        posted_payloads: list[dict[str, str]] = []
+
+        def fake_slack_call(method: str, token: str, payload: dict[str, str] | None = None) -> dict:
+            if method == "auth.test":
+                return {"ok": True, "user_id": cto_slack_rest.EXPECTED_USER_ID}
+            posted_payloads.append(payload or {})
+            return {"ok": True, "ts": "123.456"}
+
+        class ReplyResponse:
+            def __enter__(self) -> "ReplyResponse":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "messages": [
+                            {
+                                "ts": "123.456",
+                                "user": cto_slack_rest.EXPECTED_USER_ID,
+                                "text": posted_payloads[-1]["text"],
+                            }
+                        ],
+                    }
+                ).encode()
+
+        def invoke(text: str) -> dict:
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"SLACK_CTO_BOT_TOKEN": "token"}, clear=False),
+                mock.patch.object(sys, "argv", ["cto_slack_rest.py", "--channel", "C123", "--text", text]),
+                mock.patch.object(cto_slack_rest, "slack_call", side_effect=fake_slack_call),
+                mock.patch.object(cto_slack_rest.urllib.request, "urlopen", return_value=ReplyResponse()),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(cto_slack_rest.main(), 0)
+            return json.loads(stdout.getvalue())
+
+        values = [
+            "scripts/run339.py",
+            "feature/body11350",
+            "release20260905.json",
+            "python311",
+        ]
+        results = [invoke(value) for value in values]
+        self.assertEqual([payload["text"] for payload in posted_payloads], values)
+        self.assertEqual(
+            [result["text_sha256"] for result in results],
+            [hashlib.sha256(value.encode()).hexdigest() for value in values],
         )
 
 

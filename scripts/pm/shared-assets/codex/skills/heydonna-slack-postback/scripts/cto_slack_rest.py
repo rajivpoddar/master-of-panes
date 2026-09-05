@@ -83,6 +83,9 @@ _PROTECTED_SPANS = (
     re.compile(r"(?i)\bwww\.[^\s<>]+"),
     re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"),
     re.compile(r"(?<!\w)(?:~|/|\./|\.\./)[^\s<>]+"),
+    re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"),
+    re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z0-9_-]+\.)+[A-Za-z]{1,8}(?![A-Za-z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])(?:python|node|bun|deno)\d+(?![A-Za-z0-9])"),
     re.compile(r"(?<![A-Za-z0-9])(?:[0-9A-Fa-f]{8,}|[0-9A-Fa-f]{8}-[0-9A-Fa-f-]{5,})(?![A-Za-z0-9])"),
     re.compile(r"(?<![A-Za-z0-9])(?:v?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?)(?![A-Za-z0-9])"),
     re.compile(r"(?<![A-Za-z0-9])\d{1,4}[-/]\d{1,2}[-/]\d{1,4}(?:[T ]\d{1,2}:\d{2}(?::\d{2})?)?(?![A-Za-z0-9])"),
@@ -90,7 +93,7 @@ _PROTECTED_SPANS = (
     re.compile(r"(?<![A-Za-z0-9])\d+\.\d+(?![A-Za-z0-9])"),
 )
 _PROSE_NUMBER_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9])((?:body|run|head|published|[a-z][a-z-]{3,}))(\d[0-9A-Fa-f]{2,})(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9])((?:body|run|head|published))(\d[0-9A-Fa-f]{2,})(?![A-Za-z0-9])"
 )
 
 
@@ -109,8 +112,8 @@ def normalize_prose_number_spacing(text: str) -> str:
 
     Slack markup, code, links, paths, addresses, hashes, versions, dates, times,
     decimals, and short identifiers are protected. The conservative rule only
-    handles lowercase prose prefixes of at least four letters followed by a
-    multi-character numeric/hex suffix, making the operation idempotent.
+    handles only the recognized prose prefixes followed by a multi-character
+    numeric/hex suffix, making the operation idempotent.
     """
     protected: list[tuple[int, int]] = []
     for pattern in _PROTECTED_SPANS:
