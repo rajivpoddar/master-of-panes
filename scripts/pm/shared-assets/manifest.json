@@ -48,7 +48,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 71,
+    "selected_count": 72,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",

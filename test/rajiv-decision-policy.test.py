@@ -8,6 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "scripts" / "pm" / "shared-assets"
+PM_ROOT_RULE = Path("/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules/20-buddhi-pm.md")
 
 PM_SKILLS = (
     "claude/skills/direct-assign/SKILL.md",
@@ -75,6 +76,16 @@ class RajivDecisionPolicyTest(unittest.TestCase):
         self.assertIn("Only CTO/PR Merges may use this prompt", text)
         self.assertNotIn("Rajiv product/process decision gate", text)
         self.assertNotIn("wait for explicit approval", " ".join(text.split()).lower())
+
+    def test_pm_root_rule_has_one_review_boundary(self) -> None:
+        if not PM_ROOT_RULE.exists():
+            self.skipTest("installed PM root rule is outside this repository")
+        normalized = " ".join(PM_ROOT_RULE.read_text(encoding="utf-8").split()).lower()
+        self.assertNotIn("after any rework commit", normalized)
+        self.assertNotIn("use sonnet first", normalized)
+        self.assertNotIn("r2/r3", normalized)
+        self.assertIn("one functionality-first independent review", normalized)
+        self.assertIn("unchanged-code", normalized)
 
     def test_slack_skill_routes_only_material_decisions(self) -> None:
         text = (ASSETS / "codex/skills/heydonna-slack-postback/SKILL.md").read_text(
