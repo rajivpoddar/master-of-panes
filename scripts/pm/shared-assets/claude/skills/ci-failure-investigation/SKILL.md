@@ -249,6 +249,53 @@ else
     > /tmp/ci-rework-obligation-<PR>-<RUN_ID>.txt
 fi
 
+# Accepted queued rework handoff (CTO receipt only)
+
+`ci_rework` above is a diagnostic/report obligation and remains
+`PROCESS_LIMBO` to the open-PR reader. Do not rename it. Only after a real
+CTO-owned next-step receipt has been accepted, create the reader-supported
+`slot_rework` queue row below. Every placeholder must come from that receipt
+and the same immutable run/head packet; labels, prose, and a PM-only
+"accepted" message are not sufficient.
+
+```bash
+NEXT_STEP_HEAD="<same validated full head from the failed-run packet>"
+NEXT_OWNER="<owner named by the accepted CTO receipt>"
+NEXT_ACTION="<literal executable next action from the accepted receipt>"
+NEXT_WAKE="<literal wake condition from the accepted receipt>"
+SOURCE_RECEIPT="<accepted CTO next-step receipt key>"
+
+if ! [[ "$NEXT_STEP_HEAD" =~ ^[0-9a-f]{40}$ ]] \
+   || [ "$NEXT_STEP_HEAD" != "$HEAD_SHA" ] \
+   || [ -z "$NEXT_OWNER" ] || [ -z "$NEXT_ACTION" ] \
+   || [ -z "$NEXT_WAKE" ] || [ -z "$SOURCE_RECEIPT" ]; then
+  echo "REFUSE slot_rework obligation: accepted exact-head owner/action/wake receipt is incomplete or drifted" >&2
+  exit 1
+fi
+
+python3 /Users/rajiv/.claude/scripts/pm-ops.py obligation-upsert \
+  --kind slot_rework \
+  --severity high \
+  --target-type pr \
+  --target-id "<PR>" \
+  --pr "<PR>" \
+  --owner "$NEXT_OWNER" \
+  --title "Accepted exact-head rework for PR #<PR>" \
+  --action "$NEXT_ACTION" \
+  --blocker "accepted CTO next-step receipt=${SOURCE_RECEIPT}" \
+  --dedupe-group "slot_rework:<PR>:${NEXT_STEP_HEAD}:${SOURCE_RECEIPT}" \
+  --evidence "head_sha=${NEXT_STEP_HEAD}" \
+  --evidence "owner=${NEXT_OWNER}" \
+  --evidence "action=${NEXT_ACTION}" \
+  --evidence "wake=${NEXT_WAKE}" \
+  --evidence "source_receipt=${SOURCE_RECEIPT}" \
+  --print-id
+```
+
+This is one non-executing queue receipt; it does not assign a slot, start a
+workflow, or resolve the generic failure row. If the current PR head or the
+accepted receipt changes, stop and reconcile the row rather than rebinding it.
+
 python3 /Users/rajiv/.claude/scripts/pm-ops.py sync --write --no-live --reason ci-rework-pending
 ```
 

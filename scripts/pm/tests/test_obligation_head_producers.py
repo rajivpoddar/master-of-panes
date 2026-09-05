@@ -8,7 +8,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
+
+
+warnings.simplefilter("ignore", ResourceWarning)
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -156,6 +160,82 @@ class ObligationHeadProducerTests(unittest.TestCase):
             obligation = next(args for args in calls if args[0] == "obligation-upsert")
             self.assertIn("--evidence", obligation)
             self.assertIn(f"head_sha={HEAD}", obligation)
+
+    def test_accepted_slot_rework_receipt_is_queued_and_nonexecuting(self) -> None:
+        if not WRITER.is_file() or not READER.is_file():
+            self.skipTest("installed producer/reader pair is not available in this environment")
+
+        reader = load_reader()
+        with tempfile.TemporaryDirectory(prefix="slot-rework-producer-") as tmp:
+            db = Path(tmp) / "pm-ops.db"
+            env = {**os.environ, "PM_OPS_DB": str(db)}
+            command = [
+                "python3",
+                str(WRITER),
+                "obligation-upsert",
+                "--kind",
+                "slot_rework",
+                "--severity",
+                "high",
+                "--target-type",
+                "pr",
+                "--target-id",
+                "7629",
+                "--pr",
+                "7629",
+                "--owner",
+                "rescues",
+                "--title",
+                "Accepted exact-head rework for PR #7629",
+                "--action",
+                "Dispatch the accepted local reproduction packet once.",
+                "--blocker",
+                "accepted CTO next-step receipt=cto-7629-rework-v1",
+                "--dedupe-group",
+                f"slot_rework:7629:{HEAD}:cto-7629-rework-v1",
+                "--evidence",
+                f"head_sha={HEAD}",
+                "--evidence",
+                "owner=rescues",
+                "--evidence",
+                "action=Dispatch the accepted local reproduction packet once.",
+                "--evidence",
+                "wake=next healthy numbered-slot capacity",
+                "--evidence",
+                "source_receipt=cto-7629-rework-v1",
+            ]
+            for _ in range(2):
+                result = subprocess.run(command, env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            reader.PM_OPS_DB = db
+            records, error = reader._load_open_pr_continuations("7629", HEAD)
+            self.assertIsNone(error)
+            self.assertEqual(records[0]["lane"], "rework")
+            metadata = reader._continuation_motion_metadata(records)
+            self.assertIsNotNone(metadata)
+            self.assertEqual(metadata["motion_state"], "REPRO_REWORK_QUEUED")
+            self.assertEqual(metadata["workflow_motion"], "none")
+            self.assertEqual(metadata["owner"], "rescues")
+
+            with sqlite3.connect(db) as connection:
+                count = connection.execute(
+                    "select count(*) from obligations where status='open' and kind='slot_rework'"
+                ).fetchone()[0]
+            self.assertEqual(count, 1)
+
+            # Missing, wrong, or placeholder owner/head evidence never becomes
+            # a queued reader result; these are separate retained rows.
+            bad = command.copy()
+            bad[bad.index("7629", bad.index("--target-id") + 1)] = "7585"
+            bad[bad.index("7629", bad.index("--pr") + 1)] = "7585"
+            bad[bad.index("--owner") + 1] = "unknown"
+            bad.extend(("--evidence", "head_sha=not-a-head"))
+            result = subprocess.run(bad, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            records, error = reader._load_open_pr_continuations("7585", HEAD)
+            self.assertEqual(records, [])
+            self.assertTrue(error)
 
 
 if __name__ == "__main__":
