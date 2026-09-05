@@ -3,13 +3,12 @@ name: pm-wait-nudge
 description: Classify an injected slot wait notice and report the required action to PM.
 ---
 
-## Rajiv decision gate
+## Routine ownership and escalation
 
-Classify and report freely. If the notice exposes a product decision or a
-process decision such as a discretionary slot choice, priority change,
-reassignment, release choice, exception, or conveyor-policy change, PM sends one
-evidence-bound recommendation to Abhijit CTO in `#heydonna-dev` and stops before
-mutation. CTO alone DMs Rajiv and waits for explicit approval.
+Follow the shared release-conveyor decision boundary. PM may carry out routine
+scheduling, lifecycle, and conveyor actions under approved priorities and
+safety rules; route genuine decisions to CTO and do not add an approval hop to
+a routine nudge.
 
 Read the already-injected numbered-slot notice. If it is `LOCAL_CONTINUE`, continue local work, do not notify PM, and finish with:
 

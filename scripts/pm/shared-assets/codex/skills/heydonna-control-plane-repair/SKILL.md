@@ -5,18 +5,15 @@ description: Route one bounded HeyDonna control-plane defect from CTO Decisions 
 
 # HeyDonna Control-Plane Repair
 
-## Rajiv product/process decision gate
+## Routine ownership and escalation
 
-Diagnose freely. Before any mutation, distinguish mechanical execution of an
-existing Rajiv-approved rule from a decision. A product decision changes
-customer behavior, scope, priority, data, or acceptance criteria. A process
-decision changes, waives, overrides, or chooses among Ready Pool, slot,
-PR-conveyor, review, CI/capture/rerun, merge/rollout, monitor, or automation
-paths. For either decision, stop before mutation and DM Rajiv in
-`D0BPG55FG72` as Abhijit CTO with the source, evidence, one recommendation,
-exact question, and immediate effect. Resume only after explicit approval;
-material drift requires a new approval. No permit, receipt, or new service is
-required.
+Follow the shared release-conveyor decision boundary: PM owns routine
+scheduling/lifecycle/conveyor execution; CTO owns routine technical diagnosis,
+bounded repair, same-owner continuation, reviewed publication, and normal
+CI/capture/merge/rollout. Choosing among eligible actions is not itself a
+process-policy change. User-authorized repairs continue through proof, warranted
+independent review, publication, and scoped install without another approval
+hop; only the reserved escalation classes in the shared contract go to Rajiv.
 
 This is a delegation and lifecycle contract. CTO Decisions classifies and
 routes; it never investigates deeply, implements, reviews, publishes, deploys,

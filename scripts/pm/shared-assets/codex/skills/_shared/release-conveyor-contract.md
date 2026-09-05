@@ -6,6 +6,18 @@ they must not define competing ownership or state machines.
 
 ## Routine motion and ownership
 
+PM executes routine scheduling, lifecycle, and conveyor actions under approved
+priorities and safety rules. CTO executes routine technical diagnosis,
+bounded repro/rework/repair, same-owner continuation, reviewed publication,
+and normal CI/capture/merge/rollout. Choosing among eligible actions is not a
+process-policy change. Escalate only customer/product behavior or acceptance
+changes, operating-policy changes or waivers, material reprioritization or
+cost changes, explicit access-scope restrictions, destructive/high-risk
+actions, or reserved release exceptions (including a red required-workflow
+merge). PM sends genuine decisions to CTO; only CTO DMs Rajiv. User-authorized
+repairs continue through proof, warranted independent review, publication, and
+scoped install under standing authority without another approval hop.
+
 - A numbered slot owns only work executable now: implementation,
   reproduction, or production-shaped proof. CI, capture, review, decisions,
   and external waits are off-slot.

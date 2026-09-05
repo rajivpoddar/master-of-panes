@@ -5,6 +5,10 @@ description: Process one PM release or free-slot notice through existing MoP pat
 
 ## Execution contract
 
+Follow the shared release-conveyor decision boundary. PM owns this routine
+scheduling and lifecycle transition under approved priorities and safety rules;
+route genuine decisions to CTO without adding a Rajiv approval hop.
+
 Re-read the current slot and Ready Pool before every action. A changed,
 ineligible, active, productive, DND, or uncertain readback returns a typed
 `PM_ASSIGNMENT_BLOCKED reason=current_state_mismatch` and makes no POST.

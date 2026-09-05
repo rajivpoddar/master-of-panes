@@ -5,7 +5,12 @@ description: Release one quiescent numbered slot through Master of Panes.
 
 ## Execution contract
 
-Use this only for an already-authorized, mechanically required release. Read
+Follow the shared release-conveyor decision boundary. PM may execute this
+routine safety release under approved cadence and ownership rules; route
+genuine decisions to CTO without adding a Rajiv approval hop.
+
+Use this for the routine release required by the approved 20-minute safety
+rule. Read
 the current slot once and pin its complete assignment tuple (slot, epoch,
 repository, issue, PR, branch, head, work kind, handoff, owner, and task). If it is active,
 productive, DND, changed, or no longer the same held assignment, return

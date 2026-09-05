@@ -5,16 +5,13 @@ description: Reconcile every HeyDonna OPEN PR into one executable four-state rel
 
 # HeyDonna Open-PR Four-State Reconciliation
 
-## Rajiv product/process decision gate
+## Routine ownership and escalation
 
-Read and diagnose every PR freely. Execute only a transition mechanically
-required by an existing Rajiv-approved conveyor rule. Any change, waiver,
-override, exception, or discretionary choice involving PR order/state,
-Ready Pool or slot ownership, review, CI/capture/rerun, merge, or rollout is a
-process decision. Stop before mutation and DM Rajiv in `D0BPG55FG72` as
-Abhijit CTO with the source, evidence, one recommendation, exact question, and
-immediate effect. Product decisions use the same route. Resume only after
-explicit approval; material drift requires a new approval.
+Follow the shared release-conveyor decision boundary. Read and diagnose every
+PR freely; PM executes routine scheduling/lifecycle/conveyor actions and CTO
+executes routine technical and release work. Choosing among eligible actions
+is not itself a Rajiv escalation; reserved escalation classes remain governed
+by the shared contract.
 
 This is the PR Merges release-owner audit and action contract. On every wake,
 enumerate every OPEN PR at its exact 40-character head and finish each row in

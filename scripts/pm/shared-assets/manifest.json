@@ -393,7 +393,7 @@
     {
       "source_path": "claude/skills/direct-assign/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/direct-assign/SKILL.md",
-      "sha256": "bff619f299351989f0ef95556b30cf66952ebac58e9db2f4e9e09db0f7ea8f79",
+      "sha256": "ac2202b107e57b0415c180a098c736dd107596392de1b65c31d7a39368dbad5c",
       "mode": 420,
       "ownership_class": "shared-claude-direct-assignment-skill",
       "dependency_status": "closed",
@@ -402,7 +402,7 @@
     {
       "source_path": "claude/skills/direct-release/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/direct-release/SKILL.md",
-      "sha256": "bb087a37d87a86176c2420fa6ece8d5b7a01091c84bc19c961b30743867ed155",
+      "sha256": "99ac2a93928abdcae0a8ebb7037c6a2706e623e66bdb13a6699885e8a5c1c09b",
       "mode": 420,
       "ownership_class": "shared-claude-direct-release-skill",
       "dependency_status": "closed",
@@ -420,7 +420,7 @@
     {
       "source_path": "claude/skills/pm-nudge-processing/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/pm-nudge-processing/SKILL.md",
-      "sha256": "886a293471ea11a6d37922f3e8da40193c2f61624528a827c92e6fd6203e6d84",
+      "sha256": "074ae67a3fcf72cd95a22185f658a0b1bda0e51adae6b2f028756733b421e539",
       "mode": 420,
       "ownership_class": "shared-claude-pm-nudge-processing-skill",
       "dependency_status": "closed",
@@ -429,7 +429,7 @@
     {
       "source_path": "claude/skills/pm-wait-nudge/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/pm-wait-nudge/SKILL.md",
-      "sha256": "15f316bcbe6bcc29452fa53cfc35050a91a23f2583ff8917275fcba577508f1d",
+      "sha256": "647ca681d3e33315f8fb2931dcf86af17a8bfd3669ca443b7c7505866942f074",
       "mode": 420,
       "ownership_class": "shared-claude-pm-wait-nudge-skill",
       "dependency_status": "closed",
@@ -625,7 +625,7 @@
     {
       "source_path": "codex/skills/_shared/release-conveyor-contract.md",
       "canonical_target": "/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md",
-      "sha256": "f530309da812f833be0dfb2bb12144a6efe6b50a98b8d16d1fa8d76ac12d7616",
+      "sha256": "5ee7a1634782f2ab2ba47fa1fce4a7c323013ebf5e42e021e22b4c42cdae0ccc",
       "mode": 420,
       "ownership_class": "shared-codex-contract",
       "dependency_status": "closed",
@@ -670,7 +670,7 @@
     {
       "source_path": "codex/skills/heydonna-control-plane-repair/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-control-plane-repair/SKILL.md",
-      "sha256": "41e5a3c9d6482be8ca9005f03fc4c6c1aeeacec45df206fc3a5de7921ba5d054",
+      "sha256": "1dd233dad63ade1085698b5db08403605b1ece837a6dc665eb4c55203a488712",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",
@@ -679,7 +679,7 @@
     {
       "source_path": "codex/skills/heydonna-open-pr-status/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",
-      "sha256": "ac86bba11c43a84871acbd7961e8858cfbd08feedafbedea25e4a9d1772e27fc",
+      "sha256": "ae6eb12839342fab3ed92be7419b83897527f2c9b5810c84a1adfe999e14356a",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",
@@ -688,7 +688,7 @@
     {
       "source_path": "codex/skills/heydonna-slack-postback/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-slack-postback/SKILL.md",
-      "sha256": "f3994c6d591fab9facc76b4c9ed2f78817b5d4798953ba9833e0b26c565aa99c",
+      "sha256": "26f0df60bf41a96ed48ef169c61ae2e830304010d62615f6ac767f7510678f35",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",

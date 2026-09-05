@@ -23,44 +23,62 @@ CTO_SKILLS = (
 
 CHANGED_ASSETS = PM_SKILLS + CTO_SKILLS + (
     "codex/skills/heydonna-slack-postback/SKILL.md",
+    "codex/skills/_shared/release-conveyor-contract.md",
 )
 
 
 class RajivDecisionPolicyTest(unittest.TestCase):
-    def test_pm_decisions_route_to_cto_without_mutation(self) -> None:
+    def test_routine_pm_execution_has_no_approval_hop(self) -> None:
         for relative in PM_SKILLS:
             text = (ASSETS / relative).read_text(encoding="utf-8")
             normalized = " ".join(text.split())
             with self.subTest(relative=relative):
-                self.assertIn("Rajiv decision gate", text)
-                self.assertIn("#heydonna-dev", text)
                 self.assertIn("CTO", text)
-                self.assertRegex(normalized, r"CTO (?:must|alone) DM(?:s)? Rajiv")
-                self.assertRegex(
-                    normalized,
-                    r"stop(?:s)? (?:before (?:the POST|mutation|assigning)|without assigning)",
+                self.assertIn("routine", normalized)
+                self.assertTrue(
+                    "genuine decisions to cto" in normalized.lower()
+                    or "routes to cto" in normalized.lower()
                 )
+                self.assertIn("shared release-conveyor decision boundary", normalized)
+                self.assertNotIn("Rajiv decision gate", text)
+                self.assertNotIn("waits for explicit approval", normalized)
 
-    def test_cto_decisions_dm_rajiv_before_mutation(self) -> None:
+    def test_cto_owns_routine_repairs_and_escalates_only_reserved_decisions(self) -> None:
         for relative in CTO_SKILLS:
             text = (ASSETS / relative).read_text(encoding="utf-8")
             normalized = " ".join(text.split()).lower()
             with self.subTest(relative=relative):
-                self.assertIn("Rajiv product/process decision gate", text)
-                self.assertIn("D0BPG55FG72", text)
-                self.assertIn("stop before mutation", normalized)
-                self.assertIn("explicit approval", normalized)
+                self.assertIn("routine", normalized)
+                self.assertIn("shared release-conveyor decision boundary", normalized)
+                self.assertNotIn("Rajiv product/process decision gate", text)
+                self.assertNotIn("resume only after explicit approval", normalized)
 
-    def test_slack_skill_covers_product_and_process_decisions(self) -> None:
+    def test_routine_and_reserved_scenarios_are_distinct(self) -> None:
+        contract = " ".join(
+            (ASSETS / "codex/skills/_shared/release-conveyor-contract.md")
+            .read_text(encoding="utf-8")
+            .lower()
+            .split()
+        )
+        self.assertIn("reviewed publication", contract)
+        self.assertIn("red required-workflow merge", contract)
+        self.assertIn("destructive/high-risk", contract)
+        self.assertIn("routine scheduling", contract)
+        self.assertIn("choosing among eligible actions is not a process-policy change", contract)
+        self.assertNotIn("stop before mutation and dm rajiv", contract)
+
+    def test_slack_skill_routes_only_material_decisions(self) -> None:
         text = (ASSETS / "codex/skills/heydonna-slack-postback/SKILL.md").read_text(
             encoding="utf-8"
         )
-        normalized = " ".join(text.split())
-        self.assertIn("CTO product and process decisions", text)
+        normalized = " ".join(text.split()).lower()
+        self.assertIn("customer/product", normalized)
         self.assertIn("D0BPG55FG72", text)
         self.assertIn("PM sends", text)
-        self.assertIn("CTO alone sends Rajiv the DM", normalized)
-        self.assertIn("before explicit Rajiv approval", normalized)
+        self.assertIn("routine execution under approved rules does not require a rajiv approval hop", normalized)
+        self.assertIn("shared release-conveyor decision boundary", normalized)
+        self.assertNotIn("a process decision is any", normalized)
+        self.assertNotIn("before explicit rajiv approval", normalized)
 
     def test_manifest_digests_match_changed_assets(self) -> None:
         manifest = json.loads((ASSETS / "manifest.json").read_text(encoding="utf-8"))

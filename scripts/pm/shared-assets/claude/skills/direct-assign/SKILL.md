@@ -1,9 +1,13 @@
 ---
 name: direct-assign
-description: Assign one mechanically selected task to one free numbered slot.
+description: Assign one eligible task to one free numbered slot under the approved priority rules.
 ---
 
 ## Execution contract
+
+Follow the shared release-conveyor decision boundary. PM may execute this
+routine assignment under approved priorities and safety rules; route genuine
+decisions to CTO without adding a Rajiv approval hop.
 
 Classify the selected Ready Pool work as exactly one of `repro`, `rework`, or
 `new_issue` before making any request. Read the current slot and Ready Pool
