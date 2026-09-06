@@ -29,6 +29,19 @@ const completeAssignmentFields = [
   "task",
 ] as const;
 
+// The resident slot-claim wrapper carries the free-slot epoch and planned
+// branch for a new issue, but it has no PR/head identity yet. Keep this
+// narrow legacy shape distinct from a partial PR-bound request; all other
+// metadata remains subject to the complete-tuple refusal below.
+const newIssueMetadataForbiddenFields = [
+  "pr",
+  "head_sha",
+  "work_kind",
+  "handoff_id",
+  "branch_ref",
+  "claimed_at",
+] as const;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -62,6 +75,12 @@ function isCompleteAssignment(body: Record<string, unknown>): boolean {
     && body.task.trim() !== "";
 }
 
+function isNewIssueAssignmentMetadata(body: Record<string, unknown>): boolean {
+  return hasOwn(body, "expected_epoch")
+    && hasOwn(body, "branch")
+    && !newIssueMetadataForbiddenFields.some((field) => hasOwn(body, field));
+}
+
 /** Assign one free numbered slot with the minimum PM-authored contract. */
 export function registerAssignmentRoute(
   app: Hono,
@@ -90,7 +109,8 @@ export function registerAssignmentRoute(
     // repro/rework producers must use the existing epoch/CAS assignment
     // boundary so the slot readback carries the exact PR/head/branch/work
     // identity consumed by the heartbeat.
-    const completeRequested = hasCompleteAssignmentMetadata(body);
+    const newIssueMetadataRequested = isNewIssueAssignmentMetadata(body);
+    const completeRequested = hasCompleteAssignmentMetadata(body) && !newIssueMetadataRequested;
     if (completeRequested && !isCompleteAssignment(body)) {
       return c.json({ success: false, reason: "invalid_assignment_metadata" }, 400);
     }
@@ -117,6 +137,8 @@ export function registerAssignmentRoute(
         Number(body.issue),
         task,
         repositoryId,
+        newIssueMetadataRequested ? Number(body.expected_epoch) : undefined,
+        newIssueMetadataRequested ? body.branch as string : undefined,
       );
     if (!result.ok) {
       return c.json({ success: false, reason: result.reason }, 409);

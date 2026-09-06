@@ -1470,15 +1470,18 @@ export class MoPDatabase {
   /**
    * Assign one GitHub issue to a numbered slot with the minimum PM contract.
    *
-   * Epochs and the extended owner tuple remain internal telemetry.  They are
-   * deliberately not caller preconditions: the only assignment conflict is
-   * the same issue already being owned by another slot.
+   * Epochs and the extended owner tuple remain internal telemetry for the
+   * historical issue-only contract. The resident slot-claim wrapper may
+   * additionally supply its observed free-slot epoch and planned branch for
+   * a new issue; that guarded form is checked in the same transaction.
    */
   assignIssueToSlot(
     slot: number,
     issue: number,
     task: string,
     repositoryId: string | number,
+    expectedEpoch?: number,
+    branch?: string | null,
   ): SlotMutationResult {
     const normalizedIssue = Number.isInteger(issue) && issue > 0 ? issue : null;
     const normalizedRepositoryId = normalizeRepositoryId(repositoryId);
@@ -1501,6 +1504,25 @@ export class MoPDatabase {
         reason: "invalid_repository_id",
       };
     }
+    const branchIdentity = branch === undefined ? null : normalizeBranchIdentity(branch);
+    if (expectedEpoch !== undefined && !Number.isInteger(expectedEpoch)) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "expected_epoch_required",
+      };
+    }
+    if (expectedEpoch !== undefined && !branchIdentity) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: current?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "invalid_branch_ref",
+      };
+    }
 
     return this.db.transaction((): SlotMutationResult => {
       const before = this.getSlot(slot);
@@ -1512,6 +1534,15 @@ export class MoPDatabase {
           assignment_epoch: epoch,
           idempotent: false,
           reason: "invalid_slot",
+        };
+      }
+      if (expectedEpoch !== undefined && epoch !== expectedEpoch) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "epoch_mismatch",
         };
       }
 
@@ -1567,8 +1598,8 @@ export class MoPDatabase {
         task,
         repository_id: normalizedRepositoryId,
         issue: normalizedIssue,
-        branch: null,
-        branch_ref: null,
+        branch: branchIdentity?.branch ?? null,
+        branch_ref: branchIdentity?.branchRef ?? null,
         pr: null,
         head_sha: null,
         assignment_epoch: epoch + 1,

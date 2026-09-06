@@ -84,6 +84,106 @@ test("one native assignment delivers the exact multiline task once", async () =>
   });
 });
 
+test("resident new_issue slot-claim metadata keeps its epoch and planned branch", async () => {
+  const deliveries: Array<[number, string]> = [];
+  await withRoute(async (slot, task) => {
+    deliveries.push([slot, task]);
+    return true;
+  }, async (app, db) => {
+    const task = "CLAIM #245: Text Expanders / Snippets";
+    const response = await app.request("/slots/1/assign", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_epoch: 0,
+        issue: 245,
+        branch: "fix/245-pending",
+        task,
+      }),
+    });
+    assert.equal(response.status, 200);
+    const result = await response.json() as Record<string, unknown>;
+    assert.equal(result.assignment_epoch, 1);
+    assert.equal(result.issue, 245);
+    assert.equal(result.branch, "fix/245-pending");
+    assert.equal(result.branch_ref, "refs/heads/fix/245-pending");
+    assert.equal(result.pr, null);
+    assert.equal(result.head_sha, null);
+    assert.equal(result.work_kind, null);
+    assert.equal(result.handoff_id, null);
+    assert.equal(db.getSlot(1)?.branch, "fix/245-pending");
+    assert.deepEqual(deliveries, [[1, task]]);
+  });
+});
+
+test("new_issue metadata refuses PR mixing, duplicate ownership, and active slots", async () => {
+  await withRoute(async () => true, async (app, db) => {
+    const malformed = await app.request("/slots/1/assign", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_epoch: 0,
+        issue: 245,
+        branch: "fix/245-pending",
+        pr: 7640,
+        task: "mixed metadata",
+      }),
+    });
+    assert.equal(malformed.status, 400);
+    assert.equal((await malformed.json() as Record<string, unknown>).reason, "invalid_assignment_metadata");
+    assert.equal(db.getSlot(1)?.occupied, false);
+
+    const first = await app.request("/slots/1/assign", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ issue: 245, task: "first" }),
+    });
+    assert.equal(first.status, 200);
+    const duplicate = await app.request("/slots/2/assign", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_epoch: 0,
+        issue: 245,
+        branch: "fix/245-pending",
+        task: "duplicate",
+      }),
+    });
+    assert.equal(duplicate.status, 409);
+    assert.equal((await duplicate.json() as Record<string, unknown>).reason, "target_already_assigned");
+    assert.equal(db.getSlot(2)?.occupied, false);
+
+    const staleEpoch = await app.request("/slots/4/assign", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_epoch: 7,
+        issue: 247,
+        branch: "fix/247-pending",
+        task: "stale epoch",
+      }),
+    });
+    assert.equal(staleEpoch.status, 409);
+    assert.equal((await staleEpoch.json() as Record<string, unknown>).reason, "epoch_mismatch");
+    assert.equal(db.getSlot(4)?.occupied, false);
+
+    db.startAgentTurn(3, "active-turn");
+    const active = await app.request("/slots/3/assign", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_epoch: 0,
+        issue: 246,
+        branch: "fix/246-pending",
+        task: "active slot",
+      }),
+    });
+    assert.equal(active.status, 409);
+    assert.equal((await active.json() as Record<string, unknown>).reason, "active_turn");
+    assert.equal(db.getSlot(3)?.occupied, false);
+  });
+});
+
 test("occupied and exact replay never deliver a second task", async () => {
   let deliveryCount = 0;
   await withRoute(async () => {
