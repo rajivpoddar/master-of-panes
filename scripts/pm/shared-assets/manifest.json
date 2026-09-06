@@ -361,7 +361,7 @@
     {
       "source_path": "claude/scripts/stale-process-cleanup.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/stale-process-cleanup.py",
-      "sha256": "ada2347b5358c253bb038a14cc6af4d82ab89affd7f978a0db4580d44d19c0a8",
+      "sha256": "85f88fa93f40d16313e109b619240e879f0f76be23712086837b63873c40b528",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
       "dependency_status": "closed",

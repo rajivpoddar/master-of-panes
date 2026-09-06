@@ -104,7 +104,7 @@ def slot_states() -> dict[int, dict[str, Any]]:
             [
                 "sqlite3",
                 str(MOP_DB),
-                "SELECT slot,status,occupied,idle,dnd,activity,issue,branch,pr,last_activity FROM slots WHERE slot BETWEEN 1 AND 4;",
+                "SELECT slot,status,occupied,idle,dnd,activity,issue,task,repository_id,branch,branch_ref,pr,head_sha,work_kind,handoff_id,claimed_at,active_turn_state,active_turn_id,last_activity FROM slots WHERE slot BETWEEN 1 AND 4;",
             ],
             timeout=3,
         )
@@ -115,7 +115,7 @@ def slot_states() -> dict[int, dict[str, Any]]:
     states: dict[int, dict[str, Any]] = {}
     for raw in result.stdout.splitlines():
         parts = raw.split("|")
-        if len(parts) < 10:
+        if len(parts) < 19:
             continue
         try:
             slot = int(parts[0])
@@ -136,9 +136,18 @@ def slot_states() -> dict[int, dict[str, Any]]:
             "dnd": dnd,
             "activity": parts[5] or None,
             "issue": parts[6] or None,
-            "branch": parts[7] or None,
-            "pr": parts[8] or None,
-            "last_activity": parts[9] or None,
+            "task": parts[7] or None,
+            "repository_id": parts[8] or None,
+            "branch": parts[9] or None,
+            "branch_ref": parts[10] or None,
+            "pr": parts[11] or None,
+            "head_sha": parts[12] or None,
+            "work_kind": parts[13] or None,
+            "handoff_id": parts[14] or None,
+            "claimed_at": parts[15] or None,
+            "active_turn_state": parts[16] or None,
+            "active_turn_id": parts[17] or None,
+            "last_activity": parts[18] or None,
             "free_idle": status == "free" and occupied == 0 and idle == 1,
         }
     return states
@@ -169,8 +178,17 @@ def associated_slot(cwd: str | None, states: dict[int, dict[str, Any]]) -> dict[
                     "dnd": None,
                     "activity": None,
                     "issue": None,
+                    "task": None,
+                    "repository_id": None,
                     "branch": None,
+                    "branch_ref": None,
                     "pr": None,
+                    "head_sha": None,
+                    "work_kind": None,
+                    "handoff_id": None,
+                    "claimed_at": None,
+                    "active_turn_state": None,
+                    "active_turn_id": None,
                     "last_activity": None,
                     "free_idle": False,
                     "state_missing": True,
@@ -194,11 +212,28 @@ def stale_owner_evidence(slot_state: dict[str, Any] | None) -> str | None:
         or slot_state.get("occupied") != 0
         or slot_state.get("idle") != 1
         or slot_state.get("dnd") != 0
+        or slot_state.get("active_turn_state") != "inactive"
+        or slot_state.get("active_turn_id") is not None
     ):
         return None
-    if any(slot_state.get(key) for key in ("activity", "issue", "branch", "pr")):
+    if any(
+        slot_state.get(key)
+        for key in (
+            "activity",
+            "issue",
+            "task",
+            "repository_id",
+            "branch",
+            "branch_ref",
+            "pr",
+            "head_sha",
+            "work_kind",
+            "handoff_id",
+            "claimed_at",
+        )
+    ):
         return None
-    return "mop_free_idle_no_owner_or_dependency"
+    return "mop_free_idle_inactive_no_assignment"
 
 
 def classify(command: str) -> str | None:
@@ -219,6 +254,30 @@ def classify(command: str) -> str | None:
     if re.search(r"(^|[/\s])tsc(\s|$)|typescript/bin/tsc", lower) and "--noemit" in lower:
         return "tsc"
     return None
+
+
+def command_identity(command: str) -> tuple[str, str] | None:
+    """Return the strict allowlisted executable identity for a process shape."""
+    category = classify(command)
+    if category is None:
+        return None
+    lower = command.lower()
+    if category == "convex":
+        match = re.search(r"(?<!\S)(\S*/?convex)\s+dev(?:\s|$)", lower)
+        return (category, match.group(1)) if match else None
+    if category == "nextjs":
+        match = re.search(
+            r"(?<!\S)(\S*(?:next-server|node_modules/(?:\.bin/next|next/(?:dist/)?bin/next)))\s+(?:dev|start)(?:\s|$)",
+            lower,
+        )
+        return (category, match.group(1)) if match else None
+    if category == "tsc":
+        match = re.search(r"(?<!\S)(\S*(?:tsc|typescript/bin/tsc))(?:\s|$)", lower)
+        return (category, match.group(1)) if match and "--noemit" in lower else None
+    if "chrome for testing" in lower:
+        return (category, "chrome-for-testing")
+    match = re.search(r"(?<!\S)(\S*agent-browser\S*|\S*chromium\S*)(?:\s|$)", lower)
+    return (category, match.group(1)) if match else None
 
 
 def sanitize_command(command: str) -> str:
@@ -260,7 +319,8 @@ def collect_processes(agent_browser_min: int, nextjs_min: int, dev_tool_min: int
         age_seconds = parse_etime(parts[3])
         command = parts[4]
         category = classify(command)
-        if not category or age_seconds is None:
+        identity = command_identity(command)
+        if not category or identity is None or age_seconds is None:
             continue
         cwd = get_cwd(pid)
         start_time = get_start_time(pid)
@@ -294,6 +354,9 @@ def collect_processes(agent_browser_min: int, nextjs_min: int, dev_tool_min: int
         if not start_time:
             eligible = False
             skip_reason = "process start identity unavailable"
+        if identity is None:
+            eligible = False
+            skip_reason = "process shape unavailable"
         if category == "agent-browser" and "google chrome.app/contents/macos/google chrome" in command.lower():
             eligible = False
             skip_reason = "regular Google Chrome excluded"
@@ -302,6 +365,7 @@ def collect_processes(agent_browser_min: int, nextjs_min: int, dev_tool_min: int
             "ppid": ppid,
             "uid": uid,
             "category": category,
+            "command_identity": identity,
             "age_seconds": age_seconds,
             "age": fmt_age(age_seconds),
             "threshold_min": threshold_min,
@@ -362,6 +426,8 @@ def _process_snapshot(pid: int) -> dict[str, Any] | None:
         "ppid": ppid,
         "uid": uid,
         "command": parts[3],
+        "category": classify(parts[3]),
+        "command_identity": command_identity(parts[3]),
         "start_time": get_start_time(pid),
         "cwd": get_cwd(pid),
     }
@@ -375,6 +441,12 @@ def revalidate_candidate(row: dict[str, Any]) -> tuple[bool, str]:
     current = _process_snapshot(pid)
     if not current:
         return False, "process_identity_unavailable"
+    if current.get("category") != row.get("category"):
+        return False, "process_category_changed"
+    if current.get("command_identity") != row.get("command_identity"):
+        return False, "process_executable_identity_changed"
+    if current.get("command_identity") is None:
+        return False, "process_shape_unavailable"
     for key in ("pid", "ppid", "uid", "start_time", "cwd"):
         if current.get(key) != row.get(key):
             return False, f"process_identity_changed:{key}"
@@ -386,6 +458,8 @@ def revalidate_candidate(row: dict[str, Any]) -> tuple[bool, str]:
     if owner_proof != row.get("owner_proof"):
         return False, "slot_owner_evidence_changed"
     return True, "identity_and_owner_match"
+
+
 def kill_candidates(candidates: list[dict[str, Any]], wait_s: float) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for row in candidates:
