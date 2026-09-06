@@ -1143,6 +1143,92 @@ def _numbered_motion_kind(slot: dict[str, Any]) -> str | None:
     return None
 
 
+def _exact_slot_packet_bindings(
+    slots: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, str]], str | None]:
+    """Read exact packet identity from the existing MoP slot/packet fields.
+
+    Older accepted assignments can have null structured PR/head columns while
+    the native assignment payload retains a canonical packet header and exact
+    head in ``task``.  Accept only that rigid packet shape (or equivalent
+    structured fields); ordinary prose, issue-only prompts, and stale heads
+    remain non-bindings.
+    """
+
+    bindings: list[dict[str, str]] = []
+    packet_header = re.compile(
+        r"(?im)^\s*(?:REPRO|REWORK)\s*[—-]\s*Packet\s+([^\s(]+)\s+\(#(\d+)\b"
+    )
+    exact_head_line = re.compile(
+        r"(?i)\bExact head\s*[:=]?\s*([0-9a-f]{40})\b"
+    )
+    for slot_id, slot in slots.items():
+        if not isinstance(slot, dict):
+            continue
+        owner = str(slot.get("owner") or slot.get("name") or f"S{slot_id}").strip()
+        if _concrete_motion_token(owner) is None:
+            continue
+        candidates: list[tuple[str, str, str]] = []
+        structured_pr = str(slot.get("pr") or slot.get("pull_request") or "").strip()
+        structured_head = str(slot.get("head_sha") or slot.get("headSha") or "").strip()
+        structured_packet = str(
+            slot.get("packet") or slot.get("packet_id") or slot.get("assignment_packet") or ""
+        ).strip()
+        if (
+            structured_pr.isdigit()
+            and OPEN_PR_HEAD.fullmatch(structured_head)
+            and _concrete_motion_token(structured_packet) is not None
+        ):
+            candidates.append((structured_packet, structured_pr, structured_head))
+
+        task = str(slot.get("task") or "")
+        packet_matches = packet_header.findall(task)
+        head_matches = exact_head_line.findall(task)
+        if len(set(packet_matches)) == 1 and len(set(head_matches)) == 1:
+            packet, pr, head = packet_matches[0][0], packet_matches[0][1], head_matches[0]
+            if pr.isdigit() and _concrete_motion_token(packet) is not None:
+                candidates.append((packet, pr, head))
+        identities = {(packet, pr, head) for packet, pr, head in candidates}
+        if len(identities) > 1:
+            return [], f"ambiguous exact packet identity in slot {slot_id}"
+        for packet, pr, head in identities:
+            bindings.append({"slot": str(slot_id), "owner": owner, "packet": packet, "pr": pr, "head": head})
+    return bindings, None
+
+
+def _exact_queued_packet_bindings(
+    queue: dict[str, Any] | None,
+) -> tuple[list[dict[str, str]], str | None]:
+    """Read named exact-head packet rows from the existing queue snapshot."""
+
+    bindings: list[dict[str, str]] = []
+    if not isinstance(queue, dict):
+        return bindings, None
+    for section in ("dispatchable", "packet_waiting_no_free_slot"):
+        rows = queue.get(section) or []
+        if not isinstance(rows, list):
+            return [], f"authoritative queue {section} is malformed"
+        for row in rows:
+            if not isinstance(row, dict):
+                return [], f"authoritative queue {section} contains a malformed row"
+            slot = str(row.get("slot") or "").strip()
+            packet = str(row.get("packet") or "").strip()
+            pr = str(row.get("pr") or "").strip()
+            head = str(row.get("head") or "").strip()
+            if not (slot in {"1", "2", "3", "4", "5", "6"} and packet and pr.isdigit()):
+                continue
+            if not OPEN_PR_HEAD.fullmatch(head):
+                continue
+            bindings.append({
+                "slot": slot,
+                "owner": str(row.get("owner") or f"S{slot}"),
+                "packet": packet,
+                "pr": pr,
+                "head": head,
+            })
+    return bindings, None
+
+
 def _motion_result(
     *,
     number: str,
@@ -1628,6 +1714,7 @@ def _open_pr_binding(
     slots: dict[str, dict[str, Any]],
     continuation_records: list[dict[str, Any]],
     continuation_error: str | None = None,
+    queue: dict[str, Any] | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """Classify whether an open PR has real current-head execution binding.
 
@@ -1715,6 +1802,27 @@ def _open_pr_binding(
     if queued and queued["lane"] in {"repro/proof", "rework"}:
         ci_evidence.append(f"slot-queue:{queued['owner']}")
 
+    slot_packets, slot_packet_error = _exact_slot_packet_bindings(slots)
+    queued_packets, queued_packet_error = _exact_queued_packet_bindings(queue)
+    if slot_packet_error or queued_packet_error:
+        return "unknown", ci_evidence, [slot_packet_error or queued_packet_error or "authoritative packet binding is malformed"]
+    packet_matches = [
+        packet for packet in [*slot_packets, *queued_packets]
+        if packet["pr"] == number and packet["head"] == head
+    ]
+    packet_identities = {
+        (packet["slot"], packet["owner"], packet["packet"])
+        for packet in packet_matches
+    }
+    if len(packet_identities) > 1:
+        return "unknown", [], ["ambiguous multiple exact-head packet bindings"]
+    if packet_matches:
+        packet = packet_matches[0]
+        source = "slot-queue" if packet in queued_packets else "slot"
+        ci_evidence.append(
+            f"{source}:S{packet['slot']}:{packet['owner']}:packet={packet['packet']}"
+        )
+
     if continuation_error and not ci_evidence:
         return "unknown", [], [continuation_error.removeprefix("row: ").strip()]
     if malformed_slot_binding and not ci_evidence:
@@ -1740,9 +1848,10 @@ def _annotate_open_pr_binding(
     slots: dict[str, dict[str, Any]],
     continuation_records: list[dict[str, Any]],
     continuation_error: str | None = None,
+    queue: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status, evidence, limitations = _open_pr_binding(
-        number, head, runs, jobs_by_run, slots, continuation_records, continuation_error
+        number, head, runs, jobs_by_run, slots, continuation_records, continuation_error, queue
     )
     row["binding_status"] = status
     row["binding_evidence"] = evidence
@@ -1768,7 +1877,9 @@ def _mark_unknown_open_pr_binding(row: dict[str, Any], reason: str) -> dict[str,
     return row
 
 
-def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def collect_open_pr_activity_audit(
+    slots: dict[str, dict[str, Any]], queue: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Read-only exact-head activity audit for every open PR."""
 
     prs, error = _audit_gh_json(
@@ -1963,7 +2074,7 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
             if motion_state == "PROCESS_LIMBO":
                 row["missing_predicates"] = list(row.get("reasons") or [])
             _annotate_open_pr_binding(
-                row, number, head, exact_runs, jobs_by_run, slots, [], continuation_error
+                row, number, head, exact_runs, jobs_by_run, slots, [], continuation_error, queue
             )
             rows.append(row)
             continue
@@ -1984,7 +2095,7 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
         if motion_state == "PROCESS_LIMBO":
             row["missing_predicates"] = list(row.get("reasons") or [])
         _annotate_open_pr_binding(
-            row, number, head, exact_runs, jobs_by_run, slots, continuations
+            row, number, head, exact_runs, jobs_by_run, slots, continuations, None, queue
         )
         rows.append(row)
     if len(rows) != len(prs):
@@ -3394,6 +3505,7 @@ def main() -> int:
     apply_clear_policy(sessions, slots)
     mark_recent_clear_requests(sessions, mop, now_utc)
 
+    queue = collect_queue(slots)
     data: dict[str, Any] = {
         "generated_at": now_utc.isoformat(),
         "now_ist": now_utc.astimezone(IST).strftime("%Y-%m-%d %H:%M IST"),
@@ -3404,12 +3516,12 @@ def main() -> int:
         "process_sweep": process_sweep(),
         "axiom": collect_axiom(window_start=axiom_window_start, window_end=now_utc),
         "pr_drift": collect_pr_drift(),
-        "queue": collect_queue(slots),
+        "queue": queue,
         "cc_reports": collect_cc_reports(),
         "post_issue_latches": collect_post_issue_latches(),
         "control_plane": collect_control_plane(),
         "ready_pool_audit": collect_ready_pool_audit(),
-        "open_pr_activity_audit": collect_open_pr_activity_audit(slots),
+        "open_pr_activity_audit": collect_open_pr_activity_audit(slots, queue),
     }
     _, _, axiom_parsed = format_health(data["axiom"])
     data["save_suppression_prod_debug"] = (

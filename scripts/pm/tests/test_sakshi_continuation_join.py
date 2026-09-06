@@ -90,6 +90,7 @@ def collect_audit(
     records: list[dict] | None = None,
     continuation_error: str | None = None,
     pr_payload: dict | None = None,
+    queue: dict | None = None,
 ) -> dict:
     runs = runs or []
     jobs = jobs or {}
@@ -109,7 +110,7 @@ def collect_audit(
         "_load_open_pr_continuations",
         return_value=(records or [], continuation_error),
     ):
-        return MODULE.collect_open_pr_activity_audit(slots or {})
+        return MODULE.collect_open_pr_activity_audit(slots or {}, queue)
 
 
 def continuation(kind: str, owner: str = "cto", *, blocker: str = "hold") -> dict:
@@ -263,6 +264,67 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         )
         self.assertEqual(len(malformed_bound["verification_limitations"]), 1)
         self.assertEqual(malformed_bound["gaps"], [])
+
+    def test_exact_packet_task_identity_binds_null_structured_slot_fields(self) -> None:
+        slot = {
+            "slot": 1,
+            "name": "Rohini",
+            "occupied": True,
+            "active_turn_state": "inactive",
+            "task": (
+                "REPRO — Packet 635 (#7591 / issue #7435, accepted next step).\n"
+                f"Exact head {HEAD}.\n"
+                "Precheck before the single run."
+            ),
+            "pr": None,
+            "head_sha": None,
+        }
+        audit = collect_audit(self, slots={"1": slot})
+        row = audit["rows"][0]
+        self.assertEqual(row["binding_status"], "slot_bound")
+        self.assertFalse(row["unbound"])
+        self.assertIn("slot:S1:Rohini:packet=635", row["binding_evidence"])
+        self.assertEqual(MODULE.open_pr_activity_action_lines(audit), [])
+        malformed_sibling = collect_audit(
+            self,
+            slots={"1": slot},
+            continuation_error="row: durable continuation has no exact head binding",
+        )
+        self.assertEqual(malformed_sibling["rows"][0]["binding_status"], "slot_bound")
+        self.assertFalse(malformed_sibling["rows"][0]["unbound"])
+
+    def test_exact_named_queue_packet_binds_and_stale_packet_does_not(self) -> None:
+        queue = {
+            "packet_waiting_no_free_slot": [{
+                "pr": "7591", "head": HEAD, "slot": "4", "packet": "637",
+                "branch": "fix/7591", "reason": "capacity",
+            }],
+        }
+        bound = collect_audit(self, queue=queue)
+        self.assertEqual(bound["rows"][0]["binding_status"], "slot_bound")
+        self.assertIn("slot-queue:S4:S4:packet=637", bound["rows"][0]["binding_evidence"])
+
+        stale = collect_audit(self, queue={
+            "packet_waiting_no_free_slot": [{
+                "pr": "7591", "head": "a" * 40, "slot": "4", "packet": "637",
+                "reason": "capacity",
+            }],
+        })
+        self.assertEqual(stale["rows"][0]["binding_status"], "unbound")
+        self.assertTrue(stale["rows"][0]["unbound"])
+
+    def test_issue_only_prompt_and_prose_head_do_not_create_slot_binding(self) -> None:
+        slot = {
+            "slot": 2,
+            "name": "Hasta",
+            "occupied": True,
+            "task": f"Continue PR #7591 at head {HEAD}; no packet was accepted.",
+            "pr": None,
+            "head_sha": None,
+        }
+        audit = collect_audit(self, slots={"2": slot})
+        self.assertEqual(audit["rows"][0]["binding_status"], "unbound")
+        self.assertTrue(audit["rows"][0]["unbound"])
 
     def test_terminal_or_missing_required_ci_is_actionable_in_report(self) -> None:
         cases = [
