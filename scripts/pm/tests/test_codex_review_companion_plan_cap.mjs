@@ -7,6 +7,7 @@ import {
   releasePlanReviewReservation,
   reviewBudgetPreflight,
   runReviewBudget,
+  writeReviewCapPacket,
 } from "../shared-assets/codex/skills/codex-review-companion/codex-review-companion.mjs";
 
 const runner = (_command, args) => {
@@ -84,6 +85,44 @@ function completeOne(fixture, issue, head, blockerClass = "same-blocker", pr = n
   assert.equal(fourth.ok, true);
   assert.equal(fourth.budget.decision, "rescue_required");
   assert.deepEqual(fourth.budget.review_type_caps, ["plan"]);
+}
+
+{
+  const fixture = freshFixture();
+  completeOne(fixture, 681, "1111111111111111111111111111111111111111", "SCOPE-001");
+  completeOne(fixture, 681, "2222222222222222222222222222222222222222", "BASE-001");
+  completeOne(fixture, 681, "3333333333333333333333333333333333333333", "PROOF-001");
+  let runnerCalls = 0;
+  const capRunner = (...runnerArgs) => {
+    runnerCalls += 1;
+    return runner(...runnerArgs);
+  };
+  const capped = reviewBudgetPreflight(
+    {
+      ...args(681, "4444444444444444444444444444444444444444"),
+      markerFile: path.join(fixture.root, "expected-marker"),
+    },
+    capRunner,
+  );
+  assert.equal(capped.allowed, false);
+  assert.equal(runnerCalls, 2);
+  assert.match(capped.message, /PLAN_REVIEW_CAP_ACTIONABLE/);
+  assert.match(capped.message, /supported_route=cto_plan_adjudication/);
+  assert.match(capped.message, /NO_PATCH_REQUIRED or PATCH_READY/);
+  assert.doesNotMatch(capped.message, /PM_RESCUE_REQUIRED|pm-pr-rescue|pm-rescue-backend/);
+  process.env.HEYDONNA_PM_STATE_DIR = path.join(fixture.root, "packets");
+  const packet = writeReviewCapPacket(
+    { ...args(681, "4444444444444444444444444444444444444444"), markerFile: path.join(fixture.root, "expected-marker") },
+    capped,
+  );
+  const packetText = fs.readFileSync(packet, "utf8");
+  assert.match(packetText, /ordinary_review_blocked=true/);
+  assert.match(packetText, /reviewer_invoked=false/);
+  assert.match(packetText, /supported_route=cto_plan_adjudication/);
+  assert.doesNotMatch(packetText, /PM_RESCUE_REQUIRED|pm-pr-rescue|pm-rescue-backend/);
+  assert.doesNotMatch(packetText, /VERDICT:|FINAL_REVIEWER_VERDICT:/);
+  delete process.env.HEYDONNA_PM_STATE_DIR;
+  releasePlanReviewReservation(args(681, "4444444444444444444444444444444444444444"));
 }
 
 {

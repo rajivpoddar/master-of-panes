@@ -227,15 +227,24 @@ function sh(cmd, args, opts = {}) {
   };
 }
 
-function reviewRescueCommand(args) {
+function reviewCapNextAction(args) {
+  const kind = String(args.reviewType || "review").toUpperCase();
+  const adjudication =
+    args.reviewType === "plan"
+      ? "return the frozen plan and scope evidence to CTO for one bounded NO_PATCH_REQUIRED or PATCH_READY adjudication"
+      : "return the exact current-head review packet to CTO for one bounded review-cap adjudication";
+  const route =
+    args.reviewType === "plan"
+      ? "cto_plan_adjudication"
+      : "cto_review_adjudication";
   return [
-    "PM_RESCUE_REQUIRED:",
-    "freeze the exact source; release/park the owning slot so it is refillable;",
-    "PM must run Skill(pm-pr-rescue) off-slot via claude -p",
+    `${kind}_REVIEW_CAP_ACTIONABLE:`,
+    `preserve the exact source, branch, and head; ${adjudication};`,
+    "do not invoke a PM rescue selector/backend, release or park a slot, run off-slot code, or manufacture review/ready evidence",
     `issue=${args.issue}`,
     `pr=${args.pr || "none"}`,
     `reason=${args.reviewType}-review-cap`,
-    "CTO escalation requires a MoP-validated Fable FAILED packet",
+    `supported_route=${route}`,
   ].join(" ");
 }
 
@@ -730,7 +739,7 @@ function reviewBudgetPreflight(args, runner = sh) {
         `${kind}_REVIEW_CAP_REACHED issue=${args.issue} pr=${args.pr || "pre-pr"} ` +
         `negative_${args.reviewType}_rounds=${rounds} cap_reasons=${reasons || "unknown"}. ` +
         "Ordinary next review is blocked before Codex invocation. " +
-        `CTO escalation command: ${reviewRescueCommand(args)}`,
+        `Supported next action: ${reviewCapNextAction(args)}`,
     };
   }
 
@@ -759,7 +768,7 @@ function writeReviewCapPacket(args, admission) {
     `marker=${args.markerFile || `/tmp/codex-app-${args.reviewType}-review-${identity}.txt`}`,
     `round_count=${rounds}`,
     `cap_reasons=${(budget.cap_reasons || []).join(",") || "unknown"}`,
-    `next=${reviewRescueCommand(args)}`,
+    `next=${reviewCapNextAction(args)}`,
     "ordinary_review_blocked=true",
     "reviewer_invoked=false",
   ].join("\n");
