@@ -24,6 +24,11 @@ from typing import Any, Iterator
 
 HEAD_RE = re.compile(r"^[0-9a-f]{40}$")
 RUN_RE = re.compile(r"^[0-9]+$")
+BRANCH_ISSUE_RE = re.compile(
+    r"^(?:.*/)?(?:(?:fix|feat|feature|bug|test|chore|perf|refactor|enhance)/)?"
+    r"(?P<issue>[0-9]{3,6})(?:[-_/].*)?$"
+)
+PROSE_ISSUE_RE = re.compile(r"#([0-9]+)")
 REPO = "heydonna-app/heydonna-app"
 # The readiness gate is a shared installed control-plane dependency.  Calling
 # the app-checkout sibling lets its resolver select an older visual gate.
@@ -80,8 +85,38 @@ def _checkout_head(args: argparse.Namespace) -> None:
         raise Refusal("checkout_head_drift")
 
 
+def _resolve_pr_issue_from_metadata(pr: dict[str, Any]) -> int:
+    """Use the existing exact-one PR-to-issue metadata resolver contract."""
+    closing = pr.get("closingIssuesReferences")
+    if closing is not None and not isinstance(closing, list):
+        raise Refusal("linked_issue_relationship_unreadable")
+    closing_numbers: set[int] = set()
+    for ref in closing or []:
+        if not isinstance(ref, dict) or not isinstance(ref.get("number"), int) or ref["number"] <= 0:
+            raise Refusal("linked_issue_relationship_malformed")
+        closing_numbers.add(int(ref["number"]))
+    if len(closing_numbers) == 1:
+        return next(iter(closing_numbers))
+    if len(closing_numbers) > 1:
+        raise Refusal("linked_issue_relationship_ambiguous")
+
+    branch = pr.get("headRefName")
+    if isinstance(branch, str):
+        match = BRANCH_ISSUE_RE.fullmatch(branch.strip())
+        if match:
+            return int(match.group("issue"))
+
+    text = f"{pr.get('title') or ''}\n{pr.get('body') or ''}"
+    prose = {int(number) for number in PROSE_ISSUE_RE.findall(text)}
+    if len(prose) == 1:
+        return next(iter(prose))
+    if len(prose) > 1:
+        raise Refusal("linked_issue_relationship_ambiguous")
+    raise Refusal("linked_issue_relationship_missing")
+
+
 def _live_pr(args: argparse.Namespace) -> dict[str, Any]:
-    value = _gh_json(args, ["pr", "view", str(args.pr), "--repo", REPO, "--json", "number,headRefOid,state,isDraft,mergeable,mergeStateStatus,headRefName,closingIssuesReferences,labels"], "pr_state")
+    value = _gh_json(args, ["pr", "view", str(args.pr), "--repo", REPO, "--json", "number,headRefOid,state,isDraft,mergeable,mergeStateStatus,headRefName,title,body,closingIssuesReferences,labels"], "pr_state")
     if not isinstance(value, dict) or value.get("number") != args.pr:
         raise Refusal("pr_identity_malformed")
     if value.get("headRefOid") != args.head or not HEAD_RE.fullmatch(str(value.get("headRefOid") or "")):
@@ -90,12 +125,8 @@ def _live_pr(args: argparse.Namespace) -> dict[str, Any]:
         raise Refusal("pr_not_open_ready")
     if value.get("mergeable") != "MERGEABLE" or value.get("mergeStateStatus") not in {"CLEAN", "UNSTABLE"}:
         raise Refusal("pr_not_mergeable")
-    refs = value.get("closingIssuesReferences")
-    if not isinstance(refs, list):
-        raise Refusal("linked_issue_relationship_unreadable")
-    matches = [item for item in refs if isinstance(item, dict) and item.get("number") == args.issue]
-    if len(matches) != 1 or len(refs) != 1:
-        raise Refusal("linked_issue_relationship_ambiguous")
+    if _resolve_pr_issue_from_metadata(value) != args.issue:
+        raise Refusal("linked_issue_relationship_mismatch")
     return value
 
 

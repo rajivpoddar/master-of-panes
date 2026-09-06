@@ -207,7 +207,7 @@
     {
       "source_path": "claude/scripts/ci/heydonna-cto-label-gated-ci.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/ci/heydonna-cto-label-gated-ci.py",
-      "sha256": "f955e4e9cb92e74e2b40b9a07baee3beb2c852c57459e7e04a59f5e07501f43f",
+      "sha256": "fb1c0c2d7154e46d831ab5c00b6a5bba78e9f257643dcfc344f4cfa63438195f",
       "mode": 493,
       "ownership_class": "shared-claude-ci-native-admission-adapter",
       "dependency_status": "closed",
@@ -225,7 +225,7 @@
     {
       "source_path": "claude/scripts/ci/request-label-gated-ci.sh",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ci/request-label-gated-ci.sh",
-      "sha256": "eaa156f3b774a13131d5256e10180fa5e7a7e0948b8789ff59a4a460cbdf72a9",
+      "sha256": "6ff0a54662b267328d5d3974fe68d7d98c2e0445bdc01127a39d33c7f7484440",
       "mode": 493,
       "ownership_class": "shared-claude-ci-admission-caller",
       "dependency_status": "closed",

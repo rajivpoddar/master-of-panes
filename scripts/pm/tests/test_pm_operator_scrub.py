@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import hashlib
 import os
@@ -75,6 +76,126 @@ class PmOperatorScrubTests(unittest.TestCase):
             self.assertIn("--head " + head, args)
             self.assertIn("--base " + base, args)
             self.assertIn("--checkout " + str(root), args)
+
+    def test_non_closing_branch_association_forwards_authoritative_tuple_once(self) -> None:
+        head = "a" * 40
+        base = "b" * 40
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            log = root / "adapter.log"
+            gh = root / "gh"
+            gh.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' '{\"number\":7647,\"headRefOid\":\""
+                + head
+                + "\",\"baseRefOid\":\""
+                + base
+                + "\",\"headRefName\":\"fix/7645-partial\",\"title\":\"partial backend work\",\"body\":\"\",\"closingIssuesReferences\":[]}'\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            adapter = root / "adapter"
+            adapter.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" > \"$ADAPTER_LOG\"\n",
+                encoding="utf-8",
+            )
+            adapter.chmod(0o755)
+            env = dict(
+                os.environ,
+                GH_BIN=str(gh),
+                CI_ADMISSION_ADAPTER=str(adapter),
+                ADAPTER_LOG=str(log),
+                RLGC_CHECKOUT=str(root),
+            )
+            completed = subprocess.run(
+                [str(CALLER), "--pr", "7647"],
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            args = log.read_text(encoding="utf-8")
+            self.assertIn("--pr 7647", args)
+            self.assertIn("--issue 7645", args)
+            self.assertIn("--head " + head, args)
+            self.assertIn("--base " + base, args)
+
+    def test_native_adapter_uses_same_non_closing_resolver(self) -> None:
+        spec = importlib.util.spec_from_file_location("native_admission_adapter", ADAPTER)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        args = type("Args", (), {"pr": 7647, "issue": 7645, "head": "a" * 40})()
+        payload = {
+            "number": 7647,
+            "headRefOid": "a" * 40,
+            "state": "OPEN",
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "UNSTABLE",
+            "headRefName": "fix/7645-partial",
+            "title": "partial backend work",
+            "body": "",
+            "closingIssuesReferences": [],
+            "labels": [],
+        }
+        module._gh_json = lambda _args, _command, _label: payload
+        self.assertIs(module._live_pr(args), payload)
+
+        payload["headRefName"] = "fix/9999-other"
+        with self.assertRaises(module.Refusal) as caught:
+            module._live_pr(args)
+        self.assertEqual(str(caught.exception), "linked_issue_relationship_mismatch")
+
+    def test_wrong_repository_binding_and_missing_association_refuse(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            gh = root / "gh"
+            gh.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
+            gh.chmod(0o755)
+            adapter = root / "adapter"
+            adapter.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
+            adapter.chmod(0o755)
+            env = dict(
+                os.environ,
+                GH_BIN=str(gh),
+                GH_REPO="other-owner/other-repo",
+                CI_ADMISSION_ADAPTER=str(adapter),
+                RLGC_CHECKOUT=str(root),
+            )
+            completed = subprocess.run(
+                [str(CALLER), "--pr", "7647"],
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("repository_binding_mismatch", completed.stderr)
+
+        spec = importlib.util.spec_from_file_location("native_admission_adapter_missing", ADAPTER)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        args = type("Args", (), {"pr": 7647, "issue": 7645, "head": "a" * 40})()
+        module._gh_json = lambda _args, _command, _label: {
+            "number": 7647,
+            "headRefOid": "a" * 40,
+            "state": "OPEN",
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "UNSTABLE",
+            "headRefName": "feature/no-issue-binding",
+            "title": "partial backend work",
+            "body": "",
+            "closingIssuesReferences": [],
+            "labels": [],
+        }
+        with self.assertRaises(module.Refusal) as caught:
+            module._live_pr(args)
+        self.assertEqual(str(caught.exception), "linked_issue_relationship_missing")
 
     def test_missing_adapter_stops_before_any_github_effect(self) -> None:
         head = "a" * 40
@@ -260,7 +381,7 @@ class PmOperatorScrubTests(unittest.TestCase):
             for item in manifest["entries"]
             if item["source_path"] == "claude/scripts/ci/heydonna-cto-label-gated-ci.py"
         )
-        self.assertEqual(adapter_entry["sha256"], "f955e4e9cb92e74e2b40b9a07baee3beb2c852c57459e7e04a59f5e07501f43f")
+        self.assertEqual(adapter_entry["sha256"], hashlib.sha256(ADAPTER.read_bytes()).hexdigest())
         self.assertEqual(stat.S_IMODE(ADAPTER.stat().st_mode), 0o755)
 
         runtime_entry = next(

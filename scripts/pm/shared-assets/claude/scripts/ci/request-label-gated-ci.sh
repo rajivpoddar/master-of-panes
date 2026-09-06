@@ -25,6 +25,8 @@ die() {
   exit 1
 }
 
+[ "$REPO" = "heydonna-app/heydonna-app" ] || die "repository_binding_mismatch"
+
 usage() {
   cat >&2 <<'EOF'
 Usage:
@@ -48,7 +50,7 @@ validate_tuple() {
 
 live_tuple() {
   local pr="$1" payload
-  payload="$(gh_cli pr view "$pr" --repo "$REPO" --json number,headRefOid,baseRefOid,closingIssuesReferences 2>/dev/null)" \
+  payload="$(gh_cli pr view "$pr" --repo "$REPO" --json number,headRefOid,baseRefOid,headRefName,title,body,closingIssuesReferences 2>/dev/null)" \
     || die "cannot_read_pr_tuple pr=$pr"
   python3 - "$pr" "$payload" <<'PY'
 import json
@@ -64,16 +66,41 @@ if not isinstance(value, dict) or value.get("number") != expected:
     raise SystemExit("pr_identity_malformed")
 head = value.get("headRefOid")
 base = value.get("baseRefOid")
-refs = value.get("closingIssuesReferences")
 if not re.fullmatch(r"[0-9a-f]{40}", str(head or "")):
     raise SystemExit("head_identity_malformed")
 if not re.fullmatch(r"[0-9a-f]{40}", str(base or "")):
     raise SystemExit("base_identity_malformed")
-if not isinstance(refs, list) or len(refs) != 1:
+refs = value.get("closingIssuesReferences")
+if refs is not None and not isinstance(refs, list):
+    raise SystemExit("linked_issue_relationship_unreadable")
+closing = set()
+for ref in refs or []:
+    if not isinstance(ref, dict) or not isinstance(ref.get("number"), int) or ref["number"] <= 0:
+        raise SystemExit("linked_issue_relationship_malformed")
+    closing.add(int(ref["number"]))
+if len(closing) == 1:
+    issue = next(iter(closing))
+elif len(closing) > 1:
     raise SystemExit("linked_issue_relationship_ambiguous")
-issue = refs[0].get("number") if isinstance(refs[0], dict) else None
-if not isinstance(issue, int) or issue <= 0:
-    raise SystemExit("linked_issue_identity_malformed")
+else:
+    branch = value.get("headRefName")
+    branch_match = None
+    if isinstance(branch, str):
+        branch_match = re.fullmatch(
+            r"^(?:.*/)?(?:(?:fix|feat|feature|bug|test|chore|perf|refactor|enhance)/)?"
+            r"(?P<issue>[0-9]{3,6})(?:[-_/].*)?$",
+            branch.strip(),
+        )
+    if branch_match:
+        issue = int(branch_match.group("issue"))
+    else:
+        prose = {int(number) for number in re.findall(r"#([0-9]+)", f"{value.get('title') or ''}\n{value.get('body') or ''}")}
+        if len(prose) == 1:
+            issue = next(iter(prose))
+        elif len(prose) > 1:
+            raise SystemExit("linked_issue_relationship_ambiguous")
+        else:
+            raise SystemExit("linked_issue_relationship_missing")
 print(str(expected) + "\t" + str(issue) + "\t" + str(head) + "\t" + str(base))
 PY
 }
