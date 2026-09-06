@@ -1325,8 +1325,10 @@ def _exact_packet_motion(
     """Derive non-duplicating motion from one exact packet binding.
 
     Packet identity is a stronger join than a generic occupied/active flag,
-    but it never creates execution by itself: inactive packets are queued or
-    held, while only an exact packet plus an active turn is in progress.
+    but it never creates execution by itself: packets are queued or held
+    unless the existing structured current-slot PR/head assignment joins the
+    packet to the active turn.  A generic session opener is not packet
+    execution evidence.
     """
 
     slot_packets, slot_error = _exact_slot_packet_bindings(slots)
@@ -1353,8 +1355,13 @@ def _exact_packet_motion(
             kind = str(slot.get("work_kind") or "").strip().lower()
         if kind not in {"repro", "rework"}:
             return None, f"exact packet {packet['packet']} has no supported repro/rework task kind"
+        structured_pr = str(slot.get("pr") or slot.get("pull_request") or "").strip()
+        structured_head = str(slot.get("head_sha") or slot.get("headSha") or "").strip()
+        structured_assignment_matches = (
+            structured_pr == packet["pr"] and structured_head == packet["head"]
+        )
         active_state = str(slot.get("active_turn_state") or slot.get("state") or "").lower()
-        active = bool(slot.get("occupied")) and active_state in {
+        active = structured_assignment_matches and bool(slot.get("occupied")) and active_state in {
             "active", "running", "working", "in_progress"
         } and bool(str(slot.get("active_turn_id") or "").strip())
         if active:
