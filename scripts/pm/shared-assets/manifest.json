@@ -27,6 +27,7 @@
       "~/.claude/scripts/pm-terminal-wake.py",
       "~/.claude/control_plane/runtime_observation.py",
       "~/.claude/scripts/sakshi-heartbeat.py",
+      "~/.claude/scripts/stale-process-cleanup.py",
       "~/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
       "~/.claude/skills/qa-brief/SKILL.md",
       "~/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
@@ -42,7 +43,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 65,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -354,6 +355,15 @@
         "preimage_sha256": "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a",
         "mode": 493
       },
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/stale-process-cleanup.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/stale-process-cleanup.py",
+      "sha256": "ada2347b5358c253bb038a14cc6af4d82ab89affd7f978a0db4580d44d19c0a8",
+      "mode": 493,
+      "ownership_class": "shared-claude-stale-process-cleanup",
       "dependency_status": "closed",
       "dependencies": []
     },
