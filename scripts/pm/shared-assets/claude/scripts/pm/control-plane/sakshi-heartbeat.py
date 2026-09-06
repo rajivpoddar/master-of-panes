@@ -1158,7 +1158,7 @@ def _exact_slot_packet_bindings(
     bindings: list[dict[str, str]] = []
     errors: list[str] = []
     packet_header = re.compile(
-        r"(?im)^\s*(?:REPRO|REWORK)\s*[—-]\s*Packet\s+([^\s(]+)\s+\(#(\d+)\b"
+        r"(?im)^\s*(REPRO|REWORK)\s*[—-]\s*Packet\s+([^\s(]+)\s+\(#(\d+)\b"
     )
     exact_head_line = re.compile(
         r"(?i)\bExact head\s*[:=]?\s*([0-9a-f]{40})\b"
@@ -1169,7 +1169,7 @@ def _exact_slot_packet_bindings(
         owner = str(slot.get("owner") or slot.get("name") or f"S{slot_id}").strip()
         if _concrete_motion_token(owner) is None:
             continue
-        candidates: list[tuple[str, str, str]] = []
+        candidates: list[tuple[str, str, str, str]] = []
         structured_pr_raw = slot.get("pr") if "pr" in slot else slot.get("pull_request")
         structured_head_raw = slot.get("head_sha") if "head_sha" in slot else slot.get("headSha")
         structured_packet = str(
@@ -1188,33 +1188,35 @@ def _exact_slot_packet_bindings(
         task = str(slot.get("task") or "")
         packet_matches = packet_header.findall(task)
         head_matches = exact_head_line.findall(task)
-        task_identity: tuple[str, str, str] | None = None
+        task_identity: tuple[str, str, str, str] | None = None
         if len(set(packet_matches)) == 1 and len(set(head_matches)) == 1:
-            packet, pr, head = packet_matches[0][0], packet_matches[0][1], head_matches[0]
+            kind, packet, pr = packet_matches[0]
+            head = head_matches[0]
             if pr.isdigit() and _concrete_motion_token(packet) is not None:
-                task_identity = (packet, pr, head)
+                task_identity = (kind.lower(), packet, pr, head)
         if structured_identity and task_identity:
-            if structured_identity != (task_identity[1], task_identity[2]):
+            if structured_identity != (task_identity[2], task_identity[3]):
                 errors.append(f"slot {slot_id} structured PR/head conflicts with packet task identity")
-            elif structured_packet and structured_packet != task_identity[0]:
+            elif structured_packet and structured_packet != task_identity[1]:
                 errors.append(f"slot {slot_id} structured packet conflicts with packet task identity")
             else:
                 candidates.append(task_identity)
         elif structured_identity:
             if _concrete_motion_token(structured_packet) is not None:
-                candidates.append((structured_packet, structured_identity[0], structured_identity[1]))
+                kind = str(slot.get("work_kind") or "").strip().lower()
+                candidates.append((kind, structured_packet, structured_identity[0], structured_identity[1]))
             elif task_identity is None:
                 errors.append(f"slot {slot_id} structured PR/head has no packet identity")
         elif task_identity and not structured_present:
             candidates.append(task_identity)
         elif task_identity and structured_present:
             errors.append(f"slot {slot_id} structured PR/head is incomplete for packet task identity")
-        identities = {(packet, pr, head) for packet, pr, head in candidates}
+        identities = {(kind, packet, pr, head) for kind, packet, pr, head in candidates}
         if len(identities) > 1:
             errors.append(f"slot {slot_id} has ambiguous exact packet identity")
             continue
-        for packet, pr, head in identities:
-            bindings.append({"slot": str(slot_id), "owner": owner, "packet": packet, "pr": pr, "head": head})
+        for kind, packet, pr, head in identities:
+            bindings.append({"slot": str(slot_id), "owner": owner, "packet": packet, "pr": pr, "head": head, "kind": kind})
     return bindings, "; ".join(dict.fromkeys(errors)) or None
 
 
@@ -1311,6 +1313,101 @@ def _motion_result(
         "wake": wake,
         "last_exact": last_exact,
     }
+
+
+def _exact_packet_motion(
+    slots: dict[str, dict[str, Any]],
+    queue: dict[str, Any] | None,
+    number: str,
+    head: str,
+    branch: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Derive non-duplicating motion from one exact packet binding.
+
+    Packet identity is a stronger join than a generic occupied/active flag,
+    but it never creates execution by itself: inactive packets are queued or
+    held, while only an exact packet plus an active turn is in progress.
+    """
+
+    slot_packets, slot_error = _exact_slot_packet_bindings(slots)
+    queued_packets, queue_error = _exact_queued_packet_bindings(queue)
+    matches = [
+        packet for packet in [*slot_packets, *queued_packets]
+        if packet["pr"] == number and packet["head"] == head
+    ]
+    packet_identities = {
+        (packet["slot"], packet["owner"], packet["packet"])
+        for packet in matches
+    }
+    if len(packet_identities) > 1:
+        return None, "ambiguous multiple exact-head packet bindings"
+    if not matches:
+        errors = [error for error in (slot_error, queue_error) if error]
+        return None, "; ".join(dict.fromkeys(errors)) or None
+
+    packet = matches[0]
+    slot = slots.get(packet["slot"])
+    if packet in slot_packets and isinstance(slot, dict):
+        kind = str(packet.get("kind") or "").strip().lower()
+        if not kind:
+            kind = str(slot.get("work_kind") or "").strip().lower()
+        if kind not in {"repro", "rework"}:
+            return None, f"exact packet {packet['packet']} has no supported repro/rework task kind"
+        active_state = str(slot.get("active_turn_state") or slot.get("state") or "").lower()
+        active = bool(slot.get("occupied")) and active_state in {
+            "active", "running", "working", "in_progress"
+        } and bool(str(slot.get("active_turn_id") or "").strip())
+        if active:
+            return _motion_result(
+                number=number,
+                branch=branch,
+                head=head,
+                motion_state="REPRO_REWORK_IN_PROGRESS",
+                lanes={"capture": False, "ci_e2e": False, "numbered_reproduction": kind == "repro"},
+                reasons=[],
+                owner=packet["owner"],
+                lane="repro/rework",
+                owner_source="MoP exact slot packet",
+                workflow_motion="slot-packet:active",
+                hold_reason="none",
+                next_action="await the exact-head numbered packet terminal",
+                next_owner=packet["owner"],
+                next_boundary="exact-head numbered packet terminal",
+                wake="the exact-head numbered packet is active",
+            ), None
+
+    return _motion_result(
+        number=number,
+        branch=branch,
+        head=head,
+        motion_state="REPRO_REWORK_QUEUED",
+        lanes={"capture": False, "ci_e2e": False, "numbered_reproduction": False},
+        reasons=[],
+        owner=packet["owner"],
+        lane="repro/proof",
+        owner_source="MoP exact packet queue",
+        workflow_motion="none",
+        hold_reason=f"exact-head packet {packet['packet']} is queued or held at S{packet['slot']}",
+        next_action=f"reconcile exact-head packet {packet['packet']} at S{packet['slot']}",
+        next_owner=packet["owner"],
+        next_boundary="exact-head packet state",
+        wake="re-read the exact-head packet state",
+    ), None
+
+
+def _prefer_exact_packet_motion(
+    row: dict[str, Any], packet_motion: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Let valid packet motion survive ledger/chronology-only uncertainty."""
+
+    if not packet_motion or row.get("motion_state") not in {"UNKNOWN", "PROCESS_LIMBO"}:
+        return row
+    merged = dict(packet_motion)
+    merged["reasons"] = list(dict.fromkeys([
+        *(packet_motion.get("reasons") or []),
+        *(row.get("reasons") or []),
+    ]))
+    return merged
 
 
 def _open_pr_label_names(pr: dict[str, Any]) -> tuple[set[str] | None, str | None]:
@@ -1752,6 +1849,7 @@ def _open_pr_binding(
 
     ci_evidence: list[str] = []
     ci_phases: dict[str, str] = {}
+    ci_limitations: list[str] = []
     ci_candidates = [
         run for run in runs
         if isinstance(run, dict)
@@ -1760,7 +1858,8 @@ def _open_pr_binding(
     ]
     latest_ci, ci_error = _latest_required_workflow_runs(ci_candidates, head)
     if ci_error:
-        return "unknown", [], [ci_error]
+        latest_ci = {}
+        ci_limitations.append(ci_error)
     for workflow, run in latest_ci.items():
         run_id = str(run.get("id") or run.get("databaseId") or "").strip()
         phase = _workflow_phase(run, jobs_by_run.get(run_id, []))
@@ -1827,7 +1926,8 @@ def _open_pr_binding(
     slot_packets, slot_packet_error = _exact_slot_packet_bindings(slots)
     queued_packets, queued_packet_error = _exact_queued_packet_bindings(queue)
     packet_limitations = [
-        error for error in (slot_packet_error, queued_packet_error) if error
+        *ci_limitations,
+        *[error for error in (slot_packet_error, queued_packet_error) if error],
     ]
     packet_matches = [
         packet for packet in [*slot_packets, *queued_packets]
@@ -1846,6 +1946,8 @@ def _open_pr_binding(
             f"{source}:S{packet['slot']}:{packet['owner']}:packet={packet['packet']}"
         )
 
+    if ci_error and not ci_evidence and not packet_matches and not active_slots:
+        return "unknown", [], [*packet_limitations, continuation_error.removeprefix("row: ").strip()] if continuation_error else packet_limitations
     if continuation_error and not ci_evidence:
         return "unknown", [], [continuation_error.removeprefix("row: ").strip(), *packet_limitations]
     if malformed_slot_binding and not ci_evidence:
@@ -2047,6 +2149,9 @@ def collect_open_pr_activity_audit(
             continue
         normalized_pr = {**pr, "head_sha": head, "headRefName": branch}
         continuations, continuation_error = _load_open_pr_continuations(number, head)
+        packet_motion, packet_motion_error = _exact_packet_motion(
+            slots, queue, number, head, branch
+        )
         if continuation_error:
             if not continuation_error.startswith("row:"):
                 return {
@@ -2088,6 +2193,12 @@ def collect_open_pr_activity_audit(
                 row = live_row
             else:
                 row = _malformed_continuation_row(number, branch, head, continuation_error)
+            row = _prefer_exact_packet_motion(row, packet_motion)
+            if packet_motion_error and not packet_motion:
+                row["reasons"] = list(dict.fromkeys([
+                    *(row.get("reasons") or []),
+                    packet_motion_error,
+                ]))
             for lane, enabled in row.get("lanes", {}).items():
                 if enabled:
                     counts[lane] += 1
@@ -2109,6 +2220,12 @@ def collect_open_pr_activity_audit(
             now_utc=now_utc,
             continuation_records=continuations,
         )
+        row = _prefer_exact_packet_motion(row, packet_motion)
+        if packet_motion_error and not packet_motion:
+            row["reasons"] = list(dict.fromkeys([
+                *(row.get("reasons") or []),
+                packet_motion_error,
+            ]))
         for lane, enabled in row.get("lanes", {}).items():
             if enabled:
                 counts[lane] += 1

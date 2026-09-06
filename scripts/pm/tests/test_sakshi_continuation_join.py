@@ -374,6 +374,91 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         self.assertEqual(audit["rows"][0]["binding_status"], "slot_bound")
         self.assertFalse(audit["rows"][0]["unbound"])
 
+    def test_active_exact_packet_precedes_malformed_ledger_and_counts_motion(self) -> None:
+        slot = {
+            "slot": 1,
+            "name": "Rohini",
+            "occupied": True,
+            "active_turn_state": "active",
+            "active_turn_id": "turn-636",
+            "pr": None,
+            "head_sha": None,
+            "task": f"REPRO — Packet 636 (#7591 / issue #344). Exact head {HEAD}.",
+        }
+        audit = collect_audit(
+            self,
+            slots={"1": slot},
+            continuation_error="row: durable continuation has no exact head binding",
+        )
+        row = audit["rows"][0]
+        self.assertEqual(row["motion_state"], "REPRO_REWORK_IN_PROGRESS")
+        self.assertEqual(row["owner"], "Rohini")
+        self.assertEqual(row["next_action"], "await the exact-head numbered packet terminal")
+        self.assertEqual(audit["counts"]["numbered_reproduction"], 1)
+        self.assertEqual(audit["motion_states"]["REPRO_REWORK_IN_PROGRESS"], 1)
+        self.assertEqual(MODULE.open_pr_activity_action_lines(audit), [])
+        self.assertTrue(any("durable continuation has no exact head binding" in reason for reason in row["reasons"]))
+
+    def test_held_exact_packet_precedes_ledger_action_without_claiming_execution(self) -> None:
+        slot = {
+            "slot": 1,
+            "name": "Rohini",
+            "occupied": True,
+            "active_turn_state": "inactive",
+            "pr": None,
+            "head_sha": None,
+            "task": f"REPRO — Packet 636 (#7591 / issue #344). Exact head {HEAD}.",
+        }
+        audit = collect_audit(
+            self,
+            slots={"1": slot},
+            continuation_error="row: durable continuation has no exact head binding",
+        )
+        row = audit["rows"][0]
+        self.assertEqual(row["motion_state"], "REPRO_REWORK_QUEUED")
+        self.assertEqual(row["owner"], "Rohini")
+        self.assertIn("packet 636", row["next_action"])
+        self.assertEqual(audit["counts"]["numbered_reproduction"], 0)
+        self.assertEqual(audit["motion_states"]["REPRO_REWORK_QUEUED"], 1)
+        self.assertEqual(MODULE.open_pr_activity_action_lines(audit), [])
+
+    def test_exact_packet_survives_ambiguous_ci_chronology(self) -> None:
+        runs = [
+            completed_run("CI", run_id=601),
+            completed_run("CI", run_id=602),
+        ]
+        slot = {
+            "slot": 1,
+            "name": "Rohini",
+            "occupied": True,
+            "active_turn_state": "active",
+            "active_turn_id": "turn-636",
+            "pr": None,
+            "head_sha": None,
+            "task": f"REPRO — Packet 636 (#7591 / issue #344). Exact head {HEAD}.",
+        }
+        audit = collect_audit(self, runs=runs, slots={"1": slot})
+        row = audit["rows"][0]
+        self.assertEqual(row["motion_state"], "REPRO_REWORK_IN_PROGRESS")
+        self.assertEqual(row["binding_status"], "slot_bound")
+        self.assertEqual(audit["counts"]["numbered_reproduction"], 1)
+        self.assertTrue(any("chronology" in reason for reason in row["reasons"]))
+
+    def test_ambiguous_ci_chronology_without_packet_stays_unknown(self) -> None:
+        audit = collect_audit(
+            self,
+            runs=[
+                completed_run("CI", run_id=601),
+                completed_run("CI", run_id=602),
+            ],
+        )
+        row = audit["rows"][0]
+        self.assertEqual(row["motion_state"], "UNKNOWN")
+        self.assertEqual(row["binding_status"], "unknown")
+        self.assertFalse(row["unbound"])
+        self.assertTrue(row["verification_limited"])
+        self.assertEqual(MODULE.open_pr_activity_action_lines(audit), [])
+
     def test_terminal_or_missing_required_ci_is_actionable_in_report(self) -> None:
         cases = [
             ("exact-head failed CI", [completed_run("CI", run_id=501, conclusion="failure")]),
