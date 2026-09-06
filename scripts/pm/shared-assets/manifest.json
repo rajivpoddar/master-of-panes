@@ -42,7 +42,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+      "selected_count": 65,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -91,6 +91,15 @@
       "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/slot-terminal-message-pm-stop.sh",
+      "canonical_target": "/Users/rajiv/.claude/hooks/slot-terminal-message-pm-stop.sh",
+      "sha256": "0b4841c82dc6af6cfda6f2fecc9b4518efe60da8c1ebc6028951928a8deec6b5",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-stop-hook",
       "dependency_status": "closed",
       "dependencies": []
     },
