@@ -399,7 +399,7 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         self.assertEqual(MODULE.open_pr_activity_action_lines(audit), [])
         self.assertTrue(any("durable continuation has no exact head binding" in reason for reason in row["reasons"]))
 
-    def test_active_exact_packet_with_structured_assignment_counts_motion(self) -> None:
+    def test_active_exact_packet_with_structured_assignment_stays_queued(self) -> None:
         slot = {
             "slot": 1,
             "name": "Rohini",
@@ -412,12 +412,31 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         }
         audit = collect_audit(self, slots={"1": slot})
         row = audit["rows"][0]
-        self.assertEqual(row["motion_state"], "REPRO_REWORK_IN_PROGRESS")
+        self.assertEqual(row["motion_state"], "REPRO_REWORK_QUEUED")
         self.assertEqual(row["owner"], "Rohini")
-        self.assertEqual(row["next_action"], "await the exact-head lane terminal")
-        self.assertEqual(audit["counts"]["numbered_reproduction"], 1)
-        self.assertEqual(audit["motion_states"]["REPRO_REWORK_IN_PROGRESS"], 1)
+        self.assertIn("packet 636", row["next_action"])
+        self.assertEqual(audit["counts"]["numbered_reproduction"], 0)
+        self.assertEqual(audit["motion_states"]["REPRO_REWORK_QUEUED"], 1)
         self.assertEqual(MODULE.open_pr_activity_action_lines(audit), [])
+
+    def test_authoritative_workflow_motion_survives_packet_fallback(self) -> None:
+        runs, jobs = running_run("CI")
+        slot = {
+            "slot": 1,
+            "name": "Rohini",
+            "occupied": True,
+            "active_turn_state": "active",
+            "active_turn_id": "turn-636",
+            "pr": "7591",
+            "head_sha": HEAD,
+            "task": f"REPRO — Packet 636 (#7591 / issue #344). Exact head {HEAD}.",
+        }
+        audit = collect_audit(self, runs=runs, jobs=jobs, slots={"1": slot})
+        row = audit["rows"][0]
+        self.assertEqual(row["motion_state"], "CI_E2E_IN_PROGRESS")
+        self.assertEqual(row["workflow_motion"], "CI:active")
+        self.assertEqual(audit["counts"]["ci_e2e"], 1)
+        self.assertEqual(audit["counts"]["numbered_reproduction"], 0)
 
     def test_held_exact_packet_precedes_ledger_action_without_claiming_execution(self) -> None:
         slot = {
@@ -738,7 +757,7 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         ]
         self.assertEqual(
             [row["lane"] for row in rows],
-            ["CI", "capture", "repro/rework", "repro/rework", "rework-blocked", "dependency-blocked", "true limbo"],
+            ["CI", "capture", "true limbo", "true limbo", "rework-blocked", "dependency-blocked", "true limbo"],
         )
         for row in rows:
             for field in ("workflow_motion", "owner_source", "hold_reason", "next_action", "next_owner", "wake"):

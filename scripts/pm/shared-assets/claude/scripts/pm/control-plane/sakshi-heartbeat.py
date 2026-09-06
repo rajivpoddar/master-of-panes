@@ -1325,10 +1325,10 @@ def _exact_packet_motion(
     """Derive non-duplicating motion from one exact packet binding.
 
     Packet identity is a stronger join than a generic occupied/active flag,
-    but it never creates execution by itself: packets are queued or held
-    unless the existing structured current-slot PR/head assignment joins the
-    packet to the active turn.  A generic session opener is not packet
-    execution evidence.
+    but it never creates execution by itself: fallback packets are queued or
+    held.  Generic session openers and slot assignment fields do not establish
+    that the packet is executing; stronger execution motion must come from an
+    existing authoritative producer.
     """
 
     slot_packets, slot_error = _exact_slot_packet_bindings(slots)
@@ -1355,33 +1355,6 @@ def _exact_packet_motion(
             kind = str(slot.get("work_kind") or "").strip().lower()
         if kind not in {"repro", "rework"}:
             return None, f"exact packet {packet['packet']} has no supported repro/rework task kind"
-        structured_pr = str(slot.get("pr") or slot.get("pull_request") or "").strip()
-        structured_head = str(slot.get("head_sha") or slot.get("headSha") or "").strip()
-        structured_assignment_matches = (
-            structured_pr == packet["pr"] and structured_head == packet["head"]
-        )
-        active_state = str(slot.get("active_turn_state") or slot.get("state") or "").lower()
-        active = structured_assignment_matches and bool(slot.get("occupied")) and active_state in {
-            "active", "running", "working", "in_progress"
-        } and bool(str(slot.get("active_turn_id") or "").strip())
-        if active:
-            return _motion_result(
-                number=number,
-                branch=branch,
-                head=head,
-                motion_state="REPRO_REWORK_IN_PROGRESS",
-                lanes={"capture": False, "ci_e2e": False, "numbered_reproduction": kind == "repro"},
-                reasons=[],
-                owner=packet["owner"],
-                lane="repro/rework",
-                owner_source="MoP exact slot packet",
-                workflow_motion="slot-packet:active",
-                hold_reason="none",
-                next_action="await the exact-head numbered packet terminal",
-                next_owner=packet["owner"],
-                next_boundary="exact-head numbered packet terminal",
-                wake="the exact-head numbered packet is active",
-            ), None
 
     return _motion_result(
         number=number,
@@ -1640,9 +1613,7 @@ def evaluate_open_pr_activity(
             ):
                 last_exact = latest
 
-    numbered_kind: str | None = None
     owner = "unowned"
-    active_numbered_owners: list[tuple[str | None, str]] = []
     for slot_id, slot in slots.items():
         if not isinstance(slot, dict):
             continue
@@ -1650,20 +1621,6 @@ def evaluate_open_pr_activity(
         slot_head = str(slot.get("head_sha") or slot.get("headSha") or "")
         if slot_pr == number and slot_head == head:
             owner = str(slot.get("owner") or slot.get("name") or f"S{slot_id}")
-        active_state = str(slot.get("active_turn_state") or slot.get("state") or "").lower()
-        active = bool(slot.get("occupied")) and (
-            active_state in {"active", "running", "working", "in_progress"}
-            and bool(str(slot.get("active_turn_id") or "").strip())
-        )
-        if active and slot_pr == number and slot_head == head:
-            kind = _numbered_motion_kind(slot)
-            active_numbered_owners.append((kind, owner))
-
-    if len(active_numbered_owners) == 1:
-        numbered_kind, owner = active_numbered_owners[0]
-    elif len(active_numbered_owners) > 1:
-        numbered_kind = "ambiguous"
-        owner = ",".join(sorted({active_owner for _, active_owner in active_numbered_owners}))
 
     if any(len(run_ids) > 1 for run_ids in live_workflow_runs.values()):
         return _motion_result(
@@ -1691,18 +1648,17 @@ def evaluate_open_pr_activity(
     lanes = {
         "capture": capture,
         "ci_e2e": ci_e2e,
-        "numbered_reproduction": numbered_kind == "repro",
+        "numbered_reproduction": False,
     }
     active_states = [
         state
         for state, enabled in (
             ("CAPTURE_IN_PROGRESS", capture),
             ("CI_E2E_IN_PROGRESS", ci_e2e),
-            ("REPRO_REWORK_IN_PROGRESS", numbered_kind in {"repro", "rework"}),
         )
         if enabled
     ]
-    if numbered_kind == "ambiguous" or len(active_states) > 1:
+    if len(active_states) > 1:
         return _motion_result(
             number=number,
             branch=branch,
@@ -1729,10 +1685,10 @@ def evaluate_open_pr_activity(
             lanes={key: bool(value) for key, value in lanes.items()},
             reasons=[],
             owner=owner,
-            owner_source="slot" if numbered_kind else "workflow",
+            owner_source="workflow",
             workflow_motion=",".join(dict.fromkeys(active_workflow_motion)) or "slot-only",
             next_action="await the exact-head lane terminal",
-            next_owner="CTO" if numbered_kind is None else owner,
+            next_owner="CTO",
             last_exact=last_exact,
         )
 
