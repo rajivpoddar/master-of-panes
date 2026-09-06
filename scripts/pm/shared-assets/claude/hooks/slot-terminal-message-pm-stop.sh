@@ -905,13 +905,30 @@ def no_push_test_only_completion(text):
     """Allow an explicitly completed local test-only turn without retired proof tooling."""
     if not isinstance(text, str) or not text.strip():
         return False
-    return bool(
-        re.search(r"(?is)\btest[- ]only\b", text)
-        and re.search(
-            r"(?is)\b(?:no[- ]push(?:ed)?|not pushed|without pushing|local[- ]only)\b",
-            text,
-        )
+    # This is a narrow exception for a completed local test-only turn, not a
+    # keyword waiver.  Keep mixed PR/readiness claims and unresolved work on
+    # the normal current-head slot-ready path.
+    if re.search(
+        r"(?is)\b(?:not|non)\s+(?:a\s+)?test[- ]only\b|"
+        r"\b(?:unfinished|incomplete|pending|in[- ]progress)\b|"
+        r"\b(?:not|never)\s+(?:complete|completed|finished|done)\b|"
+        r"\b(?:implementation|production|feature|pull\s+request|PR)\b|"
+        r"\bready\s+for\s+(?:PM|review|approval)\b",
+        text,
+    ):
+        return False
+    completed_scope = re.search(
+        r"(?is)\b(?:task|turn|work|commit|checks?|tests?)\b[^.?!]{0,120}"
+        r"\b(?:complete|completed|finished|done|passed)\b",
+        text,
     )
+    local_test_only = re.search(r"(?is)\btest[- ]only\b", text)
+    no_push_or_local = re.search(
+        r"(?is)\b(?:no[- ]push(?:ed)?\s+(?:was\s+)?(?:required|requested|needed)|"
+        r"not pushed|without pushing|local[- ]only)\b",
+        text,
+    )
+    return bool(completed_scope and local_test_only and no_push_or_local)
 
 def current_head_ready_packet(slot_id, pr, head):
     event_dir = os.environ.get("SLOT_READY_EVENT_DIR", "/tmp/slot-ready-events")

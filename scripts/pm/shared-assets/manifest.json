@@ -97,7 +97,7 @@
     {
       "source_path": "claude/hooks/slot-terminal-message-pm-stop.sh",
       "canonical_target": "/Users/rajiv/.claude/hooks/slot-terminal-message-pm-stop.sh",
-      "sha256": "0b4841c82dc6af6cfda6f2fecc9b4518efe60da8c1ebc6028951928a8deec6b5",
+      "sha256": "0289380fd7f9a1b329e46efb8b08d82eeaf2f971acdb7c6f3cb962aafc79a24c",
       "mode": 493,
       "ownership_class": "shared-claude-slot-stop-hook",
       "dependency_status": "closed",

@@ -100,6 +100,17 @@ def main() -> None:
     assert allowed.returncode == 0, allowed
     assert "slot-submit-ready.sh" not in allowed.stdout
 
+    for counterexample in (
+        "Task complete: this is not test-only work; no-push was not requested. PR ready for PM review.",
+        "All tests passed for the test-only local-only checks; implementation is still unfinished.",
+        "Task complete: test-only local-only checks are pending; no-push was requested.",
+        "Task complete: test-only local-only checks completed; implementation is unfinished.",
+    ):
+        refused = run_stop(counterexample)
+        assert refused.returncode == 2, (counterexample, refused)
+        assert "SLOT_READY_PACKET_UNAVAILABLE" in refused.stdout, refused.stdout
+        assert "slot-submit-ready.sh" not in refused.stdout, refused.stdout
+
     incomplete = run_stop("Implementation complete and ready for PM review.")
     assert incomplete.returncode == 2, incomplete
     assert "SLOT_READY_PACKET_UNAVAILABLE" in incomplete.stdout, incomplete.stdout
