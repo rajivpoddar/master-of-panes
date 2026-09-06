@@ -116,6 +116,38 @@ test("resident new_issue slot-claim metadata keeps its epoch and planned branch"
   });
 });
 
+test("new_issue metadata rejects raw epoch and branch coercions before mutation", async () => {
+  let deliveryCount = 0;
+  await withRoute(async () => {
+    deliveryCount += 1;
+    return true;
+  }, async (app, db) => {
+    const malformed = [
+      { expected_epoch: null, branch: "fix/245-pending" },
+      { expected_epoch: false, branch: "fix/245-pending" },
+      { expected_epoch: "0", branch: "fix/245-pending" },
+      { expected_epoch: 0.5, branch: "fix/245-pending" },
+      { expected_epoch: -1, branch: "fix/245-pending" },
+      { expected_epoch: 0, branch: "" },
+      { expected_epoch: 0, branch: "refs/tags/245" },
+      { expected_epoch: 0, branch: "bad branch" },
+      { expected_epoch: 0, branch: null },
+    ];
+    for (const metadata of malformed) {
+      const response = await app.request("/slots/1/assign", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ issue: 245, task: "malformed", ...metadata }),
+      });
+      assert.equal(response.status, 400, JSON.stringify(metadata));
+      assert.equal((await response.json() as Record<string, unknown>).reason, "invalid_assignment_metadata");
+      assert.equal(db.getSlot(1)?.occupied, false);
+      assert.equal(db.getSlot(1)?.assignment_epoch, 0);
+    }
+    assert.equal(deliveryCount, 0);
+  });
+});
+
 test("new_issue metadata refuses PR mixing, duplicate ownership, and active slots", async () => {
   await withRoute(async () => true, async (app, db) => {
     const malformed = await app.request("/slots/1/assign", {

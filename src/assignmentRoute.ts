@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 import { z } from "zod";
 
-import type { MoPDatabase } from "./db.js";
+import { normalizeBranchIdentity, type MoPDatabase } from "./db.js";
 import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
 
 export type AssignmentDelivery = (slot: number, task: string) => Promise<boolean>;
@@ -81,6 +81,20 @@ function isNewIssueAssignmentMetadata(body: Record<string, unknown>): boolean {
     && !newIssueMetadataForbiddenFields.some((field) => hasOwn(body, field));
 }
 
+function isValidNewIssueAssignmentMetadata(body: Record<string, unknown>): boolean {
+  if (
+    typeof body.expected_epoch !== "number"
+    || !Number.isFinite(body.expected_epoch)
+    || !Number.isInteger(body.expected_epoch)
+    || body.expected_epoch < 0
+    || typeof body.branch !== "string"
+  ) {
+    return false;
+  }
+  const branchIdentity = normalizeBranchIdentity(body.branch);
+  return branchIdentity !== null && branchIdentity.branch !== null;
+}
+
 /** Assign one free numbered slot with the minimum PM-authored contract. */
 export function registerAssignmentRoute(
   app: Hono,
@@ -111,7 +125,10 @@ export function registerAssignmentRoute(
     // identity consumed by the heartbeat.
     const newIssueMetadataRequested = isNewIssueAssignmentMetadata(body);
     const completeRequested = hasCompleteAssignmentMetadata(body) && !newIssueMetadataRequested;
-    if (completeRequested && !isCompleteAssignment(body)) {
+    if (
+      (completeRequested && !isCompleteAssignment(body))
+      || (newIssueMetadataRequested && !isValidNewIssueAssignmentMetadata(body))
+    ) {
       return c.json({ success: false, reason: "invalid_assignment_metadata" }, 400);
     }
 
