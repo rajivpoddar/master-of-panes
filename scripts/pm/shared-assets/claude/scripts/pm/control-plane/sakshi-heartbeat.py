@@ -913,6 +913,26 @@ def _concrete_motion_text(value: Any) -> str | None:
     return text
 
 
+def _wake_absence_is_truthful(row: dict[str, Any]) -> bool:
+    """Allow no wake only when a bound active lane has a concrete next action."""
+
+    return (
+        row.get("wake") == "none"
+        and row.get("motion_state") in {
+            "CI_E2E_IN_PROGRESS",
+            "CAPTURE_IN_PROGRESS",
+            "REPRO_REWORK_IN_PROGRESS",
+        }
+        and row.get("binding_status") in {
+            "ci_bound",
+            "slot_bound",
+            "ci_and_slot_bound",
+        }
+        and row.get("unbound") is False
+        and _concrete_motion_text(row.get("next_action")) is not None
+    )
+
+
 def _continuation_head(record: dict[str, Any]) -> tuple[str | None, str | None]:
     """Extract one exact head from durable obligation evidence only."""
 
@@ -3243,9 +3263,14 @@ def validate(data: dict[str, Any]) -> list[str]:
                     if not isinstance(value, str) or not value.strip():
                         errors.append(f"open_pr_activity_audit.rows[{index}] missing {field}")
                     elif value.strip().lower() in placeholders:
-                        # `none` is a truthful value only for source/motion;
-                        # ownership, action, wake, and hold must be concrete.
-                        if field not in {"workflow_motion", "owner_source"} or value.strip().lower() != "none":
+                        # `none` is truthful for source/motion, and for wake
+                        # when an authoritative active lane has a concrete
+                        # next action. Unknown/unbound rows still need a
+                        # concrete wake and remain fail-closed.
+                        if (
+                            field not in {"workflow_motion", "owner_source"}
+                            or value.strip().lower() != "none"
+                        ) and not (field == "wake" and _wake_absence_is_truthful(row)):
                             errors.append(f"open_pr_activity_audit.rows[{index}] placeholder {field}")
                 if _concrete_motion_token(row.get("owner")) is None:
                     errors.append(f"open_pr_activity_audit.rows[{index}] owner is missing or placeholder")
@@ -3253,7 +3278,7 @@ def validate(data: dict[str, Any]) -> list[str]:
                     errors.append(f"open_pr_activity_audit.rows[{index}] next_action is missing or placeholder")
                 if _concrete_motion_token(row.get("next_owner")) is None:
                     errors.append(f"open_pr_activity_audit.rows[{index}] next_owner is missing or placeholder")
-                if _concrete_motion_text(row.get("wake")) is None:
+                if _concrete_motion_text(row.get("wake")) is None and not _wake_absence_is_truthful(row):
                     errors.append(f"open_pr_activity_audit.rows[{index}] wake is missing or placeholder")
 
     cp = data.get("control_plane")

@@ -597,6 +597,70 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         self.assertIn("open_pr_activity_audit row-count mismatch", errors)
         self.assertTrue(any("placeholder" in error for error in errors))
 
+    def test_runtime_validate_keeps_truthful_bound_lane_without_wake_nonfatal(self) -> None:
+        sessions = [{"label": label, "jsonl": "/tmp/session", "age_seconds": 1}
+                    for label in ("PM", "S1", "S2", "S3", "S4", "S5", "S6")]
+        active_ci_row = {
+            "pr": "7647",
+            "branch": "codex/7645-certificate-retry-mitigation",
+            "head": "cf7c6911cf2ceaf8e82375fca6d487ca1ef0a11b",
+            "motion_state": "CI_E2E_IN_PROGRESS",
+            "binding_status": "ci_bound",
+            "binding_evidence": ["CI:CI:active", "CI:E2E Smoke Tests:queued"],
+            "binding_limitations": [],
+            "binding_missing": [],
+            "verification_limited": True,
+            "unbound": False,
+            "owner": "unowned",
+            "workflow_motion": "E2E Smoke Tests:queued,CI:active",
+            "owner_source": "workflow",
+            "hold_reason": "none",
+            "next_action": "await the exact-head lane terminal",
+            "next_owner": "CTO",
+            "wake": "none",
+            "next_boundary": "none",
+            "reasons": [],
+            "last_exact": {},
+        }
+        malformed_row = {
+            **active_ci_row,
+            "pr": "7648",
+            "branch": "feature/7645-reactive-disable-editor-lease",
+            "head": "74c860252534898453b742ad48e61ee766743d81",
+            "motion_state": "UNKNOWN",
+            "binding_status": "unknown",
+            "binding_evidence": [],
+            "binding_limitations": ["durable continuation has no exact head binding"],
+            "verification_limited": True,
+            "owner": "CTO",
+            "workflow_motion": "none",
+            "owner_source": "pm-ops.obligations malformed",
+            "hold_reason": "malformed durable continuation: durable continuation has no exact head binding",
+            "next_action": "repair or reconcile the exact-head durable continuation record",
+            "next_owner": "CTO",
+            "wake": "CTO consumes this exact-head ledger repair row",
+            "next_boundary": "repair or reconcile the exact-head durable continuation record",
+            "reasons": ["malformed durable continuation: durable continuation has no exact head binding"],
+        }
+        audit = {
+            "ok": True,
+            "open_pr_count": 2,
+            "open_pr_activity_gaps": 0,
+            "gaps": [],
+            "rows": [active_ci_row, malformed_row],
+        }
+        data = {
+            "sessions": sessions,
+            "control_plane": {"done_status": "ok", "pending_status": "ok", "done": [], "pending": []},
+            "open_pr_activity_audit": audit,
+        }
+        self.assertEqual(MODULE.validate(data), [])
+        self.assertEqual(MODULE.open_pr_activity_action_lines(audit), [])
+
+        unknown_without_wake = {**malformed_row, "wake": "none"}
+        invalid = {**data, "open_pr_activity_audit": {**audit, "rows": [unknown_without_wake, active_ci_row]}}
+        self.assertTrue(any("wake is missing or placeholder" in error for error in MODULE.validate(invalid)))
+
     def test_stale_or_conflicting_durable_records_do_not_become_current_owner(self) -> None:
         stale = continuation("rework")
         stale["evidence_json"] = json.dumps({"head": "0" * 40})
