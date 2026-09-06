@@ -11,6 +11,8 @@
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
       "~/.claude/scripts/axiom-activity-report.py",
       "~/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
+      "~/Downloads/projects/heydonna-app/.claude/scripts/ci/request-label-gated-ci.sh",
+      "~/.claude/scripts/ci/heydonna-cto-label-gated-ci.py",
       "~/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
       "~/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
       "~/.claude/control-plane/current/claude/scripts/ci/rerun-after-local-proof.sh",
@@ -42,7 +44,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 66,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -70,7 +72,7 @@
     {
       "source_path": "claude/control_plane/runtime_observation.py",
       "canonical_target": "/Users/rajiv/.claude/control_plane/runtime_observation.py",
-      "sha256": "33e7e0447d92fef778b75bca2dfea074ad1f8d1e7f27fe25c601f67ad01c7344",
+      "sha256": "2d2c377bce846cacc0bf5649316c9f5691b08393dccae1aa637761f3d30ff3c7",
       "mode": 420,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
       "dependency_status": "closed",
@@ -203,11 +205,29 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/scripts/ci/heydonna-cto-label-gated-ci.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/heydonna-cto-label-gated-ci.py",
+      "sha256": "f955e4e9cb92e74e2b40b9a07baee3beb2c852c57459e7e04a59f5e07501f43f",
+      "mode": 493,
+      "ownership_class": "shared-claude-ci-native-admission-adapter",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/scripts/ci/publish-ci-verdict.py",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
       "sha256": "0377c424f10dfc252cd3157123a52abc1f653d7741afe903d87adbb67d54e705",
       "mode": 420,
       "ownership_class": "shared-claude-ci-verdict-producer",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/ci/request-label-gated-ci.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ci/request-label-gated-ci.sh",
+      "sha256": "2b5d93d0e214c7b1be004c51c8cf11217268650c75db057b32e41c5f63727ebb",
+      "mode": 493,
+      "ownership_class": "shared-claude-ci-admission-caller",
       "dependency_status": "closed",
       "dependencies": []
     },
@@ -511,7 +531,7 @@
     {
       "source_path": "codex/automations/heydonna-3h-ready-pool-reconciliation/prompt.template",
       "canonical_target": "/Users/rajiv/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt",
-      "sha256": "43d4b556dea01f999991259de55d1bc2f53f38f06887a98c7dc3a6aa2c54f38e",
+      "sha256": "867e3cf17181b0e85867bbb80dcf3f701422214e853d887f8338bd5302caf470",
       "mode": 420,
       "ownership_class": "shared-codex-automation-prompt-template",
       "dependency_status": "closed",
