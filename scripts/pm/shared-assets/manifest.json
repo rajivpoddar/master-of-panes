@@ -225,7 +225,7 @@
     {
       "source_path": "claude/scripts/ci/request-label-gated-ci.sh",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ci/request-label-gated-ci.sh",
-      "sha256": "2b5d93d0e214c7b1be004c51c8cf11217268650c75db057b32e41c5f63727ebb",
+      "sha256": "eaa156f3b774a13131d5256e10180fa5e7a7e0948b8789ff59a4a460cbdf72a9",
       "mode": 493,
       "ownership_class": "shared-claude-ci-admission-caller",
       "dependency_status": "closed",
