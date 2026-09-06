@@ -1595,6 +1595,138 @@ def evaluate_open_pr_activity(
     )
 
 
+OPEN_PR_TERMINAL_CI_CONCLUSIONS = {
+    "success", "failure", "cancelled", "timed_out", "neutral", "action_required",
+}
+
+
+def _open_pr_binding(
+    number: str,
+    head: str,
+    runs: list[dict[str, Any]],
+    jobs_by_run: dict[str, list[dict[str, Any]]],
+    slots: dict[str, dict[str, Any]],
+    continuation_records: list[dict[str, Any]],
+    continuation_error: str | None = None,
+) -> tuple[str, list[str], list[str]]:
+    """Classify whether an open PR has real current-head execution binding.
+
+    This is deliberately narrower than the motion classifier.  A current-head
+    workflow run or an executable numbered-slot packet is binding even when it
+    is blocked or terminally failed; labels, stale heads, skipped runs, and
+    malformed ledger rows are not.  Unreadable or contradictory authority is
+    UNKNOWN rather than an unbound alert.
+    """
+
+    if not OPEN_PR_HEAD.fullmatch(head):
+        return "unknown", [], ["open PR head is not an exact 40-character SHA"]
+
+    ci_evidence: list[str] = []
+    ci_candidates = [
+        run for run in runs
+        if isinstance(run, dict)
+        and str(run.get("workflowName") or run.get("name") or "") in OPEN_PR_AUDIT_WORKFLOWS
+        and _run_matches_exact_head(run, head)
+    ]
+    latest_ci, ci_error = _latest_required_workflow_runs(ci_candidates, head)
+    if ci_error:
+        return "unknown", [], [ci_error]
+    for workflow, run in latest_ci.items():
+        run_id = str(run.get("id") or run.get("databaseId") or "").strip()
+        phase = _workflow_phase(run, jobs_by_run.get(run_id, []))
+        status = str(run.get("status") or "").lower()
+        conclusion = str(run.get("conclusion") or "").lower()
+        if conclusion == "skipped":
+            continue
+        if phase in {"active", "queued", "green"}:
+            ci_evidence.append(f"CI:{workflow}:{phase}")
+        elif status == "completed" and conclusion in OPEN_PR_TERMINAL_CI_CONCLUSIONS:
+            ci_evidence.append(f"CI:{workflow}:{conclusion}")
+        elif status or conclusion:
+            return "unknown", ci_evidence, [
+                f"current-head {workflow} run has unreadable execution state"
+            ]
+
+    active_slots: list[tuple[str, str]] = []
+    malformed_slot_binding = False
+    for slot_id, slot in slots.items():
+        if not isinstance(slot, dict):
+            continue
+        slot_pr = str(slot.get("pr") or slot.get("pull_request") or "")
+        slot_head = str(slot.get("head_sha") or slot.get("headSha") or "")
+        if slot_pr != number or slot_head != head:
+            continue
+        state = str(slot.get("active_turn_state") or slot.get("state") or "").lower()
+        if bool(slot.get("occupied")) and state in {"active", "running", "working", "in_progress"}:
+            owner = str(slot.get("owner") or slot.get("name") or f"S{slot_id}").strip()
+            if str(slot.get("active_turn_id") or "").strip() and _concrete_motion_token(owner):
+                active_slots.append((str(slot_id), owner))
+            else:
+                malformed_slot_binding = True
+    if len(active_slots) > 1:
+        return "unknown", [], ["ambiguous multiple active exact-head numbered slots"]
+    if active_slots:
+        ci_evidence.extend(f"slot:S{slot_id}:{owner}" for slot_id, owner in active_slots)
+
+    queued = _continuation_motion_metadata(continuation_records)
+    if continuation_records and queued is None and continuation_error is None:
+        return "unknown", ci_evidence, ["exact-head continuation binding is malformed or ambiguous"]
+    if queued and queued["lane"] in {"repro/proof", "rework"}:
+        ci_evidence.append(f"slot-queue:{queued['owner']}")
+
+    if continuation_error and not ci_evidence:
+        return "unknown", [], [continuation_error.removeprefix("row: ").strip()]
+    if malformed_slot_binding and not ci_evidence:
+        return "unknown", [], ["exact-head occupied slot binding is incomplete"]
+
+    has_ci = any(item.startswith("CI:") for item in ci_evidence)
+    has_slot = any(item.startswith("slot:") or item.startswith("slot-queue:") for item in ci_evidence)
+    if has_ci and has_slot:
+        return "ci_and_slot_bound", ci_evidence, []
+    if has_ci:
+        return "ci_bound", ci_evidence, []
+    if has_slot:
+        return "slot_bound", ci_evidence, []
+    return "unbound", [], []
+
+
+def _annotate_open_pr_binding(
+    row: dict[str, Any],
+    number: str,
+    head: str,
+    runs: list[dict[str, Any]],
+    jobs_by_run: dict[str, list[dict[str, Any]]],
+    slots: dict[str, dict[str, Any]],
+    continuation_records: list[dict[str, Any]],
+    continuation_error: str | None = None,
+) -> dict[str, Any]:
+    status, evidence, limitations = _open_pr_binding(
+        number, head, runs, jobs_by_run, slots, continuation_records, continuation_error
+    )
+    row["binding_status"] = status
+    row["binding_evidence"] = evidence
+    row["unbound"] = status == "unbound"
+    row["verification_limited"] = status == "unknown" or bool(continuation_error)
+    row["binding_missing"] = ["ci", "slot"] if status == "unbound" else []
+    row["binding_limitations"] = limitations
+    if status == "unbound":
+        row["reasons"] = list(dict.fromkeys([
+            *(row.get("reasons") or []),
+            "no authoritative current-head CI or executable slot binding",
+        ]))
+    return row
+
+
+def _mark_unknown_open_pr_binding(row: dict[str, Any], reason: str) -> dict[str, Any]:
+    row["binding_status"] = "unknown"
+    row["binding_evidence"] = []
+    row["unbound"] = False
+    row["verification_limited"] = True
+    row["binding_missing"] = []
+    row["binding_limitations"] = [reason]
+    return row
+
+
 def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Read-only exact-head activity audit for every open PR."""
 
@@ -1638,6 +1770,7 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "next_action": "re-read open PR metadata",
                 "next_owner": "CTO",
             }
+            _mark_unknown_open_pr_binding(row, "malformed open PR row")
             rows.append(row)
             motion_states["UNKNOWN"] += 1
             continue
@@ -1663,6 +1796,7 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "next_action": "re-read unambiguous open PR metadata",
                 "next_owner": "CTO",
             }
+            _mark_unknown_open_pr_binding(row, identity_error)
             rows.append(row)
             motion_states["UNKNOWN"] += 1
             continue
@@ -1694,6 +1828,7 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "next_action": "re-read exact-head workflow evidence",
                 "next_owner": "CTO",
             }
+            _mark_unknown_open_pr_binding(row, "exact-head workflow run read unavailable")
             rows.append(row)
             motion_states["UNKNOWN"] += 1
             continue
@@ -1711,7 +1846,7 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
             else:
                 jobs_by_run[run_id] = [job for job in jobs["jobs"] if isinstance(job, dict)]
         if jobs_errors:
-            rows.append({
+            row = {
                 "pr": number or "?",
                 "branch": branch,
                 "head": head,
@@ -1730,7 +1865,9 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 "hold_reason": "exact-head job evidence unavailable",
                 "next_action": "re-read exact-head workflow job evidence",
                 "next_owner": "CTO",
-            })
+            }
+            _mark_unknown_open_pr_binding(row, "exact-head workflow job evidence unavailable")
+            rows.append(row)
             motion_states["UNKNOWN"] += 1
             continue
         normalized_pr = {**pr, "head_sha": head, "headRefName": branch}
@@ -1784,6 +1921,9 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
                 motion_states[motion_state] += 1
             if motion_state == "PROCESS_LIMBO":
                 row["missing_predicates"] = list(row.get("reasons") or [])
+            _annotate_open_pr_binding(
+                row, number, head, exact_runs, jobs_by_run, slots, [], continuation_error
+            )
             rows.append(row)
             continue
         row = evaluate_open_pr_activity(
@@ -1802,6 +1942,9 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
             motion_states[motion_state] += 1
         if motion_state == "PROCESS_LIMBO":
             row["missing_predicates"] = list(row.get("reasons") or [])
+        _annotate_open_pr_binding(
+            row, number, head, exact_runs, jobs_by_run, slots, continuations
+        )
         rows.append(row)
     if len(rows) != len(prs):
         return {
@@ -1833,13 +1976,16 @@ def collect_open_pr_activity_audit(slots: dict[str, dict[str, Any]]) -> dict[str
             "counts": counts,
             "motion_states": motion_states,
         }
-    gaps = [row for row in rows if row.get("gap")]
+    gaps = [row for row in rows if row.get("unbound") is True]
+    verification_limitations = [row for row in rows if row.get("verification_limited") is True]
     return {
         "ok": True,
         "status": "ok",
         "open_pr_count": len(rows),
         "open_pr_activity_gaps": len(gaps),
         "gaps": gaps,
+        "unbound_prs": gaps,
+        "verification_limitations": verification_limitations,
         "rows": rows,
         "counts": counts,
         "motion_states": motion_states,
@@ -2818,7 +2964,9 @@ def format_open_pr_activity_audit(audit: dict[str, Any]) -> list[str]:
         "*OPEN_PR_ACTIVITY_AUDIT:* "
         f"open_pr_activity_rows={len(rows)}; "
         f"open_prs={int(audit.get('open_pr_count') or 0)}; "
-        f"open_pr_activity_gaps={len(gaps)} (exceptions first); "
+        f"open_pr_activity_gaps={len(gaps)}; "
+        f"unbound_prs={len(gaps)} (exceptions first); "
+        f"verification_limitations={len(audit.get('verification_limitations') or [])}; "
         f"motion_states={json.dumps(motion_states, sort_keys=True, separators=(',', ':'))}."
     ]
     for row in rows:
@@ -2833,6 +2981,8 @@ def format_open_pr_activity_audit(audit: dict[str, Any]) -> list[str]:
             f"motion_state={row.get('motion_state', 'PROCESS_LIMBO')} owner={row.get('owner', 'unowned')} "
             f"workflow_motion={row.get('workflow_motion', 'none')}; "
             f"owner_source={row.get('owner_source', 'none')}; "
+            f"binding={row.get('binding_status', 'unknown')} "
+            f"missing_bound={','.join(row.get('binding_missing') or []) or 'none'}; "
             f"hold_reason={trim_text(row.get('hold_reason', 'missing'), 220)}; "
             f"next_action={trim_text(row.get('next_action', 'missing'), 180)}; "
             f"next_owner={row.get('next_owner', 'unowned')}; "
@@ -2850,7 +3000,7 @@ def format_open_pr_activity_audit(audit: dict[str, Any]) -> list[str]:
 
 
 def open_pr_activity_action_lines(audit: Any) -> list[str]:
-    """Return action lines for UNKNOWN/limbo audit rows before any all-clear."""
+    """Return action lines only for readable absence of both binding lanes."""
 
     if not isinstance(audit, dict) or not audit.get("ok"):
         return [
@@ -2861,8 +3011,9 @@ def open_pr_activity_action_lines(audit: Any) -> list[str]:
     if not gaps:
         return []
     actions = [
-        f"OPEN_PR_ACTIVITY_AUDIT is NOT_CLEAR: {len(gaps)} open PR(s) need exact-head "
-        "reconciliation; route each row through its stated next boundary and wake."
+        f"OPEN_PR_ACTIVITY_AUDIT is NOT_CLEAR: {len(gaps)} open PR(s) have neither "
+        "authoritative current-head CI nor executable slot binding; route each row "
+        "through its stated next boundary and wake."
     ]
     for row in gaps:
         actions.append(
@@ -3060,6 +3211,12 @@ def validate(data: dict[str, Any]) -> list[str]:
                     errors.append(f"open_pr_activity_audit.rows[{index}] branch is missing or malformed")
                 if row.get("motion_state") not in OPEN_PR_MOTION_STATES:
                     errors.append(f"open_pr_activity_audit.rows[{index}] motion_state is missing or unsupported")
+                if row.get("binding_status") is not None and row.get("binding_status") not in {
+                    "ci_bound", "slot_bound", "ci_and_slot_bound", "unbound", "unknown",
+                }:
+                    errors.append(f"open_pr_activity_audit.rows[{index}] binding_status is unsupported")
+                if row.get("unbound") is not None and not isinstance(row.get("unbound"), bool):
+                    errors.append(f"open_pr_activity_audit.rows[{index}] unbound must be boolean")
                 for field in required:
                     value = row.get(field)
                     if not isinstance(value, str) or not value.strip():

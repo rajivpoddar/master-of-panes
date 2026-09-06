@@ -61,6 +61,57 @@ def running_run(workflow: str, event: str = "pull_request") -> tuple[list[dict],
     return [run], {"33397393224": [job]}
 
 
+def completed_run(
+    workflow: str,
+    *,
+    run_id: int = 33397393224,
+    conclusion: str = "success",
+    head: str = HEAD,
+    event: str = "pull_request",
+) -> dict:
+    return {
+        "id": run_id,
+        "head_sha": head,
+        "workflowName": workflow,
+        "event": event,
+        "status": "completed",
+        "conclusion": conclusion,
+        "created_at": "2026-09-01T00:00:00Z",
+        "run_attempt": 1,
+    }
+
+
+def collect_audit(
+    test: unittest.TestCase,
+    *,
+    runs: list[dict] | None = None,
+    jobs: dict[str, list[dict]] | None = None,
+    slots: dict[str, dict] | None = None,
+    records: list[dict] | None = None,
+    continuation_error: str | None = None,
+    pr_payload: dict | None = None,
+) -> dict:
+    runs = runs or []
+    jobs = jobs or {}
+    pr_payload = pr_payload or pr()
+
+    def fake_audit(args):
+        if any("/pulls" in value for value in args):
+            return ([pr_payload], None)
+        if any("/actions/runs" in value for value in args) and not any("/jobs" in value for value in args):
+            return ({"workflow_runs": runs}, None)
+        jobs_endpoint = next(value for value in args if "/jobs" in value)
+        run_id = jobs_endpoint.rsplit("/", 2)[-2]
+        return ({"jobs": jobs.get(run_id, [])}, None)
+
+    with mock.patch.object(MODULE, "_audit_gh_json", side_effect=fake_audit), mock.patch.object(
+        MODULE,
+        "_load_open_pr_continuations",
+        return_value=(records or [], continuation_error),
+    ):
+        return MODULE.collect_open_pr_activity_audit(slots or {})
+
+
 def continuation(kind: str, owner: str = "cto", *, blocker: str = "hold") -> dict:
     lane = MODULE.CONTINUATION_KIND_LANES[kind]
     return {
@@ -130,10 +181,88 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         ):
             audit = MODULE.collect_open_pr_activity_audit({})
         self.assertTrue(audit["ok"])
-        self.assertEqual(audit["open_pr_activity_gaps"], 1)
+        self.assertEqual(audit["open_pr_activity_gaps"], 0)
+        self.assertEqual(audit["gaps"], [])
+        self.assertTrue(audit["rows"][0]["verification_limited"])
+        self.assertFalse(audit["rows"][0]["unbound"])
         self.assertEqual(audit["rows"][0]["motion_state"], "UNKNOWN")
         self.assertEqual(audit["rows"][0]["lane"], "unknown")
         self.assertIn("missing", audit["rows"][0]["hold_reason"])
+
+    def test_binding_outcome_flags_only_readable_absence_of_ci_and_slot(self) -> None:
+        stale_head = "a" * 40
+        queued_ci = {
+            **completed_run("CI", run_id=401),
+            "status": "queued",
+            "conclusion": None,
+        }
+        active_ci, active_jobs = running_run("CI")
+        active_slot = {
+            "pr": str(pr()["number"]),
+            "head_sha": HEAD,
+            "occupied": True,
+            "active_turn_state": "active",
+            "active_turn_id": "turn-1",
+            "owner": "S2",
+            "task": "production-shaped repro",
+        }
+        cases = [
+            ("queued current-head CI", [queued_ci], {}, {}, [], None, "ci_bound", False),
+            ("active numbered exact-head slot", [], {}, {"2": active_slot}, [], None, "slot_bound", False),
+            ("named queued slot", [], {}, {}, [continuation("slot_rework", "slot-owner")], None, "slot_bound", False),
+            (
+                "stale, skipped, and dummy runs",
+                [
+                    completed_run("CI", run_id=402, head=stale_head),
+                    {**completed_run("CI", run_id=403), "conclusion": "skipped"},
+                    completed_run("test", run_id=404),
+                ],
+                {}, {}, [], None, "unbound", True,
+            ),
+            ("neither binding", [], {}, {}, [], None, "unbound", True),
+            (
+                "malformed ledger with valid CI and slot",
+                active_ci,
+                active_jobs,
+                {"2": active_slot},
+                [],
+                "row: durable continuation has no exact head binding",
+                "ci_and_slot_bound",
+                False,
+            ),
+        ]
+        for name, runs, jobs, slots, records, continuation_error, expected_status, expected_unbound in cases:
+            with self.subTest(name=name):
+                audit = collect_audit(
+                    self,
+                    runs=runs,
+                    jobs=jobs,
+                    slots=slots,
+                    records=records,
+                    continuation_error=continuation_error,
+                )
+                self.assertTrue(audit["ok"])
+                row = audit["rows"][0]
+                self.assertEqual(row["binding_status"], expected_status)
+                self.assertEqual(row["unbound"], expected_unbound)
+                self.assertEqual(audit["open_pr_activity_gaps"], int(expected_unbound))
+                self.assertEqual(len(audit["gaps"]), int(expected_unbound))
+                if expected_unbound:
+                    self.assertEqual(row["binding_missing"], ["ci", "slot"])
+                    self.assertIn("no authoritative current-head CI or executable slot binding", row["reasons"])
+                    self.assertTrue(MODULE.open_pr_activity_action_lines(audit))
+                else:
+                    self.assertFalse(MODULE.open_pr_activity_action_lines(audit))
+
+        malformed_bound = collect_audit(
+            self,
+            runs=active_ci,
+            jobs=active_jobs,
+            slots={"2": active_slot},
+            continuation_error="row: durable continuation has no exact head binding",
+        )
+        self.assertEqual(len(malformed_bound["verification_limitations"]), 1)
+        self.assertEqual(malformed_bound["gaps"], [])
 
     def test_collection_refuses_duplicate_open_pr_identity(self) -> None:
         with mock.patch.object(
