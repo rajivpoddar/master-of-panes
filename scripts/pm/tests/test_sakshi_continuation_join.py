@@ -326,6 +326,54 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         self.assertEqual(audit["rows"][0]["binding_status"], "unbound")
         self.assertTrue(audit["rows"][0]["unbound"])
 
+    def test_conflicting_structured_slot_identity_is_nonbinding_and_actionable(self) -> None:
+        current_head = "a" * 40
+        stale_head = "b" * 40
+        slot = {
+            "slot": 1,
+            "name": "Rohini",
+            "occupied": True,
+            "active_turn_state": "inactive",
+            "pr": "7629",
+            "head_sha": current_head,
+            "task": (
+                "REPRO — Packet 635 (#7591 / issue #7435, retained packet).\n"
+                f"Exact head {stale_head}."
+            ),
+        }
+        audit = collect_audit(
+            self,
+            slots={"1": slot},
+            pr_payload={
+                "number": 7629,
+                "head": {"sha": current_head, "ref": "fix/7629"},
+                "headRefOid": current_head,
+                "headRefName": "fix/7629",
+            },
+        )
+        row = audit["rows"][0]
+        self.assertEqual(row["binding_status"], "unbound")
+        self.assertTrue(row["unbound"])
+        self.assertTrue(row["verification_limited"])
+        self.assertTrue(any("conflicts" in item for item in row["binding_limitations"]))
+        actions = MODULE.open_pr_activity_action_lines(audit)
+        self.assertTrue(actions)
+        self.assertIn("PR #7629", actions[1])
+
+    def test_absent_structured_identity_still_uses_rigid_packet_fallback(self) -> None:
+        slot = {
+            "slot": 1,
+            "name": "Rohini",
+            "occupied": True,
+            "active_turn_state": "inactive",
+            "pr": None,
+            "head_sha": None,
+            "task": f"REPRO — Packet 635 (#7591 / issue #7435). Exact head {HEAD}.",
+        }
+        audit = collect_audit(self, slots={"1": slot})
+        self.assertEqual(audit["rows"][0]["binding_status"], "slot_bound")
+        self.assertFalse(audit["rows"][0]["unbound"])
+
     def test_terminal_or_missing_required_ci_is_actionable_in_report(self) -> None:
         cases = [
             ("exact-head failed CI", [completed_run("CI", run_id=501, conclusion="failure")]),

@@ -1156,6 +1156,7 @@ def _exact_slot_packet_bindings(
     """
 
     bindings: list[dict[str, str]] = []
+    errors: list[str] = []
     packet_header = re.compile(
         r"(?im)^\s*(?:REPRO|REWORK)\s*[—-]\s*Packet\s+([^\s(]+)\s+\(#(\d+)\b"
     )
@@ -1169,31 +1170,52 @@ def _exact_slot_packet_bindings(
         if _concrete_motion_token(owner) is None:
             continue
         candidates: list[tuple[str, str, str]] = []
-        structured_pr = str(slot.get("pr") or slot.get("pull_request") or "").strip()
-        structured_head = str(slot.get("head_sha") or slot.get("headSha") or "").strip()
+        structured_pr_raw = slot.get("pr") if "pr" in slot else slot.get("pull_request")
+        structured_head_raw = slot.get("head_sha") if "head_sha" in slot else slot.get("headSha")
         structured_packet = str(
             slot.get("packet") or slot.get("packet_id") or slot.get("assignment_packet") or ""
         ).strip()
-        if (
-            structured_pr.isdigit()
-            and OPEN_PR_HEAD.fullmatch(structured_head)
-            and _concrete_motion_token(structured_packet) is not None
-        ):
-            candidates.append((structured_packet, structured_pr, structured_head))
+        structured_present = structured_pr_raw not in (None, "") or structured_head_raw not in (None, "")
+        structured_pr = str(structured_pr_raw or "").strip()
+        structured_head = str(structured_head_raw or "").strip()
+        structured_identity: tuple[str, str] | None = None
+        if structured_present:
+            if structured_pr.isdigit() and OPEN_PR_HEAD.fullmatch(structured_head):
+                structured_identity = (structured_pr, structured_head)
+            else:
+                errors.append(f"slot {slot_id} has malformed structured PR/head identity")
 
         task = str(slot.get("task") or "")
         packet_matches = packet_header.findall(task)
         head_matches = exact_head_line.findall(task)
+        task_identity: tuple[str, str, str] | None = None
         if len(set(packet_matches)) == 1 and len(set(head_matches)) == 1:
             packet, pr, head = packet_matches[0][0], packet_matches[0][1], head_matches[0]
             if pr.isdigit() and _concrete_motion_token(packet) is not None:
-                candidates.append((packet, pr, head))
+                task_identity = (packet, pr, head)
+        if structured_identity and task_identity:
+            if structured_identity != (task_identity[1], task_identity[2]):
+                errors.append(f"slot {slot_id} structured PR/head conflicts with packet task identity")
+            elif structured_packet and structured_packet != task_identity[0]:
+                errors.append(f"slot {slot_id} structured packet conflicts with packet task identity")
+            else:
+                candidates.append(task_identity)
+        elif structured_identity:
+            if _concrete_motion_token(structured_packet) is not None:
+                candidates.append((structured_packet, structured_identity[0], structured_identity[1]))
+            elif task_identity is None:
+                errors.append(f"slot {slot_id} structured PR/head has no packet identity")
+        elif task_identity and not structured_present:
+            candidates.append(task_identity)
+        elif task_identity and structured_present:
+            errors.append(f"slot {slot_id} structured PR/head is incomplete for packet task identity")
         identities = {(packet, pr, head) for packet, pr, head in candidates}
         if len(identities) > 1:
-            return [], f"ambiguous exact packet identity in slot {slot_id}"
+            errors.append(f"slot {slot_id} has ambiguous exact packet identity")
+            continue
         for packet, pr, head in identities:
             bindings.append({"slot": str(slot_id), "owner": owner, "packet": packet, "pr": pr, "head": head})
-    return bindings, None
+    return bindings, "; ".join(dict.fromkeys(errors)) or None
 
 
 def _exact_queued_packet_bindings(
@@ -1804,8 +1826,9 @@ def _open_pr_binding(
 
     slot_packets, slot_packet_error = _exact_slot_packet_bindings(slots)
     queued_packets, queued_packet_error = _exact_queued_packet_bindings(queue)
-    if slot_packet_error or queued_packet_error:
-        return "unknown", ci_evidence, [slot_packet_error or queued_packet_error or "authoritative packet binding is malformed"]
+    packet_limitations = [
+        error for error in (slot_packet_error, queued_packet_error) if error
+    ]
     packet_matches = [
         packet for packet in [*slot_packets, *queued_packets]
         if packet["pr"] == number and packet["head"] == head
@@ -1824,19 +1847,19 @@ def _open_pr_binding(
         )
 
     if continuation_error and not ci_evidence:
-        return "unknown", [], [continuation_error.removeprefix("row: ").strip()]
+        return "unknown", [], [continuation_error.removeprefix("row: ").strip(), *packet_limitations]
     if malformed_slot_binding and not ci_evidence:
-        return "unknown", [], ["exact-head occupied slot binding is incomplete"]
+        return "unknown", [], ["exact-head occupied slot binding is incomplete", *packet_limitations]
 
     has_ci = any(item.startswith("CI:") for item in ci_evidence)
     has_slot = any(item.startswith("slot:") or item.startswith("slot-queue:") for item in ci_evidence)
     if has_ci and has_slot:
-        return "ci_and_slot_bound", ci_evidence, []
+        return "ci_and_slot_bound", ci_evidence, packet_limitations
     if has_ci:
-        return "ci_bound", ci_evidence, []
+        return "ci_bound", ci_evidence, packet_limitations
     if has_slot:
-        return "slot_bound", ci_evidence, []
-    return "unbound", [], []
+        return "slot_bound", ci_evidence, packet_limitations
+    return "unbound", [], packet_limitations
 
 
 def _annotate_open_pr_binding(
@@ -1856,7 +1879,7 @@ def _annotate_open_pr_binding(
     row["binding_status"] = status
     row["binding_evidence"] = evidence
     row["unbound"] = status == "unbound"
-    row["verification_limited"] = status == "unknown" or bool(continuation_error)
+    row["verification_limited"] = status == "unknown" or bool(continuation_error) or bool(limitations)
     row["binding_missing"] = ["ci", "slot"] if status == "unbound" else []
     row["binding_limitations"] = limitations
     if status == "unbound":
