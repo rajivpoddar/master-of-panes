@@ -1622,6 +1622,7 @@ def _open_pr_binding(
         return "unknown", [], ["open PR head is not an exact 40-character SHA"]
 
     ci_evidence: list[str] = []
+    ci_phases: dict[str, str] = {}
     ci_candidates = [
         run for run in runs
         if isinstance(run, dict)
@@ -1639,13 +1640,33 @@ def _open_pr_binding(
         if conclusion == "skipped":
             continue
         if phase in {"active", "queued", "green"}:
-            ci_evidence.append(f"CI:{workflow}:{phase}")
+            ci_phases[workflow] = phase
         elif status == "completed" and conclusion in OPEN_PR_TERMINAL_CI_CONCLUSIONS:
-            ci_evidence.append(f"CI:{workflow}:{conclusion}")
+            ci_phases[workflow] = conclusion
         elif status or conclusion:
             return "unknown", ci_evidence, [
                 f"current-head {workflow} run has unreadable execution state"
             ]
+
+    required_ci = set(OPEN_PR_AUDIT_WORKFLOWS)
+    active_or_queued_ci = {
+        workflow: phase
+        for workflow, phase in ci_phases.items()
+        if phase in {"active", "queued"}
+    }
+    all_required_ci_green = (
+        set(ci_phases) == required_ci
+        and all(phase == "green" for phase in ci_phases.values())
+    )
+    if active_or_queued_ci:
+        ci_evidence.extend(
+            f"CI:{workflow}:{phase}"
+            for workflow, phase in sorted(active_or_queued_ci.items())
+        )
+    elif all_required_ci_green:
+        ci_evidence.extend(
+            f"CI:{workflow}:green" for workflow in sorted(required_ci)
+        )
 
     active_slots: list[tuple[str, str]] = []
     malformed_slot_binding = False

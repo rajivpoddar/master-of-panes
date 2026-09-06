@@ -264,6 +264,51 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         self.assertEqual(len(malformed_bound["verification_limitations"]), 1)
         self.assertEqual(malformed_bound["gaps"], [])
 
+    def test_terminal_or_missing_required_ci_is_actionable_in_report(self) -> None:
+        cases = [
+            ("exact-head failed CI", [completed_run("CI", run_id=501, conclusion="failure")]),
+            ("exact-head cancelled CI", [completed_run("CI", run_id=502, conclusion="cancelled")]),
+            ("green CI without required E2E", [completed_run("CI", run_id=503)]),
+        ]
+        for name, runs in cases:
+            with self.subTest(name=name):
+                audit = collect_audit(self, runs=runs)
+                self.assertTrue(audit["ok"])
+                row = audit["rows"][0]
+                self.assertEqual(row["motion_state"], "PROCESS_LIMBO")
+                self.assertEqual(row["binding_status"], "unbound")
+                self.assertTrue(row["unbound"])
+                self.assertEqual(audit["open_pr_activity_gaps"], 1)
+                self.assertEqual(len(audit["gaps"]), 1)
+                actions = MODULE.open_pr_activity_action_lines(audit)
+                self.assertTrue(actions)
+                self.assertIn("neither authoritative current-head CI nor executable slot binding", actions[0])
+
+    def test_dual_green_and_queued_required_ci_are_reported_as_bound(self) -> None:
+        dual_green = collect_audit(
+            self,
+            runs=[
+                completed_run("CI", run_id=504),
+                completed_run("E2E Smoke Tests", run_id=505),
+            ],
+            pr_payload={**pr(), "labels": [{"name": "merge-ready"}]},
+        )
+        self.assertEqual(dual_green["rows"][0]["motion_state"], "MERGE_READY")
+        self.assertEqual(dual_green["rows"][0]["binding_status"], "ci_bound")
+        self.assertFalse(dual_green["rows"][0]["unbound"])
+        self.assertEqual(dual_green["gaps"], [])
+        self.assertEqual(MODULE.open_pr_activity_action_lines(dual_green), [])
+
+        queued = {
+            **completed_run("CI", run_id=506),
+            "status": "queued",
+            "conclusion": None,
+        }
+        queued_audit = collect_audit(self, runs=[queued])
+        self.assertEqual(queued_audit["rows"][0]["binding_status"], "ci_bound")
+        self.assertFalse(queued_audit["rows"][0]["unbound"])
+        self.assertEqual(MODULE.open_pr_activity_action_lines(queued_audit), [])
+
     def test_collection_refuses_duplicate_open_pr_identity(self) -> None:
         with mock.patch.object(
             MODULE,
