@@ -112,15 +112,18 @@ bound to a single channel/thread.
    EXISTING CHECK: [searched issues? list results or "none found"]
    EXPLORATION SCOPE: [what code paths to trace]
    DESIGN INTENT: [is the observed behavior by design or a bug? check code comments]
-   ARTIFACT GATE: [for DOCX/export/formatting bugs — which artifacts need inspection?]
-   LLM PROXY IMPACT GATE: [for issues touching external API calls — see below]
+   ARTIFACT GATE (causal/FIX only): [for separately authorized DOCX/export/formatting
+   work, which artifacts need inspection? Leave bounded for INVESTIGATION.]
+   LLM PROXY IMPACT GATE (causal/FIX only): [for separately authorized external API
+   work — see below]
    OBSERVATION STATUS: [CONFIRMED or UNCONFIRMED; state the evidence limit]
-   CODEX REVIEW: mandatory
+   CODEX REVIEW: mandatory for causal/FIX claims; not an evidence gate for
+   confirmed INVESTIGATION observations
    ```
 
-   **LLM PROXY IMPACT GATE (MANDATORY for issues touching external API calls):**
-   For issues that touch external API calls (Modal → Scribie/Gemini/WhisperX/LLM, or any
-   new outbound HTTP from Modal), the agent MUST assess:
+   **LLM PROXY IMPACT GATE (MANDATORY only for separately authorized causal/FIX work):**
+   For causal/FIX work that touches external API calls (Modal → Scribie/Gemini/WhisperX/LLM,
+   or any new outbound HTTP from Modal), the agent MUST assess:
    (a) Does the proxy (`modal/shared/llm_proxy_server.py`) intercept this call?
    (b) Is the call sync request/response (replay-friendly) or async webhook (proxy can't replay)?
    (c) If async, what test-side mechanism replays the callback in E2E?
@@ -135,10 +138,12 @@ bound to a single channel/thread.
    gate for filing a confirmed observation as `INVESTIGATION`; PM cannot skip review
    when it is making a root-cause or fix claim. (Lesson: #2843.)
 
-   **ARTIFACT GATE (MANDATORY for export/formatting/pipeline bugs):**
-   Before launching the agent, identify which artifacts must be inspected (DOCX export,
-   R2 content, pipeline input/output). The agent MUST inspect the actual output
-   artifact's internal structure — not just read the generating code. (Lesson: #2833.)
+   **ARTIFACT GATE (MANDATORY only for separately authorized causal/FIX work):**
+   Before launching causal/FIX work, identify which artifacts must be inspected (DOCX
+   export, R2 content, pipeline input/output). The agent MUST inspect the actual output
+   artifact's internal structure — not just read the generating code. A confirmed
+   INVESTIGATION observation must preserve its evidence limit and must not download
+   customer JSON/DOCX or capture new data merely to satisfy this gate. (Lesson: #2833.)
 
 3. Create a tracking task: "Explore: [short description]"
 4. Launch background Agent with `run_in_background: true` — **MANDATORY**
@@ -176,8 +181,8 @@ Task(
   Requirements:
   - write IN_PROGRESS for this single source at launch
   - preserve source context from the obligation
-  - inspect required artifacts
-  - run Codex diagnosis review
+  - inspect required artifacts only for separately authorized causal/FIX work
+  - run Codex diagnosis review only for a causal/FIX claim
   - file a confirmed observation as `INVESTIGATION`, or a Codex-confirmed causal
     diagnosis as `FIX`/`CONFIRMED`; then produce READY_TO_FILE + permit and create
     the issue
@@ -225,7 +230,7 @@ PHASE 1 — Code Exploration:
      gh issue list --search "KEYWORDS" --state all --limit 5
   f. Document your findings: root cause, affected files, call chain
 
-PHASE 2 — Codex Architecture Review:
+PHASE 2 — Codex Architecture Review (causal/FIX work only):
   a. Write the review prompt to a temp file:
      cat > /tmp/codex-explore-prompt.txt << 'PROMPT_EOF'
      Review this root cause diagnosis for a bug in HeyDonna (court reporter transcript editor).
@@ -251,9 +256,13 @@ PHASE 2 — Codex Architecture Review:
        proceed to Phase 3 as `INVESTIGATION`, with cause/control point
        `UNKNOWN` or `HYPOTHESIS` and explicit evidence limits. Do not launch an
        unapproved artifact/query/capture probe just to satisfy this branch.
-     - If MISDIAGNOSED, or if the observation is UNCONFIRMED: do not file; go back
-       to Phase 1 only when an authorized investigation can establish a reportable
-       observation.
+     - If MISDIAGNOSED but the observation is CONFIRMED: discard the causal claim
+       and proceed to Phase 3 as `INVESTIGATION`, with cause/control point
+       `UNKNOWN` or `HYPOTHESIS` and explicit evidence limits; do not launch a new
+       evidence probe.
+     - If MISDIAGNOSED and the observation is UNCONFIRMED, or if the observation is
+       otherwise UNCONFIRMED: do not file; go back to Phase 1 only when an authorized
+       investigation can establish a reportable observation.
 
 PHASE 3 — READY_TO_FILE + File GitHub Issue:
   After the observation is confirmed (for `INVESTIGATION`) or Codex CONFIRMED (for a
@@ -295,7 +304,7 @@ PHASE 3 — READY_TO_FILE + File GitHub Issue:
   **[ ] HAPPY-PATH** — feature works under normal conditions
   **[ ] EDGE-CASE / ERROR-PATH** — guard / validator / error / retry / fallback branch
 
-  ## Root Cause (Codex-validated)
+  ## Root Cause / Evidence Status
   [Diagnosed root cause with file:line references, or UNKNOWN/HYPOTHESIS for an
   INVESTIGATION disposition. State the evidence limit and do not imply proof.]
   [Codex confidence: CONFIRMED, or NOT_YET_PROVEN for INVESTIGATION]
@@ -359,14 +368,18 @@ RESOLVED_FILED" as applicable, or failure details with the exact state left behi
 When the background agent finishes:
 1. Read the result — verify the obligation resolved (RESOLVED_FILED + issue number, or
    RESOLVED_NO_ISSUE) and the issue was filed.
-2. Notify Rajiv in the relevant Slack thread: "Filed #NNN — [summary]. Codex validated the diagnosis."
+2. Notify Rajiv in the relevant Slack thread with the disposition: for `INVESTIGATION`,
+   say "Filed #NNN — confirmed observation; cause not yet proven"; for `FIX`/`CONFIRMED`,
+   say "Filed #NNN — [summary]. Codex validated the diagnosis."
 3. If slots are available and Rajiv wants it assigned, use `/handoff`
 
 ## Anti-Patterns
 
 - **Never batch unrelated Slack sources** — one obligation/source per agent. A batched
   agent blocks one source on another and corrupts the per-source state machine.
-- **Never skip Codex review** — Phase 2 is mandatory. The #2492 postmortem proved that
+- **Never skip Codex review for a causal/FIX claim** — Phase 2 is mandatory for that
+  claim. A confirmed `INVESTIGATION` observation may retain an UNKNOWN/HYPOTHESIS
+  cause without an evidence-acquisition detour. The #2492 postmortem proved that
   unvalidated diagnoses waste entire implementation cycles.
 - **Never substitute your own scenario for the reporter's** — use Rajiv's exact words in
   the issue.

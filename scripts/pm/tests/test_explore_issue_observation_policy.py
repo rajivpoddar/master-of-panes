@@ -27,7 +27,7 @@ class ExploreIssueObservationPolicyTests(unittest.TestCase):
     def test_unconfirmed_and_unproven_cause_fail_closed(self) -> None:
         self.assertIn("An unconfirmed report remains unfiled", self.text)
         self.assertIn("Only causal proof may promote", self.text)
-        self.assertIn("or if the observation is UNCONFIRMED: do not file", self.text)
+        self.assertRegex(self.text, r"or if the observation is\s+(?:UNCONFIRMED|otherwise\s+UNCONFIRMED): do not file")
 
     def test_duplicate_and_external_evidence_actions_remain_bounded(self) -> None:
         self.assertRegex(self.text, r"A duplicate\s+reconciles to the existing issue")
@@ -39,6 +39,21 @@ class ExploreIssueObservationPolicyTests(unittest.TestCase):
         self.assertIn("NEEDS_DEEPER_INVESTIGATION and the reported observation is CONFIRMED", self.text)
         self.assertIn("proceed to Phase 3 as `INVESTIGATION`", self.text)
         self.assertIn("If MISDIAGNOSED", self.text)
+
+    def test_evidence_heavy_steps_are_scoped_to_authorized_causal_work(self) -> None:
+        self.assertIn("ARTIFACT GATE (causal/FIX only)", self.text)
+        self.assertIn("LLM PROXY IMPACT GATE (causal/FIX only)", self.text)
+        self.assertIn("PHASE 2 — Codex Architecture Review (causal/FIX work only)", self.text)
+        self.assertIn("must not download\n   customer JSON/DOCX", self.text)
+
+    def test_rejected_cause_preserves_confirmed_observation(self) -> None:
+        self.assertIn("If MISDIAGNOSED but the observation is CONFIRMED", self.text)
+        self.assertIn("discard the causal claim", self.text)
+        self.assertIn("If MISDIAGNOSED and the observation is UNCONFIRMED", self.text)
+
+    def test_completion_message_matches_disposition(self) -> None:
+        self.assertIn("for `INVESTIGATION`,\n   say \"Filed #NNN — confirmed observation; cause not yet proven\"", self.text)
+        self.assertIn("for `FIX`/`CONFIRMED`,\n   say \"Filed #NNN — [summary]. Codex validated the diagnosis.\"", self.text)
 
     def test_source_manifest_mapping_is_exact(self) -> None:
         relative = "codex/skills/explore-issue/SKILL.md"
