@@ -1852,3 +1852,160 @@ test("a PreToolUse plus meaningful work during relay await preserves the active 
 test("a same-session UserPromptSubmit plus meaningful work during relay await preserves the active turn", async () => {
   await assertDuringAwaitWorkPreservesInterruptedTurn("UserPromptSubmit");
 });
+
+function withOccupiedPmWaitFixture(
+  run: (db: MoPDatabase, slot: SlotState, nudgeEventId: number) => Promise<void>,
+  afterOpener?: (db: MoPDatabase, turnId: string) => void,
+): Promise<void> {
+  const directory = mkdtempSync(join(tmpdir(), "mop-occupied-pm-wait-reconcile-"));
+  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+  const assigned = db.assignSlot(
+    6,
+    "Issue 681 PM_WAIT",
+    "github:heydonna-app/heydonna-app",
+    681,
+    "fix/681",
+    681,
+    "a".repeat(40),
+    0,
+  );
+  assert.equal(assigned.ok, true);
+  const current = db.getSlot(6)!;
+  const nudgeEventId = db.logEvent(6, "idle_occupied_continue_injected", "Stuck", null, {
+    assignment_epoch: current.assignment_epoch,
+    wait_anchor: "2026-09-07T20:37:06.785Z",
+    release_required: true,
+    command: "Use Skill(pm-wait-nudge) now with slot=6 assignment_epoch=1 release_required=true action=RELEASE_REQUIRED.",
+  });
+  const turnId = "turn-occupied-pm-wait";
+  db.startAgentTurn(6, turnId);
+  db.logEvent(6, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: turnId });
+  afterOpener?.(db, turnId);
+  return run(db, db.getSlot(6)!, nudgeEventId).finally(() => {
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+}
+
+test("reconciles one interrupted occupied PM_WAIT turn after a successful idle observation", async () => {
+  await withOccupiedPmWaitFixture(async (db, slot, nudgeEventId) => {
+    db.logEvent(6, "PostToolUse", "PostToolUse", "Skill", {
+      session_id: slot.active_turn_id,
+      tool_input: { skill: "escalate", args: "provider transport is stalled" },
+    });
+    const assignmentBefore = {
+      assignment_epoch: slot.assignment_epoch,
+      issue: slot.issue,
+      pr: slot.pr,
+      branch_ref: slot.branch_ref,
+      head_sha: slot.head_sha,
+      occupied: slot.occupied,
+    };
+    const detector = new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date() } as unknown as LogManager,
+      { getSlotActivityState: async () => "idle" as const } as unknown as TmuxRelay,
+    );
+
+    await detector.checkIdleOccupied(slot);
+    const after = db.getSlot(6)!;
+    assert.equal(after.active_turn_id, null);
+    assert.equal(after.active_turn_state, "inactive");
+    assert.equal(after.idle, true);
+    assert.deepEqual({
+      assignment_epoch: after.assignment_epoch,
+      issue: after.issue,
+      pr: after.pr,
+      branch_ref: after.branch_ref,
+      head_sha: after.head_sha,
+      occupied: after.occupied,
+    }, assignmentBefore);
+    assert.equal(db.getEvents(6, 20, "interrupted_occupied_pm_wait_turn_reconciled").length, 1);
+
+    // Replaying the detector cannot clear a second turn or create another
+    // reconciliation receipt.
+    await detector.checkIdleOccupied(db.getSlot(6)!);
+    assert.equal(db.getEvents(6, 20, "interrupted_occupied_pm_wait_turn_reconciled").length, 1);
+    assert.equal(db.getEvents(6, 20, "idle_occupied_continue_injected")[0].id, nudgeEventId);
+  });
+});
+
+test("keeps an occupied PM_WAIT turn active for unknown pane state, product work, or turn drift", async () => {
+  const cases = [
+    {
+      name: "unknown pane observation",
+      activity: "unknown" as const,
+      afterOpener: undefined,
+    },
+    {
+      name: "product tool event",
+      activity: "idle" as const,
+      afterOpener: (db: MoPDatabase) => {
+        db.logEvent(6, "PostToolUse", "PostToolUse", "Edit", {
+          tool_input: { file_path: "/repo/src/product.ts" },
+        });
+      },
+    },
+    {
+      name: "mismatched current turn",
+      activity: "idle" as const,
+      afterOpener: (db: MoPDatabase) => db.startAgentTurn(6, "different-turn"),
+    },
+    {
+      name: "DND",
+      activity: "idle" as const,
+      afterOpener: (db: MoPDatabase) => db.updateSlot(6, { dnd: true }),
+    },
+    {
+      name: "pending exit",
+      activity: "idle" as const,
+      afterOpener: (db: MoPDatabase) => db.setExitPending(true),
+    },
+    {
+      name: "pending clear",
+      activity: "idle" as const,
+      afterOpener: (db: MoPDatabase) => db.setPendingClear(6),
+    },
+  ];
+
+  for (const item of cases) {
+    await withOccupiedPmWaitFixture(async (db, slot) => {
+      const detector = new StuckDetector(
+        db,
+        { getLogMtime: async () => new Date() } as unknown as LogManager,
+        { getSlotActivityState: async () => item.activity } as unknown as TmuxRelay,
+      );
+      await detector.checkIdleOccupied(slot);
+      const after = db.getSlot(6)!;
+      assert.equal(after.active_turn_id, item.name === "mismatched current turn" ? "different-turn" : "turn-occupied-pm-wait");
+      assert.equal(after.active_turn_state, "active");
+      assert.equal(after.idle, false);
+      assert.equal(db.getEvents(6, 20, "interrupted_occupied_pm_wait_turn_reconciled").length, 0);
+    }, item.afterOpener);
+  }
+});
+
+test("rechecks product work that arrives during the occupied-turn idle observation", async () => {
+  await withOccupiedPmWaitFixture(async (db, slot) => {
+    const detector = new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date() } as unknown as LogManager,
+      {
+        getSlotActivityState: async () => {
+          db.logEvent(6, "PostToolUse", "PostToolUse", "Edit", {
+            tool_input: { file_path: "/repo/src/product.ts" },
+          });
+          db.touchMeaningfulWork(6, slot.active_turn_id);
+          return "idle" as const;
+        },
+      } as unknown as TmuxRelay,
+    );
+
+    await detector.checkIdleOccupied(slot);
+    const after = db.getSlot(6)!;
+    assert.equal(after.active_turn_id, "turn-occupied-pm-wait");
+    assert.equal(after.active_turn_state, "active");
+    assert.equal(after.idle, false);
+    assert.equal(db.getEvents(6, 20, "interrupted_occupied_pm_wait_turn_reconciled").length, 0);
+  });
+});

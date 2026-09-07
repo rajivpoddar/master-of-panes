@@ -66,6 +66,27 @@ export interface InterruptedTurnReconciliationResult {
     | "already_reconciled";
 }
 
+/** Result for closing one exact occupied PM_WAIT turn after a safe terminal observation. */
+export interface InterruptedOccupiedWaitTurnReconciliationResult {
+  ok: boolean;
+  conflict: boolean;
+  assignment_epoch: number;
+  idempotent: boolean;
+  reason?:
+    | "invalid_request"
+    | "slot_not_occupied"
+    | "dnd_active"
+    | "epoch_mismatch"
+    | "turn_mismatch"
+    | "turn_not_active"
+    | "nudge_mismatch"
+    | "exit_pending"
+    | "clear_pending"
+    | "release_in_progress"
+    | "subsequent_work"
+    | "already_reconciled";
+}
+
 interface BranchIdentity {
   branch: string | null;
   branchRef: string | null;
@@ -2119,6 +2140,213 @@ export class MoPDatabase {
         idle: true,
       });
       this.logEvent(slot, "interrupted_free_turn_reconciled", null, null, {
+        assignment_epoch: expectedEpoch,
+        turn_id: expectedTurnId,
+        nudge_event_id: expectedNudgeEventId,
+        reason: "verified_pane_idle",
+      });
+      return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: false };
+    })();
+  }
+
+  /**
+   * Close one occupied PM_WAIT turn only after the caller has observed a
+   * successful idle pane capture.  The event log binds the exact delivered
+   * nudge to its immediate prompt opener and permits only PM_WAIT telemetry
+   * after that opener; product work and lifecycle events remain blockers.
+   * Assignment identity and epoch are never changed here.
+   */
+  reconcileInterruptedOccupiedWaitTurn(
+    slot: number,
+    expectedEpoch: number,
+    expectedTurnId: string,
+    expectedNudgeEventId: number,
+  ): InterruptedOccupiedWaitTurnReconciliationResult {
+    if (
+      !Number.isInteger(slot)
+      || slot < 1
+      || !Number.isInteger(expectedEpoch)
+      || expectedEpoch < 0
+      || typeof expectedTurnId !== "string"
+      || expectedTurnId.trim() === ""
+      || /[\u0000-\u001f\u007f]/.test(expectedTurnId)
+      || !Number.isInteger(expectedNudgeEventId)
+      || expectedNudgeEventId < 1
+    ) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: 0,
+        idempotent: false,
+        reason: "invalid_request",
+      };
+    }
+
+    return this.db.transaction((): InterruptedOccupiedWaitTurnReconciliationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      if (!current) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+      if (!current.occupied) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "slot_not_occupied" };
+      }
+      if (current.dnd) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "dnd_active" };
+      }
+      if (epoch !== expectedEpoch) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      }
+
+      const nudge = this.db.prepare(`
+        SELECT payload FROM events
+        WHERE id = ? AND slot = ? AND event_type = 'idle_occupied_continue_injected'
+      `).get(expectedNudgeEventId, slot) as { payload: string } | undefined;
+      if (!nudge) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "nudge_mismatch" };
+      }
+      try {
+        const payload = JSON.parse(nudge.payload) as {
+          assignment_epoch?: unknown;
+          command?: unknown;
+          release_required?: unknown;
+        };
+        const command = typeof payload.command === "string" ? payload.command : "";
+        if (
+          payload.assignment_epoch !== expectedEpoch
+          || typeof payload.command !== "string"
+          || !command.includes("Use Skill(pm-wait-nudge) now with slot=")
+          || command.includes("mode=FREE_WAIT_ASSIGNMENT")
+          || !(
+            payload.release_required === true
+            || command.includes("release_required=true")
+            || command.includes("action=RELEASE_REQUIRED")
+          )
+        ) {
+          return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "nudge_mismatch" };
+        }
+      } catch {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "nudge_mismatch" };
+      }
+
+      if (this.getExitPending()) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "exit_pending" };
+      }
+      if (this.hasPendingClear(slot)) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "clear_pending" };
+      }
+
+      const intentPayload = this.getConfig(`native_release_intent_${slot}`);
+      if (intentPayload) {
+        try {
+          const intent = JSON.parse(intentPayload) as { expected_epoch?: unknown; expires_at?: unknown };
+          if (
+            intent.expected_epoch === expectedEpoch
+            && typeof intent.expires_at === "number"
+            && intent.expires_at > Date.now()
+          ) {
+            return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "release_in_progress" };
+          }
+        } catch {
+          // A malformed intent is not an active release; it is left for the
+          // existing release-intent cleanup path rather than being changed here.
+        }
+      }
+
+      if (current.active_turn_id === null && current.active_turn_state === "inactive") {
+        const prior = this.db.prepare(`
+          SELECT 1 FROM events
+          WHERE slot = ? AND event_type = 'interrupted_occupied_pm_wait_turn_reconciled'
+            AND json_extract(payload, '$.assignment_epoch') = ?
+            AND json_extract(payload, '$.turn_id') = ?
+            AND json_extract(payload, '$.nudge_event_id') = ?
+          ORDER BY id DESC LIMIT 1
+        `).get(slot, expectedEpoch, expectedTurnId, expectedNudgeEventId);
+        if (prior) {
+          return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true, reason: "already_reconciled" };
+        }
+      }
+      if (current.active_turn_id !== expectedTurnId) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "turn_mismatch" };
+      }
+      if (current.active_turn_state !== "active" || current.idle) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "turn_not_active" };
+      }
+
+      const subsequentEvents = this.db.prepare(`
+        SELECT id, event_type, tool_name, payload FROM events
+        WHERE slot = ? AND id > ?
+        ORDER BY id ASC
+      `).all(slot, expectedNudgeEventId) as Array<{
+        id: number;
+        event_type: string;
+        tool_name: string | null;
+        payload: string;
+      }>;
+      const opener = subsequentEvents[0];
+      if (!opener || opener.event_type !== "UserPromptSubmit") {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "nudge_mismatch" };
+      }
+      try {
+        const openerPayload = JSON.parse(opener.payload) as { session_id?: unknown };
+        if (openerPayload.session_id !== expectedTurnId) {
+          return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "turn_mismatch" };
+        }
+      } catch {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "nudge_mismatch" };
+      }
+
+      const pmOnlySkillNames = new Set([
+        "pm-wait-nudge",
+        "message-pm",
+        "pm-nudge-processing",
+        "direct-release",
+        "escalate",
+      ]);
+      const isPmOnlyToolEvent = (event: typeof subsequentEvents[number]): boolean => {
+        if (event.event_type !== "PreToolUse" && event.event_type !== "PostToolUse") return false;
+        try {
+          const payload = JSON.parse(event.payload) as {
+            tool_input?: { skill?: unknown; command?: unknown };
+          };
+          const input = payload.tool_input;
+          if (event.tool_name === "Skill" && typeof input?.skill === "string") {
+            return pmOnlySkillNames.has(input.skill.trim());
+          }
+          if (event.tool_name === "Bash" && typeof input?.command === "string") {
+            return /(?:^|[\\s/])message-pm\.sh(?:[\\s]|$)/.test(input.command);
+          }
+        } catch {
+          return false;
+        }
+        return false;
+      };
+
+      if (subsequentEvents.slice(1).some((event) => {
+        if ([
+          "UserPromptSubmit",
+          "Stop",
+          "SessionEnd",
+          "SubagentStop",
+          "SessionStart",
+          "PreCompact",
+          "PostCompact",
+        ].includes(event.event_type)) return true;
+        if (event.event_type === "PreToolUse" || event.event_type === "PostToolUse") {
+          return !isPmOnlyToolEvent(event);
+        }
+        return false;
+      })) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "subsequent_work" };
+      }
+
+      this.updateSlot(slot, {
+        active_turn_id: null,
+        active_turn_started_at: null,
+        active_turn_state: "inactive",
+        idle: true,
+      });
+      this.logEvent(slot, "interrupted_occupied_pm_wait_turn_reconciled", null, null, {
         assignment_epoch: expectedEpoch,
         turn_id: expectedTurnId,
         nudge_event_id: expectedNudgeEventId,

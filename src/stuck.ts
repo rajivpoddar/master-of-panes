@@ -446,6 +446,12 @@ export class StuckDetector {
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
     if (this.hasActiveReleaseIntent(slot)) return;
 
+    // A PM_WAIT nudge can be interrupted before Claude emits Stop.  Only a
+    // successful idle observation may close that exact occupied turn; active
+    // or indeterminate panes remain blocked and cannot be made releasable by
+    // age, API text, or a projection-only write.
+    if (await this.reconcileInterruptedOccupiedWaitTurn(slot)) return;
+
     const idleState = this.isIdleByHookState(slot);
     if (!idleState.idle) return;
 
@@ -827,6 +833,97 @@ export class StuckDetector {
     ].includes(event.event_type));
     if (workOrLifecycleAfterOpener) return null;
     return { nudgeEventId: nudge.id, turnId };
+  }
+
+  /**
+   * Find the current occupied release-required nudge and its immediate hook
+   * opener.  The DB transaction repeats this association after the pane read;
+   * this first pass only avoids an activity probe for unrelated turns.
+   */
+  private getAssociatedOccupiedWaitNudge(
+    slot: SlotState,
+  ): { nudgeEventId: number; turnId: string } | null {
+    const turnId = slot.active_turn_id;
+    if (
+      !turnId
+      || slot.active_turn_state !== "active"
+      || slot.idle
+      || !slot.occupied
+    ) return null;
+
+    const events = this.db.getEvents(slot.slot, 200).slice().sort((a, b) => a.id - b.id);
+    for (const nudge of events.filter(
+      (event) => event.event_type === "idle_occupied_continue_injected",
+    ).reverse()) {
+      try {
+        const payload = JSON.parse(nudge.payload) as {
+          assignment_epoch?: unknown;
+          command?: unknown;
+          release_required?: unknown;
+        };
+        const command = typeof payload.command === "string" ? payload.command : "";
+        if (
+          payload.assignment_epoch !== slot.assignment_epoch
+          || typeof payload.command !== "string"
+          || !command.includes("Use Skill(pm-wait-nudge) now with slot=")
+          || command.includes("mode=FREE_WAIT_ASSIGNMENT")
+          || !(
+            payload.release_required === true
+            || command.includes("release_required=true")
+            || command.includes("action=RELEASE_REQUIRED")
+          )
+        ) continue;
+
+        const nudgeIndex = events.findIndex((event) => event.id === nudge.id);
+        const opener = nudgeIndex >= 0 ? events[nudgeIndex + 1] : null;
+        if (!opener || opener.event_type !== "UserPromptSubmit") continue;
+        const openerPayload = JSON.parse(opener.payload) as { session_id?: unknown };
+        if (openerPayload.session_id !== turnId) continue;
+        return { nudgeEventId: nudge.id, turnId };
+      } catch {
+        // Malformed historical events are not an association.
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Reconcile one interrupted occupied PM_WAIT turn after a successful idle
+   * pane observation.  No pane input or interruption is issued here.
+   */
+  private async reconcileInterruptedOccupiedWaitTurn(slot: SlotState): Promise<boolean> {
+    const association = this.getAssociatedOccupiedWaitNudge(slot);
+    if (!association || typeof this.relay.getSlotActivityState !== "function") return false;
+
+    let activity: "active" | "idle" | "unknown" = "unknown";
+    try {
+      activity = await this.relay.getSlotActivityState(slot.slot);
+    } catch {
+      return false;
+    }
+    if (activity !== "idle") return false;
+
+    const current = this.db.getSlot(slot.slot);
+    if (
+      !current
+      || !current.occupied
+      || current.dnd
+      || current.assignment_epoch !== slot.assignment_epoch
+      || current.active_turn_state !== "active"
+      || current.active_turn_id !== association.turnId
+      || current.idle
+    ) return false;
+
+    const reconcile = this.db.reconcileInterruptedOccupiedWaitTurn;
+    if (typeof reconcile !== "function") return false;
+    const result = reconcile.call(
+      this.db,
+      slot.slot,
+      slot.assignment_epoch,
+      association.turnId,
+      association.nudgeEventId,
+    );
+    return result.ok;
   }
 
   /**
