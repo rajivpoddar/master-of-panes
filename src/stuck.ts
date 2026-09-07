@@ -16,7 +16,7 @@ import { execShell } from "./asyncCommand.js";
 import { slotAssignmentTuple, type MoPDatabase } from "./db.js";
 import type { LogManager } from "./logs.js";
 import type { TmuxRelay } from "./relay.js";
-import type { SlotState } from "./types.js";
+import type { EventLogEntry, SlotState } from "./types.js";
 import { isValidDevSlot } from "./slotConfig.js";
 
 function debugLog(line: string): void {
@@ -614,20 +614,36 @@ export class StuckDetector {
   async checkIdleFree(slot: SlotState): Promise<void> {
     if (process.env.MOP_PM_WAIT_NUDGES_DISABLED === "1") return;
     if (!isValidDevSlot(slot.slot)) return;
-    if (slot.occupied || slot.dnd) return;
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
+    let currentSlot = slot;
+    const association = !currentSlot.occupied
+      && !currentSlot.dnd
+      && currentSlot.active_turn_state === "active"
+      && currentSlot.active_turn_id
+      ? this.getAssociatedFreeNudge(currentSlot)
+      : null;
+    if (
+      !currentSlot.occupied
+      && !currentSlot.dnd
+      && currentSlot.active_turn_state === "active"
+      && currentSlot.active_turn_id
+      && association
+    ) {
+      currentSlot = await this.reconcileInterruptedFreeTurn(currentSlot, association) ?? currentSlot;
+    }
+    if (currentSlot.occupied || currentSlot.dnd) return;
 
-    const idleState = this.isIdleByHookState(slot);
+    const idleState = this.isIdleByHookState(currentSlot);
     if (!idleState.idle) return;
 
-    const anchor = this.getOrCreateFreeAnchor(slot);
+    const anchor = this.getOrCreateFreeAnchor(currentSlot);
     if (!anchor) return;
     const freeAgeMs = Date.now() - anchor.timestampMs;
     if (!Number.isFinite(freeAgeMs) || freeAgeMs <= this.IDLE_FREE_THRESHOLD_MS) return;
     const waitAgeMinutes = Math.max(5, Math.floor(freeAgeMs / 60_000));
     const urgency = this.idleOccupiedUrgency(waitAgeMinutes);
 
-    const prior = this.db.getEvents(slot.slot, 1, "idle_free_assignment_nudge_injected")[0];
+    const prior = this.db.getEvents(currentSlot.slot, 1, "idle_free_assignment_nudge_injected")[0];
     if (prior) {
       try {
         const payload = JSON.parse(prior.payload) as {
@@ -636,7 +652,7 @@ export class StuckDetector {
           urgency?: IdleOccupiedUrgency;
         };
         if (
-          payload.assignment_epoch === slot.assignment_epoch &&
+          payload.assignment_epoch === currentSlot.assignment_epoch &&
           payload.free_anchor === anchor.timestamp &&
           this.idleOccupiedUrgencyRank(payload.urgency) >=
             this.idleOccupiedUrgencyRank(urgency)
@@ -652,10 +668,10 @@ export class StuckDetector {
       .filter((candidate) => candidate.occupied && candidate.slot !== slot.slot)
       .map((candidate) => candidate.pr)
       .filter((pr): pr is number => typeof pr === "number" && Number.isInteger(pr) && pr > 0);
-    const gate = await this.readFreeSlotAssignmentGate(slot.slot, occupiedPrs);
+    const gate = await this.readFreeSlotAssignmentGate(currentSlot.slot, occupiedPrs);
     if (!gate?.allowed) {
       debugLog(
-        `[idle-free] slot=${slot.slot} suppress=${gate?.reason ?? "gate-failed"} ` +
+        `[idle-free] slot=${currentSlot.slot} suppress=${gate?.reason ?? "gate-failed"} ` +
         `rework_pr_count=${gate?.rework_pr_count ?? 0} ` +
         `ready_pool_size=${gate?.ready_pool_size ?? 0}`
       );
@@ -664,21 +680,21 @@ export class StuckDetector {
 
     // Re-pin the free state after the asynchronous gate so a concurrent PM
     // assignment cannot receive a stale reminder command.
-    const current = this.db.getSlot(slot.slot);
+    const current = this.db.getSlot(currentSlot.slot);
     const currentIdleState = current ? this.isIdleByHookState(current) : null;
     if (
       !current ||
       current.occupied ||
       current.dnd ||
       !currentIdleState?.idle ||
-      current.assignment_epoch !== slot.assignment_epoch
+      current.assignment_epoch !== currentSlot.assignment_epoch
     ) {
       return;
     }
 
     const command =
-      `Use Skill(pm-wait-nudge) now with mode=FREE_WAIT_ASSIGNMENT slot=${slot.slot} ` +
-      `assignment_epoch=${slot.assignment_epoch} wait_started_at=${anchor.timestamp} ` +
+      `Use Skill(pm-wait-nudge) now with mode=FREE_WAIT_ASSIGNMENT slot=${currentSlot.slot} ` +
+      `assignment_epoch=${currentSlot.assignment_epoch} wait_started_at=${anchor.timestamp} ` +
       `wait_age_minutes=${waitAgeMinutes} urgency=${urgency} ` +
       `recommendation_kind=${gate.recommendation_kind ?? "none"} ` +
       `rework_packet_count=${gate.rework_packet_count} ` +
@@ -690,10 +706,10 @@ export class StuckDetector {
       "Revalidate that this slot is still free and the recommended obligation is open, " +
       "then remind PM once; do not assign work or run reconcile-capacity.";
 
-    const sent = await this.relay.sendToSlotAsync(slot.slot, command, false);
+    const sent = await this.relay.sendToSlotAsync(currentSlot.slot, command, false);
     const payload = {
       command,
-      assignment_epoch: slot.assignment_epoch,
+      assignment_epoch: currentSlot.assignment_epoch,
       free_anchor: anchor.timestamp,
       free_anchor_source: anchor.source,
       free_age_ms: freeAgeMs,
@@ -711,14 +727,14 @@ export class StuckDetector {
       slot_dispatch_wedge_id: gate.slot_dispatch_wedge_id,
     };
     this.db.logEvent(
-      slot.slot,
+      currentSlot.slot,
       sent ? "idle_free_assignment_nudge_injected" : "idle_free_assignment_nudge_failed",
       "Stuck",
       null,
       payload
     );
     debugLog(
-      `[idle-free] slot=${slot.slot} ${sent ? "injected" : "failed"} ` +
+      `[idle-free] slot=${currentSlot.slot} ${sent ? "injected" : "failed"} ` +
       `anchor=${anchor.timestamp} ready_pool_size=${gate.ready_pool_size}`
     );
   }
@@ -761,6 +777,107 @@ export class StuckDetector {
       });
       return null;
     }
+  }
+
+  private getAssociatedFreeNudge(
+    slot: SlotState,
+  ): { nudgeEventId: number; turnId: string } | null {
+    const events = this.db.getEvents(slot.slot, 200).slice().sort((a, b) => a.id - b.id);
+    const nudges = events.filter((event) => event.event_type === "idle_free_assignment_nudge_injected");
+    const nudge = nudges[nudges.length - 1];
+    const turnId = slot.active_turn_id;
+    if (!nudge || !turnId) return null;
+
+    try {
+      const payload = JSON.parse(nudge.payload) as {
+        assignment_epoch?: unknown;
+        free_anchor?: unknown;
+        command?: unknown;
+      };
+      if (
+        payload.assignment_epoch !== slot.assignment_epoch
+        || typeof payload.free_anchor !== "string"
+        || payload.free_anchor.trim() === ""
+        || typeof payload.command !== "string"
+        || !payload.command.includes("mode=FREE_WAIT_ASSIGNMENT")
+      ) return null;
+    } catch {
+      return null;
+    }
+
+    const nudgeIndex = events.findIndex((event) => event.id === nudge.id);
+    if (nudgeIndex < 0) return null;
+    const following = events.slice(nudgeIndex + 1);
+    const opener = following[0];
+    if (!opener || opener.event_type !== "UserPromptSubmit") return null;
+    try {
+      const payload = JSON.parse(opener.payload) as { session_id?: unknown };
+      if (payload.session_id !== turnId) return null;
+    } catch {
+      return null;
+    }
+
+    const workOrLifecycleAfterOpener = following.slice(1).some((event: EventLogEntry) => [
+      "UserPromptSubmit",
+      "Stop",
+      "SessionEnd",
+      "PreToolUse",
+      "PostToolUse",
+      "SubagentStop",
+    ].includes(event.event_type));
+    if (workOrLifecycleAfterOpener) return null;
+    return { nudgeEventId: nudge.id, turnId };
+  }
+
+  /**
+   * Use a fresh pane activity read, then close only the exact free-slot turn
+   * generation that was opened by the recorded free-slot nudge.  Active,
+   * unknown, DND, epoch-drift, or turn-drift states remain untouched.
+   */
+  private async reconcileInterruptedFreeTurn(
+    slot: SlotState,
+    association: { nudgeEventId: number; turnId: string },
+  ): Promise<SlotState | null> {
+    let activity: "active" | "idle" | "unknown" = "unknown";
+    try {
+      activity = await this.relay.getSlotActivityState(slot.slot);
+    } catch {
+      return null;
+    }
+    if (activity !== "idle") return null;
+
+    const expectedTurnId = slot.active_turn_id;
+    if (!expectedTurnId || expectedTurnId !== association.turnId) return null;
+
+    const current = this.db.getSlot(slot.slot);
+    if (
+      !current
+      || current.occupied
+      || current.dnd
+      || current.assignment_epoch !== slot.assignment_epoch
+      || current.active_turn_state !== "active"
+      || current.active_turn_id !== expectedTurnId
+    ) {
+      return null;
+    }
+
+    const reconcile = this.db.reconcileInterruptedFreeTurn;
+    if (typeof reconcile !== "function") return null;
+    const result = reconcile.call(
+      this.db,
+      slot.slot,
+      slot.assignment_epoch,
+      expectedTurnId,
+      association.nudgeEventId,
+    );
+    if (!result.ok) return null;
+    this.db.logEvent(slot.slot, "interrupted_free_turn_reconciliation_observed", "Stuck", null, {
+      assignment_epoch: slot.assignment_epoch,
+      turn_id: expectedTurnId,
+      activity,
+      idempotent: result.idempotent,
+    });
+    return this.db.getSlot(slot.slot) ?? null;
   }
 
   private idleOccupiedUrgencyRank(urgency?: IdleOccupiedUrgency): number {

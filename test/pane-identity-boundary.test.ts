@@ -103,6 +103,38 @@ test("numeric address drift resolves exactly one matching immutable pane id", as
   assert.equal(commands.some((command) => command.includes("send-keys") || command.includes("paste-buffer")), false);
 });
 
+test("tmux activity treats only an explicit idle result as idle", async () => {
+  const failure = Object.assign(new Error("tmux capture failed"), {
+    code: 1,
+    stdout: "ERROR: Could not capture pane 0:0.2",
+    stderr: "",
+  });
+  const empty = Object.assign(new Error("tmux returned no result"), {
+    code: 1,
+    stdout: "",
+    stderr: "",
+  });
+  const explicitIdle = Object.assign(new Error("idle"), {
+    code: 1,
+    stdout: "RESULT: IDLE\n",
+    stderr: "",
+  });
+
+  const makeRelay = (result: unknown) => new TmuxRelay(DEFAULT_CONFIG, {
+    runShell: async () => {
+      throw result;
+    },
+  });
+  assert.equal(await makeRelay(failure).getSlotActivityState(2), "unknown");
+  assert.equal(await makeRelay(empty).getSlotActivityState(2), "unknown");
+  assert.equal(await makeRelay(explicitIdle).getSlotActivityState(2), "idle");
+
+  const active = new TmuxRelay(DEFAULT_CONFIG, {
+    runShell: async () => ({ stdout: "RESULT: ACTIVE\n", stderr: "" }),
+  });
+  assert.equal(await active.getSlotActivityState(2), "active");
+});
+
 test("numeric drift with zero or multiple checkout matches fails closed before effects", async () => {
   const run = async (listed: string) => {
     const commands: string[] = [];

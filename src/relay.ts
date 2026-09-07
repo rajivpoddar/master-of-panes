@@ -1189,9 +1189,9 @@ export class TmuxRelay {
 
   /**
    * Check if a slot is currently active (processing).
-   * is-active.sh communicates via exit codes: 0=ACTIVE, 1=IDLE, 2=ERROR.
-   * Existing boolean callers retain their historical behavior; watchdogs that
-   * can inject input must use getSlotActivityState() and fail closed on unknown.
+   * is-active.sh uses exit status 1 for both a valid idle result and failed or
+   * empty pane capture.  Only its explicit verbose RESULT: IDLE marker is an
+   * idle observation; every other nonzero result stays unknown.
    */
   async isSlotActive(slotNum: number): Promise<boolean> {
     return (await this.getSlotActivityState(slotNum)) === "active";
@@ -1199,14 +1199,21 @@ export class TmuxRelay {
 
   async getSlotActivityState(slotNum: number): Promise<SlotActivityState> {
     try {
-      await execShell(
-        `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`,
+      await this.runShell(
+        `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum} -v`,
         { timeout: 5_000 }
       );
       return "active";
     } catch (err) {
       const code = (err as { code?: string | number })?.code;
-      if (code === 1 || code === "1") return "idle";
+      const stdout = (err as { stdout?: unknown })?.stdout;
+      const stderr = (err as { stderr?: unknown })?.stderr;
+      const output = `${typeof stdout === "string" ? stdout : ""}\n${typeof stderr === "string" ? stderr : ""}`;
+      if (
+        (code === 1 || code === "1")
+        && /(?:^|\n)RESULT:\s*IDLE\b/i.test(output)
+        && !/\b(?:ERROR|failed|could not capture)\b/i.test(output)
+      ) return "idle";
       return "unknown";
     }
   }
@@ -1216,7 +1223,7 @@ export class TmuxRelay {
    * Prefers log-based capture (persistent, never loses content) when LogManager is attached.
    * Falls back to tmux capture-pane if no LogManager.
    */
-  async captureOutput(slotNum: number, lines = 30): Promise<{ output: string; activity: "busy" | "idle" }> {
+  async captureOutput(slotNum: number, lines = 30): Promise<{ output: string; activity: "busy" | "idle" | "unknown" }> {
     // Always use tmux capture-pane — captures the visible terminal screen including
     // Claude Code TUI prompts (plan approval, status bar) that pipe-pane logs miss.
     // (Rajiv directive 2026-03-18: "change it to use tmux capture pane instead")
@@ -1232,7 +1239,12 @@ export class TmuxRelay {
       output = `[capture failed: ${err}]`;
     }
 
-    const activity = (await this.isSlotActive(slotNum)) ? "busy" as const : "idle" as const;
+    const activityState = await this.getSlotActivityState(slotNum);
+    const activity = activityState === "active"
+      ? "busy" as const
+      : activityState === "idle"
+        ? "idle" as const
+        : "unknown" as const;
     return { output, activity };
   }
 

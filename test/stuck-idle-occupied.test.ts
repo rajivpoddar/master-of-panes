@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { MoPDatabase } from "../src/db.js";
+import { MoPDatabase } from "../src/db.js";
 import type { LogManager } from "../src/logs.js";
 import type { TmuxRelay } from "../src/relay.js";
 import { StuckDetector } from "../src/stuck.js";
-import type { EventLogEntry, SlotState } from "../src/types.js";
+import { DEFAULT_CONFIG, type EventLogEntry, type SlotState } from "../src/types.js";
 
 const NOW = Date.parse("2026-07-27T02:30:00.000Z");
 const OLD_IDLE = "2026-07-27T02:24:00.000";
@@ -1600,4 +1600,255 @@ test("does not nudge a free slot when hook state is active despite stale log mti
     else process.env.MOP_FREE_SLOT_ASSIGNMENT_GATE = originalGate;
     gate.cleanup();
   }
+});
+
+test("reconciles one interrupted free-slot nudge only after an exact idle read", async () => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    let current = freeSlot({
+      active_turn_id: "turn-interrupted",
+      active_turn_started_at: "2026-07-27T02:29:00.000Z",
+      active_turn_state: "active",
+      idle: false,
+    });
+    let nextEventId = 4;
+    const events: EventLogEntry[] = [
+      {
+        id: 1,
+        timestamp: OLD_IDLE,
+        slot: 2,
+        event_type: "slot_released",
+        hook_type: null,
+        tool_name: null,
+        payload: "{}",
+        processed: false,
+      },
+      {
+        id: 2,
+        timestamp: OLD_IDLE,
+        slot: 2,
+        event_type: "idle_free_assignment_nudge_injected",
+        hook_type: "Stuck",
+        tool_name: null,
+        payload: JSON.stringify({
+          assignment_epoch: 4,
+          free_anchor: OLD_IDLE,
+          command: "Use Skill(pm-wait-nudge) now with mode=FREE_WAIT_ASSIGNMENT slot=2",
+          urgency: "REMINDER",
+        }),
+        processed: false,
+      },
+      {
+        id: 3,
+        timestamp: OLD_IDLE,
+        slot: 2,
+        event_type: "UserPromptSubmit",
+        hook_type: "UserPromptSubmit",
+        tool_name: null,
+        payload: JSON.stringify({ session_id: "turn-interrupted" }),
+        processed: false,
+      },
+    ];
+    const db = {
+      getExitPending: () => false,
+      hasPendingClear: () => false,
+      getSlot: () => current,
+      getAllSlots: () => [current],
+      getEvents: (_slot: number, limit: number, eventType?: string) => events
+        .filter((event) => !eventType || event.event_type === eventType)
+        .sort((a, b) => b.id - a.id)
+        .slice(0, limit),
+      reconcileInterruptedFreeTurn: (
+        slotNum: number,
+        epoch: number,
+        turnId: string,
+        nudgeEventId: number,
+      ) => {
+        if (current.slot !== slotNum || current.assignment_epoch !== epoch) {
+          return { ok: false, conflict: true, assignment_epoch: current.assignment_epoch, idempotent: false, reason: "epoch_mismatch" as const };
+        }
+        if (current.occupied || current.dnd) {
+          return { ok: false, conflict: true, assignment_epoch: current.assignment_epoch, idempotent: false, reason: "slot_not_free" as const };
+        }
+        if (current.active_turn_id !== turnId) {
+          return { ok: false, conflict: true, assignment_epoch: current.assignment_epoch, idempotent: false, reason: "turn_mismatch" as const };
+        }
+        if (nudgeEventId !== 2) {
+          return { ok: false, conflict: true, assignment_epoch: current.assignment_epoch, idempotent: false, reason: "nudge_mismatch" as const };
+        }
+        current = {
+          ...current,
+          active_turn_id: null,
+          active_turn_started_at: null,
+          active_turn_state: "inactive",
+          idle: true,
+        };
+        events.push({
+          id: nextEventId++,
+          timestamp: OLD_IDLE,
+          slot: slotNum,
+          event_type: "interrupted_free_turn_reconciled",
+          hook_type: null,
+          tool_name: null,
+          payload: JSON.stringify({ assignment_epoch: epoch, turn_id: turnId }),
+          processed: false,
+        });
+        return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: false };
+      },
+      logEvent: () => 0,
+      hasRecentSubagentDispatch: () => null,
+    } as unknown as MoPDatabase;
+    const relay = {
+      getSlotActivityState: async () => "idle" as const,
+      sendToSlotAsync: async () => {
+        throw new Error("reconciled slot must not receive a second nudge");
+      },
+    } as unknown as TmuxRelay;
+    const detector = new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(OLD_IDLE) } as unknown as LogManager,
+      relay,
+    );
+
+    await detector.checkIdleFree(current);
+    assert.equal(current.active_turn_id, null);
+    assert.equal(current.active_turn_state, "inactive");
+    assert.equal(current.idle, true);
+
+    // The same exact epoch is now admissible to the existing assignment CAS.
+    const admitted = current.active_turn_state === "inactive" && current.idle
+      && !current.occupied;
+    assert.equal(admitted, true);
+
+    current = {
+      ...current,
+      active_turn_id: "turn-active",
+      active_turn_state: "active",
+      idle: false,
+    };
+    events.push({
+      id: nextEventId++,
+      timestamp: NEW_IDLE_PROMPT,
+      slot: 2,
+      event_type: "UserPromptSubmit",
+      hook_type: "UserPromptSubmit",
+      tool_name: null,
+      payload: JSON.stringify({ session_id: "turn-active" }),
+      processed: false,
+    });
+    const before = { ...current };
+    const activeDetector = new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(OLD_IDLE) } as unknown as LogManager,
+      { getSlotActivityState: async () => "active" as const } as unknown as TmuxRelay,
+    );
+    await activeDetector.checkIdleFree(current);
+    assert.deepEqual(current, before);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("pending exit or clear wins after the idle observation await", async () => {
+  const originalKillSwitch = process.env.MOP_PM_WAIT_NUDGES_DISABLED;
+  delete process.env.MOP_PM_WAIT_NUDGES_DISABLED;
+  try {
+    for (const pending of ["exit", "clear"] as const) {
+      const directory = mkdtempSync(join(tmpdir(), "mop-interrupted-pending-"));
+      const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+      try {
+        const nudgeEventId = db.logEvent(2, "idle_free_assignment_nudge_injected", "Stuck", null, {
+          assignment_epoch: 0,
+          free_anchor: "2026-07-27T02:24:00.000",
+          command: "Use Skill(pm-wait-nudge) now with mode=FREE_WAIT_ASSIGNMENT slot=2",
+        });
+        db.startAgentTurn(2, "turn-interrupted");
+        db.logEvent(2, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "turn-interrupted" });
+        const before = db.getSlot(2)!;
+        const relay = {
+          getSlotActivityState: async () => {
+            if (pending === "exit") db.setExitPending(true);
+            else db.setPendingClear(2);
+            return "idle" as const;
+          },
+        } as unknown as TmuxRelay;
+        const detector = new StuckDetector(
+          db,
+          { getLogMtime: async () => new Date(OLD_IDLE) } as unknown as LogManager,
+          relay,
+        );
+
+        await detector.checkIdleFree(before);
+        assert.deepEqual(db.getSlot(2), before);
+        assert.equal(db.getEvents(2, 20, "interrupted_free_turn_reconciled").length, 0);
+        assert.equal(db.getEvents(2, 20, "idle_free_assignment_nudge_injected")[0].id, nudgeEventId);
+      } finally {
+        db.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    if (originalKillSwitch === undefined) delete process.env.MOP_PM_WAIT_NUDGES_DISABLED;
+    else process.env.MOP_PM_WAIT_NUDGES_DISABLED = originalKillSwitch;
+  }
+});
+
+async function assertDuringAwaitWorkPreservesInterruptedTurn(
+  eventType: "PreToolUse" | "UserPromptSubmit",
+): Promise<void> {
+  const directory = mkdtempSync(join(tmpdir(), "mop-interrupted-work-"));
+  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+  const originalNow = Date.now;
+  const turnId = "turn-interrupted";
+  try {
+    const releasedAt = new Date().toISOString();
+    db.logEvent(2, "slot_released", null, null, {});
+    const nudgeEventId = db.logEvent(2, "idle_free_assignment_nudge_injected", "Stuck", null, {
+      assignment_epoch: 0,
+      free_anchor: releasedAt,
+      command: "Use Skill(pm-wait-nudge) now with mode=FREE_WAIT_ASSIGNMENT slot=2",
+    });
+    db.startAgentTurn(2, turnId);
+    db.logEvent(2, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: turnId });
+    const before = db.getSlot(2)!;
+    Date.now = () => Date.parse(releasedAt) + 31 * 60_000;
+
+    const relay = {
+      getSlotActivityState: async () => {
+        if (eventType === "PreToolUse") {
+          db.logEvent(2, "PreToolUse", "PreToolUse", "Bash", {});
+        } else {
+          db.logEvent(2, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: turnId });
+        }
+        db.touchMeaningfulWork(2, turnId);
+        return "idle" as const;
+      },
+    } as unknown as TmuxRelay;
+    const detector = new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date(releasedAt) } as unknown as LogManager,
+      relay,
+    );
+
+    await detector.checkIdleFree(before);
+    const after = db.getSlot(2)!;
+    assert.equal(after.active_turn_id, turnId);
+    assert.equal(after.active_turn_state, "active");
+    assert.equal(after.idle, false);
+    assert.equal(db.getEvents(2, 20, "interrupted_free_turn_reconciled").length, 0);
+    assert.equal(db.getEvents(2, 20, "idle_free_assignment_nudge_injected")[0].id, nudgeEventId);
+  } finally {
+    Date.now = originalNow;
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("a PreToolUse plus meaningful work during relay await preserves the active turn", async () => {
+  await assertDuringAwaitWorkPreservesInterruptedTurn("PreToolUse");
+});
+
+test("a same-session UserPromptSubmit plus meaningful work during relay await preserves the active turn", async () => {
+  await assertDuringAwaitWorkPreservesInterruptedTurn("UserPromptSubmit");
 });

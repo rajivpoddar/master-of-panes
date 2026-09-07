@@ -323,6 +323,55 @@ test("hook turn close requires a matching session identity", () => {
   });
 });
 
+test("exact interrupted free-turn closure admits one guarded assignment", () => {
+  withDatabase((db) => {
+    const nudgeEventId = db.logEvent(2, "idle_free_assignment_nudge_injected", "Stuck", null, {
+      assignment_epoch: 0,
+      free_anchor: "2026-09-07T00:00:00.000Z",
+      command: "Use Skill(pm-wait-nudge) now with mode=FREE_WAIT_ASSIGNMENT slot=2",
+    });
+    db.startAgentTurn(2, "turn-interrupted");
+    db.logEvent(2, "UserPromptSubmit", "UserPromptSubmit", null, {
+      session_id: "turn-interrupted",
+    });
+    const before = db.getSlot(2)!;
+    assert.equal(before.occupied, false);
+    assert.equal(before.assignment_epoch, 0);
+
+    const mismatch = db.reconcileInterruptedFreeTurn(2, 0, "different-turn", nudgeEventId);
+    assert.equal(mismatch.reason, "turn_mismatch");
+    assert.deepEqual(db.getSlot(2), before);
+
+    const closed = db.reconcileInterruptedFreeTurn(2, 0, "turn-interrupted", nudgeEventId);
+    assert.deepEqual(closed, {
+      ok: true,
+      conflict: false,
+      assignment_epoch: 0,
+      idempotent: false,
+    });
+    const inactive = db.getSlot(2)!;
+    assert.equal(inactive.active_turn_id, null);
+    assert.equal(inactive.active_turn_state, "inactive");
+    assert.equal(inactive.idle, true);
+
+    const assigned = db.assignSlot(
+      2,
+      "replacement after interrupted nudge",
+      "github:repo-1",
+      7000,
+      "fix/7000",
+      null,
+      null,
+      0,
+    );
+    assert.equal(assigned.ok, true);
+
+    const replay = db.reconcileInterruptedFreeTurn(2, 0, "turn-interrupted", nudgeEventId);
+    assert.equal(replay.reason, "slot_not_free");
+    assert.equal(db.getSlot(2)?.active_turn_state, "inactive");
+  });
+});
+
 test("issue claim adoption rebinds the occupied tuple atomically", () => {
   withDatabase((db) => {
     assert.equal(
