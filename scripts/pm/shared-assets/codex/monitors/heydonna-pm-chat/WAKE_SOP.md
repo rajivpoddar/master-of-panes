@@ -22,19 +22,27 @@ must not be reduced to a status summary.
 Apply the normative ownership and motion matrix in
 `/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md`. Slots are
 for executable implementation, reproduction, or production-shaped proof
-only; CI, capture, review, decisions, and external waits are off-slot. PM
-has exactly two open-PR responsibilities: one bounded exact failed-PR/head/run
-CI/E2E investigation, and the minimal slot/session/packet mechanics for a
-CTO-authorized rework, reproduction, or production-shaped proof assignment.
-The CTO/release owner owns all other PR actions, including exact-head CI/E2E
-admission/arming, capture, labels/state, workflow terminals, reruns/retries,
-rescue/release, sync/integration, release gates, and head-pinned merge. PM
-reports evidence/status for those actions only. Every nonterminal wake includes
+only; CI, capture, review, decisions, and external waits are off-slot. PM owns
+Abi/customer-reported issue intake end to end: perform a bounded
+investigation, deduplicate and file the accurate symptom/evidence, promote it
+under the existing priority rules, assign eligible numbered work, and confirm
+actual pickup. A confirmed symptom may be filed while its cause is unknown;
+investigating, filing, promoting, and assigning do not require CTO or Rajiv
+approval. Correcting a causal claim does not suspend intake. If no eligible
+capacity exists, retain the owner and concrete next action; never invent free
+capacity or overwrite preserved work. Return status, findings, and blockers in
+the original report thread. Escalate only genuine product/acceptance,
+access/data, destructive/high-risk, or material-priority decisions. The
+CTO/release owner owns exact-head CI/E2E admission/arming, capture,
+labels/state, workflow terminals, reruns/retries, rescue/release,
+sync/integration, release gates, and head-pinned merge; PM reports
+evidence/status for those actions only. Every nonterminal wake includes
 `next_action`, `next_owner`, and `wake`; labels, holds, relays, watching, and
 queue receipts are not motion. Code-ready without admission, a CI/capture
 terminal, and a free compatible slot with executable drain work are hard
-actionable wakes routed to CTO, except that PM may assign a slot only after an
-explicit CTO-routed rework/repro packet. This monitor/SOP remains read-only
+actionable wakes routed to CTO, except that PM may assign eligible issue work
+under the existing priority/safety rules or a CTO-routed rework/repro packet.
+This monitor/SOP remains read-only
 and routes action; it never mutates GitHub, MoP, workflows, or product state.
 
 The receiving CTO wake must execute or durably delegate the next transition in
@@ -777,11 +785,12 @@ heartbeat must not manufacture workflow, capture, slot, source, label, or
 merge effects merely to make the report green; the CTO wake consumes each gap
 and acts through the matrix below.
 
-### CTO-routed rework/repro numbered-slot assignment (PM-only assignment responsibility)
+### Numbered-slot assignment (PM-owned intake and CTO-routed rework)
 
-Assignment is deliberately simple and is permitted only after CTO Decisions
-selects and authorizes the exact rework, reproduction, or production-shaped
-proof packet. Before assigning, PM checks the selected slot's current session
+Assignment is deliberately simple and is permitted for eligible issue work
+under the existing priority and safety rules, including a confirmed symptom
+whose cause remains unknown, or after CTO Decisions authorizes an exact
+rework, reproduction, or production-shaped proof packet. Before assigning, PM checks the selected slot's current session
 age. If it is older than six hours, clear that session once and prove a fresh
 context boundary; if the clear fails, stop the assignment. Otherwise PM
 performs exactly three operations:
@@ -1019,10 +1028,12 @@ For a terminal-bad required `pull_request` CI or E2E run, a raw alert is not a
 CTO investigation handoff. PM launches exactly one read-only *Sonnet 5* failure
 investigation agent. That agent binds the exact PR/head/run/attempt, consumes
 the relevant run/job logs and retained Modal artifacts once, identifies the
-first causal boundary, and completes the causal report. PM posts the full
-report to the PR transition thread and relays that same completed report to
-CTO. PM does not raw-relay the alert, block or relabel the PR, dispatch a slot,
-rerun, or capture before the report.
+first causal boundary, and completes the causal report. PM automatically posts
+the full report back to the original alert/PR transition thread, independent
+of release ownership, and relays that same completed report to CTO. PM does
+not raw-relay the alert, block or relabel the PR, dispatch a slot, rerun, or
+capture before the report; rerun, capture, merge, and release authority remain
+separate.
 
 On receipt, CTO sends the completed report to PR-merges task
 `01a0324b-68e0-7491-988f-e7e1549f16f7` for evidence verification and disposition.
