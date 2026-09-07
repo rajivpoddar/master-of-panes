@@ -95,6 +95,11 @@ _PROTECTED_SPANS = (
 _PROSE_NUMBER_TOKEN = re.compile(
     r"(?<![A-Za-z0-9_-])((?:body|run|head|published))(\d[0-9A-Fa-f]{2,})(?![A-Za-z0-9_-])"
 )
+_PROSE_WORD_NUMBER_WORD = re.compile(
+    r"(?<![A-Za-z0-9_-])((?:last|next|first|past))(\d{1,2})"
+    r"(days?|hours?|minutes?|items?|issues?|runs?|steps?)(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
 
 
 def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -121,7 +126,8 @@ def normalize_prose_number_spacing(text: str) -> str:
     protected = _merge_ranges(protected)
 
     def transform(segment: str) -> str:
-        return _PROSE_NUMBER_TOKEN.sub(r"\1 \2", segment)
+        segment = _PROSE_NUMBER_TOKEN.sub(r"\1 \2", segment)
+        return _PROSE_WORD_NUMBER_WORD.sub(r"\1 \2 \3", segment)
 
     output: list[str] = []
     cursor = 0

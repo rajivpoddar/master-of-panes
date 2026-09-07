@@ -49,6 +49,14 @@ class ProseNumberSpacingTest(unittest.TestCase):
         self.assertEqual(normalize_prose_number_spacing(once), once)
         self.assertEqual(once, "body 11350 S1 P1 AC1 R2 v2 SHA256")
 
+    def test_spaces_conservative_word_number_word_prose(self) -> None:
+        text = "last7days next2steps first3issues past1hour"
+        expected = "last 7 days next 2 steps first 3 issues past 1 hour"
+        self.assertEqual(normalize_prose_number_spacing(text), expected)
+        self.assertEqual(normalize_prose_number_spacing(expected), expected)
+        for value in ("last7days_backup", "next10steps-v2"):
+            self.assertEqual(normalize_prose_number_spacing(value), value)
+
     def test_protected_markup_and_identifier_spans_are_unchanged(self) -> None:
         text = (
             "`body11350` ```run33945611843``` <@U123> <date^123^2026-09-05> "
@@ -95,11 +103,16 @@ class ProseNumberSpacingTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             text_file = Path(directory) / "message.txt"
+            prose_file = Path(directory) / "prose.txt"
             text_file.write_text("body11350", encoding="utf-8")
+            prose_file.write_text("last7days", encoding="utf-8")
             results = [
                 invoke(["cto_slack_rest.py", "--channel", "C123", "--text", "body11350"]),
                 invoke(["cto_slack_rest.py", "--channel", "C123", "--text-file", str(text_file)]),
                 invoke(["cto_slack_rest.py", "--channel", "C123"], io.StringIO("body11350")),
+                invoke(["cto_slack_rest.py", "--channel", "C123", "--text", "last7days"]),
+                invoke(["cto_slack_rest.py", "--channel", "C123", "--text-file", str(prose_file)]),
+                invoke(["cto_slack_rest.py", "--channel", "C123"], io.StringIO("last7days")),
             ]
 
         self.assertEqual(
@@ -108,11 +121,15 @@ class ProseNumberSpacingTest(unittest.TestCase):
                 {"channel": "C123", "text": "body 11350"},
                 {"channel": "C123", "text": "body 11350"},
                 {"channel": "C123", "text": "body 11350"},
+                {"channel": "C123", "text": "last 7 days"},
+                {"channel": "C123", "text": "last 7 days"},
+                {"channel": "C123", "text": "last 7 days"},
             ],
         )
         self.assertEqual(
             [result["text_sha256"] for result in results],
-            [hashlib.sha256(b"body 11350").hexdigest()] * 3,
+            [hashlib.sha256(b"body 11350").hexdigest()] * 3
+            + [hashlib.sha256(b"last 7 days").hexdigest()] * 3,
         )
 
     def test_writer_preserves_ambiguous_tokens_in_payload_and_hash(self) -> None:

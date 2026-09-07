@@ -637,7 +637,7 @@
     {
       "source_path": "codex/skills/heydonna-slack-postback/scripts/cto_slack_rest.py",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-slack-postback/scripts/cto_slack_rest.py",
-      "sha256": "dc92ae987ac82242ac92019131016e2c230a5572d26eb87d6a344b709c7ed612",
+      "sha256": "57992c2176d825d22475003e807072a076c7328f45eff0b27ce4cb5537da487e",
       "mode": 493,
       "ownership_class": "shared-codex-skill-executable",
       "dependency_status": "closed",
@@ -655,7 +655,7 @@
     {
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py",
-      "sha256": "da75a289c347b27fa29ad7a65374d13017ee28f6765aec7592d3ac2248da4289",
+      "sha256": "af2b38226a179930f3536c26dfe55f920c4b517503687d364a9dbdb0f055b233",
       "mode": 420,
       "ownership_class": "shared-codex-skill-test",
       "dependency_status": "closed",
