@@ -316,6 +316,16 @@ if [ -n "$LAST_AUTHOR" ] && printf '%s' "$LAST_AUTHOR" | grep -qiE "$INTERNAL_NA
   INTERNAL_AUTHOR="yes"
 fi
 
+# A CTO-selected diagnostic is already owned by the CTO and is not a PM CI
+# reconciliation event.  Keep this narrowly tied to the explicit Slack
+# author/header plus the selected-diagnostic wording; ordinary CI/E2E alerts
+# still take the required investigation/reconciliation path below.
+CTO_SELECTED_DIAGNOSTIC=""
+if [ "$LAST_AUTHOR" = "Abhijit CTO" ] \
+   && printf '%s' "$LOWER" | grep -qE '(^|[^a-z])selected[[:space:]-]+diagnostic([[:space:]#:]|$)'; then
+  CTO_SELECTED_DIAGNOSTIC="yes"
+fi
+
 REMINDER=""
 REASON=""
 
@@ -359,7 +369,7 @@ fi
 CI_RUN_ID=""
 CI_ALERT_THREAD_TS=""
 CI_PR=""
-if [ -z "$REMINDER" ]; then
+if [ -z "$REMINDER" ] && [ -z "$CTO_SELECTED_DIAGNOSTIC" ]; then
   if printf '%s' "$LOWER" | grep -qE 'ci \+ e2e\*?[[:space:]]+failed|ci failed|e2e smoke tests failed|ci: failure|e2e: failure|e2e: cancelled.*timed_out|workflow.*failed.*pull[/_-]request|gh run view --log-failed'; then
     REMINDER="CI_FAILURE_DETECTED"
     REASON="CI/E2E failure alert — ci-failure-investigation SOP gate"
@@ -395,7 +405,7 @@ fi
 CI_SUCCESS_RUN_ID=""
 CI_SUCCESS_ALERT_THREAD_TS=""
 CI_SUCCESS_PR=""
-if [ -z "$REMINDER" ]; then
+if [ -z "$REMINDER" ] && [ -z "$CTO_SELECTED_DIAGNOSTIC" ]; then
   if printf '%s' "$LOWER" | grep -qE 'ci \+ e2e success on|ci: success|e2e: success|workflow.*(succeeded|success).*pull[/_-]request|white_check_mark.*ci \+ e2e'; then
     REMINDER="CI_SUCCESS_DETECTED"
     REASON="CI/E2E success alert — ci-success-reconciliation skill gate"

@@ -26,6 +26,8 @@
       "~/.claude/scripts/pm-terminal-continuity.py",
       "~/.claude/scripts/pm-terminal-wake.py",
       "~/.claude/skills/ci-failure-investigation/SKILL.md",
+      "~/Downloads/projects/heydonna-app/.claude/hooks/block-invalid-issue-contract-ledger.sh",
+      "~/Downloads/projects/heydonna-app/.claude/hooks/block-raw-clear-outside-mop.sh",
       "~/Downloads/projects/heydonna-app/.claude/hooks/pm-context-injector.sh",
       "~/Downloads/projects/heydonna-app/.claude/skills/pm-idle-notification/SKILL.md",
       "~/.claude/control_plane/runtime_observation.py",
@@ -45,7 +47,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 67,
+    "selected_count": 69,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -98,9 +100,27 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/hooks/block-invalid-issue-contract-ledger.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/block-invalid-issue-contract-ledger.sh",
+      "sha256": "4dd73c3f99d4b39d4100d6d27e500106b7bbf48631435b6b78c06bd3148fe730",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-issue-admission-guard",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/block-raw-clear-outside-mop.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/block-raw-clear-outside-mop.sh",
+      "sha256": "0e6c5f02cb23e7c3ce6a5bc5740648855d59baddf3d7a22707a7f325b24880c4",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-lifecycle-command-guard",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/hooks/pm-context-injector.sh",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-context-injector.sh",
-      "sha256": "97016cdfea5e8aa82a7953cc7719f38eb7beda5431e4d48c94bbd4febacc26d1",
+      "sha256": "ae04aaef09be9f9600ad0814bc4232a0639ab799acda718bec798214348a9896",
       "mode": 493,
       "ownership_class": "shared-claude-pm-obligation-producer",
       "dependency_status": "closed",
