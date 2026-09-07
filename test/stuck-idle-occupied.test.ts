@@ -1930,6 +1930,27 @@ test("reconciles one interrupted occupied PM_WAIT turn after a successful idle o
   });
 });
 
+test("keeps an occupied PM_WAIT turn active for a compound Bash command before observation", async () => {
+  await withOccupiedPmWaitFixture(async (db, slot) => {
+    db.logEvent(6, "PostToolUse", "PostToolUse", "Bash", {
+      session_id: slot.active_turn_id,
+      tool_input: { command: "npm run build & /tmp/message-pm.sh" },
+    });
+    const detector = new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date() } as unknown as LogManager,
+      { getSlotActivityState: async () => "idle" as const } as unknown as TmuxRelay,
+    );
+
+    await detector.checkIdleOccupied(slot);
+    const after = db.getSlot(6)!;
+    assert.equal(after.active_turn_id, "turn-occupied-pm-wait");
+    assert.equal(after.active_turn_state, "active");
+    assert.equal(after.idle, false);
+    assert.equal(db.getEvents(6, 20, "interrupted_occupied_pm_wait_turn_reconciled").length, 0);
+  });
+});
+
 test("keeps an occupied PM_WAIT turn active for unknown pane state, product work, or turn drift", async () => {
   const cases = [
     {
@@ -1996,6 +2017,31 @@ test("rechecks product work that arrives during the occupied-turn idle observati
             tool_input: { file_path: "/repo/src/product.ts" },
           });
           db.touchMeaningfulWork(6, slot.active_turn_id);
+          return "idle" as const;
+        },
+      } as unknown as TmuxRelay,
+    );
+
+    await detector.checkIdleOccupied(slot);
+    const after = db.getSlot(6)!;
+    assert.equal(after.active_turn_id, "turn-occupied-pm-wait");
+    assert.equal(after.active_turn_state, "active");
+    assert.equal(after.idle, false);
+    assert.equal(db.getEvents(6, 20, "interrupted_occupied_pm_wait_turn_reconciled").length, 0);
+  });
+});
+
+test("keeps an occupied PM_WAIT turn active for a compound Bash command during observation", async () => {
+  await withOccupiedPmWaitFixture(async (db, slot) => {
+    const detector = new StuckDetector(
+      db,
+      { getLogMtime: async () => new Date() } as unknown as LogManager,
+      {
+        getSlotActivityState: async () => {
+          db.logEvent(6, "PostToolUse", "PostToolUse", "Bash", {
+            session_id: slot.active_turn_id,
+            tool_input: { command: "npm run build & /tmp/message-pm.sh" },
+          });
           return "idle" as const;
         },
       } as unknown as TmuxRelay,

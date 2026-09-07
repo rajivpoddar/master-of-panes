@@ -2307,14 +2307,11 @@ export class MoPDatabase {
         if (event.event_type !== "PreToolUse" && event.event_type !== "PostToolUse") return false;
         try {
           const payload = JSON.parse(event.payload) as {
-            tool_input?: { skill?: unknown; command?: unknown };
+          tool_input?: { skill?: unknown };
           };
           const input = payload.tool_input;
           if (event.tool_name === "Skill" && typeof input?.skill === "string") {
             return pmOnlySkillNames.has(input.skill.trim());
-          }
-          if (event.tool_name === "Bash" && typeof input?.command === "string") {
-            return /(?:^|[\\s/])message-pm\.sh(?:[\\s]|$)/.test(input.command);
           }
         } catch {
           return false;
