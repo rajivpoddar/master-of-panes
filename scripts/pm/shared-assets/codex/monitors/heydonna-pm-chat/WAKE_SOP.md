@@ -1022,18 +1022,23 @@ Never create a task through `codex_app`. The accepting task remains the single
 accountable owner through the terminal receipt. Do not send CI/capture alert
 ownership to the standing rescues task by default when merge can accept it.
 
-### PM-investigated PR CI/E2E failure reports (Rajiv 2026-08-29)
+### PM-investigated CI/E2E failure reports (Rajiv 2026-08-29)
 
-For a terminal-bad required `pull_request` CI or E2E run, a raw alert is not a
-CTO investigation handoff. PM launches exactly one read-only *Sonnet 5* failure
-investigation agent. That agent binds the exact PR/head/run/attempt, consumes
-the relevant run/job logs and retained Modal artifacts once, identifies the
-first causal boundary, and completes the causal report. PM automatically posts
-the full report back to the original alert/PR transition thread, independent
-of release ownership, and relays that same completed report to CTO. PM does
-not raw-relay the alert, block or relabel the PR, dispatch a slot, rerun, or
-capture before the report; rerun, capture, merge, and release authority remain
-separate.
+Every genuine CI/E2E failure alert, including a terminal-bad required
+`pull_request` run and a failed selected `workflow_dispatch` diagnostic, gets a
+bounded evidence-bound investigation/result or a concrete blocker. A raw alert
+is not a CTO investigation handoff. PM reuses one exact-run investigation that
+is already owned or complete; otherwise it launches exactly one read-only
+*Sonnet 5* failure investigation agent. That agent binds the exact PR/head,
+run/attempt/event, consumes the relevant run/job logs and retained Modal
+artifacts once, identifies the first causal boundary, and completes the causal
+report. PM automatically posts the result back to the original alert/PR
+transition thread, independent of release ownership, and relays that same
+result to CTO. A selected diagnostic remains evidence-only and never satisfies
+required `pull_request` acceptance or authorizes release. Main-red execution
+ownership remains the existing fast lane below. PM does not raw-relay the
+alert, block or relabel the PR, dispatch a slot, rerun, or capture before the
+report; rerun, capture, merge, and release authority remain separate.
 
 On receipt, CTO sends the completed report to PR-merges task
 `01a0324b-68e0-7491-988f-e7e1549f16f7` for evidence verification and disposition.
