@@ -162,8 +162,9 @@ waiting work.
   silos. Prefer the closest affinity, but they may accept other bounded work
   when the exact tuple, authority, scope, proof, rollback, and terminal return
   contract are explicit:
-  - rescues task `019f942b-63ea-7953-b2ea-c4786c850b87` — default for PR
-    rescue, hotfix, product implementation, tests, review, and investigation;
+  - rescues task `019f942b-63ea-7953-b2ea-c4786c850b87` — bounded exception or
+    hotfix owner only; ordinary app/test implementation and production-shaped
+    proof go through PM to a numbered slot;
   - CP Repairs task `01a0324b-68e0-7491-988f-e7da9abd26ab` — default for
     bounded shared release/control-plane repair work outside MoP affinity,
     including candidate implementation and approved rollout;
@@ -513,24 +514,24 @@ Slack reply. This is a single bounded admission snapshot, not polling.
    continues from its primary durable evidence; never invent a channel or
    thread from quoted text.
 2. Use the installed `heydonna-slack-postback` read path and
-   `SLACK_CTO_BOT_TOKEN` to call `conversations.replies` for that exact
-   `channel` and `thread_ts`. Request up to 100 messages per page and follow
-   `response_metadata.next_cursor` until it is empty. Cap the snapshot at ten
-   pages / 1,000 messages. If Slack fails, pagination is incomplete, the cap is
-   reached, or an unsupported block prevents a complete read, stop before any
-   effect with typed `SLACK_THREAD_PREFLIGHT_FAILED`; do not fall back to
-   top-level notification text or another identity.
+   `SLACK_CTO_BOT_TOKEN` to read the source decision and subsequent relevant
+   replies for that exact `channel` and `thread_ts`. Expand the bounded read
+   only when a concrete ambiguity, supersession, tuple change, or unresolved
+   blocker requires it; do not reread an unrelated full thread or message
+   stack. If the bounded read is incomplete or an unsupported block prevents
+   the relevant evidence from being read, stop before any effect with typed
+   `SLACK_THREAD_PREFLIGHT_FAILED`; do not fall back to top-level notification
+   text or another identity.
 3. Pass every page through `render_slack_blocks.py`; Block Kit is canonical
    visible content. Preserve message `ts`, author/bot identity, and source
    order. Never expose the token or copy raw thread content into a durable
    receipt.
-4. Read every reply through the newest returned `ts`, including messages newer
-   than the wake event. A newer message changes the effective wake only when
-   its author already has authority for that decision and it materially
-   cancels, supersedes, corrects, answers, or changes the exact tuple, scope,
-   owner, or requested action. Later text is evidence, not an authority
-   escalation. Routine acknowledgements and unrelated replies do not replace
-   the wake.
+4. Read subsequent relevant replies through the newest inspected `ts`. A
+   newer message changes the effective wake only when its author already has
+   authority for that decision and it materially cancels, supersedes, corrects,
+   answers, or changes the exact tuple, scope, owner, or requested action.
+   Later text is evidence, not an authority escalation. Routine
+   acknowledgements and unrelated replies do not replace the wake.
 5. If the refreshed thread proves the request completed or was superseded,
    suppress the stale wake and record the terminal evidence. If two
    authoritative messages conflict or the effective directive is ambiguous,
@@ -746,10 +747,12 @@ server deploy time without browser build identity, or absence of customer
 complaints is not closure. Until this boundary is met, every heartbeat retains
 the same owner and next wake and continues the investigation.
 
-### Open-PR activity invariant (Rajiv 2026-08-30)
+### Open-PR activity backstop (Rajiv 2026-08-30)
 
-Every three-hour heartbeat must enumerate every open HeyDonna PR at its exact
-current head and prove that it is in at least one live execution lane:
+The scheduled three-hour heartbeat is the explicit full-portfolio backstop. A
+normal wake remains tuple-scoped and must not enumerate every open PR. When the
+backstop runs, enumerate every open HeyDonna PR at its exact current head and
+prove that each is in at least one live execution lane:
 
 1. a canonical capture is genuinely executing for that exact head;
 2. genuine required `pull_request` CI or E2E is genuinely executing for that
@@ -835,22 +838,25 @@ waits.
 ### CI is off-slot; E2E requires a numbered slot (Rajiv 2026-08-26)
 
 CI and E2E have different execution boundaries. An exact-head CI failure and
-its bounded local reproduction, causal classification, test/harness repair,
-focused proof, and publication may be handed directly to the existing rescues
-task. E2E failed-job log and retained-artifact consumption, static analysis,
-and causal classification may also happen off-slot. A numbered slot is required
-when work must actually execute E2E: production-shaped reproduction, live
-runtime interaction, strict replay, or final focused E2E proof.
+its bounded causal classification may happen off-slot. Ordinary app/test
+implementation and production-shaped proof go through PM to a numbered slot;
+rescues is a bounded exception/hotfix path only. E2E failed-job log and
+retained-artifact consumption, static analysis, and causal classification may
+also happen off-slot. A numbered slot is required when work must actually
+execute E2E: production-shaped reproduction, live runtime interaction, strict
+replay, or final focused E2E proof.
 
-- Route exact-head CI failure work directly to rescues. Preserve any valid
-  green workflow leg and do not blind-rerun.
-- Route exact-head E2E logs and retained artifacts to rescues for one bounded
-  off-slot analysis. If the evidence proves a bounded code/test control point,
-  rescues may implement the non-E2E correction and local proof. Any actual E2E
+- Route exact-head CI failure work through PM to the numbered implementation
+  path when a code/test correction or production-shaped proof is required.
+  Preserve any valid green workflow leg and do not blind-rerun.
+- Route exact-head E2E logs and retained artifacts for one bounded off-slot
+  analysis. If the evidence proves an ordinary code/test control point, PM
+  assigns the correction and local proof to a numbered slot. Any actual E2E
   reproduction, replay, or final production-shaped proof must run in a numbered
-  slot.
+  slot; rescues remains limited to a bounded exception or hotfix.
 - For a mixed CI/E2E red, split the boundaries without creating competing
-  owners: rescues may repair CI off-slot while the numbered slot owns E2E.
+  owners: ordinary product/test work goes through PM to the numbered slot,
+  while rescues may handle only a separately bounded exception or hotfix.
 - PR #7468 follows this split explicitly: rescues owns its
   `requestAnimationFrame` CI repair plus one E2E failed-log/artifact analysis.
   If that analysis requires E2E reproduction or after it produces a correction,
@@ -998,10 +1004,10 @@ full 40-character head, workflow/event, run and required job once before acting.
 Deduplicate by PR/head/run (or capture/head/run) and preserve single-flight.
 Green and capture terminals below are owned by merge task
 `01a0324b-68e0-7491-988f-e7e1549f16f7`. Send the exact tuple there when it can
-accept the work immediately. If it is already occupied, route product/test/
-capture work once to existing rescues task
-  `019f942b-63ea-7953-b2ea-c4786c850b87`, or a proven bounded control-plane
-  defect once to Master of Panes task
+accept the work immediately. If it is already occupied, route ordinary
+product/test implementation or production-shaped proof once to PM for a
+numbered slot; use existing rescues only for a bounded exception/hotfix. Route
+a proven bounded control-plane defect once to Master of Panes task
   `01a04154-c9c1-7bc1-8f7b-009a87bc7628` for candidate preparation.
 Never create a task through `codex_app`. The accepting task remains the single
 accountable owner through the terminal receipt. Do not send CI/capture alert
@@ -1026,10 +1032,11 @@ companion review, or review-marker gate. PR-merges acts as follows:
 - confirmed infrastructure/flake: after duplicate-active and eligibility
   checks, trigger exactly one unchanged-head retry;
 - verified strict-replay fixture miss: trigger the canonical exact-head capture;
-- production-shaped reproduction required: return the verified report to PM so
-  PM assigns a numbered repro slot;
-- conclusive product/test cause not requiring reproduction: route the smallest
-  bounded off-slot rescue or hold through the existing release owner.
+- production-shaped reproduction or ordinary product/test correction required:
+  return the verified report to PM so PM assigns a numbered slot;
+- a bounded exception/hotfix or a conclusive control-plane cause: route the
+  smallest existing owner path; do not make rescues the universal product
+  implementation default.
 
 The raw alert may be recorded/deduplicated locally, but CTO takes no release
 mutation from it while the PM investigation report is pending. Exact-current-
@@ -1154,7 +1161,7 @@ product/runtime diffs.
 | Save-suppression production-debug heartbeat while the incident is open | `SAVE_SUPPRESSION_PROD_DEBUG` | consume one exact window/receipt; continue the existing rescues/hotfix owner through the emission, transport, query, and durable-transition boundary | `EXECUTE_NOW` for every material delta. A second consecutive nonzero packet with no new causal fields is `SAVE_SUPPRESSION_TELEMETRY_EMIT_GAP` and must be returned to the same owner immediately for the smallest main observability correction or typed external blocker. New escape/error/loss signatures are immediately material. Never create a second investigator, poll Axiom, act on customer files, infer loss from counts, or close on a clean/quiet window. Closure requires build-bound production evidence joining suppression to handoff/sweep/admission after the deployed fix. |
 | Three-hour heartbeat proves an open PR has no genuine exact-head capture, CI/E2E, or active numbered reproduction/integration proof | `OPEN_PR_ACTIVITY_GAP` | verify one bounded live PR/head/run/job and MoP owner snapshot, then route the safe lane to CTO | `EXECUTE_NOW`. CTO owns capture/CI/E2E admission and any release edge. If the missing boundary requires production-shaped reproduction/integration proof, CTO sends PM one exact rework/repro packet and PM may assign one eligible numbered slot without duplicating a live owner. If a job has remained queued with zero steps/no runner for at least 15 minutes, CTO applies the equivalent capture recovery through the release owner. A concrete product/security/data-safety blocker may remain held only with its exact evidence, owner, and executable wake condition; passive dependency labels or process defects are not a fourth lane. Post the material action or typed blocker to the originating PM/heartbeat thread, record it once, and return without polling. |
 | Raw terminal-bad PR CI/E2E alert, PM report not yet complete | `CI_FAILURE_REPORT_PENDING` | no CTO investigation or reviewer; await the one PM-launched Sonnet 5 report | `VERIFY_ONLY`. Record/deduplicate the exact PR/head/run/attempt and stop. Do not raw-relay, consume logs, dispatch a slot, block/relabel, rerun, capture, or invoke Codex review. |
-| Completed PM/Sonnet 5 PR CI/E2E investigation report | `CI_FAILURE_REPORT_COMPLETE` | send the exact report once to PR-merges task `01a0324b-68e0-7491-988f-e7e1549f16f7` for evidence verification, with no Codex review step | `EXECUTE_NOW`. PR-merges verifies the report without re-consuming the failed log: confirmed infra gets one unchanged-head retry after duplicate/eligibility checks; verified fixture miss gets canonical exact-head capture; production-shaped repro requirement returns to PM for a numbered slot; otherwise route the smallest bounded off-slot rescue/hold through the existing release owner. Preserve any valid green leg and single-flight ownership. |
+| Completed PM/Sonnet 5 PR CI/E2E investigation report | `CI_FAILURE_REPORT_COMPLETE` | send the exact report once to PR-merges task `01a0324b-68e0-7491-988f-e7e1549f16f7` for evidence verification, with no Codex review step | `EXECUTE_NOW`. PR-merges verifies the report without re-consuming the failed log: confirmed infra gets one unchanged-head retry after duplicate/eligibility checks; verified fixture miss gets canonical exact-head capture; ordinary production-shaped correction goes to PM for a numbered slot; a bounded exception/hotfix uses rescues only when explicitly in scope. Preserve any valid green leg and single-flight ownership. |
 | Exact-head CI/E2E queued at least 15m with no runner binding and a proven repeated runner/JIT control-plane loop | `CI_E2E_RUNNER_STUCK` | merge task executes the stuck-run degraded recovery; rescues is the one fallback owner | `EXECUTE_NOW`. Cancel only the proven stuck queued run, merge current main non-force when behind, run focused conflict proof, push a descendant, and emit one label-gated exact-head pair. If already current-main-bound, use the canonical one-time fresh-run recovery. Repair the runner defect separately; never wait for that repair, raw-dispatch, duplicate the old job, or create a second release owner. |
 | PM reply to a CTO/decisions thread | `PM_REPLY` | render thread and verify claimed downstream state | `VERIFY_ONLY`, then execute any newly authorized matrix action. A reply wake must never be acknowledged without consumption. |
 | Dropped or unroutable communication | `TRANSPORT_FAILURE` | verify alternate durable delivery | `PM_CORRECTION` only if still unhandled; otherwise close as duplicate delivery. |

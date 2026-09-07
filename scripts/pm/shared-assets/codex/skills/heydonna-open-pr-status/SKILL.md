@@ -1,9 +1,9 @@
 ---
 name: heydonna-open-pr-status
-description: Reconcile every HeyDonna OPEN PR into one executable four-state release lane.
+description: Reconcile affected HeyDonna OPEN PR observations into the applicable release lane without fabricating motion.
 ---
 
-# HeyDonna Open-PR Four-State Reconciliation
+# HeyDonna Open-PR Activity Reconciliation
 
 ## Routine ownership and escalation
 
@@ -13,18 +13,26 @@ executes routine technical and release work. Choosing among eligible actions
 is not itself a Rajiv escalation; reserved escalation classes remain governed
 by the shared contract.
 
-This is the PR Merges release-owner audit and action contract. On every wake,
-enumerate every OPEN PR at its exact 40-character head and finish each row in
-exactly one state:
+This is the PR Merges release-owner audit and action contract. On a normal wake,
+inspect only the affected PR/head tuple named by the wake. A full portfolio
+snapshot is a deliberate backstop or an explicit request, not a per-wake
+requirement. Report the truthful observation for each tuple using the applicable
+state:
 
 - `CI_E2E_IN_PROGRESS`
 - `CAPTURE_IN_PROGRESS`
 - `REPRO_REWORK_IN_PROGRESS`
 - `REPRO_REWORK_QUEUED`
+- `HELD`
+- `BLOCKED`
+- `WAITING`
+- `COMPLETED`
 
-`ACTION_REQUIRED`, `UNKNOWN`, `awaiting review`, and similar labels are not
-terminal states. They may be internal `INVALID_TRANSITION` diagnostics only;
-before the wake completes, execute or durably route the smallest next edge.
+`ACTION_REQUIRED`, `UNKNOWN`, `awaiting review`, and similar labels are
+diagnostics, not proof of motion. Do not fabricate a queued rework edge or an
+executable owner to make a row fit a release lane. When no active lane is
+proven, report the exact blocker, owner, next action, and wake; preserve a
+truthful hold or wait until an authorized edge exists.
 
 ## Authority and safety
 
@@ -65,27 +73,14 @@ ordinary review path.
 4. Preserve `REPRO_REWORK_QUEUED` only for a durable exact-head owner/queue
    receipt naming the next owner and executable wake.
 
-If no protected state is proven, finish the transition in this same wake:
-
-- dual-green exact-head CI/E2E plus review/product gates clear: run the
-  canonical guard and head-pinned merge;
-- completed review/capture/rework with no active lane: merge current main into
-  the PR branch non-force, resolve a concrete conflict/product blocker through
-  one owned or queued rework receipt, otherwise admit one genuine exact-head
-  CI/E2E pair;
-- failed CI/E2E/capture: consume and classify the failure once, then create or
-  resume exactly one active or durable queued repro/rework packet; never blind
-  rerun;
-- exact-head fixture identity miss: begin one duplicate-fenced capture lane;
-- process-only refusal: use the existing guarded one-refusal direct fallback
-  once, then read back its terminal edge.
-
-An unresolved merge conflict, product/data/security blocker, or unavailable
-authoritative owner must become `REPRO_REWORK_IN_PROGRESS` or
-`REPRO_REWORK_QUEUED` with one owner, exact PR/head, attempted edge, literal
-blocker, and executable wake. A typed invariant breach is emitted if the row
-still cannot satisfy one of the four states; never emit a fifth state or an
-unowned waiting row.
+If no protected state is proven, preserve the observation and route only the
+smallest already-authorized next edge: merge only after the exact current-head
+guard is green, classify one failed run before any retry, capture only after an
+exact identity miss, and send concrete rework only to an existing owner with a
+durable receipt. A merge conflict, product/data/security blocker, or missing
+owner remains `BLOCKED` or `HELD`; it must not be converted into invented
+queued work. Never blind-rerun, duplicate an active lane, or treat a label,
+projection, or prose promise as motion.
 
 Identical snapshots are idempotent: do not repeat a run, capture, owner, or
 merge whose exact tuple is already active or durably recorded.
@@ -128,9 +123,10 @@ label-only, or owner-only receipt is a terminal continuation.
 
 ## Hourly terminal
 
-Return a post-action `OPEN_PR_FOUR_STATE_RECONCILIATION` receipt containing
-every open PR, exact head, final state, edge taken, owner/run, and blocker (if
-the edge was safely converted to queued rework). The automation is read-only
+Return a post-action `OPEN_PR_ACTIVITY_RECONCILIATION` receipt for the affected
+tuple(s), containing exact head, truthful state, edge taken (if any), owner/run,
+and blocker. A full portfolio receipt is emitted only for an explicit request
+or the scheduled backstop. The automation is read-only
 with respect to product/customer data, but the PR Merges owner may invoke only
 the existing guarded release, assignment, capture, and merge boundaries above.
 This hourly audit is a continuity backstop only: it repairs one PM-terminal

@@ -21,7 +21,10 @@ CTO_SKILLS = (
     "codex/skills/heydonna-open-pr-status/SKILL.md",
 )
 
+WAKE_SOP = ASSETS / "codex/monitors/heydonna-pm-chat/WAKE_SOP.md"
+
 CHANGED_ASSETS = PM_SKILLS + CTO_SKILLS + (
+    "codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
     "codex/skills/heydonna-slack-postback/SKILL.md",
     "codex/skills/_shared/release-conveyor-contract.md",
 )
@@ -66,6 +69,43 @@ class RajivDecisionPolicyTest(unittest.TestCase):
         self.assertIn("routine scheduling", contract)
         self.assertIn("choosing among eligible actions is not a process-policy change", contract)
         self.assertNotIn("stop before mutation and dm rajiv", contract)
+
+    def test_open_pr_reconciliation_reports_truthful_tuple_states(self) -> None:
+        text = (ASSETS / "codex/skills/heydonna-open-pr-status/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        normalized = " ".join(text.split()).lower()
+        for state in ("held", "blocked", "waiting", "completed"):
+            self.assertIn(state, normalized)
+        self.assertIn("affected pr/head tuple", normalized)
+        self.assertIn("full portfolio", normalized)
+        self.assertIn("do not fabricate a queued rework edge", normalized)
+        self.assertNotIn("one executable four-state release lane", normalized)
+        self.assertNotIn("enumerate every open pr", normalized)
+
+    def test_wake_uses_relevant_thread_evidence_and_numbered_slot_boundary(self) -> None:
+        text = WAKE_SOP.read_text(encoding="utf-8")
+        normalized = " ".join(text.split()).lower()
+        self.assertIn("source decision and subsequent relevant replies", normalized)
+        self.assertIn("ordinary app/test implementation", normalized)
+        self.assertIn("pm to a numbered slot", normalized)
+        self.assertIn("bounded exception/hotfix", normalized)
+        self.assertIn("real required `pull_request` workflows", normalized)
+        self.assertIn("head-pinned merge", normalized)
+        self.assertNotIn("read every reply through the newest returned", normalized)
+        self.assertNotIn("rescues may implement the non-e2e correction", normalized)
+
+    def test_safety_scenarios_remain_explicit(self) -> None:
+        normalized = " ".join(WAKE_SOP.read_text(encoding="utf-8").split()).lower()
+        for safety in (
+            "auth",
+            "data/security",
+            "destructive",
+            "red p0",
+            "single-flight",
+            "do not blind-rerun",
+        ):
+            self.assertIn(safety, normalized)
 
     def test_slack_skill_routes_only_material_decisions(self) -> None:
         text = (ASSETS / "codex/skills/heydonna-slack-postback/SKILL.md").read_text(

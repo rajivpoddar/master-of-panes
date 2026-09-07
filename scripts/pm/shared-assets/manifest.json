@@ -616,7 +616,7 @@
     {
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
       "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-pm-chat/WAKE_SOP.md",
-      "sha256": "e31053a83f8829c20ac48da286ec0c99a23065a2941a450d53f485f99810da9b",
+      "sha256": "009f84bfcab289c5818dffbd1807449d137db462be7673d64230398325a322a2",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
       "dependency_status": "closed",
@@ -679,7 +679,7 @@
     {
       "source_path": "codex/skills/heydonna-open-pr-status/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",
-      "sha256": "ae6eb12839342fab3ed92be7419b83897527f2c9b5810c84a1adfe999e14356a",
+      "sha256": "ae89c7e25c2a422972e921aa32e1f7c1060260c8772886455a6aabd123a0044c",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",
