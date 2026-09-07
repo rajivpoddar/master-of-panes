@@ -27,7 +27,44 @@ ERRORS=$(printf '%s' "$PY_OUT" | jq -r '.errors | join(",")')
 # The parser's existing control-plane classifier is the authority. Do not
 # duplicate its result into a PM obligation and do not require product ICL
 # ceremony for an internal reimplementation issue.
-if printf '%s' "$ERRORS" | grep -q 'internal_control_plane_issue_forbidden'; then
+if printf '%s' "$ERRORS" | grep -q 'internal_control_plane_issue_forbidden' \
+   && ! printf '%s' "$ERRORS" | grep -Eq 'body_file_unreadable_at_hook_time|stdin_body_file_requires_named_file|complex_body_requires_named_file'; then
+  # The parser may stop at the first internal issue and never inspect a later
+  # mutation. Reuse its mutation grammar to require that the exempted command
+  # contains exactly one issue create/edit, and do not treat an unreadable
+  # body file as proof of an internal issue.
+  MUTATION_INFO=$(printf '%s' "$CMD" | python3 -c '
+import re, sys
+import os
+import shlex
+pattern = re.compile(r"(?<![A-Za-z0-9_.-])(?:/[^\s;&|()]+/)?gh\s+issue\s+(?:create|edit)\b")
+command = sys.stdin.read().replace("\\\n", " ")
+try:
+    parts = shlex.split(command, posix=True)
+except ValueError:
+    parts = []
+body_files = []
+for index, part in enumerate(parts):
+    if part == "--body-file" and index + 1 < len(parts):
+        body_files.append(parts[index + 1])
+    elif part.startswith("--body-file="):
+        body_files.append(part.split("=", 1)[1])
+unsafe_body = any(
+    path == "-"
+    or not os.path.isfile(os.path.expanduser(path))
+    or not os.access(os.path.expanduser(path), os.R_OK)
+    for path in body_files
+)
+print(len(pattern.findall(command)), "unsafe" if unsafe_body else "safe")
+' 2>/dev/null || printf '0')
+  MUTATION_COUNT=${MUTATION_INFO%% *}
+  BODY_STATUS=${MUTATION_INFO#* }
+  if [ "$MUTATION_COUNT" -ne 1 ] || [ "$BODY_STATUS" != "safe" ]; then
+    cat <<EOF
+{"decision":"block","message":"BLOCKED: internal issue admission requires exactly one gh issue create/edit mutation with a readable named body; compound, ambiguous, or unreadable-body commands remain refused before the internal exemption."}
+EOF
+    exit 0
+  fi
   exit 0
 fi
 

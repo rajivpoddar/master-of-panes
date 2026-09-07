@@ -12,6 +12,7 @@ ASSETS = ROOT / "scripts" / "pm" / "shared-assets" / "claude"
 PM_CONTEXT = ASSETS / "hooks" / "pm-context-injector.sh"
 LEDGER_GUARD = ASSETS / "hooks" / "block-invalid-issue-contract-ledger.sh"
 CLEAR_GUARD = ASSETS / "hooks" / "block-raw-clear-outside-mop.sh"
+REAL_LEDGER_PARSER = Path("/Users/rajiv/.claude/scripts/issue-contract-ledger-hook.py")
 
 
 def run_hook(path: Path, payload: dict[str, object], env: dict[str, str] | None = None):
@@ -73,9 +74,12 @@ def test_internal_issue_skips_product_ledger_noise_but_external_stays_blocked() 
         parser = Path(tmp) / "parser.py"
         parser.write_text(
             "import json, os\n"
-            "print(json.dumps({'block': True, 'target': 'x', 'errors': "
-            "['internal_control_plane_issue_forbidden'] if 'control-plane' in "
-            "os.environ.get('CMD_TEXT', '') else ['invalid_ledger']}))\n",
+            "cmd = os.environ.get('CMD_TEXT', '')\n"
+            "errors = (['internal_control_plane_issue_forbidden', "
+            "'body_file_unreadable_at_hook_time'] if 'unreadable' in cmd "
+            "else ['internal_control_plane_issue_forbidden'] if "
+            "'control-plane' in cmd else ['invalid_ledger'])\n"
+            "print(json.dumps({'block': True, 'target': 'x', 'errors': errors}))\n",
             encoding="utf-8",
         )
         internal = run_hook(
@@ -96,10 +100,38 @@ def test_internal_issue_skips_product_ledger_noise_but_external_stays_blocked() 
             },
             {"ISSUE_CONTRACT_LEDGER_HOOK_PARSER": str(parser)},
         )
+        compound = run_hook(
+            LEDGER_GUARD,
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": (
+                        "gh issue create --title 'control-plane reimplementation' "
+                        "&& gh issue create --title 'customer bug'"
+                    )
+                },
+            },
+            {"ISSUE_CONTRACT_LEDGER_HOOK_PARSER": str(parser)},
+        )
         assert internal.returncode == 0
         assert internal.stdout == ""
         assert external.returncode == 0
         assert '"decision":"block"' in external.stdout
+        assert compound.returncode == 0
+        assert '"decision":"block"' in compound.stdout
+        assert "exactly one gh issue create/edit" in compound.stdout
+        unreadable = run_hook(
+            LEDGER_GUARD,
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "gh issue create --title 'unreadable control-plane body'"
+                },
+            },
+            {"ISSUE_CONTRACT_LEDGER_HOOK_PARSER": str(parser)},
+        )
+        assert unreadable.returncode == 0
+        assert '"decision":"block"' in unreadable.stdout
 
 
 def test_clear_word_in_message_is_allowed_but_lifecycle_command_is_blocked() -> None:
@@ -120,3 +152,41 @@ def test_clear_word_in_message_is_allowed_but_lifecycle_command_is_blocked() -> 
     assert prose.returncode == lifecycle.returncode == 0
     assert prose.stdout == ""
     assert '"decision":"block"' in lifecycle.stdout
+
+
+def test_real_parser_compound_internal_and_unreadable_body_stay_blocked() -> None:
+    assert REAL_LEDGER_PARSER.is_file()
+    compound = run_hook(
+        LEDGER_GUARD,
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    "gh issue create --repo heydonna-app/heydonna-app "
+                    "--title 'control-plane reimplementation' "
+                    "&& gh issue create --repo heydonna-app/heydonna-app "
+                    "--title 'customer bug'"
+                )
+            },
+        },
+        {"ISSUE_CONTRACT_LEDGER_HOOK_PARSER": str(REAL_LEDGER_PARSER)},
+    )
+    unreadable = run_hook(
+        LEDGER_GUARD,
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    "gh issue create --repo heydonna-app/heydonna-app "
+                    "--title 'control-plane reimplementation' "
+                    "--body-file /tmp/pm-guard-body-does-not-exist"
+                )
+            },
+        },
+        {"ISSUE_CONTRACT_LEDGER_HOOK_PARSER": str(REAL_LEDGER_PARSER)},
+    )
+    assert compound.returncode == unreadable.returncode == 0
+    assert '"decision":"block"' in compound.stdout
+    assert "exactly one gh issue create/edit" in compound.stdout
+    assert '"decision":"block"' in unreadable.stdout
+    assert "readable named body" in unreadable.stdout

@@ -102,7 +102,7 @@
     {
       "source_path": "claude/hooks/block-invalid-issue-contract-ledger.sh",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/block-invalid-issue-contract-ledger.sh",
-      "sha256": "4dd73c3f99d4b39d4100d6d27e500106b7bbf48631435b6b78c06bd3148fe730",
+      "sha256": "841ea114daa0e4afd7ee48fb3c3c64a7c3b8d3020071391f75fdf66a31a33c0d",
       "mode": 493,
       "ownership_class": "shared-claude-pm-issue-admission-guard",
       "dependency_status": "closed",
