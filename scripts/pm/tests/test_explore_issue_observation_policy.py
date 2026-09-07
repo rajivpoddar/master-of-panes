@@ -55,6 +55,15 @@ class ExploreIssueObservationPolicyTests(unittest.TestCase):
         self.assertIn("for `INVESTIGATION`,\n   say \"Filed #NNN — confirmed observation; cause not yet proven\"", self.text)
         self.assertIn("for `FIX`/`CONFIRMED`,\n   say \"Filed #NNN — [summary]. Codex validated the diagnosis.\"", self.text)
 
+    def test_composed_export_observation_does_not_require_acquisition_or_restart(self) -> None:
+        self.assertIn("### Mandatory only for separately authorized causal/FIX export/formatting/pipeline work:", self.text)
+        self.assertIn("These checks do not gate filing a confirmed observation as `INVESTIGATION`", self.text)
+        self.assertRegex(self.text, r"Without\s+customer-data authority")
+        self.assertIn("do not download customer JSON", self.text)
+        self.assertIn("If Codex says MISDIAGNOSED, discard only the causal diagnosis", self.text)
+        self.assertIn("continue as `INVESTIGATION` with UNKNOWN/HYPOTHESIS cause", self.text)
+        self.assertIn("truly UNCONFIRMED observations remain blocked", self.text)
+
     def test_source_manifest_mapping_is_exact(self) -> None:
         relative = "codex/skills/explore-issue/SKILL.md"
         entries = [entry for entry in self.manifest["entries"] if entry["source_path"] == relative]

@@ -601,7 +601,7 @@
     {
       "source_path": "codex/skills/explore-issue/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/explore-issue/SKILL.md",
-      "sha256": "ece9fb2f725a079b6def209c3191502f356ac5c23f81f7fb3314ba0d3528ab84",
+      "sha256": "1fdad9fe1a825487b625563d22aaf8ee09b35331a11126fdd0f524ec6295ecd4",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",

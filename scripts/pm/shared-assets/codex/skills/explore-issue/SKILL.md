@@ -384,7 +384,9 @@ When the background agent finishes:
 - **Never substitute your own scenario for the reporter's** — use Rajiv's exact words in
   the issue.
 - **Never file without checking existing issues** — Phase 1 step (e) prevents duplicates.
-- **If Codex says MISDIAGNOSED, restart** — don't proceed with a known-bad diagnosis.
+- **If Codex says MISDIAGNOSED, discard only the causal diagnosis.** If the observation
+  remains CONFIRMED, continue as `INVESTIGATION` with UNKNOWN/HYPOTHESIS cause and file
+  without delaying for another probe; truly UNCONFIRMED observations remain blocked.
 - **Never resolve RESOLVED_NO_ISSUE without a typed disposition** — the no-issue path
   requires an explicit Rajiv redirect to a verified direct-main fix, never silence.
 
@@ -399,7 +401,11 @@ When the background agent finishes:
   blocked ALL customer-origin intake. The durable source-keyed obligation + one-use
   permit replaced it; stop is non-blocking with a valid obligation.
 
-### Mandatory for export/formatting/pipeline bugs:
+### Mandatory only for separately authorized causal/FIX export/formatting/pipeline work:
+
+These checks do not gate filing a confirmed observation as `INVESTIGATION`. Without
+customer-data authority, preserve the evidence limit and do not download customer JSON
+or DOCX, fetch R2 content, or require a real-data fixture merely to record the issue.
 
 1. **R2 DATA INSPECTION** — Download the actual stored content and exported output
    from R2. If data survives a stage → that stage is NOT the root cause.
