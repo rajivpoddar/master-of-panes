@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import importlib.util
+import io
 import os
 import subprocess
 import tempfile
@@ -12,6 +15,7 @@ ROOT = Path(__file__).parents[3]
 SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 HOOK = SHARED / "claude" / "hooks" / "pm-context-injector.sh"
 SOP = SHARED / "claude" / "skills" / "pm-message-to-action" / "SKILL.md"
+INSTALLED_CI_SUCCESS = Path("/Users/rajiv/.claude/scripts/ci-success-reconciliation.py")
 
 
 class PMContextInjectorSOPTests(unittest.TestCase):
@@ -77,6 +81,90 @@ class PMContextInjectorSOPTests(unittest.TestCase):
         source = HOOK.read_text(encoding="utf-8")
         for forbidden in ("grep", "pm-ops", "obligation-upsert", "mkdir", "Skill(", "REMINDER=", "/tmp/", ">>"):
             self.assertNotIn(forbidden, source)
+
+    def test_existing_ci_success_materializer_initializes_then_claims_without_sentinel(self) -> None:
+        self.assertTrue(INSTALLED_CI_SUCCESS.is_file())
+        spec = importlib.util.spec_from_file_location("installed_ci_success", INSTALLED_CI_SUCCESS)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        head = "a" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            args = type("Args", (), {
+                "sentinel_dir": directory,
+                "guard": "/unused/guard",
+                "guard_cwd": directory,
+                "gh_bin": "gh",
+                "repo": "heydonna-app/heydonna-app",
+                "pr": 7655,
+                "max_checks": 1,
+                "marker_dir": directory,
+                "pm_ops": "/unused/pm-ops",
+                "merge_ready_alert": "/unused/alert",
+            })()
+            module.open_candidates = lambda _gh, _repo: [{
+                "number": args.pr,
+                "headRefOid": head,
+                "labels": [{"name": "pm-state:pm-review-pending"}],
+                "statusCheckRollup": [],
+            }]
+            module.exact_green = lambda _guard, _pr, cwd: (head, 123, 456, "exact-head-green")
+            module.upsert_ci_reconcile_obligation = lambda *_args, **_kwargs: None
+            module.promote_to_merge_ready = lambda *_args, **_kwargs: (False, "not a promotion fixture")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(module.materialize(args), 0)
+            sentinel = Path(directory) / "pm-required-ci-reconcile-7655.json"
+            self.assertTrue(sentinel.is_file())
+            materialized = json.loads(sentinel.read_text(encoding="utf-8"))
+            self.assertEqual(materialized["status"], "pending")
+            self.assertEqual(materialized["head_sha"], head)
+            self.assertEqual(materialized["ci_run_id"], "123")
+            self.assertEqual(materialized["e2e_run_id"], "456")
+
+            module.current_head = lambda _gh, _repo, _pr: head
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(module.claim(args), 0)
+            claimed = json.loads(sentinel.read_text(encoding="utf-8"))
+            self.assertEqual(claimed["status"], "in_progress")
+            self.assertEqual(claimed["head_sha"], head)
+
+    def test_existing_ci_success_materializer_duplicate_and_head_mismatch_controls(self) -> None:
+        self.assertTrue(INSTALLED_CI_SUCCESS.is_file())
+        spec = importlib.util.spec_from_file_location("installed_ci_success_controls", INSTALLED_CI_SUCCESS)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        head = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            args = type("Args", (), {
+                "sentinel_dir": directory,
+                "guard": "/unused/guard",
+                "guard_cwd": directory,
+                "gh_bin": "gh",
+                "repo": "heydonna-app/heydonna-app",
+                "pr": 7655,
+                "max_checks": 1,
+                "marker_dir": directory,
+                "pm_ops": "/unused/pm-ops",
+                "merge_ready_alert": "/unused/alert",
+            })()
+            sentinel = Path(directory) / "pm-required-ci-reconcile-7655.json"
+            sentinel.write_text(json.dumps({"status": "pending", "head_sha": head}) + "\n", encoding="utf-8")
+            module.open_candidates = lambda _gh, _repo: [{"number": args.pr, "headRefOid": head, "labels": [], "statusCheckRollup": []}]
+            module.upsert_ci_reconcile_obligation = lambda *_args, **_kwargs: None
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(module.materialize(args), 0)
+            self.assertEqual(json.loads(sentinel.read_text(encoding="utf-8"))["status"], "pending")
+            module.current_head = lambda _gh, _repo, _pr: "c" * 40
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(module.claim(args), 0)
+            mismatch = json.loads(sentinel.read_text(encoding="utf-8"))
+            self.assertEqual(mismatch["status"], "superseded")
+            self.assertEqual(mismatch["resolution"], "head_drift")
 
 
 if __name__ == "__main__":

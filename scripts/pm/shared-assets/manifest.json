@@ -380,7 +380,7 @@
     {
       "source_path": "claude/skills/pm-message-to-action/SKILL.md",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pm-message-to-action/SKILL.md",
-      "sha256": "d2600ef3d9651e1efbc0a9d354ba601ad8992c2d667229a7699c44ee4e36cd63",
+      "sha256": "50e077633de90f0ab75fabe8123864f1a18448d3316f9b172c2f3659d2d6678c",
       "mode": 420,
       "ownership_class": "shared-claude-pm-message-action-sop",
       "dependency_status": "closed",
