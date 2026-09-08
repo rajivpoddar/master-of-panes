@@ -534,6 +534,96 @@ cleanup_receipt_path = Path(
 )
 cleanup_receipts = {}
 cleanup_journal_error = ""
+
+
+def cleanup_receipt_identity(receipt):
+    """Return a syntactic PR/head alias without trusting the receipt yet."""
+
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("request"), dict):
+        return None
+    request = receipt["request"]
+    try:
+        pr_number = int(request.get("pr"))
+    except (TypeError, ValueError):
+        return None
+    head = str(request.get("head") or "").strip().lower()
+    if pr_number <= 0 or re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        return None
+    return pr_number, head
+
+
+def validate_cleanup_receipt(key, receipt):
+    """Validate the existing writer's record before it can suppress closeout."""
+
+    if not isinstance(key, str) or not re.fullmatch(r"mop-cleanup:[0-9a-f]{64}", key):
+        return False, "receipt_key_invalid"
+    if not isinstance(receipt, dict):
+        return False, "receipt_not_an_object"
+    request = receipt.get("request")
+    if not isinstance(request, dict):
+        return False, "receipt_request_missing"
+    required = {"repository", "pr", "issue", "head", "merge_commit"}
+    if not required.issubset(request):
+        return False, "receipt_request_incomplete"
+    if request.get("repository") != gh_repo:
+        return False, "receipt_repository_mismatch"
+    try:
+        pr_number = int(request.get("pr"))
+    except (TypeError, ValueError):
+        return False, "receipt_pr_invalid"
+    if pr_number <= 0:
+        return False, "receipt_pr_invalid"
+    head = str(request.get("head") or "").strip().lower()
+    merge_commit = str(request.get("merge_commit") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        return False, "receipt_head_invalid"
+    if re.fullmatch(r"[0-9a-f]{40}", merge_commit) is None:
+        return False, "receipt_merge_commit_invalid"
+    mode = receipt.get("cleanup_mode")
+    if mode not in {"linked_issue", "merged_pr_issue_less"}:
+        return False, "receipt_mode_invalid"
+    if mode == "merged_pr_issue_less":
+        if request.get("issue") is not None or receipt.get("thread_ts") is not None:
+            return False, "receipt_issue_less_shape_invalid"
+    else:
+        try:
+            if int(request.get("issue")) <= 0:
+                return False, "receipt_issue_invalid"
+        except (TypeError, ValueError):
+            return False, "receipt_issue_invalid"
+        if not isinstance(receipt.get("thread_ts"), str) or not receipt["thread_ts"].strip():
+            return False, "receipt_thread_missing"
+    identity = {
+        field: request[field]
+        for field in ("repository", "pr", "issue", "head", "merge_commit")
+    }
+    expected_keys = {
+        "mop-cleanup:" + hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    }
+    if receipt.get("thread_ts") is not None:
+        identity["thread_ts"] = receipt["thread_ts"]
+        expected_keys.add(
+            "mop-cleanup:" + hashlib.sha256(
+                json.dumps(identity, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            ).hexdigest()
+        )
+    if key not in expected_keys:
+        return False, "receipt_key_identity_mismatch"
+    if receipt.get("status") not in {"prepared", "processing", "completed", "ambiguous"}:
+        return False, "receipt_status_invalid"
+    if not isinstance(receipt.get("plan"), list):
+        return False, "receipt_plan_invalid"
+    if not isinstance(receipt.get("steps"), dict):
+        return False, "receipt_steps_invalid"
+    if not isinstance(receipt.get("ambiguous_steps"), list):
+        return False, "receipt_ambiguity_invalid"
+    if not isinstance(receipt.get("payload_sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", receipt["payload_sha256"].lower()) is None:
+        return False, "receipt_payload_digest_invalid"
+    return True, ""
+
+
 try:
     if cleanup_receipt_path.is_file():
         raw_cleanup_receipts = json.loads(
@@ -541,32 +631,19 @@ try:
         )
         if not isinstance(raw_cleanup_receipts, dict):
             raise ValueError("cleanup journal must be an object")
-        for receipt in raw_cleanup_receipts.values():
-            if not isinstance(receipt, dict):
+        for key, receipt in raw_cleanup_receipts.items():
+            identity = cleanup_receipt_identity(receipt)
+            if identity is None:
                 continue
-            request = receipt.get("request")
-            if not isinstance(request, dict):
-                continue
-            try:
-                pr_number = int(request.get("pr"))
-            except (TypeError, ValueError):
-                continue
-            head = str(request.get("head") or "").strip().lower()
-            if pr_number <= 0 or not head:
-                continue
-            identity = (pr_number, head)
-            prior = cleanup_receipts.get(identity)
-            if prior is None:
-                cleanup_receipts[identity] = {
+            valid, reason = validate_cleanup_receipt(key, receipt)
+            cleanup_receipts.setdefault(identity, []).append(
+                {
+                    "valid": valid,
+                    "reason": reason,
                     "status": str(receipt.get("status") or "unknown"),
                     "started_at": str(receipt.get("started_at") or ""),
-                    "count": 1,
                 }
-            else:
-                # More than one durable receipt for one current PR/head is
-                # ambiguous.  Never turn that ambiguity into a new start.
-                prior["count"] += 1
-                prior["ambiguous"] = True
+            )
 except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
     cleanup_journal_error = f"cleanup journal unavailable: {exc}"
 
@@ -577,11 +654,12 @@ def cleanup_state_for(pr_number, head):
     if cleanup_journal_error:
         return {"state": "unavailable"}
     identity = (int(pr_number), str(head or "").strip().lower())
-    record = cleanup_receipts.get(identity)
-    if not record:
+    records = cleanup_receipts.get(identity) or []
+    if not records:
         return {"state": "missing"}
-    if record.get("ambiguous"):
-        return {"state": "uncertain"}
+    if len(records) != 1 or not records[0].get("valid"):
+        return {"state": "uncertain", "reason": records[0].get("reason", "receipt_ambiguous")}
+    record = records[0]
     status = record.get("status")
     if status == "completed":
         return {"state": "completed"}

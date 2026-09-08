@@ -380,7 +380,7 @@
     {
       "source_path": "claude/skills/pr-state-sweep/scripts/sweep.sh",
       "canonical_target": "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh",
-      "sha256": "3832bb5fc7d78173cc87073051910c0340a786252cf3c723a37ec59bc411ff9c",
+      "sha256": "99a6d391c8b8cf3554fe711c3ed2b7e6d118b889856915465789ad810cea5de7",
       "mode": 493,
       "ownership_class": "shared-claude-pr-cleanup-closeout-consumer",
       "dependency_status": "closed",

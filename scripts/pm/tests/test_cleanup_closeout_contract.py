@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import stat
@@ -124,11 +125,22 @@ class CleanupCloseoutContractTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         return completed.stdout
 
-    def write_status(self, status: str) -> None:
+    def write_status(self, status: str, started_at: str | None = None) -> None:
         data = json.loads(self.receipt.read_text(encoding="utf-8"))
         self.assertEqual(len(data), 1)
-        next(iter(data.values()))["status"] = status
+        record = next(iter(data.values()))
+        record["status"] = status
+        if started_at is not None:
+            record["started_at"] = started_at
         self.receipt.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def journal_key(request: dict, thread_ts: str | None = None) -> str:
+        identity = {field: request[field] for field in ("repository", "pr", "issue", "head", "merge_commit")}
+        if thread_ts is not None:
+            identity["thread_ts"] = thread_ts
+        payload = json.dumps(identity, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        return "mop-cleanup:" + hashlib.sha256(payload).hexdigest()
 
     def test_installed_baseline_false_miss_and_current_journal_silence(self) -> None:
         baseline = self.sweep(OLD_SWEEP)
@@ -158,6 +170,10 @@ class CleanupCloseoutContractTests(unittest.TestCase):
         in_progress = self.sweep(SWEEP)
         self.assertNotIn("PR_CLEANUP_CLOSEOUT_REQUIRED PR#7655", in_progress)
 
+        self.write_status("processing", "2026-09-07T00:00:00Z")
+        overdue = self.sweep(SWEEP)
+        self.assertIn("reason=cleanup_started_over_15m", overdue)
+
     def test_uncertain_and_missing_current_head_remain_fail_closed(self) -> None:
         writer = load_writer()
         writer.run(
@@ -180,6 +196,66 @@ class CleanupCloseoutContractTests(unittest.TestCase):
         missing = self.sweep(SWEEP)
         self.assertIn("PR_CLEANUP_CLOSEOUT_REQUIRED PR#7655", missing)
         self.assertIn("merged_cleanup_pending_without_start_over_15m", missing)
+
+    def test_wrong_repo_malformed_stale_and_duplicate_aliases_are_uncertain(self) -> None:
+        request = {
+            "repository": "heydonna-app/heydonna-app",
+            "pr": PR,
+            "issue": None,
+            "head": HEAD,
+            "merge_commit": MERGE_COMMIT,
+        }
+        writer = load_writer()
+        writer.run(
+            {**request, "cleanup_mode": "merged_pr_issue_less"},
+            receipt_path=self.receipt,
+            external=FakeCleanupExternal(),
+        )
+        data = json.loads(self.receipt.read_text(encoding="utf-8"))
+
+        wrong_repo = json.loads(json.dumps(data))
+        next(iter(wrong_repo.values()))["request"]["repository"] = "other/repo"
+        self.receipt.write_text(json.dumps(wrong_repo) + "\n", encoding="utf-8")
+        self.assertIn("reason=cleanup_current_head_uncertain", self.sweep(SWEEP))
+
+        malformed = next(iter(data))
+        self.receipt.write_text(
+            json.dumps({malformed: {"status": "completed", "request": {"pr": PR, "head": HEAD}}}) + "\n",
+            encoding="utf-8",
+        )
+        self.assertIn("reason=cleanup_current_head_uncertain", self.sweep(SWEEP))
+
+        stale_request = {**request, "head": "c" * 40}
+        stale_key = self.journal_key(stale_request)
+        stale_record = next(iter(data.values()))
+        stale_record["request"] = stale_request
+        self.receipt.write_text(json.dumps({stale_key: stale_record}) + "\n", encoding="utf-8")
+        stale = self.sweep(SWEEP)
+        self.assertIn("merged_cleanup_pending_without_start_over_15m", stale)
+
+        linked_request = {**request, "issue": 123}
+        linked_record = {
+            "status": "completed",
+            "request": linked_request,
+            "cleanup_mode": "linked_issue",
+            "thread_ts": "123.456",
+            "payload_sha256": "0" * 64,
+            "plan": [],
+            "steps": {},
+            "ambiguous_steps": [],
+        }
+        self.receipt.write_text(
+            json.dumps(
+                {
+                    self.journal_key(linked_request): linked_record,
+                    self.journal_key(linked_request, "123.456"): linked_record,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        duplicate = self.sweep(SWEEP)
+        self.assertIn("reason=cleanup_current_head_uncertain", duplicate)
 
     def test_manifest_maps_both_current_cleanup_boundaries(self) -> None:
         manifest = json.loads((SHARED / "manifest.json").read_text(encoding="utf-8"))
