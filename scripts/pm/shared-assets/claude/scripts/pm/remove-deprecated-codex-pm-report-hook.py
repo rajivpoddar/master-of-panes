@@ -50,6 +50,39 @@ def _same_metadata(path: Path, mode: int, uid: int, gid: int) -> bool:
     )
 
 
+def _final_target_fence(path: Path, original: bytes, original_stat: os.stat_result) -> None:
+    """Revalidate the pathname immediately before replacing it."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeError("settings_final_target_unavailable") from exc
+    try:
+        current_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(current_stat.st_mode)
+            or current_stat.st_dev != original_stat.st_dev
+            or current_stat.st_ino != original_stat.st_ino
+            or stat.S_IMODE(current_stat.st_mode) != stat.S_IMODE(original_stat.st_mode)
+            or current_stat.st_uid != original_stat.st_uid
+            or current_stat.st_gid != original_stat.st_gid
+        ):
+            raise RuntimeError("settings_final_target_drift")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        current = bytearray()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            current.extend(chunk)
+        if bytes(current) != original:
+            raise RuntimeError("settings_final_target_drift")
+    finally:
+        os.close(descriptor)
+
+
 def _write_replacement(path: Path, payload: bytes, mode: int, uid: int, gid: int) -> None:
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.retire.", dir=path.parent)
     temporary = Path(temporary_name)
@@ -91,6 +124,8 @@ def _atomic_replace(
         # still contains exactly our candidate bytes. Never overwrite a drifted
         # concurrent edit while attempting the narrow rollback.
         try:
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError("post-replace target drifted during rollback")
             current = path.read_bytes()
         except OSError:
             raise
@@ -141,6 +176,7 @@ def main() -> int:
 
         payload = (json.dumps(updated, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
         try:
+            _final_target_fence(path, before, before_stat)
             _atomic_replace(
                 path,
                 payload,

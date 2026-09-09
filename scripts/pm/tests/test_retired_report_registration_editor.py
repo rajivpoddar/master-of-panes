@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -7,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -18,6 +20,13 @@ DEPRECATED = (
 
 
 class RetiredReportRegistrationEditorTest(unittest.TestCase):
+    @staticmethod
+    def load_helper():
+        spec = importlib.util.spec_from_file_location("retired_report_editor", HELPER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
     def run_editor(self, path, expected, *extra):
         return subprocess.run(
             [sys.executable, str(HELPER), "--settings", str(path), "--expected-sha256", expected, *extra],
@@ -81,6 +90,48 @@ class RetiredReportRegistrationEditorTest(unittest.TestCase):
             count_drift = self.run_editor(path, hashlib.sha256(before).hexdigest())
             self.assertNotEqual(count_drift.returncode, 0)
             self.assertEqual(path.read_bytes(), before)
+
+    def test_atomic_replacement_after_initial_read_refuses_without_overwrite(self):
+        module = self.load_helper()
+        fixture = {"hooks": [{"command": DEPRECATED}, {"command": DEPRECATED}]}
+        replacement = {"hooks": [{"command": "unrelated-current-settings"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "settings.json"
+            path.write_text(json.dumps(fixture) + "\n")
+            before = path.read_bytes()
+            original_fence = module._final_target_fence
+
+            def replace_then_fence(target, original, original_stat):
+                target.write_text(json.dumps(replacement) + "\n")
+                return original_fence(target, original, original_stat)
+
+            module._final_target_fence = replace_then_fence
+            argv = ["editor", "--settings", str(path), "--expected-sha256", hashlib.sha256(before).hexdigest()]
+            with mock.patch.object(sys, "argv", argv):
+                result = module.main()
+            self.assertNotEqual(result, 0)
+            self.assertEqual(json.loads(path.read_text()), replacement)
+
+    def test_in_place_change_after_initial_read_refuses_without_overwrite(self):
+        module = self.load_helper()
+        fixture = {"hooks": [{"command": DEPRECATED}, {"command": DEPRECATED}]}
+        replacement = {"hooks": [{"command": "in-place-current-settings"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "settings.json"
+            path.write_text(json.dumps(fixture) + "\n")
+            before = path.read_bytes()
+            original_fence = module._final_target_fence
+
+            def mutate_then_fence(target, original, original_stat):
+                target.write_text(json.dumps(replacement) + "\n")
+                return original_fence(target, original, original_stat)
+
+            module._final_target_fence = mutate_then_fence
+            argv = ["editor", "--settings", str(path), "--expected-sha256", hashlib.sha256(before).hexdigest()]
+            with mock.patch.object(sys, "argv", argv):
+                result = module.main()
+            self.assertNotEqual(result, 0)
+            self.assertEqual(json.loads(path.read_text()), replacement)
 
 
 if __name__ == "__main__":

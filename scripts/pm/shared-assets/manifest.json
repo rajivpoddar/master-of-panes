@@ -379,7 +379,7 @@
     {
       "source_path": "claude/scripts/pm/remove-deprecated-codex-pm-report-hook.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/pm/remove-deprecated-codex-pm-report-hook.py",
-      "sha256": "90d42ac16b4fd04e8f0167dc2f1cecab8b282625430cbfb9394c39e9208d468f",
+      "sha256": "322023ac788bd5f53cd5b78577b00068ab6250f248101fd00e91ee2ff9fd472b",
       "mode": 493,
       "ownership_class": "shared-claude-retired-report-registration-editor",
       "dependency_status": "closed",
