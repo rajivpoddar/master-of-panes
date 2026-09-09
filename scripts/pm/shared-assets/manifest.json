@@ -116,6 +116,15 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/hooks/block-unverified-codex-pm-report.py",
+      "canonical_target": "/Users/rajiv/.claude/hooks/block-unverified-codex-pm-report.py",
+      "sha256": "581b5d313359ed14ebe098bc21fe9c9dd002459aeb1ed4a736ab6f45cf1f6515",
+      "mode": 493,
+      "ownership_class": "shared-claude-retired-report-compatibility-hook",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/hooks/slot-terminal-message-pm-stop.sh",
       "canonical_target": "/Users/rajiv/.claude/hooks/slot-terminal-message-pm-stop.sh",
       "sha256": "f2066a4fcc4f3c15f9d77d853c017744016708d1b292c4f4539e2543cdee0f79",
@@ -373,15 +382,6 @@
       "sha256": "18848718df161667ed3462bcec45d4fb632beba4f1a6dc5692c867c4bb36726d",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
-      "dependency_status": "closed",
-      "dependencies": []
-    },
-    {
-      "source_path": "claude/scripts/pm/remove-deprecated-codex-pm-report-hook.py",
-      "canonical_target": "/Users/rajiv/.claude/scripts/pm/remove-deprecated-codex-pm-report-hook.py",
-      "sha256": "322023ac788bd5f53cd5b78577b00068ab6250f248101fd00e91ee2ff9fd472b",
-      "mode": 493,
-      "ownership_class": "shared-claude-retired-report-registration-editor",
       "dependency_status": "closed",
       "dependencies": []
     },

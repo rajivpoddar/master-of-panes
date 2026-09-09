@@ -1,13 +1,48 @@
+import hashlib
 import json
 import pathlib
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 ASSETS = ROOT / "scripts/pm/shared-assets"
+RETIRED_REPORT_HOOK = ASSETS / "claude/hooks/block-unverified-codex-pm-report.py"
+WRAPPER = pathlib.Path("/Users/rajiv/.claude/hooks/pretooluse-reason-wrapper.sh")
 
 
 class SlotReportRetirementTest(unittest.TestCase):
+    def test_retired_report_hook_is_compatibility_allow_noop(self):
+        payload = {
+            "cwd": "/Users/rajiv/Downloads/projects/heydonna-app-3001",
+            "tool_name": "mcp__plugin_master-of-panes_mop__mop_send_to_slot",
+            "tool_input": {"slot": 0, "message": "PR #123 Codex APPROVE"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            direct = subprocess.run(
+                [sys.executable, str(RETIRED_REPORT_HOOK)],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                cwd=directory,
+                check=False,
+            )
+            wrapped = subprocess.run(
+                [str(WRAPPER), sys.executable, str(RETIRED_REPORT_HOOK)],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                cwd=directory,
+                check=False,
+            )
+            self.assertEqual(direct.returncode, 0, direct.stderr)
+            self.assertEqual(direct.stdout, "")
+            self.assertEqual(wrapped.returncode, 0, wrapped.stderr)
+            self.assertEqual(wrapped.stdout, "")
+            self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
+
     def test_active_review_consumers_use_supported_pm_delivery(self):
         files = [
             ASSETS / "claude/agents/codex-plan-reviewer.md",
@@ -37,13 +72,26 @@ class SlotReportRetirementTest(unittest.TestCase):
             entry["canonical_target"]: entry
             for entry in manifest["entries"]
             if entry.get("canonical_target") in {
+                "/Users/rajiv/.claude/hooks/block-unverified-codex-pm-report.py",
                 "/Users/rajiv/.claude/hooks/slot-terminal-message-pm-stop.sh",
                 "/Users/rajiv/.claude/agents/codex-plan-reviewer.md",
                 "/Users/rajiv/.claude/agents/codex-code-reviewer.md",
                 "/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules/99-pm-fable-review-cap.md",
             }
         }
-        self.assertEqual(len(selected), 4)
+        self.assertEqual(len(selected), 5)
+        self.assertEqual(
+            selected["/Users/rajiv/.claude/hooks/block-unverified-codex-pm-report.py"]["sha256"],
+            hashlib.sha256(RETIRED_REPORT_HOOK.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            selected["/Users/rajiv/.claude/hooks/block-unverified-codex-pm-report.py"]["mode"],
+            493,
+        )
+        self.assertNotIn(
+            "claude/scripts/pm/remove-deprecated-codex-pm-report-hook.py",
+            [entry["source_path"] for entry in manifest["entries"]],
+        )
         self.assertEqual(
             selected["/Users/rajiv/.claude/hooks/slot-terminal-message-pm-stop.sh"]["mode"],
             493,
