@@ -42,7 +42,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 68,
+      "selected_count": 69,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -373,6 +373,15 @@
       "sha256": "18848718df161667ed3462bcec45d4fb632beba4f1a6dc5692c867c4bb36726d",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/pm/remove-deprecated-codex-pm-report-hook.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/remove-deprecated-codex-pm-report-hook.py",
+      "sha256": "93a630434159c88e9a579184cc5cd456810482db4ccdb1b3c52b09cae1f4ec6d",
+      "mode": 493,
+      "ownership_class": "shared-claude-retired-report-registration-editor",
       "dependency_status": "closed",
       "dependencies": []
     },
