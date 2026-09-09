@@ -50,10 +50,9 @@ def _same_metadata(path: Path, mode: int, uid: int, gid: int) -> bool:
     )
 
 
-def _atomic_replace(path: Path, payload: bytes, mode: int, uid: int, gid: int) -> None:
+def _write_replacement(path: Path, payload: bytes, mode: int, uid: int, gid: int) -> None:
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.retire.", dir=path.parent)
     temporary = Path(temporary_name)
-    replaced = False
     try:
         os.fchmod(fd, mode)
         os.fchown(fd, uid, gid)
@@ -64,7 +63,6 @@ def _atomic_replace(path: Path, payload: bytes, mode: int, uid: int, gid: int) -
         if not _same_metadata(temporary, mode, uid, gid):
             raise RuntimeError("temporary metadata mismatch")
         os.replace(temporary, path)
-        replaced = True
         directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
@@ -73,15 +71,33 @@ def _atomic_replace(path: Path, payload: bytes, mode: int, uid: int, gid: int) -
         if not _same_metadata(path, mode, uid, gid):
             raise RuntimeError("post-replace metadata mismatch")
     except Exception:
-        if not replaced:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         raise
     finally:
         if temporary.exists() or temporary.is_symlink():
             temporary.unlink()
+
+
+def _atomic_replace(
+    path: Path, payload: bytes, original: bytes, mode: int, uid: int, gid: int
+) -> None:
+    try:
+        _write_replacement(path, payload, mode, uid, gid)
+    except Exception:
+        # A post-replace verification failure is recoverable only if the target
+        # still contains exactly our candidate bytes. Never overwrite a drifted
+        # concurrent edit while attempting the narrow rollback.
+        try:
+            current = path.read_bytes()
+        except OSError:
+            raise
+        if hashlib.sha256(current).digest() != hashlib.sha256(payload).digest():
+            raise RuntimeError("post-replace target drifted during rollback")
+        _write_replacement(path, original, mode, uid, gid)
+        raise
 
 
 def main() -> int:
@@ -128,6 +144,7 @@ def main() -> int:
             _atomic_replace(
                 path,
                 payload,
+                before,
                 stat.S_IMODE(before_stat.st_mode),
                 before_stat.st_uid,
                 before_stat.st_gid,
