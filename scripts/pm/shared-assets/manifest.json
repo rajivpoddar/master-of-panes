@@ -42,7 +42,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 68,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -63,10 +63,31 @@
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/block-unsupported-transcript-split.py",
       "sha256": "61a13f6113390e4da1c94876b0cc80e8c86ddb17664624c22d3b3dc59a71d859",
       "mode": 493,
-      "preimage_modes": [420, 493]
+      "preimage_modes": [
+        420,
+        493
+      ]
     }
   ],
   "entries": [
+    {
+      "source_path": "claude/agents/codex-code-reviewer.md",
+      "canonical_target": "/Users/rajiv/.claude/agents/codex-code-reviewer.md",
+      "sha256": "7f0eda206571293267b7660fc6c4d477800cba7de797fdabc5329b33f2a3b3cf",
+      "mode": 420,
+      "ownership_class": "shared-claude-review-prompt",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/agents/codex-plan-reviewer.md",
+      "canonical_target": "/Users/rajiv/.claude/agents/codex-plan-reviewer.md",
+      "sha256": "60f6b3abf1c9be7c251725003282969b3871cb17bf276fb0047f045ef351dd4f",
+      "mode": 420,
+      "ownership_class": "shared-claude-review-prompt",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
     {
       "source_path": "claude/control_plane/runtime_observation.py",
       "canonical_target": "/Users/rajiv/.claude/control_plane/runtime_observation.py",
@@ -91,6 +112,15 @@
       "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/slot-terminal-message-pm-stop.sh",
+      "canonical_target": "/Users/rajiv/.claude/hooks/slot-terminal-message-pm-stop.sh",
+      "sha256": "f2066a4fcc4f3c15f9d77d853c017744016708d1b292c4f4539e2543cdee0f79",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-terminal-safety-hook",
       "dependency_status": "closed",
       "dependencies": []
     },
@@ -181,6 +211,15 @@
       "sha256": "b9056135eac4182753ee0616f1a0538cb8f3f49e78a1bb1faba74ed9fa5a75f6",
       "mode": 493,
       "ownership_class": "shared-claude-mop-plugin-hook-relay",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/rules/99-pm-fable-review-cap.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules/99-pm-fable-review-cap.md",
+      "sha256": "88c71efaded6bb8293afaece6b42d7406e1dd9c76cf1aeacd5512e906b400585",
+      "mode": 420,
+      "ownership_class": "shared-claude-review-cap-rule",
       "dependency_status": "closed",
       "dependencies": []
     },
