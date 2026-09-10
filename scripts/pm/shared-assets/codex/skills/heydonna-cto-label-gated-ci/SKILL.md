@@ -10,6 +10,17 @@ CI-trigger transition, re-read the live PR head and the current linked issue
 body, compute the issue-body SHA, and bind the transition to both values. The
 caller must not choose an exemption or rely on an earlier snapshot.
 
+Before any trigger effect, the adapter also performs a fresh main-ancestry
+fence: read the live PR head and `baseRefOid`, fetch the exact `origin/main`
+object, and require that current main is the base and an ancestor of the exact
+checkout/PR head. It repeats this fence immediately before the label write and
+binds both head and main SHAs in the receipt. A stale or behind branch returns
+`MAIN_INTEGRATION_REQUIRED` with no label or workflow effect. The operator must
+perform an ordinary conflict-free non-force main merge, preserve and reprove
+the reviewed delta, push with lease, and re-fence; this low-level adapter never
+auto-merges. When main is already an ancestor, no synthetic merge commit is
+needed. Missing/shallow objects and main advancement fail closed.
+
 For a UI-changing PR, require the current issue's authoritative visual
 acceptance contract and one valid proof for every deterministic visual AC.
 Proof must be bound to the exact PR, issue, head, issue-body SHA, AC ID, route/

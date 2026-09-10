@@ -48,7 +48,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 71,
+    "selected_count": 73,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -214,6 +214,15 @@
       "sha256": "752ccd77cc632bec2fbdeb360822ad4adb0ea3f9cef5ca94a68e5174e0875b54",
       "mode": 493,
       "ownership_class": "shared-claude-ci-failure-triage",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/ci/heydonna-cto-label-gated-ci.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/heydonna-cto-label-gated-ci.py",
+      "sha256": "c623c08311a29827512deaca0ef0118ec1290f57b169383b97e69d70299e3680",
+      "mode": 493,
+      "ownership_class": "shared-claude-cto-paid-admission",
       "dependency_status": "closed",
       "dependencies": []
     },
@@ -679,7 +688,7 @@
     {
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
-      "sha256": "2bd76ec6b90e19e9361defe3896ad3579b87ed1458260a7610990cb6b19943b9",
+      "sha256": "96a2dc3e3ee582c12e1cb029be4001f2bbe3339ebb24bcd8de3df33e7785b38b",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
       "dependency_status": "closed",
