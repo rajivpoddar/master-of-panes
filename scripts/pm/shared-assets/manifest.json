@@ -341,7 +341,8 @@
       "source_path": "claude/scripts/qa-visual-proof-gate.py",
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py",
       "additional_targets": [
-        "/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py"
+        "/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py",
+        "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/qa-visual-proof-gate.py"
       ],
       "sha256": "1a5725e503cbbeccaee3e9c7958e0c090c049cf9f1cfe35d12a04c671c2528ae",
       "mode": 493,
