@@ -661,6 +661,99 @@ def delete_after_readiness(targets: list[Path], rollback: dict[str, Any]) -> Non
             target.unlink()
 
 
+RETIREMENT_MANIFEST = "scripts/pm/shared-assets/retirements.json"
+
+
+def _load_retirement_manifest(release_dir: Path) -> dict[str, Any]:
+    """Validate the canonical shared-asset retirement inventory."""
+    path = release_dir / RETIREMENT_MANIFEST
+    if not path.is_file() or path.is_symlink():
+        raise InstallerError(f"retirement manifest missing: {path}")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InstallerError(f"retirement manifest is not valid JSON: {path}") from exc
+    if manifest.get("schema") != "mop_shared_retirements" or manifest.get("version") != 1:
+        raise InstallerError("unsupported retirement manifest schema")
+    items = manifest.get("items")
+    if not isinstance(items, list) or items != sorted(items, key=lambda item: item.get("absolute_current_path", "")):
+        raise InstallerError("retirement items must be a deterministic sorted list")
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise InstallerError("retirement item is not an object")
+        target = item.get("absolute_current_path")
+        digest = item.get("preimage_sha256")
+        mode = item.get("preimage_mode")
+        if not isinstance(target, str) or not target:
+            raise InstallerError("retirement item is missing absolute_current_path")
+        target_path = Path(target)
+        if not target_path.is_absolute() or target_path in {Path("/"), Path.home()} or ".." in target_path.parts:
+            raise InstallerError(f"retirement target is too broad: {target}")
+        if target in seen:
+            raise InstallerError(f"duplicate retirement target: {target}")
+        seen.add(target)
+        if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise InstallerError(f"invalid retirement preimage digest: {target}")
+        if not isinstance(mode, int) or mode < 0 or mode > 0o777:
+            raise InstallerError(f"invalid retirement preimage mode: {target}")
+        if item.get("disposition") not in {"DELETE", "HOLD_UNTIL_OPERATOR_LIVE"}:
+            raise InstallerError(f"unsupported retirement disposition: {target}")
+        if not str(item.get("replacement") or "").strip():
+            raise InstallerError(f"retirement item lacks an explicit replacement contract: {target}")
+    return manifest
+
+
+def retire_shared_assets(
+    *,
+    release_dir: Path,
+    installed_roots: list[Path],
+    rollback_bundle: Path,
+) -> dict[str, Any]:
+    """Retire canonically inventoried legacy surfaces; never prune unlisted files.
+
+    Reuses the reviewed deletion primitives: an exact preimage is captured into a
+    rollback bundle, a drift check compares the live bytes/mode against the
+    canonical retirement manifest, and only then is the file unlinked.  Absent
+    targets are idempotent no-ops.  Directories and non-regular files are refused.
+    """
+    retirement = _load_retirement_manifest(release_dir)
+    declared = {
+        item["absolute_current_path"]: item
+        for item in retirement["items"]
+        if item.get("disposition") == "DELETE"
+    }
+    targets = _inventory_paths(release_dir / RETIREMENT_MANIFEST, "DELETE", installed_roots)
+    if not targets:
+        raise InstallerError("no DELETE targets matched the narrow installed roots")
+    for target in targets:
+        item = declared.get(str(target))
+        if item is None:
+            raise InstallerError(f"retirement target is not declared in the canonical manifest: {target}")
+        if target.is_dir() and not target.is_symlink():
+            raise InstallerError(f"refusing directory deletion: {target}")
+        if not (target.exists() or target.is_symlink()):
+            continue
+        record = file_record(target, str(target))
+        if record.get("kind") != "file":
+            raise InstallerError(f"retirement target is not a regular file: {target}")
+        if record.get("sha256") != item["preimage_sha256"] or record.get("mode") != item["preimage_mode"]:
+            raise InstallerError(f"retirement target drifted from the canonical preimage: {target}")
+    rollback = create_rollback_bundle(targets, rollback_bundle)
+    delete_after_readiness(targets, rollback)
+    return {
+        "status": "RETIRED",
+        "release_dir": str(release_dir),
+        "retired": [str(target) for target in targets],
+        "held": sorted(
+            item["absolute_current_path"]
+            for item in retirement["items"]
+            if item.get("disposition") == "HOLD_UNTIL_OPERATOR_LIVE"
+        ),
+        "rollback_bundle": str(rollback_bundle),
+    }
+
+
 def activate(
     *,
     release_dir: Path,
@@ -741,14 +834,14 @@ def _check_launchd(*, current: Path, service: str) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("stage", "activate", "check", "shared-install", "shared-check"))
+    parser.add_argument("mode", choices=("stage", "activate", "check", "shared-install", "shared-check", "shared-retire"))
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--candidate")
     parser.add_argument("--base")
     parser.add_argument("--patch-id")
     parser.add_argument("--node-bin")
     parser.add_argument("--release-root", type=Path, required=True)
-    parser.add_argument("--current", type=Path, required=True)
+    parser.add_argument("--current", type=Path)
     parser.add_argument("--expected-old", type=Path)
     parser.add_argument("--rollback-bundle", type=Path, required=True)
     parser.add_argument("--shared-assets-root", type=Path)
@@ -763,6 +856,15 @@ def main(argv: list[str] | None = None) -> int:
             if not args.repo or not args.candidate or not args.base or not args.patch_id:
                 raise InstallerError("stage requires --repo, --candidate, --base, and --patch-id")
             result = stage_release(repo=args.repo, candidate=args.candidate, base=args.base, patch_id=args.patch_id, release_root=args.release_root, node_bin=args.node_bin)
+        elif args.mode == "shared-retire":
+            release_dir = args.release_root / args.candidate if args.candidate else None
+            if release_dir is None:
+                raise InstallerError("shared-retire requires --candidate")
+            result = retire_shared_assets(
+                release_dir=release_dir,
+                installed_roots=args.installed_root,
+                rollback_bundle=args.rollback_bundle,
+            )
         elif args.mode in {"shared-install", "shared-check"}:
             release_dir = args.release_root / args.candidate if args.candidate else None
             if release_dir is None:
@@ -781,14 +883,14 @@ def main(argv: list[str] | None = None) -> int:
             release_dir = args.release_root / args.candidate
             repo = args.repo
             if args.mode == "activate":
-                if not args.expected_old or not args.inventory or not args.repo:
-                    raise InstallerError("activate requires --repo, --expected-old, and explicit --inventory")
+                if not args.current or not args.expected_old or not args.inventory or not args.repo:
+                    raise InstallerError("activate requires --repo, --current, --expected-old, and explicit --inventory")
                 delete_targets = _inventory_paths(args.inventory, "DELETE", args.installed_root)
                 verify_staged(repo=args.repo, release_dir=release_dir, candidate=args.candidate)
                 result = activate(release_dir=release_dir, current=args.current, expected_old=args.expected_old, delete_targets=delete_targets, rollback_bundle=args.rollback_bundle, restart=lambda: _default_restart(args.service), health=lambda: _default_health(args.health_url), canary=lambda: _default_canary(args.canary_url))
             else:
-                if not args.inventory:
-                    raise InstallerError("check requires explicit --inventory")
+                if not args.current or not args.inventory:
+                    raise InstallerError("check requires --current and explicit --inventory")
                 delete_targets = _inventory_paths(args.inventory, "DELETE", args.installed_root)
                 keep_targets = _inventory_paths(args.inventory, "KEEP_IN_HEYDONNA_APP", args.installed_root)
                 result = check_install(release_dir=release_dir, current=args.current, delete_targets=delete_targets, keep_targets=keep_targets, rollback_bundle=args.rollback_bundle)

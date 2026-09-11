@@ -1,0 +1,81 @@
+{
+  "schema": "mop_shared_retirements",
+  "version": 1,
+  "owner": "master-of-panes",
+  "replacement_contract": "Queue assignment/release stays explicit and canonical: PM executes Skill(direct-assign) / Skill(direct-release) against the MoP-native boundary. No automatic sweep, no raw MoP API fallback, no synthesized occupancy. When all six slots are occupied the correct outcome is NO_ASSIGNABLE_SLOT with no assignment or release effect.",
+  "deletion_authority": "scripts/install-release.py shared-retire --candidate <release> --installed-root <root> --rollback-bundle <dir>",
+  "items": [
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/hooks/block-unrouted-status-todo.sh",
+      "disposition": "DELETE",
+      "preimage_sha256": "249486794c40534d076c8e4aa9f675938b0324812750d5903f5f10f9d3cb7ff6",
+      "preimage_mode": 493,
+      "installed_root": "/Users/rajiv/.claude/hooks",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "Legacy CP#17 status:todo routing guard. Its enforcement targets are retired: pm-transition.sh and ~/.claude/skills/slot-dispatch-sweep/scripts/sweep.sh are absent, and the pm-ops ledger is empty. The file is not registered as a hook in ~/.claude/settings.json and is not invoked by any other hook.",
+      "replacement": "MoP-native Skill(direct-assign) / Skill(direct-release); routing remains explicit and canonical.",
+      "deletion_proof": {
+        "check": "grep -F 'block-unrouted-status-todo' ~/.claude/settings.json returns no hook registration AND no surviving reference to slot-dispatch-sweep or pm-transition in the retained set",
+        "status": "SATISFIED"
+      }
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/hooks/ops-audit-stop-validator.sh",
+      "disposition": "DELETE",
+      "preimage_sha256": "120106dc33e1347f58bb3cb9c15b995e6efe3f7c6663fcda44832be9d179e0ff",
+      "preimage_mode": 493,
+      "installed_root": "/Users/rajiv/.claude/hooks",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "Legacy hourly-ops proof-token validator. Its proof schema granted credit for retired slot-dispatch-sweep tokens. The file is not registered as a hook in ~/.claude/settings.json.",
+      "replacement": "MoP-native routing proof (mop-slot:<N>, ASSIGNED:/QUEUED:/BLOCKED: lines referencing Skill(direct-assign)/Skill(direct-release)); retired sweep tokens are dropped, not replaced by new tokens.",
+      "deletion_proof": {
+        "check": "no residual proof-token dependency on slot-dispatch-sweep remains after removal; hook is unregistered",
+        "status": "SATISFIED"
+      }
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/hooks/pm-todo-debt.sh",
+      "disposition": "HOLD_UNTIL_OPERATOR_LIVE",
+      "preimage_sha256": "13bddc15533ff8a074a30129b5edaeb5926f4ae0a68f8978656d43502e454d0a",
+      "preimage_mode": 493,
+      "installed_root": "/Users/rajiv/.claude/hooks",
+      "registration": "REGISTERED_POSTTOOLUSE_IN_SETTINGS",
+      "retirement_reason": "Registered PostToolUse hook. It is live-registered, so deleting the file while the registration stands would leave a dangling hook command. It records into the legacy pm-ops ledger, which is empty (0 bytes, no tables) and feeds no live consumer.",
+      "hold_prerequisite": "Unregister the PostToolUse entry in ~/.claude/settings.json AND confirm the standalone operator/ledger consumer is live or formally dropped; then flip disposition to DELETE with the same recorded preimage.",
+      "replacement": "MoP-native Skill(direct-assign) / Skill(direct-release) for queue motion; no ledger substitution.",
+      "deletion_proof": {
+        "check": "hook registration removed from ~/.claude/settings.json and no live pm-ops obligation exists",
+        "status": "PENDING"
+      }
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/hooks/post-issue-create-sweep.sh",
+      "disposition": "HOLD_UNTIL_OPERATOR_LIVE",
+      "preimage_sha256": "af995891ed1a90b1fe61e1199c9c538d51104a660c8940975d987e9eb87f88d8",
+      "preimage_mode": 493,
+      "installed_root": "/Users/rajiv/.claude/hooks",
+      "registration": "REGISTERED_POSTTOOLUSE_IN_SETTINGS",
+      "retirement_reason": "Registered PostToolUse hook on Bash. It forces a retired slot-dispatch-sweep after `gh issue create` with status:todo and records into the empty legacy pm-ops ledger. Live-registered, so removal must be paired with unregistering the hook entry.",
+      "hold_prerequisite": "Unregister the PostToolUse entry in ~/.claude/settings.json AND confirm issue-intake routing is owned by the current managed path; then flip disposition to DELETE with the same recorded preimage.",
+      "replacement": "Issue intake routing remains explicit: file/dedupe/promote under the existing priority rules, then Skill(direct-assign); never an automatic sweep.",
+      "deletion_proof": {
+        "check": "hook registration removed and issue-intake invariant still reaches its current managed owner",
+        "status": "PENDING"
+      }
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/scripts/backlog-triage.py",
+      "disposition": "DELETE",
+      "preimage_sha256": "4c3616d6354058a9a8cb7adc4d60c17d9a7bfb77be7cf0ffd236f10b6df8d367",
+      "preimage_mode": 493,
+      "installed_root": "/Users/rajiv/.claude/scripts",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "Backlog triage helper that invokes the retired slot-dispatch-sweep and imports the unmanaged issue_claimability module. Not registered as a hook and not invoked by any hook/skill/agent.",
+      "replacement": "Canonical backlog promotion remains with the pm-backlog-promoter agent; dispatch stays Skill(direct-assign).",
+      "deletion_proof": {
+        "check": "no hook/skill/agent invokes backlog-triage.py and no surviving reference to slot-dispatch-sweep remains",
+        "status": "SATISFIED"
+      }
+    }
+  ]
+}
