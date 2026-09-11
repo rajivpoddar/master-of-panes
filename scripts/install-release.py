@@ -565,6 +565,12 @@ def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
             if temporary.exists() or temporary.is_symlink():
                 temporary.unlink()
     for entry in manifest["entries"]:
+        if entry.get("present"):
+            payload = bundle / entry["payload"]
+            expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
+            if not payload.is_file() or payload.is_symlink() or file_record(payload, entry["path"]) != expected:
+                raise InstallerError(f"rollback payload mismatch: {entry['path']}")
+    for entry in manifest["entries"]:
         target = Path(entry["path"])
         if not entry.get("present"):
             if target.exists() or target.is_symlink():
@@ -704,6 +710,56 @@ def _load_retirement_manifest(release_dir: Path) -> dict[str, Any]:
     return manifest
 
 
+def _assert_no_symlink_components(path: Path) -> None:
+    """Refuse any path whose components include a symlink.
+
+    Physical containment: a symlinked installed root (or a symlinked ancestor
+    anywhere above or below it) aliases a different physical tree, so deletion
+    must refuse rather than follow it.
+    """
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            raise InstallerError(f"refusing symlinked path component: {current}")
+
+
+def _assert_capture_matches_preimage(
+    targets: list[Path],
+    declared: dict[str, dict[str, Any]],
+    rollback: dict[str, Any],
+    rollback_bundle: Path,
+) -> None:
+    """Bind the rollback capture to the canonical manifest-authorized preimage.
+
+    The capture runs between the pre-check and the unlink, so a target rewritten
+    mid-capture (or a payload corrupted during copy) must refuse here rather than
+    delete an unreviewed file or ship an unrestorable backup.
+    """
+    captured = {entry["path"]: entry for entry in rollback["entries"]}
+    for target in targets:
+        item = declared[str(target)]
+        entry = captured.get(str(target))
+        if entry is None:
+            raise InstallerError(f"rollback capture missing for the canonical preimage: {target}")
+        if not entry.get("present"):
+            continue
+        if (
+            entry.get("kind") != "file"
+            or entry.get("sha256") != item["preimage_sha256"]
+            or entry.get("mode") != item["preimage_mode"]
+        ):
+            raise InstallerError(f"rollback capture drifted from the canonical preimage: {target}")
+        payload = rollback_bundle / entry["payload"]
+        if not payload.is_file() or payload.is_symlink():
+            raise InstallerError(f"rollback payload is not a regular file: {target}")
+        if (
+            sha256(payload) != item["preimage_sha256"]
+            or stat.S_IMODE(payload.stat().st_mode) != item["preimage_mode"]
+        ):
+            raise InstallerError(f"rollback payload drifted from the canonical preimage: {target}")
+
+
 def retire_shared_assets(
     *,
     release_dir: Path,
@@ -723,10 +779,13 @@ def retire_shared_assets(
         for item in retirement["items"]
         if item.get("disposition") == "DELETE"
     }
+    for root in installed_roots:
+        _assert_no_symlink_components(root)
     targets = _inventory_paths(release_dir / RETIREMENT_MANIFEST, "DELETE", installed_roots)
     if not targets:
         raise InstallerError("no DELETE targets matched the narrow installed roots")
     for target in targets:
+        _assert_no_symlink_components(target.parent)
         item = declared.get(str(target))
         if item is None:
             raise InstallerError(f"retirement target is not declared in the canonical manifest: {target}")
@@ -740,6 +799,7 @@ def retire_shared_assets(
         if record.get("sha256") != item["preimage_sha256"] or record.get("mode") != item["preimage_mode"]:
             raise InstallerError(f"retirement target drifted from the canonical preimage: {target}")
     rollback = create_rollback_bundle(targets, rollback_bundle)
+    _assert_capture_matches_preimage(targets, declared, rollback, rollback_bundle)
     delete_after_readiness(targets, rollback)
     return {
         "status": "RETIRED",

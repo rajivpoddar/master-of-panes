@@ -65,16 +65,17 @@
     },
     {
       "absolute_current_path": "/Users/rajiv/.claude/scripts/backlog-triage.py",
-      "disposition": "DELETE",
+      "disposition": "HOLD_UNTIL_OPERATOR_LIVE",
       "preimage_sha256": "4c3616d6354058a9a8cb7adc4d60c17d9a7bfb77be7cf0ffd236f10b6df8d367",
       "preimage_mode": 493,
       "installed_root": "/Users/rajiv/.claude/scripts",
       "registration": "NOT_REGISTERED_IN_SETTINGS",
-      "retirement_reason": "Backlog triage helper that invokes the retired slot-dispatch-sweep and imports the unmanaged issue_claimability module. Not registered as a hook and not invoked by any hook/skill/agent.",
-      "replacement": "Canonical backlog promotion remains with the pm-backlog-promoter agent; dispatch stays Skill(direct-assign).",
+      "retirement_reason": "Backlog triage helper that invokes the retired slot-dispatch-sweep and imports the unmanaged issue_claimability module. It is NOT hook-registered, but it still has surviving executable callers, so it cannot be deleted yet.",
+      "hold_prerequisite": "Retire or move EVERY surviving invocation to an existing supported replacement before flipping to DELETE. Surviving executable callers at candidate time: /Users/rajiv/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md (3 invocations), /Users/rajiv/Downloads/projects/heydonna-app/.claude/agents/pm-backlog-promoter.md (5 invocations, lines 68/104/250/267/277), /Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/ready-pool-low-stop-validator.sh:485, and the pm-triage / morning-brief / backlog-triage skills.",
+      "replacement": "Canonical backlog promotion remains with the pm-backlog-promoter agent; dispatch stays Skill(direct-assign). Do not revive the sweep, the legacy ledger, or a dispatcher.",
       "deletion_proof": {
-        "check": "no hook/skill/agent invokes backlog-triage.py and no surviving reference to slot-dispatch-sweep remains",
-        "status": "SATISFIED"
+        "check": "zero executable prompt/owner callers: no surviving invocation in the pm-backlog-promoter agent, the installed issue-triage heartbeat prompt, any hook, or any skill",
+        "status": "PENDING"
       }
     }
   ]
