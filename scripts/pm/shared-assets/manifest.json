@@ -6,6 +6,10 @@
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
+      "~/.claude/hooks/pm-state-promotion-proof-guard.sh",
+      "~/Downloads/projects/heydonna-app/.claude/hooks/pm-state-promotion-proof-guard.sh",
+      "~/.claude/scripts/pm-state-replace.sh",
+      "~/Downloads/projects/heydonna-app/.claude/scripts/pm-state-replace.sh",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/hooks/hooks.json",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
@@ -42,7 +46,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 66,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -91,6 +95,26 @@
       "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/pm-state-promotion-proof-guard.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-state-promotion-proof-guard.sh",
+      "additional_targets": [
+        "/Users/rajiv/.claude/hooks/pm-state-promotion-proof-guard.sh"
+      ],
+      "sha256": "a56f2a0efa99062c06ce2514a95efae9027886e9a5f85f5f272933ec091b2797",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-admission-guard",
+      "source_authority": {
+        "repository": "local-live-home-hook",
+        "commit": null,
+        "path": "/Users/rajiv/.claude/hooks/pm-state-promotion-proof-guard.sh",
+        "preimage_sha256": "a109e33d186de8de977dad2f942f9e913cbf1c07f0b0621ff6b064c2856ce1d1",
+        "mode": 493,
+        "adoption": "guidance-only: live home guard bytes with the two dead pm-operator merge-ready guidance strings replaced by the installed pm-state-replace.sh entrypoint; every proof/head/draft/complete-label/duplicate/no-raw-write fence is byte-preserved"
+      },
       "dependency_status": "closed",
       "dependencies": []
     },
@@ -307,6 +331,26 @@
       "sha256": "510a4994cc78c97e9189624cf56f313bd62c3694173a1c82b9ec25e1ae50f4d0",
       "mode": 493,
       "ownership_class": "shared-codex-automation-adapter",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/pm-state-replace.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/pm-state-replace.sh",
+      "additional_targets": [
+        "/Users/rajiv/.claude/scripts/pm-state-replace.sh"
+      ],
+      "sha256": "3c98bb0a95f0e0ad42c40f975a993db401db2875720e8b14b5cdccb7be755907",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-state-transition",
+      "source_authority": {
+        "repository": "heydonna-app/heydonna-app",
+        "commit": "5abb4ec486d27bb51460d287f9ce019494769977",
+        "path": "scripts/pm/control-plane/pm-state-replace.sh",
+        "blob_sha": "fed6ec0f5b877e506697bed00912274f08005481",
+        "preimage_sha256": null,
+        "mode": 493
+      },
       "dependency_status": "closed",
       "dependencies": []
     },

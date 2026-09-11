@@ -401,6 +401,16 @@ def install_shared_assets(
         for entry in manifest["entries"]
         for target_name in _shared_entry_targets(entry)
     ]
+    # Physical containment: refuse a mapped target that is itself a symlink or a
+    # directory before any rollback capture or write, so the installer never
+    # dereferences a swapped leaf (which would land bytes outside the declared
+    # path). Only the leaf is fenced here: intentionally symlinked parent
+    # directories remain valid.
+    for _, target_name, target in target_records:
+        if target.is_symlink():
+            raise InstallerError(f"shared asset target is a symlink: {target_name}")
+        if target.is_dir() and not target.is_symlink():
+            raise InstallerError(f"shared asset target is a directory: {target_name}")
     targets = [target for _, _, target in target_records]
     for entry in manifest.get("rollback_compatibility", []):
         _validate_compatibility_preimage(_shared_target_path(entry["canonical_target"], target_root), entry)
