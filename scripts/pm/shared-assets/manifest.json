@@ -6,6 +6,9 @@
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
+      "~/.claude/hooks/block-ci-rerun-without-local-proof.sh",
+      "~/Downloads/projects/heydonna-app/.claude/hooks/block-status-todo-without-ready-pool.sh",
+      "~/Downloads/projects/heydonna-app/.claude/hooks/pm-opus-review-clear-guard.sh",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/hooks/hooks.json",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
@@ -42,7 +45,7 @@
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
     ],
-    "selected_count": 64,
+    "selected_count": 67,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -91,6 +94,33 @@
       "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/block-ci-rerun-without-local-proof.sh",
+      "canonical_target": "/Users/rajiv/.claude/hooks/block-ci-rerun-without-local-proof.sh",
+      "sha256": "51d93574c969640efe3db0e5c8f810b7f79d11e0faf1d22a0c8ee6f1bd74813c",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-label-edit-boundary",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/block-status-todo-without-ready-pool.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/block-status-todo-without-ready-pool.sh",
+      "sha256": "ddc461032fcecebf9f859e2860810ffb68d2933899b2850476f2e0c51dff6445",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-label-edit-boundary",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/pm-opus-review-clear-guard.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-opus-review-clear-guard.sh",
+      "sha256": "257acd2e8ee2f7db2d2d6af19f9a118c0a3bee43f27ba9e086af505ed731842f",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-label-edit-boundary",
       "dependency_status": "closed",
       "dependencies": []
     },
