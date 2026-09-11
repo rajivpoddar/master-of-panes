@@ -531,18 +531,70 @@ def create_rollback_bundle(targets: list[Path], bundle: Path) -> dict[str, Any]:
     return manifest
 
 
+def _rollback_entry_expected(entry: dict[str, Any]) -> dict[str, Any]:
+    keys = ("path", "kind", "mode", "sha256", "target")
+    return {key: entry[key] for key in keys if key in entry}
+
+
+def _rollback_payload_record(payload: Path, expected: dict[str, Any]) -> dict[str, Any]:
+    """Kind-aware backup record that never follows a symlink referent.
+
+    Regular-file backups are bound to recorded bytes and mode; symlink backups
+    are bound to recorded link metadata (kind plus link target) using lstat, so
+    an activation-symlink rollback is supported without dereferencing it or
+    requiring the referent to exist.
+    """
+    try:
+        metadata = payload.lstat()
+    except OSError as exc:
+        raise InstallerError(f"rollback payload is unreadable: {expected['path']}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        return {
+            "path": expected["path"],
+            "kind": "symlink",
+            "mode": stat.S_IMODE(metadata.st_mode),
+            "target": os.readlink(payload),
+        }
+    if stat.S_ISREG(metadata.st_mode):
+        return {
+            "path": expected["path"],
+            "kind": "file",
+            "mode": stat.S_IMODE(metadata.st_mode),
+            "sha256": sha256(payload),
+        }
+    raise InstallerError(f"rollback payload is not a regular file or symlink: {expected['path']}")
+
+
+def _assert_rollback_payload(payload: Path, expected: dict[str, Any]) -> None:
+    """Refuse a backup that does not match its recorded entry before any effect."""
+    if _rollback_payload_record(payload, expected) != expected:
+        raise InstallerError(f"rollback payload mismatch: {expected['path']}")
+
+
 def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
     manifest = json.loads((bundle / ROLLBACK_MANIFEST).read_text(encoding="utf-8"))
-    staged_compatibility: list[tuple[dict[str, Any], Path, Path]] = []
+    compatibility_entries = manifest.get("compatibility_entries", [])
+    normal_entries = manifest.get("entries", [])
+
+    # Preflight every backup, normal and compatibility, before touching any
+    # target. A corrupt normal backup must never leave a compatibility (or any
+    # other) target already replaced when the restore refuses.
+    compatibility_prepared: list[tuple[dict[str, Any], Path, dict[str, Any]]] = []
+    for entry in compatibility_entries:
+        target = Path(entry["path"])
+        _validate_compatibility_preimage(target, entry)
+        expected = _rollback_entry_expected(entry)
+        _assert_rollback_payload(bundle / entry["payload"], expected)
+        compatibility_prepared.append((entry, target, expected))
+    for entry in normal_entries:
+        if not entry.get("present"):
+            continue
+        _assert_rollback_payload(bundle / entry["payload"], _rollback_entry_expected(entry))
+
+    staged_compatibility: list[tuple[dict[str, Any], Path, Path, dict[str, Any]]] = []
     try:
-        compatibility_entries = manifest.get("compatibility_entries", [])
-        for index, entry in enumerate(compatibility_entries):
-            target = Path(entry["path"])
-            _validate_compatibility_preimage(target, entry)
+        for index, (entry, target, expected) in enumerate(compatibility_prepared):
             payload = bundle / entry["payload"]
-            expected_payload = {"path": str(target), "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
-            if not payload.is_file() or payload.is_symlink() or file_record(payload, str(target)) != expected_payload:
-                raise InstallerError(f"rollback compatibility payload mismatch: {target}")
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(f".{target.name}.rollback.{os.getpid()}.{index}.tmp")
             if temporary.exists() or temporary.is_symlink():
@@ -551,26 +603,19 @@ def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
             os.chmod(temporary, entry["mode"])
             with temporary.open("rb") as handle:
                 os.fsync(handle.fileno())
-            if file_record(temporary, str(target)) != expected_payload:
+            if _rollback_payload_record(temporary, expected) != expected:
                 raise InstallerError(f"rollback compatibility staging mismatch: {target}")
-            staged_compatibility.append((entry, target, temporary))
-        for entry, target, temporary in staged_compatibility:
+            staged_compatibility.append((entry, target, temporary, expected))
+        for entry, target, temporary, expected in staged_compatibility:
             os.replace(temporary, target)
             _fsync_directory(target.parent)
-            expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
-            if file_record(target, entry["path"]) != expected:
+            if _rollback_payload_record(target, expected) != expected:
                 raise InstallerError(f"rollback compatibility verification failed: {target}")
     finally:
-        for _, _, temporary in staged_compatibility:
+        for _, _, temporary, _ in staged_compatibility:
             if temporary.exists() or temporary.is_symlink():
                 temporary.unlink()
-    for entry in manifest["entries"]:
-        if entry.get("present"):
-            payload = bundle / entry["payload"]
-            expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
-            if not payload.is_file() or payload.is_symlink() or file_record(payload, entry["path"]) != expected:
-                raise InstallerError(f"rollback payload mismatch: {entry['path']}")
-    for entry in manifest["entries"]:
+    for entry in normal_entries:
         target = Path(entry["path"])
         if not entry.get("present"):
             if target.exists() or target.is_symlink():
@@ -587,8 +632,8 @@ def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
         _copy_payload(payload, target)
         if entry["kind"] == "file":
             os.chmod(target, entry["mode"])
-        expected = {key: entry[key] for key in ("path", "kind", "mode", "sha256", "target") if key in entry}
-        if file_record(target, entry["path"]) != expected:
+        expected = _rollback_entry_expected(entry)
+        if _rollback_payload_record(target, expected) != expected:
             raise InstallerError(f"rollback verification failed: {target}")
     return manifest
 
@@ -724,6 +769,46 @@ def _assert_no_symlink_components(path: Path) -> None:
             raise InstallerError(f"refusing symlinked path component: {current}")
 
 
+def _containment_fence(paths: list[Path]) -> dict[str, tuple[int, int]]:
+    """Record no-follow (device, inode) for every existing ancestor directory.
+
+    Refuses symlinked or non-directory components. The fence is captured before
+    the rollback capture and re-verified at the deletion effect boundary so a
+    directory swapped during capture (for example replaced by a symlink to
+    another physical tree) cannot redirect the later unlink outside the
+    approved root.
+    """
+    fence: dict[str, tuple[int, int]] = {}
+    for path in paths:
+        directory = path.parent
+        current = Path(directory.anchor)
+        for part in directory.parts[1:]:
+            current = current / part
+            try:
+                metadata = current.lstat()
+            except FileNotFoundError:
+                break
+            if stat.S_ISLNK(metadata.st_mode):
+                raise InstallerError(f"refusing symlinked path component: {current}")
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise InstallerError(f"refusing non-directory path component: {current}")
+            fence[str(current)] = (metadata.st_dev, metadata.st_ino)
+    return fence
+
+
+def _assert_containment_fence(fence: dict[str, tuple[int, int]]) -> None:
+    """Re-verify a previously captured ancestor fence before any deletion."""
+    for path, identity in fence.items():
+        try:
+            metadata = Path(path).lstat()
+        except FileNotFoundError as exc:
+            raise InstallerError(f"containment drifted; path component missing: {path}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise InstallerError(f"refusing symlinked path component: {path}")
+        if not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != identity:
+            raise InstallerError(f"containment drifted for path component: {path}")
+
+
 def _assert_capture_matches_preimage(
     targets: list[Path],
     declared: dict[str, dict[str, Any]],
@@ -798,8 +883,10 @@ def retire_shared_assets(
             raise InstallerError(f"retirement target is not a regular file: {target}")
         if record.get("sha256") != item["preimage_sha256"] or record.get("mode") != item["preimage_mode"]:
             raise InstallerError(f"retirement target drifted from the canonical preimage: {target}")
+    fence = _containment_fence(targets)
     rollback = create_rollback_bundle(targets, rollback_bundle)
     _assert_capture_matches_preimage(targets, declared, rollback, rollback_bundle)
+    _assert_containment_fence(fence)
     delete_after_readiness(targets, rollback)
     return {
         "status": "RETIRED",
