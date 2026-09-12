@@ -1,0 +1,5 @@
+name: heydonna-cto-remote-capture
+description: >-
+  Admit one verified exact-head HeyDonna strict-fixture capture from a fixture-miss terminal tuple,
+  with no PM state and no legacy capture-required CI receipt.
+entrypoint: scripts/admit_capture.py
