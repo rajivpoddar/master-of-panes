@@ -287,7 +287,6 @@ export class PMCadenceScheduler {
 
     const ts = new Date().toISOString();
     if (injected) {
-      this.db.setConfig(configKey(task, "last_due_key"), dueKey);
     }
     this.db.setConfig(configKey(task, "last_run_ts"), ts);
     this.db.setConfig(configKey(task, "last_run_reason"), reason);
