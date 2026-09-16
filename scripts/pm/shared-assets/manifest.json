@@ -360,7 +360,7 @@
     {
       "source_path": "claude/scripts/sync-dev-slot-skill-allowlist.mjs",
       "canonical_target": "/Users/rajiv/.claude/scripts/sync-dev-slot-skill-allowlist.mjs",
-      "sha256": "3e28684422c2dc19e51b5a979fcb5e354b2c1c5a814dc055b5047f11d8640f46",
+      "sha256": "56cccadefd204d5c2977af26a39ac205dbda9bd08aa629d5e60086769229fd13",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
       "dependency_status": "closed",
