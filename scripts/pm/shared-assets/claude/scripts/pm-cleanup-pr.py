@@ -474,6 +474,12 @@ def run(
                     "cleanup_key": key, "thread_ts": stored_thread_ts,
                     "thread_reply": prior.get("thread_reply", True),
                 }
+            if prior.get("thread_reply") is False and supplied["cleanup_mode"] == LINKED_ISSUE_MODE:
+                resume_pr = ext.read_pr(request)
+                _validate_merged_snapshot(request, resume_pr)
+                resume_issue = ext.read_issue(request)
+                _validate_issue_snapshot(request, resume_issue)
+                _validate_label_only_terminal(request, resume_pr, resume_issue)
 
         token = cto_slack_token or os.environ.get("SLACK_CTO_BOT_TOKEN", "")
         if isinstance(prior, dict):
@@ -619,6 +625,12 @@ def run(
             receipt["status"] = "ambiguous"
             persist()
             raise CleanupError("cleanup_ambiguous", ambiguous=True)
+        if receipt.get("thread_reply") is False and supplied["cleanup_mode"] == LINKED_ISSUE_MODE:
+            terminal_pr = ext.read_pr(request)
+            _validate_merged_snapshot(request, terminal_pr)
+            terminal_issue = ext.read_issue(request)
+            _validate_issue_snapshot(request, terminal_issue)
+            _validate_label_only_terminal(request, terminal_pr, terminal_issue)
         receipt["status"] = "completed"
         persist()
         return {

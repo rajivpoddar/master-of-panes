@@ -255,3 +255,121 @@ def test_threaded_request_with_mapping_completes_with_reply(tmp_path):
     assert result["success"] is True and result["thread_ts"] == THREAD_TS
     assert result["thread_reply"] is True
     assert "slack:reply" in external.effects and "issue:close" in external.effects
+
+
+class ReopenOnEffectExternal(FakeExternal):
+    """Simulates the linked issue reopening while label effects run."""
+
+    def __init__(self, pr, issue):
+        super().__init__(pr, issue)
+        self.reopen_on_effect = False
+
+    def _mut(self, scope, label, op):
+        if self.reopen_on_effect:
+            self._issue["state"] = "OPEN"
+            self._issue["stateReason"] = None
+        super()._mut(scope, label, op)
+
+
+def prepared_label_only_receipt(tmp_path, pr_payload, issue_payload):
+    """Mirror run()'s prepared-receipt construction with the real writer.
+
+    Simulates exit after reservation but before any external effect, exactly
+    the reviewer's crash/resume discriminator setup.
+    """
+    import hashlib
+
+    supplied = CLEANUP._validate_request(base_request(thread_reply=False))
+    request = CLEANUP._cleanup_identity(supplied)
+    request["cleanup_mode"] = supplied["cleanup_mode"]
+    request["thread_reply"] = supplied["thread_reply"]
+    text = CLEANUP._transition_text(request)
+    pr_labels = CLEANUP._validate_merged_snapshot(request, pr_payload)
+    issue_labels = CLEANUP._validate_issue_snapshot(request, issue_payload)
+    CLEANUP._validate_label_only_terminal(request, pr_payload, issue_payload)
+    receipt = {
+        "status": "prepared",
+        "started_at": "2026-09-17T00:00:00Z",
+        "request": CLEANUP._cleanup_identity(request),
+        "cleanup_mode": supplied["cleanup_mode"],
+        "thread_reply": False,
+        "thread_ts": None,
+        "payload_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "plan": (
+            CLEANUP._label_plan("pr", pr_labels, "pm-state:closed-clean")
+            + CLEANUP._label_plan("issue", issue_labels, "status:done")
+        ),
+        "steps": {},
+        "ambiguous_steps": [],
+    }
+    key = CLEANUP._cleanup_key(request)
+    CLEANUP._write_json(tmp_path / "receipts.json", {key: receipt})
+    return key
+
+
+def read_receipt_status(tmp_path):
+    receipts = json.loads((tmp_path / "receipts.json").read_text())
+    assert len(receipts) == 1
+    (receipt,) = receipts.values()
+    return receipt["status"]
+
+
+def test_unfinished_label_only_resume_completes_when_eligibility_holds(tmp_path):
+    pr, issue = merged_pr_payload(), closed_issue_payload()
+    prepared_label_only_receipt(tmp_path, pr, issue)
+    external = FakeExternal(pr, issue)
+    result = run_cleanup(base_request(thread_reply=False), tmp_path, external, mapping_path=tmp_path)
+    assert result["success"] is True and result["status"] == "completed"
+    assert result["idempotent"] is False
+    assert "pr:add:pm-state:closed-clean" in external.effects
+    assert "slack:reply" not in external.effects
+
+
+def test_unfinished_label_only_resume_refuses_reopened_issue(tmp_path):
+    pr, issue = merged_pr_payload(), closed_issue_payload()
+    prepared_label_only_receipt(tmp_path, pr, issue)
+    issue["state"] = "OPEN"
+    issue["stateReason"] = None
+    external = FakeExternal(pr, issue)
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(base_request(thread_reply=False), tmp_path, external, mapping_path=tmp_path)
+    assert excinfo.value.reason == "linked_issue_not_terminal"
+    assert external.effects == []
+    assert read_receipt_status(tmp_path) == "prepared"
+
+
+def test_unfinished_label_only_resume_refuses_ambiguous_links(tmp_path):
+    pr, issue = merged_pr_payload(), closed_issue_payload()
+    prepared_label_only_receipt(tmp_path, pr, issue)
+    pr["closingIssuesReferences"] = [{"number": 7768}, {"number": 7767}]
+    external = FakeExternal(pr, issue)
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(base_request(thread_reply=False), tmp_path, external, mapping_path=tmp_path)
+    assert excinfo.value.reason == "linked_issue_not_unique"
+    assert external.effects == []
+    assert read_receipt_status(tmp_path) == "prepared"
+
+
+def test_label_only_drift_during_run_refuses_completion(tmp_path):
+    external = ReopenOnEffectExternal(merged_pr_payload(), closed_issue_payload())
+    external.reopen_on_effect = True
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(base_request(thread_reply=False), tmp_path, external, mapping_path=tmp_path)
+    assert excinfo.value.reason == "linked_issue_not_terminal"
+    assert read_receipt_status(tmp_path) != "completed"
+
+
+def test_issue_less_mode_with_thread_reply_false_refuses_before_effects(tmp_path):
+    external = FakeExternal(merged_pr_payload(refs="none"), closed_issue_payload())
+    request = {
+        "repository": "heydonna-app/heydonna-app",
+        "pr": 7769,
+        "head": HEAD,
+        "merge_commit": MERGE,
+        "cleanup_mode": "merged_pr_issue_less",
+        "thread_reply": False,
+    }
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(request, tmp_path, external, mapping_path=tmp_path)
+    assert excinfo.value.reason == "thread_reply_unsupported_for_issue_less"
+    assert external.effects == []
