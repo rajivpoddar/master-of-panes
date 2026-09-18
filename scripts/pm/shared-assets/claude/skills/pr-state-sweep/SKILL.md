@@ -317,12 +317,21 @@ open until `delivery_verified=true`. Do not use `message-slot.sh` for rework
 delivery, do not resume a legacy claim_slot/message-slot outbox, and do not
 retry after an uncertain or unverified delivery.
 `PR_REWORK_PACKET_REQUIRED` means an actionable blocked-rework PR has no durable
-packet comment bound to its current head. PM must create the exact packet, but
-its recording transition is retired
-(`UNSUPPORTED_LIFECYCLE_ACTION:record-rework-packet`); dispatch of that PR
-through `Skill(direct-assign)` waits for a supported packet path. This row keeps
-priority over fresh `status:todo` dispatch; never substitute a generic packet
-reconstructed from labels or stale `/tmp` prose.
+packet comment bound to its current head. PM must compose the exact head-bound
+packet file and record it with the supported ledger writer (which is
+idempotent per packet content and head, so a replay returns the existing
+packet instead of duplicating it):
+
+```bash
+python3 /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/rework-packet-ledger.py \
+  publish --repo heydonna-app/heydonna-app --pr <PR> --issue <ISSUE> \
+  --head <full-head> --kind rework --packet /tmp/exact-rework-packet.md
+```
+
+Only then dispatch that PR through `Skill(direct-assign)` with the recorded
+packet identity. This row keeps priority over fresh `status:todo` dispatch;
+never substitute a generic packet reconstructed from labels or stale `/tmp`
+prose, and never hand-write the packet comment when the writer is available.
 PM-gated blocked-rework PRs are not auto-dispatched to a slot, but they are still
 hourly current-PR work when no live owner is present. `PR_PM_GATE_REVIEW_REQUIRED`
 means PM must produce/verify the missing proof, hand a narrow forensics packet to

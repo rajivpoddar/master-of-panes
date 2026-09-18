@@ -5290,7 +5290,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr needs a durable current-head rework packet" \
-          --action "Create the exact rework packet (recording transition retired: UNSUPPORTED_LIFECYCLE_ACTION:record-rework-packet). Existing PR rework keeps priority over fresh status:todo work." \
+          --action "Compose the exact head-bound rework packet file and record it with rework-packet-ledger.py publish (--repo/--pr/--issue/--head/--kind rework/--packet; idempotent per packet content and head, replay returns existing), then dispatch only through Skill(direct-assign) with the recorded packet identity. Existing PR rework keeps priority over fresh status:todo work; never hand-write the packet comment when the writer is available." \
           --blocker "blocked_rework_missing_current_head_packet" \
           --evidence "$line"
         ;;

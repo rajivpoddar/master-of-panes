@@ -492,7 +492,7 @@
     {
       "source_path": "claude/skills/pr-state-sweep/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/pr-state-sweep/SKILL.md",
-      "sha256": "730dbbeb771978fb6af86fc9c19c0c7a7122269f7d03d052d984c9a9e273ff7a",
+      "sha256": "1ba096aefdfc54070998bfdfffeec015571956cb7b1df01799f7df7e19a03366",
       "mode": 420,
       "ownership_class": "shared-claude-pr-state-sweep",
       "dependency_status": "closed",
@@ -501,7 +501,7 @@
     {
       "source_path": "claude/skills/pr-state-sweep/scripts/sweep.sh",
       "canonical_target": "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh",
-      "sha256": "dafd27fd5afff762561b8d5291f277b11f5a947900366a07a2303b65efc8d0a6",
+      "sha256": "37daba28a2a154f34c5809e05b4934c488b24985f166757bc0629ded0e519811",
       "mode": 493,
       "ownership_class": "shared-claude-pr-state-sweep",
       "dependency_status": "closed",

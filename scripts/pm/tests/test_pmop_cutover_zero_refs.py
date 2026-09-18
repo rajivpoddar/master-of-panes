@@ -85,7 +85,6 @@ def test_retired_classes_become_typed_stops() -> None:
         "merge-ready",
         "validate-ready-proof",
         "slot-ready",
-        "record-rework-packet",
         "capture-remote-dispatch",
         "capture-remote-pass",
         "ci-local-preflight-pass",
@@ -93,7 +92,7 @@ def test_retired_classes_become_typed_stops() -> None:
     ):
         assert f"UNSUPPORTED_LIFECYCLE_ACTION:{class_name}" in sweep, class_name
     sweep_skill = _read("pr-state-sweep/SKILL.md")
-    for class_name in ("rescope-pr", "park-issue", "record-rework-packet"):
+    for class_name in ("rescope-pr", "park-issue"):
         assert f"UNSUPPORTED_LIFECYCLE_ACTION:{class_name}" in sweep_skill, class_name
     review_cap = _read("heydonna-review-cap-cto-approve-handoff/SKILL.md")
     for class_name in ("accept-ready", "rescope-decide"):
@@ -192,3 +191,19 @@ def test_manifest_covers_adopted_executable_with_parity() -> None:
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     assert entry["sha256"] == digest
     assert entry["mode"] == (os.stat(source).st_mode & 0o777) == 0o755
+
+
+def test_rework_packet_records_through_supported_ledger_writer() -> None:
+    """Post-supplement contract: the packet-record path names the supported
+    ledger writer and direct-assign, never the retired transition."""
+    sweep = _read("pr-state-sweep/scripts/sweep.sh")
+    marker = "PR_REWORK_PACKET_REQUIRED*)"
+    assert marker in sweep
+    block = sweep.split(marker, 1)[1].split(";;", 1)[0]
+    assert "rework-packet-ledger.py" in block and "publish" in block
+    assert "Skill(direct-assign)" in block
+    assert "UNSUPPORTED_LIFECYCLE_ACTION:record-rework-packet" not in block
+    assert "recording transition retired" not in block
+    skill = _read("pr-state-sweep/SKILL.md")
+    assert "rework-packet-ledger.py" in skill
+    assert "UNSUPPORTED_LIFECYCLE_ACTION:record-rework-packet" not in skill
