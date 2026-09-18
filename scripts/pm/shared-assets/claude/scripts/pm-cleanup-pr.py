@@ -147,6 +147,13 @@ def _validate_request(value: Any) -> dict[str, Any]:
     thread_reply = value.get("thread_reply", True)
     if not isinstance(thread_reply, bool):
         raise CleanupError("thread_reply_invalid")
+    post_merge_terminal = value.get("post_merge_terminal", False)
+    if not isinstance(post_merge_terminal, bool):
+        raise CleanupError("post_merge_terminal_invalid")
+    if post_merge_terminal and cleanup_mode != LINKED_ISSUE_MODE:
+        raise CleanupError("post_merge_terminal_mode_invalid")
+    if post_merge_terminal and thread_reply is not False:
+        raise CleanupError("post_merge_terminal_thread_reply_mismatch")
     if cleanup_mode == ISSUE_LESS_MODE and thread_reply is False:
         raise CleanupError("thread_reply_unsupported_for_issue_less")
     if thread_reply is False and caller_thread_ts is not None:
@@ -158,6 +165,7 @@ def _validate_request(value: Any) -> dict[str, Any]:
         "cleanup_mode": cleanup_mode,
         "head": head.lower(),
         "merge_commit": merge_commit.lower(),
+        "post_merge_terminal": post_merge_terminal,
         "_caller_thread_ts": caller_thread_ts,
         "thread_reply": thread_reply,
     }
@@ -383,6 +391,8 @@ def _cleanup_key(request: dict[str, Any], thread_ts: str | None = None) -> str:
     identity = _cleanup_identity(request)
     if request.get("thread_reply") is False:
         identity["label_only"] = True
+    if request.get("post_merge_terminal") is True:
+        identity["post_merge_terminal"] = True
     if thread_ts is not None:
         identity["thread_ts"] = thread_ts
     return "mop-cleanup:" + hashlib.sha256(_json_bytes(identity)).hexdigest()
@@ -421,7 +431,9 @@ def run(
     request = _cleanup_identity(supplied)
     request["cleanup_mode"] = supplied["cleanup_mode"]
     request["thread_reply"] = supplied["thread_reply"]
+    request["post_merge_terminal"] = bool(supplied.get("post_merge_terminal"))
     label_only = supplied["cleanup_mode"] == LINKED_ISSUE_MODE and supplied["thread_reply"] is False
+    post_merge = bool(supplied.get("post_merge_terminal")) and supplied["cleanup_mode"] == LINKED_ISSUE_MODE
     if caller_thread_ts is not None:
         request["_caller_thread_ts"] = caller_thread_ts
     mapping_file = mapping_path or Path(os.environ.get("MOP_TRANSITION_RECEIPT_PATH", str(DEFAULT_MAPPING))).expanduser()
@@ -449,6 +461,8 @@ def run(
             prior_mode = prior.get("cleanup_mode", LINKED_ISSUE_MODE)
             if prior_mode != supplied["cleanup_mode"]:
                 raise CleanupError("cleanup_receipt_mode_mismatch", ambiguous=True)
+            if bool(prior.get("post_merge_terminal")) != post_merge:
+                raise CleanupError("cleanup_receipt_mode_mismatch", ambiguous=True)
             stored_thread_ts = prior.get("thread_ts")
             if supplied["cleanup_mode"] == ISSUE_LESS_MODE:
                 if stored_thread_ts is not None:
@@ -474,7 +488,7 @@ def run(
                     "cleanup_key": key, "thread_ts": stored_thread_ts,
                     "thread_reply": prior.get("thread_reply", True),
                 }
-            if prior.get("thread_reply") is False and supplied["cleanup_mode"] == LINKED_ISSUE_MODE:
+            if prior.get("thread_reply") is False and supplied["cleanup_mode"] == LINKED_ISSUE_MODE and not post_merge:
                 resume_pr = ext.read_pr(request)
                 _validate_merged_snapshot(request, resume_pr)
                 resume_issue = ext.read_issue(request)
@@ -498,6 +512,27 @@ def run(
             if supplied["cleanup_mode"] == ISSUE_LESS_MODE:
                 pr_labels = _validate_issue_less_snapshot(request, ext.read_pr(request))
                 plan = _label_plan("pr", pr_labels, "pm-state:closed-clean")
+            elif post_merge:
+                pr_snapshot = ext.read_pr(request)
+                pr_labels = _validate_merged_snapshot(request, pr_snapshot)
+                issue_snapshot = ext.read_issue(request)
+                issue_labels = _validate_issue_snapshot(request, issue_snapshot)
+                try:
+                    _validate_label_only_terminal(request, pr_snapshot, issue_snapshot)
+                except CleanupError as exc:
+                    if exc.reason != "linked_issue_not_terminal":
+                        raise
+                    issue_terminal = False
+                else:
+                    issue_terminal = True
+                plan = (
+                    _label_plan("pr", pr_labels, "pm-state:closed-clean")
+                    + _label_plan("issue", issue_labels, "status:done")
+                )
+                if not issue_terminal:
+                    plan = plan + [
+                        {"name": "issue_close", "scope": "issue", "operation": "close", "label": ""},
+                    ]
             elif label_only:
                 pr_snapshot = ext.read_pr(request)
                 pr_labels = _validate_merged_snapshot(request, pr_snapshot)
@@ -528,6 +563,7 @@ def run(
                 "request": _cleanup_identity(request),
                 "cleanup_mode": supplied["cleanup_mode"],
                 "thread_reply": supplied["thread_reply"],
+                "post_merge_terminal": post_merge,
                 "thread_ts": thread_ts,
                 "payload_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "plan": plan,

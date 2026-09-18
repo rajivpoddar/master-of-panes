@@ -43,6 +43,7 @@
       "~/.codex/skills/codex-stdio-send-message",
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt",
+      "~/.claude/skills/pm-cleanup-pr/SKILL.md",
       "~/.claude/skills/pr-state-sweep/SKILL.md",
       "~/.claude/skills/pr-state-sweep/scripts/sweep.sh",
       "~/.claude/skills/ci-success-reconciliation/SKILL.md",
@@ -56,7 +57,7 @@
       "~/.claude/skills/codex-review-companion/SKILL.md",
       "~/.claude/skills/todo-prioritize/SKILL.md"
     ],
-    "selected_count": 78,
+    "selected_count": 79,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -327,7 +328,7 @@
     {
       "source_path": "claude/scripts/pm-cleanup-pr.py",
       "canonical_target": "/Users/rajiv/.claude/scripts/pm-cleanup-pr.py",
-      "sha256": "c6cd8dcb77063b29b6219847b8b80136f95b9fd38201cfca1ffd012e4d006272",
+      "sha256": "7d7960e1a66cb7a35bb4d00981b10105e23c83ec864ae2780ca4682eecde6ec7",
       "mode": 493,
       "ownership_class": "shared-claude-pm-cleanup",
       "dependency_status": "closed",
@@ -476,6 +477,15 @@
       "sha256": "8b3950bf50e9ae4c978262a5dcb7d3598696fae8ef331c032fd84e1d19d45ebe",
       "mode": 493,
       "ownership_class": "shared-claude-message-slot",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/pm-cleanup-pr/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/pm-cleanup-pr/SKILL.md",
+      "sha256": "1a1f11665ba34638f8b712c0510ba41476c960d71bf59eaaee1558b83ecd5403",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-cleanup",
       "dependency_status": "closed",
       "dependencies": []
     },

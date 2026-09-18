@@ -373,3 +373,183 @@ def test_issue_less_mode_with_thread_reply_false_refuses_before_effects(tmp_path
         run_cleanup(request, tmp_path, external, mapping_path=tmp_path)
     assert excinfo.value.reason == "thread_reply_unsupported_for_issue_less"
     assert external.effects == []
+
+
+def post_merge_request(**overrides):
+    request = base_request(thread_reply=False, post_merge_terminal=True)
+    request.update(overrides)
+    return request
+
+
+def open_issue_payload():
+    return closed_issue_payload(state="OPEN", reason=None)
+
+
+def test_post_merge_terminal_completes_open_issue_without_mapping(tmp_path):
+    """The #7740/next-merge shape: linked issue still OPEN, no historical
+    mapping file. Completes the full label terminal plus one journaled
+    issue close, with no Slack reply and no mapping read."""
+    external = FakeExternal(merged_pr_payload(), open_issue_payload())
+    result = run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert result["success"] is True and result["status"] == "completed"
+    assert result["thread_ts"] is None and result["thread_reply"] is False
+    assert "slack:reply" not in external.effects
+    assert "issue:close" in external.effects
+    assert "pr:add:pm-state:closed-clean" in external.effects
+    assert "pr:remove:ci-passed" in external.effects
+    assert "issue:add:status:done" in external.effects
+    receipts = json.loads((tmp_path / "receipts.json").read_text())
+    assert len(receipts) == 1
+    (receipt,) = receipts.values()
+    assert receipt["post_merge_terminal"] is True
+    assert receipt["thread_ts"] is None
+    assert "issue_close" in [step["name"] for step in receipt["plan"]]
+
+
+def test_post_merge_terminal_skips_close_when_already_terminal(tmp_path):
+    external = FakeExternal(merged_pr_payload(), closed_issue_payload())
+    result = run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert result["success"] is True
+    assert "issue:close" not in external.effects
+    assert "pr:add:pm-state:closed-clean" in external.effects
+    assert "issue:add:status:done" in external.effects
+
+
+def test_post_merge_terminal_replay_is_idempotent(tmp_path):
+    external = FakeExternal(merged_pr_payload(), open_issue_payload())
+    first = run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert first["idempotent"] is False
+    count = len(external.effects)
+    second = run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert second["success"] is True and second["idempotent"] is True
+    assert second["cleanup_key"] == first["cleanup_key"]
+    assert len(external.effects) == count
+
+
+def test_post_merge_terminal_key_differs_from_label_only(tmp_path):
+    external = FakeExternal(merged_pr_payload(), closed_issue_payload())
+    label_only = run_cleanup(base_request(thread_reply=False), tmp_path, external, mapping_path=tmp_path)
+    post_merge = run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert label_only["cleanup_key"] != post_merge["cleanup_key"]
+
+
+def test_post_merge_terminal_requires_thread_reply_false(tmp_path):
+    external = FakeExternal(merged_pr_payload(), open_issue_payload())
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(post_merge_request(thread_reply=True), tmp_path, external, mapping_path=tmp_path)
+    assert excinfo.value.reason == "post_merge_terminal_thread_reply_mismatch"
+    assert external.effects == []
+
+
+def test_post_merge_terminal_rejects_issue_less_mode(tmp_path):
+    external = FakeExternal(merged_pr_payload(refs="none"), closed_issue_payload())
+    request = {
+        "repository": "heydonna-app/heydonna-app",
+        "pr": 7769,
+        "head": HEAD,
+        "merge_commit": MERGE,
+        "cleanup_mode": "merged_pr_issue_less",
+        "thread_reply": False,
+        "post_merge_terminal": True,
+    }
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(request, tmp_path, external, mapping_path=tmp_path)
+    assert excinfo.value.reason == "post_merge_terminal_mode_invalid"
+    assert external.effects == []
+
+
+def test_post_merge_terminal_rejects_non_boolean_flag(tmp_path):
+    external = FakeExternal(merged_pr_payload(), open_issue_payload())
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(post_merge_request(post_merge_terminal="yes"), tmp_path, external, mapping_path=tmp_path)
+    assert excinfo.value.reason == "post_merge_terminal_invalid"
+    assert external.effects == []
+
+
+def test_post_merge_terminal_multiple_links_refuses(tmp_path):
+    external = FakeExternal(merged_pr_payload(refs=("multiple",)), open_issue_payload())
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert excinfo.value.reason == "linked_issue_not_unique"
+    assert external.effects == []
+
+
+def test_post_merge_terminal_unmerged_and_head_mismatch_refuse(tmp_path):
+    external = FakeExternal(merged_pr_payload(state="OPEN"), open_issue_payload())
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert excinfo.value.reason == "pr_not_merged"
+    external = FakeExternal(merged_pr_payload(), open_issue_payload())
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(post_merge_request(head="d" * 40), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert excinfo.value.reason == "pr_head_mismatch"
+    assert external.effects == []
+
+
+def test_post_merge_terminal_crash_resume_continues_pending_close(tmp_path):
+    """A prepared post_merge receipt with an open issue resumes through the
+    plan (including the pending journaled close) instead of demanding prior
+    terminality like the label-only resume path."""
+    import hashlib
+
+    supplied = CLEANUP._validate_request(post_merge_request())
+    request = CLEANUP._cleanup_identity(supplied)
+    request["cleanup_mode"] = supplied["cleanup_mode"]
+    request["thread_reply"] = supplied["thread_reply"]
+    request["post_merge_terminal"] = True
+    pr_payload, issue_payload = merged_pr_payload(), open_issue_payload()
+    pr_labels = CLEANUP._validate_merged_snapshot(request, pr_payload)
+    issue_labels = CLEANUP._validate_issue_snapshot(request, issue_payload)
+    text = CLEANUP._transition_text(request)
+    plan = (
+        CLEANUP._label_plan("pr", pr_labels, "pm-state:closed-clean")
+        + CLEANUP._label_plan("issue", issue_labels, "status:done")
+        + [{"name": "issue_close", "scope": "issue", "operation": "close", "label": ""}]
+    )
+    key = CLEANUP._cleanup_key(request)
+    CLEANUP._write_json(tmp_path / "receipts.json", {key: {
+        "status": "prepared",
+        "started_at": "2026-09-18T00:00:00Z",
+        "request": CLEANUP._cleanup_identity(request),
+        "cleanup_mode": supplied["cleanup_mode"],
+        "thread_reply": False,
+        "post_merge_terminal": True,
+        "thread_ts": None,
+        "payload_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "plan": plan,
+        "steps": {},
+        "ambiguous_steps": [],
+    }})
+    external = FakeExternal(pr_payload, issue_payload)
+    result = run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert result["success"] is True and result["idempotent"] is False
+    assert "issue:close" in external.effects
+    assert "pr:add:pm-state:closed-clean" in external.effects
+
+
+def test_post_merge_terminal_after_label_only_completion_is_effect_free(tmp_path):
+    """Distinct receipt keys per path; a post_merge run after a label-only
+    completion finds the terminal already in place and performs zero effects."""
+    external = FakeExternal(merged_pr_payload(), closed_issue_payload())
+    run_cleanup(base_request(thread_reply=False), tmp_path, external, mapping_path=tmp_path)
+    count = len(external.effects)
+    result = run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert result["success"] is True
+    assert len(external.effects) == count
+
+
+def test_post_merge_terminal_replay_with_different_flag_is_mode_mismatch(tmp_path):
+    """Same post_merge key replayed without the flag refuses instead of
+    silently continuing another path's receipt."""
+    external = FakeExternal(merged_pr_payload(), open_issue_payload())
+    first = run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert first["success"] is True
+    receipts_path = tmp_path / "receipts.json"
+    receipts = json.loads(receipts_path.read_text())
+    assert len(receipts) == 1
+    (key,) = receipts.keys()
+    receipts[key]["post_merge_terminal"] = False
+    receipts_path.write_text(json.dumps(receipts))
+    with pytest.raises(CLEANUP.CleanupError) as excinfo:
+        run_cleanup(post_merge_request(), tmp_path, external, mapping_path=tmp_path / "absent.json")
+    assert excinfo.value.reason == "cleanup_receipt_mode_mismatch"

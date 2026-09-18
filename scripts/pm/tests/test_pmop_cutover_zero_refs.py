@@ -33,6 +33,7 @@ RETIRED = [
 ]
 
 ADOPTED = [
+    "pm-cleanup-pr/SKILL.md",
     "pr-state-sweep/SKILL.md",
     "pr-state-sweep/scripts/sweep.sh",
     "ci-success-reconciliation/SKILL.md",
