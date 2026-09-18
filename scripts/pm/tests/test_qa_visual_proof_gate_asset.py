@@ -233,3 +233,150 @@ def test_installer_maps_both_targets_and_rollback_preserves_preimages(tmp_path: 
     assert installed_target.read_bytes() == installed_preimage
     assert stat.S_IMODE(app_target.stat().st_mode) == 0o755
     assert stat.S_IMODE(installed_target.stat().st_mode) == 0o755
+
+
+PR_7888 = 7888
+ISSUE_359 = 359
+HEAD_7888 = "c" * 40
+
+
+def _args_7888() -> argparse.Namespace:
+    return argparse.Namespace(
+        pr=PR_7888,
+        repo="heydonna-app/heydonna-app",
+        expect_head=HEAD_7888,
+        skip_artifact_availability=True,
+    )
+
+
+def _scope_7888(*, ui_changed: bool) -> dict:
+    path = "convex/creditsLedger.ts"
+    return {
+        "schema_version": 1,
+        "scope": "product",
+        "control_plane_only": False,
+        "product_changed": True,
+        "ci_required": True,
+        "e2e_required": True,
+        "ui_changed": ui_changed,
+        "changed_files": [path],
+        "ownership": {path: "app_product"},
+        "rules_sha256": RULES_SHA256,
+        "head": HEAD_7888,
+    }
+
+
+def _pr_7888_shape() -> dict:
+    return {
+        "number": PR_7888,
+        "headRefOid": HEAD_7888,
+        "headRefName": "credits-ledger-public-beta",
+        "title": "Credits ledger public beta (#359)",
+        "body": "Implements #359. Test plan reran PR #7888 checks locally.",
+        "closingIssuesReferences": [],
+        "comments": [],
+    }
+
+
+def test_nonvisual_pr_with_self_number_ref_resolves_deterministically(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RED/GREEN for the #7888 shape: the PR's own number in prose is a
+    self-mention, not a second implementation issue. Before the fix this
+    raised ambiguous-implementation-issue (surfaced as gate_error); after
+    the fix it resolves #359 and the non-visual contract passes."""
+    gate = _load_gate(monkeypatch, tmp_path)
+
+    def fake_run(command: list[str], *, timeout: int = 60) -> str:
+        del timeout
+        if command[:3] == ["gh", "pr", "view"]:
+            return json.dumps(_pr_7888_shape())
+        if command[0] == "python3":
+            return json.dumps(_scope_7888(ui_changed=True))
+        if command[:3] == ["gh", "issue", "view"]:
+            assert command[command.index("view") + 1] == str(ISSUE_359)
+            return json.dumps({"number": ISSUE_359, "body": "## What to Build\n\n## Why\n", "state": "OPEN"})
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(gate, "run", fake_run)
+    result = gate.live_evaluate(_args_7888())
+    assert result["ok"] is True
+    assert result["issue"] == ISSUE_359
+
+
+def test_residual_ambiguity_returns_typed_block_not_gate_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two genuine non-self refs must yield one bounded typed blocked state,
+    never a raise (which main() would flatten to gate_error)."""
+    gate = _load_gate(monkeypatch, tmp_path)
+    pr = _pr_7888_shape()
+    pr["body"] = "Implements #359 and #360."
+
+    def fake_run(command: list[str], *, timeout: int = 60) -> str:
+        del timeout
+        if command[:3] == ["gh", "pr", "view"]:
+            return json.dumps(pr)
+        if command[0] == "python3":
+            return json.dumps(_scope_7888(ui_changed=True))
+        raise AssertionError(f"issue lookup must not run before {command}")
+
+    monkeypatch.setattr(gate, "run", fake_run)
+    result = gate.live_evaluate(_args_7888())
+    assert result["ok"] is False
+    assert result["status"] == "blocked"
+    assert result["reason"] == "ambiguous_implementation_issue"
+    assert result["schema"] == "heydonna_qa_visual_proof_gate"
+
+
+def test_visual_pr_with_required_ac_still_blocks_without_proof(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A genuinely visual AC still requires durable screenshot proof."""
+    gate = _load_gate(monkeypatch, tmp_path)
+    pr = _pr_7888_shape()
+    pr["closingIssuesReferences"] = [{"number": ISSUE_359}]
+
+    def fake_proof_contract(body: str) -> tuple[list, list]:
+        del body
+        return (
+            [{"id": "AC1", "fields": {
+                "surface": "visual",
+                "qa_reachability": "deterministic",
+                "required_proof": "screenshot",
+            }}],
+            [],
+        )
+
+    def fake_run(command: list[str], *, timeout: int = 60) -> str:
+        del timeout
+        if command[:3] == ["gh", "pr", "view"]:
+            return json.dumps(pr)
+        if command[0] == "python3":
+            return json.dumps(_scope_7888(ui_changed=True))
+        if command[:3] == ["gh", "issue", "view"]:
+            return json.dumps({"number": ISSUE_359, "body": "visual contract", "state": "OPEN"})
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(gate, "run", fake_run)
+    monkeypatch.setattr(gate, "proof_contract", fake_proof_contract)
+    result = gate.live_evaluate(_args_7888())
+    assert result["ok"] is False
+    assert result["reason"] == "durable_screenshot_receipt_missing"
+    assert result["errors"] == ["missing_screenshot_proof:AC1"]
+
+
+def test_resolver_ignores_self_number_refs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gate = _load_gate(monkeypatch, tmp_path)
+    pr = {"closingIssuesReferences": [{"number": PR_7888}], "headRefName": "x", "title": "", "body": ""}
+    try:
+        gate.resolve_pr_issue_from_metadata(pr, pr_number=PR_7888)
+    except RuntimeError as exc:
+        assert "cannot resolve" in str(exc)
+    else:
+        raise AssertionError("self-only closing ref must not resolve to the PR itself")
+    mixed = {"closingIssuesReferences": [{"number": ISSUE_359}, {"number": PR_7888}],
+             "headRefName": "x", "title": "", "body": ""}
+    assert gate.resolve_pr_issue_from_metadata(mixed, pr_number=PR_7888) == ISSUE_359

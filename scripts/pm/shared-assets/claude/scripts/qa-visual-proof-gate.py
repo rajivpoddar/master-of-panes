@@ -210,22 +210,31 @@ BRANCH_ISSUE_RE = re.compile(
 PROSE_ISSUE_RE = re.compile(r"#([0-9]+)")
 
 
-def resolve_pr_issue_from_metadata(pr: dict[str, Any]) -> int:
+def resolve_pr_issue_from_metadata(pr: dict[str, Any], *, pr_number: int = 0) -> int:
     """Resolve exactly one implementation issue from read-only PR metadata.
 
     The retired resolver was a repository dependency.  The PR payload already
     contains the authoritative closing-issue references; branch/title/body are
     deterministic fallbacks for older PRs.  Ambiguous or absent ownership is
     refused rather than guessed.
+
+    References equal to the PR's own number are self-mentions (e.g. "PR #1234"
+    in the test plan), never the implementation issue, and are excluded
+    deterministically before the ambiguity check.
     """
+    self_ref = int(pr_number) if isinstance(pr_number, int) and pr_number > 0 else 0
     closing: set[int] = set()
     for ref in pr.get("closingIssuesReferences") or []:
         if isinstance(ref, dict) and isinstance(ref.get("number"), int) and ref["number"] > 0:
             closing.add(int(ref["number"]))
+    closing.discard(self_ref)
     if len(closing) == 1:
         return next(iter(closing))
     if len(closing) > 1:
-        raise RuntimeError("ambiguous implementation issue: multiple closing issue references")
+        raise RuntimeError(
+            "ambiguous implementation issue: multiple closing issue references: "
+            + ",".join(str(number) for number in sorted(closing))
+        )
 
     branch = pr.get("headRefName")
     if isinstance(branch, str):
@@ -235,10 +244,14 @@ def resolve_pr_issue_from_metadata(pr: dict[str, Any]) -> int:
 
     text = f"{pr.get('title') or ''}\n{pr.get('body') or ''}"
     prose = {int(number) for number in PROSE_ISSUE_RE.findall(text)}
+    prose.discard(self_ref)
     if len(prose) == 1:
         return next(iter(prose))
     if len(prose) > 1:
-        raise RuntimeError("ambiguous implementation issue: multiple issue references in PR metadata")
+        raise RuntimeError(
+            "ambiguous implementation issue: multiple issue references in PR metadata: "
+            + ",".join(str(number) for number in sorted(prose))
+        )
     raise RuntimeError("cannot resolve implementation issue from read-only PR metadata")
 
 
@@ -662,7 +675,21 @@ def live_evaluate(args: argparse.Namespace) -> dict[str, Any]:
     scope = validate_change_scope(scope, expected_head=head)
     ui_changed = scope["ui_changed"]
     if ui_changed:
-        issue = resolve_pr_issue_from_metadata(pr_data)
+        try:
+            issue = resolve_pr_issue_from_metadata(pr_data, pr_number=int(args.pr))
+        except RuntimeError as exc:
+            if str(exc).startswith("ambiguous implementation issue"):
+                return {
+                    "schema": "heydonna_qa_visual_proof_gate", "version": 1,
+                    "pr": int(args.pr), "issue": 0, "head_sha": head,
+                    "ui_changed": True,
+                    "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                    "ok": False, "status": "blocked",
+                    "reason": "ambiguous_implementation_issue",
+                    "errors": [str(exc)],
+                    "change_scope": scope,
+                }
+            raise
         issue_data = json.loads(
             run(["gh", "issue", "view", str(issue), "--repo", args.repo, "--json", "number,body,state"])
         )
