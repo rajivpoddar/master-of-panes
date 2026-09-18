@@ -10,6 +10,7 @@
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist",
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
       "~/.claude/scripts/axiom-activity-report.py",
+      "~/.claude/scripts/ci-success-reconciliation.py",
       "~/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
       "~/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
       "~/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
@@ -55,7 +56,7 @@
       "~/.claude/skills/codex-review-companion/SKILL.md",
       "~/.claude/skills/todo-prioritize/SKILL.md"
     ],
-    "selected_count": 77,
+    "selected_count": 78,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -203,6 +204,15 @@
       "sha256": "8b67ea060d935f4be465aa342b0f3fe00e86950ce0ccbb80a58b1e2cc1d94abd",
       "mode": 493,
       "ownership_class": "shared-claude-pm-report",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/ci-success-reconciliation.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci-success-reconciliation.py",
+      "sha256": "bd6c94e2ab76a1ec392f5fe5fa9aba6159a7da1f1f52ed248293a3af4509c7bb",
+      "mode": 493,
+      "ownership_class": "shared-claude-ci-success-reconciliation",
       "dependency_status": "closed",
       "dependencies": []
     },
@@ -409,7 +419,7 @@
     {
       "source_path": "claude/skills/ci-success-reconciliation/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/ci-success-reconciliation/SKILL.md",
-      "sha256": "6d562d2be0ea5f428a082bbf4369f4765ae671fd4e1d278b72458b801b9b204f",
+      "sha256": "c80324bf0d984f8f68f481c1bd88f66540f5ee1d24ef5670bed14b8bff927d09",
       "mode": 420,
       "ownership_class": "shared-claude-ci-success-reconciliation",
       "dependency_status": "closed",
@@ -472,7 +482,7 @@
     {
       "source_path": "claude/skills/pr-state-sweep/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/pr-state-sweep/SKILL.md",
-      "sha256": "46f98762b95864c62af83c20f1754063deeb1d9f50ab27b694b07dc79ca2baf9",
+      "sha256": "730dbbeb771978fb6af86fc9c19c0c7a7122269f7d03d052d984c9a9e273ff7a",
       "mode": 420,
       "ownership_class": "shared-claude-pr-state-sweep",
       "dependency_status": "closed",
@@ -481,7 +491,7 @@
     {
       "source_path": "claude/skills/pr-state-sweep/scripts/sweep.sh",
       "canonical_target": "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh",
-      "sha256": "b7352b0fca09524cd019e5ed8b8bbbb5126e72018b2bf70a8704aa4a528ae4c5",
+      "sha256": "dafd27fd5afff762561b8d5291f277b11f5a947900366a07a2303b65efc8d0a6",
       "mode": 493,
       "ownership_class": "shared-claude-pr-state-sweep",
       "dependency_status": "closed",

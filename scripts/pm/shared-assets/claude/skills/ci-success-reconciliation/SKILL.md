@@ -112,9 +112,10 @@ The event may come from Slack ingress or the independent green-CI watchdog.
 
    - execute the single canonical reconciliation command. It re-reads the
      live OPEN/non-draft exact head, runs the existing exact-head CI+E2E and
-     readiness gates, records one durable event plus one CTO obligation, and
-     sends the existing typed transition-alert once. It does not edit labels
-     or create merge authority:
+     readiness gates, and records one durable event plus one CTO obligation.
+     That durable handoff is the delivery authority; an optional notify
+     transport posts the already-bound handoff once when configured and never
+     mutates PR state. It does not edit labels or create merge authority:
 
      ```bash
      python3 /Users/rajiv/.claude/scripts/ci-success-reconciliation.py \

@@ -5309,7 +5309,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr rework packet exists but slot delivery is unproven" \
-          --action "Resume the canonical claim_slot assignment outbox for PR #$pr slot:$slot and its exact handoff identity; do not invoke the retired shell handoff surface. Require the outbox postcondition before treating the handoff as delivered." \
+          --action "Deliver the exact handoff identity for PR #$pr slot:$slot only through Skill(direct-assign) and require delivery_verified=true before treating the handoff as delivered; do not invoke the retired shell handoff surface and do not resume a legacy claim_slot/message-slot outbox. If the prior delivery is uncertain or unverified, keep the blocker open and do not retry." \
           --blocker "packet_created_without_delivery_ack" \
           --evidence "$line"
         ;;
@@ -5524,7 +5524,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr PM review passed while an exact-head workflow is active" \
-          --action "Do not duplicate or label-toggle the active workflow. Wait for every exact-head CI/E2E run to reach terminal, inspect any failure, then rerun pr-state-sweep so the canonical typed pm-review-done processor can continue." \
+          --action "Do not duplicate or label-toggle the active workflow. Wait for every exact-head CI/E2E run to reach terminal and inspect any failure. The pm-review-done ownership release is retired (UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done); rerunning pr-state-sweep resumes no transition and performs no release." \
           --blocker "pm_review_passed_current_head_workflow_active" \
           --evidence "$line"
         ;;

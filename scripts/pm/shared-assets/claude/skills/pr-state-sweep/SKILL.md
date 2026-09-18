@@ -238,12 +238,12 @@ Dry-run mode mutates nothing:
 ~/.claude/skills/pr-state-sweep/scripts/sweep.sh --trigger=pm-stop --dry-run
 ```
 
-Real mode mutates only deterministic slot cleanup:
-
-- removes stale `slot:*` labels from merge-ready PRs and linked issues
-- removes stale `slot:*` labels from capture-blocked PRs and linked issues
-- releases matching MoP slots
-- records a PM ops event
+Real mode performs no label deletion and no MoP slot release itself. It
+emits `PR_SLOT_RELEASE_REQUIRED` rows that delegate release to
+`Skill(direct-release)` with the complete authoritative tuple, records a PM ops
+event for the delegation, and otherwise reports audit rows plus required PM
+actions upserted into PM ops obligations. The only in-sweep state transition
+is the separately preserved family2 pm-review completion boundary.
 
 All other PR transitions are emitted as required PM actions and upserted into PM
 ops obligations. `PR_READY_PROMOTION_REQUIRED` is not an auto-flip: PM must run
@@ -311,10 +311,11 @@ expected transition, actual stuck state, evidence path or command output,
 attempted fix, recommended default, and merge-ready/slot-dispatch impact. Do
 not ask Rajiv to choose routine ops while the deterministic repair path works.
 `PR_REWORK_DELIVERY_PENDING_REQUIRED` means a PM/rework packet exists but neither
-`MESSAGE_SLOT_OK` nor slot-side pickup proof is current; PM must execute the
-named PM-local `message-slot.sh --file ... --force` command in the
-PM pane and keep the blocker open until delivery proof exists. Do not send the
-`message-slot.sh` command text to the target slot.
+`MESSAGE_SLOT_OK` nor slot-side pickup proof is current; PM must deliver the
+exact handoff identity only through `Skill(direct-assign)` and keep the blocker
+open until `delivery_verified=true`. Do not use `message-slot.sh` for rework
+delivery, do not resume a legacy claim_slot/message-slot outbox, and do not
+retry after an uncertain or unverified delivery.
 `PR_REWORK_PACKET_REQUIRED` means an actionable blocked-rework PR has no durable
 packet comment bound to its current head. PM must create the exact packet, but
 its recording transition is retired

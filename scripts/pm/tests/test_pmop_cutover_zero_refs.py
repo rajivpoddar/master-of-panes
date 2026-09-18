@@ -119,3 +119,75 @@ def test_manifest_covers_adopted_sources_with_parity() -> None:
         assert by_path[source_path]["dependency_status"] == "closed"
         assert by_path[source_path]["dependencies"] == []
     assert manifest["inventory"]["selected_count"] == len(manifest["entries"])
+
+
+ADOPTED_EXECUTABLES = [
+    "claude/scripts/ci-success-reconciliation.py",
+]
+
+
+def _read_executable(relative: str) -> str:
+    path = SHARED / relative
+    assert path.is_file(), f"adopted executable missing: {relative}"
+    return path.read_text(encoding="utf-8")
+
+
+def test_adopted_executables_have_zero_retired_references() -> None:
+    for relative in ADOPTED_EXECUTABLES:
+        text = _read_executable(relative)
+        for name in RETIRED:
+            assert name not in text, f"{relative} still references retired {name}"
+
+
+def test_adopted_executable_has_no_undeclared_retired_transport() -> None:
+    text = _read_executable("claude/scripts/ci-success-reconciliation.py")
+    assert "MERGE_READY_NOTIFY_OK" in text
+    assert "notification_skipped_no_transport" in text
+    assert "pm-transition-alert" not in text
+
+
+def test_rework_delivery_routes_only_through_direct_assign() -> None:
+    sweep = _read("pr-state-sweep/scripts/sweep.sh")
+    marker = "--kind rework_delivery_pending"
+    assert marker in sweep
+    block = sweep.split(marker, 1)[1].split(";;", 1)[0]
+    assert "Skill(direct-assign)" in block
+    assert "Resume the canonical claim_slot" not in block
+    assert "do not resume a legacy claim_slot/message-slot outbox" in block
+    assert "do not retry" in block
+    skill = _read("pr-state-sweep/SKILL.md")
+    assert "Skill(direct-assign)" in skill
+    assert "must execute the\nnamed PM-local `message-slot.sh" not in skill
+    assert "Do not use `message-slot.sh` for rework" in skill
+
+
+def test_mutation_policy_matches_no_release_behavior() -> None:
+    skill = _read("pr-state-sweep/SKILL.md")
+    assert "removes stale `slot:*` labels" not in skill
+    assert "releases matching MoP slots" not in skill
+    assert "performs no label deletion and no MoP slot release itself" in skill
+    assert "Skill(direct-release)" in skill
+    sweep = _read("pr-state-sweep/scripts/sweep.sh")
+    marker = "PR_PM_REVIEW_WORKFLOW_DRAIN_REQUIRED*)"
+    assert marker in sweep
+    block = sweep.split(marker, 1)[1].split(";;", 1)[0]
+    assert "UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done" in block
+    assert "processor can continue" not in block
+
+
+def test_manifest_covers_adopted_executable_with_parity() -> None:
+    import hashlib
+    import os
+
+    manifest = INSTALLER._load_shared_manifest(ROOT)
+    by_path = {item["source_path"]: item for item in manifest["entries"]}
+    relative = "claude/scripts/ci-success-reconciliation.py"
+    assert relative in by_path, relative
+    entry = by_path[relative]
+    assert entry["canonical_target"] == "/Users/rajiv/.claude/scripts/ci-success-reconciliation.py"
+    assert entry["dependency_status"] == "closed"
+    assert entry["dependencies"] == []
+    source = SHARED / relative
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert entry["sha256"] == digest
+    assert entry["mode"] == (os.stat(source).st_mode & 0o777) == 0o755
