@@ -41,9 +41,21 @@
       "~/Downloads/projects/heydonna-app-3006/.claude/skills/respawn",
       "~/.codex/skills/codex-stdio-send-message",
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
-      "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt"
+      "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt",
+      "~/.claude/skills/pr-state-sweep/SKILL.md",
+      "~/.claude/skills/pr-state-sweep/scripts/sweep.sh",
+      "~/.claude/skills/ci-success-reconciliation/SKILL.md",
+      "~/.claude/skills/codex-companion-cap-mechanism/SKILL.md",
+      "~/.claude/skills/cp-repair-request/SKILL.md",
+      "~/.claude/skills/anthropic-529-overload-inline-fallback/SKILL.md",
+      "~/.claude/skills/heydonna-review-cap-cto-approve-handoff/SKILL.md",
+      "~/.claude/skills/message-slot/SKILL.md",
+      "~/.claude/skills/message-slot/scripts/message-slot.sh",
+      "~/.claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
+      "~/.claude/skills/codex-review-companion/SKILL.md",
+      "~/.claude/skills/todo-prioritize/SKILL.md"
     ],
-    "selected_count": 65,
+    "selected_count": 77,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -377,6 +389,105 @@
       "dependencies": []
     },
     {
+      "source_path": "claude/skills/anthropic-529-overload-inline-fallback/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/anthropic-529-overload-inline-fallback/SKILL.md",
+      "sha256": "20768dfefe924ca21c77b08dba08735cfa50211ceeb488f8ddbb74d5ed40a3f5",
+      "mode": 420,
+      "ownership_class": "shared-claude-anthropic-529-overload-inline-fallback",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
+      "sha256": "ad44a086f5f158fb78feebc55a4787e80fd38b94f26d57c19b5dff36f42f2330",
+      "mode": 420,
+      "ownership_class": "shared-claude-bash-single-quote-collision",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/ci-success-reconciliation/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/ci-success-reconciliation/SKILL.md",
+      "sha256": "6d562d2be0ea5f428a082bbf4369f4765ae671fd4e1d278b72458b801b9b204f",
+      "mode": 420,
+      "ownership_class": "shared-claude-ci-success-reconciliation",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/codex-companion-cap-mechanism/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/codex-companion-cap-mechanism/SKILL.md",
+      "sha256": "3a94a362685ba311c1a5f76c13922ebc6fe97c040e601d2d5a69dbf5e823833f",
+      "mode": 420,
+      "ownership_class": "shared-claude-codex-companion-cap-mechanism",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/codex-review-companion/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/codex-review-companion/SKILL.md",
+      "sha256": "ad5407831c5e158f157832645f5815c8c00cec018b2293a682488cadabeaac8b",
+      "mode": 420,
+      "ownership_class": "shared-claude-codex-review-companion",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/cp-repair-request/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/cp-repair-request/SKILL.md",
+      "sha256": "66aae9c546b13db9521f521de701ecfda401fb13b8f01d4a952b3ece96a78fdc",
+      "mode": 420,
+      "ownership_class": "shared-claude-cp-repair-request",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/heydonna-review-cap-cto-approve-handoff/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/heydonna-review-cap-cto-approve-handoff/SKILL.md",
+      "sha256": "0ac525f953afd64cb70b11378bcfcbeacd87051ae15fcdbd2a34ec481d3348f5",
+      "mode": 420,
+      "ownership_class": "shared-claude-heydonna-review-cap-cto-approve-handoff",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/message-slot/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/message-slot/SKILL.md",
+      "sha256": "eb3d46461c72e756d65cafa643ccb676afe6d3df30a1804860a2c2973f16c187",
+      "mode": 420,
+      "ownership_class": "shared-claude-message-slot",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/message-slot/scripts/message-slot.sh",
+      "canonical_target": "/Users/rajiv/.claude/skills/message-slot/scripts/message-slot.sh",
+      "sha256": "8b3950bf50e9ae4c978262a5dcb7d3598696fae8ef331c032fd84e1d19d45ebe",
+      "mode": 493,
+      "ownership_class": "shared-claude-message-slot",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/pr-state-sweep/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/pr-state-sweep/SKILL.md",
+      "sha256": "46f98762b95864c62af83c20f1754063deeb1d9f50ab27b694b07dc79ca2baf9",
+      "mode": 420,
+      "ownership_class": "shared-claude-pr-state-sweep",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/pr-state-sweep/scripts/sweep.sh",
+      "canonical_target": "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh",
+      "sha256": "b7352b0fca09524cd019e5ed8b8bbbb5126e72018b2bf70a8704aa4a528ae4c5",
+      "mode": 493,
+      "ownership_class": "shared-claude-pr-state-sweep",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "claude/skills/qa-brief/SKILL.md",
       "canonical_target": "/Users/rajiv/.claude/skills/qa-brief/SKILL.md",
       "sha256": "d4117f2aae3a718837109351d43b779d172b2d558dd406fcd6423943311abfd0",
@@ -407,6 +518,15 @@
       "sha256": "f0a2af6f532dbcdff077298a494b8c7f3015a3a5c34b874e932613d4851e40c4",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/skills/todo-prioritize/SKILL.md",
+      "canonical_target": "/Users/rajiv/.claude/skills/todo-prioritize/SKILL.md",
+      "sha256": "904ffce3cc54f193c2643faf0ec224b12b3839109177bdb73ecdf861c96b00ce",
+      "mode": 420,
+      "ownership_class": "shared-claude-todo-prioritize",
       "dependency_status": "closed",
       "dependencies": []
     },
