@@ -375,7 +375,7 @@
       "additional_targets": [
         "/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py"
       ],
-      "sha256": "db19ded165d94e8f7bd63e0af46d4827e28e139598b4b3796b6415eefe426f30",
+      "sha256": "f141cbb1e4b512ef932cad9518ec78093290a78e4285ec6f04cd9ba91c6501a2",
       "mode": 493,
       "ownership_class": "shared-claude-qa-visual-proof-gate",
       "source_authority": {
