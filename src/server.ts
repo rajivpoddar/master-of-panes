@@ -1061,13 +1061,15 @@ registerFamily2Routes(app, {
 // ─── Interrupt Turn (server-verified wedge escape: Ctrl-C only) ────────
 // Trust model: identity pins in the body, every eligibility conjunct from
 // server-owned state (slot row, pinned pane identity, live pane snapshot,
-// stored meaningful-work timestamps). No caller attestation is trusted.
+// live checkout HEAD/branch, stored meaningful-work timestamps). No caller
+// attestation is trusted, and queued input alone never sanctions a wedge.
 registerWedgeInterruptRoute(app, {
   db,
   isOperatorRequest: (header) => isPmTransitionAssignmentRequest(header),
   authorityHeader: (c) => c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER),
   verifyPaneIdentity: (slotNum) => verifyPaneIdentity(slotNum),
   captureSnapshot: (paneId) => capturePaneSnapshot(paneId),
+  observeCheckout: (checkoutPath) => readCheckoutMovement(checkoutPath),
   sendInterruptKey: (slotNum) => relay.sendToSlotAsync(slotNum, WEDGE_INTERRUPT_KEY, true, true),
   nowMs: () => Date.now(),
 });
@@ -1299,6 +1301,31 @@ app.post("/slots/:slotNum/respawn", async (c) => {
  * Verify pane exists and return a snapshot of recent content for delivery
  * verification. Returns null if the pane doesn't exist or tmux is unreachable.
  */
+/**
+ * Read the live checkout HEAD/branch for the wedge-interrupt movement leg.
+ * Read-only git probes against the already identity-verified slot checkout.
+ * Returns null when the checkout cannot be inspected: indeterminate, never
+ * "no movement".
+ */
+async function readCheckoutMovement(
+  checkoutPath: string,
+): Promise<{ head: string | null; branch: string | null } | null> {
+  try {
+    const headOut = await execShell(`git -C ${shellEscape(checkoutPath)} rev-parse HEAD`, { timeout: 3_000 });
+    const branchOut = await execShell(`git -C ${shellEscape(checkoutPath)} rev-parse --abbrev-ref HEAD`, {
+      timeout: 3_000,
+    });
+    const headSha = headOut.stdout.trim();
+    const branchName = branchOut.stdout.trim();
+    return {
+      head: /^[0-9a-f]{40}$/i.test(headSha) ? headSha : null,
+      branch: branchName && branchName !== "HEAD" ? branchName : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function capturePaneSnapshot(paneAddress: string): Promise<string | null> {
   try {
     const result = await execShell(`tmux capture-pane -t ${paneAddress} -p`, { timeout: 5000 });
