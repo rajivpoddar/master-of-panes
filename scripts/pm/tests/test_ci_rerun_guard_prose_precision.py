@@ -11,12 +11,14 @@ synthetic PreToolUse JSON on stdin; nothing live is touched.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).parents[3]
 HOOK = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "hooks" / "block-ci-rerun-without-local-proof.sh"
+MATCHER = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "scripts" / "ci" / "ci-rerun-guard-matcher.py"
 
 PM_OPS = "python3 /Users/rajiv/.claude/scripts/pm-ops.py obligation-upsert --kind ci_rework --pr 7925"
 
@@ -30,10 +32,11 @@ R2_PROSE_COMMANDS = (
 )
 
 
-def verdict(command: str) -> int:
+def verdict(command: str, matcher: Path | None = None) -> int:
     payload = json.dumps({"tool_input": {"command": command}})
+    env = dict(os.environ, CI_RERUN_GUARD_MATCHER=str(matcher or MATCHER))
     completed = subprocess.run(
-        ["bash", str(HOOK)], input=payload, capture_output=True, text=True, timeout=30,
+        ["bash", str(HOOK)], input=payload, env=env, capture_output=True, text=True, timeout=30,
     )
     assert completed.returncode in (0, 2), f"unexpected hook exit {completed.returncode}: {completed.stderr[:300]}"
     return completed.returncode
@@ -69,6 +72,29 @@ def test_quoted_command_position_still_blocks() -> None:
 
 def test_hash_comment_at_word_start_still_allows() -> None:
     assert verdict("echo hi # gh run rerun 1") == 0
+
+
+def test_command_after_heredoc_terminator_blocks_rerun() -> None:
+    assert verdict("cat <<EOF\nbody\nEOF\ngh run rerun 1") == 2
+
+
+def test_command_after_heredoc_terminator_blocks_workflow_run() -> None:
+    assert verdict("cat <<EOF\nbody\nEOF\ngh workflow run ci.yml") == 2
+
+
+def test_redirected_heredoc_then_rerun_blocks() -> None:
+    assert verdict("cat > /tmp/n.md <<EOF\nbody\nEOF\ngh run rerun 42") == 2
+
+
+def test_missing_matcher_blocks_fail_closed() -> None:
+    assert verdict("echo hello", matcher=Path("/nonexistent/ci-rerun-guard-matcher.py")) == 2
+
+
+def test_crashing_matcher_blocks_fail_closed(tmp_path) -> None:
+    broken = tmp_path / "broken_matcher.py"
+    broken.write_text("import sys\nsys.exit(3)\n", encoding="utf-8")
+    broken.chmod(0o755)
+    assert verdict("echo hello", matcher=broken) == 2
 
 
 def test_hook_present_and_executable() -> None:
