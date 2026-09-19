@@ -600,7 +600,7 @@ export class NativeSlotReleaseCoordinator {
             "quiescent_attestation_failed",
             "Quiescent release requires a clean main checkout at the intended head.",
             this.dependencies.db.getSlot(request.slot),
-            "Precondition: the owning checkout must be on branch main at intended_main_head, with `git status --porcelain --untracked-files=all` empty and `@{upstream}..HEAD` empty. Send the slot the switch-to-main-and-pull instruction first, wait for that clean read-only attestation, then call release; the slot stays occupied until then.",
+            "Preconditions: the slot must be idle/inactive (no active turn, not DND, non-productive) and the owning checkout must be on branch main at intended_main_head, with `git status --porcelain --untracked-files=all` empty and `@{upstream}..HEAD` empty. Send the slot the switch-to-main-and-pull instruction first, wait for that clean read-only attestation, then call release; the slot stays occupied until then.",
           );
         }
         const cleared = this.dependencies.db.commitNativeRelease(

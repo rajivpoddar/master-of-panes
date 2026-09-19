@@ -111,6 +111,12 @@ test("authority refusals publish the working release shape and clean-checkout pr
   assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /branch main at intended_main_head/);
   assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /git status --porcelain --untracked-files=all/);
   assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /@\{upstream\}\.\.HEAD/);
+  // Both preconditions must be stated: slot state AND checkout state.
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /idle\/inactive/);
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /no active turn/);
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /not DND/);
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /non-productive/);
+  assert.doesNotMatch(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /only blocking one/);
   // The MCP pointer: a stale client that cannot send the header is told to use REST.
   assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /call this REST route directly/);
   // An assignment refusal must never hand the caller a release recipe.

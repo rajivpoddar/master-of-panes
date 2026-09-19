@@ -29,9 +29,10 @@ export const ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION =
   "intended_main_head:<40-hex head>, release_mode:'quiescent_legacy_issue_only'}. " +
   "No expected_session_id is required. The five non-issue tuple fields need no values: explicit nulls are accepted " +
   "(omitting them is not). The effect identity is minted server-side; do not supply effect_id. " +
-  "Precondition (the only blocking one): the owning checkout is on branch main at intended_main_head, with " +
-  "`git status --porcelain --untracked-files=all` empty and `@{upstream}..HEAD` empty. Send the slot the " +
-  "switch-to-main-and-pull instruction first, wait for that clean attestation, then call release. " +
+  "Preconditions: the slot is idle/inactive (no active turn, not DND, non-productive) and the owning " +
+  "checkout is on branch main at intended_main_head with `git status --porcelain --untracked-files=all` " +
+  "empty and `@{upstream}..HEAD` empty. Send the slot the switch-to-main-and-pull instruction first, wait " +
+  "for that clean attestation, then call release. " +
   "Stale MCP clients (frozen pre-contract bundle): call this REST route directly.";
 
 // Assign-family remediation for POST /slots/:n/assign and
