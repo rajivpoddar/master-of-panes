@@ -757,6 +757,24 @@
       "source_path": "codex/skills/heydonna-control-plane-repair/SKILL.md"
     },
     {
+      "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py",
+      "sha256": "1ad9c0440cefe2d3e2acc61e189eb904f45b61646da22331d7ca7613efb1b6fb",
+      "mode": 420,
+      "ownership_class": "shared-codex-skill-executable",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/test_admit_fetch_timeout.py",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/scripts/test_admit_fetch_timeout.py",
+      "sha256": "dfc6da5e1788568cac3a62da938b5cebc5ce0a42de4a8b36a749d57c311f9c83",
+      "mode": 420,
+      "ownership_class": "shared-codex-skill-test",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -852,7 +870,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 91,
+    "selected_count": 93,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
