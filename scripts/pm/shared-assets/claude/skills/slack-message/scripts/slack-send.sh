@@ -839,6 +839,18 @@ if printf '%s' "$PAYLOAD" | grep -qE 'U0BNFGX2UAU|U0BNFGX2UAT|U0BNFGX2UAY|UEQTTB
   echo "ERROR: payload contains a near-miss Slack mention ID (U0BNFGX2UAU-class typo). Canonical: CTO=<@U0BNFGX2UAX> Rajiv=<@UEQTTB97A>. Refusing to send." >&2
   exit 1
 fi
+# Missing-@ guard (2026-09-19, Rajiv: "the at mention is wrong. fix it. update
+# the skill as well"): a CORRECT id written without the `@` — e.g. `<U0BNFGX2UAX>`
+# instead of `<@U0BNFGX2UAX>` — sails past the typo guard above, and Slack renders
+# it as literal text so the mention silently never fires. The author sees a
+# well-formed angle-bracketed id and believes it resolved; the reader sees raw
+# markup. Fail closed on any angle-bracketed U-id not preceded by `@`.
+# `grep -E '<U[0-9A-Z]{8,}>'` cannot match `<@U0…>` because the char after `<`
+# is `@`, not `U`.
+if printf '%s' "$PAYLOAD" | grep -qE '<U[0-9A-Z]{8,}>'; then
+  echo "ERROR: payload contains an angle-bracketed Slack id WITHOUT the '@' (e.g. <U0BNFGX2UAX>). Slack renders that as literal text and the mention never resolves. Canonical form: <@U0BNFGX2UAX>. Refusing to send." >&2
+  exit 1
+fi
 RESULT=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
   -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
   -H "Content-Type: application/json" \

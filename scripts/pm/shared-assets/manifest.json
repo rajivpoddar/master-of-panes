@@ -535,7 +535,7 @@
     {
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh",
       "canonical_target": "/Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh",
-      "sha256": "f0a2af6f532dbcdff077298a494b8c7f3015a3a5c34b874e932613d4851e40c4",
+      "sha256": "81d81ba867163b8bb7ec7f00f742934b16cabc7c04ab3ead24212e763ae417c6",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
       "dependency_status": "closed",
