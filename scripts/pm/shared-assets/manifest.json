@@ -57,7 +57,7 @@
       "~/.claude/skills/codex-review-companion/SKILL.md",
       "~/.claude/skills/todo-prioritize/SKILL.md"
     ],
-    "selected_count": 82,
+    "selected_count": 83,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -340,6 +340,15 @@
       "sha256": "510a4994cc78c97e9189624cf56f313bd62c3694173a1c82b9ec25e1ae50f4d0",
       "mode": 493,
       "ownership_class": "shared-codex-automation-adapter",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/scripts/pm-ops-legacy.py",
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm-ops-legacy.py",
+      "sha256": "67fff1ef3c3c8a709f7b5aef9f38aed488a90acb7d91a735cdfeb2e6ad685c89",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-ops",
       "dependency_status": "closed",
       "dependencies": []
     },
