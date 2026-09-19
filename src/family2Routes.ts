@@ -2,6 +2,8 @@ import type { Hono } from "hono";
 import { z } from "zod";
 
 import {
+  ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE,
+  ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION,
   isPmTransitionAssignmentRequest,
   PM_TRANSITION_ASSIGNMENT_HEADER,
 } from "./assignmentAuthority.js";
@@ -40,7 +42,7 @@ export function registerFamily2Routes(
   app.post("/slots/:slotNum/release", async (c) => {
     // Authenticate before path/body processing, delivery/reset, or any DB use.
     if (!authorized(c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER))) {
-      return c.json({ success: false, code: "assignment_authority_required" }, 403);
+      return c.json({ success: false, code: "assignment_authority_required", message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE, remediation: ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION }, 403);
     }
     const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
@@ -88,7 +90,7 @@ export function registerFamily2Routes(
     // separate from the legacy release route, which must retain its pane
     // delivery/reset semantics for existing callers.
     if (!authorized(c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER))) {
-      return c.json({ success: false, code: "assignment_authority_required" }, 403);
+      return c.json({ success: false, code: "assignment_authority_required", message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE, remediation: ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION }, 403);
     }
     const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
@@ -129,7 +131,7 @@ export function registerFamily2Routes(
   app.get("/slots/:slotNum/release-receipt", (c) => {
     // Receipt reconciliation is authenticated too; it exposes ownership history.
     if (!authorized(c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER))) {
-      return c.json({ success: false, code: "assignment_authority_required" }, 403);
+      return c.json({ success: false, code: "assignment_authority_required", message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE, remediation: ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION }, 403);
     }
     const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) return c.json({ success: false, code: "invalid_request" }, 400);
@@ -149,7 +151,7 @@ export function registerFamily2Routes(
   /** Consume one committed Family-2 release effect through the live MoP boundary. */
   app.post("/family2/release-effect", async (c) => {
     if (!authorized(c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER))) {
-      return c.json({ success: false, code: "assignment_authority_required" }, 403);
+      return c.json({ success: false, code: "assignment_authority_required", message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE, remediation: ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION }, 403);
     }
     let payload: unknown;
     try {
