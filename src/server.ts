@@ -41,6 +41,10 @@ import {
   type CheckoutResetObservation,
 } from "./slotRelease.js";
 import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
+import {
+  evaluateWedgedRespawnEscape,
+  WEDGED_BUSY_REMEDIATION,
+} from "./wedgedRespawnEscape.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
@@ -1104,11 +1108,31 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   }
 
   // Guard: slot must be idle before we send /exit. Avoid killing in-flight work.
+  // Typed wedge escape: a session wedged inside a never-ending turn (idle
+  // prompt, no tool progress) may proceed only with explicit operator
+  // attestation. Ownership and epoch are preserved — respawn never reassigns.
   const slotState = db.getSlot(slotNum);
   if (slotState && slotState.occupied && !slotState.idle) {
-    return c.json({
-      error: `Slot ${slotNum} is busy (not idle). Wait for idle before respawning.`,
-    }, 409);
+    const wedgeEscape = evaluateWedgedRespawnEscape(slotState, body);
+    if (wedgeEscape.decision !== "allowed") {
+      const wedgeRefusal =
+        wedgeEscape.decision === "attestation_insufficient"
+          ? {
+              error: `Slot ${slotNum} is busy (not idle). Wedged-respawn attestation insufficient: requires force_wedged_escape=true with wedge_attestation { idle_prompt_observed: true, no_tool_progress_minutes >= 5 }.`,
+              reason: "wedge_attestation_insufficient",
+            }
+          : {
+              error: `Slot ${slotNum} is busy (not idle). Wait for idle before respawning.`,
+              reason: "slot_busy_respawn_refused",
+            };
+      return c.json({ ...wedgeRefusal, remediation: WEDGED_BUSY_REMEDIATION }, 409);
+    }
+    db.logEvent(slotNum, "slot_respawn_wedged_escape", null, null, {
+      assignment_epoch: slotState.assignment_epoch,
+      idle_prompt_observed: true,
+      no_tool_progress_minutes: wedgeEscape.quiet_minutes,
+      via: "respawn_wedged_escape",
+    });
   }
 
   const steps: Array<{ step: string; elapsed_ms: number; detail?: string }> = [];
