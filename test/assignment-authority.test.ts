@@ -275,11 +275,17 @@ test("production assignment route accepts the minimal issue contract", async () 
       assert.equal(refused["reason"], "assignment_authority_required");
       assert.match(String(refused["message"]), /pm-transition\.sh is retired/);
       assert.match(String(refused["message"]), /x-heydonna-assignment-authority/);
-      assert.match(String(refused["remediation"]), /expected_pr:null/);
-      assert.match(String(refused["remediation"]), /expected_claimed_at:<live value/);
-      assert.match(String(refused["remediation"]), /quiescent_legacy_issue_only/);
-      assert.match(String(refused["remediation"]), /switch-to-main-and-pull/);
-      assert.match(String(refused["remediation"]), /minted server-side/);
+      assert.match(String(refused["remediation"]), /POST \/slots\/:n\/assign/);
+      assert.match(String(refused["remediation"]), /x-heydonna-assignment-authority/);
+      assert.match(String(refused["remediation"]), /pm-transition-v1/);
+      assert.match(String(refused["remediation"]), /positive integer/);
+      assert.match(String(refused["remediation"]), /task/);
+      assert.doesNotMatch(String(refused["remediation"]), /POST \/slots\/:n\/release/);
+      assert.doesNotMatch(String(refused["remediation"]), /expected_claimed_at/);
+      assert.doesNotMatch(String(refused["remediation"]), /intended_main_head/);
+      assert.doesNotMatch(String(refused["remediation"]), /quiescent_legacy_issue_only/);
+      assert.doesNotMatch(String(refused["remediation"]), /switch-to-main-and-pull/);
+      assert.doesNotMatch(String(refused["remediation"]), /minted server-side/);
       assert.deepEqual(db.getSlot(1), initial);
       assert.equal(db.getEvents(1, 10, "slot_assigned").length, 0);
     }

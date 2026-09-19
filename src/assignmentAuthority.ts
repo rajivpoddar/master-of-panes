@@ -31,6 +31,18 @@ export const ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION =
   "unpushed commits (send switch-to-main-and-pull first). The effect identity is minted server-side; do not " +
   "supply effect_id. Stale MCP clients (frozen pre-contract bundle): call this REST route directly.";
 
+// Assign-family remediation for POST /slots/:n/assign and
+// POST /slots/:n/adopt-issue-claim authority refusals. This must never name
+// the release route: an assignment caller following a release recipe would
+// perform the wrong operation. Bodies below mirror the route validators.
+export const ASSIGNMENT_ROUTE_REMEDIATION =
+  "POST /slots/:n/assign with header x-heydonna-assignment-authority: pm-transition-v1 and JSON body " +
+  '{issue:<positive integer>, task:"<non-empty task>"} (repository_id defaults to the legacy repository when omitted). ' +
+  "For a complete claim, send all of {expected_epoch, repository_id, issue, pr (null for issue-only or a positive integer), " +
+  'branch, head_sha (40-hex), work_kind, handoff_id, task} with valid values. ' +
+  "Rebind callers use POST /slots/:n/adopt-issue-claim with the same header and the expected_current_*/desired tuple body. " +
+  "Do not call the release route for assignment.";
+
 export function isPmTransitionAssignmentRequest(
   authority: string | undefined
 ): boolean {
