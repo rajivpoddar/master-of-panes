@@ -85,3 +85,31 @@ def test_manifest_covers_sop_with_parity() -> None:
     assert entry["sha256"] == hashlib.sha256(SOP.read_bytes()).hexdigest()
     assert entry["mode"] == (os.stat(SOP).st_mode & 0o777) == 0o644
     assert manifest["inventory"]["selected_count"] == len(manifest["entries"])
+
+
+def test_required_zero_reconciles_parked_p3_classifier_rows() -> None:
+    """Complete operational contract for the required-zero point: a parked-P3
+    classifier row is reconciled (row + quoted directive recorded, terminal
+    unblocked, row left visible) instead of forcing promotion. This is the
+    executable proxy for a prose-owned control point: it pins every operative
+    sentence of the reconciliation rule in decision order. Prose limitation
+    disclosed: no code path executes the sweep decision; the SOP text is the
+    enforcement surface, so presence-plus-order of the complete rule is the
+    proof."""
+    flat = _flat()
+    assert "Parked-P3 required-zero reconciliation" in flat
+    # 1. Trigger: a backlog_promote_candidate row matching the FULL exclusion.
+    assert "a `backlog_promote_candidate` classifier row matching the FULL parked-P3 exclusion above" in flat
+    # 2. Effect: not unresolved, terminal unblocked — for every important-label family.
+    assert "does not count as an unresolved promote candidate and does not prevent terminal completion" in flat
+    for family in ("bug", "customer-feedback", "public-beta", "pmf", "post-beta"):
+        assert f"`{family}`" in flat, family
+    # 3. Recording duty: row + quoted directive as structured reason; row stays visible.
+    assert "record that classifier row plus the quoted park directive as the structured reason for excluding it" in flat
+    assert "row itself stays visible and is never hidden or deleted" in flat
+    # 4. Scope: all conjuncts; P0-P2, deferred/blocked, unparked, and
+    #    directive-less P3s stay under existing rules.
+    assert "This exception applies only when ALL parked-P3 conjuncts hold" in flat
+    assert "P0–P2 rows, deferred/blocked dependency handling, unparked P3s, and P3s lacking an attributable quoted directive remain governed by the existing classifier and promotion rules" in flat
+    # 5. Override: only a newer explicit promotion cancels.
+    assert "Only a newer post-park explicit CTO/Rajiv promotion instruction cancels the exclusion." in flat

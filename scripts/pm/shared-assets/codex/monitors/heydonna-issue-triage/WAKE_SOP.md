@@ -296,6 +296,22 @@ Required zero buckets:
 Any mutation failure or nonzero required bucket is `ACTION REQUIRED`; name the
 exact issue and failure. Never stop at diagnosis or call a proposal complete.
 
+Parked-P3 required-zero reconciliation: a `backlog_promote_candidate`
+classifier row matching the FULL parked-P3 exclusion above — P3 with
+`status:backlog` or `status:deferred`, complete Ready Pool frontmatter
+(`disposition: PROMOTE` with `application_state: ready_for_dispatch`), and a
+body-quoted explicit CTO/Rajiv park instruction — does not count as an
+unresolved promote candidate and does not prevent terminal completion,
+whether the classifier row arose from the `bug`, `customer-feedback`,
+`public-beta`, `pmf`, or `post-beta` important-label family. The wake must
+record that classifier row plus the quoted park directive as the structured
+reason for excluding it; the row itself stays visible and is never hidden or
+deleted. This exception applies only when ALL parked-P3 conjuncts hold:
+P0–P2 rows, deferred/blocked dependency handling, unparked P3s, and P3s
+lacking an attributable quoted directive remain governed by the existing
+classifier and promotion rules. Only a newer post-park explicit CTO/Rajiv
+promotion instruction cancels the exclusion.
+
 ## CTO decisions handoff and PM relay
 
 After every wake, read and use the complete
