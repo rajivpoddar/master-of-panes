@@ -110,6 +110,34 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("prior release healthy after restart attempt", message)
         self.assertEqual(self.current.resolve(), self.old.resolve())
 
+    def test_pointer_restore_failure_reports_service_healthy_on_pointer_release(self) -> None:
+        calls = {"switches": 0, "restarts": 0}
+        original_switch = MODULE.atomic_switch
+
+        def flaky_switch(current, release_dir, expected_old):
+            if calls["switches"] == 0:
+                calls["switches"] = 1
+                return original_switch(current, release_dir, expected_old)
+            raise RuntimeError("rollback switch boom")
+
+        MODULE.atomic_switch = flaky_switch  # type: ignore[assignment]
+        self.addCleanup(setattr, MODULE, "atomic_switch", original_switch)
+
+        def restart():
+            calls["restarts"] += 1
+            if calls["restarts"] == 1:
+                raise RuntimeError("activation restart boom")
+
+        with self.assertRaises(MODULE.InstallerError) as ctx:
+            self.activate(restart, lambda: {"status": 200})
+        message = str(ctx.exception)
+        self.assertNotIn("baseline restored", message)
+        self.assertNotIn("prior release healthy", message)
+        self.assertIn("POINTER_RESTORE_FAILED", message)
+        self.assertIn("rollback switch boom", message)
+        self.assertIn(str(self.new.resolve()), message, "fresh pointer target must be reported")
+        self.assertEqual(self.current.resolve(), self.new.resolve(), "pointer still selects the refused release")
+
 
 if __name__ == "__main__":
     unittest.main()
