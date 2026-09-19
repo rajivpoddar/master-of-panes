@@ -2,6 +2,8 @@ import type { Hono } from "hono";
 import { z } from "zod";
 
 import {
+  ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE,
+  ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION,
   isPmTransitionAssignmentRequest,
   PM_TRANSITION_ASSIGNMENT_HEADER,
 } from "./assignmentAuthority.js";
@@ -129,6 +131,8 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
         conflict: true,
         error: "assignment authority is required",
         reason: "assignment_authority_required",
+        message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE,
+        remediation: ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION,
       }, 403);
     }
 
@@ -288,6 +292,8 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
         conflict: true,
         error: "assignment authority is required",
         reason: "assignment_authority_required",
+        message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE,
+        remediation: ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION,
       }, 403);
     }
 

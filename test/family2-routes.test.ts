@@ -215,3 +215,29 @@ test("quiescent legacy documented example body releases an idle issue-only slot"
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("release authority refusal publishes the canonical REST path and working body", async () => {
+  const fixture = routeFixture();
+  const response = await fixture.app.request("http://mop/slots/6/release", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ expected_epoch: 1 }),
+  });
+  assert.equal(response.status, 403);
+  const denied = await response.json() as Record<string, unknown>;
+  assert.equal(denied["success"], false);
+  assert.equal(denied["code"], "assignment_authority_required");
+  assert.match(String(denied["message"]), /pm-transition\.sh is retired/);
+  assert.match(String(denied["message"]), /x-heydonna-assignment-authority/);
+  assert.match(String(denied["message"]) + String(denied["remediation"]), /POST \/slots\/:n\/release/);
+  const remediation = String(denied["remediation"]);
+  for (const field of ["expected_repository_id", "expected_issue", "expected_pr:null",
+      "expected_branch:null", "expected_head_sha:null", "expected_work_kind:null",
+      "expected_handoff_id:null", "expected_claimed_at:<live value", "intended_main_head",
+      "quiescent_legacy_issue_only"]) {
+    assert.match(remediation, new RegExp(field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `remediation must name ${field}`);
+  }
+  assert.match(remediation, /switch-to-main-and-pull/);
+  assert.match(remediation, /minted server-side/);
+  assert.equal(fixture.releaseCalls, 0);
+});

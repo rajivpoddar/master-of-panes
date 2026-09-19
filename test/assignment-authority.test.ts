@@ -268,12 +268,18 @@ test("production assignment route accepts the minimal issue contract", async () 
         assignmentRequest(authority),
       );
       assert.equal(response.status, 403);
-      assert.deepEqual(await response.json(), {
-        success: false,
-        conflict: true,
-        error: "assignment authority is required",
-        reason: "assignment_authority_required",
-      });
+      const refused = await response.json() as Record<string, unknown>;
+      assert.equal(refused["success"], false);
+      assert.equal(refused["conflict"], true);
+      assert.equal(refused["error"], "assignment authority is required");
+      assert.equal(refused["reason"], "assignment_authority_required");
+      assert.match(String(refused["message"]), /pm-transition\.sh is retired/);
+      assert.match(String(refused["message"]), /x-heydonna-assignment-authority/);
+      assert.match(String(refused["remediation"]), /expected_pr:null/);
+      assert.match(String(refused["remediation"]), /expected_claimed_at:<live value/);
+      assert.match(String(refused["remediation"]), /quiescent_legacy_issue_only/);
+      assert.match(String(refused["remediation"]), /switch-to-main-and-pull/);
+      assert.match(String(refused["remediation"]), /minted server-side/);
       assert.deepEqual(db.getSlot(1), initial);
       assert.equal(db.getEvents(1, 10, "slot_assigned").length, 0);
     }
