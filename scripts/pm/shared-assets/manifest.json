@@ -767,6 +767,33 @@
       "dependencies": []
     },
     {
+      "source_path": "codex/skills/heydonna-open-pr-status/agents/openai.yaml",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/agents/openai.yaml",
+      "sha256": "ca8c9ff80de79fc2d73702b009e3df996ab07dfbc1971c5154941aee6a3fd12a",
+      "mode": 420,
+      "ownership_class": "shared-codex-skill-metadata",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/skills/heydonna-open-pr-status/scripts/merge.py",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/scripts/merge.py",
+      "sha256": "107ca872222c54de6d0e93e382a638cf480ad2768f5d59763dbf7030bc44a72e",
+      "mode": 420,
+      "ownership_class": "shared-codex-skill-executable",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/skills/heydonna-open-pr-status/scripts/test_merge_review_gate.py",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/scripts/test_merge_review_gate.py",
+      "sha256": "0466103019e97a8451761a0d9b134d147bbe87aa563e1aa2cba8f215dcea7ed1",
+      "mode": 420,
+      "ownership_class": "shared-codex-skill-test",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "source_path": "codex/skills/heydonna-slack-postback/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-slack-postback/SKILL.md",
       "sha256": "ab1dd9ad7cf6d4a1b8bb98aeb456198c52cc6d3aacb0707d971e97c338c3b76a",
@@ -806,33 +833,6 @@
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py",
       "sha256": "c3b6fce9bcbd6e498374483a61a52fce04f7f5afb3ef5def182cae7fd5ded940",
-      "mode": 420,
-      "ownership_class": "shared-codex-skill-test",
-      "dependency_status": "closed",
-      "dependencies": []
-    },
-    {
-      "source_path": "codex/skills/heydonna-open-pr-status/agents/openai.yaml",
-      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/agents/openai.yaml",
-      "sha256": "ca8c9ff80de79fc2d73702b009e3df996ab07dfbc1971c5154941aee6a3fd12a",
-      "mode": 420,
-      "ownership_class": "shared-codex-skill-metadata",
-      "dependency_status": "closed",
-      "dependencies": []
-    },
-    {
-      "source_path": "codex/skills/heydonna-open-pr-status/scripts/merge.py",
-      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/scripts/merge.py",
-      "sha256": "107ca872222c54de6d0e93e382a638cf480ad2768f5d59763dbf7030bc44a72e",
-      "mode": 420,
-      "ownership_class": "shared-codex-skill-executable",
-      "dependency_status": "closed",
-      "dependencies": []
-    },
-    {
-      "source_path": "codex/skills/heydonna-open-pr-status/scripts/test_merge_review_gate.py",
-      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/scripts/test_merge_review_gate.py",
-      "sha256": "0466103019e97a8451761a0d9b134d147bbe87aa563e1aa2cba8f215dcea7ed1",
       "mode": 420,
       "ownership_class": "shared-codex-skill-test",
       "dependency_status": "closed",
