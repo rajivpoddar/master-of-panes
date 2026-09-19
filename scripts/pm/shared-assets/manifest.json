@@ -28,6 +28,15 @@
       "source_path": "claude/dev-slot-rules/22-slot-revati.md"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/hooks/block-ci-rerun-without-local-proof.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-ci-rerun-guard",
+      "sha256": "c6858e63d23c8e78f600714cd6948c8d1bf12c0b8ed7f7b550260c59d20bad86",
+      "source_path": "claude/hooks/block-ci-rerun-without-local-proof.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/assignmentAuthority.js",
       "dependencies": [],
       "dependency_status": "closed",
@@ -143,6 +152,15 @@
       "ownership_class": "shared-claude-ci-failure-triage",
       "sha256": "752ccd77cc632bec2fbdeb360822ad4adb0ea3f9cef5ca94a68e5174e0875b54",
       "source_path": "claude/scripts/ci/ci-fast-triage.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/ci-rerun-guard-matcher.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-ci-rerun-guard",
+      "sha256": "d791968bef20b49592a7609324d0af19a0db87421a1194f6e2cb8deec176ce0b",
+      "source_path": "claude/scripts/ci/ci-rerun-guard-matcher.py"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
@@ -789,7 +807,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 84,
+    "selected_count": 86,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
