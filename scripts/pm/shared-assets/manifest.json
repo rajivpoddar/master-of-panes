@@ -37,6 +37,24 @@
       "source_path": "claude/hooks/block-ci-rerun-without-local-proof.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/hooks/block-invalid-issue-contract-ledger.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-contract-ledger",
+      "sha256": "8700a959f924712b5f7ba0e3a6d8f6c60d09d869e63ef6b3cd2fef60200b35ac",
+      "source_path": "claude/hooks/block-invalid-issue-contract-ledger.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/block-invalid-issue-contract-ledger.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-contract-ledger",
+      "sha256": "169a9dc73b201a02692705bf6a432974381e7e79b760618241b733a3b7f262f5",
+      "source_path": "claude/hooks/heydonna-app-block-invalid-issue-contract-ledger.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/assignmentAuthority.js",
       "dependencies": [],
       "dependency_status": "closed",
@@ -188,6 +206,24 @@
       "ownership_class": "shared-claude-ci-rerun-consumer",
       "sha256": "106c0ad8cfa09e9ecc5002aec51ea8d3cd7096b1e89ab3ad523984ef2445f8b9",
       "source_path": "claude/scripts/ci/rerun-after-local-proof.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/control_plane_issue_policy.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-issue-contract-ledger",
+      "sha256": "b0c18e62cf63f27fb3f4eff00080ce2b96628ebc6e107cb43c429f28c53f5c13",
+      "source_path": "claude/scripts/control_plane_issue_policy.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/issue-contract-ledger-hook.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-contract-ledger",
+      "sha256": "4beef0ff776367ee15756824972e11e6b76efe331fdd20066627b11a668a4f92",
+      "source_path": "claude/scripts/issue-contract-ledger-hook.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/launch-dev-slot-claude.sh",
@@ -352,6 +388,15 @@
       "ownership_class": "shared-claude-slot-launcher-dependency",
       "sha256": "56cccadefd204d5c2977af26a39ac205dbda9bd08aa629d5e60086769229fd13",
       "source_path": "claude/scripts/sync-dev-slot-skill-allowlist.mjs"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/validate-issue-contract-ledger.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-contract-ledger",
+      "sha256": "3f503e12287ab82d81486f59f1f4acec9c01a6381e39998037c7271f300de4db",
+      "source_path": "claude/scripts/validate-issue-contract-ledger.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/anthropic-529-overload-inline-fallback/SKILL.md",
@@ -807,7 +852,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 86,
+    "selected_count": 91,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
