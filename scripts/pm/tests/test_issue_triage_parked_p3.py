@@ -113,3 +113,38 @@ def test_required_zero_reconciles_parked_p3_classifier_rows() -> None:
     assert "P0–P2 rows, deferred/blocked dependency handling, unparked P3s, and P3s lacking an attributable quoted directive remain governed by the existing classifier and promotion rules" in flat
     # 5. Override: only a newer explicit promotion cancels.
     assert "Only a newer post-park explicit CTO/Rajiv promotion instruction cancels the exclusion." in flat
+
+
+def test_strict_form_never_todo_and_no_slot_narrowing() -> None:
+    """Amendment pin: the rule is NEVER status:todo (not merely 'not promoted
+    to a slot'); the withdrawn narrower phrasing must not appear."""
+    flat = _flat()
+    assert "never set `status:todo`" in flat
+    assert "not promoted to a slot" not in flat
+
+
+def test_restoration_returns_parked_p3_at_todo_to_backlog() -> None:
+    """A parked P3 found carrying status:todo is moved back to backlog with
+    the quoted directive as reason — this ends the live flip-flop. The
+    trigger is satisfiable: every parked conjunct EXCEPT the status-label
+    conjunct, with single status:todo instead (exactly one status always
+    holds — the live #7905 shape carries status:todo with no simultaneous
+    backlog/deferred label). A newer explicit promotion keeps todo; unparked
+    P3s are never demoted here."""
+    flat = _flat()
+    assert "Restoration (ends flip-flopping)" in flat
+    assert "when a P3 satisfying every parked conjunct above EXCEPT the status-label conjunct" in flat
+    assert "carrying single `status:todo` instead of `status:backlog`/`status:deferred`" in flat
+    assert "(exactly one status label always holds)" in flat
+    assert "with the complete Ready Pool frontmatter and the attributable quoted CTO/Rajiv park instruction still required" in flat
+    assert "move it back to `status:backlog` (remove `status:todo`)" in flat
+    assert "quoting the park instruction as the structured reason" in flat
+    assert "no newer explicit CTO/Rajiv promotion instruction exists anywhere on the issue (body, comments, linked threads)" in flat
+    assert "a newer promotion keeps `status:todo` and cancels the exclusion for that issue" in flat
+    assert "Never remove `status:todo` from an unparked P3 under this rule." in flat
+
+
+def test_parked_p3_excluded_from_ready_pool_membership() -> None:
+    flat = _flat()
+    assert "A parked P3 is not a Ready Pool member" in flat
+    assert "the dispatchable Ready Pool carries P0–P2, and a P3 enters it only unparked under the existing promotion rules" in flat

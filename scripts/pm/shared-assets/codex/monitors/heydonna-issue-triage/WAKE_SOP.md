@@ -120,6 +120,18 @@ instruction, normal promotion applies. Only a NEW explicit CTO/Rajiv
 promotion, issued after the park instruction, may move a parked P3 to
 `status:todo`. P0–P2 promotion is unchanged by this exclusion.
 
+Restoration (ends flip-flopping): when a P3 satisfying every parked
+conjunct above EXCEPT the status-label conjunct — carrying single
+`status:todo` instead of `status:backlog`/`status:deferred` (exactly one
+status label always holds), with the complete Ready Pool frontmatter and
+the attributable quoted CTO/Rajiv park instruction still required — move it
+back to `status:backlog` (remove `status:todo`), quoting the park
+instruction as the structured reason. Do this only when no newer explicit
+CTO/Rajiv promotion instruction exists anywhere on the issue (body,
+comments, linked threads); a newer promotion keeps `status:todo` and
+cancels the exclusion for that issue. Never remove `status:todo` from an
+unparked P3 under this rule.
+
 App-CI producer/proof work is app-test work when bounded and therefore requires
 a numbered slot. This includes CI/E2E workflow behavior, fixtures/capture
 producers, promotion proof, classifiers, test planners, watchdogs, harnesses,
@@ -310,7 +322,9 @@ deleted. This exception applies only when ALL parked-P3 conjuncts hold:
 P0–P2 rows, deferred/blocked dependency handling, unparked P3s, and P3s
 lacking an attributable quoted directive remain governed by the existing
 classifier and promotion rules. Only a newer post-park explicit CTO/Rajiv
-promotion instruction cancels the exclusion.
+promotion instruction cancels the exclusion. A parked P3 is not a Ready
+Pool member: the dispatchable Ready Pool carries P0–P2, and a P3 enters it
+only unparked under the existing promotion rules.
 
 ## CTO decisions handoff and PM relay
 
