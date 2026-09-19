@@ -1,0 +1,4 @@
+interface:
+  display_name: "HeyDonna PR Merge"
+  short_description: "Verify CI and E2E, then merge the current PR head"
+  default_prompt: "Use $heydonna-open-pr-status to verify the PR workflows, inspect relevant main changes, match existing visual QA, and merge with a head pin."
