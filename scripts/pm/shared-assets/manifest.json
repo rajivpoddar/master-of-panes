@@ -57,7 +57,7 @@
       "~/.claude/skills/codex-review-companion/SKILL.md",
       "~/.claude/skills/todo-prioritize/SKILL.md"
     ],
-    "selected_count": 83,
+    "selected_count": 84,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
@@ -106,6 +106,15 @@
       "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "claude/hooks/block-ci-rerun-without-local-proof.sh",
+      "canonical_target": "/Users/rajiv/.claude/hooks/block-ci-rerun-without-local-proof.sh",
+      "sha256": "6ec47d8b87e1e3517d8eb629043c73226144556f98a2a4721d5cbf799fadcd77",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-label-edit-boundary",
       "dependency_status": "closed",
       "dependencies": []
     },
