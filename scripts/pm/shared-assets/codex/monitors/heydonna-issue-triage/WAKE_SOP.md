@@ -25,7 +25,8 @@ The wake is terminal only when:
   work claimable by a numbered slot;
 - every dependency wait names only live blockers and each chain's current head
   is Todo or has a typed non-Todo hold;
-- no eligible bounded backlog candidate remains parked;
+- no eligible bounded backlog candidate remains parked (a parked P3 per the
+  exclusion above is not eligible);
 - all changed bodies pass the canonical issue-contract validator;
 - required backlog/Ready Pool audit buckets are zero; and
 - one compact terminal receipt is delivered to the active CTO decisions task,
@@ -107,6 +108,17 @@ shared actor alone.
 Use only for one bounded, executable, dependency-free app-code or app-test
 change suitable for a numbered slot. Repair the complete contract, remove
 backlog/blocker labels, and add `status:todo`.
+
+Parked-P3 exclusion (mandatory before any PROMOTE): a P3 is parked — never
+set `status:todo` — when ALL hold: it carries `status:backlog` or
+`status:deferred`, it has complete Ready Pool frontmatter (`disposition:
+PROMOTE` with `application_state: ready_for_dispatch`), and its body quotes
+an explicit CTO/Rajiv park instruction (e.g. `no slot now`, `queue it per
+priority behind the active lanes`). Keep its current status and record the
+quoted instruction as the structured reason; absent any quoted park
+instruction, normal promotion applies. Only a NEW explicit CTO/Rajiv
+promotion, issued after the park instruction, may move a parked P3 to
+`status:todo`. P0–P2 promotion is unchanged by this exclusion.
 
 App-CI producer/proof work is app-test work when bounded and therefore requires
 a numbered slot. This includes CI/E2E workflow behavior, fixtures/capture
@@ -193,6 +205,9 @@ Pool block containing:
 
 Todo invariants:
 
+- a parked P3 per the exclusion above is never PROMOTE-eligible: `status:backlog`
+  and `status:deferred` are terminal holding states for P3s until an explicit
+  CTO/Rajiv promotion;
 - exactly one `status:todo` label;
 - exactly one matching P0/P1/P2/P3 label;
 - `blockers: none`, no dependency label, and no PM blocker label;
@@ -235,7 +250,9 @@ status labels directly after reading the live issue:
 
 - clean bounded app work -> fully repaired Todo;
 - live dependency -> dependency wait;
-- low-priority explicitly parked work -> `status:deferred`;
+- low-priority explicitly parked work -> `status:deferred`, and a parked P3
+  already in `status:backlog` or `status:deferred` keeps that status: never
+  "repair" it to `status:todo`;
 - active execution/review/QA -> its one live lifecycle status;
 - tracking/investigation/external/production-operation/control-plane/product
   decision -> typed non-Todo status.
@@ -284,7 +301,7 @@ exact issue and failure. Never stop at diagnosis or call a proposal complete.
 After every wake, read and use the complete
 `/Users/rajiv/.codex/skills/codex-stdio-send-message/SKILL.md` contract. Send
 one exact task-to-task message to the active CTO decisions task
-`01a03236-2e61-71f3-a6a8-3dc24d8c8917` through the bundled app-server stdio
+`01a09112-a09c-7361-9a2a-0ada6a4e9dfb` through the bundled app-server stdio
 helper. Do not use renderer-mediated `codex_app` messaging, and do not post the
 reconciliation directly to Slack or PM from this issue-triage task.
 

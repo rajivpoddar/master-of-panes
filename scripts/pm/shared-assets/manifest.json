@@ -679,7 +679,7 @@
     {
       "source_path": "codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
-      "sha256": "cbff8bb8482387fff7b2cb51aba64eb66e99fe2962f6331d4d93548b28a85729",
+      "sha256": "dd0d6a5ce9614be3f42d54bdf155326dcbf6a931cb2b204229f5f7e6bf0fd813",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
       "dependency_status": "closed",
