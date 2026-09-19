@@ -476,7 +476,7 @@ export class NativeSlotReleaseCoordinator {
     if (request.release_mode === QUIESCENT_LEGACY_RELEASE_MODE
       && (!issueOnlyLegacyTuple || typeof request.effect_id !== "string" || request.effect_id.trim() === "")) {
       if (!issueOnlyLegacyTuple) {
-        return result("invalid_request", "Quiescent legacy release requires the exact stored issue-only tuple: expected_repository_id and expected_issue, explicit nulls for expected_pr, expected_branch, expected_head_sha, expected_work_kind and expected_handoff_id, the stored expected_claimed_at value, and intended_main_head. The effect identity is minted server-side.", this.dependencies.db.getSlot(request.slot), "Re-read the slot owner tuple and resend every expected_* field exactly (explicit nulls, not omitted fields); do not supply effect_id.");
+        return result("invalid_request", "Quiescent legacy release requires the exact stored issue-only tuple: expected_repository_id and expected_issue, explicit nulls for expected_pr, expected_branch, expected_head_sha, expected_work_kind and expected_handoff_id, the stored expected_claimed_at value, and intended_main_head. No expected_session_id is required. The effect identity is minted server-side.", this.dependencies.db.getSlot(request.slot), "Re-read the slot owner tuple and resend every expected_* field exactly (explicit nulls, not omitted fields); do not supply effect_id.");
       }
       // Operator callers cannot mint the digest without reimplementing the
       // normalization, which would leave idle issue-only slots unreleasable.
@@ -600,7 +600,7 @@ export class NativeSlotReleaseCoordinator {
             "quiescent_attestation_failed",
             "Quiescent release requires a clean main checkout at the intended head.",
             this.dependencies.db.getSlot(request.slot),
-            "Precondition: the owning checkout must be on branch main at intended_main_head, clean with no unpushed commits. Send the slot the switch-to-main-and-pull instruction first, wait for a clean read-only attestation, then call release; the slot stays occupied until then.",
+            "Preconditions: the slot must be idle/inactive (no active turn, not DND, non-productive) and the owning checkout must be on branch main at intended_main_head, with `git status --porcelain --untracked-files=all` empty and `@{upstream}..HEAD` empty. Send the slot the switch-to-main-and-pull instruction first, wait for that clean read-only attestation, then call release; the slot stays occupied until then.",
           );
         }
         const cleared = this.dependencies.db.commitNativeRelease(
