@@ -934,12 +934,77 @@ def activate(
             "deleted": [str(path) for path in delete_targets],
         }
     except Exception as exc:
-        if switched:
+        activation_error = f"{type(exc).__name__}: {exc}"
+        if not switched:
+            # The switch never happened: the prior release is still selected and
+            # the service was never touched, so no recovery restart is due.
+            raise InstallerError(f"activation refused before switch: {activation_error}") from exc
+        phases: dict[str, str] = {}
+        # Recovery is exception-safe: a failure in any restore substep must not
+        # skip the bounded service-restoration attempt below.
+        pointer_restored = False
+        try:
             atomic_switch(current, expected_old, release_dir)
+            if current.resolve(strict=True) == expected_old.resolve(strict=True):
+                pointer_restored = True
+                phases["pointer"] = "restored to prior release"
+            else:
+                phases["pointer"] = "failed: pointer readback does not select the prior release"
+        except Exception as restore_exc:
+            phases["pointer"] = f"failed: {type(restore_exc).__name__}: {restore_exc}"
+        try:
+            pointer_target = str(current.resolve(strict=True))
+        except Exception:
+            pointer_target = "unresolvable"
+        try:
             restore_rollback_bundle(rollback_bundle)
-            restart()
-            health()
-        raise InstallerError(f"activation failed and baseline restored: {exc}") from exc
+            phases["assets"] = "restored"
+        except Exception as restore_exc:
+            phases["assets"] = f"failed: {type(restore_exc).__name__}: {restore_exc}"
+        service_errors: list[str] = []
+        healthy_after = None
+        for attempt in (1, 2):
+            try:
+                restart()
+                health()
+                healthy_after = attempt
+                break
+            except Exception as service_exc:
+                service_errors.append(f"attempt {attempt}: {type(service_exc).__name__}: {service_exc}")
+        if healthy_after is not None and pointer_restored:
+            phases["service"] = f"prior release healthy after restart attempt {healthy_after}"
+            raise InstallerError(
+                f"activation failed and baseline restored: {activation_error} | recovery="
+                f"{json.dumps({**phases, 'current_pointer_target': pointer_target}, sort_keys=True)}"
+            ) from exc
+        if healthy_after is not None:
+            # Pointer restoration failed but the service is up: report exactly
+            # that, and never claim the baseline was restored or that the prior
+            # release is the one now serving.
+            phases["service"] = (
+                f"service healthy after restart attempt {healthy_after} on the pointer-selected release"
+            )
+            detail = {
+                "status": "POINTER_RESTORE_FAILED",
+                "activation_error": activation_error,
+                "rollback_restart_errors": service_errors,
+                "phases": phases,
+                "current_pointer_target": pointer_target,
+                "current": str(current),
+                "release_dir": str(release_dir),
+            }
+            raise InstallerError("POINTER_RESTORE_FAILED " + json.dumps(detail, sort_keys=True)) from exc
+        phases["service"] = "failed: " + " | ".join(service_errors)
+        detail = {
+            "status": "RECOVERY_FAILED",
+            "activation_error": activation_error,
+            "rollback_restart_errors": service_errors,
+            "phases": phases,
+            "current_pointer_target": pointer_target,
+            "current": str(current),
+            "release_dir": str(release_dir),
+        }
+        raise InstallerError("RECOVERY_FAILED " + json.dumps(detail, sort_keys=True)) from exc
 
 
 def check_install(
