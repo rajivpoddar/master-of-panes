@@ -22,7 +22,11 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { MoPDatabase } from "./db.js";
-import { assignmentIdentityPatchFields } from "./assignmentAuthority.js";
+import {
+  assignmentIdentityPatchFields,
+  isPmTransitionAssignmentRequest,
+  PM_TRANSITION_ASSIGNMENT_HEADER,
+} from "./assignmentAuthority.js";
 import { registerAssignmentRoute } from "./assignmentRoute.js";
 import { registerFamily2Routes } from "./family2Routes.js";
 import { TmuxRelay } from "./relay.js";
@@ -41,6 +45,11 @@ import {
   type CheckoutResetObservation,
 } from "./slotRelease.js";
 import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
+import {
+  registerWedgeInterruptRoute,
+  WEDGED_BUSY_REMEDIATION,
+  WEDGE_INTERRUPT_KEY,
+} from "./wedgeInterruptRoute.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
@@ -1049,6 +1058,20 @@ registerFamily2Routes(app, {
   clearPlanApprovalTimer: (slot) => processor.clearPlanApprovalTimer(slot),
 });
 
+// ─── Interrupt Turn (server-verified wedge escape: Ctrl-C only) ────────
+// Trust model: identity pins in the body, every eligibility conjunct from
+// server-owned state (slot row, pinned pane identity, live pane snapshot,
+// stored meaningful-work timestamps). No caller attestation is trusted.
+registerWedgeInterruptRoute(app, {
+  db,
+  isOperatorRequest: (header) => isPmTransitionAssignmentRequest(header),
+  authorityHeader: (c) => c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER),
+  verifyPaneIdentity: (slotNum) => verifyPaneIdentity(slotNum),
+  captureSnapshot: (paneId) => capturePaneSnapshot(paneId),
+  sendInterruptKey: (slotNum) => relay.sendToSlotAsync(slotNum, WEDGE_INTERRUPT_KEY, true, true),
+  nowMs: () => Date.now(),
+});
+
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────
 
 /**
@@ -1104,10 +1127,14 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   }
 
   // Guard: slot must be idle before we send /exit. Avoid killing in-flight work.
+  // No force bypass: a wedged turn escapes via POST /slots/:slotNum/interrupt-turn
+  // (Ctrl-C only, server-verified evidence). Respawn runs only at genuine idle.
   const slotState = db.getSlot(slotNum);
   if (slotState && slotState.occupied && !slotState.idle) {
     return c.json({
       error: `Slot ${slotNum} is busy (not idle). Wait for idle before respawning.`,
+      reason: "slot_busy_respawn_refused",
+      remediation: WEDGED_BUSY_REMEDIATION,
     }, 409);
   }
 
