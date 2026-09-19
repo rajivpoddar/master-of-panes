@@ -57,7 +57,7 @@
       "~/.claude/skills/codex-review-companion/SKILL.md",
       "~/.claude/skills/todo-prioritize/SKILL.md"
     ],
-    "selected_count": 79,
+    "selected_count": 82,
     "excluded": [
       {
         "path": "~/.codex/skills/codex-stdio-send-message/scripts/__pycache__",
