@@ -67,3 +67,54 @@ test("attested wedge is allowed with quiet minutes carried", () => {
   assert.equal(verdict.decision, "allowed");
   assert.equal(verdict.quiet_minutes, 6);
 });
+
+import {
+  evaluateWedgeInterrupt,
+  WEDGE_INTERRUPT_KEY,
+} from "../src/wedgedRespawnEscape.js";
+
+const WEDGE_BODY = {
+  interrupt_attested: true,
+  wedge_attestation: { idle_prompt_with_queued_input_observed: true, no_tool_progress_minutes: 6 },
+};
+
+test("interrupt sends Ctrl-C only — Enter and C-m are submits, never an escape", () => {
+  assert.equal(WEDGE_INTERRUPT_KEY, "C-c");
+  assert.match(WEDGED_BUSY_REMEDIATION, /POST \/slots\/:n\/interrupt-turn/);
+  assert.match(WEDGED_BUSY_REMEDIATION, /Enter and C-m are submits/);
+});
+
+test("interrupt refuses when no turn is live", () => {
+  for (const slot of [{ occupied: false, idle: true }, { occupied: true, idle: true }, null, undefined]) {
+    const verdict = evaluateWedgeInterrupt(slot, WEDGE_BODY);
+    assert.equal(verdict.decision, "nothing_to_interrupt");
+  }
+});
+
+test("interrupt refuses DND and unattested callers without side effects", () => {
+  assert.equal(
+    evaluateWedgeInterrupt({ occupied: true, idle: false, dnd: true }, WEDGE_BODY).decision,
+    "dnd_refused",
+  );
+  for (const body of [undefined, {}, { interrupt_attested: false }, { interrupt_attested: "yes" }]) {
+    assert.equal(evaluateWedgeInterrupt(BUSY, body).decision, "attestation_insufficient");
+  }
+  // Queued-input prompt not observed, or quiet period too short, is not a wedge.
+  for (const wedge_attestation of [
+    { idle_prompt_with_queued_input_observed: false, no_tool_progress_minutes: 30 },
+    { idle_prompt_with_queued_input_observed: true, no_tool_progress_minutes: 4 },
+    { idle_prompt_with_queued_input_observed: true },
+    {},
+  ]) {
+    assert.equal(
+      evaluateWedgeInterrupt(BUSY, { interrupt_attested: true, wedge_attestation }).decision,
+      "attestation_insufficient",
+    );
+  }
+});
+
+test("attested wedge interrupt is allowed with quiet minutes carried", () => {
+  const verdict = evaluateWedgeInterrupt(BUSY, WEDGE_BODY);
+  assert.equal(verdict.decision, "allowed");
+  assert.equal(verdict.quiet_minutes, 6);
+});

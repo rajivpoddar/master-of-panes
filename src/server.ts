@@ -42,7 +42,9 @@ import {
 } from "./slotRelease.js";
 import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import {
+  evaluateWedgeInterrupt,
   evaluateWedgedRespawnEscape,
+  WEDGE_INTERRUPT_KEY,
   WEDGED_BUSY_REMEDIATION,
 } from "./wedgedRespawnEscape.js";
 import type { HookPayload, MoPConfig } from "./types.js";
@@ -1051,6 +1053,85 @@ registerFamily2Routes(app, {
   nativeSlotRelease,
   family2ReleaseEffectAdapter,
   clearPlanApprovalTimer: (slot) => processor.clearPlanApprovalTimer(slot),
+});
+
+// ─── Interrupt Turn (typed wedge escape: Ctrl-C only) ────────
+
+/**
+ * Abort the live turn on a wedged slot without respawning it.
+ *
+ * POST /slots/:slotNum/interrupt-turn
+ *   { interrupt_attested: true,
+ *     wedge_attestation: { idle_prompt_with_queued_input_observed: true,
+ *                          no_tool_progress_minutes: <>= 5> } }
+ *
+ * Live resolution (slot 5, 2026-09-19): a single Ctrl-C aborted the stuck
+ * turn, the queued continuation submitted immediately, and the session went
+ * live on the same pane — no /exit, no kill, no relaunch. Interrupt (Ctrl-C)
+ * is therefore the primary wedge escape; respawn is the fallback.
+ *
+ * Sends ONLY Ctrl-C via the relay raw-key path to the pinned pane id.
+ * Enter and C-m are submits, not aborts: this route takes no key parameter
+ * and never sends either. Ownership, epoch, and assignment are untouched;
+ * a repeat after the turn settles is a harmless no-op refused as
+ * nothing_to_interrupt once the slot reads idle.
+ */
+app.post("/slots/:slotNum/interrupt-turn", async (c) => {
+  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
+  if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
+
+  const slotNum = slotParse.data;
+  const body = await c.req.json().catch(() => ({}));
+
+  const slotState = db.getSlot(slotNum);
+  const verdict = evaluateWedgeInterrupt(slotState, body);
+  if (verdict.decision !== "allowed") {
+    return c.json({
+      success: false,
+      error:
+        verdict.decision === "nothing_to_interrupt"
+          ? `Slot ${slotNum} is not busy; no turn to interrupt.`
+          : verdict.decision === "dnd_refused"
+            ? `Slot ${slotNum} is DND; clear DND before interrupting its turn.`
+            : `Slot ${slotNum} turn interrupt refused: attestation insufficient. Requires interrupt_attested=true with wedge_attestation { idle_prompt_with_queued_input_observed: true, no_tool_progress_minutes >= 5 }.`,
+      reason: verdict.reason,
+      remediation: WEDGED_BUSY_REMEDIATION,
+    }, 409);
+  }
+
+  const identity = await verifyPaneIdentity(slotNum);
+  if (!identity.ok) {
+    return c.json({
+      success: false,
+      error: `Refused interrupt for slot ${slotNum}: ${identity.detail}`,
+      reason: "pane_identity_mismatch",
+    }, 409);
+  }
+
+  // Ctrl-C ONLY. No Enter, no C-m — those submit; they never abort.
+  const delivered = await relay.sendToSlotAsync(slotNum, WEDGE_INTERRUPT_KEY, true, true);
+  if (!delivered) {
+    return c.json({
+      success: false,
+      error: `Interrupt keystroke did not land on slot ${slotNum}; turn untouched.`,
+      reason: "interrupt_delivery_failed",
+    }, 502);
+  }
+
+  db.logEvent(slotNum, "slot_turn_interrupted", null, null, {
+    assignment_epoch: slotState?.assignment_epoch,
+    interrupt_key: WEDGE_INTERRUPT_KEY,
+    idle_prompt_with_queued_input_observed: true,
+    no_tool_progress_minutes: verdict.quiet_minutes,
+    via: "interrupt_turn_attested",
+  });
+  return c.json({
+    success: true,
+    slot: slotNum,
+    interrupted: true,
+    interrupt_key: WEDGE_INTERRUPT_KEY,
+    assignment_epoch: slotState?.assignment_epoch,
+  });
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────
