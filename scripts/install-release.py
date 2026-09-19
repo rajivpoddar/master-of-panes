@@ -934,12 +934,49 @@ def activate(
             "deleted": [str(path) for path in delete_targets],
         }
     except Exception as exc:
-        if switched:
+        activation_error = f"{type(exc).__name__}: {exc}"
+        if not switched:
+            # The switch never happened: the prior release is still selected and
+            # the service was never touched, so no recovery restart is due.
+            raise InstallerError(f"activation refused before switch: {activation_error}") from exc
+        phases: dict[str, str] = {}
+        # Recovery is exception-safe: a failure in any restore substep must not
+        # skip the bounded service-restoration attempt below.
+        try:
             atomic_switch(current, expected_old, release_dir)
+            phases["pointer"] = "restored to prior release"
+        except Exception as restore_exc:
+            phases["pointer"] = f"failed: {type(restore_exc).__name__}: {restore_exc}"
+        try:
             restore_rollback_bundle(rollback_bundle)
-            restart()
-            health()
-        raise InstallerError(f"activation failed and baseline restored: {exc}") from exc
+            phases["assets"] = "restored"
+        except Exception as restore_exc:
+            phases["assets"] = f"failed: {type(restore_exc).__name__}: {restore_exc}"
+        service_errors: list[str] = []
+        healthy_after = None
+        for attempt in (1, 2):
+            try:
+                restart()
+                health()
+                healthy_after = attempt
+                break
+            except Exception as service_exc:
+                service_errors.append(f"attempt {attempt}: {type(service_exc).__name__}: {service_exc}")
+        if healthy_after is not None:
+            phases["service"] = f"prior release healthy after restart attempt {healthy_after}"
+            raise InstallerError(
+                f"activation failed and baseline restored: {activation_error} | recovery={json.dumps(phases, sort_keys=True)}"
+            ) from exc
+        phases["service"] = "failed: " + " | ".join(service_errors)
+        detail = {
+            "status": "RECOVERY_FAILED",
+            "activation_error": activation_error,
+            "rollback_restart_errors": service_errors,
+            "phases": phases,
+            "current": str(current),
+            "release_dir": str(release_dir),
+        }
+        raise InstallerError("RECOVERY_FAILED " + json.dumps(detail, sort_keys=True)) from exc
 
 
 def check_install(
