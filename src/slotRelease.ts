@@ -315,6 +315,10 @@ export class NativeSlotReleaseCoordinator {
       return result("epoch_mismatch", "Assignment epoch changed before release delivery.", current, "Re-read MoP and retry with fresh state.");
     }
     if (!assignmentTupleMatches(slotAssignmentTuple(current), tuple)) {
+      const currentTuple = slotAssignmentTuple(current);
+      if (currentTuple !== null && assignmentTupleMatches({ ...tuple, claimed_at: currentTuple.claimed_at }, currentTuple)) {
+        return result("observed_tuple_mismatch", "Owner tuple matches except expected_claimed_at: it must carry the live claimed_at value, not null.", current, "Re-read the slot and resend expected_claimed_at with its exact live value; keep explicit nulls for expected_pr, expected_branch, expected_head_sha, expected_work_kind and expected_handoff_id.");
+      }
       return result("observed_tuple_mismatch", "Complete owner tuple changed before release delivery.", current, "Re-read MoP and retry with the current tuple.");
     }
     if (current.dnd) {
@@ -472,7 +476,7 @@ export class NativeSlotReleaseCoordinator {
     if (request.release_mode === QUIESCENT_LEGACY_RELEASE_MODE
       && (!issueOnlyLegacyTuple || typeof request.effect_id !== "string" || request.effect_id.trim() === "")) {
       if (!issueOnlyLegacyTuple) {
-        return result("invalid_request", "Quiescent legacy release requires one issue-only tuple and durable effect identity.", this.dependencies.db.getSlot(request.slot), "Supply the exact issue-only owner tuple and immutable effect identity.");
+        return result("invalid_request", "Quiescent legacy release requires the exact stored issue-only tuple: expected_repository_id and expected_issue, explicit nulls for expected_pr, expected_branch, expected_head_sha, expected_work_kind and expected_handoff_id, the stored expected_claimed_at value, and intended_main_head. The effect identity is minted server-side.", this.dependencies.db.getSlot(request.slot), "Re-read the slot owner tuple and resend every expected_* field exactly (explicit nulls, not omitted fields); do not supply effect_id.");
       }
       // Operator callers cannot mint the digest without reimplementing the
       // normalization, which would leave idle issue-only slots unreleasable.
@@ -596,7 +600,7 @@ export class NativeSlotReleaseCoordinator {
             "quiescent_attestation_failed",
             "Quiescent release requires a clean main checkout at the intended head.",
             this.dependencies.db.getSlot(request.slot),
-            "Leave the slot occupied and retry only after a fresh read-only main checkout attestation.",
+            "Precondition: the owning checkout must be on branch main at intended_main_head, clean with no unpushed commits. Send the slot the switch-to-main-and-pull instruction first, wait for a clean read-only attestation, then call release; the slot stays occupied until then.",
           );
         }
         const cleared = this.dependencies.db.commitNativeRelease(

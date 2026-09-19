@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { Hono } from "hono";
 
 import { PM_TRANSITION_ASSIGNMENT_AUTHORITY, PM_TRANSITION_ASSIGNMENT_HEADER } from "../src/assignmentAuthority.js";
 import { registerFamily2Routes } from "../src/family2Routes.js";
+import { MoPDatabase } from "../src/db.js";
+import { NativeSlotReleaseCoordinator } from "../src/slotRelease.js";
+import { DEFAULT_CONFIG } from "../src/types.js";
 import { Family2ReleaseEffectAdapter, type Family2ReleaseFetch } from "../src/family2ReleaseEffect.js";
 
 function routeFixture() {
@@ -149,4 +155,63 @@ test("authenticated release route forwards the explicit quiescent legacy mode", 
   assert.equal(requestBody.release_mode, body.release_mode);
   assert.equal(requestBody.expected_epoch, body.expected_epoch);
   assert.equal(requestBody.expected_tuple.issue, body.expected_issue);
+});
+
+test("quiescent legacy documented example body releases an idle issue-only slot", async () => {
+  // THE documented operator call. Precondition (verified by the coordinator,
+  // not the route): the owning checkout is already on branch main at
+  // intended_main_head, clean with no unpushed commits — send the slot the
+  // switch-to-main-and-pull instruction and wait for a clean attestation
+  // BEFORE calling release. claimed_at carries the live value re-read
+  // from MoP; the other five nullable fields are explicit nulls.
+  const MAIN = "b".repeat(40);
+  const REPO_ID = "github:heydonna-app/heydonna-app";
+  const directory = mkdtempSync(join(tmpdir(), "mop-quiescent-route-example-"));
+  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+  try {
+    assert.equal(db.assignSlot(6, "issue-only task", REPO_ID, 7907, null, null, null, 0).ok, true);
+    db.updateSlot(6, { idle: true, activity: "waiting_for_pm_direction" });
+    const live = db.getSlot(6)!;
+    const coordinator = new NativeSlotReleaseCoordinator({
+      db,
+      resolveOwningCheckout: async () => "/tmp/mop-quiescent-route-checkout",
+      deliverInstruction: async () => true,
+      owningSlotIsIdle: async () => true,
+      resetAndObserveCheckout: async () => { throw new Error("pane delivery must not run"); },
+      observeCheckout: async () => ({ checkout_path: "/tmp/mop-quiescent-route-checkout", clean: true, unpushed_commits: [], branch: "main", head: MAIN }),
+    });
+    const app = new Hono();
+    registerFamily2Routes(app, {
+      db,
+      nativeSlotRelease: coordinator,
+      family2ReleaseEffectAdapter: {} as any,
+      clearPlanApprovalTimer: () => undefined,
+    });
+    const body = {
+      expected_epoch: live.assignment_epoch,
+      expected_repository_id: live.repository_id,
+      expected_issue: live.issue,
+      expected_pr: null,
+      expected_branch: null,
+      expected_head_sha: null,
+      expected_work_kind: null,
+      expected_handoff_id: null,
+      expected_claimed_at: live.claimed_at,
+      intended_main_head: MAIN,
+      release_mode: "quiescent_legacy_issue_only",
+    };
+    const response = await app.request("http://mop/slots/6/release", {
+      method: "POST",
+      headers: { [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 200);
+    const json = await response.json() as { success: boolean; code: string };
+    assert.equal(json.success, true);
+    assert.equal(json.code, "released");
+    assert.equal(db.getSlot(6)!.occupied, false);
+  } finally {
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
