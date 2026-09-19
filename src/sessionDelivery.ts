@@ -45,7 +45,15 @@ async function realPaneCheck(target: string): Promise<PaneCheckResult> {
     return { state: "dead" };
   }
   const [paneId, dead] = stdout.trim().split("|");
-  if (!paneId || (dead !== "0" && dead !== "1")) {
+  // Exit-0 with no resolvable pane identity is positive target absence, not
+  // checker unavailability. Some tmux builds resolve a syntactically valid but
+  // nonexistent target to empty format expansions and still exit 0; treating
+  // that as "unknown" would record an assignment that was never delivered and
+  // reintroduce the silent wedge this gate exists to prevent.
+  if (!paneId) {
+    return { state: "dead" };
+  }
+  if (dead !== "0" && dead !== "1") {
     return { state: "unknown", reason: "pane_check_unparseable" };
   }
   return dead === "0" ? { state: "live", paneId } : { state: "dead" };
