@@ -13,6 +13,10 @@ import {
   snapshotShowsIdlePromptWithQueuedInput,
   WEDGE_INTERRUPT_KEY,
   WEDGE_INTERRUPT_QUEUE_DISPOSITION,
+  WEDGE_DWELL_FLOOR_MS,
+  WEDGE_DWELL_RULE,
+  WEDGE_WATCHDOG_DELIVERY,
+  WEDGED_BUSY_REMEDIATION,
 } from "../src/wedgeInterruptRoute.js";
 import {
   isPmTransitionAssignmentRequest,
@@ -34,7 +38,11 @@ interface FakeState {
   snapshot: string | null;
   gateSend: (() => void) | null;
   sendStarted: boolean;
+  checkout: { head: string | null; branch: string | null } | null;
 }
+
+const CHECKOUT_PATH = "/Users/rajiv/Downloads/projects/heydonna-app-3001";
+const CHECKOUT_HEAD = "1".repeat(40);
 
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "mop-wedge-interrupt-"));
@@ -47,7 +55,14 @@ function fixture() {
     legacyRepositoryId: null,
   };
   const db = new MoPDatabase(config);
-  const state: FakeState = { sends: [], identityOk: true, snapshot: WEDGE_SNAPSHOT, gateSend: null, sendStarted: false };
+  const state: FakeState = {
+    sends: [],
+    identityOk: true,
+    snapshot: WEDGE_SNAPSHOT,
+    gateSend: null,
+    sendStarted: false,
+    checkout: { head: CHECKOUT_HEAD, branch: "fix/7748-thing" },
+  };
   const app = new Hono();
   const NOW = Date.parse("2026-09-19T10:00:00.000Z");
   registerWedgeInterruptRoute(app, {
@@ -56,9 +71,10 @@ function fixture() {
     authorityHeader: (c) => c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER),
     verifyPaneIdentity: async (slotNum: number) =>
       state.identityOk
-        ? { ok: true as const, snapshot: { paneId: `%${slotNum}` } }
+        ? { ok: true as const, snapshot: { paneId: `%${slotNum}`, currentPath: CHECKOUT_PATH } }
         : { ok: false as const, detail: "pane gone" },
     captureSnapshot: async () => state.snapshot,
+    observeCheckout: async () => state.checkout,
     sendInterruptKey: async (slotNum: number) => {
       state.sends.push({ slotNum, key: WEDGE_INTERRUPT_KEY });
       state.sendStarted = true;
@@ -95,6 +111,101 @@ function interruptRequest(authority: string | undefined, body: unknown) {
 function signalEvents(db: MoPDatabase) {
   return db.getEvents(1, 50, "interrupt_signal_sent");
 }
+
+
+test("escape procedure documents the watchdog relaunch as the delivery path", () => {
+  // The live sequence that worked: park at shell -> watchdog relaunch with
+  // --continue -> queued continuation delivered. That relaunch is sanctioned.
+  assert.match(WEDGE_WATCHDOG_DELIVERY, /watchdog/i);
+  assert.match(WEDGE_WATCHDOG_DELIVERY, /--continue/);
+  assert.match(WEDGE_WATCHDOG_DELIVERY, /sanctioned/i);
+  assert.match(WEDGE_WATCHDOG_DELIVERY, /at or before/i);
+  // The same guidance must be reachable from the respawn busy refusal.
+  assert.match(WEDGED_BUSY_REMEDIATION, /watchdog/i);
+  assert.match(WEDGED_BUSY_REMEDIATION, /--continue/);
+  assert.match(WEDGED_BUSY_REMEDIATION, /recovery delivery/i);
+  // Queue survival is never claimed; the interrupt discards queued input.
+  assert.match(WEDGED_BUSY_REMEDIATION, /DISCARDS/);
+  assert.doesNotMatch(WEDGED_BUSY_REMEDIATION, /queued input (?:is|will be) (?:preserved|kept|survives)/i);
+  const serverSrc = readFileSync(
+    fileURLToPath(new URL("../src/server.ts", import.meta.url)),
+    "utf8",
+  );
+  assert.match(serverSrc, /remediation: WEDGED_BUSY_REMEDIATION/);
+});
+
+
+test("movement leg: live HEAD/branch movement or an unreadable checkout refuses", () => {
+  const now = Date.parse("2026-09-19T10:00:00.000Z");
+  const quietSlot = {
+    occupied: true,
+    idle: false,
+    dnd: false,
+    assignment_epoch: 7,
+    active_turn_id: "t1",
+    head_sha: "a".repeat(40),
+    branch: "fix/7748-thing",
+    last_meaningful_work_at: new Date(now - 6 * 60 * 1000).toISOString(),
+    active_turn_started_at: new Date(now - 10 * 60 * 1000).toISOString(),
+  };
+  const pins = { expected_assignment_epoch: 7, expected_active_turn_id: "t1" };
+  const stationary = { head: "a".repeat(40), branch: "fix/7748-thing" };
+  assert.equal(authorizeWedgeInterrupt(quietSlot, pins, WEDGE_SNAPSHOT, now, stationary).ok, true);
+  assert.equal(
+    authorizeWedgeInterrupt(quietSlot, pins, WEDGE_SNAPSHOT, now, { head: "b".repeat(40), branch: "fix/7748-thing" }).reason,
+    "checkout_moved",
+  );
+  assert.equal(
+    authorizeWedgeInterrupt(quietSlot, pins, WEDGE_SNAPSHOT, now, { head: "a".repeat(40), branch: "main" }).reason,
+    "checkout_moved",
+  );
+  assert.equal(authorizeWedgeInterrupt(quietSlot, pins, WEDGE_SNAPSHOT, now, null).reason, "checkout_movement_unverifiable");
+  assert.equal(
+    authorizeWedgeInterrupt(quietSlot, pins, WEDGE_SNAPSHOT, now, { head: null, branch: "fix/7748-thing" }).reason,
+    "checkout_movement_unverifiable",
+  );
+  // Queued input alone: a live turn still producing tool progress is refused
+  // even with identical HEAD/branch.
+  const working = { ...quietSlot, last_meaningful_work_at: new Date(now - 30 * 1000).toISOString() };
+  assert.equal(authorizeWedgeInterrupt(working, pins, WEDGE_SNAPSHOT, now, stationary).reason, "wedge_quiet_insufficient");
+});
+
+test("route refuses when the checkout observation is indeterminate", async () => {
+  const { app, db, directory, state, NOW } = fixture();
+  try {
+    const pins = await busySlot(db, 6 * 60 * 1000, NOW);
+    const body = { expected_assignment_epoch: pins.epoch, expected_active_turn_id: pins.turn };
+    state.checkout = null;
+    const res = await app.request("/slots/1/interrupt-turn", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body));
+    assert.equal(res.status, 409);
+    const payload = (await res.json()) as Record<string, unknown>;
+    assert.equal(payload.reason, "checkout_movement_unverifiable");
+    assert.match(String(payload.error), /queued input/i);
+
+    // Restore the observation; a live turn with fresh tool progress still
+    // refuses and the refusal text carries the dwell rule.
+    state.checkout = { head: CHECKOUT_HEAD, branch: "fix/7748-thing" };
+    db.updateSlot(1, { last_meaningful_work_at: new Date(NOW - 30 * 1000).toISOString() });
+    const busy = await app.request("/slots/1/interrupt-turn", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body));
+    assert.equal(busy.status, 409);
+    const busyBody = (await busy.json()) as Record<string, unknown>;
+    assert.equal(busyBody.reason, "wedge_quiet_insufficient");
+    assert.match(String(busyBody.error), /Queuing alone is never the trigger/);
+    assert.equal(state.sends.length, 0);
+  } finally {
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("dwell rule: queuing alone never triggers the interrupt", () => {
+  assert.equal(WEDGE_DWELL_FLOOR_MS, 3 * 60 * 1000);
+  assert.match(WEDGE_DWELL_RULE, /Queued input alone/i);
+  assert.match(WEDGE_DWELL_RULE, /HEAD\/branch/);
+  assert.match(WEDGE_DWELL_RULE, /tool-name progress/i);
+  assert.match(WEDGE_DWELL_RULE, /interrupt FIRST/i);
+  assert.match(WEDGE_DWELL_RULE, /only after the dwell/i);
+});
 
 test("no force-respawn escape exists; busy respawn stays fail-closed", () => {
   const serverSrc = readFileSync(
@@ -204,6 +315,10 @@ test("verified wedge sends one raw C-c with truthful signal audit", async () => 
     assert.equal(body.interrupt_key, "C-c");
     assert.equal(body.queue_disposition, "discard-queued-input");
     assert.match(String(body.followup), /AFTER this interrupt/);
+    assert.match(String(body.followup), /watchdog/i);
+    assert.equal(body.watchdog_delivery, WEDGE_WATCHDOG_DELIVERY);
+    assert.equal(body.movement_verified, true);
+    assert.equal(body.dwell_rule, WEDGE_DWELL_RULE);
     assert.equal(body.interrupted, undefined);
     assert.equal(body.assignment_epoch, pins.epoch);
 
@@ -242,8 +357,12 @@ test("relay failure returns typed 502 with no success audit", async () => {
     db,
     isOperatorRequest: (h) => isPmTransitionAssignmentRequest(h),
     authorityHeader: (c) => c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER),
-    verifyPaneIdentity: async (slotNum: number) => ({ ok: true as const, snapshot: { paneId: `%${slotNum}` } }),
+    verifyPaneIdentity: async (slotNum: number) => ({
+      ok: true as const,
+      snapshot: { paneId: `%${slotNum}`, currentPath: CHECKOUT_PATH },
+    }),
     captureSnapshot: async () => WEDGE_SNAPSHOT,
+    observeCheckout: async () => ({ head: CHECKOUT_HEAD, branch: "fix/7748-thing" }),
     sendInterruptKey: async () => { sends += 1; return false; },
     nowMs: () => NOW,
   });
@@ -293,7 +412,13 @@ test("pure authorizer pins epoch+turn and 5-minute server quiet", () => {
     active_turn_started_at: new Date(Date.parse("2026-09-19T10:00:00.000Z") - 10 * 60 * 1000).toISOString(),
   };
   const pins = { expected_assignment_epoch: 7, expected_active_turn_id: "t1" };
-  const ok = authorizeWedgeInterrupt(slot, pins, WEDGE_SNAPSHOT, Date.parse("2026-09-19T10:00:00.000Z"));
+  const ok = authorizeWedgeInterrupt(
+    slot,
+    pins,
+    WEDGE_SNAPSHOT,
+    Date.parse("2026-09-19T10:00:00.000Z"),
+    { head: null, branch: null },
+  );
   assert.equal(ok.ok, true);
   assert.ok((ok.quiet_ms ?? 0) >= 5 * 60 * 1000);
   // Caller-supplied durations are not even read: extra fields change nothing.
@@ -302,13 +427,23 @@ test("pure authorizer pins epoch+turn and 5-minute server quiet", () => {
     { ...pins, no_tool_progress_minutes: 999, idle_prompt_observed: true } as unknown as typeof pins,
     WEDGE_SNAPSHOT,
     Date.parse("2026-09-19T10:00:00.000Z"),
+    { head: null, branch: null },
   );
   assert.equal(withFabrication.ok, true);
   assert.equal(withFabrication.quiet_ms, ok.quiet_ms);
   // Stale pins, recent work, and missing timestamps refuse.
-  assert.equal(authorizeWedgeInterrupt(slot, { ...pins, expected_assignment_epoch: 8 }, WEDGE_SNAPSHOT, Date.parse("2026-09-19T10:00:00.000Z")).reason, "stale_identity");
+  assert.equal(
+    authorizeWedgeInterrupt(slot, { ...pins, expected_assignment_epoch: 8 }, WEDGE_SNAPSHOT, Date.parse("2026-09-19T10:00:00.000Z"), {
+      head: null,
+      branch: null,
+    }).reason,
+    "stale_identity",
+  );
   const recent = { ...slot, last_meaningful_work_at: new Date(Date.parse("2026-09-19T10:00:00.000Z") - 60 * 1000).toISOString() };
-  assert.equal(authorizeWedgeInterrupt(recent, pins, WEDGE_SNAPSHOT, Date.parse("2026-09-19T10:00:00.000Z")).reason, "wedge_quiet_insufficient");
+  assert.equal(
+    authorizeWedgeInterrupt(recent, pins, WEDGE_SNAPSHOT, Date.parse("2026-09-19T10:00:00.000Z"), { head: null, branch: null }).reason,
+    "wedge_quiet_insufficient",
+  );
 });
 
 void Database;
