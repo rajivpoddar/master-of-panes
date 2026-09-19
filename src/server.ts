@@ -22,7 +22,11 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { MoPDatabase } from "./db.js";
-import { assignmentIdentityPatchFields } from "./assignmentAuthority.js";
+import {
+  assignmentIdentityPatchFields,
+  isPmTransitionAssignmentRequest,
+  PM_TRANSITION_ASSIGNMENT_HEADER,
+} from "./assignmentAuthority.js";
 import { registerAssignmentRoute } from "./assignmentRoute.js";
 import { registerFamily2Routes } from "./family2Routes.js";
 import { TmuxRelay } from "./relay.js";
@@ -42,11 +46,10 @@ import {
 } from "./slotRelease.js";
 import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import {
-  evaluateWedgeInterrupt,
-  evaluateWedgedRespawnEscape,
-  WEDGE_INTERRUPT_KEY,
+  registerWedgeInterruptRoute,
   WEDGED_BUSY_REMEDIATION,
-} from "./wedgedRespawnEscape.js";
+  WEDGE_INTERRUPT_KEY,
+} from "./wedgeInterruptRoute.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
@@ -1055,83 +1058,18 @@ registerFamily2Routes(app, {
   clearPlanApprovalTimer: (slot) => processor.clearPlanApprovalTimer(slot),
 });
 
-// ─── Interrupt Turn (typed wedge escape: Ctrl-C only) ────────
-
-/**
- * Abort the live turn on a wedged slot without respawning it.
- *
- * POST /slots/:slotNum/interrupt-turn
- *   { interrupt_attested: true,
- *     wedge_attestation: { idle_prompt_with_queued_input_observed: true,
- *                          no_tool_progress_minutes: <>= 5> } }
- *
- * Live resolution (slot 5, 2026-09-19): a single Ctrl-C aborted the stuck
- * turn, the queued continuation submitted immediately, and the session went
- * live on the same pane — no /exit, no kill, no relaunch. Interrupt (Ctrl-C)
- * is therefore the primary wedge escape; respawn is the fallback.
- *
- * Sends ONLY Ctrl-C via the relay raw-key path to the pinned pane id.
- * Enter and C-m are submits, not aborts: this route takes no key parameter
- * and never sends either. Ownership, epoch, and assignment are untouched;
- * a repeat after the turn settles is a harmless no-op refused as
- * nothing_to_interrupt once the slot reads idle.
- */
-app.post("/slots/:slotNum/interrupt-turn", async (c) => {
-  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
-  if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
-
-  const slotNum = slotParse.data;
-  const body = await c.req.json().catch(() => ({}));
-
-  const slotState = db.getSlot(slotNum);
-  const verdict = evaluateWedgeInterrupt(slotState, body);
-  if (verdict.decision !== "allowed") {
-    return c.json({
-      success: false,
-      error:
-        verdict.decision === "nothing_to_interrupt"
-          ? `Slot ${slotNum} is not busy; no turn to interrupt.`
-          : verdict.decision === "dnd_refused"
-            ? `Slot ${slotNum} is DND; clear DND before interrupting its turn.`
-            : `Slot ${slotNum} turn interrupt refused: attestation insufficient. Requires interrupt_attested=true with wedge_attestation { idle_prompt_with_queued_input_observed: true, no_tool_progress_minutes >= 5 }.`,
-      reason: verdict.reason,
-      remediation: WEDGED_BUSY_REMEDIATION,
-    }, 409);
-  }
-
-  const identity = await verifyPaneIdentity(slotNum);
-  if (!identity.ok) {
-    return c.json({
-      success: false,
-      error: `Refused interrupt for slot ${slotNum}: ${identity.detail}`,
-      reason: "pane_identity_mismatch",
-    }, 409);
-  }
-
-  // Ctrl-C ONLY. No Enter, no C-m — those submit; they never abort.
-  const delivered = await relay.sendToSlotAsync(slotNum, WEDGE_INTERRUPT_KEY, true, true);
-  if (!delivered) {
-    return c.json({
-      success: false,
-      error: `Interrupt keystroke did not land on slot ${slotNum}; turn untouched.`,
-      reason: "interrupt_delivery_failed",
-    }, 502);
-  }
-
-  db.logEvent(slotNum, "slot_turn_interrupted", null, null, {
-    assignment_epoch: slotState?.assignment_epoch,
-    interrupt_key: WEDGE_INTERRUPT_KEY,
-    idle_prompt_with_queued_input_observed: true,
-    no_tool_progress_minutes: verdict.quiet_minutes,
-    via: "interrupt_turn_attested",
-  });
-  return c.json({
-    success: true,
-    slot: slotNum,
-    interrupted: true,
-    interrupt_key: WEDGE_INTERRUPT_KEY,
-    assignment_epoch: slotState?.assignment_epoch,
-  });
+// ─── Interrupt Turn (server-verified wedge escape: Ctrl-C only) ────────
+// Trust model: identity pins in the body, every eligibility conjunct from
+// server-owned state (slot row, pinned pane identity, live pane snapshot,
+// stored meaningful-work timestamps). No caller attestation is trusted.
+registerWedgeInterruptRoute(app, {
+  db,
+  isOperatorRequest: (header) => isPmTransitionAssignmentRequest(header),
+  authorityHeader: (c) => c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER),
+  verifyPaneIdentity: (slotNum) => verifyPaneIdentity(slotNum),
+  captureSnapshot: (paneId) => capturePaneSnapshot(paneId),
+  sendInterruptKey: (slotNum) => relay.sendToSlotAsync(slotNum, WEDGE_INTERRUPT_KEY, true, true),
+  nowMs: () => Date.now(),
 });
 
 // ─── Respawn Slot (MoP-orchestrated /exit → launch → continue) ────────
@@ -1189,31 +1127,15 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   }
 
   // Guard: slot must be idle before we send /exit. Avoid killing in-flight work.
-  // Typed wedge escape: a session wedged inside a never-ending turn (idle
-  // prompt, no tool progress) may proceed only with explicit operator
-  // attestation. Ownership and epoch are preserved — respawn never reassigns.
+  // No force bypass: a wedged turn escapes via POST /slots/:slotNum/interrupt-turn
+  // (Ctrl-C only, server-verified evidence). Respawn runs only at genuine idle.
   const slotState = db.getSlot(slotNum);
   if (slotState && slotState.occupied && !slotState.idle) {
-    const wedgeEscape = evaluateWedgedRespawnEscape(slotState, body);
-    if (wedgeEscape.decision !== "allowed") {
-      const wedgeRefusal =
-        wedgeEscape.decision === "attestation_insufficient"
-          ? {
-              error: `Slot ${slotNum} is busy (not idle). Wedged-respawn attestation insufficient: requires force_wedged_escape=true with wedge_attestation { idle_prompt_observed: true, no_tool_progress_minutes >= 5 }.`,
-              reason: "wedge_attestation_insufficient",
-            }
-          : {
-              error: `Slot ${slotNum} is busy (not idle). Wait for idle before respawning.`,
-              reason: "slot_busy_respawn_refused",
-            };
-      return c.json({ ...wedgeRefusal, remediation: WEDGED_BUSY_REMEDIATION }, 409);
-    }
-    db.logEvent(slotNum, "slot_respawn_wedged_escape", null, null, {
-      assignment_epoch: slotState.assignment_epoch,
-      idle_prompt_observed: true,
-      no_tool_progress_minutes: wedgeEscape.quiet_minutes,
-      via: "respawn_wedged_escape",
-    });
+    return c.json({
+      error: `Slot ${slotNum} is busy (not idle). Wait for idle before respawning.`,
+      reason: "slot_busy_respawn_refused",
+      remediation: WEDGED_BUSY_REMEDIATION,
+    }, 409);
   }
 
   const steps: Array<{ step: string; elapsed_ms: number; detail?: string }> = [];
