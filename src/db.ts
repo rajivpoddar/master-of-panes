@@ -106,6 +106,21 @@ export interface NativeReleaseEffectReceipt {
 /** Covers the complete bounded pane-release sequence (idle wait + reset). */
 export const NATIVE_RELEASE_INTENT_TTL_MS = 10 * 60 * 1000;
 
+/** Minimum quiescence before an explicit operator abandon may clear a turn.
+ * Accident guard only, not proof of death: the caller verifies the owning
+ * session is gone (e.g. pane relaunched under a new session) and attests it
+ * in `reason`. Genuinely working turns touch meaningful work on tool use, so
+ * a fresh timestamp reliably refuses. */
+export const STALE_TURN_QUIESCENCE_MS = 5 * 60 * 1000;
+
+export interface AbandonTurnResult {
+  ok: boolean;
+  conflict: boolean;
+  reason?: string;
+  idempotent: boolean;
+}
+
+
 const ASSIGNMENT_WORK_KINDS = new Set([
   "implementation",
   "rework",
@@ -1820,6 +1835,77 @@ export class MoPDatabase {
       active_turn_state: "inactive",
       idle: true,
     });
+  }
+
+  /**
+   * Canonically abandon one stale agent turn. Clears exactly the named turn
+   * through the same state transition as a normal Stop (finishAgentTurn with
+   * the exact id) so a wedged turn stops blocking release/respawn without raw
+   * row writes or hand-posted hook events. Assignment identity, epochs, DND,
+   * sessions, and checkouts are untouched; release remains the separate
+   * canonical path once the turn is clear.
+   *
+   * Fail-closed: exact turn-id match, active state, quiescence, no armed
+   * per-slot clear, and non-empty actor/reason (recorded in the audit event)
+   * are all required. A replacement turn, a fresh turn, or an indeterminate
+   * turn is never cleared by accident.
+   */
+  abandonTurn(
+    slot: number,
+    turnId: string,
+    reason: string,
+    actor: string,
+  ): AbandonTurnResult {
+    return this.db.transaction((): AbandonTurnResult => {
+      const current = this.getSlot(slot);
+      if (!current) {
+        return { ok: false, conflict: true, reason: "unknown_slot", idempotent: false };
+      }
+      const id = typeof turnId === "string" ? turnId.trim() : "";
+      const why = typeof reason === "string" ? reason.trim() : "";
+      const who = typeof actor === "string" ? actor.trim() : "";
+      if (!id || id.length > 128) {
+        return { ok: false, conflict: true, reason: "turn_id_invalid", idempotent: false };
+      }
+      if (!why || why.length > 500) {
+        return { ok: false, conflict: true, reason: "reason_invalid", idempotent: false };
+      }
+      if (!who || who.length > 64) {
+        return { ok: false, conflict: true, reason: "actor_invalid", idempotent: false };
+      }
+      if (current.active_turn_id === null && current.active_turn_state === "inactive") {
+        return { ok: true, conflict: false, idempotent: true };
+      }
+      if (current.active_turn_id !== id) {
+        return { ok: false, conflict: true, reason: "turn_mismatch", idempotent: false };
+      }
+      if (current.active_turn_state !== "active") {
+        return { ok: false, conflict: true, reason: "turn_state_not_active", idempotent: false };
+      }
+      if (this.hasPendingClear(slot)) {
+        return { ok: false, conflict: true, reason: "clear_pending_active", idempotent: false };
+      }
+      const last = Date.parse(
+        current.last_meaningful_work_at ?? current.active_turn_started_at ?? "",
+      );
+      if (Number.isNaN(last)) {
+        return { ok: false, conflict: true, reason: "turn_timestamps_missing", idempotent: false };
+      }
+      const quiescentMs = Date.now() - last;
+      if (quiescentMs < STALE_TURN_QUIESCENCE_MS) {
+        return { ok: false, conflict: true, reason: "turn_recently_active", idempotent: false };
+      }
+      const startedAt = current.active_turn_started_at;
+      this.finishAgentTurn(slot, id);
+      this.logEvent(slot, "agent_turn_abandoned", null, null, {
+        turn_id: id,
+        started_at: startedAt,
+        reason: why,
+        actor: who,
+        quiescent_ms: quiescentMs,
+      });
+      return { ok: true, conflict: false, idempotent: false };
+    })();
   }
 
   // ─── Config (KV Store) ──────────────────────────────────

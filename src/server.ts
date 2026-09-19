@@ -998,6 +998,47 @@ app.patch("/slots/:slotNum", async (c) => {
   return c.json(updated);
 });
 
+const abandonTurnBodySchema = z.object({
+  turn_id: z.string().trim().min(1).max(128),
+  reason: z.string().trim().min(1).max(500),
+  actor: z.string().trim().min(1).max(64),
+});
+
+/**
+ * Canonically abandon one stale agent turn whose owning session is gone
+ * (e.g. pane relaunched under a new session, so no Stop hook can arrive).
+ * Clears exactly the named turn through the same transition as a normal Stop;
+ * assignment identity, epochs, DND, sessions, and checkouts are untouched.
+ * A replacement turn, a fresh turn, or an indeterminate turn is refused;
+ * repeating an already-cleared turn id is idempotent.
+ */
+app.post("/slots/:slotNum/abandon-turn", async (c) => {
+  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
+  if (!slotParse.success) {
+    return c.json({ error: "Invalid slot number" }, 400);
+  }
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ ok: false, conflict: true, reason: "body_invalid", idempotent: false }, 400);
+  }
+  const parsed = abandonTurnBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, conflict: true, reason: "body_invalid", idempotent: false }, 400);
+  }
+  const result = db.abandonTurn(
+    slotParse.data,
+    parsed.data.turn_id,
+    parsed.data.reason,
+    parsed.data.actor,
+  );
+  if (result.ok) {
+    return c.json({ ...result, slot: slotParse.data, turn_id: parsed.data.turn_id });
+  }
+  return c.json({ ...result, slot: slotParse.data }, 409);
+});
+
 /** Assign a slot through the guarded PM authority route. */
 registerAssignmentRoute(app, db);
 
