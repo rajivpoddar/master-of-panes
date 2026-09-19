@@ -471,7 +471,26 @@ export class NativeSlotReleaseCoordinator {
     }
     if (request.release_mode === QUIESCENT_LEGACY_RELEASE_MODE
       && (!issueOnlyLegacyTuple || typeof request.effect_id !== "string" || request.effect_id.trim() === "")) {
-      return result("invalid_request", "Quiescent legacy release requires one issue-only tuple and durable effect identity.", this.dependencies.db.getSlot(request.slot), "Supply the exact issue-only owner tuple and immutable effect identity.");
+      if (!issueOnlyLegacyTuple) {
+        return result("invalid_request", "Quiescent legacy release requires one issue-only tuple and durable effect identity.", this.dependencies.db.getSlot(request.slot), "Supply the exact issue-only owner tuple and immutable effect identity.");
+      }
+      // Operator callers cannot mint the digest without reimplementing the
+      // normalization, which would leave idle issue-only slots unreleasable.
+      // Derive the effect identity server-side from the already-required
+      // exact tuple instead: the digest binds the same validated fields and
+      // the durable receipt table keeps repeats idempotent per release cycle.
+      const mintedEffectId = `quiescent-legacy-issue-only:slot-${request.slot}:epoch-${request.expected_epoch}`;
+      try {
+        const mintedDigest = computeFamily2ReleaseDigest({
+          effect_id: mintedEffectId,
+          expected_epoch: request.expected_epoch,
+          expected_tuple: request.expected_tuple,
+          intended_main_head: request.intended_main_head,
+        });
+        request = { ...request, effect_id: mintedEffectId, request_digest: mintedDigest };
+      } catch {
+        return result("invalid_request", "Quiescent legacy release identity cannot be normalized from the supplied tuple.", this.dependencies.db.getSlot(request.slot), "Re-read the exact owner tuple and retry.");
+      }
     }
     const replay = this.replayDurableEffect(request);
     if (replay) return replay;

@@ -35,6 +35,23 @@ function isPmControlCommand(command: string): boolean {
   return command.trim().startsWith("/");
 }
 
+export const mopReleaseSlotInputShape = {
+  slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
+  expected_epoch: z.number().int().nonnegative().describe("Current MoP assignment epoch"),
+  expected_repository_id: z.union([z.string(), z.number()]).describe("Current repository identity"),
+  expected_issue: z.number().int().positive().nullable(),
+  expected_pr: z.number().int().positive().nullable(),
+  expected_branch: z.string().nullable(),
+  expected_head_sha: z.string().regex(/^[0-9a-f]{40}$/i).nullable(),
+  expected_work_kind: z.string().nullable(),
+  expected_handoff_id: z.string().nullable(),
+  expected_claimed_at: z.string().min(1),
+  intended_main_head: z.string().regex(/^[0-9a-f]{40}$/i).describe("Exact current main head to pull and attest"),
+  release_mode: z.literal("quiescent_legacy_issue_only").optional().describe("Explicit mode for an idle issue-only legacy owner"),
+  effect_id: z.string().optional().describe("Durable effect identity; derived server-side when omitted"),
+  request_digest: z.string().regex(/^[0-9a-f]{64}$/i).optional().describe("Digest binding the effect identity to the exact tuple"),
+};
+
 export async function startMcpServer(config: MoPConfig): Promise<void> {
   const db = new MoPDatabase(config);
   const relay = new TmuxRelay(config);
@@ -299,20 +316,8 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_release_slot",
-    "Synchronously reset the exact owning checkout to clean current main, then release the same complete MoP tuple/epoch.",
-    {
-      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
-      expected_epoch: z.number().int().nonnegative().describe("Current MoP assignment epoch"),
-      expected_repository_id: z.union([z.string(), z.number()]).describe("Current repository identity"),
-      expected_issue: z.number().int().positive().nullable(),
-      expected_pr: z.number().int().positive().nullable(),
-      expected_branch: z.string().nullable(),
-      expected_head_sha: z.string().regex(/^[0-9a-f]{40}$/i).nullable(),
-      expected_work_kind: z.string().nullable(),
-      expected_handoff_id: z.string().nullable(),
-      expected_claimed_at: z.string().min(1),
-      intended_main_head: z.string().regex(/^[0-9a-f]{40}$/i).describe("Exact current main head to pull and attest"),
-    },
+    "Synchronously reset the exact owning checkout to clean current main, then release the same complete MoP tuple/epoch. For an idle issue-only owner, pass release_mode quiescent_legacy_issue_only (effect identity is derived server-side when omitted).",
+    mopReleaseSlotInputShape,
     async (releaseInput) => {
       try {
         const response = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${releaseInput.slot}/release`, {
