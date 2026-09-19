@@ -458,6 +458,8 @@ main_behind_threshold = int(os.environ.get("PR_SWEEP_MAIN_BEHIND_THRESHOLD") or 
 merge_unknown_watch_path = Path(os.environ.get("PR_SWEEP_MERGE_UNKNOWN_WATCH") or "/tmp/pr-merge-ready-unknown-watch.json")
 trigger = os.environ.get("TRIGGER") or "manual"
 dry_run = os.environ.get("DRY_RUN") == "1"
+CONTROL_PLANE_ROOT = os.environ.get("CONTROL_PLANE_ROOT") or "/Users/rajiv/.claude/control_plane/current/heydonna"
+FAMILY2_MODULE = os.environ.get("FAMILY2_MODULE") or "scripts.pm.control_plane.family2_boundary"
 # Remote capture is the default and authoritative lane. Local capture is
 # diagnostic-only (capture-local-required with a named infrastructure defect)
 # and never satisfies capture readiness or serves as a fallback after remote
@@ -4701,6 +4703,11 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                         issue,
                         branch,
                     ))
+                    continue
+                if not slots_for_pr:
+                    # Off-slot origin (Rescues/off-slot flow): pm-review-pending
+                    # records a genuinely-owed review whose verdict the merge
+                    # gate owns. Never advance it as stale legacy from the sweep.
                     continue
                 print(
                     f"PR_PM_REVIEW_COMPLETE_REQUIRED PR#{n} reason=pm_review_phase_a_passed "

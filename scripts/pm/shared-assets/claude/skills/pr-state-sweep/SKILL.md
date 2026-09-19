@@ -62,6 +62,9 @@ work before dispatching new issue work through `Skill(direct-assign)`.
   merge-ready is decided by the readiness contract.
 - `pm-state:pm-review-pending` PRs whose PM Claude marker has passed, blocked, or
   gone stale. Fresh in-flight PM review is quiet for the sweep threshold.
+  Exception: a `pm-state:pm-review-pending` PR carrying no `slot:*` label is
+  off-slot origin (Rescues/off-slot flow) and records a genuinely-owed review;
+  the sweep never advances it as stale legacy — the merge gate owns the verdict.
 - `pm-state:pm-review-pending` PRs still represented by an occupied MoP/dev
   slot. PM review is PM-owned work and must release the dev slot until a rework
   packet exists.
