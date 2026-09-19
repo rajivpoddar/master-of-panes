@@ -19,6 +19,12 @@
  *   as the canonical abandon-turn quiescence).
  * - Queue disposition is DISCARD (verified live): interrupt FIRST, then
  *   re-deliver the continuation — never deliver-then-interrupt.
+ * - Recovery delivery vs the watchdog: a parked shell is NOT terminal. The MoP
+ *   health watchdog relaunches the session with `--continue` (the same path
+ *   `exit_pending` uses), and that relaunch is what finally delivered the
+ *   queued continuation live on slot 5 after three direct submissions failed.
+ *   Deliver at or before that relaunch, or hold/pause the watchdog for the park
+ *   window; never rely on queue survival, which the interrupt discards.
  * - Audit/response claim only what was verified: interrupt_signal_sent
  *   means the Ctrl-C keystroke landed, never that the turn ended.
  */
@@ -39,14 +45,29 @@ export const WEDGE_INTERRUPT_QUEUE_DISPOSITION = "discard-queued-input";
  * after the slot genuinely reads idle. Preconditions below are
  * server-verified — no caller-supplied body alone satisfies the escape.
  */
+/**
+ * Sanctioned recovery delivery path, verified live on slot 5: after the park at
+ * a clean shell, the MoP health watchdog restarted the session with
+ * `--continue` and that relaunch finally delivered the queued combined message
+ * where three direct submissions had failed. A parked shell is therefore not a
+ * terminal state; the relaunch is the delivery opportunity.
+ */
+export const WEDGE_WATCHDOG_DELIVERY =
+  "Watchdog relaunch with --continue is a sanctioned delivery path (verified live: it delivered the queued " +
+  "continuation where repeated submissions did not). A parked shell is not terminal — the MoP health watchdog " +
+  "restarts the session with --continue, the same path exit_pending uses. Deliver the continuation at or before " +
+  "that relaunch, or hold/pause the watchdog for the park window. Do not rely on queue survival.";
+
 export const WEDGED_BUSY_REMEDIATION =
   "Sanctioned wedge recovery: primary escape is POST /slots/:n/interrupt-turn (operator authority required; " +
   "server-verified evidence; sends Ctrl-C only; Enter and C-m are submits, not aborts). Interrupt DISCARDS " +
   "queued input: interrupt FIRST, then deliver the continuation — never deliver-then-interrupt. A wedge needs " +
   ">= 5 min with no meaningful progress plus a server-observed idle prompt with queued input; queued input " +
-  "alone is normal working state, not a wedge. If interrupt is refused/unavailable: confirm the pane is " +
-  "shell-backed, terminate only the wedged Claude child, then POST /slots/:n/respawn once the slot genuinely " +
-  "reads idle. Do not reassign, reset ownership/epoch, or touch another slot.";
+  "alone is normal working state, not a wedge. Recovery delivery: " +
+  WEDGE_WATCHDOG_DELIVERY +
+  " If interrupt is refused/unavailable: confirm the pane is shell-backed, terminate only the wedged Claude " +
+  "child, then POST /slots/:n/respawn once the slot genuinely reads idle. Do not reassign, reset " +
+  "ownership/epoch, or touch another slot.";
 
 /**
  * Server-side pane observation showing the idle prompt with queued input,
@@ -257,7 +278,11 @@ export function registerWedgeInterruptRoute(app: Hono, deps: WedgeInterruptDeps)
         signal_sent: true,
         interrupt_key: WEDGE_INTERRUPT_KEY,
         queue_disposition: WEDGE_INTERRUPT_QUEUE_DISPOSITION,
-        followup: "Re-deliver the continuation AFTER this interrupt; queued input was discarded.",
+        followup:
+          "Re-deliver the continuation AFTER this interrupt; queued input was discarded. A parked shell is " +
+          "not terminal: deliver at or before the watchdog relaunch with --continue, or hold the watchdog for " +
+          "the park window.",
+        watchdog_delivery: WEDGE_WATCHDOG_DELIVERY,
         assignment_epoch: row?.assignment_epoch,
       });
     } finally {

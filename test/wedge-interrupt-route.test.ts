@@ -13,6 +13,8 @@ import {
   snapshotShowsIdlePromptWithQueuedInput,
   WEDGE_INTERRUPT_KEY,
   WEDGE_INTERRUPT_QUEUE_DISPOSITION,
+  WEDGE_WATCHDOG_DELIVERY,
+  WEDGED_BUSY_REMEDIATION,
 } from "../src/wedgeInterruptRoute.js";
 import {
   isPmTransitionAssignmentRequest,
@@ -95,6 +97,28 @@ function interruptRequest(authority: string | undefined, body: unknown) {
 function signalEvents(db: MoPDatabase) {
   return db.getEvents(1, 50, "interrupt_signal_sent");
 }
+
+
+test("escape procedure documents the watchdog relaunch as the delivery path", () => {
+  // The live sequence that worked: park at shell -> watchdog relaunch with
+  // --continue -> queued continuation delivered. That relaunch is sanctioned.
+  assert.match(WEDGE_WATCHDOG_DELIVERY, /watchdog/i);
+  assert.match(WEDGE_WATCHDOG_DELIVERY, /--continue/);
+  assert.match(WEDGE_WATCHDOG_DELIVERY, /sanctioned/i);
+  assert.match(WEDGE_WATCHDOG_DELIVERY, /at or before/i);
+  // The same guidance must be reachable from the respawn busy refusal.
+  assert.match(WEDGED_BUSY_REMEDIATION, /watchdog/i);
+  assert.match(WEDGED_BUSY_REMEDIATION, /--continue/);
+  assert.match(WEDGED_BUSY_REMEDIATION, /recovery delivery/i);
+  // Queue survival is never claimed; the interrupt discards queued input.
+  assert.match(WEDGED_BUSY_REMEDIATION, /DISCARDS/);
+  assert.doesNotMatch(WEDGED_BUSY_REMEDIATION, /queued input (?:is|will be) (?:preserved|kept|survives)/i);
+  const serverSrc = readFileSync(
+    fileURLToPath(new URL("../src/server.ts", import.meta.url)),
+    "utf8",
+  );
+  assert.match(serverSrc, /remediation: WEDGED_BUSY_REMEDIATION/);
+});
 
 test("no force-respawn escape exists; busy respawn stays fail-closed", () => {
   const serverSrc = readFileSync(
@@ -204,6 +228,8 @@ test("verified wedge sends one raw C-c with truthful signal audit", async () => 
     assert.equal(body.interrupt_key, "C-c");
     assert.equal(body.queue_disposition, "discard-queued-input");
     assert.match(String(body.followup), /AFTER this interrupt/);
+    assert.match(String(body.followup), /watchdog/i);
+    assert.equal(body.watchdog_delivery, WEDGE_WATCHDOG_DELIVERY);
     assert.equal(body.interrupted, undefined);
     assert.equal(body.assignment_epoch, pins.epoch);
 
