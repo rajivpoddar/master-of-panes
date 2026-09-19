@@ -11,6 +11,11 @@ import {
   type AssignmentTupleInput,
   type MoPDatabase,
 } from "./db.js";
+import {
+  defaultPaneTargetForSlot,
+  isValidPaneTarget,
+  verifySessionPane,
+} from "./sessionDelivery.js";
 import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
 
 const assignmentSlotParamSchema = z.coerce.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT);
@@ -138,6 +143,47 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
     }
     const completeRequested = COMPLETE_ASSIGN_DISCRIMINATORS.some((field) => hasOwn(body, field));
     const task = typeof body.task === "string" ? body.task : "";
+    // Silent-wedge guard: verify the target session pane is live BEFORE any
+    // epoch advance. A dead/missing pane fails typed with no mutation; an
+    // unverifiable checker degrades to an explicit marker, never silence.
+    // The `delivery` attestation is not a tuple field and never trips the
+    // complete-claim discriminator above.
+    const delivery = isRecord(body.delivery) ? body.delivery : null;
+    const attestedPaneId = typeof delivery?.pane_id === "string" ? delivery.pane_id : null;
+    if (attestedPaneId !== null && attestedPaneId !== "" && !isValidPaneTarget(attestedPaneId)) {
+      return c.json({
+        success: false,
+        conflict: true,
+        reason: "session_delivery_unverified",
+        error: `delivery pane target is not a pinned tmux pane: ${attestedPaneId}`,
+        pane: attestedPaneId,
+      }, 409);
+    }
+    const paneTarget = attestedPaneId ? attestedPaneId : defaultPaneTargetForSlot(slotParse.data);
+    const paneCheck = await verifySessionPane(paneTarget);
+    if (paneCheck.state === "dead" ||
+        (paneCheck.state === "unknown" && paneCheck.reason === "invalid_pane_target")) {
+      return c.json({
+        success: false,
+        conflict: true,
+        reason: "session_delivery_unverified",
+        error: `target session pane is not live: ${paneTarget}; assignment not recorded`,
+        pane: paneTarget,
+      }, 409);
+    }
+    const paneCheckUnavailable = paneCheck.state === "unknown";
+    const attested = delivery !== null;
+    const attestedTransport = typeof delivery?.transport === "string" ? delivery.transport : null;
+    const attestedPacketSha = typeof delivery?.packet_sha256 === "string" ? delivery.packet_sha256 : null;
+    const sessionDelivery = paneCheckUnavailable
+      ? { verified: false, reason: "pane_check_unavailable", pane: paneTarget, attested }
+      : {
+          verified: true,
+          pane: paneTarget,
+          attested,
+          ...(attestedTransport !== null ? { transport: attestedTransport } : {}),
+          ...(attestedPacketSha !== null ? { packet_sha256: attestedPacketSha } : {}),
+        };
     let result;
     if (completeRequested) {
       if (!hasEvery(body, COMPLETE_ASSIGN_FIELDS) || !hasCompleteAssignmentValues(body)) {
@@ -182,6 +228,7 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
       assignment_epoch: result.assignment_epoch,
       idempotent: result.idempotent,
       assignment_mode: completeRequested ? "complete" : "issue-only",
+      session_delivery: sessionDelivery,
       ...(completeRequested ? {
         repository_id: body.repository_id,
         pr: body.pr,
@@ -222,7 +269,10 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
         reason: "observed_tuple_mismatch",
       }, 409);
     }
-    return c.json(updated);
+    return c.json({
+      ...updated,
+      session_delivery: sessionDelivery,
+    });
   });
 
   app.post("/slots/:slotNum/adopt-issue-claim", async (c) => {
