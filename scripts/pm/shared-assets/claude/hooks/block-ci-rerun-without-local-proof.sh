@@ -34,6 +34,7 @@ import os
 CI_WORKFLOWS = {"ci.yml", "e2e.yml", "CI", "E2E Smoke Tests"}
 CAPTURE_WORKFLOWS = {"e2e-llm-proxy-capture.yml", "E2E LLM Proxy Capture (manual)"}
 QA_LABEL = "pm-state:qa-passed-awaiting-ci"
+QA_LABELS = {QA_LABEL, "qa-passed-awaiting-ci"}
 ALLOWLISTED = {
     "request-label-gated-ci.sh",
     "rerun-after-local-proof.sh",
@@ -75,7 +76,7 @@ def split_segments(text):
 
     while i < n:
         ch = text[i]
-        if ch == "#":
+        if ch == "#" and not word:
             j = text.find("\n", i)
             i = n if j == -1 else j
             continue
@@ -100,7 +101,7 @@ def split_segments(text):
                 i += 1
             flush_segment()
             continue
-        if ch == "<" and text[i:i + 2] == "<<":
+        if ch == "<" and text[i:i + 2] == "<<" and text[i:i + 3] != "<<<" and text[i - 1:i] != "<":
             j = i + 2
             if text[j:j + 1] == "-":
                 j += 1
@@ -198,8 +199,20 @@ def split_segments(text):
     return [seg for seg in segments if seg]
 
 
+CONTROL_KEYWORDS = {
+    "if", "then", "elif", "else", "fi", "do", "done", "while", "until",
+    "for", "case", "esac", "!", "time", "{", "}",
+}
+
+
 def bare(words):
-    """Strip leading assignments and sudo/rtk/env wrappers from a segment."""
+    """Strip leading assignments, wrappers, and shell control keywords.
+
+    Segments produced by splitting on ;, &&, ||, newlines, and subshell
+    delimiters routinely begin with a control keyword (`then gh run rerun 1`,
+    `do gh run rerun $i`, `else gh run rerun 1`). The keyword is not the
+    command head: skip it so the real invocation is classified.
+    """
     items = list(words)
     while items:
         text, is_quoted = items[0]
@@ -210,6 +223,9 @@ def bare(words):
             items.pop(0)
             continue
         if name in LEAD_SKIP:
+            items.pop(0)
+            continue
+        if name in CONTROL_KEYWORDS:
             items.pop(0)
             continue
         break
@@ -242,11 +258,13 @@ def classify_segment(words):
         return ""
     if name not in WF_RUNNERS:
         if name == "pm-state-replace.sh":
-            rest = [text for text, is_quoted in core[1:] if not is_quoted]
-            if len(rest) >= 2 and rest[0].isdigit() and rest[1] == QA_LABEL:
+            # The live caller passes the bare label; the prefixed label is the
+            # same transition. Both, quoted or not, arm CI.
+            rest = [text for text, _ in core[1:]]
+            if len(rest) >= 2 and rest[1] in QA_LABELS:
                 return "raw qa-passed-awaiting-ci state replacement"
         return ""
-    rest = [text for text, is_quoted in core[1:] if not is_quoted]
+    rest = [text for text, _ in core[1:]]
     if rest[:2] == ["run", "rerun"]:
         return "naked gh run rerun"
     if rest[:2] == ["workflow", "run"]:

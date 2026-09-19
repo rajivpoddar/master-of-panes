@@ -39,6 +39,38 @@ def verdict(command: str) -> int:
     return completed.returncode
 
 
+def test_bare_and_absolute_pm_state_replace_arm_block() -> None:
+    """The live caller passes the bare label, not the prefixed one."""
+    assert verdict("pm-state-replace.sh 7925 qa-passed-awaiting-ci") == 2
+    assert verdict("/Users/rajiv/.claude/scripts/pm-state-replace.sh 7925 qa-passed-awaiting-ci") == 2
+    assert verdict("echo hi; pm-state-replace.sh 7925 qa-passed-awaiting-ci") == 2
+    # The quoted genuine prefixed label stays blocked too.
+    assert verdict('pm-state-replace.sh 7925 "pm-state:qa-passed-awaiting-ci"') == 2
+
+
+def test_control_keyword_command_heads_block() -> None:
+    assert verdict("if true; then gh run rerun 1; fi") == 2
+    assert verdict("for i in 1; do gh run rerun $i; done") == 2
+    assert verdict("if false; then :; else gh run rerun 1; fi") == 2
+
+
+def test_hash_inside_a_word_is_not_a_comment() -> None:
+    assert verdict("echo a#b; gh run rerun 1") == 2
+
+
+def test_here_string_is_not_a_heredoc() -> None:
+    assert verdict("echo hi <<<x; gh run rerun 1") == 2
+
+
+def test_quoted_command_position_still_blocks() -> None:
+    assert verdict('gh "run" rerun 1') == 2
+    assert verdict('gh workflow "run" ci.yml') == 2
+
+
+def test_hash_comment_at_word_start_still_allows() -> None:
+    assert verdict("echo hi # gh run rerun 1") == 0
+
+
 def test_hook_present_and_executable() -> None:
     assert HOOK.is_file(), f"canonical hook missing: {HOOK}"
 

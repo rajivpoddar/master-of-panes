@@ -112,7 +112,7 @@
     {
       "source_path": "claude/hooks/block-ci-rerun-without-local-proof.sh",
       "canonical_target": "/Users/rajiv/.claude/hooks/block-ci-rerun-without-local-proof.sh",
-      "sha256": "6ec47d8b87e1e3517d8eb629043c73226144556f98a2a4721d5cbf799fadcd77",
+      "sha256": "60195cb7d24ec9705fe81fe681c24f35c05fec31cecf49e187dbf63bc95388b9",
       "mode": 493,
       "ownership_class": "shared-claude-pm-label-edit-boundary",
       "dependency_status": "closed",
