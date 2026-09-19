@@ -10,14 +10,28 @@ PARSER="${ISSUE_CONTRACT_LEDGER_HOOK_PARSER:-/Users/rajiv/.claude/scripts/issue-
 VALIDATOR="${ISSUE_CONTRACT_LEDGER_VALIDATOR:-/Users/rajiv/.claude/scripts/validate-issue-contract-ledger.py}"
 GH_BIN="${ISSUE_CONTRACT_LEDGER_GH_BIN:-gh}"
 INPUT=$(cat 2>/dev/null || echo '{}')
-[ "$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)" = "Bash" ] || exit 0
-CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
+if ! TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null); then
+  printf '%s\n' '{"decision":"block","message":"BLOCKED: the issue-contract-ledger input could not be classified (jq extraction failed or the input was malformed); no issue was mutated."}'
+  exit 0
+fi
+[ "$TOOL_NAME" = "Bash" ] || exit 0
+if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null); then
+  printf '%s\n' '{"decision":"block","message":"BLOCKED: the issue-contract-ledger input could not be classified (jq extraction failed or the input was malformed); no issue was mutated."}'
+  exit 0
+fi
 [ -n "$CMD" ] || exit 0
 
+set +e
 PY_OUT=$(
   CMD_TEXT="$CMD" VALIDATOR="$VALIDATOR" GH_BIN="$GH_BIN" \
-    python3 "$PARSER" 2>/dev/null || true
+    python3 "$PARSER" 2>/dev/null
 )
+PARSER_RC=$?
+set -e
+if [ "$PARSER_RC" -ne 0 ]; then
+  printf '%s\n' '{"decision":"block","message":"BLOCKED: the issue-contract-ledger parser failed, so this command could not be checked; no issue was mutated."}'
+  exit 0
+fi
 [ -n "$PY_OUT" ] || exit 0
 [ "$(printf '%s' "$PY_OUT" | jq -r '.block // false')" = true ] || exit 0
 
