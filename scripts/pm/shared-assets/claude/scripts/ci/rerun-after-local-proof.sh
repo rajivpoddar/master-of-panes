@@ -20,7 +20,6 @@ set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 REPO="${GH_REPO:-heydonna-app/heydonna-app}"
-PM_TRANSITION="${PM_TRANSITION:-/Users/rajiv/.claude/scripts/pm-transition.sh}"
 PM_OPS="${PM_OPS:-/Users/rajiv/.claude/scripts/pm-ops.py}"
 CAPTURE_REQUIRED="${CAPTURE_REQUIRED:-/Users/rajiv/.claude/scripts/capture-required.py}"
 REMOTE_CAPTURE_RUN_VALIDATOR="${REMOTE_CAPTURE_RUN_VALIDATOR:-/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/remote-capture-run.py}"
@@ -805,7 +804,6 @@ done
 
 [[ "$pr" =~ ^[0-9]+$ ]] || die "--pr must be numeric"
 [[ "$run_id" =~ ^[0-9]+$ ]] || die "--run must be numeric"
-[ -x "$PM_TRANSITION" ] || die "pm_transition_missing path=$PM_TRANSITION"
 
 pr_json="$(gh pr view "$pr" --repo "$REPO" --json headRefOid,headRefName 2>/dev/null || true)"
 head="$(json_get "$pr_json" headRefOid)"
@@ -992,16 +990,12 @@ mkdir "$lease_dir" 2>/dev/null || die "rerun_already_claimed pr=$pr head=$head"
 latest_head="$(gh pr view "$pr" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
 [ "$latest_head" = "$head" ] || die "head_moved_before_transition pr=$pr expected=$head actual=${latest_head:-unknown}"
 
-preflight_pass_args=(
-  --pr "$pr"
-  --proof "$proof"
-  --failed-run "$run_id"
-  --ci-class "$ci_class"
-)
-if [ -n "$rebind_checkout" ]; then
-  preflight_pass_args+=(--rebind-checkout "$rebind_checkout")
-fi
-"$PM_TRANSITION" ci-local-preflight-pass "${preflight_pass_args[@]}"
+# Sealed local-preflight recording is RETIRED. pm-transition.sh is retired and
+# its ci-local-preflight-pass class is a no-op lifecycle action
+# (UNSUPPORTED_LIFECYCLE_ACTION:ci-local-preflight-pass); the canonical
+# admission path is the CTO label-gated CI skill. The head pins above and the
+# re-checks below are kept: this wrapper still refuses on a moving head or a
+# re-owned PR, and the same-head one-retry cap is unchanged.
 
 latest_head="$(gh pr view "$pr" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
 [ "$latest_head" = "$head" ] || die "head_moved_after_transition pr=$pr expected=$head actual=${latest_head:-unknown}"

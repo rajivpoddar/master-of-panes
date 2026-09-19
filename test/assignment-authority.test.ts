@@ -7,6 +7,9 @@ import { Hono } from "hono";
 import Database from "better-sqlite3";
 
 import {
+  ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE,
+  ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION,
+  ASSIGNMENT_ROUTE_REMEDIATION,
   assignmentIdentityPatchFields,
   isPmTransitionAssignmentRequest,
   PM_TRANSITION_ASSIGNMENT_AUTHORITY,
@@ -93,6 +96,27 @@ function assignmentRequest(
     body: JSON.stringify(body),
   };
 }
+
+test("authority refusals publish the working release shape and clean-checkout precondition", () => {
+  // The retired caller must be named so an operator stops looking for it.
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE, /pm-transition\.sh is retired/);
+  // The working release shape, as verified live (slot 2, epoch 871 -> 872).
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /release_mode:'quiescent_legacy_issue_only'/);
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /No expected_session_id is required/);
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /explicit nulls are accepted/);
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /minted server-side/);
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE, /x-heydonna-assignment-authority: pm-transition-v1/);
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /with that header/);
+  // The single blocking precondition, stated exactly.
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /branch main at intended_main_head/);
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /git status --porcelain --untracked-files=all/);
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /@\{upstream\}\.\.HEAD/);
+  // The MCP pointer: a stale client that cannot send the header is told to use REST.
+  assert.match(ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION, /call this REST route directly/);
+  // An assignment refusal must never hand the caller a release recipe.
+  assert.doesNotMatch(ASSIGNMENT_ROUTE_REMEDIATION, /release_mode|\/release/);
+  assert.match(ASSIGNMENT_ROUTE_REMEDIATION, /POST \/slots\/:n\/assign/);
+});
 
 test("only the guarded PM transition authority reaches REST assignment", () => {
   assert.equal(
