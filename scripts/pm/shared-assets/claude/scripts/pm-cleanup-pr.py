@@ -156,6 +156,11 @@ def _validate_request(value: Any) -> dict[str, Any]:
         raise CleanupError("post_merge_terminal_thread_reply_mismatch")
     if cleanup_mode == ISSUE_LESS_MODE and thread_reply is False:
         raise CleanupError("thread_reply_unsupported_for_issue_less")
+    issue_authoritative = value.get("issue_authoritative", False)
+    if not isinstance(issue_authoritative, bool):
+        raise CleanupError("issue_authoritative_invalid")
+    if cleanup_mode == ISSUE_LESS_MODE and issue_authoritative:
+        raise CleanupError("issue_less_request_shape_invalid")
     if thread_reply is False and caller_thread_ts is not None:
         raise CleanupError("label_only_thread_ts_forbidden")
     return {
@@ -168,6 +173,7 @@ def _validate_request(value: Any) -> dict[str, Any]:
         "post_merge_terminal": post_merge_terminal,
         "_caller_thread_ts": caller_thread_ts,
         "thread_reply": thread_reply,
+        "issue_authoritative": issue_authoritative,
     }
 
 
@@ -294,6 +300,13 @@ class External:
 
 
 def _validate_merged_snapshot(request: dict[str, Any], pr: dict[str, Any]) -> list[str]:
+    _validate_merged_snapshot_without_ref(request, pr)
+    if not _closing_ref_names_issue(pr, request["issue"]):
+        raise CleanupError("linked_issue_mismatch")
+    return _labels(pr.get("labels"))
+
+
+def _validate_merged_snapshot_without_ref(request: dict[str, Any], pr: dict[str, Any]) -> list[str]:
     if pr.get("number") != request["pr"] or str(pr.get("state", "")).upper() != "MERGED":
         raise CleanupError("pr_not_merged")
     merge = pr.get("mergeCommit") or {}
@@ -301,10 +314,21 @@ def _validate_merged_snapshot(request: dict[str, Any], pr: dict[str, Any]) -> li
         raise CleanupError("merge_commit_mismatch")
     if str(pr.get("headRefOid", "")).lower() != request["head"]:
         raise CleanupError("pr_head_mismatch")
-    refs = pr.get("closingIssuesReferences")
-    if not isinstance(refs, list) or not any(isinstance(item, dict) and item.get("number") == request["issue"] for item in refs):
-        raise CleanupError("linked_issue_mismatch")
     return _labels(pr.get("labels"))
+
+
+def _closing_ref_names_issue(pr: dict[str, Any], issue: int | None) -> bool:
+    """True when GitHub's closingIssuesReferences names the issue.
+
+    A PR title/body mention is never authority to close an issue; only a real
+    closing reference (or an authoritative expected-issue tuple carried by the
+    merge/cleanup packet) reconciles the named issue.
+    """
+    refs = pr.get("closingIssuesReferences")
+    return (
+        isinstance(refs, list)
+        and any(isinstance(item, dict) and item.get("number") == issue for item in refs)
+    )
 
 
 def _validate_issue_less_snapshot(request: dict[str, Any], pr: dict[str, Any]) -> list[str]:
@@ -383,7 +407,7 @@ def _transition_text(request: dict[str, Any]) -> str:
 def _cleanup_identity(request: dict[str, Any]) -> dict[str, Any]:
     return {
         key: request[key]
-        for key in ("repository", "pr", "issue", "head", "merge_commit")
+        for key in ("repository", "pr", "issue", "head", "merge_commit", "issue_authoritative")
     }
 
 
@@ -418,6 +442,22 @@ def _label_plan(scope: str, labels: list[str], terminal: str) -> list[dict[str, 
     return plan
 
 
+def _live_closing_refs_absent(external: External, request: dict[str, Any]) -> bool:
+    """True when live closing refs provably do not name the issue.
+
+    Read-only probe so the named-but-unlinked residue path is not blocked by
+    the thread-mapping gate it does not need. Any read failure returns False
+    and preserves the normal fail-closed mapping gate.
+    """
+    try:
+        snapshot = external.read_pr(request)
+    except CleanupError:
+        return False
+    if not isinstance(snapshot, dict):
+        return False
+    return not _closing_ref_names_issue(snapshot, request["issue"])
+
+
 def run(
     raw_request: Any,
     *,
@@ -431,6 +471,7 @@ def run(
     request = _cleanup_identity(supplied)
     request["cleanup_mode"] = supplied["cleanup_mode"]
     request["thread_reply"] = supplied["thread_reply"]
+    request["issue_authoritative"] = supplied["issue_authoritative"]
     request["post_merge_terminal"] = bool(supplied.get("post_merge_terminal"))
     label_only = supplied["cleanup_mode"] == LINKED_ISSUE_MODE and supplied["thread_reply"] is False
     post_merge = bool(supplied.get("post_merge_terminal")) and supplied["cleanup_mode"] == LINKED_ISSUE_MODE
@@ -447,7 +488,15 @@ def run(
         prior = receipts.get(key)
         mapping = None
         thread_ts = None
-        if not isinstance(prior, dict) and supplied["cleanup_mode"] != ISSUE_LESS_MODE and not label_only:
+        residue_path = (
+            not isinstance(prior, dict)
+            and supplied["cleanup_mode"] == LINKED_ISSUE_MODE
+            and not post_merge
+            and not label_only
+            and not request["issue_authoritative"]
+            and _live_closing_refs_absent(ext, request)
+        )
+        if not isinstance(prior, dict) and supplied["cleanup_mode"] != ISSUE_LESS_MODE and not label_only and not residue_path:
             mapping = resolve_thread_mapping(mapping_file, request)
             thread_ts = _required_string(mapping.get("thread_ts"), "thread_mapping_invalid")
             if caller_thread_ts not in (None, thread_ts):
@@ -472,6 +521,9 @@ def run(
                     raise CleanupError("cleanup_receipt_request_mismatch", ambiguous=True)
                 if supplied["thread_reply"] is not False:
                     raise CleanupError("cleanup_receipt_request_mismatch", ambiguous=True)
+            elif prior.get("issue_residue") is not None:
+                if stored_thread_ts is not None or caller_thread_ts is not None:
+                    raise CleanupError("cleanup_receipt_request_mismatch", ambiguous=True)
             else:
                 stored_thread_ts = _required_string(stored_thread_ts, "thread_mapping_invalid")
                 if caller_thread_ts not in (None, stored_thread_ts):
@@ -483,11 +535,14 @@ def run(
             ):
                 raise CleanupError("cleanup_receipt_request_mismatch", ambiguous=True)
             if prior.get("status") == "completed":
-                return {
+                completed = {
                     "success": True, "status": "completed", "idempotent": True,
                     "cleanup_key": key, "thread_ts": stored_thread_ts,
                     "thread_reply": prior.get("thread_reply", True),
                 }
+                if prior.get("issue_residue") is not None:
+                    completed["issue_residue"] = prior["issue_residue"]
+                return completed
             if prior.get("thread_reply") is False and supplied["cleanup_mode"] == LINKED_ISSUE_MODE and not post_merge:
                 resume_pr = ext.read_pr(request)
                 _validate_merged_snapshot(request, resume_pr)
@@ -509,6 +564,7 @@ def run(
                 raise CleanupError("cleanup_receipt_ambiguity_invalid", ambiguous=True)
         else:
             text = _transition_text(request)
+            receipt_residue = None
             if supplied["cleanup_mode"] == ISSUE_LESS_MODE:
                 pr_labels = _validate_issue_less_snapshot(request, ext.read_pr(request))
                 plan = _label_plan("pr", pr_labels, "pm-state:closed-clean")
@@ -544,12 +600,33 @@ def run(
                     + _label_plan("issue", issue_labels, "status:done")
                 )
             else:
-                assert mapping is not None
-                assert thread_ts is not None
-                pr_labels = _validate_merged_snapshot(request, ext.read_pr(request))
-                issue_labels = _validate_issue_snapshot(request, ext.read_issue(request))
-                _validate_auth_and_thread(ext, token, mapping, request, text)
-                plan = (
+                pr_snapshot = ext.read_pr(request)
+                residue = (
+                    not _closing_ref_names_issue(pr_snapshot, request["issue"])
+                    and not request["issue_authoritative"]
+                )
+                if not residue:
+                    assert mapping is not None
+                    assert thread_ts is not None
+                if residue:
+                    # Named-but-unlinked: a title/body mention is not authority
+                    # to touch the issue. PR-only label cleanup with verified
+                    # readbacks; the issue stays untouched and the terminal
+                    # carries the typed residue.
+                    pr_labels = _validate_merged_snapshot_without_ref(request, pr_snapshot)
+                    plan = _label_plan("pr", pr_labels, "pm-state:closed-clean")
+                    text = (
+                        f"PR #{request['pr']} merged-clean | issue #{request['issue']} named but unlinked; "
+                        f"PR-only cleanup | head={request['head']} | merge_commit={request['merge_commit']} "
+                        f"| state=closed-clean | residue=named-issue-unreconciled"
+                    )
+                    receipt_residue = "named-issue-unreconciled"
+                else:
+                    receipt_residue = None
+                    pr_labels = _validate_merged_snapshot(request, pr_snapshot)
+                    issue_labels = _validate_issue_snapshot(request, ext.read_issue(request))
+                    _validate_auth_and_thread(ext, token, mapping, request, text)
+                    plan = (
                     _label_plan("pr", pr_labels, "pm-state:closed-clean")
                     + _label_plan("issue", issue_labels, "status:done")
                     + [
@@ -569,6 +646,7 @@ def run(
                 "plan": plan,
                 "steps": {},
                 "ambiguous_steps": [],
+                "issue_residue": receipt_residue,
             }
             receipts[key] = receipt
             _write_json(receipt_file, receipts)
@@ -581,6 +659,8 @@ def run(
             if scope == "pr":
                 if request["cleanup_mode"] == ISSUE_LESS_MODE:
                     labels = _validate_issue_less_snapshot(request, ext.read_pr(request))
+                elif receipt.get("issue_residue") == "named-issue-unreconciled":
+                    labels = _validate_merged_snapshot_without_ref(request, ext.read_pr(request))
                 else:
                     labels = _validate_merged_snapshot(request, ext.read_pr(request))
             else:
@@ -667,13 +747,21 @@ def run(
             terminal_issue = ext.read_issue(request)
             _validate_issue_snapshot(request, terminal_issue)
             _validate_label_only_terminal(request, terminal_pr, terminal_issue)
+        if receipt.get("issue_residue") == "named-issue-unreconciled":
+            residue_pr = ext.read_pr(request)
+            _validate_merged_snapshot_without_ref(request, residue_pr)
+            if "pm-state:closed-clean" not in _labels(residue_pr.get("labels")):
+                raise CleanupError("pr_terminal_readback_mismatch", ambiguous=True)
         receipt["status"] = "completed"
         persist()
-        return {
+        result = {
             "success": True, "status": "completed", "idempotent": False,
             "cleanup_key": key, "thread_ts": thread_ts,
             "thread_reply": supplied["thread_reply"],
         }
+        if receipt.get("issue_residue") is not None:
+            result["issue_residue"] = receipt["issue_residue"]
+        return result
 
 
 def _thread_reply_readback(external: External, token: str, thread_ts: str, text: str) -> bool:
