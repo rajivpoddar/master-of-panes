@@ -462,6 +462,15 @@
       "source_path": "claude/skills/cp-repair-request/SKILL.md"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/skills/direct-release/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-direct-release",
+      "sha256": "c76b4877d058dc12420f88f137fc4a854988a777577e177704b7daea453a986a",
+      "source_path": "claude/skills/direct-release/SKILL.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/heydonna-review-cap-cto-approve-handoff/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -879,7 +888,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 94,
+    "selected_count": 95,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
