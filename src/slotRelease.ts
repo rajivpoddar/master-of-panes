@@ -543,7 +543,22 @@ export class NativeSlotReleaseCoordinator {
       }
     }
     const replay = this.replayDurableEffect(request);
-    if (replay) return replay;
+    if (replay) {
+      // A durable replay proves the release already committed, but the derived
+      // issue surface may still be stale when the first projection failed or the
+      // process died between the FREE receipt and the projection. Every
+      // successful replay therefore re-runs the same release projection repair
+      // before returning; the durable receipt/FREE postcondition stays
+      // authoritative and the projection remains a typed sibling field.
+      if (!replay.success) return replay;
+      return {
+        ...replay,
+        issue_projection: await this.projectReleasedOwner(
+          normalizeAssignmentTuple(request.expected_tuple) ?? undefined,
+          request.slot,
+        ),
+      };
+    }
     const validated = this.validateInitialRequest(request);
     if ("success" in validated) return validated;
     let computedDigest: string | undefined;

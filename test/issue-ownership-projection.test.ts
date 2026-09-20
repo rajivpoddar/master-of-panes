@@ -29,11 +29,15 @@ function fakeGh(initial: { state?: string; labels: string[] }) {
   const state = initial.state ?? "OPEN";
   let labels = [...initial.labels];
   const edits: string[][] = [];
+  const failure = { failWrites: false };
   const runner: GhRunner = async (args) => {
     if (args[0] === "issue" && args[1] === "view") {
       return JSON.stringify({ state, labels: labels.map((name) => ({ name })) });
     }
     if (args[0] === "issue" && args[1] === "edit") {
+      if (failure.failWrites) {
+        throw new Error("gh: issue edit failed");
+      }
       edits.push(args);
       for (let index = 0; index < args.length; index += 1) {
         if (args[index] === "--add-label") {
@@ -47,7 +51,7 @@ function fakeGh(initial: { state?: string; labels: string[] }) {
     }
     throw new Error(`unexpected gh invocation: ${args.join(" ")}`);
   };
-  return { runner, edits, labels: () => labels };
+  return { runner, edits, labels: () => labels, failure };
 }
 
 function recordingProjection(): IssueOwnershipProjection & { calls: string[] } {
@@ -339,6 +343,97 @@ test("native release projects the released owner and keeps the durable release a
     assert.equal(db.getSlot(4)?.occupied, false);
     assert.equal((released.issue_projection as Record<string, unknown> | null)?.status, "projected");
     assert.deepEqual(projection.calls, ["release:7952:4:992731533"]);
+  } finally {
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a durable release replay repairs a projection that failed on the first attempt", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-issue-projection-replay-"));
+  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+  try {
+    assert.equal(
+      db.assignSlot(4, "legacy issue-only task", "992731533", 7952, null, null, null, 0).ok,
+      true,
+    );
+    db.updateSlot(4, { idle: true, activity: "waiting_for_pm_direction" });
+    const current = db.getSlot(4)!;
+    const tuple = slotAssignmentTuple(current)!;
+    const request = {
+      slot: 4,
+      expected_epoch: current.assignment_epoch,
+      expected_tuple: {
+        repository_id: tuple.repository_id,
+        issue: tuple.issue,
+        pr: tuple.pr,
+        branch: tuple.branch,
+        head_sha: tuple.head_sha,
+        work_kind: tuple.work_kind,
+        handoff_id: tuple.handoff_id,
+        claimed_at: tuple.claimed_at,
+      },
+      intended_main_head: MAIN_HEAD,
+      release_mode: "quiescent_legacy_issue_only" as const,
+      effect_id: "issue-projection-replay-7952",
+      request_digest: "",
+    };
+    request.request_digest = computeFamily2ReleaseDigest(request);
+
+    // The issue surface still carries the live label while the write path is down.
+    const gh = fakeGh({ labels: ["status:in-progress", "slot:4", "P1"] });
+    gh.failure.failWrites = true;
+    const projection = createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO });
+    const release = new NativeSlotReleaseCoordinator({
+      db,
+      issueProjection: projection,
+      resolveOwningCheckout: async () => CHECKOUT,
+      deliverInstruction: async () => true,
+      owningSlotIsIdle: async () => true,
+      resetAndObserveCheckout: async () => ({
+        checkout_path: CHECKOUT,
+        branch: "main",
+        head: MAIN_HEAD,
+        clean: true,
+        reset_succeeded: true,
+        error: null,
+      }),
+      observeCheckout: async () => ({
+        checkout_path: CHECKOUT,
+        clean: true,
+        unpushed_commits: [],
+        branch: "main",
+        head: MAIN_HEAD,
+        error: null,
+      }),
+    });
+
+    const first = await release.release(request);
+    assert.equal(first.success, true, "the durable FREE commit is authoritative");
+    assert.equal(first.code, "released");
+    assert.equal(db.getSlot(4)?.occupied, false, "the durable FREE postcondition still holds");
+    assert.equal(first.issue_projection?.status, "failed");
+    assert.match(first.issue_projection?.reason ?? "", /issue_projection_write_failed/);
+    assert.deepEqual([...gh.labels()].sort(), ["P1", "slot:4", "status:in-progress"].sort());
+
+    // The identical retry consumes the durable receipt and must still repair the surface.
+    gh.failure.failWrites = false;
+    const second = await release.release(request);
+    assert.equal(second.success, true);
+    assert.equal(second.code, "released");
+    assert.equal(second.idempotent, true, "the retry is the durable effect replay");
+    assert.equal(second.issue_projection?.status, "projected");
+    assert.equal(second.issue_projection?.verified, true);
+    assert.deepEqual(second.issue_projection?.removed_labels, ["slot:4", "status:in-progress"]);
+    assert.deepEqual([...gh.labels()].sort(), ["P1", "status:todo"].sort(), "the replay healed the issue surface");
+
+    // A third identical replay is idempotent and performs no label write at all.
+    const editsBefore = gh.edits.length;
+    const third = await release.release(request);
+    assert.equal(third.success, true);
+    assert.equal(third.issue_projection?.status, "unchanged");
+    assert.equal(third.issue_projection?.verified, true);
+    assert.equal(gh.edits.length, editsBefore, "an already-projected replay must perform zero edits");
   } finally {
     db.close();
     rmSync(directory, { recursive: true, force: true });
