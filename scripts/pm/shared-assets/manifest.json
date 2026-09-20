@@ -426,6 +426,15 @@
       "source_path": "claude/skills/ci-success-reconciliation/SKILL.md"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/cleanup-pr/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-cleanup",
+      "sha256": "dd75f208440c8ed6245968d3d98d7e9a30ba3fcf8a1368a0cd7ccd55c4056ea5",
+      "source_path": "claude/skills/cleanup-pr/SKILL.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/codex-companion-cap-mechanism/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -870,7 +879,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 93,
+    "selected_count": 94,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
