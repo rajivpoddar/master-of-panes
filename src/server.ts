@@ -28,6 +28,10 @@ import {
   PM_TRANSITION_ASSIGNMENT_HEADER,
 } from "./assignmentAuthority.js";
 import { registerAssignmentRoute } from "./assignmentRoute.js";
+import {
+  evaluateRespawnTurnPersistence,
+  respawnTurnPersistenceRemedy,
+} from "./respawnTurnGuard.js";
 import { createGhIssueOwnershipProjection } from "./issueProjection.js";
 import { registerFamily2Routes } from "./family2Routes.js";
 import { TmuxRelay } from "./relay.js";
@@ -1135,6 +1139,10 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   // No force bypass: a wedged turn escapes via POST /slots/:slotNum/interrupt-turn
   // (Ctrl-C only, server-verified evidence). Respawn runs only at genuine idle.
   const slotState = db.getSlot(slotNum);
+  // The turn record this relaunch inherits. A boot timeout can leave it active
+  // forever (its owning session never emits Stop/SessionEnd), so the respawn
+  // result below is conditional on that exact turn actually settling.
+  const preRespawnTurnId = slotState?.active_turn_id ?? null;
   if (slotState && slotState.occupied && !slotState.idle) {
     return c.json({
       error: `Slot ${slotNum} is busy (not idle). Wait for idle before respawning.`,
@@ -1268,11 +1276,34 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     }
   }
 
+  const postRespawn = db.getSlot(slotNum);
+  const persistence = evaluateRespawnTurnPersistence(preRespawnTurnId, postRespawn);
+  if (persistence.persisted && persistence.turn_id) {
+    db.logEvent(slotNum, "slot_respawn_turn_persisted", null, null, {
+      turn_id: persistence.turn_id,
+      duration_ms: Date.now() - startTime,
+      steps: steps.map((s) => s.step),
+    });
+    return c.json({
+      success: false,
+      reason: "respawn_turn_persisted",
+      error:
+        `Slot ${slotNum} relaunched, but the pre-respawn hook turn ${persistence.turn_id} is still active; ` +
+        "the respawn did not settle it.",
+      slot: postRespawn ?? null,
+      turn_id: persistence.turn_id,
+      duration_ms: Date.now() - startTime,
+      steps,
+      remediation: respawnTurnPersistenceRemedy(slotNum, persistence.turn_id),
+    }, 409);
+  }
+
   db.logEvent(slotNum, "slot_respawned", null, null, {
     continue_session: continueSession,
     model: model ?? null,
     duration_ms: Date.now() - startTime,
     steps: steps.map((s) => s.step),
+    settled_turn_id: preRespawnTurnId,
   });
 
   return c.json({
@@ -1281,6 +1312,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     continue_session: continueSession,
     model: model ?? null,
     duration_ms: Date.now() - startTime,
+    settled_turn_id: preRespawnTurnId,
     steps,
   });
 });

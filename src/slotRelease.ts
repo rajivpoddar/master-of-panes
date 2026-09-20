@@ -371,7 +371,11 @@ export class NativeSlotReleaseCoordinator {
       return result("dnd_active", "The slot is in DND and cannot be released.", current, "Leave the owner untouched and retry after DND is cleared.");
     }
     if (current.active_turn_id !== null || current.active_turn_state !== "inactive") {
-      return result("slot_not_idle", "The owning hook turn is still active or indeterminate.", current, "Wait for the authoritative Stop or SessionEnd hook and retry.");
+      const blockedTurnId = current.active_turn_id;
+      const remediation = blockedTurnId
+        ? `If the owning session is gone (relaunched or replaced, so no Stop/SessionEnd hook can arrive) and this turn has had no meaningful progress for >= 5 min, terminalize exactly this turn through the canonical path: POST /slots/${request.slot}/abandon-turn {"turn_id":"${blockedTurnId}","reason":"<why>","actor":"<who>"} (idempotent on repeat; a replacement or indeterminate turn is refused). Otherwise wait for the authoritative Stop or SessionEnd hook and retry.`
+        : "Wait for the authoritative Stop or SessionEnd hook and retry.";
+      return result("slot_not_idle", "The owning hook turn is still active or indeterminate.", current, remediation);
     }
     if (request.release_mode === QUIESCENT_LEGACY_RELEASE_MODE
       && (!current.idle || (current.activity !== null && current.activity !== "waiting_for_pm_direction"))) {
