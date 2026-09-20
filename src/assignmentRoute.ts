@@ -12,6 +12,7 @@ import {
   normalizeRepositoryId,
   type AssignmentTupleInput,
   type MoPDatabase,
+  type SlotPredecessorContext,
 } from "./db.js";
 import {
   NO_ISSUE_PROJECTION,
@@ -123,6 +124,29 @@ function completeTuple(
 }
 
 /**
+ * Decide whether a forced assignment displaced an uncleared predecessor.
+ *
+ * MoP can invalidate row-level owner state during the commit, but it must never
+ * report a silent success when the displaced slot still carries a live
+ * predecessor context (an active turn, mid-flight activity, or an owned task).
+ */
+function predecessorClearance(predecessor: SlotPredecessorContext | null | undefined): {
+  cleared: boolean;
+  reason: string;
+} {
+  if (!predecessor) {
+    return { cleared: true, reason: "no_predecessor" };
+  }
+  const liveTurn = predecessor.active_turn_id !== null
+    || predecessor.active_turn_state !== "inactive";
+  const busy = predecessor.activity !== null && predecessor.activity !== "waiting_for_pm_direction";
+  if (liveTurn || busy) {
+    return { cleared: false, reason: "predecessor_context_uncleared" };
+  }
+  return { cleared: true, reason: "predecessor_idle" };
+}
+
+/**
  * Project the derived issue-side ownership surface for a committed transition.
  *
  * The durable MoP row is already committed when this runs, so a projection
@@ -191,6 +215,39 @@ export function registerAssignmentRoute(
         reason: "invalid_issue",
       }, 409);
     }
+    if (body.force_over_occupied !== undefined && typeof body.force_over_occupied !== "boolean") {
+      return c.json({
+        success: false,
+        conflict: true,
+        error: "force_over_occupied must be a boolean",
+        reason: "invalid_force_over_occupied",
+        slot: db.getSlot(slotParse.data),
+      }, 409);
+    }
+    if (body.clear_predecessor !== undefined && typeof body.clear_predecessor !== "boolean") {
+      return c.json({
+        success: false,
+        conflict: true,
+        error: "clear_predecessor must be a boolean",
+        reason: "invalid_clear_predecessor",
+        slot: db.getSlot(slotParse.data),
+      }, 409);
+    }
+    if (body.clear_predecessor === true) {
+      // This route invalidates only row-level owner state during the commit; it
+      // must not pretend to clear a live predecessor pane. Refuse truthfully
+      // and name the canonical path instead of silently ignoring the request.
+      return c.json({
+        success: false,
+        conflict: true,
+        error: "clear_predecessor is not supported on the assign route",
+        reason: "clear_predecessor_unsupported_on_assign",
+        slot: db.getSlot(slotParse.data),
+        remediation:
+          "Release or clear the previous owner through the canonical path (Skill(direct-release) / the slot clear route) and then assign; the assign route never clears a live predecessor pane.",
+      }, 409);
+    }
+    const forceOverOccupied = body.force_over_occupied === true;
     const completeRequested = COMPLETE_ASSIGN_DISCRIMINATORS.some((field) => hasOwn(body, field));
     const task = typeof body.task === "string" ? body.task : "";
     // Silent-wedge guard: verify the target session pane is live BEFORE any
@@ -255,7 +312,7 @@ export function registerAssignmentRoute(
         body.expected_epoch as number,
         body.work_kind as string | null,
         body.handoff_id as string | null,
-        true,
+        !forceOverOccupied,
       );
     } else {
       const repositoryId = (
@@ -266,11 +323,14 @@ export function registerAssignmentRoute(
         body.issue as number,
         task,
         repositoryId,
+        { forceOverOccupied: forceOverOccupied === true },
       );
     }
 
     if (!result.ok) {
-      return c.json({ success: false, ...result }, 409);
+      // Truthful refusal: the envelope carries the actual current slot state so
+      // the caller sees exactly what blocked the transition.
+      return c.json({ success: false, slot: db.getSlot(slotParse.data), ...result }, 409);
     }
 
     db.logEvent(slotParse.data, "slot_assigned", null, null, {
@@ -319,15 +379,40 @@ export function registerAssignmentRoute(
         reason: "observed_tuple_mismatch",
       }, 409);
     }
+    const ownershipProjection = await projectOwnership(
+      issueProjection,
+      updated?.issue ?? (body.issue as number),
+      slotParse.data,
+      updated?.repository_id ?? null,
+    );
+    const clearance = predecessorClearance(result.predecessor);
+    if (!clearance.cleared) {
+      // The durable assignment committed (the readback above is truthful and
+      // authoritative), but the displaced owner still carries a live context.
+      // That is never reported as a silent success.
+      db.logEvent(slotParse.data, "slot_assigned_predecessor_uncleared", null, null, {
+        issue: body.issue,
+        assignment_epoch: result.assignment_epoch,
+        predecessor: result.predecessor ?? null,
+        reason: clearance.reason,
+      });
+      return c.json({
+        success: false,
+        conflict: false,
+        error: "the predecessor owner context was not cleared",
+        reason: clearance.reason,
+        predecessor: result.predecessor ?? null,
+        slot: updated,
+        issue_projection: ownershipProjection,
+        remediation:
+          "Release or clear the previous owner through the canonical path (Skill(direct-release), or an explicit forced clear) before re-tasking this slot; the durable assignment already committed, so the readback above is the current truth.",
+      }, 409);
+    }
     return c.json({
       ...updated,
       session_delivery: sessionDelivery,
-      issue_projection: await projectOwnership(
-        issueProjection,
-        updated?.issue ?? (body.issue as number),
-        slotParse.data,
-        updated?.repository_id ?? null,
-      ),
+      issue_projection: ownershipProjection,
+      predecessor_context: { cleared: clearance.cleared, reason: clearance.reason },
     });
   });
 

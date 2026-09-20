@@ -373,7 +373,7 @@ test("assignment ignores stale turn and tuple telemetry", async () => {
   });
 });
 
-test("claim route overwrites the selected slot without caller epoch", async () => {
+test("claim route refuses to overwrite an occupied slot unless the caller forces it", async () => {
   await withAssignmentRoute(async (app, db) => {
     const first = await app.request(
       "/slots/1/assign",
@@ -385,6 +385,8 @@ test("claim route overwrites the selected slot without caller epoch", async () =
     assert.equal(first.status, 200);
     const before = db.getSlot(1);
 
+    // Release-first invariant: an occupied, unreleased owner is never silently
+    // re-tasked (this is the S6 77 -> 78 boundary that produced lane residue).
     const occupiedClaim = await app.request(
       "/slots/1/assign",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
@@ -392,9 +394,27 @@ test("claim route overwrites the selected slot without caller epoch", async () =
         task: "replaced issue-only claim",
       }),
     );
-    assert.equal(occupiedClaim.status, 200);
+    assert.equal(occupiedClaim.status, 409);
+    const refused = await occupiedClaim.json() as Record<string, unknown>;
+    assert.equal(refused.reason, "slot_already_occupied");
+    assert.equal(db.getSlot(1)?.issue, assignment.issue);
+    assert.equal(db.getSlot(1)?.assignment_epoch, before!.assignment_epoch);
+
+    // The explicit force override still allows the transition, and it reports
+    // the displaced predecessor rather than a silent success.
+    const forced = await app.request(
+      "/slots/1/assign",
+      assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+        issue: assignment.issue + 1,
+        task: "forced issue-only claim",
+        force_over_occupied: true,
+      }),
+    );
+    assert.equal(forced.status, 200);
     assert.equal(db.getSlot(1)?.issue, assignment.issue + 1);
     assert.equal(db.getSlot(1)?.assignment_epoch, before!.assignment_epoch + 1);
+    const forcedBody = await forced.json() as Record<string, unknown>;
+    assert.equal((forcedBody.predecessor_context as Record<string, unknown>).cleared, true);
   });
 });
 
