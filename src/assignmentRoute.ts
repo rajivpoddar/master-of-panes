@@ -137,6 +137,13 @@ function predecessorClearance(predecessor: SlotPredecessorContext | null | undef
   if (!predecessor) {
     return { cleared: true, reason: "no_predecessor" };
   }
+  // An occupied accepted lane is not cleared merely because its turn state
+  // reads inactive: only an explicit idle=true qualifies for
+  // predecessor_idle. A freshly accepted-not-started lane (idle=false,
+  // no activity, inactive turn) still carries its predecessor context.
+  if (predecessor.idle !== true) {
+    return { cleared: false, reason: "predecessor_context_uncleared" };
+  }
   const liveTurn = predecessor.active_turn_id !== null
     || predecessor.active_turn_state !== "inactive";
   const busy = predecessor.activity !== null && predecessor.activity !== "waiting_for_pm_direction";
@@ -181,6 +188,50 @@ async function projectOwnership(
       verified: false,
     };
   }
+}
+
+/**
+ * Mirror of the durable layer's complete-claim idempotency predicate
+ * (db.assignSlot): same occupied row, same repository/issue/pr/branch/head
+ * and same work metadata. Used only to tell an idempotent same-tuple replay
+ * (which stays on the normal path) from a forced displace attempt.
+ */
+function isSameCompleteTuple(
+  current: {
+    occupied: boolean;
+    repository_id: string | null;
+    issue: number | null;
+    pr: number | null;
+    branch_ref: string | null;
+    head_sha: string | null;
+    work_kind: string | null;
+    handoff_id: string | null;
+  },
+  body: Record<string, unknown>,
+): boolean {
+  const normalizedRepositoryId = normalizeRepositoryId(body.repository_id);
+  const branchIdentity = normalizeBranchIdentity(body.branch as string | null | undefined);
+  if (!normalizedRepositoryId || !branchIdentity) {
+    return false;
+  }
+  const normalizedIssue = Number.isInteger(body.issue) && (body.issue as number) > 0
+    ? (body.issue as number)
+    : null;
+  const normalizedPr = Number.isInteger(body.pr) && (body.pr as number) > 0
+    ? (body.pr as number)
+    : null;
+  const normalizedWorkKind = typeof body.work_kind === "string" ? body.work_kind.trim() : body.work_kind;
+  const normalizedHandoffId = typeof body.handoff_id === "string" ? body.handoff_id.trim() : body.handoff_id;
+  const metadataMatches = normalizedWorkKind === null
+    ? current.work_kind === null && current.handoff_id === null
+    : current.work_kind === normalizedWorkKind && current.handoff_id === normalizedHandoffId;
+  return current.occupied
+    && current.repository_id === normalizedRepositoryId
+    && current.issue === normalizedIssue
+    && current.pr === normalizedPr
+    && current.branch_ref === branchIdentity.branchRef
+    && current.head_sha === body.head_sha
+    && metadataMatches;
 }
 
 export function registerAssignmentRoute(
@@ -300,6 +351,36 @@ export function registerAssignmentRoute(
           error: "complete assignment tuple is required",
           reason: "observed_tuple_mismatch",
         }, 409);
+      }
+      if (forceOverOccupied) {
+        // Complete claims stay strict: force has no meaning on this path, so
+        // a forced complete claim over a different occupied tuple must fail
+        // with a typed reason before any mutation — never silently displace
+        // the live owner (and never silently ignore the flag). An idempotent
+        // same-tuple replay falls through to the durable layer below.
+        const current = db.getSlot(slotParse.data);
+        if (current?.occupied && !isSameCompleteTuple(current, body)) {
+          const predecessor: SlotPredecessorContext = {
+            issue: current.issue,
+            pr: current.pr,
+            task: current.task,
+            active_turn_id: current.active_turn_id,
+            active_turn_state: current.active_turn_state,
+            activity: current.activity,
+            idle: current.idle,
+            claimed_at: current.claimed_at,
+          };
+          return c.json({
+            success: false,
+            conflict: true,
+            error: "force_over_occupied is not supported for complete-claim requests over an occupied slot",
+            reason: "force_over_occupied_unsupported_for_complete_claim",
+            slot: current,
+            predecessor,
+            remediation:
+              "Release the occupied slot through the canonical release-first path (Skill(direct-release)) and assign without force_over_occupied; the assign route never force-displaces a live complete-claim owner.",
+          }, 409);
+        }
       }
       result = db.assignSlot(
         slotParse.data,

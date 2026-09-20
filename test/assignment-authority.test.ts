@@ -400,8 +400,10 @@ test("claim route refuses to overwrite an occupied slot unless the caller forces
     assert.equal(db.getSlot(1)?.issue, assignment.issue);
     assert.equal(db.getSlot(1)?.assignment_epoch, before!.assignment_epoch);
 
-    // The explicit force override still allows the transition, and it reports
-    // the displaced predecessor rather than a silent success.
+    // The explicit force override still commits durably, but a freshly
+    // accepted-not-started predecessor (idle=false) is never reported as a
+    // silent success: only an explicit idle=true qualifies for
+    // predecessor_idle.
     const forced = await app.request(
       "/slots/1/assign",
       assignmentRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
@@ -410,11 +412,14 @@ test("claim route refuses to overwrite an occupied slot unless the caller forces
         force_over_occupied: true,
       }),
     );
-    assert.equal(forced.status, 200);
+    assert.equal(forced.status, 409);
+    const forcedBody = await forced.json() as Record<string, unknown>;
+    assert.equal(forcedBody.success, false);
+    assert.equal(forcedBody.reason, "predecessor_context_uncleared");
+    assert.equal((forcedBody.predecessor as Record<string, unknown>).issue, assignment.issue);
+    assert.match(String(forcedBody.remediation), /release or clear the previous owner/i);
     assert.equal(db.getSlot(1)?.issue, assignment.issue + 1);
     assert.equal(db.getSlot(1)?.assignment_epoch, before!.assignment_epoch + 1);
-    const forcedBody = await forced.json() as Record<string, unknown>;
-    assert.equal((forcedBody.predecessor_context as Record<string, unknown>).cleared, true);
   });
 });
 

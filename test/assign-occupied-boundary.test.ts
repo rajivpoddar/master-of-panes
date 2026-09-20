@@ -247,3 +247,88 @@ test("idempotent same-issue assign and typed flag validation are unchanged", asy
     close(value);
   }
 });
+
+test("complete-claim force over a different occupied tuple is refused without mutation", async () => {
+  const value = harness();
+  try {
+    occupy(value, 5, 7960, { live: false });
+    const before = value.db.getSlot(5)!;
+
+    const response = await value.app.request("/slots/5/assign", assignRequest({
+      expected_epoch: before.assignment_epoch,
+      repository_id: REPOSITORY,
+      issue: 7998,
+      pr: 9002,
+      branch: "fix/7998",
+      head_sha: "b".repeat(40),
+      work_kind: "implementation",
+      handoff_id: "handoff-7998",
+      task: "forced complete claim over a different owner",
+      force_over_occupied: true,
+    }));
+    assert.equal(response.status, 409);
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(body.success, false);
+    assert.equal(body.reason, "force_over_occupied_unsupported_for_complete_claim");
+    assert.equal((body.slot as Record<string, unknown>).issue, 7960);
+    assert.equal(
+      (body.slot as Record<string, unknown>).assignment_epoch,
+      before.assignment_epoch,
+      "no epoch change on a refused complete-claim force",
+    );
+    assert.equal((body.predecessor as Record<string, unknown>).issue, 7960);
+    assert.match(String(body.remediation), /release-first/i);
+
+    const after = value.db.getSlot(5)!;
+    assert.equal(after.issue, 7960, "no silent re-task");
+    assert.equal(after.assignment_epoch, before.assignment_epoch);
+    assert.deepEqual(value.calls, [], "a refused complete-claim force never projects");
+    assert.equal(
+      value.db.getEvents(5, 10, "slot_assigned_predecessor_uncleared").length,
+      0,
+      "no uncleared-displace audit on a refusal that committed nothing",
+    );
+  } finally {
+    close(value);
+  }
+});
+
+test("issue-only force over an accepted-not-started predecessor is a typed non-success", async () => {
+  const value = harness();
+  try {
+    occupy(value, 3, 7955, { live: false });
+    value.db.updateSlot(3, {
+      idle: false,
+      activity: null,
+      active_turn_id: null,
+      active_turn_state: "inactive",
+    });
+    const before = value.db.getSlot(3)!;
+    assert.equal(before.idle, false);
+
+    const response = await value.app.request("/slots/3/assign", assignRequest({
+      repository_id: REPOSITORY,
+      issue: 7996,
+      task: "forced re-task over an accepted-not-started owner",
+      force_over_occupied: true,
+    }));
+    assert.equal(response.status, 409, "an uncleared accepted lane is never a silent success");
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(body.success, false);
+    assert.equal(body.reason, "predecessor_context_uncleared");
+    assert.equal((body.predecessor as Record<string, unknown>).issue, 7955);
+    assert.match(String(body.remediation), /release or clear the previous owner/i);
+
+    const after = value.db.getSlot(3)!;
+    assert.equal(after.issue, 7996, "the issue-only force contract still commits durably");
+    assert.equal(after.assignment_epoch, before.assignment_epoch + 1);
+    assert.deepEqual(value.calls, ["assign:7996:3"]);
+    assert.equal(
+      value.db.getEvents(3, 10, "slot_assigned_predecessor_uncleared").length,
+      1,
+      "the uncleared displace is audited",
+    );
+  } finally {
+    close(value);
+  }
+});
