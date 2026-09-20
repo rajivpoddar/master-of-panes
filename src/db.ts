@@ -13,11 +13,24 @@ import { dirname } from "node:path";
 import type { EventLogEntry, MoPConfig, OpsJobRecord, OpsJobStatus, SlotState, SlotStatus } from "./types.js";
 import { devSlots, PM_SLOT, runtimeIdentity } from "./slotConfig.js";
 
+export interface SlotPredecessorContext {
+  issue: number | null;
+  pr: number | null;
+  task: string | null;
+  active_turn_id: string | null;
+  active_turn_state: string;
+  activity: string | null;
+  idle: boolean | null;
+  claimed_at: string | null;
+}
+
 export interface SlotMutationResult {
   ok: boolean;
   conflict: boolean;
   assignment_epoch: number;
   idempotent: boolean;
+  /** Owner context that was displaced by a forced re-assignment, if any. */
+  predecessor?: SlotPredecessorContext | null;
   reason?:
     | "expected_epoch_required"
     | "epoch_mismatch"
@@ -1494,6 +1507,7 @@ export class MoPDatabase {
     issue: number,
     task: string,
     repositoryId: string | number,
+    options: { forceOverOccupied?: boolean } = {},
   ): SlotMutationResult {
     const normalizedIssue = Number.isInteger(issue) && issue > 0 ? issue : null;
     const normalizedRepositoryId = normalizeRepositoryId(repositoryId);
@@ -1555,6 +1569,34 @@ export class MoPDatabase {
         };
       }
 
+      const predecessor: SlotPredecessorContext | null = before.occupied
+        ? {
+            issue: before.issue,
+            pr: before.pr,
+            task: before.task,
+            active_turn_id: before.active_turn_id,
+            active_turn_state: before.active_turn_state,
+            activity: before.activity,
+            idle: before.idle,
+            claimed_at: before.claimed_at,
+          }
+        : null;
+
+      // Release-first invariant: a live owner must be released (or the caller
+      // must force the transition explicitly) before a replacement assignment
+      // commits. Without this the epoch advanced while the predecessor session
+      // was never cleared, leaving the slot carrying the previous lane residue.
+      if (before.occupied && !options.forceOverOccupied) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "slot_already_occupied",
+          owner_slots: [slot],
+          predecessor,
+        };
+      }
       const assignedAt = new Date().toISOString();
       this.updateAssignmentState(slot, {
         status: "active" as SlotStatus,
@@ -1584,6 +1626,7 @@ export class MoPDatabase {
         conflict: false,
         assignment_epoch: epoch + 1,
         idempotent: false,
+        predecessor,
       };
     })();
   }

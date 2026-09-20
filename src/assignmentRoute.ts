@@ -12,6 +12,7 @@ import {
   normalizeRepositoryId,
   type AssignmentTupleInput,
   type MoPDatabase,
+  type SlotPredecessorContext,
 } from "./db.js";
 import {
   NO_ISSUE_PROJECTION,
@@ -123,6 +124,36 @@ function completeTuple(
 }
 
 /**
+ * Decide whether a forced assignment displaced an uncleared predecessor.
+ *
+ * MoP can invalidate row-level owner state during the commit, but it must never
+ * report a silent success when the displaced slot still carries a live
+ * predecessor context (an active turn, mid-flight activity, or an owned task).
+ */
+function predecessorClearance(predecessor: SlotPredecessorContext | null | undefined): {
+  cleared: boolean;
+  reason: string;
+} {
+  if (!predecessor) {
+    return { cleared: true, reason: "no_predecessor" };
+  }
+  // An occupied accepted lane is not cleared merely because its turn state
+  // reads inactive: only an explicit idle=true qualifies for
+  // predecessor_idle. A freshly accepted-not-started lane (idle=false,
+  // no activity, inactive turn) still carries its predecessor context.
+  if (predecessor.idle !== true) {
+    return { cleared: false, reason: "predecessor_context_uncleared" };
+  }
+  const liveTurn = predecessor.active_turn_id !== null
+    || predecessor.active_turn_state !== "inactive";
+  const busy = predecessor.activity !== null && predecessor.activity !== "waiting_for_pm_direction";
+  if (liveTurn || busy) {
+    return { cleared: false, reason: "predecessor_context_uncleared" };
+  }
+  return { cleared: true, reason: "predecessor_idle" };
+}
+
+/**
  * Project the derived issue-side ownership surface for a committed transition.
  *
  * The durable MoP row is already committed when this runs, so a projection
@@ -159,6 +190,50 @@ async function projectOwnership(
   }
 }
 
+/**
+ * Mirror of the durable layer's complete-claim idempotency predicate
+ * (db.assignSlot): same occupied row, same repository/issue/pr/branch/head
+ * and same work metadata. Used only to tell an idempotent same-tuple replay
+ * (which stays on the normal path) from a forced displace attempt.
+ */
+function isSameCompleteTuple(
+  current: {
+    occupied: boolean;
+    repository_id: string | null;
+    issue: number | null;
+    pr: number | null;
+    branch_ref: string | null;
+    head_sha: string | null;
+    work_kind: string | null;
+    handoff_id: string | null;
+  },
+  body: Record<string, unknown>,
+): boolean {
+  const normalizedRepositoryId = normalizeRepositoryId(body.repository_id);
+  const branchIdentity = normalizeBranchIdentity(body.branch as string | null | undefined);
+  if (!normalizedRepositoryId || !branchIdentity) {
+    return false;
+  }
+  const normalizedIssue = Number.isInteger(body.issue) && (body.issue as number) > 0
+    ? (body.issue as number)
+    : null;
+  const normalizedPr = Number.isInteger(body.pr) && (body.pr as number) > 0
+    ? (body.pr as number)
+    : null;
+  const normalizedWorkKind = typeof body.work_kind === "string" ? body.work_kind.trim() : body.work_kind;
+  const normalizedHandoffId = typeof body.handoff_id === "string" ? body.handoff_id.trim() : body.handoff_id;
+  const metadataMatches = normalizedWorkKind === null
+    ? current.work_kind === null && current.handoff_id === null
+    : current.work_kind === normalizedWorkKind && current.handoff_id === normalizedHandoffId;
+  return current.occupied
+    && current.repository_id === normalizedRepositoryId
+    && current.issue === normalizedIssue
+    && current.pr === normalizedPr
+    && current.branch_ref === branchIdentity.branchRef
+    && current.head_sha === body.head_sha
+    && metadataMatches;
+}
+
 export function registerAssignmentRoute(
   app: Hono,
   db: MoPDatabase,
@@ -191,6 +266,39 @@ export function registerAssignmentRoute(
         reason: "invalid_issue",
       }, 409);
     }
+    if (body.force_over_occupied !== undefined && typeof body.force_over_occupied !== "boolean") {
+      return c.json({
+        success: false,
+        conflict: true,
+        error: "force_over_occupied must be a boolean",
+        reason: "invalid_force_over_occupied",
+        slot: db.getSlot(slotParse.data),
+      }, 409);
+    }
+    if (body.clear_predecessor !== undefined && typeof body.clear_predecessor !== "boolean") {
+      return c.json({
+        success: false,
+        conflict: true,
+        error: "clear_predecessor must be a boolean",
+        reason: "invalid_clear_predecessor",
+        slot: db.getSlot(slotParse.data),
+      }, 409);
+    }
+    if (body.clear_predecessor === true) {
+      // This route invalidates only row-level owner state during the commit; it
+      // must not pretend to clear a live predecessor pane. Refuse truthfully
+      // and name the canonical path instead of silently ignoring the request.
+      return c.json({
+        success: false,
+        conflict: true,
+        error: "clear_predecessor is not supported on the assign route",
+        reason: "clear_predecessor_unsupported_on_assign",
+        slot: db.getSlot(slotParse.data),
+        remediation:
+          "Release or clear the previous owner through the canonical path (Skill(direct-release) / the slot clear route) and then assign; the assign route never clears a live predecessor pane.",
+      }, 409);
+    }
+    const forceOverOccupied = body.force_over_occupied === true;
     const completeRequested = COMPLETE_ASSIGN_DISCRIMINATORS.some((field) => hasOwn(body, field));
     const task = typeof body.task === "string" ? body.task : "";
     // Silent-wedge guard: verify the target session pane is live BEFORE any
@@ -244,6 +352,36 @@ export function registerAssignmentRoute(
           reason: "observed_tuple_mismatch",
         }, 409);
       }
+      if (forceOverOccupied) {
+        // Complete claims stay strict: force has no meaning on this path, so
+        // a forced complete claim over a different occupied tuple must fail
+        // with a typed reason before any mutation — never silently displace
+        // the live owner (and never silently ignore the flag). An idempotent
+        // same-tuple replay falls through to the durable layer below.
+        const current = db.getSlot(slotParse.data);
+        if (current?.occupied && !isSameCompleteTuple(current, body)) {
+          const predecessor: SlotPredecessorContext = {
+            issue: current.issue,
+            pr: current.pr,
+            task: current.task,
+            active_turn_id: current.active_turn_id,
+            active_turn_state: current.active_turn_state,
+            activity: current.activity,
+            idle: current.idle,
+            claimed_at: current.claimed_at,
+          };
+          return c.json({
+            success: false,
+            conflict: true,
+            error: "force_over_occupied is not supported for complete-claim requests over an occupied slot",
+            reason: "force_over_occupied_unsupported_for_complete_claim",
+            slot: current,
+            predecessor,
+            remediation:
+              "Release the occupied slot through the canonical release-first path (Skill(direct-release)) and assign without force_over_occupied; the assign route never force-displaces a live complete-claim owner.",
+          }, 409);
+        }
+      }
       result = db.assignSlot(
         slotParse.data,
         task,
@@ -255,7 +393,7 @@ export function registerAssignmentRoute(
         body.expected_epoch as number,
         body.work_kind as string | null,
         body.handoff_id as string | null,
-        true,
+        !forceOverOccupied,
       );
     } else {
       const repositoryId = (
@@ -266,11 +404,14 @@ export function registerAssignmentRoute(
         body.issue as number,
         task,
         repositoryId,
+        { forceOverOccupied: forceOverOccupied === true },
       );
     }
 
     if (!result.ok) {
-      return c.json({ success: false, ...result }, 409);
+      // Truthful refusal: the envelope carries the actual current slot state so
+      // the caller sees exactly what blocked the transition.
+      return c.json({ success: false, slot: db.getSlot(slotParse.data), ...result }, 409);
     }
 
     db.logEvent(slotParse.data, "slot_assigned", null, null, {
@@ -319,15 +460,40 @@ export function registerAssignmentRoute(
         reason: "observed_tuple_mismatch",
       }, 409);
     }
+    const ownershipProjection = await projectOwnership(
+      issueProjection,
+      updated?.issue ?? (body.issue as number),
+      slotParse.data,
+      updated?.repository_id ?? null,
+    );
+    const clearance = predecessorClearance(result.predecessor);
+    if (!clearance.cleared) {
+      // The durable assignment committed (the readback above is truthful and
+      // authoritative), but the displaced owner still carries a live context.
+      // That is never reported as a silent success.
+      db.logEvent(slotParse.data, "slot_assigned_predecessor_uncleared", null, null, {
+        issue: body.issue,
+        assignment_epoch: result.assignment_epoch,
+        predecessor: result.predecessor ?? null,
+        reason: clearance.reason,
+      });
+      return c.json({
+        success: false,
+        conflict: false,
+        error: "the predecessor owner context was not cleared",
+        reason: clearance.reason,
+        predecessor: result.predecessor ?? null,
+        slot: updated,
+        issue_projection: ownershipProjection,
+        remediation:
+          "Release or clear the previous owner through the canonical path (Skill(direct-release), or an explicit forced clear) before re-tasking this slot; the durable assignment already committed, so the readback above is the current truth.",
+      }, 409);
+    }
     return c.json({
       ...updated,
       session_delivery: sessionDelivery,
-      issue_projection: await projectOwnership(
-        issueProjection,
-        updated?.issue ?? (body.issue as number),
-        slotParse.data,
-        updated?.repository_id ?? null,
-      ),
+      issue_projection: ownershipProjection,
+      predecessor_context: { cleared: clearance.cleared, reason: clearance.reason },
     });
   });
 
