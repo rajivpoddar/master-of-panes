@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PM_TRANSITION_ASSIGNMENT_AUTHORITY, PM_TRANSITION_ASSIGNMENT_HEADER } from "../src/assignmentAuthority.js";
 import { Family2ReleaseEffectAdapter, consumeFamily2ReleaseEffect, type Family2ReleaseEffectRequest, type Family2ReleaseFetch } from "../src/family2ReleaseEffect.js";
 
 const T = { repository_id: "github:heydonna-app/heydonna-app", issue: 7517, pr: 7525, branch: "test/7517-r3-pagination-proof-hardening", head_sha: "b".repeat(40), work_kind: "implementation", handoff_id: "handoff-7525", claimed_at: "2026-08-26T23:51:22.392Z" };
@@ -28,8 +27,10 @@ test("historical eight-field release body is refused while immutable exact tuple
   const result = await adapter.release(request); assert.equal(result.code, "released"); assert.equal(transport.posts.length, 1);
   const receiptCall = transport.calls.find((call) => call.url.includes("/release-receipt"));
   const releaseCall = transport.calls.filter((call) => call.url.endsWith("/release")).at(-1);
-  assert.equal(receiptCall?.init?.headers?.[PM_TRANSITION_ASSIGNMENT_HEADER], PM_TRANSITION_ASSIGNMENT_AUTHORITY);
-  assert.equal(releaseCall?.init?.headers?.[PM_TRANSITION_ASSIGNMENT_HEADER], PM_TRANSITION_ASSIGNMENT_AUTHORITY);
+  // The authority header is retired: MoP is a single-user local tool, so the
+  // adapter must send no x-heydonna-assignment-authority header at all.
+  assert.equal(Object.keys(receiptCall?.init?.headers ?? {}).includes("x-heydonna-assignment-authority"), false);
+  assert.equal(Object.keys(releaseCall?.init?.headers ?? {}).includes("x-heydonna-assignment-authority"), false);
   const replay = await adapter.release(request); assert.equal(replay.code, "released"); assert.equal(replay.idempotent, true); assert.equal(transport.posts.length, 1);
 });
 

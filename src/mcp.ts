@@ -24,10 +24,6 @@ import { MoPDatabase } from "./db.js";
 import { TmuxRelay } from "./relay.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import { execShell, sleep } from "./asyncCommand.js";
-import {
-  PM_TRANSITION_ASSIGNMENT_AUTHORITY,
-  PM_TRANSITION_ASSIGNMENT_HEADER,
-} from "./assignmentAuthority.js";
 import type { MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidRuntimeSlot } from "./slotConfig.js";
 
@@ -47,7 +43,6 @@ export const mopReleaseSlotInputShape = {
   expected_handoff_id: z.string().nullable(),
   expected_claimed_at: z.string().min(1),
   intended_main_head: z.string().regex(/^[0-9a-f]{40}$/i).describe("Exact current main head to pull and attest"),
-  release_mode: z.literal("quiescent_legacy_issue_only").optional().describe("Explicit mode for an idle issue-only legacy owner"),
   effect_id: z.string().optional().describe("Durable effect identity; derived server-side when omitted"),
   request_digest: z.string().regex(/^[0-9a-f]{64}$/i).optional().describe("Digest binding the effect identity to the exact tuple"),
 };
@@ -316,16 +311,13 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_release_slot",
-    "Synchronously reset the exact owning checkout to clean current main, then release the same complete MoP tuple/epoch. For an idle issue-only owner, pass release_mode quiescent_legacy_issue_only (effect identity is derived server-side when omitted).",
+    "Release one slot. Succeeds whenever the slot is not actively working (no active/productive turn, past the short quiescence window): tuple drift, a stale intent and a moved main head are superseded automatically. The only refusal is slot_not_idle.",
     mopReleaseSlotInputShape,
     async (releaseInput) => {
       try {
         const response = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${releaseInput.slot}/release`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY,
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(releaseInput),
         });
         const releaseResult = await response.json().catch(() => ({

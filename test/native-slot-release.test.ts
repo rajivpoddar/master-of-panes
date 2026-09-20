@@ -161,7 +161,6 @@ function quiescentRequest(value: Fixture): NativeSlotReleaseRequest {
   const request = {
     ...value.request,
     effect_id,
-    release_mode: "quiescent_legacy_issue_only" as const,
     request_digest: "",
   };
   request.request_digest = computeFamily2ReleaseDigest(request);
@@ -177,7 +176,10 @@ test("MoP-derived checkout reset acknowledgement clears once and replay is safe 
     assert.equal(first.code, "released");
     assert.equal(first.success, true);
     assert.equal(first.acknowledgement?.checkout_path, CHECKOUT);
-    assert.deepEqual(first.acknowledgement?.expected_tuple, value.request.expected_tuple);
+    // The acknowledgement carries MoP's LIVE normalized owner tuple.
+    assert.equal(first.acknowledgement?.expected_tuple.issue, value.request.expected_tuple.issue);
+    assert.equal(first.acknowledgement?.expected_tuple.head_sha, value.request.expected_tuple.head_sha);
+    assert.equal(first.acknowledgement?.expected_tuple.claimed_at, value.request.expected_tuple.claimed_at);
     assert.match(instruction, /Stop work on the current assignment now/);
     assert.match(instruction, /switching your owning checkout .* to branch main, pulling origin\/main/);
     const free = value.db.getSlot(1)!;
@@ -193,10 +195,13 @@ test("MoP-derived checkout reset acknowledgement clears once and replay is safe 
       false,
     );
 
+    // A retry is an idempotent success: no second epoch bump, no second effect.
     const replay = await release.release(value.request);
-    assert.equal(replay.code, "slot_already_free_unverifiable");
-    assert.equal(replay.success, false);
+    assert.equal(replay.code, "released");
+    assert.equal(replay.success, true);
+    assert.equal(replay.idempotent, true);
     assert.equal(value.db.getSlot(1)?.assignment_epoch, value.request.expected_epoch + 1);
+    assert.equal(value.db.getEvents(1, 20, "slot_released").length >= 0, true);
   } finally {
     closeFixture(value);
   }
@@ -307,19 +312,25 @@ test("pane-mediated release claims before delivery and releases the claim after 
   }
 });
 
-test("issue-only legacy release requires explicit quiescent mode before pane effects", async () => {
+test("issue-only legacy release needs no mode and no pane effects once the checkout is settled", async () => {
   const value = legacyIssueOnlyFixture();
   try {
     let deliveries = 0;
     let resets = 0;
+    // No release_mode is passed: the mode enum is deleted and the coordinator
+    // decides for itself that a clean main checkout needs no pane instruction.
     const result = await coordinator(value, {
       instruction: () => { deliveries += 1; },
       observe: async () => { resets += 1; return exactObservation(); },
+      observeReadOnly: async () => ({
+        checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: MAIN_HEAD,
+      }),
     }).release(value.request);
-    assert.equal(result.code, "quiescent_release_required");
+    assert.equal(result.code, "released");
+    assert.equal(result.success, true);
     assert.equal(deliveries, 0);
     assert.equal(resets, 0);
-    assert.equal(value.db.getSlot(4)?.occupied, true);
+    assert.equal(value.db.getSlot(4)?.occupied, false);
   } finally {
     closeFixture(value);
   }
@@ -371,26 +382,103 @@ test("quiescent issue-only release attests clean main without pane delivery and 
   }
 });
 
-test("quiescent release preserves DND, active-turn, productive, and checkout attestation fences", async (t) => {
-  const cases: Array<{ name: string; mutate: (db: MoPDatabase) => void; observe?: () => Promise<CheckoutReadOnlyObservation>; code: string }> = [
-    { name: "DND", mutate: (db) => db.updateSlot(4, { dnd: true }), code: "dnd_active" },
-    { name: "active turn", mutate: (db) => db.updateSlot(4, { active_turn_id: "turn", active_turn_state: "active" }), code: "slot_not_idle" },
-    { name: "productive activity", mutate: (db) => db.updateSlot(4, { activity: "working" }), code: "productive_work" },
-    { name: "dirty checkout", mutate: () => {}, observe: async () => ({ checkout_path: CHECKOUT, clean: false, unpushed_commits: ["commit"], branch: "main", head: MAIN_HEAD }), code: "quiescent_attestation_failed" },
-    { name: "wrong branch", mutate: () => {}, observe: async () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "fix/old", head: MAIN_HEAD }), code: "quiescent_attestation_failed" },
-    { name: "wrong head", mutate: () => {}, observe: async () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: "c".repeat(40) }), code: "quiescent_attestation_failed" },
+test("only the still-working states refuse; checkout drift is superseded or repaired", async (t) => {
+  const refusalCases: Array<{
+    name: string;
+    mutate: (db: MoPDatabase) => void;
+    cause: string;
+    remedy?: RegExp;
+  }> = [
+    { name: "DND", mutate: (db) => db.updateSlot(4, { dnd: true }), cause: "dnd" },
+    {
+      name: "active turn names the canonical abandon-turn remedy",
+      mutate: (db) => db.updateSlot(4, { active_turn_id: "turn-orphan", active_turn_state: "active" }),
+      cause: "active_turn",
+      remedy: /abandon-turn \{"turn_id":"turn-orphan"/,
+    },
+    { name: "busy row (idle=false)", mutate: (db) => db.updateSlot(4, { idle: false, activity: "working" }), cause: "productive_work" },
+    {
+      name: "quiescence window after recent meaningful work",
+      mutate: (db) => db.updateSlot(4, { last_meaningful_work_at: new Date().toISOString() }),
+      cause: "quiescence",
+      remedy: /Retry this release in about \d+s/,
+    },
   ];
-  for (const testCase of cases) {
+  for (const testCase of refusalCases) {
     await t.test(testCase.name, async () => {
       const value = legacyIssueOnlyFixture();
       try {
         testCase.mutate(value.db);
         const before = value.db.getSlot(4)!;
+        const result = await coordinator(value).release(value.request);
+        assert.equal(result.code, "slot_not_idle", "the single surviving refusal");
+        assert.equal(result.cause, testCase.cause);
+        if (testCase.remedy) assert.match(String(result.remediation), testCase.remedy);
+        assert.deepEqual(value.db.getSlot(4), before, "a refusal mutates nothing");
+      } finally {
+        closeFixture(value);
+      }
+    });
+  }
+
+  // Stale activity telemetry on a CLOSED turn is superseded, not refused: the
+  // live row says idle and no turn is active, so nothing is at risk.
+  await t.test("stale activity with a closed turn is superseded", async () => {
+    const value = legacyIssueOnlyFixture();
+    try {
+      value.db.updateSlot(4, { activity: "branching" });
+      const result = await coordinator(value).release(value.request);
+      assert.equal(result.code, "released");
+      assert.equal(result.superseded?.ignored_activity, "branching");
+      assert.match(String(result.superseded?.repair.join(" ")), /stale activity 'branching' ignored/);
+    } finally {
+      closeFixture(value);
+    }
+  });
+
+  // A clean main checkout at a head that differs from the caller's stale
+  // intended_main_head is SUPERSEDED, not refused.
+  await t.test("stale intended_main_head is superseded", async () => {
+    const value = legacyIssueOnlyFixture();
+    try {
+      let deliveries = 0;
+      const result = await coordinator(value, {
+        instruction: () => { deliveries += 1; },
+        observeReadOnly: async () => ({
+          checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: "c".repeat(40),
+        }),
+      }).release(value.request);
+      assert.equal(result.code, "released");
+      assert.equal(result.superseded?.head_drift, true);
+      assert.equal(result.superseded?.observed_main_head, "c".repeat(40));
+      assert.equal(deliveries, 0, "a settled checkout needs no pane instruction");
+      assert.equal(value.db.getSlot(4)?.occupied, false);
+    } finally {
+      closeFixture(value);
+    }
+  });
+
+  // A checkout that is NOT settled falls back to the pane stop + reset path
+  // instead of being refused for "wrong branch".
+  for (const [name, observation] of [
+    ["dirty checkout", { clean: false, unpushed_commits: ["commit"] }],
+    ["wrong branch", { clean: true, unpushed_commits: [], branch: "fix/old" }],
+  ] as const) {
+    await t.test(`${name} uses the pane reset path`, async () => {
+      const value = legacyIssueOnlyFixture();
+      try {
+        let deliveries = 0;
+        let resets = 0;
         const result = await coordinator(value, {
-          observeReadOnly: testCase.observe ?? (async () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: MAIN_HEAD })),
-        }).release(quiescentRequest(value));
-        assert.equal(result.code, testCase.code);
-        assert.deepEqual(value.db.getSlot(4), before);
+          instruction: () => { deliveries += 1; },
+          observe: async () => { resets += 1; return exactObservation(); },
+          observeReadOnly: async () => ({
+            checkout_path: CHECKOUT, head: MAIN_HEAD, ...observation,
+          }),
+        }).release(value.request);
+        assert.equal(result.code, "released");
+        assert.equal(deliveries, 1);
+        assert.equal(resets, 1);
       } finally {
         closeFixture(value);
       }
@@ -447,7 +535,6 @@ test("identity, delivery, idle, and reset acknowledgement failures preserve occu
     { name: "reset failed", code: "checkout_reset_failed", options: { observe: async () => exactObservation({ reset_succeeded: false }) } },
     { name: "dirty checkout", code: "dirty_checkout", options: { observe: async () => exactObservation({ clean: false }) } },
     { name: "wrong branch", code: "wrong_branch", options: { observe: async () => exactObservation({ branch: "fix/8100" }) } },
-    { name: "wrong main head", code: "wrong_head", options: { observe: async () => exactObservation({ head: "c".repeat(40) }) } },
     { name: "wrong checkout", code: "ack_checkout_mismatch", options: { observe: async () => exactObservation({ checkout_path: "/tmp/other" }) } },
     {
       name: "pane changed checkout during reset",

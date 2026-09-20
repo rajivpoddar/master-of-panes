@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Hono } from "hono";
 
-import { PM_TRANSITION_ASSIGNMENT_AUTHORITY, PM_TRANSITION_ASSIGNMENT_HEADER } from "../src/assignmentAuthority.js";
 import { registerFamily2Routes } from "../src/family2Routes.js";
 import { MoPDatabase } from "../src/db.js";
 import { NativeSlotReleaseCoordinator } from "../src/slotRelease.js";
@@ -35,19 +34,26 @@ function routeFixture() {
   return { app, get releaseCalls() { return releaseCalls; }, get receiptLookups() { return receiptLookups; } };
 }
 
-test("release and receipt routes refuse missing or wrong authority before side effects", async () => {
-  for (const authority of [undefined, "wrong-authority"]) {
-    const fixture = routeFixture();
-    const headers = authority === undefined ? undefined : { [PM_TRANSITION_ASSIGNMENT_HEADER]: authority };
-    const release = await fixture.app.request("http://mop/slots/1/release", {
-      method: "POST", headers, body: "not-json",
-    });
-    assert.equal(release.status, 403);
-    const receipt = await fixture.app.request("http://mop/slots/not-a-slot/release-receipt?effect_id=secret", { headers });
-    assert.equal(receipt.status, 403);
-    assert.equal(fixture.releaseCalls, 0);
-    assert.equal(fixture.receiptLookups, 0);
-  }
+test("release and receipt routes need no authority header (single-user local tool)", async () => {
+  // The x-heydonna-assignment-authority header is RETIRED: it added friction
+  // without security on a single-user local tool. Requests without it must
+  // reach the boundary, and a stale header must simply be ignored.
+  const fixture = routeFixture();
+  const release = await fixture.app.request("http://mop/slots/1/release", {
+    method: "POST", body: "not-json",
+  });
+  assert.equal(release.status, 200);
+  assert.equal(fixture.releaseCalls, 1);
+  const stale = await fixture.app.request("http://mop/slots/1/release", {
+    method: "POST",
+    headers: { "x-heydonna-assignment-authority": "wrong-authority", "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(stale.status, 200);
+  assert.equal(fixture.releaseCalls, 2);
+  const receipt = await fixture.app.request("http://mop/slots/4/release-receipt?effect_id=secret");
+  assert.equal(receipt.status, 404);
+  assert.equal(fixture.receiptLookups, 1);
 });
 
 test("authenticated Family-2 route invokes the committed-effect consumer", async () => {
@@ -70,11 +76,11 @@ test("authenticated Family-2 route invokes the committed-effect consumer", async
     clearPlanApprovalTimer: () => undefined,
   });
   const payload = { base_url: "http://mop", slot: 4, effect_id: "effect-7525", expected_epoch: 581, expected_tuple: { repository_id: current.repository_id, issue: current.issue, pr: current.pr, branch: current.branch, head_sha: current.head_sha, work_kind: current.work_kind, handoff_id: current.handoff_id, claimed_at: current.claimed_at }, intended_main_head: "a".repeat(40) };
-  const response = await app.request("http://mop/family2/release-effect", { method: "POST", headers: { [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY, "content-type": "application/json" }, body: JSON.stringify(payload) });
+  const response = await app.request("http://mop/family2/release-effect", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
   assert.equal(response.status, 200);
   assert.equal(calls.length, 4);
   assert.equal(calls.some((call) => call.url.endsWith("/release")), true);
-  assert.equal(calls.every((call) => call.init?.headers?.[PM_TRANSITION_ASSIGNMENT_HEADER] === PM_TRANSITION_ASSIGNMENT_AUTHORITY || call.url.endsWith("/slots/4")), true);
+  assert.equal(calls.every((call) => !Object.keys(call.init?.headers ?? {}).includes("x-heydonna-assignment-authority")), true);
 });
 
 test("authenticated no-pane route forwards the complete explicit release identity", async () => {
@@ -108,7 +114,7 @@ test("authenticated no-pane route forwards the complete explicit release identit
   };
   const response = await app.request("http://mop/slots/4/release-no-pane", {
     method: "POST",
-    headers: { [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY, "content-type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   assert.equal(response.status, 200);
@@ -117,7 +123,7 @@ test("authenticated no-pane route forwards the complete explicit release identit
   assert.equal("session_id" in (requestBody as any), false);
 });
 
-test("authenticated release route forwards the explicit quiescent legacy mode", async () => {
+test("release route forwards the observed identity; the retired mode field is ignored", async () => {
   let requestBody: any;
   const app = new Hono();
   registerFamily2Routes(app, {
@@ -148,22 +154,20 @@ test("authenticated release route forwards the explicit quiescent legacy mode", 
   };
   const response = await app.request("http://mop/slots/4/release", {
     method: "POST",
-    headers: { [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY, "content-type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   assert.equal(response.status, 409);
-  assert.equal(requestBody.release_mode, body.release_mode);
+  assert.equal("release_mode" in requestBody, false, "the mode enum is deleted from the release contract");
   assert.equal(requestBody.expected_epoch, body.expected_epoch);
   assert.equal(requestBody.expected_tuple.issue, body.expected_issue);
 });
 
-test("quiescent legacy documented example body releases an idle issue-only slot", async () => {
-  // THE documented operator call. Precondition (verified by the coordinator,
-  // not the route): the owning checkout is already on branch main at
-  // intended_main_head, clean with no unpushed commits — send the slot the
-  // switch-to-main-and-pull instruction and wait for a clean attestation
-  // BEFORE calling release. claimed_at carries the live value re-read
-  // from MoP; the other five nullable fields are explicit nulls.
+test("the documented operator body (no header, no mode) releases an idle issue-only slot", async () => {
+  // THE documented operator call: the observed identity, no authority header,
+  // no mode. When the owning checkout is already clean on main the release
+  // needs no pane instruction at all; otherwise it instructs the pane, resets
+  // the checkout and then releases.
   const MAIN = "b".repeat(40);
   const REPO_ID = "github:heydonna-app/heydonna-app";
   const directory = mkdtempSync(join(tmpdir(), "mop-quiescent-route-example-"));
@@ -198,11 +202,10 @@ test("quiescent legacy documented example body releases an idle issue-only slot"
       expected_handoff_id: null,
       expected_claimed_at: live.claimed_at,
       intended_main_head: MAIN,
-      release_mode: "quiescent_legacy_issue_only",
     };
     const response = await app.request("http://mop/slots/6/release", {
       method: "POST",
-      headers: { [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY, "content-type": "application/json" },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
     assert.equal(response.status, 200);
@@ -216,28 +219,24 @@ test("quiescent legacy documented example body releases an idle issue-only slot"
   }
 });
 
-test("release authority refusal publishes the canonical REST path and working body", async () => {
+test("the retired authority contract is gone: a stale header changes nothing", async () => {
   const fixture = routeFixture();
-  const response = await fixture.app.request("http://mop/slots/6/release", {
+  const stale = await fixture.app.request("http://mop/slots/6/release", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-heydonna-assignment-authority": "pm-transition-v1" },
+    body: JSON.stringify({ expected_epoch: 1 }),
+  });
+  assert.equal(stale.status, 200, "a stale authority header must be ignored, never refused");
+  assert.equal(fixture.releaseCalls, 1);
+  const bare = await fixture.app.request("http://mop/slots/6/release", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ expected_epoch: 1 }),
   });
-  assert.equal(response.status, 403);
-  const denied = await response.json() as Record<string, unknown>;
-  assert.equal(denied["success"], false);
-  assert.equal(denied["code"], "assignment_authority_required");
-  assert.match(String(denied["message"]), /pm-transition\.sh is retired/);
-  assert.match(String(denied["message"]), /x-heydonna-assignment-authority/);
-  assert.match(String(denied["message"]) + String(denied["remediation"]), /POST \/slots\/:n\/release/);
-  const remediation = String(denied["remediation"]);
-  for (const field of ["expected_repository_id", "expected_issue", "expected_pr:null",
-      "expected_branch:null", "expected_head_sha:null", "expected_work_kind:null",
-      "expected_handoff_id:null", "expected_claimed_at:<live value", "intended_main_head",
-      "quiescent_legacy_issue_only"]) {
-    assert.match(remediation, new RegExp(field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `remediation must name ${field}`);
-  }
-  assert.match(remediation, /switch-to-main-and-pull/);
-  assert.match(remediation, /minted server-side/);
-  assert.equal(fixture.releaseCalls, 0);
+  assert.equal(bare.status, 200);
+  assert.equal(fixture.releaseCalls, 2);
+  const source = readFileSync(new URL("../src/family2Routes.ts", import.meta.url), "utf8");
+  assert.equal(source.includes("assignment_authority_required"), false);
+  assert.equal(source.includes("release_mode"), false);
+  assert.equal(source.includes("ASSIGNMENT_AUTHORITY_REQUIRED"), false);
 });

@@ -1,6 +1,6 @@
 ---
 name: direct-release
-description: Release one quiescent numbered slot through Master of Panes.
+description: Release one numbered slot through Master of Panes.
 ---
 
 ## Execution contract
@@ -9,53 +9,67 @@ Follow the shared release-conveyor decision boundary. PM may execute this
 routine safety release under approved cadence and ownership rules; route
 genuine decisions to CTO without adding a Rajiv approval hop.
 
-Use this for the routine release required by the approved 20-minute safety
-rule. Read
-the current slot once and pin its complete assignment tuple (slot, epoch,
-repository, issue, PR, branch, head, work kind, handoff, owner, and task). If it is active,
-productive, DND, changed, or no longer the same held assignment, return
-`PM_RELEASE_BLOCKED reason=current_state_mismatch` with no pane input and no
-POST.
+MoP is a single-user local tool used only by PM and CTO. There is **no
+authority header**: the retired `x-heydonna-assignment-authority` header is
+ignored if a stale client still sends it.
 
-In the assigned checkout, first:
+Read the current slot once. Then invoke the release boundary exactly once:
+
+```text
+POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release
+JSON {
+  slot, expected_epoch, expected_repository_id, expected_issue, expected_pr,
+  expected_branch, expected_head_sha, expected_work_kind, expected_handoff_id,
+  expected_claimed_at,          // the slot's LIVE claimed_at value from that read
+  intended_main_head            // current main head you want the checkout reset to
+}
+```
+
+The MCP client `mop_release_slot` carries the same contract (complete observed
+identity plus `intended_main_head`); it is registered from the canonical current
+release (`.../master-of-panes/current/dist/mcp.js`). There is no release mode to
+pass: a clean-main checkout needs no pane instruction, and anything else is
+reset through the pane automatically.
+
+### Release succeeds whenever the slot is not actively working
+
+Release is refused **only** while the slot is still working — the single
+`slot_not_idle` refusal, whose `cause` names the reason:
+
+- `active_turn` — a turn is active or indeterminate. The remediation names the
+  exact turn id and its canonical escape:
+  `POST /slots/{slot}/abandon-turn {"turn_id":"<id>","reason":"<why>","actor":"<who>"}`.
+  Abandon that exact turn, then retry; the release then succeeds.
+- `productive_work` — the row reports `idle=false`.
+- `dnd` — DND is active.
+- `quiescence` — the slot finished meaningful work inside the short settling
+  window. This is a bounded wait, not a blocker: retry once the remediation's
+  remaining seconds elapse.
+
+Everything else is **superseded, never refused**, and recorded in the response
+(`superseded` / `superseded.repair`) and in MoP's event log:
+
+- a drifted or unusable observed identity (MoP's live row wins),
+- a stale or mis-moded open release intent (superseded atomically; the response
+  names the intent id it replaced),
+- an `intended_main_head` that no longer matches the checkout's main head.
+
+A repeat call after a completed release is an idempotent success: no second
+epoch bump and no second effect.
+
+### Recommended operator sequence
+
+Send the slot the literal instruction — those preconditions still make the
+release clean:
 
 ```text
 Switch to main and pull the latest origin/main.
 ```
 
-Deliver that exact literal instruction to the owning pane exactly once through
-the existing message-slot/direct-send path, then wait for the slot's natural
-completion. Do not send a second or fallback instruction if delivery is
-uncertain. Re-read the same slot and require the pinned epoch and complete
-assignment tuple to be unchanged, inactive and idle, non-DND, with a clean
-checkout, no unpushed work, branch `main`, and `HEAD` equal to the current
-`origin/main` head. Any delivery error or uncertainty, active/productive
-state, tuple drift, dirty/unpushed checkout, pull failure, or head drift is
-`PM_RELEASE_BLOCKED` and stops before release.
+Deliver it exactly once through the existing message-slot/direct-send path, then
+wait for the slot's natural completion and re-read it before releasing. Never
+send a second or fallback instruction if delivery is uncertain. Verify the
+release by reading the returned slot state: `occupied=false`, the epoch
+advanced by one, and the owner tuple cleared.
 
-Then invoke the existing direct release boundary exactly once:
-
-```text
-POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release
-headers: x-heydonna-assignment-authority: pm-transition-v1
-JSON {
-  slot, expected_epoch, expected_repository_id, expected_issue, expected_pr,
-  expected_branch, expected_head_sha, expected_work_kind, expected_handoff_id,
-  expected_claimed_at,          // the slot's LIVE claimed_at value, not null
-  intended_main_head            // exact current main head to pull and attest
-}
-JSON for an idle issue-only legacy owner: add release_mode: "quiescent_legacy_issue_only"
-(the effect identity is minted server-side; never supply effect_id).
-```
-
-The MCP client `mop_release_slot` carries the same contract (authority header,
-complete expected tuple, intended_main_head, release_mode) and is registered
-from the canonical current release (`.../master-of-panes/current/dist/mcp.js`),
-so the documented path and the client path are the same request shape.
-
-Accept only the route's authoritative readback: the post-commit slot state for a
-successful release, or the route's typed refusal (`assignment_authority_required`,
-`observed_tuple_mismatch`, `slot_not_idle`, `productive_work`, `dnd_active`,
-`quiescent_release_required`, ...). On refusal, error, or uncertain response
-return its typed reason and stop. Never retry, reset, force, stash, alter
-ownership, send another pane message, or use another release path.
+Never hand-edit MoP DB state, slot rows, or labels to force a release.

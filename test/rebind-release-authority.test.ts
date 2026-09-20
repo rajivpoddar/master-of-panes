@@ -7,10 +7,6 @@ import { Hono } from "hono";
 
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
 import { MoPDatabase } from "../src/db.js";
-import {
-  PM_TRANSITION_ASSIGNMENT_AUTHORITY,
-  PM_TRANSITION_ASSIGNMENT_HEADER,
-} from "../src/assignmentAuthority.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
 const HEAD = "a".repeat(40);
@@ -73,7 +69,6 @@ test("full tuple rebind increments once and refuses an unverifiable replay", asy
     };
     const init = { method: "POST", headers: new Headers({
       "content-type": "application/json",
-      [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY,
     }), body: JSON.stringify(requestBody) };
 
     const first = await app.request("/slots/1/adopt-issue-claim", init);
@@ -132,7 +127,6 @@ test("complete-mode partial expected tuple refuses without mutation", async () =
     };
     const headers = new Headers({
       "content-type": "application/json",
-      [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY,
     });
     for (const field of [
       "expected_current_issue",

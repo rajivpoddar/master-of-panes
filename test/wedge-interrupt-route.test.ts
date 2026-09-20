@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+
+/** Value the retired authority header used to carry; must never be required. */
+const RETIRED_AUTHORITY_VALUE = "pm-transition-v1";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,11 +21,6 @@ import {
   WEDGE_WATCHDOG_DELIVERY,
   WEDGED_BUSY_REMEDIATION,
 } from "../src/wedgeInterruptRoute.js";
-import {
-  isPmTransitionAssignmentRequest,
-  PM_TRANSITION_ASSIGNMENT_AUTHORITY,
-  PM_TRANSITION_ASSIGNMENT_HEADER,
-} from "../src/assignmentAuthority.js";
 import { MoPDatabase } from "../src/db.js";
 import type { MoPConfig } from "../src/types.js";
 
@@ -67,8 +65,6 @@ function fixture() {
   const NOW = Date.parse("2026-09-19T10:00:00.000Z");
   registerWedgeInterruptRoute(app, {
     db,
-    isOperatorRequest: (h) => isPmTransitionAssignmentRequest(h),
-    authorityHeader: (c) => c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER),
     verifyPaneIdentity: async (slotNum: number) =>
       state.identityOk
         ? { ok: true as const, snapshot: { paneId: `%${slotNum}`, currentPath: CHECKOUT_PATH } }
@@ -97,16 +93,21 @@ async function busySlot(db: MoPDatabase, quietMs: number, nowMs: number) {
   return { epoch: assigned.assignment_epoch, turn: "turn-abc" };
 }
 
-function interruptRequest(authority: string | undefined, body: unknown) {
+/**
+ * MoP retired the x-heydonna-assignment-authority header (single-user local
+ * tool). The first argument is kept so the existing call sites stay readable,
+ * but no authority header is ever sent — every conjunct the route enforces is
+ * server-verified evidence, not a caller attestation.
+ */
+function interruptRequest(_retiredAuthority: string | undefined, body: unknown) {
   return {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(authority === undefined ? {} : { [PM_TRANSITION_ASSIGNMENT_HEADER]: authority }),
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   } as RequestInit;
 }
+
+const STALE_AUTHORITY_HEADER = { "x-heydonna-assignment-authority": "pm-transition-v1" };
 
 function signalEvents(db: MoPDatabase) {
   return db.getEvents(1, 50, "interrupt_signal_sent");
@@ -176,7 +177,7 @@ test("route refuses when the checkout observation is indeterminate", async () =>
     const pins = await busySlot(db, 6 * 60 * 1000, NOW);
     const body = { expected_assignment_epoch: pins.epoch, expected_active_turn_id: pins.turn };
     state.checkout = null;
-    const res = await app.request("/slots/1/interrupt-turn", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body));
+    const res = await app.request("/slots/1/interrupt-turn", interruptRequest(RETIRED_AUTHORITY_VALUE, body));
     assert.equal(res.status, 409);
     const payload = (await res.json()) as Record<string, unknown>;
     assert.equal(payload.reason, "checkout_movement_unverifiable");
@@ -186,7 +187,7 @@ test("route refuses when the checkout observation is indeterminate", async () =>
     // refuses and the refusal text carries the dwell rule.
     state.checkout = { head: CHECKOUT_HEAD, branch: "fix/7748-thing" };
     db.updateSlot(1, { last_meaningful_work_at: new Date(NOW - 30 * 1000).toISOString() });
-    const busy = await app.request("/slots/1/interrupt-turn", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, body));
+    const busy = await app.request("/slots/1/interrupt-turn", interruptRequest(RETIRED_AUTHORITY_VALUE, body));
     assert.equal(busy.status, 409);
     const busyBody = (await busy.json()) as Record<string, unknown>;
     assert.equal(busyBody.reason, "wedge_quiet_insufficient");
@@ -231,17 +232,15 @@ test("interrupt key is Ctrl-C only", () => {
   assert.equal(WEDGE_INTERRUPT_QUEUE_DISPOSITION, "discard-queued-input");
 });
 
-test("authority, identity, DND, quiet, evidence refusals are typed with zero effects", async () => {
+test("identity, DND, quiet, evidence refusals are typed with zero effects", async () => {
   const { app, db, directory, state, NOW } = fixture();
   try {
     const pins = await busySlot(db, 6 * 60 * 1000, NOW);
     const goodBody = { expected_assignment_epoch: pins.epoch, expected_active_turn_id: pins.turn };
     const cases: Array<[string, RequestInit, number, string]> = [
-      ["no authority", interruptRequest(undefined, goodBody), 403, "assignment_authority_required"],
-      ["wrong authority", interruptRequest("nope", goodBody), 403, "assignment_authority_required"],
-      ["no pins", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {}), 409, "stale_identity"],
-      ["wrong epoch", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, { ...goodBody, expected_assignment_epoch: 999 }), 409, "stale_identity"],
-      ["wrong turn", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, { ...goodBody, expected_active_turn_id: "turn-other" }), 409, "stale_identity"],
+      ["no pins", interruptRequest(RETIRED_AUTHORITY_VALUE, {}), 409, "stale_identity"],
+      ["wrong epoch", interruptRequest(RETIRED_AUTHORITY_VALUE, { ...goodBody, expected_assignment_epoch: 999 }), 409, "stale_identity"],
+      ["wrong turn", interruptRequest(RETIRED_AUTHORITY_VALUE, { ...goodBody, expected_active_turn_id: "turn-other" }), 409, "stale_identity"],
     ];
     for (const [name, init, status, reason] of cases) {
       const res = await app.request("/slots/1/interrupt-turn", init);
@@ -250,21 +249,21 @@ test("authority, identity, DND, quiet, evidence refusals are typed with zero eff
     }
     // Fabricated caller attestations alone never satisfy: snapshot is the evidence.
     state.snapshot = "› Working…\n$ ";
-    const noEvidence = await app.request("/slots/1/interrupt-turn", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, goodBody));
+    const noEvidence = await app.request("/slots/1/interrupt-turn", interruptRequest(RETIRED_AUTHORITY_VALUE, goodBody));
     assert.equal(noEvidence.status, 409);
     assert.equal(((await noEvidence.json()) as Record<string, unknown>).reason, "pane_evidence_unavailable");
     state.snapshot = WEDGE_SNAPSHOT;
 
     // DND refuses even with perfect pins + evidence.
     db.updateSlot(1, { dnd: true });
-    const dnd = await app.request("/slots/1/interrupt-turn", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, goodBody));
+    const dnd = await app.request("/slots/1/interrupt-turn", interruptRequest(RETIRED_AUTHORITY_VALUE, goodBody));
     assert.equal(dnd.status, 409);
     assert.equal(((await dnd.json()) as Record<string, unknown>).reason, "slot_dnd_interrupt_refused");
     db.updateSlot(1, { dnd: false });
 
     // Fresh activity (recent meaningful work) refuses: quiet insufficient.
     db.updateSlot(1, { last_meaningful_work_at: new Date(NOW - 60 * 1000).toISOString() });
-    const fresh = await app.request("/slots/1/interrupt-turn", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, goodBody));
+    const fresh = await app.request("/slots/1/interrupt-turn", interruptRequest(RETIRED_AUTHORITY_VALUE, goodBody));
     assert.equal(fresh.status, 409);
     assert.equal(((await fresh.json()) as Record<string, unknown>).reason, "wedge_quiet_insufficient");
 
@@ -282,13 +281,13 @@ test("identity failure and unsettled slot refuse with zero effects", async () =>
     const pins = await busySlot(db, 6 * 60 * 1000, NOW);
     const goodBody = { expected_assignment_epoch: pins.epoch, expected_active_turn_id: pins.turn };
     state.identityOk = false;
-    const res = await app.request("/slots/1/interrupt-turn", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, goodBody));
+    const res = await app.request("/slots/1/interrupt-turn", interruptRequest(RETIRED_AUTHORITY_VALUE, goodBody));
     assert.equal(res.status, 409);
     assert.equal(((await res.json()) as Record<string, unknown>).reason, "pane_identity_mismatch");
     state.identityOk = true;
 
     db.finishAgentTurn(1, pins.turn);
-    const settled = await app.request("/slots/1/interrupt-turn", interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, goodBody));
+    const settled = await app.request("/slots/1/interrupt-turn", interruptRequest(RETIRED_AUTHORITY_VALUE, goodBody));
     assert.equal(settled.status, 409);
     assert.equal(((await settled.json()) as Record<string, unknown>).reason, "slot_not_busy_nothing_to_interrupt");
 
@@ -306,7 +305,7 @@ test("verified wedge sends one raw C-c with truthful signal audit", async () => 
     const pins = await busySlot(db, 6 * 60 * 1000, NOW);
     const res = await app.request(
       "/slots/1/interrupt-turn",
-      interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, { expected_assignment_epoch: pins.epoch, expected_active_turn_id: pins.turn }),
+      interruptRequest(RETIRED_AUTHORITY_VALUE, { expected_assignment_epoch: pins.epoch, expected_active_turn_id: pins.turn }),
     );
     assert.equal(res.status, 200);
     const body = (await res.json()) as Record<string, unknown>;
@@ -355,8 +354,6 @@ test("relay failure returns typed 502 with no success audit", async () => {
   const app = new Hono();
   registerWedgeInterruptRoute(app, {
     db,
-    isOperatorRequest: (h) => isPmTransitionAssignmentRequest(h),
-    authorityHeader: (c) => c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER),
     verifyPaneIdentity: async (slotNum: number) => ({
       ok: true as const,
       snapshot: { paneId: `%${slotNum}`, currentPath: CHECKOUT_PATH },
@@ -370,7 +367,7 @@ test("relay failure returns typed 502 with no success audit", async () => {
     const pins = await busySlot(db, 6 * 60 * 1000, NOW);
     const res = await app.request(
       "/slots/1/interrupt-turn",
-      interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, { expected_assignment_epoch: pins.epoch, expected_active_turn_id: pins.turn }),
+      interruptRequest(RETIRED_AUTHORITY_VALUE, { expected_assignment_epoch: pins.epoch, expected_active_turn_id: pins.turn }),
     );
     assert.equal(res.status, 502);
     assert.equal(((await res.json()) as Record<string, unknown>).reason, "interrupt_delivery_failed");
@@ -386,7 +383,7 @@ test("concurrent force requests cannot double-send", async () => {
   const { app, db, directory, state, NOW } = fixture();
   try {
     const pins = await busySlot(db, 6 * 60 * 1000, NOW);
-    const init = () => interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, { expected_assignment_epoch: pins.epoch, expected_active_turn_id: pins.turn });
+    const init = () => interruptRequest(RETIRED_AUTHORITY_VALUE, { expected_assignment_epoch: pins.epoch, expected_active_turn_id: pins.turn });
     state.gateSend = (() => {}) as unknown as (() => void);
     const first = app.request("/slots/1/interrupt-turn", init());
     while (!state.sendStarted) await new Promise((r) => setTimeout(r, 5));
@@ -454,7 +451,7 @@ test("fabricated caller durations are not read; server clock governs", async () 
     const pins = await busySlot(db, 6 * 60 * 1000, NOW);
     const res = await app.request(
       "/slots/1/interrupt-turn",
-      interruptRequest(PM_TRANSITION_ASSIGNMENT_AUTHORITY, {
+      interruptRequest(RETIRED_AUTHORITY_VALUE, {
         expected_assignment_epoch: pins.epoch,
         expected_active_turn_id: pins.turn,
         no_tool_progress_minutes: 999,

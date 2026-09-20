@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Hono } from "hono";
 
-import { PM_TRANSITION_ASSIGNMENT_AUTHORITY, PM_TRANSITION_ASSIGNMENT_HEADER } from "../src/assignmentAuthority.js";
 import { normalizedFamily2ReleaseBody } from "../src/db.js";
 import { registerFamily2Routes } from "../src/family2Routes.js";
 import { Family2ReleaseEffectAdapter } from "../src/family2ReleaseEffect.js";
@@ -22,7 +21,6 @@ async function releaseWith(flatBody: Record<string, unknown>) {
   });
   const response = await app.request("http://mop/slots/1/release", {
     method: "POST",
-    headers: { [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY },
     body: JSON.stringify(flatBody),
   });
   return { response, request: captured[0] };

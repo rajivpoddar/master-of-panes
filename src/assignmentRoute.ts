@@ -1,12 +1,35 @@
 import type { Hono } from "hono";
 import { z } from "zod";
 
-import {
-  ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE,
-  ASSIGNMENT_ROUTE_REMEDIATION,
-  isPmTransitionAssignmentRequest,
-  PM_TRANSITION_ASSIGNMENT_HEADER,
-} from "./assignmentAuthority.js";
+/**
+ * Assignment identity may only be written through the guarded assign/release
+ * paths, never through the generic slot PATCH. This is an identity-integrity
+ * guard, not an authority check (MoP is a single-user local tool).
+ */
+export const ASSIGNMENT_IDENTITY_PATCH_FIELDS = new Set([
+  "occupied",
+  "status",
+  "repository_id",
+  "issue",
+  "pr",
+  "branch",
+  "branch_ref",
+  "head_sha",
+  "assignment_epoch",
+  "assigned_at",
+  "work_kind",
+  "handoff_id",
+  "claimed_at",
+]);
+
+
+export function assignmentIdentityPatchFields(
+  updates: Record<string, unknown>
+): string[] {
+  return Object.keys(updates)
+    .filter((field) => ASSIGNMENT_IDENTITY_PATCH_FIELDS.has(field))
+    .sort();
+}
 import {
   normalizeBranchIdentity,
   normalizeRepositoryId,
@@ -243,18 +266,6 @@ export function registerAssignmentRoute(
     const slotParse = assignmentSlotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) {
       return c.json({ error: "Invalid slot number" }, 400);
-    }
-    if (!isPmTransitionAssignmentRequest(
-      c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER)
-    )) {
-      return c.json({
-        success: false,
-        conflict: true,
-        error: "assignment authority is required",
-        reason: "assignment_authority_required",
-        message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE,
-        remediation: ASSIGNMENT_ROUTE_REMEDIATION,
-      }, 403);
     }
 
     const body = await c.req.json();
@@ -501,18 +512,6 @@ export function registerAssignmentRoute(
     const slotParse = assignmentSlotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) {
       return c.json({ error: "Invalid slot number" }, 400);
-    }
-    if (!isPmTransitionAssignmentRequest(
-      c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER)
-    )) {
-      return c.json({
-        success: false,
-        conflict: true,
-        error: "assignment authority is required",
-        reason: "assignment_authority_required",
-        message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE,
-        remediation: ASSIGNMENT_ROUTE_REMEDIATION,
-      }, 403);
     }
 
     const body = await c.req.json();

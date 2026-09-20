@@ -467,7 +467,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-direct-release",
-      "sha256": "c76b4877d058dc12420f88f137fc4a854988a777577e177704b7daea453a986a",
+      "sha256": "233e13ee75faa67948a5aeebf2766016e2ff3f0b229b44923a47d864cf7f8fa7",
       "source_path": "claude/skills/direct-release/SKILL.md"
     },
     {

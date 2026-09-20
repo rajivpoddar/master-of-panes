@@ -22,12 +22,7 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { MoPDatabase } from "./db.js";
-import {
-  assignmentIdentityPatchFields,
-  isPmTransitionAssignmentRequest,
-  PM_TRANSITION_ASSIGNMENT_HEADER,
-} from "./assignmentAuthority.js";
-import { registerAssignmentRoute } from "./assignmentRoute.js";
+import { assignmentIdentityPatchFields, registerAssignmentRoute } from "./assignmentRoute.js";
 import {
   evaluateRespawnTurnPersistence,
   respawnTurnPersistenceRemedy,
@@ -1072,8 +1067,6 @@ registerFamily2Routes(app, {
 // attestation is trusted, and queued input alone never sanctions a wedge.
 registerWedgeInterruptRoute(app, {
   db,
-  isOperatorRequest: (header) => isPmTransitionAssignmentRequest(header),
-  authorityHeader: (c) => c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER),
   verifyPaneIdentity: (slotNum) => verifyPaneIdentity(slotNum),
   captureSnapshot: (paneId) => capturePaneSnapshot(paneId),
   observeCheckout: (checkoutPath) => readCheckoutMovement(checkoutPath),

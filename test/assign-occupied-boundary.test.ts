@@ -5,10 +5,6 @@ import { join } from "node:path";
 import test from "node:test";
 import { Hono } from "hono";
 
-import {
-  PM_TRANSITION_ASSIGNMENT_AUTHORITY,
-  PM_TRANSITION_ASSIGNMENT_HEADER,
-} from "../src/assignmentAuthority.js";
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
 import { MoPDatabase } from "../src/db.js";
 import type { IssueOwnershipProjection, IssueProjectionOutcome } from "../src/issueProjection.js";
@@ -75,7 +71,6 @@ function close(value: Harness): void {
 
 function assignRequest(body: Record<string, unknown>): RequestInit {
   const headers = new Headers({ "content-type": "application/json" });
-  headers.set(PM_TRANSITION_ASSIGNMENT_HEADER, PM_TRANSITION_ASSIGNMENT_AUTHORITY);
   return { method: "POST", headers, body: JSON.stringify(body) };
 }
 

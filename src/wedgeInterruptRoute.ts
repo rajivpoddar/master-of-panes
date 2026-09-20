@@ -10,7 +10,9 @@
  * - The request body carries ONLY identity pins (expected assignment epoch
  *   + expected active turn id). Caller-supplied quiet durations, prompt
  *   claims, or progress claims are never trusted — a fabricated body alone
- *   can never satisfy the escape.
+ *   can never satisfy the escape. There is no authority header: MoP is a
+ *   single-user local tool, so the header added friction without security and
+ *   every conjunct below is server-verified anyway.
  * - Eligibility is derived at request time AND rechecked immediately before
  *   the effect from server-owned state: current slot row (busy, DND-clear,
  *   exact pins), pinned pane identity, a live pane snapshot showing the idle
@@ -213,9 +215,6 @@ export function releaseWedgeInterrupt(slotNum: number): void {
 
 export interface WedgeInterruptDeps {
   db: MoPDatabase;
-  /** Existing operator authority boundary (static header check). */
-  isOperatorRequest: (authorityHeader: string | undefined) => boolean;
-  authorityHeader: (c: { req: { header: (name: string) => string | undefined } }) => string | undefined;
   verifyPaneIdentity: (slotNum: number) => Promise<{
     ok: boolean;
     detail?: string;
@@ -240,16 +239,6 @@ export function registerWedgeInterruptRoute(app: Hono, deps: WedgeInterruptDeps)
     const slotNum = Number(slotRaw);
     if (!Number.isInteger(slotNum) || slotNum < 1) {
       return c.json({ success: false, error: "Invalid slot number" }, 400);
-    }
-    if (!deps.isOperatorRequest(deps.authorityHeader(c))) {
-      return c.json(
-        {
-          success: false,
-          error: "assignment authority is required",
-          reason: "assignment_authority_required",
-        },
-        403,
-      );
     }
     const body = (await c.req.json().catch(() => ({}))) as WedgeInterruptPins;
 

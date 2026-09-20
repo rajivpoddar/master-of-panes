@@ -1,12 +1,6 @@
 import type { Hono } from "hono";
 import { z } from "zod";
 
-import {
-  ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE,
-  ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION,
-  isPmTransitionAssignmentRequest,
-  PM_TRANSITION_ASSIGNMENT_HEADER,
-} from "./assignmentAuthority.js";
 import type { MoPDatabase } from "./db.js";
 import {
   consumeFamily2ReleaseEffect,
@@ -28,11 +22,7 @@ export interface Family2RouteDependencies {
   clearPlanApprovalTimer: (slot: number) => void;
 }
 
-function authorized(authority: string | undefined): boolean {
-  return isPmTransitionAssignmentRequest(authority);
-}
-
-/** Register the authenticated native release and Family-2 consumer boundary. */
+/** Register the native release and Family-2 consumer boundary. */
 export function registerFamily2Routes(
   app: Hono,
   dependencies: Family2RouteDependencies,
@@ -40,10 +30,6 @@ export function registerFamily2Routes(
   const { db, nativeSlotRelease, family2ReleaseEffectAdapter } = dependencies;
 
   app.post("/slots/:slotNum/release", async (c) => {
-    // Authenticate before path/body processing, delivery/reset, or any DB use.
-    if (!authorized(c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER))) {
-      return c.json({ success: false, code: "assignment_authority_required", message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE, remediation: ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION }, 403);
-    }
     const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
 
@@ -69,7 +55,6 @@ export function registerFamily2Routes(
       intended_main_head: body.intended_main_head as string,
       effect_id: body.effect_id as string | undefined,
       request_digest: body.request_digest as string | undefined,
-      release_mode: body.release_mode as NativeSlotReleaseRequest["release_mode"],
     };
     const releaseResult = await nativeSlotRelease.release(request);
     if (releaseResult.success) {
@@ -89,9 +74,6 @@ export function registerFamily2Routes(
     // This is an explicit stale-completed-lease boundary.  It is deliberately
     // separate from the legacy release route, which must retain its pane
     // delivery/reset semantics for existing callers.
-    if (!authorized(c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER))) {
-      return c.json({ success: false, code: "assignment_authority_required", message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE, remediation: ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION }, 403);
-    }
     const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
     let body: Record<string, unknown> = {};
@@ -129,10 +111,6 @@ export function registerFamily2Routes(
   });
 
   app.get("/slots/:slotNum/release-receipt", (c) => {
-    // Receipt reconciliation is authenticated too; it exposes ownership history.
-    if (!authorized(c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER))) {
-      return c.json({ success: false, code: "assignment_authority_required", message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE, remediation: ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION }, 403);
-    }
     const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) return c.json({ success: false, code: "invalid_request" }, 400);
     const effectId = c.req.query("effect_id");
@@ -150,9 +128,6 @@ export function registerFamily2Routes(
 
   /** Consume one committed Family-2 release effect through the live MoP boundary. */
   app.post("/family2/release-effect", async (c) => {
-    if (!authorized(c.req.header(PM_TRANSITION_ASSIGNMENT_HEADER))) {
-      return c.json({ success: false, code: "assignment_authority_required", message: ASSIGNMENT_AUTHORITY_REQUIRED_MESSAGE, remediation: ASSIGNMENT_AUTHORITY_REQUIRED_REMEDIATION }, 403);
-    }
     let payload: unknown;
     try {
       payload = await c.req.json();

@@ -6,7 +6,6 @@ import test from "node:test";
 import { Hono } from "hono";
 import { MoPDatabase } from "../src/db.js";
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
-import { PM_TRANSITION_ASSIGNMENT_AUTHORITY, PM_TRANSITION_ASSIGNMENT_HEADER } from "../src/assignmentAuthority.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 import {
   DEFAULT_DEV_SLOT_COUNT,
@@ -195,7 +194,6 @@ test("assignment HTTP accepts S6 and refuses S7 before mutation", async () => {
     };
     const headers = {
       "content-type": "application/json",
-      [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY,
     };
     const accepted = await app.request("/slots/6/assign", { method: "POST", headers, body: JSON.stringify(body) });
     assert.equal(accepted.status, 200);

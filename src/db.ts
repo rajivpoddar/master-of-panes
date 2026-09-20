@@ -2163,6 +2163,64 @@ export class MoPDatabase {
     })();
   }
 
+  /**
+   * Claim the live owner for a release critical section, superseding any
+   * existing intent atomically.
+   *
+   * MoP is a single-user local tool driven by PM/CTO: a stale or mis-moded
+   * intent left by a crashed or mismoded attempt must never brick the slot's
+   * release. The caller learns which intent (if any) it replaced so the
+   * supersession can be echoed and audited. Returns null only when the slot is
+   * absent, free, or still has an active turn - the single release refusal.
+   */
+  claimNativeReleaseIntentForLiveOwner(
+    slot: number,
+    ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
+  ): {
+    token: string;
+    superseded_intent_id: string | null;
+    expected_epoch: number;
+    expected_tuple: AssignmentTuple;
+  } | null {
+    if (!Number.isInteger(slot)) return null;
+    const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : NATIVE_RELEASE_INTENT_TTL_MS;
+    const key = `native_release_intent_${slot}`;
+    return this.db.transaction(() => {
+      const current = this.getSlot(slot);
+      if (!current || !current.occupied) return null;
+      if (current.active_turn_id !== null || current.active_turn_state !== "inactive") return null;
+      const tuple = slotAssignmentTuple(current);
+      if (!tuple) return null;
+      const now = Date.now();
+      let superseded: string | null = null;
+      const raw = this.getConfig(key);
+      if (raw) {
+        try {
+          const prior = JSON.parse(raw) as NativeReleaseIntent;
+          if (Number.isFinite(prior.expires_at) && prior.expires_at > now && typeof prior.token === "string") {
+            superseded = prior.token;
+          }
+        } catch {
+          // A malformed lease is simply replaced by the new claim.
+        }
+      }
+      const token = randomUUID();
+      this.setConfig(key, JSON.stringify({
+        slot,
+        expected_epoch: current.assignment_epoch,
+        expected_tuple: tuple,
+        expires_at: now + ttl,
+        token,
+      } satisfies NativeReleaseIntent));
+      return {
+        token,
+        superseded_intent_id: superseded,
+        expected_epoch: current.assignment_epoch,
+        expected_tuple: tuple,
+      };
+    })();
+  }
+
   /** Clear only the matching intent; a replacement owner can never clear it. */
   clearNativeReleaseIntent(
     slot: number,

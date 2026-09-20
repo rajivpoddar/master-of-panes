@@ -3,10 +3,6 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { Hono } from "hono";
 
-import {
-  PM_TRANSITION_ASSIGNMENT_AUTHORITY,
-  PM_TRANSITION_ASSIGNMENT_HEADER,
-} from "../src/assignmentAuthority.js";
 import { registerFamily2Routes } from "../src/family2Routes.js";
 
 const REPO_ROOT = new URL("..", import.meta.url).pathname;
@@ -14,6 +10,7 @@ const MCP_JSON = `${REPO_ROOT}.mcp.json`;
 const CURRENT_DIST = "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/current/dist/mcp.js";
 const FROZEN_DIST = "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/mcp.js";
 const SKILL = `${REPO_ROOT}scripts/pm/shared-assets/claude/skills/direct-release/SKILL.md`;
+const RETIRED_HEADER = "x-heydonna-assignment-authority";
 
 /** The current release's built MCP bundle, when the local release pointer exists. */
 function currentBundle(): string | null {
@@ -30,31 +27,27 @@ test("the MCP client resolves from the canonical current release, not the frozen
   assert.equal(config.mop.env.MOP_DB_PATH.endsWith("/1.0.0/data/mop.db"), true);
 });
 
-test("the registered MCP bundle implements the current release contract", () => {
+test("the release client carries no authority header and no release mode", () => {
+  const source = readFileSync(`${REPO_ROOT}src/mcp.ts`, "utf8");
+  assert.match(source, /mopReleaseSlotInputShape/);
+  assert.match(source, /intended_main_head/);
+  assert.match(source, /expected_claimed_at/);
+  assert.equal(source.includes("PM_TRANSITION_ASSIGNMENT"), false, "the authority header is retired");
+  assert.equal(source.includes("release_mode"), false, "the mode enum is deleted");
+  assert.equal(existsSync(`${REPO_ROOT}src/assignmentAuthority.ts`), false, "the authority module is deleted");
+
   const bundle = currentBundle();
-  if (bundle === null) {
-    // The release pointer is absent in a bare checkout; the contract is then
-    // asserted against the source of truth instead.
-    const source = readFileSync(`${REPO_ROOT}src/mcp.ts`, "utf8");
-    assert.match(source, /mopReleaseSlotInputShape/);
-    assert.match(source, /PM_TRANSITION_ASSIGNMENT_HEADER\]: PM_TRANSITION_ASSIGNMENT_AUTHORITY/);
-    assert.match(source, /intended_main_head/);
-    assert.match(source, /release_mode/);
-    return;
+  if (bundle !== null) {
+    assert.match(bundle, /mop_release_slot/);
+    assert.match(bundle, /intended_main_head/);
+    assert.equal(bundle.includes("assignment_authority_required"), false);
   }
-  assert.match(bundle, /mop_release_slot/);
-  assert.match(bundle, /PM_TRANSITION_ASSIGNMENT_HEADER/);
-  assert.match(bundle, /intended_main_head/);
-  assert.match(bundle, /release_mode/);
-  assert.match(bundle, /expected_claimed_at/);
 });
 
-test("RED evidence: the frozen 1.0.0 client shape could never satisfy the release authority", () => {
+test("RED evidence: the frozen 1.0.0 client predates the observed-identity contract", () => {
   const frozen = existsSync(FROZEN_DIST) ? readFileSync(FROZEN_DIST, "utf8") : null;
   if (frozen === null) return;
-  assert.match(frozen, /"mop_release_slot", "Release one idle, inactive, non-DND numbered slot with one direct MoP call\."/);
   assert.equal(frozen.includes("intended_main_head"), false, "frozen client predates the expected-tuple contract");
-  assert.equal(frozen.includes("PM_TRANSITION_ASSIGNMENT_HEADER"), false, "frozen client sends no authority header");
 });
 
 function routeFixture() {
@@ -65,13 +58,10 @@ function routeFixture() {
     release: async (request: Record<string, unknown>) => {
       callsCount += 1;
       calls.push(request);
-      if (request.expected_epoch !== 883) {
-        return { success: false, code: "observed_tuple_mismatch", message: "Complete owner tuple changed before release delivery.", slot: null, assignment_epoch: 883, remediation: "Re-read MoP." };
-      }
       if (callsCount > 1) {
-        return { success: true, code: "released", message: "already committed", slot: { slot: 3, occupied: false, assignment_epoch: 884 }, assignment_epoch: 884, remediation: null, idempotent: true };
+        return { success: true, code: "released", message: "Slot 3 is already FREE; release is an idempotent no-op.", slot: { slot: 3, occupied: false, assignment_epoch: 884 }, assignment_epoch: 884, remediation: null, idempotent: true };
       }
-      return { success: true, code: "released", message: "Slot 3 reset and released.", slot: { slot: 3, occupied: false, assignment_epoch: 884 }, assignment_epoch: 884, remediation: null, idempotent: false };
+      return { success: true, code: "released", message: "Slot 3 released.", slot: { slot: 3, occupied: false, assignment_epoch: 884 }, assignment_epoch: 884, remediation: null, idempotent: false };
     },
   } as any;
   const app = new Hono();
@@ -84,7 +74,7 @@ function routeFixture() {
   return { app, calls, get callsCount() { return callsCount; } };
 }
 
-const FULL_TUPLE_REQUEST = {
+const OBSERVED_IDENTITY_BODY = {
   slot: 3,
   expected_epoch: 883,
   expected_repository_id: "992731533",
@@ -96,32 +86,32 @@ const FULL_TUPLE_REQUEST = {
   expected_handoff_id: null,
   expected_claimed_at: "2026-09-19T21:59:50.855Z",
   intended_main_head: "a".repeat(40),
-  release_mode: "quiescent_legacy_issue_only",
 };
 
-test("RED: the stale client shape (no authority header, slot-only body) is refused before any release", async () => {
+test("a slot-only body and a stale authority header both reach the release boundary", async () => {
   const fixture = routeFixture();
-  const stale = await fixture.app.request("http://mop/slots/3/release", {
+  const bare = await fixture.app.request("http://mop/slots/3/release", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ slot: 3 }),
   });
-  assert.equal(stale.status, 403);
-  const body = await stale.json() as Record<string, unknown>;
-  assert.equal(body.code, "assignment_authority_required");
-  assert.equal(body.success, false);
-  assert.equal(fixture.callsCount, 0, "the stale shape must not reach the release coordinator");
+  assert.equal(bare.status, 200, "the retired authority refusal must be gone");
+  assert.equal(fixture.callsCount, 1);
+  const stale = await fixture.app.request("http://mop/slots/3/release", {
+    method: "POST",
+    headers: { "content-type": "application/json", [RETIRED_HEADER]: "wrong-authority" },
+    body: JSON.stringify({ slot: 3 }),
+  });
+  assert.equal(stale.status, 200, "a stale authority header is inert");
+  assert.equal(fixture.callsCount, 2);
 });
 
-test("GREEN: the documented contract (header + complete tuple + intended_main_head + release_mode) releases", async () => {
+test("GREEN: the documented body (observed identity, no header, no mode) releases", async () => {
   const fixture = routeFixture();
   const response = await fixture.app.request("http://mop/slots/3/release", {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY,
-    },
-    body: JSON.stringify(FULL_TUPLE_REQUEST),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(OBSERVED_IDENTITY_BODY),
   });
   assert.equal(response.status, 200);
   const body = await response.json() as Record<string, unknown>;
@@ -130,7 +120,7 @@ test("GREEN: the documented contract (header + complete tuple + intended_main_he
   assert.equal((body.slot as Record<string, unknown>).occupied, false, "authoritative post-commit readback");
   assert.equal(fixture.callsCount, 1);
   // The route maps the documented flat body onto the coordinator's request
-  // shape; assert the mapped contract the client must therefore supply.
+  // shape; there is no mode to carry.
   assert.deepEqual(fixture.calls[0], {
     slot: 3,
     expected_epoch: 883,
@@ -147,45 +137,39 @@ test("GREEN: the documented contract (header + complete tuple + intended_main_he
     intended_main_head: "a".repeat(40),
     effect_id: undefined,
     request_digest: undefined,
-    release_mode: "quiescent_legacy_issue_only",
   });
+  assert.equal("release_mode" in fixture.calls[0], false, "the mode enum is deleted from the request shape");
 });
 
-test("refusal and idempotency: a drifted tuple is typed, and an exact replay is idempotent", async () => {
+test("a drifted observation is forwarded, not refused at the route", async () => {
   const fixture = routeFixture();
   const drifted = await fixture.app.request("http://mop/slots/3/release", {
     method: "POST",
-    headers: { "content-type": "application/json", [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY },
-    body: JSON.stringify({ ...FULL_TUPLE_REQUEST, expected_epoch: 882 }),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...OBSERVED_IDENTITY_BODY, expected_epoch: 882 }),
   });
-  assert.equal(drifted.status, 409);
-  assert.equal(((await drifted.json()) as Record<string, unknown>).code, "observed_tuple_mismatch");
-
-  const first = await fixture.app.request("http://mop/slots/3/release", {
-    method: "POST",
-    headers: { "content-type": "application/json", [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY },
-    body: JSON.stringify(FULL_TUPLE_REQUEST),
-  });
-  assert.equal(first.status, 200);
+  assert.equal(drifted.status, 200);
+  assert.equal((fixture.calls[0] as { expected_epoch: number }).expected_epoch, 882);
   const replay = await fixture.app.request("http://mop/slots/3/release", {
     method: "POST",
-    headers: { "content-type": "application/json", [PM_TRANSITION_ASSIGNMENT_HEADER]: PM_TRANSITION_ASSIGNMENT_AUTHORITY },
-    body: JSON.stringify(FULL_TUPLE_REQUEST),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(OBSERVED_IDENTITY_BODY),
   });
   assert.equal(replay.status, 200);
-  const replayBody = await replay.json() as Record<string, unknown>;
-  assert.equal(replayBody.success, true);
-  assert.equal(replayBody.idempotent, true);
+  assert.equal(((await replay.json()) as Record<string, unknown>).idempotent, true);
 });
 
 test("the documented skill states the same contract as the working client", () => {
   const skill = readFileSync(SKILL, "utf8");
-  assert.match(skill, /x-heydonna-assignment-authority: pm-transition-v1/);
+  assert.equal(
+    new RegExp(`headers:\\s*${RETIRED_HEADER}`).test(skill),
+    false,
+    "the skill must stop instructing the retired header",
+  );
+  assert.equal(skill.includes("release_mode"), false, "the skill must stop instructing the retired mode");
   assert.match(skill, /expected_claimed_at/);
   assert.match(skill, /intended_main_head/);
-  assert.match(skill, /release_mode: "quiescent_legacy_issue_only"/);
   assert.match(skill, /mop_release_slot/);
-  assert.match(skill, /authoritative readback/);
-  assert.equal(skill.includes("POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release\n```"), false,
-    "the bare no-header POST block must be gone");
+  assert.match(skill, /slot_not_idle/, "the single surviving refusal must be named");
+  assert.match(skill, /supersed/i, "superseding drift must be documented");
 });

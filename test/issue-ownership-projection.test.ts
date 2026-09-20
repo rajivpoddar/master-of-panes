@@ -6,10 +6,6 @@ import test from "node:test";
 import { Hono } from "hono";
 
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
-import {
-  PM_TRANSITION_ASSIGNMENT_AUTHORITY,
-  PM_TRANSITION_ASSIGNMENT_HEADER,
-} from "../src/assignmentAuthority.js";
 import { MoPDatabase, computeFamily2ReleaseDigest, slotAssignmentTuple } from "../src/db.js";
 import {
   createGhIssueOwnershipProjection,
@@ -196,7 +192,6 @@ async function withAssignmentRoute(
 
 function assignRequest(body: Record<string, unknown>): RequestInit {
   const headers = new Headers({ "content-type": "application/json" });
-  headers.set(PM_TRANSITION_ASSIGNMENT_HEADER, PM_TRANSITION_ASSIGNMENT_AUTHORITY);
   return { method: "POST", headers, body: JSON.stringify(body) };
 }
 
