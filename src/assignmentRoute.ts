@@ -14,6 +14,11 @@ import {
   type MoPDatabase,
 } from "./db.js";
 import {
+  NO_ISSUE_PROJECTION,
+  type IssueOwnershipProjection,
+  type IssueProjectionOutcome,
+} from "./issueProjection.js";
+import {
   defaultPaneTargetForSlot,
   isValidPaneTarget,
   verifySessionPane,
@@ -117,7 +122,48 @@ function completeTuple(
   };
 }
 
-export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
+/**
+ * Project the derived issue-side ownership surface for a committed transition.
+ *
+ * The durable MoP row is already committed when this runs, so a projection
+ * failure is reported as a typed sibling field and never rewrites the durable
+ * outcome, the HTTP status, or the exact tuple/CAS refusal path.
+ */
+async function projectOwnership(
+  projection: IssueOwnershipProjection,
+  issue: number | null | undefined,
+  slot: number,
+  repositoryId: string | number | null | undefined,
+): Promise<IssueProjectionOutcome | null> {
+  const target = Number(issue);
+  if (!Number.isInteger(target) || target <= 0) {
+    return null;
+  }
+  const repositoryKey = repositoryId === null || repositoryId === undefined
+    ? null
+    : String(repositoryId);
+  try {
+    return await projection.onAssigned(target, slot, repositoryKey);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      status: "failed",
+      reason: `issue_projection_unexpected:${detail.split("\n")[0].slice(0, 200)}`,
+      repository: null,
+      issue: target,
+      slot,
+      added_labels: [],
+      removed_labels: [],
+      verified: false,
+    };
+  }
+}
+
+export function registerAssignmentRoute(
+  app: Hono,
+  db: MoPDatabase,
+  issueProjection: IssueOwnershipProjection = NO_ISSUE_PROJECTION,
+): void {
   app.post("/slots/:slotNum/assign", async (c) => {
     const slotParse = assignmentSlotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) {
@@ -276,6 +322,12 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
     return c.json({
       ...updated,
       session_delivery: sessionDelivery,
+      issue_projection: await projectOwnership(
+        issueProjection,
+        updated?.issue ?? (body.issue as number),
+        slotParse.data,
+        updated?.repository_id ?? null,
+      ),
     });
   });
 
@@ -350,6 +402,15 @@ export function registerAssignmentRoute(app: Hono, db: MoPDatabase): void {
         idempotent: false,
       });
     }
-    return c.json(db.getSlot(slotParse.data));
+    const rebound = db.getSlot(slotParse.data);
+    return c.json({
+      ...rebound,
+      issue_projection: await projectOwnership(
+        issueProjection,
+        rebound?.issue ?? desiredTuple.issue,
+        slotParse.data,
+        rebound?.repository_id ?? desiredTuple.repository_id,
+      ),
+    });
   });
 }

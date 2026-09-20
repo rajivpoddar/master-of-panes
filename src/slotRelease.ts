@@ -10,6 +10,10 @@ import {
   type AssignmentTupleInput,
   type MoPDatabase,
 } from "./db.js";
+import type {
+  IssueOwnershipProjection,
+  IssueProjectionOutcome,
+} from "./issueProjection.js";
 import type { SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
 
@@ -101,6 +105,7 @@ export interface NativeSlotReleaseResult {
   request_digest?: string;
   idempotent?: boolean;
   acknowledgement?: NativeSlotReleaseAcknowledgement;
+  issue_projection?: IssueProjectionOutcome | null;
 }
 
 interface NormalizedReleaseRequest extends NativeSlotReleaseRequest {
@@ -109,6 +114,8 @@ interface NormalizedReleaseRequest extends NativeSlotReleaseRequest {
 
 export interface NativeSlotReleaseDependencies {
   db: MoPDatabase;
+  /** Canonical issue-side ownership projection; optional so tests stay hermetic. */
+  issueProjection?: IssueOwnershipProjection;
   resolveOwningCheckout: (slot: number) => Promise<string | null>;
   deliverInstruction: (slot: number, instruction: string) => Promise<boolean>;
   owningSlotIsIdle: (slot: number) => Promise<boolean>;
@@ -221,6 +228,10 @@ export class NativeSlotReleaseCoordinator {
         effect_id: request.effect_id,
         request_digest: request.request_digest,
         idempotent: true,
+        issue_projection: await this.projectReleasedOwner(
+          normalizeAssignmentTuple(request.expected_tuple) ?? undefined,
+          request.slot,
+        ),
       };
     }
     if (this.inProgressSlots.has(request.slot)) {
@@ -274,9 +285,44 @@ export class NativeSlotReleaseCoordinator {
         effect_id: request.effect_id,
         request_digest: request.request_digest,
         idempotent: committed.idempotent,
+        issue_projection: await this.projectReleasedOwner(
+          normalizeAssignmentTuple(request.expected_tuple) ?? undefined,
+          request.slot,
+        ),
       };
     } finally {
       this.inProgressSlots.delete(request.slot);
+    }
+  }
+
+  /**
+   * Project the derived issue-side surface after a committed release. The
+   * durable release already happened, so any failure is returned as a typed
+   * sibling field and never changes the reported release outcome.
+   */
+  private async projectReleasedOwner(
+    tuple: AssignmentTuple | undefined,
+    slot: number,
+  ): Promise<IssueProjectionOutcome | null> {
+    const projection = this.dependencies.issueProjection;
+    const issue = Number(tuple?.issue);
+    if (!projection || !Number.isInteger(issue) || issue <= 0) {
+      return null;
+    }
+    try {
+      return await projection.onReleased(issue, slot, tuple?.repository_id ?? null);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        status: "failed",
+        reason: `issue_projection_unexpected:${detail.split("\n")[0].slice(0, 200)}`,
+        repository: null,
+        issue,
+        slot,
+        added_labels: [],
+        removed_labels: [],
+        verified: false,
+      };
     }
   }
 
@@ -636,6 +682,7 @@ export class NativeSlotReleaseCoordinator {
           effect_id: request.effect_id,
           request_digest: computedDigest ?? request.request_digest,
           idempotent: cleared.idempotent,
+          issue_projection: await this.projectReleasedOwner(validated.tuple, request.slot),
         };
       }
       const instruction = buildLiteralResetInstruction(validated.request, checkoutPath);
@@ -780,6 +827,7 @@ export class NativeSlotReleaseCoordinator {
         request_digest: computedDigest ?? request.request_digest,
         idempotent: false,
         acknowledgement,
+        issue_projection: await this.projectReleasedOwner(validated.tuple, request.slot),
       };
     } finally {
       if (releaseIntentToken) {

@@ -28,6 +28,7 @@ import {
   PM_TRANSITION_ASSIGNMENT_HEADER,
 } from "./assignmentAuthority.js";
 import { registerAssignmentRoute } from "./assignmentRoute.js";
+import { createGhIssueOwnershipProjection } from "./issueProjection.js";
 import { registerFamily2Routes } from "./family2Routes.js";
 import { TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
@@ -167,8 +168,10 @@ async function waitForOwningSlotIdle(slot: number): Promise<boolean> {
   return false;
 }
 
+const issueProjection = createGhIssueOwnershipProjection();
 const nativeSlotRelease = new NativeSlotReleaseCoordinator({
   db,
+  issueProjection,
   resolveOwningCheckout: (slot) => relay.getSlotCheckoutPath(slot),
   deliverInstruction: (slot, instruction) => relay.sendToSlotAsync(slot, instruction, true, false),
   owningSlotIsIdle: waitForOwningSlotIdle,
@@ -1049,7 +1052,7 @@ app.post("/slots/:slotNum/abandon-turn", async (c) => {
 });
 
 /** Assign a slot through the guarded PM authority route. */
-registerAssignmentRoute(app, db);
+registerAssignmentRoute(app, db, issueProjection);
 
 registerFamily2Routes(app, {
   db,
