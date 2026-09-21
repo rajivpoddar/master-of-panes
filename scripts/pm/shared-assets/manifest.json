@@ -744,7 +744,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "54e3671448b9085dbf80a267362b5cf1d766955d4e6c5536e6c6598ea89f0416",
+      "sha256": "82581d78da90503950e67f98b24cd9bc9663d760ba15b0d655f2366d519114db",
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md"
     },
     {
@@ -775,6 +775,15 @@
       "source_path": "codex/skills/codex-stdio-send-message/agents/openai.yaml"
     },
     {
+      "canonical_target": "/Users/rajiv/.codex/skills/codex-stdio-send-message/scripts/queue_preview.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-codex-stdio-send-message",
+      "sha256": "6d2a39a4cd7cd9b548dbfbe9b68fe7de458ff5e0ad0d5cf25daf36485ffd540e",
+      "source_path": "codex/skills/codex-stdio-send-message/scripts/queue_preview.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.codex/skills/codex-stdio-send-message/scripts/send_message.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -782,6 +791,15 @@
       "ownership_class": "shared-codex-skill-executable",
       "sha256": "1f4433eea43d62fd9c183968b13432857af6dc4dc7e36e4ce05a84671cf54874",
       "source_path": "codex/skills/codex-stdio-send-message/scripts/send_message.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.codex/skills/codex-stdio-send-message/scripts/test_queue_preview.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-codex-stdio-send-message",
+      "sha256": "9d3bf0c5aa0e163e9321061881bd4cc811f0a6c2c8706c7bee3d7cc1f66cd3cc",
+      "source_path": "codex/skills/codex-stdio-send-message/scripts/test_queue_preview.py"
     },
     {
       "canonical_target": "/Users/rajiv/.codex/skills/codex-stdio-send-message/scripts/test_send_message.py",
@@ -915,7 +933,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 98,
+    "selected_count": 100,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
