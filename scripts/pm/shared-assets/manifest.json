@@ -440,7 +440,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "dd75f208440c8ed6245968d3d98d7e9a30ba3fcf8a1368a0cd7ccd55c4056ea5",
+      "sha256": "fb57781c6d12134729c8ab6ccbb2fbfc57284d48bfb4e0b81d7597462b5d0b18",
       "source_path": "claude/skills/cleanup-pr/SKILL.md"
     },
     {
@@ -784,22 +784,22 @@
       "source_path": "codex/skills/heydonna-control-plane-repair/SKILL.md"
     },
     {
-      "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py",
-      "sha256": "1ad9c0440cefe2d3e2acc61e189eb904f45b61646da22331d7ca7613efb1b6fb",
+      "dependencies": [],
+      "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "dependency_status": "closed",
-      "dependencies": []
+      "sha256": "1ad9c0440cefe2d3e2acc61e189eb904f45b61646da22331d7ca7613efb1b6fb",
+      "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py"
     },
     {
-      "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/test_admit_fetch_timeout.py",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/scripts/test_admit_fetch_timeout.py",
-      "sha256": "dfc6da5e1788568cac3a62da938b5cebc5ce0a42de4a8b36a749d57c311f9c83",
+      "dependencies": [],
+      "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-test",
-      "dependency_status": "closed",
-      "dependencies": []
+      "sha256": "dfc6da5e1788568cac3a62da938b5cebc5ce0a42de4a8b36a749d57c311f9c83",
+      "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/test_admit_fetch_timeout.py"
     },
     {
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",

@@ -227,9 +227,25 @@ gh pr edit $PR_NUMBER --remove-label "pm-cleanup:needed" 2>/dev/null || true
 
 **Material-event Kanban trigger (Phase 3.5 of slot-claim spec — 2026-05-24).** Both `pm-state-replace.sh` invocations above (Step 4b `merged-cleanup-pending` and Step 9 `closed-clean`) append one line to `/tmp/kanban-pending.flag` on success. `pm-context-injector` hook reads that flag on next UserPromptSubmit and emits a Kanban-refresh reminder. No additional flag-write needed from this skill — the writer is owned by the canonical state-mutator.
 
-### Step 5: Release slot (if occupied)
+### Step 5: Slot ownership is NOT released here
 
-Check `mop_all_slots()` — if any slot has this issue assigned, release it via `mop_release_slot(slot: N)`.
+Post-merge housekeeping must **never** call `mop_release_slot` (or any release path).
+
+Slot ownership transitions at the **assignment boundary**, not here. A release is an
+ownership operation keyed to the identity of the work that just finished; cleanup-pr runs
+downstream of the merge, so it holds a historical identity by definition — best case a
+no-op, worst case a stale release landing on a slot that has legitimately moved on to new
+work. The epoch/tuple guards fail closed, but they cannot make a downstream trigger correct.
+
+Ownership moves when the **next assignment** takes the slot over atomically with the live
+identity in hand (`POST /slots/:n/assign` with the complete expected tuple + expected_epoch,
+which CAS-rebinds via `db.rebindSlot` and advances the ownership epoch exactly once), and the
+session `/clear` happens at that boundary. No release is required for an assignment onto an
+occupied slot to succeed.
+
+`mop_release_slot` stays available for explicit operator transitions only — transfer,
+capacity, or a terminal slot with no successor — issued from a fresh read with its exact
+tuple / idle / inactive requirements.
 
 ### Step 5b: Clean up remote branch
 
