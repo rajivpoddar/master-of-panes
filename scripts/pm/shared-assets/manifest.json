@@ -168,7 +168,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-ci-failure-triage",
-      "sha256": "752ccd77cc632bec2fbdeb360822ad4adb0ea3f9cef5ca94a68e5174e0875b54",
+      "sha256": "2ca5638de77f31b5073dde0929cacb362178a24747530895e3956e352ee63f16",
       "source_path": "claude/scripts/ci/ci-fast-triage.py"
     },
     {
