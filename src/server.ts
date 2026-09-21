@@ -29,6 +29,7 @@ import {
 } from "./respawnTurnGuard.js";
 import { createGhIssueOwnershipProjection } from "./issueProjection.js";
 import { registerFamily2Routes } from "./family2Routes.js";
+import { registerAssignmentEffectRoutes } from "./assignmentEffectRoutes.js";
 import { TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
@@ -1051,7 +1052,102 @@ app.post("/slots/:slotNum/abandon-turn", async (c) => {
 });
 
 /** Assign a slot through the guarded PM authority route. */
+/**
+ * Session clear for the atomic new-issue assignment boundary.
+ *
+ * Reuses the one existing clear path (`/slots/:n/send` with `command:"/clear"`)
+ * that the HTTP clear endpoint already drives.  A slot that is not free is
+ * refused here rather than silently queued: the assignment boundary must not
+ * hand a task to a slot whose session was never actually reset.
+ */
+async function clearSlotForAssignment(
+  slotNum: number,
+): Promise<{ ok: boolean; reason: string; detail?: string }> {
+  const results = await clearSlotsThroughMopHttp([slotNum], {
+    clearExistingPendingForTargets: true,
+    source: "mop_assign_slot_new_issue",
+    terminalOnly: false,
+  });
+  const result = results.find((entry) => entry.slot === slotNum);
+  if (!result) {
+    return { ok: false, reason: "assignment_clear_no_result" };
+  }
+  if (result.status.startsWith("cleared")) {
+    return { ok: true, reason: "cleared", detail: result.status };
+  }
+  return { ok: false, reason: "assignment_clear_not_applied", detail: result.status };
+}
+
+/**
+ * Literal task delivery through the existing message-slot/file-send path.
+ *
+ * This is the same pinned-pane paste + post-send verification the `/send`
+ * route performs; it exists as a named function so the assignment boundary can
+ * require a verified delivery receipt instead of trusting a dispatch.
+ */
+async function deliverTaskFileForAssignment(
+  slotNum: number,
+  filePath: string,
+): Promise<{ verified: boolean; receipt: Record<string, unknown>; reason?: string }> {
+  const identity = await verifyPaneIdentity(slotNum);
+  if (!identity.ok) {
+    return {
+      verified: false,
+      reason: "pane_identity_mismatch",
+      receipt: { slot: slotNum, verified: false, detail: identity.detail },
+    };
+  }
+  const paneTarget = identity.snapshot.paneId;
+  let filePayload: Buffer;
+  try {
+    filePayload = await readFile(filePath);
+  } catch {
+    return {
+      verified: false,
+      reason: "task_file_unreadable",
+      receipt: { slot: slotNum, pane: paneTarget, verified: false, file: filePath },
+    };
+  }
+  const preSnapshot = (await capturePaneSnapshot(paneTarget)) ?? "";
+  const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, filePayload, {
+    source: "file",
+    label: filePath,
+  });
+  await sleep(600);
+  const verify = await deliveryConfirmed(paneTarget, preSnapshot);
+  if (!verify.ok) {
+    return {
+      verified: false,
+      reason: verify.reason ?? "session_delivery_unverified",
+      receipt: { slot: slotNum, pane: paneTarget, bytes: paste.bytes, chunks: paste.chunks, verified: false },
+    };
+  }
+  return {
+    verified: true,
+    receipt: {
+      slot: slotNum,
+      pane: paneTarget,
+      mode: "file",
+      bytes: paste.bytes,
+      chunks: paste.chunks,
+      chunkSize: paste.chunkSize,
+      verified: true,
+    },
+  };
+}
+
 registerAssignmentRoute(app, db, issueProjection);
+
+// ─── Atomic assignment effect (mop-assign-slot) ───────────────────────
+// One durable operation performs clear (new_issue), ownership commit, literal
+// delivery, and the dual readback.  Ownership is always committed before
+// delivery; a delivery failure leaves a named recoverable state and never
+// rolls ownership back implicitly.
+registerAssignmentEffectRoutes(app, {
+  db,
+  clearSlot: (slotNum) => clearSlotForAssignment(slotNum),
+  deliverTaskFile: (slotNum, filePath) => deliverTaskFileForAssignment(slotNum, filePath),
+});
 
 registerFamily2Routes(app, {
   db,

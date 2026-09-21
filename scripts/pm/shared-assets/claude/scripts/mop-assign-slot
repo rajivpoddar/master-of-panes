@@ -1,0 +1,5 @@
+#!/bin/sh
+# Stable alias for the sanctioned atomic assignment boundary.
+# The real operation lives in mop-assign-slot.py; this shim exists so callers
+# can use the extensionless name without guessing the interpreter.
+exec python3 "$(dirname "$0")/mop-assign-slot.py" "$@"

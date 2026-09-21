@@ -116,6 +116,33 @@ export interface NativeReleaseEffectReceipt {
   created_at: string;
 }
 
+/**
+ * Durable intent for one atomic assignment effect.
+ *
+ * The row is the delivery-pending marker adopted from the Family-2 release
+ * shape: it is minted before the ownership commit, advanced to
+ * `pending_delivery` once the durable ownership row is committed, and only
+ * reaches `delivered` after both the ownership and delivery readbacks pass.
+ * A crash at any boundary leaves a reconcilable intent instead of a silently
+ * half-assigned slot.
+ */
+export type AssignmentEffectState = "planned" | "pending_delivery" | "delivered";
+
+export interface AssignmentEffectIntent {
+  effect_id: string;
+  request_digest: string;
+  slot: number;
+  selection_class: string;
+  state: AssignmentEffectState;
+  before_epoch: number;
+  committed_epoch: number | null;
+  desired_tuple: AssignmentTupleInput;
+  task_digest: string;
+  delivery_receipt: string | null;
+  created_at: string;
+  delivered_at: string | null;
+}
+
 /** Covers the complete bounded pane-release sequence (idle wait + reset). */
 export const NATIVE_RELEASE_INTENT_TTL_MS = 10 * 60 * 1000;
 
@@ -557,6 +584,24 @@ export class MoPDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_native_release_receipts_slot_epoch
         ON native_release_effect_receipts(slot, expected_epoch);
+
+      -- Durable delivery-pending marker for one atomic assignment effect.
+      CREATE TABLE IF NOT EXISTS assignment_effect_intents (
+        effect_id TEXT PRIMARY KEY,
+        request_digest TEXT NOT NULL,
+        slot INTEGER NOT NULL,
+        selection_class TEXT NOT NULL,
+        state TEXT NOT NULL,
+        before_epoch INTEGER NOT NULL,
+        committed_epoch INTEGER,
+        desired_tuple TEXT NOT NULL,
+        task_digest TEXT NOT NULL,
+        delivery_receipt TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+        delivered_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_assignment_effect_intents_slot
+        ON assignment_effect_intents(slot, created_at DESC);
     `);
 
     // Initialize config KV table
@@ -1233,6 +1278,103 @@ export class MoPDatabase {
       throw new Error(`native release effect receipt ${effectId} has malformed tuple`, { cause: error });
     }
     return { ...row, expected_tuple: expectedTuple };
+  }
+
+  /**
+   * Mint (or read back) one durable assignment-effect intent.
+   *
+   * A repeated mint of the same immutable binding is idempotent so a crashed
+   * or retried invocation resumes the existing intent instead of minting a
+   * second assignment. A different binding under the same effect id is a
+   * conflict and must never overwrite the committed row.
+   */
+  mintAssignmentEffectIntent(intent: {
+    effect_id: string;
+    request_digest: string;
+    slot: number;
+    selection_class: string;
+    before_epoch: number;
+    desired_tuple: AssignmentTupleInput;
+    task_digest: string;
+  }): { ok: boolean; conflict: boolean; reason?: string; intent?: AssignmentEffectIntent } {
+    if (typeof intent.effect_id !== "string" || intent.effect_id.trim() === "") {
+      return { ok: false, conflict: true, reason: "invalid_effect_id" };
+    }
+    const existing = this.getAssignmentEffectIntent(intent.effect_id);
+    if (existing) {
+      if (existing.request_digest === intent.request_digest && existing.slot === intent.slot) {
+        return { ok: true, conflict: false, intent: existing };
+      }
+      return { ok: false, conflict: true, reason: "effect_binding_conflict", intent: existing };
+    }
+    this.db.prepare(`
+      INSERT INTO assignment_effect_intents (
+        effect_id, request_digest, slot, selection_class, state,
+        before_epoch, committed_epoch, desired_tuple, task_digest
+      ) VALUES (?, ?, ?, ?, 'planned', ?, NULL, ?, ?)
+    `).run(
+      intent.effect_id,
+      intent.request_digest,
+      intent.slot,
+      intent.selection_class,
+      intent.before_epoch,
+      JSON.stringify(intent.desired_tuple),
+      intent.task_digest,
+    );
+    return { ok: true, conflict: false, intent: this.getAssignmentEffectIntent(intent.effect_id) ?? undefined };
+  }
+
+  /** Read one durable assignment-effect intent by immutable effect identity. */
+  getAssignmentEffectIntent(effectId: string): AssignmentEffectIntent | null {
+    if (typeof effectId !== "string" || effectId.trim() === "") return null;
+    const row = this.db.prepare(`
+      SELECT effect_id, request_digest, slot, selection_class, state,
+             before_epoch, committed_epoch, desired_tuple, task_digest,
+             delivery_receipt, created_at, delivered_at
+      FROM assignment_effect_intents
+      WHERE effect_id = ?
+    `).get(effectId) as {
+      effect_id: string;
+      request_digest: string;
+      slot: number;
+      selection_class: string;
+      state: AssignmentEffectState;
+      before_epoch: number;
+      committed_epoch: number | null;
+      desired_tuple: string;
+      task_digest: string;
+      delivery_receipt: string | null;
+      created_at: string;
+      delivered_at: string | null;
+    } | undefined;
+    if (!row) return null;
+    let desiredTuple: AssignmentTupleInput;
+    try {
+      desiredTuple = JSON.parse(row.desired_tuple) as AssignmentTupleInput;
+    } catch (error) {
+      throw new Error(`assignment effect intent ${effectId} has malformed tuple`, { cause: error });
+    }
+    return { ...row, desired_tuple: desiredTuple };
+  }
+
+  /** Advance a minted intent to pending-delivery once ownership is committed. */
+  markAssignmentEffectCommitted(effectId: string, committedEpoch: number): void {
+    this.db.prepare(`
+      UPDATE assignment_effect_intents
+      SET state = 'pending_delivery', committed_epoch = ?
+      WHERE effect_id = ? AND state = 'planned'
+    `).run(committedEpoch, effectId);
+  }
+
+  /** Finalize an intent only after both readbacks have passed. */
+  markAssignmentEffectDelivered(effectId: string, deliveryReceipt: string): void {
+    this.db.prepare(`
+      UPDATE assignment_effect_intents
+      SET state = 'delivered',
+          delivery_receipt = ?,
+          delivered_at = strftime('%Y-%m-%dT%H:%M:%f', 'now')
+      WHERE effect_id = ?
+    `).run(deliveryReceipt, effectId);
   }
 
   assignSlot(

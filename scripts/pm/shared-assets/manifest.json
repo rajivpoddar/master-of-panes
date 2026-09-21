@@ -298,6 +298,24 @@
       "source_path": "claude/scripts/launch-slot-6.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/mop-assign-slot",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-mop-assign-slot",
+      "sha256": "2019d9dbba4f6367a84f5c010d52326ae863aa4b0e0234982f9c05eadd604423",
+      "source_path": "claude/scripts/mop-assign-slot"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/mop-assign-slot.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-mop-assign-slot",
+      "sha256": "526f1a6acfea4f19726e2a7b2476851f5525637a8526bfeb766471b3a7b8b8fa",
+      "source_path": "claude/scripts/mop-assign-slot.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/mop-slot-respawn.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -897,7 +915,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 96,
+    "selected_count": 98,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
