@@ -166,6 +166,19 @@ def category_for(annotations: Iterable[Annotation], jobs: Iterable[dict[str, Any
     combined = f"{text}\n{job_text}"
     lower = combined.lower()
 
+    # Modal auth-plane transport transient (narrow): an "Authorization check
+    # failed" line paired with a gRPC deadline token inside Modal/setup
+    # context. Placed first: the token conjunction is novel, so no existing
+    # category input can reach this arm by accident.
+    if (
+        ("modal" in lower or "setup" in lower)
+        and "authorization check failed" in lower
+        and any(
+            token in lower
+            for token in ("statuscode.deadline_exceeded", "deadline exceeded", "grpc.rpcerror")
+        )
+    ):
+        return "modal-auth-plane-transient"
     if "convex preview deploy" in lower and "start_push" in lower:
         return "convex-preview-deploy"
     if "heydonna_env is required" in lower or "environment identity" in lower:
@@ -207,6 +220,8 @@ def local_command(category: str, annotations: Iterable[Annotation]) -> str | Non
 
     if category == "convex-preview-deploy":
         return "not applicable (external Convex control-plane failure)"
+    if category == "modal-auth-plane-transient":
+        return "not applicable (Modal auth-plane transport transient; workflow auto-retry owns recovery)"
     if category == "static-lint":
         targets = " ".join(py_paths) if py_paths else "modal/ scripts/modal-gc-classify.py"
         return f"python3 -m ruff check {targets}"
@@ -318,6 +333,33 @@ def extract_log_annotations(log_text: str) -> list[Annotation]:
         if key not in seen:
             seen.add(key)
             annotations.append(Annotation("", None, "failure", "", message, ""))
+
+    # Modal auth-plane transport failure (narrow): pair "Authorization check
+    # failed" with a gRPC deadline token inside the same local window, in
+    # Modal context. Whole-log conjunction would pair unrelated lines, so the
+    # window — not the log — is the evidence unit.
+    auth_lines = [
+        (index, line)
+        for index, line in enumerate(log_text.splitlines())
+        if "authorization check failed" in line.lower()
+    ]
+    for index, _line in auth_lines:
+        window_lines = log_text.splitlines()[max(0, index - 3):index + 4]
+        window_lower = "\n".join(window_lines).lower()
+        if "modal" not in window_lower:
+            continue
+        if "statuscode.deadline_exceeded" in window_lower or "deadline exceeded" in window_lower:
+            detail = "StatusCode.DEADLINE_EXCEEDED"
+        elif "grpc.rpcerror" in window_lower:
+            detail = "grpc.RpcError"
+        else:
+            continue
+        message = f"Modal auth-plane transport failure: Authorization check failed ({detail})"
+        key = ("", None, message)
+        if key not in seen:
+            seen.add(key)
+            annotations.append(Annotation("", None, "failure", "", message, ""))
+        break
 
     ruff_block = re.compile(
         r"(?m)^(F\d{3}[^\n]+)\n\s*-->\s*([^:\n]+\.py):(\d+):\d+"
