@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
-      "sha256": "18848718df161667ed3462bcec45d4fb632beba4f1a6dc5692c867c4bb36726d",
+      "sha256": "f0c12a8087b210d3551cfa06dcce27c0f2471d466fae9e0681502a7ee5d6286c",
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py"
     },
     {
