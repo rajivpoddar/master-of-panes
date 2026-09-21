@@ -109,9 +109,11 @@ function exactObservation(
 interface AdapterOptions {
   checkout?: string | null;
   resolveCheckout?: () => Promise<string | null>;
+  delivered?: boolean;
   idle?: boolean;
   observe?: () => Promise<CheckoutResetObservation>;
   observeReadOnly?: () => Promise<CheckoutReadOnlyObservation>;
+  instruction?: (value: string) => void;
 }
 
 function coordinator(value: Fixture, options: AdapterOptions = {}): NativeSlotReleaseCoordinator {
@@ -119,6 +121,10 @@ function coordinator(value: Fixture, options: AdapterOptions = {}): NativeSlotRe
     db: value.db,
     resolveOwningCheckout: options.resolveCheckout
       ?? (async () => options.checkout === undefined ? CHECKOUT : options.checkout),
+    deliverInstruction: async (_slot, instruction) => {
+      options.instruction?.(instruction);
+      return options.delivered !== false;
+    },
     owningSlotIsIdle: async () => options.idle !== false,
     resetAndObserveCheckout: options.observe ?? (async () => exactObservation()),
     observeCheckout: options.observeReadOnly ?? (async (): Promise<CheckoutReadOnlyObservation> => ({
@@ -164,7 +170,8 @@ function quiescentRequest(value: Fixture): NativeSlotReleaseRequest {
 test("MoP-derived checkout reset acknowledgement clears once and replay is safe typed drift", async () => {
   const value = fixture();
   try {
-    const release = coordinator(value);
+    let instruction = "";
+    const release = coordinator(value, { instruction: (text) => { instruction = text; } });
     const first = await release.release(value.request);
     assert.equal(first.code, "released");
     assert.equal(first.success, true);
@@ -173,9 +180,10 @@ test("MoP-derived checkout reset acknowledgement clears once and replay is safe 
     assert.equal(first.acknowledgement?.expected_tuple.issue, value.request.expected_tuple.issue);
     assert.equal(first.acknowledgement?.expected_tuple.head_sha, value.request.expected_tuple.head_sha);
     assert.equal(first.acknowledgement?.expected_tuple.claimed_at, value.request.expected_tuple.claimed_at);
-    // The release delivers no pane prose at all (Rajiv directive 2026-09-21).
-    assert.equal(value.db.getEvents(1, 50, "release_instruction_delivered").length, 0);
-    assert.equal(value.db.getEvents(1, 50, "release_effect_delivered").length, 1);
+    assert.equal(instruction, "Switch to main and pull the latest origin/main.",
+      "the release message must be the actionable literal the slot executes with its own tools");
+    assert.equal(/stop work|remain idle|do not run another tool/i.test(instruction), false,
+      "the release message must never tell an idle slot to stop working");
     const free = value.db.getSlot(1)!;
     assert.equal(free.occupied, false);
     assert.equal(free.assignment_epoch, value.request.expected_epoch + 1);
@@ -278,22 +286,21 @@ test("release intent is exact-owner, short-lived, and visible before pane delive
   }
 });
 
-test("pane-mediated release claims before the checkout reset and releases the claim after completion", async () => {
+test("pane-mediated release claims before delivery and releases the claim after completion", async () => {
   const value = fixture();
   try {
-    let visibleDuringReset = false;
+    let visibleDuringDelivery = false;
     const release = coordinator(value, {
-      observe: async () => {
-        visibleDuringReset = value.db.hasActiveNativeReleaseIntent(
+      instruction: () => {
+        visibleDuringDelivery = value.db.hasActiveNativeReleaseIntent(
           value.request.slot,
           value.request.expected_epoch,
           value.request.expected_tuple,
         );
-        return exactObservation();
       },
     });
     assert.equal((await release.release(value.request)).code, "released");
-    assert.equal(visibleDuringReset, true);
+    assert.equal(visibleDuringDelivery, true);
     assert.equal(
       value.db.hasActiveNativeReleaseIntent(
         value.request.slot,
@@ -465,13 +472,14 @@ test("only the still-working states refuse; checkout drift is superseded or repa
         let deliveries = 0;
         let resets = 0;
         const result = await coordinator(value, {
+          instruction: () => { deliveries += 1; },
           observe: async () => { resets += 1; return exactObservation(); },
           observeReadOnly: async () => ({
             checkout_path: CHECKOUT, head: MAIN_HEAD, ...observation,
           }),
         }).release(value.request);
         assert.equal(result.code, "released");
-        assert.equal(deliveries, 0, "a release delivers no pane prose");
+        assert.equal(deliveries, 1);
         assert.equal(resets, 1);
       } finally {
         closeFixture(value);
@@ -524,6 +532,7 @@ test("numbered slots expose no compatibility or epoch-only clear surface", () =>
 test("identity, delivery, idle, and reset acknowledgement failures preserve occupied", async (t) => {
   const cases: Array<{ name: string; code: string; options: AdapterOptions }> = [
     { name: "pane checkout unavailable", code: "checkout_identity_unavailable", options: { checkout: null } },
+    { name: "delivery failed", code: "delivery_failed", options: { delivered: false } },
     { name: "slot stayed active", code: "slot_not_idle", options: { idle: false } },
     { name: "reset failed", code: "checkout_reset_failed", options: { observe: async () => exactObservation({ reset_succeeded: false }) } },
     { name: "dirty checkout", code: "dirty_checkout", options: { observe: async () => exactObservation({ clean: false }) } },
@@ -619,7 +628,7 @@ test("releasing one slot does not mutate an unrelated occupied slot", async () =
   }
 });
 
-test("effect-bound release persists an atomic receipt and replays without a second pane effect", async () => {
+test("effect-bound release persists an atomic receipt and replays without a second clear", async () => {
   const value = fixture();
   try {
     const request = {
@@ -628,7 +637,7 @@ test("effect-bound release persists an atomic receipt and replays without a seco
       request_digest: computeFamily2ReleaseDigest({ effect_id: "family2-effect-8100", ...value.request }),
     };
     let deliveries = 0;
-    const release = coordinator(value, { observe: async () => { deliveries += 1; return exactObservation(); } });
+    const release = coordinator(value, { instruction: () => { deliveries += 1; } });
     const first = await release.release(request);
     assert.equal(first.code, "released");
     assert.equal(first.idempotent, false);
@@ -637,8 +646,7 @@ test("effect-bound release persists an atomic receipt and replays without a seco
     const replay = await release.release(request);
     assert.equal(replay.code, "released");
     assert.equal(replay.idempotent, true);
-    assert.equal(deliveries, 1, "the first call runs the checkout reset exactly once");
-    assert.equal(value.db.getEvents(1, 50, "release_instruction_delivered").length, 0);
+    assert.equal(deliveries, 1);
     assert.equal(value.db.getSlot(1)?.occupied, false);
   } finally {
     closeFixture(value);

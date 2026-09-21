@@ -254,6 +254,7 @@ export interface NativeSlotReleaseDependencies {
   /** Canonical issue-side ownership projection; optional so tests stay hermetic. */
   issueProjection?: IssueOwnershipProjection;
   resolveOwningCheckout: (slot: number) => Promise<string | null>;
+  deliverInstruction: (slot: number, instruction: string) => Promise<boolean>;
   owningSlotIsIdle: (slot: number) => Promise<boolean>;
   resetAndObserveCheckout: (
     checkoutPath: string,
@@ -284,6 +285,23 @@ function result(
     remediation,
     ...(cause ? { cause } : {}),
   };
+}
+
+/**
+ * The ONLY slot-facing release message. It is the actionable literal from the
+ * direct-release contract: the slot switches itself to main with its own tools.
+ *
+ * It must never tell the slot to stop work or stay idle. The release gate has
+ * already proved the slot is idle, inactive and quiescent before this is ever
+ * delivered, so a "stop work" instruction addressed a slot that was not working
+ * (Rajiv ruling 2026-09-21). MoP keeps the enforcement: it resets the checkout to
+ * the exact intended head, attests clean main through the pane, and leaves the
+ * slot occupied when attestation fails.
+ */
+export const RELEASE_ACTIONABLE_INSTRUCTION = "Switch to main and pull the latest origin/main.";
+
+export function buildLiteralResetInstruction(): string {
+  return RELEASE_ACTIONABLE_INSTRUCTION;
 }
 
 export class NativeSlotReleaseCoordinator {
@@ -899,24 +917,30 @@ export class NativeSlotReleaseCoordinator {
           );
         }
         const preDeliveryTurnId = preDelivery?.active_turn_id ?? null;
-        // NO pane prose is delivered by a release. This branch is only reached
-        // after the gate above has already proved the slot is idle, inactive and
-        // quiescent, so a stop-work instruction asked a slot that was not working
-        // to stop working. The release effect is the settle guard below plus the
-        // checkout switch to main at the exact intended head. (Rajiv directive
-        // 2026-09-21; this was the last path that delivered the stop-work text.)
+        const instruction = buildLiteralResetInstruction();
+        const delivered = await this.dependencies.deliverInstruction(request.slot, instruction);
+        if (!delivered) {
+          return result(
+            "delivery_failed",
+            "The owning slot did not receive the stop/reset instruction.",
+            this.dependencies.db.getSlot(request.slot),
+            "Leave the slot occupied, repair delivery, and retry from a fresh MoP read.",
+          );
+        }
+        // The delivered instruction IS a user prompt, so the slot's
+        // UserPromptSubmit hook records it as an agent turn. Wait, bounded, for
+        // that self-induced turn to settle before the authoritative re-check;
+        // any OTHER turn id is a replacement/pre-existing turn and refuses.
         const settle = await this.awaitInducedResetTurnSettle(
           request.slot,
           claim.expected_epoch,
           claim.expected_tuple,
           preDeliveryTurnId,
         );
-        this.dependencies.db.logEvent(request.slot, "release_effect_delivered", null, null, {
+        this.dependencies.db.logEvent(request.slot, "release_instruction_delivered", null, null, {
           checkout_path: checkoutPath,
-          delivery: "none",
-          instruction_bytes: 0,
-          effect: "checkout_reset_to_main",
-          intended_main_head: request.intended_main_head.toLowerCase(),
+          delivery: "pane",
+          instruction_bytes: instruction.length,
           prior_turn_id: preDeliveryTurnId,
           induced_turn_id: settle.induced_turn_id,
           settle_ms: settle.waited_ms,
@@ -927,12 +951,12 @@ export class NativeSlotReleaseCoordinator {
           if (settle.kind === "timeout") {
             return result(
               "slot_not_idle",
-              `Slot ${request.slot} did not settle within ${Math.round(settle.waited_ms / 1000)}s after the release effect${
+              `Slot ${request.slot} did not settle within ${Math.round(settle.waited_ms / 1000)}s after the reset instruction${
                 settle.induced_turn_id ? ` (turn ${settle.induced_turn_id})` : ""
               }; no release was performed.`,
               settle.slot,
               settle.cause === "quiescence"
-                ? "The slot is settling after the release effect; retry once the stated window elapses. Do not hand-edit slot state."
+                ? "The slot is settling after the reset instruction; retry once the stated window elapses. Do not hand-edit slot state."
                 : "Wait for the slot's turn to close, then retry the release; do not hand-edit slot state.",
               false,
               settle.cause,
@@ -941,7 +965,7 @@ export class NativeSlotReleaseCoordinator {
           if (settle.kind === "replacement_turn") {
             return result(
               "slot_not_idle",
-              `Slot ${request.slot} is running a different turn (${settle.turn_id}) than the release expected${
+              `Slot ${request.slot} is running a different turn (${settle.turn_id}) than the reset instruction${
                 settle.induced_turn_id ? ` (${settle.induced_turn_id})` : ""
               } induced; no release was performed.`,
               settle.slot,

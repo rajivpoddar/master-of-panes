@@ -172,6 +172,7 @@ const nativeSlotRelease = new NativeSlotReleaseCoordinator({
   db,
   issueProjection,
   resolveOwningCheckout: (slot) => relay.getSlotCheckoutPath(slot),
+  deliverInstruction: (slot, instruction) => relay.sendToSlotAsync(slot, instruction, true, false),
   owningSlotIsIdle: waitForOwningSlotIdle,
   resetAndObserveCheckout,
   observeCheckout,
