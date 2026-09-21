@@ -64,6 +64,27 @@ export interface CheckoutResetObservation {
  */
 export const RELEASE_QUIESCENCE_MS = 60 * 1000;
 
+/**
+ * Bounded wait for the reset instruction's OWN induced turn to settle.
+ *
+ * The pane-mediated release delivers a stop/reset instruction into the owning
+ * pane. That instruction is a user prompt, so the slot's UserPromptSubmit hook
+ * records it as an agent turn (`db.startAgentTurn(slot, session_id)`). The
+ * release must wait for that self-created turn to close before its authoritative
+ * re-check, otherwise it mistakes its own instruction for a pre-existing active
+ * turn and refuses forever. The wait is bounded and never treats a different
+ * turn id as self-induced.
+ */
+export const RELEASE_SELF_TURN_SETTLE_MS = 180 * 1000;
+export const RELEASE_SELF_TURN_POLL_MS = 2 * 1000;
+
+/** Outcome of the bounded settle wait that follows a reset-instruction delivery. */
+export type ReleaseSelfTurnSettle =
+  | { ok: true; induced_turn_id: string | null; waited_ms: number }
+  | { ok: false; kind: "timeout"; slot: SlotState | null; induced_turn_id: string | null; waited_ms: number; cause: ReleaseBlockCause }
+  | { ok: false; kind: "replacement_turn"; slot: SlotState; induced_turn_id: string | null; turn_id: string; waited_ms: number }
+  | { ok: false; kind: "epoch_mismatch" | "observed_tuple_mismatch" | "slot_free" | "slot_missing"; slot: SlotState | null; induced_turn_id: string | null; waited_ms: number };
+
 /** Why the single release refusal fired. */
 export type ReleaseBlockCause = "active_turn" | "dnd" | "productive_work" | "quiescence" | "state_moved";
 
@@ -229,6 +250,11 @@ export interface NativeSlotReleaseDependencies {
     intendedMainHead: string,
   ) => Promise<CheckoutResetObservation>;
   observeCheckout: (checkoutPath: string) => Promise<CheckoutReadOnlyObservation>;
+  /** Bounded settle wait tuning + clock seam (defaults are production values). */
+  selfTurnSettleTimeoutMs?: number;
+  selfTurnSettlePollMs?: number;
+  nowMs?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function result(
@@ -407,6 +433,64 @@ export class NativeSlotReleaseCoordinator {
    * durable release already happened, so any failure is returned as a typed
    * sibling field and never changes the reported release outcome.
    */
+  /**
+   * Wait, bounded, for the reset instruction's own induced turn to settle.
+   *
+   * `priorTurnId` is the turn the row carried immediately BEFORE delivery (the
+   * release refuses earlier when one exists, so it is normally null). The first
+   * turn observed after delivery is therefore the one our instruction induced;
+   * any OTHER turn id is a replacement/pre-existing turn and refuses.
+   */
+  private async awaitInducedResetTurnSettle(
+    slotNum: number,
+    expectedEpoch: number,
+    expectedTuple: AssignmentTuple,
+    priorTurnId: string | null,
+  ): Promise<ReleaseSelfTurnSettle> {
+    const now = this.dependencies.nowMs ?? (() => Date.now());
+    const sleep = this.dependencies.sleep
+      ?? ((ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms)));
+    const timeoutMs = this.dependencies.selfTurnSettleTimeoutMs ?? RELEASE_SELF_TURN_SETTLE_MS;
+    const pollMs = this.dependencies.selfTurnSettlePollMs ?? RELEASE_SELF_TURN_POLL_MS;
+    const startedAt = now();
+    let inducedTurnId: string | null = priorTurnId;
+    let lastCause: ReleaseBlockCause = "active_turn";
+    for (;;) {
+      const elapsed = now() - startedAt;
+      const row = this.dependencies.db.getSlot(slotNum);
+      if (!row) return { ok: false, kind: "slot_missing", slot: null, induced_turn_id: inducedTurnId, waited_ms: elapsed };
+      if (row.assignment_epoch !== expectedEpoch) {
+        return { ok: false, kind: "epoch_mismatch", slot: row, induced_turn_id: inducedTurnId, waited_ms: elapsed };
+      }
+      if (!assignmentTupleMatches(slotAssignmentTuple(row), expectedTuple)) {
+        return { ok: false, kind: "observed_tuple_mismatch", slot: row, induced_turn_id: inducedTurnId, waited_ms: elapsed };
+      }
+      if (!row.occupied) {
+        return { ok: false, kind: "slot_free", slot: row, induced_turn_id: inducedTurnId, waited_ms: elapsed };
+      }
+      const turnId = row.active_turn_id;
+      if (turnId !== null) {
+        if (inducedTurnId === null) {
+          inducedTurnId = turnId;
+        } else if (turnId !== inducedTurnId) {
+          return { ok: false, kind: "replacement_turn", slot: row, induced_turn_id: inducedTurnId, turn_id: turnId, waited_ms: elapsed };
+        }
+      }
+      // Reuse the SAME readiness predicate the release gate uses, so "settled"
+      // means exactly "the post-delivery authoritative re-check will pass":
+      // the induced turn has closed AND the short settling window has elapsed.
+      const readiness = evaluateReleaseReadiness(row, now());
+      if (readiness.ok) {
+        return { ok: true, induced_turn_id: inducedTurnId, waited_ms: elapsed };
+      }
+      lastCause = readiness.cause;
+      if (elapsed >= timeoutMs) {
+        return { ok: false, kind: "timeout", slot: row, induced_turn_id: inducedTurnId, waited_ms: elapsed, cause: lastCause };
+      }
+      await sleep(pollMs);
+    }
+  }
+
   private async projectReleasedOwner(
     tuple: AssignmentTuple | undefined,
     slot: number,
@@ -783,6 +867,28 @@ export class NativeSlotReleaseCoordinator {
       );
 
       if (!checkoutSettled) {
+        // Retry guard: never inject a reset instruction while the row reports an
+        // active turn. A repeat call made while a prior release-induced turn is
+        // still live refuses HERE, without delivering another prompt, so the
+        // release cannot pile instructions onto a busy slot.
+        const preDelivery = this.dependencies.db.getSlot(request.slot);
+        if (
+          preDelivery
+          && (preDelivery.active_turn_id !== null || preDelivery.active_turn_state !== "inactive")
+        ) {
+          const busy = evaluateReleaseReadiness(preDelivery, Date.now());
+          return result(
+            "slot_not_idle",
+            busy.ok
+              ? `Slot ${request.slot} is still working; no reset instruction was delivered.`
+              : busy.message,
+            preDelivery,
+            busy.ok ? "Wait for the active turn to close, then retry the release." : busy.remediation,
+            false,
+            "active_turn",
+          );
+        }
+        const preDeliveryTurnId = preDelivery?.active_turn_id ?? null;
         const instruction = buildLiteralResetInstruction(
           { ...request, intended_main_head: request.intended_main_head.toLowerCase() },
           checkoutPath,
@@ -794,6 +900,84 @@ export class NativeSlotReleaseCoordinator {
             "The owning slot did not receive the stop/reset instruction.",
             this.dependencies.db.getSlot(request.slot),
             "Leave the slot occupied, repair delivery, and retry from a fresh MoP read.",
+          );
+        }
+        // The delivered instruction IS a user prompt, so the slot's
+        // UserPromptSubmit hook records it as an agent turn. Wait, bounded, for
+        // that self-induced turn to settle before the authoritative re-check;
+        // any OTHER turn id is a replacement/pre-existing turn and refuses.
+        const settle = await this.awaitInducedResetTurnSettle(
+          request.slot,
+          claim.expected_epoch,
+          claim.expected_tuple,
+          preDeliveryTurnId,
+        );
+        this.dependencies.db.logEvent(request.slot, "release_instruction_delivered", null, null, {
+          checkout_path: checkoutPath,
+          delivery: "pane",
+          instruction_bytes: instruction.length,
+          prior_turn_id: preDeliveryTurnId,
+          induced_turn_id: settle.induced_turn_id,
+          settle_ms: settle.waited_ms,
+          settle_outcome: settle.ok ? "settled" : settle.kind,
+          epoch: claim.expected_epoch,
+        });
+        if (!settle.ok) {
+          if (settle.kind === "timeout") {
+            return result(
+              "slot_not_idle",
+              `Slot ${request.slot} did not settle within ${Math.round(settle.waited_ms / 1000)}s after the reset instruction${
+                settle.induced_turn_id ? ` (turn ${settle.induced_turn_id})` : ""
+              }; no release was performed.`,
+              settle.slot,
+              settle.cause === "quiescence"
+                ? "The slot is settling after the reset instruction; retry once the stated window elapses. Do not hand-edit slot state."
+                : "Wait for the slot's turn to close, then retry the release; do not hand-edit slot state.",
+              false,
+              settle.cause,
+            );
+          }
+          if (settle.kind === "replacement_turn") {
+            return result(
+              "slot_not_idle",
+              `Slot ${request.slot} is running a different turn (${settle.turn_id}) than the reset instruction${
+                settle.induced_turn_id ? ` (${settle.induced_turn_id})` : ""
+              } induced; no release was performed.`,
+              settle.slot,
+              "A replacement/pre-existing turn owns the slot now; wait for it to close, then re-read and release.",
+              false,
+              "active_turn",
+            );
+          }
+          if (settle.kind === "epoch_mismatch") {
+            return result(
+              "epoch_mismatch",
+              "Assignment epoch changed while the reset instruction settled.",
+              settle.slot,
+              "Re-read the slot and retry the release with fresh state.",
+            );
+          }
+          if (settle.kind === "observed_tuple_mismatch") {
+            return result(
+              "observed_tuple_mismatch",
+              "The owner tuple changed while the reset instruction settled.",
+              settle.slot,
+              "Re-read the slot and retry the release with fresh state.",
+            );
+          }
+          if (settle.kind === "slot_free") {
+            return result(
+              "slot_already_free_unverifiable",
+              `Slot ${request.slot} became FREE while the reset instruction settled.`,
+              settle.slot,
+              "Re-read the caller's state; the slot is already free.",
+            );
+          }
+          return result(
+            "slot_not_found",
+            `Slot ${request.slot} disappeared while the reset instruction settled.`,
+            null,
+            "Re-read MoP slot inventory.",
           );
         }
         if (!(await this.dependencies.owningSlotIsIdle(request.slot))) {
