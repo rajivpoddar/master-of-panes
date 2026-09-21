@@ -191,7 +191,7 @@ def category_for(annotations: Iterable[Annotation], jobs: Iterable[dict[str, Any
         "worker" in lower and any(token in lower for token in ("positionindex", "postmessage", "terminate"))
     ):
         return "worker-contract"
-    if any(token in lower for token in ("llm_proxy_cache_miss", "fixture miss", "capture-required")):
+    if any(token in lower for token in ("llm_proxy_cache_miss", "llm_proxy_miss_strict", "fixture miss", "capture-required")):
         return "capture-or-fixture"
     if any(token in lower for token in ("timed out", "timeout", "wall budget", "wall-budget")):
         return "timeout-or-wall-budget"
