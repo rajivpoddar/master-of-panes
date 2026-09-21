@@ -55,6 +55,24 @@
       "source_path": "claude/hooks/heydonna-app-block-invalid-issue-contract-ledger.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-ops-sync-stop-validator.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-ops-sync-stop-validator",
+      "sha256": "38f7e7e8a9070cac17a53cae91050ea75ee83466c8619b0d80147b2724d80470",
+      "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-self-clear-stop.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-self-clear-stop",
+      "sha256": "bd024f9adae4d85da7d9e76969a3081bd289ae9e383843d3d289f991e98ef410",
+      "source_path": "claude/hooks/pm-self-clear-stop.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/hooks/pre-issue-create-audit.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -487,6 +505,15 @@
       "ownership_class": "shared-claude-cp-repair-request",
       "sha256": "66aae9c546b13db9521f521de701ecfda401fb13b8f01d4a952b3ece96a78fdc",
       "source_path": "claude/skills/cp-repair-request/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/direct-assign/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-direct-assign",
+      "sha256": "82f764a0d8db7d46667855ffc7a743cb00ae26c649c37f855419d3f9787efcd8",
+      "source_path": "claude/skills/direct-assign/SKILL.md"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/direct-release/SKILL.md",
@@ -933,7 +960,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 100,
+    "selected_count": 103,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
