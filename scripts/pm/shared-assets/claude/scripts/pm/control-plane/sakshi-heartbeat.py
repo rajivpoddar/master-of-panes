@@ -1814,6 +1814,8 @@ def evaluate_open_pr_activity(
             workflow_motion=",".join(dict.fromkeys(active_workflow_motion)) or "slot-only",
             next_action="await the exact-head lane terminal",
             next_owner="CTO" if numbered_kind is None else owner,
+            next_boundary="await the exact-head lane terminal",
+            wake="CTO consumes the exact-head lane terminal",
             last_exact=last_exact,
         )
 
