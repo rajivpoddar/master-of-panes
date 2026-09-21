@@ -2535,10 +2535,12 @@ def main(argv: list[str]) -> int:
     elif args.cmd == "record":
         record_event(args)
     elif args.cmd == "obligation-upsert":
-        # Propagate a typed contract refusal (non-zero) instead of swallowing the exit code.
+        # Propagate ONLY the typed contract refusal (2). upsert_obligation also returns
+        # truthy values on SUCCESS (it reports the affected id), so a bare truthiness check
+        # would turn every successful upsert into a non-zero exit.
         _upsert_rc = upsert_obligation(args)
-        if _upsert_rc:
-            return _upsert_rc
+        if _upsert_rc == 2:
+            return 2
     elif args.cmd == "obligation-resolve":
         resolve_obligation(args)
     elif args.cmd == "obligation-resolve-target":
