@@ -55,6 +55,15 @@
       "source_path": "claude/hooks/heydonna-app-block-invalid-issue-contract-ledger.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/hooks/pre-issue-create-audit.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-create-audit",
+      "sha256": "e736c058fd4ab89495df061578a4adf0370a2df48e3d8d1f8bf677dfe0414290",
+      "source_path": "claude/hooks/pre-issue-create-audit.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/assignmentAuthority.js",
       "dependencies": [],
       "dependency_status": "closed",
@@ -888,7 +897,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 95,
+    "selected_count": 96,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
