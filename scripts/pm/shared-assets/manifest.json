@@ -235,6 +235,15 @@
       "source_path": "claude/scripts/control_plane_issue_policy.py"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/heartbeat-session-age-clear.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-heartbeat-session-age-clear",
+      "sha256": "e71747bc97d68b9ead7e95c2e22df2fcd1a7ecb62b9bd98a572d71e181d8f5ca",
+      "source_path": "claude/scripts/heartbeat-session-age-clear.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/issue-contract-ledger-hook.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -582,7 +591,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-session-age-clear",
-      "sha256": "34f5c262525a49c0e50302fdcb97f7a53b84a15c89e4594f255247e49e97e85b",
+      "sha256": "7a83fae313da06de4e1cff7ef77454e57c8117e16fc4c2ccc49ac4dc0c176b06",
       "source_path": "claude/skills/session-age-clear/SKILL.md"
     },
     {
@@ -933,7 +942,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 100,
+    "selected_count": 101,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
