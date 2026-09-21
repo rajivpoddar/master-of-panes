@@ -37,6 +37,15 @@
       "source_path": "claude/hooks/block-ci-rerun-without-local-proof.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/hooks/block-direct-mop-assign.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-direct-mop-assign-guard",
+      "sha256": "2b8080989d5856b20ce86b2bc54848cee56b1613afe283ed0eeceb0be062b0bb",
+      "source_path": "claude/hooks/block-direct-mop-assign.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/hooks/block-invalid-issue-contract-ledger.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -960,7 +969,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 103,
+    "selected_count": 104,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
