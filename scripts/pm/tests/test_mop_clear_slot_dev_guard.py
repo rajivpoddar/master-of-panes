@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -30,13 +31,24 @@ GUARD_FLAG = "--operator-confirm-dev-slot-clear"
 DEAD_URL = "http://127.0.0.1:9"  # discard port: the health probe always fails
 
 
+# The script resolves DB_PATH from MOP_DB_PATH, else from $HOME. Both are pinned
+# to a throwaway directory so the pm / 0 / --repair-* cases can never reach the
+# LIVE control-plane DB: repair_stale_pm_pending conditionally WRITES there, so a
+# harness that inherits the default environment is a data-integrity hazard, not a
+# style point.
+ISOLATED_HOME = Path(tempfile.mkdtemp(prefix="mop-clear-guard-home-"))
+
+
 def run(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["bash", str(SCRIPT), *args],
         capture_output=True, text=True, check=False,
-        # HOME is required: the script runs under `set -u` and resolves its
-        # default DB path from $HOME. A real invocation always has it.
-        env={"MOP_BASE_URL": DEAD_URL, "PATH": "/usr/bin:/bin", "HOME": str(Path.home())},
+        env={
+            "MOP_BASE_URL": DEAD_URL,
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(ISOLATED_HOME),                          # never the operator's HOME
+            "MOP_DB_PATH": str(ISOLATED_HOME / "mop.db"),        # never the live MoP DB
+        },
     )
 
 
