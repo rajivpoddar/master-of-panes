@@ -219,7 +219,7 @@ INTERNAL_USER_IDS_REGEX='^(U0ALEAYCAUT|U0AMF0XE6TS|UEQTTB97A|U0AJZTN7SM6)$'
 # the customer-facing / feedback Slack channels. Empty by default — an
 # operator/CTO names the real channels explicitly; until then classification
 # rests on the originator identity (bot/app/user allowlists) below.
-CUSTOMER_CHANNELS_REGEX="${EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX:-}" 
+CUSTOMER_CHANNELS_REGEX="${EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX:-}"
 INTERNAL_NAME_REGEX='Rajiv|Dhruva|Dhurva|HeyDonna PM|HeyDonna Alerts|Codex|claude|mop|master.of.panes'
 
 # Internal infra bot allowlist (NEW). bot_id OR app_id match → internal regardless of user_id.
