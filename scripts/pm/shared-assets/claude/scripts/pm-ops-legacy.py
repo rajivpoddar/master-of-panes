@@ -654,6 +654,7 @@ CONTINUATION_PLACEHOLDERS = {
     "not-actionable",
 }
 CONTINUATION_HEAD_RE = re.compile(r"^[0-9a-f]{40}$")
+CONTINUATION_OWNER_RE = re.compile(r"^[^\s]{2,}$")
 
 
 def continuation_upsert_refusal(*, kind, evidence, owner, required_action):
@@ -662,8 +663,12 @@ def continuation_upsert_refusal(*, kind, evidence, owner, required_action):
     Pure: performs no DB access. Called before init_db()/connect() so a refusal
     writes zero rows and leaves no partial state.
     """
+    if kind == "durable_continuation":
+        # Explicitly refused: the literal kind is NOT reader-recognized, so blessing it would
+        # create rows the reader then rejects. This is the defect this contract exists to stop.
+        return "continuation_kind_not_reader_recognized"
     if kind not in CONTINUATION_KIND_LANES:
-        return None  # not a continuation kind: existing behavior is preserved
+        return None  # ordinary non-continuation kind: existing behavior is preserved
     heads = []
     for key in CONTINUATION_HEAD_KEYS:
         if key not in evidence:
@@ -676,8 +681,12 @@ def continuation_upsert_refusal(*, kind, evidence, owner, required_action):
         return "continuation_head_missing"
     if len(set(heads)) > 1:
         return "continuation_head_conflicting"
+    # Mirror the reader exactly: _concrete_motion_token does value.strip(), requires a
+    # full OPEN_PR_CONCRETE_TOKEN match (^[^\s]{2,}$), then rejects the placeholder set.
     owner_text = owner.strip() if isinstance(owner, str) else ""
-    if not owner_text or owner_text.lower() in CONTINUATION_PLACEHOLDERS:
+    if not CONTINUATION_OWNER_RE.fullmatch(owner_text):
+        return "continuation_owner_shape_invalid"
+    if owner_text.lower() in CONTINUATION_PLACEHOLDERS:
         return "continuation_owner_placeholder"
     action_text = required_action.strip() if isinstance(required_action, str) else ""
     if not action_text or action_text.lower() in CONTINUATION_PLACEHOLDERS:
@@ -2526,7 +2535,10 @@ def main(argv: list[str]) -> int:
     elif args.cmd == "record":
         record_event(args)
     elif args.cmd == "obligation-upsert":
-        upsert_obligation(args)
+        # Propagate a typed contract refusal (non-zero) instead of swallowing the exit code.
+        _upsert_rc = upsert_obligation(args)
+        if _upsert_rc:
+            return _upsert_rc
     elif args.cmd == "obligation-resolve":
         resolve_obligation(args)
     elif args.cmd == "obligation-resolve-target":

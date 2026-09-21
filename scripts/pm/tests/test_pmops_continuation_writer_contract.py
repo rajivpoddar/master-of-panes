@@ -36,9 +36,18 @@ class WriterContract(unittest.TestCase):
         self.assertIsNone(call())
 
     def test_non_continuation_kind_is_untouched(self):
-        for kind in ("p0_escalation", "customer_incident", "backlog", "durable_continuation"):
+        for kind in ("p0_escalation", "customer_incident", "backlog"):
             with self.subTest(kind=kind):
                 self.assertIsNone(call(kind=kind, evidence={}, owner=None, required_action=None))
+
+    def test_durable_continuation_is_typed_refused(self):
+        self.assertEqual(call(kind="durable_continuation", evidence={"head": HEAD}),
+                         "continuation_kind_not_reader_recognized")
+
+    def test_owner_shape_is_mirrored_from_the_reader(self):
+        for bad in ("a", "ab cd"):  # OPEN_PR_CONCRETE_TOKEN = ^[^\s]{2,}$
+            with self.subTest(owner=bad):
+                self.assertEqual(call(owner=bad), "continuation_owner_shape_invalid")
 
     # ---- head rules ----
     def test_absent_head_refuses(self):
@@ -58,7 +67,12 @@ class WriterContract(unittest.TestCase):
 
     # ---- owner / action rules ----
     def test_placeholder_owner_refuses(self):
-        for bad in ("", "   ", "unknown", "NONE", "n/a", "cto-owned", "relay-only", "not-actionable"):
+        # the reader checks fullmatch(OPEN_PR_CONCRETE_TOKEN) BEFORE the placeholder set, so an
+        # empty/whitespace owner fails the shape rule and a placeholder WORD fails the placeholder rule.
+        for bad in ("", "   "):
+            with self.subTest(bad=bad):
+                self.assertEqual(call(owner=bad), "continuation_owner_shape_invalid")
+        for bad in ("unknown", "NONE", "n/a", "cto-owned", "relay-only", "not-actionable"):
             with self.subTest(bad=bad):
                 self.assertEqual(call(owner=bad), "continuation_owner_placeholder")
 
@@ -94,3 +108,76 @@ class WriterContract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+
+
+def _run_writer(db, *args):
+    env = dict(os.environ)
+    env["PM_OPS_DB"] = db
+    return subprocess.run([sys.executable, str(WRITER), *args], env=env,
+                          capture_output=True, text=True)
+
+
+def _rows(db):
+    con = sqlite3.connect(db)
+    try:
+        return int(con.execute("SELECT COUNT(*) FROM obligations").fetchone()[0])
+    finally:
+        con.close()
+
+
+class WriterRefusalEndToEnd(unittest.TestCase):
+    """Disposable temp-DB proof: every refusal exits 2, writes zero rows, leaves no partial state."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="pmops-contract-")
+        self.db = os.path.join(self.dir, "pm-ops.db")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _case(self, kind, evidence, owner, action):
+        before = _rows(self.db) if os.path.exists(self.db) else 0
+        r = _run_writer(self.db, "obligation-upsert", "--kind", kind, "--pr", "7721",
+                        "--owner", owner, "--title", "t", "--action", action,
+                        "--evidence-json", evidence)
+        after = _rows(self.db) if os.path.exists(self.db) else 0
+        self.assertEqual(r.returncode, 2, f"{kind}/{evidence}: expected exit 2, got {r.returncode}: {r.stderr}")
+        self.assertIn("REFUSED:", r.stderr, "refusal must be typed on stderr")
+        self.assertEqual(after, before, "a refusal must write zero rows")
+
+    def test_all_refusals_are_zero_write(self):
+        good = ("pm", "Continue from the exact head and verify CI/E2E.")
+        cases = [
+            ("durable_continuation", '{"head": "%s"}' % HEAD, *good),          # 1
+            ("capture_recovery", "{}", *good),                                  # absent head
+            ("capture_recovery", '{"head": "%s"}' % ("a" * 39), *good),         # partial head
+            ("capture_recovery", '{"head": "%s", "head_sha": "%s"}' % (HEAD, "b" * 40), *good),  # conflict
+            ("capture_recovery", '{"head": "%s"}' % HEAD, "a", good[1]),        # owner shape
+            ("capture_recovery", '{"head": "%s"}' % HEAD, "ab cd", good[1]),    # owner shape
+            ("capture_recovery", '{"head": "%s"}' % HEAD, "unknown", good[1]),  # owner placeholder
+            ("capture_recovery", '{"head": "%s"}' % HEAD, good[0], "unknown"),  # action placeholder
+        ]
+        for kind, evidence, owner, action in cases:
+            with self.subTest(kind=kind, evidence=evidence, owner=owner):
+                self._case(kind, evidence, owner, action)
+
+    def test_valid_continuation_writes_one_row(self):
+        r = _run_writer(self.db, "obligation-upsert", "--kind", "capture_recovery", "--pr", "7721",
+                        "--owner", "pm", "--title", "t",
+                        "--action", "Continue from the exact head and verify CI/E2E.",
+                        "--evidence-json", '{"head": "%s"}' % HEAD, "--print-id")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(_rows(self.db), 1)
+
+    def test_ordinary_non_continuation_kind_still_writes(self):
+        r = _run_writer(self.db, "obligation-upsert", "--kind", "cleanup_pr", "--pr", "7721",
+                        "--owner", "pm", "--title", "t", "--action", "seed", "--evidence-json", "{}")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(_rows(self.db), 1)

@@ -74,13 +74,13 @@ def test_noid_exact_key_match_still_resolves_with_receipt(tmp_path) -> None:
 
 def test_id_match_resolves_and_mismatch_refuses(tmp_path) -> None:
     db = str(tmp_path / "byid.db")
-    printed = run(db, "obligation-upsert", "--kind", "ci_rework", "--pr", "1", "--title", "s", "--print-id")
+    printed = run(db, "obligation-upsert", "--kind", "cleanup_pr", "--pr", "1", "--title", "s", "--print-id")
     rid = printed.stdout.strip()
     assert rid.isdigit(), f"expected printed obligation id, got: {printed.stdout!r}"
-    matched = run(db, "obligation-resolve", "--kind", "ci_rework", "--id", rid)
+    matched = run(db, "obligation-resolve", "--kind", "cleanup_pr", "--id", rid)
     assert matched.returncode == 0, matched.stderr
     assert statuses(db) == ["resolved"]
-    missed = run(db, "obligation-resolve", "--kind", "ci_rework", "--id", "99999")
+    missed = run(db, "obligation-resolve", "--kind", "cleanup_pr", "--id", "99999")
     assert missed.returncode != 0, "unknown --id must keep refusing"
 
 
