@@ -26,6 +26,7 @@ interface Harness {
   clearResult: AssignmentEffectClearResult;
   deliveryVerified: boolean;
   deliverError: string | null;
+  corruptTaskAfterDelivery: boolean;
   close: () => void;
 }
 
@@ -40,6 +41,7 @@ function harness(): Harness {
     clearResult: { ok: true, reason: "cleared" },
     deliveryVerified: true,
     deliverError: null,
+    corruptTaskAfterDelivery: false,
     close: () => {
       db.close();
       rmSync(directory, { recursive: true, force: true });
@@ -53,6 +55,11 @@ function harness(): Harness {
     },
     deliverTaskFile: async (slot, filePath) => {
       state.deliverCalls.push(`${slot}:${filePath}`);
+      if (state.corruptTaskAfterDelivery) {
+        // Simulate a durable row that does not corroborate the delivery: the
+        // ownership tuple survives but the recorded task text is gone.
+        state.db.updateSlot(slot, { task: "" });
+      }
       if (state.deliverError) {
         return {
           verified: false,
@@ -325,4 +332,89 @@ test("the durable digest is stable across identical bindings and changes with th
   const digest = computeAssignmentEffectDigest(base);
   assert.equal(digest, computeAssignmentEffectDigest({ ...base }));
   assert.notEqual(digest, computeAssignmentEffectDigest({ ...base, task: TASK + "extra" }));
+});
+
+test("a readback failure is never replayed as an assigned success", async () => {
+  const h = harness();
+  try {
+    h.corruptTaskAfterDelivery = true;
+    const epoch0 = h.db.getSlot(3)!.assignment_epoch;
+
+    const first = await post(h.app, 3, effectBody(3, epoch0));
+    assert.equal(first.json.status, "refused");
+    assert.equal(first.json.step_failed, "readback");
+    assert.equal(first.json.reason, "assignment_readback_inconsistent");
+    assert.equal(
+      h.db.getAssignmentEffectIntent("assign-3-8110")!.state,
+      "pending_delivery",
+      "a failed readback must not finalize the intent",
+    );
+
+    const second = await post(h.app, 3, effectBody(3, epoch0));
+    assert.equal(second.json.status, "refused");
+    assert.equal(second.json.step_failed, "readback", "an identical retry must stay a readback refusal");
+    assert.notEqual(second.json.idempotent, true);
+    assert.equal(
+      h.db.getAssignmentEffectIntent("assign-3-8110")!.state,
+      "pending_delivery",
+      "the intent must still be un-finalized after the replay",
+    );
+  } finally {
+    h.close();
+  }
+});
+
+test("pending_delivery resume refuses on ownership drift with zero delivery", async () => {
+  const h = harness();
+  try {
+    h.deliverError = "session_delivery_unverified";
+    const epoch0 = h.db.getSlot(5)!.assignment_epoch;
+    const failed = await post(h.app, 5, effectBody(5, epoch0));
+    assert.equal(failed.json.step_failed, "delivery");
+    assert.equal(h.db.getAssignmentEffectIntent("assign-5-8110")!.state, "pending_delivery");
+    const deliveriesBefore = h.deliverCalls.length;
+
+    // External ownership change: another actor rebinds the slot away.
+    const now = h.db.getSlot(5)!;
+    const rebind = h.db.rebindSlot(
+      5,
+      now.assignment_epoch,
+      {
+        repository_id: now.repository_id,
+        issue: now.issue,
+        pr: now.pr,
+        branch: now.branch,
+        head_sha: now.head_sha,
+        work_kind: now.work_kind,
+        handoff_id: now.handoff_id,
+        claimed_at: now.claimed_at,
+      },
+      {
+        repository_id: REPO,
+        issue: 9999,
+        pr: null,
+        branch: "fix/9999-someone-else",
+        head_sha: HEAD,
+        work_kind: "implementation",
+        handoff_id: "handoff-9999",
+        claimed_at: "2026-09-21T16:00:00.000Z",
+      },
+      "someone else's task",
+    );
+    assert.equal(rebind.ok, true);
+
+    h.deliverError = null;
+    const retried = await post(h.app, 5, effectBody(5, epoch0));
+    assert.equal(retried.json.status, "refused");
+    assert.equal(retried.json.step_failed, "ownership");
+    assert.equal(retried.json.reason, "assignment_ownership_drift_on_resume");
+    assert.equal(
+      h.deliverCalls.length,
+      deliveriesBefore,
+      "a resumed intent must deliver nothing when ownership drifted",
+    );
+    assert.equal(h.db.getSlot(5)!.issue, 9999, "the external owner must survive untouched");
+  } finally {
+    h.close();
+  }
 });

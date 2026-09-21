@@ -5,7 +5,6 @@ import { createHash } from "node:crypto";
 import type { AssignmentTupleInput, MoPDatabase } from "./db.js";
 import type { SlotState } from "./types.js";
 import {
-  assignmentTupleMatches,
   normalizeAssignmentTuple,
   normalizeBranchIdentity,
   normalizeRepositoryId,
@@ -140,9 +139,16 @@ function refusal(
 }
 
 /**
- * Decide whether the current durable row already carries the desired tuple,
- * i.e. the ownership commit has already happened for this effect and a retry
- * must NOT bump the epoch or rewrite the task text a second time.
+ * Decide whether the current durable row already carries the desired binding
+ * identity, i.e. the ownership commit for this effect has already happened and
+ * a retry must NOT bump the epoch or rewrite the task text a second time.
+ *
+ * `claimed_at` is deliberately excluded from this comparison. MoP owns that
+ * timestamp -- `db.assignSlot` stamps it at commit time rather than persisting
+ * the caller's value -- so comparing it would make every resume path look like
+ * ownership drift and defeat the idempotent-retry contract. The binding
+ * identity plus the assignment epoch are the real generation fence; the resume
+ * path additionally pins `assignment_epoch` to the intent's `committed_epoch`.
  */
 function desiredTupleAlreadyCommitted(
   current: SlotState,
@@ -161,7 +167,13 @@ function desiredTupleAlreadyCommitted(
   });
   const desiredNormalized = normalizeAssignmentTuple(desired);
   if (!currentNormalized || !desiredNormalized) return false;
-  return assignmentTupleMatches(currentNormalized, desiredNormalized);
+  return currentNormalized.repository_id === desiredNormalized.repository_id
+    && currentNormalized.issue === desiredNormalized.issue
+    && currentNormalized.pr === desiredNormalized.pr
+    && currentNormalized.branch_ref === desiredNormalized.branch_ref
+    && currentNormalized.head_sha === desiredNormalized.head_sha
+    && currentNormalized.work_kind === desiredNormalized.work_kind
+    && currentNormalized.handoff_id === desiredNormalized.handoff_id;
 }
 
 export function registerAssignmentEffectRoutes(
@@ -391,6 +403,25 @@ export function registerAssignmentEffectRoutes(
         assignment_epoch: committedEpoch,
         request_digest: requestDigest,
       });
+    } else {
+      // Resume path: the ownership commit already happened for this binding, so
+      // revalidate the live row BEFORE re-delivering. If the slot was released,
+      // re-tasked, or the epoch moved underneath us, refuse with zero delivery.
+      // Never rebind, silently repair, or roll the ownership back here.
+      const current = db.getSlot(slotNum);
+      const epochMatches = typeof committedEpoch !== "number"
+        || current?.assignment_epoch === committedEpoch;
+      if (
+        !current
+        || current.occupied !== true
+        || !desiredTupleAlreadyCommitted(current, desiredTuple)
+        || !epochMatches
+      ) {
+        return c.json(
+          refusal("ownership", "assignment_ownership_drift_on_resume", slotStateSummary(current)),
+          409,
+        );
+      }
     }
 
     const delivery = await dependencies.deliverTaskFile(slotNum, request.task_file);
@@ -403,13 +434,6 @@ export function registerAssignmentEffectRoutes(
         502,
       );
     }
-    db.markAssignmentEffectDelivered(request.effect_id, JSON.stringify(delivery.receipt));
-    db.logEvent(slotNum, "assignment_effect_delivered", null, null, {
-      effect_id: request.effect_id,
-      assignment_epoch: committedEpoch,
-      delivery: delivery.receipt,
-    });
-
     const after = db.getSlot(slotNum);
     const readbackOk = !!after
       && after.occupied === true
@@ -417,11 +441,23 @@ export function registerAssignmentEffectRoutes(
       && typeof after.task === "string"
       && after.task.trim() !== "";
     if (!readbackOk) {
+      // The task was delivered but the durable row does not corroborate it.
+      // NEVER finalize here: the intent stays pending_delivery so an identical
+      // retry re-enters this readback (ownership revalidated first) instead of
+      // replaying as an assigned/idempotent=true success against a row that is
+      // still inconsistent.
       return c.json(
         refusal("readback", "assignment_readback_inconsistent", slotStateSummary(after)),
         409,
       );
     }
+
+    db.markAssignmentEffectDelivered(request.effect_id, JSON.stringify(delivery.receipt));
+    db.logEvent(slotNum, "assignment_effect_delivered", null, null, {
+      effect_id: request.effect_id,
+      assignment_epoch: committedEpoch,
+      delivery: delivery.receipt,
+    });
 
     return c.json({
       status: "assigned",
