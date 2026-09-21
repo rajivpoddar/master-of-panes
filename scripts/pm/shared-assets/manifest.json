@@ -46,6 +46,15 @@
       "source_path": "claude/hooks/block-invalid-issue-contract-ledger.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/block-raw-clear-outside-mop.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-raw-clear-guard",
+      "sha256": "593c1fb406b3a1d46441c5c26e002371300d17c1d13eacfc4592e4f2150c7275",
+      "source_path": "claude/hooks/block-raw-clear-outside-mop.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/block-invalid-issue-contract-ledger.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -915,7 +924,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 98,
+    "selected_count": 99,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

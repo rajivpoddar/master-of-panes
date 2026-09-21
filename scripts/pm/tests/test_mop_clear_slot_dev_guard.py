@@ -24,6 +24,7 @@ SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 SCRIPT = SHARED / "claude" / "scripts" / "mop-clear-slot.sh"
 SKILL = SHARED / "claude" / "skills" / "heartbeat-tasks" / "SKILL.md"
 MANIFEST = SHARED / "manifest.json"
+RAW_CLEAR = SHARED / "claude" / "hooks" / "block-raw-clear-outside-mop.sh"
 
 GUARD_FLAG = "--operator-confirm-dev-slot-clear"
 DEAD_URL = "http://127.0.0.1:9"  # discard port: the health probe always fails
@@ -97,6 +98,40 @@ class MopClearSlotDevGuardTests(unittest.TestCase):
         self.assertEqual(row["sha256"], hashlib.sha256(SCRIPT.read_bytes()).hexdigest())
         self.assertEqual(manifest["entries"], sorted(manifest["entries"], key=lambda i: i["source_path"]))
         self.assertEqual(manifest["inventory"]["selected_count"], len(manifest["entries"]))
+
+
+class RawClearHookMessageTests(unittest.TestCase):
+    """The /clear-injection hook must not send S1-S6 callers to a bare dev-slot clear."""
+
+    def test_bare_dev_slot_clear_is_no_longer_recommended(self) -> None:
+        hook = RAW_CLEAR.read_text(encoding="utf-8")
+        self.assertNotIn("mop-clear-slot.sh N.", hook, "the bare dev-slot clear must not be the sanctioned route")
+
+    def test_sanctioned_paths_are_named(self) -> None:
+        hook = RAW_CLEAR.read_text(encoding="utf-8")
+        self.assertIn("mop-assign-slot", hook, "assignment-boundary clearing must be named")
+        self.assertIn("--operator-confirm-dev-slot-clear", hook, "the operator acknowledgement must be named")
+        self.assertIn("mop-clear-slot.sh pm", hook, "PM self-clear must stay documented")
+
+    def test_hook_still_blocks_the_injection_class_only(self) -> None:
+        hook = RAW_CLEAR.read_text(encoding="utf-8")
+        self.assertIn("mcp__plugin_master-of-panes_mop__mop_send_to_slot", hook)
+        self.assertIn("tmux[[:space:]]+send-keys", hook)
+        # it must not start policing assignment ownership - that is the separate Slice-B hook
+        self.assertNotIn("mop-assign-slot.py --slot", hook.split("json_block")[0])
+
+    def test_manifest_row_is_mapped_and_current(self) -> None:
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        rows = [r for r in manifest["entries"] if r["source_path"] == "claude/hooks/block-raw-clear-outside-mop.sh"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(
+            row["canonical_target"],
+            "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/block-raw-clear-outside-mop.sh",
+        )
+        self.assertEqual(row["mode"], 493)
+        self.assertEqual(row["dependency_status"], "closed")
+        self.assertEqual(row["sha256"], hashlib.sha256(RAW_CLEAR.read_bytes()).hexdigest())
 
 
 if __name__ == "__main__":
