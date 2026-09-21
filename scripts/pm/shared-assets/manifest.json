@@ -298,6 +298,15 @@
       "source_path": "claude/scripts/launch-slot-6.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/mop-clear-slot.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-mop-clear-slot",
+      "sha256": "c79fad24ec1e0bf6cbce676dbf4b2a29751f669c7e2de1ebf41c957a91cf1416",
+      "source_path": "claude/scripts/mop-clear-slot.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/mop-slot-respawn.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -906,7 +915,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 97,
+    "selected_count": 98,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
