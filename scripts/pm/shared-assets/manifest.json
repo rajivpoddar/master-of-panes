@@ -577,6 +577,15 @@
       "source_path": "claude/skills/qa-brief/SKILL.md"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/session-age-clear/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-session-age-clear",
+      "sha256": "34f5c262525a49c0e50302fdcb97f7a53b84a15c89e4594f255247e49e97e85b",
+      "source_path": "claude/skills/session-age-clear/SKILL.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/slack-message/scripts/block-unsupported-transcript-split.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -924,7 +933,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 99,
+    "selected_count": 100,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
