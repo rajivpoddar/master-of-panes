@@ -237,23 +237,24 @@ test("live work is still protected: DND and a busy row refuse", async () => {
   }
 });
 
-test("a checkout that is not settled is reset through the pane instead of refused", async () => {
+test("a checkout that is not settled is reset, with no pane prose delivered", async () => {
   const f = fixture({ settled: false });
   try {
-    let deliveries = 0;
+    let resets = 0;
     const coordinator = new NativeSlotReleaseCoordinator({
       db: f.db,
       resolveOwningCheckout: async () => CHECKOUT,
-      deliverInstruction: async () => { deliveries += 1; return true; },
       owningSlotIsIdle: async () => true,
-      resetAndObserveCheckout: async () => ({
-        checkout_path: CHECKOUT, branch: "main", head: MAIN_HEAD, clean: true, reset_succeeded: true, error: null,
-      }),
+      resetAndObserveCheckout: async () => {
+        resets += 1;
+        return { checkout_path: CHECKOUT, branch: "main", head: MAIN_HEAD, clean: true, reset_succeeded: true, error: null };
+      },
       observeCheckout: async () => ({ checkout_path: CHECKOUT, clean: false, unpushed_commits: ["deadbeef"], branch: "fix/7982" }),
     });
     const result = await coordinator.release(releaseOf(f.db));
     assert.equal(result.code, "released");
-    assert.equal(deliveries, 1, "the pane is instructed before the reset");
+    assert.equal(resets, 1, "the checkout is switched to main at the exact intended head");
+    assert.equal(f.db.getEvents(1, 50, "release_instruction_delivered").length, 0, "no pane prose is delivered");
   } finally {
     f.close();
   }
