@@ -6,7 +6,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
-      "sha256": "33e7e0447d92fef778b75bca2dfea074ad1f8d1e7f27fe25c601f67ad01c7344",
+      "sha256": "2d2c377bce846cacc0bf5649316c9f5691b08393dccae1aa637761f3d30ff3c7",
       "source_path": "claude/control_plane/runtime_observation.py"
     },
     {
@@ -429,7 +429,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
-      "sha256": "0d2428a0d2270b54482ec48ac248d3c5425bbf8d86dcc04163d7c50c8dc5a75b",
+      "sha256": "631a3d3263f6c7df1f698f5abe0a68f6ece389c8d1ae7f383c55717d59c7c758",
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py"
     },
     {

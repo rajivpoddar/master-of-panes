@@ -162,8 +162,8 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
             module = importlib.util.module_from_spec(spec)
             sys.modules["sakshi_target"] = module
             spec.loader.exec_module(module)
-            if module.RuntimeObservationAdapter.__module__ != "pm_operator.control_plane.runtime_observation":
-                raise AssertionError("installed target did not load the canonical observation authority")
+            if module.RuntimeObservationAdapter.__module__ != "control_plane.runtime_observation":
+                raise AssertionError("installed target did not load the adopted observation authority")
             head = "f109414c02cc296510103fe2c090ce964e9b9dfb"
             prs = []
             for number in range(7591, 7602):
