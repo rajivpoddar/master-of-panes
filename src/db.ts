@@ -1132,7 +1132,13 @@ export class MoPDatabase {
       if (!assignmentTupleMatches(slotAssignmentTuple(live), expectedTuple)) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
       }
-      if (live.task !== expectedTask.trim()) {
+      // Compare the task modulo surrounding whitespace on BOTH sides: the
+      // stored task may itself carry trailing/leading whitespace, so a
+      // byte-identical caller value used to be rejected forever
+      // (`live.task !== expectedTask.trim()`). Genuinely different text still
+      // refuses; the durable effect identity keeps binding the caller's exact
+      // value through the digest.
+      if ((live.task ?? "").trim() !== expectedTask.trim()) {
         return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "task_mismatch" };
       }
       if (live.dnd) {
