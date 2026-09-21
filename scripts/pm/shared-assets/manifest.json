@@ -402,7 +402,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops",
-      "sha256": "67fff1ef3c3c8a709f7b5aef9f38aed488a90acb7d91a735cdfeb2e6ad685c89",
+      "sha256": "c762e0d890d4c8850fd15a08ab0f83b0fc370fd2d321b25cb3a5a99a867ffb1a",
       "source_path": "claude/scripts/pm-ops-legacy.py"
     },
     {

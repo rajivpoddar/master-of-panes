@@ -612,7 +612,93 @@ def record_resolution_receipt(con: sqlite3.Connection, kind: str, target_type: s
         )
 
 
+# ─── Durable-continuation writer contract ──────────────────────────────
+# The reader (sakshi-heartbeat.py) accepts an exact-head continuation only when
+# the kind is in CONTINUATION_KIND_LANES, the evidence carries exactly one
+# accepted head key with a lowercase 40-hex value, and owner/required_action are
+# concrete. These constants mirror that predicate as duplicated runtime values
+# (no runtime dependency on the heartbeat); the focused contract test loads the
+# reader source and asserts they stay equal. `durable_continuation` is
+# deliberately ABSENT - it is not reader-recognized, so validating it would
+# bless rows the reader rejects.
+CONTINUATION_HEAD_KEYS = (
+    "head",
+    "head_sha",
+    "headRefOid",
+    "current_head",
+    "current_head_sha",
+)
+CONTINUATION_KIND_LANES = {
+    "ci_watch": "CI",
+    "pr_admission": "CI",
+    "capture_release": "capture",
+    "capture_recovery": "capture",
+    "pr_qa_pending": "repro/proof",
+    "slot_ready_pending": "repro/proof",
+    "slot_retask": "rework",
+    "slot_rework": "rework",
+    "dependency_wait": "dependency-blocked",
+    "infra_blocker": "dependency-blocked",
+    "rework": "rework-blocked",
+    "rework_review": "rework-blocked",
+    "ci_rework": "rework-blocked",
+    "control_plane_defect": "rework-blocked",
+    "followup": "rework-blocked",
+}
+CONTINUATION_PLACEHOLDERS = {
+    "unknown",
+    "none",
+    "n/a",
+    "cto-owned",
+    "relay-only",
+    "not-actionable",
+}
+CONTINUATION_HEAD_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def continuation_upsert_refusal(*, kind, evidence, owner, required_action):
+    """Return a typed refusal reason, or None when the upsert is well-formed.
+
+    Pure: performs no DB access. Called before init_db()/connect() so a refusal
+    writes zero rows and leaves no partial state.
+    """
+    if kind not in CONTINUATION_KIND_LANES:
+        return None  # not a continuation kind: existing behavior is preserved
+    heads = []
+    for key in CONTINUATION_HEAD_KEYS:
+        if key not in evidence:
+            continue
+        value = evidence.get(key)
+        if not isinstance(value, str) or not CONTINUATION_HEAD_RE.fullmatch(value):
+            return "continuation_head_malformed"
+        heads.append(value)
+    if not heads:
+        return "continuation_head_missing"
+    if len(set(heads)) > 1:
+        return "continuation_head_conflicting"
+    owner_text = owner.strip() if isinstance(owner, str) else ""
+    if not owner_text or owner_text.lower() in CONTINUATION_PLACEHOLDERS:
+        return "continuation_owner_placeholder"
+    action_text = required_action.strip() if isinstance(required_action, str) else ""
+    if not action_text or action_text.lower() in CONTINUATION_PLACEHOLDERS:
+        return "continuation_action_placeholder"
+    return None
+
+
 def upsert_obligation(args: argparse.Namespace) -> int:
+    # Validate BEFORE init_db()/connect(): a refused continuation upsert must write zero
+    # rows and leave no partial state.
+    _evidence_for_contract = parse_payload(args.evidence, args.evidence_json)
+    _kind_for_contract = obligation_key(args)[0]
+    _refusal = continuation_upsert_refusal(
+        kind=_kind_for_contract,
+        evidence=_evidence_for_contract if isinstance(_evidence_for_contract, dict) else {},
+        owner=getattr(args, "owner", None),
+        required_action=getattr(args, "action", None),
+    )
+    if _refusal:
+        print(f"REFUSED: {_refusal}", file=sys.stderr)
+        return 2
     init_db()
     now = utc_now()
     evidence = parse_payload(args.evidence, args.evidence_json)
