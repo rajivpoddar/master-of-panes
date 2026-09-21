@@ -480,6 +480,15 @@
       "source_path": "claude/skills/direct-release/SKILL.md"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/heartbeat-tasks/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-heartbeat-tasks",
+      "sha256": "a637e0f0cd1ec6983fe25a3db03de795139364185d4684dc657e60c9af58c7b9",
+      "source_path": "claude/skills/heartbeat-tasks/SKILL.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/heydonna-review-cap-cto-approve-handoff/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -897,7 +906,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 96,
+    "selected_count": 97,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
