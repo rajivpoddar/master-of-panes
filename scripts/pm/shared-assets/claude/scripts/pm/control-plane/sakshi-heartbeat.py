@@ -398,11 +398,16 @@ def apply_clear_policy(sessions: list[dict[str, Any]], slots: dict[str, dict[str
         row["pm_clear_candidate"] = False
         if row.get("clear_due"):
             row["clear_due"] = True
-            row["clear_reason"] = (
-                f">={SESSION_CLEAR_THRESHOLD_HOURS}h session age; "
-                "session-age-clear owns logged MoP clear"
-            )
-            row["pm_clear_candidate"] = True
+            # Dev slots S1-S6 are never cleared on a cadence: their clearing belongs
+            # to the new-issue assignment boundary. Only the PM row keeps the clear
+            # handoff fields, so the age read above stays observation-only for dev
+            # slots - no reason text, no candidate flag, nothing actionable.
+            if str(row.get("id") or "") == "pm":
+                row["clear_reason"] = (
+                    f">={SESSION_CLEAR_THRESHOLD_HOURS}h session age; "
+                    "session-age-clear owns logged MoP clear"
+                )
+                row["pm_clear_candidate"] = True
 
 
 def update_omp_effective_starts(
@@ -2535,8 +2540,9 @@ def format_session_age(sessions: list[dict[str, Any]]) -> list[str]:
     else:
         flag_text = ", ".join(f"{row['label']} {row.get('age', 'unknown')} {row.get('severity')}" for row in flags)
         lines = [f"*Session age:* {flag_text}."]
-    if clear_due:
-        due_text = ", ".join(f"{row['label']} {row.get('age', 'unknown')}" for row in clear_due)
+    pm_clear_due = [row for row in clear_due if str(row.get("id") or "") == "pm"]
+    if pm_clear_due:
+        due_text = ", ".join(f"{row['label']} {row.get('age', 'unknown')}" for row in pm_clear_due)
         lines.append(f"*Session-age clear handoff:* {due_text} clear_due=true; hourly ops/session-age-clear owns execution.")
     if already_requested:
         requested_text = ", ".join(
@@ -2859,9 +2865,13 @@ def build_report(data: dict[str, Any]) -> str:
     actions: list[str] = []
     actions.extend(open_pr_activity_action_lines(data.get("open_pr_activity_audit")))
     for row in clear_due:
+        if str(row.get("id") or "") != "pm":
+            # Dev slots S1-S6 are never cleared on a cadence and no directive is
+            # emitted for them; their clearing belongs to the assignment boundary.
+            continue
         if row.get("clear_already_requested"):
             continue
-        target = "pm" if row["id"] == "pm" else row["id"]
+        target = "pm"
         actions.append(
             f"Session-age clear due for {row['label']} {row['age']}: hourly ops should invoke Skill(session-age-clear) for slot \"{target}\" ({row.get('clear_reason')})."
         )
