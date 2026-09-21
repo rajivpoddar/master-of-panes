@@ -45,6 +45,10 @@ function harness(options: {
   task?: string;
   onDeliver?: (db: MoPDatabase) => void;
   onSleep?: (db: MoPDatabase, tick: number) => void;
+  /** The post-delivery pane idle probe; used to model a prompt that registers late. */
+  onIdleProbe?: (db: MoPDatabase) => void;
+  /** Set false to model a prompt whose UserPromptSubmit has NOT registered yet. */
+  autoRegisterOnDelivery?: boolean;
   selfTurnSettleTimeoutMs?: number;
   selfTurnSettlePollMs?: number;
 } = {}) {
@@ -64,11 +68,16 @@ function harness(options: {
       state.deliveries.push(instruction);
       // UserPromptSubmit -> db.startAgentTurn(slot, session_id), exactly as the
       // live hook chain records the delivered instruction as an agent turn.
-      db.startAgentTurn(1, SESSION_ID);
+      // Suppressible: in the real race that hook can land AFTER this delivery,
+      // which is exactly what the delivery-registration grace must absorb.
+      if (options.autoRegisterOnDelivery !== false) db.startAgentTurn(1, SESSION_ID);
       options.onDeliver?.(db);
       return true;
     },
-    owningSlotIsIdle: async () => true, // the pane probe that said "idle" while the row was busy
+    owningSlotIsIdle: async () => {
+      options.onIdleProbe?.(db);
+      return true; // the pane probe that said "idle" while the row was busy
+    },
     resetAndObserveCheckout: async (): Promise<CheckoutResetObservation> => {
       state.resets += 1;
       return { checkout_path: CHECKOUT, branch: "main", head: MAIN_HEAD, clean: true, reset_succeeded: true, error: null };
@@ -352,6 +361,105 @@ test("no-pane release still refuses genuinely different task text", async () => 
     assert.equal(result.code, "task_mismatch");
     assert.equal(value.db.getSlot(1)!.occupied, true);
     assert.equal(value.db.getEvents(1, 50, "slot_released_no_pane").length, 0);
+  } finally {
+    value.close();
+  }
+});
+
+/**
+ * Keep the quiescence window out of the frame: any turn mutation bumps
+ * `last_meaningful_work_at`, and these tests are about TURN REGISTRATION, not
+ * about the (unchanged) release quiescence gate.
+ */
+function markQuiet(db: MoPDatabase): void {
+  db.updateSlot(1, { last_meaningful_work_at: new Date(Date.now() - 10 * 60 * 1000).toISOString() });
+}
+
+test("GREEN: the settle wait holds through delivery-registration, binds the induced turn that registers AFTER the first idle sample, then releases exactly once", async () => {
+  // The live race: the pane's UserPromptSubmit lands a moment after delivery, so
+  // the first post-delivery sample still reads an idle row with no induced turn.
+  // The wait must not accept that sample as settlement.
+  const value = harness({
+    autoRegisterOnDelivery: false,
+    onDeliver: markQuiet,
+    onSleep: (db, tick) => {
+      if (tick === 1) { db.startAgentTurn(1, SESSION_ID); markQuiet(db); } // the late UserPromptSubmit
+      if (tick === 2) db.finishAgentTurn(1, SESSION_ID); // the Stop hook
+    },
+  });
+  try {
+    const request = releaseRequest(value.db);
+    const result = await value.coordinator.release(request);
+
+    assert.equal(result.success, true, `a late-registering induced turn must not become a refusal: ${result.code} / ${result.message}`);
+    assert.equal(result.code, "released");
+    assert.equal(value.deliveries.length, 1, "exactly ONE reset instruction");
+    assert.equal(value.db.getSlot(1)!.occupied, false);
+    assert.equal(value.db.getSlot(1)!.assignment_epoch, request.expected_epoch + 1);
+
+    const audits = deliveryAudits(value.db);
+    assert.equal(audits.length, 1);
+    const payload = JSON.parse(audits[0].payload) as Record<string, unknown>;
+    assert.equal(payload.induced_turn_id, SESSION_ID, "the late-observed induced turn id is bound and audited");
+    assert.equal(payload.settle_outcome, "settled");
+    assert.ok(
+      (payload.settle_ms as number) >= 2 * 1_000,
+      `the wait must span the two-poll registration grace (settle_ms=${String(payload.settle_ms)})`,
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test("RED/GREEN: registration landing just after the settle sample is still waited out, so the release never refuses on its own prompt", async () => {
+  // On the shipped bytes the wait returns at settle_ms=0 / induced_turn_id=null;
+  // the prompt then registers and the authoritative post-delivery re-check
+  // refuses the release on a turn the release itself created.
+  let registered = false;
+  const value = harness({
+    autoRegisterOnDelivery: false,
+    onDeliver: markQuiet,
+    onSleep: (db, tick) => {
+      if (tick === 1 && !registered) { db.startAgentTurn(1, SESSION_ID); registered = true; markQuiet(db); }
+      if (tick === 2) db.finishAgentTurn(1, SESSION_ID);
+    },
+    onIdleProbe: (db) => {
+      if (!registered) { db.startAgentTurn(1, SESSION_ID); registered = true; }
+    },
+  });
+  try {
+    const request = releaseRequest(value.db);
+    const result = await value.coordinator.release(request);
+
+    assert.equal(result.success, true, `the release must wait out the registration it induced: ${result.code} / ${result.message}`);
+    assert.equal(result.code, "released");
+    assert.equal(value.deliveries.length, 1);
+    const payload = JSON.parse(deliveryAudits(value.db)[0].payload) as Record<string, unknown>;
+    assert.equal(payload.induced_turn_id, SESSION_ID);
+    assert.ok((payload.settle_ms as number) >= 2 * 1_000);
+  } finally {
+    value.close();
+  }
+});
+
+test("GREEN: when no induced turn ever registers, the wait exits on the bounded two-poll grace and releases once", async () => {
+  let sleeps = 0;
+  const value = harness({
+    autoRegisterOnDelivery: false, // the delivered prompt never reaches the pane
+    onDeliver: markQuiet,
+    onSleep: () => { sleeps += 1; },
+  });
+  try {
+    const request = releaseRequest(value.db);
+    const result = await value.coordinator.release(request);
+
+    assert.equal(result.success, true, `expected a bounded-grace release: ${result.code} / ${result.message}`);
+    assert.equal(result.code, "released");
+    assert.equal(sleeps, 2, "bounded: exactly the two-poll grace, never an indefinite wait");
+    const payload = JSON.parse(deliveryAudits(value.db)[0].payload) as Record<string, unknown>;
+    assert.equal(payload.induced_turn_id, null, "no induced turn was ever observed");
+    assert.equal(payload.settle_ms, 2 * 1_000, "the grace is exactly two complete poll intervals");
+    assert.equal(value.deliveries.length, 1);
   } finally {
     value.close();
   }

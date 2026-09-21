@@ -77,6 +77,17 @@ export const RELEASE_QUIESCENCE_MS = 60 * 1000;
  */
 export const RELEASE_SELF_TURN_SETTLE_MS = 180 * 1000;
 export const RELEASE_SELF_TURN_POLL_MS = 2 * 1000;
+/**
+ * Delivery-registration grace, measured in complete settle poll intervals.
+ *
+ * The delivered instruction is a user prompt, so its `UserPromptSubmit` turn can
+ * register a moment AFTER the first post-delivery sample. A row that still shows
+ * no induced turn is therefore NOT proof of settlement until the prompt has had
+ * at least this many complete poll intervals to register. Once an induced turn
+ * has actually been observed, its own closure is authoritative and this grace no
+ * longer applies.
+ */
+export const RELEASE_SELF_TURN_REGISTRATION_POLLS = 2;
 
 /** Outcome of the bounded settle wait that follows a reset-instruction delivery. */
 export type ReleaseSelfTurnSettle =
@@ -452,6 +463,7 @@ export class NativeSlotReleaseCoordinator {
       ?? ((ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms)));
     const timeoutMs = this.dependencies.selfTurnSettleTimeoutMs ?? RELEASE_SELF_TURN_SETTLE_MS;
     const pollMs = this.dependencies.selfTurnSettlePollMs ?? RELEASE_SELF_TURN_POLL_MS;
+    const registrationGraceMs = pollMs * RELEASE_SELF_TURN_REGISTRATION_POLLS;
     const startedAt = now();
     let inducedTurnId: string | null = priorTurnId;
     let lastCause: ReleaseBlockCause = "active_turn";
@@ -480,10 +492,20 @@ export class NativeSlotReleaseCoordinator {
       // means exactly "the post-delivery authoritative re-check will pass":
       // the induced turn has closed AND the short settling window has elapsed.
       const readiness = evaluateReleaseReadiness(row, now());
-      if (readiness.ok) {
+      // A row that reads "ready" before the delivered prompt has had time to
+      // register its UserPromptSubmit turn is NOT proof of settlement: the
+      // induced turn would then appear after this wait returned, and the
+      // authoritative post-delivery re-check would refuse the release on a turn
+      // the release itself created. Hold for the bounded two-poll grace while no
+      // induced turn has been observed; once one is observed its closure is
+      // authoritative and this grace no longer applies.
+      const registrationPending = inducedTurnId === null && elapsed < registrationGraceMs;
+      if (readiness.ok && !registrationPending) {
         return { ok: true, induced_turn_id: inducedTurnId, waited_ms: elapsed };
       }
-      lastCause = readiness.cause;
+      if (!readiness.ok) {
+        lastCause = readiness.cause;
+      }
       if (elapsed >= timeoutMs) {
         return { ok: false, kind: "timeout", slot: row, induced_turn_id: inducedTurnId, waited_ms: elapsed, cause: lastCause };
       }
