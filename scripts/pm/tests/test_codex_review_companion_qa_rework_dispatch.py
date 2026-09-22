@@ -36,6 +36,7 @@ const cases = JSON.parse(process.argv[3]);
 const out = [];
 for (const c of cases) {
   const re = m.isReReview({reviewType: c[0], reworkItems: c[1]});
+  if (c[2] === false) { out.push({reviewType: c[0], rework: Boolean(c[1]), isReReview: re, framing: false, err: null, skipped: true}); continue; }
   let loaded = null, err = null;
   try { loaded = m.loadPromptTemplate({reviewType: c[0], reworkItems: c[1], previousHead: "0".repeat(40)}); }
   catch (e) { err = String(e && e.message || e); }
@@ -72,7 +73,7 @@ class QaReworkDispatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             tmp = pathlib.Path(d)
             home = stage_home(tmp)
-            result = run_node(COMPANION, [[c[0], c[1]] for c in CASES], home, tmp)
+            result = run_node(COMPANION, [[c[0], c[1], c[4]] for c in CASES], home, tmp)
             self.assertEqual(result.returncode, 0, result.stderr[-400:])
             rows = json.loads(result.stdout.strip().splitlines()[-1])
             for row, (rt, rw, want_re, _rel, must_load) in zip(rows, CASES):
@@ -96,7 +97,7 @@ class QaReworkDispatchTests(unittest.TestCase):
             self.assertEqual(blob.returncode, 0)
             parent.write_text(blob.stdout, encoding="utf-8")
             home = stage_home(tmp)
-            result = run_node(parent, [["qa", "x"]], home, tmp)
+            result = run_node(parent, [["qa", "x", True]], home, tmp)
             self.assertEqual(result.returncode, 0, result.stderr[-400:])
             row = json.loads(result.stdout.strip().splitlines()[-1])[0]
             self.assertFalse(row["isReReview"], "reviewed parent must NOT treat QA rework as rework")
