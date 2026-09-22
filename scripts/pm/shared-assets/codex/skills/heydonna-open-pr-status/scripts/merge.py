@@ -181,6 +181,10 @@ def workflow_proof(pr, workflow, names):
         if scope and scope.get("conclusion") == "skipped":
             continue
         by_name = {job["name"]: job for job in jobs}
+        if scope is not None and successful(scope):
+            exempt = classifier_exemption(pr, workflow, run, scope)
+            if exempt is not None:
+                return exempt
         if not successful(run) or not all(successful(by_name.get(name, {})) for name in names):
             raise Refusal(f"WORKFLOW_NOT_GREEN workflow={workflow} run={run['id']}")
         # These steps distinguish real test execution from successful wrapper jobs.
@@ -194,6 +198,131 @@ def workflow_proof(pr, workflow, names):
                 raise Refusal(f"TEST_EXECUTION_MISSING workflow={workflow} run={run['id']} step={prefix}")
         return {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head}
     raise Refusal(f"WORKFLOW_MISSING workflow={workflow}")
+
+
+# ---------- classifier exemption (control-plane-only PRs) ----------
+CLASSIFIER_JOB_NAME = "classify-change-scope"
+EXEMPTION_RECEIPT = {
+    "schema_version": 1,
+    "scope": "control_plane_only",
+    "paid_ci_exempt": True,
+    "control_plane_only": True,
+    "product_changed": False,
+    "ci_required": False,
+    "e2e_required": False,
+}
+REQUIRED_BINDINGS = ("BASE_SHA", "HEAD_SHA", "WORKFLOW_SHA", "EVENT_NAME", "PR_NUMBER")
+HEX40 = re.compile(r"^[0-9a-f]{40}$")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+TS = re.compile(r"^\s*\d{4}-\d\d-\d\dT[0-9:.]+Z\s?")
+
+
+def job_log(job_id):
+    """Raw job log text via the existing gh transport (no JSON decode)."""
+    return command("gh", "api", f"repos/{REPO}/actions/jobs/{job_id}/logs")
+
+
+def strip_log_framing(text):
+    """Remove only the standard log framing: ANSI colour and leading timestamps."""
+    out = []
+    for line in ANSI.sub("", text).splitlines():
+        match = TS.match(line)
+        out.append(line[match.end():] if match else line)
+    return out
+
+
+def classifier_receipt(lines):
+    """Exactly one schema_version=1 JSON receipt, else None."""
+    found = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            obj = json.loads(stripped)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("schema_version") == 1:
+            found.append(obj)
+    if len(found) != 1:
+        return None
+    receipt = found[0]
+    for key, expected in EXEMPTION_RECEIPT.items():
+        if receipt.get(key) != expected:
+            return None
+    rules = receipt.get("rules_sha256")
+    if not isinstance(rules, str) or not HEX64.match(rules):
+        return None
+    return receipt
+
+
+def classifier_bindings(lines):
+    """Unique env bindings from the classifier log, else None."""
+    seen = {key: set() for key in REQUIRED_BINDINGS}
+    for line in lines:
+        stripped = line.strip()
+        for key in REQUIRED_BINDINGS:
+            prefix = key + "="
+            if stripped.startswith(prefix):
+                seen[key].add(stripped[len(prefix):].strip())
+    if any(len(values) != 1 for values in seen.values()):
+        return None
+    return {key: next(iter(values)) for key, values in seen.items()}
+
+
+def contents_identity(path, ref):
+    """(blob sha, bytes) for a repo path at a ref through the GitHub contents API."""
+    payload = api(f"contents/{path}?ref={ref}")
+    if not isinstance(payload, dict) or "sha" not in payload:
+        return None
+    blob = payload["sha"]
+    encoded = payload.get("content") or ""
+    try:
+        import base64
+        raw = base64.b64decode(encoded) if encoded else b""
+    except Exception:
+        return None
+    return blob, raw
+
+
+def classifier_exemption(pr, workflow, run, scope):
+    """Fail-closed verifier. Returns an exemption proof, or None to fall through."""
+    head = pr["head"]["sha"]
+    if not successful(run) or not successful(scope):
+        return None
+    lines = strip_log_framing(job_log(scope["id"]))
+    receipt = classifier_receipt(lines)
+    if receipt is None:
+        return None
+    bindings = classifier_bindings(lines)
+    if bindings is None:
+        return None
+    base_sha, head_sha = bindings["BASE_SHA"], bindings["HEAD_SHA"]
+    workflow_sha, event = bindings["WORKFLOW_SHA"], bindings["EVENT_NAME"]
+    if not (HEX40.match(base_sha) and HEX40.match(workflow_sha)):
+        return None
+    if head_sha != head or event != "pull_request" or bindings["PR_NUMBER"] != str(pr["number"]):
+        return None
+    commit = api(f"git/commits/{workflow_sha}")
+    parents = [parent["sha"] for parent in commit.get("parents", [])]
+    if parents != [base_sha, head_sha]:
+        return None
+    workflow_path = f".github/workflows/{workflow}"
+    for path in (workflow_path, "scripts/ci/change_scope.py", "scripts/ci/change-scope-rules.json"):
+        at_base = contents_identity(path, base_sha)
+        at_workflow = contents_identity(path, workflow_sha)
+        if at_base is None or at_workflow is None or at_base[0] != at_workflow[0]:
+            return None
+    rules = contents_identity("scripts/ci/change-scope-rules.json", workflow_sha)
+    if rules is None:
+        return None
+    import hashlib
+    if hashlib.sha256(rules[1]).hexdigest() != receipt["rules_sha256"]:
+        return None
+    return {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head,
+            "scope_job_id": scope["id"], "workflow_sha": workflow_sha,
+            "rules_sha256": receipt["rules_sha256"], "exempt": "control_plane_only"}
 
 
 def merge(number, head, apply=False, unrelated_main=None):
