@@ -228,7 +228,7 @@ class RedAndNegativeTests(unittest.TestCase):
 
 class ParentRedWitnessTests(unittest.TestCase):
     def test_reviewed_parent_refuses_the_exempt_shape(self):
-        blob = subprocess.run(["git", "show", "origin/main:scripts/pm/shared-assets/codex/skills/"
+        blob = subprocess.run(["git", "show", "9a95152844ad0e551b5a4a21a13a96cdc3d0e312:scripts/pm/shared-assets/codex/skills/"
                                "heydonna-open-pr-status/scripts/merge.py"],
                               capture_output=True, text=True, cwd=HERE)
         self.assertEqual(blob.returncode, 0, blob.stderr)
@@ -277,7 +277,10 @@ class RealColonFormLogTests(unittest.TestCase):
             proof()
 
     def test_reviewed_parent_refuses_the_colon_form_exempt_shape(self):
-        """RED: the superseded candidate only accepted KEY=value, so colon-form logs refused."""
+        """RED: the superseded candidate only accepted KEY=value, so colon-form logs refused.
+
+        The reviewed parent is pinned by commit, not by origin/main, so this witness
+        stays valid after publication moves main."""
         rev = "5bde859adfc67fbe7bddcc7b67e22f097d3143a6"
         blob = subprocess.run(["git", "show", f"{rev}:scripts/pm/shared-assets/codex/skills/"
                                "heydonna-open-pr-status/scripts/merge.py"],
