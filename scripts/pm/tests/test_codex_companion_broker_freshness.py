@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Contract tests for the companion broker pre-acquisition freshness gate.
 
-Synthetic epochs only: nothing here starts, kills, inspects or recycles a real
-broker, and no test reads or asserts on token material.
+Live-shaped where it matters: several cases stand up a REAL AF_UNIX listener and
+speak the broker's real read-only probe (thread/list) at it. No test ever starts
+or kills a real broker process - the recycle path is always injected.
 """
 
 from __future__ import annotations
@@ -10,25 +11,18 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 ROOT = pathlib.Path(__file__).parents[3]
 HELPER = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "scripts" / "codex-companion-broker-freshness.py"
 CANARY = "rt.1.CANARY_TOKEN_VALUE_MUST_NEVER_APPEAR"
-
-BROKER_CMD = (
-    "node /x/app-server-broker.mjs serve --endpoint unix:/tmp/cxc-A/broker.sock "
-    "--cwd /work/co1 --pid-file /tmp/cxc-A/broker.pid"
-)
-OTHER_CMD = (
-    "node /x/app-server-broker.mjs serve --endpoint unix:/tmp/cxc-B/broker.sock "
-    "--cwd /work/co2 --pid-file /tmp/cxc-B/broker.pid"
-)
-CHILD_CMD = "node /x/codex app-server --socket /tmp/cxc-A/broker.sock"
-UNRELATED_CHILD = "node /x/something-else --flag"
+REFRESH = "2026-09-22T06:35:17Z"
 
 
 def _load():
@@ -43,149 +37,276 @@ def _load():
 MODULE = _load()
 
 
-def proc(pid: int, ppid: int, start: float | None, command: str) -> dict:
+def proc(pid, ppid, start, command):
     return {"pid": pid, "ppid": ppid, "start_epoch": start, "command": command}
 
 
+def broker_cmd(sock_path: str, cwd: str = "/work/co1") -> str:
+    return (
+        f"node /x/app-server-broker.mjs serve --endpoint unix:{sock_path} "
+        f"--cwd {cwd} --pid-file /tmp/cxc-A/broker.pid"
+    )
+
+
+CHILD_CMD = "node /x/codex app-server --socket /tmp/cxc-A/broker.sock"
+UNRELATED_CHILD = "node /x/something-else --flag"
+
+
+class FakeBroker:
+    """A real unix-socket listener that answers like the vendor broker."""
+
+    def __init__(self, reply: dict | None, *, respond: bool = True):
+        self.reply = reply
+        self.respond = respond
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = str(pathlib.Path(self.dir.name) / "broker.sock")
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.bind(self.path)
+        self.sock.listen(4)
+        self._stop = False
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        while not self._stop:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                if not self.respond:
+                    time.sleep(0.5)
+                    continue
+                try:
+                    conn.recv(65536)
+                except OSError:
+                    continue
+                try:
+                    conn.sendall((json.dumps(self.reply) + "\n").encode())
+                except OSError:
+                    pass
+
+    def close(self):
+        self._stop = True
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        self.dir.cleanup()
+
+
+def auth(home: pathlib.Path, refresh: str = REFRESH, tokens: dict | None = None) -> float:
+    (home / "auth.json").write_text(
+        json.dumps({"last_refresh": refresh, "tokens": tokens or {"refresh_token": CANARY}}),
+        encoding="utf-8",
+    )
+    return MODULE.read_refresh_epoch(home)[0]
+
+
 class DecisionPolicyTests(unittest.TestCase):
-    def test_fresh_broker_is_a_noop(self) -> None:
-        verdict = MODULE.decide(2_000.0, "", proc(10, 1, 2_500.0, BROKER_CMD), "unknown", "")
-        self.assertEqual(verdict["action"], MODULE.NOOP)
+    def test_fresh_broker_is_a_noop(self):
+        v = MODULE.decide(2_000.0, "", proc(10, 1, 2_500.0, broker_cmd("/tmp/x")), MODULE.IDLE, "")
+        self.assertEqual(v["action"], MODULE.NOOP)
 
-    def test_stale_idle_broker_is_recycled(self) -> None:
-        verdict = MODULE.decide(2_000.0, "", proc(10, 1, 1_000.0, BROKER_CMD), "idle", "verified")
-        self.assertEqual(verdict["action"], MODULE.RECYCLE)
+    def test_stale_idle_is_recycled(self):
+        v = MODULE.decide(2_000.0, "", proc(10, 1, 1_000.0, broker_cmd("/tmp/x")), MODULE.IDLE, "")
+        self.assertEqual(v["action"], MODULE.RECYCLE)
 
-    def test_stale_busy_broker_defers_without_interruption(self) -> None:
-        verdict = MODULE.decide(2_000.0, "", proc(10, 1, 1_000.0, BROKER_CMD), "active", "in flight")
-        self.assertEqual(verdict["action"], MODULE.DEFER)
+    def test_stale_active_defers(self):
+        v = MODULE.decide(2_000.0, "", proc(10, 1, 1_000.0, broker_cmd("/tmp/x")), MODULE.ACTIVE, "")
+        self.assertEqual(v["action"], MODULE.DEFER)
 
-    def test_stale_broker_with_unknown_busy_state_defers(self) -> None:
-        verdict = MODULE.decide(2_000.0, "", proc(10, 1, 1_000.0, BROKER_CMD), "unknown", "socket present")
-        self.assertEqual(verdict["action"], MODULE.DEFER)
+    def test_stale_unknown_defers(self):
+        v = MODULE.decide(2_000.0, "", proc(10, 1, 1_000.0, broker_cmd("/tmp/x")), MODULE.UNKNOWN, "probe timeout")
+        self.assertEqual(v["action"], MODULE.DEFER)
 
-    def test_missing_refresh_fails_safe(self) -> None:
-        verdict = MODULE.decide(None, "auth_refresh_missing_or_unparseable", proc(10, 1, 1_000.0, BROKER_CMD), "idle", "")
-        self.assertEqual(verdict["action"], MODULE.FAIL_SAFE)
-        self.assertIn("auth_refresh", verdict["reason"])
+    def test_missing_refresh_fails_safe(self):
+        v = MODULE.decide(None, "auth_refresh_missing_or_unparseable", proc(10, 1, 1_000.0, broker_cmd("/tmp/x")), MODULE.IDLE, "")
+        self.assertEqual(v["action"], MODULE.FAIL_SAFE)
 
-    def test_unparseable_broker_start_fails_safe(self) -> None:
-        verdict = MODULE.decide(2_000.0, "", proc(10, 1, None, BROKER_CMD), "idle", "")
-        self.assertEqual(verdict["action"], MODULE.FAIL_SAFE)
-
-    def test_no_broker_for_checkout_is_a_noop(self) -> None:
-        verdict = MODULE.decide(2_000.0, "", None, "unknown", "")
-        self.assertEqual(verdict["action"], MODULE.NOOP)
+    def test_unparseable_start_fails_safe(self):
+        v = MODULE.decide(2_000.0, "", proc(10, 1, None, broker_cmd("/tmp/x")), MODULE.IDLE, "")
+        self.assertEqual(v["action"], MODULE.FAIL_SAFE)
 
 
-class ProcessTargetingTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.processes = [
-            proc(100, 1, 1_000.0, BROKER_CMD),
-            proc(200, 1, 1_500.0, OTHER_CMD),
-            proc(101, 100, 1_010.0, CHILD_CMD),
-            proc(102, 100, 1_011.0, UNRELATED_CHILD),
-            proc(103, 9, 1_012.0, CHILD_CMD),
-        ]
+class LiveProbeTests(unittest.TestCase):
+    def test_busy_code_means_active(self):
+        broker = FakeBroker({"id": 1, "error": {"code": MODULE.BUSY_RPC_CODE, "message": "busy"}})
+        try:
+            state, why = MODULE.probe_busy(broker.path)
+            self.assertEqual(state, MODULE.ACTIVE)
+            self.assertIn("BUSY", why)
+        finally:
+            broker.close()
 
-    def test_selection_is_scoped_to_the_checkout(self) -> None:
-        picked = MODULE.select_brokers(self.processes, "/work/co1")
-        self.assertEqual([p["pid"] for p in picked], [100])
+    def test_any_other_reply_means_idle(self):
+        broker = FakeBroker({"id": 1, "result": {"threads": []}})
+        try:
+            state, _ = MODULE.probe_busy(broker.path)
+            self.assertEqual(state, MODULE.IDLE)
+        finally:
+            broker.close()
 
-    def test_children_are_only_the_parents_app_server_children(self) -> None:
-        children = MODULE.select_children(self.processes, 100)
-        self.assertEqual([c["pid"] for c in children], [101])
+    def test_no_listener_is_idle_not_unknown(self):
+        state, why = MODULE.probe_busy("/tmp/definitely-not-a-broker.sock")
+        self.assertEqual(state, MODULE.IDLE)
+        self.assertIn("no listener", why)
 
-    def test_recycle_refuses_unsafe_pids(self) -> None:
+    def test_garbage_reply_is_unknown(self):
+        broker = FakeBroker({"unexpected": True})
+        try:
+            state, _ = MODULE.probe_busy(broker.path)
+            self.assertEqual(state, MODULE.UNKNOWN)
+        finally:
+            broker.close()
+
+    def test_silent_broker_times_out_unknown(self):
+        broker = FakeBroker(None, respond=False)
+        try:
+            state, _ = MODULE.probe_busy(broker.path, timeout=0.4)
+            self.assertEqual(state, MODULE.UNKNOWN)
+        finally:
+            broker.close()
+
+
+class LiveShapedStaleBrokerTests(unittest.TestCase):
+    def test_stale_idle_present_socket_is_recycled(self):
+        broker = FakeBroker({"id": 1, "result": {}})
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                home = pathlib.Path(tmp)
+                refresh = auth(home)
+                procs = [proc(100, 1, refresh - 86_400.0, broker_cmd(broker.path)),
+                         proc(101, 100, refresh - 86_000.0, CHILD_CMD)]
+                plan = MODULE.build_plan(home, "/work/co1", "auto", processes=procs)
+                self.assertEqual(plan["brokers"][0]["action"], MODULE.RECYCLE)
+                self.assertEqual(plan["brokers"][0]["busy"], MODULE.IDLE)
+        finally:
+            broker.close()
+
+    def test_stale_active_present_socket_defers(self):
+        broker = FakeBroker({"id": 1, "error": {"code": MODULE.BUSY_RPC_CODE, "message": "busy"}})
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                home = pathlib.Path(tmp)
+                refresh = auth(home)
+                procs = [proc(100, 1, refresh - 86_400.0, broker_cmd(broker.path))]
+                plan = MODULE.build_plan(home, "/work/co1", "auto", processes=procs)
+                self.assertEqual(plan["brokers"][0]["action"], MODULE.DEFER)
+                self.assertEqual(plan["brokers"][0]["busy"], MODULE.ACTIVE)
+        finally:
+            broker.close()
+
+
+class AcquisitionContractTests(unittest.TestCase):
+    def _setup(self, tmp, cmd):
+        home = pathlib.Path(tmp)
+        refresh = auth(home)
+        return home, refresh, [proc(100, 1, refresh - 86_400.0, cmd), proc(101, 100, refresh - 86_000.0, CHILD_CMD)]
+
+    def test_stale_idle_performs_exactly_one_scoped_recycle_then_fresh_is_noop(self):
+        broker = FakeBroker({"id": 1, "result": {}})
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                home, refresh, procs = self._setup(tmp, broker_cmd(broker.path))
+                kills = []
+                def killer(pid, children):
+                    kills.append((pid, list(children)))
+                    return True, "recycled"
+
+                plan = MODULE.ensure_fresh(home, "/work/co1", "auto", processes=procs, killer=killer)
+                self.assertEqual(kills, [(100, [101])], "exactly one scoped recycle of parent+child")
+                self.assertTrue(plan["recycled"][0]["ok"])
+
+                fresh = [proc(200, 1, refresh + 60.0, broker_cmd(broker.path))]
+                second = MODULE.ensure_fresh(home, "/work/co1", "auto", processes=fresh, killer=killer)
+                self.assertEqual(second["brokers"][0]["action"], MODULE.NOOP)
+                self.assertEqual(len(kills), 1, "a fresh broker is never recycled")
+        finally:
+            broker.close()
+
+    def test_active_review_never_kills_and_never_proceeds(self):
+        broker = FakeBroker({"id": 1, "error": {"code": MODULE.BUSY_RPC_CODE, "message": "busy"}})
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                home, _, procs = self._setup(tmp, broker_cmd(broker.path))
+                kills = []
+                plan = MODULE.ensure_fresh(home, "/work/co1", "auto", processes=procs,
+                                           killer=lambda p, c: (kills.append(p), (True, "x"))[1])
+                self.assertEqual(kills, [], "an active review is never interrupted")
+                self.assertEqual(plan["brokers"][0]["action"], MODULE.DEFER)
+        finally:
+            broker.close()
+
+    def test_unknown_busy_state_never_kills(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, _, procs = self._setup(tmp, broker_cmd("/tmp/definitely-absent.sock"))
+            state, _ = MODULE.probe_busy("/tmp/definitely-absent.sock")
+            self.assertEqual(state, MODULE.IDLE)  # no listener == idle, still no kill below
+            kills = []
+            MODULE.ensure_fresh(home, "/work/co1", "auto", processes=procs,
+                                probe=lambda ep: (MODULE.UNKNOWN, "probe failed"),
+                                killer=lambda p, c: (kills.append(p), (True, "x"))[1])
+            self.assertEqual(kills, [], "unverifiable busy state must not kill")
+
+    def test_review_starting_after_planning_is_not_interrupted(self):
+        broker = FakeBroker({"id": 1, "result": {}})
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                home, _, procs = self._setup(tmp, broker_cmd(broker.path))
+                calls = {"n": 0}
+                def probe_two_phase(endpoint):
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        return MODULE.IDLE, "idle at plan time"
+                    return MODULE.ACTIVE, "a review started after planning"
+                kills = []
+                plan = MODULE.ensure_fresh(home, "/work/co1", "auto", processes=procs, probe=probe_two_phase,
+                                           killer=lambda p, c: (kills.append(p), (True, "x"))[1])
+                self.assertEqual(kills, [], "the immediate idle re-check must abort the recycle")
+                self.assertEqual(plan["brokers"][0]["action"], MODULE.DEFER)
+        finally:
+            broker.close()
+
+
+class TargetingTests(unittest.TestCase):
+    def test_cwd_match_is_exact_not_a_prefix(self):
+        procs = [proc(100, 1, 1.0, broker_cmd("/tmp/a", "/work/co10")),
+                 proc(200, 1, 2.0, broker_cmd("/tmp/b", "/work/co1"))]
+        self.assertEqual([p["pid"] for p in MODULE.select_brokers(procs, "/work/co1")], [200])
+
+    def test_children_are_only_the_parents_app_server_children(self):
+        procs = [proc(100, 1, 1.0, broker_cmd("/tmp/a")), proc(101, 100, 2.0, CHILD_CMD),
+                 proc(102, 100, 3.0, UNRELATED_CHILD), proc(103, 9, 4.0, CHILD_CMD)]
+        self.assertEqual([c["pid"] for c in MODULE.select_children(procs, 100)], [101])
+
+    def test_recycle_refuses_unsafe_pids(self):
         ok, detail = MODULE.recycle(1, [])
         self.assertFalse(ok)
         self.assertEqual(detail, "refused_unsafe_pid")
 
 
-class FreshnessReadingTests(unittest.TestCase):
-    def test_reads_only_last_refresh_and_never_token_material(self) -> None:
+class SecretHygieneTests(unittest.TestCase):
+    def test_read_refresh_epoch_never_reads_token_material(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = pathlib.Path(tmp)
-            (home / "auth.json").write_text(json.dumps({
-                "auth_mode": "chatgpt",
-                "last_refresh": "2026-09-22T06:35:17.934139Z",
-                "tokens": {"refresh_token": CANARY, "account_id": "acct"},
-            }), encoding="utf-8")
-            epoch, error = MODULE.read_refresh_epoch(home)
-            self.assertEqual(error, "")
+            epoch = auth(home)
             self.assertIsNotNone(epoch)
-            self.assertNotIn(CANARY, repr((epoch, error)))
+            self.assertNotIn(CANARY, repr(epoch))
 
-    def test_missing_file_is_a_typed_error(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            epoch, error = MODULE.read_refresh_epoch(pathlib.Path(tmp))
-            self.assertIsNone(epoch)
-            self.assertTrue(error.startswith("auth_store_unreadable"))
-
-    def test_unparseable_refresh_is_a_typed_error(self) -> None:
+    def test_missing_and_unparseable_auth_are_typed(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = pathlib.Path(tmp)
-            (home / "auth.json").write_text(json.dumps({"last_refresh": "not-a-timestamp"}), encoding="utf-8")
-            epoch, error = MODULE.read_refresh_epoch(home)
-            self.assertIsNone(epoch)
-            self.assertEqual(error, "auth_refresh_missing_or_unparseable")
+            self.assertTrue(MODULE.read_refresh_epoch(home)[1].startswith("auth_store_unreadable"))
+            (home / "auth.json").write_text(json.dumps({"last_refresh": "nope"}), encoding="utf-8")
+            self.assertEqual(MODULE.read_refresh_epoch(home)[1], "auth_refresh_missing_or_unparseable")
 
-    def test_iso_parsing(self) -> None:
-        self.assertEqual(MODULE.parse_iso_epoch(""), None)
-        self.assertGreater(MODULE.parse_iso_epoch("2026-09-22T06:35:17.934139Z"), 0)
-
-
-class BuildPlanTests(unittest.TestCase):
-    def test_plan_reports_recycle_for_stale_idle_and_is_hermetic(self) -> None:
+    def test_cli_emits_no_secret_material(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = pathlib.Path(tmp)
-            (home / "auth.json").write_text(json.dumps({"last_refresh": "2026-09-22T06:35:17Z"}), encoding="utf-8")
-            refresh = MODULE.read_refresh_epoch(home)[0]
-            processes = [proc(100, 1, refresh - 86_400.0, BROKER_CMD), proc(101, 100, refresh - 86_000.0, CHILD_CMD)]
-            plan = MODULE.build_plan(home, "/work/co1", "idle", processes=processes)
-            entry = plan["brokers"][0]
-            self.assertEqual(entry["action"], MODULE.RECYCLE)
-            self.assertEqual(entry["children"], [101])
-
-    def test_plan_auto_treats_an_absent_socket_as_idle(self) -> None:
-        # auto mode: no socket means the broker is not serving, so a stale broker
-        # is safe to recycle. This is idle evidence, not a guess.
-        with tempfile.TemporaryDirectory() as tmp:
-            home = pathlib.Path(tmp)
-            (home / "auth.json").write_text(json.dumps({"last_refresh": "2026-09-22T06:35:17Z"}), encoding="utf-8")
-            refresh = MODULE.read_refresh_epoch(home)[0]
-            processes = [proc(100, 1, refresh - 86_400.0, BROKER_CMD)]
-            plan = MODULE.build_plan(home, "/work/co1", "auto", processes=processes)
-            self.assertEqual(plan["brokers"][0]["action"], MODULE.RECYCLE)
-            self.assertEqual(plan["brokers"][0]["busy"], "idle")
-
-    def test_plan_defers_when_the_socket_exists_but_busy_is_unverifiable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = pathlib.Path(tmp)
-            (home / "auth.json").write_text(json.dumps({"last_refresh": "2026-09-22T06:35:17Z"}), encoding="utf-8")
-            sock = home / "broker.sock"
-            sock.write_text("", encoding="utf-8")
-            refresh = MODULE.read_refresh_epoch(home)[0]
-            command = (
-                "node /x/app-server-broker.mjs serve --endpoint unix:" + str(sock) +
-                " --cwd /work/co1 --pid-file /tmp/cxc-A/broker.pid"
-            )
-            processes = [proc(100, 1, refresh - 86_400.0, command)]
-            plan = MODULE.build_plan(home, "/work/co1", "auto", processes=processes)
-            self.assertEqual(plan["brokers"][0]["action"], MODULE.DEFER)
-            self.assertEqual(plan["brokers"][0]["busy"], "unknown")
-
-
-class CliTests(unittest.TestCase):
-    def test_cli_outputs_no_secret_material_and_exits_zero_without_a_broker(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = pathlib.Path(tmp)
-            (home / "auth.json").write_text(json.dumps({
-                "last_refresh": "2026-09-22T06:35:17Z",
-                "tokens": {"refresh_token": CANARY},
-            }), encoding="utf-8")
+            auth(home)
             result = subprocess.run(
-                [sys.executable, str(HELPER), "--home", str(home), "--cwd", "/work/absent-checkout", "--json"],
+                [sys.executable, str(HELPER), "--home", str(home), "--cwd", "/work/absent", "--json"],
                 capture_output=True, text=True, timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stderr)

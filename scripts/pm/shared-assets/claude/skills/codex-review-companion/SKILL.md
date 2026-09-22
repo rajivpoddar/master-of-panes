@@ -27,23 +27,44 @@ Local Codex review orchestration script that talks to Codex via the **app-server
 - **Upstream companion isn't review-specialised.** The upstream companion is a generic relay. This fork wires in HeyDonna review prompts (`codex-app-plan-review`, `codex-app-code-review`, `codex-app-qa-review`, `codex-app-arch-review` skill bodies), binary-file exclusion flags, and the local-branch fallback for plan reviews.
 - **Lives outside the heydonna-app repo.** Per CP #8b (PM-direct infra surface), tooling/infra scripts ship via `~/.claude/skills/` — not via app PRs. Relocated here 2026-05-08 19:14 IST per Rajiv directive (Slack thread `1778247389.415769`).
 
-## Pre-acquisition freshness gate (run first)
+## Pre-acquisition freshness gate (run first, before the broker)
 
 A broker loads credentials at startup and keeps presenting them for its whole
-life, so an auth refresh (routine token refresh, exactly like the 2026-09-19
-auth-store migration) makes every older broker present a stale credential. Run
-the owned gate before acquiring or entering a companion broker:
+life, so ANY auth refresh — a routine token refresh exactly like the 2026-09-19
+auth-store migration — makes every older broker present a stale credential.
+The acquisition sequence is: **gate, then acquire**. Never acquire a broker
+before this gate has passed.
 
-    python3 /Users/rajiv/.claude/scripts/codex-companion-broker-freshness.py --cwd <checkout> --busy auto
+Step 1 — gate + recover in one call (this is the acquisition path):
 
-- `noop` (exit 0): the broker postdates the companion `auth.json` `last_refresh`; proceed.
-- `recycle`: the broker predates the refresh and is idle. The gate is dry-run by default; re-run with `--recycle` to retire that broker parent and its `app-server` children, then let the ordinary next invocation spawn a fresh one.
-- `defer` (exit 3): a review is in flight, or busy state cannot be verified. Do NOT interrupt it; retry after that review reaches its terminal.
-- `fail_safe` (exit 4): the refresh or broker start epoch is missing/unparseable. Do not proceed on a possibly stale broker; report the typed diagnostic.
+    python3 /Users/rajiv/.claude/scripts/codex-companion-broker-freshness.py \
+        --cwd <checkout> --busy auto --recycle
 
-Never pass `--busy idle` without having actually verified no review is in flight.
-`codex login status` cannot detect this condition. See
-`/Users/rajiv/.codex-companions/RUNBOOK.md`.
+Behavior, by verdict:
+
+- `noop` (exit 0): the broker postdates the companion `auth.json` `last_refresh`.
+  Proceed to acquire.
+- `recycle` (exit 0): the broker predates the refresh AND the live probe reports
+  idle. `--recycle` retires exactly that broker parent and its own `app-server`
+  children, then you proceed — the ordinary next invocation spawns a fresh
+  broker. Idle is re-probed immediately before the signal, so a review that
+  starts in between is never interrupted.
+- `defer` (exit 3): the live probe reports active, or busy state could not be
+  verified. **Do not acquire and do not proceed**; retry after that review
+  reaches its terminal.
+- `fail_safe` (exit 4): the refresh or broker start epoch is missing or
+  unparseable. Do not proceed on a possibly stale broker; report the typed
+  diagnostic.
+
+Step 2 — only after a `noop` (or a completed `recycle`) do you acquire the
+broker and run the review.
+
+Manual/inspection use: omit `--recycle` (dry-run by default — it prints the plan
+and performs no recycle). `--busy idle`/`--busy active` are operator assertions
+and must only be used when actually verified; `--busy auto` probes the broker's
+read-only `thread/list` surface, where the vendor's BROKER_BUSY_RPC_CODE
+(-32001) means active and anything else means idle. `codex login status` cannot
+detect this condition. See `/Users/rajiv/.codex-companions/RUNBOOK.md`.
 
 ## Invocation
 

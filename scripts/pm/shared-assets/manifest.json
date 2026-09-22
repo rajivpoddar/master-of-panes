@@ -258,7 +258,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-codex-companion-broker-freshness",
-      "sha256": "04ee2672be5f3d07adf73e650aa087848a1c9eaf078fa12939bff1721035bc35",
+      "sha256": "df5d5bff9f22185d7122806b547909da9b004295a9e67c2c2e15047e275713bd",
       "source_path": "claude/scripts/codex-companion-broker-freshness.py"
     },
     {
@@ -539,7 +539,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "eeeae2365c5731d9e39e70481c1430052e376f987cf12863c36b0f13bd5e4d2a",
+      "sha256": "f64d62bfd4b34993afc922f60777ee44a01c52ba21f6cbb75e3d5b2572a64e12",
       "source_path": "claude/skills/codex-review-companion/SKILL.md"
     },
     {
