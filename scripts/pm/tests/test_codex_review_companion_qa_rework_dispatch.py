@@ -36,11 +36,19 @@ const cases = JSON.parse(process.argv[3]);
 const out = [];
 for (const c of cases) {
   const re = m.isReReview({reviewType: c[0], reworkItems: c[1]});
-  if (c[2] === false) { out.push({reviewType: c[0], rework: Boolean(c[1]), isReReview: re, framing: false, err: null, skipped: true}); continue; }
+  if (c[2] === false) {
+    out.push({reviewType: c[0], rework: Boolean(c[1]), isReReview: re, framing: false, delta: false, err: null, skipped: true});
+    continue;
+  }
   let loaded = null, err = null;
   try { loaded = m.loadPromptTemplate({reviewType: c[0], reworkItems: c[1], previousHead: "0".repeat(40)}); }
   catch (e) { err = String(e && e.message || e); }
-  out.push({reviewType: c[0], rework: Boolean(c[1]), isReReview: re, framing: Boolean(loaded && loaded.includes("Re-review framing")), err});
+  out.push({
+    reviewType: c[0], rework: Boolean(c[1]), isReReview: re,
+    framing: Boolean(loaded && loaded.includes("Re-review framing")),
+    delta: Boolean(loaded && loaded.includes("DELTA REVIEW")),
+    err,
+  });
 }
 console.log(JSON.stringify(out));
 """
@@ -79,12 +87,18 @@ class QaReworkDispatchTests(unittest.TestCase):
             for row, (rt, rw, want_re, _rel, must_load) in zip(rows, CASES):
                 with self.subTest(review=rt, rework=bool(rw)):
                     self.assertEqual(row["isReReview"], want_re)
-                    if must_load:
-                        self.assertIsNone(row["err"], row["err"])
+                    if not must_load:
+                        # plan keeps its pre-existing rework selection; no template is staged here
+                        self.assertTrue(row["isReReview"])
+                        continue
+                    self.assertIsNone(row["err"], row["err"])
+                    if rt == "qa":
+                        # QA rework is the surface that carries the new rework framing
                         self.assertEqual(row["framing"], want_re)
                     else:
-                        # plan keeps its pre-existing rework selection; no template is staged
-                        self.assertTrue(row["isReReview"])
+                        # code keeps its own pre-existing delta framing; the QA heading must not appear
+                        self.assertFalse(row["framing"], "QA-only heading leaked into code")
+                        self.assertEqual(row["delta"], want_re)
 
     def test_reviewed_parent_predicate_skips_qa_rework_red_witness(self):
         with tempfile.TemporaryDirectory() as d:
