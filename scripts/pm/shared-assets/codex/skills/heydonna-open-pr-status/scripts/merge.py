@@ -216,6 +216,8 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TS = re.compile(r"^\s*\d{4}-\d\d-\d\dT[0-9:.]+Z\s?")
+# Real GitHub Actions log framing emits "KEY: value"; the "=" form is also accepted.
+BINDING = re.compile(r"^\s*([A-Z_]+)\s*[:=]\s*(\S+?)\s*$")
 
 
 def job_log(job_id):
@@ -258,14 +260,19 @@ def classifier_receipt(lines):
 
 
 def classifier_bindings(lines):
-    """Unique env bindings from the classifier log, else None."""
+    """Unique env bindings from the classifier log, else None.
+
+    Accepts both the real log form (``KEY: value``) and ``KEY=value``, with
+    optional surrounding whitespace.
+    """
     seen = {key: set() for key in REQUIRED_BINDINGS}
     for line in lines:
-        stripped = line.strip()
-        for key in REQUIRED_BINDINGS:
-            prefix = key + "="
-            if stripped.startswith(prefix):
-                seen[key].add(stripped[len(prefix):].strip())
+        match = BINDING.match(line)
+        if match is None:
+            continue
+        key, value = match.group(1), match.group(2)
+        if key in seen:
+            seen[key].add(value)
     if any(len(values) != 1 for values in seen.values()):
         return None
     return {key: next(iter(values)) for key, values in seen.items()}

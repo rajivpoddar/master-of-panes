@@ -56,11 +56,12 @@ def jobs(scope_conclusion="success", substantive="skipped"):
     return out
 
 
-def log_text(receipt=None, bindings=None, extra_lines=()):
+def log_text(receipt=None, bindings=None, extra_lines=(), sep="="):
     base = {"BASE_SHA": BASE, "HEAD_SHA": HEAD, "WORKFLOW_SHA": WORKFLOW_SHA,
             "EVENT_NAME": "pull_request", "PR_NUMBER": str(NUMBER)}
     base.update(bindings or {})
-    lines = [f"2026-09-22T10:00:0{i}Z {k}={v}" for i, (k, v) in enumerate(base.items())]
+    joiner = ": " if sep == ":" else "="
+    lines = [f"2026-09-22T10:00:0{i}Z {k}{joiner}{v}" for i, (k, v) in enumerate(base.items())]
     body = receipt if receipt is not None else dict(
         schema_version=1, scope="control_plane_only", paid_ci_exempt=True,
         control_plane_only=True, product_changed=False, ci_required=False,
@@ -240,6 +241,57 @@ class ParentRedWitnessTests(unittest.TestCase):
             spec.loader.exec_module(parent)
             stub = Stub({})
             parent.api, parent.pages = stub.api, stub.pages
+            with self.assertRaises(parent.Refusal) as ctx:
+                parent.workflow_proof(pr(), WORKFLOW, NAMES)
+            self.assertIn("WORKFLOW_NOT_GREEN", str(ctx.exception))
+
+
+class RealColonFormLogTests(unittest.TestCase):
+    """The real GitHub Actions classifier log emits KEY: value - it must exempt."""
+
+    # shaped from CI run 35744803503 / classify-change-scope job 106803509894
+    REAL_BINDINGS = {"BASE_SHA": BASE, "HEAD_SHA": HEAD, "WORKFLOW_SHA": WORKFLOW_SHA,
+                     "EVENT_NAME": "pull_request", "PR_NUMBER": str(NUMBER)}
+
+    def test_colon_form_bindings_reach_the_exemption_path(self):
+        install({"log": log_text(bindings=self.REAL_BINDINGS, sep=":")})
+        result = proof()
+        self.assertEqual(result["exempt"], "control_plane_only")
+        self.assertEqual(result["workflow_sha"], WORKFLOW_SHA)
+
+    def test_colon_form_bindings_tolerate_surrounding_whitespace(self):
+        text = log_text(bindings=self.REAL_BINDINGS, sep=":")
+        text = text.replace("BASE_SHA: ", "  BASE_SHA :  ")
+        install({"log": text})
+        self.assertEqual(proof()["exempt"], "control_plane_only")
+
+    def test_colon_form_still_enforces_exactly_one_value(self):
+        install({"log": log_text(bindings=self.REAL_BINDINGS, sep=":",
+                                 extra_lines=["2026-09-22T10:00:20Z HEAD_SHA: " + "0" * 40])})
+        with self.assertRaises(merge.Refusal):
+            proof()
+
+    def test_colon_form_mismatch_still_refuses(self):
+        install({"log": log_text(bindings={"PR_NUMBER": "9999"}, sep=":")})
+        with self.assertRaises(merge.Refusal):
+            proof()
+
+    def test_reviewed_parent_refuses_the_colon_form_exempt_shape(self):
+        """RED: the superseded candidate only accepted KEY=value, so colon-form logs refused."""
+        rev = "5bde859adfc67fbe7bddcc7b67e22f097d3143a6"
+        blob = subprocess.run(["git", "show", f"{rev}:scripts/pm/shared-assets/codex/skills/"
+                               "heydonna-open-pr-status/scripts/merge.py"],
+                              capture_output=True, text=True, cwd=HERE)
+        self.assertEqual(blob.returncode, 0, blob.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "merge_reviewed_parent.py")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(blob.stdout)
+            spec = importlib.util.spec_from_file_location("merge_reviewed_parent", path)
+            parent = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(parent)
+            stub = Stub({"log": log_text(bindings=RealColonFormLogTests.REAL_BINDINGS, sep=":")})
+            parent.api, parent.pages, parent.command = stub.api, stub.pages, stub.command
             with self.assertRaises(parent.Refusal) as ctx:
                 parent.workflow_proof(pr(), WORKFLOW, NAMES)
             self.assertIn("WORKFLOW_NOT_GREEN", str(ctx.exception))
