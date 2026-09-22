@@ -161,7 +161,7 @@ export interface AbandonTurnResult {
 }
 
 
-const ASSIGNMENT_WORK_KINDS = new Set([
+export const ASSIGNMENT_WORK_KINDS = new Set([
   "implementation",
   "rework",
   "repro",
