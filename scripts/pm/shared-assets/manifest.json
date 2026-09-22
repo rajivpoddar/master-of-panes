@@ -543,6 +543,15 @@
       "source_path": "claude/skills/codex-review-companion/SKILL.md"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/skills/codex-review-companion/codex-review-companion.mjs",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-codex-review-companion",
+      "sha256": "96f5fa50153631c839175e9c693aae5f6b488c63abdd85e27eab58f59ee21c7e",
+      "source_path": "claude/skills/codex-review-companion/codex-review-companion.mjs"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/cp-repair-request/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1032,7 +1041,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 111,
+    "selected_count": 112,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
