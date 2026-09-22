@@ -602,7 +602,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-direct-assign",
-      "sha256": "82f764a0d8db7d46667855ffc7a743cb00ae26c649c37f855419d3f9787efcd8",
+      "sha256": "594592d9093b24f774c84ff976cc39caf85e12ec3d14389acbb7c9c7387dedc0",
       "source_path": "claude/skills/direct-assign/SKILL.md"
     },
     {

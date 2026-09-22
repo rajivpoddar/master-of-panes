@@ -144,6 +144,30 @@ skill POSTs to MoP is itself the handoff; the work the slot performs begins at
 plan-agent. This chain is kept in sync with the MoP-side dispatch/handoff
 template — both must read plan-agent-first with no `/handoff` step.
 
+### `self-QA` names the qa-tester agent when browser testing is required
+
+[HIGH] Rajiv directive 2026-09-22 22:15 IST (thread `1790095531.366469`), verbatim:
+
+> *"during assignments, the message should mention the qa-tester agent for self qa when browser testing is required. get this updated."*
+
+Every dispatched `task` **whose acceptance criteria require browser testing**
+— a real editor/UI path, a real-browser reproduction, a visual/screenshot proof,
+or an end-to-end user gesture — MUST name the **`qa-tester` agent** in its
+`self-QA` step, so the slot performs browser self-QA through that agent rather
+than improvising a harness. State it explicitly in the task message, e.g.:
+
+```text
+… → implement → self-QA (use the `qa-tester` agent for the browser/UI leg) → Codex code review → PR
+```
+
+Where browser testing is **not** required (pure unit / integration / docs /
+tooling lanes), the `self-QA` step stays as-is — do not add the agent by rote.
+The test is whether the AC's required proof includes a browser, visual, or
+end-to-end surface; if it does, naming `qa-tester` is mandatory, not optional.
+
+This is part of the literal `task` message the skill POSTs, not a separate
+delivery. Keep it in sync with the MoP-side dispatch/handoff template.
+
 After successful `new_issue` assignment, post exactly one new top-level
 `#heydonna-dev` transition parent containing the issue, slot, assignment
 summary, and CTO mention. Record its `thread_ts`; all later PR transitions for
