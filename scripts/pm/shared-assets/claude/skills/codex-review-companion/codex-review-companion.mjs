@@ -805,8 +805,10 @@ function fail(msg, code = 3) {
 }
 
 function isReReview(args) {
+  // QA rework intent selects the QA rework prompt too (Ev0C3ECXCGJF);
+  // an initial QA review (no --rework-items) is untouched.
   return (
-    new Set(["plan", "code"]).has(args.reviewType) && Boolean(args.reworkItems)
+    new Set(["plan", "code", "qa"]).has(args.reviewType) && Boolean(args.reworkItems)
   );
 }
 
@@ -1770,7 +1772,10 @@ function classifyDelta(args, baseline, headRef, runner = sh) {
 
 function automaticDeltaReview(args, source, budget, runner = sh) {
   if (!new Set(["plan", "code"]).has(args.reviewType) || isReReview(args)) {
-    return { source, mode: isReReview(args) ? "explicit_delta" : "full" };
+    // explicit_delta stays a plan/code delta concept; QA rework keeps "full" sourcing
+    // exactly as before and only gains the rework prompt + baseline gate.
+    const deltaMode = new Set(["plan", "code"]).has(args.reviewType) && isReReview(args);
+    return { source, mode: deltaMode ? "explicit_delta" : "full" };
   }
   const previous = latestReviewedHead(budget, args.reviewType);
   if (!previous) return { source, mode: "full" };
@@ -3368,6 +3373,7 @@ export {
   exactQaPrHeadBinding,
   isIssueOnlyArchReview,
   isReReview,
+  loadPromptTemplate,
   issueFromBranchName,
   latestReviewedHead,
   latestApprovedReviewEvent,
