@@ -418,3 +418,37 @@ test("pending_delivery resume refuses on ownership drift with zero delivery", as
     h.close();
   }
 });
+
+test("invalid_assignment_tuple names the failing tuple predicate (additive diagnosability)", async () => {
+  const h = harness();
+  try {
+    const epoch = h.db.getSlot(1)!.assignment_epoch;
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["head_sha", { head_sha: "abc1234" }],          // short SHA is the case that misled the caller
+      ["head_sha", { head_sha: 12345 }],              // non-string
+      ["work_kind", { work_kind: "" }],               // empty
+      ["work_kind", { work_kind: "   " }],            // whitespace-only
+      ["handoff_id", { handoff_id: "" }],             // empty
+      ["handoff_id", { handoff_id: "  " }],           // whitespace-only
+      ["issue", { issue: 0 }],                        // not > 0
+      ["issue", { issue: 1.5 }],                      // not an integer
+      ["repository_id", { repository_id: "" }],       // normalizes empty
+    ];
+    for (const [field, overrides] of cases) {
+      const r = await post(h.app, 1, effectBody(1, epoch, overrides));
+      assert.equal(r.status, 400, `${field}: expected 400`);
+      assert.equal(r.json.status, "refused");
+      assert.equal(r.json.step_failed, "ownership", "refusal shape unchanged");
+      assert.equal(r.json.reason, "invalid_assignment_tuple", "reason code unchanged");
+      assert.equal(r.json.sanctioned_path, "mop-assign-slot", "sanctioned path unchanged");
+      assert.equal(r.json.failed_field, field, `expected failed_field=${field}, got ${r.json.failed_field}`);
+      assert.equal(h.db.getSlot(1)!.occupied, false, "no mutation on refusal");
+    }
+    // A valid tuple must NOT carry failed_field and must still work.
+    const ok = await post(h.app, 1, effectBody(1, epoch, {}));
+    assert.notEqual(ok.status, 400, "a valid tuple must not be refused");
+    assert.equal(ok.json.failed_field, undefined, "failed_field must be absent on a non-refusal");
+  } finally {
+    h.close();
+  }
+});

@@ -122,12 +122,15 @@ interface AssignmentEffectRefusalBody {
   reason: string;
   slot_state_after: string;
   sanctioned_path: "mop-assign-slot";
+  /** Additive diagnosability: which tuple predicate failed. Never present on success. */
+  failed_field?: string;
 }
 
 function refusal(
   stepFailed: AssignmentEffectRefusalBody["step_failed"],
   reason: string,
   slotStateAfter: string,
+  failedField?: string | null,
 ): AssignmentEffectRefusalBody {
   return {
     status: "refused",
@@ -135,6 +138,9 @@ function refusal(
     reason,
     slot_state_after: slotStateAfter,
     sanctioned_path: "mop-assign-slot",
+    // Additive diagnosability only: names which predicate of the tuple validation failed, so a
+    // caller does not have to permute class flags to discover it. No behaviour change.
+    ...(failedField ? { failed_field: failedField } : {}),
   };
 }
 
@@ -244,6 +250,16 @@ export function registerAssignmentEffectRoutes(
     };
     const normalizedTuple = normalizeAssignmentTuple(desiredTuple);
     const branchIdentity = normalizeBranchIdentity(desiredTuple.branch);
+    // Name the failing predicate for diagnosability. Evaluated with the same predicates, in the same
+    // order, as the validation below; it never changes whether the refusal fires.
+    const failedField =
+      normalizeRepositoryId(desiredTuple.repository_id) === null ? "repository_id"
+      : !Number.isInteger(desiredTuple.issue) || (desiredTuple.issue as number) <= 0 ? "issue"
+      : !branchIdentity ? "branch"
+      : typeof desiredTuple.head_sha !== "string" || !/^[0-9a-f]{40}$/i.test(desiredTuple.head_sha) ? "head_sha"
+      : typeof desiredTuple.work_kind !== "string" || desiredTuple.work_kind.trim() === "" ? "work_kind"
+      : typeof desiredTuple.handoff_id !== "string" || desiredTuple.handoff_id.trim() === "" ? "handoff_id"
+      : null;
     if (
       !normalizedTuple
       || normalizeRepositoryId(desiredTuple.repository_id) === null
@@ -258,7 +274,7 @@ export function registerAssignmentEffectRoutes(
       || desiredTuple.handoff_id.trim() === ""
     ) {
       return c.json(
-        refusal("ownership", "invalid_assignment_tuple", slotStateSummary(db.getSlot(slotNum))),
+        refusal("ownership", "invalid_assignment_tuple", slotStateSummary(db.getSlot(slotNum)), failedField),
         400,
       );
     }
