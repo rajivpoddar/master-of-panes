@@ -253,6 +253,15 @@
       "source_path": "claude/scripts/ci/rerun-after-local-proof.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/codex-companion-broker-freshness.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-codex-companion-broker-freshness",
+      "sha256": "04ee2672be5f3d07adf73e650aa087848a1c9eaf078fa12939bff1721035bc35",
+      "source_path": "claude/scripts/codex-companion-broker-freshness.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/control_plane_issue_policy.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -530,7 +539,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "ad5407831c5e158f157832645f5815c8c00cec018b2293a682488cadabeaac8b",
+      "sha256": "eeeae2365c5731d9e39e70481c1430052e376f987cf12863c36b0f13bd5e4d2a",
       "source_path": "claude/skills/codex-review-companion/SKILL.md"
     },
     {
@@ -784,6 +793,15 @@
       "source_path": "claude/slot-skills/slot6/respawn/scripts/respawn.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.codex-companions/RUNBOOK.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-codex-companions-runbook",
+      "sha256": "2a06d9f9abf7f1ddcd74596b2a746bc0e7d3bb221a49fee5f6dbae1af32b1a9e",
+      "source_path": "codex-companions/RUNBOOK.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1014,7 +1032,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 109,
+    "selected_count": 111,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

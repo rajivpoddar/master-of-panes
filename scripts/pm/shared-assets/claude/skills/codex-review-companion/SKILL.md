@@ -27,6 +27,24 @@ Local Codex review orchestration script that talks to Codex via the **app-server
 - **Upstream companion isn't review-specialised.** The upstream companion is a generic relay. This fork wires in HeyDonna review prompts (`codex-app-plan-review`, `codex-app-code-review`, `codex-app-qa-review`, `codex-app-arch-review` skill bodies), binary-file exclusion flags, and the local-branch fallback for plan reviews.
 - **Lives outside the heydonna-app repo.** Per CP #8b (PM-direct infra surface), tooling/infra scripts ship via `~/.claude/skills/` — not via app PRs. Relocated here 2026-05-08 19:14 IST per Rajiv directive (Slack thread `1778247389.415769`).
 
+## Pre-acquisition freshness gate (run first)
+
+A broker loads credentials at startup and keeps presenting them for its whole
+life, so an auth refresh (routine token refresh, exactly like the 2026-09-19
+auth-store migration) makes every older broker present a stale credential. Run
+the owned gate before acquiring or entering a companion broker:
+
+    python3 /Users/rajiv/.claude/scripts/codex-companion-broker-freshness.py --cwd <checkout> --busy auto
+
+- `noop` (exit 0): the broker postdates the companion `auth.json` `last_refresh`; proceed.
+- `recycle`: the broker predates the refresh and is idle. The gate is dry-run by default; re-run with `--recycle` to retire that broker parent and its `app-server` children, then let the ordinary next invocation spawn a fresh one.
+- `defer` (exit 3): a review is in flight, or busy state cannot be verified. Do NOT interrupt it; retry after that review reaches its terminal.
+- `fail_safe` (exit 4): the refresh or broker start epoch is missing/unparseable. Do not proceed on a possibly stale broker; report the typed diagnostic.
+
+Never pass `--busy idle` without having actually verified no review is in flight.
+`codex login status` cannot detect this condition. See
+`/Users/rajiv/.codex-companions/RUNBOOK.md`.
+
 ## Invocation
 
 ### Pre-implementation architecture review (`--issue` only)
