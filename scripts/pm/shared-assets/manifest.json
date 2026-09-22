@@ -525,6 +525,42 @@
       "source_path": "claude/skills/cleanup-pr/SKILL.md"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/skills/codex-app-code-review/templates/prompt-rework.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-codex-app-review-prompts",
+      "sha256": "34482b0f45fa186cf7f40790c61667f440f6040bd707164f5bf54a21ecbed0ea",
+      "source_path": "claude/skills/codex-app-code-review/templates/prompt-rework.txt"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/codex-app-code-review/templates/prompt.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-codex-app-review-prompts",
+      "sha256": "c8e09d24cf01db00b1afb40a7e2fbae003074ec8a1ca9babedefa5f8f12798d5",
+      "source_path": "claude/skills/codex-app-code-review/templates/prompt.txt"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/codex-app-qa-review/templates/prompt-rework.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-codex-app-review-prompts",
+      "sha256": "3a89ee641fa623f9e783409eedb4cd1ee4ffd98f0e3d9c2239fe8b0f086b4b54",
+      "source_path": "claude/skills/codex-app-qa-review/templates/prompt-rework.txt"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/codex-app-qa-review/templates/prompt.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-codex-app-review-prompts",
+      "sha256": "642f7373fc2b358f336ae87a376dabfa200f69988a551fbc55b89ca95e025f9e",
+      "source_path": "claude/skills/codex-app-qa-review/templates/prompt.txt"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/codex-companion-cap-mechanism/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1041,7 +1077,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 112,
+    "selected_count": 116,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

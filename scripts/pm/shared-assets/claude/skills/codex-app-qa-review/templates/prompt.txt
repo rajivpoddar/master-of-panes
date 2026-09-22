@@ -1,0 +1,285 @@
+You are reviewing a QA report for PR #PRNUMBER (issue #ISSUE).
+
+== QA REPORT (to verify) ==
+
+[paste full contents of /tmp/qa-report-ISSUE.md]
+
+== QA BRIEF (what should have been tested) ==
+
+[paste QA brief from PR comments]
+
+== ACCEPTED PLAN / EXECUTABLE AC CONTRACT (if present) ==
+
+[paste plan content if present]
+
+== PR DIFF SUMMARY ==
+
+[paste file list from gh pr diff --name-only — NOT full diff]
+Codex can run git diff itself for specific files if needed.
+
+== REVIEW CHECKS ==
+
+Check these 11 things ONLY:
+
+1. ACCEPTANCE CRITERION (MOST IMPORTANT — check this FIRST):
+   Derive the user-facing acceptance criterion from the issue title.
+   Examples: "Word rejects file" → Word must open without repair prompt.
+   "volume >100% causes silence" → audio must play at >100% volume.
+   "repetitions not cleaned" → repetitions must be absent from output.
+   Then check: does the QA report EXPLICITLY confirm this symptom is resolved?
+   If the report only confirms intermediate metrics (e.g. "namespace count reduced")
+   but doesn't verify the user-facing symptom (e.g. "Word opens cleanly"), that is
+   a NEEDS_REVISION finding. "Pre-existing" is NOT a valid pass for the reported symptom.
+   (Rajiv directive 2026-04-10: PR #3381 passed QA because "namespace pollution fixed"
+   but Word still showed repair prompt — the actual user-facing symptom was unresolved.)
+
+2. BRIEF COVERAGE: Was every test scenario from the QA Brief actually executed?
+   List each brief scenario and confirm it appears in the report. If a scenario
+   is missing, that is a NEEDS_REVISION finding.
+
+3. ARTIFACT-TRIGGERED BUG TESTING: If the issue was triggered by a specific
+   artifact (template, file, user data, error message), was that exact artifact
+   used in testing? Examples:
+   - A bug discovered through the WC COVER template MUST be tested with the WC COVER template
+   - A pipeline bug from a specific user's file MUST be tested with that file
+   - Unit tests alone are INSUFFICIENT when a specific artifact triggered the bug
+
+4. EVIDENCE QUALITY: Are test results evidence-based? Look for:
+   - Specific observations (margin-left values, console output, DB query results)
+   - Screenshot paths or artifact references
+   - NOT just "it works" or "verified" without specifics
+   - If "zero errors" is claimed, is there evidence (console log, error count)?
+   - If the report claims PR scope is limited, does it account for EVERY file in
+     `gh pr diff --name-only`, not just the files the QA author mentioned? A scope
+     pass that omits changed implementation/fixture files is NEEDS_REVISION.
+     (PR #3840 anti-pattern: report claimed PR-A-only based on modal/shared files,
+     but the PR also changed TypeScript formatter parity/fixture files; Codex round
+     1 correctly rejected until a full-diff scope audit covered every file.)
+
+5. REGRESSION COVERAGE: For bugs found during testing, were regression tests
+   written or at minimum documented as needed? A bug fix without a regression
+   test is incomplete.
+
+6. MODAL CHANGE BROWSER TESTING: If the PR diff includes ANY file under modal/
+   (audio/, docx/, or root modal files), the QA report MUST include evidence of
+   browser-based end-to-end pipeline testing (project creation → auto-process →
+   completion verification). Unit tests and Python tests alone are INSUFFICIENT
+   for Modal changes. If modal/ files are in the diff but the report only shows
+   unit/Python test results with no browser/pipeline test, that is a NEEDS_REVISION
+   finding. (Rajiv directive 2026-03-31: PR #3217 Modal change passed Codex QA
+   review with only unit tests — this check would have caught it.)
+
+7. DATA-DRIVEN FEATURE TESTING: If the PR creates new database tables or data
+   types (schema additions in convex/schema.ts), the QA report MUST include
+   evidence of creating test data and verifying it displays correctly in the UI.
+   Empty-state-only testing for a data-driven feature is NEEDS_REVISION.
+   Examples:
+   - Notification system → must create a notification and verify badge + panel
+   - Broadcast system → must create a broadcast and verify it reaches users
+   - Label collection → must trigger a save and verify labels are stored
+   - Comments feature → must add a comment and verify it renders
+   If the report only shows "No notifications" / "No broadcasts yet" / empty
+   tables with no attempt to populate data, that is a NEEDS_REVISION finding.
+   (Rajiv directive 2026-04-12: PR #3458 passed QA with only empty-state UI
+   testing — no test notification was created to verify the bell badge or
+   notification panel rendering with actual content.)
+
+8. PLAN-TO-QA EVIDENCE DRIFT (mandatory for pipeline/routing/fallback/provider/validator work):
+   If the accepted plan content contains executable ACs, a verification ledger, or an executable AC/test contract, the QA report MUST account for every AC. The report must include a Plan Contract Coverage table with these columns: `Plan AC | Production path | Required proof | QA evidence | Result`.
+
+   Return NEEDS_REVISION if:
+   - Any executable AC from the plan is omitted from the QA report.
+   - The report marks an AC PASS with vague language like "verified", "unit tests pass", or "works" but no evidence.
+   - A routing/fallback AC is proven only through helper/classifier output when the plan required a production orchestration path.
+   - The report does not name the production path for pipeline ACs (`_run_speaker_correction_stage`, `GuardedLLMStage.run`, ASR provider selector, proofread/format stage runner, Modal endpoint, etc.).
+   - Negative-route evidence is missing where required: no unintended Layer 1 retry, no fallback-of-fallback, no wrong provider reuse, no wrong terminal/fail-open state.
+   - Budget/deadline or validator-severity ACs are claimed as QA-passed without citing the local test name/log/CI evidence that actually proves them.
+
+   If an AC is not QA-provable, the report may mark it `N/A`, but only with the owner named (`code-review`, `CI`, or `PM`) and the exact evidence still required. Silent omission is NEEDS_REVISION.
+
+9. E2E ASSERTION-VS-PATH VERIFICATION (mandatory when the PR fixes a specific output property — paragraph attrs, OOXML elements, line-spacing, indents, fonts, headers, page-breaks, tab characters, or any pipeline / formatter / DOCX-export bug whose symptom is a named property's value):
+
+   This is a HARD RULE per Rajiv directive 2026-05-02 11:24 IST (thread `1777701000.518459`), reinforcing memory `feedback_e2e_coverage_path_vs_assertion_distinction.md`. A test that exercises the buggy code path but does NOT assert on the buggy output silently passes regressions.
+
+   Read the E2E spec diff (or the cited existing E2E test). Confirm BOTH:
+   (a) The new/touched test assertions reference the buggy property BY NAME — e.g., `firstLineIndent`, `w:ind`, `textAlign`, `lineRule`, `pageBreakBefore`, `\t` tab character, `<w:br w:type="page"/>`, the specific attr/element the fix is preserving or restoring.
+   (b) The test would FAIL if the fix is reverted on the same fixture (regression-guard property). The slot must verify this locally before claiming coverage. If the QA report does not state the regression-guard check was performed, that is a NEEDS_REVISION finding.
+
+   If the E2E test only checks "section count" / "no crash" / "section content present" / "happy-path renders" without naming the property in question → flag as INSUFFICIENT COVERAGE. Verdict: NEEDS_REVISION.
+
+   This is NOT optional — "Mode B: unit tests are authoritative" is NOT an acceptable answer when the bug is in a code path that runs end-to-end. Unit tests can complement but never replace the named-attr assertion at the E2E layer.
+
+   Reference incident: PR #3964 (#3961 `format_tiptap_sections`) shipped with E2E coverage that asserted section-content-exists but NOT paragraph attributes (`firstLineIndent`, `textAlign`, `indent`); regression in any of these attrs would silently pass. Rajiv directive 2026-05-02 made this a hard rule.
+
+10. UI-STORAGE PARITY (mandatory when the PR diff touches `default_rules.yaml`,
+   `formattingRulesYaml`, `dsl_vars`, template variables, or any user-configurable
+   field that BOTH the pipeline reads at runtime AND the editor/template UI
+   displays in a settings/Variables panel): The QA report MUST include evidence
+   that BOTH surfaces — the editor's Variables/Settings panel AND the exported
+   artifact (DOCX/PDF) — render the same semantic value after the fix. If the
+   pipeline applies a runtime semantic transform (integer→tabs, space-count→
+   tab-count, pt→twips, raw int→derived display) that the UI does NOT also apply,
+   that is a NEEDS_REVISION finding regardless of whether the export is correct
+   in isolation. The QA tester must open the template editor and screenshot the
+   relevant variable, AND inspect the exported file's bytes (OOXML for DOCX,
+   raw PDF stream, etc.) — and the two must agree on the semantic. If the report
+   only shows export evidence without the UI screenshot, or only shows the UI
+   without the export bytes, NEEDS_REVISION. (Rajiv directive 2026-04-30:
+   PR #3856 → #3918 follow-up — Modal-side `colloquy_tab=3` → `\t\t\t` runtime
+   override shipped with no QA check on the editor's Variables panel; QC-facing
+   divergence broke template-verification workflow because the panel still showed
+   "15 spaces" while the exported DOCX emitted tabs. The QA report should have
+   flagged that divergence at review time, before merge.)
+
+11. SEED REFRESH GATE (DEFENSIVE LAST CHECK, mandatory when the PR diff touches
+   `convex/schema.ts`, `convex/migrations.ts`, or any file matching
+   `convex/migrations/*.ts` or `convex/migrations*.ts`): Verify that the same
+   diff also modifies `tests/e2e/fixtures/preview-seed.zip`. If the schema/
+   migration files are present in the diff but `preview-seed.zip` is NOT, return
+   NEEDS_REVISION with reason: "Phase 8b not run — preview-seed.zip refresh
+   missing. Per-PR Convex preview infra (#3986) seeds from this fixture; without
+   refresh, downstream PR E2Es fail against stale snapshot." This is the last
+   gate before mark-ready; plan-review and code-review should have caught it
+   earlier, but enforce here too. Override hatch SCOPE (Rajiv directive 2026-05-09 21:40 IST -- TIGHTENED):
+   PR body line "Seed refresh skipped: <reason>" is VALID ONLY for: (a) index-
+   only changes to EXISTING tables (e.g., adding `.index("by_foo")` to an
+   existing `defineTable`), (b) comment/JSDoc-only changes to schema (no
+   semantic change), or (c) field-rename in existing table with no semantic
+   change (no new field, no removed field). Override hatch is INVALID (and
+   Convex import WILL fail with table-ID collision) for: (i) any new
+   `defineTable(...)` block (Convex allocates table-IDs at import time; new
+   table absent from snapshot collides with existing seeded table-ID space),
+   (ii) any new field on existing table (Convex schema validator may reject
+   seed rows missing the new field), or (iii) any schema-removal (table or
+   field). If the PR adds a new table and the override hatch is cited, return
+   NEEDS_REVISION (NOT acceptance) and require: (1) `bun run scripts/regenerate-
+   preview-seed.sh` (or canonical export command via env-unset wrapper to avoid
+   CONVEX_DEPLOY_KEY hang), (2) push refreshed `tests/e2e/fixtures/preview-
+   seed.zip` in the same PR, (3) re-run CI. Validated incident: 2026-05-09
+   21:35 IST PR #4265 #4259 Phase A -- slot author cited "additive-only
+   override" for new `stageRuns` table; Convex import failed with `New table
+   'templateRulesHistory' has IDs that conflict with existing table
+   'stageRuns'`. Seed refresh + re-push fixed it. See `feedback_seed_refresh_
+   phase_8b.md` for full Override hatch SCOPE subsection. For genuinely-valid
+   overrides (a/b/c above), if the override note is present and plausible, do
+   NOT flag. (Rajiv directive 2026-05-05 11:51 IST: integrated
+   into plan/code/qa review pipeline as the 5-touchpoint enforcement of seed
+   refresh on schema-changing PRs.)
+
+13. OOXML STRUCTURE PARITY FOR EXPORT-PIPELINE PRs (HARD RULE per Rajiv
+   directive 2026-05-06 12:53 IST): If the PR diff includes ANY of:
+   - `modal/docx/processor.py`
+   - `lib/utils/docx-tiptap-convert*`
+   - `*.docx` template fixtures (`tests/e2e/fixtures/`, `convex/seed/`)
+   - Any change to OOXML emission (paragraph attrs, runs, sectPr, pPr,
+     `<w:ind>`, `<w:jc>`, `<w:pStyle>`, leading-whitespace text content)
+
+   Then the QA report MUST include an OOXML parity diff between the
+   source template fixture and the exported DOCX:
+   1. Unzip the source template fixture (e.g.
+      `tests/e2e/fixtures/example-deposition.docx`,
+      `ACR_MA_DEPO_MU.docx`, `Mina_*.docx`).
+   2. Extract the relevant paragraphs' OOXML (pStyle, jc, ind attrs,
+      leading-space text content) — `unzip -p <fixture> word/document.xml`.
+   3. Compare against the exported DOCX's OOXML for the same paragraphs.
+   4. The QA report must show BOTH OOXML extracts side-by-side or a
+      diff, AND state explicitly which mechanism the source uses
+      (leading-space text vs `<w:ind>` vs `<w:jc>` vs `pStyle` indent).
+
+   If the QA report only verifies VISUAL position (e.g. "appears
+   right-aligned in Word", "centered in MS Word render", screenshot of
+   the rendered page) and NOT the OOXML mechanism, return
+   NEEDS_REVISION. Visual outcome can be achieved by the wrong
+   mechanism — `pStyle=Colloquy` + `<w:ind left=1440 right=792
+   firstLine=1440>` renders visually similar to leading-space text in
+   Word, but only one matches the source template convention. The other
+   breaks editor↔export parity, breaks under different page-margin
+   geometry, and gets stripped or rewritten on subsequent LLM passes.
+
+   Reference incident: PR #4089 (#4062 ACR cover-page first 3 lines
+   centered) — R0/R1/R2/R3 all verified visual position in Word and
+   PASSED, but used `pStyle=Colloquy` + `<w:ind>` attrs. ACR template
+   convention is 45 leading spaces in `<w:t>` text content with no
+   `<w:jc>` and no `<w:ind>`. R4 finally landed the correct mechanism
+   as a single-line guard — the 4-round cycle would have been avoided
+   if any of the QA briefs had inspected OOXML structure parity.
+   See `feedback_acr_template_leading_space_alignment.md` for the ACR
+   convention specifically.
+
+12. CORE-SPEC COVERAGE GATE (HARD RULE per Rajiv directive 2026-05-05 12:59 IST,
+   thread `1777965887.883359`): If the QA report claims VERIFIED/PASS but the
+   PR diff includes a `.skip(`, `test.skip(`, `describe.skip(`, `it.skip(`,
+   `test.skip.if(`, or any conditional skip call inside a core E2E spec
+   (post-#4063: any file under `tests/e2e/specs/core/`; pre-#4063: one of the
+   named core specs `auto-process-regression.spec.ts`, `smoke-project-upload.spec.ts`,
+   `template-vars-fidelity.spec.ts`, `smoke-large-file-perf.spec.ts`,
+   `auto-process-template-export.spec.ts`), or if the QA narrative reports
+   "skipped a core test as flaky" / "skipped because environment-specific" /
+   "skipped pending follow-up" — return NEEDS_REVISION. Finding type:
+   process-violation. Required action: slot must un-skip and either pass the
+   test cleanly or `/escalate` to PM with a real diagnosis. PM may not
+   mark-ready until the core spec is live and green. Core E2E specs cover
+   product-critical happy paths and may never silently regress.
+
+== WHAT NOT TO FLAG ==
+
+Do NOT flag any of the following:
+- Missing screenshots or evidence formatting style
+- Wording of pass/fail claims (but DO flag if the acceptance criterion is unverified)
+- Style or structure of the report
+- Severity assessments on CONDITIONAL PASS
+- Whether the QA tester used the "right" browser or device
+
+DO flag: "Pre-existing" classification of the reported symptom. If the issue
+was filed because X happens, and X still happens after the fix, that's FAIL —
+not "pre-existing baseline." (Lesson: PR #3381 — namespace cleanup improved
+intermediate metrics but Word still showed repair prompt.)
+
+== VERDICT ==
+
+Respond with one of:
+VERIFIED — all brief scenarios were tested, triggering artifacts were used,
+results are evidence-based, and regression coverage is adequate.
+
+NEEDS_REVISION — list EACH specific gap:
+- Which brief scenario was not tested?
+- Which triggering artifact was not used?
+- Which claim lacks evidence?
+- Which bug lacks regression test coverage?
+
+Be specific. "Missing evidence" is not helpful. "Scenario 3 (scroll persistence)
+has no specific observation — report says 'works correctly' but doesn't state
+what was measured" is helpful.
+
+== CUSTOMER ARTIFACT DELIVERY INVARIANT (Mandatory — Rajiv CTO directive 2026-05-26 10:57 IST thread `1779763828.526989`) ==
+
+For auto-process, proofread, format, BoN, validator, and export paths, the product default is to deliver the best usable content-safe output and surface warnings. Do not hard-reject, roll back, block draft readiness, or discard a non-empty usable candidate because of validator uncertainty, score thresholds, formatting drift, co-occurrence ratios, or quality concerns. Those must become structured warnings and `ready_with_warnings`.
+
+Hard reject is allowed only when delivery is impossible or unsafe: no candidate exists, persistence/export is impossible, auth/security/privacy fails, or the artifact would be materially corrupt in a way the user cannot reasonably inspect/recover from.
+
+Any threshold controlling validator severity, BoN rescue, warning vs hard block, or candidate selection must be configurable through the existing Modal BoN/validator threshold config. New magic-number thresholds are a review blocker.
+
+Review gate shape for THIS reviewer:
+
+**QA review**: REQUIRE evidence that (a) a warning-class candidate is delivered as `ready_with_warnings` (NOT `degraded`, NOT `blocked`), AND (b) catastrophic cases (empty output, content corruption, wrong transcript, auth leakage) still hard-reject. Both proof-points must be in the QA report. If the PR touches auto-process / proofread / format / BoN / validator / export paths, the QA report MUST include:
+- A test scenario exercising a warning-class candidate (e.g., near-threshold validator warning, BoN soft-warning, format-pass with drift) and proof the customer state is `ready_with_warnings` with non-empty output delivered + warning surfaced in UI.
+- A test scenario exercising a catastrophic case (empty output, content corruption, auth/privacy fail) and proof the system still hard-rejects with safe customer-visible failure.
+
+If the QA report lacks either proof-point on an in-scope PR, return NEEDS_REVISION with the missing scenario(s) listed.
+
+LONG-FILE EDITOR PERF REGRESSION GUARD (HARD RULE per Rajiv CTO directive 2026-07-04): For QA reports on PRs tied to reported editor performance or lag on long files, return NEEDS_REVISION unless the report accounts for the required core perf regression guard in `tests/e2e/specs/core/smoke-large-file-perf.spec.ts` using `SEED_PROJECT_LONG`, or the linked issue is a pure prerequisite that explicitly delegates the guard to a named runtime issue. Valid QA evidence must identify the protected user path, runtime control point, telemetry/assertions, budget or bounded behavior, and whether the assertion would fail on the original regression. Manual/local harnesses and `tests/e2e/specs/qa-tests/` evidence do not replace this core guard.
+
+## Runtime and branch coverage (CTO directive Ev0C3ECXCGJF)
+
+For changed production paths, identify the actual execution runtime, verify new imports/APIs and their
+dependencies are supported there, and verify the test enters the changed critical branch with
+production-shaped state. A mock or a test that bypasses that branch is not runtime-compatibility proof.
+
+QA-reviewer specifics:
+
+- Distinguish logic proof in convex-test from same-runtime integration proof.
+- Name the changed critical predicate/state, its entry point, the runtime, and the asserted product
+  outcome - and identify the mocks/bypasses in the evidence.
+- Deterministic provider fixtures remain fine. Real-runtime proof is needed for a runtime-sensitive
+  boundary, not for every pure helper change.
+- Missing unexecuted evidence stays explicit; never report it as PASS.

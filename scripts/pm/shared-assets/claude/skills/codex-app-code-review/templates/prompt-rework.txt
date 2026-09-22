@@ -1,0 +1,74 @@
+Review the code rework for issue #ISSUE and PR #PRNUMBER.
+
+This is a DELTA REVIEW, not a fresh whole-PR review.
+
+BASELINE: [PREVIOUS_REVIEW_HEAD]
+DELTA FILES:
+[REWORK_FILES]
+
+REWORK ITEMS:
+[paste rework items]
+
+DELTA SCOPE: [DELTA_SCOPE]
+SCOPE RULE: [DELTA_SCOPE_DETAIL]
+
+PLAN CONTRACT:
+[paste plan content if present]
+
+Required procedure:
+
+1. Terminalize every prior blocker from the injected ledger using its existing
+   stable ID: `RESOLVED`, `OPEN`, or `SUPERSEDED`.
+2. Inspect only the baseline-to-current delta and the smallest directly affected
+   production consumer seams needed to determine functional correctness,
+   regression risk, data integrity, and release safety.
+3. Do not reopen an unchanged surface, restate a prior blocker under a new ID,
+   or repeat broad repository doctrine already evaluated on the baseline.
+4. A genuinely new blocker is allowed only when it is caused by `new_revision`
+   or was `newly_inspectable`. Name the changed line/control point and explain
+   why it could not have been raised against the prior head.
+5. For a non-product-only delta, validate the named proof/process change and its
+   mechanical contract only. Do not restart product architecture review.
+6. Block only for P0/P1 functional defects, real regression/data-loss risk,
+   unsafe runtime state transitions, or missing release-critical proof directly
+   required by a prior blocker. Documentation, wording, cleanup, additional
+   tests, and proof-shape improvements are P2 follow-ups when runtime behavior is
+   already sound.
+7. When a touched behavior crosses a Convex, Modal, R2, webhook, editor state,
+   retry, validator, or export boundary, inspect that exact emitted/consumed
+   contract. Do not expand into unrelated sibling systems.
+8. A regression test must fail when the changed production control point is
+   reverted. Helper-only or copied-logic tests do not close a runtime blocker.
+
+<!-- BEHAVIORAL_AC_PROOF_CONTRACT_V1 -->
+For every behavior-changing AC in the delta, require its predeclared production
+case, runtime control point, exact command/fixture, observable, and negative
+proof. A repeated same-class blocker must end in a terminal patch, split,
+rescope, override, or product decision—not another generic rework cycle.
+
+UNIT-TEST DETERMINISM GATE (HARD RULE per branch-green/main-red meta-analysis 2026-07-29): Trigger when the delta adds or modifies a unit/integration test using timers, requestAnimationFrame, microtasks, wall-clock/performance timestamps, randomness, workers, listeners, concurrent tasks, filesystem/network completion, or asynchronously produced collections/events. Inspect the test harness itself. REQUEST_CHANGES when correctness depends on a fixed sleep, default timeout, uncontrolled timer/rAF ordering, wall-clock threshold, unchecked `[0]` lookup, retry wrapper, or one green CI run. A fixed sleep may simulate elapsed time but cannot synchronize an assertion. Require an observable production completion boundary (promise/callback/event/latch); captured and explicitly released timer/rAF callbacks plus one adverse interleaving when ordering is under test; afterEach cleanup of timers/listeners/performance entries/mocks/global state; functional proof on small deterministic fixtures separate from real wall-time benchmarks; and five consecutive targeted executions under normal CI worker settings. A timeout increase alone is not a correctness fix, and repetition never substitutes for explicit synchronization. Return exact fields: `TEST_DETERMINISM: NOT_TRIGGERED | PASS | REQUEST_CHANGES`; `RISK_PRIMITIVES`; `SYNCHRONIZATION_BOUNDARY`; `ADVERSE_INTERLEAVING_PROOF`; `TARGETED_REPEAT_PROOF`.
+
+Return exactly one verdict: `APPROVE`, `REQUEST_CHANGES`, or `REJECT`.
+P2 findings cannot support a negative verdict without a concrete
+`SEVERITY_OVERRIDE: P1` and runtime/release evidence.
+
+For every blocker, emit the convergence marker fields required by the companion.
+Do not claim merge-ready; current-head CI/E2E is a separate gate.
+
+VALIDATOR HARD-REJECT RECURRENCE CHECK (issue #7944 lineage): If the rework re-imposes (or preserves) a hard reject, retry loop, forced original fallback, or readiness/pipeline failure over a heading/template/blank-line/casing preference — e.g. `missing immutable anchor` on a candidate with no deleted content, where the correct control point is deterministic DSL normalization to `DEPOSITION` plus structured warnings with the usable output deliverable (`ready_with_warnings`) — keep the blocker OPEN: a re-promoted soft result is still a must-fix defect. The executed discriminators on main `6793164e` (blank-line-only and `DEPOSITION`→`Deposition`-only, neither deleting content) must remain selectable with warning-only handling. Genuine witnessed-corruption controls stay.
+
+## Runtime and branch coverage (CTO directive Ev0C3ECXCGJF)
+
+For changed production paths, identify the actual execution runtime, verify new imports/APIs and their
+dependencies are supported there, and verify the test enters the changed critical branch with
+production-shaped state. A mock or a test that bypasses that branch is not runtime-compatibility proof.
+
+Code-reviewer specifics:
+
+- Inspect new runtime dependencies and their reachable call paths.
+- Reject concrete unsupported APIs/imports in the ACTUAL runtime - specifically runtime dynamic loading
+  reachable from Convex queries/mutations. Prefer static imports for that shape; `node` cannot make a
+  query/mutation Node-capable.
+- Do NOT ban valid type imports, test modules, or genuinely supported Node/action-only code.
+- Shared production code remains production-impacting even when the parent feature says "test mode".
+- Flag concrete runtime harm, not paperwork.
