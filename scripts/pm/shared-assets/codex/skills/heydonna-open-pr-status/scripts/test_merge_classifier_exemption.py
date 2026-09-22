@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import pathlib
 import subprocess
 import tempfile
 import unittest
@@ -242,6 +243,43 @@ class ParentRedWitnessTests(unittest.TestCase):
             with self.assertRaises(parent.Refusal) as ctx:
                 parent.workflow_proof(pr(), WORKFLOW, NAMES)
             self.assertIn("WORKFLOW_NOT_GREEN", str(ctx.exception))
+
+
+class ManifestMappingTests(unittest.TestCase):
+    """The repaired merge executable must be install-activatable at the Codex path."""
+
+    ROOT = pathlib.Path(__file__).resolve().parents[7]
+    SOURCE_PATH = "codex/skills/heydonna-open-pr-status/scripts/merge.py"
+    TARGET = "/Users/rajiv/.codex/skills/heydonna-open-pr-status/scripts/merge.py"
+
+    def manifest_row(self):
+        manifest = json.loads((self.ROOT / "scripts" / "pm" / "shared-assets" / "manifest.json").read_text())
+        rows = [e for e in manifest["entries"] if e["source_path"] == self.SOURCE_PATH]
+        self.assertEqual(len(rows), 1, "exactly one mapping row for the merge executable")
+        return rows[0]
+
+    def test_source_exists_and_digest_matches_candidate_bytes(self):
+        source = self.ROOT / "scripts" / "pm" / "shared-assets" / self.SOURCE_PATH
+        self.assertTrue(source.is_file())
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), self.manifest_row()["sha256"])
+
+    def test_canonical_target_is_the_live_codex_executable_never_claude(self):
+        target = self.manifest_row()["canonical_target"]
+        self.assertEqual(target, self.TARGET)
+        self.assertNotIn("/.claude/", target)
+        self.assertTrue(target.startswith("/Users/rajiv/.codex/skills/"))
+
+    def test_row_metadata_matches_adjacent_codex_skill_conventions(self):
+        row = self.manifest_row()
+        self.assertEqual(row["mode"], 420)                      # live file is 0644
+        self.assertEqual(row["ownership_class"], "shared-codex-skill-executable")
+        self.assertEqual(row["dependency_status"], "closed")
+        self.assertEqual(row["dependencies"], [])
+
+    def test_the_test_file_is_not_mapped(self):
+        manifest = json.loads((self.ROOT / "scripts" / "pm" / "shared-assets" / "manifest.json").read_text())
+        paths = {e["source_path"] for e in manifest["entries"]}
+        self.assertNotIn("codex/skills/heydonna-open-pr-status/scripts/test_merge_classifier_exemption.py", paths)
 
 
 if __name__ == "__main__":
