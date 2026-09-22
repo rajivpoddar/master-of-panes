@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import type { AssignmentTupleInput, MoPDatabase } from "./db.js";
 import type { SlotState } from "./types.js";
 import {
+  ASSIGNMENT_WORK_KINDS,
   normalizeAssignmentTuple,
   normalizeBranchIdentity,
   normalizeRepositoryId,
@@ -251,13 +252,18 @@ export function registerAssignmentEffectRoutes(
     const normalizedTuple = normalizeAssignmentTuple(desiredTuple);
     const branchIdentity = normalizeBranchIdentity(desiredTuple.branch);
     // Name the failing predicate for diagnosability. Evaluated with the same predicates, in the same
-    // order, as the validation below; it never changes whether the refusal fires.
+    // order, as the authoritative validation (normalizeAssignmentTuple), including work_kind
+    // MEMBERSHIP via the exported ASSIGNMENT_WORK_KINDS set - the set is imported, never duplicated.
+    // It never changes whether the refusal fires.
     const failedField =
       normalizeRepositoryId(desiredTuple.repository_id) === null ? "repository_id"
       : !Number.isInteger(desiredTuple.issue) || (desiredTuple.issue as number) <= 0 ? "issue"
       : !branchIdentity ? "branch"
       : typeof desiredTuple.head_sha !== "string" || !/^[0-9a-f]{40}$/i.test(desiredTuple.head_sha) ? "head_sha"
-      : typeof desiredTuple.work_kind !== "string" || desiredTuple.work_kind.trim() === "" ? "work_kind"
+      : typeof desiredTuple.work_kind !== "string"
+          || desiredTuple.work_kind.trim() === ""
+          || !ASSIGNMENT_WORK_KINDS.has(desiredTuple.work_kind.trim())
+        ? "work_kind"
       : typeof desiredTuple.handoff_id !== "string" || desiredTuple.handoff_id.trim() === "" ? "handoff_id"
       : null;
     if (

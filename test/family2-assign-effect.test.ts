@@ -428,6 +428,8 @@ test("invalid_assignment_tuple names the failing tuple predicate (additive diagn
       ["head_sha", { head_sha: 12345 }],              // non-string
       ["work_kind", { work_kind: "" }],               // empty
       ["work_kind", { work_kind: "   " }],            // whitespace-only
+      ["work_kind", { work_kind: "banana" }],           // NONEMPTY but not in ASSIGNMENT_WORK_KINDS
+      ["work_kind", { work_kind: "Implementation" }],   // case variant is not a member
       ["handoff_id", { handoff_id: "" }],             // empty
       ["handoff_id", { handoff_id: "  " }],           // whitespace-only
       ["issue", { issue: 0 }],                        // not > 0
