@@ -316,5 +316,97 @@ class SecretHygieneTests(unittest.TestCase):
             self.assertIn("noop", blob)
 
 
+class PreSignalRevalidationTests(unittest.TestCase):
+    """The planning snapshot is never trusted for a signal."""
+
+    def _home(self, tmp):
+        home = pathlib.Path(tmp)
+        return home, auth(home)
+
+    def test_parent_disappearance_is_treated_as_already_gone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, refresh = self._home(tmp)
+            plan_procs = [proc(100, 1, refresh - 100.0, broker_cmd("/tmp/x"))]
+            fresh_procs = []
+            calls = {"n": 0}
+            def provider():
+                calls["n"] += 1
+                return plan_procs if calls["n"] == 1 else fresh_procs
+            kills = []
+            plan = MODULE.ensure_fresh(
+                home, "/work/co1", "auto",
+                process_provider=provider,
+                probe=lambda ep: (MODULE.IDLE, "idle"),
+                killer=lambda p, c: (kills.append(p), (True, "x"))[1],
+            )
+            self.assertEqual(plan["brokers"][0]["action"], MODULE.RECYCLE)
+            self.assertIn("already absent", plan["brokers"][0]["reason"])
+
+    def test_pid_reuse_or_command_drift_is_fail_safe_with_no_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, refresh = self._home(tmp)
+            planned = [proc(100, 1, refresh - 100.0, broker_cmd("/tmp/x"))]
+            reused = [proc(100, 1, refresh + 5.0, "node /somewhere/else --cwd /work/co1")]
+            calls = {"n": 0}
+            def provider():
+                calls["n"] += 1
+                return planned if calls["n"] == 1 else reused
+            kills = []
+            plan = MODULE.ensure_fresh(home, "/work/co1", "auto", process_provider=provider,
+                                       probe=lambda ep: (MODULE.IDLE, "idle"),
+                                       killer=lambda p, c: (kills.append(p), (True, "x"))[1])
+            self.assertEqual(kills, [], "drifted identity must never be signalled")
+            self.assertEqual(plan["brokers"][0]["action"], MODULE.FAIL_SAFE)
+
+    def test_child_set_drift_uses_the_fresh_child_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, refresh = self._home(tmp)
+            planned = [proc(100, 1, refresh - 100.0, broker_cmd("/tmp/x")), proc(101, 100, 1.0, CHILD_CMD)]
+            fresh = planned + [proc(104, 100, 2.0, CHILD_CMD)]
+            calls = {"n": 0}
+            def provider():
+                calls["n"] += 1
+                return planned if calls["n"] == 1 else fresh
+            kills = []
+            MODULE.ensure_fresh(home, "/work/co1", "auto", process_provider=provider,
+                                probe=lambda ep: (MODULE.IDLE, "idle"),
+                                killer=lambda p, c: (kills.append((p, list(c))), (True, "x"))[1])
+            self.assertEqual(kills, [(100, [101, 104])], "children are recomputed from the fresh snapshot")
+
+
+class RecycleVerificationTests(unittest.TestCase):
+    def test_survivor_after_sigkill_is_not_success(self):
+        ok, detail = MODULE.recycle(4242, [4243], kill=lambda p, s: None, alive=lambda p: True,
+                                    sleep=lambda s: None, grace_seconds=0.01)
+        self.assertFalse(ok)
+        self.assertIn("survivor_after_sigkill", detail)
+
+    def test_verified_gone_is_success(self):
+        ok, detail = MODULE.recycle(4242, [4243], kill=lambda p, s: None, alive=lambda p: False,
+                                    sleep=lambda s: None, grace_seconds=0.01)
+        self.assertTrue(ok)
+        self.assertIn("recycled", detail)
+
+    def test_permission_failure_is_typed(self):
+        def deny(pid, sig):
+            raise PermissionError(1, "denied")
+        ok, detail = MODULE.recycle(4242, [], kill=deny, alive=lambda p: True,
+                                    sleep=lambda s: None, grace_seconds=0.01)
+        self.assertFalse(ok)
+        self.assertIn("permission_denied", detail)
+
+    def test_failed_recycle_never_permits_acquisition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            refresh = auth(home)
+            procs = [proc(100, 1, refresh - 100.0, broker_cmd("/tmp/x")), proc(101, 100, 1.0, CHILD_CMD)]
+            plan = MODULE.ensure_fresh(home, "/work/co1", "auto", processes=procs,
+                                       probe=lambda ep: (MODULE.IDLE, "idle"),
+                                       killer=lambda p, c: (False, "survivor_after_sigkill:pid=100"))
+            entry = plan["brokers"][0]
+            self.assertEqual(entry["action"], MODULE.FAIL_SAFE)
+            self.assertIn("do not acquire", entry["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

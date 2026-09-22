@@ -258,7 +258,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-codex-companion-broker-freshness",
-      "sha256": "df5d5bff9f22185d7122806b547909da9b004295a9e67c2c2e15047e275713bd",
+      "sha256": "be8ac1bfe2693fb94b8ff1570cc47b1faf1c63394a194ac540b47bf8ccec7510",
       "source_path": "claude/scripts/codex-companion-broker-freshness.py"
     },
     {

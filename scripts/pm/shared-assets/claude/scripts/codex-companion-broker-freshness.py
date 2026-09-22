@@ -268,61 +268,145 @@ def ensure_fresh(
     busy_mode: str,
     *,
     processes: list[dict[str, Any]] | None = None,
+    process_provider: Callable[[], list[dict[str, Any]]] | None = None,
     probe: Callable[[str | None], tuple[str, str]] = probe_busy,
     killer: Callable[[int, list[int]], tuple[bool, str]] | None = None,
 ) -> dict[str, Any]:
-    """Plan, then perform at most one scoped recycle per stale-idle broker.
+    """Plan, then recycle stale-idle brokers with a FRESH pre-signal re-check.
 
-    Idle is re-probed immediately before any signal, so a review that starts
-    after planning is never interrupted.
+    Nothing is signalled on the strength of the planning snapshot: immediately
+    before any signal the process table is re-read, the parent must still match
+    PID AND start epoch AND the full command (which carries the broker marker,
+    the exact --cwd and the endpoint), the child set is recomputed from that
+    fresh snapshot, and the live idle probe is re-run against the fresh parent.
+    Any mismatch defers with no signal.
     """
-    procs = list_processes() if processes is None else processes
+    if process_provider is None:
+        if processes is None:
+            provider: Callable[[], list[dict[str, Any]]] = list_processes
+        else:
+            provider = lambda: processes
+    else:
+        provider = process_provider
+
+    procs = provider()
     plan = build_plan(home, cwd, busy_mode, processes=procs, probe=probe)
     killer = recycle if killer is None else killer
     performed: list[dict[str, Any]] = []
+
     for entry in plan["brokers"]:
         if entry["action"] != RECYCLE or not entry["broker_pid"]:
             continue
-        current = next((p for p in procs if p["pid"] == entry["broker_pid"]), None)
-        if current is None or current["start_epoch"] != entry["broker_start_epoch"]:
-            performed.append({"broker_pid": entry["broker_pid"], "ok": False, "detail": "broker_identity_changed"})
-            entry["action"], entry["reason"] = DEFER, "broker identity changed before recycle"
+        pid = entry["broker_pid"]
+        planned = next((p for p in procs if p["pid"] == pid), None)
+
+        fresh = provider()
+        current = next((p for p in fresh if p["pid"] == pid), None)
+
+        if current is None:
+            # The broker exited on its own; a stale broker is no longer serving,
+            # so the next acquisition spawns fresh. No signal is needed.
+            performed.append({"broker_pid": pid, "ok": True, "detail": "already_absent"})
+            entry["action"], entry["reason"] = RECYCLE, "broker already absent before any signal; next invocation spawns fresh"
             continue
+
+        drift = []
+        if planned is None:
+            drift.append("planning snapshot lost the parent")
+        else:
+            if current.get("start_epoch") != planned.get("start_epoch"):
+                drift.append("start_epoch changed")
+            if current.get("command") != planned.get("command"):
+                drift.append("command changed")
+        if BROKER_MARKER not in str(current.get("command") or ""):
+            drift.append("broker marker missing")
+        if command_cwd(str(current.get("command") or "")) != cwd:
+            drift.append("cwd no longer matches")
+        if planned is not None and (
+            command_endpoint(str(current.get("command") or ""))
+            != command_endpoint(str(planned.get("command") or ""))
+        ):
+            drift.append("endpoint changed")
+        if current.get("ppid") == pid:
+            drift.append("self-parented pid")
+
+        if drift:
+            performed.append({"broker_pid": pid, "ok": False, "detail": "identity_drift:" + ";".join(drift)})
+            entry["action"] = FAIL_SAFE
+            entry["reason"] = f"refusing to signal pid {pid}: process identity changed ({'; '.join(drift)})"
+            continue
+
+        children = [c["pid"] for c in select_children(fresh, pid)]
+
         if busy_mode == "auto":
-            recheck, why = probe(command_endpoint(current["command"]))
+            recheck, why = probe(command_endpoint(str(current.get("command") or "")))
             if recheck != IDLE:
-                performed.append({"broker_pid": entry["broker_pid"], "ok": False, "detail": f"idle_recheck_failed:{recheck}"})
+                performed.append({"broker_pid": pid, "ok": False, "detail": f"idle_recheck_failed:{recheck}"})
                 entry["action"], entry["reason"] = DEFER, f"idle re-check before recycle reported {recheck} ({why})"
                 continue
-        ok, detail = killer(entry["broker_pid"], entry["children"])
-        performed.append({"broker_pid": entry["broker_pid"], "ok": ok, "detail": detail})
+
+        ok, detail = killer(pid, children)
+        performed.append({"broker_pid": pid, "ok": ok, "detail": detail})
         if ok:
-            entry["action"], entry["reason"] = RECYCLE, "recycled; the next invocation spawns a fresh broker"
+            entry["action"], entry["reason"] = RECYCLE, "recycled and verified gone; the next invocation spawns a fresh broker"
+        else:
+            entry["action"] = FAIL_SAFE
+            entry["reason"] = f"recycle failed or incomplete ({detail}); the stale broker may still be serving - do not acquire"
+
     plan["recycled"] = performed
     return plan
 
 
-def recycle(broker_pid: int, children: list[int]) -> tuple[bool, str]:
+def recycle(
+    broker_pid: int,
+    children: list[int],
+    *,
+    kill: Callable[[int, int], None] | None = None,
+    alive: Callable[[int], bool] | None = None,
+    sleep: Callable[[float], None] | None = None,
+    grace_seconds: float = 5.0,
+) -> tuple[bool, str]:
+    """TERM then KILL the parent and its children, then VERIFY each is gone."""
+    kill = os.kill if kill is None else kill
+    alive = _alive if alive is None else alive
+    sleep = time.sleep if sleep is None else sleep
+
     if broker_pid <= 1 or broker_pid == os.getpid():
         return False, "refused_unsafe_pid"
-    for pid in list(children) + [broker_pid]:
+    targets = list(children) + [broker_pid]
+    if any(pid <= 1 or pid == os.getpid() for pid in targets):
+        return False, "refused_unsafe_pid"
+
+    for pid in targets:
         try:
-            os.kill(pid, signal.SIGTERM)
+            kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             continue
         except PermissionError:
             return False, f"permission_denied:pid={pid}"
-    deadline = time.time() + 5.0
+        except OSError as exc:
+            return False, f"signal_failed:{type(exc).__name__}:pid={pid}"
+
+    deadline = time.time() + grace_seconds
     while time.time() < deadline:
-        if not any(_alive(p) for p in list(children) + [broker_pid]):
+        if not any(alive(pid) for pid in targets):
             return True, "recycled"
-        time.sleep(0.2)
-    for pid in list(children) + [broker_pid]:
-        if _alive(pid):
+        sleep(0.2)
+
+    for pid in targets:
+        if alive(pid):
             try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+                kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                return False, f"permission_denied:sigkill:pid={pid}"
+            except OSError as exc:
+                return False, f"signal_failed:{type(exc).__name__}:pid={pid}"
+
+    survivors = [pid for pid in targets if alive(pid)]
+    if survivors:
+        return False, "survivor_after_sigkill:pid=" + ",".join(str(p) for p in survivors)
     return True, "recycled_after_sigkill"
 
 
