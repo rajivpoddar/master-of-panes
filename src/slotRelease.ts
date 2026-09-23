@@ -56,15 +56,6 @@ export interface CheckoutResetObservation {
 }
 
 /**
- * Short quiescence floor for release. A slot whose last meaningful work is
- * inside this window may still be settling (a queued continuation, a resuming
- * session), so release waits rather than discarding live work. This is the
- * release-side companion of the 5-minute stale-turn standard: it is short
- * because an idle slot with no active turn is already proven not to be working.
- */
-export const RELEASE_QUIESCENCE_MS = 60 * 1000;
-
-/**
  * Bounded wait for the reset instruction's OWN induced turn to settle.
  *
  * The pane-mediated release delivers a stop/reset instruction into the owning
@@ -97,7 +88,7 @@ export type ReleaseSelfTurnSettle =
   | { ok: false; kind: "epoch_mismatch" | "observed_tuple_mismatch" | "slot_free" | "slot_missing"; slot: SlotState | null; induced_turn_id: string | null; waited_ms: number };
 
 /** Why the single release refusal fired. */
-export type ReleaseBlockCause = "active_turn" | "dnd" | "productive_work" | "quiescence" | "state_moved";
+export type ReleaseBlockCause = "active_turn" | "dnd" | "productive_work" | "state_moved";
 
 export type ReleaseReadiness =
   | { ok: true }
@@ -109,8 +100,7 @@ export type ReleaseReadiness =
  * superseded against the live row rather than refused.
  */
 export function evaluateReleaseReadiness(
-  slot: Pick<SlotState, "idle" | "dnd" | "activity" | "active_turn_id" | "active_turn_state" | "last_meaningful_work_at">,
-  nowMs: number,
+  slot: Pick<SlotState, "idle" | "dnd" | "activity" | "active_turn_id" | "active_turn_state">,
 ): ReleaseReadiness {
   const turnId = typeof slot.active_turn_id === "string" && slot.active_turn_id.length > 0 ? slot.active_turn_id : null;
   if (turnId !== null || slot.active_turn_state !== "inactive") {
@@ -141,21 +131,6 @@ export function evaluateReleaseReadiness(
       message: `Slot is not releasable: it reports itself busy (idle=false, activity=${slot.activity ?? "null"}).`,
       remediation: "Leave the owner untouched and retry once the slot reports idle with no active turn.",
     };
-  }
-  const last = typeof slot.last_meaningful_work_at === "string" && slot.last_meaningful_work_at.length > 0
-    ? Date.parse(slot.last_meaningful_work_at)
-    : Number.NaN;
-  if (!Number.isNaN(last)) {
-    const quietMs = nowMs - last;
-    if (quietMs < RELEASE_QUIESCENCE_MS) {
-      const remaining = Math.max(1, Math.ceil((RELEASE_QUIESCENCE_MS - quietMs) / 1000));
-      return {
-        ok: false,
-        cause: "quiescence",
-        message: `Slot is not releasable yet: the quiescence window has ${remaining}s left.`,
-        remediation: `Retry this release in about ${remaining}s; the slot is settling, not blocked.`,
-      };
-    }
   }
   return { ok: true };
 }
@@ -496,8 +471,8 @@ export class NativeSlotReleaseCoordinator {
       }
       // Reuse the SAME readiness predicate the release gate uses, so "settled"
       // means exactly "the post-delivery authoritative re-check will pass":
-      // the induced turn has closed AND the short settling window has elapsed.
-      const readiness = evaluateReleaseReadiness(row, now());
+      // the induced turn has closed and no other refusal cause remains.
+      const readiness = evaluateReleaseReadiness(row);
       // A row that reads "ready" before the delivered prompt has had time to
       // register its UserPromptSubmit turn is NOT proof of settlement: the
       // induced turn would then appear after this wait returned, and the
@@ -806,7 +781,7 @@ export class NativeSlotReleaseCoordinator {
     }
 
     // The ONE surviving refusal: the slot is still working.
-    const readiness = evaluateReleaseReadiness(current, Date.now());
+    const readiness = evaluateReleaseReadiness(current);
     if (!readiness.ok) {
       return result(
         "slot_not_idle",
@@ -835,7 +810,7 @@ export class NativeSlotReleaseCoordinator {
     if (!claim) {
       this.inProgressSlots.delete(request.slot);
       const live = this.dependencies.db.getSlot(request.slot);
-      const blocked = live ? evaluateReleaseReadiness(live, Date.now()) : null;
+      const blocked = live ? evaluateReleaseReadiness(live) : null;
       if (blocked && !blocked.ok) {
         return result("slot_not_idle", blocked.message, live, blocked.remediation, false, blocked.cause);
       }
@@ -899,10 +874,8 @@ export class NativeSlotReleaseCoordinator {
       // it owns and landing on main. A checkout that already reports main needs
       // no pane instruction — the reset/attestation path below pulls the exact
       // head itself, and the acknowledgement checks still refuse a dirty or
-      // wrong-branch checkout. Delivering a prompt the slot cannot act on only
-      // re-arms the quiescence window with work this release created, so the
-      // identical retry (live S6, 2026-09-23: main + one untracked plan file)
-      // could never converge.
+      // wrong-branch checkout. A prompt the slot cannot act on only creates an
+      // unnecessary user turn; it cannot improve an already-main checkout.
       const paneInstructionRequired = !checkoutSettled && readOnly?.branch !== "main";
       const unpushedCommitsOnMain = readOnly?.branch === "main" && !checkoutSettled
         && Array.isArray(readOnly.unpushed_commits)
@@ -933,7 +906,7 @@ export class NativeSlotReleaseCoordinator {
           preDelivery
           && (preDelivery.active_turn_id !== null || preDelivery.active_turn_state !== "inactive")
         ) {
-          const busy = evaluateReleaseReadiness(preDelivery, Date.now());
+          const busy = evaluateReleaseReadiness(preDelivery);
           return result(
             "slot_not_idle",
             busy.ok
@@ -984,9 +957,7 @@ export class NativeSlotReleaseCoordinator {
                 settle.induced_turn_id ? ` (turn ${settle.induced_turn_id})` : ""
               }; no release was performed.`,
               settle.slot,
-              settle.cause === "quiescence"
-                ? "The slot is settling after the reset instruction; retry once the stated window elapses. Do not hand-edit slot state."
-                : "Wait for the slot's turn to close, then retry the release; do not hand-edit slot state.",
+              "Wait for the slot's turn to close, then retry the release; do not hand-edit slot state.",
               false,
               settle.cause,
             );
@@ -1046,7 +1017,7 @@ export class NativeSlotReleaseCoordinator {
         }
         const postDelivery = this.dependencies.db.getSlot(request.slot);
         if (postDelivery) {
-          const afterDelivery = evaluateReleaseReadiness(postDelivery, Date.now());
+          const afterDelivery = evaluateReleaseReadiness(postDelivery);
           if (!afterDelivery.ok) {
             return result(
               "slot_not_idle",

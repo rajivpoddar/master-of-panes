@@ -7,7 +7,7 @@ import { Hono } from "hono";
 
 import { registerFamily2Routes } from "../src/family2Routes.js";
 import { MoPDatabase, slotAssignmentTuple, type AssignmentTupleInput } from "../src/db.js";
-import { NativeSlotReleaseCoordinator, RELEASE_QUIESCENCE_MS } from "../src/slotRelease.js";
+import { NativeSlotReleaseCoordinator } from "../src/slotRelease.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
 const REPO = "github:heydonna-app/heydonna-app";
@@ -200,19 +200,14 @@ test("the orphaned-turn shape refuses with the abandon-turn remedy, then release
   }
 });
 
-test("the quiescence window refuses briefly, then the same release succeeds", async () => {
+test("a finished slot releases immediately inside the former settling window", async () => {
   const f = fixture();
   try {
     f.db.updateSlot(1, { last_meaningful_work_at: new Date().toISOString() });
-    const tooSoon = await f.coordinator.release(releaseOf(f.db));
-    assert.equal(tooSoon.code, "slot_not_idle");
-    assert.equal(tooSoon.cause, "quiescence");
-    assert.match(String(tooSoon.remediation), /Retry this release in about \d+s/);
-    assert.equal(f.db.getSlot(1)!.occupied, true, "a refusal mutates nothing");
-
-    f.db.updateSlot(1, { last_meaningful_work_at: new Date(Date.now() - RELEASE_QUIESCENCE_MS - 1000).toISOString() });
     const released = await f.coordinator.release(releaseOf(f.db));
     assert.equal(released.code, "released");
+    assert.equal(released.success, true);
+    assert.equal(f.db.getSlot(1)!.occupied, false);
   } finally {
     f.close();
   }

@@ -399,12 +399,6 @@ test("only the still-working states refuse; checkout drift is superseded or repa
       remedy: /abandon-turn \{"turn_id":"turn-orphan"/,
     },
     { name: "busy row (idle=false)", mutate: (db) => db.updateSlot(4, { idle: false, activity: "working" }), cause: "productive_work" },
-    {
-      name: "quiescence window after recent meaningful work",
-      mutate: (db) => db.updateSlot(4, { last_meaningful_work_at: new Date().toISOString() }),
-      cause: "quiescence",
-      remedy: /Retry this release in about \d+s/,
-    },
   ];
   for (const testCase of refusalCases) {
     await t.test(testCase.name, async () => {
@@ -490,9 +484,9 @@ test("only the still-working states refuse; checkout drift is superseded or repa
   // Live S6 (2026-09-23): an idle slot already standing on main must never take
   // another pane instruction. The literal can only leave a non-main branch, so
   // on-main residue (an untracked plan file in the live case) made every retry
-  // re-deliver a prompt the slot could not act on — and that prompt's turn
-  // re-armed the quiescence window with work the release itself created, so the
-  // identical retry could never converge. The reset/attestation path still runs
+  // re-deliver a prompt the slot could not act on. That prompt's turn blocked
+  // the release, so the identical retry could never converge. The
+  // reset/attestation path still runs
   // and still refuses a dirty tree with a typed code.
   await t.test("on-main residue takes the reset path with NO pane instruction", async () => {
     const value = legacyIssueOnlyFixture();

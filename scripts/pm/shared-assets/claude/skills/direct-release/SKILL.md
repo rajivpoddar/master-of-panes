@@ -42,9 +42,6 @@ Release is refused **only** while the slot is still working — the single
   Abandon that exact turn, then retry; the release then succeeds.
 - `productive_work` — the row reports `idle=false`.
 - `dnd` — DND is active.
-- `quiescence` — the slot finished meaningful work inside the short settling
-  window. This is a bounded wait, not a blocker: retry once the remediation's
-  remaining seconds elapse.
 
 Everything else is **superseded, never refused**, and recorded in the response
 (`superseded` / `superseded.repair`) and in MoP's event log:
@@ -59,17 +56,17 @@ epoch bump and no second effect.
 
 ### Recommended operator sequence
 
-Send the slot the literal instruction — those preconditions still make the
-release clean:
+MoP sends the slot the literal instruction when its checkout needs the slot's
+own tools to switch it to main:
 
 ```text
 Switch to main and pull the latest origin/main.
 ```
 
-Deliver it exactly once through the existing message-slot/direct-send path, then
-wait for the slot's natural completion and re-read it before releasing. Never
-send a second or fallback instruction if delivery is uncertain. Verify the
-release by reading the returned slot state: `occupied=false`, the epoch
+The release operation handles delivery and waits for that delivered turn to
+settle before its final readback. Do not wait out a post-work settling window.
+Never send a second or fallback instruction if delivery is uncertain. Verify
+the release by reading the returned slot state: `occupied=false`, the epoch
 advanced by one, and the owner tuple cleared.
 
 Never hand-edit MoP DB state, slot rows, or labels to force a release.

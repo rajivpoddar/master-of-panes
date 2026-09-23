@@ -311,7 +311,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_release_slot",
-    "Release one slot. Succeeds whenever the slot is not actively working (no active/productive turn, past the short quiescence window): tuple drift, a stale intent and a moved main head are superseded automatically. The only refusal is slot_not_idle.",
+    "Release one slot. Succeeds whenever it is idle, has no active turn, and DND is off: tuple drift, a stale intent and a moved main head are superseded automatically. The only refusal is slot_not_idle for an active turn, productive work, or DND.",
     mopReleaseSlotInputShape,
     async (releaseInput) => {
       try {

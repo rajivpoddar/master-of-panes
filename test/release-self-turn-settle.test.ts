@@ -372,9 +372,8 @@ test("no-pane release still refuses genuinely different task text", async () => 
 });
 
 /**
- * Keep the quiescence window out of the frame: any turn mutation bumps
- * `last_meaningful_work_at`, and these tests are about TURN REGISTRATION, not
- * about the (unchanged) release quiescence gate.
+ * Keep turn lifecycle assertions focused on registration and settlement;
+ * recent-work timestamps do not add a separate release wait.
  */
 function markQuiet(db: MoPDatabase): void {
   db.updateSlot(1, { last_meaningful_work_at: new Date(Date.now() - 10 * 60 * 1000).toISOString() });
@@ -470,7 +469,7 @@ test("GREEN: when no induced turn ever registers, the wait exits on the bounded 
   }
 });
 
-test("GREEN: a settled idle slot is releasable after one quiescence window with no pane instruction", async () => {
+test("a finished idle slot with recent work is releasable immediately with no pane instruction", async () => {
   const value = harness({
     readOnly: () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: MAIN_HEAD }),
   });
@@ -478,7 +477,7 @@ test("GREEN: a settled idle slot is releasable after one quiescence window with 
     value.db.updateSlot(1, {
       idle: true,
       activity: "waiting_for_pm_direction",
-      last_meaningful_work_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      last_meaningful_work_at: new Date().toISOString(),
     });
     const before = value.db.getSlot(1)!;
     const result = await value.coordinator.release(releaseRequest(value.db));
@@ -494,7 +493,7 @@ test("GREEN: a settled idle slot is releasable after one quiescence window with 
   }
 });
 
-test("GREEN: an on-main checkout with residue never re-enters the pane, so no retry restarts the window", async () => {
+test("an on-main checkout with residue fails attestation without pane delivery", async () => {
   const value = harness({
     // Live S6 shape: branch main at the intended head, one untracked artifact,
     // nothing for the actionable literal to do.
@@ -519,27 +518,6 @@ test("GREEN: an on-main checkout with residue never re-enters the pane, so no re
     const after = value.db.getSlot(1)!;
     assert.equal(after.occupied, true, "a typed refusal leaves the slot occupied");
     assert.equal(after.assignment_epoch, before.assignment_epoch, "a refusal never advances the epoch");
-  } finally {
-    value.close();
-  }
-});
-
-test("NEGATIVE: a genuinely recent edit still holds the quiescence floor", async () => {
-  const value = harness({
-    readOnly: () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: MAIN_HEAD }),
-  });
-  try {
-    value.db.updateSlot(1, {
-      idle: true,
-      activity: "waiting_for_pm_direction",
-      last_meaningful_work_at: new Date().toISOString(),
-    });
-    const result = await value.coordinator.release(releaseRequest(value.db));
-    assert.equal(result.code, "slot_not_idle");
-    assert.equal(result.cause, "quiescence");
-    assert.deepEqual(value.deliveries, [], "the floor refuses before any delivery");
-    assert.equal(value.resets, 0);
-    assert.equal(value.db.getSlot(1)?.occupied, true);
   } finally {
     value.close();
   }
