@@ -10,6 +10,11 @@ import {
   normalizeBranchIdentity,
   normalizeRepositoryId,
 } from "./db.js";
+import {
+  NO_ISSUE_PROJECTION,
+  type IssueOwnershipProjection,
+  type IssueProjectionOutcome,
+} from "./issueProjection.js";
 import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
 
 const assignmentEffectSlotParamSchema = z.coerce
@@ -60,6 +65,133 @@ export interface AssignmentEffectDependencies {
     slot: number,
     filePath: string,
   ) => Promise<AssignmentEffectDeliveryResult>;
+  /**
+  * Best-effort interrupt of any live turn in the pane (Ctrl-C through the
+  * existing relay path). The outcome is audited and never refuses.
+   */
+  interruptTurn: (slot: number) => Promise<{ ok: boolean; reason: string }>;
+  /**
+   * Read-only observation of the pane worktree dirty/clean state for the
+  * displacement audit row. Never mutates; null clean means unobserved.
+   */
+  observeWorktree: (slot: number) => Promise<{ clean: boolean | null; detail: string }>;
+  /**
+   * Issue-side label projection (GitHub). Called after the ownership commit
+   * with the same shape as the deprecated assign route's projectOwnership:
+   * onReleased for a displaced prior lane, then onAssigned for the new
+   * lane. Labels are a projection, so a failure is recorded and never
+   * refuses. Optional so tests stay hermetic.
+   */
+  issueProjection?: IssueOwnershipProjection;
+}
+
+/**
+ * Mirror of the deprecated assign route's projectOwnership: project one
+ * lane's labels, translating a throw into a typed failed outcome so the
+ * durable assignment is always reported truthfully.
+ */
+async function projectIssue(
+  projection: IssueOwnershipProjection,
+  mode: "assigned" | "released",
+  issue: number | null | undefined,
+  slot: number,
+  repositoryId: string | number | null | undefined,
+): Promise<IssueProjectionOutcome | null> {
+  const target = Number(issue);
+  if (!Number.isInteger(target) || target <= 0) {
+    return null;
+  }
+  const repositoryKey = repositoryId === null || repositoryId === undefined
+    ? null
+    : String(repositoryId);
+  try {
+    return mode === "assigned"
+      ? await projection.onAssigned(target, slot, repositoryKey)
+      : await projection.onReleased(target, slot, repositoryKey);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      status: "failed",
+      reason: `issue_projection_unexpected:${detail.split("\n")[0].slice(0, 200)}`,
+      repository: null,
+      issue: target,
+      slot,
+      added_labels: [],
+      removed_labels: [],
+      verified: false,
+    };
+  }
+}
+
+function isIssueProjectionOutcome(value: unknown): value is IssueProjectionOutcome {
+  return (
+    isRecord(value)
+    && typeof value.status === "string"
+    && ["projected", "unchanged", "skipped", "failed"].includes(value.status)
+    && typeof value.issue === "number"
+    && typeof value.slot === "number"
+  );
+}
+
+interface ParsedDeliveredReceipt {
+  /** Stored delivery fields with the projection keys removed. */
+  delivery: Record<string, unknown>;
+  issue_projection: IssueProjectionOutcome | null;
+  release_projection: IssueProjectionOutcome | null;
+  /** False for rows finalized before labels existed: release is not retried. */
+  has_release_projection: boolean;
+}
+
+function parseDeliveredReceipt(raw: unknown): ParsedDeliveredReceipt {
+  const empty: ParsedDeliveredReceipt = {
+    delivery: {},
+    issue_projection: null,
+    release_projection: null,
+    has_release_projection: false,
+  };
+  if (typeof raw !== "string") return empty;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return empty;
+  }
+  if (!isRecord(parsed)) return empty;
+  const { issue_projection: rawAssign, release_projection: rawRelease, ...delivery } = parsed;
+  return {
+    delivery,
+    issue_projection: isIssueProjectionOutcome(rawAssign) ? rawAssign : null,
+    release_projection: isIssueProjectionOutcome(rawRelease) ? rawRelease : null,
+    has_release_projection: Object.hasOwn(parsed, "release_projection"),
+  };
+}
+
+function mergeProjectionReceipt(
+  delivery: Record<string, unknown>,
+  assign: IssueProjectionOutcome | null,
+  release: IssueProjectionOutcome | null,
+): string {
+  return JSON.stringify({ ...delivery, issue_projection: assign, release_projection: release });
+}
+
+/**
+ * Parse the displaced prior lane recorded on the committed intent. Returns
+ * null for free-slot assigns, legacy rows, and malformed payloads (never
+ * throw on the projection path).
+ */
+function parseDisplacedTuple(raw: string | null | undefined): { issue: number; repository_id: string | null } | null {
+  if (typeof raw !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const { issue, repository_id: repositoryId } = parsed as { issue?: unknown; repository_id?: unknown };
+  if (!Number.isInteger(issue) || (issue as number) <= 0) return null;
+  if (repositoryId !== null && repositoryId !== undefined && typeof repositoryId !== "string") return null;
+  return { issue: issue as number, repository_id: (repositoryId as string | null | undefined) ?? null };
 }
 
 export interface AssignmentEffectRequestBody {
@@ -223,18 +355,19 @@ export function registerAssignmentEffectRoutes(
     }
 
     const selectionClass = normalizeSelectionClass(raw.selection_class);
+    // Thin PM surface (Rajiv directive 2026-09-23 15:57): only the lane
+    // binding matters. Epoch, full tuple detail, and task text are advisory;
+    // the live row is authoritative and nothing here is a precondition retry.
     if (
       typeof raw.effect_id !== "string"
       || raw.effect_id.trim() === ""
       || selectionClass === null
-      || !Number.isInteger(raw.expected_epoch)
-      || typeof raw.task !== "string"
-      || raw.task.trim() === ""
-      || typeof raw.task_file !== "string"
-      || raw.task_file.trim() === ""
+      || (raw.expected_epoch !== undefined && !Number.isInteger(raw.expected_epoch))
+      || (raw.task !== undefined && typeof raw.task !== "string")
+      || (raw.task_file !== undefined && typeof raw.task_file !== "string")
     ) {
       return c.json(
-        refusal("ownership", "invalid_assignment_effect_request", slotStateSummary(db.getSlot(slotNum))),
+      refusal("ownership", "invalid_assignment_effect_request", slotStateSummary(db.getSlot(slotNum))),
         400,
       );
     }
@@ -247,37 +380,36 @@ export function registerAssignmentEffectRoutes(
       head_sha: (raw.head_sha ?? null) as string | null,
       work_kind: (raw.work_kind ?? null) as string | null,
       handoff_id: (raw.handoff_id ?? null) as string | null,
-      claimed_at: (raw.claimed_at ?? null) as string | null,
+      claimed_at: (typeof raw.claimed_at === "string" && raw.claimed_at.trim() === ""
+        ? null
+        : (raw.claimed_at ?? null)) as string | null,
     };
     const normalizedTuple = normalizeAssignmentTuple(desiredTuple);
     const branchIdentity = normalizeBranchIdentity(desiredTuple.branch);
-    // Name the failing predicate for diagnosability. Evaluated with the same predicates, in the same
-    // order, as the authoritative validation (normalizeAssignmentTuple), including work_kind
-    // MEMBERSHIP via the exported ASSIGNMENT_WORK_KINDS set - the set is imported, never duplicated.
-    // It never changes whether the refusal fires.
+    // Name the failing predicate for diagnosability. The lane identity is
+    // the issue; every other tuple field is optional detail validated with
+    // the same predicates as normalizeAssignmentTuple (work_kind membership
+    // via the imported ASSIGNMENT_WORK_KINDS set, never duplicated).
+    const workKindRaw = desiredTuple.work_kind;
+    const handoffRaw = desiredTuple.handoff_id;
+    const workKindValid = workKindRaw === null
+      || (typeof workKindRaw === "string" && ASSIGNMENT_WORK_KINDS.has(workKindRaw.trim()));
+    const handoffValid = handoffRaw === null
+      || (typeof handoffRaw === "string" && handoffRaw.trim() !== "");
     const failedField =
       normalizeRepositoryId(desiredTuple.repository_id) === null ? "repository_id"
       : !Number.isInteger(desiredTuple.issue) || (desiredTuple.issue as number) <= 0 ? "issue"
-      : !branchIdentity ? "branch"
-      : typeof desiredTuple.head_sha !== "string" || !/^[0-9a-f]{40}$/i.test(desiredTuple.head_sha) ? "head_sha"
-      : typeof desiredTuple.work_kind !== "string"
-          || desiredTuple.work_kind.trim() === ""
-          || !ASSIGNMENT_WORK_KINDS.has(desiredTuple.work_kind.trim())
-        ? "work_kind"
-      : typeof desiredTuple.handoff_id !== "string" || desiredTuple.handoff_id.trim() === "" ? "handoff_id"
+      : (desiredTuple.pr !== null && (!Number.isInteger(desiredTuple.pr) || (desiredTuple.pr as number) <= 0)) ? "pr"
+      : (desiredTuple.branch !== null && !branchIdentity) ? "branch"
+      : (desiredTuple.head_sha !== null && (typeof desiredTuple.head_sha !== "string" || !/^[0-9a-f]{40}$/i.test(desiredTuple.head_sha))) ? "head_sha"
+      : (!workKindValid || !handoffValid || (workKindRaw === null) !== (handoffRaw === null)) ? "work_kind"
+      : (desiredTuple.pr !== null && (branchIdentity?.branchRef == null || desiredTuple.head_sha === null)) ? "branch"
       : null;
     if (
       !normalizedTuple
       || normalizeRepositoryId(desiredTuple.repository_id) === null
       || !Number.isInteger(desiredTuple.issue)
       || (desiredTuple.issue as number) <= 0
-      || !branchIdentity
-      || typeof desiredTuple.head_sha !== "string"
-      || !/^[0-9a-f]{40}$/i.test(desiredTuple.head_sha)
-      || typeof desiredTuple.work_kind !== "string"
-      || desiredTuple.work_kind.trim() === ""
-      || typeof desiredTuple.handoff_id !== "string"
-      || desiredTuple.handoff_id.trim() === ""
     ) {
       return c.json(
         refusal("ownership", "invalid_assignment_tuple", slotStateSummary(db.getSlot(slotNum)), failedField),
@@ -288,10 +420,12 @@ export function registerAssignmentEffectRoutes(
     const request: AssignmentEffectRequestBody = {
       effect_id: raw.effect_id.trim(),
       selection_class: selectionClass,
-      expected_epoch: raw.expected_epoch as number,
+      expected_epoch: Number.isInteger(raw.expected_epoch)
+        ? (raw.expected_epoch as number)
+        : (db.getSlot(slotNum)?.assignment_epoch ?? 0),
       desired_tuple: desiredTuple,
-      task: raw.task,
-      task_file: raw.task_file.trim(),
+      task: typeof raw.task === "string" ? raw.task : "",
+      task_file: typeof raw.task_file === "string" ? raw.task_file.trim() : "",
     };
     const taskDigest = createHash("sha256").update(request.task).digest("hex");
     const requestDigest = computeAssignmentEffectDigest(request);
@@ -306,6 +440,35 @@ export function registerAssignmentEffectRoutes(
         );
       }
       if (existing.state === "delivered") {
+        // Delivered replay: clear, commit, and delivery all already happened,
+        // so none of them repeats. Only a MISSING or FAILED label projection
+        // is retried now; a recorded successful projection is reused verbatim
+        // and never re-projected or clobbered.
+        const projector = dependencies.issueProjection ?? NO_ISSUE_PROJECTION;
+        const stored = parseDeliveredReceipt(existing.delivery_receipt);
+        let replayAssign = stored.issue_projection ?? null;
+        // Absent key = row finalized before labels existed: the claim still
+        // needs its projection. Present-null = no displacement, skip release.
+        let replayRelease = stored.has_release_projection ? stored.release_projection : undefined;
+        if (!replayAssign || replayAssign.status === "failed") {
+          replayAssign = await projectIssue(
+            projector, "assigned", desiredTuple.issue, slotNum, desiredTuple.repository_id,
+          );
+        }
+        if (replayRelease !== undefined && replayRelease !== null && replayRelease.status === "failed") {
+          replayRelease = await projectIssue(
+            projector, "released", replayRelease.issue, slotNum, replayRelease.repository,
+          );
+        }
+        if (replayRelease === undefined) replayRelease = null;
+        const mergedReplayReceipt = mergeProjectionReceipt(stored.delivery, replayAssign, replayRelease);
+        if (
+          mergedReplayReceipt !== null
+          && (replayAssign?.status !== stored.issue_projection?.status
+            || (replayRelease?.status ?? null) !== (stored.release_projection?.status ?? null))
+        ) {
+          db.markAssignmentEffectDelivered(request.effect_id, mergedReplayReceipt);
+        }
         const delivered = db.getSlot(slotNum);
         return c.json({
           status: "assigned",
@@ -316,7 +479,9 @@ export function registerAssignmentEffectRoutes(
             assignment_epoch: existing.committed_epoch,
             idempotent: true,
           },
-          delivery_receipt: { verified: true, detail: existing.delivery_receipt, idempotent: true },
+          delivery_receipt: { verified: true, detail: mergedReplayReceipt ?? existing.delivery_receipt, idempotent: true },
+          issue_projection: replayAssign,
+          ...(replayRelease ? { release_projection: replayRelease } : {}),
           idempotent: true,
           slot_state_after: slotStateSummary(delivered),
         });
@@ -352,17 +517,89 @@ export function registerAssignmentEffectRoutes(
 
     const ownershipPending = intent.state === "planned";
 
+    // Displacement audit context. Every step below is attempted, recorded,
+    // and never refuses: an occupied target is implicitly released and
+    // reassigned, and the session clear is never gated on "free".
+    const displacement: {
+      clear: { ok: boolean; reason: string } | null;
+      interrupt: { ok: boolean; reason: string } | null;
+      worktree: { clean: boolean | null; detail: string } | null;
+      prior: Record<string, unknown> | null;
+      conflicting_owner_slots: number[];
+    } = {
+      clear: null,
+      interrupt: null,
+      worktree: null,
+      prior: null,
+      conflicting_owner_slots: [],
+    };
+
+    // Pre-decision duplicate gate (fix 3): a lane already bound to another
+    // occupied slot refuses BEFORE any clear/interrupt/observe side effect.
+    // The atomic commit path re-checks inside its own transaction, so this
+    // ordering gate can never admit what the commit would refuse.
+    if (ownershipPending) {
+      const pre = db.getSlot(slotNum);
+      if (!pre) {
+        return c.json(refusal("ownership", "slot_not_found", slotStateSummary(null)), 404);
+      }
+      if (!desiredTupleAlreadyCommitted(pre, desiredTuple)) {
+        const holders = db.duplicateHolders(slotNum, desiredTuple);
+        if (holders.length > 0) {
+          return c.json(
+            {
+              ...refusal("ownership", "duplicate_assignment", slotStateSummary(pre)),
+              owner_slots: holders,
+            },
+            409,
+          );
+        }
+      }
+    }
+
     if (ownershipPending && request.selection_class === "new_issue") {
       const cleared = await dependencies.clearSlot(slotNum);
-      if (!cleared.ok) {
-        return c.json(
-          refusal("clean", cleared.reason, slotStateSummary(db.getSlot(slotNum))),
-          409,
-        );
+      displacement.clear = {
+        ok: cleared.ok,
+        reason: cleared.ok ? cleared.reason : `recorded:${cleared.reason}`,
+      };
+    }
+
+    if (ownershipPending) {
+      // Interrupt any live turn in the pane before overwriting ownership.
+      // Best effort: the outcome is audited and never refuses.
+      const live = db.getSlot(slotNum);
+      if (live && (live.active_turn_id !== null || live.active_turn_state !== "inactive")) {
+        try {
+          const interrupted = await dependencies.interruptTurn(slotNum);
+          displacement.interrupt = { ok: interrupted.ok, reason: interrupted.reason };
+        } catch (error) {
+          displacement.interrupt = {
+            ok: false,
+            reason: `interrupt_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
+          };
+        }
+      } else {
+        displacement.interrupt = { ok: true, reason: "no_live_turn" };
+      }
+      // Observe (never reset) the pane worktree for the audit row.
+      try {
+        displacement.worktree = await dependencies.observeWorktree(slotNum);
+      } catch (error) {
+        displacement.worktree = {
+          clean: null,
+          detail: `observe_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
+        };
       }
     }
 
     let committedEpoch = intent.committed_epoch;
+    // Label projection outcomes for the "assigned" response. Labels run only
+    // after ownership AND delivery succeed (see below): never before the
+    // slot has both the record and the task. Resume and fresh paths share
+    // the projection below; only the delivered replay skips straight to it.
+    let releaseProjection: IssueProjectionOutcome | null = null;
+    let assignProjection: IssueProjectionOutcome | null = null;
     if (ownershipPending) {
       const current = db.getSlot(slotNum);
       if (!current) {
@@ -372,51 +609,45 @@ export function registerAssignmentEffectRoutes(
         // The ownership commit already happened for this binding (e.g. a crash
         // between the commit and the intent update). Never bump a second epoch.
         committedEpoch = current.assignment_epoch;
-      } else if (current.occupied) {
-        const rebind = db.rebindSlot(
-          slotNum,
-          current.assignment_epoch,
-          {
-            repository_id: current.repository_id,
-            issue: current.issue,
-            pr: current.pr,
-            branch: current.branch,
-            head_sha: current.head_sha,
-            work_kind: current.work_kind,
-            handoff_id: current.handoff_id,
-            claimed_at: current.claimed_at,
-          },
-          desiredTuple,
-          request.task,
-        );
-        if (!rebind.ok) {
-          return c.json(
-            refusal("ownership", rebind.reason ?? "ownership_rebind_refused", slotStateSummary(db.getSlot(slotNum))),
-            409,
-          );
-        }
-        committedEpoch = rebind.assignment_epoch;
       } else {
-        const assign = db.assignSlot(
-          slotNum,
-          request.task,
-          desiredTuple.repository_id,
-          desiredTuple.issue,
-          desiredTuple.branch,
-          desiredTuple.pr,
-          desiredTuple.head_sha,
-          request.expected_epoch,
-          desiredTuple.work_kind,
-          desiredTuple.handoff_id,
-          true,
-        );
-        if (!assign.ok) {
+        // Simple path: one atomic overwrite. Occupied targets are implicitly
+        // released; the turn pointer is cleared in the same write; the
+        // worktree is untouched. The ONLY refusal is a lane already bound to
+        // another occupied slot.
+        if (current.occupied) {
+          // Persist the displaced prior lane on the intent BEFORE the
+          // overwrite, so every later resume can unwind its labels even if
+          // this invocation crashes before delivery. Re-recording the same
+          // JSON is idempotent and touches no ownership state.
+          db.recordAssignmentEffectDisplaced(
+            request.effect_id,
+            current.issue !== null && Number.isInteger(current.issue) && current.issue > 0
+              ? { issue: current.issue, repository_id: current.repository_id }
+              : null,
+          );
+        }
+        const assigned = db.assignSlotSimple(slotNum, desiredTuple, request.task);
+        if (!assigned.ok) {
           return c.json(
-            refusal("ownership", assign.reason ?? "ownership_assign_refused", slotStateSummary(db.getSlot(slotNum))),
+            {
+              ...refusal("ownership", assigned.reason ?? "ownership_refused", slotStateSummary(db.getSlot(slotNum))),
+              ...(assigned.reason === "duplicate_assignment" ? { owner_slots: assigned.owner_slots ?? [] } : {}),
+            },
             409,
           );
         }
-        committedEpoch = assign.assignment_epoch;
+        committedEpoch = assigned.assignment_epoch;
+        const prior = assigned.predecessor ?? null;
+        displacement.prior = prior ? {
+          issue: prior.issue,
+          pr: prior.pr,
+          repository_id: current.repository_id,
+          task_present: typeof prior.task === "string" && prior.task.trim() !== "",
+          assignment_epoch: current.assignment_epoch,
+          active_turn_id: prior.active_turn_id,
+          active_turn_state: prior.active_turn_state,
+        } : null;
+        displacement.conflicting_owner_slots = assigned.owner_slots ?? [];
       }
       db.markAssignmentEffectCommitted(request.effect_id, committedEpoch ?? 0);
       db.logEvent(slotNum, "assignment_effect_committed", null, null, {
@@ -425,6 +656,21 @@ export function registerAssignmentEffectRoutes(
         assignment_epoch: committedEpoch,
         request_digest: requestDigest,
       });
+      if (displacement.prior) {
+        // One audit row for the displaced in-flight work: prior owner,
+        // issue, PR, epoch, turn id, clear/interrupt outcomes, and the
+        // observed (never reset) worktree state.
+        db.logEvent(slotNum, "assignment_displaced", null, null, {
+          effect_id: request.effect_id,
+          prior: displacement.prior,
+          conflicting_owner_slots: displacement.conflicting_owner_slots,
+          clear: displacement.clear,
+          interrupt: displacement.interrupt,
+          worktree: displacement.worktree,
+          worktree_reset: false,
+          assignment_epoch: committedEpoch,
+        });
+      }
     } else {
       // Resume path: the ownership commit already happened for this binding, so
       // revalidate the live row BEFORE re-delivering. If the slot was released,
@@ -446,11 +692,15 @@ export function registerAssignmentEffectRoutes(
       }
     }
 
-    const delivery = await dependencies.deliverTaskFile(slotNum, request.task_file);
+    // Delivery is required only when the caller gave the slot something to
+    // do: with no task text there is nothing to deliver, so ownership alone
+    // is committed and read back. Otherwise a failed delivery is still a
+    // NAMED recoverable state, never a silent success or implicit rollback.
+    const needsDelivery = request.task.trim() !== "" && request.task_file !== "";
+    const delivery = needsDelivery
+      ? await dependencies.deliverTaskFile(slotNum, request.task_file)
+      : { verified: true, receipt: { slot: slotNum, skipped: "no_task_text", verified: true } };
     if (!delivery.verified) {
-      // NAMED recoverable state: ownership is committed and the task text is
-      // recorded, but the session has not been proven to receive it. Never a
-      // silent success, never an implicit rollback.
       return c.json(
         refusal("delivery", delivery.reason ?? "session_delivery_unverified", slotStateSummary(db.getSlot(slotNum))),
         502,
@@ -460,8 +710,7 @@ export function registerAssignmentEffectRoutes(
     const readbackOk = !!after
       && after.occupied === true
       && after.issue === desiredTuple.issue
-      && typeof after.task === "string"
-      && after.task.trim() !== "";
+      && (!needsDelivery || (typeof after.task === "string" && after.task.trim() !== ""));
     if (!readbackOk) {
       // The task was delivered but the durable row does not corroborate it.
       // NEVER finalize here: the intent stays pending_delivery so an identical
@@ -474,11 +723,44 @@ export function registerAssignmentEffectRoutes(
       );
     }
 
-    db.markAssignmentEffectDelivered(request.effect_id, JSON.stringify(delivery.receipt));
+    // Label projection runs ONLY after ownership and delivery both succeed.
+    // Implicit-release-first ordering: unwind the displaced lane, then
+    // project the new claim. Failures are recorded and never refuse the
+    // durable assignment; a same-binding resume retries them (see the
+    // delivered-replay path above) without repeating clear, commit, or
+    // delivery. The displaced lane is read from the committed intent (not
+    // this invocation's memory), so a resume that completes delivery still
+    // unwinds the prior lane's labels even though the overwrite happened in
+    // an earlier attempt.
+    const projector = dependencies.issueProjection ?? NO_ISSUE_PROJECTION;
+    const recordedDisplaced = parseDisplacedTuple(
+      db.getAssignmentEffectIntent(request.effect_id)?.displaced_tuple,
+    );
+    if (recordedDisplaced) {
+      releaseProjection = await projectIssue(
+        projector, "released",
+        recordedDisplaced.issue,
+        slotNum,
+        recordedDisplaced.repository_id,
+      );
+    }
+    assignProjection = await projectIssue(
+      projector, "assigned", desiredTuple.issue, slotNum, desiredTuple.repository_id,
+    );
+    // The delivered receipt durably carries the projection outcomes so a
+    // resume can finish failed labels without repeating any MoP-side step.
+    const mergedReceipt = mergeProjectionReceipt(
+      isRecord(delivery.receipt) ? delivery.receipt : {},
+      assignProjection,
+      releaseProjection,
+    );
+    db.markAssignmentEffectDelivered(request.effect_id, mergedReceipt);
     db.logEvent(slotNum, "assignment_effect_delivered", null, null, {
       effect_id: request.effect_id,
       assignment_epoch: committedEpoch,
       delivery: delivery.receipt,
+      release_projection: releaseProjection,
+      issue_projection: assignProjection,
     });
 
     return c.json({
@@ -503,6 +785,17 @@ export function registerAssignmentEffectRoutes(
       request_digest: requestDigest,
       idempotent: false,
       slot_state_after: slotStateSummary(after),
+      issue_projection: assignProjection,
+      ...(releaseProjection ? { release_projection: releaseProjection } : {}),
+      ...(displacement.prior ? {
+        displacement: {
+          prior: displacement.prior,
+          conflicting_owner_slots: displacement.conflicting_owner_slots,
+          clear: displacement.clear,
+          interrupt: displacement.interrupt,
+          worktree: displacement.worktree,
+        },
+      } : {}),
     });
   });
 }

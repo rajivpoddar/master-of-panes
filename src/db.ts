@@ -29,7 +29,7 @@ export interface SlotMutationResult {
   conflict: boolean;
   assignment_epoch: number;
   idempotent: boolean;
-  /** Owner context that was displaced by a forced re-assignment, if any. */
+  /** Owner context displaced by a simple re-assignment or release, if any. */
   predecessor?: SlotPredecessorContext | null;
   reason?:
     | "expected_epoch_required"
@@ -52,7 +52,8 @@ export interface SlotMutationResult {
     | "effect_receipt_malformed"
     | "dnd_active"
     | "task_mismatch"
-    | "productive_work";
+    | "productive_work"
+    | "duplicate_assignment";
   owner_slots?: number[];
   owner_conflicts?: Array<{
     slot: number;
@@ -139,6 +140,12 @@ export interface AssignmentEffectIntent {
   desired_tuple: AssignmentTupleInput;
   task_digest: string;
   delivery_receipt: string | null;
+  /**
+   * JSON {issue, repository_id} of the lane this effect displaced, recorded
+   * at commit time so a resume can unwind its labels. NULL when nothing was
+   * displaced (or the row predates the column).
+   */
+  displaced_tuple: string | null;
   created_at: string;
   delivered_at: string | null;
 }
@@ -603,6 +610,14 @@ export class MoPDatabase {
       CREATE INDEX IF NOT EXISTS idx_assignment_effect_intents_slot
         ON assignment_effect_intents(slot, created_at DESC);
     `);
+
+    // Migration: persist the displaced prior lane on the intent so a resume
+    // that completes delivery can unwind its labels (assign-effect label
+    // projection). NULL means no displacement was recorded.
+    const intentColumns = this.db.prepare("PRAGMA table_info(assignment_effect_intents)").all() as Array<{ name: string }>;
+    if (!intentColumns.some((c) => c.name === "displaced_tuple")) {
+      this.db.exec("ALTER TABLE assignment_effect_intents ADD COLUMN displaced_tuple TEXT");
+    }
 
     // Initialize config KV table
     this.initConfig();
@@ -1330,7 +1345,7 @@ export class MoPDatabase {
     const row = this.db.prepare(`
       SELECT effect_id, request_digest, slot, selection_class, state,
              before_epoch, committed_epoch, desired_tuple, task_digest,
-             delivery_receipt, created_at, delivered_at
+             delivery_receipt, displaced_tuple, created_at, delivered_at
       FROM assignment_effect_intents
       WHERE effect_id = ?
     `).get(effectId) as {
@@ -1344,6 +1359,7 @@ export class MoPDatabase {
       desired_tuple: string;
       task_digest: string;
       delivery_receipt: string | null;
+      displaced_tuple: string | null;
       created_at: string;
       delivered_at: string | null;
     } | undefined;
@@ -1354,7 +1370,59 @@ export class MoPDatabase {
     } catch (error) {
       throw new Error(`assignment effect intent ${effectId} has malformed tuple`, { cause: error });
     }
+    // Rows created before the displaced_tuple migration read back NULL
+    // (the column defaults NULL). The migration runs at construction, so
+    // the column always exists here.
     return { ...row, desired_tuple: desiredTuple };
+  }
+
+  /**
+   * Record the displaced prior lane on a planned intent, BEFORE the
+   * ownership overwrite commits, so every later resume can unwind its
+   * labels even if this invocation crashes before delivery. Overwriting
+   * the same JSON twice is idempotent. Never touches ownership, epochs,
+   * turns, or delivery state.
+   */
+  recordAssignmentEffectDisplaced(
+    effectId: string,
+    displaced: { issue: number; repository_id: string | null } | null,
+  ): void {
+    this.db.prepare(`
+      UPDATE assignment_effect_intents
+      SET displaced_tuple = ?
+      WHERE effect_id = ? AND state = 'planned'
+    `).run(displaced === null ? null : JSON.stringify(displaced), effectId);
+  }
+
+  /**
+   * Read-only duplicate check for pre-decision gating: which OTHER occupied
+   * slots hold the desired issue/PR/branch. The atomic commit path
+   * re-checks inside its own transaction; this exists so a refusal can
+   * happen BEFORE any clear/interrupt/delivery side effect.
+   */
+  duplicateHolders(slot: number, desiredTupleInput: AssignmentTupleInput): number[] {
+    const desiredTuple = normalizeAssignmentTuple(desiredTupleInput);
+    if (!desiredTuple) return [];
+    const owners = this.db.prepare(`
+      SELECT slot
+      FROM slots
+      WHERE occupied = 1
+        AND repository_id = ?
+        AND slot != ?
+        AND (
+          (? IS NOT NULL AND pr = ?)
+          OR (? IS NOT NULL AND issue = ?)
+          OR (? IS NOT NULL AND branch_ref = ?)
+        )
+      ORDER BY slot
+    `).all(
+      desiredTuple.repository_id,
+      slot,
+      desiredTuple.pr, desiredTuple.pr,
+      desiredTuple.issue, desiredTuple.issue,
+      desiredTuple.branch_ref, desiredTuple.branch_ref,
+    ) as Array<{ slot: number }>;
+    return owners.map((owner) => owner.slot);
   }
 
   /** Advance a minted intent to pending-delivery once ownership is committed. */
@@ -1919,6 +1987,220 @@ export class MoPDatabase {
       }
 
       return { ok: true, conflict: false, assignment_epoch: epoch + 1, idempotent: false };
+    })();
+  }
+
+  /**
+   * Simple assignment overwrite (Rajiv directive 2026-09-23 15:57): one
+   * slot, one lane. The ONLY refusal is a lane already bound to another
+   * occupied slot (`duplicate_assignment`, naming that slot). An occupied
+   * target is implicitly released and reassigned in ONE atomic write: prior
+   * tuple captured, turn pointer cleared, new tuple committed, epoch bumped
+   * exactly once. Same-slot same-lane is idempotent. The pane worktree is
+   * never touched here; the caller records its observed state in the audit
+   * event and delivers the new task through the normal path.
+   */
+  assignSlotSimple(
+    slot: number,
+    desiredTupleInput: AssignmentTupleInput,
+    task: string,
+  ): SlotMutationResult {
+    const currentBeforeValidation = this.getSlot(slot);
+    const desiredTuple = normalizeAssignmentTuple(desiredTupleInput);
+    if (!desiredTuple) {
+      return {
+        ok: false,
+        conflict: true,
+        assignment_epoch: currentBeforeValidation?.assignment_epoch ?? 0,
+        idempotent: false,
+        reason: "observed_tuple_mismatch",
+      };
+    }
+
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      if (!current) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "invalid_slot" };
+      }
+      const currentTuple = slotAssignmentTuple(current);
+      if (assignmentTupleMatches(currentTuple, desiredTuple)) {
+        return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
+      }
+      const predecessor: SlotPredecessorContext = {
+        issue: current.issue,
+        pr: current.pr,
+        task: current.task,
+        active_turn_id: current.active_turn_id,
+        active_turn_state: current.active_turn_state,
+        activity: current.activity,
+        idle: current.idle,
+        claimed_at: current.claimed_at,
+      };
+      // Force displaces conflicting owners: any OTHER occupied slot holding
+      // the desired issue/PR/branch is the ONE invariant violation: refuse
+      // with duplicate_assignment naming that slot. Releasing one lane to
+      // take it on another slot is an explicit release-then-assign, never an
+      // implicit steal.
+      const owners = this.db.prepare(`
+        SELECT slot, issue, pr, branch_ref
+        FROM slots
+        WHERE occupied = 1
+          AND repository_id = ?
+          AND slot != ?
+          AND (
+            (? IS NOT NULL AND pr = ?)
+            OR (? IS NOT NULL AND issue = ?)
+            OR (? IS NOT NULL AND branch_ref = ?)
+          )
+        ORDER BY slot
+      `).all(
+        desiredTuple.repository_id,
+        slot,
+        desiredTuple.pr, desiredTuple.pr,
+        desiredTuple.issue, desiredTuple.issue,
+        desiredTuple.branch_ref, desiredTuple.branch_ref,
+      ) as Array<{ slot: number; issue: number | null; pr: number | null; branch_ref: string | null }>;
+      if (owners.length > 0) {
+        return {
+          ok: false,
+          conflict: true,
+          assignment_epoch: epoch,
+          idempotent: false,
+          reason: "duplicate_assignment",
+          owner_slots: owners.map((owner) => owner.slot),
+        };
+      }
+      this.updateAssignmentState(slot, {
+        status: "active" as SlotStatus,
+        occupied: true,
+        task,
+        repository_id: desiredTuple.repository_id,
+        issue: desiredTuple.issue,
+        branch: desiredTuple.branch,
+        branch_ref: desiredTuple.branch_ref,
+        pr: desiredTuple.pr,
+        head_sha: desiredTuple.head_sha,
+        assignment_epoch: epoch + 1,
+        assigned_at: current.assigned_at,
+        work_kind: desiredTuple.work_kind,
+        handoff_id: desiredTuple.handoff_id,
+        claimed_at: desiredTuple.claimed_at,
+        dnd: current.dnd,
+        active_turn_id: null,
+        active_turn_started_at: null,
+        active_turn_state: "inactive",
+      });
+      return {
+        ok: true,
+        conflict: false,
+        assignment_epoch: epoch + 1,
+        idempotent: false,
+        predecessor,
+        owner_slots: owners.map((owner) => owner.slot),
+      };
+    })();
+  }
+
+  /**
+  * Simple release (Rajiv directive 2026-09-23 15:57): freeing a named slot
+  * always succeeds. No refusal on active turn, productive work, DND,
+  * epoch/tuple drift, or checkout state. An already-free slot is an
+  * idempotent success. Otherwise the prior owner is captured, the turn
+  * pointer terminalized, and the row freed with the canonical shape and
+  * exactly one epoch bump, all in one atomic write. The pane worktree is
+  * never touched; the caller audits its observed state.
+  *
+  * When a machine-internal Family-2 effect binding is supplied (already
+  * digest-verified by the caller), its receipt is persisted in the same
+  * write so the exactly-once replay keeps working.
+   */
+  releaseSlotSimple(
+    slot: number,
+    effect?: {
+      effect_id: string;
+      request_digest: string;
+      expected_epoch: number;
+      expected_tuple: AssignmentTupleInput;
+      intended_main_head: string;
+    },
+  ): SlotMutationResult {
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      if (!current) {
+        return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "invalid_slot" };
+      }
+      if (!current.occupied) {
+        return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: true };
+      }
+      const predecessor: SlotPredecessorContext = {
+        issue: current.issue,
+        pr: current.pr,
+        task: current.task,
+        active_turn_id: current.active_turn_id,
+        active_turn_state: current.active_turn_state,
+        activity: current.activity,
+        idle: current.idle,
+        claimed_at: current.claimed_at,
+      };
+      this.updateAssignmentState(slot, {
+        status: "free" as SlotStatus,
+        occupied: false,
+        task: null,
+        repository_id: null,
+        issue: null,
+        branch: null,
+        branch_ref: null,
+        pr: null,
+        head_sha: null,
+        assigned_at: null,
+        work_kind: null,
+        handoff_id: null,
+        claimed_at: null,
+        dnd: false,
+        idle: true,
+        activity: null,
+        active_turn_id: null,
+        active_turn_started_at: null,
+        active_turn_state: "inactive",
+        assignment_epoch: epoch + 1,
+      });
+      this.db.prepare("UPDATE slots SET session_id = NULL WHERE slot = ?").run(slot);
+      if (effect) {
+        const normalized = normalizeAssignmentTuple(effect.expected_tuple);
+        this.db.prepare(`
+          INSERT INTO native_release_effect_receipts (
+            effect_id, request_digest, slot, expected_epoch, released_epoch,
+            expected_session_id, expected_tuple, intended_main_head
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          effect.effect_id,
+          effect.request_digest.toLowerCase(),
+          slot,
+          effect.expected_epoch,
+          epoch + 1,
+          "",
+          JSON.stringify(normalized ? {
+            repository_id: normalized.repository_id,
+            issue: normalized.issue,
+            pr: normalized.pr,
+            branch: normalized.branch,
+            head_sha: normalized.head_sha,
+            work_kind: normalized.work_kind,
+            handoff_id: normalized.handoff_id,
+            claimed_at: normalized.claimed_at,
+          } : effect.expected_tuple),
+          effect.intended_main_head.toLowerCase(),
+        );
+      }
+      return {
+        ok: true,
+        conflict: false,
+        assignment_epoch: epoch + 1,
+        idempotent: false,
+        predecessor,
+      };
     })();
   }
 

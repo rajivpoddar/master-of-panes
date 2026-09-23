@@ -17,56 +17,27 @@ Read the current slot once. Then invoke the release boundary exactly once:
 
 ```text
 POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release
-JSON {
-  slot, expected_epoch, expected_repository_id, expected_issue, expected_pr,
-  expected_branch, expected_head_sha, expected_work_kind, expected_handoff_id,
-  expected_claimed_at,          // the slot's LIVE claimed_at value from that read
-  intended_main_head            // current main head you want the checkout reset to
-}
+JSON { slot }   // only the slot number; anything else in the body is advisory
 ```
 
-The MCP client `mop_release_slot` carries the same contract (complete observed
-identity plus `intended_main_head`); it is registered from the canonical current
-release (`.../master-of-panes/current/dist/mcp.js`). There is no release mode to
-pass: a clean-main checkout needs no pane instruction, and anything else is
-reset through the pane automatically.
+The MCP client `mop_release_slot` carries the same contract (slot number plus
+an optional reason); it is registered from the canonical current release
+(`.../master-of-panes/current/dist/mcp.js`).
 
-### Release succeeds whenever the slot is not actively working
+### Release always succeeds on the named slot
 
-Release is refused **only** while the slot is still working — the single
-`slot_not_idle` refusal, whose `cause` names the reason:
+Freeing a named slot never refuses on state. If a turn is live, MoP
+interrupts it and terminalizes the turn id, then frees the row in one atomic
+write with a single audit row carrying the prior owner/issue/PR/epoch/turn
+and the observed worktree dirty/clean state. The worktree itself is never
+touched. An already-free slot is an idempotent success. DND does not block a
+release. There is nothing to wait out and nothing to retry: assign the next
+lane directly after the release returns.
 
-- `active_turn` — a turn is active or indeterminate. The remediation names the
-  exact turn id and its canonical escape:
-  `POST /slots/{slot}/abandon-turn {"turn_id":"<id>","reason":"<why>","actor":"<who>"}`.
-  Abandon that exact turn, then retry; the release then succeeds.
-- `productive_work` — the row reports `idle=false`.
-- `dnd` — DND is active.
+Verify the release by reading the returned slot state: `occupied=false`, the
+epoch advanced by one, and the owner tuple cleared.
 
-Everything else is **superseded, never refused**, and recorded in the response
-(`superseded` / `superseded.repair`) and in MoP's event log:
-
-- a drifted or unusable observed identity (MoP's live row wins),
-- a stale or mis-moded open release intent (superseded atomically; the response
-  names the intent id it replaced),
-- an `intended_main_head` that no longer matches the checkout's main head.
-
-A repeat call after a completed release is an idempotent success: no second
-epoch bump and no second effect.
-
-### Recommended operator sequence
-
-MoP sends the slot the literal instruction when its checkout needs the slot's
-own tools to switch it to main:
-
-```text
-Switch to main and pull the latest origin/main.
-```
-
-The release operation handles delivery and waits for that delivered turn to
-settle before its final readback. Do not wait out a post-work settling window.
-Never send a second or fallback instruction if delivery is uncertain. Verify
-the release by reading the returned slot state: `occupied=false`, the epoch
-advanced by one, and the owner tuple cleared.
+GitHub labels are server-projected: the release unwinds the lane's labels
+itself. Do NOT edit labels by hand or with `gh`.
 
 Never hand-edit MoP DB state, slot rows, or labels to force a release.

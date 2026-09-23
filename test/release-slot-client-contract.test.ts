@@ -30,8 +30,10 @@ test("the MCP client resolves from the canonical current release, not the frozen
 test("the release client carries no authority header and no release mode", () => {
   const source = readFileSync(`${REPO_ROOT}src/mcp.ts`, "utf8");
   assert.match(source, /mopReleaseSlotInputShape/);
-  assert.match(source, /intended_main_head/);
-  assert.match(source, /expected_claimed_at/);
+  // Thin surface: the tool takes only the slot plus an optional reason.
+  assert.match(source, /reason: z\.string\(\)\.optional\(\)/);
+  assert.equal(source.includes("expected_epoch"), false, "no epoch ceremony in the tool shape");
+  assert.equal(source.includes("intended_main_head"), false, "no head attestation in the tool shape");
   assert.equal(source.includes("PM_TRANSITION_ASSIGNMENT"), false, "the authority header is retired");
   assert.equal(source.includes("release_mode"), false, "the mode enum is deleted");
   assert.equal(existsSync(`${REPO_ROOT}src/assignmentAuthority.ts`), false, "the authority module is deleted");
@@ -39,7 +41,6 @@ test("the release client carries no authority header and no release mode", () =>
   const bundle = currentBundle();
   if (bundle !== null) {
     assert.match(bundle, /mop_release_slot/);
-    assert.match(bundle, /intended_main_head/);
     assert.equal(bundle.includes("assignment_authority_required"), false);
   }
 });
@@ -167,9 +168,7 @@ test("the documented skill states the same contract as the working client", () =
     "the skill must stop instructing the retired header",
   );
   assert.equal(skill.includes("release_mode"), false, "the skill must stop instructing the retired mode");
-  assert.match(skill, /expected_claimed_at/);
-  assert.match(skill, /intended_main_head/);
   assert.match(skill, /mop_release_slot/);
-  assert.match(skill, /slot_not_idle/, "the single surviving refusal must be named");
-  assert.match(skill, /supersed/i, "superseding drift must be documented");
+  assert.match(skill, /JSON \{\s*slot\s*\}/, "the documented body is the slot number");
+  assert.match(skill, /always succeeds/, "the always-succeed contract must be stated");
 });

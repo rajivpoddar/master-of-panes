@@ -114,6 +114,8 @@ interface AdapterOptions {
   observe?: () => Promise<CheckoutResetObservation>;
   observeReadOnly?: () => Promise<CheckoutReadOnlyObservation>;
   instruction?: (value: string) => void;
+  interrupt?: () => void;
+  interruptResult?: { ok: boolean; reason: string };
 }
 
 function coordinator(value: Fixture, options: AdapterOptions = {}): NativeSlotReleaseCoordinator {
@@ -121,12 +123,10 @@ function coordinator(value: Fixture, options: AdapterOptions = {}): NativeSlotRe
     db: value.db,
     resolveOwningCheckout: options.resolveCheckout
       ?? (async () => options.checkout === undefined ? CHECKOUT : options.checkout),
-    deliverInstruction: async (_slot, instruction) => {
-      options.instruction?.(instruction);
-      return options.delivered !== false;
+    interruptTurn: async () => {
+      options.interrupt?.();
+      return options.interruptResult ?? { ok: true, reason: "interrupt_sent" };
     },
-    owningSlotIsIdle: async () => options.idle !== false,
-    resetAndObserveCheckout: options.observe ?? (async () => exactObservation()),
     observeCheckout: options.observeReadOnly ?? (async (): Promise<CheckoutReadOnlyObservation> => ({
       checkout_path: CHECKOUT,
       clean: true,
@@ -167,505 +167,173 @@ function quiescentRequest(value: Fixture): NativeSlotReleaseRequest {
   return request;
 }
 
-test("MoP-derived checkout reset acknowledgement clears once and replay is safe typed drift", async () => {
+test("release with only a slot number frees the row, bumps epoch once, clears the tuple", async () => {
   const value = fixture();
   try {
-    let instruction = "";
-    const release = coordinator(value, { instruction: (text) => { instruction = text; } });
-    const first = await release.release(value.request);
-    assert.equal(first.code, "released");
-    assert.equal(first.success, true);
-    assert.equal(first.acknowledgement?.checkout_path, CHECKOUT);
-    // The acknowledgement carries MoP's LIVE normalized owner tuple.
-    assert.equal(first.acknowledgement?.expected_tuple.issue, value.request.expected_tuple.issue);
-    assert.equal(first.acknowledgement?.expected_tuple.head_sha, value.request.expected_tuple.head_sha);
-    assert.equal(first.acknowledgement?.expected_tuple.claimed_at, value.request.expected_tuple.claimed_at);
-    assert.equal(instruction, "Switch to main and pull the latest origin/main.",
-      "the release message must be the actionable literal the slot executes with its own tools");
-    assert.equal(/stop work|remain idle|do not run another tool/i.test(instruction), false,
-      "the release message must never tell an idle slot to stop working");
-    const free = value.db.getSlot(1)!;
-    assert.equal(free.occupied, false);
-    assert.equal(free.assignment_epoch, value.request.expected_epoch + 1);
-    assert.equal(slotAssignmentTuple(free), null);
-    assert.equal(
-      value.db.hasActiveNativeReleaseIntent(
-        value.request.slot,
-        value.request.expected_epoch,
-        value.request.expected_tuple,
-      ),
-      false,
-    );
-
-    // A retry is an idempotent success: no second epoch bump, no second effect.
-    const replay = await release.release(value.request);
-    assert.equal(replay.code, "released");
-    assert.equal(replay.success, true);
-    assert.equal(replay.idempotent, true);
-    assert.equal(value.db.getSlot(1)?.assignment_epoch, value.request.expected_epoch + 1);
-    assert.equal(value.db.getEvents(1, 20, "slot_released").length >= 0, true);
+    const epochBefore = value.db.getSlot(1)!.assignment_epoch;
+    const result = await coordinator(value).release({ slot: 1 });
+    assert.equal(result.success, true);
+    assert.equal(result.code, "released");
+    assert.equal(result.idempotent, false);
+    const freed = value.db.getSlot(1)!;
+    assert.equal(freed.occupied, false);
+    assert.equal(freed.assignment_epoch, epochBefore + 1);
+    assert.equal(slotAssignmentTuple(freed), null);
+    assert.equal(freed.task, null);
+    assert.equal(freed.active_turn_id, null);
+    assert.equal(freed.active_turn_state, "inactive");
   } finally {
     closeFixture(value);
   }
 });
 
-test("release intent is exact-owner, short-lived, and visible before pane delivery", async () => {
-  const value = fixture();
-  const originalNow = Date.now;
-  let now = 10_000;
-  Date.now = () => now;
-  try {
-    assert.equal(
-      value.db.claimNativeReleaseIntent(
-        value.request.slot,
-        value.request.expected_epoch,
-        value.request.expected_tuple,
-        100,
-      ),
-      true,
-    );
-    assert.equal(
-      value.db.claimNativeReleaseIntent(
-        value.request.slot,
-        value.request.expected_epoch,
-        value.request.expected_tuple,
-        100,
-      ),
-      false,
-    );
-    assert.equal(
-      value.db.hasActiveNativeReleaseIntent(
-        value.request.slot,
-        value.request.expected_epoch,
-        value.request.expected_tuple,
-      ),
-      true,
-    );
-    assert.equal(
-      value.db.hasActiveNativeReleaseIntent(
-        value.request.slot,
-        value.request.expected_epoch + 1,
-        value.request.expected_tuple,
-      ),
-      false,
-    );
-    now += 101;
-    assert.equal(
-      value.db.hasActiveNativeReleaseIntent(
-        value.request.slot,
-        value.request.expected_epoch,
-        value.request.expected_tuple,
-      ),
-      false,
-    );
-    assert.equal(
-      value.db.claimNativeReleaseIntent(
-        value.request.slot,
-        value.request.expected_epoch,
-        value.request.expected_tuple,
-        100,
-      ),
-      true,
-    );
-    value.db.clearNativeReleaseIntent(
-      value.request.slot,
-      value.request.expected_epoch,
-      value.request.expected_tuple,
-    );
-    assert.equal(
-      value.db.hasActiveNativeReleaseIntent(
-        value.request.slot,
-        value.request.expected_epoch,
-        value.request.expected_tuple,
-      ),
-      false,
-    );
-  } finally {
-    Date.now = originalNow;
-    closeFixture(value);
-  }
-});
-
-test("pane-mediated release claims before delivery and releases the claim after completion", async () => {
+test("release with an active turn interrupts, terminalizes, and audits the prior", async () => {
   const value = fixture();
   try {
-    let visibleDuringDelivery = false;
-    const release = coordinator(value, {
-      instruction: () => {
-        visibleDuringDelivery = value.db.hasActiveNativeReleaseIntent(
-          value.request.slot,
-          value.request.expected_epoch,
-          value.request.expected_tuple,
-        );
-      },
+    const turnId = "98e27143-live-turn";
+    value.db.updateSlot(1, {
+      active_turn_id: turnId,
+      active_turn_state: "active",
+      active_turn_started_at: new Date(Date.now() - 60 * 1000).toISOString(),
+      last_meaningful_work_at: new Date(Date.now() - 60 * 1000).toISOString(),
     });
-    assert.equal((await release.release(value.request)).code, "released");
-    assert.equal(visibleDuringDelivery, true);
-    assert.equal(
-      value.db.hasActiveNativeReleaseIntent(
-        value.request.slot,
-        value.request.expected_epoch,
-        value.request.expected_tuple,
-      ),
-      false,
-    );
+    const epochBefore = value.db.getSlot(1)!.assignment_epoch;
+    let interrupts = 0;
+    const release = coordinator(value, {
+      interrupt: () => { interrupts += 1; },
+    });
+    const result = await release.release({ slot: 1 });
+    assert.equal(result.success, true);
+    assert.equal(result.code, "released");
+    assert.equal(interrupts, 1, "the live turn is interrupted exactly once");
+    const freed = value.db.getSlot(1)!;
+    assert.equal(freed.occupied, false);
+    assert.equal(freed.assignment_epoch, epochBefore + 1);
+    assert.equal(freed.active_turn_id, null, "the turn id is terminalized in the same write");
+    assert.equal(freed.active_turn_state, "inactive");
+    const events = value.db.getEvents(1, 10).filter((event) => event.event_type === "slot_released_simple");
+    assert.equal(events.length, 1, "one audit row");
+    const payload = JSON.parse(events[0].payload) as Record<string, unknown>;
+    assert.equal((payload.prior as Record<string, unknown>).active_turn_id, turnId);
+    assert.equal((payload.prior as Record<string, unknown>).issue, 8100);
+    assert.equal(payload.worktree_reset, false, "the worktree is never touched");
   } finally {
     closeFixture(value);
   }
 });
 
-test("issue-only legacy release needs no mode and no pane effects once the checkout is settled", async () => {
-  const value = legacyIssueOnlyFixture();
+test("DND and busy rows do not block an explicit release", async () => {
+  for (const name of ["dnd", "busy row"] as const) {
+    const value = fixture();
+    try {
+      value.db.updateSlot(1, name === "dnd" ? { dnd: true } : { idle: false, activity: "working" });
+      const epochBefore = value.db.getSlot(1)!.assignment_epoch;
+      const result = await coordinator(value).release({ slot: 1 });
+      assert.equal(result.code, "released", name);
+      assert.equal(result.success, true, name);
+      assert.equal(value.db.getSlot(1)!.occupied, false, name);
+      assert.equal(value.db.getSlot(1)!.assignment_epoch, epochBefore + 1, name);
+    } finally {
+      closeFixture(value);
+    }
+  }
+});
+
+test("release of a free slot is an idempotent no-op with no epoch bump", async () => {
+  const value = fixture();
   try {
-    let deliveries = 0;
-    let resets = 0;
-    // No release_mode is passed: the mode enum is deleted and the coordinator
-    // decides for itself that a clean main checkout needs no pane instruction.
-    const result = await coordinator(value, {
-      instruction: () => { deliveries += 1; },
-      observe: async () => { resets += 1; return exactObservation(); },
-      observeReadOnly: async () => ({
-        checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: MAIN_HEAD,
-      }),
-    }).release(value.request);
+    assert.equal((await coordinator(value).release({ slot: 1 })).code, "released");
+    const epochAfterFirst = value.db.getSlot(1)!.assignment_epoch;
+    const retry = await coordinator(value).release({ slot: 1 });
+    assert.equal(retry.success, true);
+    assert.equal(retry.code, "released");
+    assert.equal(retry.idempotent, true);
+    assert.equal(value.db.getSlot(1)!.assignment_epoch, epochAfterFirst, "no second epoch bump");
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test("a stale presented identity still releases on the live row", async () => {
+  const value = fixture();
+  try {
+    const result = await coordinator(value).release({
+      slot: 1,
+      expected_epoch: value.request.expected_epoch + 7,
+      expected_tuple: { ...value.request.expected_tuple, issue: 999999 },
+      intended_main_head: "c".repeat(40),
+    });
     assert.equal(result.code, "released");
     assert.equal(result.success, true);
-    assert.equal(deliveries, 0);
-    assert.equal(resets, 0);
-    assert.equal(value.db.getSlot(4)?.occupied, false);
+    assert.equal(result.superseded?.epoch_drift, true);
+    assert.equal(result.superseded?.tuple_drift, true);
+    assert.equal(value.db.getSlot(1)!.occupied, false);
   } finally {
     closeFixture(value);
   }
 });
 
-test("quiescent issue-only release attests clean main without pane delivery and replays safely", async () => {
-  const value = legacyIssueOnlyFixture();
-  try {
-    let deliveries = 0;
-    let resets = 0;
-    let observations = 0;
-    let intentVisible = false;
-    const request = quiescentRequest(value);
-    const release = coordinator(value, {
-      instruction: () => { deliveries += 1; },
-      observe: async () => { resets += 1; return exactObservation(); },
-      observeReadOnly: async () => {
-        observations += 1;
-        intentVisible = value.db.hasActiveNativeReleaseIntent(
-          request.slot,
-          request.expected_epoch,
-          request.expected_tuple,
-        );
-        return { checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: MAIN_HEAD };
-      },
-    });
-    const first = await release.release(request);
-    assert.equal(first.code, "released");
-    assert.equal(first.success, true);
-    assert.equal(first.idempotent, false);
-    assert.equal(deliveries, 0);
-    assert.equal(resets, 0);
-    assert.equal(observations, 1);
-    assert.equal(intentVisible, true);
-    assert.equal(value.db.getSlot(4)?.occupied, false);
-    assert.equal(value.db.getSlot(4)?.assignment_epoch, request.expected_epoch + 1);
-    assert.equal(slotAssignmentTuple(value.db.getSlot(4)!), null);
-    assert.equal(value.db.getSlot(4)?.task, null);
-
-    const replay = await release.release(request);
-    assert.equal(replay.code, "released");
-    assert.equal(replay.success, true);
-    assert.equal(replay.idempotent, true);
-    assert.equal(deliveries, 0);
-    assert.equal(resets, 0);
-    assert.equal(observations, 1);
-  } finally {
-    closeFixture(value);
-  }
-});
-
-test("only the still-working states refuse; checkout drift is superseded or repaired", async (t) => {
-  const refusalCases: Array<{
-    name: string;
-    mutate: (db: MoPDatabase) => void;
-    cause: string;
-    remedy?: RegExp;
-  }> = [
-    { name: "DND", mutate: (db) => db.updateSlot(4, { dnd: true }), cause: "dnd" },
-    {
-      name: "active turn names the canonical abandon-turn remedy",
-      mutate: (db) => db.updateSlot(4, { active_turn_id: "turn-orphan", active_turn_state: "active" }),
-      cause: "active_turn",
-      remedy: /abandon-turn \{"turn_id":"turn-orphan"/,
-    },
-    { name: "busy row (idle=false)", mutate: (db) => db.updateSlot(4, { idle: false, activity: "working" }), cause: "productive_work" },
-  ];
-  for (const testCase of refusalCases) {
-    await t.test(testCase.name, async () => {
-      const value = legacyIssueOnlyFixture();
-      try {
-        testCase.mutate(value.db);
-        const before = value.db.getSlot(4)!;
-        const result = await coordinator(value).release(value.request);
-        assert.equal(result.code, "slot_not_idle", "the single surviving refusal");
-        assert.equal(result.cause, testCase.cause);
-        if (testCase.remedy) assert.match(String(result.remediation), testCase.remedy);
-        assert.deepEqual(value.db.getSlot(4), before, "a refusal mutates nothing");
-      } finally {
-        closeFixture(value);
-      }
-    });
-  }
-
-  // Stale activity telemetry on a CLOSED turn is superseded, not refused: the
-  // live row says idle and no turn is active, so nothing is at risk.
-  await t.test("stale activity with a closed turn is superseded", async () => {
-    const value = legacyIssueOnlyFixture();
-    try {
-      value.db.updateSlot(4, { activity: "branching" });
-      const result = await coordinator(value).release(value.request);
-      assert.equal(result.code, "released");
-      assert.equal(result.superseded?.ignored_activity, "branching");
-      assert.match(String(result.superseded?.repair.join(" ")), /stale activity 'branching' ignored/);
-    } finally {
-      closeFixture(value);
-    }
-  });
-
-  // A clean main checkout at a head that differs from the caller's stale
-  // intended_main_head is SUPERSEDED, not refused.
-  await t.test("stale intended_main_head is superseded", async () => {
-    const value = legacyIssueOnlyFixture();
-    try {
-      let deliveries = 0;
-      const result = await coordinator(value, {
-        instruction: () => { deliveries += 1; },
-        observeReadOnly: async () => ({
-          checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: "c".repeat(40),
-        }),
-      }).release(value.request);
-      assert.equal(result.code, "released");
-      assert.equal(result.superseded?.head_drift, true);
-      assert.equal(result.superseded?.observed_main_head, "c".repeat(40));
-      assert.equal(deliveries, 0, "a settled checkout needs no pane instruction");
-      assert.equal(value.db.getSlot(4)?.occupied, false);
-    } finally {
-      closeFixture(value);
-    }
-  });
-
-  // A checkout that is NOT settled falls back to the pane stop + reset path
-  // instead of being refused for "wrong branch".
-  for (const [name, observation] of [
-    ["dirty checkout", { clean: false, unpushed_commits: ["commit"] }],
-    ["wrong branch", { clean: true, unpushed_commits: [], branch: "fix/old" }],
-  ] as const) {
-    await t.test(`${name} uses the pane reset path`, async () => {
-      const value = legacyIssueOnlyFixture();
-      try {
-        let deliveries = 0;
-        let resets = 0;
-        const result = await coordinator(value, {
-          instruction: () => { deliveries += 1; },
-          observe: async () => { resets += 1; return exactObservation(); },
-          observeReadOnly: async () => ({
-            checkout_path: CHECKOUT, head: MAIN_HEAD, ...observation,
-          }),
-        }).release(value.request);
-        assert.equal(result.code, "released");
-        assert.equal(deliveries, 1);
-        assert.equal(resets, 1);
-      } finally {
-        closeFixture(value);
-      }
-    });
-  }
-
-  // Live S6 (2026-09-23): an idle slot already standing on main must never take
-  // another pane instruction. The literal can only leave a non-main branch, so
-  // on-main residue (an untracked plan file in the live case) made every retry
-  // re-deliver a prompt the slot could not act on. That prompt's turn blocked
-  // the release, so the identical retry could never converge. The
-  // reset/attestation path still runs
-  // and still refuses a dirty tree with a typed code.
-  await t.test("on-main residue takes the reset path with NO pane instruction", async () => {
-    const value = legacyIssueOnlyFixture();
-    try {
-      let deliveries = 0;
-      let resets = 0;
-      const result = await coordinator(value, {
-        instruction: () => { deliveries += 1; },
-        observe: async () => { resets += 1; return exactObservation({ clean: false }); },
-        observeReadOnly: async () => ({
-          checkout_path: CHECKOUT, head: MAIN_HEAD, clean: false, unpushed_commits: [], branch: "main",
-        }),
-      }).release(value.request);
-      assert.equal(result.code, "dirty_checkout");
-      assert.equal(result.success, false);
-      assert.equal(deliveries, 0, "an on-main checkout must not re-enter the pane");
-      assert.equal(resets, 1, "the server-side reset/attestation path still runs");
-      assert.equal(value.db.getSlot(4)?.occupied, true, "a typed refusal leaves the slot occupied");
-    } finally {
-      closeFixture(value);
-    }
-  });
-
-  // REVIEW MUST-FIX (data safety): a checkout that is on main with a clean
-  // worktree but still ahead of its upstream cannot be attested through the
-  // reset path — `git pull --ff-only` leaves local main ahead and the
-  // acknowledgement chain never inspects unpushed commits, so releasing would
-  // mark the slot FREE with that work unreachable. It must refuse before any
-  // reset or pane delivery.
-  await t.test("main with unpushed commits refuses before any reset or delivery", async () => {
-    const value = legacyIssueOnlyFixture();
-    try {
-      let deliveries = 0;
-      let resets = 0;
-      const before = value.db.getSlot(4)!;
-      const result = await coordinator(value, {
-        instruction: () => { deliveries += 1; },
-        observe: async () => { resets += 1; return exactObservation(); },
-        observeReadOnly: async () => ({
-          checkout_path: CHECKOUT, head: MAIN_HEAD, clean: true, unpushed_commits: ["a".repeat(40)], branch: "main",
-        }),
-      }).release(value.request);
-      assert.equal(result.code, "checkout_not_clean");
-      assert.equal(result.success, false);
-      assert.match(String(result.message), /unpushed/);
-      assert.equal(deliveries, 0, "an already-main checkout takes no pane instruction");
-      assert.equal(resets, 0, "no reset runs while local main is ahead of upstream");
-      const after = value.db.getSlot(4)!;
-      assert.equal(after.occupied, true, "the slot stays occupied");
-      assert.equal(after.assignment_epoch, before.assignment_epoch, "a refusal never advances the epoch");
-    } finally {
-      closeFixture(value);
-    }
-  });
-});
-
-test("pane activity race refuses before checkout reset until the Stop hook closes", async () => {
+test("a dirty checkout releases without reset, instruction, or refusal; the audit observes it", async () => {
   const value = fixture();
   try {
-    let resetCalled = false;
+    const result = await coordinator(value, {
+      observeReadOnly: async () => ({ checkout_path: CHECKOUT, clean: false, unpushed_commits: ["deadbeef"], branch: "fix/8100" }),
+    }).release({ slot: 1 });
+    assert.equal(result.code, "released");
+    assert.equal(result.success, true);
+    assert.equal(value.db.getSlot(1)!.occupied, false);
+    const events = value.db.getEvents(1, 10).filter((event) => event.event_type === "slot_released_simple");
+    assert.equal(events.length, 1);
+    const payload = JSON.parse(events[0].payload) as Record<string, unknown>;
+    assert.equal((payload.worktree as Record<string, unknown>).clean, false, "dirty state observed, not reset");
+    assert.equal(payload.worktree_reset, false);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test("an invalid slot number is invalid_request with no mutation", async () => {
+  const value = fixture();
+  try {
+    const before = value.db.getSlot(1)!;
+    const result = await coordinator(value).release({ slot: 99 } as unknown as NativeSlotReleaseRequest);
+    assert.equal(result.code, "invalid_request");
+    assert.equal(result.success, false);
+    assert.deepEqual(value.db.getSlot(1), before);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test("REVISE-2: slot-only release unwinds the live predecessor lane labels", async () => {
+  const value = fixture();
+  try {
+    const released: Array<{ issue: number; slot: number; repository: string | null }> = [];
     const release = new NativeSlotReleaseCoordinator({
       db: value.db,
       resolveOwningCheckout: async () => CHECKOUT,
-      deliverInstruction: async () => true,
-      owningSlotIsIdle: async () => {
-        // is-active.sh can report idle before /hooks/slot finishes its
-        // finishAgentTurn update. This is the production ordering race.
-        value.db.startAgentTurn(1, "stop-hook-race");
-        return true;
-      },
-      resetAndObserveCheckout: async () => {
-        resetCalled = true;
-        return exactObservation();
-      },
-    });
-    const result = await release.release(value.request);
-    assert.equal(result.code, "slot_not_idle");
-    assert.equal(resetCalled, false);
-    assert.equal(value.db.getSlot(1)?.occupied, true);
-  } finally {
-    closeFixture(value);
-  }
-});
-
-test("numbered slots expose no compatibility or epoch-only clear surface", () => {
-  const value = fixture();
-  try {
-    const compatibilityClearName = ["release", "Slot"].join("");
-    const exactClearName = ["release", "Slot", "Exact"].join("");
-    assert.equal(compatibilityClearName in value.db, false);
-    assert.equal(exactClearName in value.db, false);
-    assert.equal(value.db.getSlot(1)?.occupied, true);
-  } finally {
-    closeFixture(value);
-  }
-});
-
-test("identity, delivery, idle, and reset acknowledgement failures preserve occupied", async (t) => {
-  const cases: Array<{ name: string; code: string; options: AdapterOptions }> = [
-    { name: "pane checkout unavailable", code: "checkout_identity_unavailable", options: { checkout: null } },
-    { name: "delivery failed", code: "delivery_failed", options: { delivered: false } },
-    { name: "slot stayed active", code: "slot_not_idle", options: { idle: false } },
-    { name: "reset failed", code: "checkout_reset_failed", options: { observe: async () => exactObservation({ reset_succeeded: false }) } },
-    { name: "dirty checkout", code: "dirty_checkout", options: { observe: async () => exactObservation({ clean: false }) } },
-    { name: "wrong branch", code: "wrong_branch", options: { observe: async () => exactObservation({ branch: "fix/8100" }) } },
-    { name: "wrong checkout", code: "ack_checkout_mismatch", options: { observe: async () => exactObservation({ checkout_path: "/tmp/other" }) } },
-    {
-      name: "pane changed checkout during reset",
-      code: "ack_checkout_mismatch",
-      options: {
-        resolveCheckout: (() => {
-          let read = 0;
-          return async () => ++read === 1 ? CHECKOUT : "/tmp/other";
-        })(),
-      },
-    },
-  ];
-
-  for (const testCase of cases) {
-    await t.test(testCase.name, async () => {
-      const value = fixture();
-      try {
-        const before = value.db.getSlot(1)!;
-        const releaseResult = await coordinator(value, testCase.options).release(value.request);
-        assert.equal(releaseResult.code, testCase.code);
-        assert.deepEqual(value.db.getSlot(1), before);
-      } finally {
-        closeFixture(value);
-      }
-    });
-  }
-});
-
-test("final CAS catches complete tuple identity change without epoch advance", async () => {
-  const value = fixture();
-  try {
-    const release = coordinator(value, {
-      observe: async () => {
-        const drift = value.db.syncSlotCheckout(1, "fix/8100", "d".repeat(40), value.request.expected_epoch);
-        assert.equal(drift.ok, true);
-        assert.equal(drift.assignment_epoch, value.request.expected_epoch);
-        return exactObservation();
+      interruptTurn: async () => ({ ok: true, reason: "no_live_turn" }),
+      observeCheckout: async () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [] }),
+      issueProjection: {
+        onAssigned: async () => { throw new Error("assign must not project on release"); },
+        onReleased: async (issue, slot, repository) => {
+          released.push({ issue, slot, repository: repository ?? null });
+          return {
+            status: "projected", reason: null, repository: repository ?? null,
+            issue, slot, added_labels: ["status:todo"], removed_labels: ["status:in-progress"],
+            verified: true,
+          };
+        },
       },
     });
-    assert.equal((await release.release(value.request)).code, "clear_conflict");
-    const occupied = value.db.getSlot(1)!;
-    assert.equal(occupied.occupied, true);
-    assert.equal(occupied.assignment_epoch, value.request.expected_epoch);
-    assert.equal(occupied.head_sha, "d".repeat(40));
-  } finally {
-    closeFixture(value);
-  }
-});
-
-test("final CAS catches epoch drift and preserves the replacement owner", async () => {
-  const value = fixture();
-  try {
-    const desired: AssignmentTupleInput = {
-      ...value.request.expected_tuple,
-      branch: "fix/8100-successor",
-      head_sha: "e".repeat(40),
-    };
-    const release = coordinator(value, {
-      observe: async () => {
-        assert.equal(value.db.rebindSlot(
-          1,
-          value.request.expected_epoch,
-          value.request.expected_tuple,
-          desired,
-          "replacement owner",
-        ).ok, true);
-        return exactObservation();
-      },
-    });
-    assert.equal((await release.release(value.request)).code, "clear_conflict");
-    const replacement = value.db.getSlot(1)!;
-    assert.equal(replacement.occupied, true);
-    assert.equal(replacement.assignment_epoch, value.request.expected_epoch + 1);
-    assert.equal(replacement.branch, "fix/8100-successor");
+    // No presented tuple at all: the freed lane's labels still unwind from
+    // the live predecessor row.
+    const result = await release.release({ slot: 1 });
+    assert.equal(result.code, "released");
+    assert.equal(result.success, true);
+    assert.deepEqual(released, [{ issue: 8100, slot: 1, repository: "github:heydonna-app/heydonna-app" }]);
+    assert.equal(result.issue_projection?.status, "projected");
+    assert.equal(result.issue_projection?.issue, 8100);
   } finally {
     closeFixture(value);
   }
@@ -691,8 +359,7 @@ test("effect-bound release persists an atomic receipt and replays without a seco
       effect_id: "family2-effect-8100",
       request_digest: computeFamily2ReleaseDigest({ effect_id: "family2-effect-8100", ...value.request }),
     };
-    let deliveries = 0;
-    const release = coordinator(value, { instruction: () => { deliveries += 1; } });
+    const release = coordinator(value);
     const first = await release.release(request);
     assert.equal(first.code, "released");
     assert.equal(first.idempotent, false);
@@ -701,7 +368,6 @@ test("effect-bound release persists an atomic receipt and replays without a seco
     const replay = await release.release(request);
     assert.equal(replay.code, "released");
     assert.equal(replay.idempotent, true);
-    assert.equal(deliveries, 1);
     assert.equal(value.db.getSlot(1)?.occupied, false);
   } finally {
     closeFixture(value);

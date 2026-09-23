@@ -128,13 +128,38 @@ class MopAssignSlotClientTests(unittest.TestCase):
         self.assertIn("task_present=true", terminal["slot_state_after"])
 
     def test_empty_task_text_refuses_before_any_network_call(self) -> None:
+        # Thin surface: an empty task file is not a refusal. Ownership still
+        # commits; the server skips delivery when there is no task text.
         empty = Path(self.temp.name) / "empty.md"
         empty.write_text("   \n", encoding="utf-8")
         completed = self.run_script(task_file=empty)
-        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
         terminal = json.loads(completed.stdout.strip())
-        self.assertEqual(terminal["reason"], "empty_task_text")
-        self.assertEqual(self.server.requests, [])
+        self.assertEqual(terminal["status"], "assigned")
+        posts = [r for r in self.server.requests if r[0] == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0][2]["task"], "   \n")
+
+    def test_minimal_slot_and_issue_invocation_assigns(self) -> None:
+        # The thin PM surface: only --slot and --issue are required.
+        command = [
+            sys.executable,
+            str(SCRIPT),
+            "--slot", "3",
+            "--issue", "8131",
+        ]
+        env = {"MOP_PORT": str(self.port), "PATH": "/usr/bin:/bin"}
+        completed = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        terminal = json.loads(completed.stdout.strip())
+        self.assertEqual(terminal["status"], "assigned")
+        posts = [r for r in self.server.requests if r[0] == "POST"]
+        self.assertEqual(len(posts), 1)
+        body = posts[0][2]
+        self.assertEqual(body["issue"], 8131)
+        self.assertEqual(body["selection_class"], "new_issue")
+        self.assertEqual(body["task"], "")
+        self.assertEqual(body["task_file"], "")
 
     def test_unreachable_mop_refuses_typed(self) -> None:
         self.server.shutdown()

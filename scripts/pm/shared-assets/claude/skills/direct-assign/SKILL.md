@@ -21,18 +21,39 @@ terminal:
 
 ```text
 python3 /Users/rajiv/.claude/scripts/mop-assign-slot.py \
-  --slot <N> --class <repro|rework|new_issue> \
-  --repo-id <repository_id> --issue <n> \
+  --slot <N> --issue <n> \
+  [--class <repro|rework|new_issue>] \
+  [--repo-id <repository_id>] \
   [--pr <n>] [--branch <ref>] [--head <sha>] \
   [--work-kind <k>] [--handoff <id>] [--claimed-at <iso>] \
-  --task-file /path/to/task.md
+  [--task-file /path/to/task.md]
 ```
+
+Only `--slot` and `--issue` are required. Assigning an occupied slot
+implicitly releases it first in the same atomic write; the session clear is
+done by MoP as part of the assign. There is no release-first step, no epoch
+or expected-tuple ceremony, and no retry loop: one call returns the new
+state. The ONLY refusal is a lane already bound to another occupied slot
+(`duplicate_assignment`, naming that slot) — release that lane there first,
+then assign here. Re-assigning the same lane to the same slot is idempotent.
 
 Success prints `{"status":"assigned","slot":N,"assignment_epoch":E,
 "ownership_receipt":{...},"delivery_receipt":{...}}` and exits 0. A typed
 refusal prints `{"status":"refused","step_failed":"clean|ownership|delivery|readback",
 "reason":"...","slot_state_after":"...","sanctioned_path":"mop-assign-slot"}`
 and exits non-zero; return that reason and stop.
+
+GitHub labels are server-projected (Rajiv directive 2026-09-23): after the
+ownership commit MoP itself applies `status:in-progress` plus `slot:N` (and
+unwinds the displaced lane's labels on an occupied-slot assign) and returns
+the outcome as `issue_projection` (plus `release_projection` when a prior
+lane was displaced) in the same terminal. Do NOT edit labels by hand or with
+`gh`: a projection failure is recorded in the terminal and never refuses the
+assignment.
+Labels project only after delivery succeeds — never before the slot has both
+the record and the task. If the terminal shows a failed projection, rerunning
+the identical command finishes the labels without repeating clear, commit, or
+delivery.
 
 [HIGH] Do NOT call the MoP assignment boundary directly. `POST
 /slots/{slot}/assign` and `POST /slots/{slot}/adopt-issue-claim` are gated and
@@ -68,12 +89,13 @@ keep their prior context/history, and the operation knows the difference from
 `--class`.
 
 [HIGH] Precondition — the slot MUST already be `free` (released) before the
-clear. NEVER `POST .../clear` on an `occupied`/`active` slot: a clear on an
-active slot resets or queues-a-reset of its live session and destroys in-flight
-work/context (it is not a read-only probe). Confirm `status:free`,
-`occupied:false` from a fresh readback immediately before the clear. If the slot
-is not free, release it first (idle-occupied = release-then-clear-then-assign);
-if it cannot be safely freed, return `PM_ASSIGNMENT_BLOCKED` and do not clear.
+clear. NEVER issue a standalone `POST .../clear` or `mop-clear-slot.sh` call
+on an `occupied`/`active` slot yourself: a clear on an active slot resets or
+queues-a-reset of its live session and destroys in-flight work/context (it is
+not a read-only probe). Assigning onto an occupied slot lets MoP do the
+implicit release plus the clear inside the one atomic operation, with the
+displaced prior owner recorded in the audit row — that is the only supported
+way to take over an occupied slot.
 
 ## Message shapes
 

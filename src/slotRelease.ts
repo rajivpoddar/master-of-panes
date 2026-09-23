@@ -19,9 +19,11 @@ import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
 
 export interface NativeSlotReleaseRequest {
   slot: number;
-  expected_epoch: number;
-  expected_tuple: AssignmentTupleInput;
-  intended_main_head: string;
+  // Thin PM surface (Rajiv directive 2026-09-23 15:57): only the slot
+  // number is required. Presented identity is advisory; the live row wins.
+  expected_epoch?: number;
+  expected_tuple?: AssignmentTupleInput;
+  intended_main_head?: string;
   /** Immutable Family-2 effect identity; absent for legacy native callers. */
   effect_id?: string;
   request_digest?: string;
@@ -53,86 +55,6 @@ export interface CheckoutResetObservation {
   clean: boolean;
   reset_succeeded: boolean;
   error?: string | null;
-}
-
-/**
- * Bounded wait for the reset instruction's OWN induced turn to settle.
- *
- * The pane-mediated release delivers a stop/reset instruction into the owning
- * pane. That instruction is a user prompt, so the slot's UserPromptSubmit hook
- * records it as an agent turn (`db.startAgentTurn(slot, session_id)`). The
- * release must wait for that self-created turn to close before its authoritative
- * re-check, otherwise it mistakes its own instruction for a pre-existing active
- * turn and refuses forever. The wait is bounded and never treats a different
- * turn id as self-induced.
- */
-export const RELEASE_SELF_TURN_SETTLE_MS = 180 * 1000;
-export const RELEASE_SELF_TURN_POLL_MS = 2 * 1000;
-/**
- * Delivery-registration grace, measured in complete settle poll intervals.
- *
- * The delivered instruction is a user prompt, so its `UserPromptSubmit` turn can
- * register a moment AFTER the first post-delivery sample. A row that still shows
- * no induced turn is therefore NOT proof of settlement until the prompt has had
- * at least this many complete poll intervals to register. Once an induced turn
- * has actually been observed, its own closure is authoritative and this grace no
- * longer applies.
- */
-export const RELEASE_SELF_TURN_REGISTRATION_POLLS = 2;
-
-/** Outcome of the bounded settle wait that follows a reset-instruction delivery. */
-export type ReleaseSelfTurnSettle =
-  | { ok: true; induced_turn_id: string | null; waited_ms: number }
-  | { ok: false; kind: "timeout"; slot: SlotState | null; induced_turn_id: string | null; waited_ms: number; cause: ReleaseBlockCause }
-  | { ok: false; kind: "replacement_turn"; slot: SlotState; induced_turn_id: string | null; turn_id: string; waited_ms: number }
-  | { ok: false; kind: "epoch_mismatch" | "observed_tuple_mismatch" | "slot_free" | "slot_missing"; slot: SlotState | null; induced_turn_id: string | null; waited_ms: number };
-
-/** Why the single release refusal fired. */
-export type ReleaseBlockCause = "active_turn" | "dnd" | "productive_work" | "state_moved";
-
-export type ReleaseReadiness =
-  | { ok: true }
-  | { ok: false; cause: ReleaseBlockCause; message: string; remediation: string };
-
-/**
- * The ONE release refusal: the slot is still working. Everything else about a
- * release (tuple drift, a stale/mis-moded intent, a moved main head) is
- * superseded against the live row rather than refused.
- */
-export function evaluateReleaseReadiness(
-  slot: Pick<SlotState, "idle" | "dnd" | "activity" | "active_turn_id" | "active_turn_state">,
-): ReleaseReadiness {
-  const turnId = typeof slot.active_turn_id === "string" && slot.active_turn_id.length > 0 ? slot.active_turn_id : null;
-  if (turnId !== null || slot.active_turn_state !== "inactive") {
-    const indeterminate = slot.active_turn_state === "indeterminate";
-    return {
-      ok: false,
-      cause: "active_turn",
-      message: turnId
-        ? `Slot is not releasable: ${indeterminate ? "turn" : "hook turn"} ${turnId} is still active or indeterminate.`
-        : "Slot is not releasable: an agent turn is still active or indeterminate.",
-      remediation: turnId
-        ? `If the owning session is gone (relaunched or replaced, so no Stop/SessionEnd hook can arrive) terminalize exactly this turn through the canonical path: POST /slots/{slot}/abandon-turn {"turn_id":"${turnId}","reason":"<why>","actor":"<who>"} (idempotent on repeat; a replacement or indeterminate turn is refused), then retry this release; it then succeeds. Otherwise wait for the authoritative Stop/SessionEnd hook and retry.`
-        : "Wait for the authoritative Stop/SessionEnd hook and retry.",
-    };
-  }
-  if (slot.dnd) {
-    return {
-      ok: false,
-      cause: "dnd",
-      message: "Slot is not releasable: DND is active.",
-      remediation: "Clear DND, then retry this release.",
-    };
-  }
-  if (!slot.idle) {
-    return {
-      ok: false,
-      cause: "productive_work",
-      message: `Slot is not releasable: it reports itself busy (idle=false, activity=${slot.activity ?? "null"}).`,
-      remediation: "Leave the owner untouched and retry once the slot reports idle with no active turn.",
-    };
-  }
-  return { ok: true };
 }
 
 /**
@@ -214,14 +136,8 @@ export interface NativeSlotReleaseResult {
   idempotent?: boolean;
   acknowledgement?: NativeSlotReleaseAcknowledgement;
   issue_projection?: IssueProjectionOutcome | null;
-  /** Why the single `slot_not_idle` refusal fired. */
-  cause?: ReleaseBlockCause;
   /** Everything this release superseded instead of refusing. */
   superseded?: ReleaseSupersession;
-}
-
-interface NormalizedReleaseRequest extends NativeSlotReleaseRequest {
-  intended_main_head: string;
 }
 
 export interface NativeSlotReleaseDependencies {
@@ -229,18 +145,12 @@ export interface NativeSlotReleaseDependencies {
   /** Canonical issue-side ownership projection; optional so tests stay hermetic. */
   issueProjection?: IssueOwnershipProjection;
   resolveOwningCheckout: (slot: number) => Promise<string | null>;
-  deliverInstruction: (slot: number, instruction: string) => Promise<boolean>;
-  owningSlotIsIdle: (slot: number) => Promise<boolean>;
-  resetAndObserveCheckout: (
-    checkoutPath: string,
-    intendedMainHead: string,
-  ) => Promise<CheckoutResetObservation>;
+  /**
+   * Best-effort interrupt of any live turn in the pane (Ctrl-C through the
+   * existing relay seam). The outcome is audited and never refuses.
+   */
+  interruptTurn: (slot: number) => Promise<{ ok: boolean; reason: string }>;
   observeCheckout: (checkoutPath: string) => Promise<CheckoutReadOnlyObservation>;
-  /** Bounded settle wait tuning + clock seam (defaults are production values). */
-  selfTurnSettleTimeoutMs?: number;
-  selfTurnSettlePollMs?: number;
-  nowMs?: () => number;
-  sleep?: (ms: number) => Promise<void>;
 }
 
 function result(
@@ -249,7 +159,6 @@ function result(
   slot: SlotState | null | undefined,
   remediation: string | null,
   success = false,
-  cause?: ReleaseBlockCause,
 ): NativeSlotReleaseResult {
   return {
     success,
@@ -258,25 +167,7 @@ function result(
     slot: slot ?? null,
     assignment_epoch: slot?.assignment_epoch ?? null,
     remediation,
-    ...(cause ? { cause } : {}),
   };
-}
-
-/**
- * The ONLY slot-facing release message. It is the actionable literal from the
- * direct-release contract: the slot switches itself to main with its own tools.
- *
- * It must never tell the slot to stop work or stay idle. The release gate has
- * already proved the slot is idle, inactive and quiescent before this is ever
- * delivered, so a "stop work" instruction addressed a slot that was not working
- * (Rajiv ruling 2026-09-21). MoP keeps the enforcement: it resets the checkout to
- * the exact intended head, attests clean main through the pane, and leaves the
- * slot occupied when attestation fails.
- */
-export const RELEASE_ACTIONABLE_INSTRUCTION = "Switch to main and pull the latest origin/main.";
-
-export function buildLiteralResetInstruction(): string {
-  return RELEASE_ACTIONABLE_INSTRUCTION;
 }
 
 export class NativeSlotReleaseCoordinator {
@@ -425,75 +316,6 @@ export class NativeSlotReleaseCoordinator {
    * durable release already happened, so any failure is returned as a typed
    * sibling field and never changes the reported release outcome.
    */
-  /**
-   * Wait, bounded, for the reset instruction's own induced turn to settle.
-   *
-   * `priorTurnId` is the turn the row carried immediately BEFORE delivery (the
-   * release refuses earlier when one exists, so it is normally null). The first
-   * turn observed after delivery is therefore the one our instruction induced;
-   * any OTHER turn id is a replacement/pre-existing turn and refuses.
-   */
-  private async awaitInducedResetTurnSettle(
-    slotNum: number,
-    expectedEpoch: number,
-    expectedTuple: AssignmentTuple,
-    priorTurnId: string | null,
-  ): Promise<ReleaseSelfTurnSettle> {
-    const now = this.dependencies.nowMs ?? (() => Date.now());
-    const sleep = this.dependencies.sleep
-      ?? ((ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms)));
-    const timeoutMs = this.dependencies.selfTurnSettleTimeoutMs ?? RELEASE_SELF_TURN_SETTLE_MS;
-    const pollMs = this.dependencies.selfTurnSettlePollMs ?? RELEASE_SELF_TURN_POLL_MS;
-    const registrationGraceMs = pollMs * RELEASE_SELF_TURN_REGISTRATION_POLLS;
-    const startedAt = now();
-    let inducedTurnId: string | null = priorTurnId;
-    let lastCause: ReleaseBlockCause = "active_turn";
-    for (;;) {
-      const elapsed = now() - startedAt;
-      const row = this.dependencies.db.getSlot(slotNum);
-      if (!row) return { ok: false, kind: "slot_missing", slot: null, induced_turn_id: inducedTurnId, waited_ms: elapsed };
-      if (row.assignment_epoch !== expectedEpoch) {
-        return { ok: false, kind: "epoch_mismatch", slot: row, induced_turn_id: inducedTurnId, waited_ms: elapsed };
-      }
-      if (!assignmentTupleMatches(slotAssignmentTuple(row), expectedTuple)) {
-        return { ok: false, kind: "observed_tuple_mismatch", slot: row, induced_turn_id: inducedTurnId, waited_ms: elapsed };
-      }
-      if (!row.occupied) {
-        return { ok: false, kind: "slot_free", slot: row, induced_turn_id: inducedTurnId, waited_ms: elapsed };
-      }
-      const turnId = row.active_turn_id;
-      if (turnId !== null) {
-        if (inducedTurnId === null) {
-          inducedTurnId = turnId;
-        } else if (turnId !== inducedTurnId) {
-          return { ok: false, kind: "replacement_turn", slot: row, induced_turn_id: inducedTurnId, turn_id: turnId, waited_ms: elapsed };
-        }
-      }
-      // Reuse the SAME readiness predicate the release gate uses, so "settled"
-      // means exactly "the post-delivery authoritative re-check will pass":
-      // the induced turn has closed and no other refusal cause remains.
-      const readiness = evaluateReleaseReadiness(row);
-      // A row that reads "ready" before the delivered prompt has had time to
-      // register its UserPromptSubmit turn is NOT proof of settlement: the
-      // induced turn would then appear after this wait returned, and the
-      // authoritative post-delivery re-check would refuse the release on a turn
-      // the release itself created. Hold for the bounded two-poll grace while no
-      // induced turn has been observed; once one is observed its closure is
-      // authoritative and this grace no longer applies.
-      const registrationPending = inducedTurnId === null && elapsed < registrationGraceMs;
-      if (readiness.ok && !registrationPending) {
-        return { ok: true, induced_turn_id: inducedTurnId, waited_ms: elapsed };
-      }
-      if (!readiness.ok) {
-        lastCause = readiness.cause;
-      }
-      if (elapsed >= timeoutMs) {
-        return { ok: false, kind: "timeout", slot: row, induced_turn_id: inducedTurnId, waited_ms: elapsed, cause: lastCause };
-      }
-      await sleep(pollMs);
-    }
-  }
-
   private async projectReleasedOwner(
     tuple: AssignmentTuple | undefined,
     slot: number,
@@ -553,13 +375,32 @@ export class NativeSlotReleaseCoordinator {
         request_digest: request.request_digest,
       };
     }
+    // The machine-internal effect path keeps strict binding: epoch and head
+    // are required here even though the operator surface treats them as
+    // advisory.
+    if (
+      !Number.isInteger(request.expected_epoch)
+      || typeof request.intended_main_head !== "string"
+      || !/^[0-9a-f]{40}$/i.test(request.intended_main_head)
+    ) {
+      return {
+        ...result(
+          "effect_receipt_malformed",
+          "Family-2 release effect is missing its immutable epoch/head binding.",
+          this.dependencies.db.getSlot(request.slot),
+          "Preserve the committed outbox row and retry with its complete immutable tuple.",
+        ),
+        effect_id: request.effect_id,
+        request_digest: request.request_digest,
+      };
+    }
     let computedDigest: string;
     try {
       computedDigest = computeFamily2ReleaseDigest({
         effect_id: request.effect_id,
-        expected_epoch: request.expected_epoch,
-        expected_tuple: request.expected_tuple,
-        intended_main_head: request.intended_main_head,
+        expected_epoch: request.expected_epoch as number,
+        expected_tuple: request.expected_tuple as AssignmentTupleInput,
+        intended_main_head: request.intended_main_head as string,
       });
     } catch {
       return {
@@ -640,20 +481,26 @@ export class NativeSlotReleaseCoordinator {
     // Only the request SHAPE is validated here. The presented identity itself
     // is advisory: MoP's live row is authoritative, and anything it disagrees
     // with is superseded and audited rather than refused.
-    const presentedTuple = normalizeAssignmentTuple(request.expected_tuple);
+    const presentedTuple = normalizeAssignmentTuple(request.expected_tuple ?? {
+      repository_id: null,
+      issue: null,
+      pr: null,
+      branch: null,
+      head_sha: null,
+      work_kind: null,
+      handoff_id: null,
+      claimed_at: null,
+    });
     if (
       !Number.isInteger(request.slot)
       || request.slot < 1
       || request.slot > DEFAULT_DEV_SLOT_COUNT
-      || !Number.isInteger(request.expected_epoch)
-      || typeof request.intended_main_head !== "string"
-      || !/^[0-9a-f]{40}$/i.test(request.intended_main_head)
     ) {
       return result(
         "invalid_request",
-        "A slot number, an epoch, and intended_main_head (40 hex) are required.",
+        "A slot number (1-6) is required.",
         this.dependencies.db.getSlot(request.slot),
-        "Re-read the slot and resend the request with those fields.",
+        "Resend the request with a valid slot number.",
       );
     }
     const current = this.dependencies.db.getSlot(request.slot);
@@ -663,15 +510,21 @@ export class NativeSlotReleaseCoordinator {
 
     // Drift between the presented identity and MoP's live row is superseded,
     // never refused: the callers here are PM/CTO on one local machine, and the
-    // live row is authoritative. Only "the slot is still working" refuses.
+    // live row is authoritative. The operator release itself never refuses on
+    // state: it interrupts, terminalizes, frees, and audits.
     const drift = (live: SlotState | null): ReleaseSupersession => ({
-      presented_epoch: request.expected_epoch,
+      presented_epoch: Number.isInteger(request.expected_epoch)
+        ? (request.expected_epoch as number)
+        : (live?.assignment_epoch ?? 0),
       live_epoch: live?.assignment_epoch ?? null,
-      epoch_drift: live?.assignment_epoch !== request.expected_epoch,
+      epoch_drift: Number.isInteger(request.expected_epoch)
+        && live?.assignment_epoch !== request.expected_epoch,
       presented_identity_usable: presentedTuple !== null,
       tuple_drift: presentedTuple === null
         || !assignmentTupleMatches(live ? slotAssignmentTuple(live) : null, presentedTuple),
-      intended_main_head: request.intended_main_head.toLowerCase(),
+      intended_main_head: typeof request.intended_main_head === "string"
+        ? request.intended_main_head.toLowerCase()
+        : "",
       observed_main_head: null,
       head_drift: false,
       ignored_activity: null,
@@ -709,8 +562,22 @@ export class NativeSlotReleaseCoordinator {
     // exactly-once receipt is keyed to the immutable effect tuple, so drift
     // there is a receipt conflict rather than an operator release.
     let computedDigest: string | undefined;
+    let effectBinding: {
+      effect_id: string;
+      request_digest: string;
+      expected_epoch: number;
+      expected_tuple: AssignmentTupleInput;
+      intended_main_head: string;
+    } | undefined;
     if (request.effect_id !== undefined) {
-      if (presentedTuple === null) {
+      // The machine-internal effect path keeps strict binding: it needs the
+      // complete immutable identity, unlike the thin operator surface.
+      if (
+        presentedTuple === null
+        || !Number.isInteger(request.expected_epoch)
+        || typeof request.intended_main_head !== "string"
+        || !/^[0-9a-f]{40}$/i.test(request.intended_main_head)
+      ) {
         return result(
           "invalid_request",
           "A committed Family-2 effect requires its complete immutable tuple.",
@@ -718,12 +585,15 @@ export class NativeSlotReleaseCoordinator {
           "Resend the exact committed outbox tuple.",
         );
       }
+      const effectEpoch = request.expected_epoch as number;
+      const effectTuple = request.expected_tuple as AssignmentTupleInput;
+      const effectHead = request.intended_main_head as string;
       try {
         computedDigest = computeFamily2ReleaseDigest({
           effect_id: request.effect_id,
-          expected_epoch: request.expected_epoch,
-          expected_tuple: request.expected_tuple,
-          intended_main_head: request.intended_main_head,
+          expected_epoch: effectEpoch,
+          expected_tuple: effectTuple,
+          intended_main_head: effectHead,
         });
       } catch {
         return {
@@ -749,6 +619,13 @@ export class NativeSlotReleaseCoordinator {
           request_digest: request.request_digest,
         };
       }
+      effectBinding = {
+        effect_id: request.effect_id,
+        request_digest: computedDigest,
+        expected_epoch: effectEpoch,
+        expected_tuple: effectTuple,
+        intended_main_head: effectHead,
+      };
       if (!current.occupied) {
         return result(
           "slot_already_free_unverifiable",
@@ -758,7 +635,7 @@ export class NativeSlotReleaseCoordinator {
         );
       }
       if (
-        current.assignment_epoch !== request.expected_epoch
+        current.assignment_epoch !== effectEpoch
         || !assignmentTupleMatches(slotAssignmentTuple(current), presentedTuple)
       ) {
         return result(
@@ -780,19 +657,11 @@ export class NativeSlotReleaseCoordinator {
       };
     }
 
-    // The ONE surviving refusal: the slot is still working.
-    const readiness = evaluateReleaseReadiness(current);
-    if (!readiness.ok) {
-      return result(
-        "slot_not_idle",
-        readiness.message,
-        current,
-        readiness.remediation,
-        false,
-        readiness.cause,
-      );
-    }
-
+    // Simple release (Rajiv directive 2026-09-23 15:57): freeing a named
+    // slot always succeeds. A live turn is interrupted and terminalized,
+    // then the row is freed in one atomic write with a single audit row.
+    // Nothing here waits on quiescence, refuses on state, or touches the
+    // worktree.
     if (this.inProgressSlots.has(request.slot)) {
       return result(
         "release_in_progress",
@@ -802,379 +671,74 @@ export class NativeSlotReleaseCoordinator {
       );
     }
     this.inProgressSlots.add(request.slot);
-
-    // Claim the live owner for the critical section. A stale or mis-moded
-    // intent is superseded atomically here (and audited) instead of blocking
-    // every later attempt.
-    const claim = this.dependencies.db.claimNativeReleaseIntentForLiveOwner(request.slot);
-    if (!claim) {
-      this.inProgressSlots.delete(request.slot);
-      const live = this.dependencies.db.getSlot(request.slot);
-      const blocked = live ? evaluateReleaseReadiness(live) : null;
-      if (blocked && !blocked.ok) {
-        return result("slot_not_idle", blocked.message, live, blocked.remediation, false, blocked.cause);
-      }
-      return result(
-        "slot_not_idle",
-        `Slot ${request.slot} changed while the release was starting; re-read and retry.`,
-        live,
-        "Re-read the slot identity and retry the release.",
-        false,
-        "state_moved",
-      );
-    }
-    const releaseIntentToken: string = claim.token;
-    superseded.live_epoch = claim.expected_epoch;
-    superseded.epoch_drift = claim.expected_epoch !== request.expected_epoch;
-    superseded.tuple_drift = !assignmentTupleMatches(claim.expected_tuple, presentedTuple);
-    superseded.superseded_intent_id = claim.superseded_intent_id;
-    if (claim.superseded_intent_id) {
-      this.dependencies.db.logEvent(request.slot, "native_release_intent_superseded", null, null, {
-        superseded_intent_id: claim.superseded_intent_id,
-        live_epoch: claim.expected_epoch,
-        intended_main_head: request.intended_main_head.toLowerCase(),
-        presentation: describeSupersession(superseded),
-      });
-    }
-
     try {
-      const checkoutPathRaw = await this.dependencies.resolveOwningCheckout(request.slot);
-      if (!checkoutPathRaw) {
-        return result(
-          "checkout_identity_unavailable",
-          "MoP could not derive the owning checkout from the numbered pane.",
-          this.dependencies.db.getSlot(request.slot),
-          "Leave the slot occupied, restore the pane checkout identity, and retry from a fresh MoP read.",
-        );
+      const live = this.dependencies.db.getSlot(request.slot);
+      if (!live) {
+        return result("slot_not_found", `Slot ${request.slot} does not exist.`, null, "Re-read MoP slot inventory.");
       }
-      const checkoutPath = resolve(checkoutPathRaw);
-
-      // Already clean on main => nothing to discard, so release without
-      // disturbing the pane (this replaces the caller-facing release mode).
-      let readOnly: CheckoutReadOnlyObservation | null = null;
-      try {
-        readOnly = await this.dependencies.observeCheckout(checkoutPath);
-      } catch {
-        readOnly = null;
-      }
-      const checkoutSettled = Boolean(
-        readOnly
-        && readOnly.checkout_path === checkoutPath
-        && readOnly.clean
-        && Array.isArray(readOnly.unpushed_commits)
-        && readOnly.unpushed_commits.length === 0
-        && readOnly.error == null
-        && readOnly.branch === "main"
-        && typeof readOnly.head === "string"
-        && /^[0-9a-f]{40}$/i.test(readOnly.head),
-      );
-
-      // A pane instruction is only worth delivering when the slot's own tools
-      // are uniquely able to satisfy it: leaving whatever branch/worktree state
-      // it owns and landing on main. A checkout that already reports main needs
-      // no pane instruction — the reset/attestation path below pulls the exact
-      // head itself, and the acknowledgement checks still refuse a dirty or
-      // wrong-branch checkout. A prompt the slot cannot act on only creates an
-      // unnecessary user turn; it cannot improve an already-main checkout.
-      const paneInstructionRequired = !checkoutSettled && readOnly?.branch !== "main";
-      const unpushedCommitsOnMain = readOnly?.branch === "main" && !checkoutSettled
-        && Array.isArray(readOnly.unpushed_commits)
-        ? readOnly.unpushed_commits.length
-        : 0;
-
-      // An already-main checkout that is still ahead of its upstream cannot be
-      // attested: the reset helper's `pull --ff-only` leaves local main ahead,
-      // and the acknowledgement chain never inspects unpushed commits, so
-      // releasing would mark the slot FREE with that work still unreachable.
-      // Refuse before any reset or pane delivery, on the existing not-clean code.
-      if (unpushedCommitsOnMain > 0) {
-        return result(
-          "checkout_not_clean",
-          `The owning checkout is on main with ${unpushedCommitsOnMain} unpushed commit(s); the release would free the slot while that work stays unreachable.`,
-          this.dependencies.db.getSlot(request.slot),
-          "Push or park the local main commit(s), then retry the release from a fresh MoP read.",
-        );
-      }
-
-      if (paneInstructionRequired) {
-        // Retry guard: never inject a reset instruction while the row reports an
-        // active turn. A repeat call made while a prior release-induced turn is
-        // still live refuses HERE, without delivering another prompt, so the
-        // release cannot pile instructions onto a busy slot.
-        const preDelivery = this.dependencies.db.getSlot(request.slot);
-        if (
-          preDelivery
-          && (preDelivery.active_turn_id !== null || preDelivery.active_turn_state !== "inactive")
-        ) {
-          const busy = evaluateReleaseReadiness(preDelivery);
-          return result(
-            "slot_not_idle",
-            busy.ok
-              ? `Slot ${request.slot} is still working; no reset instruction was delivered.`
-              : busy.message,
-            preDelivery,
-            busy.ok ? "Wait for the active turn to close, then retry the release." : busy.remediation,
-            false,
-            "active_turn",
-          );
-        }
-        const preDeliveryTurnId = preDelivery?.active_turn_id ?? null;
-        const instruction = buildLiteralResetInstruction();
-        const delivered = await this.dependencies.deliverInstruction(request.slot, instruction);
-        if (!delivered) {
-          return result(
-            "delivery_failed",
-            "The owning slot did not receive the stop/reset instruction.",
-            this.dependencies.db.getSlot(request.slot),
-            "Leave the slot occupied, repair delivery, and retry from a fresh MoP read.",
-          );
-        }
-        // The delivered instruction IS a user prompt, so the slot's
-        // UserPromptSubmit hook records it as an agent turn. Wait, bounded, for
-        // that self-induced turn to settle before the authoritative re-check;
-        // any OTHER turn id is a replacement/pre-existing turn and refuses.
-        const settle = await this.awaitInducedResetTurnSettle(
-          request.slot,
-          claim.expected_epoch,
-          claim.expected_tuple,
-          preDeliveryTurnId,
-        );
-        this.dependencies.db.logEvent(request.slot, "release_instruction_delivered", null, null, {
-          checkout_path: checkoutPath,
-          delivery: "pane",
-          instruction_bytes: instruction.length,
-          prior_turn_id: preDeliveryTurnId,
-          induced_turn_id: settle.induced_turn_id,
-          settle_ms: settle.waited_ms,
-          settle_outcome: settle.ok ? "settled" : settle.kind,
-          epoch: claim.expected_epoch,
-        });
-        if (!settle.ok) {
-          if (settle.kind === "timeout") {
-            return result(
-              "slot_not_idle",
-              `Slot ${request.slot} did not settle within ${Math.round(settle.waited_ms / 1000)}s after the reset instruction${
-                settle.induced_turn_id ? ` (turn ${settle.induced_turn_id})` : ""
-              }; no release was performed.`,
-              settle.slot,
-              "Wait for the slot's turn to close, then retry the release; do not hand-edit slot state.",
-              false,
-              settle.cause,
-            );
-          }
-          if (settle.kind === "replacement_turn") {
-            return result(
-              "slot_not_idle",
-              `Slot ${request.slot} is running a different turn (${settle.turn_id}) than the reset instruction${
-                settle.induced_turn_id ? ` (${settle.induced_turn_id})` : ""
-              } induced; no release was performed.`,
-              settle.slot,
-              "A replacement/pre-existing turn owns the slot now; wait for it to close, then re-read and release.",
-              false,
-              "active_turn",
-            );
-          }
-          if (settle.kind === "epoch_mismatch") {
-            return result(
-              "epoch_mismatch",
-              "Assignment epoch changed while the reset instruction settled.",
-              settle.slot,
-              "Re-read the slot and retry the release with fresh state.",
-            );
-          }
-          if (settle.kind === "observed_tuple_mismatch") {
-            return result(
-              "observed_tuple_mismatch",
-              "The owner tuple changed while the reset instruction settled.",
-              settle.slot,
-              "Re-read the slot and retry the release with fresh state.",
-            );
-          }
-          if (settle.kind === "slot_free") {
-            return result(
-              "slot_already_free_unverifiable",
-              `Slot ${request.slot} became FREE while the reset instruction settled.`,
-              settle.slot,
-              "Re-read the caller's state; the slot is already free.",
-            );
-          }
-          return result(
-            "slot_not_found",
-            `Slot ${request.slot} disappeared while the reset instruction settled.`,
-            null,
-            "Re-read MoP slot inventory.",
-          );
-        }
-        if (!(await this.dependencies.owningSlotIsIdle(request.slot))) {
-          return result(
-            "slot_not_idle",
-            "The owning slot did not reach idle after the stop instruction.",
-            this.dependencies.db.getSlot(request.slot),
-            "Leave the slot occupied and retry from a fresh read once the turn is inactive.",
-            false,
-            "active_turn",
-          );
-        }
-        const postDelivery = this.dependencies.db.getSlot(request.slot);
-        if (postDelivery) {
-          const afterDelivery = evaluateReleaseReadiness(postDelivery);
-          if (!afterDelivery.ok) {
-            return result(
-              "slot_not_idle",
-              afterDelivery.message,
-              postDelivery,
-              afterDelivery.remediation,
-              false,
-              afterDelivery.cause,
-            );
-          }
-        }
-      }
-
-      let observation: CheckoutResetObservation;
-      if (checkoutSettled) {
-        observation = {
-          checkout_path: checkoutPath,
-          branch: "main",
-          head: readOnly?.head ?? null,
-          clean: true,
-          reset_succeeded: true,
-          error: null,
-        };
-      } else {
+      // Best-effort interrupt of any live turn; audited, never refusing.
+      let interrupt: { ok: boolean; reason: string } = { ok: true, reason: "no_live_turn" };
+      if (live.active_turn_id !== null || live.active_turn_state !== "inactive") {
         try {
-          observation = await this.dependencies.resetAndObserveCheckout(
-            checkoutPath,
-            request.intended_main_head.toLowerCase(),
-          );
-          if (
-            !observation
-            || typeof observation.checkout_path !== "string"
-            || (observation.branch !== null && typeof observation.branch !== "string")
-            || (observation.head !== null && typeof observation.head !== "string")
-            || typeof observation.clean !== "boolean"
-            || typeof observation.reset_succeeded !== "boolean"
-          ) {
-            throw new Error("checkout reset helper returned an invalid structured observation");
-          }
+          interrupt = await this.dependencies.interruptTurn(request.slot);
         } catch (error) {
-          observation = {
-            checkout_path: checkoutPath,
-            branch: null,
-            head: null,
-            clean: false,
-            reset_succeeded: false,
-            error: error instanceof Error ? error.message : String(error),
+          interrupt = {
+            ok: false,
+            reason: `interrupt_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
           };
         }
       }
-
-      const observedHead = typeof observation.head === "string" ? observation.head.toLowerCase() : null;
-      superseded.observed_main_head = observedHead;
-      superseded.head_drift = observedHead !== null && observedHead !== request.intended_main_head.toLowerCase();
-
-      const acknowledgement: NativeSlotReleaseAcknowledgement = {
-        ...observation,
-        slot: request.slot,
-        assignment_epoch: claim.expected_epoch,
-        expected_tuple: claim.expected_tuple,
-      };
-
-      let refusal: NativeSlotReleaseCode | null = null;
-      const finalPaneCheckoutRaw = await this.dependencies.resolveOwningCheckout(request.slot);
-      if (
-        !finalPaneCheckoutRaw
-        || resolve(finalPaneCheckoutRaw) !== checkoutPath
-      ) refusal = "ack_checkout_mismatch";
-      else if (resolve(observation.checkout_path) !== checkoutPath) refusal = "ack_checkout_mismatch";
-      else if (!observation.reset_succeeded) refusal = "checkout_reset_failed";
-      else if (!observation.clean) refusal = "dirty_checkout";
-      else if (observation.branch !== "main") refusal = "wrong_branch";
-      if (refusal) {
-        return {
-          ...result(
-            refusal,
-            `Checkout reset acknowledgement refused: ${refusal}.`,
-            this.dependencies.db.getSlot(request.slot),
-            "Leave the slot occupied, correct the checkout state, and retry from a fresh MoP read.",
-          ),
-          acknowledgement,
-          superseded: withRepair(),
+      // Read-only worktree observation for the audit row; never a reset.
+      let worktree: { clean: boolean | null; detail: string } = { clean: null, detail: "unobserved" };
+      try {
+        const checkoutPathRaw = await this.dependencies.resolveOwningCheckout(request.slot);
+        if (checkoutPathRaw) {
+          const observed = await this.dependencies.observeCheckout(resolve(checkoutPathRaw));
+          worktree = { clean: observed.clean, detail: observed.checkout_path };
+        } else {
+          worktree = { clean: null, detail: "checkout_identity_unavailable" };
+        }
+      } catch (error) {
+        worktree = {
+          clean: null,
+          detail: `observe_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
         };
       }
-
-      const effectBinding = request.effect_id && request.request_digest
-        ? { effect_id: request.effect_id, request_digest: request.request_digest, intended_main_head: request.intended_main_head.toLowerCase() }
-        : undefined;
-      const cleared = this.dependencies.db.commitNativeRelease(
-        request.slot,
-        claim.expected_epoch,
-        claim.expected_tuple,
-        effectBinding,
-      );
-      if (!cleared.ok) {
-        const working = cleared.reason === "dnd_active"
-          || cleared.reason === "active_turn"
-          || cleared.reason === "productive_work";
-        return {
-          ...result(
-            working ? "slot_not_idle" : "clear_conflict",
-            `Release clear refused: ${cleared.reason ?? "unknown"}.`,
-            this.dependencies.db.getSlot(request.slot),
-            working
-              ? "The slot started working again during the release; leave it occupied and retry once it is idle."
-              : "Re-read MoP and retry the release; drift is superseded automatically.",
-            false,
-            working ? "state_moved" : undefined,
-          ),
-          acknowledgement,
-          superseded: withRepair(),
-        };
+      const freed = this.dependencies.db.releaseSlotSimple(request.slot, effectBinding);
+      if (!freed.ok) {
+        return result("slot_not_found", `Slot ${request.slot} does not exist.`, null, "Re-read MoP slot inventory.");
       }
+      const prior = freed.predecessor ?? null;
+      this.dependencies.db.logEvent(request.slot, "slot_released_simple", null, null, {
+        prior: prior ? {
+          issue: prior.issue,
+          pr: prior.pr,
+          assignment_epoch: live.assignment_epoch,
+          active_turn_id: prior.active_turn_id,
+          active_turn_state: prior.active_turn_state,
+        } : null,
+        interrupt,
+        worktree,
+        worktree_reset: false,
+        assignment_epoch: freed.assignment_epoch,
+        idempotent: freed.idempotent,
+      });
       const readback = this.dependencies.db.getSlot(request.slot);
-      if (
-        !readback
-        || readback.occupied
-        || readback.assignment_epoch !== claim.expected_epoch + 1
-        || slotAssignmentTuple(readback) !== null
-      ) {
-        return {
-          ...result(
-            "free_readback_failed",
-            "Final MoP readback did not prove the exact FREE postcondition.",
-            readback,
-            "Stop; inspect MoP authority before any further slot mutation.",
-          ),
-          acknowledgement,
-          superseded: withRepair(),
-        };
-      }
-      if (superseded.epoch_drift || superseded.tuple_drift || superseded.head_drift || superseded.superseded_intent_id) {
-        this.dependencies.db.logEvent(request.slot, "native_release_superseded", null, null, {
-          presentation: describeSupersession(superseded),
-          live_epoch: claim.expected_epoch,
-          live_tuple: claim.expected_tuple,
-          observed_main_head: superseded.observed_main_head,
-        });
-      }
       return {
         ...result("released", `Slot ${request.slot} released.`, readback, null, true),
         effect_id: request.effect_id,
         request_digest: computedDigest ?? request.request_digest,
-        idempotent: false,
-        acknowledgement,
+        idempotent: freed.idempotent,
         superseded: withRepair(),
-        issue_projection: await this.projectReleasedOwner(claim.expected_tuple, request.slot),
+        // A slot-only release carries no presented tuple; project the live
+        // predecessor row instead so the freed lane's labels still unwind.
+        // A presented (possibly drifted) tuple keeps its existing meaning.
+        issue_projection: await this.projectReleasedOwner(
+          presentedTuple ?? slotAssignmentTuple(live) ?? undefined,
+          request.slot,
+        ),
       };
     } finally {
-      if (releaseIntentToken) {
-        this.dependencies.db.clearNativeReleaseIntent(
-          request.slot,
-          claim.expected_epoch,
-          claim.expected_tuple,
-          releaseIntentToken,
-        );
-      }
       this.inProgressSlots.delete(request.slot);
     }
   }

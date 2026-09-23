@@ -16,7 +16,6 @@ import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { lstatSync } from "node:fs";
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
@@ -43,7 +42,6 @@ import { DEFAULT_CONFIG } from "./types.js";
 import {
   NativeSlotReleaseCoordinator,
   type CheckoutReadOnlyObservation,
-  type CheckoutResetObservation,
 } from "./slotRelease.js";
 import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import {
@@ -53,6 +51,7 @@ import {
 } from "./wedgeInterruptRoute.js";
 import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
+import { runtimeIdentity } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 
 // ─── Config ──────────────────────────────────────────────
@@ -78,37 +77,6 @@ const relay = new TmuxRelay(config);
 // Rajiv directive 2026-05-06 11:18 IST.
 relay.setDatabase(db);
 const processor = new HookProcessor(db, relay);
-const releaseResetHelper =
-  process.env.MOP_RELEASE_RESET_HELPER
-  ?? fileURLToPath(new URL("../scripts/release-slot-reset-and-ack.py", import.meta.url));
-
-function resetAndObserveCheckout(
-  checkoutPath: string,
-  intendedMainHead: string,
-): Promise<CheckoutResetObservation> {
-  return new Promise((resolvePromise, rejectPromise) => {
-    execFile(
-      "python3",
-      [
-        releaseResetHelper,
-        "--checkout", checkoutPath,
-        "--intended-main-head", intendedMainHead,
-      ],
-      { timeout: 180_000, maxBuffer: 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error) {
-          rejectPromise(new Error(`checkout reset helper failed: ${stderr.trim() || error.message}`));
-          return;
-        }
-        try {
-          resolvePromise(JSON.parse(stdout) as CheckoutResetObservation);
-        } catch {
-          rejectPromise(new Error("checkout reset helper returned invalid JSON"));
-        }
-      },
-    );
-  });
-}
 
 function readOnlyGit(checkoutPath: string, args: string[]): Promise<string> {
   return new Promise((resolvePromise, rejectPromise) => {
@@ -153,29 +121,26 @@ async function observeCheckout(checkoutPath: string): Promise<CheckoutReadOnlyOb
   }
 }
 
-async function waitForOwningSlotIdle(slot: number): Promise<boolean> {
-  const timeoutMs = parseInt(process.env.MOP_RELEASE_IDLE_TIMEOUT_MS ?? "120000", 10);
-  const deadline = Date.now() + timeoutMs;
-  // Let the just-delivered prompt reach the slot's hook-derived activity state
-  // before accepting an idle observation.
-  await sleep(500);
-  while (Date.now() < deadline) {
-    const activity = await relay.getSlotActivityState(slot);
-    if (activity === "idle") return true;
-    if (activity === "unknown") return false;
-    await sleep(250);
-  }
-  return false;
-}
-
 const issueProjection = createGhIssueOwnershipProjection();
 const nativeSlotRelease = new NativeSlotReleaseCoordinator({
   db,
   issueProjection,
   resolveOwningCheckout: (slot) => relay.getSlotCheckoutPath(slot),
-  deliverInstruction: (slot, instruction) => relay.sendToSlotAsync(slot, instruction, true, false),
-  owningSlotIsIdle: waitForOwningSlotIdle,
-  resetAndObserveCheckout,
+  // Simple-release path only: best-effort Ctrl-C through the same relay
+  // seam the wedge-interrupt route uses. Audited, never refusing.
+  interruptTurn: async (slot) => {
+    try {
+      const sent = await relay.sendToSlotAsync(slot, WEDGE_INTERRUPT_KEY, true, true);
+      return sent
+        ? { ok: true, reason: "interrupt_sent" }
+        : { ok: false, reason: "interrupt_send_failed" };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: `interrupt_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
+      };
+    }
+  },
   observeCheckout,
 });
 const family2ReleaseEffectAdapter = new Family2ReleaseEffectAdapter();
@@ -1055,27 +1020,32 @@ app.post("/slots/:slotNum/abandon-turn", async (c) => {
 /**
  * Session clear for the atomic new-issue assignment boundary.
  *
- * Reuses the one existing clear path (`/slots/:n/send` with `command:"/clear"`)
- * that the HTTP clear endpoint already drives.  A slot that is not free is
- * refused here rather than silently queued: the assignment boundary must not
- * hand a task to a slot whose session was never actually reset.
+ * Sends `/clear` through the one existing send path regardless of occupancy:
+ * assignment onto an occupied slot implicitly releases it first, so the
+ * clear is never gated on "free". The outcome is recorded by the caller and
+ * never refuses. (The standalone `/slots/:n/clear` HTTP route keeps its own
+ * occupied guard; only the assignment boundary uses this.)
  */
 async function clearSlotForAssignment(
   slotNum: number,
 ): Promise<{ ok: boolean; reason: string; detail?: string }> {
-  const results = await clearSlotsThroughMopHttp([slotNum], {
-    clearExistingPendingForTargets: true,
-    source: "mop_assign_slot_new_issue",
-    terminalOnly: false,
-  });
-  const result = results.find((entry) => entry.slot === slotNum);
-  if (!result) {
-    return { ok: false, reason: "assignment_clear_no_result" };
+  db.clearPendingClear(slotNum);
+  const sent = await sendClearViaMopSendPath(slotNum, "mop_assign_slot_new_issue");
+  if (sent.success) {
+    db.clearPendingClear(slotNum);
+    db.logEvent(slotNum, "slot_cleared", null, null, {
+      cleared_at: new Date().toISOString(),
+      immediate: true,
+      via: "mop_assign_slot_new_issue",
+      delivery: "mop_send_to_slot",
+    });
+    return { ok: true, reason: "cleared" };
   }
-  if (result.status.startsWith("cleared")) {
-    return { ok: true, reason: "cleared", detail: result.status };
-  }
-  return { ok: false, reason: "assignment_clear_not_applied", detail: result.status };
+  return {
+    ok: false,
+    reason: "assignment_clear_not_applied",
+    detail: sent.reason ?? sent.error ?? `send failed status=${sent.status}`,
+  };
 }
 
 /**
@@ -1147,6 +1117,46 @@ registerAssignmentEffectRoutes(app, {
   db,
   clearSlot: (slotNum) => clearSlotForAssignment(slotNum),
   deliverTaskFile: (slotNum, filePath) => deliverTaskFileForAssignment(slotNum, filePath),
+  // Best-effort Ctrl-C through the same relay seam the wedge-interrupt
+  // route uses. Audited, never refusing.
+  interruptTurn: async (slotNum) => {
+    try {
+      const sent = await relay.sendToSlotAsync(slotNum, WEDGE_INTERRUPT_KEY, true, true);
+      return sent
+        ? { ok: true, reason: "interrupt_sent" }
+        : { ok: false, reason: "interrupt_send_failed" };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: `interrupt_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
+      };
+    }
+  },
+  // Read-only dirty/clean observation for the audit row. The worktree is
+  // never reset by an assignment.
+  observeWorktree: async (slotNum) => {
+    const identity = runtimeIdentity(slotNum);
+    if (!identity) {
+      return { clean: null, detail: "no_runtime_identity" };
+    }
+    try {
+      const observed = await observeCheckout(identity.checkoutPath);
+      return {
+        clean: observed.clean,
+        detail: observed.checkout_path,
+      };
+    } catch (error) {
+      return {
+        clean: null,
+        detail: `observe_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
+      };
+    }
+  },
+  // Canonical issue-side label projection: the assign-effect boundary
+  // projects onAssigned (and onReleased for a displaced prior lane) only
+  // after ownership and delivery both succeed. Failures are recorded,
+  // never refuse.
+  issueProjection,
 });
 
 registerFamily2Routes(app, {

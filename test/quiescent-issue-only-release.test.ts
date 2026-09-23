@@ -37,9 +37,7 @@ function setup(observeCheckout: () => Promise<CheckoutReadOnlyObservation> = att
   const coordinator = new NativeSlotReleaseCoordinator({
     db,
     resolveOwningCheckout: async () => CHECKOUT,
-    deliverInstruction: async () => true,
-    owningSlotIsIdle: async () => true,
-    resetAndObserveCheckout: async () => { throw new Error("pane delivery must not run"); },
+    interruptTurn: async () => ({ ok: true, reason: "interrupt_sent" }),
     observeCheckout,
   });
   return { db, directory, coordinator };
@@ -94,18 +92,20 @@ test("idle issue-only slot releases without caller-minted identity and replays i
   }
 });
 
-test("a slot with live work still refuses with the typed idle guard", async () => {
+test("a slot with live work releases: interrupt, terminalize, audit", async () => {
   const { db, directory, coordinator } = setup();
   try {
     assert.equal(db.assignSlot(4, "live task", REPO, 7904, null, null, null, 0).ok, true);
     db.updateSlot(4, { idle: true, activity: "waiting_for_pm_direction" });
     db.startAgentTurn(4, "live-turn-id");
     db.touchMeaningfulWork(4, "live-turn-id");
-    const refused = await coordinator.release(issueOnlyRequest(db, 4));
-    assert.equal(refused.success, false);
-    assert.equal(refused.code, "slot_not_idle");
-    assert.equal(db.getSlot(4)!.occupied, true);
-    assert.equal(db.getSlot(4)!.active_turn_id, "live-turn-id");
+    // No idle guard anymore: the live turn is interrupted and terminalized.
+    const released = await coordinator.release({ slot: 4 });
+    assert.equal(released.success, true);
+    assert.equal(released.code, "released");
+    assert.equal(db.getSlot(4)!.occupied, false);
+    assert.equal(db.getSlot(4)!.active_turn_id, null);
+    assert.equal(db.getSlot(4)!.active_turn_state, "inactive");
   } finally {
     db.close();
     rmSync(directory, { recursive: true, force: true });
@@ -132,24 +132,14 @@ test("a released slot accepts the next assignment", async () => {
 
 test("MCP release input carries no mode: the enum and its refusal path are deleted", () => {
   const schema = z.object(mopReleaseSlotInputShape);
-  const base = {
-    slot: 6,
-    expected_epoch: 71,
-    expected_repository_id: REPO,
-    expected_issue: 7907,
-    expected_pr: null,
-    expected_branch: null,
-    expected_head_sha: null,
-    expected_work_kind: null,
-    expected_handoff_id: null,
-    expected_claimed_at: "2026-09-19T00:00:00Z",
-    intended_main_head: MAIN_HEAD,
-  };
-  const parsed = schema.safeParse(base);
+  // Thin surface: only the slot number is required.
+  const parsed = schema.safeParse({ slot: 6 });
   assert.equal(parsed.success, true);
   assert.equal("release_mode" in mopReleaseSlotInputShape, false, "the mode is gone from the tool shape");
-  // A stale caller that still sends the retired mode is simply ignored.
-  const stale = schema.safeParse({ ...base, release_mode: "quiescent_legacy_issue_only" });
+  assert.equal("expected_epoch" in mopReleaseSlotInputShape, false, "no epoch in the tool shape");
+  assert.equal("intended_main_head" in mopReleaseSlotInputShape, false, "no head in the tool shape");
+  // A stale caller that still sends retired fields is simply ignored.
+  const stale = schema.safeParse({ slot: 6, release_mode: "quiescent_legacy_issue_only", expected_epoch: 71 });
   assert.equal(stale.success, true);
   assert.equal((stale as { data: Record<string, unknown> }).data["release_mode"], undefined);
 });
@@ -233,8 +223,8 @@ test("genuine tuple drift is superseded: the live row wins and the drift is reco
     assert.equal(released.success, true);
     assert.equal(released.superseded?.tuple_drift, true);
     assert.match(String(released.superseded?.repair.join(" ")), /owner tuple superseded by the live row/);
-    // The supersession is audited.
-    assert.equal(db.getEvents(6, 20, "native_release_superseded").length, 1);
+    // The release is audited on the simple row.
+    assert.equal(db.getEvents(6, 20, "slot_released_simple").length, 1);
     assert.equal(db.getSlot(6)!.occupied, false);
     assert.equal(db.getSlot(6)!.assignment_epoch, epoch + 1);
   } finally {
@@ -243,12 +233,10 @@ test("genuine tuple drift is superseded: the live row wins and the drift is reco
   }
 });
 
-test("an unsettled checkout falls back to the pane reset path and fails typed there", async () => {
-  // A checkout that is genuinely on a work branch (not main) is the shape that
-  // takes the pane-mediated reset path; the helper here cannot run, so the
-  // release must fail typed with the slot intact. (A main checkout that is still
-  // ahead of its upstream never reaches the pane path — it refuses earlier as
-  // checkout_not_clean, covered by test/native-slot-release.test.ts.)
+test("an unsettled checkout releases without reset or refusal; the audit observes it", async () => {
+  // A checkout that is genuinely on a work branch with unpushed work: the
+  // release observes that state for the audit row and frees the slot anyway.
+  // The worktree is never touched.
   const { db, directory, coordinator } = setup(async () => ({
     ...attested(), clean: false, unpushed_commits: ["deadbeef"], branch: "fix-7907-pending-push",
   }));
@@ -262,13 +250,16 @@ test("an unsettled checkout falls back to the pane reset path and fails typed th
       repository_id: REPO, issue: 7907, pr: null, branch: null, head_sha: null,
       work_kind: null, handoff_id: null, claimed_at: stored.claimed_at,
     };
-    // This fixture's reset helper cannot run, so the checkout cannot be
-    // brought to clean main and the release fails typed with the slot intact.
-    const refused = await coordinator.release(request);
-    assert.equal(refused.success, false);
-    assert.equal(refused.code, "checkout_reset_failed");
-    assert.equal(db.getSlot(6)!.occupied, true);
-    assert.equal(db.getSlot(6)!.assignment_epoch, epoch);
+    const released = await coordinator.release(request);
+    assert.equal(released.success, true);
+    assert.equal(released.code, "released");
+    assert.equal(db.getSlot(6)!.occupied, false);
+    assert.equal(db.getSlot(6)!.assignment_epoch, epoch + 1);
+    const events = db.getEvents(6, 20, "slot_released_simple");
+    assert.equal(events.length, 1);
+    const payload = JSON.parse(events[0].payload) as Record<string, unknown>;
+    assert.equal((payload.worktree as Record<string, unknown>).clean, false);
+    assert.equal(payload.worktree_reset, false);
   } finally {
     db.close();
     rmSync(directory, { recursive: true, force: true });

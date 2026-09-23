@@ -43,16 +43,7 @@ function releaseCoordinator(db: MoPDatabase, checkout: string) {
   return new NativeSlotReleaseCoordinator({
     db,
     resolveOwningCheckout: async () => checkout,
-    deliverInstruction: async () => true,
-    owningSlotIsIdle: async () => true,
-    resetAndObserveCheckout: async () => ({
-      checkout_path: checkout,
-      branch: "main",
-      head: "b".repeat(40),
-      clean: true,
-      reset_succeeded: true,
-      error: null,
-    }),
+    interruptTurn: async () => ({ ok: true, reason: "interrupt_sent" }),
     observeCheckout: async () => ({
       checkout_path: checkout,
       clean: true,
@@ -139,20 +130,23 @@ test("a genuinely active turn is never force-cleared by the recovery path", () =
   }
 });
 
-test("release names the canonical escape while the orphaned turn blocks it, then proceeds after recovery", async () => {
+test("release frees the slot despite the orphaned turn: interrupt, terminalize, audit", async () => {
   const value = orphanedTurnFixture();
   const checkout = "/tmp/mop-s6-orphan-checkout";
   try {
     const release = releaseCoordinator(value.db, checkout);
-    const blocked = await release.release(releaseRequest(value));
-    assert.equal(blocked.success, false);
-    assert.equal(blocked.code, "slot_not_idle");
-    assert.match(String(blocked.remediation), /abandon-turn/);
-    assert.match(String(blocked.remediation), new RegExp(TURN_ID), "the remedy names the exact blocked turn");
-
-    assert.equal(value.db.abandonTurn(value.slot, TURN_ID, "session gone", "cto").ok, true);
-    const after = await release.release(releaseRequest(value));
-    assert.notEqual(after.code, "slot_not_idle", "the released path is no longer blocked by the stale turn");
+    // No abandon-turn round-trip: the orphaned turn no longer blocks release.
+    // (The db-level abandon-turn path above stays intact for explicit use.)
+    const freed = await release.release({ slot: value.slot });
+    assert.equal(freed.success, true);
+    assert.equal(freed.code, "released");
+    const row = value.db.getSlot(value.slot)!;
+    assert.equal(row.occupied, false);
+    assert.equal(row.active_turn_id, null, "the orphaned turn id is terminalized");
+    assert.equal(row.active_turn_state, "inactive");
+    const audits = value.db.getEvents(value.slot, 10, "slot_released_simple");
+    assert.equal(audits.length, 1);
+    assert.match(audits[0].payload, new RegExp(TURN_ID), "the audit names the displaced turn");
   } finally {
     close(value);
   }

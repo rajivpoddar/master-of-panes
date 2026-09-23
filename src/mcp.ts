@@ -33,18 +33,7 @@ function isPmControlCommand(command: string): boolean {
 
 export const mopReleaseSlotInputShape = {
   slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
-  expected_epoch: z.number().int().nonnegative().describe("Current MoP assignment epoch"),
-  expected_repository_id: z.union([z.string(), z.number()]).describe("Current repository identity"),
-  expected_issue: z.number().int().positive().nullable(),
-  expected_pr: z.number().int().positive().nullable(),
-  expected_branch: z.string().nullable(),
-  expected_head_sha: z.string().regex(/^[0-9a-f]{40}$/i).nullable(),
-  expected_work_kind: z.string().nullable(),
-  expected_handoff_id: z.string().nullable(),
-  expected_claimed_at: z.string().min(1),
-  intended_main_head: z.string().regex(/^[0-9a-f]{40}$/i).describe("Exact current main head to pull and attest"),
-  effect_id: z.string().optional().describe("Durable effect identity; derived server-side when omitted"),
-  request_digest: z.string().regex(/^[0-9a-f]{64}$/i).optional().describe("Digest binding the effect identity to the exact tuple"),
+  reason: z.string().optional().describe("Optional operator reason recorded in the release audit row"),
 };
 
 export async function startMcpServer(config: MoPConfig): Promise<void> {
@@ -311,14 +300,14 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_release_slot",
-    "Release one slot. Succeeds whenever it is idle, has no active turn, and DND is off: tuple drift, a stale intent and a moved main head are superseded automatically. The only refusal is slot_not_idle for an active turn, productive work, or DND.",
+    "Release one numbered slot. Always succeeds on a known slot: a live turn is interrupted and terminalized, then the row is freed with one audit row. An already-free slot is an idempotent success. No epoch, tuple, or head to pass.",
     mopReleaseSlotInputShape,
     async (releaseInput) => {
       try {
         const response = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${releaseInput.slot}/release`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(releaseInput),
+          body: JSON.stringify({ slot: releaseInput.slot, reason: releaseInput.reason ?? null }),
         });
         const releaseResult = await response.json().catch(() => ({
           success: false,
@@ -734,7 +723,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_clear_all_slots",
-    "Compatibility wrapper for mop_clear_slot(slot: 'all'). Clears PM/free pane contexts only; occupied numbered slots are refused and require exact acknowledged mop_release_slot.",
+    "Compatibility wrapper for mop_clear_slot(slot: 'all'). Clears PM/free pane contexts only; occupied numbered slots are refused here, release them with mop_release_slot.",
     {
       slots: z.array(z.number().int().min(0).max(DEFAULT_DEV_SLOT_COUNT)).optional().describe("Specific slots to clear (default: all 0-6 including PM)."),
     },
@@ -760,7 +749,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_clear_slot",
-    "Clear PM or free pane contexts. Occupied numbered slots are refused and require exact acknowledged mop_release_slot; this command never clears their MoP ownership.",
+    "Clear PM or free pane contexts. Occupied numbered slots are refused here; release them with mop_release_slot, which always succeeds.",
     {
       slot: z.string().describe("Slot to clear: '0' through '6', 'pm', or 'all'."),
     },

@@ -16,6 +16,13 @@ no epoch bump, no second task text.  The durable effect id is derived from the
 immutable binding, so a retry resumes the same effect rather than minting a
 second assignment.
 
+Thin surface (Rajiv directive 2026-09-23): the only required flags are
+--slot and --issue.  Assigning an occupied slot implicitly releases it
+first; the session clear is done by MoP as part of the assign.  The ONLY
+refusal is a lane already bound to another occupied slot
+(`duplicate_assignment`, naming that slot).  No epochs, acks, expected
+tuple ceremony, or retries for the caller.
+
 stdout is exactly one JSON terminal:
 
   success  {"status":"assigned","slot":N,"assignment_epoch":E,
@@ -105,30 +112,31 @@ def slot_state_after(payload: Any) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Assign one numbered slot atomically through MoP.")
     parser.add_argument("--slot", type=int, required=True)
-    parser.add_argument("--class", dest="selection_class", choices=SELECTION_CLASSES, required=True)
-    parser.add_argument("--repo-id", dest="repo_id", required=True)
     parser.add_argument("--issue", type=int, required=True)
+    parser.add_argument("--class", dest="selection_class", choices=SELECTION_CLASSES, default="new_issue")
+    parser.add_argument("--repo-id", dest="repo_id", default="github:heydonna-app/heydonna-app")
     parser.add_argument("--pr", type=int, default=None)
     parser.add_argument("--branch", default=None)
     parser.add_argument("--head", default=None)
     parser.add_argument("--work-kind", dest="work_kind", default=None)
     parser.add_argument("--handoff", default=None)
     parser.add_argument("--claimed-at", dest="claimed_at", default=None)
-    parser.add_argument("--task-file", dest="task_file", required=True)
+    parser.add_argument("--task-file", dest="task_file", default=None,
+                        help="File holding the literal task message. Optional: without it only ownership is committed.")
     args = parser.parse_args(argv)
 
     if args.slot < 1:
         return emit(refusal("ownership", "invalid_slot", "not_applied"), 2)
 
-    try:
-        with open(args.task_file, "rb") as handle:
-            task_bytes = handle.read()
-    except OSError as error:
-        return emit(refusal("ownership", f"task_file_unreadable:{error.errno}", "not_applied"), 2)
-
-    task = task_bytes.decode("utf-8", "replace")
-    if not task.strip():
-        return emit(refusal("ownership", "empty_task_text", "not_applied"), 2)
+    task_bytes = b""
+    task = ""
+    if args.task_file:
+        try:
+            with open(args.task_file, "rb") as handle:
+                task_bytes = handle.read()
+        except OSError as error:
+            return emit(refusal("ownership", f"task_file_unreadable:{error.errno}", "not_applied"), 2)
+        task = task_bytes.decode("utf-8", "replace")
 
     base = mop_base_url()
     status, current = http_json("GET", f"{base}/slots/{args.slot}")
@@ -149,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         "slot": args.slot,
         "selection_class": args.selection_class,
         **desired_tuple,
-        "task_file": args.task_file,
+        "task_file": args.task_file or "",
     }
     task_digest = hashlib.sha256(task_bytes).hexdigest()
     effect_id = compute_effect_id(binding, task_digest)
@@ -160,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         "expected_epoch": current.get("assignment_epoch"),
         **desired_tuple,
         "task": task,
-        "task_file": args.task_file,
+        "task_file": args.task_file or "",
     }
 
     status, payload = http_json("POST", f"{base}/slots/{args.slot}/assign-effect", body)
