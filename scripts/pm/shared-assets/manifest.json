@@ -1,6 +1,15 @@
 {
   "entries": [
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/commands/dev-handoff.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-dev-handoff-command",
+      "sha256": "2e6ea32ee4cfe6901eaab6da869623e5b638c84bcc22cc69aef908776d8c01e8",
+      "source_path": "claude/commands/dev-handoff.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/control_plane/runtime_observation.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1113,7 +1122,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 120,
+    "selected_count": 121,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
