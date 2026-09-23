@@ -904,6 +904,24 @@ export class NativeSlotReleaseCoordinator {
       // identical retry (live S6, 2026-09-23: main + one untracked plan file)
       // could never converge.
       const paneInstructionRequired = !checkoutSettled && readOnly?.branch !== "main";
+      const unpushedCommitsOnMain = readOnly?.branch === "main" && !checkoutSettled
+        && Array.isArray(readOnly.unpushed_commits)
+        ? readOnly.unpushed_commits.length
+        : 0;
+
+      // An already-main checkout that is still ahead of its upstream cannot be
+      // attested: the reset helper's `pull --ff-only` leaves local main ahead,
+      // and the acknowledgement chain never inspects unpushed commits, so
+      // releasing would mark the slot FREE with that work still unreachable.
+      // Refuse before any reset or pane delivery, on the existing not-clean code.
+      if (unpushedCommitsOnMain > 0) {
+        return result(
+          "checkout_not_clean",
+          `The owning checkout is on main with ${unpushedCommitsOnMain} unpushed commit(s); the release would free the slot while that work stays unreachable.`,
+          this.dependencies.db.getSlot(request.slot),
+          "Push or park the local main commit(s), then retry the release from a fresh MoP read.",
+        );
+      }
 
       if (paneInstructionRequired) {
         // Retry guard: never inject a reset instruction while the row reports an

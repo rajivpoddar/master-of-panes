@@ -515,6 +515,38 @@ test("only the still-working states refuse; checkout drift is superseded or repa
       closeFixture(value);
     }
   });
+
+  // REVIEW MUST-FIX (data safety): a checkout that is on main with a clean
+  // worktree but still ahead of its upstream cannot be attested through the
+  // reset path — `git pull --ff-only` leaves local main ahead and the
+  // acknowledgement chain never inspects unpushed commits, so releasing would
+  // mark the slot FREE with that work unreachable. It must refuse before any
+  // reset or pane delivery.
+  await t.test("main with unpushed commits refuses before any reset or delivery", async () => {
+    const value = legacyIssueOnlyFixture();
+    try {
+      let deliveries = 0;
+      let resets = 0;
+      const before = value.db.getSlot(4)!;
+      const result = await coordinator(value, {
+        instruction: () => { deliveries += 1; },
+        observe: async () => { resets += 1; return exactObservation(); },
+        observeReadOnly: async () => ({
+          checkout_path: CHECKOUT, head: MAIN_HEAD, clean: true, unpushed_commits: ["a".repeat(40)], branch: "main",
+        }),
+      }).release(value.request);
+      assert.equal(result.code, "checkout_not_clean");
+      assert.equal(result.success, false);
+      assert.match(String(result.message), /unpushed/);
+      assert.equal(deliveries, 0, "an already-main checkout takes no pane instruction");
+      assert.equal(resets, 0, "no reset runs while local main is ahead of upstream");
+      const after = value.db.getSlot(4)!;
+      assert.equal(after.occupied, true, "the slot stays occupied");
+      assert.equal(after.assignment_epoch, before.assignment_epoch, "a refusal never advances the epoch");
+    } finally {
+      closeFixture(value);
+    }
+  });
 });
 
 test("pane activity race refuses before checkout reset until the Stop hook closes", async () => {

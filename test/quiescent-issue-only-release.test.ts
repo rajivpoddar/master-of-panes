@@ -244,7 +244,14 @@ test("genuine tuple drift is superseded: the live row wins and the drift is reco
 });
 
 test("an unsettled checkout falls back to the pane reset path and fails typed there", async () => {
-  const { db, directory, coordinator } = setup(async () => ({ ...attested(), clean: false, unpushed_commits: ["deadbeef"] }));
+  // A checkout that is genuinely on a work branch (not main) is the shape that
+  // takes the pane-mediated reset path; the helper here cannot run, so the
+  // release must fail typed with the slot intact. (A main checkout that is still
+  // ahead of its upstream never reaches the pane path — it refuses earlier as
+  // checkout_not_clean, covered by test/native-slot-release.test.ts.)
+  const { db, directory, coordinator } = setup(async () => ({
+    ...attested(), clean: false, unpushed_commits: ["deadbeef"], branch: "fix-7907-pending-push",
+  }));
   try {
     assert.equal(db.assignSlot(6, "issue-only task", REPO, 7907, null, null, null, 0).ok, true);
     db.updateSlot(6, { idle: true, activity: "waiting_for_pm_direction" });
