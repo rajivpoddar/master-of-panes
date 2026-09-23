@@ -63,7 +63,7 @@ def fixture_pr(number: int, head: str, branch: str, labels: list[str]) -> dict:
     }
 
 
-def run_sweep(sweep: Path, tmp_path: Path) -> str:
+def run_sweep(sweep: Path, tmp_path: Path, review_fixtures=None) -> str:
     bindir = tmp_path / "bin"
     bindir.mkdir()
     prs = [
@@ -77,6 +77,10 @@ def run_sweep(sweep: Path, tmp_path: Path) -> str:
         f"  printf '%s' '{json.dumps(prs)}'\n"
         "elif [[ \"$*\" == *\"--state merged\"* ]]; then\n"
         "  printf '[]'\n"
+        'elif [[ "$*" == *"/pulls/7990/reviews"* ]]; then\n'
+        '  printf "%s" "$REVIEW_7990"\n'
+        'elif [[ "$*" == *"/pulls/7991/reviews"* ]]; then\n'
+        '  printf "%s" "$REVIEW_7991"\n'
         "else\n"
         "  printf '[]'\n"
         "fi\n",
@@ -99,6 +103,8 @@ def run_sweep(sweep: Path, tmp_path: Path) -> str:
         PR_STATE_SWEEP_SENTINEL=str(tmp_path / "sentinel.json"),
         PR_STATE_SWEEP_CLEAN_PROOF=str(tmp_path / "clean.json"),
         PM_OPS_DB=str(tmp_path / "pm-ops.db"),
+        REVIEW_7990=json.dumps([review_fixtures.get(str(OFF_PR), [])]) if review_fixtures else "[[]]",
+        REVIEW_7991=json.dumps([review_fixtures.get(str(SLOT_PR), [])]) if review_fixtures else "[[]]",
     )
     try:
         completed = subprocess.run(
@@ -124,3 +130,29 @@ def test_offslot_pending_survives_while_slot_completes(tmp_path) -> None:
         f"off-slot pm-review-pending must survive the sweep:\n{out[-3000:]}"
     )
     assert "PR_SWEEP_ACTIONABLE" in out or "PR_SWEEP_CLEAN" in out, "sweep must reach its terminal"
+
+
+def test_codex_review_body_badge_is_reported_but_dashboard_summary_is_not(tmp_path) -> None:
+    review_fixtures = {
+        str(OFF_PR): [{
+            "id": 5289094711,
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "state": "COMMENTED",
+            "commit_id": OFF_HEAD,
+            "body": "### P1 Preserve manual hard rejects through the API route",
+        }],
+        str(SLOT_PR): [{
+            "id": 5289094712,
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "state": "COMMENTED",
+            "commit_id": SLOT_HEAD,
+            "body": "Review Summary: no findings were included in this dashboard body.",
+        }],
+    }
+    out = run_sweep(SWEEP, tmp_path, review_fixtures)
+    assert (
+        f"PR_CODEX_REVIEW_BODY_FINDING PR#{OFF_PR} review=5289094711 severity=P1 "
+        f"review_commit={OFF_HEAD} head={OFF_HEAD} head_moved=false "
+        "unresolved_by_default=true resolution_requires_moved_head_and_finding_addressed"
+    ) in out, f"review-body-only P1 was not surfaced:\n{out[-3000:]}"
+    assert "review=5289094712" not in out, "unbadged dashboard summary must not be flagged"

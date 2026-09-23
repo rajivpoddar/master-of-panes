@@ -2295,6 +2295,44 @@ def pr_comments(pr_number):
     cache[pr_number] = comments
     return comments
 
+def codex_review_body_findings(pr_number):
+    if not hasattr(codex_review_body_findings, "_cache"):
+        codex_review_body_findings._cache = {}
+    cache = codex_review_body_findings._cache
+    if pr_number in cache:
+        return cache[pr_number]
+    cmd = [
+        "gh", "api", "--paginate", "--slurp",
+        f"repos/{gh_repo}/pulls/{pr_number}/reviews",
+    ]
+    try:
+        proc = read_only_subprocess_run(cmd, text=True, capture_output=True, timeout=12)
+        if proc.returncode != 0:
+            cache[pr_number] = None
+            return None
+        pages = json.loads(proc.stdout or "[]")
+        if not isinstance(pages, list):
+            cache[pr_number] = None
+            return None
+        reviews = [review for page in pages for review in page] if pages and all(isinstance(page, list) for page in pages) else pages
+        findings = []
+        badge = re.compile(r"\bP[012]\b", re.IGNORECASE)
+        for review in reviews:
+            author = str((review.get("user") or {}).get("login") or "")
+            body = str(review.get("body") or "")
+            commit_id = str(review.get("commit_id") or "")
+            if re.search(r"codex", author, re.IGNORECASE) and body.strip() and badge.search(body):
+                findings.append({
+                    "review_id": str(review.get("id") or "unknown"),
+                    "commit_id": commit_id,
+                    "body": body,
+                })
+        cache[pr_number] = findings
+        return findings
+    except Exception:
+        cache[pr_number] = None
+        return None
+
 def extract_ci_verdict(text):
     marker = "<!-- ci-verdict:"
     start = text.find(marker)
@@ -3583,6 +3621,25 @@ for pr in sorted(merged_prs, key=lambda p: int(p.get("number") or 0), reverse=Tr
 for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
     n = int(pr["number"])
     title = (pr.get("title") or "").replace("|", "/")[:140]
+    head = str(pr.get("headRefOid") or "")
+    review_bodies = codex_review_body_findings(n)
+    if review_bodies is None:
+        print(
+            f"PR_CODEX_REVIEW_BODY_CHECK_UNAVAILABLE PR#{n} head={head or 'unknown'} "
+            "remediation=retry_read_only_review_body_check"
+        )
+    else:
+        for finding in review_bodies:
+            commit_id = finding["commit_id"]
+            moved = bool(head and commit_id and head.lower() != commit_id.lower())
+            badge = re.search(r"\bP[012]\b", finding["body"], re.IGNORECASE)
+            severity = badge.group(0).upper() if badge else "unknown"
+            print(
+                f"PR_CODEX_REVIEW_BODY_FINDING PR#{n} review={finding['review_id']} severity={severity} "
+                f"review_commit={commit_id or 'unbound'} head={head or 'unknown'} "
+                f"head_moved={str(moved).lower()} unresolved_by_default=true "
+                "resolution_requires_moved_head_and_finding_addressed"
+            )
     state = effective_state(pr)
     # CTO rescue is exclusive ownership outside the PM slot/rework state
     # machine. Do not emit any PM transition for this PR until terminal rescue
@@ -5190,7 +5247,7 @@ priority = [
     (6, re.compile(r"^PR_REWORK_PACKET_REQUIRED\b|^PR_REWORK_DISPATCH_REQUIRED\b|^PR_REWORK_DELIVERY_PENDING_REQUIRED\b|^PR_ACTIVE_REWORK_IDLE_REQUIRED\b|^PR_PM_GATE_REVIEW_REQUIRED\b|^PR_PRODUCT_DECISION_WAITING\b|^PR_RESCOPE_|^ISSUE_RESCOPE_")),
     (7, re.compile(r"^PR_SLOT_RELEASE_REQUIRED\b|^PR_SLOT_RELEASE_BEFORE_CI_REQUIRED\b|^PR_STALE_SLOT_LABEL_REQUIRED\b|^PR_STALE_BLOCKER_REQUIRED\b|^PR_STATE_RECONCILE_REQUIRED\b|^PR_STATE_LABEL_REQUIRED\b|^PR_DRAFT_ORPHAN_REVIEW_REQUIRED\b|^PR_READY_BEFORE_CI_REQUIRED\b")),
     (8, re.compile(r"^PR_CI_STALE_HEAD_CHURN_REQUIRED\b")),
-    (9, re.compile(r"^PR_CI_(?:DEPENDENCY|HOLD)_WATCHING\b|^PR_CTO_DECISION_WAITING\b|^PR_CAPTURE_REARM_AFTER_MAIN_SYNC_WATCHING\b")),
+    (9, re.compile(r"^PR_CI_(?:DEPENDENCY|HOLD)_WATCHING\b|^PR_CTO_DECISION_WAITING\b|^PR_CAPTURE_REARM_AFTER_MAIN_SYNC_WATCHING\b|^PR_CODEX_REVIEW_BODY_(?:FINDING|CHECK_UNAVAILABLE)\b")),
 ]
 
 def line_priority(line):
@@ -5209,7 +5266,7 @@ seen_prs = set()
 out = []
 for prio, _idx, line in rows:
     pr = pr_key(line)
-    if pr and not line.startswith(("PR_CI_DEPENDENCY_WATCHING ", "PR_CI_HOLD_WATCHING ", "PR_CTO_DECISION_WAITING ", "PR_CAPTURE_LOCAL_RUNNING ", "PR_CAPTURE_REARM_AFTER_MAIN_SYNC_WATCHING ")):
+    if pr and not line.startswith(("PR_CI_DEPENDENCY_WATCHING ", "PR_CI_HOLD_WATCHING ", "PR_CTO_DECISION_WAITING ", "PR_CAPTURE_LOCAL_RUNNING ", "PR_CAPTURE_REARM_AFTER_MAIN_SYNC_WATCHING ", "PR_CODEX_REVIEW_BODY_FINDING ", "PR_CODEX_REVIEW_BODY_CHECK_UNAVAILABLE ")):
         if pr in seen_prs:
             continue
         seen_prs.add(pr)
@@ -5220,6 +5277,8 @@ PYEOF
 ACTION_LINES="$SORTED_ACTION_LINES"
 unset SORTED_ACTION_LINES
 
+CODEX_REVIEW_BODY_LINES="$(printf '%s\n' "$ACTION_LINES" | sed -n '/^PR_CODEX_REVIEW_BODY_FINDING /p;/^PR_CODEX_REVIEW_BODY_CHECK_UNAVAILABLE /p')"
+ACTION_LINES="$(printf '%s\n' "$ACTION_LINES" | sed '/^PR_CODEX_REVIEW_BODY_FINDING /d;/^PR_CODEX_REVIEW_BODY_CHECK_UNAVAILABLE /d')"
 WATCH_LINES="$(printf '%s\n' "$ACTION_LINES" | sed -n '/^PR_CI_DEPENDENCY_WATCHING /p;/^PR_CI_HOLD_WATCHING /p;/^PR_CTO_DECISION_WAITING /p;/^PR_CAPTURE_LOCAL_RUNNING /p;/^PR_CAPTURE_REARM_AFTER_MAIN_SYNC_WATCHING /p')"
 ACTION_LINES="$(printf '%s\n' "$ACTION_LINES" | sed '/^[[:space:]]*$/d;/^PR_CI_DEPENDENCY_WATCHING /d;/^PR_CI_HOLD_WATCHING /d;/^PR_CTO_DECISION_WAITING /d;/^PR_CAPTURE_LOCAL_RUNNING /d;/^PR_CAPTURE_REARM_AFTER_MAIN_SYNC_WATCHING /d')"
 
@@ -5234,6 +5293,12 @@ esac
 ACTION_COUNT="$(printf '%s\n' "$ACTION_LINES" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
 
 MUTATED=0
+if [ -n "$CODEX_REVIEW_BODY_LINES" ]; then
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    emit "$line"
+  done <<< "$CODEX_REVIEW_BODY_LINES"
+fi
 if [ -n "$WATCH_LINES" ]; then
   while IFS= read -r line; do
     [ -n "$line" ] || continue

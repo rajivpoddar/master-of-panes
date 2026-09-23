@@ -419,6 +419,35 @@ Include the count in the tracker post alongside Step 5c's count:
 - Step 5c.1: <N> Codex issue-level comments found, <M> still live at merge head (follow-up issue: #<NNNN> or none)
 ```
 
+### Step 5c.2: Also check Codex review-body findings (MANDATORY)
+
+Codex can submit a finding in `pulls/<PR>/reviews[].body` with state
+`COMMENTED` and no inline review comment. Fetch review objects separately;
+`pulls/<PR>/comments` does not include review bodies:
+
+```bash
+gh api --paginate /repos/heydonna-app/heydonna-app/pulls/$PR_NUMBER/reviews \
+  > "/tmp/pm-codex-review-bodies-PR-$PR_NUMBER.json"
+```
+
+For each review whose `user.login` matches `/codex/i`, inspect its non-empty
+`body`. A body carrying a P0, P1, or P2 badge is a finding bound to that
+review's `commit_id`; include the review ID and commit in the cleanup record.
+A dashboard-only `Review Summary` body without a P0/P1/P2 badge is not a
+finding. Treat each finding as open unless the current head has moved beyond
+`commit_id` **and** the finding is addressed: compare the diff from that
+reviewed commit to the current head against the finding, and retain it as open
+if the change does not address it or the relationship is unclear. A newer head
+alone does not resolve a finding. An unaddressed P0/P1/P2 review-body finding
+blocks merge-ready; use the existing cleanup decision path and do not invent
+an inline-thread mutation for a review body.
+
+The read-only `pr-state-sweep` check emits each badge-bearing Codex review with
+its review ID, `commit_id`, current head, and whether the head moved. An
+advanced head is explicitly marked for addressed-verification and is not
+auto-cleared; API read failures are surfaced rather than reported as zero
+findings.
+
 ### Step 6: Classify whether the PR requires a migration, then run it
 
 **Don't use a regex.** Regexes miss real cases (e.g., `convex/migrations.ts` root file vs `convex/migrations/*.ts` directory vs `*-backfill.ts` vs migrations declared inside `convex/admin.ts`). 2026-05-01 incident: PR #3936 modified `convex/migrations.ts` (singular root file) which the old regex `convex/migrations/|backfill|migration\\.ts$` missed → migration silently skipped → customer-facing UI bug surfaced 6h later (Abilaasha #3918 follow-up).
