@@ -30,9 +30,11 @@ RUN_ID = 111
 SCOPE_ID = 999
 WORKFLOW = "ci.yml"
 NAMES = ("typescript", "python", "test")
-RULES = b'{"version":1,"control_plane":["scripts/pm/**"]}\n'
+RULES = b'{"version":1,"control_plane":["scripts/pm/**"],"site":["website/**","docs-site/**"]}\n'
 RULES_SHA = hashlib.sha256(RULES).hexdigest()
 TRUSTED = (".github/workflows/ci.yml", "scripts/ci/change_scope.py", "scripts/ci/change-scope-rules.json")
+SITE_RUN_ID = 222
+SITE_SCOPE_ID = 333
 
 
 def pr():
@@ -47,6 +49,12 @@ def run(conclusion="success"):
             "status": "completed", "conclusion": conclusion}
 
 
+def site_run(conclusion="success"):
+    return {"id": SITE_RUN_ID, "run_attempt": 1, "head_sha": HEAD, "event": "pull_request",
+            "head_branch": REF, "path": ".github/workflows/ci-dummy.yml",
+            "status": "completed", "conclusion": conclusion}
+
+
 def jobs(scope_conclusion="success", substantive="skipped"):
     out = [{"id": SCOPE_ID, "name": "classify-change-scope", "status": "completed",
             "conclusion": scope_conclusion, "steps": [{"name": "classify", "status": "completed", "conclusion": scope_conclusion}]}]
@@ -54,6 +62,12 @@ def jobs(scope_conclusion="success", substantive="skipped"):
         out.append({"id": 500 + len(out), "name": name, "status": "completed",
                     "conclusion": substantive, "steps": []})
     return out
+
+
+def site_jobs(scope_conclusion="success"):
+    return [{"id": SITE_SCOPE_ID, "name": "detect-docs-only", "status": "completed",
+             "conclusion": scope_conclusion, "steps": [{"name": "Check all changed files",
+             "status": "completed", "conclusion": scope_conclusion}]}]
 
 
 def log_text(receipt=None, bindings=None, extra_lines=(), sep="="):
@@ -69,6 +83,14 @@ def log_text(receipt=None, bindings=None, extra_lines=(), sep="="):
     lines.append("2026-09-22T10:00:09Z " + json.dumps(body, sort_keys=True))
     lines.extend(extra_lines)
     return "\x1b[36m" + "\n".join(lines) + "\x1b[0m\n"
+
+
+def site_log_text(receipt=None, bindings=None, extra_lines=(), sep="="):
+    body = dict(schema_version=1, scope="site", paid_ci_exempt=True,
+                control_plane_only=False, product_changed=False, ci_required=False,
+                e2e_required=False, rules_sha256=RULES_SHA)
+    body.update(receipt or {})
+    return log_text(body, bindings, extra_lines, sep)
 
 
 class Stub:
@@ -99,14 +121,24 @@ class Stub:
 
     def pages(self, path, key):
         if "/runs?" in path:
+            if "ci-dummy.yml" in path:
+                return self.world.get("site_runs", [])
             return [self.world.get("run", run())]
         if "/jobs?" in path:
+            if f"/{SITE_RUN_ID}/jobs?" in path:
+                return self.world.get("site_jobs", site_jobs())
             return self.world.get("jobs", jobs())
         raise AssertionError(path)
 
     def command(self, *args):
         if self.world.get("log_failure"):
             raise merge.Refusal("LOG_FETCH_FAILED")
+        path = args[-1]
+        if "/pulls/" in path and "/files?" in path:
+            files = self.world.get("site_files", [{"filename": "website/index.html"}])
+            return json.dumps([files])
+        if f"/actions/jobs/{SITE_SCOPE_ID}/logs" in path:
+            return self.world.get("site_log", site_log_text())
         return self.world.get("log", log_text())
 
 
@@ -227,8 +259,8 @@ class RedAndNegativeTests(unittest.TestCase):
 
 
 class ParentRedWitnessTests(unittest.TestCase):
-    def test_reviewed_parent_refuses_the_exempt_shape(self):
-        blob = subprocess.run(["git", "show", "9a95152844ad0e551b5a4a21a13a96cdc3d0e312:scripts/pm/shared-assets/codex/skills/"
+    def test_reviewed_parent_refuses_site_exempt_shape(self):
+        blob = subprocess.run(["git", "show", "e22cea8b051de42e231eeb46e755a51bf515919a:scripts/pm/shared-assets/codex/skills/"
                                "heydonna-open-pr-status/scripts/merge.py"],
                               capture_output=True, text=True, cwd=HERE)
         self.assertEqual(blob.returncode, 0, blob.stderr)
@@ -236,14 +268,69 @@ class ParentRedWitnessTests(unittest.TestCase):
             path = os.path.join(tmp, "merge_parent.py")
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(blob.stdout)
-            spec = importlib.util.spec_from_file_location("merge_parent", path)
+            spec = importlib.util.spec_from_file_location("merge_parent_site", path)
             parent = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(parent)
-            stub = Stub({})
-            parent.api, parent.pages = stub.api, stub.pages
+            stub = Stub({"site_runs": [site_run()], "site_jobs": site_jobs(),
+                         "site_log": site_log_text(),
+                         "run": run(conclusion="skipped"), "jobs": jobs(scope_conclusion="skipped")})
+            parent.api, parent.pages, parent.command = stub.api, stub.pages, stub.command
             with self.assertRaises(parent.Refusal) as ctx:
                 parent.workflow_proof(pr(), WORKFLOW, NAMES)
-            self.assertIn("WORKFLOW_NOT_GREEN", str(ctx.exception))
+            self.assertIn("WORKFLOW_MISSING", str(ctx.exception))
+
+
+class SiteExemptionTests(unittest.TestCase):
+    def site_proof(self, world=None):
+        defaults = {"site_runs": [site_run()], "site_jobs": site_jobs(),
+                    "site_log": site_log_text(), "run": run(conclusion="skipped"),
+                    "jobs": jobs(scope_conclusion="skipped")}
+        if world is not None:
+            defaults.update(world)
+        world = defaults
+        install(world)
+        return proof()
+
+    def test_exact_site_receipt_and_site_only_file_set_is_ready(self):
+        result = self.site_proof()
+        self.assertEqual(result["exempt"], "site")
+        self.assertEqual(result["run"], SITE_RUN_ID)
+        self.assertEqual(result["scope_job_id"], SITE_SCOPE_ID)
+        self.assertEqual(result["head"], HEAD)
+        self.assertEqual(result["workflow_sha"], WORKFLOW_SHA)
+
+    def assert_site_refused(self, world):
+        base = {"site_runs": [site_run()], "site_jobs": site_jobs(),
+                "site_log": site_log_text(), "run": run(conclusion="skipped"),
+                "jobs": jobs(scope_conclusion="skipped")}
+        base.update(world)
+        install(base)
+        with self.assertRaises(merge.Refusal):
+            proof()
+
+    def test_product_scope_receipt_is_not_exempt(self):
+        receipt = dict(schema_version=1, scope="product", paid_ci_exempt=False,
+                       control_plane_only=False, product_changed=True, ci_required=True,
+                       e2e_required=True, rules_sha256=RULES_SHA)
+        self.assert_site_refused({"site_log": site_log_text(receipt=receipt)})
+
+    def test_site_exemption_booleans_must_match_the_classifier_contract(self):
+        for key, value in (("paid_ci_exempt", False), ("product_changed", True),
+                           ("ci_required", True), ("e2e_required", True),
+                           ("control_plane_only", True)):
+            with self.subTest(key=key):
+                self.assert_site_refused({"site_log": site_log_text(receipt={key: value})})
+
+    def test_site_receipt_with_wrong_head_is_not_exempt(self):
+        self.assert_site_refused({"site_log": site_log_text(bindings={"HEAD_SHA": "0" * 40})})
+
+    def test_site_receipt_with_out_of_scope_pr_path_is_not_exempt(self):
+        self.assert_site_refused({"site_files": [{"filename": "website/index.html"},
+                                                   {"filename": "src/app.ts"}]})
+
+    def test_renamed_path_must_also_match_site_globs(self):
+        self.assert_site_refused({"site_files": [{"filename": "website/new.html",
+                                                   "previous_filename": "src/old.ts"}]})
 
 
 class RealColonFormLogTests(unittest.TestCase):

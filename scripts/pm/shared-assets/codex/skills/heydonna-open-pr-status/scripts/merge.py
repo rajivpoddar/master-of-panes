@@ -2,6 +2,7 @@
 """Verify actual CI/E2E execution and squash a PR with a head pin."""
 
 import argparse
+import fnmatch
 import json
 import re
 import subprocess
@@ -9,6 +10,8 @@ import sys
 
 REPO = "heydonna-app/heydonna-app"
 WORKFLOWS = {"ci.yml": ("typescript", "python", "test"), "e2e.yml": ("e2e",)}
+SITE_EXEMPTION_WORKFLOW = "ci-dummy.yml"
+SITE_CLASSIFIER_JOB_NAME = "detect-docs-only"
 
 
 class Refusal(RuntimeError):
@@ -50,6 +53,10 @@ def successful(item):
 
 def workflow_proof(pr, workflow, names):
     head = pr["head"]["sha"]
+    if workflow == "ci.yml":
+        site_exempt = site_classifier_exemption(pr)
+        if site_exempt is not None:
+            return site_exempt
     runs = pages(f"actions/workflows/{workflow}/runs?event=pull_request&head_sha={head}&per_page=100", "workflow_runs")
     runs.sort(key=lambda run: (run["id"], run.get("run_attempt", 1)), reverse=True)
     for run in runs:
@@ -85,9 +92,7 @@ def workflow_proof(pr, workflow, names):
 CLASSIFIER_JOB_NAME = "classify-change-scope"
 EXEMPTION_RECEIPT = {
     "schema_version": 1,
-    "scope": "control_plane_only",
     "paid_ci_exempt": True,
-    "control_plane_only": True,
     "product_changed": False,
     "ci_required": False,
     "e2e_required": False,
@@ -115,8 +120,8 @@ def strip_log_framing(text):
     return out
 
 
-def classifier_receipt(lines):
-    """Exactly one schema_version=1 JSON receipt, else None."""
+def classifier_receipt(lines, expected_scope):
+    """Exactly one correctly scoped schema_version=1 receipt, else None."""
     found = []
     for line in lines:
         stripped = line.strip()
@@ -131,9 +136,13 @@ def classifier_receipt(lines):
     if len(found) != 1:
         return None
     receipt = found[0]
+    if receipt.get("scope") != expected_scope:
+        return None
     for key, expected in EXEMPTION_RECEIPT.items():
         if receipt.get(key) != expected:
             return None
+    if receipt.get("control_plane_only") is not (expected_scope == "control_plane_only"):
+        return None
     rules = receipt.get("rules_sha256")
     if not isinstance(rules, str) or not HEX64.match(rules):
         return None
@@ -174,13 +183,13 @@ def contents_identity(path, ref):
     return blob, raw
 
 
-def classifier_exemption(pr, workflow, run, scope):
+def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane_only"):
     """Fail-closed verifier. Returns an exemption proof, or None to fall through."""
     head = pr["head"]["sha"]
     if not successful(run) or not successful(scope):
         return None
     lines = strip_log_framing(job_log(scope["id"]))
-    receipt = classifier_receipt(lines)
+    receipt = classifier_receipt(lines, expected_scope)
     if receipt is None:
         return None
     bindings = classifier_bindings(lines)
@@ -208,9 +217,68 @@ def classifier_exemption(pr, workflow, run, scope):
     import hashlib
     if hashlib.sha256(rules[1]).hexdigest() != receipt["rules_sha256"]:
         return None
+    if expected_scope == "site" and not site_paths_confined(pr, rules[1]):
+        return None
     return {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head,
             "scope_job_id": scope["id"], "workflow_sha": workflow_sha,
-            "rules_sha256": receipt["rules_sha256"], "exempt": "control_plane_only"}
+            "rules_sha256": receipt["rules_sha256"], "exempt": expected_scope}
+
+
+def site_paths_confined(pr, rules_bytes):
+    """Require the complete PR file set to match the trusted site rule globs."""
+    try:
+        rules = json.loads(rules_bytes)
+        patterns = rules["site"]
+        if not isinstance(patterns, list) or not patterns or not all(
+                isinstance(pattern, str) and pattern for pattern in patterns):
+            return False
+        pages_json = json.loads(command(
+            "gh", "api", "--paginate", "--slurp",
+            f"repos/{REPO}/pulls/{pr['number']}/files?per_page=100"))
+        if not isinstance(pages_json, list) or not pages_json:
+            return False
+        paths = []
+        for page in pages_json:
+            if not isinstance(page, list):
+                return False
+            for item in page:
+                if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
+                    return False
+                paths.append(item["filename"])
+                previous = item.get("previous_filename")
+                if previous is not None:
+                    if not isinstance(previous, str):
+                        return False
+                    paths.append(previous)
+        return bool(paths) and all(
+            any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+            for path in paths)
+    except (KeyError, TypeError, ValueError, Refusal, OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def site_classifier_exemption(pr):
+    """Accept the exact-head site decision from the shared CI Exemption run."""
+    head = pr["head"]["sha"]
+    runs = pages(
+        f"actions/workflows/{SITE_EXEMPTION_WORKFLOW}/runs?event=pull_request&head_sha={head}&per_page=100",
+        "workflow_runs")
+    runs.sort(key=lambda run: (run["id"], run.get("run_attempt", 1)), reverse=True)
+    expected_path = f".github/workflows/{SITE_EXEMPTION_WORKFLOW}"
+    for run in runs:
+        if (run.get("head_sha") != head or run.get("event") != "pull_request"
+                or run.get("head_branch") != pr["head"]["ref"]
+                or run.get("path", "").split("@")[0] != expected_path):
+            continue
+        if not successful(run):
+            return None
+        jobs = pages(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100", "jobs")
+        scope_jobs = [job for job in jobs if job.get("name") == SITE_CLASSIFIER_JOB_NAME]
+        if len(scope_jobs) != 1 or not successful(scope_jobs[0]):
+            return None
+        return classifier_exemption(pr, SITE_EXEMPTION_WORKFLOW, run, scope_jobs[0],
+                                    expected_scope="site")
+    return None
 
 
 def merge(number, head, apply=False, unrelated_main=None):
