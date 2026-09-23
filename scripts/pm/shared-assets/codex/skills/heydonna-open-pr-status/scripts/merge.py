@@ -53,10 +53,6 @@ def successful(item):
 
 def workflow_proof(pr, workflow, names):
     head = pr["head"]["sha"]
-    if workflow == "ci.yml":
-        site_exempt = site_classifier_exemption(pr)
-        if site_exempt is not None:
-            return site_exempt
     runs = pages(f"actions/workflows/{workflow}/runs?event=pull_request&head_sha={head}&per_page=100", "workflow_runs")
     runs.sort(key=lambda run: (run["id"], run.get("run_attempt", 1)), reverse=True)
     for run in runs:
@@ -285,7 +281,14 @@ def merge(number, head, apply=False, unrelated_main=None):
     pr = pr_at(number, head)
     if pr.get("merged"):
         return {"status": "ALREADY_MERGED", "head": head, "merge_commit": pr["merge_commit_sha"]}
-    proof = {workflow: workflow_proof(pr, workflow, names) for workflow, names in WORKFLOWS.items()}
+    try:
+        site_exempt = site_classifier_exemption(pr)
+    except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        site_exempt = None
+    if site_exempt is not None:
+        proof = {workflow: dict(site_exempt) for workflow in WORKFLOWS}
+    else:
+        proof = {workflow: workflow_proof(pr, workflow, names) for workflow, names in WORKFLOWS.items()}
     main = api("git/ref/heads/main")["object"]["sha"]
     comparison = api(f"compare/{head}...{main}")
     later = comparison["merge_base_commit"]["sha"] != main

@@ -96,9 +96,17 @@ def site_log_text(receipt=None, bindings=None, extra_lines=(), sep="="):
 class Stub:
     def __init__(self, world):
         self.world = world
+        self.calls = []
 
     def api(self, path):
         w = self.world
+        if path.startswith("pulls/"):
+            return w.get("pr", pr())
+        if path == "git/ref/heads/main":
+            return {"object": {"sha": w.get("main", BASE)}}
+        if path.startswith("compare/"):
+            return {"merge_base_commit": {"sha": w.get("main", BASE)},
+                    "html_url": "https://example.invalid/compare", "files": []}
         if path.startswith("git/commits/"):
             sha = path.split("/", 2)[2]
             if sha != w.get("workflow_sha", WORKFLOW_SHA) or w.get("bad_parents"):
@@ -120,9 +128,16 @@ class Stub:
         raise AssertionError(path)
 
     def pages(self, path, key):
+        self.calls.append(path)
         if "/runs?" in path:
             if "ci-dummy.yml" in path:
                 return self.world.get("site_runs", [])
+            if "ci.yml" in path:
+                return self.world.get("ci_runs", [self.world.get("run", run())])
+            if "e2e.yml" in path:
+                e2e_run = copy.deepcopy(self.world.get("run", run()))
+                e2e_run["path"] = ".github/workflows/e2e.yml"
+                return self.world.get("e2e_runs", [e2e_run])
             return [self.world.get("run", run())]
         if "/jobs?" in path:
             if f"/{SITE_RUN_ID}/jobs?" in path:
@@ -146,7 +161,7 @@ def install(world=None):
     world = {} if world is None else world
     stub = Stub(world)
     merge.api, merge.pages, merge.command = stub.api, stub.pages, stub.command
-    return world
+    return stub
 
 
 def non_exempt_log():
@@ -259,25 +274,45 @@ class RedAndNegativeTests(unittest.TestCase):
 
 
 class ParentRedWitnessTests(unittest.TestCase):
-    def test_reviewed_parent_refuses_site_exempt_shape(self):
-        blob = subprocess.run(["git", "show", "e22cea8b051de42e231eeb46e755a51bf515919a:scripts/pm/shared-assets/codex/skills/"
+    @staticmethod
+    def load_reviewed_parent():
+        blob = subprocess.run(["git", "show", "c33c295c46c471de233e3420523bfc2e96c9e760:scripts/pm/shared-assets/codex/skills/"
                                "heydonna-open-pr-status/scripts/merge.py"],
                               capture_output=True, text=True, cwd=HERE)
-        self.assertEqual(blob.returncode, 0, blob.stderr)
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "merge_parent.py")
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(blob.stdout)
-            spec = importlib.util.spec_from_file_location("merge_parent_site", path)
-            parent = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(parent)
-            stub = Stub({"site_runs": [site_run()], "site_jobs": site_jobs(),
-                         "site_log": site_log_text(),
-                         "run": run(conclusion="skipped"), "jobs": jobs(scope_conclusion="skipped")})
-            parent.api, parent.pages, parent.command = stub.api, stub.pages, stub.command
-            with self.assertRaises(parent.Refusal) as ctx:
-                parent.workflow_proof(pr(), WORKFLOW, NAMES)
-            self.assertIn("WORKFLOW_MISSING", str(ctx.exception))
+        if blob.returncode != 0:
+            raise AssertionError(blob.stderr)
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "merge_parent.py")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(blob.stdout)
+        spec = importlib.util.spec_from_file_location("merge_parent_site", path)
+        parent = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(parent)
+        return tmp, parent
+
+    def test_reviewed_parent_refuses_site_exempt_shape(self):
+        tmp, parent = self.load_reviewed_parent()
+        self.addCleanup(tmp.cleanup)
+        stub = Stub({"site_runs": [site_run()], "site_jobs": site_jobs(),
+                     "site_log": site_log_text(),
+                     "run": run(conclusion="skipped"), "jobs": jobs(scope_conclusion="skipped")})
+        parent.api, parent.pages, parent.command = stub.api, stub.pages, stub.command
+        with self.assertRaises(parent.Refusal) as ctx:
+            parent.merge(NUMBER, HEAD)
+        self.assertIn("WORKFLOW_MISSING workflow=e2e.yml", str(ctx.exception))
+
+    def test_site_fixture_returns_ready_with_the_same_proof_for_both_slots(self):
+        world = {"site_runs": [site_run()], "site_jobs": site_jobs(),
+                 "site_log": site_log_text(),
+                 "run": run(conclusion="skipped"), "jobs": jobs(scope_conclusion="skipped")}
+        stub = install(world)
+        result = merge.merge(NUMBER, HEAD)
+        self.assertEqual(result["status"], "READY_TO_MERGE")
+        ci, e2e = result["workflows"]["ci.yml"], result["workflows"]["e2e.yml"]
+        self.assertEqual(ci["exempt"], "site")
+        self.assertEqual(e2e["exempt"], "site")
+        self.assertEqual((ci["run"], ci["scope_job_id"]), (e2e["run"], e2e["scope_job_id"]))
+        self.assertEqual(sum("ci-dummy.yml" in path for path in stub.calls), 1)
 
 
 class SiteExemptionTests(unittest.TestCase):
@@ -289,7 +324,7 @@ class SiteExemptionTests(unittest.TestCase):
             defaults.update(world)
         world = defaults
         install(world)
-        return proof()
+        return merge.site_classifier_exemption(pr())
 
     def test_exact_site_receipt_and_site_only_file_set_is_ready(self):
         result = self.site_proof()
@@ -305,8 +340,17 @@ class SiteExemptionTests(unittest.TestCase):
                 "jobs": jobs(scope_conclusion="skipped")}
         base.update(world)
         install(base)
-        with self.assertRaises(merge.Refusal):
-            proof()
+        self.assertIsNone(merge.site_classifier_exemption(pr()))
+
+    def test_out_of_glob_files_fall_through_to_the_real_workflow_pair(self):
+        stub = install({"site_runs": [site_run()], "site_jobs": site_jobs(),
+                        "site_log": site_log_text(), "site_files": [
+                            {"filename": "website/index.html"}, {"filename": "src/app.ts"}],
+                        "ci_runs": [], "e2e_runs": []})
+        with self.assertRaises(merge.Refusal) as ctx:
+            merge.merge(NUMBER, HEAD)
+        self.assertIn("WORKFLOW_MISSING workflow=ci.yml", str(ctx.exception))
+        self.assertTrue(any("actions/workflows/ci.yml/runs?" in path for path in stub.calls))
 
     def test_product_scope_receipt_is_not_exempt(self):
         receipt = dict(schema_version=1, scope="product", paid_ci_exempt=False,
