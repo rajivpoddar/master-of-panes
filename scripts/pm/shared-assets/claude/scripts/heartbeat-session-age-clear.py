@@ -53,6 +53,29 @@ def _parse_ts(ts: str) -> datetime | None:
         return None
 
 
+def _mcp_children_running() -> int | None:
+    """Count live MoP MCP child processes (any master-of-panes dist/mcp.js).
+
+    Rajiv directive 2026-09-23: the MCP is retired in favor of REST; the
+    directive is complete when this reaches 0. Fail-open: None on any
+    collection error, never blocks the session-age materialization.
+    """
+    try:
+        proc = subprocess.run(
+            ["ps", "-ax", "-o", "command="],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    count = 0
+    for line in proc.stdout.splitlines():
+        if "master-of-panes" in line and "dist/mcp.js" in line:
+            count += 1
+    return count
+
+
 def _mop_slots() -> list | None:
     """GET /slots — live MoP slot inventory. None on any failure (fail-soft)."""
     try:
@@ -237,6 +260,7 @@ def main() -> int:
     out = {
         "due_before": list(pending),
         "execution": "materialize_numbered_and_upsert_pm",
+        "mcp_children_running": _mcp_children_running(),
         "generated_at": _iso_now(),
         "inventory": inventory,
         "kind": "session_age_clear",

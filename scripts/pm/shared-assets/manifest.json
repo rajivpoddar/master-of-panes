@@ -285,7 +285,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-heartbeat-session-age-clear",
-      "sha256": "e71747bc97d68b9ead7e95c2e22df2fcd1a7ecb62b9bd98a572d71e181d8f5ca",
+      "sha256": "9c4c11585fb9a442b9aa367ef573587e5b4383316ce5664e92126902a096389e",
       "source_path": "claude/scripts/heartbeat-session-age-clear.py"
     },
     {
