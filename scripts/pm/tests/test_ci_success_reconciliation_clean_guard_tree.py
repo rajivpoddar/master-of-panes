@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import argparse
+import contextlib
 import importlib.util
+import io
+import json
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -69,26 +74,66 @@ def make_checkout(tmp: Path) -> tuple[Path, Path]:
 
 
 class CleanGuardTreeTests(unittest.TestCase):
-    def test_staged_rule_drift_is_red_in_operator_tree_and_green_from_origin_main(self):
+    def test_materialize_rejects_staged_guard_drift_but_candidate_uses_clean_main(self):
         with tempfile.TemporaryDirectory(prefix="ci-success-clean-guard-test-") as temp:
             checkout, guard = make_checkout(Path(temp))
             rules = checkout / "scripts/ci/change-scope-rules.json"
             rules.write_text('{"site":["website/**","docs-site/**"]}\n', encoding="utf-8")
             git(checkout, "add", "scripts/ci/change-scope-rules.json")
 
-            red = subprocess.run(
-                [str(guard), "--mode", "promotion", "8156"],
-                cwd=checkout,
-                capture_output=True,
-                text=True,
+            args = argparse.Namespace(
+                sentinel_dir=str(Path(temp) / "sentinels"),
+                guard=str(guard),
+                guard_cwd=str(checkout),
+                gh_bin="gh-fixture",
+                repo="fixture/repo",
+                pr=8156,
+                max_checks=1,
+                pm_ops="unused-in-test",
             )
-            self.assertNotEqual(red.returncode, 0)
-            self.assertIn("change_scope rules digest mismatch", red.stdout)
+            candidate = [{"number": 8156, "headRefOid": HEAD, "labels": []}]
+            legacy_output = []
 
-            proof = RECONCILER_MODULE.exact_green(guard, 8156, cwd=checkout)
-            self.assertEqual(proof[:3], (HEAD, 35858112396, 35858112464))
-            self.assertIn("success_run=35858112464", proof[3])
-            self.assertIn("M  scripts/ci/change-scope-rules.json", git(checkout, "status", "--short"))
+            def run_materialize(exact_green):
+                output = io.StringIO()
+                with (
+                    mock.patch.object(
+                        RECONCILER_MODULE, "open_candidates", return_value=candidate
+                    ),
+                    mock.patch.object(RECONCILER_MODULE, "upsert_ci_reconcile_obligation"),
+                    mock.patch.object(RECONCILER_MODULE, "exact_green", side_effect=exact_green),
+                    contextlib.redirect_stdout(output),
+                ):
+                    result_code = RECONCILER_MODULE.materialize(args)
+                self.assertEqual(result_code, 0)
+                return json.loads(output.getvalue())
+
+            def legacy_exact_green(guard_path, pr, *, cwd):
+                completed = subprocess.run(
+                    [str(guard_path), "--mode", "promotion", str(pr)],
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                )
+                legacy_output.append(completed.stdout + completed.stderr)
+                if completed.returncode:
+                    return None
+                return (HEAD, 35858112396, 35858112464, completed.stdout)
+
+            red = run_materialize(legacy_exact_green)
+            self.assertEqual(red["not_green"], [8156])
+            self.assertEqual(red["materialized"], [])
+            self.assertIn("change_scope rules digest mismatch", legacy_output[0])
+
+            green = run_materialize(RECONCILER_MODULE.exact_green)
+            self.assertEqual(green["not_green"], [])
+            self.assertEqual(green["materialized"], [8156])
+            self.assertEqual(green["errors"], [])
+            self.assertIn(
+                "M  scripts/ci/change-scope-rules.json",
+                git(checkout, "status", "--short"),
+            )
 
     def test_unavailable_origin_main_fails_with_a_typed_error(self):
         with tempfile.TemporaryDirectory(prefix="ci-success-no-origin-test-") as temp:
