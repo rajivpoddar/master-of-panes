@@ -1408,6 +1408,17 @@ def _load_open_pr_continuations(
         if not isinstance(row, dict):
             row_errors.append("row: durable continuation row is malformed")
             continue
+        # Only a reader-recognized kind is continuation evidence. Every other kind is an
+        # ordinary obligation: the writer contract leaves it untouched
+        # (pm-ops-legacy.continuation_upsert_refusal returns None for kinds outside
+        # CONTINUATION_KIND_LANES), so its evidence must never be parsed for a head binding
+        # and it must never be reported as a malformed continuation. A durable obligation at
+        # most proves ownership and the next wake; the row is still decided by genuinely
+        # executing exact-head workflow/slot evidence.
+        kind = str(row.get("kind") or "").strip()
+        lane = CONTINUATION_KIND_LANES.get(kind)
+        if not lane:
+            continue
         bound_head, error = _continuation_head(row)
         if error:
             row_errors.append("row: " + error)
@@ -1415,11 +1426,6 @@ def _load_open_pr_continuations(
         if bound_head != head:
             if bound_head is None:
                 row_errors.append("row: durable continuation has no exact head binding")
-            continue
-        kind = str(row.get("kind") or "").strip()
-        lane = CONTINUATION_KIND_LANES.get(kind)
-        if not lane:
-            row_errors.append(f"row: unsupported exact-head continuation kind: {kind or 'missing'}")
             continue
         row_id = str(row.get("id") or "").strip()
         if not row_id or str(row.get("pr") or "").strip() != pr_number:

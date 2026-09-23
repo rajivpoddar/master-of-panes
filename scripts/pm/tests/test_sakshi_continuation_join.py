@@ -485,5 +485,113 @@ class SakshiContinuationJoinTests(unittest.TestCase):
                 conn.close()
 
 
+def ordinary_row(kind: str, *, head: str = HEAD, owner: str = "slot:2") -> dict:
+    """One open obligation of a kind the reader does not recognize as a continuation."""
+
+    return {
+        "id": "18889",
+        "kind": kind,
+        "pr": "7591",
+        "issue": "7554",
+        "slot": "3",
+        "owner": owner,
+        "title": "slot task",
+        "required_action": "dispatch the exact-head rework at the next safe boundary",
+        "blocker": "",
+        "evidence_json": json.dumps({"head": head}),
+    }
+
+
+class OrdinaryObligationKindTests(unittest.TestCase):
+    """An unrecognized kind is an ordinary obligation, never a continuation row.
+
+    The writer contract (pm-ops-legacy.continuation_upsert_refusal) leaves kinds outside
+    CONTINUATION_KIND_LANES untouched, so the reader must not parse their evidence for a head
+    binding, must not report them as malformed continuations, and must not manufacture motion:
+    the row is decided by genuinely executing exact-head workflow/slot evidence alone.
+    """
+
+    def load(self, rows):
+        with mock.patch.object(
+            MODULE,
+            "run_cmd",
+            return_value=MODULE.CmdResult(True, json.dumps(rows), "", 0),
+        ):
+            return MODULE._load_open_pr_continuations("7591", HEAD)
+
+    def collect(self, rows, runs=None, jobs=None):
+        runs = runs or []
+        side_effects = [([pr()], None), ({"workflow_runs": runs}, None)]
+        if runs:
+            side_effects.append(({"jobs": jobs or []}, None))
+        with mock.patch.object(MODULE, "_audit_gh_json", side_effect=side_effects), mock.patch.object(
+            MODULE, "_load_open_pr_continuations", return_value=self.load(rows)
+        ):
+            return MODULE.collect_open_pr_activity_audit({})
+
+    def test_unrecognized_kinds_are_not_continuation_evidence(self) -> None:
+        for kind in ("slot_task", "pr_rework"):
+            with self.subTest(kind=kind):
+                records, error = self.load([ordinary_row(kind)])
+                self.assertEqual(records, [])
+                self.assertIsNone(error)
+
+    def test_unrecognized_kind_is_not_a_malformed_ledger_row(self) -> None:
+        for kind in ("slot_task", "pr_rework"):
+            with self.subTest(kind=kind):
+                row = self.collect([ordinary_row(kind)])["rows"][0]
+                self.assertEqual(row["motion_state"], "PROCESS_LIMBO")
+                self.assertTrue(row["gap"])
+                rendered = " ".join(
+                    [row["hold_reason"], *row["reasons"], row["next_action"], row["wake"]]
+                )
+                self.assertNotIn("malformed durable continuation", rendered)
+                self.assertNotIn("unsupported exact-head continuation kind", rendered)
+                self.assertNotIn("ledger repair", rendered)
+                self.assertIn("no genuinely executing exact-head lane", rendered)
+
+    def test_unrecognized_kind_never_suppresses_genuine_exact_head_execution(self) -> None:
+        runs, jobs = running_run("CI")
+        audit = self.collect([ordinary_row("slot_task")], runs=runs, jobs=jobs["33397393224"])
+        self.assertEqual(audit["rows"][0]["motion_state"], "CI_IN_PROGRESS")
+        self.assertEqual(audit["open_pr_activity_gaps"], 0)
+        self.assertEqual(audit["counts"]["ci_e2e"], 1)
+
+    def test_unrecognized_kind_with_stale_or_prose_head_is_ignored(self) -> None:
+        stale = ordinary_row("slot_task", head="0" * 40)
+        prose = ordinary_row("pr_rework", head=HEAD + "; assignment_epoch=758")
+        records, error = self.load([prose, stale])
+        self.assertEqual(records, [])
+        self.assertIsNone(error)
+
+    def test_unrecognized_kind_with_missing_owner_is_not_a_continuation_error(self) -> None:
+        records, error = self.load([ordinary_row("slot_task", owner="")])
+        self.assertEqual(records, [])
+        self.assertIsNone(error)
+
+    def test_recognized_kinds_still_require_exact_head_and_concrete_owner(self) -> None:
+        headless = continuation("ci_watch")
+        headless["evidence_json"] = "{}"
+        records, error = self.load([headless])
+        self.assertEqual(records, [])
+        self.assertIn("exact head", error or "")
+        placeholder = continuation("ci_watch", "unknown")
+        placeholder["pr"] = "7591"
+        placeholder["id"] = "15913"
+        records, error = self.load([placeholder])
+        self.assertEqual(records, [])
+        self.assertIn("placeholder", error or "")
+
+    def test_exact_head_ci_watch_ownership_is_still_not_execution(self) -> None:
+        row = MODULE.evaluate_open_pr_activity(
+            pr(), [], {}, {}, now_utc=NOW, continuation_records=[continuation("ci_watch")]
+        )
+        self.assertEqual(row["motion_state"], "PROCESS_LIMBO")
+        self.assertEqual(row["lane"], "true limbo")
+        self.assertEqual(row["owner"], "cto")
+        self.assertEqual(row["owner_source"], "pm-ops.obligations")
+        self.assertTrue(row["gap"])
+
+
 if __name__ == "__main__":
     unittest.main()
