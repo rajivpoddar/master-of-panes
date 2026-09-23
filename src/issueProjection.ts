@@ -138,7 +138,13 @@ export function createGhIssueOwnershipProjection(
     if (!value) {
       return repository;
     }
-    return legacyIds.has(value) ? repository : null;
+    if (legacyIds.has(value)) {
+      return repository;
+    }
+    // Canonical "github:<owner>/<repo>" form (the mop-assign-slot.py default).
+    // Strip one leading "github:" and compare against the same identity set.
+    const unprefixed = value.startsWith("github:") ? value.slice("github:".length) : value;
+    return legacyIds.has(unprefixed) ? repository : null;
   }
 
   async function readIssue(issue: number): Promise<IssueSnapshot> {
