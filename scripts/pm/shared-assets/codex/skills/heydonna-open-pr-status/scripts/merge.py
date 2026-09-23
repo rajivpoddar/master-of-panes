@@ -199,7 +199,15 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
         return None
     commit = api(f"git/commits/{workflow_sha}")
     parents = [parent["sha"] for parent in commit.get("parents", [])]
-    if parents != [base_sha, head_sha]:
+    if expected_scope == "site":
+        # For site PRs BASE_SHA is the common merge base, while GitHub's
+        # synthetic merge commit first parent is the current base-branch tip.
+        # Main may advance between those points; retain the exact PR-head
+        # binding without incorrectly requiring those two base SHAs to match.
+        if (len(parents) != 2 or not HEX40.match(parents[0])
+                or parents[1] != head_sha):
+            return None
+    elif parents != [base_sha, head_sha]:
         return None
     workflow_path = f".github/workflows/{workflow}"
     for path in (workflow_path, "scripts/ci/change_scope.py", "scripts/ci/change-scope-rules.json"):

@@ -35,6 +35,9 @@ RULES_SHA = hashlib.sha256(RULES).hexdigest()
 TRUSTED = (".github/workflows/ci.yml", "scripts/ci/change_scope.py", "scripts/ci/change-scope-rules.json")
 SITE_RUN_ID = 222
 SITE_SCOPE_ID = 333
+SITE_HEAD = "ea3d429342e6e53df344115aa651a5bb5d28cd1a"
+SITE_BASE = "350ddb05" + "0" * 32
+ADVANCED_MAIN = "edc414c" + "1" * 33
 
 
 def pr():
@@ -53,6 +56,14 @@ def site_run(conclusion="success"):
     return {"id": SITE_RUN_ID, "run_attempt": 1, "head_sha": HEAD, "event": "pull_request",
             "head_branch": REF, "path": ".github/workflows/ci-dummy.yml",
             "status": "completed", "conclusion": conclusion}
+
+
+def site_pr():
+    # #8164 shape: website-only, no implementation issue, and main advanced
+    # after the PR branch point.
+    return {"number": 8164, "head": {"sha": SITE_HEAD, "ref": "site/8164",
+            "repo": {"full_name": "heydonna-app/heydonna-app"}},
+            "state": "open", "draft": False, "base": {"ref": "main"}, "labels": []}
 
 
 def jobs(scope_conclusion="success", substantive="skipped"):
@@ -112,7 +123,8 @@ class Stub:
             if sha != w.get("workflow_sha", WORKFLOW_SHA) or w.get("bad_parents"):
                 parents = [{"sha": "0" * 40}, {"sha": HEAD}]
             else:
-                parents = [{"sha": BASE}, {"sha": HEAD}]
+                parents = [{"sha": w.get("workflow_parent", BASE)},
+                           {"sha": w.get("workflow_head", HEAD)}]
             return {"sha": sha, "parents": parents}
         if path.startswith("contents/"):
             rel, _, ref = path[len("contents/"):].partition("?ref=")
@@ -333,6 +345,63 @@ class SiteExemptionTests(unittest.TestCase):
         self.assertEqual(result["scope_job_id"], SITE_SCOPE_ID)
         self.assertEqual(result["head"], HEAD)
         self.assertEqual(result["workflow_sha"], WORKFLOW_SHA)
+
+    def test_8164_issue_less_site_pr_passes_when_main_advanced_since_merge_base(self):
+        fixture_pr = site_pr()
+        self.assertNotIn("issue", fixture_pr)
+        site_log = site_log_text(bindings={
+            "BASE_SHA": SITE_BASE,
+            "HEAD_SHA": SITE_HEAD,
+            "WORKFLOW_SHA": WORKFLOW_SHA,
+            "EVENT_NAME": "pull_request",
+            "PR_NUMBER": "8164",
+        })
+        site_run_row = site_run()
+        site_run_row["head_sha"] = SITE_HEAD
+        site_run_row["head_branch"] = "site/8164"
+        stub = install({
+            "pr": fixture_pr,
+            "main": ADVANCED_MAIN,
+            "workflow_parent": ADVANCED_MAIN,
+            "workflow_head": SITE_HEAD,
+            "site_runs": [site_run_row],
+            "site_jobs": site_jobs(),
+            "site_log": site_log,
+            "site_files": [{"filename": "website/index.html"}],
+            "run": run(conclusion="skipped"),
+            "jobs": jobs(scope_conclusion="skipped"),
+        })
+
+        result = merge.merge(8164, SITE_HEAD)
+
+        self.assertEqual(result["status"], "READY_TO_MERGE")
+        self.assertEqual(result["workflows"]["ci.yml"]["exempt"], "site")
+        self.assertEqual(result["workflows"]["e2e.yml"]["exempt"], "site")
+        self.assertEqual(result["workflows"]["ci.yml"]["head"], SITE_HEAD)
+        self.assertEqual(result["workflows"]["ci.yml"]["rules_sha256"], RULES_SHA)
+        self.assertTrue(any("ci-dummy.yml" in path for path in stub.calls))
+
+    def test_site_receipt_still_requires_synthetic_second_parent_to_match_pr_head(self):
+        site_log = site_log_text(bindings={
+            "BASE_SHA": SITE_BASE,
+            "HEAD_SHA": SITE_HEAD,
+            "WORKFLOW_SHA": WORKFLOW_SHA,
+            "EVENT_NAME": "pull_request",
+            "PR_NUMBER": "8164",
+        })
+        site_run_row = site_run()
+        site_run_row["head_sha"] = SITE_HEAD
+        site_run_row["head_branch"] = "site/8164"
+        install({
+            "pr": site_pr(),
+            "workflow_parent": ADVANCED_MAIN,
+            "workflow_head": "0" * 40,
+            "site_runs": [site_run_row],
+            "site_jobs": site_jobs(),
+            "site_log": site_log,
+            "site_files": [{"filename": "website/index.html"}],
+        })
+        self.assertIsNone(merge.site_classifier_exemption(site_pr()))
 
     def assert_site_refused(self, world):
         base = {"site_runs": [site_run()], "site_jobs": site_jobs(),
