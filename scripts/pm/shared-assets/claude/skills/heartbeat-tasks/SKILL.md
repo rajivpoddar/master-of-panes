@@ -282,7 +282,7 @@ The 5 sources (all must agree before stating an effective state):
 5. **MoP slot state** — live slot occupancy (GitHub labels are the tracking
    surface):
    ```bash
-   mop_slot_status(slot: $SLOT)  # via Slot tool
+   mop status --slot $SLOT  # REST CLI
    ```
 
 **Reconciliation decision tree:**
@@ -311,7 +311,7 @@ PR #NNNN reconciliation:
 
 Before any heartbeat report claims `Actions needed: none` or `No follow-up items`, the bg agent MUST run all three checks AND have all three return CLEAR. If any returns NOT_CLEAR, replace the "none" claim with the specific action(s) required and route dispatch/rework through the canonical `Skill(direct-assign)` / `Skill(direct-assign)` path.
 
-1. **Live slot state vs in-flight work mismatch.** Run `mop_all_slots()` and cross-reference with `gh pr list --state open --json number,title,headRefName,labels,isDraft`. For every slot in FREE / STANDBY state, the Ready Pool must either (a) have no clean `status:todo` item claimable by `Skill(direct-assign)`, OR (b) carry a concrete blocker emitted by `Skill(direct-assign)`. Otherwise -> dispatch required.
+1. **Live slot state vs in-flight work mismatch.** Run `mop all` and cross-reference with `gh pr list --state open --json number,title,headRefName,labels,isDraft`. For every slot in FREE / STANDBY state, the Ready Pool must either (a) have no clean `status:todo` item claimable by `Skill(direct-assign)`, OR (b) carry a concrete blocker emitted by `Skill(direct-assign)`. Otherwise -> dispatch required.
 2. **Approved dispatchable queue (GitHub labels).** Run the canonical
    `Skill(direct-assign)` / `Skill(direct-assign)` path over the GitHub Ready Pool labels.
    If `free_slots > 0` and `CLEAN_CLAIMABLE_ISSUES count > 0`, the heartbeat
@@ -611,7 +611,7 @@ reference material only. Do not bypass the runtime contract above and do not
 post Slack before action handling.
 
 STEP 0 — Load tools:
-  Use ToolSearch to load: mcp__plugin_master-of-panes_mop__mop_all_slots
+  Use the REST CLI for slot state (no MCP tool load needed).
 
 STEP 1 — Axiom Error Health (3h window):
   Run: python3 scripts/axiom-activity-report.py --hours 3 --quiet
@@ -630,7 +630,7 @@ STEP 1 — Axiom Error Health (3h window):
   Banned: "likely caused by <code path>" from Axiom summary alone.
 
 STEP 2 — Slot Status + Session Age:
-  Call mop_all_slots() for state data.
+  Call `mop all` for state data.
   Also capture live tmux: for i in 1 2 3 4; tmux capture-pane -t 0:0.$i -p -S -5
   Check for stuck-on-prompt: "Would you like to proceed?" pattern.
   Record per-slot status (task, activity, idle/active, DND).

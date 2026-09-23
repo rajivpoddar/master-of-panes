@@ -40,8 +40,8 @@ case "$TOOL_NAME" in
     fi
     ;;
   Bash)
-    if is_clear_command "$COMMAND" && printf '%s' "$COMMAND" | grep -Eq '(tmux[[:space:]]+send-keys|send-to-slot\.sh|run-and-wait\.sh)'; then
-      json_block "BLOCKED: do not inject /clear with raw tmux or slot scripts. Dev slots S1-S6 are never cleared by an injected /clear; clearing belongs to the new-issue assignment boundary via mop-assign-slot (python3 /Users/rajiv/.claude/scripts/mop-assign-slot.py --slot N --class new_issue ... --task-file <file>). PM self-clear uses mop_clear_slot(slot: \"pm\") / mop-clear-slot.sh pm. A genuine operator clear of a dev slot requires the distinct explicit acknowledgement --operator-confirm-dev-slot-clear."
+    if is_clear_command "$COMMAND" && printf '%s' "$COMMAND" | grep -Eq '(tmux[[:space:]]+send-keys|send-to-slot\.sh|run-and-wait\.sh|(^|[[:space:];|&])mop([[:space:]]+send)?[[:space:]]+.*--command.*|mop[[:space:]]+send[[:space:]])'; then
+      json_block "BLOCKED: do not inject /clear with raw tmux, slot scripts, or mop send (REST CLI). Dev slots S1-S6 are never cleared by an injected /clear; clearing belongs to the new-issue assignment boundary via mop-assign-slot (python3 /Users/rajiv/.claude/scripts/mop-assign-slot.py --slot N --class new_issue ... --task-file <file>). PM self-clear uses mop clear --slot pm (REST CLI) / mop-clear-slot.sh pm. A genuine operator clear of a dev slot requires the distinct explicit acknowledgement --operator-confirm-dev-slot-clear."
     fi
     ;;
 esac

@@ -168,7 +168,8 @@ test("the documented skill states the same contract as the working client", () =
     "the skill must stop instructing the retired header",
   );
   assert.equal(skill.includes("release_mode"), false, "the skill must stop instructing the retired mode");
-  assert.match(skill, /mop_release_slot/);
+  assert.match(skill, /mop release/, "the skill names the REST CLI");
+  assert.equal(skill.includes("mop_release_slot"), false, "the skill must not instruct the retired MCP tool");
   assert.match(skill, /JSON \{\s*slot\s*\}/, "the documented body is the slot number");
   assert.match(skill, /always succeeds/, "the always-succeed contract must be stated");
 });

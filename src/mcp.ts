@@ -20,10 +20,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { MoPDatabase } from "./db.js";
-import { TmuxRelay } from "./relay.js";
 import { DEFAULT_CONFIG } from "./types.js";
-import { execShell, sleep } from "./asyncCommand.js";
+import { sleep } from "./asyncCommand.js";
 import type { MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidRuntimeSlot } from "./slotConfig.js";
 
@@ -37,8 +35,8 @@ export const mopReleaseSlotInputShape = {
 };
 
 export async function startMcpServer(config: MoPConfig): Promise<void> {
-  const db = new MoPDatabase(config);
-  const relay = new TmuxRelay(config);
+  // REST-only: no MoPDatabase or TmuxRelay in this process. All state
+  // transitions go through the HTTP coordinator. config is used for httpPort/slotCount only.
 
   const server = new McpServer({
     name: "master-of-panes",
@@ -52,13 +50,19 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "Get the authoritative hook-derived state of a specific dev slot (1-6). Returns status, task, issue, branch, DND flag, and last activity.",
     { slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)") },
     async ({ slot }) => {
-      const state = db.getSlot(slot);
-      if (!state) {
-        return { content: [{ type: "text" as const, text: `Slot ${slot} not found` }] };
+      // REST-only: no direct DB read from the MCP process. Same server path as GET /slots/:n.
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slot}`);
+        const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        if (!res.ok) {
+          return { content: [{ type: "text" as const, text: `Slot ${slot} not found` }] };
+        }
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `ERROR: failed to reach MoP HTTP server on port ${config.httpPort}: ${err}` }] };
       }
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
-      };
     }
   );
 
@@ -69,23 +73,29 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "Get the authoritative hook-derived status of all 6 dev slots in one call. Returns an array of slot states with a summary line.",
     {},
     async () => {
-      const slots = db.getAllSlots();
-      const free = slots.filter((s) => s.status === "free").length;
-      const active = slots.filter((s) => s.status === "active").length;
-      const dnd = slots.filter((s) => s.dnd).length;
-      const slotNames = slots
-        .map((s) => `${s.name ?? `slot-${s.slot}`}: ${s.status}${s.dnd ? " (DND)" : ""}${s.task ? ` — ${s.task}` : ""}`)
-        .join("\n");
-      const summary = `${free} free, ${active} active, ${dnd} DND\n${slotNames}`;
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ summary, slots }, null, 2),
-          },
-        ],
-      };
+      // REST-only: same server path as GET /slots.
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/slots`);
+        const data = (await res.json().catch(() => ({}))) as { slots?: Array<{ status?: string; dnd?: boolean; name?: string; slot?: number; task?: string | null }> };
+        const slots = data.slots ?? [];
+        const free = slots.filter((s) => s.status === "free").length;
+        const active = slots.filter((s) => s.status === "active").length;
+        const dnd = slots.filter((s) => s.dnd).length;
+        const slotNames = slots
+          .map((s) => `${s.name ?? `slot-${s.slot}`}: ${s.status}${s.dnd ? " (DND)" : ""}${s.task ? ` — ${s.task}` : ""}`)
+          .join("\n");
+        const summary = `${free} free, ${active} active, ${dnd} DND\n${slotNames}`;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ summary, slots }, null, 2),
+            },
+          ],
+        };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `ERROR: failed to reach MoP HTTP server on port ${config.httpPort}: ${err}` }] };
+      }
     }
   );
 
@@ -99,10 +109,16 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       limit: z.number().int().min(1).max(200).default(20).describe("Max events to return"),
     },
     async ({ slot, limit }) => {
-      const events = db.getSlotHistory(slot, limit);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(events, null, 2) }],
-      };
+      // REST-only: same server path as GET /events?slot=N&limit=N.
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/events?slot=${slot}&limit=${limit}`);
+        const data = (await res.json().catch(() => ({}))) as { events?: unknown };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data.events ?? [], null, 2) }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `ERROR: failed to reach MoP HTTP server on port ${config.httpPort}: ${err}` }] };
+      }
     }
   );
 
@@ -115,15 +131,22 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       minutes: z.number().int().min(1).max(1440).default(60).describe("Look back N minutes"),
     },
     async ({ minutes }) => {
-      const events = db.getRecentActivity(minutes);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ count: events.length, events }, null, 2),
-          },
-        ],
-      };
+      // REST-only: same server path as GET /activity?minutes=N.
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/activity?minutes=${minutes}`);
+        const data = (await res.json().catch(() => ({}))) as { events?: unknown[]; count?: number };
+        const events = data.events ?? [];
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ count: data.count ?? events.length, events }, null, 2),
+            },
+          ],
+        };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `ERROR: failed to reach MoP HTTP server on port ${config.httpPort}: ${err}` }] };
+      }
     }
   );
 
@@ -139,160 +162,58 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       raw: z.boolean().default(false).describe("Send as raw tmux key sequence (e.g., Escape, BTab for Shift+Tab, C-c). No Enter appended, no mode detection."),
     },
     async ({ slot, command, force, raw }) => {
-      if (slot === 0 && raw) {
-        db.logEvent(slot, "send_rejected_pm_raw", null, null, {
-          command: command.slice(0, 200),
-          raw,
-          reason: "pm_raw_send_blocked",
+      // REST-only: all gates (PM raw/control, DND, review-active, pane identity,
+      // force/active, "2" routing, delivery verification) are enforced server-side
+      // by POST /slots/:n/send. The MCP process never touches the DB or tmux.
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slot}/send`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command, force: force === true, raw: raw === true }),
         });
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "✗ Refused raw send to PM pane (reason=pm_raw_send_blocked). Use message-pm with a plain message body.",
-            },
-          ],
-        };
-      }
-      if (slot === 0 && isPmControlCommand(command)) {
-        db.logEvent(slot, "send_rejected_pm_control_command", null, null, {
-          command: command.slice(0, 200),
-          force,
-          raw,
-          reason: "pm_control_command_blocked",
-        });
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "✗ Refused PM-pane slash command (reason=pm_control_command_blocked). Use message-pm with a plain status body; hard blocks should start with ESCALATION:.",
-            },
-          ],
-        };
-      }
-
-      const slotState = db.getSlot(slot);
-      if (slotState?.dnd && !force) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `⚠️ Slot ${slot} (${slotState.name ?? "unknown"}) is DND. Command NOT sent.\n` +
-                `Suggest: escalate to Rajiv, or use force: true to override DND.\n` +
-                `To clear DND: mop_set_dnd(slot: ${slot}, dnd: false)`,
-            },
-          ],
-        };
-      }
-      if (slotState?.dnd && force) {
-        db.logEvent(slot, "dnd_override", null, null, {
-          command: command.slice(0, 200),
-          reason: "force: true used to override DND",
-        });
-      }
-
-      // Guard: block /review-and-pr when slot is active (even with force)
-      if (command.includes("/review-and-pr") && await relay.isSlotActive(slot)) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `⚠️ Slot ${slot} is ACTIVE — cannot send /review-and-pr while processing. Wait for idle notification first.`,
-            },
-          ],
-        };
-      }
-
-      // Route ALL non-raw sends through the HTTP /slots/N/send endpoint.
-      // The HTTP route does pane-existence + force-active gates and post-send
-      // delivery verification (capture-pane diff). It returns success: true
-      // ONLY if keystrokes actually landed in the receiving pane.
-      //
-      // `raw: true` keeps the legacy direct-tmux path because raw key
-      // sequences (Escape, BTab, C-c) intentionally bypass mode detection
-      // and don't carry user content that needs UserPromptSubmit verification.
-      //
-      // (Fix for feedback_mop_send_to_slot_no_false_success.md, 2026-05-05.
-      //  Earlier slot=0-only fix is feedback_slot_to_pm_raw_mop_send_false_success.md.)
-      if (!raw) {
-        try {
-          const res = await fetch(`http://localhost:3100/slots/${slot}/send`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ command, force: force === true }),
-          });
-          const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-          const ok = res.ok && data.success === true;
-          db.logEvent(slot, "command_sent", null, null, {
-            command: command.slice(0, 200),
-            force,
-            raw,
-            success: ok,
-            via: `http_slots_${slot}_send`,
-            status: res.status,
-            reason: data.reason,
-          });
-          if (ok) {
-            const target = slot === 0 ? "PM (slot 0)" : `slot ${slot}`;
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `✓ Sent to ${target} via HTTP: ${command.slice(0, 100)}`,
-                },
-              ],
-            };
-          }
-          const errMsg = (data.error as string | undefined) ?? `HTTP ${res.status}`;
-          const reason = (data.reason as string | undefined) ?? "unknown";
-          const hint = slot === 0
-            ? "If you're a dev slot trying to reach PM, use the message-pm skill instead."
-            : reason === "slot_active_force_required"
-              ? `Pass force: true to deliver immediately (now the default).`
-              : reason === "pane_not_found"
-                ? `Run /slot-boot ${slot} to bring the slot up, or check tmux session.`
-                : reason === "delivery_unverified"
-                  ? `Keystrokes did not produce a pane-content change. The slot pane may be wedged or the TUI is dropping input.`
-                  : "";
+        const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        const ok = res.ok && data.success === true;
+        if (ok) {
+          const target = slot === 0 ? "PM (slot 0)" : `slot ${slot}`;
+          const via = (data as { via?: string }).via === "http_send_raw" ? "raw keys " : "";
           return {
             content: [
               {
                 type: "text" as const,
-                text: `✗ Failed to send to slot ${slot} (reason=${reason}): ${errMsg}${hint ? "\n" + hint : ""}`,
-              },
-            ],
-          };
-        } catch (err: any) {
-          db.logEvent(slot, "send_error", null, null, {
-            error: err?.message?.slice(0, 200),
-            command: command.slice(0, 100),
-            via: `http_slots_${slot}_send`,
-          });
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `✗ HTTP send to slot ${slot} failed: ${err?.message?.slice(0, 200) ?? "unknown"}. MoP HTTP server may be down — run the mop-restart skill.`,
+                text: `✓ Sent ${via}to ${target} via HTTP: ${command.slice(0, 100)}`,
               },
             ],
           };
         }
+        const errMsg = (data.error as string | undefined) ?? `HTTP ${res.status}`;
+        const reason = (data.reason as string | undefined) ?? "unknown";
+        const hint = slot === 0
+          ? "If you're a dev slot trying to reach PM, use the message-pm skill instead."
+          : reason === "slot_active_force_required"
+            ? `Pass force: true to deliver immediately (now the default).`
+            : reason === "pane_not_found"
+              ? `Run /slot-boot ${slot} to bring the slot up, or check tmux session.`
+              : reason === "delivery_unverified"
+                ? `Keystrokes did not produce a pane-content change. The slot pane may be wedged or the TUI is dropping input.`
+                : "";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `✗ Failed to send to slot ${slot} (reason=${reason}): ${errMsg}${hint ? "\n" + hint : ""}`,
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `✗ HTTP send to slot ${slot} failed: ${err?.message?.slice(0, 200) ?? "unknown"}. MoP HTTP server may be down — run the mop-restart skill.`,
+            },
+          ],
+        };
       }
-
-      // raw: true → legacy direct-tmux send (key sequences only)
-      const success = await relay.sendToSlotAsync(slot, command, force, raw);
-      db.logEvent(slot, "command_sent", null, null, { command, force, raw, success });
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: success
-              ? `✓ Sent raw keys to slot ${slot}: ${command.slice(0, 100)}`
-              : `✗ Slot ${slot} raw send failed (busy or pane unreachable). Use force: true or check pane.`,
-          },
-        ],
-      };
     }
   );
 
@@ -400,30 +321,36 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       dnd: z.boolean().describe("true to enable DND, false to clear"),
     },
     async ({ slot, dnd }) => {
-      const current = db.getSlot(slot);
-      if (dnd && current && !current.occupied) {
-        db.updateSlot(slot, { dnd: false });
-        db.logEvent(slot, "dnd_free_slot_rejected", null, null, {
-          requested: true,
-          reason: "free_slot_cannot_be_dnd",
+      // REST-only: same server path as POST /slots/:n/dnd. No direct DB write.
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slot}/dnd`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dnd }),
         });
+        const data = (await res.json().catch(() => ({}))) as { dnd?: boolean; reason?: string; error?: string };
+        if (!res.ok) {
+          return { content: [{ type: "text" as const, text: `✗ DND update failed: ${data.error ?? `HTTP ${res.status}`}` }] };
+        }
+        if (data.reason === "free_slot_cannot_be_dnd") {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Slot ${slot} is free; DND request ignored and cleared so dispatch can use the slot.`,
+            }],
+          };
+        }
         return {
-          content: [{
-            type: "text" as const,
-            text: `Slot ${slot} is free; DND request ignored and cleared so dispatch can use the slot.`,
-          }],
+          content: [
+            {
+              type: "text" as const,
+              text: `✓ Slot ${slot} DND ${data.dnd ? "enabled" : "disabled"}`,
+            },
+          ],
         };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `ERROR: failed to reach MoP HTTP server on port ${config.httpPort}: ${err}` }] };
       }
-      db.updateSlot(slot, { dnd });
-      db.logEvent(slot, dnd ? "dnd_enabled" : "dnd_disabled", null, null, {});
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `✓ Slot ${slot} DND ${dnd ? "enabled" : "disabled"}`,
-          },
-        ],
-      };
     }
   );
 
@@ -436,19 +363,28 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       enabled: z.boolean().describe("true to enable exit_pending, false to clear"),
     },
     async ({ enabled }) => {
-      db.setExitPending(enabled);
-      db.logEvent(0, enabled ? "exit_pending_enabled" : "exit_pending_disabled", null, null, {
-        reason: enabled ? "PM set exit_pending — slots will /exit at next idle" : "PM cleared exit_pending flag",
-      });
-      const status = db.getExitStatus();
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `✓ exit_pending ${enabled ? "ENABLED" : "DISABLED"}\n${JSON.stringify(status, null, 2)}`,
-          },
-        ],
-      };
+      // REST-only: same server path as POST /exit-pending. No direct DB write.
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/exit-pending`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        const data = (await res.json().catch(() => ({}))) as { status?: unknown; error?: string };
+        if (!res.ok) {
+          return { content: [{ type: "text" as const, text: `✗ exit_pending update failed: ${data.error ?? `HTTP ${res.status}`}` }] };
+        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `✓ exit_pending ${enabled ? "ENABLED" : "DISABLED"}\n${JSON.stringify(data.status, null, 2)}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `ERROR: failed to reach MoP HTTP server on port ${config.httpPort}: ${err}` }] };
+      }
     }
   );
 
@@ -459,18 +395,24 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "Check exit_pending flag status and which slots have cycled through exit. Slot 0 = PM, slots 1-6 = dev.",
     {},
     async () => {
-      const status = db.getExitStatus();
-      const cycledList = Object.entries(status.cycled)
-        .map(([slot, done]) => `  slot ${slot}: ${done ? "✅ cycled" : "⏳ pending"}`)
-        .join("\n");
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `exit_pending: ${status.pending ? "ENABLED" : "disabled"}\n\n${cycledList}`,
-          },
-        ],
-      };
+      // REST-only: same server path as GET /exit-status. No direct DB read.
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/exit-status`);
+        const status = (await res.json().catch(() => ({}))) as { pending?: boolean; cycled?: Record<string, boolean> };
+        const cycledList = Object.entries(status.cycled ?? {})
+          .map(([slot, done]) => `  slot ${slot}: ${done ? "✅ cycled" : "⏳ pending"}`)
+          .join("\n");
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `exit_pending: ${status.pending ? "ENABLED" : "disabled"}\n\n${cycledList}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `ERROR: failed to reach MoP HTTP server on port ${config.httpPort}: ${err}` }] };
+      }
     }
   );
 
@@ -484,18 +426,25 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       lines: z.number().int().min(5).max(200).default(30).describe("Number of lines to capture (default 30)"),
     },
     async ({ slot, lines }) => {
-      const { output, activity } = await relay.captureOutput(slot, lines);
-      const slotState = db.getSlot(slot);
-      const taskPart = slotState?.task ? ` | task: ${slotState.task}` : "";
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `[slot ${slot}: ${activity}${taskPart}]\n\n${output}`,
-          },
-        ],
-      };
+      // REST-only: same server path as GET /slots/:n/capture. No direct relay/DB.
+      try {
+        const res = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slot}/capture?lines=${lines}`);
+        const data = (await res.json().catch(() => ({}))) as { activity?: string; output?: string; task?: string | null; error?: string };
+        if (!res.ok) {
+          return { content: [{ type: "text" as const, text: `✗ capture failed: ${data.error ?? `HTTP ${res.status}`}` }] };
+        }
+        const taskPart = data.task ? ` | task: ${data.task}` : "";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `[slot ${slot}: ${data.activity}${taskPart}]\n\n${data.output}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `ERROR: failed to reach MoP HTTP server on port ${config.httpPort}: ${err}` }] };
+      }
     }
   );
 
@@ -551,92 +500,24 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
   // Rajiv directive 2026-03-19: "Screenshots of the pane to a slack thread
   // whenever it is active, every minute or so, whenever enabled."
 
-  const streamingSlots = new Map<number, ReturnType<typeof setInterval>>();
-
-  server.tool(
+    server.tool(
     "mop_stream_slot",
-    "Enable/disable periodic pane screenshots to a Slack thread. Posts a tmux capture every 60s while the slot is active. Stops when slot goes idle or streaming is disabled.",
+    "DEPRECATED for REST-only: periodic screenshots are not coordinator-owned. Use one-shot capture via GET /slots/:n/capture (mop CLI `mop capture`) in a caller-side loop instead.",
     {
       slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
       enable: z.boolean().describe("true to start streaming, false to stop"),
-      thread_ts: z.string().optional().describe("Slack thread timestamp to post screenshots to (required when enabling)"),
-      channel_id: z.string().optional().describe("Slack channel ID (default: C0ALZJHGE49 #heydonna-dev)"),
-      interval_seconds: z.number().optional().describe("Capture interval in seconds (default: 60)"),
+      thread_ts: z.string().optional().describe("Slack thread timestamp (required when enabling)"),
+      channel_id: z.string().optional().describe("Slack channel ID"),
+      interval_seconds: z.number().optional().describe("Capture interval in seconds"),
     },
-    async ({ slot, enable, thread_ts, channel_id, interval_seconds }) => {
-      const channelId = channel_id ?? "C0ALZJHGE49";
-      const intervalMs = (interval_seconds ?? 60) * 1000;
-
-      if (!enable) {
-        // Stop streaming
-        const timer = streamingSlots.get(slot);
-        if (timer) {
-          clearInterval(timer);
-          streamingSlots.delete(slot);
-        }
-        return {
-          content: [{ type: "text" as const, text: `✓ Streaming stopped for slot ${slot}` }],
-        };
-      }
-
-      if (!thread_ts) {
-        return {
-          content: [{ type: "text" as const, text: `✗ thread_ts required when enabling streaming` }],
-        };
-      }
-
-      // Stop existing timer if any
-      const existing = streamingSlots.get(slot);
-      if (existing) clearInterval(existing);
-
-      // Read Slack bot token from env
-      const slackToken = process.env.SLACK_BOT_TOKEN;
-      if (!slackToken) {
-        // Try sourcing from .env.local
-        try {
-          const token = await execShell(
-            `source /Users/rajiv/Downloads/projects/heydonna-app/.env.local 2>/dev/null && echo $SLACK_BOT_TOKEN`,
-            { timeout: 5000 }
-          );
-          if (token.stdout.trim()) process.env.SLACK_BOT_TOKEN = token.stdout.trim();
-        } catch { /* ignore */ }
-      }
-
-      const captureAndPost = async () => {
-        try {
-          // Check if slot is active
-          const isActive = await relay.isSlotActive(slot);
-          if (!isActive) return; // Skip idle slots
-
-          // Use pane-screenshot.sh which does: tmux zoom → ttyd → Playwright → unzoom → Slack upload
-          // Pass thread_ts so the script handles the Slack upload directly
-          await execShell(
-            `bash ${process.env.HOME}/.claude/skills/tmux-pane-screenshot/scripts/pane-screenshot.sh ${slot} ${thread_ts}`,
-            { timeout: 30_000, env: { ...process.env, SLACK_CHANNEL: channelId } }
-          );
-
-          db.logEvent(slot, "stream_screenshot", "Timer", null, {
-            thread_ts,
-            channel: channelId,
-          });
-        } catch {
-          // Silent failure — don't break the timer
-        }
-      };
-
-      // Start interval
-      const timer = setInterval(captureAndPost, intervalMs);
-      if (timer.unref) timer.unref();
-      streamingSlots.set(slot, timer);
-
-      // Fire immediately
-      captureAndPost();
-
+    async ({ slot }) => {
       return {
-        content: [{
-          type: "text" as const,
-          text: `✓ Streaming slot ${slot} to thread ${thread_ts} every ${interval_seconds ?? 60}s (while active)`,
-        }],
+        content: [
+          {
+            type: "text" as const,
+            text: `✗ mop_stream_slot is retired in the REST-only contract (reason=stream_retired_use_capture). Use the sanctioned path: mop capture --slot ${slot} [--lines N], or GET /slots/${slot}/capture.`,
+          },
+        ],
       };
     }
   );
@@ -1016,7 +897,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   // Cleanup on exit
   process.on("SIGINT", () => {
-    db.close();
+    // no local DB handle to close (REST-only).
     process.exit(0);
   });
 }

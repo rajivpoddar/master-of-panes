@@ -140,7 +140,7 @@ If 0 issues → post `*Backlog empty.*` to `#heydonna-dev` and exit.
 
 ### Step 2: Read MoP slot state
 
-`mop_all_slots()` for slots 1–4. Capture: idle, dnd, task, issue, branch.
+`mop all` for slots 1–4. Capture: idle, dnd, task, issue, branch.
 
 Also read the current queue projection and PM ops ledger status:
 

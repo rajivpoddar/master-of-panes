@@ -229,7 +229,7 @@ gh pr edit $PR_NUMBER --remove-label "pm-cleanup:needed" 2>/dev/null || true
 
 ### Step 5: Slot ownership is NOT released here
 
-Post-merge housekeeping must **never** call `mop_release_slot` (or any release path).
+Post-merge housekeeping must **never** call `mop release` (or any release path).
 
 Slot ownership transitions at the **assignment boundary**, not here. A release is an
 ownership operation keyed to the identity of the work that just finished; cleanup-pr runs
@@ -243,7 +243,7 @@ which CAS-rebinds via `db.rebindSlot` and advances the ownership epoch exactly o
 session `/clear` happens at that boundary. No release is required for an assignment onto an
 occupied slot to succeed.
 
-`mop_release_slot` stays available for explicit operator transitions only — transfer,
+`mop release` stays available for explicit operator transitions only — transfer,
 capacity, or a terminal slot with no successor — issued from a fresh read with its exact
 tuple / idle / inactive requirements.
 

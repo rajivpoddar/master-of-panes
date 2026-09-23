@@ -837,6 +837,83 @@ app.get("/slots/:slotNum", (c) => {
   return c.json(slot);
 });
 
+/** Set or clear Do Not Disturb on a slot (REST parity for mop_set_dnd).
+ * Same code path and audits as the former MCP direct-DB tool: free-slot
+ * rejection, updateSlot, dnd_enabled/disabled events. No second writer. */
+app.post("/slots/:slotNum/dnd", async (c) => {
+  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
+  if (!slotParse.success) {
+    return c.json({ error: "Invalid slot number" }, 400);
+  }
+  const slot = slotParse.data;
+  if (slot < 1 || slot > DEFAULT_DEV_SLOT_COUNT) {
+    return c.json({ error: "DND applies to dev slots 1-6" }, 400);
+  }
+  let body: { dnd?: boolean } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  if (typeof body.dnd !== "boolean") {
+    return c.json({ error: "Missing 'dnd' boolean field" }, 400);
+  }
+  const current = db.getSlot(slot);
+  if (body.dnd && current && !current.occupied) {
+    db.updateSlot(slot, { dnd: false });
+    db.logEvent(slot, "dnd_free_slot_rejected", null, null, {
+      requested: true,
+      reason: "free_slot_cannot_be_dnd",
+    });
+    return c.json({ ok: true, slot, dnd: false, reason: "free_slot_cannot_be_dnd" });
+  }
+  db.updateSlot(slot, { dnd: body.dnd });
+  db.logEvent(slot, body.dnd ? "dnd_enabled" : "dnd_disabled", null, null, {});
+  return c.json({ ok: true, slot, dnd: body.dnd });
+});
+
+/** Set or clear the exit_pending flag (REST parity for mop_set_exit_pending). */
+app.post("/exit-pending", async (c) => {
+  let body: { enabled?: boolean } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  if (typeof body.enabled !== "boolean") {
+    return c.json({ error: "Missing 'enabled' boolean field" }, 400);
+  }
+  db.setExitPending(body.enabled);
+  db.logEvent(0, body.enabled ? "exit_pending_enabled" : "exit_pending_disabled", null, null, {
+    reason: body.enabled ? "PM set exit_pending — slots will /exit at next idle" : "PM cleared exit_pending flag",
+  });
+  return c.json({ ok: true, enabled: body.enabled, status: db.getExitStatus() });
+});
+
+/** Exit-pending status (REST parity for mop_exit_status). */
+app.get("/exit-status", (c) => {
+  return c.json(db.getExitStatus());
+});
+
+/** Capture live pane output (REST parity for mop_capture_output).
+ * Same server-side relay path and task projection; no MCP direct relay. */
+app.get("/slots/:slotNum/capture", async (c) => {
+  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
+  if (!slotParse.success) {
+    return c.json({ error: "Invalid slot number" }, 400);
+  }
+  const slot = slotParse.data;
+  if (slot < 1 || slot > DEFAULT_DEV_SLOT_COUNT) {
+    return c.json({ error: "Capture applies to dev slots 1-6" }, 400);
+  }
+  const rawLines = c.req.query("lines") ?? "30";
+  const parsed = parseInt(rawLines, 10);
+  const lines = Number.isFinite(parsed) ? Math.min(200, Math.max(5, parsed)) : 30;
+  const { output, activity } = await relay.captureOutput(slot, lines);
+  const slotState = db.getSlot(slot);
+  return c.json({ slot, activity, output, task: slotState?.task ?? null });
+});
+
 /** Clear one slot, PM, or all slots through MoP logging. */
 app.post("/slots/:slotNum/clear", async (c) => {
   const targetSlots = normalizeClearTarget(c.req.param("slotNum"));
@@ -1654,6 +1731,7 @@ app.post("/slots/:slotNum/send", async (c) => {
   let command = body.command?.trim() || "";
   let filePath = body.file || "";
   const force = body.force === true;
+  const raw = body.raw === true;
   const allowPmClear =
     slotNum === 0 &&
     body.allow_pm_clear === true &&
@@ -1773,6 +1851,63 @@ app.post("/slots/:slotNum/send", async (c) => {
       },
       409,
     );
+  }
+
+  // Guard (moved server-side for REST-only): block /review-and-pr on an active slot.
+  if (command.includes("/review-and-pr") && isValidDevSlot(slotNum, config.slotCount)) {
+    let active = false;
+    try {
+      active = await relay.isSlotActive(slotNum);
+    } catch {
+      active = false;
+    }
+    if (active) {
+      db.logEvent(slotNum, "send_rejected_review_active", null, null, {
+        command: command.slice(0, 100),
+        reason: "slot_active_review_blocked",
+      });
+      return c.json(
+        {
+          success: false,
+          error: `Slot ${slotNum} is ACTIVE — cannot send /review-and-pr while processing. Wait for idle notification first.`,
+          reason: "slot_active_review_blocked",
+        },
+        409,
+      );
+    }
+  }
+
+  // Raw key sequences (Escape, BTab, C-c) intentionally bypass mode detection.
+  // Executed server-side so the MCP process never touches tmux directly.
+  if (raw) {
+    if (slotNum === 0) {
+      db.logEvent(slotNum, "send_rejected_pm_raw", null, null, {
+        command: command.slice(0, 200),
+        raw,
+        reason: "pm_raw_send_blocked",
+      });
+      return c.json(
+        {
+          success: false,
+          error: "Refused raw send to PM pane (reason=pm_raw_send_blocked). Use message-pm with a plain message body.",
+          reason: "pm_raw_send_blocked",
+        },
+        403,
+      );
+    }
+    const ok = await relay.sendToSlotAsync(slotNum, command, force, true);
+    db.logEvent(slotNum, "command_sent", null, null, { command: command.slice(0, 200), force, raw, success: ok, via: "http_send_raw" });
+    if (ok) {
+      return c.json({ success: true, slot: slotNum, command: command.slice(0, 100), via: "http_send_raw" });
+    }
+    return c.json({ success: false, error: `Slot ${slotNum} raw send failed (busy or pane unreachable).`, reason: "tmux_exec_error" }, 500);
+  }
+
+  if (slotState?.dnd && force) {
+    db.logEvent(slotNum, "dnd_override", null, null, {
+      command: command.slice(0, 200),
+      reason: "force: true used to override DND",
+    });
   }
 
   // ── GATE 2: force=false on active slot returns failure ─

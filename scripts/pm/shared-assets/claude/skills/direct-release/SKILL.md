@@ -20,9 +20,8 @@ POST http://127.0.0.1:<MOP_PORT>/slots/{slot}/release
 JSON { slot }   // only the slot number; anything else in the body is advisory
 ```
 
-The MCP client `mop_release_slot` carries the same contract (slot number plus
-an optional reason); it is registered from the canonical current release
-(`.../master-of-panes/current/dist/mcp.js`).
+The thin CLI `mop release --slot N [--reason R]` carries the same contract
+(slot number plus an optional reason) over REST; prefer it for all releases.
 
 ### Release always succeeds on the named slot
 

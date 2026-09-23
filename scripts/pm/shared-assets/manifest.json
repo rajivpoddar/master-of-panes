@@ -352,6 +352,15 @@
       "source_path": "claude/scripts/launch-slot-6.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/mop",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-mop-cli",
+      "sha256": "cf306e0930c4328b23e46c111e0fb4eef37d50a3d01bd8090424a904d65c1389",
+      "source_path": "claude/scripts/mop"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/mop-assign-slot",
       "dependencies": [],
       "dependency_status": "closed",
@@ -386,6 +395,15 @@
       "ownership_class": "shared-claude-slot-respawn-client",
       "sha256": "996927262a5c37a639f84493330938c4d6cb73319cf36094c23a795aaa90bbbb",
       "source_path": "claude/scripts/mop-slot-respawn.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/mop.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-mop-cli",
+      "sha256": "52d181b6de5b7e1231d5021896ee3a2bed39730e94153cd300dda28832ca50cc",
+      "source_path": "claude/scripts/mop.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/pm-cleanup-pr.py",
@@ -1095,7 +1113,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 118,
+    "selected_count": 120,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

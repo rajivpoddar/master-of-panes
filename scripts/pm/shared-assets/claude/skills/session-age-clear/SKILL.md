@@ -32,11 +32,11 @@ Policy:
   routine hygiene.
 - Autocompact count is not required.
 - Clears that are safe to execute must go through MoP logging so MoP logs the
-  request/result. Use `mop_clear_slot` when the MCP tool is loadable; otherwise
-  use `/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/mop-clear-slot.sh`.
+  request/result. Use `mop clear --slot pm` (REST CLI) for the MoP-logged PM clear;
+  otherwise use `/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/mop-clear-slot.sh pm`.
 - Never inject `/clear` directly and never use respawn as the stale-session fix.
 - PM is never auto-cleared by this skill.
-- Do not use `mop_clear_slot(slot: "all")` from this skill because it clears PM
+- Do not use `mop clear --slot all` from this skill because it clears PM
   too early and can interrupt the caller before proof is written.
 - PM self-clear is a nag/manual-ack transition: heartbeat creates/updates
   `SESSION_AGE_CLEAR_PENDING PM`; the project Stop hook

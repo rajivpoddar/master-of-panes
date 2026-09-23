@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stable alias for the thin MoP REST CLI.
+exec python3 "$(dirname "$0")/mop.py" "$@"

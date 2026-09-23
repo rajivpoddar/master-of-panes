@@ -68,7 +68,7 @@ The `--task-file` holds the complete literal PM-authored message for the
 selected work.
 
 [HIGH] Delivery is owned by the operation (Rajiv directive 2026-09-20). Do NOT
-run a separate `mop_send_to_slot` after assigning. The historical defect was
+run a separate `mop send` after assigning. The historical defect was
 that the `/assign` POST wrote the ownership record (occupied + issue + task)
 without reliably delivering to the pane: S2/#7994 read back `occupied=true`,
 `issue=7994`, task present, yet the pane received nothing. `mop-assign-slot`
