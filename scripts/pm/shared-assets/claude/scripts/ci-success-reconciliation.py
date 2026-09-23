@@ -57,6 +57,10 @@ EXEMPT_PASS_RE = re.compile(
 )
 
 
+class GuardCheckoutError(OSError):
+    """The immutable origin/main guard checkout could not be prepared."""
+
+
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace(
         "+00:00", "Z"
@@ -151,13 +155,82 @@ def exact_green(
     # exact-head proof gates, never current-main CI/E2E health. A red main run
     # is a default-mode merge gate (CTO merge safety), not a promotion
     # suppressor. See incident cp-ci-success-readiness-main-health-promotion-gate.
-    completed = subprocess.run(
-        [str(guard), "--mode", "promotion", str(pr)],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=90,
-    )
+    try:
+        guard_path = Path(guard)
+        if not guard_path.is_absolute():
+            guard_path = Path(cwd).resolve() / guard_path
+        guard_path = guard_path.resolve()
+        # The guard's own checkout is authoritative; cwd may be operator state.
+        root_result = subprocess.run(
+            ["git", "-C", str(guard_path.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if root_result.returncode:
+            raise OSError(root_result.stderr.strip() or "not a Git checkout")
+        repo_root = Path(root_result.stdout.strip()).resolve()
+        guard_relative = guard_path.resolve().relative_to(repo_root)
+        fetch = subprocess.run(
+            ["git", "fetch", "--quiet", "origin", "main"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if fetch.returncode:
+            raise GuardCheckoutError(fetch.stderr.strip() or "git fetch failed")
+        main_ref = subprocess.run(
+            ["git", "rev-parse", "--verify", "refs/remotes/origin/main^{commit}"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if main_ref.returncode or not re.fullmatch(r"[0-9a-f]{40}\n?", main_ref.stdout):
+            raise GuardCheckoutError(main_ref.stderr.strip() or "origin/main is unavailable")
+        temporary_root = Path(tempfile.mkdtemp(prefix="ci-success-guard-main-"))
+        clean_checkout = temporary_root / "checkout"
+        add = subprocess.run(
+            ["git", "worktree", "add", "--quiet", "--detach", str(clean_checkout), main_ref.stdout.strip()],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if add.returncode:
+            temporary_root.rmdir()
+            raise GuardCheckoutError(add.stderr.strip() or "git worktree add failed")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise GuardCheckoutError(f"CI_GUARD_CLEAN_TREE_UNAVAILABLE: {exc}") from exc
+
+    try:
+        clean_guard = clean_checkout / guard_relative
+        if not clean_guard.is_file():
+            raise GuardCheckoutError(
+                "CI_GUARD_CLEAN_TREE_UNAVAILABLE: guard path absent from origin/main"
+            )
+        completed = subprocess.run(
+            [str(clean_guard), "--mode", "promotion", str(pr)],
+            cwd=clean_checkout,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    finally:
+        remove = subprocess.run(
+            ["git", "worktree", "remove", "--force", str(clean_checkout)],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if remove.returncode:
+            raise GuardCheckoutError(
+                "CI_GUARD_CLEAN_TREE_CLEANUP_FAILED: "
+                + (remove.stderr.strip() or "git worktree remove failed")
+            )
+        temporary_root.rmdir()
     output = f"{completed.stdout}\n{completed.stderr}".strip()
     if completed.returncode != 0:
         return None
@@ -1009,7 +1082,11 @@ def resolve(args: argparse.Namespace) -> int:
             # or run IDs.  Never turn that unbound wake into a CTO handoff:
             # re-run the exact-head promotion guard and require its real
             # pull_request CI/E2E evidence before any ledger or alert effect.
-            exact = exact_green(Path(args.guard), args.pr, cwd=Path(args.guard_cwd))
+            try:
+                exact = exact_green(Path(args.guard), args.pr, cwd=Path(args.guard_cwd))
+            except GuardCheckoutError as exc:
+                print(f"CI_SUCCESS_RESOLUTION_REFUSED {exc}", file=sys.stderr)
+                return 2
             if exact is None or exact[0] != head:
                 print(
                     "CI_SUCCESS_RESOLUTION_REFUSED merge_ready promotion: "

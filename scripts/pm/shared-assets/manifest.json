@@ -204,7 +204,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-ci-success-reconciliation",
-      "sha256": "bd6c94e2ab76a1ec392f5fe5fa9aba6159a7da1f1f52ed248293a3af4509c7bb",
+      "sha256": "358eb6b11935c105b95a208681cf87036412ebad27dd313b7f161b32a5507eab",
       "source_path": "claude/scripts/ci-success-reconciliation.py"
     },
     {
