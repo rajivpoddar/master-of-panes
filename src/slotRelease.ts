@@ -894,7 +894,18 @@ export class NativeSlotReleaseCoordinator {
         && /^[0-9a-f]{40}$/i.test(readOnly.head),
       );
 
-      if (!checkoutSettled) {
+      // A pane instruction is only worth delivering when the slot's own tools
+      // are uniquely able to satisfy it: leaving whatever branch/worktree state
+      // it owns and landing on main. A checkout that already reports main needs
+      // no pane instruction — the reset/attestation path below pulls the exact
+      // head itself, and the acknowledgement checks still refuse a dirty or
+      // wrong-branch checkout. Delivering a prompt the slot cannot act on only
+      // re-arms the quiescence window with work this release created, so the
+      // identical retry (live S6, 2026-09-23: main + one untracked plan file)
+      // could never converge.
+      const paneInstructionRequired = !checkoutSettled && readOnly?.branch !== "main";
+
+      if (paneInstructionRequired) {
         // Retry guard: never inject a reset instruction while the row reports an
         // active turn. A repeat call made while a prior release-induced turn is
         // still live refuses HERE, without delivering another prompt, so the

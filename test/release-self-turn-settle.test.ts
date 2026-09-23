@@ -51,6 +51,10 @@ function harness(options: {
   autoRegisterOnDelivery?: boolean;
   selfTurnSettleTimeoutMs?: number;
   selfTurnSettlePollMs?: number;
+  /** Read-only checkout observation; defaults to the unsettled feature-branch shape. */
+  readOnly?: () => { checkout_path: string; clean: boolean; unpushed_commits: string[]; branch?: string; head?: string };
+  /** Reset/attestation observation; defaults to a clean main acknowledgement. */
+  reset?: () => CheckoutResetObservation;
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mop-release-selfturn-"));
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
@@ -80,12 +84,13 @@ function harness(options: {
     },
     resetAndObserveCheckout: async (): Promise<CheckoutResetObservation> => {
       state.resets += 1;
-      return { checkout_path: CHECKOUT, branch: "main", head: MAIN_HEAD, clean: true, reset_succeeded: true, error: null };
+      return options.reset?.() ?? { checkout_path: CHECKOUT, branch: "main", head: MAIN_HEAD, clean: true, reset_succeeded: true, error: null };
     },
     // NOT settled: on a feature branch -> forced pane-mediated path.
-    observeCheckout: async (): Promise<CheckoutReadOnlyObservation> => ({
-      checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "fix-8018-self-turn", head: "a".repeat(40),
-    }),
+    observeCheckout: async (): Promise<CheckoutReadOnlyObservation> =>
+      options.readOnly?.() ?? {
+        checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "fix-8018-self-turn", head: "a".repeat(40),
+      },
     selfTurnSettleTimeoutMs: options.selfTurnSettleTimeoutMs,
     selfTurnSettlePollMs: options.selfTurnSettlePollMs ?? 1_000,
     nowMs: () => state.now,
@@ -460,6 +465,81 @@ test("GREEN: when no induced turn ever registers, the wait exits on the bounded 
     assert.equal(payload.induced_turn_id, null, "no induced turn was ever observed");
     assert.equal(payload.settle_ms, 2 * 1_000, "the grace is exactly two complete poll intervals");
     assert.equal(value.deliveries.length, 1);
+  } finally {
+    value.close();
+  }
+});
+
+test("GREEN: a settled idle slot is releasable after one quiescence window with no pane instruction", async () => {
+  const value = harness({
+    readOnly: () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: MAIN_HEAD }),
+  });
+  try {
+    value.db.updateSlot(1, {
+      idle: true,
+      activity: "waiting_for_pm_direction",
+      last_meaningful_work_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    });
+    const before = value.db.getSlot(1)!;
+    const result = await value.coordinator.release(releaseRequest(value.db));
+    assert.equal(result.code, "released");
+    assert.equal(result.success, true);
+    assert.deepEqual(value.deliveries, [], "a settled checkout needs no pane instruction");
+    assert.equal(value.resets, 0, "a settled checkout needs no server-side reset either");
+    const after = value.db.getSlot(1)!;
+    assert.equal(after.occupied, false);
+    assert.equal(after.assignment_epoch, before.assignment_epoch + 1);
+  } finally {
+    value.close();
+  }
+});
+
+test("GREEN: an on-main checkout with residue never re-enters the pane, so no retry restarts the window", async () => {
+  const value = harness({
+    // Live S6 shape: branch main at the intended head, one untracked artifact,
+    // nothing for the actionable literal to do.
+    readOnly: () => ({
+      checkout_path: CHECKOUT, clean: false, unpushed_commits: [], branch: "main", head: MAIN_HEAD,
+    }),
+    reset: () => ({
+      checkout_path: CHECKOUT, branch: "main", head: MAIN_HEAD, clean: false, reset_succeeded: true, error: null,
+    }),
+    onDeliver: () => {
+      throw new Error("an on-main checkout must not take a pane instruction");
+    },
+  });
+  try {
+    value.db.updateSlot(1, { idle: true, activity: "waiting_for_pm_direction", last_meaningful_work_at: null });
+    const before = value.db.getSlot(1)!;
+    const result = await value.coordinator.release(releaseRequest(value.db));
+    assert.equal(result.code, "dirty_checkout");
+    assert.equal(result.success, false);
+    assert.deepEqual(value.deliveries, []);
+    assert.equal(value.resets, 1, "the reset/attestation path still runs and still refuses");
+    const after = value.db.getSlot(1)!;
+    assert.equal(after.occupied, true, "a typed refusal leaves the slot occupied");
+    assert.equal(after.assignment_epoch, before.assignment_epoch, "a refusal never advances the epoch");
+  } finally {
+    value.close();
+  }
+});
+
+test("NEGATIVE: a genuinely recent edit still holds the quiescence floor", async () => {
+  const value = harness({
+    readOnly: () => ({ checkout_path: CHECKOUT, clean: true, unpushed_commits: [], branch: "main", head: MAIN_HEAD }),
+  });
+  try {
+    value.db.updateSlot(1, {
+      idle: true,
+      activity: "waiting_for_pm_direction",
+      last_meaningful_work_at: new Date().toISOString(),
+    });
+    const result = await value.coordinator.release(releaseRequest(value.db));
+    assert.equal(result.code, "slot_not_idle");
+    assert.equal(result.cause, "quiescence");
+    assert.deepEqual(value.deliveries, [], "the floor refuses before any delivery");
+    assert.equal(value.resets, 0);
+    assert.equal(value.db.getSlot(1)?.occupied, true);
   } finally {
     value.close();
   }

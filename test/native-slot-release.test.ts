@@ -486,6 +486,35 @@ test("only the still-working states refuse; checkout drift is superseded or repa
       }
     });
   }
+
+  // Live S6 (2026-09-23): an idle slot already standing on main must never take
+  // another pane instruction. The literal can only leave a non-main branch, so
+  // on-main residue (an untracked plan file in the live case) made every retry
+  // re-deliver a prompt the slot could not act on — and that prompt's turn
+  // re-armed the quiescence window with work the release itself created, so the
+  // identical retry could never converge. The reset/attestation path still runs
+  // and still refuses a dirty tree with a typed code.
+  await t.test("on-main residue takes the reset path with NO pane instruction", async () => {
+    const value = legacyIssueOnlyFixture();
+    try {
+      let deliveries = 0;
+      let resets = 0;
+      const result = await coordinator(value, {
+        instruction: () => { deliveries += 1; },
+        observe: async () => { resets += 1; return exactObservation({ clean: false }); },
+        observeReadOnly: async () => ({
+          checkout_path: CHECKOUT, head: MAIN_HEAD, clean: false, unpushed_commits: [], branch: "main",
+        }),
+      }).release(value.request);
+      assert.equal(result.code, "dirty_checkout");
+      assert.equal(result.success, false);
+      assert.equal(deliveries, 0, "an on-main checkout must not re-enter the pane");
+      assert.equal(resets, 1, "the server-side reset/attestation path still runs");
+      assert.equal(value.db.getSlot(4)?.occupied, true, "a typed refusal leaves the slot occupied");
+    } finally {
+      closeFixture(value);
+    }
+  });
 });
 
 test("pane activity race refuses before checkout reset until the Stop hook closes", async () => {
