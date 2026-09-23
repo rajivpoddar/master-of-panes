@@ -43,6 +43,17 @@ refusal prints `{"status":"refused","step_failed":"clean|ownership|delivery|read
 "reason":"...","slot_state_after":"...","sanctioned_path":"mop-assign-slot"}`
 and exits non-zero; return that reason and stop.
 
+Work-kind contract (the `invalid_assignment_tuple` trap): `--class` and
+`--work-kind` are different fields. `--class` is one of
+`repro|rework|new_issue` and selects the assignment path; `--work-kind` is
+one of `implementation|rework|repro|review` and describes the lane's work,
+and must never be `new_issue`. `--work-kind` and `--handoff` are
+both-or-neither: pass both together for a fully-identified lane, or neither
+(the thin default). The default invocation is just the thin form —
+`--slot N --issue X` — and the operation fills the rest; only add the fuller
+tuple flags when the lane genuinely carries that identity. A bad `--work-kind`
+is refused locally before any POST with a reason naming the valid set.
+
 GitHub labels are server-projected (Rajiv directive 2026-09-23): after the
 ownership commit MoP itself applies `status:in-progress` plus `slot:N` (and
 unwinds the displaced lane's labels on an occupied-slot assign) and returns

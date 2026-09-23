@@ -45,6 +45,7 @@ from urllib.request import Request, urlopen
 
 
 SELECTION_CLASSES = ("new_issue", "repro", "rework")
+WORK_KINDS = ("implementation", "rework", "repro", "review")
 SANCTIONED_PATH = "mop-assign-slot"
 
 
@@ -127,6 +128,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.slot < 1:
         return emit(refusal("ownership", "invalid_slot", "not_applied"), 2)
+
+    if args.work_kind is not None and args.work_kind not in WORK_KINDS:
+        return emit(refusal(
+            "ownership",
+            f"invalid_work_kind:{args.work_kind} (valid: {'|'.join(WORK_KINDS)}; "
+            "--class selects the path, --work-kind describes the lane and is never new_issue)",
+            "not_applied",
+        ), 2)
 
     task_bytes = b""
     task = ""
