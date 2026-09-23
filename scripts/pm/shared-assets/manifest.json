@@ -199,6 +199,15 @@
       "source_path": "claude/plugins/master-of-panes/scripts/hook-relay.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules/99-pm-fable-review-cap.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-review-cap-policy",
+      "sha256": "bdaa54c4176f103b99c28c36a4d1c934a702c2c61a79c6d1cb5922063af2cc72",
+      "source_path": "claude/rules/99-pm-fable-review-cap.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/axiom-activity-report.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1122,7 +1131,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 121,
+    "selected_count": 122,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
