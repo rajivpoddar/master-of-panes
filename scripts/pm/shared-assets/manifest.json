@@ -476,7 +476,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
-      "sha256": "56cccadefd204d5c2977af26a39ac205dbda9bd08aa629d5e60086769229fd13",
+      "sha256": "545dd1ac73ca385553a09348fa853c481e3db9995719026063cae3bf31be6530",
       "source_path": "claude/scripts/sync-dev-slot-skill-allowlist.mjs"
     },
     {
@@ -631,6 +631,24 @@
       "ownership_class": "shared-claude-heydonna-review-cap-cto-approve-handoff",
       "sha256": "0ac525f953afd64cb70b11378bcfcbeacd87051ae15fcdbd2a34ec481d3348f5",
       "source_path": "claude/skills/heydonna-review-cap-cto-approve-handoff/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/macos-word-window-screenshot/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-word-window-screenshot",
+      "sha256": "5b8081d06cbabb65ab8b6c3a2c6b882c4dc67679ff5b792673ba6ab17bb0d9f8",
+      "source_path": "claude/skills/macos-word-window-screenshot/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-word-window-screenshot",
+      "sha256": "8d3c470e514a24727aee84ad05090334212b41fb4d083b3380d129a6a1994b7a",
+      "source_path": "claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/message-slot/SKILL.md",

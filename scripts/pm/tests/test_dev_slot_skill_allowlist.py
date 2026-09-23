@@ -56,6 +56,7 @@ def test_dev_slot_skill_sync_enables_review_lifecycle_and_browser_toolkit(
         "codex-qa-review",
         "qa-brief",
         "proofshot",
+        "macos-word-window-screenshot",
         "heydonna-agent-browser",
         "playwright-testmatch-override-qa-only",
         "respawn",

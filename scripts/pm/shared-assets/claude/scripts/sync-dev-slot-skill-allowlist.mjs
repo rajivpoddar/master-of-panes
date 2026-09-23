@@ -19,6 +19,7 @@ const allowlist = new Set([
   "codex-qa-review",
   "qa-brief",
   "proofshot",
+  "macos-word-window-screenshot",
   "heydonna-agent-browser",
   "playwright-testmatch-override-qa-only",
   "agent-browser",
