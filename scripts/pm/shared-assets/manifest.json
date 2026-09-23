@@ -1095,7 +1095,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 116,
+    "selected_count": 118,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1144,6 +1144,8 @@
       "~/.claude/skills/cp-repair-request/SKILL.md",
       "~/.claude/skills/anthropic-529-overload-inline-fallback/SKILL.md",
       "~/.claude/skills/heydonna-review-cap-cto-approve-handoff/SKILL.md",
+      "~/.claude/skills/macos-word-window-screenshot/SKILL.md",
+      "~/.claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift",
       "~/.claude/skills/message-slot/SKILL.md",
       "~/.claude/skills/message-slot/scripts/message-slot.sh",
       "~/.claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
