@@ -199,11 +199,10 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
         return None
     commit = api(f"git/commits/{workflow_sha}")
     parents = [parent["sha"] for parent in commit.get("parents", [])]
-    if expected_scope == "site":
-        # For site PRs BASE_SHA is the common merge base, while GitHub's
-        # synthetic merge commit first parent is the current base-branch tip.
-        # Main may advance between those points; retain the exact PR-head
-        # binding without incorrectly requiring those two base SHAs to match.
+    if workflow == SITE_EXEMPTION_WORKFLOW and expected_scope in ("site", "control_plane_only"):
+        # BASE_SHA is the common merge base, while GitHub's synthetic merge
+        # commit first parent is the current base-branch tip. Main may advance
+        # between those points; bind the second parent to the exact PR head.
         if (len(parents) != 2 or not HEX40.match(parents[0])
                 or parents[1] != head_sha):
             return None
@@ -221,7 +220,11 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
     import hashlib
     if hashlib.sha256(rules[1]).hexdigest() != receipt["rules_sha256"]:
         return None
-    if expected_scope == "site" and not site_paths_confined(pr, rules[1]):
+    if workflow == SITE_EXEMPTION_WORKFLOW and expected_scope == "site" \
+            and not site_paths_confined(pr, rules[1]):
+        return None
+    if (workflow == SITE_EXEMPTION_WORKFLOW and expected_scope == "control_plane_only"
+            and not control_plane_paths_confined(pr, rules[1])):
         return None
     return {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head,
             "scope_job_id": scope["id"], "workflow_sha": workflow_sha,
@@ -230,11 +233,25 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
 
 def site_paths_confined(pr, rules_bytes):
     """Require the complete PR file set to match the trusted site rule globs."""
+    return paths_confined(pr, rules_bytes, ("site",))
+
+
+def control_plane_paths_confined(pr, rules_bytes):
+    """Require every changed path to match trusted control-plane classifier globs."""
+    return paths_confined(pr, rules_bytes,
+                          ("control_plane_only", "control_plane_legacy", "control_plane_ci"))
+
+
+def paths_confined(pr, rules_bytes, rule_names):
     try:
         rules = json.loads(rules_bytes)
-        patterns = rules["site"]
-        if not isinstance(patterns, list) or not patterns or not all(
-                isinstance(pattern, str) and pattern for pattern in patterns):
+        pattern_lists = [rules.get(name, []) for name in rule_names]
+        if any(not isinstance(patterns, list) or not all(
+                isinstance(pattern, str) and pattern for pattern in patterns)
+               for patterns in pattern_lists):
+            return False
+        patterns = [pattern for group in pattern_lists for pattern in group]
+        if not patterns:
             return False
         pages_json = json.loads(command(
             "gh", "api", "--paginate", "--slurp",
@@ -261,8 +278,8 @@ def site_paths_confined(pr, rules_bytes):
         return False
 
 
-def site_classifier_exemption(pr):
-    """Accept the exact-head site decision from the shared CI Exemption run."""
+def ci_exemption_proof(pr, expected_scope):
+    """Accept a confined exact-head decision from the shared CI Exemption run."""
     head = pr["head"]["sha"]
     runs = pages(
         f"actions/workflows/{SITE_EXEMPTION_WORKFLOW}/runs?event=pull_request&head_sha={head}&per_page=100",
@@ -281,8 +298,16 @@ def site_classifier_exemption(pr):
         if len(scope_jobs) != 1 or not successful(scope_jobs[0]):
             return None
         return classifier_exemption(pr, SITE_EXEMPTION_WORKFLOW, run, scope_jobs[0],
-                                    expected_scope="site")
+                                    expected_scope=expected_scope)
     return None
+
+
+def site_classifier_exemption(pr):
+    return ci_exemption_proof(pr, "site")
+
+
+def control_plane_classifier_exemption(pr):
+    return ci_exemption_proof(pr, "control_plane_only")
 
 
 def merge(number, head, apply=False, unrelated_main=None):
@@ -293,8 +318,14 @@ def merge(number, head, apply=False, unrelated_main=None):
         site_exempt = site_classifier_exemption(pr)
     except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
         site_exempt = None
-    if site_exempt is not None:
-        proof = {workflow: dict(site_exempt) for workflow in WORKFLOWS}
+    try:
+        control_plane_exempt = (None if site_exempt is not None
+                                else control_plane_classifier_exemption(pr))
+    except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        control_plane_exempt = None
+    exemption = site_exempt or control_plane_exempt
+    if exemption is not None:
+        proof = {workflow: dict(exemption) for workflow in WORKFLOWS}
     else:
         proof = {workflow: workflow_proof(pr, workflow, names) for workflow, names in WORKFLOWS.items()}
     main = api("git/ref/heads/main")["object"]["sha"]

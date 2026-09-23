@@ -30,7 +30,11 @@ RUN_ID = 111
 SCOPE_ID = 999
 WORKFLOW = "ci.yml"
 NAMES = ("typescript", "python", "test")
-RULES = b'{"version":1,"control_plane":["scripts/pm/**"],"site":["website/**","docs-site/**"]}\n'
+RULES = (b'{"schema_version":1,"control_plane_only":[".agents/**",".claude/**",'
+         b'"docs/**","scripts/pm/**","AGENTS.md","*.md","benchmarks/pm-ops/**"],'
+         b'"control_plane_legacy":["scripts/legacy-pm/**"],'
+         b'"control_plane_ci":["scripts/ci/ci-fast-triage.py"],'
+         b'"site":["website/**","docs-site/**"]}\n')
 RULES_SHA = hashlib.sha256(RULES).hexdigest()
 TRUSTED = (".github/workflows/ci.yml", "scripts/ci/change_scope.py", "scripts/ci/change-scope-rules.json")
 SITE_RUN_ID = 222
@@ -38,6 +42,13 @@ SITE_SCOPE_ID = 333
 SITE_HEAD = "ea3d429342e6e53df344115aa651a5bb5d28cd1a"
 SITE_BASE = "350ddb05" + "0" * 32
 ADVANCED_MAIN = "edc414c" + "1" * 33
+CONTROL_PLANE_HEAD = "d279c3fa0" + "d" * 31
+CONTROL_PLANE_BASE = "037050316" + "0" * 31
+CONTROL_PLANE_MAIN = "2856130a" + "1" * 32
+CONTROL_PLANE_WORKFLOW_SHA = "7040efea" + "2" * 32
+CONTROL_PLANE_PR = 8186
+CONTROL_PLANE_RUN_ID = 35915535742
+CONTROL_PLANE_SCOPE_ID = 8186001
 
 
 def pr():
@@ -66,6 +77,13 @@ def site_pr():
             "state": "open", "draft": False, "base": {"ref": "main"}, "labels": []}
 
 
+def control_plane_pr():
+    return {"number": CONTROL_PLANE_PR,
+            "head": {"sha": CONTROL_PLANE_HEAD, "ref": "docs/8186",
+                     "repo": {"full_name": "heydonna-app/heydonna-app"}},
+            "state": "open", "draft": False, "base": {"ref": "main"}, "labels": []}
+
+
 def jobs(scope_conclusion="success", substantive="skipped"):
     out = [{"id": SCOPE_ID, "name": "classify-change-scope", "status": "completed",
             "conclusion": scope_conclusion, "steps": [{"name": "classify", "status": "completed", "conclusion": scope_conclusion}]}]
@@ -79,6 +97,34 @@ def site_jobs(scope_conclusion="success"):
     return [{"id": SITE_SCOPE_ID, "name": "detect-docs-only", "status": "completed",
              "conclusion": scope_conclusion, "steps": [{"name": "Check all changed files",
              "status": "completed", "conclusion": scope_conclusion}]}]
+
+
+def control_plane_exemption_jobs():
+    return [{"id": CONTROL_PLANE_SCOPE_ID, "name": "detect-docs-only",
+             "status": "completed", "conclusion": "success",
+             "steps": [{"name": "Classify all changed files", "status": "completed",
+                        "conclusion": "success"}]}]
+
+
+def control_plane_exemption_run():
+    return {"id": CONTROL_PLANE_RUN_ID, "run_attempt": 1,
+            "head_sha": CONTROL_PLANE_HEAD, "event": "pull_request",
+            "head_branch": "docs/8186", "path": ".github/workflows/ci-dummy.yml",
+            "status": "completed", "conclusion": "success"}
+
+
+def control_plane_exemption_log(receipt=None, bindings=None):
+    body = dict(schema_version=1, scope="control_plane_only", paid_ci_exempt=True,
+                control_plane_only=True, product_changed=False, ci_required=False,
+                e2e_required=False, rules_sha256=RULES_SHA)
+    body.update(receipt or {})
+    values = {"BASE_SHA": CONTROL_PLANE_BASE, "HEAD_SHA": CONTROL_PLANE_HEAD,
+              "WORKFLOW_SHA": CONTROL_PLANE_WORKFLOW_SHA,
+              "EVENT_NAME": "pull_request", "PR_NUMBER": str(CONTROL_PLANE_PR)}
+    values.update(bindings or {})
+    lines = [f"{key}={value}" for key, value in values.items()]
+    lines.append(json.dumps(body, sort_keys=True))
+    return "\n".join(lines) + "\n"
 
 
 def log_text(receipt=None, bindings=None, extra_lines=(), sep="="):
@@ -120,7 +166,10 @@ class Stub:
                     "html_url": "https://example.invalid/compare", "files": []}
         if path.startswith("git/commits/"):
             sha = path.split("/", 2)[2]
-            if sha != w.get("workflow_sha", WORKFLOW_SHA) or w.get("bad_parents"):
+            if sha == CONTROL_PLANE_WORKFLOW_SHA:
+                parents = [{"sha": w.get("workflow_parent", CONTROL_PLANE_MAIN)},
+                           {"sha": w.get("workflow_head", CONTROL_PLANE_HEAD)}]
+            elif sha != w.get("workflow_sha", WORKFLOW_SHA) or w.get("bad_parents"):
                 parents = [{"sha": "0" * 40}, {"sha": HEAD}]
             else:
                 parents = [{"sha": w.get("workflow_parent", BASE)},
@@ -152,6 +201,8 @@ class Stub:
                 return self.world.get("e2e_runs", [e2e_run])
             return [self.world.get("run", run())]
         if "/jobs?" in path:
+            if f"/{CONTROL_PLANE_RUN_ID}/jobs?" in path:
+                return self.world.get("control_plane_jobs", control_plane_exemption_jobs())
             if f"/{SITE_RUN_ID}/jobs?" in path:
                 return self.world.get("site_jobs", site_jobs())
             return self.world.get("jobs", jobs())
@@ -163,7 +214,11 @@ class Stub:
         path = args[-1]
         if "/pulls/" in path and "/files?" in path:
             files = self.world.get("site_files", [{"filename": "website/index.html"}])
+            if str(CONTROL_PLANE_PR) in path:
+                files = self.world.get("control_plane_files", [{"filename": "docs/merge-gate.md"}])
             return json.dumps([files])
+        if f"/actions/jobs/{CONTROL_PLANE_SCOPE_ID}/logs" in path:
+            return self.world.get("site_log", control_plane_exemption_log())
         if f"/actions/jobs/{SITE_SCOPE_ID}/logs" in path:
             return self.world.get("site_log", site_log_text())
         return self.world.get("log", log_text())
@@ -444,6 +499,75 @@ class SiteExemptionTests(unittest.TestCase):
     def test_renamed_path_must_also_match_site_globs(self):
         self.assert_site_refused({"site_files": [{"filename": "website/new.html",
                                                    "previous_filename": "src/old.ts"}]})
+
+
+class ControlPlaneExemptionTests(unittest.TestCase):
+    def setup_world(self, **overrides):
+        world = {
+            "pr": control_plane_pr(),
+            "main": CONTROL_PLANE_MAIN,
+            "site_runs": [control_plane_exemption_run()],
+            "control_plane_jobs": control_plane_exemption_jobs(),
+            "site_log": control_plane_exemption_log(),
+            "control_plane_files": [{"filename": "docs/merge-gate.md"}],
+            "ci_runs": [],
+            "e2e_runs": [],
+        }
+        world.update(overrides)
+        return install(world)
+
+    def test_8186_shaped_docs_exemption_with_advanced_main_satisfies_both_slots(self):
+        stub = self.setup_world()
+        self.assertNotEqual(CONTROL_PLANE_BASE, CONTROL_PLANE_MAIN)
+        result = merge.merge(CONTROL_PLANE_PR, CONTROL_PLANE_HEAD)
+        self.assertEqual(result["status"], "READY_TO_MERGE")
+        ci, e2e = result["workflows"]["ci.yml"], result["workflows"]["e2e.yml"]
+        self.assertEqual(ci["exempt"], "control_plane_only")
+        self.assertEqual(e2e["exempt"], "control_plane_only")
+        self.assertEqual((ci["run"], ci["scope_job_id"]),
+                         (CONTROL_PLANE_RUN_ID, CONTROL_PLANE_SCOPE_ID))
+        self.assertEqual((ci["workflow_sha"], ci["rules_sha256"]),
+                         (CONTROL_PLANE_WORKFLOW_SHA, RULES_SHA))
+        self.assertTrue(any("ci-dummy.yml" in path for path in stub.calls))
+
+    def assert_falls_through(self, **overrides):
+        self.setup_world(**overrides)
+        with self.assertRaises(merge.Refusal) as ctx:
+            merge.merge(CONTROL_PLANE_PR, CONTROL_PLANE_HEAD)
+        self.assertIn("WORKFLOW_MISSING workflow=ci.yml", str(ctx.exception))
+
+    def test_wrong_synthetic_second_parent_refuses(self):
+        self.assert_falls_through(workflow_head="0" * 40)
+
+    def test_product_path_in_pr_file_list_refuses(self):
+        self.assert_falls_through(control_plane_files=[
+            {"filename": "docs/merge-gate.md"}, {"filename": "src/app.ts"}])
+
+    def test_parent_without_control_plane_ci_exemption_is_red(self):
+        rev = "0889385c7679198a10006c086c1da9b2c95b7d41"
+        blob = subprocess.run(
+            ["git", "show", f"{rev}:scripts/pm/shared-assets/codex/skills/"
+             "heydonna-open-pr-status/scripts/merge.py"],
+            capture_output=True, text=True, cwd=HERE)
+        self.assertEqual(blob.returncode, 0, blob.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "merge_parent.py")
+            pathlib.Path(path).write_text(blob.stdout, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location("merge_parent", path)
+            parent = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(parent)
+            stub = Stub({
+                "pr": control_plane_pr(), "main": CONTROL_PLANE_MAIN,
+                "site_runs": [control_plane_exemption_run()],
+                "control_plane_jobs": control_plane_exemption_jobs(),
+                "site_log": control_plane_exemption_log(),
+                "control_plane_files": [{"filename": "docs/merge-gate.md"}],
+                "ci_runs": [], "e2e_runs": [],
+            })
+            parent.api, parent.pages, parent.command = stub.api, stub.pages, stub.command
+            with self.assertRaises(parent.Refusal) as ctx:
+                parent.merge(CONTROL_PLANE_PR, CONTROL_PLANE_HEAD)
+            self.assertIn("WORKFLOW_MISSING workflow=ci.yml", str(ctx.exception))
 
 
 class RealColonFormLogTests(unittest.TestCase):
