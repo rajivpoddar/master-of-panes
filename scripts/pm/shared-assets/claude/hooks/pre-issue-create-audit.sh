@@ -214,7 +214,7 @@ fi
 #   U0ALEAYCAUT  — Dhruva PM bot (Slack user_id)
 #   U0AJZTN7SM6  — HeyDonna Alerts bot (Slack user_id) — added per Rajiv directive 2026-05-26 22:40 IST
 # ---------------------------------------------------------------------------
-INTERNAL_USER_IDS_REGEX='^(U0ALEAYCAUT|U0AMF0XE6TS|UEQTTB97A|U0AJZTN7SM6)$'
+INTERNAL_USER_IDS_REGEX='^(U0ALEAYCAUT|U0AMF0XE6TS|UEQTTB97A|U0AJZTN7SM6|U0BNFGX2UAX)$'
 # Structured CUSTOMER SOURCE signal (real signal, not free text): the ids of
 # the customer-facing / feedback Slack channels. Empty by default — an
 # operator/CTO names the real channels explicitly; until then classification
@@ -223,7 +223,7 @@ CUSTOMER_CHANNELS_REGEX="${EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX:-}"
 INTERNAL_NAME_REGEX='Rajiv|Dhruva|Dhurva|HeyDonna PM|HeyDonna Alerts|Codex|claude|mop|master.of.panes'
 
 # Internal infra bot allowlist (NEW). bot_id OR app_id match → internal regardless of user_id.
-INTERNAL_BOT_IDS_REGEX='^(B0ALH9R1LRK|B0AJ3HSC2PQ)$'
+INTERNAL_BOT_IDS_REGEX='^(B0ALH9R1LRK|B0AJ3HSC2PQ|B0BNMPL5EN6)$'
 INTERNAL_APP_IDS_REGEX='^(A0ALQA1BVLL|A0AHQ6WMKF1)$'
 
 ORIGIN_CLASS=""   # "internal" | "customer" | "unknown"

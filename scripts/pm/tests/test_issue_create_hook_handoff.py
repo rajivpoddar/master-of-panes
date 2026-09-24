@@ -301,3 +301,30 @@ def test_non_internal_originator_still_classifies_without_any_prose(tmp_path):
     message = _decision(out)["message"]
     assert "Customer-origin" in message
     assert "non-internal user-id U0CUSTOMER01" in message
+
+
+@pytest.mark.parametrize(
+    "originator",
+    [
+        {"user": "U0BNFGX2UAX"},
+        {"bot_id": "B0BNMPL5EN6"},
+    ],
+    ids=["cto-user", "cto-bot"],
+)
+def test_cto_source_user_and_bot_ids_classify_as_internal(tmp_path, originator):
+    env = dict(_env(tmp_path), EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX="^C0ALZJHGE49$")
+    source_ts = "1785932534.656769"
+    body = _body(
+        tmp_path,
+        "body-cto.md",
+        VALID_BODY + f"\n<!-- audit-bypass: internal-followup -->\n\nSource: C0ALZJHGE49:{source_ts}\n",
+    )
+    cache_dir = tmp_path / "slack"
+    cache_dir.mkdir(exist_ok=True)
+    (cache_dir / f"{source_ts}.json").write_text(
+        json.dumps({"ok": True, "messages": [originator]}), encoding="utf-8"
+    )
+
+    rc, out = _run(AUDIT_HOOK, _create_cmd(str(body)), env)
+
+    assert (rc, out) == (0, "")
