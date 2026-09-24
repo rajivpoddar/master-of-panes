@@ -34,7 +34,10 @@ RULES = (b'{"schema_version":1,"control_plane_only":[".agents/**",".claude/**",'
          b'"docs/**","scripts/pm/**","AGENTS.md","*.md","benchmarks/pm-ops/**"],'
          b'"control_plane_legacy":["scripts/legacy-pm/**"],'
          b'"control_plane_ci":["scripts/ci/ci-fast-triage.py"],'
-         b'"site":["website/**","docs-site/**"]}\n')
+         b'"site":["website/**","docs-site/**"],'
+         b'"app_test_only":["convex/__tests__/**","__tests__/**",'
+         b'"**/*.test.ts","**/*.test.tsx"],'
+         b'"app_e2e":["tests/e2e/**"]}\n')
 RULES_SHA = hashlib.sha256(RULES).hexdigest()
 TRUSTED = (".github/workflows/ci.yml", "scripts/ci/change_scope.py", "scripts/ci/change-scope-rules.json")
 SITE_RUN_ID = 222
@@ -49,6 +52,11 @@ CONTROL_PLANE_WORKFLOW_SHA = "7040efea" + "2" * 32
 CONTROL_PLANE_PR = 8186
 CONTROL_PLANE_RUN_ID = 35915535742
 CONTROL_PLANE_SCOPE_ID = 8186001
+TEST_ONLY_HEAD = "8219" + "a" * 36
+TEST_ONLY_BASE = "8219" + "b" * 36
+TEST_ONLY_WORKFLOW_SHA = "8219" + "c" * 36
+TEST_ONLY_NUMBER = 8219
+TEST_ONLY_SCOPE_ID = 8219001
 
 
 def pr():
@@ -82,6 +90,46 @@ def control_plane_pr():
             "head": {"sha": CONTROL_PLANE_HEAD, "ref": "docs/8186",
                      "repo": {"full_name": "heydonna-app/heydonna-app"}},
             "state": "open", "draft": False, "base": {"ref": "main"}, "labels": []}
+
+
+def test_only_pr():
+    return {"number": TEST_ONLY_NUMBER,
+            "head": {"sha": TEST_ONLY_HEAD, "ref": "test/8219",
+                     "repo": {"full_name": "heydonna-app/heydonna-app"}},
+            "state": "open", "draft": False, "base": {"ref": "main"}, "labels": []}
+
+
+def test_only_run(conclusion="success", path="ci.yml"):
+    return {"id": 8219002 if path == "ci.yml" else 8219004,
+            "run_attempt": 1, "head_sha": TEST_ONLY_HEAD,
+            "event": "pull_request", "head_branch": "test/8219",
+            "path": f".github/workflows/{path}", "status": "completed",
+            "conclusion": conclusion}
+
+
+def test_only_jobs():
+    rows = jobs(scope_conclusion="success", substantive="success")
+    for row in rows:
+        if row["name"] == "classify-change-scope":
+            row["id"] = TEST_ONLY_SCOPE_ID
+        if row["name"] == "typescript":
+            row["steps"] = [{"name": "Unit tests", "status": "completed",
+                             "conclusion": "success"}]
+    return rows
+
+
+def test_only_log(receipt=None, bindings=None):
+    body = {"schema_version": 1, "scope": "app_test_only", "app_test_only": True,
+            "control_plane_only": False, "paid_ci_exempt": False,
+            "product_changed": False, "ci_required": True, "e2e_required": False,
+            "rules_sha256": RULES_SHA}
+    body.update(receipt or {})
+    values = {"BASE_SHA": TEST_ONLY_BASE, "HEAD_SHA": TEST_ONLY_HEAD,
+              "WORKFLOW_SHA": TEST_ONLY_WORKFLOW_SHA,
+              "EVENT_NAME": "pull_request", "PR_NUMBER": str(TEST_ONLY_NUMBER)}
+    values.update(bindings or {})
+    return "\n".join([*(f"{key}={value}" for key, value in values.items()),
+                       json.dumps(body, sort_keys=True)]) + "\n"
 
 
 def jobs(scope_conclusion="success", substantive="skipped"):
@@ -166,7 +214,12 @@ class Stub:
                     "html_url": "https://example.invalid/compare", "files": []}
         if path.startswith("git/commits/"):
             sha = path.split("/", 2)[2]
-            if sha == CONTROL_PLANE_WORKFLOW_SHA:
+            if sha == TEST_ONLY_WORKFLOW_SHA:
+                parents = ([{"sha": "0" * 40}, {"sha": TEST_ONLY_HEAD}]
+                           if w.get("bad_parents") else
+                           [{"sha": w.get("workflow_parent", TEST_ONLY_BASE)},
+                            {"sha": w.get("workflow_head", TEST_ONLY_HEAD)}])
+            elif sha == CONTROL_PLANE_WORKFLOW_SHA:
                 parents = [{"sha": w.get("workflow_parent", CONTROL_PLANE_MAIN)},
                            {"sha": w.get("workflow_head", CONTROL_PLANE_HEAD)}]
             elif sha != w.get("workflow_sha", WORKFLOW_SHA) or w.get("bad_parents"):
@@ -180,10 +233,11 @@ class Stub:
             if rel in w.get("missing_paths", ()):
                 raise merge.Refusal("CONTENTS_MISSING")
             blob = "blob-" + rel
-            if w.get("blob_mismatch") and ref == WORKFLOW_SHA:
+            if w.get("blob_mismatch") and ref in (WORKFLOW_SHA, TEST_ONLY_WORKFLOW_SHA):
                 blob += "-drifted"
             content = base64.b64encode(RULES if rel.endswith("rules.json") else b"x").decode()
-            if w.get("rules_bytes") is not None and rel.endswith("rules.json") and ref == WORKFLOW_SHA:
+            if (w.get("rules_bytes") is not None and rel.endswith("rules.json")
+                    and ref in (WORKFLOW_SHA, TEST_ONLY_WORKFLOW_SHA)):
                 content = base64.b64encode(w["rules_bytes"]).decode()
             return {"sha": blob, "content": content}
         raise AssertionError(path)
@@ -196,11 +250,17 @@ class Stub:
             if "ci.yml" in path:
                 return self.world.get("ci_runs", [self.world.get("run", run())])
             if "e2e.yml" in path:
+                if "e2e_runs" in self.world:
+                    return self.world["e2e_runs"]
                 e2e_run = copy.deepcopy(self.world.get("run", run()))
                 e2e_run["path"] = ".github/workflows/e2e.yml"
-                return self.world.get("e2e_runs", [e2e_run])
+                return [e2e_run]
+            if "ci.yml" in path and "ci_runs" in self.world:
+                return self.world["ci_runs"]
             return [self.world.get("run", run())]
         if "/jobs?" in path:
+            if f"/{test_only_run(path='e2e.yml')['id']}/jobs?" in path:
+                return self.world.get("e2e_jobs", [])
             if f"/{CONTROL_PLANE_RUN_ID}/jobs?" in path:
                 return self.world.get("control_plane_jobs", control_plane_exemption_jobs())
             if f"/{SITE_RUN_ID}/jobs?" in path:
@@ -214,6 +274,9 @@ class Stub:
         path = args[-1]
         if "/pulls/" in path and "/files?" in path:
             files = self.world.get("site_files", [{"filename": "website/index.html"}])
+            if str(TEST_ONLY_NUMBER) in path:
+                files = self.world.get("app_test_files", [
+                    {"filename": "convex/__tests__/prmHunksMigration.test.ts"}])
             if str(CONTROL_PLANE_PR) in path:
                 files = self.world.get("control_plane_files", [{"filename": "docs/merge-gate.md"}])
             return json.dumps([files])
@@ -221,6 +284,8 @@ class Stub:
             return self.world.get("site_log", control_plane_exemption_log())
         if f"/actions/jobs/{SITE_SCOPE_ID}/logs" in path:
             return self.world.get("site_log", site_log_text())
+        if f"/actions/jobs/{TEST_ONLY_SCOPE_ID}/logs" in path:
+            return self.world.get("test_only_log", test_only_log())
         return self.world.get("log", log_text())
 
 
@@ -568,6 +633,110 @@ class ControlPlaneExemptionTests(unittest.TestCase):
             with self.assertRaises(parent.Refusal) as ctx:
                 parent.merge(CONTROL_PLANE_PR, CONTROL_PLANE_HEAD)
             self.assertIn("WORKFLOW_MISSING workflow=ci.yml", str(ctx.exception))
+
+
+class AppTestOnlyCompatibilityTests(unittest.TestCase):
+    def world(self, **overrides):
+        world = {"pr": test_only_pr(), "workflow_parent": TEST_ONLY_BASE,
+                 "workflow_head": TEST_ONLY_HEAD, "ci_runs": [test_only_run()],
+                 "jobs": test_only_jobs(), "test_only_log": test_only_log(),
+                 "app_test_files": [
+                     {"filename": "convex/__tests__/prmHunksMigration.test.ts"}],
+                 "e2e_runs": []}
+        world.update(overrides)
+        return world
+
+    def test_parent_is_red_for_green_ci_and_absent_e2e(self):
+        rev = "a386cc9ce28b600d2eec62ff4589d5b4c08307fc"
+        blob = subprocess.run(
+            ["git", "show", f"{rev}:scripts/pm/shared-assets/codex/skills/"
+             "heydonna-open-pr-status/scripts/merge.py"],
+            capture_output=True, text=True, cwd=HERE)
+        self.assertEqual(blob.returncode, 0, blob.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "merge_parent.py")
+            pathlib.Path(path).write_text(blob.stdout, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location("merge_parent_test_only", path)
+            parent = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(parent)
+            stub = Stub(self.world())
+            parent.api, parent.pages, parent.command = stub.api, stub.pages, stub.command
+            with self.assertRaises(parent.Refusal) as ctx:
+                parent.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
+            self.assertIn("WORKFLOW_MISSING workflow=e2e.yml", str(ctx.exception))
+
+    def test_exact_app_test_only_receipt_allows_absent_e2e_with_green_ci(self):
+        install(self.world())
+        result = merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
+        self.assertEqual(result["status"], "READY_TO_MERGE")
+        self.assertTrue(result["workflows"]["ci.yml"]["app_test_only"])
+        self.assertEqual(result["workflows"]["e2e.yml"]["exempt"], "app_test_only")
+        self.assertIsNone(result["workflows"]["e2e.yml"]["run"])
+
+    def test_exact_app_test_only_receipt_allows_successful_explicit_e2e_skip(self):
+        skipped = test_only_run(path="e2e.yml")
+        install(self.world(e2e_runs=[skipped], e2e_jobs=[
+            {"id": 8219003, "name": "e2e", "status": "completed",
+             "conclusion": "skipped", "steps": []}]))
+        result = merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
+        self.assertEqual(result["status"], "READY_TO_MERGE")
+        self.assertTrue(result["workflows"]["e2e.yml"]["skipped"])
+
+    def assert_blocked(self, world):
+        install(self.world(**world))
+        with self.assertRaises(merge.Refusal) as ctx:
+            merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
+        self.assertIn("WORKFLOW_MISSING workflow=e2e.yml", str(ctx.exception))
+
+    def test_product_mixed_and_unknown_scopes_still_require_e2e(self):
+        product = test_only_log(receipt={"scope": "product", "app_test_only": False,
+                                         "product_changed": True, "e2e_required": True})
+        self.assert_blocked({"test_only_log": product})
+        self.assert_blocked({"app_test_files": [
+            {"filename": "convex/__tests__/prmHunksMigration.test.ts"},
+            {"filename": "src/app.ts"}]})
+        unknown = test_only_log(receipt={"scope": "unknown"})
+        self.assert_blocked({"test_only_log": unknown})
+
+    def test_stale_head_and_boolean_mismatches_still_require_e2e(self):
+        self.assert_blocked({"test_only_log": test_only_log(
+            bindings={"HEAD_SHA": "0" * 40})})
+        for key, value in (("app_test_only", False), ("control_plane_only", True),
+                           ("paid_ci_exempt", True), ("product_changed", True),
+                           ("ci_required", False), ("e2e_required", True)):
+            with self.subTest(key=key):
+                self.assert_blocked({"test_only_log": test_only_log(
+                    receipt={key: value})})
+
+    def test_stale_workflow_and_classifier_rule_drift_require_e2e(self):
+        self.assert_blocked({"bad_parents": True})
+        self.assert_blocked({"blob_mismatch": True})
+        self.assert_blocked({"rules_bytes": b"different trusted rules\n"})
+        self.assert_blocked({"test_only_log": test_only_log(
+            bindings={"WORKFLOW_SHA": "short"})})
+
+    def test_failed_or_non_skipped_e2e_does_not_use_test_only_waiver(self):
+        failed = test_only_run(path="e2e.yml", conclusion="failure")
+        install(self.world(e2e_runs=[failed], e2e_jobs=[
+            {"id": 8219003, "name": "e2e", "status": "completed",
+             "conclusion": "failure", "steps": []}]))
+        with self.assertRaises(merge.Refusal):
+            merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
+
+    def test_red_ci_still_blocks_even_with_a_valid_test_only_receipt(self):
+        failed = test_only_run(conclusion="failure")
+        install(self.world(ci_runs=[failed]))
+        with self.assertRaises(merge.Refusal) as ctx:
+            merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
+        self.assertIn("WORKFLOW_NOT_GREEN workflow=ci.yml", str(ctx.exception))
+
+    def test_duplicate_classifier_jobs_cannot_authorize_test_only(self):
+        rows = test_only_jobs()
+        rows.append({**rows[0], "id": TEST_ONLY_SCOPE_ID + 1})
+        install(self.world(jobs=rows))
+        with self.assertRaises(merge.Refusal) as ctx:
+            merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
+        self.assertIn("WORKFLOW_MISSING workflow=e2e.yml", str(ctx.exception))
 
 
 class RealColonFormLogTests(unittest.TestCase):

@@ -61,14 +61,22 @@ def workflow_proof(pr, workflow, names):
                 or run.get("path", "").split("@")[0] != f".github/workflows/{workflow}"):
             continue
         jobs = pages(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100", "jobs")
-        scope = next((job for job in jobs if job["name"] == "classify-change-scope"), None)
+        scope_jobs = [job for job in jobs if job.get("name") == CLASSIFIER_JOB_NAME]
+        scope = scope_jobs[0] if scope_jobs else None
         if scope and scope.get("conclusion") == "skipped":
             continue
         by_name = {job["name"]: job for job in jobs}
+        test_only = None
         if scope is not None and successful(scope):
             exempt = classifier_exemption(pr, workflow, run, scope)
             if exempt is not None:
                 return exempt
+            if workflow == "ci.yml" and len(scope_jobs) == 1:
+                try:
+                    test_only = app_test_only_classifier_proof(pr, workflow, run, scope)
+                except (Refusal, OSError, ValueError, KeyError,
+                        subprocess.TimeoutExpired):
+                    test_only = None
         if not successful(run) or not all(successful(by_name.get(name, {})) for name in names):
             raise Refusal(f"WORKFLOW_NOT_GREEN workflow={workflow} run={run['id']}")
         # These steps distinguish real test execution from successful wrapper jobs.
@@ -80,12 +88,16 @@ def workflow_proof(pr, workflow, names):
             if not any(step["name"].startswith(prefix) and successful(step)
                        for step in by_name[job_name].get("steps", [])):
                 raise Refusal(f"TEST_EXECUTION_MISSING workflow={workflow} run={run['id']} step={prefix}")
-        return {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head}
+        proof = {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head}
+        if test_only is not None:
+            proof["app_test_only"] = test_only
+        return proof
     raise Refusal(f"WORKFLOW_MISSING workflow={workflow}")
 
 
 # ---------- classifier exemption (control-plane-only PRs) ----------
 CLASSIFIER_JOB_NAME = "classify-change-scope"
+TEST_ONLY_SCOPE = "app_test_only"
 EXEMPTION_RECEIPT = {
     "schema_version": 1,
     "paid_ci_exempt": True,
@@ -118,6 +130,22 @@ def strip_log_framing(text):
 
 def classifier_receipt(lines, expected_scope):
     """Exactly one correctly scoped schema_version=1 receipt, else None."""
+    receipt = classifier_receipt_object(lines, expected_scope)
+    if receipt is None:
+        return None
+    for key, expected in EXEMPTION_RECEIPT.items():
+        if receipt.get(key) != expected:
+            return None
+    if receipt.get("control_plane_only") is not (expected_scope == "control_plane_only"):
+        return None
+    rules = receipt.get("rules_sha256")
+    if not isinstance(rules, str) or not HEX64.match(rules):
+        return None
+    return receipt
+
+
+def classifier_receipt_object(lines, expected_scope):
+    """Exactly one schema_version=1 JSON object with the requested scope."""
     found = []
     for line in lines:
         stripped = line.strip()
@@ -133,14 +161,6 @@ def classifier_receipt(lines, expected_scope):
         return None
     receipt = found[0]
     if receipt.get("scope") != expected_scope:
-        return None
-    for key, expected in EXEMPTION_RECEIPT.items():
-        if receipt.get(key) != expected:
-            return None
-    if receipt.get("control_plane_only") is not (expected_scope == "control_plane_only"):
-        return None
-    rules = receipt.get("rules_sha256")
-    if not isinstance(rules, str) or not HEX64.match(rules):
         return None
     return receipt
 
@@ -229,6 +249,80 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
     return {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head,
             "scope_job_id": scope["id"], "workflow_sha": workflow_sha,
             "rules_sha256": receipt["rules_sha256"], "exempt": expected_scope}
+
+
+def app_test_only_classifier_proof(pr, workflow, run, scope):
+    """Verify the exact-head, non-paid app-test-only receipt from CI."""
+    head = pr["head"]["sha"]
+    if workflow != "ci.yml" or not successful(run) or not successful(scope):
+        return None
+    lines = strip_log_framing(job_log(scope["id"]))
+    receipt = classifier_receipt_object(lines, TEST_ONLY_SCOPE)
+    if receipt is None or receipt.get("app_test_only") is not True:
+        return None
+    expected = {"control_plane_only": False, "paid_ci_exempt": False,
+                "product_changed": False, "ci_required": True, "e2e_required": False}
+    if any(receipt.get(key) is not value for key, value in expected.items()):
+        return None
+    rules_sha = receipt.get("rules_sha256")
+    if not isinstance(rules_sha, str) or not HEX64.fullmatch(rules_sha):
+        return None
+    bindings = classifier_bindings(lines)
+    if bindings is None:
+        return None
+    base_sha, head_sha, workflow_sha = (bindings["BASE_SHA"], bindings["HEAD_SHA"],
+                                        bindings["WORKFLOW_SHA"])
+    if not (HEX40.fullmatch(base_sha) and HEX40.fullmatch(workflow_sha)):
+        return None
+    if (head_sha != head or run.get("head_sha") != head or run.get("event") != "pull_request"
+            or run.get("head_branch") != pr["head"]["ref"]
+            or run.get("path", "").split("@")[0] != ".github/workflows/ci.yml"
+            or bindings["EVENT_NAME"] != "pull_request"
+            or bindings["PR_NUMBER"] != str(pr["number"])):
+        return None
+    commit = api(f"git/commits/{workflow_sha}")
+    if [parent["sha"] for parent in commit.get("parents", [])] != [base_sha, head_sha]:
+        return None
+    for path in (".github/workflows/ci.yml", "scripts/ci/change_scope.py",
+                 "scripts/ci/change-scope-rules.json"):
+        at_base = contents_identity(path, base_sha)
+        at_workflow = contents_identity(path, workflow_sha)
+        if at_base is None or at_workflow is None or at_base[0] != at_workflow[0]:
+            return None
+    rules = contents_identity("scripts/ci/change-scope-rules.json", workflow_sha)
+    if rules is None:
+        return None
+    import hashlib
+    if hashlib.sha256(rules[1]).hexdigest() != rules_sha:
+        return None
+    if not paths_confined(pr, rules[1], (TEST_ONLY_SCOPE,)):
+        return None
+    return {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head,
+            "scope_job_id": scope["id"], "workflow_sha": workflow_sha,
+            "rules_sha256": rules_sha, "exempt": TEST_ONLY_SCOPE}
+
+
+def app_test_only_e2e_proof(pr, classifier_proof):
+    """Allow E2E absence or an exact-head successful run with its E2E job skipped."""
+    head = pr["head"]["sha"]
+    runs = pages(f"actions/workflows/e2e.yml/runs?event=pull_request&head_sha={head}&per_page=100",
+                 "workflow_runs")
+    runs.sort(key=lambda run: (run["id"], run.get("run_attempt", 1)), reverse=True)
+    matching = [run for run in runs if (
+        run.get("head_sha") == head and run.get("event") == "pull_request"
+        and run.get("head_branch") == pr["head"]["ref"]
+        and run.get("path", "").split("@")[0] == ".github/workflows/e2e.yml")]
+    if not matching:
+        return {**classifier_proof, "workflow": "e2e.yml", "run": None, "skipped": True}
+    run = matching[0]
+    if not successful(run):
+        return None
+    jobs = pages(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100", "jobs")
+    e2e_jobs = [job for job in jobs if job.get("name") == "e2e"]
+    if len(e2e_jobs) != 1 or e2e_jobs[0].get("conclusion") != "skipped":
+        return None
+    return {**classifier_proof, "workflow": "e2e.yml", "run": run["id"],
+            "attempt": run.get("run_attempt", 1), "skipped": True}
 
 
 def site_paths_confined(pr, rules_bytes):
@@ -327,7 +421,12 @@ def merge(number, head, apply=False, unrelated_main=None):
     if exemption is not None:
         proof = {workflow: dict(exemption) for workflow in WORKFLOWS}
     else:
-        proof = {workflow: workflow_proof(pr, workflow, names) for workflow, names in WORKFLOWS.items()}
+        ci_proof = workflow_proof(pr, "ci.yml", WORKFLOWS["ci.yml"])
+        test_only = ci_proof.get("app_test_only")
+        e2e_proof = app_test_only_e2e_proof(pr, test_only) if test_only else None
+        if e2e_proof is None:
+            e2e_proof = workflow_proof(pr, "e2e.yml", WORKFLOWS["e2e.yml"])
+        proof = {"ci.yml": ci_proof, "e2e.yml": e2e_proof}
     main = api("git/ref/heads/main")["object"]["sha"]
     comparison = api(f"compare/{head}...{main}")
     later = comparison["merge_base_commit"]["sha"] != main
