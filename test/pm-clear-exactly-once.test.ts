@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { MoPDatabase } from "../src/db.js";
 import { HookProcessor } from "../src/hooks.js";
+import { requestPmClearOnce } from "../src/pmClearLatch.js";
 import type { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
@@ -33,6 +34,74 @@ test("repeated PM Stop events never resend an already-latched clear", async () =
     const held = db.getEvents(0, 10, "clear_pending_duplicate_suppressed");
     assert.equal(held.length, 2);
     assert.ok(held.every((event) => event.payload.includes('"via":"hook_stop"')));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a stale PM clear latch crossed by a later Stop re-arms one new delivery", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-clear-stale-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const now = Date.now();
+    db.setPendingClear(0);
+    db.setConfig("pm_clear_requested_at", new Date(now - 11 * 60_000).toISOString());
+    db.logEvent(0, "Stop", "Stop", null, { session_id: "pm-turn-after-request" });
+
+    const [laterStop] = db.getEvents(0, 1, "Stop");
+    let deliveries = 0;
+    const options = {
+      db,
+      source: "test",
+      staleAfterMs: 10 * 60_000,
+      recentSuppressMs: 10 * 60_000,
+      hasRecentClearEvent: false,
+      laterLifecycleEvent: laterStop,
+      send: async () => {
+        deliveries += 1;
+        return { success: true };
+      },
+    };
+
+    const first = await requestPmClearOnce({ ...options, nowMs: now });
+    assert.equal(first.kind, "sent");
+    assert.equal(db.hasPendingClear(0), true);
+
+    const duplicate = await requestPmClearOnce({ ...options, nowMs: now + 1000 });
+    assert.equal(duplicate.kind, "pending");
+    assert.equal(deliveries, 1);
+    assert.equal(db.getEvents(0, 10, "clear_pending_stale_repaired").length, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a fresh in-flight PM clear remains deduplicated", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-clear-fresh-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const now = Date.now();
+    db.setPendingClear(0);
+    db.setConfig("pm_clear_requested_at", new Date(now - 60_000).toISOString());
+    let deliveries = 0;
+
+    const result = await requestPmClearOnce({
+      db,
+      source: "test",
+      nowMs: now,
+      staleAfterMs: 10 * 60_000,
+      recentSuppressMs: 10 * 60_000,
+      hasRecentClearEvent: false,
+      laterLifecycleEvent: null,
+      send: async () => {
+        deliveries += 1;
+        return { success: true };
+      },
+    });
+
+    assert.equal(result.kind, "pending");
+    assert.equal(deliveries, 0);
+    assert.equal(db.hasPendingClear(0), true);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -53,6 +53,7 @@ import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { runtimeIdentity } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { requestPmClearOnce } from "./pmClearLatch.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -249,7 +250,6 @@ const PM_CLEAR_STALE_ACK_REPAIR_MS = parseInt(
   10,
 );
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
-const PM_CLEAR_CONFIRMED_AT_KEY = "pm_clear_confirmed_at";
 
 function normalizeClearTarget(raw: string): number[] | null {
   const normalized = raw.trim().toLowerCase();
@@ -259,12 +259,6 @@ function normalizeClearTarget(raw: string): number[] | null {
     return [Number(normalized)];
   }
   return null;
-}
-
-function isRecentIso(value: string | null, windowMs: number): boolean {
-  if (!value) return false;
-  const ts = Date.parse(value);
-  return Number.isFinite(ts) && Date.now() - ts >= 0 && Date.now() - ts < windowMs;
 }
 
 function parseMoPIsoMs(value: string | null | undefined): number | null {
@@ -286,37 +280,19 @@ function hasRecentClearEvent(slotNum: number, windowMs: number): boolean {
     });
 }
 
-function findPmSessionStartAfter(cutoffMs: number) {
-  return db
-    .getEvents(0, 50, "SessionStart")
+function findLaterPmLifecycleEvent(requestedAt: string | null) {
+  const requestedMs = parseMoPIsoMs(requestedAt);
+  if (requestedMs === null) return null;
+
+  return [
+    ...db.getEvents(0, 100, "SessionStart"),
+    ...db.getEvents(0, 100, "Stop"),
+  ]
+    .sort((left, right) => right.id - left.id)
     .find((event) => {
       const ts = parseMoPIsoMs(event.timestamp);
-      return ts !== null && ts >= cutoffMs;
-    });
-}
-
-function reconcileStalePmClearRequest(source: string): boolean {
-  if (!db.hasPendingClear(0)) return false;
-
-  const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
-  const requestedMs = parseMoPIsoMs(requestedAt);
-  if (requestedMs === null) return false;
-  if (Date.now() - requestedMs < PM_CLEAR_STALE_ACK_REPAIR_MS) return false;
-
-  const laterSessionStart = findPmSessionStartAfter(requestedMs);
-  if (!laterSessionStart) return false;
-
-  db.clearPendingClear(0);
-  db.logEvent(0, "clear_pending_stale_repaired", null, null, {
-    name: "PM",
-    requested_at: requestedAt,
-    repaired_at: new Date().toISOString(),
-    later_session_start_event_id: laterSessionStart.id,
-    later_session_start_timestamp: laterSessionStart.timestamp,
-    via: source,
-    reason: "PM clear request never received SessionStart:clear ack; later SessionStart proves the latch is stale. Clearing latch only, not marking clear complete.",
-  });
-  return true;
+      return ts !== null && ts > requestedMs;
+    }) ?? null;
 }
 
 async function sendClearViaMopSendPath(
@@ -434,60 +410,48 @@ async function clearSlotsThroughMopHttp(
   }
 
   if (includePmSlot) {
-    reconcileStalePmClearRequest(options.source);
+    const nowMs = Date.now();
+    const delivery = await requestPmClearOnce({
+      db,
+      source: options.source,
+      nowMs,
+      staleAfterMs: PM_CLEAR_STALE_ACK_REPAIR_MS,
+      recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
+      hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
+      laterLifecycleEvent: findLaterPmLifecycleEvent(db.getConfig(PM_CLEAR_REQUESTED_AT_KEY)),
+      send: async () => {
+        const sent = await sendClearViaMopSendPath(0, options.source);
+        return {
+          success: sent.success,
+          error: sent.error ?? sent.reason ?? `send failed status=${sent.status}`,
+        };
+      },
+    });
 
-    if (
-      db.hasPendingClear(0) ||
-      isRecentIso(db.getConfig(PM_CLEAR_REQUESTED_AT_KEY), PM_CLEAR_RECENT_SUPPRESS_MS)
-    ) {
-      db.logEvent(0, "clear_pending_duplicate_suppressed", null, null, {
-        name: "PM",
-        via: options.source,
-        reason: "pm_clear_already_requested",
-        requested_at: db.getConfig(PM_CLEAR_REQUESTED_AT_KEY),
-      });
+    if (delivery.kind === "pending") {
       results.push({ slot: 0, name: "PM", status: "skipped (PM clear already requested)" });
       return results;
     }
 
-    if (
-      isRecentIso(db.getConfig(PM_CLEAR_CONFIRMED_AT_KEY), PM_CLEAR_RECENT_SUPPRESS_MS) ||
-      hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS)
-    ) {
-      db.logEvent(0, "clear_recent_duplicate_suppressed", null, null, {
-        name: "PM",
-        via: options.source,
-        reason: "pm_clear_recently_confirmed",
-        confirmed_at: db.getConfig(PM_CLEAR_CONFIRMED_AT_KEY),
-        suppress_window_ms: PM_CLEAR_RECENT_SUPPRESS_MS,
-      });
+    if (delivery.kind === "recent") {
       results.push({ slot: 0, name: "PM", status: "skipped (PM clear recently confirmed)" });
       return results;
     }
 
-    try {
-      db.setPendingClear(0);
-      const requestedAt = new Date().toISOString();
-      db.setConfig(PM_CLEAR_REQUESTED_AT_KEY, requestedAt);
-
-      const sent = await sendClearViaMopSendPath(0, options.source);
-      if (!sent.success) {
-        db.clearPendingClear(0);
-        throw new Error(sent.error ?? sent.reason ?? `send failed status=${sent.status}`);
-      }
-
-      db.logEvent(0, "clear_pending_queued", null, null, {
-        name: "PM",
-        queued_at: requestedAt,
-        reason: "PM clear sent through MoP send path; awaiting SessionStart source=clear acknowledgement",
-        via: options.source,
-        delivery: "mop_send_to_slot",
-      });
-
-      results.push({ slot: 0, name: "PM", status: "queued (PM /clear sent; awaiting clear acknowledgement)" });
-    } catch (err) {
-      results.push({ slot: 0, name: "PM", status: `failed: ${err}` });
+    if (delivery.kind === "failed") {
+      results.push({ slot: 0, name: "PM", status: `failed: ${delivery.error}` });
+      return results;
     }
+
+    db.logEvent(0, "clear_pending_queued", null, null, {
+      name: "PM",
+      queued_at: delivery.requestedAt,
+      reason: "PM clear sent through MoP send path; awaiting SessionStart source=clear acknowledgement",
+      via: options.source,
+      delivery: "mop_send_to_slot",
+    });
+
+    results.push({ slot: 0, name: "PM", status: "queued (PM /clear sent; awaiting clear acknowledgement)" });
   }
 
   return results;
