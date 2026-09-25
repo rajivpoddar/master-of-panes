@@ -2,6 +2,8 @@ import type { MoPDatabase } from "./db.js";
 
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
 const PM_CLEAR_DELIVERY_STATE_KEY = "pm_clear_delivery_state";
+const PM_CLEAR_REARMED_REQUESTED_AT_KEY = "pm_clear_rearmed_requested_at";
+const PM_CLEAR_ACK_MISSING_FOR_KEY = "pm_clear_ack_missing_for";
 
 type PendingClearEvent = {
   id: number;
@@ -20,6 +22,28 @@ export type PMClearDelivery =
   | { kind: "deferred_busy"; requestedAt: string }
   | { kind: "failed"; error: string };
 
+export async function waitForPmIdleDrain(options: {
+  afterEventId: number;
+  getDrainEvent: () => { id: number } | null;
+  isPMBusy: () => boolean;
+  isCurrent: () => boolean;
+  onDrain: () => Promise<void>;
+  wait: (ms: number) => Promise<void>;
+  timeoutMs?: number;
+  nowMs?: () => number;
+}): Promise<boolean> {
+  const deadline = (options.nowMs ?? Date.now)() + (options.timeoutMs ?? 60_000);
+  while (options.isCurrent() && (options.nowMs ?? Date.now)() < deadline) {
+    const drainEvent = options.getDrainEvent();
+    if (drainEvent && drainEvent.id > options.afterEventId && !options.isPMBusy()) {
+      await options.onDrain();
+      return true;
+    }
+    await options.wait(100);
+  }
+  return false;
+}
+
 function parseMoPIsoMs(value: string | null | undefined): number | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -37,6 +61,7 @@ export function claimPmClearRequest(options: {
   recentSuppressMs: number;
   hasRecentClearEvent: boolean;
   laterLifecycleEvent: PendingClearEvent | null;
+  operatorReRequest?: boolean;
 }): PMClearClaim {
   const { db, source, nowMs, staleAfterMs, recentSuppressMs } = options;
   const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
@@ -71,6 +96,21 @@ export function claimPmClearRequest(options: {
       return { kind: "pending" };
     }
 
+    if (requestedAt !== null && db.getConfig(PM_CLEAR_REARMED_REQUESTED_AT_KEY) === requestedAt) {
+      if (db.getConfig(PM_CLEAR_ACK_MISSING_FOR_KEY) !== requestedAt) {
+        db.setConfig(PM_CLEAR_ACK_MISSING_FOR_KEY, requestedAt);
+        db.logEvent(0, "pm_clear_ack_missing", null, null, {
+          requested_at: requestedAt,
+          observed_at: new Date(nowMs).toISOString(),
+          later_lifecycle_event_id: evidence.id,
+          later_lifecycle_event_type: evidence.event_type,
+          reason: "The single stale-latch re-arm was not acknowledged by SessionStart source=clear; further automatic sends are suppressed.",
+          via: source,
+        });
+      }
+      return { kind: "pending" };
+    }
+
     repaired = evidence;
     db.clearPendingClear(0);
     db.logEvent(0, "clear_pending_stale_repaired", null, null, {
@@ -94,7 +134,7 @@ export function claimPmClearRequest(options: {
     latestRequestedMs !== null &&
     nowMs >= latestRequestedMs &&
     nowMs - latestRequestedMs < recentSuppressMs;
-  if (recentlyConfirmed || recentlyRequested || options.hasRecentClearEvent) {
+  if (!options.operatorReRequest && (recentlyConfirmed || recentlyRequested || options.hasRecentClearEvent)) {
     db.logEvent(0, "clear_recent_duplicate_suppressed", null, null, {
       name: "PM",
       via: source,
@@ -107,9 +147,14 @@ export function claimPmClearRequest(options: {
   }
 
   const nextRequestedAt = new Date(nowMs).toISOString();
+  if (options.operatorReRequest) {
+    db.setConfig(PM_CLEAR_REARMED_REQUESTED_AT_KEY, "");
+    db.setConfig(PM_CLEAR_ACK_MISSING_FOR_KEY, "");
+  }
   db.setPendingClear(0);
   db.setConfig(PM_CLEAR_REQUESTED_AT_KEY, nextRequestedAt);
   db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "claimed");
+  if (repaired) db.setConfig(PM_CLEAR_REARMED_REQUESTED_AT_KEY, nextRequestedAt);
   return { kind: "send", requestedAt: nextRequestedAt, repaired };
 }
 

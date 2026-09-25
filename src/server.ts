@@ -53,7 +53,7 @@ import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { runtimeIdentity } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
-import { requestPmClearOnce } from "./pmClearLatch.js";
+import { requestPmClearOnce, waitForPmIdleDrain } from "./pmClearLatch.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -250,6 +250,7 @@ const PM_CLEAR_STALE_ACK_REPAIR_MS = parseInt(
   10,
 );
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
+let pmClearDrainGeneration = 0;
 
 function normalizeClearTarget(raw: string): number[] | null {
   const normalized = raw.trim().toLowerCase();
@@ -293,7 +294,39 @@ function findLaterPmLifecycleEvent(requestedAt: string | null) {
     .find((event) => {
       const ts = parseMoPIsoMs(event.timestamp);
       return ts !== null && ts > requestedMs;
-    }) ?? null;
+  }) ?? null;
+}
+
+function retryPendingPmClearAfterDrain(stopEventId: number, generation: number): void {
+  void waitForPmIdleDrain({
+    afterEventId: stopEventId,
+    getDrainEvent: () => db.getEvents(0, 1, "pm_debounce_drain_fired")[0] ?? null,
+    isPMBusy: () => relay.isPMBusy(),
+    isCurrent: () => generation === pmClearDrainGeneration,
+    wait: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
+    onDrain: async () => {
+      if (!db.hasPendingClear(0)) return;
+      const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
+      await requestPmClearOnce({
+        db,
+        source: "pm_status_stop",
+        nowMs: Date.now(),
+        staleAfterMs: PM_CLEAR_STALE_ACK_REPAIR_MS,
+        recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
+        hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
+        laterLifecycleEvent: findLaterPmLifecycleEvent(requestedAt),
+        isPMBusy: () => relay.isPMBusy(),
+        send: async () => {
+          const sent = await sendClearViaMopSendPath(0, "pm_status_stop", false);
+          return {
+            success: sent.success,
+            busy: sent.busy,
+            error: sent.error ?? sent.reason ?? `send failed status=${sent.status}`,
+          };
+        },
+      });
+    },
+  });
 }
 
 async function sendClearViaMopSendPath(
@@ -422,6 +455,7 @@ async function clearSlotsThroughMopHttp(
       recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
       hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
       laterLifecycleEvent: findLaterPmLifecycleEvent(db.getConfig(PM_CLEAR_REQUESTED_AT_KEY)),
+      operatorReRequest: options.clearExistingPendingForTargets,
       isPMBusy: () => relay.isPMBusy(),
       send: async () => {
         const sent = await sendClearViaMopSendPath(0, options.source, false);
@@ -621,38 +655,22 @@ app.post("/pm-status", async (c) => {
     return c.json({ success: false, error: "event must be 'start' or 'stop'" }, 400);
   }
   if (event === "start") {
+    pmClearDrainGeneration += 1;
     const result = relay.setPMBusy(true);
     db.logEvent(0, "pm_status_busy", null, null, { event });
     return c.json({ success: true, pm_busy: true, drained: result.drained });
   } else {
     // event === "stop" → drain
+    const generation = ++pmClearDrainGeneration;
     const before = db.getPendingPMEventCount();
     const result = relay.setPMBusy(false);
-    db.logEvent(0, "pm_status_idle_drained", null, null, {
+    const idleDrainedEventId = db.logEvent(0, "pm_status_idle_drained", null, null, {
       event,
       queued_before: before,
       drained: result.drained,
     });
     if (db.hasPendingClear(0)) {
-      const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
-      await requestPmClearOnce({
-        db,
-        source: "pm_status_stop",
-        nowMs: Date.now(),
-        staleAfterMs: PM_CLEAR_STALE_ACK_REPAIR_MS,
-        recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
-        hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
-        laterLifecycleEvent: findLaterPmLifecycleEvent(requestedAt),
-        isPMBusy: () => relay.isPMBusy(),
-        send: async () => {
-          const sent = await sendClearViaMopSendPath(0, "pm_status_stop", false);
-          return {
-            success: sent.success,
-            busy: sent.busy,
-            error: sent.error ?? sent.reason ?? `send failed status=${sent.status}`,
-          };
-        },
-      });
+      retryPendingPmClearAfterDrain(idleDrainedEventId, generation);
     }
     return c.json({ success: true, pm_busy: false, queued_before: before, drained: result.drained });
   }

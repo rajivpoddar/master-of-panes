@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { MoPDatabase } from "../src/db.js";
 import { HookProcessor } from "../src/hooks.js";
-import { requestPmClearOnce } from "../src/pmClearLatch.js";
+import { requestPmClearOnce, waitForPmIdleDrain } from "../src/pmClearLatch.js";
 import type { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
@@ -165,7 +165,135 @@ test("a stale latch is re-armed by pm_status_idle_drained without hook Stop rows
   }
 });
 
-test("PM status Stop retries only through the PM clear exact-once path", () => {
+test("a stale PM clear retries only after the debounced drain proves idle", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-clear-after-drain-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const now = Date.now();
+    db.setPendingClear(0);
+    db.setConfig("pm_clear_requested_at", new Date(now - 11 * 60_000).toISOString());
+    const stopEventId = db.logEvent(0, "pm_status_idle_drained", null, null, { event: "stop" });
+    let busy = true;
+    let drainEvent: { id: number } | null = null;
+    let waitCount = 0;
+    let deliveries = 0;
+    const retry = waitForPmIdleDrain({
+      afterEventId: stopEventId,
+      getDrainEvent: () => drainEvent,
+      isPMBusy: () => busy,
+      isCurrent: () => true,
+      wait: async () => {
+        waitCount += 1;
+        if (waitCount === 2) {
+          drainEvent = { id: db.logEvent(0, "pm_debounce_drain_fired", null, null, { drained: 1 }) };
+          busy = false;
+        }
+      },
+      onDrain: async () => {
+        const [idleDrained] = db.getEvents(0, 1, "pm_status_idle_drained");
+        const result = await requestPmClearOnce({
+          db,
+          source: "pm_status_stop",
+          nowMs: Date.now(),
+          staleAfterMs: 10 * 60_000,
+          recentSuppressMs: 10 * 60_000,
+          hasRecentClearEvent: false,
+          laterLifecycleEvent: idleDrained,
+          isPMBusy: () => busy,
+          send: async () => {
+            deliveries += 1;
+            return { success: true };
+          },
+        });
+        assert.equal(result.kind, "sent");
+      },
+    });
+
+    assert.equal(deliveries, 0, "the stop request schedules observation but does not send");
+    const completed = await retry;
+    assert.equal(completed, true);
+    assert.equal(deliveries, 1);
+    assert.equal(waitCount, 2);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("one stale-latch re-arm reports a missing acknowledgement instead of sending repeatedly", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-clear-ack-missing-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const now = Date.now();
+    db.setPendingClear(0);
+    db.setConfig("pm_clear_requested_at", new Date(now - 11 * 60_000).toISOString());
+    let deliveries = 0;
+    const options = {
+      db,
+      source: "pm_status_stop",
+      nowMs: now,
+      staleAfterMs: 10 * 60_000,
+      recentSuppressMs: 10 * 60_000,
+      hasRecentClearEvent: false,
+      laterLifecycleEvent: db.getEvents(0, 1, "pm_status_idle_drained")[0],
+      isPMBusy: () => false,
+      send: async () => {
+        deliveries += 1;
+        return { success: true };
+      },
+    };
+
+    const stopAndDrain = async (nowMs: number) => {
+      const stopEventId = db.logEvent(0, "pm_status_idle_drained", null, null, { event: "stop" });
+      db.logEvent(0, "pm_debounce_drain_fired", null, null, { drained: 0 });
+      let delivery: Awaited<ReturnType<typeof requestPmClearOnce>> | undefined;
+      await waitForPmIdleDrain({
+        afterEventId: stopEventId,
+        getDrainEvent: () => db.getEvents(0, 1, "pm_debounce_drain_fired")[0] ?? null,
+        isPMBusy: () => false,
+        isCurrent: () => true,
+        wait: async () => {},
+        onDrain: async () => {
+          delivery = await requestPmClearOnce({
+            ...options,
+            nowMs,
+            laterLifecycleEvent: db.getEvents(0, 1, "pm_status_idle_drained")[0],
+          });
+        },
+      });
+      return delivery;
+    };
+
+    const first = await stopAndDrain(now);
+    assert.equal(first.kind, "sent");
+    assert.equal(deliveries, 1);
+    const rearmedAt = db.getConfig("pm_clear_requested_at");
+    const laterNow = Date.parse(rearmedAt!) + 11 * 60_000;
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      const result = await stopAndDrain(laterNow + cycle * 1000);
+      assert.equal(result.kind, "pending");
+    }
+
+    assert.equal(deliveries, 1);
+    const missing = db.getEvents(0, 10, "pm_clear_ack_missing");
+    assert.equal(missing.length, 1);
+    assert.equal(missing[0].payload.includes(`"requested_at":"${rearmedAt}"`), true);
+
+    db.clearPendingClear(0);
+    const explicit = await requestPmClearOnce({
+      ...options,
+      nowMs: laterNow + 5000,
+      laterLifecycleEvent: null,
+      operatorReRequest: true,
+    });
+    assert.equal(explicit.kind, "sent");
+    assert.equal(deliveries, 2, "an explicit operator re-request can begin a new request");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("PM status Stop schedules retry after drain and keeps explicit retry distinct", () => {
   const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   const start = source.indexOf('app.post("/pm-status"');
   const end = source.indexOf('app.get("/pm-status"', start);
@@ -173,11 +301,15 @@ test("PM status Stop retries only through the PM clear exact-once path", () => {
   assert.notEqual(end, -1);
 
   const route = source.slice(start, end);
-  assert.match(route, /await requestPmClearOnce\(/);
-  assert.match(route, /sendClearViaMopSendPath\(0, "pm_status_stop", false\)/);
+  assert.doesNotMatch(route, /requestPmClearOnce\(/);
+  assert.doesNotMatch(route, /sendClearViaMopSendPath\(/);
+  assert.match(route, /retryPendingPmClearAfterDrain\(idleDrainedEventId, generation\)/);
+  assert.match(source, /getEvents\(0, 1, "pm_debounce_drain_fired"\)/);
+  assert.match(source, /sendClearViaMopSendPath\(0, "pm_status_stop", false\)/);
   assert.match(source, /isPMBusy: \(\) => relay\.isPMBusy\(\)/);
   assert.match(source, /sendClearViaMopSendPath\(0, options\.source, false\)/);
   assert.match(source, /db\.getEvents\(0, 100, "pm_status_idle_drained"\)/);
+  assert.match(source, /operatorReRequest: options\.clearExistingPendingForTargets/);
 
   const sendRouteStart = source.indexOf('app.post("/slots/:slotNum/send"');
   const pmSubmit = source.indexOf("const submitted = await relay.submitToPM(command)", sendRouteStart);
