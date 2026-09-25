@@ -32,6 +32,7 @@ interface Harness {
   worktreeResult: { clean: boolean | null; detail: string };
   projectedAssigned: Array<{ issue: number; slot: number; repository: string | null }>;
   projectedReleased: Array<{ issue: number; slot: number; repository: string | null }>;
+  projectionCalls: number;
   projectorThrowOn: "assigned" | "released" | null;
   orderLog: string[];
   close: () => void;
@@ -54,6 +55,7 @@ function harness(): Harness {
     worktreeResult: { clean: true, detail: "clean" },
     projectedAssigned: [],
     projectedReleased: [],
+    projectionCalls: 0,
     projectorThrowOn: null,
     orderLog: [],
     close: () => {
@@ -74,6 +76,7 @@ function harness(): Harness {
     observeWorktree: async () => state.worktreeResult,
     issueProjection: {
       onAssigned: async (issue, slot, repository) => {
+        state.projectionCalls += 1;
         if (state.projectorThrowOn === "assigned") throw new Error("gh labels down");
         state.orderLog.push("project:assigned");
         state.projectedAssigned.push({ issue, slot, repository: repository ?? null });
@@ -83,6 +86,7 @@ function harness(): Harness {
         };
       },
       onReleased: async (issue, slot, repository) => {
+        state.projectionCalls += 1;
         if (state.projectorThrowOn === "released") throw new Error("gh labels down");
         state.orderLog.push("project:released");
         state.projectedReleased.push({ issue, slot, repository: repository ?? null });
@@ -248,7 +252,7 @@ test("a different binding under the same effect id is refused with zero mutation
     const epoch0 = h.db.getSlot(1)!.assignment_epoch;
     await post(h.app, 1, effectBody(1, epoch0));
     const committed = h.db.getSlot(1)!.assignment_epoch;
-    const conflict = await post(h.app, 1, effectBody(1, epoch0, { issue: 9999 }));
+    const conflict = await post(h.app, 1, effectBody(1, committed, { issue: 9999 }));
     assert.equal(conflict.status, 409);
     assert.equal(conflict.json.status, "refused");
     assert.equal(conflict.json.reason, "effect_binding_conflict");
@@ -724,9 +728,15 @@ test("idempotent replay projects zero times and clobbers no labels", async () =>
     assert.equal(first.json.status, "assigned");
     assert.equal(h.projectedAssigned.length, 1);
     assert.equal(first.json.issue_projection.status, "projected");
-    const second = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-proj-replay" }));
+    const clearCount = h.clearCalls.length;
+    const deliveryCount = h.deliverCalls.length;
+    const committedEpoch = h.db.getSlot(3)!.assignment_epoch;
+    const second = await post(h.app, 3, effectBody(3, committedEpoch, { effect_id: "assign-3-proj-replay" }));
     assert.equal(second.json.status, "assigned");
     assert.equal(second.json.idempotent, true);
+    assert.equal(h.db.getSlot(3)!.assignment_epoch, committedEpoch);
+    assert.equal(h.clearCalls.length, clearCount);
+    assert.equal(h.deliverCalls.length, deliveryCount);
     assert.equal(h.projectedAssigned.length, 1, "the replay must not re-project");
     assert.equal(h.projectedReleased.length, 0);
     // The replay returns the STORED outcome without a new GitHub call.
@@ -754,13 +764,86 @@ test("a projector throw still returns assigned with a typed failed projection", 
     const clearsBefore = h.clearCalls.length;
     const deliveriesBefore = h.deliverCalls.length;
     const epochAfterFirst = h.db.getSlot(3)!.assignment_epoch;
-    const resumed = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-proj-throw" }));
+    const resumed = await post(h.app, 3, effectBody(3, epochAfterFirst, { effect_id: "assign-3-proj-throw" }));
     assert.equal(resumed.json.status, "assigned");
     assert.equal(resumed.json.issue_projection.status, "projected", "the resume finishes the labels");
     assert.equal(h.projectedAssigned.length, 1, "exactly one successful projection total");
     assert.equal(h.clearCalls.length, clearsBefore, "no repeated clear");
     assert.equal(h.deliverCalls.length, deliveriesBefore, "no repeated delivery");
     assert.equal(h.db.getSlot(3)!.assignment_epoch, epochAfterFirst, "no repeated commit");
+  } finally {
+    h.close();
+  }
+});
+
+test("a failed projection retry refuses after the assigned slot is released", async () => {
+  const h = harness();
+  try {
+    h.projectorThrowOn = "assigned";
+    const epoch0 = h.db.getSlot(3)!.assignment_epoch;
+    const first = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-proj-released" }));
+    assert.equal(first.json.issue_projection.status, "failed");
+    const committedEpoch = h.db.getSlot(3)!.assignment_epoch;
+    h.projectorThrowOn = null;
+    const callsBeforeReleaseRetry = h.projectionCalls;
+
+    const released = h.db.releaseSlotSimple(3);
+    assert.equal(released.ok, true);
+    const retry = await post(
+      h.app,
+      3,
+      effectBody(3, committedEpoch, { effect_id: "assign-3-proj-released" }),
+    );
+
+    assert.equal(retry.status, 409);
+    assert.equal(retry.json.reason, "assignment_superseded");
+    assert.equal(h.projectionCalls, callsBeforeReleaseRetry, "superseded replay makes no projection calls");
+    assert.equal(h.db.getSlot(3)!.assignment_epoch, committedEpoch + 1);
+  } finally {
+    h.close();
+  }
+});
+
+test("a failed projection retry refuses after the slot is reassigned", async () => {
+  const h = harness();
+  try {
+    h.projectorThrowOn = "assigned";
+    const epoch0 = h.db.getSlot(3)!.assignment_epoch;
+    const first = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-proj-reassigned" }));
+    assert.equal(first.json.issue_projection.status, "failed");
+    const committedEpoch = h.db.getSlot(3)!.assignment_epoch;
+    h.projectorThrowOn = null;
+
+    const released = h.db.releaseSlotSimple(3);
+    assert.equal(released.ok, true);
+    const reassigned = h.db.assignSlot(
+      3,
+      "replacement task",
+      REPO,
+      9001,
+      "fix/9001-replacement",
+      null,
+      HEAD,
+      released.assignment_epoch,
+      "implementation",
+      "handoff-9001",
+      true,
+    );
+    assert.equal(reassigned.ok, true);
+    const replacementEpoch = h.db.getSlot(3)!.assignment_epoch;
+    const callsBeforeRetry = h.projectionCalls;
+
+    const retry = await post(
+      h.app,
+      3,
+      effectBody(3, committedEpoch, { effect_id: "assign-3-proj-reassigned" }),
+    );
+
+    assert.equal(retry.status, 409);
+    assert.equal(retry.json.reason, "assignment_superseded");
+    assert.equal(h.projectionCalls, callsBeforeRetry, "superseded replay makes no projection calls");
+    assert.equal(h.db.getSlot(3)!.issue, 9001, "replacement ownership remains intact");
+    assert.equal(h.db.getSlot(3)!.assignment_epoch, replacementEpoch);
   } finally {
     h.close();
   }

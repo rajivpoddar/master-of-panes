@@ -433,13 +433,39 @@ export function registerAssignmentEffectRoutes(
     // Idempotent replay / binding fence.
     const existing = db.getAssignmentEffectIntent(request.effect_id);
     if (existing) {
-      if (existing.request_digest !== requestDigest || existing.slot !== slotNum) {
+      // A completed assignment may be retried with its now-current epoch.
+      // Re-hashing at the stored pre-commit epoch proves every other binding
+      // field, including task_file, is unchanged.
+      const committedEpochReplay =
+        existing.state === "delivered" &&
+        existing.committed_epoch !== null &&
+        request.expected_epoch === existing.committed_epoch &&
+        computeAssignmentEffectDigest({
+          ...request,
+          expected_epoch: existing.before_epoch,
+        }) === existing.request_digest;
+      if (
+        existing.slot !== slotNum ||
+        (existing.request_digest !== requestDigest && !committedEpochReplay)
+      ) {
         return c.json(
           refusal("ownership", "effect_binding_conflict", slotStateSummary(db.getSlot(slotNum))),
           409,
         );
       }
       if (existing.state === "delivered") {
+        const live = db.getSlot(slotNum);
+        if (
+          existing.committed_epoch === null
+          || !live
+          || live.assignment_epoch !== existing.committed_epoch
+          || !desiredTupleAlreadyCommitted(live, existing.desired_tuple)
+        ) {
+          return c.json(
+            refusal("ownership", "assignment_superseded", slotStateSummary(live)),
+            409,
+          );
+        }
         // Delivered replay: clear, commit, and delivery all already happened,
         // so none of them repeats. Only a MISSING or FAILED label projection
         // is retried now; a recorded successful projection is reused verbatim
