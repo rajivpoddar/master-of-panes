@@ -50,6 +50,7 @@ test("a stale PM clear latch crossed by a later Stop re-arms one new delivery", 
 
     const [laterStop] = db.getEvents(0, 1, "Stop");
     let deliveries = 0;
+    let pmBusy = true;
     const options = {
       db,
       source: "test",
@@ -57,6 +58,7 @@ test("a stale PM clear latch crossed by a later Stop re-arms one new delivery", 
       recentSuppressMs: 10 * 60_000,
       hasRecentClearEvent: false,
       laterLifecycleEvent: laterStop,
+      isPMBusy: () => pmBusy,
       send: async () => {
         deliveries += 1;
         return { success: true };
@@ -64,13 +66,21 @@ test("a stale PM clear latch crossed by a later Stop re-arms one new delivery", 
     };
 
     const first = await requestPmClearOnce({ ...options, nowMs: now });
-    assert.equal(first.kind, "sent");
+    assert.equal(first.kind, "deferred_busy");
     assert.equal(db.hasPendingClear(0), true);
+    assert.equal(db.getConfig("pm_clear_delivery_state"), "deferred_busy");
+    assert.equal(deliveries, 0);
 
-    const duplicate = await requestPmClearOnce({ ...options, nowMs: now + 1000 });
+    pmBusy = false;
+    const resumed = await requestPmClearOnce({ ...options, nowMs: now + 1000 });
+    assert.equal(resumed.kind, "sent");
+    assert.equal(db.getConfig("pm_clear_delivery_state"), "awaiting_ack");
+
+    const duplicate = await requestPmClearOnce({ ...options, nowMs: now + 2000 });
     assert.equal(duplicate.kind, "pending");
     assert.equal(deliveries, 1);
     assert.equal(db.getEvents(0, 10, "clear_pending_stale_repaired").length, 1);
+    assert.equal(db.getEvents(0, 10, "clear_pending_deferred_busy").length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -93,6 +103,7 @@ test("a fresh in-flight PM clear remains deduplicated", async () => {
       recentSuppressMs: 10 * 60_000,
       hasRecentClearEvent: false,
       laterLifecycleEvent: null,
+      isPMBusy: () => false,
       send: async () => {
         deliveries += 1;
         return { success: true };
@@ -118,4 +129,12 @@ test("PM status Stop cannot contain a pending-clear resend path", () => {
   assert.doesNotMatch(route, /sendClearViaMopSendPath/);
   assert.doesNotMatch(route, /clear_pending_pm_retry_sent/);
   assert.match(route, /clear_pending_duplicate_suppressed/);
+  assert.match(source, /isPMBusy: \(\) => relay\.isPMBusy\(\)/);
+  assert.match(source, /sendClearViaMopSendPath\(0, options\.source, false\)/);
+
+  const sendRouteStart = source.indexOf('app.post("/slots/:slotNum/send"');
+  const pmSubmit = source.indexOf("const submitted = await relay.submitToPM(command)", sendRouteStart);
+  const busyGuard = source.indexOf("if (allowPmClear && relay.isPMBusy())", sendRouteStart);
+  assert.ok(sendRouteStart >= 0);
+  assert.ok(busyGuard >= 0 && busyGuard < pmSubmit, "PM clear busy guard must precede the actual submit");
 });

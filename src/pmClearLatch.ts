@@ -1,6 +1,7 @@
 import type { MoPDatabase } from "./db.js";
 
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
+const PM_CLEAR_DELIVERY_STATE_KEY = "pm_clear_delivery_state";
 
 type PendingClearEvent = {
   id: number;
@@ -16,6 +17,7 @@ export type PMClearClaim =
 export type PMClearDelivery =
   | PMClearClaim
   | { kind: "sent"; requestedAt: string }
+  | { kind: "deferred_busy"; requestedAt: string }
   | { kind: "failed"; error: string };
 
 function parseMoPIsoMs(value: string | null | undefined): number | null {
@@ -50,6 +52,14 @@ export function claimPmClearRequest(options: {
       evidence !== null &&
       evidenceMs !== null &&
       evidenceMs > requestedMs;
+
+    const deferredBusy =
+      requestedAt !== null &&
+      db.getConfig(PM_CLEAR_DELIVERY_STATE_KEY) === "deferred_busy";
+
+    if (deferredBusy) {
+      return { kind: "send", requestedAt };
+    }
 
     if (!stale) {
       db.logEvent(0, "clear_pending_duplicate_suppressed", null, null, {
@@ -99,19 +109,41 @@ export function claimPmClearRequest(options: {
   const nextRequestedAt = new Date(nowMs).toISOString();
   db.setPendingClear(0);
   db.setConfig(PM_CLEAR_REQUESTED_AT_KEY, nextRequestedAt);
+  db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "claimed");
   return { kind: "send", requestedAt: nextRequestedAt, repaired };
 }
 
 export async function requestPmClearOnce(options: Parameters<typeof claimPmClearRequest>[0] & {
-  send: () => Promise<{ success: boolean; error?: string }>;
+  isPMBusy: () => boolean;
+  send: () => Promise<{ success: boolean; busy?: boolean; error?: string }>;
 }): Promise<PMClearDelivery> {
   const claim = claimPmClearRequest(options);
   if (claim.kind !== "send") return claim;
 
+  options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "sending");
+  if (options.isPMBusy()) {
+    options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "deferred_busy");
+    options.db.logEvent(0, "clear_pending_deferred_busy", null, null, {
+      requested_at: claim.requestedAt,
+      reason: "PM is busy at clear-send boundary; latch retained for retry when idle",
+    });
+    return { kind: "deferred_busy", requestedAt: claim.requestedAt };
+  }
+
   const result = await options.send();
+  if (result.busy) {
+    options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "deferred_busy");
+    options.db.logEvent(0, "clear_pending_deferred_busy", null, null, {
+      requested_at: claim.requestedAt,
+      reason: "PM became busy before the send endpoint; latch retained for retry when idle",
+    });
+    return { kind: "deferred_busy", requestedAt: claim.requestedAt };
+  }
   if (!result.success) {
     options.db.clearPendingClear(0);
+    options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "failed");
     return { kind: "failed", error: result.error ?? "PM clear send failed" };
   }
+  options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "awaiting_ack");
   return { kind: "sent", requestedAt: claim.requestedAt };
 }

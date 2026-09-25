@@ -298,14 +298,15 @@ function findLaterPmLifecycleEvent(requestedAt: string | null) {
 async function sendClearViaMopSendPath(
   slotNum: number,
   source: string,
-): Promise<{ success: boolean; status: number; reason?: string; error?: string }> {
+  force = true,
+): Promise<{ success: boolean; busy?: boolean; status: number; reason?: string; error?: string }> {
   try {
     const res = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slotNum}/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         command: "/clear",
-        force: true,
+        force,
         allow_pm_clear: slotNum === 0,
         source,
       }),
@@ -313,6 +314,7 @@ async function sendClearViaMopSendPath(
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     return {
       success: res.ok && data.success === true,
+      busy: data.reason === "pm_busy_deferred",
       status: res.status,
       reason: typeof data.reason === "string" ? data.reason : undefined,
       error: typeof data.error === "string" ? data.error : undefined,
@@ -419,10 +421,12 @@ async function clearSlotsThroughMopHttp(
       recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
       hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
       laterLifecycleEvent: findLaterPmLifecycleEvent(db.getConfig(PM_CLEAR_REQUESTED_AT_KEY)),
+      isPMBusy: () => relay.isPMBusy(),
       send: async () => {
-        const sent = await sendClearViaMopSendPath(0, options.source);
+        const sent = await sendClearViaMopSendPath(0, options.source, false);
         return {
           success: sent.success,
+          busy: sent.busy,
           error: sent.error ?? sent.reason ?? `send failed status=${sent.status}`,
         };
       },
@@ -435,6 +439,11 @@ async function clearSlotsThroughMopHttp(
 
     if (delivery.kind === "recent") {
       results.push({ slot: 0, name: "PM", status: "skipped (PM clear recently confirmed)" });
+      return results;
+    }
+
+    if (delivery.kind === "deferred_busy") {
+      results.push({ slot: 0, name: "PM", status: "deferred (PM busy; clear remains pending)" });
       return results;
     }
 
@@ -2022,6 +2031,17 @@ app.post("/slots/:slotNum/send", async (c) => {
         // turn — a pane that looks unchanged after the queue is the expected
         // success state.
         const bytes = Buffer.byteLength(command, "utf8");
+        if (allowPmClear && relay.isPMBusy()) {
+          db.logEvent(0, "clear_pending_deferred_busy", null, null, {
+            via: body.source ?? "unknown",
+            reason: "PM became busy before /clear reached the send boundary",
+          });
+          return c.json({
+            success: false,
+            error: "PM is busy; the pending clear was retained for retry when idle.",
+            reason: "pm_busy_deferred",
+          }, 409);
+        }
         const submitted = await relay.submitToPM(command);
         if (!submitted.ok) {
           db.logEvent(slotNum, "send_error", null, null, {
