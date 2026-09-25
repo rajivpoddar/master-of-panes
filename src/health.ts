@@ -102,6 +102,8 @@ export class ProcessHealthChecker {
   private readonly CHECK_INTERVAL_MS = 30 * 1000;       // Check every 30s
   private readonly RESTART_COOLDOWN_MS = 120 * 1000;    // 2min cooldown per slot
   private readonly MAX_RESTARTS_PER_HOUR = 3;           // Prevent crash loops
+  private readonly AGENT_BOOT_TIMEOUT_MS = 60_000;
+  private readonly AGENT_BOOT_POLL_MS = 1_000;
   private readonly UNRESPONSIVE_PROBE_CHECKS = 6;       // 6 unchanged 30s ticks (~3m) before redraw probe
   private readonly UNRESPONSIVE_RESPAWN_CHECKS = 8;     // 8 unchanged ticks (~4m) before force respawn
   private readonly UNRESPONSIVE_FORCE_RESPAWN_COOLDOWN_MS = 15 * 60 * 1000;
@@ -263,20 +265,20 @@ export class ProcessHealthChecker {
   /**
    * Restart a slot's Claude Code process by sending the alias command.
    */
-  private async restartSlot(slotNum: number): Promise<boolean> {
+  private async restartSlot(slotNum: number): Promise<{ success: boolean; reason: string }> {
     const launchCmd = typedLaunchCommandForPane(slotNum);
-    if (!launchCmd) return false;
+    if (!launchCmd) return { success: false, reason: "launcher command is not configured" };
 
     const identity = await verifyPaneIdentity(slotNum);
     if (!identity.ok) {
       console.warn(`[health] refusing restart for slot ${slotNum}: ${identity.detail}`);
-      return false;
+      return { success: false, reason: `pane identity unavailable: ${identity.detail}` };
     }
     const paneTarget = identity.snapshot.paneId;
     // Effect-edge fence: verifyPaneIdentity() yields. A controlled respawn can
     // begin or finish while that lookup is in flight, so re-check immediately
     // before the launcher command is sent to the pane.
-    if (this.isRestartSuppressed(slotNum)) return false;
+    if (this.isRestartSuppressed(slotNum)) return { success: false, reason: "restart suppressed by an active fence" };
     try {
       // Send restart command to the pane's shell.
       // Uses standalone bash scripts (not aliases) — no .zshrc/OMZ dependency.
@@ -285,11 +287,32 @@ export class ProcessHealthChecker {
         `tmux send-keys -t ${paneTarget} ${shellEscape(launchCmd)} Enter`,
         { timeout: 10_000 },
       );
-      return true;
+      const bootCommand = await this.waitForAgentBoot(slotNum);
+      return bootCommand
+        ? { success: true, reason: `agent boot verified (${bootCommand})` }
+        : { success: false, reason: `agent boot not observed within ${this.AGENT_BOOT_TIMEOUT_MS}ms` };
     } catch (err) {
       console.error(`[health] Failed to restart slot ${slotNum}:`, err);
-      return false;
+      return { success: false, reason: `launcher failed: ${String(err)}` };
     }
+  }
+
+  private async waitForAgentBoot(slotNum: number, timeoutMs = this.AGENT_BOOT_TIMEOUT_MS): Promise<string | null> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+      const command = await this.getPaneCommand(slotNum);
+      if (command && AGENT_COMMANDS.has(command)) {
+        this.db.logEvent(slotNum, "agent_booted", null, null, {
+          command,
+          launch_command: RESTART_COMMANDS[slotNum],
+          observed_at: new Date().toISOString(),
+        });
+        return command;
+      }
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(this.AGENT_BOOT_POLL_MS, Math.max(0, deadline - Date.now()))));
+    }
+    return null;
   }
 
   private async forceRespawnSlot(slotNum: number, reason: string): Promise<boolean> {
@@ -522,9 +545,9 @@ export class ProcessHealthChecker {
         pane_command: paneCommand,
       });
 
-      const restarted = await this.restartSlot(slot);
-      if (restarted) {
-        this.lastRestart.set(slot, now);
+      const restartResult = await this.restartSlot(slot);
+      if (restartResult.success) {
+        this.lastRestart.set(slot, Date.now());
         this.recordRestart(slot);
 
         this.db.logEvent(slot, "process_restarted", null, null, {
@@ -546,14 +569,34 @@ export class ProcessHealthChecker {
           this.relay.injectToPM(
             `# 🔄 ${slotName} process died — auto-restarted with --continue${taskInfo}`,
           );
-        } else {
-          // PM died — can't notify PM. Just log.
+      } else {
+          // PM died — keep the operator alert in the durable PM queue. Relay
+          // delivery is gated on a booted agent, so this can never type into
+          // the shell while recovery is incomplete.
           console.log("[health] PM process restarted — PM will resume via --continue");
         }
 
         // Post-restart continue injection: wait one check cycle (30s),
         // verify Claude is running, then send "continue" to resume session.
         this.scheduleContinueInjection(slot);
+        if (slot === 0) void this.relay.drainPMQueue();
+      } else {
+        // Failed attempts get the ordinary cooldown to avoid a 30s launcher
+        // storm, but they do not count as successful restarts for the hourly
+        // crash-loop limit.
+        this.lastRestart.set(slot, Date.now());
+        const failure = {
+          command: RESTART_COMMANDS[slot],
+          reason: restartResult.reason,
+          failed_at: new Date().toISOString(),
+          max_restarts_per_hour: this.MAX_RESTARTS_PER_HOUR,
+          restart_count_incremented: false,
+        };
+        this.db.logEvent(slot, "process_restart_failed", null, null, failure);
+        console.error(`[health][restart-failed] ${slotName}: ${restartResult.reason}`);
+        this.relay.injectToPM(
+          `# 🔴 ${slotName} restart failed — ${restartResult.reason}. Manual intervention may be needed.`,
+        );
       }
     }
 

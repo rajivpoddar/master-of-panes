@@ -1976,9 +1976,9 @@ app.post("/slots/:slotNum/send", async (c) => {
       // File mode: load-buffer + paste-buffer, chunked when needed. No payload cap.
       const filePayload = await readFile(filePath);
       if (slotNum === 0) {
-        // PM file deliveries use the same observation-bound submit primitive
-        // as command deliveries. Busy/unknown selects C-q; only a proven idle
-        // observation selects Enter.
+        // PM file deliveries use the shared submit path. It requires a booted
+        // runtime; native Claude preserves its Enter composer behavior, while
+        // OMP selects its busy-aware submit key.
         const submitted = await relay.submitToPM(filePayload.toString("utf8"));
         if (!submitted.ok) {
           return c.json({
@@ -1992,15 +1992,18 @@ app.post("/slots/:slotNum/send", async (c) => {
           file: filePath,
           bytes: filePayload.byteLength,
           submit: submitted.submitKey,
-          verified: true,
-          verification: "submit_aware_receipt",
+          verified: !submitted.queued,
+          queued: submitted.queued === true,
+          verification: submitted.queued ? "durably_queued_until_agent_boot" : "submit_aware_receipt",
         });
         return c.json({
           success: true,
           mode: "file",
           slot: slotNum,
           submit: submitted.submitKey,
-          verified: true,
+          verified: !submitted.queued,
+          queued: submitted.queued === true,
+          verification: submitted.queued ? "durably_queued_until_agent_boot" : "submit_aware_receipt",
           bytes: filePayload.byteLength,
         });
       }
@@ -2047,20 +2050,8 @@ app.post("/slots/:slotNum/send", async (c) => {
       }
 
       if (slotNum === 0) {
-        // Slot 0 is the PM pane. Ordinary slot→PM status bodies must route
-        // through the relay's busy-aware submit primitive (idle → Enter,
-        // busy/unknown → C-q) instead of pastePayloadWithTmuxBuffer's
-        // always-Enter, so a busy PM never has the active turn steered by an
-        // Enter queue-jump.
-        //
-        // Delivery verification is preserved as a submit-aware receipt: the
-        // relay returns ok=true only when the paste (load/paste-buffer) AND
-        // the selected submit key (send-keys) all dispatched without a tmux
-        // error, and the chosen key is recorded on the send_command event and
-        // the response. The pane-diff deliveryConfirmed check does not apply
-        // here because C-q queues a follow-up and does NOT enter the active
-        // turn — a pane that looks unchanged after the queue is the expected
-        // success state.
+        // Slot 0 is the PM pane. Submit through the relay so it can verify the
+        // runtime is booted and apply runtime-specific paste/submit semantics.
         const bytes = Buffer.byteLength(command, "utf8");
         if (allowPmClear && relay.isPMBusy()) {
           db.logEvent(0, "clear_pending_deferred_busy", null, null, {
@@ -2095,8 +2086,9 @@ app.post("/slots/:slotNum/send", async (c) => {
           mode: isInsert ? "insert" : isNormal ? "normal" : "unknown",
           paste: "buffer",
           submit: submitted.submitKey,
-          verified: true,
-          verification: "submit_aware_receipt",
+          verified: !submitted.queued,
+          queued: submitted.queued === true,
+          verification: submitted.queued ? "durably_queued_until_agent_boot" : "submit_aware_receipt",
           bytes,
           chunks: 1,
         });
@@ -2106,7 +2098,9 @@ app.post("/slots/:slotNum/send", async (c) => {
           slot: slotNum,
           paste: "buffer",
           submit: submitted.submitKey,
-          verified: true,
+          verified: !submitted.queued,
+          queued: submitted.queued === true,
+          verification: submitted.queued ? "durably_queued_until_agent_boot" : "submit_aware_receipt",
           bytes,
           chunks: 1,
         });
@@ -2455,7 +2449,7 @@ app.post("/api/slack-route", async (c) => {
             submit: submitted.submitKey,
           }, 502);
         }
-        results.push(`${pane}: ${submitted.ok ? "delivered" : "failed"} (submit=${submitted.submitKey})`);
+        results.push(`${pane}: ${submitted.queued ? "durably queued" : "delivered"} (submit=${submitted.submitKey})`);
       } else {
         const match = /0:0\.(\d+)$/.exec(pane);
         const slotNum = match ? Number(match[1]) : NaN;

@@ -18,7 +18,7 @@ import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
-const PM_INJECT_ENTER_DELAY_MS: number = (() => {
+export const PM_INJECT_ENTER_DELAY_MS: number = (() => {
   const raw = process.env.MOP_PM_INJECT_ENTER_DELAY_MS;
   const n = raw ? parseInt(raw, 10) : NaN;
   return Number.isFinite(n) && n >= 0 ? n : 500;
@@ -184,6 +184,8 @@ export type PMSubmitResult = {
   submitKey: PMSubmitKey;
   /** True when paste succeeded but submit outcome is not authoritative. */
   ambiguous: boolean;
+  /** True when MoP durably accepted the message but the pane was not booted. */
+  queued?: boolean;
 };
 
 type PMQueueRow = {
@@ -196,6 +198,7 @@ type PMQueueRow = {
 type DirectSubmitResult = {
   ok: boolean;
   ambiguous: boolean;
+  notReady?: boolean;
 };
 
 /**
@@ -273,14 +276,16 @@ export class TmuxRelay {
   private pmDrainChain: Promise<number> = Promise.resolve(0);
   private directInjectSeq = 0;
   private runShell: typeof execShell;
+  private readonly pmPaneReadyOverride?: () => Promise<boolean>;
 
   constructor(
     config: MoPConfig,
-    deps: { runShell?: typeof execShell; pmRuntime?: PMRuntime } = {},
+    deps: { runShell?: typeof execShell; pmRuntime?: PMRuntime; pmPaneReady?: () => Promise<boolean> } = {},
   ) {
     this.pmPaneAddress = config.pmPaneAddress;
     this.pmRuntime = deps.pmRuntime ?? resolvePMRuntime(process.env.MOP_PM_RUNTIME);
     this.runShell = deps.runShell ?? execShell;
+    this.pmPaneReadyOverride = deps.pmPaneReady;
   }
 
   /** Attach the MoP DB so injectToPM can enqueue when PM is busy. */
@@ -390,6 +395,9 @@ export class TmuxRelay {
 
   private async drainPMQueueOnce(): Promise<number> {
     if (!this.db) return 0;
+    // Do not destructively coalesce/drain rows until the configured agent is
+    // actually running in the PM pane. In particular, never type into zsh.
+    if (!(await this.isPMPaneReady())) return 0;
     const rows = this.db.drainPendingPMEvents();
     let injected = 0;
     for (const row of rows) {
@@ -555,13 +563,7 @@ export class TmuxRelay {
    */
   injectToPM(message: string, eventTypeOverride?: string): boolean {
     if (this.pmRuntime === "claude") {
-      const parsed = parseRelayMessage(message);
-      const decorated = withMopSlotHeader(message, parsed);
-      void this.injectDirectWithSubmitKey(decorated, "Enter").then((result) => {
-        if (!result.ok) {
-          console.error("[relay] Native-Claude PM inject failed; prompt was not persisted");
-        }
-      });
+      void this.injectNativeClaudeOrQueue(message, eventTypeOverride);
       return true;
     }
     if (!this.db) {
@@ -579,6 +581,27 @@ export class TmuxRelay {
     );
     void this.drainPMQueue();
     return true;
+  }
+
+  private async injectNativeClaudeOrQueue(message: string, eventTypeOverride?: string): Promise<void> {
+    if (!(await this.isPMPaneReady())) {
+      if (!this.db) {
+        console.error("[relay] PM pane is not booted and no database is available for durable queueing");
+        return;
+      }
+      this.enqueuePMMessage(message, eventTypeOverride, "native-claude-pane-not-ready");
+      return;
+    }
+    const parsed = parseRelayMessage(message);
+    const decorated = withMopSlotHeader(message, parsed);
+    const result = await this.injectDirectWithSubmitKey(decorated, "Enter");
+    if (!result.ok) {
+      if (result.notReady && this.db) {
+        this.enqueuePMMessage(message, eventTypeOverride, "native-claude-pane-became-not-ready");
+        return;
+      }
+      console.error("[relay] Native-Claude PM inject failed; prompt was not persisted");
+    }
   }
 
   private enqueuePMMessage(
@@ -620,11 +643,7 @@ export class TmuxRelay {
     const parsed = parseRelayMessage(message);
     const decorated = withMopSlotHeader(message, parsed);
     if (this.pmRuntime === "claude") {
-      void this.injectDirectWithSubmitKey(decorated, "Enter").then((result) => {
-        if (!result.ok) {
-          console.error("[relay] Native-Claude direct PM inject failed; prompt was not persisted");
-        }
-      });
+      void this.injectNativeClaudeOrQueue(message, parsed?.eventType);
       return true;
     }
     if (parsed && this.db) {
@@ -666,9 +685,18 @@ export class TmuxRelay {
    */
   async submitToPM(message: string, eventTypeOverride?: string): Promise<PMSubmitResult> {
     if (this.pmRuntime === "claude") {
+      if (!(await this.isPMPaneReady())) {
+        if (!this.db) return { ok: false, submitKey: "Enter", ambiguous: false };
+        this.enqueuePMMessage(message, eventTypeOverride, "submitToPM-pane-not-ready");
+        return { ok: true, submitKey: "Enter", ambiguous: false, queued: true };
+      }
       const parsed = parseRelayMessage(message);
       const decorated = withMopSlotHeader(message, parsed);
       const result = await this.injectDirectWithSubmitKey(decorated, "Enter");
+      if (result.notReady && this.db) {
+        this.enqueuePMMessage(message, eventTypeOverride, "submitToPM-pane-became-not-ready");
+        return { ok: true, submitKey: "Enter", ambiguous: false, queued: true };
+      }
       return { ...result, submitKey: "Enter" };
     }
     if (!this.db) {
@@ -776,6 +804,7 @@ export class TmuxRelay {
     let pasted = false;
     const effectiveSubmitKey = submitKey;
     try {
+      if (!(await this.isPMPaneReady())) return { ok: false, ambiguous: false, notReady: true };
       const firstLine = message.split("\n", 1)[0];
       console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""} (submit=${effectiveSubmitKey})`);
       if (message.includes("\n")) {
@@ -791,7 +820,10 @@ export class TmuxRelay {
         await fs.writeFile(tmpFile, message);
         try {
           await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
-          await this.runShell(`tmux paste-buffer -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
+          // `-p` wraps this as a bracketed paste. Claude Code 2.1.282 keeps a
+          // plain multiline paste in its composer after Enter; bracketed paste
+          // lets the same single Enter submit the complete message.
+          await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
           pasted = true;
           await sleep(PM_INJECT_ENTER_DELAY_MS);
           await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
@@ -811,6 +843,19 @@ export class TmuxRelay {
     } catch (err) {
       console.error(`[relay] Failed to inject into PM pane:`, err);
       return { ok: false, ambiguous: pasted };
+    }
+  }
+
+  private async isPMPaneReady(): Promise<boolean> {
+    if (this.pmPaneReadyOverride) return this.pmPaneReadyOverride();
+    try {
+      const result = await this.runShell(
+        `tmux display-message -t ${this.pmPaneAddress} -p '#{pane_current_command}'`,
+        { timeout: 5_000 },
+      );
+      return result.stdout.trim() === (this.pmRuntime === "omp" ? "omp" : "claude");
+    } catch {
+      return false;
     }
   }
 

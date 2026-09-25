@@ -282,7 +282,7 @@ export class PMCadenceScheduler {
     // explicit idle; busy/unknown uses C-q immediately. Awaiting the result
     // keeps the due key tied to actual delivery rather than enqueueing.
     const submitted = await this.relay.submitToPM(message, eventType);
-    injected = submitted.ok;
+    injected = submitted.ok && submitted.queued !== true;
     queued = !injected;
 
     const ts = new Date().toISOString();

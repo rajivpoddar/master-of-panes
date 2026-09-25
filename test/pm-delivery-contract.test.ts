@@ -8,10 +8,16 @@ import Database from "better-sqlite3";
 import { MoPDatabase } from "../src/db.js";
 import { PMCadenceScheduler } from "../src/pmCadence.js";
 import { P0EscalationWatcher } from "../src/p0EscalationWatch.js";
-import { decidePMSubmitKey, TmuxRelay } from "../src/relay.js";
+import { decidePMSubmitKey, PM_INJECT_ENTER_DELAY_MS, TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
-test("native Claude always uses Enter while OMP remains busy-aware", () => {
+function pmReadyCommandResult(command: string, runtime: "claude" | "omp" = "omp") {
+  return command.includes("pane_current_command")
+    ? { stdout: `${runtime}\n`, stderr: "" }
+    : null;
+}
+
+test("native Claude preserves Enter composer-queue semantics while OMP remains busy-aware", () => {
   assert.equal(decidePMSubmitKey(false, "claude"), "Enter");
   assert.equal(decidePMSubmitKey(true, "claude"), "Enter");
   assert.equal(decidePMSubmitKey(null, "claude"), "Enter");
@@ -22,7 +28,7 @@ test("native Claude always uses Enter while OMP remains busy-aware", () => {
   assert.equal(decidePMSubmitKey(undefined, "omp"), "C-q");
 });
 
-test("native Claude submits immediately without a PM pending-event row", async () => {
+test("native Claude submits immediately during a busy turn without a MoP queue row", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-pm-native-claude-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
@@ -31,7 +37,7 @@ test("native Claude submits immediately without a PM pending-event row", async (
       pmRuntime: "claude",
       runShell: async (command) => {
         commands.push(command);
-        return { stdout: "", stderr: "" };
+        return { stdout: command.includes("pane_current_command") ? "claude\n" : "", stderr: "" };
       },
     });
     relay.setDatabase(db);
@@ -40,6 +46,7 @@ test("native Claude submits immediately without a PM pending-event row", async (
     const result = await relay.submitToPM("native Claude immediate message");
 
     assert.equal(result.ok, true);
+    assert.equal(result.queued, undefined);
     assert.equal(result.submitKey, "Enter");
     assert.equal(commands.filter((command) => command.endsWith(" Enter")).length, 1);
     assert.equal(commands.some((command) => command.endsWith(" C-q")), false);
@@ -57,13 +64,18 @@ test("native Claude serializes complete paste-delay-Enter sequences", async () =
   let firstEnterStarted!: () => void;
   const firstEnter = new Promise<void>((resolve) => { firstEnterStarted = resolve; });
   let enters = 0;
+  let firstPasteAt = 0;
+  let firstEnterAt = 0;
   const relay = new TmuxRelay(DEFAULT_CONFIG, {
     pmRuntime: "claude",
     runShell: async (command) => {
       commands.push(command);
+      if (command.includes("pane_current_command")) return { stdout: "claude\n", stderr: "" };
+      if (command.includes("native A")) firstPasteAt = Date.now();
       if (command.endsWith(" Enter")) {
         enters += 1;
         if (enters === 1) {
+          firstEnterAt = Date.now();
           firstEnterStarted();
           await firstEnterRelease;
         }
@@ -80,6 +92,7 @@ test("native Claude serializes complete paste-delay-Enter sequences", async () =
   const results = await Promise.all([first, second]);
 
   assert.deepEqual(results.map((result) => result.ok), [true, true]);
+  assert.equal(firstEnterAt - firstPasteAt >= 500, true);
   const firstPaste = commands.findIndex((command) => command.includes("native A"));
   const firstSubmit = commands.findIndex((command) => command.endsWith(" Enter"));
   const secondPaste = commands.findIndex((command) => command.includes("native B"));
@@ -87,7 +100,65 @@ test("native Claude serializes complete paste-delay-Enter sequences", async () =
   assert.equal(firstPaste < firstSubmit && firstSubmit < secondPaste && secondPaste < secondSubmit, true);
 });
 
-test("P0 batch stops after a local native submit failure without pasting the next prompt", async () => {
+test("one Enter submits a complete bracketed multiline paste after 500ms", async () => {
+  const commands: string[] = [];
+  const timestamps: number[] = [];
+  const relay = new TmuxRelay(DEFAULT_CONFIG, {
+    pmRuntime: "claude",
+    runShell: async (command) => {
+      commands.push(command);
+      timestamps.push(Date.now());
+      if (command.includes("pane_current_command")) return { stdout: "claude\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    },
+  });
+
+  const result = await relay.submitToPM("complete first line\ncomplete second line");
+
+  assert.equal(PM_INJECT_ENTER_DELAY_MS, 500);
+  assert.equal(result.ok, true);
+  const load = commands.findIndex((command) => command.includes("tmux load-buffer"));
+  const paste = commands.findIndex((command) => command.includes("tmux paste-buffer"));
+  const enter = commands.findIndex((command) => command.endsWith(" Enter"));
+  assert.equal(load >= 0 && load < paste && paste < enter, true);
+  assert.match(commands[paste] ?? "", /paste-buffer -p/);
+  assert.equal(commands.filter((command) => command.endsWith(" Enter")).length, 1);
+  assert.equal(timestamps[enter]! - timestamps[paste]! >= 500, true);
+});
+
+test("native Claude pane shell retains a message until a booted agent can receive it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-shell-hold-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const commands: string[] = [];
+    let paneCommand = "zsh";
+    const relay = new TmuxRelay(DEFAULT_CONFIG, {
+      pmRuntime: "claude",
+      runShell: async (command) => {
+        commands.push(command);
+        if (command.includes("pane_current_command")) return { stdout: `${paneCommand}\n`, stderr: "" };
+        return { stdout: "", stderr: "" };
+      },
+    });
+    relay.setDatabase(db);
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = true;
+
+    const submitted = await relay.submitToPM("held while PM is at shell", "freeform-shell-hold");
+    assert.deepEqual(submitted, { ok: true, submitKey: "Enter", ambiguous: false, queued: true });
+    assert.equal(db.getPendingPMEventCount(), 1);
+    assert.equal(commands.some((command) => command.includes("held while PM is at shell")), false);
+
+    paneCommand = "claude";
+    assert.equal(await relay.drainPMQueue(), 1);
+    assert.equal(db.getPendingPMEventCount(), 0);
+    assert.equal(commands.filter((command) => command.includes("held while PM is at shell")).length, 1);
+    assert.equal(commands.filter((command) => command.endsWith(" Enter")).length, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("P0 escalation watcher records diagnostics without owning delivery", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-p0-native-stop-"));
   const previousDb = process.env.MOP_PM_OPS_DB;
   const previousDue = process.env.MOP_P0_ESCALATION_DUE_AFTER_MS;
@@ -134,13 +205,14 @@ test("P0 batch stops after a local native submit failure without pasting the nex
 
     const result = await new P0EscalationWatcher(db, relay).tick("manual");
 
-    assert.equal(result.due, 1);
+    assert.equal(result.due, 2);
     assert.equal(result.injected, 0);
-    assert.equal(submitted.length, 1);
-    assert.match(submitted[0] ?? "", /obligation #1/);
-    assert.doesNotMatch(submitted[0] ?? "", /obligation #2/);
+    assert.equal(result.skipped, 2);
+    assert.equal(submitted.length, 0);
     assert.equal(db.getPendingPMEventCount(), 0);
-    assert.equal(db.getEvents(0, 10, "p0_escalation_watch_batch_stopped").length, 1);
+    const diagnostics = db.getEvents(0, 10, "p0_escalation_watch_diagnostic");
+    assert.equal(diagnostics.length, 2);
+    assert.ok(diagnostics.every((event) => JSON.parse(event.payload).delivery_mode === "retired-heartbeat-owned"));
   } finally {
     if (previousDb === undefined) delete process.env.MOP_PM_OPS_DB;
     else process.env.MOP_PM_OPS_DB = previousDb;
@@ -165,7 +237,7 @@ test("queued cadence due key coalesces across scheduler restart and is not marke
       submitToPM: async (message: string, eventType?: string) => {
         queued.push({ message, eventType });
         db.enqueuePendingPMEvent(0, eventType ?? "freeform-test", message);
-        return { ok: false, submitKey: "C-q" as const, ambiguous: false };
+        return { ok: true, submitKey: "C-q" as const, ambiguous: false, queued: true };
       },
     } as unknown as TmuxRelay;
 
@@ -211,7 +283,7 @@ test("busy/unknown injects and cadence use immediate C-q without a later Stop", 
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
     const commands: string[] = [];
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
-      pmRuntime: "omp",
+      pmRuntime: "omp", pmPaneReady: async () => true,
       runShell: async (command) => {
         commands.push(command);
         return { stdout: "", stderr: "" };
@@ -246,7 +318,7 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
     const commands: string[] = [];
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
-      pmRuntime: "omp",
+      pmRuntime: "omp", pmPaneReady: async () => true,
       runShell: async (command) => {
         commands.push(command);
         return { stdout: "", stderr: "" };
@@ -285,7 +357,7 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
 
     const failedDb = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "failed.db") });
     const failedRelay = new TmuxRelay(DEFAULT_CONFIG, {
-      pmRuntime: "omp",
+      pmRuntime: "omp", pmPaneReady: async () => true,
       runShell: async (command) => {
         if (command.includes("send-keys") && command.includes("C-q")) throw new Error("synthetic submit failure");
         return { stdout: "", stderr: "" };
@@ -306,7 +378,7 @@ test("automated PM injects are durable before async submit and retain both idle/
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
-      pmRuntime: "omp",
+      pmRuntime: "omp", pmPaneReady: async () => true,
       runShell: async () => { throw new Error("synthetic tmux failure"); },
     });
     relay.setDatabase(db);
@@ -330,7 +402,7 @@ test("paste-success/submit-failure retry submits the existing prompt once", asyn
     const commands: string[] = [];
     let submitAttempts = 0;
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
-      pmRuntime: "omp",
+      pmRuntime: "omp", pmPaneReady: async () => true,
       runShell: async (command) => {
         commands.push(command);
         if (command.includes("send-keys") && command.includes("C-q") && !command.includes("paste-buffer")) {
@@ -348,7 +420,7 @@ test("paste-success/submit-failure retry submits the existing prompt once", asyn
     // Recreate the relay against the same DB: the existing event log, not
     // transient relay memory, must tell the retry to submit only the key.
     const restartedRelay = new TmuxRelay(DEFAULT_CONFIG, {
-      pmRuntime: "omp",
+      pmRuntime: "omp", pmPaneReady: async () => true,
       runShell: async (command) => {
         commands.push(command);
         if (command.includes("send-keys") && command.includes("C-q") && !command.includes("paste-buffer")) {
@@ -385,7 +457,7 @@ test("ambiguous queue occurrence stays fail-closed beyond the event read horizon
       }
       return { stdout: "", stderr: "" };
     };
-    const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell, pmRuntime: "omp" });
+    const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell, pmRuntime: "omp", pmPaneReady: async () => true });
     relay.setDatabase(db);
     (relay as unknown as { pmBusy: boolean | null }).pmBusy = null;
     const message = "ambiguous durable occurrence";
@@ -393,7 +465,7 @@ test("ambiguous queue occurrence stays fail-closed beyond the event read horizon
     for (let i = 0; i < 600; i += 1) {
       db.logEvent(0, "unrelated-diagnostic", null, null, { i });
     }
-    const restartedRelay = new TmuxRelay(DEFAULT_CONFIG, { runShell, pmRuntime: "omp" });
+    const restartedRelay = new TmuxRelay(DEFAULT_CONFIG, { runShell, pmRuntime: "omp", pmPaneReady: async () => true });
     restartedRelay.setDatabase(db);
     (restartedRelay as unknown as { pmBusy: boolean | null }).pmBusy = null;
     assert.equal((await restartedRelay.submitToPM(message)).ok, false);
@@ -417,7 +489,7 @@ test("concurrent idle/direct inject drains serialize the whole occurrence delive
     const release = new Promise<void>((resolve) => { releaseFirstSubmit = resolve; });
     let submitCount = 0;
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
-      pmRuntime: "omp",
+      pmRuntime: "omp", pmPaneReady: async () => true,
       runShell: async (command) => {
         commands.push(command);
         if (command.endsWith(" Enter")) {
@@ -460,7 +532,7 @@ test("in-flight delivery only removes the selected occurrence, preserving a same
     let submitStarted!: () => void;
     const started = new Promise<void>((resolve) => { submitStarted = resolve; });
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
-      pmRuntime: "omp",
+      pmRuntime: "omp", pmPaneReady: async () => true,
       runShell: async (command) => {
         if (command.endsWith(" Enter")) {
           submitStarted();
@@ -491,7 +563,7 @@ test("queued drain demotes idle after Enter so later PM rows use C-q", async () 
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
     const commands: string[] = [];
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
-      pmRuntime: "omp",
+      pmRuntime: "omp", pmPaneReady: async () => true,
       runShell: async (command) => {
         commands.push(command);
         return { stdout: "", stderr: "" };
@@ -529,7 +601,7 @@ test("Slack route and numbered-slot paths use shared PM/slot submit boundaries",
   const sendStart = relay.indexOf("async sendToSlotAsync");
   const sendEnd = relay.indexOf("\n  /**", sendStart);
   const sendBody = relay.slice(sendStart, sendEnd);
-  assert.match(sendBody, /tmux send-keys -t \$\{paneAddr\} Enter/);
+  assert.match(sendBody, /tmux send-keys -t \$\{paneTarget\} Enter/);
   assert.match(sendBody, /submitToPM\(command\)/);
   const numberedBody = sendBody.slice(sendBody.indexOf("const paneAddr"));
   assert.doesNotMatch(numberedBody, /C-q/);
