@@ -287,6 +287,7 @@ function findLaterPmLifecycleEvent(requestedAt: string | null) {
   return [
     ...db.getEvents(0, 100, "SessionStart"),
     ...db.getEvents(0, 100, "Stop"),
+    ...db.getEvents(0, 100, "pm_status_idle_drained"),
   ]
     .sort((left, right) => right.id - left.id)
     .find((event) => {
@@ -634,11 +635,23 @@ app.post("/pm-status", async (c) => {
     });
     if (db.hasPendingClear(0)) {
       const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
-      db.logEvent(0, "clear_pending_duplicate_suppressed", null, null, {
-        name: "PM",
-        reason: "PM clear delivery is already latched; awaiting SessionStart source=clear acknowledgement",
-        requested_at: requestedAt,
-        via: "pm_status_stop",
+      await requestPmClearOnce({
+        db,
+        source: "pm_status_stop",
+        nowMs: Date.now(),
+        staleAfterMs: PM_CLEAR_STALE_ACK_REPAIR_MS,
+        recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
+        hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
+        laterLifecycleEvent: findLaterPmLifecycleEvent(requestedAt),
+        isPMBusy: () => relay.isPMBusy(),
+        send: async () => {
+          const sent = await sendClearViaMopSendPath(0, "pm_status_stop", false);
+          return {
+            success: sent.success,
+            busy: sent.busy,
+            error: sent.error ?? sent.reason ?? `send failed status=${sent.status}`,
+          };
+        },
       });
     }
     return c.json({ success: true, pm_busy: false, queued_before: before, drained: result.drained });

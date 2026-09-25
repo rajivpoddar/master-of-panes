@@ -118,7 +118,54 @@ test("a fresh in-flight PM clear remains deduplicated", async () => {
   }
 });
 
-test("PM status Stop cannot contain a pending-clear resend path", () => {
+test("a stale latch is re-armed by pm_status_idle_drained without hook Stop rows", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-pm-clear-idle-drained-"));
+  try {
+    const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+    const now = Date.now();
+    db.setPendingClear(0);
+    db.setConfig("pm_clear_requested_at", new Date(now - 11 * 60_000).toISOString());
+    db.logEvent(0, "pm_status_idle_drained", null, null, { event: "stop" });
+
+    assert.equal(db.getEvents(0, 10, "Stop").length, 0);
+    const [idleDrained] = db.getEvents(0, 1, "pm_status_idle_drained");
+    assert.ok(idleDrained);
+    let deliveries = 0;
+    let pmBusy = true;
+    const options = {
+      db,
+      source: "pm_status_stop",
+      nowMs: now,
+      staleAfterMs: 10 * 60_000,
+      recentSuppressMs: 10 * 60_000,
+      hasRecentClearEvent: false,
+      laterLifecycleEvent: idleDrained,
+      isPMBusy: () => pmBusy,
+      send: async () => {
+        deliveries += 1;
+        return { success: true };
+      },
+    };
+
+    const deferred = await requestPmClearOnce(options);
+    assert.equal(deferred.kind, "deferred_busy");
+    assert.equal(deliveries, 0);
+    assert.equal(db.hasPendingClear(0), true);
+
+    pmBusy = false;
+    const sent = await requestPmClearOnce({ ...options, nowMs: now + 1000 });
+    assert.equal(sent.kind, "sent");
+    const duplicate = await requestPmClearOnce({ ...options, nowMs: now + 2000, laterLifecycleEvent: null });
+    assert.equal(duplicate.kind, "pending");
+    assert.equal(deliveries, 1);
+    assert.equal(db.getEvents(0, 10, "clear_pending_stale_repaired").length, 1);
+    assert.equal(db.getEvents(0, 10, "clear_pending_deferred_busy").length, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("PM status Stop retries only through the PM clear exact-once path", () => {
   const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   const start = source.indexOf('app.post("/pm-status"');
   const end = source.indexOf('app.get("/pm-status"', start);
@@ -126,11 +173,11 @@ test("PM status Stop cannot contain a pending-clear resend path", () => {
   assert.notEqual(end, -1);
 
   const route = source.slice(start, end);
-  assert.doesNotMatch(route, /sendClearViaMopSendPath/);
-  assert.doesNotMatch(route, /clear_pending_pm_retry_sent/);
-  assert.match(route, /clear_pending_duplicate_suppressed/);
+  assert.match(route, /await requestPmClearOnce\(/);
+  assert.match(route, /sendClearViaMopSendPath\(0, "pm_status_stop", false\)/);
   assert.match(source, /isPMBusy: \(\) => relay\.isPMBusy\(\)/);
   assert.match(source, /sendClearViaMopSendPath\(0, options\.source, false\)/);
+  assert.match(source, /db\.getEvents\(0, 100, "pm_status_idle_drained"\)/);
 
   const sendRouteStart = source.indexOf('app.post("/slots/:slotNum/send"');
   const pmSubmit = source.indexOf("const submitted = await relay.submitToPM(command)", sendRouteStart);
