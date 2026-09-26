@@ -22,6 +22,12 @@ export const INJECT_ENTER_DELAY_MS: number = resolveInjectEnterDelayMs(
   process.env.MOP_PM_INJECT_ENTER_DELAY_MS,
 );
 
+/** Assignment handoffs need one extra second for Claude to consume a pasted
+ * composer before its single submit key. Keep larger operator dwell settings. */
+export function resolveAssignmentInjectEnterDelayMs(configured = INJECT_ENTER_DELAY_MS): number {
+  return Math.max(2000, configured);
+}
+
 const RULE_LINE = /^\s*─{20,}\s*$/;
 
 /**

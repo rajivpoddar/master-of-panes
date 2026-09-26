@@ -7,6 +7,7 @@ import {
   composerHoldsPayload,
   INJECT_ENTER_DELAY_MS,
   resolveInjectEnterDelayMs,
+  resolveAssignmentInjectEnterDelayMs,
   submitWithComposerCheck,
   waitForEmptyComposer,
 } from "../src/composer.js";
@@ -43,6 +44,12 @@ test("slot and PM share one 1000 ms paste->Enter dwell", () => {
   assert.match(sendBody, /withSlotSendLock\(slotNum, async \(\) =>/);
 });
 
+test("assignment submit dwell is at least 2s while honoring larger configured dwell", () => {
+  assert.equal(resolveAssignmentInjectEnterDelayMs(1000), 2000);
+  assert.equal(resolveAssignmentInjectEnterDelayMs(1500), 2000);
+  assert.equal(resolveAssignmentInjectEnterDelayMs(3000), 3000);
+});
+
 test("composerText reads the Claude input line between the rules", () => {
   assert.equal(composerText(pane(["❯ "])), "");
   assert.equal(composerText(pane(["❯ fix the flaky test", "  second line"])), "fix the flaky test\n  second line");
@@ -71,6 +78,7 @@ test("assignment packets wait for a stable empty composer before the first paste
       && pastePath.indexOf("waitForEmptyComposer") < pastePath.indexOf("tmux load-buffer"),
     "the composer readiness check must run before any tmux paste",
   );
+  assert.match(pastePath, /const submitDwellMs = meta\.requireEmptyComposerBeforePaste[\s\S]*?resolveAssignmentInjectEnterDelayMs\(\)[\s\S]*?: INJECT_ENTER_DELAY_MS/);
 });
 
 test("clear-transition tail and unreadable pane must settle to an empty composer before paste", async () => {
@@ -155,6 +163,32 @@ test("waits one second after the complete payload first appears before Enter", a
   });
 
   assert.equal(enterAtMs, 2000, "the payload was first observed at 1000 ms and must remain stable for another second");
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: true, enterPresses: 1 });
+});
+
+test("assignment submit waits the extra dwell, then sends one Enter and verifies clear", async () => {
+  let elapsedMs = 0;
+  let submitted = false;
+  let enters = 0;
+  let enterAtMs: number | null = null;
+  const result = await submitWithComposerCheck("short inline task", {
+    capture: async () => submitted ? pane(["❯ "]) : pane(["❯ short inline task"]),
+    pressSubmit: async () => {
+      enters++;
+      enterAtMs = elapsedMs;
+      submitted = true;
+    },
+    sleep: async (ms) => {
+      elapsedMs += ms;
+    },
+    prePasteComposer: "",
+    dwellMs: resolveAssignmentInjectEnterDelayMs(1000),
+    clearGraceMs: 250,
+    pollMs: 250,
+  });
+
+  assert.equal(enterAtMs, 3000, "assignment waits 2s after paste plus 1s of stable full payload");
+  assert.equal(enters, 1);
   assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: true, enterPresses: 1 });
 });
 
