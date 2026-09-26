@@ -12,10 +12,15 @@ function parseDelay(raw: string | undefined): number | null {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
-export const INJECT_ENTER_DELAY_MS: number =
-  parseDelay(process.env.MOP_INJECT_ENTER_DELAY_MS) ??
-  parseDelay(process.env.MOP_PM_INJECT_ENTER_DELAY_MS) ??
-  1000;
+export function resolveInjectEnterDelayMs(primary?: string, legacy?: string): number {
+  const configured = parseDelay(primary) ?? parseDelay(legacy) ?? 1000;
+  return Math.max(1000, configured);
+}
+
+export const INJECT_ENTER_DELAY_MS: number = resolveInjectEnterDelayMs(
+  process.env.MOP_INJECT_ENTER_DELAY_MS,
+  process.env.MOP_PM_INJECT_ENTER_DELAY_MS,
+);
 
 const RULE_LINE = /^\s*─{20,}\s*$/;
 
@@ -51,16 +56,15 @@ function squash(text: string): string {
 }
 
 /**
- * True when the composer shows the complete paste: either Claude's collapsed
- * paste placeholder or the payload's final line (whitespace-insensitive, so
- * soft wrapping in the pane does not matter).
+ * True when the full visible payload is in the composer, or Claude has
+ * collapsed a multiline paste into its paste placeholder. Matching only the
+ * last line is unsafe: a truncated packet can end with the expected tail.
  */
 export function composerHoldsPayload(composer: string, payload: string): boolean {
   if (/\[Pasted text/i.test(composer)) return true;
-  const lastLine = payload.trimEnd().split("\n").pop() ?? "";
-  const tail = squash(lastLine).slice(-40);
-  if (!tail) return composer.length > 0;
-  return squash(composer).includes(tail);
+  const expected = squash(payload.trim());
+  if (!expected) return composer.trim() === "";
+  return squash(composer).includes(expected);
 }
 
 export type SubmitCheckResult = {
@@ -75,6 +79,8 @@ export type SubmitCheckDeps = {
   capture: () => Promise<string | null>;
   pressSubmit: () => Promise<void>;
   sleep: (ms: number) => Promise<void>;
+  /** Composer contents sampled before paste; non-empty or unknown blocks Enter. */
+  prePasteComposer?: string | null;
   dwellMs?: number;
   payloadGraceMs?: number;
   clearGraceMs?: number;
@@ -83,15 +89,23 @@ export type SubmitCheckDeps = {
 
 /**
  * Paste has already happened. Dwell, wait (bounded) until the composer shows
- * the complete payload, press the submit key, then confirm the composer input
- * line is empty. If the payload is still sitting in the composer after the
- * first submit, press it exactly once more (the buffered-prompt failure).
+ * the payload, then press Enter once and confirm the input line is empty. If
+ * the composer is partial or unreadable, leave it untouched for an operator;
+ * never submit unrelated text or automatically press Enter a second time.
  */
 export async function submitWithComposerCheck(payload: string, deps: SubmitCheckDeps): Promise<SubmitCheckResult> {
   const dwellMs = deps.dwellMs ?? INJECT_ENTER_DELAY_MS;
   const payloadGraceMs = deps.payloadGraceMs ?? 3000;
   const clearGraceMs = deps.clearGraceMs ?? 2000;
   const pollMs = deps.pollMs ?? 250;
+
+  if (deps.prePasteComposer !== undefined && deps.prePasteComposer !== "") {
+    return {
+      payloadSeen: deps.prePasteComposer === null ? null : false,
+      cleared: null,
+      enterPresses: 0,
+    };
+  }
 
   await deps.sleep(dwellMs);
 
@@ -104,25 +118,22 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
     await deps.sleep(pollMs);
   }
 
-  let enterPresses = 0;
-  let cleared: boolean | null = null;
-  for (let press = 0; press < 2; press++) {
-    await deps.pressSubmit();
-    enterPresses++;
-    let stillHolding = false;
-    for (let waited = 0; ; waited += pollMs) {
-      await deps.sleep(pollMs);
-      const composer = composerText(await deps.capture());
-      if (composer === null) {
-        cleared = null;
-        break;
-      }
-      cleared = composer === "";
-      stillHolding = !cleared && composerHoldsPayload(composer, payload);
-      if (cleared || waited + pollMs >= clearGraceMs) break;
-    }
-    if (!stillHolding) break;
+  if (payloadSeen !== true) {
+    return { payloadSeen, cleared: null, enterPresses: 0 };
   }
 
-  return { payloadSeen, cleared, enterPresses };
+  await deps.pressSubmit();
+  let cleared: boolean | null = null;
+  for (let waited = 0; ; waited += pollMs) {
+    await deps.sleep(pollMs);
+    const composer = composerText(await deps.capture());
+    if (composer === null) {
+      cleared = null;
+      break;
+    }
+    cleared = composer === "";
+    if (cleared || waited + pollMs >= clearGraceMs) break;
+  }
+
+  return { payloadSeen, cleared, enterPresses: 1 };
 }

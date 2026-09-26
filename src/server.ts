@@ -38,7 +38,8 @@ import { PMCadenceScheduler } from "./pmCadence.js";
 import { P0EscalationWatcher } from "./p0EscalationWatch.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
-import { INJECT_ENTER_DELAY_MS, submitWithComposerCheck, type SubmitCheckResult } from "./composer.js";
+import { composerText, INJECT_ENTER_DELAY_MS, submitWithComposerCheck, type SubmitCheckResult } from "./composer.js";
+import { withSlotSendLock } from "./slotSendLock.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import {
   NativeSlotReleaseCoordinator,
@@ -1160,13 +1161,11 @@ async function deliverTaskFileForAssignment(
       receipt: { slot: slotNum, pane: paneTarget, verified: false, file: filePath },
     };
   }
-  const preSnapshot = (await capturePaneSnapshot(paneTarget)) ?? "";
   const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, filePayload, {
     source: "file",
     label: filePath,
   });
-  await sleep(600);
-  const verify = await deliveryConfirmed(paneTarget, preSnapshot, paste.submit);
+  const verify = paste.verify;
   if (!verify.ok) {
     return {
       verified: false,
@@ -1661,10 +1660,13 @@ async function deliveryConfirmed(
   preSnapshot: string,
   submit?: SubmitCheckResult,
 ): Promise<{ ok: boolean; reason?: string }> {
-  if (submit?.payloadSeen === false) {
+  if (submit && submit.payloadSeen !== true) {
     return { ok: false, reason: "composer never showed the complete payload before Enter" };
   }
-  if (submit?.cleared === false) {
+  if (submit && submit.enterPresses !== 1) {
+    return { ok: false, reason: "payload was not submitted exactly once" };
+  }
+  if (submit && submit.cleared !== true) {
     return { ok: false, reason: "composer input still holds the prompt after Enter (buffered, not submitted)" };
   }
   const post = await capturePaneSnapshot(paneAddress);
@@ -1692,62 +1694,76 @@ async function pastePayloadWithTmuxBuffer(
   paneAddress: string,
   payload: Buffer,
   meta: { source: "command" | "file"; label: string },
-): Promise<{ chunks: number; bytes: number; chunkSize: number; submit: SubmitCheckResult }> {
-  const chunkSize = sendChunkSizeBytes();
-  const bytes = payload.byteLength;
-  const chunks = Math.max(1, Math.ceil(bytes / chunkSize));
-  const bufName = `mop-send-${slotNum}-${Date.now()}`;
+): Promise<{
+  chunks: number;
+  bytes: number;
+  chunkSize: number;
+  submit: SubmitCheckResult;
+  verify: { ok: boolean; reason?: string };
+}> {
+  return withSlotSendLock(slotNum, async () => {
+    const preSnapshot = (await capturePaneSnapshot(paneAddress)) ?? "";
+    const chunkSize = sendChunkSizeBytes();
+    const bytes = payload.byteLength;
+    const chunks = Math.max(1, Math.ceil(bytes / chunkSize));
+    const bufName = `mop-send-${slotNum}-${Date.now()}`;
 
-  db.logEvent(slotNum, "send_buffer_start", null, null, {
-    source: meta.source,
-    label: meta.label.slice(0, 200),
-    bytes,
-    chunkSize,
-    chunks,
-    paste: "buffer",
-  });
-  console.log(
-    `[slots/send] slot=${slotNum} source=${meta.source} bytes=${bytes} chunks=${chunks} chunkSize=${chunkSize} paste=buffer`
-  );
+    db.logEvent(slotNum, "send_buffer_start", null, null, {
+      source: meta.source,
+      label: meta.label.slice(0, 200),
+      bytes,
+      chunkSize,
+      chunks,
+      paste: "buffer",
+    });
+    console.log(
+      `[slots/send] slot=${slotNum} source=${meta.source} bytes=${bytes} chunks=${chunks} chunkSize=${chunkSize} paste=buffer`
+    );
 
-  for (let index = 0; index < chunks; index++) {
-    const start = index * chunkSize;
-    const end = Math.min(start + chunkSize, bytes);
-    const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}-${index + 1}-of-${chunks}.txt`;
-    await writeFile(tmpFile, payload.subarray(start, end));
-    try {
-      await execShell(`tmux load-buffer -b ${shellEscape(bufName)} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
-      await execShell(`tmux paste-buffer -b ${shellEscape(bufName)} -t ${paneAddress} -d`, { timeout: 10_000 });
-      db.logEvent(slotNum, "send_buffer_chunk", null, null, {
-        source: meta.source,
-        chunk: index + 1,
-        chunks,
-        bytes: end - start,
-      });
-    } finally {
-      await unlink(tmpFile).catch(() => undefined);
+    for (let index = 0; index < chunks; index++) {
+      const start = index * chunkSize;
+      const end = Math.min(start + chunkSize, bytes);
+      const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}-${index + 1}-of-${chunks}.txt`;
+      await writeFile(tmpFile, payload.subarray(start, end));
+      try {
+        await execShell(`tmux load-buffer -b ${shellEscape(bufName)} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+        await execShell(`tmux paste-buffer -b ${shellEscape(bufName)} -t ${paneAddress} -d`, { timeout: 10_000 });
+        db.logEvent(slotNum, "send_buffer_chunk", null, null, {
+          source: meta.source,
+          chunk: index + 1,
+          chunks,
+          bytes: end - start,
+        });
+      } finally {
+        await unlink(tmpFile).catch(() => undefined);
+      }
+      if (chunks > 1) {
+        await sleep(150);
+      }
     }
-    if (chunks > 1) {
-      await sleep(150);
-    }
-  }
 
-  const submit = await submitWithComposerCheck(payload.toString("utf8"), {
-    capture: () => capturePaneSnapshot(paneAddress),
-    pressSubmit: async () => {
-      await execShell(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 10_000 });
-    },
-    sleep,
-    dwellMs: INJECT_ENTER_DELAY_MS,
+    const submit = await submitWithComposerCheck(payload.toString("utf8"), {
+      capture: () => capturePaneSnapshot(paneAddress),
+      pressSubmit: async () => {
+        await execShell(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 10_000 });
+      },
+      sleep,
+      prePasteComposer: composerText(preSnapshot),
+      dwellMs: INJECT_ENTER_DELAY_MS,
+    });
+    db.logEvent(slotNum, "send_submit_check", null, null, {
+      source: meta.source,
+      dwell_ms: INJECT_ENTER_DELAY_MS,
+      payload_seen: submit.payloadSeen,
+      cleared: submit.cleared,
+      enter_presses: submit.enterPresses,
+    });
+    // Keep the pane lock through readback so another send cannot make this
+    // delivery look successful by changing the same composer first.
+    await sleep(600);
+    const verify = await deliveryConfirmed(paneAddress, preSnapshot, submit);
+    return { chunks, bytes, chunkSize, submit, verify };
   });
-  db.logEvent(slotNum, "send_submit_check", null, null, {
-    source: meta.source,
-    dwell_ms: INJECT_ENTER_DELAY_MS,
-    payload_seen: submit.payloadSeen,
-    cleared: submit.cleared,
-    enter_presses: submit.enterPresses,
-  });
-  return { chunks, bytes, chunkSize, submit };
 }
 
 app.post("/slots/:slotNum/send", async (c) => {
@@ -1992,9 +2008,6 @@ app.post("/slots/:slotNum/send", async (c) => {
     db.logEvent(slotNum, "send_command_2_not_plan_approval", null, null, { activity });
   }
 
-  // Capture pane snapshot before send, for post-send delivery verification.
-  const preSnapshot = (await capturePaneSnapshot(paneTarget)) ?? "";
-
   try {
     if (filePath) {
       // File mode: load-buffer + paste-buffer, chunked when needed. No payload cap.
@@ -2035,9 +2048,7 @@ app.post("/slots/:slotNum/send", async (c) => {
         source: "file",
         label: filePath,
       });
-      // Verify pane content actually changed.
-      await sleep(600);
-      const verify = await deliveryConfirmed(paneTarget, preSnapshot, paste.submit);
+      const verify = paste.verify;
       if (!verify.ok) {
         db.logEvent(slotNum, "send_unverified", null, null, {
           file: filePath,
@@ -2136,9 +2147,7 @@ app.post("/slots/:slotNum/send", async (c) => {
         label: command.slice(0, 200),
       });
 
-      // Post-send verification.
-      await sleep(500);
-      const verify = await deliveryConfirmed(paneTarget, preSnapshot, paste.submit);
+      const verify = paste.verify;
       if (!verify.ok) {
         db.logEvent(slotNum, "send_unverified", null, null, {
           command: command.slice(0, 200),
