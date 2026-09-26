@@ -67,6 +67,57 @@ export function composerHoldsPayload(composer: string, payload: string): boolean
   return squash(composer).includes(expected);
 }
 
+export type EmptyComposerWaitDeps = {
+  capture: () => Promise<string | null>;
+  sleep: (ms: number) => Promise<void>;
+  stableMs?: number;
+  timeoutMs?: number;
+  pollMs?: number;
+};
+
+export type EmptyComposerWaitResult =
+  | { ready: true; snapshot: string; waitedMs: number }
+  | { ready: false; snapshot: string | null; waitedMs: number };
+
+/**
+ * Wait for a readable empty Claude composer to remain empty before a paste.
+ * A cleared input line alone is not enough immediately after `/clear`: the
+ * new TUI can still be settling, and a paste during that transition can lose
+ * its head. On timeout, callers must leave the pane untouched.
+ */
+export async function waitForEmptyComposer(deps: EmptyComposerWaitDeps): Promise<EmptyComposerWaitResult> {
+  const stableMs = deps.stableMs ?? INJECT_ENTER_DELAY_MS;
+  const timeoutMs = deps.timeoutMs ?? 3000;
+  const pollMs = deps.pollMs ?? 250;
+  let waitedMs = 0;
+  let stableForMs = 0;
+  let lastComposer: string | null = null;
+  let lastSnapshot: string | null = null;
+
+  for (;;) {
+    const snapshot = await deps.capture();
+    lastSnapshot = snapshot;
+    const composer = composerText(snapshot);
+    if (composer === "") {
+      stableForMs = lastComposer === "" ? stableForMs + pollMs : 0;
+      lastComposer = "";
+      if (stableForMs >= stableMs && snapshot !== null) {
+        return { ready: true, snapshot, waitedMs };
+      }
+    } else {
+      lastComposer = composer;
+      stableForMs = 0;
+    }
+
+    if (waitedMs >= timeoutMs) {
+      return { ready: false, snapshot: lastSnapshot, waitedMs };
+    }
+    const sleepMs = Math.min(pollMs, timeoutMs - waitedMs);
+    await deps.sleep(sleepMs);
+    waitedMs += sleepMs;
+  }
+}
+
 export type SubmitCheckResult = {
   /** true/false once the composer was readable before Enter; null if unrecognised. */
   payloadSeen: boolean | null;
