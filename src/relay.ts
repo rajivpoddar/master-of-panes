@@ -15,14 +15,12 @@ import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { INJECT_ENTER_DELAY_MS, submitWithComposerCheck } from "./composer.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
-export const PM_INJECT_ENTER_DELAY_MS: number = (() => {
-  const raw = process.env.MOP_PM_INJECT_ENTER_DELAY_MS;
-  const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n >= 0 ? n : 500;
-})();
+/** Shared PM + numbered-slot paste->Enter dwell (see composer.ts). */
+export const PM_INJECT_ENTER_DELAY_MS: number = INJECT_ENTER_DELAY_MS;
 
 // v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
 // wrapper. Kept for reference / fallback diagnostic; no longer invoked by
@@ -1116,13 +1114,30 @@ export class TmuxRelay {
               `tmux paste-buffer -b ${bufName} -t ${paneTarget} -d`,
               { timeout: 3_000 }
             );
-            // Small breathing room so the TUI registers the paste before Enter.
-            // Matches the 0.3s that injectDirect uses for PM pane sends.
-            await sleep(300);
-            await this.runShell(
-              `tmux send-keys -t ${paneTarget} Enter`,
-              { timeout: 3_000 }
-            );
+            // Shared dwell, then Enter, then confirm the composer emptied
+            // (one extra Enter if the prompt is still buffered).
+            const submit = await submitWithComposerCheck(command, {
+              capture: async () => {
+                try {
+                  return (await this.runShell(`tmux capture-pane -t ${paneTarget} -p`, { timeout: 5_000 })).stdout;
+                } catch {
+                  return null;
+                }
+              },
+              pressSubmit: async () => {
+                await this.runShell(`tmux send-keys -t ${paneTarget} Enter`, { timeout: 3_000 });
+              },
+              sleep,
+            });
+            if (this.db && (submit.payloadSeen === false || submit.cleared === false || submit.enterPresses > 1)) {
+              this.db.logEvent(slotNum, "send_submit_check", null, null, {
+                command: command.slice(0, 200),
+                dwell_ms: INJECT_ENTER_DELAY_MS,
+                payload_seen: submit.payloadSeen,
+                cleared: submit.cleared,
+                enter_presses: submit.enterPresses,
+              });
+            }
           } finally {
             await fs.unlink(tmpFile).catch(() => undefined);
           }
