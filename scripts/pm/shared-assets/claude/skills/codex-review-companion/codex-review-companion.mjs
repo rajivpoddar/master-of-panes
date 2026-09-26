@@ -58,11 +58,10 @@ import process from "node:process";
 
 const HOME = os.homedir();
 const REVIEW_TYPES = new Set(["arch", "plan", "code", "qa"]);
-export const DEFAULT_MODEL = "gpt-5.5";
+export const DEFAULT_MODEL = "gpt-6-luna";
 export const DEFAULT_REVIEW_EFFORT = "high";
 const DIFF_TRUNCATE_AT = 800_000; // chars
-const CODEX_BIN =
-  process.env.CODEX_BIN || "/opt/homebrew/bin/codex";
+const DEFAULT_CODEX_BIN = "/opt/homebrew/bin/codex";
 const CODEX_TIMEOUT_MS = parseInt(
   process.env.CODEX_TIMEOUT_MS || `${9 * 60 * 1000}`,
   10,
@@ -73,6 +72,48 @@ const CODEX_SERVICE_TIER =
   process.env.CODEX_SERVICE_TIER === "inherit"
     ? null
     : process.env.CODEX_SERVICE_TIER || null;
+
+function isExecutableFile(filePath) {
+  try {
+    if (!fs.statSync(filePath).isFile()) return false;
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function resolveCodexBinary({
+  configuredBinary = process.env.CODEX_BIN,
+  pathValue = process.env.PATH || "",
+  defaultBinary = DEFAULT_CODEX_BIN,
+  isExecutable = isExecutableFile,
+} = {}) {
+  const pathEntries = pathValue.split(path.delimiter).filter(Boolean);
+  const candidates = [];
+  const add = (candidate) => {
+    if (typeof candidate !== "string" || !candidate.trim()) return;
+    const resolved = path.resolve(candidate.trim());
+    if (!candidates.includes(resolved)) candidates.push(resolved);
+  };
+
+  if (typeof configuredBinary === "string" && configuredBinary.trim()) {
+    const configured = configuredBinary.trim();
+    if (path.isAbsolute(configured) || configured.includes(path.sep)) {
+      add(configured);
+    } else {
+      for (const directory of pathEntries) add(path.join(directory, configured));
+    }
+  }
+  for (const directory of pathEntries) add(path.join(directory, "codex"));
+  add(defaultBinary);
+
+  const selected = candidates.find(isExecutable);
+  if (selected) return selected;
+  throw new Error(
+    `CODEX_BIN_NOT_FOUND: no executable Codex CLI found (checked ${candidates.join(", ") || "no candidates"}); set CODEX_BIN to an executable file or add codex to PATH`,
+  );
+}
 
 // ---------- arg parsing ----------
 
@@ -2082,8 +2123,9 @@ const APP_SERVER_CAPABILITIES = {
 };
 
 class CodexAppServerClient {
-  constructor(args) {
+  constructor(args, resolveBinary = resolveCodexBinary) {
     this.args = args;
+    this.resolveBinary = resolveBinary;
     this.proc = null;
     this.rl = null;
     this.pending = new Map(); // id -> {resolve, reject, method}
@@ -2102,8 +2144,15 @@ class CodexAppServerClient {
     const codexArgs = CODEX_SERVICE_TIER
       ? ["-c", `service_tier="${CODEX_SERVICE_TIER}"`, "app-server"]
       : ["app-server"];
-    info(this.args, `spawning ${CODEX_BIN} ${codexArgs.join(" ")}`);
-    this.proc = spawn(CODEX_BIN, codexArgs, {
+    let codexBin;
+    try {
+      codexBin = this.resolveBinary();
+    } catch (error) {
+      this._handleExit(error);
+      throw error;
+    }
+    info(this.args, `spawning ${codexBin} ${codexArgs.join(" ")}`);
+    this.proc = spawn(codexBin, codexArgs, {
       cwd: this.args.repoRoot,
       env: { ...process.env, NO_COLOR: "1" },
       stdio: ["pipe", "pipe", "pipe"],
@@ -2273,8 +2322,8 @@ class CodexAppServerClient {
   }
 }
 
-function invokeCodex(prompt, args) {
-  const client = new CodexAppServerClient(args);
+function invokeCodex(prompt, args, resolveBinary = resolveCodexBinary) {
+  const client = new CodexAppServerClient(args, resolveBinary);
   return new Promise(async (resolve, reject) => {
     const startedAt = Date.now();
     let phase = "starting";
@@ -3373,6 +3422,7 @@ export {
   exactQaPrHeadBinding,
   isIssueOnlyArchReview,
   isReReview,
+  invokeCodex,
   loadPromptTemplate,
   issueFromBranchName,
   latestReviewedHead,
