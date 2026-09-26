@@ -73,6 +73,17 @@ edit labels, comment on GitHub, or send anything to the slot.
 Treat green CI, slot self-report, and slot Codex approval as inputs, not
 conclusions.
 
+## No-disabled-button gate (Rajiv product rule 2026-09-26)
+
+UI RULE (Rajiv 2026-09-26): Do not gate actions with disabled buttons. Buttons stay enabled; on click, validate and render an error state on the offending control (checkbox/field error styling + inline message) and do not proceed. The only allowed disabled state is the action's own in-flight/double-submit guard. Plans and reviews must call out any new `disabled=` on a button that encodes a precondition and require the error-state pattern instead.
+
+Return `PM_CLAUDE_REVIEW: BLOCKED` (REQUEST_CHANGES) and name this gate when
+the diff adds a precondition-gated disabled button (e.g. `disabled={!agreed}`);
+require click-time validation, the error state on the offending control
+(`aria-invalid` plus inline error text), no action on invalid click, and a test
+for it. `disabled={isSubmitting}` for the action's own in-flight guard is
+allowed. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
+
 ## Review Source Invariant
 
 Before reading PR files, producing a verdict, or writing any `/tmp` patch/packet,

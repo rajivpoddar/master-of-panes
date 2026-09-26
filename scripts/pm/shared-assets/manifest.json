@@ -6,7 +6,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "3dacf1db70a00cb0d3a4af259537d10b5bab786ac08c5693ffdd09c58d5accc9",
+      "sha256": "5987936e05e18e6952ffd7aa678e3f0b03440db447a2800d2ae245efb3cf11ba",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "37d130c54be07117f772e965108a3f390ea221bdd5533b7c9a3de9fea2e0178e",
+      "sha256": "908b47118852556152bc08b751e9007f44e2564950ccd0be938999acc8f49105",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "123608d3f98d8ca0cfb0bf6c9b96c254b4b92b57dc7b20a85eb838534d761ba8",
+      "sha256": "7ea3c3f25c406c7e5b68117b5eeab9b350a9a6915ad1b37e5cc8d756df97107c",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -231,7 +231,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "41e1c345d57d5f031b5259386a9ee9f62c74373e0be6f96cf412070a8e4d071c",
+      "sha256": "89ab793e53cd43c2fd06d73c488487364d3bcdcd567dd672b976323618d3fddc",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -240,7 +240,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "6ce3880e97e59028707a103520d410dec691917a37d4310b6e92123f3c77d7ce",
+      "sha256": "b4120bfc2ef890a6a9c3702824413f88a93b18d0279c5f3f8a16257cd8e6b656",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
@@ -611,7 +611,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "34482b0f45fa186cf7f40790c61667f440f6040bd707164f5bf54a21ecbed0ea",
+      "sha256": "793f8a0edc24f825b31fda715740bb5e5aac636427878355342d70855fbfdb45",
       "source_path": "claude/skills/codex-app-code-review/templates/prompt-rework.txt"
     },
     {
@@ -620,7 +620,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "c8e09d24cf01db00b1afb40a7e2fbae003074ec8a1ca9babedefa5f8f12798d5",
+      "sha256": "fab5d7d929f74f406a5e588129cb6d91315c636013398903106003da823b927a",
       "source_path": "claude/skills/codex-app-code-review/templates/prompt.txt"
     },
     {
@@ -629,7 +629,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "b64c50b63d2baa90931d019041f46701831da33b0871b155b78cb806e8fa4c9c",
+      "sha256": "d54521c3a7fd2bb70731d508f265b128be4827e53ab60827de0bf22e123232a9",
       "source_path": "claude/skills/codex-app-plan-review/templates/prompt-rework.txt"
     },
     {
@@ -638,7 +638,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "db862dac7edd2418af80dc5d43a609fc4f161bb86a034b2346509834f3957d46",
+      "sha256": "699d16c9e28e3a859c024cce60db6f70025ab25bab8401479a4ce8dd673c8884",
       "source_path": "claude/skills/codex-app-plan-review/templates/prompt.txt"
     },
     {
@@ -955,6 +955,15 @@
       "source_path": "claude/slot-skills/slot6/respawn/scripts/respawn.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/rules/33-heydonna-ui-product-rules.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-heydonna-product-rules",
+      "sha256": "fd3dedc5be235a246d454cd98bac3bdfd57912779a342d891063b41874f78558",
+      "source_path": "claude/user-rules/33-heydonna-ui-product-rules.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.codex-companions/RUNBOOK.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1194,7 +1203,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 129,
+    "selected_count": 130,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1256,7 +1265,8 @@
       "~/.claude/skills/codex-app-plan-review/templates/prompt-rework.txt",
       "~/.claude/skills/codex-app-plan-review/templates/prompt.txt",
       "~/Downloads/projects/heydonna-app/.claude/agents/pm-code-reviewer.md",
-      "~/Downloads/projects/heydonna-app/.claude/agents/pm-plan-reviewer.md"
+      "~/Downloads/projects/heydonna-app/.claude/agents/pm-plan-reviewer.md",
+      "~/.claude/rules/33-heydonna-ui-product-rules.md"
     ]
   },
   "owner": "master-of-panes",

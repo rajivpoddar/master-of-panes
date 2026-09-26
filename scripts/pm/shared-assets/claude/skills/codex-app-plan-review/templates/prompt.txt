@@ -149,6 +149,10 @@ generic "tests pass", or deferring proof discovery to paid CI is REVISE.
 Phase 4 may attach receipts; it must not invent the proof strategy after code
 exists.
 
+<!-- NO_DISABLED_BUTTON_UI_RULE_V1 -->
+UI RULE (Rajiv 2026-09-26): Do not gate actions with disabled buttons. Buttons stay enabled; on click, validate and render an error state on the offending control (checkbox/field error styling + inline message) and do not proceed. The only allowed disabled state is the action's own in-flight/double-submit guard. Plans and reviews must call out any new `disabled=` on a button that encodes a precondition and require the error-state pattern instead.
+NO-DISABLED-BUTTON GATE: REQUEST_CHANGES and name `NO-DISABLED-BUTTON GATE` when the plan or an AC specifies a precondition-gated disabled button (e.g. "Continue disabled until the checkbox is checked", `<Button disabled={!agreed}>`); require the plan to keep the button enabled, click-time validation, `aria-invalid` + inline error text on the offending control, no action on invalid click, and a named test that clicks the enabled button with the precondition unmet. `disabled={isSubmitting}`/`disabled={isPending}` for the action's own in-flight guard is allowed.
+
 <!-- SPLIT_SEAM_COHESIVE_TRANSACTION_V1 -->
 SPLIT-SEAM / COHESIVE RUNTIME TRANSACTION GATE (Codex meta-analysis 2026-08-10):
 For any plan spanning multiple surfaces (capture workflow, deployment/rollout,

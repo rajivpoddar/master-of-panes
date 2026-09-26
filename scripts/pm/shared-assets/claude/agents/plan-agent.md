@@ -109,6 +109,18 @@ divergence, preserve the authoritative 1-25 gutter shape, and name both OOXML
 assertions and real-Word side-by-side proof. A standards-based replacement is
 not acceptable merely because it opens in Word.
 
+## No-disabled-button Planning Gate (Rajiv product rule 2026-09-26)
+
+UI RULE (Rajiv 2026-09-26): Do not gate actions with disabled buttons. Buttons stay enabled; on click, validate and render an error state on the offending control (checkbox/field error styling + inline message) and do not proceed. The only allowed disabled state is the action's own in-flight/double-submit guard. Plans and reviews must call out any new `disabled=` on a button that encodes a precondition and require the error-state pattern instead.
+
+When a plan adds or changes a button whose action has a precondition, the plan
+must specify the click-time validation, the error state on the offending control
+(`aria-invalid` plus inline error text), that the action does not run, and a test
+that clicks the enabled button with the precondition unmet and asserts the error
+state. If the issue or an AC asks for a disabled precondition button, plan the
+error-state pattern and note the correction. Full rule:
+`~/.claude/rules/33-heydonna-ui-product-rules.md`.
+
 ## Input
 
 You will receive:

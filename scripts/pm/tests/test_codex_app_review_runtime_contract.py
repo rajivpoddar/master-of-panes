@@ -90,7 +90,8 @@ class ManagedRegistrationTests(unittest.TestCase):
         import hashlib
         import stat
         entries = json.loads(MANIFEST.read_text(encoding="utf-8"))["entries"]
-        rows = [e for e in entries if e["source_path"].endswith(("prompt.txt", "prompt-rework.txt")) and "codex-app-" in e["source_path"]]
+        rows = [e for e in entries if e["source_path"].endswith(("prompt.txt", "prompt-rework.txt"))
+                and ("codex-app-code-review" in e["source_path"] or "codex-app-qa-review" in e["source_path"])]
         self.assertEqual(len(rows), 4)
         for row in rows:
             f = ROOT / "scripts" / "pm" / "shared-assets" / row["source_path"]

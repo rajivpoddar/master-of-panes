@@ -567,6 +567,20 @@ severity labels or made warning UI smaller while non-catastrophic states still
 reserved editor chrome. The final contract was "no persistent editor banner
 unless catastrophic", not "less prominent warnings".
 
+## No-disabled-button gate (Mandatory - Rajiv product rule 2026-09-26)
+
+UI RULE (Rajiv 2026-09-26): Do not gate actions with disabled buttons. Buttons stay enabled; on click, validate and render an error state on the offending control (checkbox/field error styling + inline message) and do not proceed. The only allowed disabled state is the action's own in-flight/double-submit guard. Plans and reviews must call out any new `disabled=` on a button that encodes a precondition and require the error-state pattern instead.
+
+REQUEST_CHANGES and name this gate when the diff adds or keeps a new
+precondition-gated disabled button (for example `<Button disabled={!agreed}>`,
+`disabled={!isValid}`, `disabled={!selected}`). Require instead: the button
+stays enabled, the click handler validates, the offending control renders an
+error state (`aria-invalid` plus inline error text), the action does not run,
+and a test clicks the enabled button with the precondition unmet and asserts
+the error state. `disabled={isSubmitting}` / `disabled={isPending}` guarding
+the action's own in-flight request is allowed. Full rule:
+`~/.claude/rules/33-heydonna-ui-product-rules.md`.
+
 ## Convex metadata-only transcript artifact boundary gate (Mandatory — #5940/#5944 retro, 2026-07-01)
 
 Convex must never store or receive large transcript-related artifacts inline.

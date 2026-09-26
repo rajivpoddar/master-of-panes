@@ -119,6 +119,19 @@ harness), require a stated **split-seam / cohesive-transaction justification**:
    `TERMINAL_DISPOSITION: SPLIT_REQUIRED` (or `ISSUE_REWRITE_REQUIRED` when the
    issue itself spans incompatible surfaces).
 
+## No-disabled-button gate (Mandatory - Rajiv product rule 2026-09-26)
+
+UI RULE (Rajiv 2026-09-26): Do not gate actions with disabled buttons. Buttons stay enabled; on click, validate and render an error state on the offending control (checkbox/field error styling + inline message) and do not proceed. The only allowed disabled state is the action's own in-flight/double-submit guard. Plans and reviews must call out any new `disabled=` on a button that encodes a precondition and require the error-state pattern instead.
+
+REQUEST_CHANGES and name this gate when a plan or its ACs specify a
+precondition-gated disabled button (for example "Continue disabled until the
+checkbox is checked", `<Button disabled={!agreed}>`). Require the plan to keep
+the button enabled, validate on click, render the error state on the offending
+control (`aria-invalid` plus inline error text), not run the action, and name a
+test that clicks the enabled button with the precondition unmet and asserts the
+error state. An in-flight/double-submit guard (`disabled={isSubmitting}`) is
+allowed. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
+
 ## How you work
 
 1. Receive: issue number (REQUIRED) and the branch the plan is on (REQUIRED for pre-PR — `--pr` only works after the PR exists).

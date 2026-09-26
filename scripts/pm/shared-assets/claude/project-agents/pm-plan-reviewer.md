@@ -75,6 +75,15 @@ not emit another iterative patch: return `PM_CLAUDE_PLAN_REVIEW: BLOCKED` with
 `cap_decision: rescue_required` and `TERMINAL_DISPOSITION: SPLIT_REQUIRED` (or
 `ISSUE_REWRITE_REQUIRED` when the issue itself spans incompatible surfaces).
 
+## No-disabled-button gate (Rajiv product rule 2026-09-26)
+
+UI RULE (Rajiv 2026-09-26): Do not gate actions with disabled buttons. Buttons stay enabled; on click, validate and render an error state on the offending control (checkbox/field error styling + inline message) and do not proceed. The only allowed disabled state is the action's own in-flight/double-submit guard. Plans and reviews must call out any new `disabled=` on a button that encodes a precondition and require the error-state pattern instead.
+
+Return `PM_CLAUDE_PLAN_REVIEW: BLOCKED` (REQUEST_CHANGES) and name this gate
+when a plan or AC adds a precondition-gated disabled button; require the
+click-time error-state pattern plus a test that clicks the enabled button with
+the precondition unmet. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
+
 ## Review Source Invariant
 
 Before reading the plan file, adjudicating the plan, or writing a `/tmp` plan
