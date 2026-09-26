@@ -70,6 +70,8 @@ export function composerHoldsPayload(composer: string, payload: string): boolean
 export type SubmitCheckResult = {
   /** true/false once the composer was readable before Enter; null if unrecognised. */
   payloadSeen: boolean | null;
+  /** True only after the complete payload stays unchanged for the readiness interval. */
+  payloadStable: boolean | null;
   /** true/false once the composer was readable after Enter; null if unrecognised. */
   cleared: boolean | null;
   enterPresses: number;
@@ -83,6 +85,10 @@ export type SubmitCheckDeps = {
   prePasteComposer?: string | null;
   dwellMs?: number;
   payloadGraceMs?: number;
+  /** Time the complete visible composer must remain unchanged before Enter. */
+  payloadStableMs?: number;
+  /** Bounded time to reach a stable complete composer after it first appears. */
+  payloadStableGraceMs?: number;
   clearGraceMs?: number;
   pollMs?: number;
 };
@@ -96,12 +102,15 @@ export type SubmitCheckDeps = {
 export async function submitWithComposerCheck(payload: string, deps: SubmitCheckDeps): Promise<SubmitCheckResult> {
   const dwellMs = deps.dwellMs ?? INJECT_ENTER_DELAY_MS;
   const payloadGraceMs = deps.payloadGraceMs ?? 3000;
+  const payloadStableMs = deps.payloadStableMs ?? INJECT_ENTER_DELAY_MS;
+  const payloadStableGraceMs = deps.payloadStableGraceMs ?? payloadGraceMs + payloadStableMs;
   const clearGraceMs = deps.clearGraceMs ?? 2000;
   const pollMs = deps.pollMs ?? 250;
 
   if (deps.prePasteComposer !== undefined && deps.prePasteComposer !== "") {
     return {
       payloadSeen: deps.prePasteComposer === null ? null : false,
+      payloadStable: deps.prePasteComposer === null ? null : false,
       cleared: null,
       enterPresses: 0,
     };
@@ -110,16 +119,45 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
   await deps.sleep(dwellMs);
 
   let payloadSeen: boolean | null = null;
-  for (let waited = 0; ; waited += pollMs) {
+  let payloadDiscovered = false;
+  let payloadWaited = 0;
+  let payloadStableWaited = 0;
+  let stableComposer: string | null = null;
+  let stableForMs = 0;
+  let payloadStable: boolean | null = false;
+  for (;;) {
     const composer = composerText(await deps.capture());
-    if (composer === null) break;
+    if (composer === null) {
+      payloadStable = null;
+      break;
+    }
     payloadSeen = composerHoldsPayload(composer, payload);
-    if (payloadSeen || waited >= payloadGraceMs) break;
+    if (payloadSeen) {
+      payloadDiscovered = true;
+      if (composer === stableComposer) {
+        stableForMs += pollMs;
+      } else {
+        stableComposer = composer;
+        stableForMs = 0;
+      }
+      if (stableForMs >= payloadStableMs) {
+        payloadStable = true;
+        break;
+      }
+      if (payloadStableWaited >= payloadStableGraceMs) break;
+    } else {
+      stableComposer = null;
+      stableForMs = 0;
+      if (!payloadDiscovered && payloadWaited >= payloadGraceMs) break;
+      if (payloadDiscovered && payloadStableWaited >= payloadStableGraceMs) break;
+    }
     await deps.sleep(pollMs);
+    if (payloadDiscovered) payloadStableWaited += pollMs;
+    else payloadWaited += pollMs;
   }
 
-  if (payloadSeen !== true) {
-    return { payloadSeen, cleared: null, enterPresses: 0 };
+  if (payloadSeen !== true || payloadStable !== true) {
+    return { payloadSeen, payloadStable, cleared: null, enterPresses: 0 };
   }
 
   await deps.pressSubmit();
@@ -135,5 +173,5 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
     if (cleared || waited + pollMs >= clearGraceMs) break;
   }
 
-  return { payloadSeen, cleared, enterPresses: 1 };
+  return { payloadSeen, payloadStable, cleared, enterPresses: 1 };
 }

@@ -62,8 +62,34 @@ test("buffered prompt after Enter remains untouched and is reported uncleared", 
     dwellMs: 0,
     clearGraceMs: 250,
   });
-  assert.deepEqual(result, { payloadSeen: true, cleared: false, enterPresses: 1 });
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: false, enterPresses: 1 });
   assert.equal(enterPresses, 1);
+});
+
+test("waits one second after the complete payload first appears before Enter", async () => {
+  let elapsedMs = 0;
+  let submitted = false;
+  let enterAtMs: number | null = null;
+  const result = await submitWithComposerCheck("complete task", {
+    capture: async () => {
+      if (submitted) return pane(["❯ "]);
+      return pane(["❯ complete task"]);
+    },
+    pressSubmit: async () => {
+      enterAtMs = elapsedMs;
+      submitted = elapsedMs >= 2000;
+    },
+    sleep: async (ms) => {
+      elapsedMs += ms;
+    },
+    prePasteComposer: "",
+    dwellMs: 1000,
+    clearGraceMs: 250,
+    pollMs: 250,
+  });
+
+  assert.equal(enterAtMs, 2000, "the payload was first observed at 1000 ms and must remain stable for another second");
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: true, enterPresses: 1 });
 });
 
 test("partial paste is reported so the send is not marked verified", async () => {
@@ -76,6 +102,7 @@ test("partial paste is reported so the send is not marked verified", async () =>
     clearGraceMs: 250,
   });
   assert.equal(result.payloadSeen, false);
+  assert.equal(result.payloadStable, false);
   assert.equal(result.cleared, null);
   assert.equal(result.enterPresses, 0);
 });
@@ -92,6 +119,7 @@ test("pre-existing or unreadable composer content is never submitted", async () 
       prePasteComposer,
     });
     assert.equal(result.enterPresses, 0);
+    assert.notEqual(result.payloadStable, true);
     assert.equal(enterPresses, 0);
   }
 });

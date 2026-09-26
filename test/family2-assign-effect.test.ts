@@ -210,6 +210,8 @@ test("a failed delivery leaves a NAMED recoverable state and never rolls ownersh
     assert.equal(result.json.step_failed, "delivery");
     assert.equal(result.json.reason, "session_delivery_unverified");
     assert.equal(result.json.sanctioned_path, "mop-assign-slot");
+    assert.equal(result.json.ownership_receipt, undefined, "a refused delivery must not look like an assigned success");
+    assert.equal(result.json.delivery_receipt, undefined, "a refused delivery must not claim a verified receipt");
     const after = h.db.getSlot(4)!;
     assert.equal(after.occupied, true, "ownership must NOT be rolled back implicitly");
     assert.equal(after.issue, 8110);
@@ -217,6 +219,10 @@ test("a failed delivery leaves a NAMED recoverable state and never rolls ownersh
     assert.equal(after.assignment_epoch, epoch0 + 1);
     const intent = h.db.getAssignmentEffectIntent("assign-4-8110")!;
     assert.equal(intent.state, "pending_delivery");
+    assert.equal(intent.delivery_receipt, null, "a refused delivery must remain unfinalized");
+    const ownershipEvent = h.db.getEvents(4, 20, "assignment_effect_ownership_bound")[0];
+    assert.equal(JSON.parse(ownershipEvent.payload).delivery_state, "pending");
+    assert.equal(h.db.getEvents(4, 20, "assignment_effect_committed").length, 0);
     assert.match(result.json.slot_state_after, /occupied=true/);
     assert.match(result.json.slot_state_after, /task_present=true/);
   } finally {

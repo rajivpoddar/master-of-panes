@@ -1144,6 +1144,7 @@ export class TmuxRelay {
                 command: command.slice(0, 200),
                 dwell_ms: INJECT_ENTER_DELAY_MS,
                 payload_seen: submit.payloadSeen,
+                payload_stable: submit.payloadStable,
                 cleared: submit.cleared,
                 enter_presses: submit.enterPresses,
               });
@@ -1151,6 +1152,7 @@ export class TmuxRelay {
             // A missing/partial/unreadable composer or an uncleared input is
             // ambiguous. Do not auto-repaste or press Enter a second time.
             return submit.payloadSeen === true
+              && submit.payloadStable === true
               && submit.cleared === true
               && submit.enterPresses === 1;
           } finally {

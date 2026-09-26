@@ -12,10 +12,11 @@
  * 5. Returns a HookResponse that Claude Code acts on
  */
 
-import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
@@ -56,6 +57,7 @@ import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, P
 import { runtimeIdentity } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { requestPmClearOnce, waitForPmIdleDrain } from "./pmClearLatch.js";
+import { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } from "./assignmentTaskPacket.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -1161,8 +1163,28 @@ async function deliverTaskFileForAssignment(
       receipt: { slot: slotNum, pane: paneTarget, verified: false, file: filePath },
     };
   }
-  const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, filePayload, {
-    source: "file",
+  let deliveryPath = filePath;
+  if (filePayload.byteLength > ASSIGNMENT_INLINE_TASK_MAX_BYTES) {
+    try {
+      const archiveDirectory = "/tmp/pm-delivered-archive";
+      await mkdir(archiveDirectory, { recursive: true, mode: 0o700 });
+      const sourceName = basename(filePath).replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 120) || "task.md";
+      deliveryPath = join(
+        archiveDirectory,
+        `mop-assignment-s${slotNum}-${Date.now()}-${randomUUID()}-${sourceName}`,
+      );
+      await writeFile(deliveryPath, filePayload, { flag: "wx", mode: 0o600 });
+    } catch {
+      return {
+        verified: false,
+        reason: "task_file_archive_failed",
+        receipt: { slot: slotNum, pane: paneTarget, task_bytes: filePayload.byteLength, verified: false },
+      };
+    }
+  }
+  const packet = buildAssignmentTaskPacket(deliveryPath, filePayload);
+  const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, packet.payload, {
+    source: packet.mode === "file_ref" ? "file_ref" : "file",
     label: filePath,
   });
   const verify = paste.verify;
@@ -1170,7 +1192,16 @@ async function deliverTaskFileForAssignment(
     return {
       verified: false,
       reason: verify.reason ?? "session_delivery_unverified",
-      receipt: { slot: slotNum, pane: paneTarget, bytes: paste.bytes, chunks: paste.chunks, verified: false },
+      receipt: {
+        slot: slotNum,
+        pane: paneTarget,
+        mode: packet.mode,
+        task_bytes: packet.taskBytes,
+        task_sha256: packet.taskSha256,
+        message_bytes: paste.bytes,
+        chunks: paste.chunks,
+        verified: false,
+      },
     };
   }
   return {
@@ -1178,8 +1209,10 @@ async function deliverTaskFileForAssignment(
     receipt: {
       slot: slotNum,
       pane: paneTarget,
-      mode: "file",
-      bytes: paste.bytes,
+      mode: packet.mode,
+      bytes: packet.taskBytes,
+      sha256: packet.taskSha256,
+      message_bytes: paste.bytes,
       chunks: paste.chunks,
       chunkSize: paste.chunkSize,
       verified: true,
@@ -1663,6 +1696,9 @@ async function deliveryConfirmed(
   if (submit && submit.payloadSeen !== true) {
     return { ok: false, reason: "composer never showed the complete payload before Enter" };
   }
+  if (submit && submit.payloadStable !== true) {
+    return { ok: false, reason: "composer did not hold the complete payload steady before Enter" };
+  }
   if (submit && submit.enterPresses !== 1) {
     return { ok: false, reason: "payload was not submitted exactly once" };
   }
@@ -1693,7 +1729,7 @@ async function pastePayloadWithTmuxBuffer(
   slotNum: number,
   paneAddress: string,
   payload: Buffer,
-  meta: { source: "command" | "file"; label: string },
+  meta: { source: "command" | "file" | "file_ref"; label: string },
 ): Promise<{
   chunks: number;
   bytes: number;
@@ -1755,6 +1791,7 @@ async function pastePayloadWithTmuxBuffer(
       source: meta.source,
       dwell_ms: INJECT_ENTER_DELAY_MS,
       payload_seen: submit.payloadSeen,
+      payload_stable: submit.payloadStable,
       cleared: submit.cleared,
       enter_presses: submit.enterPresses,
     });
