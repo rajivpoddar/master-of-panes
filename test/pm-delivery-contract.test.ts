@@ -100,7 +100,7 @@ test("native Claude serializes complete paste-delay-Enter sequences", async () =
   assert.equal(firstPaste < firstSubmit && firstSubmit < secondPaste && secondPaste < secondSubmit, true);
 });
 
-test("one Enter submits a complete bracketed multiline paste after 500ms", async () => {
+test("one Enter submits a complete bracketed multiline paste after the inject dwell", async () => {
   const commands: string[] = [];
   const timestamps: number[] = [];
   const relay = new TmuxRelay(DEFAULT_CONFIG, {
@@ -115,7 +115,7 @@ test("one Enter submits a complete bracketed multiline paste after 500ms", async
 
   const result = await relay.submitToPM("complete first line\ncomplete second line");
 
-  assert.equal(PM_INJECT_ENTER_DELAY_MS, 500);
+  assert.equal(PM_INJECT_ENTER_DELAY_MS, 1000);
   assert.equal(result.ok, true);
   const load = commands.findIndex((command) => command.includes("tmux load-buffer"));
   const paste = commands.findIndex((command) => command.includes("tmux paste-buffer"));
@@ -123,7 +123,7 @@ test("one Enter submits a complete bracketed multiline paste after 500ms", async
   assert.equal(load >= 0 && load < paste && paste < enter, true);
   assert.match(commands[paste] ?? "", /paste-buffer -p/);
   assert.equal(commands.filter((command) => command.endsWith(" Enter")).length, 1);
-  assert.equal(timestamps[enter]! - timestamps[paste]! >= 500, true);
+  assert.equal(timestamps[enter]! - timestamps[paste]! >= 1000, true);
 });
 
 test("native Claude pane shell retains a message until a booted agent can receive it", async () => {
@@ -332,8 +332,9 @@ test("queued PM delivery uses shared submit key, retains failed rows, and record
     assert.ok(firstOccurrence);
 
     // injectToPM now enters the shared drain immediately; no later Stop hook
-    // is required to produce the follow-up.
-    await new Promise((resolve) => setTimeout(resolve, 1_300));
+    // is required to produce the follow-up. Each delivery costs one pre-Enter
+    // dwell plus the 500ms post-submit settle, so derive the window.
+    await new Promise((resolve) => setTimeout(resolve, PM_INJECT_ENTER_DELAY_MS + 1_200));
     const delivered = db.getEvents(0, 10, "pm_queue_delivered").length;
     assert.equal(delivered, 1);
     assert.equal(db.getPendingPMEventCount(), 0);
@@ -510,7 +511,7 @@ test("concurrent idle/direct inject drains serialize the whole occurrence delive
     await firstStarted;
     assert.equal(commands.filter((command) => command.endsWith(" Enter")).length, 1);
     releaseFirstSubmit();
-    await new Promise((resolve) => setTimeout(resolve, 1_800));
+    await new Promise((resolve) => setTimeout(resolve, 2 * PM_INJECT_ENTER_DELAY_MS + 1_000));
     assert.equal(db.getEvents(0, 20, "pm_queue_delivered").length, 2);
     assert.equal(db.getPendingPMEventCount(), 0);
     assert.deepEqual(

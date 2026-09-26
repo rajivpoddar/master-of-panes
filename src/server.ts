@@ -38,6 +38,7 @@ import { PMCadenceScheduler } from "./pmCadence.js";
 import { P0EscalationWatcher } from "./p0EscalationWatch.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
+import { INJECT_ENTER_DELAY_MS, submitWithComposerCheck, type SubmitCheckResult } from "./composer.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import {
   NativeSlotReleaseCoordinator,
@@ -1165,7 +1166,7 @@ async function deliverTaskFileForAssignment(
     label: filePath,
   });
   await sleep(600);
-  const verify = await deliveryConfirmed(paneTarget, preSnapshot);
+  const verify = await deliveryConfirmed(paneTarget, preSnapshot, paste.submit);
   if (!verify.ok) {
     return {
       verified: false,
@@ -1655,7 +1656,17 @@ function parseMessageSlotWrapper(command: string): { targetSlot: number | null; 
  * the keystrokes (dead/detached pane, or — worst case — the TUI is in a
  * state that ignores input). Either way: return failure.
  */
-async function deliveryConfirmed(paneAddress: string, preSnapshot: string): Promise<{ ok: boolean; reason?: string }> {
+async function deliveryConfirmed(
+  paneAddress: string,
+  preSnapshot: string,
+  submit?: SubmitCheckResult,
+): Promise<{ ok: boolean; reason?: string }> {
+  if (submit?.payloadSeen === false) {
+    return { ok: false, reason: "composer never showed the complete payload before Enter" };
+  }
+  if (submit?.cleared === false) {
+    return { ok: false, reason: "composer input still holds the prompt after Enter (buffered, not submitted)" };
+  }
   const post = await capturePaneSnapshot(paneAddress);
   if (post === null) {
     return { ok: false, reason: "pane disappeared after send (capture-pane failed)" };
@@ -1681,7 +1692,7 @@ async function pastePayloadWithTmuxBuffer(
   paneAddress: string,
   payload: Buffer,
   meta: { source: "command" | "file"; label: string },
-): Promise<{ chunks: number; bytes: number; chunkSize: number }> {
+): Promise<{ chunks: number; bytes: number; chunkSize: number; submit: SubmitCheckResult }> {
   const chunkSize = sendChunkSizeBytes();
   const bytes = payload.byteLength;
   const chunks = Math.max(1, Math.ceil(bytes / chunkSize));
@@ -1721,9 +1732,22 @@ async function pastePayloadWithTmuxBuffer(
     }
   }
 
-  await sleep(bytes > chunkSize ? 1000 : 500);
-  await execShell(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 10_000 });
-  return { chunks, bytes, chunkSize };
+  const submit = await submitWithComposerCheck(payload.toString("utf8"), {
+    capture: () => capturePaneSnapshot(paneAddress),
+    pressSubmit: async () => {
+      await execShell(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 10_000 });
+    },
+    sleep,
+    dwellMs: INJECT_ENTER_DELAY_MS,
+  });
+  db.logEvent(slotNum, "send_submit_check", null, null, {
+    source: meta.source,
+    dwell_ms: INJECT_ENTER_DELAY_MS,
+    payload_seen: submit.payloadSeen,
+    cleared: submit.cleared,
+    enter_presses: submit.enterPresses,
+  });
+  return { chunks, bytes, chunkSize, submit };
 }
 
 app.post("/slots/:slotNum/send", async (c) => {
@@ -2013,7 +2037,7 @@ app.post("/slots/:slotNum/send", async (c) => {
       });
       // Verify pane content actually changed.
       await sleep(600);
-      const verify = await deliveryConfirmed(paneTarget, preSnapshot);
+      const verify = await deliveryConfirmed(paneTarget, preSnapshot, paste.submit);
       if (!verify.ok) {
         db.logEvent(slotNum, "send_unverified", null, null, {
           file: filePath,
@@ -2114,7 +2138,7 @@ app.post("/slots/:slotNum/send", async (c) => {
 
       // Post-send verification.
       await sleep(500);
-      const verify = await deliveryConfirmed(paneTarget, preSnapshot);
+      const verify = await deliveryConfirmed(paneTarget, preSnapshot, paste.submit);
       if (!verify.ok) {
         db.logEvent(slotNum, "send_unverified", null, null, {
           command: command.slice(0, 200),
