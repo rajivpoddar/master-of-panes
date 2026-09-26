@@ -2,7 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { composerText, composerHoldsPayload, INJECT_ENTER_DELAY_MS, resolveInjectEnterDelayMs, submitWithComposerCheck } from "../src/composer.js";
+import {
+  composerText,
+  composerHoldsPayload,
+  INJECT_ENTER_DELAY_MS,
+  resolveInjectEnterDelayMs,
+  submitWithComposerCheck,
+  waitForEmptyComposer,
+} from "../src/composer.js";
 import { PM_INJECT_ENTER_DELAY_MS, TmuxRelay } from "../src/relay.js";
 import { withSlotSendLock } from "../src/slotSendLock.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
@@ -47,6 +54,65 @@ test("composerHoldsPayload requires the full visible payload or the paste placeh
   assert.equal(composerHoldsPayload("do X\nthen finish it", "do X\nthen finish it\n"), true);
   assert.equal(composerHoldsPayload("[Pasted text #1 +40 lines]", "long"), true);
   assert.equal(composerHoldsPayload("then finish it", "do X\nthen finish it"), false);
+});
+
+test("assignment packets wait for a stable empty composer before the first paste", () => {
+  const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const assignmentStart = server.indexOf("async function deliverTaskFileForAssignment");
+  const assignmentEnd = server.indexOf("registerAssignmentRoute(app, db, issueProjection)");
+  const assignmentDelivery = server.slice(assignmentStart, assignmentEnd);
+  assert.match(assignmentDelivery, /requireEmptyComposerBeforePaste:\s*true/);
+
+  const pasteStart = server.indexOf("async function pastePayloadWithTmuxBuffer");
+  const pasteEnd = server.indexOf('app.post("/slots/:slotNum/send"', pasteStart);
+  const pastePath = server.slice(pasteStart, pasteEnd);
+  assert.ok(
+    pastePath.indexOf("waitForEmptyComposer") >= 0
+      && pastePath.indexOf("waitForEmptyComposer") < pastePath.indexOf("tmux load-buffer"),
+    "the composer readiness check must run before any tmux paste",
+  );
+});
+
+test("clear-transition tail and unreadable pane must settle to an empty composer before paste", async () => {
+  const snapshots = [
+    pane(["❯ only the final two lines"]),
+    "Claude Code is restarting after /clear",
+    pane(["❯ "]),
+    pane(["❯ "]),
+    pane(["❯ "]),
+    pane(["❯ "]),
+    pane(["❯ "]),
+  ];
+  let captures = 0;
+  let sleptMs = 0;
+  const result = await waitForEmptyComposer({
+    capture: async () => snapshots[Math.min(captures++, snapshots.length - 1)] ?? null,
+    sleep: async (ms) => {
+      sleptMs += ms;
+    },
+    stableMs: 1000,
+    timeoutMs: 3000,
+    pollMs: 250,
+  });
+
+  assert.equal(result.ready, true);
+  assert.equal(result.snapshot, pane(["❯ "]));
+  assert.ok(sleptMs >= 1500, `the stale tail and restart screen were not skipped (${sleptMs}ms)`);
+});
+
+test("assignment pre-paste readiness times out without entering or pasting into a stale composer", async () => {
+  const result = await waitForEmptyComposer({
+    capture: async () => pane(["❯ only the final two lines"]),
+    sleep: async () => undefined,
+    stableMs: 1000,
+    timeoutMs: 500,
+    pollMs: 250,
+  });
+  assert.deepEqual(result, {
+    ready: false,
+    snapshot: pane(["❯ only the final two lines"]),
+    waitedMs: 500,
+  });
 });
 
 test("buffered prompt after Enter remains untouched and is reported uncleared", async () => {

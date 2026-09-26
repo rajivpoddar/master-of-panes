@@ -39,7 +39,13 @@ import { PMCadenceScheduler } from "./pmCadence.js";
 import { P0EscalationWatcher } from "./p0EscalationWatch.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
-import { composerText, INJECT_ENTER_DELAY_MS, submitWithComposerCheck, type SubmitCheckResult } from "./composer.js";
+import {
+  composerText,
+  INJECT_ENTER_DELAY_MS,
+  submitWithComposerCheck,
+  waitForEmptyComposer,
+  type SubmitCheckResult,
+} from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import {
@@ -1186,6 +1192,7 @@ async function deliverTaskFileForAssignment(
   const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, packet.payload, {
     source: packet.mode === "file_ref" ? "file_ref" : "file",
     label: filePath,
+    requireEmptyComposerBeforePaste: true,
   });
   const verify = paste.verify;
   if (!verify.ok) {
@@ -1729,7 +1736,11 @@ async function pastePayloadWithTmuxBuffer(
   slotNum: number,
   paneAddress: string,
   payload: Buffer,
-  meta: { source: "command" | "file" | "file_ref"; label: string },
+  meta: {
+    source: "command" | "file" | "file_ref";
+    label: string;
+    requireEmptyComposerBeforePaste?: boolean;
+  },
 ): Promise<{
   chunks: number;
   bytes: number;
@@ -1738,9 +1749,34 @@ async function pastePayloadWithTmuxBuffer(
   verify: { ok: boolean; reason?: string };
 }> {
   return withSlotSendLock(slotNum, async () => {
-    const preSnapshot = (await capturePaneSnapshot(paneAddress)) ?? "";
     const chunkSize = sendChunkSizeBytes();
     const bytes = payload.byteLength;
+    let preSnapshot: string;
+    if (meta.requireEmptyComposerBeforePaste) {
+      const readiness = await waitForEmptyComposer({
+        capture: () => capturePaneSnapshot(paneAddress),
+        sleep,
+      });
+      if (!readiness.ready) {
+        const reason = "composer did not remain empty and readable before paste";
+        db.logEvent(slotNum, "send_precheck_refused", null, null, {
+          source: meta.source,
+          bytes,
+          waited_ms: readiness.waitedMs,
+          reason,
+        });
+        return {
+          chunks: 0,
+          bytes,
+          chunkSize,
+          submit: { payloadSeen: false, payloadStable: false, cleared: null, enterPresses: 0 },
+          verify: { ok: false, reason },
+        };
+      }
+      preSnapshot = readiness.snapshot;
+    } else {
+      preSnapshot = (await capturePaneSnapshot(paneAddress)) ?? "";
+    }
     const chunks = Math.max(1, Math.ceil(bytes / chunkSize));
     const bufName = `mop-send-${slotNum}-${Date.now()}`;
 
