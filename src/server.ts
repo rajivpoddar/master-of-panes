@@ -42,6 +42,7 @@ import { execShell, execShellOk, sleep } from "./asyncCommand.js";
 import {
   composerText,
   INJECT_ENTER_DELAY_MS,
+  resolveAssignmentInjectEnterDelayMs,
   submitWithComposerCheck,
   waitForEmptyComposer,
   type SubmitCheckResult,
@@ -1751,6 +1752,9 @@ async function pastePayloadWithTmuxBuffer(
   return withSlotSendLock(slotNum, async () => {
     const chunkSize = sendChunkSizeBytes();
     const bytes = payload.byteLength;
+    const submitDwellMs = meta.requireEmptyComposerBeforePaste
+      ? resolveAssignmentInjectEnterDelayMs()
+      : INJECT_ENTER_DELAY_MS;
     let preSnapshot: string;
     if (meta.requireEmptyComposerBeforePaste) {
       const readiness = await waitForEmptyComposer({
@@ -1821,11 +1825,11 @@ async function pastePayloadWithTmuxBuffer(
       },
       sleep,
       prePasteComposer: composerText(preSnapshot),
-      dwellMs: INJECT_ENTER_DELAY_MS,
+      dwellMs: submitDwellMs,
     });
     db.logEvent(slotNum, "send_submit_check", null, null, {
       source: meta.source,
-      dwell_ms: INJECT_ENTER_DELAY_MS,
+      dwell_ms: submitDwellMs,
       payload_seen: submit.payloadSeen,
       payload_stable: submit.payloadStable,
       cleared: submit.cleared,
