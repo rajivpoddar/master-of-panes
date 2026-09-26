@@ -1,6 +1,33 @@
 {
   "entries": [
     {
+      "canonical_target": "/Users/rajiv/.claude/agents/codex-code-reviewer.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-review-agents",
+      "sha256": "3dacf1db70a00cb0d3a4af259537d10b5bab786ac08c5693ffdd09c58d5accc9",
+      "source_path": "claude/agents/codex-code-reviewer.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/agents/codex-plan-reviewer.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-review-agents",
+      "sha256": "37d130c54be07117f772e965108a3f390ea221bdd5533b7c9a3de9fea2e0178e",
+      "source_path": "claude/agents/codex-plan-reviewer.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/agents/plan-agent.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-planning-agents",
+      "sha256": "123608d3f98d8ca0cfb0bf6c9b96c254b4b92b57dc7b20a85eb838534d761ba8",
+      "source_path": "claude/agents/plan-agent.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/commands/dev-handoff.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -197,6 +224,24 @@
       "ownership_class": "shared-claude-mop-plugin-hook-relay",
       "sha256": "b9056135eac4182753ee0616f1a0538cb8f3f49e78a1bb1faba74ed9fa5a75f6",
       "source_path": "claude/plugins/master-of-panes/scripts/hook-relay.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/agents/pm-code-reviewer.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-review-agents",
+      "sha256": "41e1c345d57d5f031b5259386a9ee9f62c74373e0be6f96cf412070a8e4d071c",
+      "source_path": "claude/project-agents/pm-code-reviewer.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/agents/pm-plan-reviewer.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-review-agents",
+      "sha256": "6ce3880e97e59028707a103520d410dec691917a37d4310b6e92123f3c77d7ce",
+      "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules/99-pm-fable-review-cap.md",
@@ -577,6 +622,24 @@
       "ownership_class": "shared-claude-codex-app-review-prompts",
       "sha256": "c8e09d24cf01db00b1afb40a7e2fbae003074ec8a1ca9babedefa5f8f12798d5",
       "source_path": "claude/skills/codex-app-code-review/templates/prompt.txt"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/codex-app-plan-review/templates/prompt-rework.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-codex-app-review-prompts",
+      "sha256": "b64c50b63d2baa90931d019041f46701831da33b0871b155b78cb806e8fa4c9c",
+      "source_path": "claude/skills/codex-app-plan-review/templates/prompt-rework.txt"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/codex-app-plan-review/templates/prompt.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-codex-app-review-prompts",
+      "sha256": "db862dac7edd2418af80dc5d43a609fc4f161bb86a034b2346509834f3957d46",
+      "source_path": "claude/skills/codex-app-plan-review/templates/prompt.txt"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/codex-app-qa-review/templates/prompt-rework.txt",
@@ -1131,7 +1194,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 122,
+    "selected_count": 129,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1186,7 +1249,14 @@
       "~/.claude/skills/message-slot/scripts/message-slot.sh",
       "~/.claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
       "~/.claude/skills/codex-review-companion/SKILL.md",
-      "~/.claude/skills/todo-prioritize/SKILL.md"
+      "~/.claude/skills/todo-prioritize/SKILL.md",
+      "~/.claude/agents/codex-code-reviewer.md",
+      "~/.claude/agents/codex-plan-reviewer.md",
+      "~/.claude/agents/plan-agent.md",
+      "~/.claude/skills/codex-app-plan-review/templates/prompt-rework.txt",
+      "~/.claude/skills/codex-app-plan-review/templates/prompt.txt",
+      "~/Downloads/projects/heydonna-app/.claude/agents/pm-code-reviewer.md",
+      "~/Downloads/projects/heydonna-app/.claude/agents/pm-plan-reviewer.md"
     ]
   },
   "owner": "master-of-panes",

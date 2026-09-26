@@ -1,0 +1,63 @@
+Review the revised implementation plan for issue #ISSUE.
+
+This is a DELTA REVIEW, not a fresh architecture review.
+
+BASELINE: [PREVIOUS_REVIEW_HEAD]
+DELTA FILES:
+[REWORK_FILES]
+
+REWORK ITEMS:
+[paste rework items]
+
+DELTA SCOPE: [DELTA_SCOPE]
+SCOPE RULE: [DELTA_SCOPE_DETAIL]
+
+ISSUE CONTRACT:
+[paste issue body]
+
+CURRENT PLAN:
+[paste plan content]
+
+Required procedure:
+
+1. Terminalize every prior blocker from the injected ledger using its existing
+   stable ID: `RESOLVED`, `OPEN`, or `SUPERSEDED`.
+2. Review only the plan changes since the baseline and the minimum repository
+   control points needed to verify those changes. Do not repeat a full plan or
+   architecture review.
+3. Do not reopen approved unchanged decisions or restate a prior blocker under a
+   new ID. A new blocker must be caused by `new_revision` or be
+   `newly_inspectable`, with exact evidence explaining why it was unavailable on
+   the prior head.
+4. Confirm directive fidelity, the actual production failure mode, the runtime
+   control point being changed, the smallest coherent implementation, and an
+   executable test/rollout contract for the changed portion only.
+5. For a non-product-only delta, validate the named process/proof contract and do
+   not restart product architecture review.
+6. Block only for P0/P1 product/runtime correctness, data integrity, unsafe state
+   transitions, directive drift, or missing release-critical proof. Wording,
+   extra documentation, cleanup, and nonessential proof improvements are P2
+   follow-ups.
+7. If the delta adds or changes a surface not present in the baseline (capture
+   workflow, deployment/rollout, observability, schema/migration, product
+   runtime), require the split-seam / cohesive-transaction justification from
+   the full plan gate and do not silently absorb the new surface into the
+   existing PR scope without that statement.
+7. If the revised plan still cannot close a prior blocker within the review
+   budget, return that blocker as OPEN with a concrete split/rescope/product
+   decision. Do not request another generic plan rewrite.
+
+<!-- BEHAVIORAL_AC_PROOF_CONTRACT_V1 -->
+For every behavior-changing AC in the delta, require its predeclared production
+case, runtime control point, exact command/fixture, observable, and negative
+proof. A repeated same-class blocker must end in a terminal patch, split,
+rescope, override, or product decision—not another generic rework cycle.
+
+Return exactly one verdict: `APPROVE`, `REVISE`, or `REJECT`.
+P2 findings cannot support a negative verdict without a concrete
+`SEVERITY_OVERRIDE: P1` and runtime/release evidence.
+
+For every blocker, emit the convergence marker fields required by the companion.
+
+
+VALIDATOR HARD-REJECT RECURRENCE CHECK (issue #7944 lineage): If the revised plan still hard-rejects (or preserves a re-promotion to rejection) over a heading/template/blank-line/casing preference without a word-level LCS corruption witness — e.g. `missing immutable anchor` on a candidate with no deleted content, where the correct shape is DSL normalization to `DEPOSITION` plus structured warnings with deliverable output (`ready_with_warnings`) — return that blocker as OPEN with the concrete warn-not-reject reshape. The main-`6793164e` discriminators (no content deleted) stay warning-only. Do not request another generic plan rewrite for this class.
