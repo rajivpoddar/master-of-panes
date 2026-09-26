@@ -676,11 +676,12 @@ export function registerAssignmentEffectRoutes(
         displacement.conflicting_owner_slots = assigned.owner_slots ?? [];
       }
       db.markAssignmentEffectCommitted(request.effect_id, committedEpoch ?? 0);
-      db.logEvent(slotNum, "assignment_effect_committed", null, null, {
+      db.logEvent(slotNum, "assignment_effect_ownership_bound", null, null, {
         effect_id: request.effect_id,
         selection_class: request.selection_class,
         assignment_epoch: committedEpoch,
         request_digest: requestDigest,
+        delivery_state: request.task.trim() !== "" && request.task_file !== "" ? "pending" : "not_required",
       });
       if (displacement.prior) {
         // One audit row for the displaced in-flight work: prior owner,
