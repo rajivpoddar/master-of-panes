@@ -496,6 +496,15 @@
       "source_path": "claude/scripts/pm-ops-legacy.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm-post-visual-proof.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-qa-visual-proof-publisher",
+      "sha256": "d0e62a36fa8697f8b21c26b090671ee88bd9cdb976d1770fe91ba4c2df206438",
+      "source_path": "claude/scripts/pm-post-visual-proof.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/pm-terminal-continuity.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1221,7 +1230,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 132,
+    "selected_count": 133,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1244,6 +1253,7 @@
       "~/.claude/scripts/mop-slot-respawn.sh",
       "~/.claude/scripts/pm-cleanup-pr.py",
       "~/.claude/scripts/pm-merges-automation-update.py",
+      "~/.claude/scripts/pm-post-visual-proof.py",
       "~/.claude/scripts/pm-terminal-continuity.py",
       "~/.claude/scripts/pm-terminal-wake.py",
       "~/.claude/control_plane/runtime_observation.py",
