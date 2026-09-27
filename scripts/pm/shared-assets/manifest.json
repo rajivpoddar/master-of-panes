@@ -531,10 +531,10 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-visual-proof-gate",
-      "sha256": "f141cbb1e4b512ef932cad9518ec78093290a78e4285ec6f04cd9ba91c6501a2",
+      "sha256": "87423bd3ea86bc3cb10fccffade14c86ec5c0f1eb45508dfaedde2a92eb0f280",
       "source_authority": {
-        "blob_sha": "2bde63420e0070debb048c94d6f2513785638c3e",
-        "commit": "a9edd8a9f3bd2c70375073f67d1d41e9ab3c4f1a",
+        "blob_sha": "fcbb30ed379591b782ac8d8e17b9169686d84dea",
+        "commit": "a2039dedccb89ab29456f6946589382362a3bb3c",
         "mode": 493,
         "path": "scripts/pm/qa-visual-proof-gate.py",
         "preimage_sha256": "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a",
@@ -1099,6 +1099,15 @@
       "source_path": "codex/skills/heydonna-control-plane-repair/SKILL.md"
     },
     {
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-codex-skill",
+      "sha256": "90eadaf60834e8e1dd5ce471a5960e906a4ed1175b0231679b4b1713f2f83763",
+      "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1251,6 +1260,7 @@
       "~/Downloads/projects/heydonna-app-3005/.claude/skills/respawn",
       "~/Downloads/projects/heydonna-app-3006/.claude/skills/respawn",
       "~/.codex/skills/codex-stdio-send-message",
+      "~/.codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt",
       "~/.claude/skills/pm-cleanup-pr/SKILL.md",

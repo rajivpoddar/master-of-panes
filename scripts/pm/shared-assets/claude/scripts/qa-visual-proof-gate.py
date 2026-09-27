@@ -3,8 +3,8 @@
 
 The issue contract decides whether screenshots are required. A changed-file
 classifier decides only whether this gate must inspect that contract. Proof is
-accepted from GitHub Actions artifacts, GitHub attachments, HTTPS R2 objects,
-or a hash-bound local PNG under /tmp for same-host promotion.
+accepted from Slack threads, GitHub Actions artifacts, GitHub attachments, HTTPS
+R2 objects, or a hash-bound local PNG under /tmp for same-host promotion.
 """
 
 from __future__ import annotations
@@ -23,7 +23,9 @@ import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
 def _find_repo_root(anchor: Path) -> Path | None:
@@ -54,6 +56,7 @@ def resolve_repo_root() -> Path:
 
 REPO_ROOT = resolve_repo_root()
 MARKER = re.compile(r"<!--\s*qa-visual-proof:\s*(\{.*?\})\s*-->", re.I | re.S)
+SLACK_MARKER = re.compile(r"<!--\s*qa-visual-proof-slack:\s*(\{.*?\})\s*-->", re.I | re.S)
 SHA256 = re.compile(r"[0-9a-f]{64}")
 ALLOWED_ARTIFACT_KINDS = {
     "actions_artifact",
@@ -64,6 +67,14 @@ ALLOWED_ARTIFACT_KINDS = {
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_PNG_BYTES = 25 * 1024 * 1024
 MAX_ACTIONS_ARCHIVE_BYTES = 100 * 1024 * 1024
+SLACK_API = "https://slack.com/api"
+SLACK_CTO_USER_ID = "U0BNFGX2UAX"
+SLACK_CHANNEL_ID = re.compile(r"^[CG][A-Z0-9]{1,31}$")
+SLACK_FILE_ID = re.compile(r"^F[A-Z0-9]{5,63}$")
+SLACK_THREAD_TS = re.compile(r"^[0-9]{10}\.[0-9]{6}$")
+SLACK_AC_ID = re.compile(r"^[A-Z0-9][A-Z0-9._-]{0,99}$")
+SLACK_DOWNLOAD_HOSTS = {"files.slack.com"}
+MAX_SLACK_THREAD_PAGES = 10
 
 
 def load_module(name: str, path: Path) -> Any:
@@ -102,6 +113,228 @@ def download(command: list[str], target: Path, *, timeout: int = 90) -> None:
     if completed.returncode:
         message = completed.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(message or "artifact download failed")
+
+
+class SlackProofError(RuntimeError):
+    pass
+
+
+def load_cto_slack_token() -> str | None:
+    token = os.environ.get("SLACK_CTO_BOT_TOKEN")
+    if token:
+        return token
+    for path in (
+        Path("/Users/rajiv/Downloads/projects/heydonna-app/.env.local"),
+        Path.home() / ".claude" / ".env",
+    ):
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                match = re.match(r"^(?:export\s+)?SLACK_CTO_BOT_TOKEN=(.*)$", line.strip())
+                if match:
+                    value = match.group(1).strip().strip("\"").strip("'")
+                    if value:
+                        return value
+        except OSError:
+            continue
+    return None
+
+
+def slack_api_call(method: str, token: str, payload: dict[str, str]) -> dict[str, Any]:
+    request = Request(
+        f"{SLACK_API}/{method}",
+        data=urlencode(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, OSError, TimeoutError, json.JSONDecodeError) as exc:
+        raise SlackProofError(f"slack_api_unavailable:{method}:{type(exc).__name__}") from None
+    if not isinstance(result, dict):
+        raise SlackProofError(f"slack_api_malformed:{method}")
+    if result.get("ok") is not True:
+        error = str(result.get("error") or "unknown_error")
+        if not re.fullmatch(r"[a-z0-9_]+", error):
+            error = "unknown_error"
+        raise SlackProofError(f"slack_api_error:{method}:{error}")
+    return result
+
+
+def download_slack_file_bytes(url: str, token: str) -> bytes:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in SLACK_DOWNLOAD_HOSTS:
+        raise SlackProofError("slack_file_download_url_untrusted")
+
+    class RejectRedirect(HTTPRedirectHandler):
+        def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+            del request, file_pointer, code, message, headers, new_url
+            return None
+
+    request = Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with build_opener(RejectRedirect()).open(request, timeout=45) as response:
+            if response.status != 200:
+                raise SlackProofError("slack_file_download_failed")
+            data = response.read(MAX_PNG_BYTES + 1)
+    except SlackProofError:
+        raise
+    except (HTTPError, URLError, OSError, TimeoutError) as exc:
+        raise SlackProofError(f"slack_file_download_unavailable:{type(exc).__name__}") from None
+    if len(data) > MAX_PNG_BYTES:
+        raise SlackProofError("png_too_large")
+    return data
+
+
+def slack_thread_messages(token: str, channel: str, thread_ts: str) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    cursor = ""
+    seen: set[str] = set()
+    for _ in range(MAX_SLACK_THREAD_PAGES):
+        payload = {"channel": channel, "ts": thread_ts, "limit": "1000"}
+        if cursor:
+            payload["cursor"] = cursor
+        page = slack_api_call("conversations.replies", token, payload)
+        page_messages = page.get("messages")
+        if not isinstance(page_messages, list) or any(not isinstance(item, dict) for item in page_messages):
+            raise SlackProofError("slack_thread_malformed")
+        messages.extend(page_messages)
+        metadata = page.get("response_metadata")
+        cursor = str(metadata.get("next_cursor") or "") if isinstance(metadata, dict) else ""
+        if not cursor:
+            return messages
+        if cursor in seen:
+            raise SlackProofError("slack_thread_pagination_repeated")
+        seen.add(cursor)
+    raise SlackProofError("slack_thread_too_large")
+
+
+def verify_slack_receipt(
+    receipt: dict[str, Any],
+    *,
+    pr: int,
+    head: str,
+    required_ac_ids: list[str],
+    verify_remote: bool,
+) -> list[str]:
+    errors: list[str] = []
+    if receipt.get("_parse_error"):
+        return ["invalid_slack_receipt_json"]
+    if (
+        receipt.get("schema") != "heydonna_qa_visual_proof"
+        or receipt.get("version") != 2
+        or receipt.get("artifact_kind") != "slack"
+    ):
+        errors.append("invalid_slack_receipt_schema")
+    if type(receipt.get("pr")) is not int or receipt.get("pr") != pr:
+        errors.append("receipt_pr_mismatch")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("head_sha") or "")):
+        errors.append("receipt_head_malformed")
+    elif receipt.get("head_sha") != head:
+        errors.append("receipt_head_mismatch")
+    channel = str(receipt.get("slack_channel") or "")
+    thread_ts = str(receipt.get("slack_thread_ts") or "")
+    if not SLACK_CHANNEL_ID.fullmatch(channel):
+        errors.append("receipt_slack_channel_malformed")
+    if not SLACK_THREAD_TS.fullmatch(thread_ts):
+        errors.append("receipt_slack_thread_malformed")
+
+    scenarios = receipt.get("scenarios")
+    if not isinstance(scenarios, list) or not scenarios:
+        return [*errors, "receipt_scenarios_missing"]
+    by_id: dict[str, dict[str, Any]] = {}
+    file_ids: set[str] = set()
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            errors.append("invalid_receipt_scenario")
+            continue
+        raw_ac_id = str(scenario.get("ac_id") or "").upper()
+        if not SLACK_AC_ID.fullmatch(raw_ac_id):
+            errors.append("invalid_slack_ac_id")
+            continue
+        if raw_ac_id in by_id:
+            errors.append(f"duplicate_receipt_scenario:{raw_ac_id}")
+        by_id[raw_ac_id] = scenario
+        file_id = str(scenario.get("slack_file_id") or "")
+        if not SLACK_FILE_ID.fullmatch(file_id):
+            errors.append(f"invalid_slack_file_id:{raw_ac_id}")
+        elif file_id in file_ids:
+            errors.append(f"duplicate_slack_file_id:{raw_ac_id}")
+        file_ids.add(file_id)
+        file_name = str(scenario.get("file_name") or "")
+        if (
+            not file_name
+            or Path(file_name).name != file_name
+            or "/" in file_name
+            or "\\" in file_name
+            or not file_name.lower().endswith(".png")
+        ):
+            errors.append(f"invalid_slack_file_name:{raw_ac_id}")
+        if not SHA256.fullmatch(str(scenario.get("sha256") or "")):
+            errors.append(f"invalid_screenshot_sha256:{raw_ac_id}")
+    for ac_id in required_ac_ids:
+        if ac_id not in by_id:
+            errors.append(f"missing_screenshot_proof:{ac_id}")
+    if errors or not verify_remote:
+        return errors
+
+    token = load_cto_slack_token()
+    if not token:
+        return ["slack_cto_token_unavailable"]
+    try:
+        identity = slack_api_call("auth.test", token, {})
+        if identity.get("user_id") != SLACK_CTO_USER_ID:
+            raise SlackProofError("slack_cto_identity_mismatch")
+        messages = slack_thread_messages(token, channel, thread_ts)
+        if not messages or str(messages[0].get("ts") or "") != thread_ts:
+            raise SlackProofError("slack_thread_root_mismatch")
+
+        attached: dict[str, list[dict[str, Any]]] = {}
+        for message in messages:
+            message_ts = str(message.get("ts") or "")
+            message_thread = str(message.get("thread_ts") or message_ts)
+            if message_thread != thread_ts:
+                continue
+            for file in message.get("files") or []:
+                if isinstance(file, dict) and file.get("id"):
+                    attached.setdefault(str(file["id"]), []).append(message)
+
+        expected_header = f"UI proof for PR #{pr} at head `{head[:9]}` for layout review."
+        for ac_id, scenario in by_id.items():
+            file_id = str(scenario.get("slack_file_id") or "")
+            matching_messages = attached.get(file_id, [])
+            if len(matching_messages) != 1:
+                raise SlackProofError(f"slack_file_not_unique_in_thread:{ac_id}")
+            text = str(matching_messages[0].get("text") or "")
+            if (
+                expected_header not in text
+                or ac_id not in text
+                or str(scenario.get("file_name") or "") not in text
+                or str(scenario.get("sha256") or "")[:12] not in text
+            ):
+                raise SlackProofError(f"slack_thread_receipt_binding_mismatch:{ac_id}")
+
+            metadata = slack_api_call("files.info", token, {"file": file_id}).get("file")
+            if not isinstance(metadata, dict) or metadata.get("id") != file_id:
+                raise SlackProofError(f"slack_file_identity_mismatch:{ac_id}")
+            if (
+                metadata.get("name") != scenario.get("file_name")
+                or metadata.get("mimetype") != "image/png"
+                or type(metadata.get("size")) is not int
+                or metadata["size"] <= 0
+                or metadata["size"] > MAX_PNG_BYTES
+            ):
+                raise SlackProofError(f"slack_file_metadata_mismatch:{ac_id}")
+            url = str(metadata.get("url_private_download") or "")
+            screenshot = download_slack_file_bytes(url, token)
+            png_error = validate_png_bytes(screenshot)
+            if png_error:
+                raise SlackProofError(f"{png_error}:{ac_id}")
+            if hashlib.sha256(screenshot).hexdigest() != scenario.get("sha256"):
+                raise SlackProofError(f"screenshot_sha256_mismatch:{ac_id}")
+    except SlackProofError as exc:
+        return [str(exc)]
+    return []
 
 
 def validate_png_bytes(data: bytes) -> str | None:
@@ -255,7 +488,7 @@ def resolve_pr_issue_from_metadata(pr: dict[str, Any], *, pr_number: int = 0) ->
     raise RuntimeError("cannot resolve implementation issue from read-only PR metadata")
 
 
-EXPECTED_CHANGE_SCOPE_RULES_SHA256 = "d2871cb61c562c26f5d3555412f0c3f128332b22fe32d0bee24000e9108430e5"
+EXPECTED_CHANGE_SCOPE_RULES_SHA256 = "c2db802cb7d8bd20d8fb09c391285cca8fcd4a6988a157077b5f928d5879455e"
 ALLOWED_CHANGE_SCOPE_SCOPES = {
     "control_plane_only",
     "mixed",
@@ -328,21 +561,31 @@ def required_screenshot_ac_ids(criteria: list[dict[str, Any]]) -> list[str]:
 def extract_receipts(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     for comment in comments:
-        for match in MARKER.finditer(str(comment.get("body") or "")):
-            try:
-                receipt = json.loads(match.group(1))
-            except json.JSONDecodeError:
-                continue
-            if isinstance(receipt, dict):
-                receipt["_comment_created_at"] = str(comment.get("createdAt") or "")
-                receipt["_comment_url"] = str(comment.get("url") or "")
-                receipts.append(receipt)
+        body = str(comment.get("body") or "")
+        for receipt_kind, marker in (("legacy", MARKER), ("slack", SLACK_MARKER)):
+            for match in marker.finditer(body):
+                try:
+                    receipt = json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    receipt = {"_parse_error": True}
+                if isinstance(receipt, dict):
+                    receipt["_receipt_kind"] = receipt_kind
+                    receipt["_comment_created_at"] = str(comment.get("createdAt") or "")
+                    receipt["_comment_url"] = str(comment.get("url") or "")
+                    receipts.append(receipt)
     return sorted(receipts, key=lambda item: item.get("_comment_created_at") or "", reverse=True)
 
 
 def receipt_matches_tuple(
     receipt: dict[str, Any], *, pr: int, issue: int, head: str, issue_body_sha: str
 ) -> bool:
+    if receipt.get("_receipt_kind") == "slack":
+        return (
+            receipt.get("schema") == "heydonna_qa_visual_proof"
+            and receipt.get("version") == 2
+            and str(receipt.get("pr") or "") == str(pr)
+            and str(receipt.get("head_sha") or "") == head
+        )
     return (
         str(receipt.get("pr") or "") == str(pr)
         and str(receipt.get("issue") or "") == str(issue)
@@ -517,6 +760,14 @@ def validate_receipt(
     repo: str,
     verify_remote: bool,
 ) -> list[str]:
+    if receipt.get("_receipt_kind") == "slack":
+        return verify_slack_receipt(
+            receipt,
+            pr=pr,
+            head=head,
+            required_ac_ids=required_ac_ids,
+            verify_remote=verify_remote,
+        )
     errors: list[str] = []
     if receipt.get("schema") != "heydonna_qa_visual_proof" or receipt.get("version") != 1:
         errors.append("invalid_receipt_schema")
