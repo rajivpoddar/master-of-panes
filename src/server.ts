@@ -1727,7 +1727,7 @@ async function deliveryConfirmed(
   if (submit && (submit.enterPresses < 1 || submit.enterPresses > 2)) {
     return { ok: false, reason: "payload was not submitted exactly once" };
   }
-  if (submit && submit.cleared !== true) {
+  if (submit && submit.cleared !== true && submit.queued !== true) {
     return { ok: false, reason: "composer input still holds the prompt after Enter (buffered, not submitted)" };
   }
   const post = await capturePaneSnapshot(paneAddress);
@@ -1883,7 +1883,8 @@ async function pastePayloadWithTmuxBuffer(
       dwellMs: submitDwellMs,
     });
     // Enter pressed but the composer still holds the paste = never submitted.
-    const unsubmitted = submit.enterPresses === 0 || submit.cleared === false;
+    const unsubmitted = submit.enterPresses === 0
+      || (submit.cleared === false && submit.queued !== true);
     const cleanup = meta.clearOwnedComposerOnRefusal && unsubmitted
       ? await clearOwnedRefusedPasteComposer(payloadText, {
           prePasteComposer,

@@ -1153,7 +1153,7 @@ export class TmuxRelay {
             // ambiguous. Do not auto-repaste or press Enter a second time.
             return submit.payloadSeen === true
               && submit.payloadStable === true
-              && submit.cleared === true
+              && (submit.cleared === true || submit.queued === true)
               && submit.enterPresses === 1;
           } finally {
             await fs.unlink(tmpFile).catch(() => undefined);

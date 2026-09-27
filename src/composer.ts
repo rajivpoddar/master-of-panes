@@ -183,6 +183,8 @@ export type SubmitCheckResult = {
   payloadStable: boolean | null;
   /** true/false once the composer was readable after Enter; null if unrecognised. */
   cleared: boolean | null;
+  /** Present only when Claude confirms this still-visible prompt is queued. */
+  queued?: true;
   enterPresses: number;
 };
 
@@ -289,9 +291,10 @@ export type SubmitCheckDeps = {
 
 /**
  * Paste has already happened. Dwell, wait (bounded) until the composer shows
- * the payload, then press Enter once and confirm the input line is empty. If
- * the composer is partial or unreadable, leave it untouched for an operator;
- * never submit unrelated text or automatically press Enter a second time.
+ * the payload, then press Enter and confirm either an empty input line or
+ * Claude's queued-message indicator for the unchanged prompt. If the composer
+ * is partial or unreadable, leave it untouched for an operator; never submit
+ * unrelated text or automatically press Enter a second time.
  */
 export async function submitWithComposerCheck(payload: string, deps: SubmitCheckDeps): Promise<SubmitCheckResult> {
   const dwellMs = deps.dwellMs ?? INJECT_ENTER_DELAY_MS;
@@ -358,6 +361,7 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
   const submittedComposer = stableComposer;
   let enterPresses = 0;
   let cleared: boolean | null = null;
+  let queued = false;
   // One Enter, then verify; retry Enter once only if the exact pasted composer
   // is still sitting there (Enter was swallowed), never after it changed.
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -366,14 +370,25 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
     let lastComposer: string | null = null;
     for (let waited = 0; ; waited += pollMs) {
       await deps.sleep(pollMs);
-      lastComposer = composerText(await deps.capture());
+      const snapshot = await deps.capture();
+      lastComposer = composerText(snapshot);
       if (lastComposer === null) {
         cleared = null;
         break;
       }
       cleared = lastComposer === "";
+      if (
+        !cleared
+        && /press\s+up\s+to\s+edit\s+queued\s+messages/i.test(snapshot ?? "")
+        && submittedComposer !== null
+        && squash(lastComposer) === squash(submittedComposer)
+      ) {
+        queued = true;
+        break;
+      }
       if (cleared || waited + pollMs >= clearGraceMs) break;
     }
+    if (queued) break;
     // Mid-turn TUIs reflow the composer after Enter (wrap/indent changes), so
     // compare whitespace-normalized text: retry only when it is still exactly
     // our submitted composer, never after foreign text appeared.
@@ -381,5 +396,7 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
     if (squash(lastComposer) !== squash(submittedComposer)) break;
   }
 
-  return { payloadSeen, payloadStable, cleared, enterPresses };
+  return queued
+    ? { payloadSeen, payloadStable, cleared, queued: true, enterPresses }
+    : { payloadSeen, payloadStable, cleared, enterPresses };
 }

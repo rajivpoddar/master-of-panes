@@ -553,11 +553,11 @@ const MIDTURN_REFLOWED = [
   "  depend on your token; ship only the Origin branch.",
 ];
 
-async function midturnSubmit(afterPress: (press: number) => string[]) {
+async function midturnSubmit(afterPress: (press: number) => string[] | string) {
   let presses = 0;
-  let view = MIDTURN_WIDE;
+  let view: string[] | string = MIDTURN_WIDE;
   const result = await submitWithComposerCheck(MIDTURN_PAYLOAD, {
-    capture: async () => pane(view),
+    capture: async () => typeof view === "string" ? view : pane(view),
     pressSubmit: async () => {
       presses++;
       view = afterPress(presses);
@@ -578,17 +578,38 @@ test("mid-turn: reflowed composer after Enter #1 gets Enter #2 and clears", asyn
   assert.equal(presses, 2);
 });
 
-test("mid-turn: queued indicator with empty prompt after Enter #1 is success with one press", async () => {
+test("mid-turn: empty composer after Enter #1 is success with one press", async () => {
   const { result, presses } = await midturnSubmit(() => ["❯ "]);
   assert.equal(result.cleared, true);
   assert.equal(presses, 1);
-  assert.equal(composerText(pane(["❯ "]).replace("· Twisting", "Press up to edit queued messages\n· Twisting")), "");
+});
+
+test("mid-turn: unchanged prompt plus queued indicator is success without a second Enter", async () => {
+  const queuedSnapshot = pane(MIDTURN_WIDE).replace(
+    "· Twisting…",
+    "Press up to edit queued messages\n· Twisting…",
+  );
+  const { result, presses } = await midturnSubmit(() => queuedSnapshot);
+  assert.deepEqual(result, {
+    payloadSeen: true,
+    payloadStable: true,
+    cleared: false,
+    queued: true,
+    enterPresses: 1,
+  });
+  assert.equal(presses, 1);
 });
 
 test("mid-turn: still held after two Enters is an explicit uncleared failure (no third press)", async () => {
   const { result, presses } = await midturnSubmit(() => MIDTURN_REFLOWED);
   assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: false, enterPresses: 2 });
   assert.equal(presses, 2);
+});
+
+test("mid-turn: exact prompt without queued indicator stays uncleared after at most two Enters", async () => {
+  const { result, presses } = await midturnSubmit(() => MIDTURN_WIDE);
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: false, enterPresses: 2 });
+  assert.equal(presses, 2, "retry once, never a third time");
 });
 
 test("mid-turn: foreign text after Enter #1 is never submitted again", async () => {
