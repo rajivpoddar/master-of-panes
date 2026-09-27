@@ -838,6 +838,15 @@
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/skills/tmux-slot-command/scripts/send-to-slot.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-tmux-slot-command",
+      "sha256": "04fcbec292a90bad4dcd656974dba273416c056b10e8a15370a57baab58509d7",
+      "source_path": "claude/skills/tmux-slot-command/scripts/send-to-slot.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/todo-prioritize/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1203,7 +1212,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 130,
+    "selected_count": 131,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1256,6 +1265,7 @@
       "~/.claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift",
       "~/.claude/skills/message-slot/SKILL.md",
       "~/.claude/skills/message-slot/scripts/message-slot.sh",
+      "~/.claude/skills/tmux-slot-command/scripts/send-to-slot.sh",
       "~/.claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
       "~/.claude/skills/codex-review-companion/SKILL.md",
       "~/.claude/skills/todo-prioritize/SKILL.md",
