@@ -6,6 +6,9 @@ import {
   composerText,
   composerHoldsPayload,
   clearOwnedRefusedPasteComposer,
+  composerIsOnlyPastePlaceholders,
+  composerShowsNewPastePlaceholder,
+  maxPastePlaceholderNumber,
   INJECT_ENTER_DELAY_MS,
   resolveInjectEnterDelayMs,
   resolveAssignmentInjectEnterDelayMs,
@@ -66,20 +69,49 @@ test("composerHoldsPayload requires the full visible payload and rejects hidden 
   assert.equal(composerHoldsPayload("then finish it", "do X\nthen finish it"), false);
 });
 
-test("refused short FILE_PACKET placeholder clears its owned composer and leaves it reusable", async () => {
+test("new [Pasted text #N] placeholder proves the paste landed and is submitted", async () => {
   const payload = `FILE_PACKET sha256=${"a".repeat(64)} ${"pointer".repeat(30)}`;
-  assert.ok(Buffer.byteLength(payload) < 512, "exercise the short FILE_PACKET transport");
-
   let composer = "[Pasted text #68]";
+  let enterPresses = 0;
+  const result = await submitWithComposerCheck(payload, {
+    capture: async () => pane([`❯ ${composer}`]),
+    pressSubmit: async () => {
+      enterPresses++;
+      composer = "";
+    },
+    sleep: async () => undefined,
+    prePasteComposer: "",
+    dwellMs: 0,
+    pollMs: 250,
+  });
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: true, enterPresses: 1 });
+  assert.equal(enterPresses, 1);
+});
+
+test("placeholder detection requires N greater than any pre-paste placeholder", () => {
+  assert.equal(maxPastePlaceholderNumber("[Pasted text #47][Pasted text #48 +12 lines]"), 48);
+  assert.equal(maxPastePlaceholderNumber("plain text"), 0);
+  assert.equal(composerShowsNewPastePlaceholder("[Pasted text #49]", ""), true);
+  assert.equal(composerShowsNewPastePlaceholder("[Pasted text #48][Pasted text #49 +3 lines]", "[Pasted text #48]"), true);
+  assert.equal(composerShowsNewPastePlaceholder("[Pasted text #48]", "[Pasted text #48]"), false);
+  assert.equal(composerShowsNewPastePlaceholder("hello", ""), false);
+  assert.equal(composerIsOnlyPastePlaceholders("[Pasted text #47][Pasted text #48]"), true);
+  assert.equal(composerIsOnlyPastePlaceholders("[Pasted text #47] hi"), false);
+  assert.equal(composerIsOnlyPastePlaceholders(""), false);
+});
+
+test("refusal after two swallowed Enters clears the stale placeholder with C-u", async () => {
+  const payload = "PM test packet body";
+  let composer = "[Pasted text #50]";
   let lastObservedComposer: string | null = null;
   let enterPresses = 0;
   let clearKeys = 0;
   const capture = async (): Promise<string> => pane([`❯ ${composer}`]);
-  const refused = await submitWithComposerCheck(payload, {
+  const result = await submitWithComposerCheck(payload, {
     capture: async () => {
-      const snapshot = await capture();
-      lastObservedComposer = composerText(snapshot);
-      return snapshot;
+      const snap = await capture();
+      lastObservedComposer = composerText(snap);
+      return snap;
     },
     pressSubmit: async () => {
       enterPresses++;
@@ -87,15 +119,15 @@ test("refused short FILE_PACKET placeholder clears its owned composer and leaves
     sleep: async () => undefined,
     prePasteComposer: "",
     dwellMs: 0,
-    payloadGraceMs: 500,
+    clearGraceMs: 250,
     pollMs: 250,
   });
-  assert.deepEqual(refused, { payloadSeen: false, payloadStable: false, cleared: null, enterPresses: 0 });
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: false, enterPresses: 2 });
 
   const cleanup = await clearOwnedRefusedPasteComposer(payload, {
     prePasteComposer: "",
     lastObservedComposer,
-    enterPresses: refused.enterPresses,
+    enterPresses: 0,
     capture,
     clearComposer: async () => {
       clearKeys++;
@@ -107,11 +139,29 @@ test("refused short FILE_PACKET placeholder clears its owned composer and leaves
     timeoutMs: 500,
     pollMs: 250,
   });
-
   assert.deepEqual(cleanup, { attempted: true, cleared: true, reason: "composer_cleared" });
-  assert.equal(clearKeys, 1, "send one C-u cleanup key and never Enter or resend");
-  assert.equal(enterPresses, 0);
-  assert.equal(composerText(await capture()), "", "the next delivery sees an empty reusable composer");
+  assert.equal(clearKeys, 1);
+  assert.equal(enterPresses, 2, "retry Enter at most once");
+});
+
+test("stale placeholder-only pre-paste composer is owned by refusal cleanup", async () => {
+  let composer = "[Pasted text #47][Pasted text #48]";
+  const capture = async (): Promise<string> => pane([`❯ ${composer}`]);
+  const cleanup = await clearOwnedRefusedPasteComposer("unrelated payload", {
+    prePasteComposer: "[Pasted text #47][Pasted text #48]",
+    lastObservedComposer: composer,
+    enterPresses: 0,
+    capture,
+    clearComposer: async () => {
+      composer = "";
+      return true;
+    },
+    sleep: async () => undefined,
+    stableMs: 250,
+    timeoutMs: 500,
+    pollMs: 250,
+  });
+  assert.deepEqual(cleanup, { attempted: true, cleared: true, reason: "composer_cleared" });
 });
 
 test("refused-paste cleanup preserves preexisting, changed, unreadable, and already-submitted composer state", async () => {
@@ -144,6 +194,29 @@ test("refused-paste cleanup preserves preexisting, changed, unreadable, and alre
   }
 });
 
+test("incidental FILE_PACKET words are not enough to clear a refused composer", async () => {
+  const payload = `FILE_PACKET sha256=${"a".repeat(64)} payload contains a the gate pointer`;
+
+  for (const fragment of ["a", "the", "gate"]) {
+    let clearKeys = 0;
+    const result = await clearOwnedRefusedPasteComposer(payload, {
+      prePasteComposer: "",
+      lastObservedComposer: fragment,
+      enterPresses: 0,
+      capture: async () => pane([`❯ ${fragment}`]),
+      clearComposer: async () => {
+        clearKeys++;
+        return true;
+      },
+      sleep: async () => undefined,
+    });
+
+    assert.equal(result.reason, "composer_not_owned_by_send", fragment);
+    assert.equal(result.attempted, false, fragment);
+    assert.equal(clearKeys, 0, fragment);
+  }
+});
+
 test("refusal cleanup is shared by file and text sends without changing the active-slot force gate", () => {
   const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   const routeStart = server.indexOf('app.post("/slots/:slotNum/send"');
@@ -161,6 +234,12 @@ test("refusal cleanup is shared by file and text sends without changing the acti
   const pasteStart = server.indexOf("async function pastePayloadWithTmuxBuffer");
   const pasteEnd = server.indexOf('app.post("/slots/:slotNum/send"', pasteStart);
   assert.match(server.slice(pasteStart, pasteEnd), /clearOwnedRefusedPasteComposer/);
+
+  const refusedBlocks = route.split("if (!verify.ok) {").slice(1);
+  assert.equal(refusedBlocks.length, 2, "file and text refusals both return through the unverified response path");
+  for (const block of refusedBlocks) {
+    assert.match(block.slice(0, 600), /success:\s*false/);
+  }
 
   const assignmentStart = server.indexOf("async function deliverTaskFileForAssignment");
   const assignmentEnd = server.indexOf("registerAssignmentRoute(app, db, issueProjection)", assignmentStart);
@@ -187,38 +266,33 @@ test("assignment packets wait for a stable empty composer before the first paste
   assert.match(pastePath, /paste-buffer\$\{meta\.bracketedPaste \? " -p" : ""\}/);
 });
 
-test("post-clear assignment refuses a collapsed tail-only packet without Enter", async () => {
+test("post-clear assignment submits a collapsed placeholder packet once", async () => {
   const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   const assignmentStart = server.indexOf("async function deliverTaskFileForAssignment");
   const assignmentEnd = server.indexOf("registerAssignmentRoute(app, db, issueProjection)");
-  const assignmentDelivery = server.slice(assignmentStart, assignmentEnd);
-  assert.match(assignmentDelivery, /bracketedPaste:\s*true/);
+  assert.match(server.slice(assignmentStart, assignmentEnd), /bracketedPaste:\s*true/);
 
   const payload = Array.from({ length: 13 }, (_, index) => `packet line ${index + 1}`).join("\n");
-  const collapsedComposer = [
+  let collapsed: string[] | null = [
     "❯ [Pasted text #13 +7 lines]",
     ...Array.from({ length: 5 }, (_, index) => `packet line ${index + 9}`),
-  ].join("\n");
-  let elapsedMs = 0;
+  ];
   let enterPresses = 0;
   const result = await submitWithComposerCheck(payload, {
-    capture: async () => pane(collapsedComposer.split("\n")),
+    capture: async () => pane(collapsed ?? ["❯ "]),
     pressSubmit: async () => {
       enterPresses++;
+      collapsed = null;
     },
-    sleep: async (ms) => {
-      elapsedMs += ms;
-    },
+    sleep: async () => undefined,
     prePasteComposer: "",
     dwellMs: resolveAssignmentInjectEnterDelayMs(1000),
     payloadStableMs: 1000,
     clearGraceMs: 1000,
     pollMs: 250,
   });
-
-  assert.equal(enterPresses, 0);
-  assert.ok(elapsedMs >= 4000, "hidden packet contents stay unverified through the bounded payload wait");
-  assert.deepEqual(result, { payloadSeen: false, payloadStable: false, cleared: null, enterPresses: 0 });
+  assert.equal(enterPresses, 1);
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: true, enterPresses: 1 });
 });
 
 test("slot sends check tmux pane mode before any normal input or paste", () => {
@@ -292,21 +366,19 @@ test("assignment pre-paste readiness times out without entering or pasting into 
   });
 });
 
-test("buffered prompt after Enter remains untouched and is reported uncleared", async () => {
-  const screens = [pane(["❯ task body"]), pane(["❯ task body"])];
+test("buffered prompt after Enter gets one retry Enter and is reported uncleared", async () => {
   let enterPresses = 0;
   const result = await submitWithComposerCheck("task body", {
-    capture: async () => screens[0] ?? null,
+    capture: async () => pane(["❯ task body"]),
     pressSubmit: async () => {
       enterPresses++;
-      screens.shift();
     },
     sleep: async () => undefined,
     dwellMs: 0,
     clearGraceMs: 250,
   });
-  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: false, enterPresses: 1 });
-  assert.equal(enterPresses, 1);
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: false, enterPresses: 2 });
+  assert.equal(enterPresses, 2, "one retry Enter, never more");
 });
 
 test("waits one second after the complete payload first appears before Enter", async () => {
