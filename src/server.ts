@@ -48,6 +48,7 @@ import {
   waitForEmptyComposer,
   type SubmitCheckResult,
   type RefusedPasteCleanupResult,
+  composerIsOnlyPastePlaceholders,
 } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 import { DEFAULT_CONFIG } from "./types.js";
@@ -1723,7 +1724,7 @@ async function deliveryConfirmed(
   if (submit && submit.payloadStable !== true) {
     return { ok: false, reason: "composer did not hold the complete payload steady before Enter" };
   }
-  if (submit && submit.enterPresses !== 1) {
+  if (submit && (submit.enterPresses < 1 || submit.enterPresses > 2)) {
     return { ok: false, reason: "payload was not submitted exactly once" };
   }
   if (submit && submit.cleared !== true) {
@@ -1815,6 +1816,14 @@ async function pastePayloadWithTmuxBuffer(
       preSnapshot = readiness.snapshot;
     } else {
       preSnapshot = (await capturePaneSnapshot(paneAddress)) ?? "";
+      // Stale collapsed-paste placeholders left by earlier refused sends would
+      // block this delivery forever; clear them (C-u) before pasting.
+      if (composerIsOnlyPastePlaceholders(composerText(preSnapshot))) {
+        await execShell(`tmux send-keys -t ${paneAddress} C-u`, { timeout: 10_000 });
+        db.logEvent(slotNum, "send_stale_placeholder_cleared", null, null, { source: meta.source });
+        await sleep(300);
+        preSnapshot = (await capturePaneSnapshot(paneAddress)) ?? "";
+      }
     }
     const chunks = Math.max(1, Math.ceil(bytes / chunkSize));
     const bufName = `mop-send-${slotNum}-${Date.now()}`;
@@ -1873,11 +1882,13 @@ async function pastePayloadWithTmuxBuffer(
       prePasteComposer,
       dwellMs: submitDwellMs,
     });
-    const cleanup = meta.clearOwnedComposerOnRefusal && submit.enterPresses === 0
+    // Enter pressed but the composer still holds the paste = never submitted.
+    const unsubmitted = submit.enterPresses === 0 || submit.cleared === false;
+    const cleanup = meta.clearOwnedComposerOnRefusal && unsubmitted
       ? await clearOwnedRefusedPasteComposer(payloadText, {
           prePasteComposer,
           lastObservedComposer,
-          enterPresses: submit.enterPresses,
+          enterPresses: 0,
           capture: captureForSubmit,
           clearComposer: async () => {
             if (await readPaneInputModeRefusal(paneAddress)) return false;
@@ -1895,7 +1906,7 @@ async function pastePayloadWithTmuxBuffer(
       cleared: submit.cleared,
       enter_presses: submit.enterPresses,
     });
-    if (cleanup && submit.enterPresses === 0) {
+    if (cleanup && unsubmitted) {
       db.logEvent(slotNum, "send_refusal_composer_cleanup", null, null, {
         source: meta.source,
         pre_paste_composer_empty: prePasteComposer === "",

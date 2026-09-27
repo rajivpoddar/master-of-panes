@@ -73,12 +73,14 @@ export function composerHoldsPayload(composer: string, payload: string): boolean
   return squash(composer).includes(expected);
 }
 
+const MIN_REFUSED_PASTE_PREFIX_LENGTH = 24;
+
 /**
  * True only when the visible composer is attributable to this refused paste:
  * the pre-paste composer was empty, and the post-paste text is either a
  * collapsed paste placeholder (with any visible tail matching this payload)
- * or a visible fragment of this payload. This is cleanup ownership, not proof
- * that the whole payload arrived.
+ * or a sufficiently long visible prefix of this payload. This is cleanup
+ * ownership, not proof that the whole payload arrived.
  */
 export function composerIsRefusedPasteContent(composer: string, payload: string): boolean {
   const expected = squash(payload.trim());
@@ -92,7 +94,35 @@ export function composerIsRefusedPasteContent(composer: string, payload: string)
     return visibleTail === "" || expected.endsWith(visibleTail);
   }
 
-  return expected.includes(squash(composer.trim()));
+  const visible = squash(composer.trim());
+  return visible.length >= MIN_REFUSED_PASTE_PREFIX_LENGTH && expected.startsWith(visible);
+}
+
+const PLACEHOLDER_RE = /\[Pasted text(?:\s+#(\d+))?(?:\s+\+\d+\s+lines?)?\]/gi;
+
+/** Highest `[Pasted text #N]` number in the composer, 0 when none. */
+export function maxPastePlaceholderNumber(composer: string | null | undefined): number {
+  let max = 0;
+  for (const m of (composer ?? "").matchAll(PLACEHOLDER_RE)) {
+    max = Math.max(max, m[1] ? Number(m[1]) : 1);
+  }
+  return max;
+}
+
+/** True when the composer holds only collapsed-paste placeholders (stale MoP pastes). */
+export function composerIsOnlyPastePlaceholders(composer: string | null | undefined): boolean {
+  if (!composer || !composer.trim()) return false;
+  return composer.replace(PLACEHOLDER_RE, "").trim() === "";
+}
+
+/**
+ * Claude Code collapses large pastes into `[Pasted text #N ...]`. A placeholder
+ * whose N exceeds every placeholder present before the paste proves that this
+ * paste landed in the composer.
+ */
+export function composerShowsNewPastePlaceholder(composer: string, prePasteComposer: string | null | undefined): boolean {
+  const current = maxPastePlaceholderNumber(composer);
+  return current > 0 && current > maxPastePlaceholderNumber(prePasteComposer);
 }
 
 export type EmptyComposerWaitDeps = {
@@ -197,7 +227,7 @@ export async function clearOwnedRefusedPasteComposer(
   payload: string,
   deps: RefusedPasteCleanupDeps,
 ): Promise<RefusedPasteCleanupResult> {
-  if (deps.prePasteComposer !== "") {
+  if (deps.prePasteComposer !== "" && !composerIsOnlyPastePlaceholders(deps.prePasteComposer)) {
     return { attempted: false, cleared: false, reason: "pre_paste_composer_not_empty" };
   }
   if (deps.enterPresses !== 0) {
@@ -215,7 +245,7 @@ export async function clearOwnedRefusedPasteComposer(
   if (currentComposer !== deps.lastObservedComposer) {
     return { attempted: false, cleared: false, reason: "composer_changed_after_refusal" };
   }
-  if (!composerIsRefusedPasteContent(currentComposer, payload)) {
+  if (!composerIsRefusedPasteContent(currentComposer, payload) && !composerIsOnlyPastePlaceholders(currentComposer)) {
     return { attempted: false, cleared: false, reason: "composer_not_owned_by_send" };
   }
 
@@ -265,7 +295,7 @@ export type SubmitCheckDeps = {
  */
 export async function submitWithComposerCheck(payload: string, deps: SubmitCheckDeps): Promise<SubmitCheckResult> {
   const dwellMs = deps.dwellMs ?? INJECT_ENTER_DELAY_MS;
-  const payloadGraceMs = deps.payloadGraceMs ?? 3000;
+  const payloadGraceMs = deps.payloadGraceMs ?? 5000;
   const payloadStableMs = deps.payloadStableMs ?? INJECT_ENTER_DELAY_MS;
   const payloadStableGraceMs = deps.payloadStableGraceMs ?? payloadGraceMs + payloadStableMs;
   const clearGraceMs = deps.clearGraceMs ?? 2000;
@@ -295,7 +325,8 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
       payloadStable = null;
       break;
     }
-    payloadSeen = composerHoldsPayload(composer, payload);
+    payloadSeen = composerHoldsPayload(composer, payload)
+      || composerShowsNewPastePlaceholder(composer, deps.prePasteComposer);
     if (payloadSeen) {
       payloadDiscovered = true;
       if (composer === stableComposer) {
@@ -324,18 +355,27 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
     return { payloadSeen, payloadStable, cleared: null, enterPresses: 0 };
   }
 
-  await deps.pressSubmit();
+  const submittedComposer = stableComposer;
+  let enterPresses = 0;
   let cleared: boolean | null = null;
-  for (let waited = 0; ; waited += pollMs) {
-    await deps.sleep(pollMs);
-    const composer = composerText(await deps.capture());
-    if (composer === null) {
-      cleared = null;
-      break;
+  // One Enter, then verify; retry Enter once only if the exact pasted composer
+  // is still sitting there (Enter was swallowed), never after it changed.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await deps.pressSubmit();
+    enterPresses++;
+    let lastComposer: string | null = null;
+    for (let waited = 0; ; waited += pollMs) {
+      await deps.sleep(pollMs);
+      lastComposer = composerText(await deps.capture());
+      if (lastComposer === null) {
+        cleared = null;
+        break;
+      }
+      cleared = lastComposer === "";
+      if (cleared || waited + pollMs >= clearGraceMs) break;
     }
-    cleared = composer === "";
-    if (cleared || waited + pollMs >= clearGraceMs) break;
+    if (cleared !== false || lastComposer !== submittedComposer) break;
   }
 
-  return { payloadSeen, payloadStable, cleared, enterPresses: 1 };
+  return { payloadSeen, payloadStable, cleared, enterPresses };
 }
