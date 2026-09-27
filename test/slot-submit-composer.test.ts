@@ -70,6 +70,7 @@ test("assignment packets wait for a stable empty composer before the first paste
   const assignmentEnd = server.indexOf("registerAssignmentRoute(app, db, issueProjection)");
   const assignmentDelivery = server.slice(assignmentStart, assignmentEnd);
   assert.match(assignmentDelivery, /requireEmptyComposerBeforePaste:\s*true/);
+  assert.match(assignmentDelivery, /bracketedPaste:\s*true/);
 
   const pasteStart = server.indexOf("async function pastePayloadWithTmuxBuffer");
   const pasteEnd = server.indexOf('app.post("/slots/:slotNum/send"', pasteStart);
@@ -80,6 +81,43 @@ test("assignment packets wait for a stable empty composer before the first paste
     "the composer readiness check must run before any tmux paste",
   );
   assert.match(pastePath, /const submitDwellMs = meta\.requireEmptyComposerBeforePaste[\s\S]*?resolveAssignmentInjectEnterDelayMs\(\)[\s\S]*?: INJECT_ENTER_DELAY_MS/);
+  assert.match(pastePath, /paste-buffer\$\{meta\.bracketedPaste \? " -p" : ""\}/);
+});
+
+test("post-clear assignment bracketed paste submits a complete collapsed packet once", async () => {
+  const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const assignmentStart = server.indexOf("async function deliverTaskFileForAssignment");
+  const assignmentEnd = server.indexOf("registerAssignmentRoute(app, db, issueProjection)");
+  const assignmentDelivery = server.slice(assignmentStart, assignmentEnd);
+  assert.match(assignmentDelivery, /bracketedPaste:\s*true/);
+
+  const payload = Array.from({ length: 13 }, (_, index) => `packet line ${index + 1}`).join("\n");
+  const collapsedComposer = [
+    "❯ [Pasted text #13 +7 lines]",
+    ...Array.from({ length: 5 }, (_, index) => `packet line ${index + 9}`),
+  ].join("\n");
+  let elapsedMs = 0;
+  let entered = false;
+  let enterPresses = 0;
+  const result = await submitWithComposerCheck(payload, {
+    capture: async () => entered ? pane(["❯ "]) : pane(collapsedComposer.split("\n")),
+    pressSubmit: async () => {
+      enterPresses++;
+      entered = true;
+    },
+    sleep: async (ms) => {
+      elapsedMs += ms;
+    },
+    prePasteComposer: "",
+    dwellMs: resolveAssignmentInjectEnterDelayMs(1000),
+    payloadStableMs: 1000,
+    clearGraceMs: 1000,
+    pollMs: 250,
+  });
+
+  assert.equal(enterPresses, 1);
+  assert.ok(elapsedMs >= 3000);
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: true, enterPresses: 1 });
 });
 
 test("slot sends check tmux pane mode before any normal input or paste", () => {
@@ -235,6 +273,21 @@ test("partial paste is reported so the send is not marked verified", async () =>
   assert.equal(result.payloadStable, false);
   assert.equal(result.cleared, null);
   assert.equal(result.enterPresses, 0);
+});
+
+test("unreadable post-paste composer refuses without Enter", async () => {
+  let enterPresses = 0;
+  const result = await submitWithComposerCheck("complete packet", {
+    capture: async () => null,
+    pressSubmit: async () => {
+      enterPresses++;
+    },
+    sleep: async () => undefined,
+    prePasteComposer: "",
+    dwellMs: 0,
+  });
+  assert.equal(enterPresses, 0);
+  assert.deepEqual(result, { payloadSeen: null, payloadStable: null, cleared: null, enterPresses: 0 });
 });
 
 test("pre-existing or unreadable composer content is never submitted", async () => {
