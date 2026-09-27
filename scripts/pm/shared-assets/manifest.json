@@ -531,10 +531,10 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-visual-proof-gate",
-      "sha256": "f141cbb1e4b512ef932cad9518ec78093290a78e4285ec6f04cd9ba91c6501a2",
+      "sha256": "b4bec34c5b7d8490072367a4a8841a0f1e64854716456c118522ba55e9f1667c",
       "source_authority": {
-        "blob_sha": "2bde63420e0070debb048c94d6f2513785638c3e",
-        "commit": "a9edd8a9f3bd2c70375073f67d1d41e9ab3c4f1a",
+        "blob_sha": "fd3604644ad9bb48c4cf06f6eb99e4abcf508693",
+        "commit": "26c592065a1584bfdd6bc7ba0272149c5ed88612",
         "mode": 493,
         "path": "scripts/pm/qa-visual-proof-gate.py",
         "preimage_sha256": "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a",
@@ -838,6 +838,15 @@
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/skills/tmux-slot-command/scripts/send-to-slot.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-tmux-slot-command",
+      "sha256": "04fcbec292a90bad4dcd656974dba273416c056b10e8a15370a57baab58509d7",
+      "source_path": "claude/skills/tmux-slot-command/scripts/send-to-slot.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/todo-prioritize/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1090,6 +1099,15 @@
       "source_path": "codex/skills/heydonna-control-plane-repair/SKILL.md"
     },
     {
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-codex-skill",
+      "sha256": "90eadaf60834e8e1dd5ce471a5960e906a4ed1175b0231679b4b1713f2f83763",
+      "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1203,7 +1221,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 130,
+    "selected_count": 132,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1242,6 +1260,7 @@
       "~/Downloads/projects/heydonna-app-3005/.claude/skills/respawn",
       "~/Downloads/projects/heydonna-app-3006/.claude/skills/respawn",
       "~/.codex/skills/codex-stdio-send-message",
+      "~/.codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt",
       "~/.claude/skills/pm-cleanup-pr/SKILL.md",
@@ -1256,6 +1275,7 @@
       "~/.claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift",
       "~/.claude/skills/message-slot/SKILL.md",
       "~/.claude/skills/message-slot/scripts/message-slot.sh",
+      "~/.claude/skills/tmux-slot-command/scripts/send-to-slot.sh",
       "~/.claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
       "~/.claude/skills/codex-review-companion/SKILL.md",
       "~/.claude/skills/todo-prioritize/SKILL.md",

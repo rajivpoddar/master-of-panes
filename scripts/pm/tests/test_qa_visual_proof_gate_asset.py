@@ -17,9 +17,9 @@ SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 SOURCE = SHARED / "claude" / "scripts" / "qa-visual-proof-gate.py"
 MANIFEST = SHARED / "manifest.json"
 HEAD = "f026a0094573fc10e9613d3dde1351d7724c103b"
-RULES_SHA256 = "d2871cb61c562c26f5d3555412f0c3f128332b22fe32d0bee24000e9108430e5"
-APP_ORIGIN_COMMIT = "a9edd8a9f3bd2c70375073f67d1d41e9ab3c4f1a"
-APP_ORIGIN_BLOB = "2bde63420e0070debb048c94d6f2513785638c3e"
+RULES_SHA256 = "c2db802cb7d8bd20d8fb09c391285cca8fcd4a6988a157077b5f928d5879455e"
+APP_ORIGIN_COMMIT = "26c592065a1584bfdd6bc7ba0272149c5ed88612"
+APP_ORIGIN_BLOB = "fd3604644ad9bb48c4cf06f6eb99e4abcf508693"
 APP_ORIGIN_PREIMAGE_SHA256 = "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a"
 APP_TARGET = "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py"
 INSTALLED_TARGET = "/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py"
@@ -65,6 +65,8 @@ def _args(*, expect_head: str = HEAD) -> argparse.Namespace:
 
 def test_manifest_has_one_versioned_payload_and_two_existing_targets() -> None:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    assert manifest["entries"] == sorted(manifest["entries"], key=lambda item: item["source_path"])
+    assert manifest["inventory"]["selected_count"] == len(manifest["entries"])
     entries = [entry for entry in manifest["entries"] if entry["source_path"] == "claude/scripts/qa-visual-proof-gate.py"]
     assert len(entries) == 1
     entry = entries[0]
@@ -72,6 +74,8 @@ def test_manifest_has_one_versioned_payload_and_two_existing_targets() -> None:
     assert entry["additional_targets"] == [INSTALLED_TARGET]
     assert entry["mode"] == 0o755
     assert entry["sha256"] == hashlib.sha256(SOURCE.read_bytes()).hexdigest()
+    blob = hashlib.sha1(b"blob " + str(len(SOURCE.read_bytes())).encode() + b"\0" + SOURCE.read_bytes()).hexdigest()
+    assert blob == entry["source_authority"]["blob_sha"]
     assert entry["source_authority"] == {
         "repository": "heydonna-app/heydonna-app",
         "commit": APP_ORIGIN_COMMIT,
@@ -81,6 +85,22 @@ def test_manifest_has_one_versioned_payload_and_two_existing_targets() -> None:
         "mode": 0o755,
     }
     assert SOURCE.read_text(encoding="utf-8").count("def validate_change_scope") == 1
+
+
+def test_admission_skill_is_canonically_mapped_to_verify_visual_proof() -> None:
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    source = SHARED / "codex" / "skills" / "heydonna-cto-label-gated-ci" / "SKILL.md"
+    entries = [
+        entry
+        for entry in manifest["entries"]
+        if entry["source_path"] == "codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
+    ]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["canonical_target"] == "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
+    assert entry["mode"] == 0o644
+    assert entry["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert "--expect-head FULL_HEAD --json" in source.read_text(encoding="utf-8")
 
 
 def test_non_ui_live_path_classifies_before_issue_resolution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
