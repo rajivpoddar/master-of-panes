@@ -330,7 +330,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-contract-ledger",
-      "sha256": "b0c18e62cf63f27fb3f4eff00080ce2b96628ebc6e107cb43c429f28c53f5c13",
+      "sha256": "bd266a2d4a6c26d2f932cb22faccf7d08bdd1d1b01749d5c20b8d326bd4c17c9",
       "source_path": "claude/scripts/control_plane_issue_policy.py"
     },
     {

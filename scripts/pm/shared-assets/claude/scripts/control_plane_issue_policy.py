@@ -39,7 +39,7 @@ _INTERNAL_SURFACE_RE = re.compile(
     r"\b(?:"
     r"github/workflows|"
     r"scripts/pm|"
-    r"affected[-_ ]test[-_ ]plan(?:\.py)?|"
+    r"affected[-_]test[-_]plan(?:\.py)?|"
     r"pr[-_ ]ci[-_ ]readiness[-_ ]gate|"
     r"slot[-_ ](?:dispatch|claim|submit[-_ ]ready|ready)|"
     r"backlog[-_ ]triage|"
@@ -89,7 +89,7 @@ _APP_CI_SURFACE_RE = re.compile(
 _GENUINE_CONTROL_PLANE_SURFACE_RE = re.compile(
     r"\b(?:"
     r"scripts/pm|"
-    r"affected[-_ ]test[-_ ]plan(?:\.py)?|"
+    r"affected[-_]test[-_]plan(?:\.py)?|"
     r"pr[-_ ]ci[-_ ]readiness[-_ ]gate|"
     r"slot[-_ ](?:dispatch|claim|submit[-_ ]ready|ready)|"
     r"backlog[-_ ]triage|"
