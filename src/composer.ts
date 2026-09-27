@@ -62,12 +62,12 @@ function squash(text: string): string {
 }
 
 /**
- * True when the full visible payload is in the composer, or Claude has
- * collapsed a multiline paste into its paste placeholder. Matching only the
- * last line is unsafe: a truncated packet can end with the expected tail.
+ * True only when the full payload is visible in the composer. Claude's
+ * `[Pasted text ...]` placeholder hides its contents and cannot prove that a
+ * truncated paste contains the expected head, middle, and tail.
  */
 export function composerHoldsPayload(composer: string, payload: string): boolean {
-  if (/\[Pasted text/i.test(composer)) return true;
+  if (/\[Pasted text/i.test(composer)) return false;
   const expected = squash(payload.trim());
   if (!expected) return composer.trim() === "";
   return squash(composer).includes(expected);

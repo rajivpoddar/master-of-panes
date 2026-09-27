@@ -58,9 +58,10 @@ test("composerText reads the Claude input line between the rules", () => {
   assert.equal(composerText(null), null);
 });
 
-test("composerHoldsPayload requires the full visible payload or the paste placeholder", () => {
+test("composerHoldsPayload requires the full visible payload and rejects hidden paste contents", () => {
   assert.equal(composerHoldsPayload("do X\nthen finish it", "do X\nthen finish it\n"), true);
-  assert.equal(composerHoldsPayload("[Pasted text #1 +40 lines]", "long"), true);
+  assert.equal(composerHoldsPayload("[Pasted text #1 +40 lines]", "long"), false);
+  assert.equal(composerHoldsPayload("[Pasted text #13 +7 lines]\npacket line 9\npacket line 10", "packet line 1\npacket line 10\npacket line 13"), false);
   assert.equal(composerHoldsPayload("then finish it", "do X\nthen finish it"), false);
 });
 
@@ -84,7 +85,7 @@ test("assignment packets wait for a stable empty composer before the first paste
   assert.match(pastePath, /paste-buffer\$\{meta\.bracketedPaste \? " -p" : ""\}/);
 });
 
-test("post-clear assignment bracketed paste submits a complete collapsed packet once", async () => {
+test("post-clear assignment refuses a collapsed tail-only packet without Enter", async () => {
   const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   const assignmentStart = server.indexOf("async function deliverTaskFileForAssignment");
   const assignmentEnd = server.indexOf("registerAssignmentRoute(app, db, issueProjection)");
@@ -97,13 +98,11 @@ test("post-clear assignment bracketed paste submits a complete collapsed packet 
     ...Array.from({ length: 5 }, (_, index) => `packet line ${index + 9}`),
   ].join("\n");
   let elapsedMs = 0;
-  let entered = false;
   let enterPresses = 0;
   const result = await submitWithComposerCheck(payload, {
-    capture: async () => entered ? pane(["❯ "]) : pane(collapsedComposer.split("\n")),
+    capture: async () => pane(collapsedComposer.split("\n")),
     pressSubmit: async () => {
       enterPresses++;
-      entered = true;
     },
     sleep: async (ms) => {
       elapsedMs += ms;
@@ -115,9 +114,9 @@ test("post-clear assignment bracketed paste submits a complete collapsed packet 
     pollMs: 250,
   });
 
-  assert.equal(enterPresses, 1);
-  assert.ok(elapsedMs >= 3000);
-  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: true, enterPresses: 1 });
+  assert.equal(enterPresses, 0);
+  assert.ok(elapsedMs >= 4000, "hidden packet contents stay unverified through the bounded payload wait");
+  assert.deepEqual(result, { payloadSeen: false, payloadStable: false, cleared: null, enterPresses: 0 });
 });
 
 test("slot sends check tmux pane mode before any normal input or paste", () => {
