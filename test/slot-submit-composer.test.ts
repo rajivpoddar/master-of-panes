@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import {
   composerText,
   composerHoldsPayload,
+  clearOwnedRefusedPasteComposer,
   INJECT_ENTER_DELAY_MS,
   resolveInjectEnterDelayMs,
   resolveAssignmentInjectEnterDelayMs,
@@ -63,6 +64,107 @@ test("composerHoldsPayload requires the full visible payload and rejects hidden 
   assert.equal(composerHoldsPayload("[Pasted text #1 +40 lines]", "long"), false);
   assert.equal(composerHoldsPayload("[Pasted text #13 +7 lines]\npacket line 9\npacket line 10", "packet line 1\npacket line 10\npacket line 13"), false);
   assert.equal(composerHoldsPayload("then finish it", "do X\nthen finish it"), false);
+});
+
+test("refused short FILE_PACKET placeholder clears its owned composer and leaves it reusable", async () => {
+  const payload = `FILE_PACKET sha256=${"a".repeat(64)} ${"pointer".repeat(30)}`;
+  assert.ok(Buffer.byteLength(payload) < 512, "exercise the short FILE_PACKET transport");
+
+  let composer = "[Pasted text #68]";
+  let lastObservedComposer: string | null = null;
+  let enterPresses = 0;
+  let clearKeys = 0;
+  const capture = async (): Promise<string> => pane([`❯ ${composer}`]);
+  const refused = await submitWithComposerCheck(payload, {
+    capture: async () => {
+      const snapshot = await capture();
+      lastObservedComposer = composerText(snapshot);
+      return snapshot;
+    },
+    pressSubmit: async () => {
+      enterPresses++;
+    },
+    sleep: async () => undefined,
+    prePasteComposer: "",
+    dwellMs: 0,
+    payloadGraceMs: 500,
+    pollMs: 250,
+  });
+  assert.deepEqual(refused, { payloadSeen: false, payloadStable: false, cleared: null, enterPresses: 0 });
+
+  const cleanup = await clearOwnedRefusedPasteComposer(payload, {
+    prePasteComposer: "",
+    lastObservedComposer,
+    enterPresses: refused.enterPresses,
+    capture,
+    clearComposer: async () => {
+      clearKeys++;
+      composer = "";
+      return true;
+    },
+    sleep: async () => undefined,
+    stableMs: 250,
+    timeoutMs: 500,
+    pollMs: 250,
+  });
+
+  assert.deepEqual(cleanup, { attempted: true, cleared: true, reason: "composer_cleared" });
+  assert.equal(clearKeys, 1, "send one C-u cleanup key and never Enter or resend");
+  assert.equal(enterPresses, 0);
+  assert.equal(composerText(await capture()), "", "the next delivery sees an empty reusable composer");
+});
+
+test("refused-paste cleanup preserves preexisting, changed, unreadable, and already-submitted composer state", async () => {
+  const cases = [
+    { name: "preexisting composer", pre: "user draft", observed: "[Pasted text #1]", current: "[Pasted text #1]", enters: 0, reason: "pre_paste_composer_not_empty" },
+    { name: "operator edited after refusal", pre: "", observed: "[Pasted text #2]", current: "[Pasted text #2]\noperator text", enters: 0, reason: "composer_changed_after_refusal" },
+    { name: "unreadable composer", pre: "", observed: null, current: null, enters: 0, reason: "composer_unreadable" },
+    { name: "unrelated visible text", pre: "", observed: "operator-authored text", current: "operator-authored text", enters: 0, reason: "composer_not_owned_by_send" },
+    { name: "Enter already sent", pre: "", observed: "[Pasted text #4]", current: "[Pasted text #4]", enters: 1, reason: "enter_already_sent" },
+  ] as const;
+
+  for (const scenario of cases) {
+    let clearKeys = 0;
+    const result = await clearOwnedRefusedPasteComposer("FILE_PACKET pointer", {
+      prePasteComposer: scenario.pre,
+      lastObservedComposer: scenario.observed,
+      enterPresses: scenario.enters,
+      capture: async () => scenario.current === null ? null : pane([`❯ ${scenario.current}`]),
+      clearComposer: async () => {
+        clearKeys++;
+        return true;
+      },
+      sleep: async () => undefined,
+      pollMs: 250,
+    });
+    assert.equal(result.attempted, false, scenario.name);
+    assert.equal(result.cleared, false, scenario.name);
+    assert.equal(result.reason, scenario.reason, scenario.name);
+    assert.equal(clearKeys, 0, scenario.name);
+  }
+});
+
+test("refusal cleanup is shared by file and text sends without changing the active-slot force gate", () => {
+  const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const routeStart = server.indexOf('app.post("/slots/:slotNum/send"');
+  const routeEnd = server.indexOf("// ─── Plan Approval", routeStart);
+  const route = server.slice(routeStart, routeEnd);
+  const activeGate = route.indexOf("if (!force && isValidDevSlot(slotNum, config.slotCount))");
+  const fileSend = route.indexOf("pastePayloadWithTmuxBuffer(slotNum, paneTarget, filePayload");
+  const textSend = route.indexOf("pastePayloadWithTmuxBuffer(slotNum, paneTarget, commandPayload");
+  assert.ok(activeGate >= 0 && activeGate < fileSend && activeGate < textSend);
+  assert.match(route, /reason: "slot_active_force_required"/);
+  assert.ok(fileSend >= 0 && textSend >= 0, "both transports use the same serialized paste helper");
+  assert.match(route.slice(fileSend, fileSend + 240), /clearOwnedComposerOnRefusal:\s*true/);
+  assert.match(route.slice(textSend, textSend + 240), /clearOwnedComposerOnRefusal:\s*true/);
+
+  const pasteStart = server.indexOf("async function pastePayloadWithTmuxBuffer");
+  const pasteEnd = server.indexOf('app.post("/slots/:slotNum/send"', pasteStart);
+  assert.match(server.slice(pasteStart, pasteEnd), /clearOwnedRefusedPasteComposer/);
+
+  const assignmentStart = server.indexOf("async function deliverTaskFileForAssignment");
+  const assignmentEnd = server.indexOf("registerAssignmentRoute(app, db, issueProjection)", assignmentStart);
+  assert.doesNotMatch(server.slice(assignmentStart, assignmentEnd), /clearOwnedComposerOnRefusal/);
 });
 
 test("assignment packets wait for a stable empty composer before the first paste", () => {
