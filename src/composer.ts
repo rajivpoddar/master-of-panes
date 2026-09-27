@@ -298,7 +298,7 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
   const payloadGraceMs = deps.payloadGraceMs ?? 5000;
   const payloadStableMs = deps.payloadStableMs ?? INJECT_ENTER_DELAY_MS;
   const payloadStableGraceMs = deps.payloadStableGraceMs ?? payloadGraceMs + payloadStableMs;
-  const clearGraceMs = deps.clearGraceMs ?? 2000;
+  const clearGraceMs = deps.clearGraceMs ?? 5000;
   const pollMs = deps.pollMs ?? 250;
 
   if (deps.prePasteComposer !== undefined && deps.prePasteComposer !== "") {
