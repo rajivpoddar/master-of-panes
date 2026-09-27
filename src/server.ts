@@ -1195,6 +1195,7 @@ async function deliverTaskFileForAssignment(
     source: packet.mode === "file_ref" ? "file_ref" : "file",
     label: filePath,
     requireEmptyComposerBeforePaste: true,
+    bracketedPaste: true,
   });
   const verify = paste.verify;
   if (!verify.ok) {
@@ -1754,6 +1755,7 @@ async function pastePayloadWithTmuxBuffer(
     source: "command" | "file" | "file_ref";
     label: string;
     requireEmptyComposerBeforePaste?: boolean;
+    bracketedPaste?: boolean;
   },
 ): Promise<{
   chunks: number;
@@ -1832,7 +1834,10 @@ async function pastePayloadWithTmuxBuffer(
       await writeFile(tmpFile, payload.subarray(start, end));
       try {
         await execShell(`tmux load-buffer -b ${shellEscape(bufName)} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
-        await execShell(`tmux paste-buffer -b ${shellEscape(bufName)} -t ${paneAddress} -d`, { timeout: 10_000 });
+        await execShell(
+          `tmux paste-buffer${meta.bracketedPaste ? " -p" : ""} -b ${shellEscape(bufName)} -t ${paneAddress} -d`,
+          { timeout: 10_000 },
+        );
         db.logEvent(slotNum, "send_buffer_chunk", null, null, {
           source: meta.source,
           chunk: index + 1,
