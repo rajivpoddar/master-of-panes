@@ -40,12 +40,14 @@ import { P0EscalationWatcher } from "./p0EscalationWatch.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
 import {
+  clearOwnedRefusedPasteComposer,
   composerText,
   INJECT_ENTER_DELAY_MS,
   resolveAssignmentInjectEnterDelayMs,
   submitWithComposerCheck,
   waitForEmptyComposer,
   type SubmitCheckResult,
+  type RefusedPasteCleanupResult,
 } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 import { DEFAULT_CONFIG } from "./types.js";
@@ -1756,12 +1758,14 @@ async function pastePayloadWithTmuxBuffer(
     label: string;
     requireEmptyComposerBeforePaste?: boolean;
     bracketedPaste?: boolean;
+    clearOwnedComposerOnRefusal?: boolean;
   },
 ): Promise<{
   chunks: number;
   bytes: number;
   chunkSize: number;
   submit: SubmitCheckResult;
+  cleanup?: RefusedPasteCleanupResult;
   verify: { ok: boolean; reason?: string };
 }> {
   return withSlotSendLock(slotNum, async () => {
@@ -1852,15 +1856,37 @@ async function pastePayloadWithTmuxBuffer(
       }
     }
 
-    const submit = await submitWithComposerCheck(payload.toString("utf8"), {
-      capture: () => capturePaneSnapshot(paneAddress),
+    const payloadText = payload.toString("utf8");
+    const prePasteComposer = composerText(preSnapshot);
+    let lastObservedComposer: string | null = null;
+    const captureForSubmit = async (): Promise<string | null> => {
+      const snapshot = await capturePaneSnapshot(paneAddress);
+      lastObservedComposer = composerText(snapshot);
+      return snapshot;
+    };
+    const submit = await submitWithComposerCheck(payloadText, {
+      capture: captureForSubmit,
       pressSubmit: async () => {
         await execShell(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 10_000 });
       },
       sleep,
-      prePasteComposer: composerText(preSnapshot),
+      prePasteComposer,
       dwellMs: submitDwellMs,
     });
+    const cleanup = meta.clearOwnedComposerOnRefusal && submit.enterPresses === 0
+      ? await clearOwnedRefusedPasteComposer(payloadText, {
+          prePasteComposer,
+          lastObservedComposer,
+          enterPresses: submit.enterPresses,
+          capture: captureForSubmit,
+          clearComposer: async () => {
+            if (await readPaneInputModeRefusal(paneAddress)) return false;
+            await execShell(`tmux send-keys -t ${paneAddress} C-u`, { timeout: 10_000 });
+            return true;
+          },
+          sleep,
+        })
+      : { attempted: false, cleared: false, reason: "enter_already_sent" as const };
     db.logEvent(slotNum, "send_submit_check", null, null, {
       source: meta.source,
       dwell_ms: submitDwellMs,
@@ -1869,11 +1895,20 @@ async function pastePayloadWithTmuxBuffer(
       cleared: submit.cleared,
       enter_presses: submit.enterPresses,
     });
+    if (cleanup && submit.enterPresses === 0) {
+      db.logEvent(slotNum, "send_refusal_composer_cleanup", null, null, {
+        source: meta.source,
+        pre_paste_composer_empty: prePasteComposer === "",
+        cleanup_attempted: cleanup.attempted,
+        composer_cleared: cleanup.cleared,
+        reason: cleanup.reason,
+      });
+    }
     // Keep the pane lock through readback so another send cannot make this
     // delivery look successful by changing the same composer first.
     await sleep(600);
     const verify = await deliveryConfirmed(paneAddress, preSnapshot, submit);
-    return { chunks, bytes, chunkSize, submit, verify };
+    return { chunks, bytes, chunkSize, submit, cleanup, verify };
   });
 }
 
@@ -2173,6 +2208,7 @@ app.post("/slots/:slotNum/send", async (c) => {
       const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, filePayload, {
         source: "file",
         label: filePath,
+        clearOwnedComposerOnRefusal: true,
       });
       const verify = paste.verify;
       if (!verify.ok) {
@@ -2181,12 +2217,14 @@ app.post("/slots/:slotNum/send", async (c) => {
           paste: "buffer",
           bytes: paste.bytes,
           chunks: paste.chunks,
+          composer_cleanup: paste.cleanup,
           reason: verify.reason,
         });
         return c.json(
           {
             success: false,
             error: `Send dispatched but delivery not verified: ${verify.reason}`,
+            composer_cleanup: paste.cleanup,
             reason: verify.reason === "pane_in_copy_mode" || verify.reason === "pane_mode_unreadable"
               ? verify.reason
               : "delivery_unverified",
@@ -2273,6 +2311,7 @@ app.post("/slots/:slotNum/send", async (c) => {
       const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, commandPayload, {
         source: "command",
         label: command.slice(0, 200),
+        clearOwnedComposerOnRefusal: true,
       });
 
       const verify = paste.verify;
@@ -2282,12 +2321,14 @@ app.post("/slots/:slotNum/send", async (c) => {
           paste: "buffer",
           bytes: paste.bytes,
           chunks: paste.chunks,
+          composer_cleanup: paste.cleanup,
           reason: verify.reason,
         });
         return c.json(
           {
             success: false,
             error: `Send dispatched but delivery not verified: ${verify.reason}`,
+            composer_cleanup: paste.cleanup,
             reason: verify.reason === "pane_in_copy_mode" || verify.reason === "pane_mode_unreadable"
               ? verify.reason
               : "delivery_unverified",

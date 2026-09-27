@@ -73,6 +73,28 @@ export function composerHoldsPayload(composer: string, payload: string): boolean
   return squash(composer).includes(expected);
 }
 
+/**
+ * True only when the visible composer is attributable to this refused paste:
+ * the pre-paste composer was empty, and the post-paste text is either a
+ * collapsed paste placeholder (with any visible tail matching this payload)
+ * or a visible fragment of this payload. This is cleanup ownership, not proof
+ * that the whole payload arrived.
+ */
+export function composerIsRefusedPasteContent(composer: string, payload: string): boolean {
+  const expected = squash(payload.trim());
+  if (!expected || !composer.trim()) return false;
+
+  const placeholder = composer.trim().match(
+    /^\[Pasted text(?:\s+#\d+)?(?:\s+\+\d+\s+lines?)?\](?:\n([\s\S]*))?$/i,
+  );
+  if (placeholder) {
+    const visibleTail = squash(placeholder[1] ?? "");
+    return visibleTail === "" || expected.endsWith(visibleTail);
+  }
+
+  return expected.includes(squash(composer.trim()));
+}
+
 export type EmptyComposerWaitDeps = {
   capture: () => Promise<string | null>;
   sleep: (ms: number) => Promise<void>;
@@ -133,6 +155,91 @@ export type SubmitCheckResult = {
   cleared: boolean | null;
   enterPresses: number;
 };
+
+export type RefusedPasteCleanupResult = {
+  attempted: boolean;
+  cleared: boolean;
+  reason:
+    | "pre_paste_composer_not_empty"
+    | "enter_already_sent"
+    | "composer_unreadable"
+    | "composer_already_empty"
+    | "composer_changed_after_refusal"
+    | "composer_not_owned_by_send"
+    | "pane_mode_refused"
+    | "clear_key_outcome_unknown"
+    | "composer_cleared"
+    | "composer_empty_not_confirmed";
+};
+
+export type RefusedPasteCleanupDeps = {
+  /** The composer contents captured immediately before this send pasted. */
+  prePasteComposer: string | null;
+  /** Last readable composer contents seen by submit verification. */
+  lastObservedComposer: string | null;
+  enterPresses: number;
+  capture: () => Promise<string | null>;
+  /** Return false when the pane mode changed and C-u must not be sent. */
+  clearComposer: () => Promise<boolean>;
+  sleep: (ms: number) => Promise<void>;
+  stableMs?: number;
+  timeoutMs?: number;
+  pollMs?: number;
+};
+
+/**
+ * Recover a refused paste only when the send began from a readable empty
+ * composer, no Enter was sent, and a fresh read still matches the refused
+ * paste observed by verification. C-u is sent once; the payload is never
+ * resubmitted and a changed/unreadable composer is left untouched.
+ */
+export async function clearOwnedRefusedPasteComposer(
+  payload: string,
+  deps: RefusedPasteCleanupDeps,
+): Promise<RefusedPasteCleanupResult> {
+  if (deps.prePasteComposer !== "") {
+    return { attempted: false, cleared: false, reason: "pre_paste_composer_not_empty" };
+  }
+  if (deps.enterPresses !== 0) {
+    return { attempted: false, cleared: false, reason: "enter_already_sent" };
+  }
+
+  const currentSnapshot = await deps.capture();
+  const currentComposer = composerText(currentSnapshot);
+  if (currentComposer === null) {
+    return { attempted: false, cleared: false, reason: "composer_unreadable" };
+  }
+  if (currentComposer === "") {
+    return { attempted: false, cleared: true, reason: "composer_already_empty" };
+  }
+  if (currentComposer !== deps.lastObservedComposer) {
+    return { attempted: false, cleared: false, reason: "composer_changed_after_refusal" };
+  }
+  if (!composerIsRefusedPasteContent(currentComposer, payload)) {
+    return { attempted: false, cleared: false, reason: "composer_not_owned_by_send" };
+  }
+
+  let clearSent: boolean;
+  try {
+    clearSent = await deps.clearComposer();
+  } catch {
+    return { attempted: true, cleared: false, reason: "clear_key_outcome_unknown" };
+  }
+  if (!clearSent) {
+    return { attempted: false, cleared: false, reason: "pane_mode_refused" };
+  }
+
+  const empty = await waitForEmptyComposer({
+    capture: deps.capture,
+    sleep: deps.sleep,
+    stableMs: deps.stableMs ?? 250,
+    timeoutMs: deps.timeoutMs ?? 1000,
+    pollMs: deps.pollMs ?? 250,
+  });
+  return empty.ready
+    ? { attempted: true, cleared: true, reason: "composer_cleared" }
+    : { attempted: true, cleared: false, reason: "composer_empty_not_confirmed" };
+}
 
 export type SubmitCheckDeps = {
   capture: () => Promise<string | null>;
