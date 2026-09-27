@@ -15,14 +15,13 @@ import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { composerText, INJECT_ENTER_DELAY_MS, submitWithComposerCheck } from "./composer.js";
+import { withSlotSendLock } from "./slotSendLock.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
-export const PM_INJECT_ENTER_DELAY_MS: number = (() => {
-  const raw = process.env.MOP_PM_INJECT_ENTER_DELAY_MS;
-  const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n >= 0 ? n : 500;
-})();
+/** Shared PM + numbered-slot paste->Enter dwell (see composer.ts). */
+export const PM_INJECT_ENTER_DELAY_MS: number = INJECT_ENTER_DELAY_MS;
 
 // v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
 // wrapper. Kept for reference / fallback diagnostic; no longer invoked by
@@ -1094,20 +1093,30 @@ export class TmuxRelay {
     let lastErr: unknown = null;
     for (let attempt = 0; attempt <= TmuxRelay.SEND_MAX_RETRIES; attempt++) {
       try {
-        if (raw) {
-          // Raw: tmux interprets key names (Escape, C-c, BTab, etc.).
-          // Do NOT pass -l (literal) flag — that would type the name as text.
-          await this.runShell(
-            `tmux send-keys -t ${paneTarget} ${shellEscape(command)}`,
-            { timeout: 5_000 }
-          );
-        } else {
-          // Text mode: load-buffer + paste-buffer + Enter is multi-line safe
-          // and avoids quoting hell vs. a single send-keys 'long $string'.
+        const sent = await withSlotSendLock(slotNum, async () => {
+          if (raw) {
+            // Raw: tmux interprets key names (Escape, C-c, BTab, etc.).
+            // Do NOT pass -l (literal) flag — that would type the name as text.
+            await this.runShell(
+              `tmux send-keys -t ${paneTarget} ${shellEscape(command)}`,
+              { timeout: 5_000 }
+            );
+            return true;
+          }
+
+          // Keep the buffer paste, dwell, one Enter, and composer readback
+          // serialized with server.ts sends for this pane.
           const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}-${attempt}.txt`;
           const bufName = `mop-send-${slotNum}`;
           await fs.writeFile(tmpFile, command);
           try {
+            let prePasteComposer: string | null = null;
+            try {
+              const before = await this.runShell(`tmux capture-pane -t ${paneTarget} -p`, { timeout: 5_000 });
+              prePasteComposer = composerText(before.stdout);
+            } catch {
+              // Unknown composer state must not be followed by Enter.
+            }
             await this.runShell(
               `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
               { timeout: 3_000 }
@@ -1116,17 +1125,41 @@ export class TmuxRelay {
               `tmux paste-buffer -b ${bufName} -t ${paneTarget} -d`,
               { timeout: 3_000 }
             );
-            // Small breathing room so the TUI registers the paste before Enter.
-            // Matches the 0.3s that injectDirect uses for PM pane sends.
-            await sleep(300);
-            await this.runShell(
-              `tmux send-keys -t ${paneTarget} Enter`,
-              { timeout: 3_000 }
-            );
+            const submit = await submitWithComposerCheck(command, {
+              capture: async () => {
+                try {
+                  return (await this.runShell(`tmux capture-pane -t ${paneTarget} -p`, { timeout: 5_000 })).stdout;
+                } catch {
+                  return null;
+                }
+              },
+              pressSubmit: async () => {
+                await this.runShell(`tmux send-keys -t ${paneTarget} Enter`, { timeout: 3_000 });
+              },
+              sleep,
+              prePasteComposer,
+            });
+            if (this.db) {
+              this.db.logEvent(slotNum, "send_submit_check", null, null, {
+                command: command.slice(0, 200),
+                dwell_ms: INJECT_ENTER_DELAY_MS,
+                payload_seen: submit.payloadSeen,
+                payload_stable: submit.payloadStable,
+                cleared: submit.cleared,
+                enter_presses: submit.enterPresses,
+              });
+            }
+            // A missing/partial/unreadable composer or an uncleared input is
+            // ambiguous. Do not auto-repaste or press Enter a second time.
+            return submit.payloadSeen === true
+              && submit.payloadStable === true
+              && submit.cleared === true
+              && submit.enterPresses === 1;
           } finally {
             await fs.unlink(tmpFile).catch(() => undefined);
           }
-        }
+        });
+        if (!sent) return false;
         if (attempt > 0) {
           console.log(
             `[relay] sendToSlot ${slotNum} (${command.slice(0, 60)}) succeeded on retry ${attempt}`

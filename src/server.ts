@@ -12,10 +12,11 @@
  * 5. Returns a HookResponse that Claude Code acts on
  */
 
-import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
@@ -38,6 +39,15 @@ import { PMCadenceScheduler } from "./pmCadence.js";
 import { P0EscalationWatcher } from "./p0EscalationWatch.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
+import {
+  composerText,
+  INJECT_ENTER_DELAY_MS,
+  resolveAssignmentInjectEnterDelayMs,
+  submitWithComposerCheck,
+  waitForEmptyComposer,
+  type SubmitCheckResult,
+} from "./composer.js";
+import { withSlotSendLock } from "./slotSendLock.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import {
   NativeSlotReleaseCoordinator,
@@ -54,6 +64,7 @@ import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, P
 import { runtimeIdentity } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { requestPmClearOnce, waitForPmIdleDrain } from "./pmClearLatch.js";
+import { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } from "./assignmentTaskPacket.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -1159,18 +1170,46 @@ async function deliverTaskFileForAssignment(
       receipt: { slot: slotNum, pane: paneTarget, verified: false, file: filePath },
     };
   }
-  const preSnapshot = (await capturePaneSnapshot(paneTarget)) ?? "";
-  const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, filePayload, {
-    source: "file",
+  let deliveryPath = filePath;
+  if (filePayload.byteLength > ASSIGNMENT_INLINE_TASK_MAX_BYTES) {
+    try {
+      const archiveDirectory = "/tmp/pm-delivered-archive";
+      await mkdir(archiveDirectory, { recursive: true, mode: 0o700 });
+      const sourceName = basename(filePath).replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 120) || "task.md";
+      deliveryPath = join(
+        archiveDirectory,
+        `mop-assignment-s${slotNum}-${Date.now()}-${randomUUID()}-${sourceName}`,
+      );
+      await writeFile(deliveryPath, filePayload, { flag: "wx", mode: 0o600 });
+    } catch {
+      return {
+        verified: false,
+        reason: "task_file_archive_failed",
+        receipt: { slot: slotNum, pane: paneTarget, task_bytes: filePayload.byteLength, verified: false },
+      };
+    }
+  }
+  const packet = buildAssignmentTaskPacket(deliveryPath, filePayload);
+  const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, packet.payload, {
+    source: packet.mode === "file_ref" ? "file_ref" : "file",
     label: filePath,
+    requireEmptyComposerBeforePaste: true,
   });
-  await sleep(600);
-  const verify = await deliveryConfirmed(paneTarget, preSnapshot);
+  const verify = paste.verify;
   if (!verify.ok) {
     return {
       verified: false,
       reason: verify.reason ?? "session_delivery_unverified",
-      receipt: { slot: slotNum, pane: paneTarget, bytes: paste.bytes, chunks: paste.chunks, verified: false },
+      receipt: {
+        slot: slotNum,
+        pane: paneTarget,
+        mode: packet.mode,
+        task_bytes: packet.taskBytes,
+        task_sha256: packet.taskSha256,
+        message_bytes: paste.bytes,
+        chunks: paste.chunks,
+        verified: false,
+      },
     };
   }
   return {
@@ -1178,8 +1217,10 @@ async function deliverTaskFileForAssignment(
     receipt: {
       slot: slotNum,
       pane: paneTarget,
-      mode: "file",
-      bytes: paste.bytes,
+      mode: packet.mode,
+      bytes: packet.taskBytes,
+      sha256: packet.taskSha256,
+      message_bytes: paste.bytes,
       chunks: paste.chunks,
       chunkSize: paste.chunkSize,
       verified: true,
@@ -1655,7 +1696,23 @@ function parseMessageSlotWrapper(command: string): { targetSlot: number | null; 
  * the keystrokes (dead/detached pane, or — worst case — the TUI is in a
  * state that ignores input). Either way: return failure.
  */
-async function deliveryConfirmed(paneAddress: string, preSnapshot: string): Promise<{ ok: boolean; reason?: string }> {
+async function deliveryConfirmed(
+  paneAddress: string,
+  preSnapshot: string,
+  submit?: SubmitCheckResult,
+): Promise<{ ok: boolean; reason?: string }> {
+  if (submit && submit.payloadSeen !== true) {
+    return { ok: false, reason: "composer never showed the complete payload before Enter" };
+  }
+  if (submit && submit.payloadStable !== true) {
+    return { ok: false, reason: "composer did not hold the complete payload steady before Enter" };
+  }
+  if (submit && submit.enterPresses !== 1) {
+    return { ok: false, reason: "payload was not submitted exactly once" };
+  }
+  if (submit && submit.cleared !== true) {
+    return { ok: false, reason: "composer input still holds the prompt after Enter (buffered, not submitted)" };
+  }
   const post = await capturePaneSnapshot(paneAddress);
   if (post === null) {
     return { ok: false, reason: "pane disappeared after send (capture-pane failed)" };
@@ -1680,50 +1737,110 @@ async function pastePayloadWithTmuxBuffer(
   slotNum: number,
   paneAddress: string,
   payload: Buffer,
-  meta: { source: "command" | "file"; label: string },
-): Promise<{ chunks: number; bytes: number; chunkSize: number }> {
-  const chunkSize = sendChunkSizeBytes();
-  const bytes = payload.byteLength;
-  const chunks = Math.max(1, Math.ceil(bytes / chunkSize));
-  const bufName = `mop-send-${slotNum}-${Date.now()}`;
-
-  db.logEvent(slotNum, "send_buffer_start", null, null, {
-    source: meta.source,
-    label: meta.label.slice(0, 200),
-    bytes,
-    chunkSize,
-    chunks,
-    paste: "buffer",
-  });
-  console.log(
-    `[slots/send] slot=${slotNum} source=${meta.source} bytes=${bytes} chunks=${chunks} chunkSize=${chunkSize} paste=buffer`
-  );
-
-  for (let index = 0; index < chunks; index++) {
-    const start = index * chunkSize;
-    const end = Math.min(start + chunkSize, bytes);
-    const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}-${index + 1}-of-${chunks}.txt`;
-    await writeFile(tmpFile, payload.subarray(start, end));
-    try {
-      await execShell(`tmux load-buffer -b ${shellEscape(bufName)} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
-      await execShell(`tmux paste-buffer -b ${shellEscape(bufName)} -t ${paneAddress} -d`, { timeout: 10_000 });
-      db.logEvent(slotNum, "send_buffer_chunk", null, null, {
-        source: meta.source,
-        chunk: index + 1,
-        chunks,
-        bytes: end - start,
+  meta: {
+    source: "command" | "file" | "file_ref";
+    label: string;
+    requireEmptyComposerBeforePaste?: boolean;
+  },
+): Promise<{
+  chunks: number;
+  bytes: number;
+  chunkSize: number;
+  submit: SubmitCheckResult;
+  verify: { ok: boolean; reason?: string };
+}> {
+  return withSlotSendLock(slotNum, async () => {
+    const chunkSize = sendChunkSizeBytes();
+    const bytes = payload.byteLength;
+    const submitDwellMs = meta.requireEmptyComposerBeforePaste
+      ? resolveAssignmentInjectEnterDelayMs()
+      : INJECT_ENTER_DELAY_MS;
+    let preSnapshot: string;
+    if (meta.requireEmptyComposerBeforePaste) {
+      const readiness = await waitForEmptyComposer({
+        capture: () => capturePaneSnapshot(paneAddress),
+        sleep,
       });
-    } finally {
-      await unlink(tmpFile).catch(() => undefined);
+      if (!readiness.ready) {
+        const reason = "composer did not remain empty and readable before paste";
+        db.logEvent(slotNum, "send_precheck_refused", null, null, {
+          source: meta.source,
+          bytes,
+          waited_ms: readiness.waitedMs,
+          reason,
+        });
+        return {
+          chunks: 0,
+          bytes,
+          chunkSize,
+          submit: { payloadSeen: false, payloadStable: false, cleared: null, enterPresses: 0 },
+          verify: { ok: false, reason },
+        };
+      }
+      preSnapshot = readiness.snapshot;
+    } else {
+      preSnapshot = (await capturePaneSnapshot(paneAddress)) ?? "";
     }
-    if (chunks > 1) {
-      await sleep(150);
-    }
-  }
+    const chunks = Math.max(1, Math.ceil(bytes / chunkSize));
+    const bufName = `mop-send-${slotNum}-${Date.now()}`;
 
-  await sleep(bytes > chunkSize ? 1000 : 500);
-  await execShell(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 10_000 });
-  return { chunks, bytes, chunkSize };
+    db.logEvent(slotNum, "send_buffer_start", null, null, {
+      source: meta.source,
+      label: meta.label.slice(0, 200),
+      bytes,
+      chunkSize,
+      chunks,
+      paste: "buffer",
+    });
+    console.log(
+      `[slots/send] slot=${slotNum} source=${meta.source} bytes=${bytes} chunks=${chunks} chunkSize=${chunkSize} paste=buffer`
+    );
+
+    for (let index = 0; index < chunks; index++) {
+      const start = index * chunkSize;
+      const end = Math.min(start + chunkSize, bytes);
+      const tmpFile = `/tmp/mop-send-${slotNum}-${Date.now()}-${index + 1}-of-${chunks}.txt`;
+      await writeFile(tmpFile, payload.subarray(start, end));
+      try {
+        await execShell(`tmux load-buffer -b ${shellEscape(bufName)} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+        await execShell(`tmux paste-buffer -b ${shellEscape(bufName)} -t ${paneAddress} -d`, { timeout: 10_000 });
+        db.logEvent(slotNum, "send_buffer_chunk", null, null, {
+          source: meta.source,
+          chunk: index + 1,
+          chunks,
+          bytes: end - start,
+        });
+      } finally {
+        await unlink(tmpFile).catch(() => undefined);
+      }
+      if (chunks > 1) {
+        await sleep(150);
+      }
+    }
+
+    const submit = await submitWithComposerCheck(payload.toString("utf8"), {
+      capture: () => capturePaneSnapshot(paneAddress),
+      pressSubmit: async () => {
+        await execShell(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 10_000 });
+      },
+      sleep,
+      prePasteComposer: composerText(preSnapshot),
+      dwellMs: submitDwellMs,
+    });
+    db.logEvent(slotNum, "send_submit_check", null, null, {
+      source: meta.source,
+      dwell_ms: submitDwellMs,
+      payload_seen: submit.payloadSeen,
+      payload_stable: submit.payloadStable,
+      cleared: submit.cleared,
+      enter_presses: submit.enterPresses,
+    });
+    // Keep the pane lock through readback so another send cannot make this
+    // delivery look successful by changing the same composer first.
+    await sleep(600);
+    const verify = await deliveryConfirmed(paneAddress, preSnapshot, submit);
+    return { chunks, bytes, chunkSize, submit, verify };
+  });
 }
 
 app.post("/slots/:slotNum/send", async (c) => {
@@ -1968,9 +2085,6 @@ app.post("/slots/:slotNum/send", async (c) => {
     db.logEvent(slotNum, "send_command_2_not_plan_approval", null, null, { activity });
   }
 
-  // Capture pane snapshot before send, for post-send delivery verification.
-  const preSnapshot = (await capturePaneSnapshot(paneTarget)) ?? "";
-
   try {
     if (filePath) {
       // File mode: load-buffer + paste-buffer, chunked when needed. No payload cap.
@@ -2011,9 +2125,7 @@ app.post("/slots/:slotNum/send", async (c) => {
         source: "file",
         label: filePath,
       });
-      // Verify pane content actually changed.
-      await sleep(600);
-      const verify = await deliveryConfirmed(paneTarget, preSnapshot);
+      const verify = paste.verify;
       if (!verify.ok) {
         db.logEvent(slotNum, "send_unverified", null, null, {
           file: filePath,
@@ -2112,9 +2224,7 @@ app.post("/slots/:slotNum/send", async (c) => {
         label: command.slice(0, 200),
       });
 
-      // Post-send verification.
-      await sleep(500);
-      const verify = await deliveryConfirmed(paneTarget, preSnapshot);
+      const verify = paste.verify;
       if (!verify.ok) {
         db.logEvent(slotNum, "send_unverified", null, null, {
           command: command.slice(0, 200),
