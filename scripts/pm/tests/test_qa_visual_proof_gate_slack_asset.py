@@ -48,7 +48,9 @@ def receipt(screenshot: bytes) -> dict:
         "version": 2,
         "artifact_kind": "slack",
         "pr": 77,
+        "issue": 88,
         "head_sha": HEAD,
+        "issue_body_sha256": hashlib.sha256(b"current issue body").hexdigest(),
         "slack_channel": CHANNEL,
         "slack_thread_ts": THREAD,
         "scenarios": [{"ac_id": "AC-1", "slack_file_id": FILE_ID, "file_name": "ac-1.png", "sha256": digest}],
@@ -95,7 +97,9 @@ def test_shared_gate_reads_slack_file_bytes_and_binds_thread(monkeypatch, tmp_pa
     screenshot = png_bytes()
     calls = install_slack_harness(monkeypatch, gate, screenshot)
     assert gate.verify_slack_receipt(
-        receipt(screenshot), pr=77, head=HEAD, required_ac_ids=["AC-1"], verify_remote=True
+        receipt(screenshot), pr=77, issue=88, head=HEAD,
+        issue_body_sha=hashlib.sha256(b"current issue body").hexdigest(),
+        required_ac_ids=["AC-1"], verify_remote=True
     ) == []
     assert calls == ["auth.test", "conversations.replies", "files.info"]
 
@@ -105,8 +109,34 @@ def test_shared_gate_refuses_stale_head_before_slack_read(monkeypatch, tmp_path)
     screenshot = png_bytes()
     calls = install_slack_harness(monkeypatch, gate, screenshot)
     assert gate.verify_slack_receipt(
-        receipt(screenshot), pr=77, head="b" * 40, required_ac_ids=["AC-1"], verify_remote=True
+        receipt(screenshot), pr=77, issue=88, head="b" * 40,
+        issue_body_sha=hashlib.sha256(b"current issue body").hexdigest(),
+        required_ac_ids=["AC-1"], verify_remote=True
     ) == ["receipt_head_mismatch"]
+    assert calls == []
+
+
+def test_shared_gate_refuses_same_head_body_edit_before_slack_read(monkeypatch, tmp_path) -> None:
+    gate = load_gate(monkeypatch, tmp_path)
+    screenshot = png_bytes()
+    calls = install_slack_harness(monkeypatch, gate, screenshot)
+    assert gate.verify_slack_receipt(
+        receipt(screenshot), pr=77, issue=88, head=HEAD,
+        issue_body_sha=hashlib.sha256(b"edited issue body").hexdigest(),
+        required_ac_ids=["AC-1"], verify_remote=True
+    ) == ["receipt_issue_body_mismatch"]
+    assert calls == []
+
+
+def test_shared_gate_refuses_wrong_issue_before_slack_read(monkeypatch, tmp_path) -> None:
+    gate = load_gate(monkeypatch, tmp_path)
+    screenshot = png_bytes()
+    calls = install_slack_harness(monkeypatch, gate, screenshot)
+    assert gate.verify_slack_receipt(
+        receipt(screenshot), pr=77, issue=89, head=HEAD,
+        issue_body_sha=hashlib.sha256(b"current issue body").hexdigest(),
+        required_ac_ids=["AC-1"], verify_remote=True
+    ) == ["receipt_issue_mismatch"]
     assert calls == []
 
 
@@ -115,5 +145,7 @@ def test_shared_gate_refuses_missing_slack_file_readback(monkeypatch, tmp_path) 
     screenshot = png_bytes()
     install_slack_harness(monkeypatch, gate, screenshot, missing_file=True)
     assert gate.verify_slack_receipt(
-        receipt(screenshot), pr=77, head=HEAD, required_ac_ids=["AC-1"], verify_remote=True
+        receipt(screenshot), pr=77, issue=88, head=HEAD,
+        issue_body_sha=hashlib.sha256(b"current issue body").hexdigest(),
+        required_ac_ids=["AC-1"], verify_remote=True
     ) == ["slack_api_error:files.info:file_not_found"]

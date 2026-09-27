@@ -18,8 +18,8 @@ SOURCE = SHARED / "claude" / "scripts" / "qa-visual-proof-gate.py"
 MANIFEST = SHARED / "manifest.json"
 HEAD = "f026a0094573fc10e9613d3dde1351d7724c103b"
 RULES_SHA256 = "c2db802cb7d8bd20d8fb09c391285cca8fcd4a6988a157077b5f928d5879455e"
-APP_ORIGIN_COMMIT = "a2039dedccb89ab29456f6946589382362a3bb3c"
-APP_ORIGIN_BLOB = "fcbb30ed379591b782ac8d8e17b9169686d84dea"
+APP_ORIGIN_COMMIT = "26c592065a1584bfdd6bc7ba0272149c5ed88612"
+APP_ORIGIN_BLOB = "fd3604644ad9bb48c4cf06f6eb99e4abcf508693"
 APP_ORIGIN_PREIMAGE_SHA256 = "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a"
 APP_TARGET = "/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/qa-visual-proof-gate.py"
 INSTALLED_TARGET = "/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py"
@@ -74,6 +74,8 @@ def test_manifest_has_one_versioned_payload_and_two_existing_targets() -> None:
     assert entry["additional_targets"] == [INSTALLED_TARGET]
     assert entry["mode"] == 0o755
     assert entry["sha256"] == hashlib.sha256(SOURCE.read_bytes()).hexdigest()
+    blob = hashlib.sha1(b"blob " + str(len(SOURCE.read_bytes())).encode() + b"\0" + SOURCE.read_bytes()).hexdigest()
+    assert blob == entry["source_authority"]["blob_sha"]
     assert entry["source_authority"] == {
         "repository": "heydonna-app/heydonna-app",
         "commit": APP_ORIGIN_COMMIT,

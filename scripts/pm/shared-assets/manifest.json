@@ -531,10 +531,10 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-visual-proof-gate",
-      "sha256": "87423bd3ea86bc3cb10fccffade14c86ec5c0f1eb45508dfaedde2a92eb0f280",
+      "sha256": "b4bec34c5b7d8490072367a4a8841a0f1e64854716456c118522ba55e9f1667c",
       "source_authority": {
-        "blob_sha": "fcbb30ed379591b782ac8d8e17b9169686d84dea",
-        "commit": "a2039dedccb89ab29456f6946589382362a3bb3c",
+        "blob_sha": "fd3604644ad9bb48c4cf06f6eb99e4abcf508693",
+        "commit": "26c592065a1584bfdd6bc7ba0272149c5ed88612",
         "mode": 493,
         "path": "scripts/pm/qa-visual-proof-gate.py",
         "preimage_sha256": "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a",

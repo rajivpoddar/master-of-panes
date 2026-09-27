@@ -213,7 +213,9 @@ def verify_slack_receipt(
     receipt: dict[str, Any],
     *,
     pr: int,
+    issue: int,
     head: str,
+    issue_body_sha: str,
     required_ac_ids: list[str],
     verify_remote: bool,
 ) -> list[str]:
@@ -228,10 +230,17 @@ def verify_slack_receipt(
         errors.append("invalid_slack_receipt_schema")
     if type(receipt.get("pr")) is not int or receipt.get("pr") != pr:
         errors.append("receipt_pr_mismatch")
+    if type(receipt.get("issue")) is not int or receipt.get("issue") != issue:
+        errors.append("receipt_issue_mismatch")
     if not re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("head_sha") or "")):
         errors.append("receipt_head_malformed")
     elif receipt.get("head_sha") != head:
         errors.append("receipt_head_mismatch")
+    observed_body_sha = str(receipt.get("issue_body_sha256") or "")
+    if not SHA256.fullmatch(observed_body_sha):
+        errors.append("receipt_issue_body_sha256_malformed")
+    elif observed_body_sha != issue_body_sha:
+        errors.append("receipt_issue_body_mismatch")
     channel = str(receipt.get("slack_channel") or "")
     thread_ts = str(receipt.get("slack_thread_ts") or "")
     if not SLACK_CHANNEL_ID.fullmatch(channel):
@@ -584,7 +593,10 @@ def receipt_matches_tuple(
             receipt.get("schema") == "heydonna_qa_visual_proof"
             and receipt.get("version") == 2
             and str(receipt.get("pr") or "") == str(pr)
+            and type(receipt.get("issue")) is int
+            and receipt.get("issue") == issue
             and str(receipt.get("head_sha") or "") == head
+            and str(receipt.get("issue_body_sha256") or "") == issue_body_sha
         )
     return (
         str(receipt.get("pr") or "") == str(pr)
@@ -764,7 +776,9 @@ def validate_receipt(
         return verify_slack_receipt(
             receipt,
             pr=pr,
+            issue=issue,
             head=head,
+            issue_body_sha=issue_body_sha,
             required_ac_ids=required_ac_ids,
             verify_remote=verify_remote,
         )
