@@ -543,3 +543,56 @@ test("numbered-slot send dwells at least 1s and presses Enter once", async () =>
   const mutations = commands.filter((command) => command.includes("send-keys") || command.includes("paste-buffer"));
   assert.ok(mutations.every((command) => command.includes("-t %42")));
 });
+
+// Incident mop-midturn-submit-20260927 (event 3284927): mid-turn pane reflowed
+// the composer after Enter #1, so the exact-string retry guard skipped Enter #2.
+const MIDTURN_PAYLOAD = "PM -> slot 4: split approved with one change: do NOT make S3 depend on your token; ship only the Origin branch.";
+const MIDTURN_WIDE = [`❯ ${MIDTURN_PAYLOAD}`];
+const MIDTURN_REFLOWED = [
+  "❯ PM -> slot 4: split approved with one change: do NOT make S3",
+  "  depend on your token; ship only the Origin branch.",
+];
+
+async function midturnSubmit(afterPress: (press: number) => string[]) {
+  let presses = 0;
+  let view = MIDTURN_WIDE;
+  const result = await submitWithComposerCheck(MIDTURN_PAYLOAD, {
+    capture: async () => pane(view),
+    pressSubmit: async () => {
+      presses++;
+      view = afterPress(presses);
+    },
+    sleep: async () => undefined,
+    prePasteComposer: "",
+    dwellMs: 0,
+    pollMs: 250,
+    payloadStableMs: 250,
+    clearGraceMs: 500,
+  });
+  return { result, presses };
+}
+
+test("mid-turn: reflowed composer after Enter #1 gets Enter #2 and clears", async () => {
+  const { result, presses } = await midturnSubmit((p) => (p === 1 ? MIDTURN_REFLOWED : ["❯ "]));
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: true, enterPresses: 2 });
+  assert.equal(presses, 2);
+});
+
+test("mid-turn: queued indicator with empty prompt after Enter #1 is success with one press", async () => {
+  const { result, presses } = await midturnSubmit(() => ["❯ "]);
+  assert.equal(result.cleared, true);
+  assert.equal(presses, 1);
+  assert.equal(composerText(pane(["❯ "]).replace("· Twisting", "Press up to edit queued messages\n· Twisting")), "");
+});
+
+test("mid-turn: still held after two Enters is an explicit uncleared failure (no third press)", async () => {
+  const { result, presses } = await midturnSubmit(() => MIDTURN_REFLOWED);
+  assert.deepEqual(result, { payloadSeen: true, payloadStable: true, cleared: false, enterPresses: 2 });
+  assert.equal(presses, 2);
+});
+
+test("mid-turn: foreign text after Enter #1 is never submitted again", async () => {
+  const { result, presses } = await midturnSubmit(() => [`❯ ${MIDTURN_PAYLOAD} plus operator text`]);
+  assert.equal(result.cleared, false);
+  assert.equal(presses, 1);
+});

@@ -374,7 +374,11 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
       cleared = lastComposer === "";
       if (cleared || waited + pollMs >= clearGraceMs) break;
     }
-    if (cleared !== false || lastComposer !== submittedComposer) break;
+    // Mid-turn TUIs reflow the composer after Enter (wrap/indent changes), so
+    // compare whitespace-normalized text: retry only when it is still exactly
+    // our submitted composer, never after foreign text appeared.
+    if (cleared !== false || lastComposer === null || submittedComposer === null) break;
+    if (squash(lastComposer) !== squash(submittedComposer)) break;
   }
 
   return { payloadSeen, payloadStable, cleared, enterPresses };
