@@ -63,6 +63,7 @@ import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { runtimeIdentity } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { paneInputModeRefusalReason, type PaneInputModeRefusalReason } from "./paneInputMode.js";
 import { requestPmClearOnce, waitForPmIdleDrain } from "./pmClearLatch.js";
 import { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } from "./assignmentTaskPacket.js";
 
@@ -1591,6 +1592,18 @@ async function capturePaneSnapshot(paneAddress: string): Promise<string | null> 
   }
 }
 
+async function readPaneInputModeRefusal(paneAddress: string): Promise<PaneInputModeRefusalReason | null> {
+  try {
+    const result = await execShell(
+      `tmux display-message -p -t ${shellEscape(paneAddress)} '#{pane_in_mode}'`,
+      { timeout: 3000 },
+    );
+    return paneInputModeRefusalReason(result.stdout);
+  } catch {
+    return "pane_mode_unreadable";
+  }
+}
+
 /**
  * Confirm a tmux pane address is live (session + window + pane exist).
  * `tmux list-panes -t <pane>` exits 0 only when the address resolves.
@@ -1752,6 +1765,22 @@ async function pastePayloadWithTmuxBuffer(
   return withSlotSendLock(slotNum, async () => {
     const chunkSize = sendChunkSizeBytes();
     const bytes = payload.byteLength;
+    const paneModeRefusal = await readPaneInputModeRefusal(paneAddress);
+    if (paneModeRefusal) {
+      db.logEvent(slotNum, "send_precheck_refused", null, null, {
+        source: meta.source,
+        bytes,
+        reason: paneModeRefusal,
+      });
+      return {
+        chunks: 0,
+        bytes,
+        chunkSize,
+        submit: { payloadSeen: false, payloadStable: false, cleared: null, enterPresses: 0 },
+        verify: { ok: false, reason: paneModeRefusal },
+      };
+    }
+
     const submitDwellMs = meta.requireEmptyComposerBeforePaste
       ? resolveAssignmentInjectEnterDelayMs()
       : INJECT_ENTER_DELAY_MS;
@@ -2085,6 +2114,21 @@ app.post("/slots/:slotNum/send", async (c) => {
     db.logEvent(slotNum, "send_command_2_not_plan_approval", null, null, { activity });
   }
 
+  if (slotNum > 0) {
+    const paneModeRefusal = await readPaneInputModeRefusal(paneTarget);
+    if (paneModeRefusal) {
+      db.logEvent(slotNum, "send_precheck_refused", null, null, {
+        source: filePath ? "file" : "command",
+        reason: paneModeRefusal,
+      });
+      return c.json({
+        success: false,
+        error: `Send refused before pane input: ${paneModeRefusal}`,
+        reason: paneModeRefusal,
+      }, 409);
+    }
+  }
+
   try {
     if (filePath) {
       // File mode: load-buffer + paste-buffer, chunked when needed. No payload cap.
@@ -2138,7 +2182,9 @@ app.post("/slots/:slotNum/send", async (c) => {
           {
             success: false,
             error: `Send dispatched but delivery not verified: ${verify.reason}`,
-            reason: "delivery_unverified",
+            reason: verify.reason === "pane_in_copy_mode" || verify.reason === "pane_mode_unreadable"
+              ? verify.reason
+              : "delivery_unverified",
           },
           502,
         );
@@ -2237,7 +2283,9 @@ app.post("/slots/:slotNum/send", async (c) => {
           {
             success: false,
             error: `Send dispatched but delivery not verified: ${verify.reason}`,
-            reason: "delivery_unverified",
+            reason: verify.reason === "pane_in_copy_mode" || verify.reason === "pane_mode_unreadable"
+              ? verify.reason
+              : "delivery_unverified",
           },
           502,
         );

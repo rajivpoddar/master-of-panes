@@ -13,6 +13,7 @@ import {
 } from "../src/composer.js";
 import { PM_INJECT_ENTER_DELAY_MS, TmuxRelay } from "../src/relay.js";
 import { withSlotSendLock } from "../src/slotSendLock.js";
+import { paneInputModeRefusalReason } from "../src/paneInputMode.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
 const RULE = "─".repeat(103);
@@ -79,6 +80,35 @@ test("assignment packets wait for a stable empty composer before the first paste
     "the composer readiness check must run before any tmux paste",
   );
   assert.match(pastePath, /const submitDwellMs = meta\.requireEmptyComposerBeforePaste[\s\S]*?resolveAssignmentInjectEnterDelayMs\(\)[\s\S]*?: INJECT_ENTER_DELAY_MS/);
+});
+
+test("slot sends check tmux pane mode before any normal input or paste", () => {
+  const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const routeStart = server.indexOf('app.post("/slots/:slotNum/send"');
+  const routeEnd = server.indexOf('\n});', routeStart);
+  const route = server.slice(routeStart, routeEnd);
+  const routeModeCheck = route.indexOf("readPaneInputModeRefusal(paneTarget)");
+  const rawBranch = route.indexOf("if (raw) {");
+  const typedModeRefusal = route.indexOf("reason: paneModeRefusal", routeModeCheck);
+  const firstNormalKey = route.indexOf("tmux send-keys -t ${paneTarget} i");
+  assert.ok(routeModeCheck > rawBranch, "raw keys remain available for safe operator recovery");
+  assert.ok(routeModeCheck >= 0 && routeModeCheck < firstNormalKey, "mode is checked before editor-mode keystrokes");
+  assert.ok(typedModeRefusal > routeModeCheck && typedModeRefusal < firstNormalKey, "copy mode is returned as a typed refusal before input");
+
+  const pasteStart = server.indexOf("async function pastePayloadWithTmuxBuffer");
+  const pasteEnd = server.indexOf('app.post("/slots/:slotNum/send"', pasteStart);
+  const pastePath = server.slice(pasteStart, pasteEnd);
+  const pasteModeCheck = pastePath.indexOf("readPaneInputModeRefusal(paneAddress)");
+  const firstBufferWrite = pastePath.indexOf("tmux load-buffer");
+  assert.ok(pasteModeCheck >= 0 && pasteModeCheck < firstBufferWrite, "pane mode is rechecked before paste-buffer writes");
+});
+
+test("tmux pane input mode check allows only readable normal mode", () => {
+  assert.equal(paneInputModeRefusalReason("0\n"), null);
+  assert.equal(paneInputModeRefusalReason("1\n"), "pane_in_copy_mode");
+  assert.equal(paneInputModeRefusalReason(null), "pane_mode_unreadable");
+  assert.equal(paneInputModeRefusalReason(""), "pane_mode_unreadable");
+  assert.equal(paneInputModeRefusalReason("unexpected"), "pane_mode_unreadable");
 });
 
 test("clear-transition tail and unreadable pane must settle to an empty composer before paste", async () => {
