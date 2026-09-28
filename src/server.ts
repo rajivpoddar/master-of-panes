@@ -147,9 +147,9 @@ const nativeSlotRelease = new NativeSlotReleaseCoordinator({
   interruptTurn: async (slot) => {
     try {
       const sent = await relay.sendToSlotAsync(slot, WEDGE_INTERRUPT_KEY, true, true);
-      return sent
-        ? { ok: true, reason: "interrupt_sent" }
-        : { ok: false, reason: "interrupt_send_failed" };
+      if (!sent) return { ok: false, reason: "interrupt_send_failed" };
+      const residue = await clearComposerResidueAfterReleaseInterrupt(slot);
+      return { ok: true, reason: `interrupt_sent;composer_${residue}` };
     } catch (error) {
       return {
         ok: false,
@@ -1249,9 +1249,9 @@ registerAssignmentEffectRoutes(app, {
   interruptTurn: async (slotNum) => {
     try {
       const sent = await relay.sendToSlotAsync(slotNum, WEDGE_INTERRUPT_KEY, true, true);
-      return sent
-        ? { ok: true, reason: "interrupt_sent" }
-        : { ok: false, reason: "interrupt_send_failed" };
+      if (!sent) return { ok: false, reason: "interrupt_send_failed" };
+      const residue = await clearComposerResidueAfterReleaseInterrupt(slotNum);
+      return { ok: true, reason: `interrupt_sent;composer_${residue}` };
     } catch (error) {
       return {
         ok: false,
@@ -1585,6 +1585,34 @@ async function readCheckoutMovement(
   } catch {
     return null;
   }
+}
+
+/**
+ * Claude Code restores an interrupted turn's prompt into the composer. On a
+ * release/reassign interrupt that restored text is stale (the lane is being
+ * freed), and leaving it there shows up as a "buffered input" that can merge
+ * with the next delivery. Wait briefly for the restore, then C-u until the
+ * composer reads empty. Bounded; never presses Enter.
+ */
+async function clearComposerResidueAfterReleaseInterrupt(
+  slotNum: number,
+): Promise<"empty" | "cleared" | "unreadable" | "mode_refused" | "not_cleared"> {
+  const address = paneAddress(slotNum);
+  let sawText = false;
+  for (let i = 0; i < 12; i += 1) {
+    await sleep(250);
+    const composer = composerText(await capturePaneSnapshot(address));
+    if (composer === null) return sawText ? "not_cleared" : "unreadable";
+    if (composer === "") {
+      if (sawText) return "cleared";
+      if (i >= 5) return "empty";
+      continue;
+    }
+    sawText = true;
+    if (await readPaneInputModeRefusal(address)) return "mode_refused";
+    await execShell(`tmux send-keys -t ${address} C-u`, { timeout: 10_000 });
+  }
+  return sawText ? "not_cleared" : "empty";
 }
 
 async function capturePaneSnapshot(paneAddress: string): Promise<string | null> {
