@@ -1007,3 +1007,25 @@ test("REVISE-3: refused duplicate new_issue is side-effect free and names the ho
     h.close();
   }
 });
+
+test("rerun after a delivery refusal resumes with the committed epoch (mop-assign-slot sends the live epoch)", async () => {
+  const h = harness();
+  try {
+    h.deliverError = "session_delivery_unverified";
+    const epoch0 = h.db.getSlot(1)!.assignment_epoch;
+    const failed = await post(h.app, 1, effectBody(1, epoch0, { effect_id: "assign-1-rerun" }));
+    assert.equal(failed.json.step_failed, "delivery");
+    const committed = h.db.getSlot(1)!.assignment_epoch;
+    assert.equal(committed, epoch0 + 1);
+
+    h.deliverError = null;
+    const retried = await post(h.app, 1, effectBody(1, committed, { effect_id: "assign-1-rerun" }));
+    assert.equal(retried.json.reason, undefined, `unexpected refusal ${retried.json.reason}`);
+    assert.equal(retried.json.status, "assigned");
+    assert.equal(h.db.getSlot(1)!.assignment_epoch, committed, "resume must not bump the epoch");
+    assert.equal(h.db.getAssignmentEffectIntent("assign-1-rerun")!.state, "delivered");
+    assert.equal(h.deliverCalls.length, 2);
+  } finally {
+    h.close();
+  }
+});

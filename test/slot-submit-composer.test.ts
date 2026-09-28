@@ -617,3 +617,68 @@ test("mid-turn: foreign text after Enter #1 is never submitted again", async () 
   assert.equal(result.cleared, false);
   assert.equal(presses, 1);
 });
+
+// 2026-09-28 slot 1 / #8422 epoch 1081: MoP's own `/clear` sat in Claude
+// Code's queued-message area above an EMPTY `❯` input line while a turn ran.
+// The queued area must not count as a foreign draft.
+function busyQueuedPane(input: string[]): string {
+  return [
+    "✽ Considering… (4m 49s · ↓ 2.0k tokens)",
+    "",
+    RULE,
+    "❯ /clear",
+    ...input,
+    RULE,
+    "  ctrl+x ctrl+s to send now · Press up to edit queued messages",
+    "   Rohini SD  heydonna-app-3001",
+    "",
+  ].join("\n");
+}
+
+test("queued area: busy pane with queued /clear and empty input reads as empty", async () => {
+  assert.equal(composerText(busyQueuedPane(["❯ "])), "");
+  const ready = await waitForEmptyComposer({
+    capture: async () => busyQueuedPane(["❯ "]),
+    sleep: async () => undefined,
+    stableMs: 500,
+  });
+  assert.equal(ready.ready, true, "busy + queued /clear + empty input must deliver");
+});
+
+test("queued area: foreign draft on the real input line still refuses", async () => {
+  assert.equal(composerText(busyQueuedPane(["❯ half-typed operator note"])), "half-typed operator note");
+  const ready = await waitForEmptyComposer({
+    capture: async () => busyQueuedPane(["❯ half-typed operator note"]),
+    sleep: async () => undefined,
+    stableMs: 500,
+    timeoutMs: 1000,
+  });
+  assert.equal(ready.ready, false);
+});
+
+test("queued area: idle empty pane still delivers", async () => {
+  const ready = await waitForEmptyComposer({
+    capture: async () => pane(["❯ "]),
+    sleep: async () => undefined,
+    stableMs: 500,
+  });
+  assert.equal(ready.ready, true);
+});
+
+test("queued area: payload moving into the queue after Enter counts as delivered", async () => {
+  let view = pane(["❯ /clear"]);
+  let presses = 0;
+  const result = await submitWithComposerCheck("/clear", {
+    capture: async () => view,
+    pressSubmit: async () => {
+      presses++;
+      view = busyQueuedPane(["❯ "]);
+    },
+    sleep: async () => undefined,
+    prePasteComposer: "",
+    dwellMs: 0,
+    payloadStableMs: 250,
+  });
+  assert.equal(result.cleared, true);
+  assert.equal(presses, 1);
+});

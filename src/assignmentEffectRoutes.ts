@@ -432,12 +432,15 @@ export function registerAssignmentEffectRoutes(
 
     // Idempotent replay / binding fence.
     const existing = db.getAssignmentEffectIntent(request.effect_id);
+    let bindingDigest = requestDigest;
     if (existing) {
       // A completed assignment may be retried with its now-current epoch.
       // Re-hashing at the stored pre-commit epoch proves every other binding
       // field, including task_file, is unchanged.
       const committedEpochReplay =
-        existing.state === "delivered" &&
+        // Also covers a pending_delivery resume: mop-assign-slot reruns send
+        // the live (already committed) epoch after a delivery-step refusal.
+        existing.state !== "planned" &&
         existing.committed_epoch !== null &&
         request.expected_epoch === existing.committed_epoch &&
         computeAssignmentEffectDigest({
@@ -453,6 +456,7 @@ export function registerAssignmentEffectRoutes(
           409,
         );
       }
+      if (committedEpochReplay) bindingDigest = existing.request_digest;
       if (existing.state === "delivered") {
         const live = db.getSlot(slotNum);
         if (
@@ -523,7 +527,7 @@ export function registerAssignmentEffectRoutes(
     // later boundary leaves a reconcilable delivery-pending row.
     const minted = db.mintAssignmentEffectIntent({
       effect_id: request.effect_id,
-      request_digest: requestDigest,
+      request_digest: bindingDigest,
       slot: slotNum,
       selection_class: request.selection_class,
       before_epoch: before.assignment_epoch,
@@ -809,7 +813,7 @@ export function registerAssignmentEffectRoutes(
       },
       delivery_receipt: delivery.receipt,
       effect_id: request.effect_id,
-      request_digest: requestDigest,
+      request_digest: bindingDigest,
       idempotent: false,
       slot_state_after: slotStateSummary(after),
       issue_projection: assignProjection,
