@@ -552,6 +552,15 @@
       "source_path": "claude/scripts/qa-visual-proof-gate.py"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ready-pool-contract-repair.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-ready-pool-contract-repair",
+      "sha256": "f7a0126d612ae00516c7b1e8d9cb53a11fc936c7963471f01bc685d27ff2df64",
+      "source_path": "claude/scripts/ready-pool-contract-repair.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/stale-process-cleanup.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1230,7 +1239,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 133,
+    "selected_count": 134,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
