@@ -11,6 +11,13 @@ import { P0EscalationWatcher } from "../src/p0EscalationWatch.js";
 import { decidePMSubmitKey, PM_INJECT_ENTER_DELAY_MS, TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
+// Every PM inject is a load-buffer + paste-buffer; expose the buffered text
+// on the recorded load-buffer command so tests can locate a payload.
+function withPastedText(command: string): string {
+  const match = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
+  return match ? `${command} PASTE:${readFileSync(match[1]!, "utf8")}` : command;
+}
+
 function pmReadyCommandResult(command: string, runtime: "claude" | "omp" = "omp") {
   return command.includes("pane_current_command")
     ? { stdout: `${runtime}\n`, stderr: "" }
@@ -69,6 +76,7 @@ test("native Claude serializes complete paste-delay-Enter sequences", async () =
   const relay = new TmuxRelay(DEFAULT_CONFIG, {
     pmRuntime: "claude",
     runShell: async (command) => {
+      command = withPastedText(command);
       commands.push(command);
       if (command.includes("pane_current_command")) return { stdout: "claude\n", stderr: "" };
       if (command.includes("native A")) firstPasteAt = Date.now();
@@ -135,7 +143,8 @@ test("native Claude pane shell retains a message until a booted agent can receiv
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
       pmRuntime: "claude",
       runShell: async (command) => {
-        commands.push(command);
+        command = withPastedText(command);
+      commands.push(command);
         if (command.includes("pane_current_command")) return { stdout: `${paneCommand}\n`, stderr: "" };
         return { stdout: "", stderr: "" };
       },
@@ -451,7 +460,7 @@ test("ambiguous queue occurrence stays fail-closed beyond the event read horizon
     const commands: string[] = [];
     let submitAttempts = 0;
     const runShell = async (command: string) => {
-      commands.push(command);
+      commands.push(withPastedText(command));
       if (command.includes("send-keys") && command.includes("C-q") && !command.includes("paste-buffer")) {
         submitAttempts += 1;
         if (submitAttempts === 1) throw new Error("synthetic lost submit acknowledgement");
@@ -470,9 +479,9 @@ test("ambiguous queue occurrence stays fail-closed beyond the event read horizon
     restartedRelay.setDatabase(db);
     (restartedRelay as unknown as { pmBusy: boolean | null }).pmBusy = null;
     assert.equal((await restartedRelay.submitToPM(message)).ok, false);
-    // This single-line occurrence has no paste-buffer phase; the durable
-    // started marker still prevents a second submit-key after restart.
-    assert.equal(commands.filter((command) => command.includes("paste-buffer")).length, 0);
+    // The occurrence is pasted exactly once; the durable started marker
+    // prevents a second paste and a second submit-key after restart.
+    assert.equal(commands.filter((command) => command.includes("paste-buffer")).length, 1);
     assert.equal(commands.filter((command) => command.includes("send-keys") && command.includes("C-q")).length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -614,4 +623,33 @@ test("Slack route and numbered-slot paths use shared PM/slot submit boundaries",
 
   const opsAudit = readFileSync(new URL("../src/opsAudit.ts", import.meta.url), "utf8");
   assert.match(opsAudit, /relay\.injectToPM\(/);
+});
+
+test("long single-line PM body is buffer-pasted whole, never streamed as send-keys text", async () => {
+  // Regression: slot 5 #8406 report (1507 bytes, one line) reached PM with
+  // its first ~1KB missing because single-line bodies were typed via
+  // `tmux send-keys <text>`.
+  const commands: string[] = [];
+  const relay = new TmuxRelay(DEFAULT_CONFIG, {
+    pmRuntime: "claude",
+    runShell: async (command) => {
+      commands.push(withPastedText(command));
+      if (command.includes("pane_current_command")) return { stdout: "claude\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    },
+  });
+  const body = `slot 5 (Revati): HEAD-MARKER ${"x".repeat(1400)} TAIL-MARKER`;
+
+  const result = await relay.submitToPM(body);
+
+  assert.equal(result.ok, true);
+  const load = commands.findIndex((command) => command.startsWith("tmux load-buffer"));
+  const paste = commands.findIndex((command) => command.includes("tmux paste-buffer -p"));
+  const enter = commands.findIndex((command) => command.endsWith(" Enter"));
+  assert.equal(load >= 0 && load < paste && paste < enter, true);
+  assert.equal(commands[load]!.endsWith(`PASTE:${body}`), true);
+  assert.equal(
+    commands.some((command) => command.includes("send-keys") && command.includes("HEAD-MARKER")),
+    false,
+  );
 });

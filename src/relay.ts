@@ -806,13 +806,13 @@ export class TmuxRelay {
       if (!(await this.isPMPaneReady())) return { ok: false, ambiguous: false, notReady: true };
       const firstLine = message.split("\n", 1)[0];
       console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""} (submit=${effectiveSubmitKey})`);
-      if (message.includes("\n")) {
-        // Multi-line payload (e.g., /check-slot N\n<bg-summary>): use
-        // load-buffer + paste-buffer + submit — same pattern sendToSlot uses
-        // for multi-line content. send-keys with embedded \n would press
-        // Enter on each newline and submit the prompt prematurely.
-        // Rajiv directive 2026-05-15 13:44 IST thread `1778831723.165019`:
-        // "make it inline" — MoP injects command + bg-output as one atomic prompt.
+      // Every PM payload goes through load-buffer + paste-buffer, single-line
+      // included. `tmux send-keys <text>` streams the text as keystrokes in
+      // ~1KB pty writes; Claude Code's composer dropped the leading chunk(s)
+      // of long single-line bodies (slot 5 #8406 report 2026-09-28: 1507B
+      // injected, PM received only the last 483 chars). Buffer paste is the
+      // same path sendToSlot uses and never loses the head.
+      {
         const seq = ++this.directInjectSeq;
         const tmpFile = `/tmp/mop-pm-inject-${Date.now()}-${process.pid}-${seq}.txt`;
         const bufName = `mop-pm-inject-${process.pid}-${seq}`;
@@ -830,12 +830,6 @@ export class TmuxRelay {
         } finally {
           await fs.unlink(tmpFile).catch(() => undefined);
         }
-      } else {
-        await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${shellEscape(message)}`, { timeout: 10_000 });
-        pasted = true;
-        await sleep(PM_INJECT_ENTER_DELAY_MS);
-        await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
-        await sleep(500);
       }
       console.log(`[relay-debug] injectToPM success → ${firstLine} (submit=${effectiveSubmitKey})`);
       return { ok: true, ambiguous: false };
