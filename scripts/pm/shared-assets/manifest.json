@@ -1032,7 +1032,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "82581d78da90503950e67f98b24cd9bc9663d760ba15b0d655f2366d519114db",
+      "sha256": "1d97cceb4aea7839b15a5508ff89c42d3e3336c99455b7afb1680446d1d8f632",
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md"
     },
     {
@@ -1113,7 +1113,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "90eadaf60834e8e1dd5ce471a5960e906a4ed1175b0231679b4b1713f2f83763",
+      "sha256": "c0d2e88e2bc7e0f7d1fc2f7ac8406163380fb9074faccabaab6f1e66ff2de68e",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
     },
     {
@@ -1140,7 +1140,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "3628322b1a60bc0096acb6e030b32682a45a4198f0c94a28f0993d17357bf28d",
+      "sha256": "e5ee6e6f0f0632541fca4293d5e53a00a473d291f3fad65e8711350d59e216bf",
       "source_path": "codex/skills/heydonna-open-pr-status/SKILL.md"
     },
     {

@@ -1,6 +1,6 @@
 ---
 name: heydonna-open-pr-status
-description: Reconcile every HeyDonna OPEN PR into one executable four-state release lane.
+description: Reconcile every HeyDonna OPEN PR through its reviewed-scope release lane.
 ---
 
 # HeyDonna Open-PR Four-State Reconciliation
@@ -28,12 +28,23 @@ Labels, prose, and MoP projections are readback, not transition authority.
 PM is limited to one failed-run investigation and explicitly authorized slot
 assignment mechanics; PR Merges owns release transitions.
 
+Bind reviewed scope to the exact live changed-file set. An authoritative
+exact-head classifier receipt confirming marketing website/blog-only `site`
+scope, with no app code or shared app
+runtime/dependency change, requires relevant exact-head site build,
+media/asset, and visual proof as applicable, but no paid app CI/E2E pair.
+App, mixed, or unknown scope requires the genuine exact-head CI/E2E pair;
+unknown or mismatched scope is never exempt. Site-only completion is not
+dual-green and is not a red-app-workflow waiver.
+
 ## Transition contract
 
 1. Preserve `CAPTURE_IN_PROGRESS` only for an accepted exact-head capture that
    is queued or running.
 2. Preserve `CI_E2E_IN_PROGRESS` only for genuine exact-head pull-request CI
-   and E2E runs that are queued or running as a pair.
+   and E2E runs that are queued or running as a pair for app, mixed, or
+   unknown scope. Never use it to imply a pair is required or green for
+   confirmed marketing-only site scope.
 3. Preserve `REPRO_REWORK_IN_PROGRESS` only for active numbered or owned
    exact-head repro/rework with live evidence.
 4. Preserve `REPRO_REWORK_QUEUED` only for a durable exact-head owner/queue
@@ -41,15 +52,18 @@ assignment mechanics; PR Merges owns release transitions.
 
 If no protected state is proven, finish the transition in this same wake:
 
-- dual-green exact-head CI/E2E plus review/product gates clear: run the
-  canonical guard and head-pinned merge;
+- exact-head review/product gates clear and either app/mixed/unknown CI/E2E is
+  dual-green, or confirmed marketing-only site scope has its required exact-head
+  site proof: run the canonical guard and head-pinned merge. A site-only result
+  is not reported as dual-green;
 - completed review/capture/rework with no active lane: merge current main into
   the PR branch non-force, resolve a concrete conflict/product blocker through
   one owned or queued rework receipt, otherwise admit one genuine exact-head
-  CI/E2E pair;
-- failed CI/E2E/capture: consume and classify the failure once, then create or
-  resume exactly one active or durable queued repro/rework packet; never blind
-  rerun;
+  CI/E2E pair for app, mixed, or unknown scope; confirmed site-only scope
+  instead follows its exact-head site-proof path;
+- failed required CI/E2E, site proof, or capture: consume and classify the
+  failure once, then create or resume exactly one active or durable queued
+  repro/rework packet; never blind rerun;
 - exact-head fixture identity miss: begin one duplicate-fenced capture lane;
 - process-only refusal: use the existing guarded one-refusal direct fallback
   once, then read back its terminal edge.
@@ -95,7 +109,8 @@ The receiving CTO wake executes or durably delegates the mapped next edge in
 that same wake. The mapping is: failed-run investigation -> classify and route
 one next release edge; numbered proof -> consume proof and route admission or
 rework; rework/review candidate -> review/admit or route correction; capture
-terminal -> exact-head CI/E2E admission; assignment terminal -> verify the
+terminal -> scope-appropriate next edge (app/mixed/unknown CI/E2E admission or
+confirmed site-only proof); assignment terminal -> verify the
 assigned packet's next boundary; typed blocker -> execute the safe degraded
 edge or record the concrete harm that makes it unsafe. No PM_WAIT, prose-only,
 label-only, or owner-only receipt is a terminal continuation.
