@@ -622,23 +622,26 @@ test("mid-turn: foreign text after Enter #1 is never submitted again", async () 
 // Code's queued-message area above an EMPTY `❯` input line while a turn ran.
 // The queued area must not count as a foreign draft.
 function busyQueuedPane(input: string[]): string {
+  // Captured from slot 1 on 2026-09-28 10:44Z: queued prompts render ABOVE
+  // the box and the empty input line shows a placeholder hint (NBSP after ❯).
   return [
-    "✽ Considering… (4m 49s · ↓ 2.0k tokens)",
-    "",
-    RULE,
     "❯ /clear",
+    "  ctrl+x ctrl+s to send now",
+    "",
+    "· Considering… (11m 22s · ↓ 10.1k tokens)",
+    RULE,
     ...input,
     RULE,
-    "  ctrl+x ctrl+s to send now · Press up to edit queued messages",
-    "   Rohini SD  heydonna-app-3001",
+    "   Rohini SD  muse-spark-1.3-contributor · heydonna-app-3001",
     "",
   ].join("\n");
 }
+const QUEUED_EMPTY_INPUT = "❯\u00a0Press up to edit queued messages";
 
 test("queued area: busy pane with queued /clear and empty input reads as empty", async () => {
-  assert.equal(composerText(busyQueuedPane(["❯ "])), "");
+  assert.equal(composerText(busyQueuedPane([QUEUED_EMPTY_INPUT])), "");
   const ready = await waitForEmptyComposer({
-    capture: async () => busyQueuedPane(["❯ "]),
+    capture: async () => busyQueuedPane([QUEUED_EMPTY_INPUT]),
     sleep: async () => undefined,
     stableMs: 500,
   });
@@ -672,7 +675,7 @@ test("queued area: payload moving into the queue after Enter counts as delivered
     capture: async () => view,
     pressSubmit: async () => {
       presses++;
-      view = busyQueuedPane(["❯ "]);
+      view = busyQueuedPane([QUEUED_EMPTY_INPUT]);
     },
     sleep: async () => undefined,
     prePasteComposer: "",

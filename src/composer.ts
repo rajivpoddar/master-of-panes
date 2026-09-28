@@ -30,6 +30,7 @@ export function resolveAssignmentInjectEnterDelayMs(configured = INJECT_ENTER_DE
 
 const RULE_LINE = /^\s*─{20,}\s*$/;
 /** Claude Code hints shown while prompts sit in the queued-message area. */
+const QUEUED_INPUT_PLACEHOLDER = /^press\s+up\s+to\s+edit\s+queued\s+messages$/i;
 export const QUEUED_HINT = /press\s+up\s+to\s+edit\s+queued\s+messages|ctrl\+x\s+ctrl\+s\s+to\s+send\s+now/i;
 
 /**
@@ -40,31 +41,24 @@ export const QUEUED_HINT = /press\s+up\s+to\s+edit\s+queued\s+messages|ctrl\+x\s
  */
 export function composerText(snapshot: string | null | undefined): string | null {
   if (!snapshot) return null;
-  const queued = QUEUED_HINT.test(snapshot);
   const lines = snapshot.replace(/\s+$/, "").split("\n");
   for (let bottom = lines.length - 1; bottom > 0; bottom--) {
     if (!RULE_LINE.test(lines[bottom])) continue;
     let top = bottom - 1;
     while (top >= 0 && !RULE_LINE.test(lines[top])) top--;
     if (top < 0) return null;
-    let body = lines.slice(top + 1, bottom);
-    if (queued) {
-      // Claude Code renders messages queued during a busy turn above the real
-      // input line inside the same box. Only the last `❯` line onward is the
-      // live input; the queued area is already submitted and must be ignored.
-      body = body.filter((line) => !QUEUED_HINT.test(line));
-      let inputStart = -1;
-      body.forEach((line, index) => { if (/^\s*❯/.test(line)) inputStart = index; });
-      if (inputStart > 0) body = body.slice(inputStart);
-    }
+    const body = lines.slice(top + 1, bottom);
     if (body.length === 0 || !/^\s*❯/.test(body[0])) {
       bottom = top + 1;
       continue;
     }
-    return body
+    const text = body
       .map((line, index) => (index === 0 ? line.replace(/^\s*❯/, "") : line))
       .join("\n")
       .trim();
+    // While a busy turn holds queued messages (rendered above the box),
+    // Claude shows this placeholder on an otherwise EMPTY input line.
+    return QUEUED_INPUT_PLACEHOLDER.test(text) ? "" : text;
   }
   return null;
 }
