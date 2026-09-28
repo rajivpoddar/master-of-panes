@@ -1214,6 +1214,24 @@
       "ownership_class": "shared-codex-skill-test",
       "sha256": "c3b6fce9bcbd6e498374483a61a52fce04f7f5afb3ef5def182cae7fd5ded940",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/alerts-reminder/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-alerts-reminder",
+      "sha256": "17fcc78127f944006f4dc23eb033fde54ab5bd6af1d9cd9a4ba5261322c32963",
+      "source_path": "claude/skills/alerts-reminder/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/alerts-reminder/scripts/schedule.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-alerts-reminder",
+      "sha256": "674c5277101b48fb093998240e4fcc66e8a1e76d53b3a3f676d8052d50b3e9cf",
+      "source_path": "claude/skills/alerts-reminder/scripts/schedule.py"
     }
   ],
   "inventory": {
@@ -1230,7 +1248,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 133,
+    "selected_count": 135,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1296,7 +1314,9 @@
       "~/.claude/skills/codex-app-plan-review/templates/prompt.txt",
       "~/Downloads/projects/heydonna-app/.claude/agents/pm-code-reviewer.md",
       "~/Downloads/projects/heydonna-app/.claude/agents/pm-plan-reviewer.md",
-      "~/.claude/rules/33-heydonna-ui-product-rules.md"
+      "~/.claude/rules/33-heydonna-ui-product-rules.md",
+      "~/Downloads/projects/heydonna-app/.claude/skills/alerts-reminder/SKILL.md",
+      "~/Downloads/projects/heydonna-app/.claude/skills/alerts-reminder/scripts/schedule.py"
     ]
   },
   "owner": "master-of-panes",
