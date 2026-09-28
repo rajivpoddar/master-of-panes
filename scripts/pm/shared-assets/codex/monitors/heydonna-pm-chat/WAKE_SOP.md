@@ -136,7 +136,8 @@ delegates the packet and consumes the result; it never runs either skill.
   conflicts. Slot-origin product work skips PR Reviews (companion review
   covers it); hotfix/Rescues-origin work needs the single PR Reviews gate
   (Rajiv 2026-09-18, `Ev0C2BE61939`). PM runs its own PM PR review agent on
-  slot-origin PRs and posts a verdict before it asks for CI admission. A
+  slot-origin PRs and posts a verdict before it asks for CI admission.
+  Decisions routes admission only after that verdict. A
   re-review is needed only when a new head changes authored bytes; a clean
   main integration does not (Rajiv 2026-09-23, thread 1790131666.264829 ts
   1790143579.210689). This covers Rescues corrections to a slot PR: Rescues
