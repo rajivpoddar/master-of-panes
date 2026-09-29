@@ -23,7 +23,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export type IssueProjectionStatus = "projected" | "unchanged" | "skipped" | "failed";
+export type IssueProjectionStatus = "projected" | "unchanged" | "skipped" | "failed" | "pending";
 
 export interface IssueProjectionOutcome {
   status: IssueProjectionStatus;

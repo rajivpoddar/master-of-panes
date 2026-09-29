@@ -15,6 +15,17 @@ import {
 } from "../src/assignmentEffectRoutes.js";
 
 const REPO = "github:heydonna-app/heydonna-app";
+
+/**
+ * Label projection now runs after the response is sent (never blocks the
+ * assign-effect HTTP response — see assignmentEffectRoutes.ts). Its response
+ * field is deterministically "pending"; the REAL outcome lands on the
+ * durable effect row a tick later. Tests that need the terminal outcome
+ * await this before reading it back.
+ */
+function flushBackgroundProjection(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 const HEAD = "a".repeat(40);
 const TASK = "Implement issue 8110: harden the assignment boundary.\n";
 
@@ -34,6 +45,8 @@ interface Harness {
   projectedReleased: Array<{ issue: number; slot: number; repository: string | null }>;
   projectionCalls: number;
   projectorThrowOn: "assigned" | "released" | null;
+  /** Simulated `gh` label-call latency, to prove the response never awaits it. */
+  projectorDelayMs: number;
   orderLog: string[];
   close: () => void;
 }
@@ -57,6 +70,7 @@ function harness(): Harness {
     projectedReleased: [],
     projectionCalls: 0,
     projectorThrowOn: null,
+    projectorDelayMs: 0,
     orderLog: [],
     close: () => {
       db.close();
@@ -77,6 +91,9 @@ function harness(): Harness {
     issueProjection: {
       onAssigned: async (issue, slot, repository) => {
         state.projectionCalls += 1;
+        if (state.projectorDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, state.projectorDelayMs));
+        }
         if (state.projectorThrowOn === "assigned") throw new Error("gh labels down");
         state.orderLog.push("project:assigned");
         state.projectedAssigned.push({ issue, slot, repository: repository ?? null });
@@ -709,15 +726,19 @@ test("new_issue projects the lane labels exactly once and returns the outcome", 
     const epoch0 = h.db.getSlot(3)!.assignment_epoch;
     const result = await post(h.app, 3, effectBody(3, epoch0));
     assert.equal(result.json.status, "assigned");
-    assert.deepEqual(h.projectedAssigned, [{ issue: 8110, slot: 3, repository: REPO }]);
-    assert.deepEqual(h.projectedReleased, [], "a free-slot assign releases nothing");
-    assert.equal(result.json.issue_projection.status, "projected");
+    // The response never blocks on the GitHub label call: it always carries
+    // a "pending" placeholder, fixed at response-construction time.
+    assert.equal(result.json.issue_projection.status, "pending");
     assert.equal(result.json.issue_projection.issue, 8110);
     assert.equal(result.json.issue_projection.slot, 3);
+    await flushBackgroundProjection();
+    assert.deepEqual(h.projectedAssigned, [{ issue: 8110, slot: 3, repository: REPO }]);
+    assert.deepEqual(h.projectedReleased, [], "a free-slot assign releases nothing");
     // Labels run only after delivery succeeds: never before the slot has
     // both the ownership record and the task.
     assert.deepEqual(h.orderLog, ["deliver", "project:assigned"]);
-    // The delivered receipt durably carries the projection outcome.
+    // The delivered receipt durably carries the REAL projection outcome once
+    // the background run lands (never the transient "pending" placeholder).
     const stored = h.db.getAssignmentEffectIntent("assign-3-8110")!;
     const receipt = JSON.parse(stored.delivery_receipt as string) as Record<string, unknown>;
     assert.equal((receipt.issue_projection as Record<string, unknown>).status, "projected");
@@ -732,8 +753,9 @@ test("idempotent replay projects zero times and clobbers no labels", async () =>
     const epoch0 = h.db.getSlot(3)!.assignment_epoch;
     const first = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-proj-replay" }));
     assert.equal(first.json.status, "assigned");
+    assert.equal(first.json.issue_projection.status, "pending");
+    await flushBackgroundProjection();
     assert.equal(h.projectedAssigned.length, 1);
-    assert.equal(first.json.issue_projection.status, "projected");
     const clearCount = h.clearCalls.length;
     const deliveryCount = h.deliverCalls.length;
     const committedEpoch = h.db.getSlot(3)!.assignment_epoch;
@@ -760,19 +782,36 @@ test("a projector throw still returns assigned with a typed failed projection", 
     const epoch0 = h.db.getSlot(3)!.assignment_epoch;
     const result = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-proj-throw" }));
     assert.equal(result.json.status, "assigned", "labels never refuse the durable assignment");
-    assert.equal(result.json.issue_projection.status, "failed");
-    assert.match(String(result.json.issue_projection.reason), /issue_projection_unexpected/);
+    assert.equal(result.json.issue_projection.status, "pending");
+    await flushBackgroundProjection();
+    const storedAfterFirst = h.db.getAssignmentEffectIntent("assign-3-proj-throw")!;
+    const receiptAfterFirst = JSON.parse(storedAfterFirst.delivery_receipt as string) as Record<string, unknown>;
+    assert.equal((receiptAfterFirst.issue_projection as Record<string, unknown>).status, "failed");
+    assert.match(
+      String((receiptAfterFirst.issue_projection as Record<string, unknown>).reason),
+      /issue_projection_unexpected/,
+    );
     assert.equal(h.db.getSlot(3)!.issue, 8110, "ownership committed despite the label failure");
     assert.equal(h.db.getSlot(3)!.occupied, true);
     // Same-binding resume finishes the labels WITHOUT repeating clear,
-    // ownership commit, or pane delivery.
+    // ownership commit, or pane delivery. The resume's own response is also
+    // "pending" (it kicks a fresh background attempt rather than blocking),
+    // so the terminal outcome is read back from the durable row again.
     h.projectorThrowOn = null;
     const clearsBefore = h.clearCalls.length;
     const deliveriesBefore = h.deliverCalls.length;
     const epochAfterFirst = h.db.getSlot(3)!.assignment_epoch;
     const resumed = await post(h.app, 3, effectBody(3, epochAfterFirst, { effect_id: "assign-3-proj-throw" }));
     assert.equal(resumed.json.status, "assigned");
-    assert.equal(resumed.json.issue_projection.status, "projected", "the resume finishes the labels");
+    assert.equal(resumed.json.issue_projection.status, "pending", "the resume kicks a fresh background attempt");
+    await flushBackgroundProjection();
+    const storedAfterResume = h.db.getAssignmentEffectIntent("assign-3-proj-throw")!;
+    const receiptAfterResume = JSON.parse(storedAfterResume.delivery_receipt as string) as Record<string, unknown>;
+    assert.equal(
+      (receiptAfterResume.issue_projection as Record<string, unknown>).status,
+      "projected",
+      "the resume finishes the labels",
+    );
     assert.equal(h.projectedAssigned.length, 1, "exactly one successful projection total");
     assert.equal(h.clearCalls.length, clearsBefore, "no repeated clear");
     assert.equal(h.deliverCalls.length, deliveriesBefore, "no repeated delivery");
@@ -788,7 +827,11 @@ test("a failed projection retry refuses after the assigned slot is released", as
     h.projectorThrowOn = "assigned";
     const epoch0 = h.db.getSlot(3)!.assignment_epoch;
     const first = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-proj-released" }));
-    assert.equal(first.json.issue_projection.status, "failed");
+    assert.equal(first.json.issue_projection.status, "pending");
+    await flushBackgroundProjection();
+    const storedFirst = h.db.getAssignmentEffectIntent("assign-3-proj-released")!;
+    const receiptFirst = JSON.parse(storedFirst.delivery_receipt as string) as Record<string, unknown>;
+    assert.equal((receiptFirst.issue_projection as Record<string, unknown>).status, "failed");
     const committedEpoch = h.db.getSlot(3)!.assignment_epoch;
     h.projectorThrowOn = null;
     const callsBeforeReleaseRetry = h.projectionCalls;
@@ -816,7 +859,11 @@ test("a failed projection retry refuses after the slot is reassigned", async () 
     h.projectorThrowOn = "assigned";
     const epoch0 = h.db.getSlot(3)!.assignment_epoch;
     const first = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-proj-reassigned" }));
-    assert.equal(first.json.issue_projection.status, "failed");
+    assert.equal(first.json.issue_projection.status, "pending");
+    await flushBackgroundProjection();
+    const storedFirst = h.db.getAssignmentEffectIntent("assign-3-proj-reassigned")!;
+    const receiptFirst = JSON.parse(storedFirst.delivery_receipt as string) as Record<string, unknown>;
+    assert.equal((receiptFirst.issue_projection as Record<string, unknown>).status, "failed");
     const committedEpoch = h.db.getSlot(3)!.assignment_epoch;
     h.projectorThrowOn = null;
 
@@ -870,12 +917,13 @@ test("occupied assign projects the displaced release plus the new claim, release
       selection_class: "rework",
     }));
     assert.equal(result.json.status, "assigned");
+    assert.equal(result.json.release_projection.status, "pending");
+    assert.equal(result.json.release_projection.issue, 7000);
+    assert.equal(result.json.issue_projection.status, "pending");
+    assert.equal(result.json.issue_projection.issue, 8110);
+    await flushBackgroundProjection();
     assert.deepEqual(h.projectedReleased, [{ issue: 7000, slot: 3, repository: REPO }]);
     assert.deepEqual(h.projectedAssigned, [{ issue: 8110, slot: 3, repository: REPO }]);
-    assert.equal(result.json.release_projection.status, "projected");
-    assert.equal(result.json.release_projection.issue, 7000);
-    assert.equal(result.json.issue_projection.status, "projected");
-    assert.equal(result.json.issue_projection.issue, 8110);
     assert.deepEqual(h.orderLog, ["deliver", "project:released", "project:assigned"]);
   } finally {
     h.close();
@@ -1025,6 +1073,56 @@ test("rerun after a delivery refusal resumes with the committed epoch (mop-assig
     assert.equal(h.db.getSlot(1)!.assignment_epoch, committed, "resume must not bump the epoch");
     assert.equal(h.db.getAssignmentEffectIntent("assign-1-rerun")!.state, "delivered");
     assert.equal(h.deliverCalls.length, 2);
+  } finally {
+    h.close();
+  }
+});
+
+// ─── 2026-09-30 01:18 IST regression: label projection must never block ───
+// mop-assign-slot.py --class new_issue hit its 60s client timeout on a slot
+// whose `gh` label projection alone took ~42s (two sequential shell-outs,
+// one for a displaced prior lane, one for the new claim), even though
+// delivery had already succeeded in ~51s. The rerun then succeeded at a new
+// epoch because the durable effect row had already advanced. The fix: the
+// response returns as soon as delivery+readback are verified, carrying a
+// "pending" projection placeholder; the real projection runs after the
+// response, in the background, and a same-effect_id re-poll (exactly what
+// mop-assign-slot.py's "identical rerun" already does) picks up the real
+// outcome once it lands.
+test("a slow label projection never delays the assign response past delivery+readback", async () => {
+  const h = harness();
+  try {
+    h.projectorDelayMs = 500; // stands in for a slow `gh` call in real life
+    const epoch0 = h.db.getSlot(3)!.assignment_epoch;
+    const startedAt = Date.now();
+    const result = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-slow-projection" }));
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result.json.status, "assigned");
+    assert.ok(
+      elapsedMs < h.projectorDelayMs,
+      `response took ${elapsedMs}ms, which did not beat the ${h.projectorDelayMs}ms projector delay — it blocked`,
+    );
+    // Deterministic placeholder, not a race: fixed at response time.
+    assert.equal(result.json.issue_projection.status, "pending");
+    assert.equal(result.json.issue_projection.issue, 8110);
+    // The durable row is already "delivered" (poll-ready) even though the
+    // real label call has not landed yet.
+    assert.equal(h.db.getAssignmentEffectIntent("assign-3-slow-projection")!.state, "delivered");
+
+    // A client re-poll (mop-assign-slot's "identical rerun") after the
+    // background projection has actually landed sees the real outcome and,
+    // crucially, ALSO returns fast (idempotent replay, no re-clear/re-deliver).
+    await new Promise((resolve) => setTimeout(resolve, h.projectorDelayMs + 50));
+    const pollStartedAt = Date.now();
+    const poll = await post(h.app, 3, effectBody(3, h.db.getSlot(3)!.assignment_epoch, {
+      effect_id: "assign-3-slow-projection",
+    }));
+    const pollElapsedMs = Date.now() - pollStartedAt;
+    assert.equal(poll.json.idempotent, true);
+    assert.equal(poll.json.issue_projection.status, "projected", "the poll sees the real, by-then-landed outcome");
+    assert.ok(pollElapsedMs < h.projectorDelayMs, `poll took ${pollElapsedMs}ms and should not re-run gh`);
+    assert.equal(h.clearCalls.length, 1, "the poll must not repeat the clear");
+    assert.equal(h.deliverCalls.length, 1, "the poll must not repeat delivery");
   } finally {
     h.close();
   }

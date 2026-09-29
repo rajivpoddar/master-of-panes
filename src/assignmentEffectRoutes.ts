@@ -127,10 +127,68 @@ function isIssueProjectionOutcome(value: unknown): value is IssueProjectionOutco
   return (
     isRecord(value)
     && typeof value.status === "string"
-    && ["projected", "unchanged", "skipped", "failed"].includes(value.status)
+    && ["projected", "unchanged", "skipped", "failed", "pending"].includes(value.status)
     && typeof value.issue === "number"
     && typeof value.slot === "number"
   );
+}
+
+/**
+ * Placeholder outcome written into the durable receipt (and returned to the
+ * caller) the instant delivery is verified, before the real GitHub label
+ * projection has run. Label projection is a network-bound `gh` shell-out
+ * (2 sequential calls when a prior lane is displaced) that can alone take
+ * tens of seconds — see the 2026-09-30 01:18 IST incident where it pushed a
+ * `new_issue` assign past the 60s `mop-assign-slot.py` client timeout even
+ * though delivery itself had already succeeded. The response must never
+ * block on it.
+ */
+function pendingProjectionOutcome(
+  issue: number,
+  slot: number,
+  repositoryId: string | number | null,
+): IssueProjectionOutcome {
+  return {
+    status: "pending",
+    reason: "projection_deferred_background",
+    repository: repositoryId === null || repositoryId === undefined ? null : String(repositoryId),
+    issue,
+    slot,
+    added_labels: [],
+    removed_labels: [],
+    verified: false,
+  };
+}
+
+/**
+ * Runs the (possibly two, sequential) GitHub label-projection calls and
+ * persists the outcome to the durable effect row, entirely after the HTTP
+ * response for the triggering request has already been sent. Never awaited
+ * by a request handler — callers fire this with `void ... .catch(...)`.
+ * Idempotent by design (projectIssue/onAssigned/onReleased are themselves
+ * idempotent live-read-then-apply), so an overlapping second background run
+ * (e.g. from a client retry that also kicks one off) is safe.
+ */
+async function runProjectionsInBackground(
+  db: MoPDatabase,
+  projector: IssueOwnershipProjection,
+  effectId: string,
+  slotNum: number,
+  desiredTuple: { issue: number | null; repository_id: string | number | null },
+  recordedDisplaced: { issue: number; repository_id: string | null } | null,
+  baseDeliveryReceipt: Record<string, unknown>,
+): Promise<void> {
+  const release = recordedDisplaced
+    ? await projectIssue(projector, "released", recordedDisplaced.issue, slotNum, recordedDisplaced.repository_id)
+    : null;
+  const assign = await projectIssue(projector, "assigned", desiredTuple.issue, slotNum, desiredTuple.repository_id);
+  const merged = mergeProjectionReceipt(baseDeliveryReceipt, assign, release);
+  db.markAssignmentEffectDelivered(effectId, merged);
+  db.logEvent(slotNum, "assignment_effect_projection_completed", null, null, {
+    effect_id: effectId,
+    issue_projection: assign,
+    release_projection: release,
+  });
 }
 
 interface ParsedDeliveredReceipt {
@@ -472,23 +530,28 @@ export function registerAssignmentEffectRoutes(
         }
         // Delivered replay: clear, commit, and delivery all already happened,
         // so none of them repeats. Only a MISSING or FAILED label projection
-        // is retried now; a recorded successful projection is reused verbatim
-        // and never re-projected or clobbered.
+        // is retried now, and it is retried the same way as the first-time
+        // path: kicked off in the background, never awaited inline, so a
+        // client re-poll (this is exactly what mop-assign-slot.py's
+        // "identical rerun" already does) can never itself block on `gh`
+        // again. A recorded successful projection is reused verbatim and
+        // never re-projected or clobbered; a "pending" one is left as-is
+        // (a background attempt is presumed in flight from the call that
+        // originally kicked it off).
         const projector = dependencies.issueProjection ?? NO_ISSUE_PROJECTION;
         const stored = parseDeliveredReceipt(existing.delivery_receipt);
         let replayAssign = stored.issue_projection ?? null;
         // Absent key = row finalized before labels existed: the claim still
         // needs its projection. Present-null = no displacement, skip release.
         let replayRelease = stored.has_release_projection ? stored.release_projection : undefined;
-        if (!replayAssign || replayAssign.status === "failed") {
-          replayAssign = await projectIssue(
-            projector, "assigned", desiredTuple.issue, slotNum, desiredTuple.repository_id,
-          );
+        const needsAssignKick = !replayAssign || replayAssign.status === "failed";
+        if (needsAssignKick) {
+          replayAssign = pendingProjectionOutcome(desiredTuple.issue ?? 0, slotNum, desiredTuple.repository_id ?? null);
         }
+        let releaseKickTarget: { issue: number; repository_id: string | null } | null = null;
         if (replayRelease !== undefined && replayRelease !== null && replayRelease.status === "failed") {
-          replayRelease = await projectIssue(
-            projector, "released", replayRelease.issue, slotNum, replayRelease.repository,
-          );
+          releaseKickTarget = { issue: replayRelease.issue, repository_id: replayRelease.repository };
+          replayRelease = pendingProjectionOutcome(replayRelease.issue, slotNum, replayRelease.repository);
         }
         if (replayRelease === undefined) replayRelease = null;
         const mergedReplayReceipt = mergeProjectionReceipt(stored.delivery, replayAssign, replayRelease);
@@ -498,6 +561,16 @@ export function registerAssignmentEffectRoutes(
             || (replayRelease?.status ?? null) !== (stored.release_projection?.status ?? null))
         ) {
           db.markAssignmentEffectDelivered(request.effect_id, mergedReplayReceipt);
+        }
+        if (needsAssignKick || releaseKickTarget) {
+          void runProjectionsInBackground(
+            db, projector, request.effect_id, slotNum, desiredTuple, releaseKickTarget, stored.delivery,
+          ).catch((error) => {
+            console.error(
+              `[assignment-effect] background replay projection threw for effect ${request.effect_id}: `
+                + (error instanceof Error ? error.message : String(error)),
+            );
+          });
         }
         const delivered = db.getSlot(slotNum);
         return c.json({
@@ -754,37 +827,35 @@ export function registerAssignmentEffectRoutes(
       );
     }
 
-    // Label projection runs ONLY after ownership and delivery both succeed.
-    // Implicit-release-first ordering: unwind the displaced lane, then
-    // project the new claim. Failures are recorded and never refuse the
-    // durable assignment; a same-binding resume retries them (see the
-    // delivered-replay path above) without repeating clear, commit, or
-    // delivery. The displaced lane is read from the committed intent (not
-    // this invocation's memory), so a resume that completes delivery still
-    // unwinds the prior lane's labels even though the overwrite happened in
-    // an earlier attempt.
+    // Label projection runs ONLY after ownership and delivery both succeed,
+    // but it must never block this response: it is a network-bound `gh`
+    // shell-out (two sequential calls when a prior lane is displaced) that
+    // can alone take tens of seconds (2026-09-30 01:18 IST incident: it
+    // pushed a `new_issue` assign to ~93s server-side, well past the 60s
+    // `mop-assign-slot.py` client timeout, even though delivery had already
+    // succeeded in ~51s). The durable row is marked "delivered" and this
+    // response returns immediately with a "pending" projection placeholder;
+    // the real projection runs after the response, in the background, and
+    // persists its outcome to the same effect row. The delivered-replay path
+    // above already re-checks the stored projection status on the client's
+    // next call (same effect_id) and reuses whatever landed, or kicks a
+    // fresh background attempt if it's still missing/failed/pending — so the
+    // client's existing "identical rerun" behavior IS the re-poll.
     const projector = dependencies.issueProjection ?? NO_ISSUE_PROJECTION;
     const recordedDisplaced = parseDisplacedTuple(
       db.getAssignmentEffectIntent(request.effect_id)?.displaced_tuple,
     );
-    if (recordedDisplaced) {
-      releaseProjection = await projectIssue(
-        projector, "released",
-        recordedDisplaced.issue,
-        slotNum,
-        recordedDisplaced.repository_id,
-      );
-    }
-    assignProjection = await projectIssue(
-      projector, "assigned", desiredTuple.issue, slotNum, desiredTuple.repository_id,
+    releaseProjection = recordedDisplaced
+      ? pendingProjectionOutcome(recordedDisplaced.issue, slotNum, recordedDisplaced.repository_id)
+      : null;
+    assignProjection = pendingProjectionOutcome(
+      desiredTuple.issue ?? 0, slotNum, desiredTuple.repository_id ?? null,
     );
-    // The delivered receipt durably carries the projection outcomes so a
-    // resume can finish failed labels without repeating any MoP-side step.
-    const mergedReceipt = mergeProjectionReceipt(
-      isRecord(delivery.receipt) ? delivery.receipt : {},
-      assignProjection,
-      releaseProjection,
-    );
+    // The delivered receipt durably carries the (pending) projection
+    // placeholders so a resume/poll can tell "not started yet" apart from
+    // "ran and failed" without repeating any MoP-side step.
+    const baseDeliveryReceipt = isRecord(delivery.receipt) ? delivery.receipt : {};
+    const mergedReceipt = mergeProjectionReceipt(baseDeliveryReceipt, assignProjection, releaseProjection);
     db.markAssignmentEffectDelivered(request.effect_id, mergedReceipt);
     db.logEvent(slotNum, "assignment_effect_delivered", null, null, {
       effect_id: request.effect_id,
@@ -792,6 +863,14 @@ export function registerAssignmentEffectRoutes(
       delivery: delivery.receipt,
       release_projection: releaseProjection,
       issue_projection: assignProjection,
+    });
+    void runProjectionsInBackground(
+      db, projector, request.effect_id, slotNum, desiredTuple, recordedDisplaced, baseDeliveryReceipt,
+    ).catch((error) => {
+      console.error(
+        `[assignment-effect] background projection threw for effect ${request.effect_id}: `
+          + (error instanceof Error ? error.message : String(error)),
+      );
     });
 
     return c.json({
