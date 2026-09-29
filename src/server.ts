@@ -30,7 +30,12 @@ import {
 } from "./respawnTurnGuard.js";
 import { createGhIssueOwnershipProjection } from "./issueProjection.js";
 import { registerFamily2Routes } from "./family2Routes.js";
-import { registerAssignmentEffectRoutes, type AssignmentEffectClearResult } from "./assignmentEffectRoutes.js";
+import {
+  ASSIGNMENT_EFFECT_CLEAR_SOURCE,
+  isAssignmentEffectInFlight,
+  registerAssignmentEffectRoutes,
+  type AssignmentEffectClearResult,
+} from "./assignmentEffectRoutes.js";
 import { TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
@@ -1153,7 +1158,7 @@ async function clearSlotForAssignment(
       },
       pending: assignmentClearPending,
       sendClear: async (slot) => {
-        const sent = await sendClearViaMopSendPath(slot, "mop_assign_slot_new_issue");
+        const sent = await sendClearViaMopSendPath(slot, ASSIGNMENT_EFFECT_CLEAR_SOURCE);
         return sent.success
           ? { ok: true }
           : { ok: false, detail: sent.reason ?? sent.error ?? `send failed status=${sent.status}` };
@@ -2005,6 +2010,30 @@ app.post("/slots/:slotNum/send", async (c) => {
     command === "/clear";
   if (!command && !filePath) {
     return c.json({ error: "Missing 'command' or 'file' field" }, 400);
+  }
+
+  // Serialize every /clear at the slot boundary with a running assign-effect:
+  // a foreign clear's SessionStart:clear ack would otherwise satisfy the
+  // assign-effect's own outstanding-clear count and let its packet be wiped
+  // by a clear it never sent for. Only the assign-effect's own clear-send
+  // (tagged with its source) may pass while the lock is held (Codex P1).
+  if (
+    command === "/clear"
+    && isAssignmentEffectInFlight(slotNum)
+    && body.source !== ASSIGNMENT_EFFECT_CLEAR_SOURCE
+  ) {
+    db.logEvent(slotNum, "send_rejected_clear_assignment_in_flight", null, null, {
+      reason: "assignment_effect_in_flight",
+      source: body.source ?? "unknown",
+    });
+    return c.json(
+      {
+        success: false,
+        error: `Refused /clear for slot ${slotNum}: an assign-effect clear is in flight.`,
+        reason: "assignment_effect_in_flight",
+      },
+      409,
+    );
   }
 
   const identity = await verifyPaneIdentity(slotNum);

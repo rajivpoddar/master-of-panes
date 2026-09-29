@@ -40,6 +40,23 @@ const assignmentEffectSlotParamSchema = z.coerce
  * state (occupied + task present + delivery pending) and never rolls the
  * ownership back implicitly.
  */
+// Per-slot in-flight lock over the whole assign-effect (clear -> commit ->
+// deliver). Module-scoped (not per-registration) so every clear-sending path
+// in the process -- not just the assign-effect route itself -- can check it
+// before sending its own `/clear`, closing the interleaving gap where a
+// clear sent through `/slots/:slotNum/send` or the queued-clear Stop-hook
+// path acknowledges and satisfies this assignment's outstanding clear count
+// while THIS assignment's own `/clear` remains pending (Codex P1).
+const assignmentEffectInFlight = new Set<number>();
+
+export function isAssignmentEffectInFlight(slot: number): boolean {
+  return assignmentEffectInFlight.has(slot);
+}
+
+/** `source` value the assign-effect's own clear-send carries, so callers can
+ * tell it apart from every other clear source while the lock is held. */
+export const ASSIGNMENT_EFFECT_CLEAR_SOURCE = "mop_assign_slot_new_issue";
+
 export const ASSIGNMENT_SELECTION_CLASSES = ["new_issue", "repro", "rework"] as const;
 
 export type AssignmentSelectionClass = (typeof ASSIGNMENT_SELECTION_CLASSES)[number];
@@ -348,24 +365,22 @@ export function registerAssignmentEffectRoutes(
 
   app.get("/assign-effect/bounds", (c) => c.json({ success: true, ...(dependencies.clearWaitBounds?.() ?? {}) }));
 
-  // Per-slot in-flight lock over the whole assign-effect (clear -> commit ->
-  // deliver). A concurrent assign to the same slot is refused, so two clears
-  // or two packets can never interleave on one pane.
-  const inFlight = new Set<number>();
+  // A concurrent assign to the same slot is refused, so two clears or two
+  // packets can never interleave on one pane.
   app.post("/slots/:slotNum/assign-effect", async (c) => {
     const slotParse = assignmentEffectSlotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) {
       return c.json({ error: "Invalid slot number" }, 400);
     }
     const lockedSlot = slotParse.data;
-    if (inFlight.has(lockedSlot)) {
+    if (assignmentEffectInFlight.has(lockedSlot)) {
       return c.json(refusal("ownership", "assignment_in_flight", slotStateSummary(db.getSlot(lockedSlot))), 409);
     }
-    inFlight.add(lockedSlot);
+    assignmentEffectInFlight.add(lockedSlot);
     try {
       return await handleAssignEffect(c);
     } finally {
-      inFlight.delete(lockedSlot);
+      assignmentEffectInFlight.delete(lockedSlot);
     }
   });
 
