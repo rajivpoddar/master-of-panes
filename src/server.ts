@@ -12,6 +12,7 @@
  * 5. Returns a HookResponse that Claude Code acts on
  */
 
+import { clearSlotWhenIdle, clearWaitOptionsFromEnv } from "./assignmentClearWait.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -29,7 +30,7 @@ import {
 } from "./respawnTurnGuard.js";
 import { createGhIssueOwnershipProjection } from "./issueProjection.js";
 import { registerFamily2Routes } from "./family2Routes.js";
-import { registerAssignmentEffectRoutes } from "./assignmentEffectRoutes.js";
+import { registerAssignmentEffectRoutes, type AssignmentEffectClearResult } from "./assignmentEffectRoutes.js";
 import { TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
@@ -1124,24 +1125,51 @@ app.post("/slots/:slotNum/abandon-turn", async (c) => {
  */
 async function clearSlotForAssignment(
   slotNum: number,
-): Promise<{ ok: boolean; reason: string; detail?: string }> {
+): Promise<AssignmentEffectClearResult> {
   db.clearPendingClear(slotNum);
-  const sent = await sendClearViaMopSendPath(slotNum, "mop_assign_slot_new_issue");
-  if (sent.success) {
+  const result = await clearSlotWhenIdle(
+    slotNum,
+    {
+      getActivity: (slot) => relay.getSlotActivityState(slot),
+      latestEventId: (slot) => db.getEvents(slot, 1)[0]?.id ?? 0,
+      findClearAck: (slot, afterId) => {
+        for (const event of db.getEvents(slot, 20, "SessionStart")) {
+          if (event.id <= afterId) break;
+          try {
+            const payload = JSON.parse(String(event.payload ?? "{}")) as { source?: string };
+            if (payload.source === "clear") return event.id;
+          } catch {
+            // Unparseable payload is not an acknowledgement.
+          }
+        }
+        return null;
+      },
+      sendClear: async (slot) => {
+        const sent = await sendClearViaMopSendPath(slot, "mop_assign_slot_new_issue");
+        return sent.success
+          ? { ok: true }
+          : { ok: false, detail: sent.reason ?? sent.error ?? `send failed status=${sent.status}` };
+      },
+      sleep,
+      now: () => Date.now(),
+    },
+    clearWaitOptionsFromEnv(),
+  );
+  if (result.ok) {
     db.clearPendingClear(slotNum);
     db.logEvent(slotNum, "slot_cleared", null, null, {
       cleared_at: new Date().toISOString(),
-      immediate: true,
+      immediate: false,
+      confirmed: true,
       via: "mop_assign_slot_new_issue",
       delivery: "mop_send_to_slot",
+      clear_marker_event_id: result.clear_marker_event_id,
+      clear_ack_event_id: result.clear_ack_event_id,
+      waited_ms: result.waited_ms,
     });
-    return { ok: true, reason: "cleared" };
+    return { ok: true, reason: "cleared", clear_ack_event_id: result.clear_ack_event_id };
   }
-  return {
-    ok: false,
-    reason: "assignment_clear_not_applied",
-    detail: sent.reason ?? sent.error ?? `send failed status=${sent.status}`,
-  };
+  return { ok: false, reason: result.reason, detail: result.detail, step: result.step };
 }
 
 /**

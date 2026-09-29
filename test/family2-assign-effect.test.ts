@@ -35,6 +35,7 @@ interface Harness {
   projectionCalls: number;
   projectorThrowOn: "assigned" | "released" | null;
   orderLog: string[];
+  stepLog: string[];
   close: () => void;
 }
 
@@ -58,6 +59,7 @@ function harness(): Harness {
     projectionCalls: 0,
     projectorThrowOn: null,
     orderLog: [],
+    stepLog: [],
     close: () => {
       db.close();
       rmSync(directory, { recursive: true, force: true });
@@ -67,10 +69,12 @@ function harness(): Harness {
     db,
     clearSlot: async (slot) => {
       state.clearCalls.push(slot);
+      state.stepLog.push("clear");
       return state.clearResult;
     },
     interruptTurn: async (slot) => {
       state.interruptCalls.push(slot);
+      state.stepLog.push("interrupt");
       return state.interruptResult;
     },
     observeWorktree: async () => state.worktreeResult,
@@ -99,6 +103,7 @@ function harness(): Harness {
     deliverTaskFile: async (slot, filePath) => {
       state.deliverCalls.push(`${slot}:${filePath}`);
       state.orderLog.push("deliver");
+      state.stepLog.push("deliver");
       if (state.corruptTaskAfterDelivery) {
         // Simulate a durable row that does not corroborate the delivery: the
         // ownership tuple survives but the recorded task text is gone.
@@ -1025,6 +1030,46 @@ test("rerun after a delivery refusal resumes with the committed epoch (mop-assig
     assert.equal(h.db.getSlot(1)!.assignment_epoch, committed, "resume must not bump the epoch");
     assert.equal(h.db.getAssignmentEffectIntent("assign-1-rerun")!.state, "delivered");
     assert.equal(h.deliverCalls.length, 2);
+  } finally {
+    h.close();
+  }
+});
+
+test("new_issue clear_wait timeout refuses with step_failed=clear_wait: no commit, no delivery", async () => {
+  const h = harness();
+  try {
+    h.clearResult = { ok: false, step: "clear_wait", reason: "clear_wait_timeout:no_session_start_clear" };
+    const epoch0 = h.db.getSlot(4)!.assignment_epoch;
+    const result = await post(h.app, 4, effectBody(4, epoch0, { effect_id: "assign-4-clear-wait" }));
+    assert.equal(result.status, 409);
+    assert.equal(result.json.status, "refused");
+    assert.equal(result.json.step_failed, "clear_wait");
+    assert.equal(result.json.reason, "clear_wait_timeout:no_session_start_clear");
+    assert.deepEqual(h.deliverCalls, [], "the packet is never delivered after an unconfirmed clear");
+    const after = h.db.getSlot(4)!;
+    assert.equal(after.assignment_epoch, epoch0, "ownership is not committed");
+    assert.notEqual(after.issue, 8110);
+
+    // Retry after the slot settles: same effect id succeeds, clear precedes delivery.
+    h.clearResult = { ok: true, reason: "cleared" };
+    h.stepLog.length = 0;
+    const retry = await post(h.app, 4, effectBody(4, epoch0, { effect_id: "assign-4-clear-wait" }));
+    assert.equal(retry.json.status, "assigned");
+    assert.deepEqual(h.stepLog.filter((step) => step !== "interrupt"), ["clear", "deliver"]);
+  } finally {
+    h.close();
+  }
+});
+
+test("new_issue sequences interrupt, then idle-gated clear, then delivery", async () => {
+  const h = harness();
+  try {
+    const epoch0 = h.db.getSlot(3)!.assignment_epoch;
+    h.db.updateSlot(3, { active_turn_state: "running" } as never);
+    const result = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-order" }));
+    assert.equal(result.json.status, "assigned");
+    const order = h.stepLog;
+    assert.deepEqual(order, ["interrupt", "clear", "deliver"]);
   } finally {
     h.close();
   }

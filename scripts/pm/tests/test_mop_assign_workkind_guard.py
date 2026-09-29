@@ -49,8 +49,11 @@ class WorkKindGuardTest(unittest.TestCase):
         module = load_module()
         calls: list = []
 
-        def fake_http(method, url, body=None):
+        timeouts: dict = {}
+
+        def fake_http(method, url, body=None, timeout=60):
             calls.append((method, url))
+            timeouts[method] = timeout
             if method == "GET":
                 return 200, {"assignment_epoch": 5}
             return 400, {"status": "refused", "reason": "probe", "step_failed": "ownership"}
@@ -61,6 +64,9 @@ class WorkKindGuardTest(unittest.TestCase):
         methods = [m for m, _ in calls]
         self.assertIn("GET", methods)
         self.assertIn("POST", methods)
+        # The assign-effect POST outlives MoP's bounded idle + clear-ack waits
+        # (240s + 180s defaults) so a slow slot's clear_wait refusal is read.
+        self.assertGreaterEqual(timeouts["POST"], 420)
 
 
 if __name__ == "__main__":

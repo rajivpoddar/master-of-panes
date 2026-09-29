@@ -45,6 +45,7 @@ from urllib.request import Request, urlopen
 
 
 SELECTION_CLASSES = ("new_issue", "repro", "rework")
+ASSIGN_EFFECT_TIMEOUT_SECONDS = 600
 WORK_KINDS = ("implementation", "rework", "repro", "review")
 SANCTIONED_PATH = "mop-assign-slot"
 
@@ -54,7 +55,7 @@ def mop_base_url() -> str:
     return f"http://127.0.0.1:{port}"
 
 
-def http_json(method: str, url: str, body: dict[str, Any] | None = None) -> tuple[int, Any]:
+def http_json(method: str, url: str, body: dict[str, Any] | None = None, timeout: float = 60) -> tuple[int, Any]:
     data = None
     headers = {"accept": "application/json"}
     if body is not None:
@@ -62,7 +63,7 @@ def http_json(method: str, url: str, body: dict[str, Any] | None = None) -> tupl
         headers["content-type"] = "application/json"
     request = Request(url, data=data, headers=headers, method=method)
     try:
-        with urlopen(request, timeout=60) as response:  # noqa: S310 - fixed local MoP base URL
+        with urlopen(request, timeout=timeout) as response:  # noqa: S310 - fixed local MoP base URL
             raw = response.read().decode("utf-8")
             return response.status, (json.loads(raw) if raw.strip() else {})
     except HTTPError as error:
@@ -71,7 +72,7 @@ def http_json(method: str, url: str, body: dict[str, Any] | None = None) -> tupl
             return error.code, json.loads(raw)
         except json.JSONDecodeError:
             return error.code, {"error": raw[:400]}
-    except URLError as error:
+    except (URLError, TimeoutError) as error:
         return 0, {"error": f"mop_unreachable: {error}"}
 
 
@@ -180,7 +181,11 @@ def main(argv: list[str] | None = None) -> int:
         "task_file": args.task_file or "",
     }
 
-    status, payload = http_json("POST", f"{base}/slots/{args.slot}/assign-effect", body)
+    # new_issue waits server-side for the slot to go idle, for the /clear to
+    # be acknowledged (SessionStart:clear), and only then delivers; slow
+    # (DGX Spark) slots need minutes. MoP bounds each wait and refuses with
+    # step_failed=clear_wait, so this client bound just has to exceed them.
+    status, payload = http_json("POST", f"{base}/slots/{args.slot}/assign-effect", body, timeout=ASSIGN_EFFECT_TIMEOUT_SECONDS)
     if not isinstance(payload, dict):
         return emit(refusal("ownership", "assignment_effect_response_unreadable", "unknown"), 2)
     if status == 200 and payload.get("status") == "assigned":

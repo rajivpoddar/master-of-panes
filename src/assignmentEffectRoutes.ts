@@ -48,6 +48,13 @@ export interface AssignmentEffectClearResult {
   ok: boolean;
   reason: string;
   detail?: string;
+  /**
+   * "clear_wait": the idle-gated clear did not complete (slot never idle, or
+   * no SessionStart:clear acknowledgement) within the bound. The route
+   * refuses before delivery so the packet is never wiped by a late clear.
+   */
+  step?: "clear_wait" | "clear_send";
+  clear_ack_event_id?: number;
 }
 
 export interface AssignmentEffectDeliveryResult {
@@ -251,7 +258,7 @@ function slotStateSummary(slot: SlotState | null | undefined): string {
 
 interface AssignmentEffectRefusalBody {
   status: "refused";
-  step_failed: "clean" | "ownership" | "delivery" | "readback";
+  step_failed: "clean" | "ownership" | "clear_wait" | "delivery" | "readback";
   reason: string;
   slot_state_after: string;
   sanctioned_path: "mop-assign-slot";
@@ -587,14 +594,6 @@ export function registerAssignmentEffectRoutes(
       }
     }
 
-    if (ownershipPending && request.selection_class === "new_issue") {
-      const cleared = await dependencies.clearSlot(slotNum);
-      displacement.clear = {
-        ok: cleared.ok,
-        reason: cleared.ok ? cleared.reason : `recorded:${cleared.reason}`,
-      };
-    }
-
     if (ownershipPending) {
       // Interrupt any live turn in the pane before overwriting ownership.
       // Best effort: the outcome is audited and never refuses.
@@ -620,6 +619,33 @@ export function registerAssignmentEffectRoutes(
           clean: null,
           detail: `observe_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
         };
+      }
+    }
+
+    // Session clear AFTER the interrupt, so the idle gate can be met: the
+    // clear waits for the slot to be idle, then for SessionStart:clear, and
+    // only then does delivery run. A clear_wait timeout refuses before the
+    // ownership commit and delivery (never a false success); a plain send
+    // failure keeps the historical record-and-proceed behavior.
+    if (ownershipPending && request.selection_class === "new_issue") {
+      const cleared = await dependencies.clearSlot(slotNum);
+      displacement.clear = {
+        ok: cleared.ok,
+        reason: cleared.ok ? cleared.reason : `recorded:${cleared.reason}`,
+      };
+      if (!cleared.ok && cleared.step === "clear_wait") {
+        db.logEvent(slotNum, "assign_effect_clear_wait_refused", null, null, {
+          effect_id: request.effect_id,
+          reason: cleared.reason,
+          detail: cleared.detail ?? null,
+        });
+        return c.json(
+          {
+            ...refusal("clear_wait", cleared.reason, slotStateSummary(db.getSlot(slotNum))),
+            ...(cleared.detail ? { detail: cleared.detail } : {}),
+          },
+          409,
+        );
       }
     }
 
