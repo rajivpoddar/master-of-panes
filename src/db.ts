@@ -2463,6 +2463,45 @@ export class MoPDatabase {
     this.setConfig(`clear_pending_${slot}`, "false");
   }
 
+  // ─── Resume Prompt (durable, consume-once) ──────────────
+  //
+  // A `/clear` caller may attach a `resume_prompt` to be injected into the
+  // slot's pane once its SessionStart(source=clear) acknowledgement lands.
+  // Same KV-config storage pattern as clear_pending_* above; the value is
+  // persisted BEFORE the actual /clear command is sent so it survives the
+  // clear-and-reconnect cycle. `claimResumePrompt` is the only consumer path:
+  // it reads and immediately blanks the key in one synchronous call, so the
+  // hook-driven injection and the bounded fallback poll can never both fire
+  // for the same prompt (Node's single-threaded event loop makes the
+  // read+write here atomic with respect to any other caller in this
+  // process, since neither step awaits).
+
+  private resumePromptConfigKey(slot: number): string {
+    return `resume_prompt_${slot}`;
+  }
+
+  /** Persist a resume prompt for `slot`, replacing any prior unclaimed one. */
+  setResumePrompt(slot: number, prompt: string): void {
+    this.setConfig(this.resumePromptConfigKey(slot), prompt);
+  }
+
+  /** True while a resume prompt for `slot` is persisted and unclaimed. */
+  hasResumePrompt(slot: number): boolean {
+    return !!this.getConfig(this.resumePromptConfigKey(slot));
+  }
+
+  /**
+   * Atomically read-and-clear the persisted resume prompt for `slot`.
+   * Returns null when none is pending (including "already claimed").
+   */
+  claimResumePrompt(slot: number): string | null {
+    const key = this.resumePromptConfigKey(slot);
+    const value = this.getConfig(key);
+    if (!value) return null;
+    this.setConfig(key, "");
+    return value;
+  }
+
   /**
    * Get all pending clear statuses.
    */

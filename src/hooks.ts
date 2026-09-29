@@ -1370,6 +1370,25 @@ export class HookProcessor {
           delivery: "mop_send_to_slot",
         });
         debugLog(`[hooks] SessionStart:clear slot=0 (PM) — clear acknowledged`);
+
+        // Consume-once: a resume_prompt persisted by /clear (or /slots/0/clear)
+        // before this /clear was sent gets injected now, through the same
+        // verified buffer-paste PM-submit mechanism used elsewhere
+        // (relay.injectToPM), then is claimed (read-and-cleared) so it can
+        // never replay on a later clear. Purely additive: when no
+        // resume_prompt was persisted, claimResumePrompt returns null and
+        // nothing below runs.
+        const resumePrompt = this.db.claimResumePrompt(0);
+        if (resumePrompt) {
+          const injected = this.relay.injectToPM(resumePrompt);
+          this.db.logEvent(0, "resume_prompt_injected", "SessionStart", null, {
+            name: "PM",
+            chars: resumePrompt.length,
+            injected,
+            via: "SessionStart:clear",
+          });
+          debugLog(`[hooks] SessionStart:clear slot=0 (PM) — resume_prompt injected=${injected}`);
+        }
         return {};
       }
       // PM pane — compact sessions are now passive from MoP's perspective.

@@ -66,6 +66,11 @@ import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { runtimeIdentity } from "./slotConfig.js";
 import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import {
+  clearSlotForAssignmentWithReadyWait,
+  latestSessionStartEventId,
+  waitForSessionStartClearOnDb,
+} from "./sessionStartClearWait.js";
 import { paneInputModeRefusalReason, type PaneInputModeRefusalReason } from "./paneInputMode.js";
 import { requestPmClearOnce, waitForPmIdleDrain } from "./pmClearLatch.js";
 import { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } from "./assignmentTaskPacket.js";
@@ -266,6 +271,65 @@ const PM_CLEAR_STALE_ACK_REPAIR_MS = parseInt(
 );
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
 let pmClearDrainGeneration = 0;
+
+// ─── resume_prompt fallback (bounded poll) ──────────────
+// The hook-driven injection in hooks.ts (SessionStart source=clear) is the
+// primary delivery path. This fallback exists only for the case that hook
+// never arrives (misconfigured hook, race, dropped POST, etc.) so a
+// resume_prompt is never silently lost. Same deadline+poll shape as
+// health.ts's AGENT_BOOT_TIMEOUT_MS/AGENT_BOOT_POLL_MS.
+const RESUME_PROMPT_FALLBACK_TIMEOUT_MS = parseInt(
+  process.env.MOP_RESUME_PROMPT_FALLBACK_TIMEOUT_MS ?? "45000",
+  10,
+);
+const RESUME_PROMPT_FALLBACK_POLL_MS = parseInt(
+  process.env.MOP_RESUME_PROMPT_FALLBACK_POLL_MS ?? "1000",
+  10,
+);
+
+// ─── assign-effect new_issue: post-clear readiness wait ─────────────────
+// mop-assign-slot.py's HTTP client times out at 60s; this stays well under
+// that so there is headroom left for the delivery paste that follows.
+const ASSIGNMENT_CLEAR_READY_TIMEOUT_MS = parseInt(
+  process.env.MOP_ASSIGNMENT_CLEAR_READY_TIMEOUT_MS ?? "45000",
+  10,
+);
+const ASSIGNMENT_CLEAR_READY_POLL_MS = parseInt(
+  process.env.MOP_ASSIGNMENT_CLEAR_READY_POLL_MS ?? "1000",
+  10,
+);
+
+/**
+ * Background, non-blocking arm: wait (bounded) for slot's SessionStart
+ * source=clear acknowledgement. If it lands in time, the hook path in
+ * hooks.ts already claimed and injected the resume_prompt — nothing more to
+ * do here. If it times out, claim (read-and-clear) the persisted prompt
+ * directly and inject it through the same verified buffer-paste PM-submit
+ * mechanism, so a dropped/never-arriving hook cannot strand it forever.
+ * `claimResumePrompt` is the single consume-once gate shared with the hook
+ * path, so at most one of the two ever actually injects.
+ */
+function armResumePromptFallback(slotNum: number, baselineEventId: number, source: string): void {
+  void (async () => {
+    const wait = await waitForSessionStartClearOnDb(db, slotNum, baselineEventId, {
+      timeoutMs: RESUME_PROMPT_FALLBACK_TIMEOUT_MS,
+      pollMs: RESUME_PROMPT_FALLBACK_POLL_MS,
+    });
+    if (wait.ready) return;
+    const prompt = db.claimResumePrompt(slotNum);
+    if (!prompt) return;
+    const injected = relay.injectToPM(prompt);
+    db.logEvent(slotNum, "resume_prompt_fallback_injected", null, null, {
+      chars: prompt.length,
+      injected,
+      via: "fallback_poll",
+      waited_ms: wait.waitedMs,
+      timeout_ms: RESUME_PROMPT_FALLBACK_TIMEOUT_MS,
+      original_source: source,
+      reason: "SessionStart source=clear was not observed within the bounded fallback window",
+    });
+  })();
+}
 
 function normalizeClearTarget(raw: string): number[] | null {
   const normalized = raw.trim().toLowerCase();
@@ -933,6 +997,44 @@ app.get("/slots/:slotNum/capture", async (c) => {
   return c.json({ slot, activity, output, task: slotState?.task ?? null });
 });
 
+type ClearRequestBody = {
+  source?: string;
+  clear_existing_pending?: boolean;
+  terminal_only?: boolean;
+  /**
+   * Optional prompt to inject into slot 0 (PM) once its SessionStart
+   * source=clear acknowledgement lands. Purely additive: when absent, the
+   * response and every clear code path below are byte-for-byte identical to
+   * before this field existed.
+   */
+  resume_prompt?: string;
+};
+
+/**
+ * Persist an optional `resume_prompt` for slot 0 BEFORE the actual /clear
+ * command is sent (durability requirement), then arm the bounded fallback
+ * poll. No-op — and no response-shape change — when `resume_prompt` is
+ * absent/blank or slot 0 is not among `targetSlots`.
+ */
+function armResumePromptIfRequested(
+  targetSlots: number[],
+  body: ClearRequestBody,
+  source: string,
+): boolean {
+  const resumePrompt = typeof body.resume_prompt === "string" ? body.resume_prompt.trim() : "";
+  if (!resumePrompt || !targetSlots.includes(PM_SLOT)) return false;
+
+  const baselineEventId = latestSessionStartEventId(db, PM_SLOT);
+  db.setResumePrompt(PM_SLOT, resumePrompt);
+  db.logEvent(PM_SLOT, "resume_prompt_persisted", null, null, {
+    name: "PM",
+    via: source,
+    chars: resumePrompt.length,
+  });
+  armResumePromptFallback(PM_SLOT, baselineEventId, source);
+  return true;
+}
+
 /** Clear one slot, PM, or all slots through MoP logging. */
 app.post("/slots/:slotNum/clear", async (c) => {
   const targetSlots = normalizeClearTarget(c.req.param("slotNum"));
@@ -940,7 +1042,7 @@ app.post("/slots/:slotNum/clear", async (c) => {
     return c.json({ error: "slotNum must be an integer from 0 through 6, pm, or all" }, 400);
   }
 
-  let body: { source?: string; clear_existing_pending?: boolean; terminal_only?: boolean } = {};
+  let body: ClearRequestBody = {};
   try {
     body = await c.req.json();
   } catch {
@@ -948,17 +1050,23 @@ app.post("/slots/:slotNum/clear", async (c) => {
   }
 
   const source = body.source ?? "http_clear_endpoint";
+  const resumePromptArmed = armResumePromptIfRequested(targetSlots, body, source);
   const results = await clearSlotsThroughMopHttp(targetSlots, {
     clearExistingPendingForTargets: body.clear_existing_pending ?? false,
     source,
     terminalOnly: body.terminal_only ?? false,
   });
-  return c.json({ ok: true, source, results });
+  return c.json({
+    ok: true,
+    source,
+    results,
+    ...(resumePromptArmed ? { resume_prompt: "armed" } : {}),
+  });
 });
 
 /** Clear endpoint that accepts {slot:"pm"|"all"|"0"..}. */
 app.post("/clear", async (c) => {
-  let body: { slot?: string; source?: string; clear_existing_pending?: boolean; terminal_only?: boolean } = {};
+  let body: ClearRequestBody & { slot?: string } = {};
   try {
     body = await c.req.json();
   } catch {
@@ -971,12 +1079,18 @@ app.post("/clear", async (c) => {
   }
 
   const source = body.source ?? "http_clear_endpoint";
+  const resumePromptArmed = armResumePromptIfRequested(targetSlots, body, source);
   const results = await clearSlotsThroughMopHttp(targetSlots, {
     clearExistingPendingForTargets: body.clear_existing_pending ?? false,
     source,
     terminalOnly: body.terminal_only ?? false,
   });
-  return c.json({ ok: true, source, results });
+  return c.json({
+    ok: true,
+    source,
+    results,
+    ...(resumePromptArmed ? { resume_prompt: "armed" } : {}),
+  });
 });
 
 /** Get event log (optionally filtered by slot) */
@@ -1121,27 +1235,42 @@ app.post("/slots/:slotNum/abandon-turn", async (c) => {
  * clear is never gated on "free". The outcome is recorded by the caller and
  * never refuses. (The standalone `/slots/:n/clear` HTTP route keeps its own
  * occupied guard; only the assignment boundary uses this.)
+ *
+ * The readiness wait after a successful clear send is event-driven (bounded
+ * poll on SessionStart source=clear via sessionStartClearWait.ts) instead of
+ * a blind sleep — this used to leave `deliverTaskFile`'s downstream paste
+ * racing the slot's actual session restart. The wait never turns a
+ * successful clear into a refusal (timeout just proceeds), so the
+ * `{ ok, reason, detail? }` response contract is unchanged.
  */
 async function clearSlotForAssignment(
   slotNum: number,
 ): Promise<{ ok: boolean; reason: string; detail?: string }> {
-  db.clearPendingClear(slotNum);
-  const sent = await sendClearViaMopSendPath(slotNum, "mop_assign_slot_new_issue");
-  if (sent.success) {
-    db.clearPendingClear(slotNum);
-    db.logEvent(slotNum, "slot_cleared", null, null, {
-      cleared_at: new Date().toISOString(),
-      immediate: true,
-      via: "mop_assign_slot_new_issue",
-      delivery: "mop_send_to_slot",
-    });
-    return { ok: true, reason: "cleared" };
-  }
-  return {
-    ok: false,
-    reason: "assignment_clear_not_applied",
-    detail: sent.reason ?? sent.error ?? `send failed status=${sent.status}`,
-  };
+  return clearSlotForAssignmentWithReadyWait(slotNum, {
+    clearPendingClear: (slot) => db.clearPendingClear(slot),
+    getBaselineEventId: (slot) => latestSessionStartEventId(db, slot),
+    sendClear: (slot) => sendClearViaMopSendPath(slot, "mop_assign_slot_new_issue"),
+    logSlotCleared: (slot) =>
+      db.logEvent(slot, "slot_cleared", null, null, {
+        cleared_at: new Date().toISOString(),
+        immediate: true,
+        via: "mop_assign_slot_new_issue",
+        delivery: "mop_send_to_slot",
+      }),
+    waitForReady: (slot, baselineEventId) =>
+      waitForSessionStartClearOnDb(db, slot, baselineEventId, {
+        timeoutMs: ASSIGNMENT_CLEAR_READY_TIMEOUT_MS,
+        pollMs: ASSIGNMENT_CLEAR_READY_POLL_MS,
+      }),
+    logReadyWait: (slot, result) =>
+      db.logEvent(slot, "assignment_clear_ready_wait", null, null, {
+        ready: result.ready,
+        waited_ms: result.waitedMs,
+        event_id: result.eventId,
+        timeout_ms: ASSIGNMENT_CLEAR_READY_TIMEOUT_MS,
+        via: "mop_assign_slot_new_issue",
+      }),
+  });
 }
 
 /**
