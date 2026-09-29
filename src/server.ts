@@ -210,6 +210,7 @@ const eventLoopLagTimer = setInterval(() => {
 
 const app = new Hono();
 
+
 // ─── MoP Clear Helpers ─────────────────────────────────
 // HTTP path for deterministic schedulers that cannot call MCP tools.
 // This keeps clears logged in MoP and avoids raw /clear injection from shell.
@@ -226,6 +227,22 @@ const PM_CLEAR_STALE_ACK_REPAIR_MS = parseInt(
 );
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
 const PM_CLEAR_CONFIRMED_AT_KEY = "pm_clear_confirmed_at";
+// Resume-prompt persistence (Rajiv 2026-09-30, thread 1790707604.948989):
+// a caller clearing the PM pane may attach a resume prompt. It is persisted
+// here BEFORE /clear is sent so it survives the clear even if MoP restarts.
+// Primary delivery is event-driven off SessionStart:clear (handleSessionStart
+// in hooks.ts). PM_CLEAR_RESUME_POLL_* below is a bounded fallback only for
+// the case where that SessionStart hook event never arrives.
+const PM_CLEAR_RESUME_PROMPT_KEY = "pm_clear_resume_prompt";
+const PM_CLEAR_RESUME_REQUESTED_AT_KEY = "pm_clear_resume_prompt_requested_at";
+const PM_CLEAR_RESUME_POLL_INTERVAL_MS = parseInt(
+  process.env.MOP_PM_CLEAR_RESUME_POLL_INTERVAL_MS ?? `${15 * 1000}`,
+  10,
+);
+const PM_CLEAR_RESUME_POLL_MAX_WINDOW_MS = parseInt(
+  process.env.MOP_PM_CLEAR_RESUME_POLL_MAX_WINDOW_MS ?? `${5 * 60 * 1000}`,
+  10,
+);
 
 function normalizeClearTarget(raw: string): number[] | null {
   const normalized = raw.trim().toLowerCase();
@@ -329,7 +346,7 @@ async function sendClearViaMopSendPath(
 
 async function clearSlotsThroughMopHttp(
   targetSlots: number[],
-  options: { clearExistingPendingForTargets: boolean; source: string; terminalOnly: boolean },
+  options: { clearExistingPendingForTargets: boolean; source: string; terminalOnly: boolean; resumePrompt?: string },
 ): Promise<ClearSlotResult[]> {
   const normalizedTargets = Array.from(new Set(targetSlots))
     .filter((slot) => isValidRuntimeSlot(slot, config.slotCount));
@@ -446,6 +463,22 @@ async function clearSlotsThroughMopHttp(
       const requestedAt = new Date().toISOString();
       db.setConfig(PM_CLEAR_REQUESTED_AT_KEY, requestedAt);
 
+      // Persist the resume prompt BEFORE /clear is sent, so it survives even
+      // if MoP restarts before the SessionStart:clear ack arrives. Trimmed
+      // whitespace-only prompts are treated as "no prompt" (unchanged
+      // behavior).
+      const trimmedResumePrompt = options.resumePrompt?.trim();
+      if (trimmedResumePrompt) {
+        db.setConfig(PM_CLEAR_RESUME_PROMPT_KEY, trimmedResumePrompt);
+        db.setConfig(PM_CLEAR_RESUME_REQUESTED_AT_KEY, requestedAt);
+        db.logEvent(0, "resume_prompt_persisted", null, null, {
+          name: "PM",
+          requested_at: requestedAt,
+          bytes: trimmedResumePrompt.length,
+          via: options.source,
+        });
+      }
+
       const sent = await sendClearViaMopSendPath(0, options.source);
       if (!sent.success) {
         db.clearPendingClear(0);
@@ -468,6 +501,43 @@ async function clearSlotsThroughMopHttp(
 
   return results;
 }
+
+// ─── PM Resume-Prompt Fallback Poller ───────────────────
+// Primary delivery is event-driven: hooks.ts injects the resume prompt off
+// the real SessionStart source=clear hook the instant the PM pane's clear
+// finishes. This poller exists ONLY for the rare case where that hook event
+// never arrives (e.g. hook-relay.sh's fire-and-forget POST times out or is
+// dropped) — bounded to PM_CLEAR_RESUME_POLL_MAX_WINDOW_MS from when the
+// prompt was persisted so a genuinely stuck/failed clear does not spin
+// forever.
+const pmResumePromptFallbackTimer = setInterval(() => {
+  void (async () => {
+    const prompt = db.getConfig(PM_CLEAR_RESUME_PROMPT_KEY);
+    if (!prompt || !prompt.trim()) return;
+    if (db.hasPendingClear(0)) return; // clear itself hasn't landed yet — wait for the real hook
+
+    const requestedAt = parseMoPIsoMs(db.getConfig(PM_CLEAR_RESUME_REQUESTED_AT_KEY));
+    if (requestedAt === null) return;
+    const ageMs = Date.now() - requestedAt;
+    if (ageMs < 0) return;
+    if (ageMs > PM_CLEAR_RESUME_POLL_MAX_WINDOW_MS) {
+      db.setConfig(PM_CLEAR_RESUME_PROMPT_KEY, "");
+      db.logEvent(0, "resume_prompt_expired_unfallback_delivered", null, null, {
+        name: "PM",
+        requested_at: db.getConfig(PM_CLEAR_RESUME_REQUESTED_AT_KEY),
+        window_ms: PM_CLEAR_RESUME_POLL_MAX_WINDOW_MS,
+        reason: "No SessionStart:clear ack and fallback window elapsed; prompt dropped to avoid stale injection into an unrelated later session.",
+      });
+      return;
+    }
+
+    // Pending clear already cleared and the prompt is still present: either
+    // the SessionStart:clear hook event never reached MoP, or its injection
+    // attempt failed. Retry via the same idempotent path the hook uses.
+    await processor.injectPendingResumePromptIfAny();
+  })();
+}, PM_CLEAR_RESUME_POLL_INTERVAL_MS);
+pmResumePromptFallbackTimer.unref?.();
 
 // ─── Validation ──────────────────────────────────────────
 
@@ -820,7 +890,7 @@ app.post("/slots/:slotNum/clear", async (c) => {
     return c.json({ error: "slotNum must be an integer from 0 through 6, pm, or all" }, 400);
   }
 
-  let body: { source?: string; clear_existing_pending?: boolean; terminal_only?: boolean } = {};
+  let body: { source?: string; clear_existing_pending?: boolean; terminal_only?: boolean; resume_prompt?: string } = {};
   try {
     body = await c.req.json();
   } catch {
@@ -832,13 +902,14 @@ app.post("/slots/:slotNum/clear", async (c) => {
     clearExistingPendingForTargets: body.clear_existing_pending ?? false,
     source,
     terminalOnly: body.terminal_only ?? false,
+    resumePrompt: body.resume_prompt,
   });
   return c.json({ ok: true, source, results });
 });
 
 /** Clear endpoint that accepts {slot:"pm"|"all"|"0"..}. */
 app.post("/clear", async (c) => {
-  let body: { slot?: string; source?: string; clear_existing_pending?: boolean; terminal_only?: boolean } = {};
+  let body: { slot?: string; source?: string; clear_existing_pending?: boolean; terminal_only?: boolean; resume_prompt?: string } = {};
   try {
     body = await c.req.json();
   } catch {
@@ -855,6 +926,7 @@ app.post("/clear", async (c) => {
     clearExistingPendingForTargets: body.clear_existing_pending ?? false,
     source,
     terminalOnly: body.terminal_only ?? false,
+    resumePrompt: body.resume_prompt,
   });
   return c.json({ ok: true, source, results });
 });

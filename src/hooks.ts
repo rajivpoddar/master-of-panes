@@ -169,7 +169,7 @@ export class HookProcessor {
   private static readonly WAITING_PM_CHECK_SLOT_INJECTS_ENABLED =
     process.env.MOP_WAITING_PM_CHECK_SLOT_INJECTS_ENABLED === "1";
   private lastDirectSlotStateNotificationAt = new Map<string, number>();
-  private static readonly PM_WAIT_REMINDER_INTERVAL_MS = 5 * 60 * 1000;
+  private static readonly PM_WAIT_REMINDER_INTERVAL_MS = 30 * 60 * 1000;
   private static readonly PM_WAIT_REMINDER_SWEEP_MS = 60 * 1000;
   private static readonly PM_WAIT_ACTIVITIES = new Set([
     "awaiting_plan_approval",
@@ -1370,6 +1370,7 @@ export class HookProcessor {
           delivery: "mop_send_to_slot",
         });
         debugLog(`[hooks] SessionStart:clear slot=0 (PM) — clear acknowledged`);
+        await this.injectPendingResumePromptIfAny();
         return {};
       }
       // PM pane — compact sessions are now passive from MoP's perspective.
@@ -1403,6 +1404,43 @@ export class HookProcessor {
       );
     }
     return {};
+  }
+
+  /**
+   * Deliver a resume prompt persisted before a PM /clear (Rajiv 2026-09-30,
+   * thread 1790707604.948989), fired from the event-driven SessionStart
+   * source=clear ack above. Idempotent: the config key is only cleared on a
+   * verified successful delivery, so a delivery failure (or MoP restart
+   * mid-flight) leaves the prompt intact for the next attempt — either the
+   * next SessionStart:clear ack, or the bounded fallback poller in
+   * server.ts for the rare case where the hook event never arrives at all.
+   * No resume prompt persisted = no-op (unchanged behavior).
+   */
+  async injectPendingResumePromptIfAny(): Promise<boolean> {
+    const prompt = this.db.getConfig("pm_clear_resume_prompt");
+    if (!prompt || !prompt.trim()) return false;
+
+    const result = await this.relay.submitToPM(prompt, "pm_clear_resume_prompt");
+    if (result.ok) {
+      this.db.setConfig("pm_clear_resume_prompt", "");
+      this.db.logEvent(0, "resume_prompt_injected", "SessionStart", null, {
+        name: "PM",
+        injected_at: new Date().toISOString(),
+        bytes: prompt.length,
+        delivery: "buffer_paste_submit_to_pm",
+      });
+      debugLog(`[hooks] resume prompt injected into PM pane (${prompt.length} bytes)`);
+    } else {
+      this.db.logEvent(0, "resume_prompt_injection_failed", "SessionStart", null, {
+        name: "PM",
+        attempted_at: new Date().toISOString(),
+        bytes: prompt.length,
+        ambiguous: result.ambiguous ?? false,
+        reason: "submitToPM returned ok=false; prompt retained for retry",
+      });
+      debugLog(`[hooks] resume prompt injection FAILED (retained for retry)`);
+    }
+    return result.ok;
   }
 
   // ─── Stop Hook ─────────────────────────────────────────
