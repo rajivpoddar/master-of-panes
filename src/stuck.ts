@@ -35,6 +35,25 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+// PM wait-nudge interval: how long a slot must be idle-occupied/idle-free
+// before the detector asks it to request an assignment from PM. Re-enabled
+// at Rajiv's direction (2026-09-29) via the launchd
+// MOP_PM_WAIT_NUDGE_INTERVAL_MS env var (com.heydonna.mop-server.plist), read
+// live at call time so a runtime toggle takes effect without a restart, same
+// pattern as MOP_PM_WAIT_NUDGES_DISABLED above. Falls back to the historical
+// 30-minute default when unset or invalid, floored at 60s so a misconfigured
+// tiny value cannot make the detector spam a slot every tick.
+const PM_WAIT_NUDGE_INTERVAL_FLOOR_MS = 60_000;
+const PM_WAIT_NUDGE_INTERVAL_DEFAULT_MS = 30 * 60 * 1000;
+
+export function getPmWaitNudgeIntervalMs(): number {
+  const raw = process.env.MOP_PM_WAIT_NUDGE_INTERVAL_MS;
+  if (raw === undefined || raw === "") return PM_WAIT_NUDGE_INTERVAL_DEFAULT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return PM_WAIT_NUDGE_INTERVAL_DEFAULT_MS;
+  return Math.max(parsed, PM_WAIT_NUDGE_INTERVAL_FLOOR_MS);
+}
+
 /**
  * Parse a SQLite timestamp string as UTC.
  *
@@ -132,8 +151,17 @@ function validateGateRecommendation(parsed: FreeSlotAssignmentGate): void {
 
 export class StuckDetector {
   private readonly STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes no output
-  private readonly IDLE_OCCUPIED_THRESHOLD_MS = 5 * 60 * 1000;
-  private readonly IDLE_FREE_THRESHOLD_MS = 5 * 60 * 1000;
+  // PM wait-nudge cadence. Read live from MOP_PM_WAIT_NUDGE_INTERVAL_MS on
+  // every check (see getPmWaitNudgeIntervalMs) rather than cached once at
+  // construction, matching the MOP_PM_WAIT_NUDGES_DISABLED kill-switch
+  // pattern. Kept as getters (not fields) so a runtime env change is
+  // honored without a process restart.
+  private get IDLE_OCCUPIED_THRESHOLD_MS(): number {
+    return getPmWaitNudgeIntervalMs();
+  }
+  private get IDLE_FREE_THRESHOLD_MS(): number {
+    return getPmWaitNudgeIntervalMs();
+  }
   // How many recent release events per type are walked to find the newest
   // non-idempotent free-episode start. Idempotent replays are skipped; if no
   // real release/clear marker exists, a stable idle_free_anchor_created
@@ -579,10 +607,23 @@ export class StuckDetector {
     );
   }
 
-  private idleOccupiedUrgency(waitAgeMinutes: number): IdleOccupiedUrgency {
-    if (waitAgeMinutes >= 60) return "ESCALATION";
-    if (waitAgeMinutes >= 30) return "URGENT";
-    if (waitAgeMinutes >= 15) return "FOLLOW_UP";
+  /**
+   * Tier boundaries scale with the configured nudge interval (3x/6x/12x),
+   * preserving the historical 15/30/60-minute tiers at the original 5-minute
+   * interval while staying proportionate at any other configured interval
+   * (e.g. a 30-minute interval yields 90/180/360-minute tiers). Each tier
+   * fires at most once per wait episode via the rank-comparison dedupe in
+   * checkIdleOccupied/checkIdleFree, so a short interval (e.g. 5 minutes)
+   * still yields at most one nudge per interval, not one per detector tick.
+   */
+  private idleOccupiedUrgency(
+    waitAgeMinutes: number,
+    intervalMs: number = getPmWaitNudgeIntervalMs()
+  ): IdleOccupiedUrgency {
+    const intervalMinutes = Math.max(intervalMs / 60_000, 1);
+    if (waitAgeMinutes >= intervalMinutes * 12) return "ESCALATION";
+    if (waitAgeMinutes >= intervalMinutes * 6) return "URGENT";
+    if (waitAgeMinutes >= intervalMinutes * 3) return "FOLLOW_UP";
     return "REMINDER";
   }
 
