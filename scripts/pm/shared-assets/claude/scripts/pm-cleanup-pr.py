@@ -29,7 +29,9 @@ SLACK_API = "https://slack.com/api"
 SLACK_CHANNEL = "C0ALZJHGE49"
 CTO_USER_ID = "U0BNFGX2UAX"
 CTO_MENTION = f"<@{CTO_USER_ID}>"
-DEFAULT_MAPPING = Path.home() / ".claude" / "mop" / "pm-transition-parent-receipts.json"
+# Parent-thread mapping for an optional cleanup reply. Supplied by the caller;
+# the retired pm-transition receipt mapping is never inferred (Rajiv 2026-09-21).
+DEFAULT_MAPPING = Path.home() / ".claude" / "mop" / "pm-cleanup-parent-receipts.json"
 DEFAULT_RECEIPT = Path.home() / ".claude" / "mop" / "pm-cleanup-receipts.json"
 HEAD_RE = r"[0-9a-fA-F]{40}"
 STALE_LABEL_PREFIXES = (

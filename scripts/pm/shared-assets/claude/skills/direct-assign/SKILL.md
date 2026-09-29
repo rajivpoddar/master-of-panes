@@ -202,8 +202,10 @@ This is part of the literal `task` message the skill POSTs, not a separate
 delivery. Keep it in sync with the MoP-side dispatch/handoff template.
 
 After successful `new_issue` assignment, post exactly one new top-level
-`#heydonna-dev` transition parent containing the issue, slot, assignment
-summary, and CTO mention. Record its `thread_ts`; all later PR transitions for
+`#heydonna-dev` transition parent containing the issue, slot and assignment
+summary, with NO CTO @-mention (Rajiv 2026-09-28 15:34 IST, thread
+`1790589863.207179`: *"this is an ack. why is this being sent to the cto? it's not required."*).
+Assignment notices are status, never a CTO wake. Record its `thread_ts`; all later PR transitions for
 that assignment reply in that thread. For `repro` and `rework`, reuse the
 existing authoritative PR transition thread when present and never create a
 new-issue parent. A missing or ambiguous thread mapping is a typed blocker and

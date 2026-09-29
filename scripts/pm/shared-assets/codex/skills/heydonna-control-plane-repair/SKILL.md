@@ -5,6 +5,16 @@ description: Route one bounded HeyDonna control-plane defect from CTO Decisions 
 
 # HeyDonna Control-Plane Repair
 
+## Routine ownership and escalation
+
+Follow the shared release-conveyor decision boundary: PM owns routine
+scheduling/lifecycle/conveyor execution; CTO owns routine technical diagnosis,
+bounded repair, same-owner continuation, reviewed publication, and normal
+CI/capture/merge/rollout. Choosing among eligible actions is not itself a
+process-policy change. User-authorized repairs continue through proof, warranted
+independent review, publication, and scoped install without another approval
+hop; only the reserved escalation classes in the shared contract go to Rajiv.
+
 This is a delegation and lifecycle contract. CTO Decisions classifies and
 routes; it never investigates deeply, implements, reviews, publishes, deploys,
 installs, activates, restarts, rolls back, monitors, or waits.
@@ -39,16 +49,16 @@ timestamps, and the complete prior prompt/metadata rollback preimage.
 
 ## Task affinity
 
-- CP Repairs `01a0324b-68e0-7491-988f-e7da9abd26ab`: shared release and
+- CP Repairs `01a08f69-45db-71c2-b433-678419139ed7`: shared release and
   control-plane investigation, implementation, publication, deployment,
   activation, restart/readiness, and rollback outside the MoP/PM Operator
   runtime affinity.
-- Master of Panes `01a04154-c9c1-7bc1-8f7b-009a87bc7628`: MoP and PM Operator
+- Master of Panes `01a0d779-9a74-7f52-89ad-167910930d27`: MoP and PM Operator
   investigation, implementation, caller migration, install, cutover,
   restart/readiness, rollback, and retirement.
-- PR Reviews `01a03265-4b66-7672-bbc2-4a38fb1005b5`: the single independent
+- PR Reviews `01a0b53e-3316-77d3-9610-1c0c58d4ba5b`: the single independent
   functionality-first candidate review. It never implements or deploys.
-- CTO Decisions `01a03236-2e61-71f3-a6a8-3dc24d8c8917`: bounded
+- CTO Decisions `01a09112-a09c-7361-9a2a-0ada6a4e9dfb`: bounded
   classification, routing, verdict consumption, and the final PM communication.
 
 Repository location does not override task affinity. Preserve one

@@ -62,8 +62,9 @@ _INTERNAL_SURFACE_RE = re.compile(
 # PR/slot state machine. They join the allowlist; the genuine control plane
 # stays the scripts/state-machine surfaces below (scripts/pm, slot
 # dispatch/claim, issue-admission, ICL hook/validator, master-of-panes).
-# Rajiv 2026-09-11 (thread 1789111520): `pm-transition` is DEPRECATED and
-# REMOVED — the control plane now lives in the MoP repo (master-of-panes).
+# Rajiv 2026-09-11 (thread 1789111520), reaffirmed 2026-09-21: the legacy PM
+# transition helper family is DEPRECATED and REMOVED — the control plane now
+# lives in the MoP repo (master-of-panes).
 _APP_CI_SURFACE_RE = re.compile(
     r"\b(?:"
     r"scripts/ci|"
