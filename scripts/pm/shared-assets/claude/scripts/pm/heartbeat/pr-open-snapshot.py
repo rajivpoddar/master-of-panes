@@ -117,10 +117,21 @@ def classify_pr(pr: dict) -> dict:
         state = "CI+E2E green"
         if not admitted:
             nxt = "not admitted: no merge ask"
-        elif slots:
-            nxt = f"slot:{slots[0]} lane open: no merge ask"
         else:
+            # Admission already transferred ownership to PM; a lingering slot:* label is
+            # stale pre-admission ownership, not live authority, so it must not suppress
+            # the merge ask — emit the ask and a cleanup action for the stale label.
             nxt = "CTO merge ask"
+            if slots:
+                actions.append(
+                    f"stale slot:{slots[0]} label on admitted+green PR#{pr.get('number')}@{head} -> remove label"
+                )
+    elif admitted and not required_red and not any(g in checks["pending"] for g in GATES):
+        # Admitted head with a required gate absent or reported SKIPPED (matches none of
+        # red/pending/green): this is an admitted head awaiting or lacking terminal checks,
+        # not an un-admitted PR — never turn it into a re-admission request.
+        state = "admitted: gate missing/SKIPPED"
+        nxt = "await terminal (gate not run)"
     else:
         state = "stale admission" if stale_admission else "not admitted"
         nxt = "PM 12b review -> pm-admit-ci" if owner == "PM" else f"{owner} rework -> PM admit"

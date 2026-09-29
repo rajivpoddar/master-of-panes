@@ -39,9 +39,11 @@ TEAM = {
 IST = timezone(timedelta(hours=5, minutes=30))
 LINK_RE = re.compile(r"(?<![\w/])#(\d{3,5})\b|github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/(\d+)")
 # A requester's short closing message after a team reply does not reopen a thread.
+# Must match the COMPLETE (trimmed) message -- a continuation like "Thanks, but it
+# still does not work" is not an acknowledgement and must not be dropped (Codex #7 P1).
 ACK_RE = re.compile(
     r"^\W*(ok(ay)?|thanks?|thank you|thx|great|perfect|got it|yes|cool|sounds good|"
-    r"(that|it) worked|will do|awesome|noted)\b",
+    r"(that|it) worked|will do|awesome|noted)[!.\s]*$",
     re.IGNORECASE,
 )
 MAIN_CHECKOUT = Path.home() / "Downloads/projects/heydonna-app"
@@ -204,10 +206,14 @@ def carry_forward(threads: list[dict], prev_tracked, fetch_thread) -> list[dict]
 
 
 def tracked_roots(threads: list[dict], now_ts: float) -> dict[str, float]:
-    """All roots to keep tracking with their last-seen reply ts (pruned after TRACK_DAYS idle)."""
-    horizon = now_ts - TRACK_DAYS * 86400
-    return {t["ts"]: t["last_activity"] for t in sorted(threads, key=lambda t: t["ts"])
-            if t["state"] == "needs_reply" or t["last_activity"] >= horizon}
+    """All roots to keep tracking with their last-seen reply ts.
+
+    `conversations.history` only searches the latest 24h by default, so an answered
+    root is the ONLY way a later customer reply on it gets rediscovered. Retain answered
+    roots indefinitely (never prune by TRACK_DAYS) -- pruning them silently drops any
+    reply that lands after the cutoff (Codex #7 P1).
+    """
+    return {t["ts"]: t["last_activity"] for t in sorted(threads, key=lambda t: t["ts"])}
 
 
 def open_roots(threads: list[dict]) -> list[str]:

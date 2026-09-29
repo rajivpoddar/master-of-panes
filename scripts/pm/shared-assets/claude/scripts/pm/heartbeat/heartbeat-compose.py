@@ -406,10 +406,18 @@ def main() -> int:
     if prs is None and not args.prs_json:
         prs = _run_json([py, str(SCRIPTS / "pr-open-snapshot.py")], failures, "pr-open-snapshot")
 
+    # Idle-slot actions are only rendered into the post's ACTIONS line by `compose()`.
+    # The runtime contract requires them in the structured ACTIONS: channel the agent
+    # copies into its return value, so compute + persist them here too (Codex #7 P2).
+    slot_actions: list[str] = []
+    if slots is not None and not args.no_slots:
+        _, _, slot_actions = slot_block(slots, datetime.now(timezone.utc), release_seen)
+    pm_actions = [a for r in (prs or []) for a in r.get("actions") or []] + slot_actions
+
     if args.save_inputs:
         out = Path(args.save_inputs)
         out.mkdir(parents=True, exist_ok=True)
-        for name, value in (("axiom", axiom), ("map", mapping_doc), ("support", support), ("prs", prs), ("active", active), ("slots", slots)):
+        for name, value in (("axiom", axiom), ("map", mapping_doc), ("support", support), ("prs", prs), ("active", active), ("slots", slots), ("actions", pm_actions)):
             (out / f"{name}.json").write_text(json.dumps(value, indent=2))
 
     print(compose(
@@ -418,6 +426,8 @@ def main() -> int:
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
     ))
+    if pm_actions:
+        print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)
     return 0
 
 

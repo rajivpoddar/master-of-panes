@@ -98,6 +98,11 @@ def load_token() -> str:
     sys.exit(1)
 
 
+# Non-200/malformed Axiom responses append their status here so `main()` can surface a
+# failure footer and a nonzero exit instead of silently reporting zero-count "quiet" data.
+AXIOM_QUERY_FAILED: list[int] = []
+
+
 def run_apl_query(token: str, apl: str, start_time: str, end_time: str) -> dict:
     """Execute an APL query against the Axiom API."""
     headers = {
@@ -135,16 +140,19 @@ def run_apl_query(token: str, apl: str, start_time: str, end_time: str) -> dict:
             "  Set AXIOM_API_TOKEN to an API token with query access (not an ingest-only token).",
             file=sys.stderr,
         )
+        AXIOM_QUERY_FAILED.append(status)
         return {"matches": [], "buckets": {"series": [], "totals": []}}
 
     if status != 200:
         print(f"Error: Axiom API returned {status}: {body}", file=sys.stderr)
+        AXIOM_QUERY_FAILED.append(status)
         return {"matches": [], "buckets": {"series": [], "totals": []}}
 
     try:
         value = json.loads(body)
     except json.JSONDecodeError:
         print("Error: Axiom API returned invalid JSON", file=sys.stderr)
+        AXIOM_QUERY_FAILED.append(status)
         return {"matches": [], "buckets": {"series": [], "totals": []}}
     return value if isinstance(value, dict) else {"matches": [], "buckets": {"series": [], "totals": []}}
 
@@ -282,8 +290,10 @@ def mask_email(email: str) -> str:
     if "*" in email:  # already masked at log ingest; keep the more informative ingest mask
         return email
     parts = email.split("@") if email else ["?"]
-    if len(parts) == 2 and len(parts[0]) > 2:
-        return parts[0][:2] + "***@" + parts[1]
+    if len(parts) == 2 and parts[0]:
+        local = parts[0]
+        keep = local[:2] if len(local) > 2 else local[:1]
+        return keep + "***@" + parts[1]
     return email
 
 
@@ -398,8 +408,10 @@ def main() -> int:
         report = build_error_code_report(codes, totals, prior, same_slot, top=a.top)
         report["all_codes"] = codes
     report["window"] = {"start": s, "end": e}
+    if AXIOM_QUERY_FAILED:
+        report["ops_error"] = f"axiom_query_failed statuses={sorted(set(AXIOM_QUERY_FAILED))}"
     print(json.dumps(report, indent=2, default=str))
-    return 0
+    return 1 if AXIOM_QUERY_FAILED else 0
 
 
 if __name__ == "__main__":
