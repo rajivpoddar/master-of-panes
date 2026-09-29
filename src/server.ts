@@ -12,7 +12,7 @@
  * 5. Returns a HookResponse that Claude Code acts on
  */
 
-import { clearSlotWhenIdle, clearWaitOptionsFromEnv } from "./assignmentClearWait.js";
+import { clearSlotWhenIdle, clearWaitBoundsMs, clearWaitOptionsFromEnv } from "./assignmentClearWait.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -1123,6 +1123,8 @@ app.post("/slots/:slotNum/abandon-turn", async (c) => {
  * never refuses. (The standalone `/slots/:n/clear` HTTP route keeps its own
  * occupied guard; only the assignment boundary uses this.)
  */
+const assignmentClearPending = new Map<number, { marker: number; outstanding: number }>();
+
 async function clearSlotForAssignment(
   slotNum: number,
 ): Promise<AssignmentEffectClearResult> {
@@ -1132,18 +1134,24 @@ async function clearSlotForAssignment(
     {
       getActivity: (slot) => relay.getSlotActivityState(slot),
       latestEventId: (slot) => db.getEvents(slot, 1)[0]?.id ?? 0,
-      findClearAck: (slot, afterId) => {
-        for (const event of db.getEvents(slot, 20, "SessionStart")) {
+      countClearAcks: (slot, afterId) => {
+        let count = 0;
+        let lastId = 0;
+        for (const event of db.getEvents(slot, 50, "SessionStart")) {
           if (event.id <= afterId) break;
           try {
             const payload = JSON.parse(String(event.payload ?? "{}")) as { source?: string };
-            if (payload.source === "clear") return event.id;
+            if (payload.source === "clear") {
+              count += 1;
+              lastId = Math.max(lastId, event.id);
+            }
           } catch {
             // Unparseable payload is not an acknowledgement.
           }
         }
-        return null;
+        return { count, lastId };
       },
+      pending: assignmentClearPending,
       sendClear: async (slot) => {
         const sent = await sendClearViaMopSendPath(slot, "mop_assign_slot_new_issue");
         return sent.success
@@ -1271,6 +1279,7 @@ registerAssignmentRoute(app, db, issueProjection);
 registerAssignmentEffectRoutes(app, {
   db,
   clearSlot: (slotNum) => clearSlotForAssignment(slotNum),
+  clearWaitBounds: () => clearWaitBoundsMs(clearWaitOptionsFromEnv()),
   deliverTaskFile: (slotNum, filePath) => deliverTaskFileForAssignment(slotNum, filePath),
   // Best-effort Ctrl-C through the same relay seam the wedge-interrupt
   // route uses. Audited, never refusing.

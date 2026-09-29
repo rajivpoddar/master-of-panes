@@ -54,6 +54,8 @@ class WorkKindGuardTest(unittest.TestCase):
         def fake_http(method, url, body=None, timeout=60):
             calls.append((method, url))
             timeouts[method] = timeout
+            if method == "GET" and url.endswith("/assign-effect/bounds"):
+                return 200, {"success": True, "max_clear_wait_ms": 900_000}
             if method == "GET":
                 return 200, {"assignment_epoch": 5}
             return 400, {"status": "refused", "reason": "probe", "step_failed": "ownership"}
@@ -65,8 +67,29 @@ class WorkKindGuardTest(unittest.TestCase):
         self.assertIn("GET", methods)
         self.assertIn("POST", methods)
         # The assign-effect POST outlives MoP's bounded idle + clear-ack waits
-        # (240s + 180s defaults) so a slow slot's clear_wait refusal is read.
-        self.assertGreaterEqual(timeouts["POST"], 420)
+        # as reported by the server's bounds endpoint, plus a delivery margin.
+        self.assertGreater(timeouts["POST"], 900)
+
+
+
+
+class ClientTimeoutFallbackTest(unittest.TestCase):
+    def test_timeout_falls_back_to_server_env_bounds(self):
+        import os
+        module = load_module()
+        module.http_json = lambda method, url, body=None, timeout=60: (0, {"error": "down"})  # type: ignore[attr-defined]
+        old = {k: os.environ.get(k) for k in ("MOP_ASSIGN_CLEAR_IDLE_TIMEOUT_MS", "MOP_ASSIGN_CLEAR_ACK_TIMEOUT_MS")}
+        os.environ["MOP_ASSIGN_CLEAR_IDLE_TIMEOUT_MS"] = "600000"
+        os.environ["MOP_ASSIGN_CLEAR_ACK_TIMEOUT_MS"] = "300000"
+        try:
+            timeout = module.assign_effect_timeout_seconds("http://x")  # type: ignore[attr-defined]
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertGreater(timeout, 600 + 2 * 300)
 
 
 if __name__ == "__main__":

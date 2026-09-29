@@ -36,6 +36,7 @@ interface Harness {
   projectorThrowOn: "assigned" | "released" | null;
   orderLog: string[];
   stepLog: string[];
+  clearGate: Promise<void> | null;
   close: () => void;
 }
 
@@ -60,6 +61,7 @@ function harness(): Harness {
     projectorThrowOn: null,
     orderLog: [],
     stepLog: [],
+    clearGate: null,
     close: () => {
       db.close();
       rmSync(directory, { recursive: true, force: true });
@@ -70,6 +72,7 @@ function harness(): Harness {
     clearSlot: async (slot) => {
       state.clearCalls.push(slot);
       state.stepLog.push("clear");
+      if (state.clearGate) await state.clearGate;
       return state.clearResult;
     },
     interruptTurn: async (slot) => {
@@ -1070,6 +1073,30 @@ test("new_issue sequences interrupt, then idle-gated clear, then delivery", asyn
     assert.equal(result.json.status, "assigned");
     const order = h.stepLog;
     assert.deepEqual(order, ["interrupt", "clear", "deliver"]);
+  } finally {
+    h.close();
+  }
+});
+
+test("a concurrent assign to the same slot gets 409 assignment_in_flight, not a second clear", async () => {
+  const h = harness();
+  try {
+    let release!: () => void;
+    h.clearGate = new Promise<void>((resolve) => { release = resolve; });
+    const epoch0 = h.db.getSlot(4)!.assignment_epoch;
+    const first = post(h.app, 4, effectBody(4, epoch0, { effect_id: "assign-4-first" }));
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = await post(h.app, 4, effectBody(4, epoch0, { effect_id: "assign-4-second", issue: 8111 }));
+    assert.equal(second.status, 409);
+    assert.equal(second.json.reason, "assignment_in_flight");
+    assert.deepEqual(h.clearCalls, [4], "exactly one clear");
+    release();
+    assert.equal((await first).json.status, "assigned");
+    assert.equal(h.deliverCalls.length, 1);
+    // Lock is released after completion.
+    h.clearGate = null;
+    const third = await post(h.app, 4, effectBody(4, epoch0 + 1, { effect_id: "assign-4-first" }));
+    assert.notEqual(third.json.reason, "assignment_in_flight");
   } finally {
     h.close();
   }

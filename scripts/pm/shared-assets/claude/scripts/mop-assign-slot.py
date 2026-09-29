@@ -45,7 +45,31 @@ from urllib.request import Request, urlopen
 
 
 SELECTION_CLASSES = ("new_issue", "repro", "rework")
-ASSIGN_EFFECT_TIMEOUT_SECONDS = 600
+# Delivery (paste + verify + readback + label projection) plus margin, on top
+# of the server's clear-wait bounds.
+ASSIGN_EFFECT_DELIVERY_MARGIN_SECONDS = 180
+
+
+def env_ms(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, ""))
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
+
+def assign_effect_timeout_seconds(base: str) -> float:
+    """Client bound derived from the SERVER's clear-wait bounds so a client
+    timeout can never fire while the server is still waiting (which would
+    let a retry overlap an in-flight assignment).  Falls back to the same env
+    vars + defaults the server reads."""
+    status, bounds = http_json("GET", f"{base}/assign-effect/bounds")
+    max_ms = bounds.get("max_clear_wait_ms") if status == 200 and isinstance(bounds, dict) else None
+    if not isinstance(max_ms, (int, float)) or max_ms <= 0:
+        idle = env_ms("MOP_ASSIGN_CLEAR_IDLE_TIMEOUT_MS", 240_000)
+        ack = env_ms("MOP_ASSIGN_CLEAR_ACK_TIMEOUT_MS", 180_000)
+        max_ms = idle + 2 * ack
+    return max_ms / 1000 + ASSIGN_EFFECT_DELIVERY_MARGIN_SECONDS
 WORK_KINDS = ("implementation", "rework", "repro", "review")
 SANCTIONED_PATH = "mop-assign-slot"
 
@@ -184,8 +208,13 @@ def main(argv: list[str] | None = None) -> int:
     # new_issue waits server-side for the slot to go idle, for the /clear to
     # be acknowledged (SessionStart:clear), and only then delivers; slow
     # (DGX Spark) slots need minutes. MoP bounds each wait and refuses with
-    # step_failed=clear_wait, so this client bound just has to exceed them.
-    status, payload = http_json("POST", f"{base}/slots/{args.slot}/assign-effect", body, timeout=ASSIGN_EFFECT_TIMEOUT_SECONDS)
+    # step_failed=clear_wait; the client bound is derived from those bounds.
+    status, payload = http_json(
+        "POST",
+        f"{base}/slots/{args.slot}/assign-effect",
+        body,
+        timeout=assign_effect_timeout_seconds(base),
+    )
     if not isinstance(payload, dict):
         return emit(refusal("ownership", "assignment_effect_response_unreadable", "unknown"), 2)
     if status == 200 and payload.get("status") == "assigned":

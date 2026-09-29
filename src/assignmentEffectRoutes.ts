@@ -1,4 +1,4 @@
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { createHash } from "node:crypto";
 
@@ -90,6 +90,8 @@ export interface AssignmentEffectDependencies {
    * refuses. Optional so tests stay hermetic.
    */
   issueProjection?: IssueOwnershipProjection;
+  /** Server clear-wait bounds (ms), exposed so the client can size its timeout. */
+  clearWaitBounds?: () => Record<string, number>;
 }
 
 /**
@@ -344,7 +346,30 @@ export function registerAssignmentEffectRoutes(
     return c.json({ success: true, ...intent });
   });
 
+  app.get("/assign-effect/bounds", (c) => c.json({ success: true, ...(dependencies.clearWaitBounds?.() ?? {}) }));
+
+  // Per-slot in-flight lock over the whole assign-effect (clear -> commit ->
+  // deliver). A concurrent assign to the same slot is refused, so two clears
+  // or two packets can never interleave on one pane.
+  const inFlight = new Set<number>();
   app.post("/slots/:slotNum/assign-effect", async (c) => {
+    const slotParse = assignmentEffectSlotParamSchema.safeParse(c.req.param("slotNum"));
+    if (!slotParse.success) {
+      return c.json({ error: "Invalid slot number" }, 400);
+    }
+    const lockedSlot = slotParse.data;
+    if (inFlight.has(lockedSlot)) {
+      return c.json(refusal("ownership", "assignment_in_flight", slotStateSummary(db.getSlot(lockedSlot))), 409);
+    }
+    inFlight.add(lockedSlot);
+    try {
+      return await handleAssignEffect(c);
+    } finally {
+      inFlight.delete(lockedSlot);
+    }
+  });
+
+  const handleAssignEffect = async (c: Context) => {
     const slotParse = assignmentEffectSlotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) {
       return c.json({ error: "Invalid slot number" }, 400);
@@ -854,5 +879,5 @@ export function registerAssignmentEffectRoutes(
         },
       } : {}),
     });
-  });
+  };
 }

@@ -11,6 +11,13 @@
  *   3. wait for a SessionStart source=clear event newer than the marker AND
  *      an idle slot (bounded);
  *
+ * Acknowledgements carry no nonce, so they are correlated by COUNT: a clear
+ * that timed out stays recorded as outstanding (per slot, with its marker).
+ * A retry first waits for that prior clear to settle (its ack, or an idle
+ * slot); if it never acked, the retry keeps the old marker and requires one
+ * ack per outstanding clear, so a late ack from an earlier attempt can never
+ * satisfy the current attempt and wipe a freshly delivered packet.
+ *
  * Only then may the caller deliver the packet. A timeout returns a typed
  * `step: "clear_wait"` failure, never a false success.
  */
@@ -21,8 +28,10 @@ export interface ClearWaitDependencies {
   getActivity: (slot: number) => Promise<ClearWaitActivity>;
   /** Highest event id currently logged for the slot (0 when none). */
   latestEventId: (slot: number) => number;
-  /** Id of a SessionStart source=clear event for the slot newer than `afterId`, or null. */
-  findClearAck: (slot: number, afterId: number) => number | null;
+  /** Number of SessionStart source=clear events for the slot with id > afterId, and the newest id. */
+  countClearAcks: (slot: number, afterId: number) => { count: number; lastId: number };
+  /** Per-slot outstanding (sent, unacknowledged) clears; survives across attempts. */
+  pending: Map<number, { marker: number; outstanding: number }>;
   sendClear: (slot: number) => Promise<{ ok: boolean; detail?: string }>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
@@ -70,26 +79,53 @@ export async function clearSlotWhenIdle(
   options: ClearWaitOptions,
 ): Promise<ClearWaitResult> {
   const started = deps.now();
-  if (!(await waitUntilIdle(slot, deps, started + options.idleTimeoutMs, options.pollMs))) {
+
+  // Settle any clear an earlier attempt left in flight before sending another.
+  const prior = deps.pending.get(slot);
+  if (prior) {
+    const settleDeadline = started + options.ackTimeoutMs;
+    for (;;) {
+      if (deps.countClearAcks(slot, prior.marker).count >= prior.outstanding) {
+        deps.pending.delete(slot);
+        break;
+      }
+      if (deps.now() >= settleDeadline) {
+        if ((await deps.getActivity(slot)) !== "idle") {
+          return { ok: false, step: "clear_wait", reason: "clear_wait_timeout:prior_clear_unsettled" };
+        }
+        break; // idle but never acked: keep counting against the old marker
+      }
+      await deps.sleep(options.pollMs);
+    }
+  }
+
+  if (!(await waitUntilIdle(slot, deps, deps.now() + options.idleTimeoutMs, options.pollMs))) {
     return { ok: false, step: "clear_wait", reason: "clear_wait_timeout:slot_not_idle_before_clear" };
   }
 
-  const marker = deps.latestEventId(slot);
+  const carried = deps.pending.get(slot);
+  const marker = carried ? carried.marker : deps.latestEventId(slot);
+  const required = (carried?.outstanding ?? 0) + 1;
   const sent = await deps.sendClear(slot);
   if (!sent.ok) {
     return { ok: false, step: "clear_send", reason: "assignment_clear_not_applied", detail: sent.detail };
   }
+  deps.pending.set(slot, { marker, outstanding: required });
 
   const ackDeadline = deps.now() + options.ackTimeoutMs;
-  let ackId: number | null = null;
+  let ackId = 0;
   for (;;) {
-    ackId = deps.findClearAck(slot, marker);
-    if (ackId !== null) break;
+    const acks = deps.countClearAcks(slot, marker);
+    if (acks.count >= required) {
+      ackId = acks.lastId;
+      break;
+    }
     if (deps.now() >= ackDeadline) {
       return { ok: false, step: "clear_wait", reason: "clear_wait_timeout:no_session_start_clear" };
     }
     await deps.sleep(options.pollMs);
   }
+  deps.pending.delete(slot);
   if (!(await waitUntilIdle(slot, deps, ackDeadline, options.pollMs))) {
     return { ok: false, step: "clear_wait", reason: "clear_wait_timeout:slot_not_idle_after_clear" };
   }
@@ -99,5 +135,14 @@ export async function clearSlotWhenIdle(
     clear_marker_event_id: marker,
     clear_ack_event_id: ackId,
     waited_ms: deps.now() - started,
+  };
+}
+
+export function clearWaitBoundsMs(options: ClearWaitOptions): Record<string, number> {
+  // settle(prior) + idle + ack are the worst-case sequential waits.
+  return {
+    idle_timeout_ms: options.idleTimeoutMs,
+    ack_timeout_ms: options.ackTimeoutMs,
+    max_clear_wait_ms: options.ackTimeoutMs * 2 + options.idleTimeoutMs,
   };
 }
