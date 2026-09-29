@@ -39,9 +39,7 @@ const HEARTBEAT_TASK: PMCadenceTask = {
   name: "heartbeat",
   label: "3h heartbeat",
   configPrefix: "pm_cadence_heartbeat",
-  commandDescription:
-    "MoP: 3h heartbeat due\n\n" +
-    "Invoke Skill(heartbeat-tasks) now. Launch its background agent with run_in_background=true, then return to normal PM event processing. Do not run /heartbeat-tasks inline.",
+  commandDescription: "MoP: run Skill(heartbeat-tasks) now with a background agent.",
 };
 
 const MORNING_BRIEF_TASK: PMCadenceTask = {
@@ -57,9 +55,7 @@ const HOURLY_HEARTBEAT_TASK: PMCadenceTask = {
   name: "hourly-heartbeat",
   label: "1h heartbeat",
   configPrefix: "pm_cadence_hourly_heartbeat",
-  commandDescription:
-    "MoP: 1h heartbeat due\n\n" +
-    "Invoke Skill(hourly-heartbeat) now. Launch its background agent with run_in_background=true; the agent composes and posts the new top-level hourly thread and records its ts. Then act on the agent's returned ACTIONS list. Do not run /hourly-heartbeat inline.",
+  commandDescription: "MoP: run Skill(hourly-heartbeat) now with a background agent.",
 };
 
 const TASKS: Record<PMCadenceTaskName, PMCadenceTask> = {
