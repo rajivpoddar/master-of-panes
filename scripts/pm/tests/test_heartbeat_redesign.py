@@ -140,7 +140,7 @@ def test_old_open_thread_outside_lookback_is_carried_forward_until_answered(tmp_
     assert support.select_items(threads, 1000 + 27 * 3600) == threads
     path = tmp_path / "open.json"
     support.save_open_state({"C1": support.open_roots(threads)}, path)
-    assert support.load_open_state(path) == {"C1": ["1000.000000"]}
+    assert support.load_open_state(path) == {"C1": {"1000.000000": 0.0}}  # legacy list format still loads
     # Once answered it drops out of the persisted open set.
     answered = support.classify_thread([_m(CUST, 1000), _m("UEQTTB97A", 1100, "done")], 2000)
     assert support.open_roots(support.carry_forward([], ["1000.000000"], lambda ts: answered)) == []
@@ -410,3 +410,57 @@ def test_known_codes_map_marks_code_mapped_not_new(tmp_path):
 
 def test_shipped_known_codes_seed():
     assert "TURNSTILE_SECRET_KEY" in errmap.load_known_codes()["contact_config_error"]
+
+
+# --- Codex round 2 on MoP #7 ------------------------------------------------
+
+
+def test_answered_thread_is_tracked_and_reopens_on_new_customer_reply(tmp_path):
+    answered = support.classify_thread([_m(CUST, 1000, "export broken"), _m("UEQTTB97A", 1100, "fixed now")], 2000)
+    assert answered["state"] == "answered"
+    tracked = support.tracked_roots([answered], 2000)
+    assert tracked == {"1000.000000": 1100.0}
+    path = tmp_path / "open.json"
+    support.save_open_state({"C1": tracked}, path)
+    prev = support.load_open_state(path)["C1"]
+    # Next run: root is outside the lookback, customer wrote again after PM's reply.
+    reopened = support.classify_thread(
+        [_m(CUST, 1000, "export broken"), _m("UEQTTB97A", 1100, "fixed now"), _m(CUST, 5000, "still failing on page 3")],
+        6000)
+    fetched = []
+    threads = support.carry_forward([], prev, lambda ts: fetched.append(ts) or reopened)
+    assert fetched == [answered["ts"]]
+    assert threads[0]["state"] == "needs_reply"
+    assert support.select_items(threads, 5900) == threads
+
+
+def test_tracked_roots_prunes_stale_answered_but_keeps_open():
+    now = 100 * 86400
+    old_answered = {"ts": "1", "state": "answered", "last_activity": 1.0}
+    old_open = {"ts": "2", "state": "needs_reply", "last_activity": 2.0}
+    assert list(support.tracked_roots([old_answered, old_open], now)) == ["2"]
+
+
+def test_free_slot_idle_measured_from_release_not_stale_work():
+    now = NOW
+    # Released 5 min ago; last_meaningful_work_at is 3h old (pre-release) and must be ignored.
+    doc = {"slots": [{"slot": 3, "name": "Ashwini", "occupied": False, "assignment_epoch": 801,
+                      "last_meaningful_work_at": "2026-09-29T02:30:00Z", "last_activity": None}]}
+    prev = {"3": {"sig": [800, True], "since": "2026-09-29T01:00:00+00:00"}}
+    changed, state = compose.slot_transitions(doc, now - __import__("datetime").timedelta(minutes=5), prev)
+    lines, _, actions = compose.slot_block(doc, now, changed)
+    assert "S3 Ashwini: free 5m" in "\n".join(lines) and actions == []
+    # Unchanged signature keeps the original release time -> flagged once >= 20m.
+    changed2, _ = compose.slot_transitions(doc, now + __import__("datetime").timedelta(minutes=30), state)
+    _, _, actions2 = compose.slot_block(doc, now + __import__("datetime").timedelta(minutes=30), changed2)
+    assert actions2 == ["idle-slot S3 free idle 35m"]
+
+
+def test_error_users_count_by_userid_not_sentinel_email():
+    rows = [("user_A", "not_collected"), ("user_B", "not_collected"), ("user_C", "none"),
+            ("unknown", "b***@gmail.com"), ("pseudonymous", "not_collected")]
+    who = {axiom.error_identity(u, e) for u, e in rows} - {""}
+    assert who == {"user_A", "user_B", "user_C", "b***@gmail.com"}
+    ext = axiom.ERROR_CODE_EXTEND
+    assert "case(isnotempty(uid)" in ext and "'not_collected'" in ext and "'none'" in ext
+    assert ext.index("uid, isnotempty(em)") > 0  # userId branch precedes email fallback

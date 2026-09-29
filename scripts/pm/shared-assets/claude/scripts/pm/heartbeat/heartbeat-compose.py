@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -149,7 +150,31 @@ def _parse_ts(value) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)  # MoP naive stamps are UTC
 
 
-def slot_block(slots_doc: dict | None, now: datetime) -> tuple[list[str], str, list[str]]:
+SLOT_STATE = Path(os.environ.get(
+    "HEARTBEAT_SLOT_STATE",
+    str(Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/heartbeat-slot-epochs.json"),
+))
+
+
+def slot_transitions(slots_doc: dict | None, now: datetime, prev: dict | None) -> tuple[dict, dict]:
+    """Pure: return (change_time_by_slot, new_state). A slot's change time is when its
+    (assignment_epoch, occupied) pair was first seen different from the previous run;
+    this is the release time used for free-slot idle."""
+    prev = prev or {}
+    state: dict = {}
+    changed: dict = {}
+    slots = (slots_doc or {}).get("slots", []) if isinstance(slots_doc, dict) else (slots_doc or [])
+    for s in slots:
+        key = str(s.get("slot"))
+        sig = [s.get("assignment_epoch"), bool(s.get("occupied"))]
+        old = prev.get(key) or {}
+        since = old.get("since") if old.get("sig") == sig else now.isoformat()
+        state[key] = {"sig": sig, "since": since}
+        changed[key] = since
+    return changed, state
+
+
+def slot_block(slots_doc: dict | None, now: datetime, release_seen: dict | None = None) -> tuple[list[str], str, list[str]]:
     """Return (lines, tldr, pm_actions). Rajiv 2026-09-29 13:23 IST:
     "add the slot status to this hourly report as well. idle slots have to be checked."
     """
@@ -166,7 +191,14 @@ def slot_block(slots_doc: dict | None, now: datetime) -> tuple[list[str], str, l
             if s.get("pr"):
                 work += f"/PR#{s['pr']}"
         working = s.get("occupied") and s.get("active_turn_state") == "active" and not s.get("idle")
-        last = _parse_ts(s.get("last_meaningful_work_at")) or _parse_ts(s.get("last_activity"))
+        if s.get("occupied"):
+            last = _parse_ts(s.get("last_meaningful_work_at")) or _parse_ts(s.get("last_activity"))
+        else:
+            # Free slot: idle since it was released, never since pre-release work.
+            marks = [_parse_ts(s.get("last_activity")),
+                     _parse_ts((release_seen or {}).get(str(s.get("slot"))))]
+            marks = [m for m in marks if m]
+            last = max(marks) if marks else None
         idle_min = int((now - last).total_seconds() // 60) if last else None
         if working:
             state = "working"
@@ -223,6 +255,7 @@ def compose(
     include_active: bool = False,
     slots: dict | None = None,
     include_slots: bool = False,
+    release_seen: dict | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -246,7 +279,7 @@ def compose(
     body += ["", *pr_lines]
     slot_actions: list[str] = []
     if include_slots:
-        sl_lines, sl_tldr, slot_actions = slot_block(slots, now)
+        sl_lines, sl_tldr, slot_actions = slot_block(slots, now, release_seen)
         parts.append(sl_tldr)
         body += ["", *sl_lines]
 
@@ -340,6 +373,18 @@ def main() -> int:
         slots = _load(args.slots_json)
         if slots is None and not args.slots_json:
             slots = _fetch_slots()  # read-only; None => "MoP unreachable", never a failure
+    release_seen = None
+    if slots is not None:
+        try:
+            prev = json.loads(SLOT_STATE.read_text())
+        except (OSError, ValueError):
+            prev = {}
+        release_seen, new_state = slot_transitions(slots, datetime.now(timezone.utc), prev)
+        try:
+            SLOT_STATE.parent.mkdir(parents=True, exist_ok=True)
+            SLOT_STATE.write_text(json.dumps(new_state, indent=2))
+        except OSError as exc:
+            failures.append(f"slot-state save: {exc}")
     mapping_doc = _load(args.map_json)
     if mapping_doc is None and axiom:
         codes = [a for row in axiom.get("top", []) for a in ("--code", row["code"])]
@@ -370,7 +415,7 @@ def main() -> int:
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
         active=active, include_active=not args.no_active_users,
-        slots=slots, include_slots=not args.no_slots,
+        slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
     ))
     return 0
 

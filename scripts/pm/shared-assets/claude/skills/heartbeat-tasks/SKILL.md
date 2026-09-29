@@ -41,13 +41,12 @@ The original 910-line v2.2.1 skill is backed up next to the live target as
 ```
 You are the 3h heartbeat agent. Work from /Users/rajiv/Downloads/projects/heydonna-app (main).
 
-STEP 0 — dependency check. The composer and collectors
-  (scripts/pm/heartbeat/*) ship in heydonna-app PR #8481; they exist only after
-  #8481 is merged and main is pulled. If
-  /Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/heartbeat/heartbeat-compose.py
+STEP 0 — dependency check. The composer and collectors are MoP shared assets
+  installed to /Users/rajiv/.claude/scripts/pm/heartbeat/. If
+  /Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-compose.py
   is absent, or STEP 1 exits 3 with HEARTBEAT_COLLECTORS_ABSENT, fail soft:
   skip STEPS 1-3, still run STEP 4 housekeeping, and return exactly
-  "HEARTBEAT_3H_SKIPPED: collectors absent (needs heydonna-app #8481 merged)".
+  "HEARTBEAT_3H_SKIPPED: collectors absent (install the MoP release shipping pm/heartbeat)".
   Do not hand-compose a post and do not treat it as an error.
 
 STEP 1 — compose (prints the post; never posts):
@@ -92,7 +91,7 @@ STEP 5 — return exactly:
 
 ## Blocks (what the composer does)
 
-Scripts live in the repo (`scripts/pm/heartbeat/`, plus `scripts/axiom-activity-report.py`), all read-only:
+Scripts are MoP-installed at `~/.claude/scripts/pm/heartbeat/` (Axiom queries in `heartbeat-axiom.py`), all read-only:
 
 | Block | Script |
 |---|---|

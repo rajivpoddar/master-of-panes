@@ -117,7 +117,8 @@ def classify_thread(messages: list[dict], now_ts: float) -> dict | None:
 
 
 def select_items(threads: list[dict], window_start: float) -> list[dict]:
-    """Pure: keep threads active in the window, plus every open needs_reply."""
+    """Pure: keep threads active in the window, plus every open needs_reply
+    (a reopened answered thread is needs_reply, so it is always kept)."""
     return [t for t in threads if t["last_activity"] >= window_start or t["state"] == "needs_reply"]
 
 
@@ -159,37 +160,54 @@ def fetch_channel(token: str, channel: str, oldest: float, now_ts: float) -> lis
     return out
 
 
-def load_open_state(path: Path = OPEN_STATE) -> dict[str, list[str]]:
+TRACK_DAYS = 14  # stop re-fetching a tracked root after this long without activity
+
+
+def load_open_state(path: Path = OPEN_STATE) -> dict[str, dict[str, float]]:
+    """{channel: {root_ts: last_seen_reply_ts}} for ALL tracked roots (answered too).
+    Legacy {channel: [root_ts]} files load with last_seen 0."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return {str(k): [str(t) for t in v] for k, v in data.items()}
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError):
         return {}
+    out: dict[str, dict[str, float]] = {}
+    if not isinstance(data, dict):
+        return {}
+    for ch, v in data.items():
+        if isinstance(v, list):
+            out[str(ch)] = {str(t): 0.0 for t in v}
+        elif isinstance(v, dict):
+            out[str(ch)] = {str(t): float(ls or 0) for t, ls in v.items()}
+    return out
 
 
-def save_open_state(open_map: dict[str, list[str]], path: Path = OPEN_STATE) -> None:
+def save_open_state(open_map: dict, path: Path = OPEN_STATE) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(open_map, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
 
 
-def carry_forward(threads: list[dict], prev_open: list[str], fetch_thread) -> list[dict]:
-    """Re-fetch previously-open roots that fell out of the lookback, until answered.
-
-    `fetch_thread(ts)` returns the classified thread (or None). Threads already in
-    `threads` are not refetched. A failed refetch keeps nothing (the root stays in
-    state only if it is still needs_reply after this run's merge).
-    """
+def carry_forward(threads: list[dict], prev_tracked, fetch_thread) -> list[dict]:
+    """Re-fetch every previously tracked root (answered or not) that fell out of the
+    lookback, so a new customer reply on an answered thread flips it back to needs_reply
+    (classify_thread decides from the full reply list)."""
     seen = {t["ts"] for t in threads}
     out = list(threads)
-    for ts in prev_open:
+    for ts in (prev_tracked or {}):
         if ts in seen:
             continue
         item = fetch_thread(ts)
         if item:
             out.append(item)
     return out
+
+
+def tracked_roots(threads: list[dict], now_ts: float) -> dict[str, float]:
+    """All roots to keep tracking with their last-seen reply ts (pruned after TRACK_DAYS idle)."""
+    horizon = now_ts - TRACK_DAYS * 86400
+    return {t["ts"]: t["last_activity"] for t in sorted(threads, key=lambda t: t["ts"])
+            if t["state"] == "needs_reply" or t["last_activity"] >= horizon}
 
 
 def open_roots(threads: list[dict]) -> list[str]:
@@ -252,7 +270,7 @@ def main() -> int:
                     threads, prev_state.get(channel, []),
                     lambda ts, ch=channel: fetch_thread(token, ch, ts, now_ts),
                 )
-                new_state[channel] = open_roots(threads)
+                new_state[channel] = tracked_roots(threads, now_ts)
                 result["slack"].extend(select_items(threads, window_start))
             except Exception as exc:  # noqa: BLE001
                 # Keep the previous open set for this channel so nothing is dropped.

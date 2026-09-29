@@ -20,11 +20,32 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 AXIOM_API_URL = "https://api.axiom.co/v1/datasets/_apl?format=legacy"
+WHO_SENTINELS = ("unknown", "pseudonymous", "none", "not_collected", "userId-only", "anonymous", "cron")
+
+
+def _apl_list(values) -> str:
+    return ", ".join(f"'{v}'" for v in values)
+
+
+# Distinct error users: Clerk userId first; email only when userId is missing/sentinel.
+# Sentinel emails ("not_collected"/"none") never collapse distinct userIds into one user.
 ERROR_CODE_EXTEND = (
     "| where ['level'] == 'error' "
     "| extend code = coalesce(tostring(['action']), tostring(['message']), 'unknown'), "
-    "who = coalesce(tostring(['email']), tostring(['userId']))"
+    "uid = tostring(['userId']), em = tostring(['email']) "
+    f"| extend who = case(isnotempty(uid) and uid !in ({_apl_list(WHO_SENTINELS)}), uid, "
+    f"isnotempty(em) and em !in ({_apl_list(WHO_SENTINELS)}), em, '')"
 )
+
+
+def error_identity(user_id, email) -> str:
+    """Pure mirror of the APL `who` rule (userId first, email fallback, sentinels dropped)."""
+    uid, em = str(user_id or ""), str(email or "")
+    if uid and uid not in WHO_SENTINELS:
+        return uid
+    if em and em not in WHO_SENTINELS:
+        return em
+    return ""
 
 
 DATASET = "heydonna-logs"

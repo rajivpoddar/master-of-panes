@@ -46,10 +46,12 @@ readmit."
 ```
 You are the hourly heartbeat agent. Work from /Users/rajiv/Downloads/projects/heydonna-app (main).
 
-STEP 0 — dependency check: the composer/collectors (scripts/pm/heartbeat/*) ship
-  in heydonna-app PR #8481. If STEP 1 exits 3 with HEARTBEAT_COLLECTORS_ABSENT,
-  post nothing and return "HOURLY_SKIPPED: collectors absent (needs heydonna-app
-  #8481 merged)" with an empty ACTIONS list.
+STEP 0 — dependency check: the composer/collectors are MoP shared assets installed
+  to /Users/rajiv/.claude/scripts/pm/heartbeat/. If
+  /Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-compose.py is absent, or STEP 1
+  exits 3 with HEARTBEAT_COLLECTORS_ABSENT, post nothing and return "HOURLY_SKIPPED:
+  collectors absent (install the MoP release shipping pm/heartbeat)" with an empty
+  ACTIONS list.
 
 STEP 1 — compose (prints; never posts):
   bash /Users/rajiv/.claude/scripts/sakshi-heartbeat.sh compose --mode 1h \
@@ -131,6 +133,6 @@ different rule.)
 - The agent never merges, admits, reruns, edits labels, or DMs Rajiv. PM acts.
 - PR state comes only from live GitHub on the current `headRefOid`, never from
   pm-ops rows or pm-state labels.
-- Scripts (repo, read-only): `scripts/pm/heartbeat/heartbeat-compose.py`,
-  `scripts/axiom-activity-report.py --hours 1 --errors-by-code --compare`,
-  `scripts/pm/heartbeat/heartbeat-error-map.py`, `scripts/pm/heartbeat/pr-open-snapshot.py`.
+- Scripts (MoP-installed, read-only) in `~/.claude/scripts/pm/heartbeat/`: `heartbeat-compose.py`,
+  `heartbeat-axiom.py --hours 1 --errors-by-code --compare` / `--active-users`,
+  `heartbeat-error-map.py`, `pr-open-snapshot.py`, plus MoP `/slots` (read-only GET).
