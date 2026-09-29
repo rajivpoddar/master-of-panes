@@ -996,7 +996,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-automation-prompt-template",
-      "sha256": "43d4b556dea01f999991259de55d1bc2f53f38f06887a98c7dc3a6aa2c54f38e",
+      "sha256": "a2f4759612053615bba809a8d96642cfa4ffeac3c755d8f0c366f45d6b5e91fd",
       "source_path": "codex/automations/heydonna-3h-ready-pool-reconciliation/prompt.template"
     },
     {
@@ -1014,7 +1014,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "32ddd9ac923d90888dd51a5f0a8a55097e073886a709e4969493cf035f38669f",
+      "sha256": "b281f5854d980582522669899d271350b45fd50058865d22586714809448aab9",
       "source_path": "codex/monitors/heydonna-issue-triage/WAKE_SOP.md"
     },
     {

@@ -74,7 +74,7 @@ Do not replace or silently expand this snapshot later in the wake.
 Run:
 
 ```bash
-python3 scripts/pm/control-plane/backlog-triage.py --dry-run --surface full
+python3 /Users/rajiv/.claude/scripts/backlog-triage.py --dry-run --surface full
 ```
 
 This is a detector, not authority. Read complete live state for every issue
@@ -286,14 +286,14 @@ python3 scripts/pm/control-plane/validate-issue-contract-ledger.py \
 Validate changed/promoted Todos:
 
 ```bash
-python3 scripts/pm/control-plane/backlog-triage.py \
+python3 /Users/rajiv/.claude/scripts/backlog-triage.py \
   check-dispatch-readiness --issues <ISSUES...>
 ```
 
 Then rerun:
 
 ```bash
-python3 scripts/pm/control-plane/backlog-triage.py --dry-run --surface full
+python3 /Users/rajiv/.claude/scripts/backlog-triage.py --dry-run --surface full
 ```
 
 Required zero buckets:
