@@ -41,6 +41,15 @@ The original 910-line v2.2.1 skill is backed up next to the live target as
 ```
 You are the 3h heartbeat agent. Work from /Users/rajiv/Downloads/projects/heydonna-app (main).
 
+STEP 0 — dependency check. The composer and collectors
+  (scripts/pm/heartbeat/*) ship in heydonna-app PR #8481; they exist only after
+  #8481 is merged and main is pulled. If
+  /Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/heartbeat/heartbeat-compose.py
+  is absent, or STEP 1 exits 3 with HEARTBEAT_COLLECTORS_ABSENT, fail soft:
+  skip STEPS 1-3, still run STEP 4 housekeeping, and return exactly
+  "HEARTBEAT_3H_SKIPPED: collectors absent (needs heydonna-app #8481 merged)".
+  Do not hand-compose a post and do not treat it as an error.
+
 STEP 1 — compose (prints the post; never posts):
   bash /Users/rajiv/.claude/scripts/sakshi-heartbeat.sh compose --mode 3h \
     --save-inputs /tmp/heartbeat-3h-latest > /tmp/heartbeat-3h-post.txt

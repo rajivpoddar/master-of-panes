@@ -54,3 +54,49 @@ test("first scheduled tick seeds the hourly bucket instead of firing; manual run
   assert.equal(result.injected, true);
   assert.equal(relay.injections.filter((m) => m.includes("Skill(hourly-heartbeat)")).length, 1);
 });
+
+async function withClock<T>(at: Date, fn: () => Promise<T>): Promise<T> {
+  const RealDate = Date;
+  class FakeDate extends RealDate {
+    constructor(...args: unknown[]) {
+      if (args.length === 0) super(at.getTime());
+      else super(...(args as [number]));
+    }
+    static now(): number {
+      return at.getTime();
+    }
+  }
+  globalThis.Date = FakeDate as DateConstructor;
+  try {
+    return await fn();
+  } finally {
+    globalThis.Date = RealDate;
+  }
+}
+
+test("startup before :13 does not suppress that hour's :13 hourly heartbeat", async () => {
+  const db = new FakeMopDb();
+  const relay = new FakeRelay();
+  const cadence = new PMCadenceScheduler(db as never, relay as never);
+  const hourly = () => relay.injections.filter((m) => m.includes("Skill(hourly-heartbeat)")).length;
+  await withClock(new Date(2026, 8, 29, 10, 5, 0), () => cadence.tick("boot"));
+  assert.equal(hourly(), 0);
+  await withClock(new Date(2026, 8, 29, 10, 12, 0), () => cadence.tick("scheduled"));
+  assert.equal(hourly(), 0);
+  await withClock(new Date(2026, 8, 29, 10, 13, 0), () => cadence.tick("scheduled"));
+  assert.equal(hourly(), 1);
+  await withClock(new Date(2026, 8, 29, 10, 40, 0), () => cadence.tick("scheduled"));
+  assert.equal(hourly(), 1);
+});
+
+test("startup at or after :13 seeds the current hour and fires next hour", async () => {
+  const db = new FakeMopDb();
+  const relay = new FakeRelay();
+  const cadence = new PMCadenceScheduler(db as never, relay as never);
+  const hourly = () => relay.injections.filter((m) => m.includes("Skill(hourly-heartbeat)")).length;
+  await withClock(new Date(2026, 8, 29, 10, 20, 0), () => cadence.tick("boot"));
+  await withClock(new Date(2026, 8, 29, 10, 50, 0), () => cadence.tick("scheduled"));
+  assert.equal(hourly(), 0);
+  await withClock(new Date(2026, 8, 29, 11, 13, 0), () => cadence.tick("scheduled"));
+  assert.equal(hourly(), 1);
+});

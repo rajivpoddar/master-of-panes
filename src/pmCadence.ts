@@ -245,7 +245,10 @@ export class PMCadenceScheduler {
     const dueKey = this.currentDueKey(taskName, now);
     const lastDueKey = this.db.getConfig(configKey(task, "last_due_key"));
     if (lastDueKey === null && reason !== "manual" && (taskName === "heartbeat" || taskName === "hourly-heartbeat")) {
-      this.seedCurrentBucket(taskName, reason, dueKey);
+      // Hourly: a startup before :13 must not suppress this hour's :13 run. Seed a
+      // pre-window marker that differs from the hour's due key so :13 still fires.
+      const seedKey = taskName === "hourly-heartbeat" && !isHourlyHeartbeatWindow(now) ? `${dueKey}:pre` : dueKey;
+      this.seedCurrentBucket(taskName, reason, seedKey);
       return null;
     }
     if (!this.isTaskDue(taskName, now, lastDueKey)) {
