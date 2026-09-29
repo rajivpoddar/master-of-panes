@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Print (or record) the ts of the current hourly-heartbeat thread in #heydonna-dev.
+
+  hourly-thread-ts                 print current ts; exit 1 if missing or stale
+  hourly-thread-ts --set <ts>      record a new hourly post (called by Skill(hourly-heartbeat))
+  hourly-thread-ts --json          print the full state record
+
+PR tracking replies (admission/merge asks, PR status, CI/capture follow-ups) go to
+`slack-send.sh -c C0ALZJHGE49 -t "$(hourly-thread-ts)" -f < msg`. Rajiv 2026-09-29
+11:02 IST, thread 1790659381.537339: "the hourly thread should be used for any
+further tracking or pr's." The old thread 1790531842.023499 is retired.
+"""
+
+import argparse
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+STATE = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/hourly-thread.json"
+CHANNEL = "C0ALZJHGE49"
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--set", metavar="TS")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--max-age-min", type=int, default=150, help="treat older records as stale (default 150)")
+    a = p.parse_args()
+    if a.set:
+        if not re.fullmatch(r"\d{10}\.\d{6}", a.set):
+            print(f"invalid Slack ts: {a.set}", file=sys.stderr)
+            return 2
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"channel": CHANNEL, "ts": a.set, "recorded_at": int(time.time())}))
+        tmp.replace(STATE)
+        print(a.set)
+        return 0
+    try:
+        rec = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        print(f"no hourly thread recorded at {STATE}", file=sys.stderr)
+        return 1
+    if a.json:
+        print(json.dumps(rec))
+        return 0
+    age_min = (time.time() - float(rec["ts"])) / 60
+    if age_min > a.max_age_min:
+        print(f"hourly thread {rec['ts']} is stale ({age_min:.0f}m old)", file=sys.stderr)
+        return 1
+    print(rec["ts"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

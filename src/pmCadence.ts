@@ -4,6 +4,9 @@
  * Owns PM scheduled cadence that used to be split across launchd scripts:
  * - 3h heartbeat: queues a normal PM prompt to invoke Skill(heartbeat-tasks)
  * - daily morning brief: queues a normal PM prompt to invoke Skill(morning-brief)
+ * - 1h hourly heartbeat (at :13 local): queues a normal PM prompt to invoke
+ *   Skill(hourly-heartbeat). It replaces the PM session-only "HOURLY OPEN-PR
+ *   DRIVE" cron (Rajiv 2026-09-29 11:02 IST, thread C0ALZJHGE49/1790659381.537339).
  *
  * launchd remains the MoP watchdog only. These ticks are persisted in MoP DB
  * config keys so restarts do not double-fire within the same cadence bucket.
@@ -12,7 +15,7 @@
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 
-export type PMCadenceTaskName = "heartbeat" | "morning-brief";
+export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat";
 export type PMCadenceTriggerReason = "scheduled" | "manual" | "boot";
 
 type PMCadenceTask = {
@@ -50,13 +53,25 @@ const MORNING_BRIEF_TASK: PMCadenceTask = {
     "Invoke Skill(morning-brief) now. Launch the morning-brief background agent with run_in_background=true; the agent owns evidence gathering and Slack posting. Do not run /morning-brief inline.",
 };
 
+const HOURLY_HEARTBEAT_TASK: PMCadenceTask = {
+  name: "hourly-heartbeat",
+  label: "1h heartbeat",
+  configPrefix: "pm_cadence_hourly_heartbeat",
+  commandDescription:
+    "MoP: 1h heartbeat due\n\n" +
+    "Invoke Skill(hourly-heartbeat) now. Launch its background agent with run_in_background=true; the agent composes and posts the new top-level hourly thread and records its ts. Then act on the agent's returned ACTIONS list. Do not run /hourly-heartbeat inline.",
+};
+
 const TASKS: Record<PMCadenceTaskName, PMCadenceTask> = {
   heartbeat: HEARTBEAT_TASK,
   "morning-brief": MORNING_BRIEF_TASK,
+  "hourly-heartbeat": HOURLY_HEARTBEAT_TASK,
 };
 
 const CFG_GLOBAL_PAUSED = "pm_cadence_paused";
 const LOCAL_MORNING_BRIEF_HOUR = 10;
+// Offset from the top of the hour so the hourly post never races the 3h heartbeat.
+const HOURLY_HEARTBEAT_MINUTE = 13;
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
@@ -69,6 +84,14 @@ function localDayKey(now: Date): string {
 function heartbeatDueKey(now: Date): string {
   // Local 3h buckets: 00-02, 03-05, 06-08, 09-11, 12-14, 15-17, 18-20, 21-23.
   return `${localDayKey(now)}:${Math.floor(now.getHours() / 3)}`;
+}
+
+export function hourlyHeartbeatDueKey(now: Date): string {
+  return `${localDayKey(now)}:${pad2(now.getHours())}`;
+}
+
+export function isHourlyHeartbeatWindow(now: Date): boolean {
+  return now.getMinutes() >= HOURLY_HEARTBEAT_MINUTE;
 }
 
 function morningBriefDueKey(now: Date): string {
@@ -145,6 +168,8 @@ export class PMCadenceScheduler {
       if (heartbeat) results.push(heartbeat);
       const morningBrief = await this.runIfDue("morning-brief", reason);
       if (morningBrief) results.push(morningBrief);
+      const hourly = await this.runIfDue("hourly-heartbeat", reason);
+      if (hourly) results.push(hourly);
       return results;
     } finally {
       this.running = false;
@@ -219,8 +244,11 @@ export class PMCadenceScheduler {
     const now = new Date();
     const dueKey = this.currentDueKey(taskName, now);
     const lastDueKey = this.db.getConfig(configKey(task, "last_due_key"));
-    if (lastDueKey === null && reason !== "manual" && taskName === "heartbeat") {
-      this.seedCurrentBucket(taskName, reason, dueKey);
+    if (lastDueKey === null && reason !== "manual" && (taskName === "heartbeat" || taskName === "hourly-heartbeat")) {
+      // Hourly: a startup before :13 must not suppress this hour's :13 run. Seed a
+      // pre-window marker that differs from the hour's due key so :13 still fires.
+      const seedKey = taskName === "hourly-heartbeat" && !isHourlyHeartbeatWindow(now) ? `${dueKey}:pre` : dueKey;
+      this.seedCurrentBucket(taskName, reason, seedKey);
       return null;
     }
     if (!this.isTaskDue(taskName, now, lastDueKey)) {
@@ -325,12 +353,17 @@ export class PMCadenceScheduler {
   }
 
   private currentDueKey(taskName: PMCadenceTaskName, now = new Date()): string {
-    return taskName === "heartbeat" ? heartbeatDueKey(now) : morningBriefDueKey(now);
+    if (taskName === "heartbeat") return heartbeatDueKey(now);
+    if (taskName === "hourly-heartbeat") return hourlyHeartbeatDueKey(now);
+    return morningBriefDueKey(now);
   }
 
   private isTaskDue(taskName: PMCadenceTaskName, now: Date, lastDueKey: string | null): boolean {
     if (taskName === "heartbeat") {
       return heartbeatDueKey(now) !== lastDueKey;
+    }
+    if (taskName === "hourly-heartbeat") {
+      return isHourlyHeartbeatWindow(now) && hourlyHeartbeatDueKey(now) !== lastDueKey;
     }
     if (!isMorningBriefWindow(now)) {
       return false;

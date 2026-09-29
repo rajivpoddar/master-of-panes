@@ -343,6 +343,15 @@
       "source_path": "claude/scripts/heartbeat-session-age-clear.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/hourly-thread-ts",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "a3a3494fa599a97713f5500b8919c44a7d2793adeea265b3b703715c4c353b8e",
+      "source_path": "claude/scripts/hourly-thread-ts"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/issue-contract-ledger-hook.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -552,6 +561,15 @@
       "source_path": "claude/scripts/qa-visual-proof-gate.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-sakshi-heartbeat-producer",
+      "sha256": "87db2042031a98e1a1a2375d8b775f90cedfa2f87fe4460f9c6dc94897841f48",
+      "source_path": "claude/scripts/sakshi-heartbeat.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/stale-process-cleanup.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -728,7 +746,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heartbeat-tasks",
-      "sha256": "fef9490e3d8b0736bcf3e08ab293fab1d28389bd6024834c6e740754234da97f",
+      "sha256": "64b2ebc0c4c36b71be593250430ae2ce99f467c92f535a5f1faac7cf6bf82144",
       "source_path": "claude/skills/heartbeat-tasks/SKILL.md"
     },
     {
@@ -739,6 +757,15 @@
       "ownership_class": "shared-claude-heydonna-review-cap-cto-approve-handoff",
       "sha256": "0ac525f953afd64cb70b11378bcfcbeacd87051ae15fcdbd2a34ec481d3348f5",
       "source_path": "claude/skills/heydonna-review-cap-cto-approve-handoff/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/hourly-heartbeat/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "f4155712752ae4475b75e9a98a0fe4f0fcfadc28aa8c041ba55fa9094f57cd39",
+      "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/macos-word-window-screenshot/SKILL.md",
@@ -1230,7 +1257,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 133,
+    "selected_count": 136,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1296,7 +1323,10 @@
       "~/.claude/skills/codex-app-plan-review/templates/prompt.txt",
       "~/Downloads/projects/heydonna-app/.claude/agents/pm-code-reviewer.md",
       "~/Downloads/projects/heydonna-app/.claude/agents/pm-plan-reviewer.md",
-      "~/.claude/rules/33-heydonna-ui-product-rules.md"
+      "~/.claude/rules/33-heydonna-ui-product-rules.md",
+      "~/Downloads/projects/heydonna-app/.claude/skills/hourly-heartbeat/SKILL.md",
+      "~/.claude/scripts/hourly-thread-ts",
+      "~/.claude/scripts/sakshi-heartbeat.sh"
     ]
   },
   "owner": "master-of-panes",
