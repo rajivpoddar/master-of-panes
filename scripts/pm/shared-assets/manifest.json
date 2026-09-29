@@ -728,7 +728,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heartbeat-tasks",
-      "sha256": "fef9490e3d8b0736bcf3e08ab293fab1d28389bd6024834c6e740754234da97f",
+      "sha256": "4ef6a48093d3f999d719e6bb1e99cf9c9b44d9693e3072102b34ce38f879c5bd",
       "source_path": "claude/skills/heartbeat-tasks/SKILL.md"
     },
     {
