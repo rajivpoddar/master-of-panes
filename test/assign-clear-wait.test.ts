@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { MoPDatabase } from "../src/db.js";
+import { DEFAULT_CONFIG } from "../src/types.js";
 import {
   clearSlotWhenIdle,
+  persistentClearPending,
   type ClearWaitActivity,
   type ClearWaitDependencies,
 } from "../src/assignmentClearWait.js";
@@ -169,4 +176,43 @@ test("P1: a stale ack arriving AFTER attempt 2's clear still cannot satisfy atte
   f.state.ackPolicy = 1;
   const third = await clearSlotWhenIdle(4, f.deps, OPTS);
   assert.equal(third.ok, true);
+});
+
+test("P1: an outstanding clear persisted before a MoP restart is honored after it (no duplicate /clear)", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-clear-pending-"));
+  const dbPath = join(directory, "mop.db");
+  try {
+    // Before restart: /clear sent, pane never acks within the window.
+    const before = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath });
+    const f = fake({ activity: ["idle"], ackAfterPolls: null });
+    f.deps.pending = persistentClearPending(before);
+    assert.equal((await clearSlotWhenIdle(4, f.deps, OPTS)).ok, false);
+    before.close();
+    assert.equal(f.log.filter((e) => e === "send_clear").length, 1);
+
+    // Simulated restart: fresh process state, same SQLite file. The first
+    // clear is still queued on a busy pane, so a retry must NOT send again.
+    const after = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath });
+    try {
+      f.deps.pending = persistentClearPending(after);
+      assert.equal(f.deps.pending.get(4)?.outstanding, 1, "marker reloaded from SQLite");
+      f.deps.getActivity = async () => "active";
+      const retry = await clearSlotWhenIdle(4, f.deps, OPTS);
+      assert.equal(retry.ok, false);
+      if (!retry.ok) assert.match(retry.reason, /prior_clear_unsettled/);
+      assert.equal(f.log.filter((e) => e === "send_clear").length, 1, "no duplicate /clear after restart");
+
+      // The ack then lands: the persisted marker settles and is cleared.
+      f.state.emitAck();
+      f.deps.getActivity = async () => "idle";
+      f.state.ackPolicy = 1;
+      const settled = await clearSlotWhenIdle(4, f.deps, OPTS);
+      assert.equal(settled.ok, true);
+      assert.equal(persistentClearPending(after).get(4), undefined, "marker removed on ack");
+    } finally {
+      after.close();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

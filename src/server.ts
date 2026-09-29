@@ -12,7 +12,7 @@
  * 5. Returns a HookResponse that Claude Code acts on
  */
 
-import { clearSlotWhenIdle, clearWaitBoundsMs, clearWaitOptionsFromEnv } from "./assignmentClearWait.js";
+import { clearSlotWhenIdle, clearWaitBoundsMs, clearWaitOptionsFromEnv, persistentClearPending } from "./assignmentClearWait.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -1123,7 +1123,7 @@ app.post("/slots/:slotNum/abandon-turn", async (c) => {
  * never refuses. (The standalone `/slots/:n/clear` HTTP route keeps its own
  * occupied guard; only the assignment boundary uses this.)
  */
-const assignmentClearPending = new Map<number, { marker: number; outstanding: number }>();
+const assignmentClearPending = persistentClearPending(db);
 
 async function clearSlotForAssignment(
   slotNum: number,

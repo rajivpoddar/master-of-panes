@@ -31,10 +31,49 @@ export interface ClearWaitDependencies {
   /** Number of SessionStart source=clear events for the slot with id > afterId, and the newest id. */
   countClearAcks: (slot: number, afterId: number) => { count: number; lastId: number };
   /** Per-slot outstanding (sent, unacknowledged) clears; survives across attempts. */
-  pending: Map<number, { marker: number; outstanding: number }>;
+  pending: ClearPendingStore;
   sendClear: (slot: number) => Promise<{ ok: boolean; detail?: string }>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
+}
+
+export type ClearPending = { marker: number; outstanding: number };
+
+/** Minimal map surface the clear wait needs for outstanding-clear markers. */
+export interface ClearPendingStore {
+  get(slot: number): ClearPending | undefined;
+  set(slot: number, value: ClearPending): unknown;
+  delete(slot: number): unknown;
+}
+
+/**
+ * Outstanding-clear markers persisted in MoP's existing SQLite config table, so
+ * a MoP restart between sending `/clear` and its SessionStart:clear ack does not
+ * forget the in-flight clear (a retry would otherwise send a duplicate /clear).
+ */
+export function persistentClearPending(config: {
+  getConfig(key: string): string | null;
+  setConfig(key: string, value: string): void;
+}): ClearPendingStore {
+  const key = (slot: number) => `assignment_clear_pending_${slot}`;
+  return {
+    get(slot) {
+      const raw = config.getConfig(key(slot));
+      if (!raw) return undefined;
+      try {
+        const v = JSON.parse(raw) as ClearPending;
+        return Number.isFinite(v.marker) && Number.isFinite(v.outstanding) ? v : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    set(slot, value) {
+      config.setConfig(key(slot), JSON.stringify(value));
+    },
+    delete(slot) {
+      config.setConfig(key(slot), "");
+    },
+  };
 }
 
 export interface ClearWaitOptions {
