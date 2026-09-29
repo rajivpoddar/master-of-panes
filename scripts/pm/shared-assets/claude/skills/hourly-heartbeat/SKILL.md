@@ -76,6 +76,16 @@ STEP 4 — build ACTIONS from /tmp/heartbeat-1h-latest/prs.json (live GitHub; re
   - CI+E2E green                 → already in the post's merge ask; no action
   - capture terminal (green/red) → "capture PR#<n> <green|red> run=<id>"
   - no movement ≥ 60 min with no armed wait (LIMBO) → "limbo PR#<n>@<head40> <why>"
+  - Codex wait comes ONLY from live review threads on the current head, never the
+    `pm-blocked:codex` label: a wait = ≥1 unresolved thread by the Codex bot
+    (`chatgpt-codex-connector` / login matching /codex/i) with a P0/P1 badge
+    (state "held (codex P1 xN)").
+    - only isOutdated such threads → no wait; state notes
+      "codex P1 outdated — owner confirm" (owner confirms fixed, then resolve)
+    - `pm-blocked:codex` label but 0 live threads → the snapshot's
+      "stale pm-blocked:codex label PR#<n>@<head40>" ACTION: remove the label
+      (`gh pr edit <n> --remove-label pm-blocked:codex`); never report it as waiting.
+  Copy every `actions` entry from prs.json into ACTIONS verbatim.
   Run ids: `gh run list --commit <head40> --json databaseId,name,conclusion`.
   Also check main's latest CI/E2E: a red main → "ci-repair main run=<id>".
   NEW error codes in /tmp/heartbeat-1h-latest/map.json → "investigate <code>".

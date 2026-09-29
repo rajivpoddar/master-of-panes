@@ -297,8 +297,9 @@ def compose(
     lines = [first, *body]
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
-    if slot_actions:
-        lines.append("*ACTIONS (PM):* " + "; ".join(slot_actions))
+    pm_actions = [a for r in (prs or []) for a in r.get("actions") or []] + slot_actions
+    if pm_actions:
+        lines.append("*ACTIONS (PM):* " + "; ".join(pm_actions))
     if failures:
         lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:80] for f in failures[:2]))
     return "\n".join(lines)

@@ -232,6 +232,39 @@ def test_pm_blocked_green_admitted_head_never_gets_merge_ask():
     assert r["next"] != "CTO merge ask" and r["state"].startswith("held (product)")
 
 
+def _thread(author="chatgpt-codex-connector", body="![P1 Badge] bug", resolved=False, outdated=False):
+    return {"author": author, "body": body, "isResolved": resolved, "isOutdated": outdated}
+
+
+def test_stale_codex_label_with_zero_live_threads_is_not_a_wait_and_emits_action():
+    pr = _pr([_c("test", "SUCCESS"), _c("e2e", "SUCCESS")], [f"ci-head:{HEAD}", "pm-blocked:codex"])
+    pr["reviewThreads"] = [_thread(resolved=True), _thread(author="rajiv", body="P1 nit")]
+    r = prsnap.classify_pr(pr)
+    assert "codex" not in r["state"] and "codex" not in r["next"]
+    assert r["next"] == "CTO merge ask"
+    assert r["actions"] == [f"stale pm-blocked:codex label PR#8400@{HEAD} (0 live Codex P0/P1 threads) -> remove label"]
+
+
+def test_unresolved_codex_p1_thread_is_a_wait_even_without_label():
+    pr = _pr([_c("test", "SUCCESS"), _c("e2e", "SUCCESS")], [f"ci-head:{HEAD}"])
+    pr["reviewThreads"] = [_thread()]
+    r = prsnap.classify_pr(pr)
+    assert r["state"].startswith("held (codex P1 x1)") and r["next"] != "CTO merge ask"
+    assert r["actions"] == []
+
+
+def test_outdated_codex_p1_is_owner_confirm_not_wait_and_p2_ignored():
+    pr = _pr([_c("test", "SUCCESS"), _c("e2e", "SUCCESS")], [f"ci-head:{HEAD}"])
+    pr["reviewThreads"] = [_thread(outdated=True), _thread(body="![P2 Badge] style")]
+    r = prsnap.classify_pr(pr)
+    assert "codex P1 outdated x1 — owner confirm" in r["state"] and r["next"] == "CTO merge ask"
+
+
+def test_thread_fetch_failure_falls_back_to_label_hold():
+    r = prsnap.classify_pr(_pr([_c("test", "SUCCESS")], ["pm-blocked:codex"]))
+    assert r["state"].startswith("held (codex)") and r["actions"] == []
+
+
 def test_advisory_check_red_does_not_block_merge_ask():
     checks = [_c("test", "SUCCESS"), _c("e2e", "SUCCESS"),
               _c("core-large-file-correctness", "FAILURE", workflow="E2E Large File Correctness")]

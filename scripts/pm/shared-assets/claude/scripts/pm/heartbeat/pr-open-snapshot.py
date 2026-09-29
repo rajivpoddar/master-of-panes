@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 
@@ -24,6 +25,9 @@ PENDING = {"", "PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "EXPECTED", "REQUE
 # names are the required-check source. Every other check (e.g. core-large-file-correctness)
 # is advisory: it never makes a PR red and never suppresses a merge ask.
 GATES = ("test", "e2e")
+CODEX_LABEL = "pm-blocked:codex"
+CODEX_AUTHOR = re.compile(r"codex", re.I)  # chatgpt-codex-connector and friends
+CODEX_BLOCKING = re.compile(r"\bP[01]\b")  # "![P1 Badge]" etc.
 
 
 def _check_result(check: dict) -> tuple[str, str]:
@@ -48,6 +52,27 @@ def summarize_checks(rollup: list[dict]) -> dict:
     return {"red": red, "pending": pending, "green": green}
 
 
+def codex_threads(threads: list[dict] | None) -> dict | None:
+    """Pure: count unresolved Codex-bot P0/P1 review threads (live vs isOutdated).
+
+    `threads` items: {isResolved, isOutdated, author, body} (first comment).
+    None means the live read failed -> unknown.
+    """
+    if threads is None:
+        return None
+    live = outdated = 0
+    for t in threads:
+        if t.get("isResolved") or not CODEX_AUTHOR.search(t.get("author") or ""):
+            continue
+        if not CODEX_BLOCKING.search(t.get("body") or ""):
+            continue
+        if t.get("isOutdated"):
+            outdated += 1
+        else:
+            live += 1
+    return {"live": live, "outdated": outdated}
+
+
 def classify_pr(pr: dict) -> dict:
     """Pure: one PR -> state/owner/next from live head checks and labels."""
     head = pr.get("headRefOid") or ""
@@ -58,7 +83,16 @@ def classify_pr(pr: dict) -> dict:
     # only names the owner before admission.
     owner = "PM" if admitted or not slots else f"S{slots[0]}"
     stale_admission = any(x.startswith("ci-head:") for x in labels) and not admitted
-    blocked = [x.split(":", 1)[1] for x in labels if x.startswith("pm-blocked:")]
+    # The Codex wait comes from live review threads, never the pm-blocked:codex label.
+    codex = codex_threads(pr.get("reviewThreads"))
+    has_codex_label = CODEX_LABEL in labels
+    blocked = [x.split(":", 1)[1] for x in labels
+               if x.startswith("pm-blocked:") and (x != CODEX_LABEL or codex is None)]
+    actions: list[str] = []
+    if codex and codex["live"]:
+        blocked.insert(0, f"codex P1 x{codex['live']}")
+    if has_codex_label and codex is not None and codex["live"] == 0:
+        actions.append(f"stale pm-blocked:codex label PR#{pr.get('number')}@{head} (0 live Codex P0/P1 threads) -> remove label")
     checks = summarize_checks(pr.get("statusCheckRollup") or [])
     gates_green = all(g in checks["green"] for g in GATES)
 
@@ -92,6 +126,8 @@ def classify_pr(pr: dict) -> dict:
         nxt = "PM 12b review -> pm-admit-ci" if owner == "PM" else f"{owner} rework -> PM admit"
     if advisory_red:
         state += " (advisory red: " + ",".join(advisory_red[:3]) + ")"
+    if codex and codex["outdated"]:
+        state += f" (codex P1 outdated x{codex['outdated']} — owner confirm)"
     return {
         "number": pr.get("number"),
         "head": head[:7],
@@ -102,6 +138,7 @@ def classify_pr(pr: dict) -> dict:
         "state": state,
         "owner": owner,
         "next": nxt,
+        "actions": actions,
     }
 
 
@@ -119,7 +156,48 @@ def fetch_open_prs() -> list[dict]:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"gh pr list failed: {proc.stderr.strip()[:200]}")
-    return json.loads(proc.stdout)
+    prs = json.loads(proc.stdout)
+    threads = fetch_review_threads()
+    for pr in prs:
+        pr["reviewThreads"] = None if threads is None else threads.get(pr.get("number"), [])
+    return prs
+
+
+THREADS_QUERY = """query($owner:String!,$name:String!,$after:String){
+  repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:25,after:$after){
+    pageInfo{hasNextPage endCursor}
+    nodes{number reviewThreads(first:100){nodes{isResolved isOutdated
+      comments(first:1){nodes{author{login} body}}}}}}}}"""
+
+
+def fetch_review_threads() -> dict[int, list[dict]] | None:
+    """Live review threads per open PR; None on failure (caller falls back to the label)."""
+    owner, name = REPO.split("/")
+    out: dict[int, list[dict]] = {}
+    after = None
+    try:
+        while True:
+            cmd = ["gh", "api", "graphql", "-f", f"query={THREADS_QUERY}",
+                   "-F", f"owner={owner}", "-F", f"name={name}"]
+            if after:
+                cmd += ["-F", f"after={after}"]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if proc.returncode != 0:
+                return None
+            page = json.loads(proc.stdout)["data"]["repository"]["pullRequests"]
+            for node in page["nodes"]:
+                rows = []
+                for t in node["reviewThreads"]["nodes"]:
+                    first = (t["comments"]["nodes"] or [{}])[0]
+                    rows.append({"isResolved": t["isResolved"], "isOutdated": t["isOutdated"],
+                                 "author": ((first.get("author") or {}).get("login") or ""),
+                                 "body": first.get("body") or ""})
+                out[node["number"]] = rows
+            if not page["pageInfo"]["hasNextPage"]:
+                return out
+            after = page["pageInfo"]["endCursor"]
+    except (subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None
 
 
 def main() -> int:
@@ -129,6 +207,9 @@ def main() -> int:
     rows = sorted((classify_pr(pr) for pr in fetch_open_prs()), key=lambda r: -int(r["number"]))
     if args.text:
         print("\n".join(format_line(r) for r in rows))
+        for r in rows:
+            for a in r["actions"]:
+                print(f"ACTION: {a}")
     else:
         print(json.dumps(rows, indent=2))
     return 0
