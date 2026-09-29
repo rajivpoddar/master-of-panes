@@ -323,6 +323,10 @@ def test_internal_matching_survives_masking():
     assert axiom.is_internal_identity("user_x", "a**@scribie.com")
     assert not axiom.is_internal_identity("user_x", "e***@gmail.com")
     assert not axiom.is_internal_identity("user_x", "b**in**i@gmail.com")
+    # 12b must-fix: masked customer names must not hit separator-terminated prefixes
+    assert not axiom.is_internal_identity("u", "qa*im@gmail.com")   # e.g. Qasim
+    assert not axiom.is_internal_identity("u", "t**t*r*@x.com")     # e.g. Trotter
+    assert axiom.is_internal_identity("u", "p*a*w*i*h*@gmail.com")  # playwright keeps 2-char min
 
 
 def test_active_users_query_excludes_none_fileid_and_groups_by_userid(monkeypatch):
@@ -392,3 +396,17 @@ def test_compose_with_slots_and_active_users_stays_under_24_lines():
     lines = msg.splitlines()
     assert "*ACTIONS (PM):* idle-slot S2 #8478 idle 25m; idle-slot S3 free idle 40m" in lines
     assert len(lines) <= 24
+
+
+def test_known_codes_map_marks_code_mapped_not_new(tmp_path):
+    kc = tmp_path / "known.json"
+    kc.write_text('{"contact_config_error": "missing TURNSTILE_SECRET_KEY (thread 1790662166.619739)"}')
+    known = errmap.load_known_codes(kc)
+    r = errmap.classify_mapping("contact_config_error", [], [], [], known)
+    assert r["status"] == "mapped" and r["refs"] == ["missing TURNSTILE_SECRET_KEY (thread 1790662166.619739)"]
+    assert errmap.classify_mapping("other", [], [], [], known)["status"] == "NEW"
+    assert errmap.load_known_codes(tmp_path / "absent.json") == {}
+
+
+def test_shipped_known_codes_seed():
+    assert "TURNSTILE_SECRET_KEY" in errmap.load_known_codes()["contact_config_error"]

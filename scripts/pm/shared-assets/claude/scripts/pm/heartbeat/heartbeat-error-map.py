@@ -34,8 +34,21 @@ PM_OPS_DB = Path(
 GENERIC_CODES = {"unknown", "error", ""}
 
 
-def classify_mapping(code: str, issues: list[dict], obligations: list[dict], investigations: list[str]) -> dict:
-    """Pure: decide mapped vs NEW and build ordered refs (issue/PR first)."""
+KNOWN_CODES_PATH = Path(os.environ.get("HEARTBEAT_KNOWN_CODES", str(Path(__file__).resolve().parent / "heartbeat-known-codes.json")))
+
+
+def load_known_codes(path: Path = KNOWN_CODES_PATH) -> dict:
+    """Optional code -> ref map (known causes that have no issue/obligation yet)."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def classify_mapping(code: str, issues: list[dict], obligations: list[dict], investigations: list[str],
+                     known: dict | None = None) -> dict:
+    """Pure: decide mapped vs NEW and build ordered refs (issue/PR first, then known-code ref)."""
     refs: list[str] = []
     for item in issues:
         kind = "PR" if item.get("is_pr") else "issue"
@@ -49,6 +62,8 @@ def classify_mapping(code: str, issues: list[dict], obligations: list[dict], inv
         refs.append(label)
     for path in investigations:
         refs.append(Path(path).name)
+    if known and code in known:
+        refs.append(known[code])
     return {"code": code, "status": "mapped" if refs else "NEW", "refs": refs}
 
 
@@ -100,6 +115,7 @@ def search_investigations(code: str, root: Path = REPO_ROOT / "docs/investigatio
 def map_codes(codes: list[str]) -> tuple[dict, list[str]]:
     result: dict[str, dict] = {}
     failures: list[str] = []
+    known = load_known_codes()
     for code in codes:
         if code in GENERIC_CODES:
             result[code] = {"code": code, "status": "generic", "refs": []}
@@ -113,7 +129,7 @@ def map_codes(codes: list[str]) -> tuple[dict, list[str]]:
             obligations = search_pm_ops(code)
         except Exception as exc:  # noqa: BLE001
             failures.append(f"pm-ops {code}: {exc}")
-        result[code] = classify_mapping(code, issues, obligations, search_investigations(code))
+        result[code] = classify_mapping(code, issues, obligations, search_investigations(code), known)
     return result, failures
 
 

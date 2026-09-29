@@ -267,9 +267,17 @@ def mask_email(email: str) -> str:
 
 
 def _masked_prefix_match(local: str, prefix: str) -> bool:
-    """`*` in the masked local part matches any char; needs >=2 concrete matching chars."""
+    """`*` in the masked local part is a wildcard for LETTERS only.
+
+    A prefix ending in a separator (`-`, `+`, `.`) must match that separator as a real
+    character, so a masked customer name (`qa*im`, `t**t*r*`) never matches `qa-`/`test-`.
+    Non-separator prefixes (playwright) need >=2 concrete matching chars.
+    """
     if len(local) < len(prefix):
         return False
+    if prefix[-1] in "-+.":
+        if local[len(prefix) - 1] != prefix[-1]:
+            return False
     concrete = 0
     for got, want in zip(local, prefix):
         if got == "*":

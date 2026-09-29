@@ -546,7 +546,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "4e0d12c1f19205897f36ab4b4c8831bda46a96461eada948875159d35868b456",
+      "sha256": "4c5c3256893acce30d093f966d8e5cbc03e2cafbdc8f2668fa7fb5e441cfd719",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-axiom.py"
     },
     {
@@ -564,8 +564,17 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "65423d64eb0fa90961006245673e7775d8149b22974f6a296e53ed50cc05971a",
+      "sha256": "21fe50f35a2bfaddf94ba9095baf8a894f418e51e7552952294084a129d55800",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-error-map.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-known-codes.json",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "0533d09e06fbc63a95e4db07e27eda5a5276a73f3874bf1a87b1e747ad1e975e",
+      "source_path": "claude/scripts/pm/heartbeat/heartbeat-known-codes.json"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/pr-open-snapshot.py",
@@ -1302,7 +1311,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 141,
+    "selected_count": 142,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1376,7 +1385,8 @@
       "~/.claude/scripts/pm/heartbeat/heartbeat-compose.py",
       "~/.claude/scripts/pm/heartbeat/heartbeat-error-map.py",
       "~/.claude/scripts/pm/heartbeat/pr-open-snapshot.py",
-      "~/.claude/scripts/pm/heartbeat/support-inbox-snapshot.py"
+      "~/.claude/scripts/pm/heartbeat/support-inbox-snapshot.py",
+      "~/.claude/scripts/pm/heartbeat/heartbeat-known-codes.json"
     ]
   },
   "owner": "master-of-panes",
