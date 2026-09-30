@@ -63,7 +63,7 @@ test("S5/S6 runtime identities are isolated and launchable without provisioning 
   assert.notEqual(SLOT_RUNTIME_IDENTITIES[5].appPort, SLOT_RUNTIME_IDENTITIES[6].appPort);
 });
 
-test("all six versioned launch wrappers default to Ornith and preserve the shared launcher library", () => {
+test("all six versioned launch wrappers pin their live Spark profile and preserve the shared launcher library", () => {
   const manifest = JSON.parse(readFileSync(new URL("../scripts/pm/shared-assets/manifest.json", import.meta.url), "utf8")) as {
     entries: Array<{ source_path: string; canonical_target: string; mode: number }>;
   };
@@ -78,7 +78,13 @@ test("all six versioned launch wrappers default to Ornith and preserve the share
       "utf8",
     );
     assert.match(wrapper, /set -euo pipefail/);
-    assert.match(wrapper, /DEV_SLOT_SPARK_PROFILE="\$\{DEV_SLOT_SPARK_PROFILE:-ornith\}"/);
+    // Live wrappers (synced from ~/.claude): slots 1-2 default to qwen38-next, slots 3-6 pin swift-qwen38.
+    assert.match(
+      wrapper,
+      slot <= 2
+        ? /DEV_SLOT_SPARK_PROFILE="\$\{DEV_SLOT_SPARK_PROFILE:-qwen38-next\}"/
+        : /DEV_SLOT_SPARK_PROFILE=swift-qwen38/,
+    );
     assert.match(
       wrapper,
       new RegExp(`exec /Users/rajiv/\\.claude/scripts/launch-dev-slot-claude\\.sh ${slot} "\\$@"`),
@@ -97,11 +103,11 @@ test("all six versioned launch wrappers default to Ornith and preserve the share
   );
   assert.match(launcher, /5\) SLOT_NAME="Revati"/);
   assert.match(launcher, /6\) SLOT_NAME="Pushya"/);
-  assert.match(launcher, /CLAUDE_CODE_SUBAGENT_MODEL="\$SPARK_MODEL"/);
+  assert.match(launcher, /CLAUDE_CODE_SUBAGENT_MODEL="\$\{SPARK_MODEL%\\\[1m\\\]\}"/);
   assert.match(launcher, /SPARK_PROFILE="\$\{DEV_SLOT_SPARK_PROFILE:-ornith\}"/);
-  assert.match(launcher, /CLAUDE_CODE_MAX_CONTEXT_TOKENS="\$\{DEV_SLOT_SPARK_MAX_CONTEXT_TOKENS:-240000\}"/);
-  assert.match(launcher, /CLAUDE_CODE_MAX_OUTPUT_TOKENS="\$\{DEV_SLOT_SPARK_MAX_OUTPUT_TOKENS:-32000\}"/);
-  assert.match(launcher, /MAX_THINKING_TOKENS="\$\{DEV_SLOT_SPARK_MAX_THINKING_TOKENS:-2048\}"/);
+  assert.match(launcher, /CLAUDE_CODE_MAX_CONTEXT_TOKENS="\$\{DEV_SLOT_SPARK_MAX_CONTEXT_TOKENS:-\$\{SPARK_MAX_CONTEXT_TOKENS:-240000\}\}"/);
+  assert.match(launcher, /CLAUDE_CODE_MAX_OUTPUT_TOKENS="\$\{DEV_SLOT_SPARK_MAX_OUTPUT_TOKENS:-\$\{SPARK_MAX_OUTPUT_TOKENS:-32000\}\}"/);
+  assert.match(launcher, /MAX_THINKING_TOKENS="\$\{SPARK_MAX_THINKING_TOKENS:-\$\{DEV_SLOT_SPARK_MAX_THINKING_TOKENS:-2048\}\}"/);
   assert.match(launcher, /ANTHROPIC_BASE_URL="\$SPARK_BASE_URL"/);
   assert.match(launcher, /ANTHROPIC_DEFAULT_SONNET_MODEL="\$SPARK_MODEL"/);
   assert.match(launcher, /\.config\/ornith15\/api-key/);
