@@ -136,6 +136,15 @@
       "source_path": "claude/hooks/pre-issue-create-audit.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/hooks/validate-codex-review-agent-result.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-codex-review-agent-result-validator",
+      "sha256": "e8b5e82df000b360ac483a637450d86bcfb364195f9c9dcd1105ef127a84b670",
+      "source_path": "claude/hooks/validate-codex-review-agent-result.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/assignmentAuthority.js",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1311,7 +1320,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 142,
+    "selected_count": 143,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
