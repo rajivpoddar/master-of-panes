@@ -106,7 +106,7 @@ def test_team_last_is_answered_and_pm_bot_counts_as_team():
 
 
 def test_customer_thanks_does_not_reopen():
-    t = support.classify_thread([_m(CUST, 1000), _m("UEQTTB97A", 1100, "done"), _m(CUST, 1200, "Great! It worked")], 2000)
+    t = support.classify_thread([_m(CUST, 1000), _m("UEQTTB97A", 1100, "done"), _m(CUST, 1200, "It worked!")], 2000)
     assert t["state"] == "answered"
 
 
@@ -467,11 +467,12 @@ def test_answered_thread_is_tracked_and_reopens_on_new_customer_reply(tmp_path):
     assert support.select_items(threads, 5900) == threads
 
 
-def test_tracked_roots_prunes_stale_answered_but_keeps_open():
+def test_tracked_roots_retains_stale_answered_and_open():
     now = 100 * 86400
     old_answered = {"ts": "1", "state": "answered", "last_activity": 1.0}
     old_open = {"ts": "2", "state": "needs_reply", "last_activity": 2.0}
-    assert list(support.tracked_roots([old_answered, old_open], now)) == ["2"]
+    # Codex #7 P1: answered roots are retained indefinitely so a later customer reply is rediscovered.
+    assert list(support.tracked_roots([old_answered, old_open], now)) == ["1", "2"]
 
 
 def test_free_slot_idle_measured_from_release_not_stale_work():
