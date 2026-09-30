@@ -41,13 +41,12 @@ The original 910-line v2.2.1 skill is backed up next to the live target as
 ```
 You are the 3h heartbeat agent. Work from /Users/rajiv/Downloads/projects/heydonna-app (main).
 
-STEP 0 — dependency check. The composer and collectors
-  (scripts/pm/heartbeat/*) ship in heydonna-app PR #8481; they exist only after
-  #8481 is merged and main is pulled. If
-  /Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/heartbeat/heartbeat-compose.py
+STEP 0 — dependency check. The composer and collectors are MoP shared assets
+  installed to /Users/rajiv/.claude/scripts/pm/heartbeat/. If
+  /Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-compose.py
   is absent, or STEP 1 exits 3 with HEARTBEAT_COLLECTORS_ABSENT, fail soft:
   skip STEPS 1-3, still run STEP 4 housekeeping, and return exactly
-  "HEARTBEAT_3H_SKIPPED: collectors absent (needs heydonna-app #8481 merged)".
+  "HEARTBEAT_3H_SKIPPED: collectors absent (install the MoP release shipping pm/heartbeat)".
   Do not hand-compose a post and do not treat it as an error.
 
 STEP 1 — compose (prints the post; never posts):
@@ -57,7 +56,8 @@ STEP 1 — compose (prints the post; never posts):
 
 STEP 2 — sanity check before posting:
   - first line starts with "<@U0BNFGX2UAX> *Heartbeat"
-  - at most ~20 lines, no tables, no housekeeping lines
+  - at most ~24 lines (five blocks incl. slot occupancy), no tables, no
+    housekeeping lines
   Do not hand-edit block content. If a block says "unavailable", keep it; the
   _Ops:_ footer already names the failure.
 
@@ -92,7 +92,7 @@ STEP 5 — return exactly:
 
 ## Blocks (what the composer does)
 
-Scripts live in the repo (`scripts/pm/heartbeat/`, plus `scripts/axiom-activity-report.py`), all read-only:
+Scripts are MoP-installed at `~/.claude/scripts/pm/heartbeat/` (Axiom queries in `heartbeat-axiom.py`), all read-only:
 
 | Block | Script |
 |---|---|
@@ -148,10 +148,16 @@ Never inject raw `/clear`; never respawn as the stale-session fix.
 
 ## Dropped from the post (do not re-add)
 
-Session-age tables and self-clear reminders, slot occupancy and queue-motion
-gates, backlog-triage and Ready Pool counts, stale-process/chrome counts, PM
+Session-age tables and self-clear reminders, queue-motion gates,
+backlog-triage and Ready Pool counts, stale-process/chrome counts, PM
 state-label drift, PROCESS_LIMBO lists, ledger-hygiene notes, artifact-path
 proof lines. Labels are advisory; PR state comes only from live GitHub.
+
+Slot occupancy IS in the post as its own block (default-enabled since
+2026-09-29; pass `--no-slots` to the composer to omit it) -- a live
+per-slot idle/occupied line, not a session-age table or a self-clear
+reminder. An `idle-slot` action it returns is a structured `ACTIONS:` entry
+the agent must copy into its return value, not just post text.
 
 ## Boundaries
 
@@ -163,6 +169,7 @@ proof lines. Labels are advisory; PR state comes only from live GitHub.
 
 ## Proof of done
 
-A run is done when: the post is ≤ ~20 lines, has all three blocks, starts with
+A run is done when: the post is ≤ ~24 lines, has all five blocks (Axiom
+errors, support inbox, open PRs, active users, slot occupancy), starts with
 the CTO mention, contains no housekeeping lines, and the `OK ts=` readback is
 recorded. Target: zero CTO "heartbeat correction" replies over 4 runs.

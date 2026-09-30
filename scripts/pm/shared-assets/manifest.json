@@ -541,6 +541,60 @@
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-axiom.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "c881363f2bf307eb20b9c2ee77ee0307f0e8176e33aa15f51071c4ceda361993",
+      "source_path": "claude/scripts/pm/heartbeat/heartbeat-axiom.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-compose.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "dcea5c3d9d01c5866cd512e9b72da1125f53d56237eda0b238623017ac1ed61b",
+      "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-error-map.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "21fe50f35a2bfaddf94ba9095baf8a894f418e51e7552952294084a129d55800",
+      "source_path": "claude/scripts/pm/heartbeat/heartbeat-error-map.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-known-codes.json",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "0533d09e06fbc63a95e4db07e27eda5a5276a73f3874bf1a87b1e747ad1e975e",
+      "source_path": "claude/scripts/pm/heartbeat/heartbeat-known-codes.json"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/pr-open-snapshot.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "074d0bb1ce822b01a15fcd1e5f71f5e57e0f22199fd139f5d3ebeae4d48cb6d0",
+      "source_path": "claude/scripts/pm/heartbeat/pr-open-snapshot.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/support-inbox-snapshot.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "6c2c1a3511b422d39e8b97dbf8a8b8cb35fe302f5249915b989ffd61b9e8581c",
+      "source_path": "claude/scripts/pm/heartbeat/support-inbox-snapshot.py"
+    },
+    {
       "additional_targets": [
         "/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py"
       ],
@@ -566,7 +620,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
-      "sha256": "87db2042031a98e1a1a2375d8b775f90cedfa2f87fe4460f9c6dc94897841f48",
+      "sha256": "2d69b98d857db5d4ed8c25aef9ab7df2d8a027c002de4dba8d9e4166f61ce957",
       "source_path": "claude/scripts/sakshi-heartbeat.sh"
     },
     {
@@ -746,7 +800,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heartbeat-tasks",
-      "sha256": "64b2ebc0c4c36b71be593250430ae2ce99f467c92f535a5f1faac7cf6bf82144",
+      "sha256": "d3786160f3be80e457479958b04413d47dabf500a3481aa7d487fd5620d62875",
       "source_path": "claude/skills/heartbeat-tasks/SKILL.md"
     },
     {
@@ -764,7 +818,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "f4155712752ae4475b75e9a98a0fe4f0fcfadc28aa8c041ba55fa9094f57cd39",
+      "sha256": "2ea2e4a702d71ce6a6d67959fe67946c937e8b3b9463f7821c41d8695dd9c347",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
@@ -1257,7 +1311,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 136,
+    "selected_count": 142,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1326,7 +1380,13 @@
       "~/.claude/rules/33-heydonna-ui-product-rules.md",
       "~/Downloads/projects/heydonna-app/.claude/skills/hourly-heartbeat/SKILL.md",
       "~/.claude/scripts/hourly-thread-ts",
-      "~/.claude/scripts/sakshi-heartbeat.sh"
+      "~/.claude/scripts/sakshi-heartbeat.sh",
+      "~/.claude/scripts/pm/heartbeat/heartbeat-axiom.py",
+      "~/.claude/scripts/pm/heartbeat/heartbeat-compose.py",
+      "~/.claude/scripts/pm/heartbeat/heartbeat-error-map.py",
+      "~/.claude/scripts/pm/heartbeat/pr-open-snapshot.py",
+      "~/.claude/scripts/pm/heartbeat/support-inbox-snapshot.py",
+      "~/.claude/scripts/pm/heartbeat/heartbeat-known-codes.json"
     ]
   },
   "owner": "master-of-panes",
