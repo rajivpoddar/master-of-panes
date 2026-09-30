@@ -6,7 +6,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "5987936e05e18e6952ffd7aa678e3f0b03440db447a2800d2ae245efb3cf11ba",
+      "sha256": "82557dc6852508babf0851a68d9d1bb1e8d4e44bde0d9f0abd5b52685273d8eb",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "908b47118852556152bc08b751e9007f44e2564950ccd0be938999acc8f49105",
+      "sha256": "e51fae824e0a4a0af2f49cab4c72ebc780a50d7970ce56b97ad4972cfd217166",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "7ea3c3f25c406c7e5b68117b5eeab9b350a9a6915ad1b37e5cc8d756df97107c",
+      "sha256": "22dba78cf79e3a7341e9f4de75e66acd6572861c1f802910a708a1f7da11bcfd",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -51,7 +51,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
-      "sha256": "a05ca46c1b5e03230392739a4d09700da50e4ff1938e8f5d104cc752bde56d80",
+      "sha256": "92b9107001f833e34209d9170ec076ee214c366464409083ad81111eda731cf1",
       "source_path": "claude/dev-slot-rules/22-slot-pushya.md"
     },
     {
@@ -60,7 +60,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-slot-identity",
-      "sha256": "e32a7c7917ddbe74fb37da0552f3e2655f269ebac3e4db94260054467734192f",
+      "sha256": "049a18dfd1bf185995721c22ef2c524c7e31dbb63135d35ec6e4d74add742ac6",
       "source_path": "claude/dev-slot-rules/22-slot-revati.md"
     },
     {
@@ -231,7 +231,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "89ab793e53cd43c2fd06d73c488487364d3bcdcd567dd672b976323618d3fddc",
+      "sha256": "15fbd2c27335e0bba542fa190ed4fa9d0aaf99e4bf86531ffc7c57df697ec771",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -249,7 +249,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-cap-policy",
-      "sha256": "bdaa54c4176f103b99c28c36a4d1c934a702c2c61a79c6d1cb5922063af2cc72",
+      "sha256": "b91440cdf992a57aa9b25e5bacff859384bb8fda879e8aa45c1a471f6ac898aa",
       "source_path": "claude/rules/99-pm-fable-review-cap.md"
     },
     {
@@ -330,7 +330,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-contract-ledger",
-      "sha256": "b0c18e62cf63f27fb3f4eff00080ce2b96628ebc6e107cb43c429f28c53f5c13",
+      "sha256": "2e27c267129e0f31d22cd9d84f738d08f455247b4e09da7bed26f8a2a477ad14",
       "source_path": "claude/scripts/control_plane_issue_policy.py"
     },
     {
@@ -366,7 +366,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "e6da71cf83edc748e43513904596abad8452173bd27d3d8acbd422397b275d7e",
+      "sha256": "bfec7bbcfe7abe2b01ac7566ae44fe58152a223efc7a5fbfa17c0e4e9bce4e84",
       "source_path": "claude/scripts/launch-dev-slot-claude.sh"
     },
     {
@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "4f8d1739b137aeed4f59c869d66323f02984d730fadaa477aaa71f935c9e293b",
+      "sha256": "f8e3177038cdb79ecd5e4050014e2842dbfbec7915c54272617df2ce9581be7d",
       "source_path": "claude/scripts/launch-slot-1.sh"
     },
     {
@@ -384,7 +384,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "833c04288a26889818009e085d2e10a819392b3eab2aa0e193470e386aafbc34",
+      "sha256": "1c036cbdec749acd84fdb9fe12509315e773d2b2f048d11c1029150d36012105",
       "source_path": "claude/scripts/launch-slot-2.sh"
     },
     {
@@ -393,7 +393,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "ca3cc9340b6c62b9df05cecbd2aa2f0113aea506d3266a95032feb41a0c89705",
+      "sha256": "53d2445ae7b1e0ac85d798534a8d2478a9527bcea980a125ca97ac64eec602c6",
       "source_path": "claude/scripts/launch-slot-3.sh"
     },
     {
@@ -402,7 +402,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "3fdd5e7e782cf21e9c366ae9249e354f86235770bb6214d7c874b037020eb55b",
+      "sha256": "a688d18b4a990b4bd9c38799ae900d3898ba688143979a3283d1b19f28f38510",
       "source_path": "claude/scripts/launch-slot-4.sh"
     },
     {
@@ -411,7 +411,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "978a99d547a4ef154e71e28683b54f16ccb79f2176b8a6cb8690571bfedf6a14",
+      "sha256": "a4c4b66c8e4fa067dcdd9dc9ebb741e0d43e7237cfab03ddf2e8b65275a1e802",
       "source_path": "claude/scripts/launch-slot-5.sh"
     },
     {
@@ -420,7 +420,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "9a6e819090bda972e9fcecef8d60b032f9018825ad6635d07b7dabcb240c88ad",
+      "sha256": "c89f52dcf894f7c560e08dc50c2ff59d6f08f0db16ca5e91a640fe645ebb1458",
       "source_path": "claude/scripts/launch-slot-6.sh"
     },
     {
@@ -483,7 +483,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "0042cc464ffd714c48e09526a92033f1d216cb1c8de9b23814ddcbd6ca6d519f",
+      "sha256": "6375cf8cfb620f49584a426efbc4286684695e7c62fbb8e2c8493334ca862713",
       "source_path": "claude/scripts/pm-cleanup-pr.py"
     },
     {
@@ -501,7 +501,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops",
-      "sha256": "33fd5d1b577e1e4fbeb9bf2ddc2317606d75e1d52a28c19492502e97eb3e601a",
+      "sha256": "380888f488603d74ab686160eaa56354d794cee2ad617ba60913e944d1716a93",
       "source_path": "claude/scripts/pm-ops-legacy.py"
     },
     {
@@ -528,7 +528,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-terminal-wake-adapter",
-      "sha256": "7746204f7f0bf9b0c825e249c5b714bc20f59b7dd57da12b7bc06371c55b4054",
+      "sha256": "ed007981b51169f86a75e766bb1548557a2e384b4ee38aaadfd885a479bca73b",
       "source_path": "claude/scripts/pm-terminal-wake.py"
     },
     {
@@ -638,7 +638,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "793f8a0edc24f825b31fda715740bb5e5aac636427878355342d70855fbfdb45",
+      "sha256": "b9e40709f89130206c62c9976b22e61ef4bf5ddfc1efc80e919cb677b65a076f",
       "source_path": "claude/skills/codex-app-code-review/templates/prompt-rework.txt"
     },
     {
@@ -647,7 +647,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "fab5d7d929f74f406a5e588129cb6d91315c636013398903106003da823b927a",
+      "sha256": "b39f993062483fedc63d7024a06ab6a0f0eeb0a3aacb6bb7ebbc965f7b8f831a",
       "source_path": "claude/skills/codex-app-code-review/templates/prompt.txt"
     },
     {
@@ -656,7 +656,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "d54521c3a7fd2bb70731d508f265b128be4827e53ab60827de0bf22e123232a9",
+      "sha256": "7737879c8d000c15fbc654b228a01a3181c32b33a01a52824f14b3f961912af0",
       "source_path": "claude/skills/codex-app-plan-review/templates/prompt-rework.txt"
     },
     {
@@ -665,7 +665,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "699d16c9e28e3a859c024cce60db6f70025ab25bab8401479a4ce8dd673c8884",
+      "sha256": "0d2208dcbdc1b92cee6f9217e9c46e5a42588a135f1872b36e54db831694cf33",
       "source_path": "claude/skills/codex-app-plan-review/templates/prompt.txt"
     },
     {
@@ -728,7 +728,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-direct-assign",
-      "sha256": "b3e73ee7d286320a468a37ce516e191dbd222de0c676fa3373ff21e93a081bcc",
+      "sha256": "df34bd76f168d0b1acec654dc4780cc2dae6de827a959d82ac2e572a382619b7",
       "source_path": "claude/skills/direct-assign/SKILL.md"
     },
     {
@@ -870,7 +870,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
-      "sha256": "81d81ba867163b8bb7ec7f00f742934b16cabc7c04ab3ead24212e763ae417c6",
+      "sha256": "953e2ab30edea6643e4a504db7554c6744b7d1298cab0def9620de97e29b3e6a",
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {
@@ -1023,7 +1023,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-automation-prompt-template",
-      "sha256": "43d4b556dea01f999991259de55d1bc2f53f38f06887a98c7dc3a6aa2c54f38e",
+      "sha256": "867e3cf17181b0e85867bbb80dcf3f701422214e853d887f8338bd5302caf470",
       "source_path": "codex/automations/heydonna-3h-ready-pool-reconciliation/prompt.template"
     },
     {
@@ -1050,7 +1050,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "2c573c4c3048f6fd29c996245d4d520f584735b6a321edf0f8023527470c7066",
+      "sha256": "88e6b490fd96846fdc31d0b4f3feacf329a867ee3f1db15987213e8fe9bc6de2",
       "source_path": "codex/monitors/heydonna-pm-chat/MONITOR.md"
     },
     {
@@ -1068,7 +1068,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-contract",
-      "sha256": "f530309da812f833be0dfb2bb12144a6efe6b50a98b8d16d1fa8d76ac12d7616",
+      "sha256": "f641d4339a6f90747cac0916089a90e16c89cb4eaed883962eacdd5530621624",
       "source_path": "codex/skills/_shared/release-conveyor-contract.md"
     },
     {
@@ -1131,7 +1131,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "6f45c6d68bd753f411e92ab433592a3702a97badcda694ccf4785dd182046316",
+      "sha256": "668a865fa49007187e72b7bcd5a2f4ed67a5ef77e89b1739f757c93344f6af62",
       "source_path": "codex/skills/heydonna-control-plane-repair/SKILL.md"
     },
     {
@@ -1203,7 +1203,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "ab1dd9ad7cf6d4a1b8bb98aeb456198c52cc6d3aacb0707d971e97c338c3b76a",
+      "sha256": "26f0df60bf41a96ed48ef169c61ae2e830304010d62615f6ac767f7510678f35",
       "source_path": "codex/skills/heydonna-slack-postback/SKILL.md"
     },
     {
@@ -1221,7 +1221,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "cce4f86899b203dd04a5b5599b6d048553082781a24d492eca6d6326f92ad163",
+      "sha256": "2f70a0aaf1725d8a3493c106ca147e6b2ffd28a1b530639da870189e1937c2ca",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/cto_slack_rest.py"
     },
     {
@@ -1239,7 +1239,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-test",
-      "sha256": "c3b6fce9bcbd6e498374483a61a52fce04f7f5afb3ef5def182cae7fd5ded940",
+      "sha256": "db79c76449b12f1b931464ae35ff58e545cb8483287bd1a1df315240a5acdd18",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
     }
   ],

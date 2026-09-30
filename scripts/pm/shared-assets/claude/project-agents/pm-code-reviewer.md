@@ -277,6 +277,19 @@ output and decide it immediately; do not let it emerge as a late-round surprise.
      `node scripts/ci/check-qa-tests-coverage.mjs`). A spec that CI would not
      execute is a BLOCK.
 
+12. Visual/UI proof and layout (Rajiv directive 2026-09-27 08:37/08:44, thread
+   `1790476865.865109`; UI screenshots go to the PR's Slack thread as part of
+   PM PR review before admission): if any visual/UI AC exists or the diff
+   changes rendered UI, locate the exact-head AC screenshots (the PR
+   `qa-visual-proof` receipt, then the slot checkout, for example
+   `.qa-<PR>/*.png`). Open each with Read and judge placement and order,
+   alignment, truncation, overlap, mobile width and the no-disabled-button rule.
+   Correct state in the wrong place is a defect (#8343 miss). BLOCK on a
+   concrete layout defect or on a missing or stale-head visual AC screenshot.
+   Do not post anywhere; return each image's abs path, AC id, sha256 and head
+   as `visual_proof_files` so PM posts them to the Slack thread and writes the
+   structured PR comment.
+
 ## Required Reads
 
 1. `gh pr view <PR> --json number,title,body,headRefOid,headRefName,baseRefName,isDraft,labels,mergeStateStatus,statusCheckRollup,commits,files`
@@ -406,6 +419,8 @@ pass_scope: <blocker-clear | phase-a | blocked>
 readiness_ceiling: <highest PM state this review supports, and why>
 branch_freshness: <verified/not-requested/blocked + evidence>
 unresolved_review_threads: <none | blocking | overridden with source>
+visual_proof: <not-applicable | missing | stale | layout-defect | ok> + reason
+visual_proof_files: <none | AC-id | abs path | sha256 | head, one per line>
 product_ac_proof: <verified/blocked/not-applicable + evidence>
 loop_reduction_decision: <none | split_pr | send_verified_patch | send_instruction_packet | send_test_harness_packet | override_with_evidence | escalate_product_decision>
 required_pm_action: <clear blocker | keep blocked + rework | fix_slot_worktree | run_pr_rescue | rewrite_issue | split_pr | send_verified_patch | send_instruction_packet | send_test_harness_packet | override_with_evidence | escalate | escalate_product_decision>

@@ -1327,7 +1327,14 @@ def ingest_sentinels() -> None:
             match = re.search(r"ISSUE:\s+#(\d+)", text)
             if match:
                 issue = int(match.group(1))
-                resolve_obligation(argparse.Namespace(kind="issue_routing", target_type="issue", target_id=str(issue), pr=None, issue=issue, slot=None))
+                # An already-resolved routing row (e.g. resolved by --id) is the
+                # desired end state; the strict key-based resolve raises on a
+                # no-match, which must not abort the whole sync.
+                try:
+                    resolve_obligation(argparse.Namespace(kind="issue_routing", target_type="issue", target_id=str(issue), pr=None, issue=issue, slot=None))
+                except SystemExit as exc:
+                    if "matched no open row" not in str(exc):
+                        raise
             continue
         text = Path(path).read_text(errors="ignore")
         match = re.search(r"ISSUE:\s+#(\d+)", text)
@@ -1358,9 +1365,14 @@ def ingest_sentinels() -> None:
                 for label in live_labels
             )
         ):
-            resolve_obligation(
-                argparse.Namespace(kind="issue_routing", target_type="issue", target_id=str(issue), pr=None, issue=issue, slot=None)
-            )
+            try:
+                resolve_obligation(
+                    argparse.Namespace(kind="issue_routing", target_type="issue", target_id=str(issue), pr=None, issue=issue, slot=None)
+                )
+            except SystemExit as exc:
+                # Already resolved (e.g. by --id): desired end state, not a sync failure.
+                if "matched no open row" not in str(exc):
+                    raise
             mark_post_create_flag_resolved(issue)
             continue
         if typed_resolution_exists("issue_routing", "issue", str(issue), None, issue):

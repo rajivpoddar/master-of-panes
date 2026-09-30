@@ -153,7 +153,7 @@ class PMTerminalContinuityTests(unittest.TestCase):
         self.assertEqual(delivered["status"], "DELIVERED")
         self.assertEqual(delivered["receipt"], "queued-1")
         args = json.loads(helper.with_suffix(".seen").read_text().splitlines()[0])
-        self.assertEqual(args[args.index("--thread-id") + 1], "01a03236-2e61-71f3-a6a8-3dc24d8c8917")
+        self.assertEqual(args[args.index("--thread-id") + 1], "01a09112-a09c-7361-9a2a-0ada6a4e9dfb")
         self.assertEqual(args[args.index("--dedup-key") + 1], delivered["key"])
         self.assertIn('"terminal_type":"FAILED_RUN_INVESTIGATION"', args[args.index("--message") + 1])
         replay = self.call("deliver", value, "--effect-command", str(WAKE_ADAPTER))

@@ -41,12 +41,15 @@ escalate integrity rather than guessing. This ordering is mandatory:
 
 ## Shared release-conveyor contract
 
-The normative ownership and motion matrix is
-`/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md`. This
-monitor is read-only: it reports and routes work but never mutates GitHub,
-MoP, workflows, slots, or product state. Every report row keeps these fields
-separate: `workflow_motion`, `owner_source`, and `hold_reason`; absence of a
-running workflow is not evidence that the owner is unknown.
+The shared release/motion mechanics remain in
+`/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md`. Its PR-red
+ownership rows predate Rajiv's 2026-09-27 directive and require a MoP-affinity
+update; for this CTO consumer, the current ownership rule in `WAKE_SOP.md`
+supersedes those rows immediately. This monitor is read-only: it reports and
+routes work but never mutates GitHub, MoP, workflows, slots, or product state.
+Every report row keeps `workflow_motion`, `owner_source`, and `hold_reason`
+separate; absence of a running workflow is not evidence that the owner is
+unknown.
 
 ### Control-plane repair routing (Rajiv current directive)
 
@@ -54,7 +57,7 @@ This monitor only detects and routes. PM reports the first literal
 control-plane blocker and exact tuple to CTO Decisions; PM does not diagnose,
 review, approve, deploy, retry, create markers, or admit repairs. CTO Decisions
 classifies the issue and sends one verified bounded `CONTROL_PLANE` brief to
-Master of Panes task `01a04154-c9c1-7bc1-8f7b-009a87bc7628`, the sole
+Master of Panes task `01a0d779-9a74-7f52-89ad-167910930d27`, the sole
 implementation owner for control-plane and PM Operator scopes. MoP returns one
 clean exact-main candidate packet through renderer-free stdio and cannot
 publish, install, activate, restart, deploy, or notify PM. CTO Decisions
@@ -66,49 +69,53 @@ handoff uses renderer-free stdio and is not a PM review or ledger-only route.
 
 ### Open-PR ownership (Rajiv current directive)
 
-For open PRs, PM has exactly two operational responsibilities: launch and
-return one bounded CI/E2E failure investigation bound to the exact failed
-PR/head/run, and perform the minimal slot/session/packet mechanics for a
-CTO-authorized rework, reproduction, or production-shaped proof packet. A
-conclusive investigation returns its exact packet to CTO Decisions; PM does
-not arm CI/E2E, decide or dispatch capture, edit PR labels/state, rerun or
-retry, route rescue/release, make sync/integration decisions, apply release
-gates, or merge. PM reports evidence/status for those CTO-owned actions only.
-The monitor therefore routes every other actionable open-PR row to CTO, while
-retaining PM slot assignment only after an explicit CTO-routed rework/repro
-authorization. A PM terminal is a material handoff: it is emitted once as a
-bounded `PM_CTO_TERMINAL` envelope in the canonical PM Slack thread with
-`terminal_type`, `pr`, full `head`, optional `run_or_capture`, `owner`,
-`evidence_summary`, `next_action`, `next_owner`, `wake`, and `source_receipt`.
-The supported terminal types are `FAILED_RUN_INVESTIGATION`, `NUMBERED_PROOF`,
+PM owns the complete PR CI/E2E terminal loop: exact-head run reads, causal
+classification, CI fixes through a PM background agent or slot, E2E flake
+proof and one exact-head admission request when warranted, and non-flake E2E
+reproduction/rework on a slot. PM preserves successful workflow legs, never
+blind-reruns or merges red, and maintains hourly continuity. CTO Decisions
+accepts PM requests only for exact-head CI/E2E admission and final head-pinned
+merge, plus reserved decisions outside this PR-terminal policy. PR Merges
+executes those gate edges; it is not the PR-red investigator. Rescues owns no
+PR-red work. Main-branch Hotfixes and production deploys remain separate.
+
+This monitor's open-PR classifications are read-only diagnostics for PM
+continuity, not automatic CTO work. Do not wake CTO for a failed run,
+investigation packet, repro/rework, routine status, or generic PM terminal.
+Route a PM terminal only when it explicitly requests exact-head admission or a
+head-pinned merge and includes the exact PR/head plus the relevant evidence;
+deduplicate by terminal type plus exact PR/head/source receipt. Other supported
+terminal types (`FAILED_RUN_INVESTIGATION`, `NUMBERED_PROOF`,
 `REWORK_REVIEW_CANDIDATE`, `CAPTURE_TERMINAL`, `ASSIGNMENT_TERMINAL`, and
-`TYPED_BLOCKER`. Route each first envelope immediately to CTO; deduplicate by
-terminal type plus exact PR/head/source receipt. Routine acknowledgement and
-progress remain suppressed. PM terminals never perform CTO-owned CI/E2E
-admission, capture, integration, or merge.
+`TYPED_BLOCKER`) remain PM continuity unless they ask for one of those gate
+edges or raise a reserved decision outside this policy. The envelope schema
+remains `PM_CTO_TERMINAL` with `terminal_type`, `pr`, full `head`, optional
+`run_or_capture`, `owner`, `evidence_summary`, `next_action`, `next_owner`,
+`wake`, and `source_receipt`.
 
 The executable PM boundary is the manifest-mapped
 `/Users/rajiv/.claude/scripts/pm-terminal-continuity.py`. A PM completion
 adapter invokes `complete` with the validated envelope; the monitor invokes
-`deliver` for the reserved key and its existing wake transport. `deliver`
+`deliver` only for an eligible admission/merge request or reserved decision.
+`deliver`
 durably records `effect-start` immediately before the first wake effect and
 then commits `delivered` only from an authoritative receipt. Crash, timeout,
 nonzero, malformed, or response-loss outcomes become permanent
 `ambiguous` records and are never replayed. The monitor records the exact
 continuity key `terminal_type+pr+full_head+source_receipt`, binds CTO
 consumption and next-edge receipts, and treats changed head or terminal type
-as a new key. The hourly task may invoke `hourly-repair` once only when the
-emitted key lacks consumption or next-edge continuity; it must not replay an
-ambiguous or effect-start delivery.
+as a new key. Hourly PR continuity belongs to PM. The monitor may invoke
+`hourly-repair` once only for an eligible gate request that lacks consumption
+or next-edge continuity; it must not turn red-investigation status into a CTO
+wake or replay an ambiguous/effect-start delivery.
 
-Treat the following as hard actionable wakes: code/proof-ready with no
-exact-head CI/E2E admission for 10 minutes; a CI or capture terminal awaiting
-its next release boundary; and a free compatible slot with executable open-PR
-drain work. For every open PR, classify exactly one motion state and include
-`next_action`, `next_owner`, and `wake`. Labels, holds, relays, watching, idle
-slot claims, queued shells, and historical/skipped runs do not satisfy an
-active lane. Emit exceptions first; only a verified clean enumeration may
-report `open_pr_activity_gaps=0`.
+Do not generate automatic CTO wakes for code/proof-ready timers, red CI/E2E or
+capture terminals, or free-slot availability; PM continues that work directly.
+For every open PR, keep the read-only motion classification with
+`next_action`, `next_owner`, and `wake` for PM continuity. Labels, holds,
+relays, watching, idle slot claims, queued shells, and historical/skipped runs
+do not satisfy an active lane. Emit exceptions first; only a verified clean
+enumeration may report `open_pr_activity_gaps=0`.
 
 ### Normalized open-PR motion
 
@@ -116,26 +123,27 @@ For each open PR at its exact current head, classify exactly one of the four
 valid states: `CI_E2E_IN_PROGRESS`, `CAPTURE_IN_PROGRESS`,
 `REPRO_REWORK_IN_PROGRESS`, or `REPRO_REWORK_QUEUED`. `ACTION_REQUIRED`,
 `PROCESS_LIMBO`, `UNKNOWN`, and owner-only/label-only holds are internal
-diagnostics, never stable output. An invalid row must execute or durably route
-its smallest next edge in the same wake; if no safe edge can be established,
-emit a typed `OPEN_PR_FOUR_STATE_INVARIANT_BREACH` naming the attempted edge
-and concrete blocker rather than inventing a fifth state.
+diagnostics, never stable output. An invalid row is a PM-owned PR continuity
+diagnostic: PM resolves its smallest safe next edge in its existing work loop.
+Do not turn it into an automatic CTO wake; keep a typed
+`OPEN_PR_FOUR_STATE_INVARIANT_BREACH` as an internal PM-continuity diagnostic
+only when the state cannot be classified without inventing a fifth state.
 
 Keep `workflow_motion`, `owner_source`, and `hold_reason` separate. Absence of
 a running workflow never implies `owner=unknown`. Every row names
 `next_action`, `next_owner`, and `wake`; a durable exact PM terminal owner is
-used even when no workflow is running. The hourly audit only checks continuity
-of PM terminal -> CTO consumption/next-edge receipts and may repair one missed
+used even when no workflow is running. PM performs the hourly PR continuity
+check. The monitor's audit checks CTO consumption/next-edge continuity only
+for an explicitly requested admission/merge gate and may repair one missed gate
 wake once. It is not the normal mover and cannot create `ACTION_REQUIRED`.
 
-On any control-plane refusal, route the first literal blocker with the exact
-PR, full head, and current labels immediately; do not retry marker shapes,
-owner tuples, projected metadata, review receipts, or alternate commands. The
-receiving CTO wake must either execute/delegate the safe manual edge in that
-same wake or record concrete data-loss, security/privacy, or irreversible harm
-as the reason motion is unsafe. Any degraded/manual bypass uses the shared
-`Native bypass contract (CTO-only, after one high-level refusal)`: this monitor
-only reports/routes it and never performs the mutation.
+On a refusal affecting a PR's CI/E2E processing, keep the first literal
+blocker with exact PR/head evidence in PM-owned continuity; do not retry marker
+shapes, owner tuples, projected metadata, review receipts, or alternate
+commands. PM owns the PR-red next step. Only a refusal of a requested
+admission/merge gate becomes a CTO wake; any degraded/manual bypass still uses the shared
+`Native bypass contract (CTO-only, after one high-level refusal)`. This monitor
+only reports/routes and never performs a mutation.
 
 ## Primary source
 
@@ -288,7 +296,7 @@ cannot classify an event or call `send_message_to_thread` by itself.
 ## Separation of duties and sole wake target
 
 This monitor is a read-only detector and delivery mechanism. Its sole wake
-target is CTO task `01a03236-2e61-71f3-a6a8-3dc24d8c8917`. The receiving task,
+target is CTO task `01a09112-a09c-7361-9a2a-0ada6a4e9dfb`. The receiving task,
 not this monitor, owns `WAKE_SOP.md` consumption and every downstream action.
 
 - The monitor may discover, classify, minimally verify, deduplicate, and send
@@ -299,7 +307,7 @@ not this monitor, owns `WAKE_SOP.md` consumption and every downstream action.
   hotfix, merge, control-plane repair, PM transition, slot operation, GitHub
   mutation, or Slack post. It must not send recovery instructions to PM.
 - Deliver wakes only with the Codex thread-messaging tool to task
-  `01a03236-2e61-71f3-a6a8-3dc24d8c8917`. Do not use `codex exec resume`, a
+  `01a09112-a09c-7361-9a2a-0ada6a4e9dfb`. Do not use `codex exec resume`, a
   subprocess, shell injection, or any mechanism that starts or synchronously
   drives the receiving task.
 - After a successful message-delivery receipt, record delivery and return from
@@ -309,6 +317,15 @@ not this monitor, owns `WAKE_SOP.md` consumption and every downstream action.
 - If thread messaging is unavailable or delivery fails, retain the event as
   undelivered, do not advance its handled watermark, and report monitor
   integrity failure. Never substitute direct processing for failed delivery.
+
+### #heydonna-dev CTO wake eligibility (Rajiv 2026-09-27)
+
+For a Slack-derived `#heydonna-dev` event, deliver a wake to CTO Decisions only
+when the current source message explicitly mentions `<@U0BNFGX2UAX>` and requests
+an eligible CTO action. Unmentioned bot alerts/status and PM continuity updates
+are not CTO wakes. Never infer a mention from the parent, quoted text, preview,
+or display name. Direct CTO DMs remain on their separate relay route; this
+consumer rule does not change bridge ingress or routing.
 
 ## CTO Slack DM exclusion
 
@@ -378,8 +395,8 @@ and visible text.
   sets `monitor_integrity_failure=true`.
 - On first adoption, scan from the configured adoption watermark rather than
   from zero. Classify already-merged or head-superseded historical handoffs as
-  consumed/superseded after live verification; wake every still-current open
-  handoff.
+  consumed/superseded after live verification; wake only still-current explicit
+  admission/merge requests or reserved decisions.
 - Routine heartbeats, healthy status reports, acknowledgements, and messages
   with no CTO/product/merge authority boundary are `IGNORE` after
   classification. Do not forward the whole DM stream.
@@ -399,15 +416,14 @@ suppress the JSONL wake.
 
 ### Slack channel reply scan (degraded-secondary fallback)
 
-The per-tick automation also requires scanning `#heydonna-dev` top-level roots
-authored by Rajiv (`UEQTTB97A`) or Abhijit CTO (`U0BNFGX2UAX`) and PM replies
-under those roots since the reply watermark. The Abhijit source exclusion above
-applies to CTO DMs and mention ingress, not to discovery of CTO-authored audit or
-decision roots whose downstream PM replies this monitor owns. Dynamically add
-every newly discovered eligible root before scanning its replies; never rely
-only on the pre-seeded root registry. If the in-thread Slack history/MCP tool is
-unavailable, use the repo-local read-only curl path exactly as in the postback
-skill:
+The per-tick automation may scan `#heydonna-dev` roots authored by Rajiv
+(`UEQTTB97A`) or Abhijit CTO (`U0BNFGX2UAX`) and PM replies under those roots
+for PM continuity. Reading a root or reply does not itself authorize a CTO
+wake: the current source message must explicitly mention `<@U0BNFGX2UAX>` and
+request an eligible CTO action under the rule above. Dynamically add newly
+discovered roots needed for PM continuity; never rely only on the pre-seeded
+root registry. If the in-thread Slack history/MCP tool is unavailable, use the
+repo-local read-only curl path exactly as in the postback skill:
 
 ```bash
 set -a
@@ -777,10 +793,10 @@ For every candidate involving a numbered slot:
    report whose tuple already changed is stale and must be suppressed or
    reclassified.
 3. Before waking on a free or incompletely populated MoP row, inspect the live
-   process tree for a canonical per-slot transition already in progress,
-   including `pm-transition.sh assign`, `assign-rework`,
-   `ci-repro-dispatch`, `reconcile-capacity`, or a `slot-dispatch-sweep` child
-   targeting that slot. While such a command is live and within its 120-second
+   process tree for a canonical per-slot transition already in progress
+   (a slot assignment, rework dispatch, capacity reconciliation, or dispatch
+   sweep) targeting that slot. The legacy pm-transition/pm-state helper
+   scripts are retired (Rajiv 2026-09-21) and are never expected to appear. While such a command is live and within its 120-second
    transition SLA, classify the sample `IGNORE` and wait for its terminal
    result. A transition may temporarily move through free, owner-only, or
    owner-without-head/turn states; none is independently wake-worthy while the

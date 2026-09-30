@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 
-CTO_DECISIONS_TASK = "01a03236-2e61-71f3-a6a8-3dc24d8c8917"
+CTO_DECISIONS_TASK = "01a09112-a09c-7361-9a2a-0ada6a4e9dfb"
 DEFAULT_STDIO_HELPER = Path(
     "/Users/rajiv/.codex/skills/codex-stdio-send-message/scripts/send_message.py"
 )

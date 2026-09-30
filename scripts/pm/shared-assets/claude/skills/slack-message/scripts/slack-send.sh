@@ -451,7 +451,40 @@ fi
 
 # Get message text
 if [ "$FROM_STDIN" = true ]; then
-  MESSAGE=$(cat)
+  # -f means "read the message body from STDIN" and takes NO argument.
+  # `slack-send.sh -f /path/to/file` leaves the path as a leftover positional
+  # and then blocks forever on `cat` because stdin never arrives — no error,
+  # no output, no timeout (three PM->CTO messages were silently lost this way).
+  # Fail fast when stdin is a terminal, and bound the read otherwise.
+  if [ -t 0 ]; then
+    echo "ERROR: -f reads the message body from STDIN, but stdin is a terminal." >&2
+    echo "       -f takes NO argument. Use a redirect or a pipe:" >&2
+    echo "         slack-send.sh -c <CHAN> -t <TS> -f < body.txt" >&2
+    echo "         cat body.txt | slack-send.sh -c <CHAN> -t <TS> -f" >&2
+    exit 2
+  fi
+  STDIN_TIMEOUT="${SLACK_SEND_STDIN_TIMEOUT:-30}"
+  if command -v timeout >/dev/null 2>&1; then
+    MESSAGE=$(timeout "$STDIN_TIMEOUT" cat) || {
+      echo "ERROR: slack-send.sh -f timed out after ${STDIN_TIMEOUT}s waiting on stdin — NOTHING was sent." >&2
+      exit 3
+    }
+  elif command -v gtimeout >/dev/null 2>&1; then
+    MESSAGE=$(gtimeout "$STDIN_TIMEOUT" cat) || {
+      echo "ERROR: slack-send.sh -f timed out after ${STDIN_TIMEOUT}s waiting on stdin — NOTHING was sent." >&2
+      exit 3
+    }
+  else
+    # No timeout(1) available (bare macOS). Guard with a read deadline so an
+    # never-closing stdin still cannot hang forever.
+    MESSAGE=""
+    while IFS= read -r -t "$STDIN_TIMEOUT" _line; do
+      MESSAGE+="$_line"$'\n'
+    done || {
+      echo "ERROR: slack-send.sh -f timed out after ${STDIN_TIMEOUT}s waiting on stdin — NOTHING was sent." >&2
+      exit 3
+    }
+  fi
 elif [ $# -gt 0 ]; then
   MESSAGE="$*"
 else
@@ -816,7 +849,23 @@ if blocks is None:
         blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': chunk}} for chunk in chunks]
 
 # Fallback text for notifications: strip table pipes for readability.
-fallback_text = text[:3000]
+#
+# This carries the WHOLE body, not a 3000-char prefix. Slack's text field
+# accepts far more than 3000 characters, and a bot consumer reads THIS field
+# rather than the blocks -- so capping it here silently truncated the tail of
+# every brief over 3000 chars for every bot reader, while the send still
+# returned a success timestamp. Bound only by Slack's own ~40k ceiling, and
+# fail loudly there rather than silently cutting the tail.
+#
+# WARNING: this whole block is BASH, not Python -- it lives inside the
+# python3 -c double-quoted argument at the invocation above. Do NOT write a
+# backtick character or a dollar-paren command substitution anywhere in these
+# comments: bash performs command substitution inside double quotes, so the
+# contents would be EXECUTED as a command. An earlier edit of this comment
+# wrapped the field names in backtick characters and silently ran them
+# (text/blocks: command not found). Use plain words, or chr(96) in Python code
+# if a literal backtick character is genuinely required.
+fallback_text = text if len(text) <= 39000 else text[:39000]
 
 payload = {
     'channel': channel,

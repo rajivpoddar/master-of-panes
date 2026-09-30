@@ -6,6 +6,18 @@ they must not define competing ownership or state machines.
 
 ## Routine motion and ownership
 
+PM executes routine scheduling, lifecycle, and conveyor actions under approved
+priorities and safety rules. CTO executes routine technical diagnosis,
+bounded repro/rework/repair, same-owner continuation, reviewed publication,
+and normal CI/capture/merge/rollout. Choosing among eligible actions is not a
+process-policy change. Escalate only customer/product behavior or acceptance
+changes, operating-policy changes or waivers, material reprioritization or
+cost changes, explicit access-scope restrictions, destructive/high-risk
+actions, or reserved release exceptions (including a red required-workflow
+merge). PM sends genuine decisions to CTO; only CTO DMs Rajiv. User-authorized
+repairs continue through proof, warranted independent review, publication, and
+scoped install under standing authority without another approval hop.
+
 - A numbered slot owns only work executable now: implementation,
   reproduction, or production-shaped proof. CI, capture, review, decisions,
   and external waits are off-slot.
@@ -22,6 +34,23 @@ they must not define competing ownership or state machines.
   head-pinned merge. PM may report evidence and status for these actions, but
   does not execute them. Every nonterminal state names `next_action`,
   `next_owner`, and `wake`.
+- CI/E2E admission always uses a PR head that contains the exact current
+  `origin/main`; non-overlap is not an admission exemption. When needed, the
+  release owner performs one ordinary conflict-free non-force main merge,
+  preserves the reviewed delta, pushes with an exact old-head lease, and
+  re-fences before triggering the exact-head pair.
+- If main advances after admission, the final merge checks only the later
+  main-only delta for path and runtime/test/build/generated/schema/migration/
+  dependency/behavioral/release-proof overlap. Unrelated later commits do not
+  invalidate genuine exact-head CI/E2E. Overlap or ambiguity requires another
+  current-main integration and fresh exact-head evidence. The final guarded,
+  head-pinned merge occurs after admission; admission itself never merges the
+  PR to main.
+- Every canonical pre-merge-guard or head-pinned-merge refusal is escalated
+  once to Rajiv by DM with the exact PR/head/main tuple, literal refusal,
+  evidence, and one recommended disposition. Identical refusal tuples are
+  deduplicated. The DM reports the refusal; an override still requires Rajiv's
+  explicit decision.
 - Every PM-owned terminal emits exactly one bounded `PM_CTO_TERMINAL` envelope
   in the canonical PM Slack thread. The envelope is not prose, a `PM_WAIT`, a
   label projection, or an hourly-audit dependency. It contains
@@ -59,8 +88,8 @@ they must not define competing ownership or state machines.
    `CONTROL_PLANE` repair proceeds.
 2. CTO sends one exact implementation brief to the task matching the repair
    affinity. Shared release/control-plane work outside MoP affinity goes to CP
-   Repairs task `01a0324b-68e0-7491-988f-e7da9abd26ab`. Master of Panes and PM
-   Operator work goes to MoP task `01a04154-c9c1-7bc1-8f7b-009a87bc7628`.
+   Repairs task `01a08f69-45db-71c2-b433-678419139ed7`. Master of Panes and PM
+   Operator work goes to MoP task `01a0d779-9a74-7f52-89ad-167910930d27`.
    Exactly one task owns implementation and rollout for the repair.
 3. The implementation task uses a clean exact-current-main worktree, makes the
    smallest change, proves RED/GREEN and fail-closed negatives, and returns an
@@ -68,7 +97,7 @@ they must not define competing ownership or state machines.
    rollout, rollback, and no-mutation inventory to CTO Decisions through
    renderer-free stdio. It does not use a numbered product slot or inform PM.
 4. CTO Decisions sends that exact candidate once to PR Reviews task
-   `01a03265-4b66-7672-bbc2-4a38fb1005b5`. PR Reviews performs the single
+   `01a0b53e-3316-77d3-9610-1c0c58d4ba5b`. PR Reviews performs the single
    functionality-first independent review and returns `APPROVE`, `REVISE`, or
    `BLOCK` to CTO Decisions. CTO Decisions does not perform the review.
 5. `REVISE` or `BLOCK` sends one bounded correction back to the same
