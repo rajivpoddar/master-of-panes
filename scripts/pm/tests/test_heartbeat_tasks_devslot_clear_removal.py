@@ -135,7 +135,8 @@ class HeartbeatTasksDevSlotClearRemovalTests(unittest.TestCase):
 
     def test_three_hour_cadence_still_invokes_the_skill(self) -> None:
         cadence = (ROOT / "src" / "pmCadence.ts").read_text(encoding="utf-8")
-        self.assertIn("Invoke Skill(heartbeat-tasks)", cadence)
+        # One-line inject (69b9035): "MoP: run Skill(heartbeat-tasks) now with a background agent."
+        self.assertIn("run Skill(heartbeat-tasks) now", cadence)
 
     def test_canonical_source_is_manifest_mapped_to_the_resolver_target(self) -> None:
         rows = [r for r in self.manifest["entries"] if r["source_path"] == "claude/skills/heartbeat-tasks/SKILL.md"]
