@@ -13,6 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts/pm/shared-assets/claude/scripts/launch-dev-slot-claude.sh"
+# The launcher passes the slot identity rule as an appended system prompt (slot 5 = Revati).
+RULE = "/Users/rajiv/.claude/dev-slot-rules/22-slot-revati.md"
 
 
 class FreshSlotSessionTest(unittest.TestCase):
@@ -42,9 +44,14 @@ class FreshSlotSessionTest(unittest.TestCase):
             "\"${ANTHROPIC_DEFAULT_SONNET_MODEL:-}\" \"${ANTHROPIC_BASE_URL:-}\" >> \"$CLAUDE_ENV_LOG\"\n",
             encoding="utf-8",
         )
+        (self.bin / "curl").write_text(
+            "#!/bin/sh\n"
+            "printf '%s' '{\"data\":[{\"id\":\"ling-3.0-flash\"}]}'\n",
+            encoding="utf-8",
+        )
         self.sync = self.root / "sync.sh"
         self.sync.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        for path in (self.bin / "uuidgen", self.bin / "claude", self.sync):
+        for path in (self.bin / "uuidgen", self.bin / "claude", self.bin / "curl", self.sync):
             path.chmod(path.stat().st_mode | stat.S_IXUSR)
         self.key = self.root / "spark-key"
         self.key.write_text("test-key\n", encoding="utf-8")
@@ -79,9 +86,11 @@ class FreshSlotSessionTest(unittest.TestCase):
         argv = self.log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(argv, [
             "--model", "ornith-1.5-35b-a3b", "--effort", "low",
+            "--append-system-prompt-file", RULE,
             "--permission-mode", "bypassPermissions", "--session-id",
             "11111111-1111-4111-8111-111111111111",
             "--model", "ornith-1.5-35b-a3b", "--effort", "low",
+            "--append-system-prompt-file", RULE,
             "--permission-mode", "bypassPermissions", "--session-id",
             "22222222-2222-4222-8222-222222222222",
         ])
@@ -93,9 +102,11 @@ class FreshSlotSessionTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
             "--model", "ornith-1.5-35b-a3b", "--effort", "low",
+            "--append-system-prompt-file", RULE,
             "--permission-mode", "bypassPermissions", "--continue",
             "--session-id", "11111111-1111-4111-8111-111111111111",
             "--model", "ornith-1.5-35b-a3b", "--effort", "low",
+            "--append-system-prompt-file", RULE,
             "--permission-mode", "bypassPermissions", "--session-id",
             "22222222-2222-4222-8222-222222222222", "--continue",
         ])
@@ -105,6 +116,7 @@ class FreshSlotSessionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
             "--model", "ling-3.0-flash", "--effort", "low",
+            "--append-system-prompt-file", RULE,
             "--permission-mode", "bypassPermissions", "--continue",
         ])
         self.assertEqual(
@@ -117,6 +129,7 @@ class FreshSlotSessionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
             "--model", "ornstein3.8-27b", "--effort", "low",
+            "--append-system-prompt-file", RULE,
             "--permission-mode", "bypassPermissions", "--continue",
         ])
         self.assertEqual(
@@ -127,7 +140,7 @@ class FreshSlotSessionTest(unittest.TestCase):
     def test_unknown_spark_profile_fails_before_claude_launch(self) -> None:
         result = self.run_launcher("--spark-profile=unknown")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("unsupported Spark profile", result.stderr)
+        self.assertIn("unsupported profile", result.stderr)
         self.assertFalse(self.log.exists())
 
     def test_fresh_launch_rejects_fixed_session_id(self) -> None:
