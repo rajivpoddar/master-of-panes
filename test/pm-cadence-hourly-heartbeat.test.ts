@@ -30,10 +30,25 @@ test("hourly heartbeat is a cadence task that invokes Skill(hourly-heartbeat) in
   const hourly = cadence.getStatus().tasks.find((task) => task.task === "hourly-heartbeat");
   assert.ok(hourly);
   assert.equal(hourly.label, "1h heartbeat");
-  assert.match(hourly.command, /Invoke Skill\(hourly-heartbeat\)/);
-  assert.match(hourly.command, /run_in_background=true/);
+  // Pinned exact one-line injects (Rajiv 2026-09-29 20:15 IST, DM 1790693148.609479).
+  // The old multi-line "1h/3h heartbeat due ... Invoke Skill(...)" text regressed once
+  // when a release was rebuilt from a branch that lacked this change.
+  assert.equal(hourly.command, "MoP: run Skill(hourly-heartbeat) now with a background agent.");
   const heartbeat = cadence.getStatus().tasks.find((task) => task.task === "heartbeat");
-  assert.match(heartbeat!.command, /Invoke Skill\(heartbeat-tasks\)/);
+  assert.equal(heartbeat!.command, "MoP: run Skill(heartbeat-tasks) now with a background agent.");
+  assert.equal(hourly.command.includes("\n"), false);
+  assert.equal(heartbeat!.command.includes("\n"), false);
+});
+
+test("hourly and 3h heartbeat injects delivered to the PM are the pinned one-line texts", async () => {
+  const relay = new FakeRelay();
+  const cadence = new PMCadenceScheduler(new FakeMopDb() as never, relay as never);
+  await cadence.runManual("hourly-heartbeat");
+  await cadence.runManual("heartbeat");
+  assert.deepEqual(relay.injections, [
+    "MoP: run Skill(hourly-heartbeat) now with a background agent.",
+    "MoP: run Skill(heartbeat-tasks) now with a background agent.",
+  ]);
 });
 
 test("hourly due key is per local hour and fires only from :13", () => {
