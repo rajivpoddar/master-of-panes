@@ -36,16 +36,36 @@ TEAM = {
     "UEQTTB97A": "Rajiv",
     "U09L1CTGP9T": "Abi",
 }
+# The PM bot ("Dhurva PM") posts as user U0ALEAYCAUT and also carries this bot_id. Real thread
+# replies have both, but a bot_message-shaped post can carry only bot_id, so match either.
+TEAM_BOT_IDS = {"B0ALH9R1LRK": "PM"}
 IST = timezone(timedelta(hours=5, minutes=30))
 LINK_RE = re.compile(r"(?<![\w/])#(\d{3,5})\b|github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/(\d+)")
 # A requester's short closing message after a team reply does not reopen a thread.
-# Must match the COMPLETE (trimmed) message -- a continuation like "Thanks, but it
-# still does not work" is not an acknowledgement and must not be dropped (Codex #7 P1).
+# A bare acknowledgement must match the COMPLETE (trimmed, mention-stripped) message -- a
+# continuation like "Thanks, but it still does not work" is not an acknowledgement and must
+# not be dropped (Codex #7 P1).
 ACK_RE = re.compile(
     r"^\W*(ok(ay)?|thanks?|thank you|thx|great|perfect|got it|yes|cool|sounds good|"
     r"(that|it) worked|will do|awesome|noted)[!.\s]*$",
     re.IGNORECASE,
 )
+# Real closings are rarely bare: "I turned it on and it worked. thank you!" (thanks at the end) or
+# "<@PM> Was able to create both projects." (answers the PM's follow-up question). A short
+# message with a thanks/resolved cue and NO question, contrast, negation or new-request cue is a
+# closing; anything else stays needs_reply (the safe side: a missed closing is only noise).
+MENTION_RE = re.compile(r"<[@!][^>]*>")
+CLOSING_CUE_RE = re.compile(
+    r"\b(thanks?|thank you|thx|cheers|appreciate\w*|worked|went through|fixed|resolved|solved|sorted|"
+    r"all set|(?:was|were) able to|that did it)\b",
+    re.IGNORECASE,
+)
+REOPEN_CUE_RE = re.compile(
+    r"\?|n['\u2019]t\b|\b(but|however|although|though|still|not|never|nothing|cannot|unable|fail\w*|"
+    r"error|broken|wrong|issue|problem|stuck|yet|also|another|please|pls|need|want)\b|\b(can|could|would) you\b",
+    re.IGNORECASE,
+)
+CLOSING_MAX_CHARS = 100
 MAIN_CHECKOUT = Path.home() / "Downloads/projects/heydonna-app"
 OPEN_STATE = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/support-inbox-open.json"
 
@@ -69,8 +89,23 @@ def needs_reply_threshold_minutes(now: datetime) -> int:
     return 60 if business else 180
 
 
+def team_name(msg: dict) -> str | None:
+    """Team display name for a message, by Slack user id or by the PM bot's bot_id."""
+    return TEAM.get(msg.get("user")) or TEAM_BOT_IDS.get(msg.get("bot_id"))
+
+
 def is_team(msg: dict) -> bool:
-    return msg.get("user") in TEAM
+    return team_name(msg) is not None
+
+
+def is_closing_ack(text: str) -> bool:
+    """Pure: True when a requester message only closes the thread (thanks / it worked / done)."""
+    body = " ".join(MENTION_RE.sub(" ", text or "").split())
+    if not body or len(body) > CLOSING_MAX_CHARS:
+        return False
+    if ACK_RE.match(body):
+        return True
+    return not REOPEN_CUE_RE.search(body) and bool(CLOSING_CUE_RE.search(body))
 
 
 def is_human(msg: dict) -> bool:
@@ -86,7 +121,7 @@ def classify_thread(messages: list[dict], now_ts: float) -> dict | None:
         return None
     root = messages[0]
     requester = root.get("user")
-    if not is_human(root) or (requester in TEAM and requester != "U09L1CTGP9T"):
+    if not is_human(root) or (is_team(root) and requester != "U09L1CTGP9T"):
         # Team-started threads (except Abi, who relays Scribie users) are not support asks.
         return None
     humans = [m for m in messages if is_human(m)]
@@ -95,8 +130,7 @@ def classify_thread(messages: list[dict], now_ts: float) -> dict | None:
     while (
         len(effective) > 1
         and effective[-1].get("user") == requester
-        and len(effective[-1].get("text") or "") <= 80
-        and ACK_RE.match(effective[-1].get("text") or "")
+        and is_closing_ack(effective[-1].get("text") or "")
         and any(is_team(m) and m.get("user") != requester for m in effective[:-1])
     ):
         effective.pop()
@@ -109,7 +143,7 @@ def classify_thread(messages: list[dict], now_ts: float) -> dict | None:
         "ts": root["ts"],
         "requester": requester,
         "state": "answered" if answered else "needs_reply",
-        "answered_by": TEAM.get(last.get("user")) if answered else None,
+        "answered_by": team_name(last) if answered else None,
         "answered_at": float(last["ts"]) if answered else None,
         "age_min": int((now_ts - last_requester_ts) / 60),
         "links": links,

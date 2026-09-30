@@ -498,3 +498,117 @@ def test_error_users_count_by_userid_not_sentinel_email():
     ext = axiom.ERROR_CODE_EXTEND
     assert "case(isnotempty(uid)" in ext and "'not_collected'" in ext and "'none'" in ext
     assert ext.index("uid, isnotempty(em)") > 0  # userId branch precedes email fallback
+
+
+# --- PM-bot replies + closing thanks (false "needs_reply" on answered threads, 2026-09-30) ---------
+# Sanitized shapes of the two real threads. The PM bot posts as user U0ALEAYCAUT *and* carries
+# bot_id/app_id/bot_profile; requester closings are synthetic paraphrases (no customer text).
+
+PM_ID = "U0ALEAYCAUT"
+ABI = "U09L1CTGP9T"
+
+
+def _pm_bot(ts, text, requester, **extra):
+    d = {
+        "type": "message", "user": PM_ID, "bot_id": "B0ALH9R1LRK", "app_id": "A0ALQA1BVLL",
+        "bot_profile": {"id": "B0ALH9R1LRK", "name": "Dhurva PM", "app_id": "A0ALQA1BVLL", "deleted": False},
+        "parent_user_id": requester, "ts": f"{ts}.000000", "text": text,
+    }
+    d.update(extra)
+    return d
+
+
+def _req(user, ts, text):
+    return {"type": "message", "user": user, "client_msg_id": f"m{ts}", "ts": f"{ts}.000000", "text": text}
+
+
+def test_feedback_thread_pm_bot_reply_then_closing_thanks_is_answered():
+    # #heydonna-feedback shape: root, PM bot reply, requester closes with "... it worked. thank you!"
+    msgs = [
+        _req(CUST, 1000, "Is there an autocorrect feature?"),
+        _pm_bot(1100, "Yes, under Settings > Text replacement.", CUST),
+        _req(CUST, 1900, "I turned it on and it worked. thank you!"),
+    ]
+    t = support.classify_thread(msgs, 1900 + 79 * 60)
+    assert t["state"] == "answered" and t["answered_by"] == "PM"
+
+
+def test_pm_channel_thread_abi_root_pm_bot_replies_then_closing_confirmation_is_answered():
+    # #heydonna-pm shape: Abi (in TEAM) is the requester; mention-prefixed closings after PM bot replies.
+    msgs = [
+        _req(ABI, 1000, "Got an error creating a project"),
+        _pm_bot(1010, "Got it, looking.", ABI),
+        _req(ABI, 1400, "Same error on the second file"),
+        _pm_bot(2000, "Fixed, please retry.", ABI),
+        _req(ABI, 3000, f"<@{PM_ID}> thanks for this, I re-ran it and it went through"),
+        _pm_bot(3010, "Thanks Abi, glad it went through. Did the second file also create fine?", ABI),
+        _req(ABI, 3050, f"<@{PM_ID}> Was able to create both projects."),
+    ]
+    t = support.classify_thread(msgs, 3050 + 183 * 60)
+    assert t["state"] == "answered" and t["answered_by"] == "PM"
+    assert support.select_items([t], 3050 + 183 * 60 + 1) == []  # answered + stale -> not reported
+
+
+def test_bot_id_only_pm_reply_counts_as_answer():
+    # Defensive: a bot_message-shaped post from the PM bot carries bot_id but no user.
+    reply = {"type": "message", "subtype": "bot_message", "bot_id": "B0ALH9R1LRK", "username": "Dhurva PM",
+             "ts": "1100.000000", "text": "Fixed."}
+    t = support.classify_thread([_req(CUST, 1000, "export blank"), reply], 2000)
+    assert t["state"] == "answered" and t["answered_by"] == "PM"
+    # ...and a bot_id-only PM post is never a support root.
+    assert support.classify_thread([reply], 2000) is None
+
+
+@pytest.mark.parametrize("text", [
+    "It worked!",
+    "thanks",
+    "Thank you!",
+    "I tried that and it worked. thank you!",
+    f"<@{PM_ID}> thanks for this, I re-ran it and it went through",
+    f"<@{PM_ID}> Was able to create both projects.",
+    "Perfect, thanks a lot for the quick fix",
+    "all set, appreciate the help",
+])
+def test_closing_ack_recognised(text):
+    assert support.is_closing_ack(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Thanks, but it still does not work",                                   # Codex #7 P1
+    "It worked for the first file but not the second",
+    "thanks! can you also check the second file?",
+    "that worked, however the export is blank",
+    "thanks. the second file failed with an error",
+    "Yes, it is about 40 pages",                                            # bare 'yes' + new info
+    "still broken",
+    "audio won't load",
+    "Thanks. Also please process the attached file and send me the transcript when it is ready tonight.",
+    f"<@{PM_ID}> can you look at this again",
+    "",
+])
+def test_non_closing_messages_still_reopen(text):
+    assert not support.is_closing_ack(text)
+
+
+def test_thanks_with_new_problem_after_pm_reply_stays_needs_reply():
+    msgs = [_req(CUST, 1000, "export blank"), _pm_bot(1100, "Fixed.", CUST),
+            _req(CUST, 1200, "Thanks, but it still does not work")]
+    assert support.classify_thread(msgs, 2000)["state"] == "needs_reply"
+
+
+def test_closing_thanks_without_any_team_reply_does_not_answer():
+    # A lone customer "thanks" must not be swallowed when nobody on the team ever replied.
+    msgs = [_req(CUST, 1000, "export blank"), _req(CUST, 1100, "thanks")]
+    assert support.classify_thread(msgs, 2000)["state"] == "needs_reply"
+
+
+def test_answered_pm_threads_compose_without_needs_reply_or_overdue():
+    feedback = support.classify_thread(
+        [_req(CUST, 1000, "autocorrect?"), _pm_bot(1100, "Yes.", CUST), _req(CUST, 1900, "it worked. thank you!")], 1900 + 79 * 60)
+    pm = support.classify_thread(
+        [_req(ABI, 1000, "error"), _pm_bot(1100, "Fixed?", ABI), _req(ABI, 1200, f"<@{PM_ID}> Was able to create both projects.")], 1200 + 183 * 60)
+    for t, ch in ((feedback, "#heydonna-feedback"), (pm, "#heydonna-pm")):
+        t["channel"] = ch
+    lines, tldr = compose.support_block({"threshold_min": 60, "slack": [feedback, pm], "in_app": []}, "3h")
+    assert tldr == "support answered"
+    assert "NEEDS REPLY" not in "\n".join(lines) and "overdue" not in tldr
