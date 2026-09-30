@@ -10,6 +10,15 @@ import type { TmuxRelay } from "../src/relay.js";
 import { StuckDetector } from "../src/stuck.js";
 import type { EventLogEntry, SlotState } from "../src/types.js";
 
+// This suite exercises the historical 5-minute PM wait-nudge cadence
+// (threshold + REMINDER/FOLLOW_UP/URGENT/ESCALATION tiers at 5/15/30/60
+// minutes). MOP_PM_WAIT_NUDGE_INTERVAL_MS is what production's launchd
+// plist (com.heydonna.mop-server.plist) sets to pin that cadence
+// (300000ms = 5 minutes); pin it here too so this suite's fixed
+// timestamps keep exercising the same tiers regardless of the
+// unset/invalid fallback default.
+process.env.MOP_PM_WAIT_NUDGE_INTERVAL_MS = "300000";
+
 const NOW = Date.parse("2026-07-27T02:30:00.000Z");
 const OLD_IDLE = "2026-07-27T02:24:00.000";
 const NEW_IDLE_PROMPT = "2026-07-27T02:24:30.000";
