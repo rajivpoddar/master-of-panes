@@ -114,7 +114,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops-sync-stop-validator",
-      "sha256": "38f7e7e8a9070cac17a53cae91050ea75ee83466c8619b0d80147b2724d80470",
+      "sha256": "df3de256f4dbee89c3fb35d9273450fcc5cad6aebbee5d7e844b3dc844fded0d",
       "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
     },
     {
@@ -555,7 +555,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "dcea5c3d9d01c5866cd512e9b72da1125f53d56237eda0b238623017ac1ed61b",
+      "sha256": "971440e2722e29362f94e0925e0d764d178ce113f74b317d53f5fd8bc55e1cfa",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -582,7 +582,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "074d0bb1ce822b01a15fcd1e5f71f5e57e0f22199fd139f5d3ebeae4d48cb6d0",
+      "sha256": "cb072f912dc84945c73515cc49cc7805dbc18f60963dd397b6b8964858def0a9",
       "source_path": "claude/scripts/pm/heartbeat/pr-open-snapshot.py"
     },
     {
@@ -620,7 +620,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
-      "sha256": "2d69b98d857db5d4ed8c25aef9ab7df2d8a027c002de4dba8d9e4166f61ce957",
+      "sha256": "3818ecc1d755684f15b0c8062790bf3effe52bd23e793f09d1327a11d23fb7f7",
       "source_path": "claude/scripts/sakshi-heartbeat.sh"
     },
     {

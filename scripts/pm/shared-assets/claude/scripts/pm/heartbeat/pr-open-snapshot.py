@@ -12,10 +12,13 @@ Output (JSON, or --text one line per PR):
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import re
 import subprocess
 import sys
+import urllib.request
+from pathlib import Path
 
 REPO = "heydonna-app/heydonna-app"
 RED = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
@@ -28,6 +31,297 @@ GATES = ("test", "e2e")
 CODEX_LABEL = "pm-blocked:codex"
 CODEX_AUTHOR = re.compile(r"codex", re.I)  # chatgpt-codex-connector and friends
 CODEX_BLOCKING = re.compile(r"\bP[01]\b")  # "![P1 Badge]" etc.
+
+MOP_URL = "http://127.0.0.1:3100/slots"
+# Paths that never need real CI/E2E (Rajiv 2026-09-28/29): a PR touching only
+# these gets a direct CI-exempt merge ask instead of sitting in the PM 12b queue.
+CI_EXEMPT_PREFIXES = ("benchmarks/", "website/", "scripts/ci/hetzner/", "docs/")
+DO_NOT_MERGE_RE = re.compile(r"do not merge", re.IGNORECASE)
+PM_12B_PASS_RE = re.compile(r"PM[ _-]?12b|PM_OPUS_REVIEW:\s*PASS", re.IGNORECASE)
+
+# --- Deterministic every-turn open-PR obligations (Rajiv 2026-09-30 00:58/01:00
+# IST, thread C0ALZJHGE49/1790707604.948989: "the pr's should never get
+# stuck" / "there's already an obligation system we have. reuse that instead
+# of adding a new hook"). Each open, non-draft, non-pm-blocked, non-slot-owned
+# PR gets up to three pm-ops obligation rows (one per concern below), created
+# and resolved through the existing writer so the existing
+# pm-ops-sync-stop-validator Stop hook surfaces them every PM turn like any
+# other due obligation. No new hook, no new cadence.
+PM_OPS_CLI = Path(
+    __import__("os").environ.get("PM_OPS_CLI", str(Path.home() / ".claude/scripts/pm-ops.py"))
+)
+PM_OPS_DB = Path(
+    __import__("os").environ.get(
+        "PM_OPS_DB",
+        str(
+            Path.home()
+            / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db"
+        ),
+    )
+)
+GREEN_MIN_DURATION_SECONDS = 5 * 60
+OBLIGATION_KINDS = ("pr_admission", "pr_red_unowned", "pr_merge_ask")
+# PM claims ownership of an in-flight PR obligation (e.g. right after
+# launching ci-repair-agent on a red PR) with the one-liner documented in
+# .claude/rules/20-buddhi-pm.md §12b -- --owner names the claimant and
+# --suppress-until stops the existing pm-ops-sync-stop-validator Stop hook
+# from re-surfacing the row while the claim is fresh. A claim is fresh for
+# OWNER_CLAIM_TTL_SECONDS; while fresh, this producer additionally leaves the
+# row alone (no upsert) instead of treating it as still-unowned, so it never
+# clobbers the claim on the next hourly/3h/every-stop sync pass. See
+# sync_pr_obligations().
+OWNER_CLAIM_TTL_SECONDS = 60 * 60
+
+
+def _iso_duration_seconds(started: str, completed_at: str) -> float:
+    try:
+        def parse(value: str) -> "datetime.datetime":
+            return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        return (parse(completed_at) - parse(started)).total_seconds()
+    except Exception:
+        return 0.0
+
+
+def gate_state(pr: dict) -> dict:
+    """Pure: required-gate (GATES) red/green-with-duration state for one PR."""
+    checks = summarize_checks(pr.get("statusCheckRollup") or [])
+    required_red = [n for n in checks["red"] if n in GATES]
+    gate_durations_ok = set()
+    for check in pr.get("statusCheckRollup") or []:
+        name, value = _check_result(check)
+        if name not in GATES or value != "SUCCESS":
+            continue
+        started, completed_at = check.get("startedAt"), check.get("completedAt")
+        if isinstance(started, str) and isinstance(completed_at, str):
+            if _iso_duration_seconds(started, completed_at) >= GREEN_MIN_DURATION_SECONDS:
+                gate_durations_ok.add(name)
+    green_ready = all(g in checks["green"] and g in gate_durations_ok for g in GATES)
+    return {"required_red": required_red, "green_ready": green_ready}
+
+
+def _obligation_upsert(*, kind: str, pr: int, head: str, title: str, action: str, owner: str | None = None) -> None:
+    if not PM_OPS_CLI.is_file():
+        return
+    argv = [
+        sys.executable, str(PM_OPS_CLI), "obligation-upsert",
+        "--kind", kind,
+        "--severity", "high",
+        "--horizon", "hourly",
+        "--target-type", "github_pr",
+        "--target-id", str(pr),
+        "--pr", str(pr),
+        "--title", title[:200],
+        "--action", action,
+        "--evidence-json", json.dumps({"pm_stop_actionable": True, "head": head}),
+    ]
+    if owner:
+        argv += ["--owner", owner]
+    try:
+        subprocess.run(argv, capture_output=True, text=True, timeout=20, check=False)
+    except Exception:
+        pass
+
+
+def _existing_obligation(kind: str, pr: int) -> dict | None:
+    """Read-only lookup of the current open (kind, pr) row, or None.
+
+    Used only to detect an agent's ownership claim before deciding whether to
+    upsert. Never mutates; failures return None (fail open -> treat as
+    unclaimed, same as today).
+    """
+    if not PM_OPS_DB.is_file():
+        return None
+    try:
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{PM_OPS_DB}?mode=ro", uri=True, timeout=2)
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            """
+            SELECT owner, updated_at FROM obligations
+            WHERE status='open' AND kind=? AND pr=?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (kind, pr),
+        ).fetchone()
+        con.close()
+    except Exception:
+        return None
+    return dict(row) if row else None
+
+
+def _is_fresh_owner_claim(row: dict | None) -> bool:
+    """True when `row` records a non-PM owner claimed within the TTL."""
+    if not row:
+        return False
+    owner = (row.get("owner") or "").strip()
+    if not owner or owner.lower() == "pm":
+        return False
+    updated_at = row.get("updated_at")
+    if not isinstance(updated_at, str) or not updated_at:
+        return False
+    try:
+        parsed = datetime.datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        age = (datetime.datetime.now(datetime.timezone.utc) - parsed).total_seconds()
+    except Exception:
+        return False
+    return 0 <= age <= OWNER_CLAIM_TTL_SECONDS
+
+
+def _obligation_resolve(*, kind: str, pr: int, reason: str) -> None:
+    if not PM_OPS_CLI.is_file():
+        return
+    try:
+        subprocess.run(
+            [
+                sys.executable, str(PM_OPS_CLI), "obligation-resolve",
+                "--kind", kind,
+                "--target-type", "github_pr",
+                "--target-id", str(pr),
+                "--pr", str(pr),
+                "--reason", reason,
+            ],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except Exception:
+        pass  # best-effort: no matching open row is not an error here
+
+
+def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
+    """Create/resolve pr_admission|pr_red_unowned|pr_merge_ask obligations.
+
+    Fails open: any gh/pm-ops error must never raise; a skipped sync just
+    means the Stop hook's next due-obligation pass is unchanged, never a
+    block storm. Returns the list of {pr, kind, action} rows actually
+    upserted, for callers that want to report what was created.
+    """
+    created: list[dict] = []
+    seen_open_prs: set[int] = set()
+    for pr in prs:
+        number = pr.get("number")
+        head = pr.get("headRefOid") or ""
+        if not isinstance(number, int) or not head:
+            continue
+        seen_open_prs.add(number)
+        labels = [label.get("name", "") for label in pr.get("labels", [])]
+        blocked = any(x.startswith("pm-blocked:") for x in labels)
+        owned = bool(pr.get("isDraft")) or blocked or number in mop_owned_prs
+        title = (pr.get("title") or "")[:60]
+
+        if owned:
+            # Owned/blocked/draft: an in-flight obligation for this PR is no
+            # longer PM's to chase; resolve any that are still open.
+            for kind in OBLIGATION_KINDS:
+                _obligation_resolve(kind=kind, pr=number, reason="owned_by_slot_or_blocked_or_draft")
+            continue
+
+        admitted = f"ci-head:{head}" in labels
+        gates = gate_state(pr)
+
+        if not admitted:
+            if _is_fresh_owner_claim(_existing_obligation("pr_admission", number)):
+                pass  # claimed by an agent within the TTL: leave it alone, don't re-flag
+            else:
+                _obligation_upsert(
+                    kind="pr_admission", pr=number, head=head, title=f"PR #{number} not admitted: {title}",
+                    action="launch pm-admission-reviewer now (PASS -> pm-admit-ci.sh same turn)",
+                    owner="PM",
+                )
+                created.append({"pr": number, "kind": "pr_admission"})
+        else:
+            _obligation_resolve(kind="pr_admission", pr=number, reason="ci-head_matches_current_head")
+
+        if gates["required_red"]:
+            if _is_fresh_owner_claim(_existing_obligation("pr_red_unowned", number)):
+                pass  # e.g. ci-repair-agent already claimed this PR/head
+            else:
+                _obligation_upsert(
+                    kind="pr_red_unowned", pr=number, head=head,
+                    title=f"PR #{number} red at {head[:12]}: {title}",
+                    action="ci-repair-agent / e2e-failure-investigator / slot repro",
+                )
+                created.append({"pr": number, "kind": "pr_red_unowned"})
+        else:
+            _obligation_resolve(kind="pr_red_unowned", pr=number, reason="required_gates_not_red")
+
+        if admitted and gates["green_ready"] and not gates["required_red"]:
+            if _is_fresh_owner_claim(_existing_obligation("pr_merge_ask", number)):
+                pass
+            else:
+                _obligation_upsert(
+                    kind="pr_merge_ask", pr=number, head=head,
+                    title=f"PR #{number} green, no merge ask: {title}",
+                    action="send the exact-head merge ask to CTO now",
+                )
+                created.append({"pr": number, "kind": "pr_merge_ask"})
+        else:
+            _obligation_resolve(kind="pr_merge_ask", pr=number, reason="not_green_or_not_admitted")
+
+    _resolve_stale_pr_obligations(seen_open_prs)
+    return created
+
+
+def _resolve_stale_pr_obligations(seen_open_prs: set[int]) -> None:
+    """Resolve pr_* obligations for PRs no longer open (merged/closed).
+
+    Read-only DB lookup to find candidates; the actual resolve still goes
+    through the canonical obligation-resolve CLI. Best-effort: any failure
+    here is silently skipped, never raised.
+    """
+    db_path = Path(
+        __import__("os").environ.get(
+            "PM_OPS_DB",
+            str(
+                Path.home()
+                / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db"
+            ),
+        )
+    )
+    if not db_path.is_file():
+        return
+    try:
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        con.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in OBLIGATION_KINDS)
+        rows = con.execute(
+            f"""
+            SELECT DISTINCT pr FROM obligations
+            WHERE status='open' AND kind IN ({placeholders}) AND pr IS NOT NULL
+            """,
+            OBLIGATION_KINDS,
+        ).fetchall()
+        con.close()
+    except Exception:
+        return
+    for row in rows:
+        try:
+            pr_number = int(row["pr"])
+        except Exception:
+            continue
+        if pr_number in seen_open_prs:
+            continue
+        for kind in OBLIGATION_KINDS:
+            _obligation_resolve(kind=kind, pr=pr_number, reason="pr_no_longer_open")
+
+
+def fetch_mop_owned_prs() -> set[int]:
+    """PR numbers a live MoP slot is actively reworking. Best-effort: MoP down -> empty set."""
+    try:
+        with urllib.request.urlopen(MOP_URL, timeout=3) as resp:
+            data = json.load(resp)
+    except Exception:
+        return set()
+    owned = set()
+    for slot in data.get("slots", []):
+        pr = slot.get("pr")
+        if isinstance(pr, int):
+            owned.add(pr)
+    return owned
 
 
 def _check_result(check: dict) -> tuple[str, str]:
@@ -73,8 +367,21 @@ def codex_threads(threads: list[dict] | None) -> dict | None:
     return {"live": live, "outdated": outdated}
 
 
-def classify_pr(pr: dict) -> dict:
-    """Pure: one PR -> state/owner/next from live head checks and labels."""
+def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None) -> dict:
+    """Pure: one PR -> state/owner/next from live head checks, labels, body and comments.
+
+    Priority order for `next` (Rajiv 2026-09-29: too many PRs were reported as
+    "waiting for PM review" when most were actually slot rework, CI-in-progress,
+    blocked, CI-exempt, or already 12b-passed):
+      1. draft -> slot rework (draft)
+      2. pm-state:qa-failed-rework / pm-blocked:codex / MoP-owned rework -> slot rework
+      3. stale ci-head + runs in progress -> CI running
+      4. "DO NOT MERGE" / blocked precondition in body -> blocked: <reason>
+      5. CI-exempt paths only (benchmarks/, website/, scripts/ci/hetzner/, docs) -> CI-exempt merge ask
+      6. PM 12b PASS comment on the current head -> 12b done -> admit
+      7. otherwise -> PM 12b review
+    """
+    mop_owned_prs = mop_owned_prs or set()
     head = pr.get("headRefOid") or ""
     labels = [label.get("name", "") for label in pr.get("labels", [])]
     slots = [x.split(":", 1)[1] for x in labels if x.startswith("slot:")]
@@ -100,8 +407,21 @@ def classify_pr(pr: dict) -> dict:
     advisory_red = [n for n in checks["red"] if n not in GATES]
     gates_pending = any(g in checks["pending"] for g in GATES)
 
+    is_slot_rework = (
+        "qa-failed-rework" in labels
+        # A PM 12b BLOCK (pm-state:blocked-rework) must never yield a merge ask
+        # (2026-09-30: the hourly asked CTO to merge the blocked #8525).
+        or "blocked-rework" in labels
+        or "pm-state:blocked-rework" in labels
+        or "codex" in blocked
+        or pr.get("number") in mop_owned_prs
+    )
+
     if pr.get("isDraft"):
-        state, nxt = "draft", f"{owner} finishing"
+        state, nxt = "draft", "slot rework (draft)"
+    elif is_slot_rework:
+        state = f"held ({','.join(blocked)})" if blocked else "rework in progress"
+        nxt = "slot rework"
     elif blocked:
         # A pm-blocked hold wins over every CI state: a blocked PR never gets a merge ask.
         state, nxt = f"held ({','.join(blocked)})", f"{owner} / {blocked[0]} wait"
@@ -112,7 +432,7 @@ def classify_pr(pr: dict) -> dict:
         if owner == "PM":
             state += ", unowned"
     elif gates_pending or (admitted and not gates_green and checks["pending"]):
-        state, nxt = "CI running", "await terminal"
+        state, nxt = "CI running", "CI running" if stale_admission else "await terminal"
     elif gates_green:
         state = "CI+E2E green"
         if not admitted:
@@ -134,7 +454,26 @@ def classify_pr(pr: dict) -> dict:
         nxt = "await terminal (gate not run)"
     else:
         state = "stale admission" if stale_admission else "not admitted"
-        nxt = "PM 12b review -> pm-admit-ci" if owner == "PM" else f"{owner} rework -> PM admit"
+        body = pr.get("body") or ""
+        files = [f.get("path", "") for f in (pr.get("files") or [])]
+        comments = pr.get("comments") or []
+        dnm = DO_NOT_MERGE_RE.search(body)
+        ci_exempt = bool(files) and all(
+            any(f.startswith(p) for p in CI_EXEMPT_PREFIXES) for f in files
+        )
+        head_short = head[:7]
+        has_12b_pass = any(
+            PM_12B_PASS_RE.search(c.get("body") or "") and (not head_short or head_short in (c.get("body") or ""))
+            for c in comments
+        )
+        if dnm:
+            nxt = "blocked: DO NOT MERGE in PR body"
+        elif ci_exempt:
+            nxt = "CI-exempt -> merge ask"
+        elif has_12b_pass:
+            nxt = "12b done -> admit"
+        else:
+            nxt = "PM 12b review"
     if advisory_red:
         state += " (advisory red: " + ",".join(advisory_red[:3]) + ")"
     if codex and codex["outdated"]:
@@ -157,18 +496,19 @@ def format_line(row: dict) -> str:
     return f"#{row['number']} {row['head']} — {row['state']} — {row['owner']} — {row['next']}"
 
 
-def fetch_open_prs() -> list[dict]:
+def fetch_open_prs(with_threads: bool = True) -> list[dict]:
     proc = subprocess.run(
         [
             "gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "100",
-            "--json", "number,headRefOid,title,isDraft,labels,statusCheckRollup",
+            "--json", "number,headRefOid,title,isDraft,labels,statusCheckRollup,files,body,comments",
         ],
         capture_output=True, text=True, timeout=120,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"gh pr list failed: {proc.stderr.strip()[:200]}")
     prs = json.loads(proc.stdout)
-    threads = fetch_review_threads()
+    # --sync-obligations runs under the Stop hook's 8s budget and never reads review threads.
+    threads = fetch_review_threads() if with_threads else None
     for pr in prs:
         pr["reviewThreads"] = None if threads is None else threads.get(pr.get("number"), [])
     return prs
@@ -214,8 +554,22 @@ def fetch_review_threads() -> dict[int, list[dict]] | None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Live open-PR snapshot")
     parser.add_argument("--text", action="store_true")
+    parser.add_argument(
+        "--sync-obligations", action="store_true",
+        help="Create/resolve pr_admission|pr_red_unowned|pr_merge_ask pm-ops "
+             "obligations for open PRs (see sync_pr_obligations).",
+    )
     args = parser.parse_args()
-    rows = sorted((classify_pr(pr) for pr in fetch_open_prs()), key=lambda r: -int(r["number"]))
+    mop_owned_prs = fetch_mop_owned_prs()
+    raw_prs = fetch_open_prs(with_threads=not args.sync_obligations)
+    if args.sync_obligations:
+        created = sync_pr_obligations(raw_prs, mop_owned_prs)
+        print(json.dumps({"obligations_synced": created}, indent=2))
+        return 0
+    rows = sorted(
+        (classify_pr(pr, mop_owned_prs) for pr in raw_prs),
+        key=lambda r: -int(r["number"]),
+    )
     if args.text:
         print("\n".join(format_line(r) for r in rows))
         for r in rows:

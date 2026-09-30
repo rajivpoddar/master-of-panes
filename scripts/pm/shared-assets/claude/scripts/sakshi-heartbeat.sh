@@ -11,6 +11,11 @@
 #       scripts/pm/install-sakshi-heartbeat.py (writes /tmp/sakshi-heartbeat.json).
 REPO="${HEYDONNA_REPO:-/Users/rajiv/Downloads/projects/heydonna-app}"
 HEARTBEAT_DIR="${HEARTBEAT_DIR:-/Users/rajiv/.claude/scripts/pm/heartbeat}"  # MoP-installed (manifest)
+# Transition fallback: until the repo copy is removed (heydonna-app PR #8494), use it when the
+# installed collectors are absent. Delete this block once that PR has merged.
+if [ ! -f "$HEARTBEAT_DIR/heartbeat-compose.py" ] && [ -f "$REPO/scripts/pm/heartbeat/heartbeat-compose.py" ]; then
+  HEARTBEAT_DIR="$REPO/scripts/pm/heartbeat"
+fi
 if [ "${1:-}" = "compose" ]; then
   shift
   export AXIOM_ENV_FILE="${AXIOM_ENV_FILE:-$REPO/.env.local}"

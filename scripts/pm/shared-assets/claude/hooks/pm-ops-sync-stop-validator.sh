@@ -10,6 +10,34 @@ HOOK_INPUT="$(cat 2>/dev/null || true)"
 
 [ -x "$PM_OPS" ] || exit 0
 
+# Deterministic every-turn open-PR drive (Rajiv 2026-09-30 01:xx IST, thread
+# C0ALZJHGE49/1790707604.948989): the hourly/3h heartbeat alone recreates the
+# hourly gap this validator exists to close. Refresh the pr_admission /
+# pr_red_unowned / pr_merge_ask obligations here too, cached at 120s so
+# back-to-back Stop turns don't hammer GitHub, bounded to 8s, and fully
+# fail-open -- a gh/pm-ops error here must never block or fail this hook.
+HB_INSTALLED="/Users/rajiv/.claude/scripts/pm/heartbeat"  # MoP-installed collectors (manifest)
+if [ -n "${PR_OPEN_SNAPSHOT:-}" ]; then
+  PR_SNAPSHOT="$PR_OPEN_SNAPSHOT"
+elif [ -f "$HB_INSTALLED/pr-open-snapshot.py" ]; then
+  PR_SNAPSHOT="$HB_INSTALLED/pr-open-snapshot.py"
+else  # transition fallback until heydonna-app PR #8494 removes the repo copy
+  PR_SNAPSHOT="/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/heartbeat/pr-open-snapshot.py"
+fi
+PR_SYNC_CACHE="${PR_SYNC_CACHE_STAMP:-/tmp/pr-open-snapshot-sync.stamp}"
+PR_SYNC_TTL=120
+if [ -f "$PR_SNAPSHOT" ]; then
+  now_epoch=$(date +%s 2>/dev/null || echo 0)
+  last_epoch=0
+  if [ -f "$PR_SYNC_CACHE" ]; then
+    last_epoch=$(stat -f %m "$PR_SYNC_CACHE" 2>/dev/null || stat -c %Y "$PR_SYNC_CACHE" 2>/dev/null || echo 0)
+  fi
+  if [ "$now_epoch" -gt 0 ] && [ $(( now_epoch - last_epoch )) -ge "$PR_SYNC_TTL" ]; then
+    touch "$PR_SYNC_CACHE" 2>/dev/null || true
+    timeout 8 python3 "$PR_SNAPSHOT" --sync-obligations >>"$LOG" 2>&1 || true
+  fi
+fi
+
 STATUS_JSON=$(python3 "$PM_OPS" status --format json --read-only 2>>"$LOG" || echo '{}')
 
 python3 - "$STATUS_JSON" "$HOOK_INPUT" <<'PYEOF'
