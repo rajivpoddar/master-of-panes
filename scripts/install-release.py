@@ -358,6 +358,28 @@ def _shared_entry_targets(entry: dict[str, Any]) -> list[str]:
     return [entry["canonical_target"], *entry.get("additional_targets", [])]
 
 
+def _shared_target_records(
+    manifest: dict[str, Any], target_root: Path | None, selected_target: str | None
+) -> list[tuple[dict[str, Any], str, Path]]:
+    """Resolve an optional selector to one exact manifest destination."""
+    declared = [
+        (entry, target_name)
+        for entry in manifest["entries"]
+        for target_name in _shared_entry_targets(entry)
+    ]
+    if selected_target is not None:
+        if not isinstance(selected_target, str) or not selected_target.strip():
+            raise InstallerError("shared target selection must be a nonempty exact manifest destination")
+        matches = [(entry, target_name) for entry, target_name in declared if target_name == selected_target]
+        if len(matches) != 1:
+            raise InstallerError("shared target selection must match exactly one declared destination")
+        declared = matches
+    return [
+        (entry, target_name, _shared_target_path(target_name, target_root))
+        for entry, target_name in declared
+    ]
+
+
 def _validate_compatibility_preimage(target: Path, entry: dict[str, Any]) -> None:
     """Only an absent or exact validator may be replaced during rollback."""
     if not (target.exists() or target.is_symlink()):
@@ -392,20 +414,22 @@ def install_shared_assets(
     release_dir: Path,
     target_root: Path | None,
     rollback_bundle: Path,
+    selected_target: str | None = None,
     fail_after: int | None = None,
 ) -> dict[str, Any]:
     """Atomically install only manifest-listed files; never prune unlisted files."""
     manifest = _load_shared_manifest(release_dir)
-    target_records = [
-        (entry, target_name, _shared_target_path(target_name, target_root))
-        for entry in manifest["entries"]
-        for target_name in _shared_entry_targets(entry)
-    ]
+    target_records = _shared_target_records(manifest, target_root, selected_target)
     targets = [target for _, _, target in target_records]
-    for entry in manifest.get("rollback_compatibility", []):
+    compatibility_entries = manifest.get("rollback_compatibility", [])
+    if selected_target is not None:
+        compatibility_entries = [
+            entry for entry in compatibility_entries if entry["canonical_target"] == selected_target
+        ]
+    for entry in compatibility_entries:
         _validate_compatibility_preimage(_shared_target_path(entry["canonical_target"], target_root), entry)
     rollback = create_rollback_bundle(targets, rollback_bundle)
-    compatibility = manifest.get("rollback_compatibility", [])
+    compatibility = compatibility_entries
     if compatibility:
         rollback_manifest_path = rollback_bundle / ROLLBACK_MANIFEST
         rollback_manifest = json.loads(rollback_manifest_path.read_text(encoding="utf-8"))
@@ -469,16 +493,16 @@ def install_shared_assets(
                 temporary.unlink()
 
 
-def check_shared_assets(*, release_dir: Path, target_root: Path | None) -> dict[str, Any]:
+def check_shared_assets(
+    *, release_dir: Path, target_root: Path | None, selected_target: str | None = None
+) -> dict[str, Any]:
     manifest = _load_shared_manifest(release_dir)
     checked: list[str] = []
-    for entry in manifest["entries"]:
-        for target_name in _shared_entry_targets(entry):
-            target = _shared_target_path(target_name, target_root)
-            expected = {"path": target_name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
-            if not target.is_file() or target.is_symlink() or file_record(target, target_name) != expected:
-                raise InstallerError(f"shared asset target parity mismatch: {target}")
-            checked.append(str(target))
+    for entry, target_name, target in _shared_target_records(manifest, target_root, selected_target):
+        expected = {"path": target_name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+        if not target.is_file() or target.is_symlink() or file_record(target, target_name) != expected:
+            raise InstallerError(f"shared asset target parity mismatch: {target}")
+        checked.append(str(target))
     return {"status": "SHARED_ASSETS_PASS", "count": len(checked), "targets": checked}
 
 
@@ -1057,6 +1081,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-old", type=Path)
     parser.add_argument("--rollback-bundle", type=Path, required=True)
     parser.add_argument("--shared-assets-root", type=Path)
+    parser.add_argument("--shared-target")
     parser.add_argument("--inventory", type=Path)
     parser.add_argument("--installed-root", type=Path, action="append", default=[])
     parser.add_argument("--service", default="com.heydonna.mop-server")
@@ -1064,6 +1089,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--canary-url", default="http://127.0.0.1:3100")
     args = parser.parse_args(argv)
     try:
+        if args.shared_target is not None and args.mode not in {"shared-install", "shared-check"}:
+            raise InstallerError("--shared-target is only valid with shared-install or shared-check")
         if args.mode == "stage":
             if not args.repo or not args.candidate or not args.base or not args.patch_id:
                 raise InstallerError("stage requires --repo, --candidate, --base, and --patch-id")
@@ -1086,9 +1113,14 @@ def main(argv: list[str] | None = None) -> int:
                     release_dir=release_dir,
                     target_root=args.shared_assets_root,
                     rollback_bundle=args.rollback_bundle,
+                    selected_target=args.shared_target,
                 )
             else:
-                result = check_shared_assets(release_dir=release_dir, target_root=args.shared_assets_root)
+                result = check_shared_assets(
+                    release_dir=release_dir,
+                    target_root=args.shared_assets_root,
+                    selected_target=args.shared_target,
+                )
         else:
             if not args.candidate:
                 raise InstallerError("activate/check requires --candidate")
