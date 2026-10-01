@@ -8,10 +8,17 @@ from pathlib import Path
 ROOT = Path(__file__).parents[3]
 SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 MANIFEST = SHARED / "manifest.json"
-NEW_TASK = "01a04154-c9c1-7bc1-8f7b-009a87bc7628"
-CTO_TASK = "01a03236-2e61-71f3-a6a8-3dc24d8c8917"
-CP_REPAIRS_TASK = "01a0324b-68e0-7491-988f-e7da9abd26ab"
-PR_REVIEWS_TASK = "01a03265-4b66-7672-bbc2-4a38fb1005b5"
+# Rebaselined 2026-10-01: the Sept-1 pins (task ids 01a04154/01a03236/01a0324b-
+# ...e7da/01a03265 and the pre-prune WAKE_SOP prose) were superseded by 9ad9e00
+# (2026-09-20, live Decisions SOP adopted + pruned; old text kept in
+# WAKE_SOP.archive-2026-09-20.md) and 3fdc245 (2026-09-29, task roster + Rajiv's
+# 09-27/09-28 "PM owns PR terminal processing" direction synced back).
+CTO_DECISIONS_TASK = "01a09112-a09c-7361-9a2a-0ada6a4e9dfb"
+NEW_TASK = CTO_DECISIONS_TASK
+CTO_TASK = CTO_DECISIONS_TASK
+CP_REPAIRS_TASK = "01a08f69-45db-71c2-b433-678419139ed7"
+MOP_TASK = "01a0d779-9a74-7f52-89ad-167910930d27"
+PR_REVIEWS_TASK = "01a0b53e-3316-77d3-9610-1c0c58d4ba5b"
 
 
 def _text(relative: str) -> str:
@@ -21,11 +28,14 @@ def _text(relative: str) -> str:
 def test_process_routes_pm_report_to_cto_diagnosis() -> None:
     monitor = _text("codex/monitors/heydonna-pm-chat/MONITOR.md")
     wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
+    contract = _text("codex/skills/_shared/release-conveyor-contract.md")
     assert "PM reports the first literal" in monitor
     assert "control-plane blocker and exact tuple" in monitor
     assert "CTO Decisions" in monitor
     assert "PM does not diagnose" in monitor
-    assert "CTO decisions performs the causal diagnosis" in wake
+    # Causal diagnosis moved from WAKE_SOP prose to the shared contract (9ad9e00).
+    assert "CTO Decisions performs causal diagnosis" in contract
+    assert f"Sole consumer: CTO Decisions\n`{CTO_DECISIONS_TASK}`" in wake
 
 
 def test_verified_control_plane_routes_by_affinity_then_to_pr_reviews() -> None:
@@ -35,10 +45,12 @@ def test_verified_control_plane_routes_by_affinity_then_to_pr_reviews() -> None:
         _text("codex/skills/heydonna-control-plane-repair/SKILL.md"),
     ]
     combined = "\n".join(texts)
-    assert NEW_TASK in combined
+    assert CTO_DECISIONS_TASK in combined
     assert CP_REPAIRS_TASK in combined
+    assert MOP_TASK in combined
     assert PR_REVIEWS_TASK in combined
-    assert "same implementation task" in combined
+    assert "same implementation task" not in texts[0]  # pruned wording (9ad9e00)
+    assert "approval back to that same task" in combined
     assert "functionality-first independent review" in combined
     assert "CTO Decisions does not perform the review" in combined
     assert "CTO_INLINE_APPROVE" not in combined
@@ -53,9 +65,9 @@ def test_approval_returns_rollout_to_same_owner_and_cto_only_notifies_pm() -> No
     assert "approval back to that same task" in skill
     assert "never investigates deeply, implements, reviews, publishes" in skill
     assert "PR Reviews" in skill
-    assert "same implementation task" in wake
-    assert "CTO decisions does not implement" in wake
-    assert "Never implement or continuously monitor" in wake
+    assert "rework/approval returns to that same owner" in wake
+    assert "same-owner rollout" in wake
+    assert "CTO Decisions never implements" in contract
     assert "CTO_INLINE_APPROVE" not in wake
 
 
@@ -89,15 +101,20 @@ def test_open_pr_ownership_has_only_two_pm_responsibilities() -> None:
     assert '"sync_integration_and_merge": {"owner": "CTO_DECISIONS"' in contract
     assert "PM owns routine free-slot refill" not in combined
     assert "PM performs routine free-compatible-slot refill" not in combined
-    assert "PM owns" not in combined
+    # Rajiv 2026-09-27/28 (thread 1790563991.676189): PM owns PR CI/E2E terminal
+    # processing; CTO only for exact-head admission and merge (d133914, 3fdc245).
+    # This replaces the old blanket `"PM owns" not in combined` pin.
+    assert "PM owns PR CI/E2E diagnosis and fixes" in wake
+    assert "PM owns the complete PR CI/E2E terminal loop" in monitor
+    assert "PM requests CTO Decisions only at an exact-head pair" in wake
+    assert "PR Merges executes admission/merge" in wake
     assert "direct PM to fire label-gated" not in combined
     assert "PM releases the stuck slot" not in combined
     assert "PM must force terminalization" not in monitor
     assert "PM does\n  not commit/push terminalization" in monitor
     assert "park/release" in monitor
     assert "choose the\n  next work" in monitor
-    assert "PM slot assignment only after an explicit CTO-routed rework/repro" in combined
-    assert "PM may assign a numbered slot only when CTO explicitly routes" in combined
+    assert "CTO-authorized rework/repro/proof slot assignment" in monitor
     assert CP_REPAIRS_TASK in skill
     assert PR_REVIEWS_TASK in skill
 
@@ -140,32 +157,27 @@ def test_unrelated_asset_is_unchanged_from_candidate_base() -> None:
 def test_cto_return_transport_is_explicit() -> None:
     skill = _text("codex/skills/heydonna-control-plane-repair/SKILL.md")
     wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
+    contract = _text("codex/skills/_shared/release-conveyor-contract.md")
     assert CTO_TASK in skill
     assert "$codex-stdio-send-message" in skill
-    assert "renderer-free" in wake
-    assert "$codex-stdio-send-message" in wake
-    assert "PM may provide the initial" in wake
-    assert "blocker/context only" in wake
+    assert "renderer-free stdio" in contract
+    assert "installed\n  `codex-stdio-send-message` with exact destination" in wake
+    assert "Never poll the\n  recipient" in wake
 
 
 def test_slack_backed_wake_reconciles_latest_thread_before_processing() -> None:
+    # The full pre-wake Slack reconciliation section was pruned to a compact
+    # "Slack (only for concrete ambiguity)" rule in 9ad9e00; the archive keeps
+    # the old 6-step text as non-operative evidence.
     wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
-    preflight = wake.index("## Pre-wake Slack thread reconciliation")
-    consumption = wake.index("## Consumption sequence")
-    sequence = wake[consumption:]
-
-    assert preflight < consumption
-    assert "before\ndeduplication, classification, live verification, delegation, mutation" in wake
-    assert "conversations.replies" in wake
-    assert "response_metadata.next_cursor" in wake
-    assert "ten\n   pages / 1,000 messages" in wake
-    assert "render_slack_blocks.py" in wake
-    assert "SLACK_THREAD_PREFLIGHT_FAILED" in wake
-    assert "SLACK_THREAD_CONTEXT_AMBIGUOUS" in wake
-    assert "observed_through_ts" in wake
-    assert "messages\n   arriving after `observed_through_ts` are the next wake" in wake
-    assert sequence.index("perform the pre-wake") < sequence.index("Deduplicate the effective fingerprint")
-    assert "not an authority\n   escalation" in wake
+    mechanics = wake[wake.index("## Wake mechanics"):]
+    assert "- Slack (only for concrete ambiguity)" in mechanics
+    assert "read via postback skill + bot token" in mechanics
+    assert "authoritative newer replies count" in mechanics
+    assert "freeze `observed_through_ts` + digest" in mechanics
+    assert "stop typed on incomplete/conflict" in mechanics
+    assert "Action + receipt first; new events queue next" in mechanics
+    assert mechanics.index("dedupe fingerprint") < mechanics.index("- Slack (only")
 
 
 def test_slack_postback_is_a_managed_global_codex_skill() -> None:
@@ -205,14 +217,16 @@ def test_slack_postback_is_a_managed_global_codex_skill() -> None:
     wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
     global_root = "/Users/rajiv/.codex/skills/heydonna-slack-postback"
     assert global_root in skill
-    assert f"{global_root}/scripts/cto_slack_rest.py" in wake
+    # 9ad9e00 replaced the inline cto_slack_rest.py path with a reference to
+    # the managed postback skill.
+    assert "read via postback skill + bot token" in wake
     assert ".agents/skills/heydonna-slack-postback" not in skill
     assert ".agents/skills/heydonna-slack-postback" not in wake
 
 
 def test_native_bypass_contract_is_single_fenced_and_ordered() -> None:
     contract = _text("codex/skills/_shared/release-conveyor-contract.md")
-    wake = _text("codex/monitors/heydonna-pm-chat/WAKE_SOP.md")
+    monitor = _text("codex/monitors/heydonna-pm-chat/MONITOR.md")
     skill = _text("codex/skills/heydonna-control-plane-repair/SKILL.md")
     assert "high-level typed/control-plane path is attempted once" in contract
     assert "do not retry it" in contract
@@ -224,5 +238,6 @@ def test_native_bypass_contract_is_single_fenced_and_ordered() -> None:
     assert "literal `message-slot` continuation packet" in contract
     assert "raw `workflow_dispatch`" in contract
     assert "blind rerun" in contract
-    assert "shared native bypass contract" in wake
+    # The WAKE_SOP pointer was pruned in 9ad9e00; MONITOR.md carries it now.
+    assert "`Native bypass contract (CTO-only, after one high-level refusal)`" in monitor
     assert "No direct CTO implementation, review, publication" in skill

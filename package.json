@@ -10,6 +10,7 @@
     "test:idle-occupied": "/Users/rajiv/.nvm/versions/node/v22.13.1/bin/node --import tsx --test test/stuck-idle-occupied.test.ts",
     "test:jsonl-activity": "/Users/rajiv/.nvm/versions/node/v22.13.1/bin/node --import tsx --test test/jsonl-activity.test.ts",
     "test:responsiveness": "/Users/rajiv/.nvm/versions/node/v22.13.1/bin/node --import tsx --test test/responsiveness.test.ts",
+    "test:all": "bash scripts/test-all.sh",
     "start": "node dist/server.js",
     "lint": "eslint src/"
   },

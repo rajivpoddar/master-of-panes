@@ -116,6 +116,10 @@ When a Claude Code session ends in a dev pane:
 ## Development Commands
 
 ```bash
+# Canonical full suite (required green before any commit to main):
+# builds dist, node test/*.test.ts, pytest over scripts/, and test/*.test.py
+npm run test:all
+
 # Test the plugin locally
 claude --plugin-dir /path/to/master-of-panes
 

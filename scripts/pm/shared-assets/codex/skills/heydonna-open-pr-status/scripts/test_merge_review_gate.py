@@ -197,12 +197,26 @@ def t8_review_gate_symbols_and_marker_lookup_are_gone():
         assert token not in source, token
 
 
-for name, fn in sorted([(k, v) for k, v in list(globals().items())
-                        if k.startswith("t") and callable(v)]):
-    check(name, fn)
+def _tests():
+    return sorted((k, v) for k, v in list(globals().items())
+                  if len(k) > 1 and k[0] == "t" and k[1].isdigit() and callable(v))
 
-failed = [result for result in RESULTS if not result[1]]
-for name, ok, detail in RESULTS:
-    print(("PASS " if ok else "FAIL ") + name + ("" if ok else " :: " + detail))
-print(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
-sys.exit(1 if failed else 0)
+
+import unittest  # noqa: E402
+
+
+class MergeReviewGateRemovalTests(unittest.TestCase):
+    def test_all_focused_checks(self):
+        for name, fn in _tests():
+            with self.subTest(check=name):
+                fn()
+
+
+if __name__ == "__main__":
+    for name, fn in _tests():
+        check(name, fn)
+    failed = [result for result in RESULTS if not result[1]]
+    for name, ok, detail in RESULTS:
+        print(("PASS " if ok else "FAIL ") + name + ("" if ok else " :: " + detail))
+    print(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
+    sys.exit(1 if failed else 0)

@@ -290,14 +290,29 @@ def with_env(fn):
         os.environ.update(saved)
 
 
-CAND_MOD = load(CANDIDATE)
-for _n, _f in sorted([(k, v) for k, v in list(globals().items())
-                      if k.startswith("t") and callable(v)]):
-    check(_n, lambda _f=_f: with_env(_f))
+def _tests():
+    return sorted((k, v) for k, v in list(globals().items())
+                  if len(k) > 1 and k[0] == "t" and k[1].isdigit() and callable(v))
 
 
-failed = [r for r in RESULTS if not r[1]]
-for name, ok, detail in RESULTS:
-    print(("PASS " if ok else "FAIL ") + name + ("" if ok else " :: " + detail))
-print(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
-sys.exit(1 if failed else 0)
+import unittest  # noqa: E402
+
+
+class AdmitFetchTimeoutTests(unittest.TestCase):
+    def test_all_focused_checks(self):
+        global CAND_MOD
+        CAND_MOD = load(CANDIDATE)
+        for name, fn in _tests():
+            with self.subTest(check=name):
+                with_env(fn)
+
+
+if __name__ == "__main__":
+    CAND_MOD = load(CANDIDATE)
+    for _n, _f in _tests():
+        check(_n, lambda _f=_f: with_env(_f))
+    failed = [r for r in RESULTS if not r[1]]
+    for name, ok, detail in RESULTS:
+        print(("PASS " if ok else "FAIL ") + name + ("" if ok else " :: " + detail))
+    print(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
+    sys.exit(1 if failed else 0)

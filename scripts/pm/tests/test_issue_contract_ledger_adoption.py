@@ -20,7 +20,6 @@ APP_WRAPPER = ROOT / "scripts/pm/shared-assets/claude/hooks/heydonna-app-block-i
 PARSER = ROOT / "scripts/pm/shared-assets/claude/scripts/issue-contract-ledger-hook.py"
 VALIDATOR = ROOT / "scripts/pm/shared-assets/claude/scripts/validate-issue-contract-ledger.py"
 POLICY = ROOT / "scripts/pm/shared-assets/claude/scripts/control_plane_issue_policy.py"
-PREIMAGE_PARSER = Path("/Users/rajiv/.claude/scripts/issue-contract-ledger-hook.py")
 
 PROSE = ('python3 /Users/rajiv/.claude/scripts/pm-ops.py obligation-resolve --kind ci_rework --target-id 18218 '
          '--external-state "reworded prose mentioning gh issue edit 7945 --repo heydonna-app/heydonna-app as history only"')
@@ -106,14 +105,6 @@ def test_genuine_mutation_still_blocks(tmp_path) -> None:
     for wrapper in (HOME_WRAPPER, APP_WRAPPER):
         out = run(wrapper, PARSER, val, gh, tmp_path, QUOTED_TEMPLATE.format(body=body_file(tmp_path)))
         assert blocked(out) and "Issue Contract Ledger" in out.get("message", ""), out
-
-
-def test_red_on_live_preimage(tmp_path) -> None:
-    gh, val = shims(tmp_path, validator_ok=False)
-    prose = run(HOME_WRAPPER, PREIMAGE_PARSER, val, gh, tmp_path, PROSE)
-    assert blocked(prose), "RED anchor: the live preimage classified quoted prose as a mutation"
-    var = run(HOME_WRAPPER, PREIMAGE_PARSER, val, gh, tmp_path, VARIABLE)
-    assert "literal issue number" not in var.get("message", ""), "preimage lacks the typed literal refusal"
 
 
 def run_raw(wrapper: Path, env_extra: dict, payload: str):

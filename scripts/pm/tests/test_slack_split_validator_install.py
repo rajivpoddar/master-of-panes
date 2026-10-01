@@ -54,7 +54,10 @@ def test_manifest_import_and_colocated_sender_preserve_safe_gate() -> None:
     entries = {entry["source_path"]: entry for entry in manifest["entries"]}
     validator_key = "claude/skills/slack-message/scripts/block-unsupported-transcript-split.py"
     sender_key = "claude/skills/slack-message/scripts/slack-send.sh"
-    assert manifest["inventory"]["selected_count"] == 28
+    # Was a literal 28 from 774c051; the manifest has grown since (first in
+    # 1f7b3cc). The installer's real invariant (install-release.py) is
+    # selected_count == len(entries).
+    assert manifest["inventory"]["selected_count"] == len(manifest["entries"])
     assert entries[validator_key]["canonical_target"] == "/Users/rajiv/.claude/skills/slack-message/scripts/block-unsupported-transcript-split.py"
     assert entries[sender_key]["canonical_target"] == "/Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh"
     assert hashlib.sha256(VALIDATOR.read_bytes()).hexdigest() == entries[validator_key]["sha256"]
