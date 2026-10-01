@@ -347,3 +347,32 @@ def test_ci_exempt_without_ask_raises_merge_ask_not_admission():
     assert created == [{"pr": 205, "kind": "pr_merge_ask"}]
     assert "pr_admission" in {c.kwargs["kind"] for c in res.call_args_list}
     assert prsnap.classify_pr(pr)["next"] == "CI-exempt -> merge ask"
+
+
+def test_later_same_head_12b_pass_releases_earlier_block():
+    head = "7654321" + "0" * 33
+    pr = _pr(206, head=head)
+    pr["comments"] = [
+        {"body": "PM_OPUS_REVIEW: BLOCK @7654321 - missing guard"},
+        {"body": "PM_OPUS_REVIEW: PASS @7654321"},
+    ]
+    rework_row = {"owner": "pm-rework-queued", "updated_at": _now_iso(minutes_ago=30),
+                  "suppress_until": _future_iso(), "evidence_json": '{"head": "' + head + '"}'}
+    assert prsnap.admission_hold(pr, {"pr_admission": rework_row}) is None
+    created, _, _ = _sync(pr, {"pr_admission": rework_row})
+    assert {"pr": 206, "kind": "pr_admission"} in created
+    assert prsnap.classify_pr(pr)["next"] != prsnap.REWORK_QUEUED
+    pr["comments"].append({"body": "PM_OPUS_REVIEW: BLOCK @7654321 - regression"})
+    assert prsnap.admission_hold(pr, {}) == prsnap.REWORK_QUEUED
+
+
+def test_ci_exempt_with_red_gate_gets_no_merge_ask_and_keeps_red():
+    pr = _pr(207, checks=[_check("test", conclusion="FAILURE")])
+    pr["files"] = [{"path": "docs-site/pages/faq.mdx"}]
+    ask = {"owner": "pr-merges", "updated_at": _now_iso(minutes_ago=10),
+           "suppress_until": None, "evidence_json": '{"head": "' + "a" * 40 + '"}'}
+    created, up, res = _sync(pr, {"pr_merge_ask": ask})
+    assert {"pr": 207, "kind": "pr_red_unowned"} in created
+    assert "pr_merge_ask" not in {c.kwargs["kind"] for c in up.call_args_list}
+    assert "pr_merge_ask" in {c.kwargs["kind"] for c in res.call_args_list}
+    assert prsnap.admission_hold(pr, {"pr_merge_ask": ask}) is None

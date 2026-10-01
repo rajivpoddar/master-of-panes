@@ -209,12 +209,32 @@ def _row_holds_head(row: dict | None, head: str) -> bool:
     return parsed > datetime.datetime.now(datetime.timezone.utc)
 
 
-def _has_12b_block(pr: dict, head: str) -> bool:
+def _latest_12b_verdict(pr: dict, head: str) -> str | None:
+    """"PASS" / "BLOCK" from the LATEST head-bound PM 12b comment, else None.
+
+    Comments are chronological (gh order); a later same-head PASS supersedes
+    an earlier same-head BLOCK and vice versa (CTO REVISE 2026-10-01).
+    """
     head_short = head[:7]
-    return any(
-        PM_12B_BLOCK_RE.search(c.get("body") or "") and head_short and head_short in (c.get("body") or "")
-        for c in (pr.get("comments") or [])
-    )
+    verdict = None
+    for c in pr.get("comments") or []:
+        body = c.get("body") or ""
+        if not head_short or head_short not in body:
+            continue
+        if PM_12B_BLOCK_RE.search(body):
+            verdict = "BLOCK"
+        elif PM_12B_PASS_RE.search(body):
+            verdict = "PASS"
+    return verdict
+
+
+def _has_12b_block(pr: dict, head: str) -> bool:
+    return _latest_12b_verdict(pr, head) == "BLOCK"
+
+
+def _exempt_merge_eligible(pr: dict) -> bool:
+    """Local path exemption alone is not enough: a RED required gate keeps the red disposition."""
+    return _is_ci_exempt(pr) and not gate_state(pr)["required_red"]
 
 
 def _is_ci_exempt(pr: dict) -> bool:
@@ -231,11 +251,12 @@ def admission_hold(pr: dict, rows: dict | None = None) -> str | None:
     rows = rows or {}
     head = pr.get("headRefOid") or ""
     adm = rows.get("pr_admission")
-    if _has_12b_block(pr, head):
+    verdict = _latest_12b_verdict(pr, head)
+    if verdict == "BLOCK":
         return REWORK_QUEUED
-    if adm and REWORK_OWNER_RE.search(adm.get("owner") or "") and _row_holds_head(adm, head):
+    if verdict != "PASS" and adm and REWORK_OWNER_RE.search(adm.get("owner") or "") and _row_holds_head(adm, head):
         return REWORK_QUEUED
-    if _is_ci_exempt(pr) and (
+    if _exempt_merge_eligible(pr) and (
         _row_holds_head(rows.get("pr_merge_ask"), head) or _row_holds_head(adm, head)
     ):
         return MERGE_ASK_PENDING
@@ -295,8 +316,15 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
         if not admitted:
             adm_row = _existing_obligation("pr_admission", number)
             hold = admission_hold(pr, {"pr_admission": adm_row, "pr_merge_ask": _existing_obligation("pr_merge_ask", number)})
-            if hold or _is_fresh_owner_claim(adm_row):
+            rework_claim_released = (
+                adm_row is not None
+                and REWORK_OWNER_RE.search(adm_row.get("owner") or "")
+                and _latest_12b_verdict(pr, head) == "PASS"
+            )
+            if hold or (_is_fresh_owner_claim(adm_row) and not rework_claim_released):
                 pass  # 12b BLOCK / rework queued / merge ask pending / fresh claim at this head
+            elif _is_ci_exempt(pr) and gates["required_red"]:
+                pass  # red exempt PR: pr_red_unowned below owns it; merge ask resolved below
             elif _is_ci_exempt(pr):
                 # CI-exempt paths need a direct merge ask, not 12b admission.
                 _obligation_resolve(kind="pr_admission", pr=number, reason="ci_exempt_merge_ask")
@@ -339,7 +367,7 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
                     action="send the exact-head merge ask to CTO now",
                 )
                 created.append({"pr": number, "kind": "pr_merge_ask"})
-        elif not admitted and _is_ci_exempt(pr):
+        elif not admitted and _is_ci_exempt(pr) and not gates["required_red"]:
             pass  # CI-exempt merge ask row is owned by the not-admitted branch above
         else:
             _obligation_resolve(kind="pr_merge_ask", pr=number, reason="not_green_or_not_admitted")
@@ -546,10 +574,8 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
             any(f.startswith(p) for p in CI_EXEMPT_PREFIXES) for f in files
         )
         head_short = head[:7]
-        has_12b_pass = any(
-            PM_12B_PASS_RE.search(c.get("body") or "") and (not head_short or head_short in (c.get("body") or ""))
-            for c in comments
-        )
+        has_12b_pass = _latest_12b_verdict(pr, head) == "PASS"
+        ci_exempt = ci_exempt and not gate_state(pr)["required_red"]
         hold = (holds or {}).get(pr.get("number")) or (REWORK_QUEUED if _has_12b_block(pr, head) else None)
         if dnm:
             nxt = "blocked: DO NOT MERGE in PR body"

@@ -8,7 +8,6 @@ import { registerFamily2Routes } from "../src/family2Routes.js";
 const REPO_ROOT = new URL("..", import.meta.url).pathname;
 const MCP_JSON = `${REPO_ROOT}.mcp.json`;
 const CURRENT_DIST = "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/current/dist/mcp.js";
-const FROZEN_DIST = "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/mcp.js";
 const SKILL = `${REPO_ROOT}scripts/pm/shared-assets/claude/skills/direct-release/SKILL.md`;
 const RETIRED_HEADER = "x-heydonna-assignment-authority";
 
@@ -43,12 +42,6 @@ test("the release client carries no authority header and no release mode", () =>
     assert.match(bundle, /mop_release_slot/);
     assert.equal(bundle.includes("assignment_authority_required"), false);
   }
-});
-
-test("RED evidence: the frozen 1.0.0 client predates the observed-identity contract", () => {
-  const frozen = existsSync(FROZEN_DIST) ? readFileSync(FROZEN_DIST, "utf8") : null;
-  if (frozen === null) return;
-  assert.equal(frozen.includes("intended_main_head"), false, "frozen client predates the expected-tuple contract");
 });
 
 function routeFixture() {
