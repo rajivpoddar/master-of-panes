@@ -219,6 +219,54 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual([record["id"] for record in records], ["15905"])
 
+    def _load_rows(self, rows: list[dict]):
+        with mock.patch.object(
+            MODULE,
+            "run_cmd",
+            return_value=MODULE.CmdResult(True, json.dumps(rows), "", 0),
+        ):
+            return MODULE._load_open_pr_continuations("7591", HEAD)
+
+    def test_headless_continuation_kinds_are_ordinary_obligations(self) -> None:
+        for kind in ("followup", "pr_admission", "capture_recovery"):
+            for evidence in ("{}", "", None, json.dumps({"note": "claim"})):
+                row = {
+                    "id": "16001", "kind": kind, "pr": "7591", "owner": "pm",
+                    "required_action": "drive the PR", "blocker": "",
+                    "evidence_json": evidence,
+                }
+                with self.subTest(kind=kind, evidence=evidence):
+                    self.assertEqual(self._load_rows([row]), ([], None))
+
+    def test_headless_pr_admission_row_does_not_produce_process_limbo(self) -> None:
+        row = {
+            "id": "16002", "kind": "pr_admission", "pr": "7591", "owner": "pm",
+            "required_action": "admit", "blocker": "", "evidence_json": "{}",
+        }
+        with mock.patch.object(
+            MODULE, "run_cmd",
+            return_value=MODULE.CmdResult(True, json.dumps([row]), "", 0),
+        ), mock.patch.object(
+            MODULE, "_audit_gh_json",
+            side_effect=[([pr()], None), ({"workflow_runs": []}, None)],
+        ), mock.patch.object(MODULE.PM_OPS_DB.__class__, "is_file", return_value=True):
+            audit = MODULE.collect_open_pr_activity_audit({})
+        self.assertTrue(audit["ok"])
+        self.assertNotIn("malformed durable continuation", " ".join(audit["rows"][0].get("reasons") or []))
+        self.assertNotEqual(audit["rows"][0].get("owner_source"), "pm-ops.obligations malformed")
+
+    def test_explicit_bad_head_on_continuation_kind_still_errors(self) -> None:
+        for bad in ("", None, "abc123", HEAD[:-1]):
+            row = {
+                "id": "16003", "kind": "followup", "pr": "7591", "owner": "pm",
+                "required_action": "drive", "blocker": "",
+                "evidence_json": json.dumps({"head": bad}),
+            }
+            with self.subTest(bad=bad):
+                records, error = self._load_rows([row])
+                self.assertEqual(records, [])
+                self.assertIn("missing or malformed", error)
+
     def test_headless_sibling_cannot_hide_executing_exact_head_lane(self) -> None:
         headless_error = "row: durable continuation has no exact head binding"
         runs, jobs = running_run("CI")
@@ -426,8 +474,8 @@ class SakshiContinuationJoinTests(unittest.TestCase):
                 )
                 conn.commit()
                 records, error = MODULE._load_open_pr_continuations("7591", HEAD)
-                self.assertEqual(records, [])
-                self.assertIn("exact head", error or "")
+                # head-less continuation kind = ordinary obligation (CTO REVISE 1790839313.419129)
+                self.assertEqual((records, error), ([], None))
                 conn.execute("delete from obligations where id=3")
                 conn.commit()
                 conn.execute(
@@ -573,8 +621,7 @@ class OrdinaryObligationKindTests(unittest.TestCase):
         headless = continuation("ci_watch")
         headless["evidence_json"] = "{}"
         records, error = self.load([headless])
-        self.assertEqual(records, [])
-        self.assertIn("exact head", error or "")
+        self.assertEqual((records, error), ([], None))
         placeholder = continuation("ci_watch", "unknown")
         placeholder["pr"] = "7591"
         placeholder["id"] = "15913"

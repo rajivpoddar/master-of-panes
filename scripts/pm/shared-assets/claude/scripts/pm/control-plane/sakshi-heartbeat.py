@@ -1424,8 +1424,10 @@ def _load_open_pr_continuations(
             row_errors.append("row: " + error)
             continue
         if bound_head != head:
-            if bound_head is None:
-                row_errors.append("row: durable continuation has no exact head binding")
+            # A continuation-kind row that omits EVERY head key (head-less followup,
+            # pr_admission claim, ...) is an ordinary obligation, matching the writer
+            # (pm-ops-legacy f70a4c4). Explicit empty/null/non-40-hex heads already
+            # errored in _continuation_head above.
             continue
         row_id = str(row.get("id") or "").strip()
         if not row_id or str(row.get("pr") or "").strip() != pr_number:
