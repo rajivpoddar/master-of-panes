@@ -50,8 +50,11 @@ class WriterContract(unittest.TestCase):
                 self.assertEqual(call(owner=bad), "continuation_owner_shape_invalid")
 
     # ---- head rules ----
-    def test_absent_head_refuses(self):
-        self.assertEqual(call(evidence={}), "continuation_head_missing")
+    def test_absent_head_is_an_ordinary_row(self):
+        # followup rows and pr_admission owner/suppress claims carry no head key.
+        for kind in ("capture_recovery", "followup", "pr_admission"):
+            with self.subTest(kind=kind):
+                self.assertIsNone(call(kind=kind, evidence={}, owner="pm-rework-queued"))
 
     def test_partial_head_refuses(self):
         for bad in ("a" * 39, "a" * 41, HEAD.upper(), "g" * 40, "", None, 123):
@@ -156,7 +159,6 @@ class WriterRefusalEndToEnd(unittest.TestCase):
         good = ("pm", "Continue from the exact head and verify CI/E2E.")
         cases = [
             ("durable_continuation", '{"head": "%s"}' % HEAD, *good),          # 1
-            ("capture_recovery", "{}", *good),                                  # absent head
             ("capture_recovery", '{"head": "%s"}' % ("a" * 39), *good),         # partial head
             ("capture_recovery", '{"head": "%s", "head_sha": "%s"}' % (HEAD, "b" * 40), *good),  # conflict
             ("capture_recovery", '{"head": "%s"}' % HEAD, "a", good[1]),        # owner shape

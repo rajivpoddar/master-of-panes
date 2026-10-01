@@ -669,6 +669,10 @@ def continuation_upsert_refusal(*, kind, evidence, owner, required_action):
         return "continuation_kind_not_reader_recognized"
     if kind not in CONTINUATION_KIND_LANES:
         return None  # ordinary non-continuation kind: existing behavior is preserved
+    if not any(key in evidence for key in CONTINUATION_HEAD_KEYS):
+        # No head key: an ordinary row (followup, owner/suppress claim), not an exact-head
+        # continuation. The CLI has no --head flag, so refusing here blocked every such call.
+        return None
     heads = []
     for key in CONTINUATION_HEAD_KEYS:
         if key not in evidence:
@@ -1264,7 +1268,13 @@ def ingest_sentinels() -> None:
         data = load_json(path)
         if data.get("status") in {"resolved", "superseded"}:
             args = argparse.Namespace(kind="ci_reconcile", target_type="pr", target_id=str(data.get("pr") or ""), pr=data.get("pr"), issue=None, slot=None)
-            resolve_obligation(args)
+            # A resolved sentinel whose ci_reconcile row was already resolved (or
+            # never created) has nothing left to close; do not abort the sync.
+            try:
+                resolve_obligation(args)
+            except SystemExit as exc:
+                if "matched no open row" not in str(exc):
+                    raise
             continue
         pr = data.get("pr")
         if not pr:
