@@ -22,7 +22,6 @@ def load(path):
 
 
 CANDIDATE = os.path.join(HERE, "admit.py")
-PREIMAGE = "/Users/rajiv/.codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py"
 
 HEAD = "a" * 40
 MAIN = "b" * 40
@@ -293,32 +292,9 @@ def with_env(fn):
 
 CAND_MOD = load(CANDIDATE)
 for _n, _f in sorted([(k, v) for k, v in list(globals().items())
-                      if k.startswith("t") and callable(v) and k != "t9_red_on_preimage"]):
+                      if k.startswith("t") and callable(v)]):
     check(_n, lambda _f=_f: with_env(_f))
 
-
-def t9_red_on_preimage():
-    mod = load(PREIMAGE)
-    assert not hasattr(mod, "_verified_local_fetch"), "preimage must lack the escape"
-    assert not hasattr(mod, "_remote_oid"), "preimage must lack remote verification"
-    assert not hasattr(mod, "_local_objects_ready"), "preimage must lack local proof"
-    import inspect
-    assert len(inspect.signature(mod._fetch_head_and_main).parameters) == 3
-    s = Scripted(mod, fetch="timeout")
-    mod.command = s
-    mod._same_repo_objects_dir = lambda: "/nonexistent/objects"
-    try:
-        mod._fetch_head_and_main("/tmp/checkout", HEAD, MAIN, BRANCH)
-    except TypeError:
-        pass  # 3-param signature rejects branch: no verification path exists
-    except subprocess.TimeoutExpired:
-        pass  # timeout propagates raw: no ls-remote verification attempted
-    else:
-        raise AssertionError("preimage should not succeed on timeout")
-    assert s.ls_remote_calls() == [], s.calls
-
-
-check("t9_red_on_preimage", t9_red_on_preimage)
 
 failed = [r for r in RESULTS if not r[1]]
 for name, ok, detail in RESULTS:
