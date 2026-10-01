@@ -144,6 +144,22 @@ test("SessionStart source=compact for slot 0 is unaffected by a pending resume_p
     assert.equal(db.getEvents(0, 5, "session_start_compact").length, 1);
   }));
 
+test("SessionStart source=compact for a dev slot injects nothing (continue-after-compaction removed, Rajiv 2026-10-01)", () =>
+  withDb(async (db) => {
+    const sent: string[] = [];
+    const relay = {
+      injectToPM: (m: string) => { sent.push(`pm:${m}`); return true; },
+      sendToSlot: (s: number, m: string) => { sent.push(`${s}:${m}`); return true; },
+      sendToSlotAsync: async (s: number, m: string) => { sent.push(`${s}:${m}`); return true; },
+    } as unknown as TmuxRelay;
+    const processor = new HookProcessor(db, relay);
+
+    await processor.process(1, { type: "SessionStart", source: "compact", session_id: "slot-1-c" });
+
+    assert.deepEqual(sent, []);
+    assert.equal(db.getEvents(1, 5, "session_start_compact").length, 1);
+  }));
+
 // ─── bounded fallback poll: SessionStart never arrives ───────────────────
 
 test("bounded fallback poll: if no SessionStart(source=clear) event ever lands, waitForSessionStartClear reports ready=false (fallback then claims+injects directly in server.ts)", () =>

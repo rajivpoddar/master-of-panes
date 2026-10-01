@@ -1329,18 +1329,11 @@ export class HookProcessor {
    * Fires when Claude Code (re)initializes a session.
    * Matchers: "startup" | "resume" | "clear" | "compact"
    *
-   * For source="compact" (post-/compact), send "continue your work"
-   * directly to the slot's pane. Critical for slots 1+4 (codex-proxy /
-   * GPT-5.5) which do not auto-resume their task after compaction.
-   * Slots 2+3 (native Sonnet) auto-resume but receive the same nudge —
-   * a duplicate "continue" is harmless and keeps the path uniform.
-   *
-   * Direct-recovery model (Rajiv directive 2026-04-30 12:44-12:45):
-   * Previously injected /slot-compact-resumed into the PM pane; the PM
-   * skill then sent "continue" to the slot. That round-trip is now gone.
-   * The legacy /slot-compact-resumed PM-side skill is deprecated.
-   *
-   * Reference: feedback_gpt55_compact_needs_continue_trigger.md
+   * source="compact" is passive for every pane (PM and slots): the event is
+   * logged as session_start_compact (overflow-detector dedup reads it) but
+   * nothing is injected. Rajiv 2026-10-01 10:46 IST (DM thread
+   * 1790826771.236229): "remove the continue your work injection after
+   * compaction that is done in MoP. not required anymore."
    */
   private async handleSessionStart(slotNum: number, payload: HookPayload): Promise<HookResponse> {
     const source = payload.source ?? "";
@@ -1408,14 +1401,9 @@ export class HookProcessor {
     if (source === "compact") {
       this.db.logEvent(slotNum, "session_start_compact", "SessionStart", null, {
         source,
+        via: "no_auto_continue",
       });
-      // Direct-recovery: send "continue your work" straight to the slot.
-      // force=true because the slot just resumed and may not yet show
-      // the active prompt to the active-check.
-      const ok = this.relay.sendToSlot(slotNum, "continue your work", true);
-      debugLog(
-        `[hooks] SessionStart:compact slot=${slotNum} sendToSlot(continue)=${ok}`
-      );
+      debugLog(`[hooks] SessionStart:compact slot=${slotNum} — no auto-continue`);
     } else {
       debugLog(
         `[hooks] SessionStart slot=${slotNum} source=${source} — no nudge (only 'compact' triggers)`
