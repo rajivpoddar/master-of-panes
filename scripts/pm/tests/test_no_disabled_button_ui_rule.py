@@ -125,7 +125,9 @@ class CompanionPromptTests(unittest.TestCase):
             self.assertIn("when the diff adds", code)
 
     def test_parent_prompts_lack_the_rule_red_witness(self):
-        parent = subprocess.run(["git", "rev-parse", "HEAD^"], capture_output=True, text=True,
+        # Pinned to the parent of the commit that introduced the rule (0d0719a);
+        # HEAD^ only held while that commit was HEAD.
+        parent = subprocess.run(["git", "rev-parse", "0d0719a^"], capture_output=True, text=True,
                                 cwd=str(ROOT)).stdout.strip()
         for rt, rw in COMPANION_MODES:
             rel = companion_prompt(rt, rw).relative_to(ROOT).as_posix()

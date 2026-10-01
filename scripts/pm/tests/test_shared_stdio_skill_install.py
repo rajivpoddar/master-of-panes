@@ -71,7 +71,9 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
     def test_manifest_is_deterministic_and_source_parity_is_exact(self) -> None:
         manifest = MODULE._load_shared_manifest(self.release)
         self.assertEqual(manifest["entries"], sorted(manifest["entries"], key=lambda item: item["source_path"]))
-        self.assertEqual(manifest["inventory"]["selected_count"], 91)
+        # The shared-asset inventory grows with every synced asset; pin the
+        # count to the manifest's own entry list instead of a stale literal.
+        self.assertEqual(manifest["inventory"]["selected_count"], len(manifest["entries"]))
         self.assertEqual(manifest["inventory"]["ambiguous"], [])
         result = self.install()
         self.assertEqual(result["status"], "SHARED_ASSETS_INSTALLED")
@@ -132,9 +134,13 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
         self.assertIn("journal", contract)
         self.assertIn("literal pre/post label", contract)
         self.assertIn("immutable candidate packet to CTO Decisions", skill)
-        self.assertIn("functionality-first independent review", wake_sop)
-        self.assertIn("same implementation owner", wake_sop)
-        self.assertIn("CTO decisions does not implement", wake_sop)
+        # The 2026-09-20 WAKE_SOP prune (4d06000) moved the control-plane
+        # repair routing prose into release-conveyor-contract.md; WAKE_SOP
+        # keeps only the PR Reviews single-review line.
+        self.assertIn("single functionality-first review", wake_sop)
+        self.assertIn("functionality-first independent review", contract)
+        self.assertIn("same\n   implementation task", contract)
+        self.assertIn("CTO Decisions never implements", contract)
         self.assertNotIn("CTO_INLINE_APPROVE", wake_sop)
 
     def test_installed_heartbeat_target_runs_continuation_join_at_supported_boundary(self) -> None:

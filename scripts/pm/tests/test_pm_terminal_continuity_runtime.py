@@ -302,8 +302,11 @@ class PMTerminalContinuityTests(unittest.TestCase):
         self.assertEqual(tomllib.loads(config.read_text())["created_at"], 1)
 
     def test_docs_bind_real_executable_boundary(self) -> None:
-        for text in (MONITOR.read_text(), SOP.read_text(), PROMPT.read_text()):
+        for text in (MONITOR.read_text(), PROMPT.read_text()):
             self.assertIn("pm-terminal-continuity.py", text)
+        # The 2026-09-20 WAKE_SOP prune (4d06000) dropped the script name from
+        # the SOP; it binds the backstop by its terminal breach code instead.
+        self.assertIn("TERMINAL_CONTINUITY_BREACH", SOP.read_text())
         self.assertIn("pm-merges-automation-update.py", PROMPT.read_text())
         open_pr_text = OPEN_PR.read_text()
         self.assertIn("pm-terminal-continuity.py complete", open_pr_text)

@@ -206,12 +206,28 @@ def t5_failure_no_clean_terminal(mod):
     assert "pm-state:closed-clean" not in [l["name"] for l in ext.pr["labels"]]
 
 
-MOD = load()
-for _n, _f in sorted([(k, v) for k, v in list(globals().items())
-                      if len(k) > 1 and k[0] == "t" and k[1].isdigit()]):
-    check(_n, lambda _f=_f: _f(MOD))
-failed = [r for r in RESULTS if not r[1]]
-for name, ok, detail in RESULTS:
-    print(("PASS " if ok else "FAIL ") + name + ("" if ok else " :: " + detail))
-print(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
-sys.exit(1 if failed else 0)
+def _tests():
+    return sorted((k, v) for k, v in list(globals().items())
+                  if len(k) > 1 and k[0] == "t" and k[1].isdigit() and callable(v))
+
+
+import unittest  # noqa: E402
+
+
+class CleanupTerminalOrderingTests(unittest.TestCase):
+    def test_all_focused_checks(self):
+        mod = load()
+        for name, fn in _tests():
+            with self.subTest(check=name):
+                fn(mod)
+
+
+if __name__ == "__main__":
+    MOD = load()
+    for _n, _f in _tests():
+        check(_n, lambda _f=_f: _f(MOD))
+    failed = [r for r in RESULTS if not r[1]]
+    for name, ok, detail in RESULTS:
+        print(("PASS " if ok else "FAIL ") + name + ("" if ok else " :: " + detail))
+    print(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
+    sys.exit(1 if failed else 0)

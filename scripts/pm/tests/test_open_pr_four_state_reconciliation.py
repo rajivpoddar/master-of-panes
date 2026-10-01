@@ -51,7 +51,10 @@ class OpenPrFourStateContractTests(unittest.TestCase):
         self.assertIn('"pm_terminal_envelope"', CONTRACT.read_text())
         self.assertIn('"terminal_continuity_backstop"', CONTRACT.read_text())
         self.assertIn("receipt-continuity backstop", PROMPT.read_text())
-        self.assertIn("non-suppressible", WAKE.read_text())
+        # 2026-09-20 prune (4d06000) dropped the old "non-suppressible" wording;
+        # the live rule: a typed blocker needing CTO action is a material delta
+        # that is never ledger-only suppressed.
+        self.assertIn("typed blocker needing CTO action", WAKE.read_text())
         self.assertNotIn("ACTION_REQUIRED as", PROMPT.read_text())
 
     def test_terminal_fixtures_wake_once_and_backstop_only_repairs_missed_consumption(self):
@@ -87,8 +90,13 @@ class OpenPrFourStateContractTests(unittest.TestCase):
         routine = {"kind": "progress", "wake": False}
         self.assertFalse(routine["wake"])
         combined = (MONITOR.read_text() + WAKE.read_text() + PROMPT.read_text())
-        self.assertIn("PM never executes CTO-owned CI/E2E", combined)
-        self.assertIn("integration, or merge", combined)
+        # Rajiv 2026-09-27/28 moved PR-red processing to PM (4d06000/d133914
+        # rewrote the old "PM never executes CTO-owned CI/E2E" text). The live
+        # contract: routine progress is ledger-only, PM asks CTO only at the
+        # exact-head admission / head-pinned merge boundary, PR Merges executes.
+        self.assertIn("routine PM ACKs/progress are ledger-only", combined)
+        self.assertIn("exact-head pair\nadmission or final head-pinned merge boundary", combined)
+        self.assertIn("PR Merges executes admission/merge", combined)
 
     def test_transition_fixtures_finish_exactly_once(self):
         fixtures = [
