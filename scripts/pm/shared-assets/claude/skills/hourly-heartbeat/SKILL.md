@@ -71,7 +71,12 @@ STEP 4 — build ACTIONS from /tmp/heartbeat-1h-latest/prs.json (live GitHub; re
   a head with `gh pr view <n> --json headRefOid` right before listing it):
   - red on current head, CI      → "ci-repair PR#<n>@<head40> run=<id>"
   - red on current head, E2E     → "e2e-investigate PR#<n>@<head40> run=<id>"
-  - not admitted, owner PM       → "review-admit PR#<n>@<head40>"   (12b, then pm-admit-ci.sh)
+  - not admitted, owner PM, next "PM 12b review" / "12b done -> admit"
+                                 → "review-admit PR#<n>@<head40>"   (12b, then pm-admit-ci.sh)
+  - next "rework-queued (no slot)" (12b BLOCK on this head or a pm-rework-queued
+    row) → no review-admit; assign the queued rework to a free slot
+  - next "merge-ask-pending" (CI-exempt, merge ask already with PR Merges) → no action
+  - next "CI-exempt -> merge ask" → CI-exempt exact-head merge ask, never review-admit
   - head moved since admission   → "review-admit PR#<n>@<head40>"
   - CI+E2E green                 → already in the post's merge ask; no action
   - capture terminal (green/red) → "capture PR#<n> <green|red> run=<id>"

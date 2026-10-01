@@ -267,3 +267,83 @@ def test_sync_obligations_fetch_skips_review_thread_graphql():
 
     with patch.object(prsnap.subprocess, "run", return_value=_Proc()), patch.object(prsnap, "fetch_review_threads", lambda: {7: []}):
         assert prsnap.fetch_open_prs()[0]["reviewThreads"] == []
+
+
+# --- 12b BLOCK / rework-queued / merge-ask-pending holds (Rajiv 2026-10-01 13:17 IST,
+# C0ALZJHGE49/1790840684.251169: "why are so many pr's stuck at pm 12b review?") ----
+
+
+def _future_iso(minutes=60):
+    import datetime
+
+    ts = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes)
+    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _sync(pr, rows):
+    with patch.object(prsnap, "_obligation_upsert") as up, patch.object(prsnap, "_obligation_resolve") as res, \
+         patch.object(prsnap, "_resolve_stale_pr_obligations"), \
+         patch.object(prsnap, "_existing_obligation", side_effect=lambda kind, n: rows.get(kind)):
+        created = prsnap.sync_pr_obligations([pr], mop_owned_prs=set())
+    return created, up, res
+
+
+def test_rework_queued_row_suppresses_pr_admission_and_classifies():
+    pr = _pr(200)
+    row = {"owner": "pm-rework-queued", "updated_at": _now_iso(minutes_ago=120),
+           "suppress_until": _future_iso(), "evidence_json": "{}"}
+    created, up, _ = _sync(pr, {"pr_admission": row})
+    assert created == [] and not up.called
+    assert prsnap.admission_hold(pr, {"pr_admission": row}) == prsnap.REWORK_QUEUED
+    assert prsnap.classify_pr(pr, holds={200: prsnap.REWORK_QUEUED})["next"] == "rework-queued (no slot)"
+
+
+def test_rework_queued_row_for_old_head_reraises_admission():
+    pr = _pr(201, head="e" * 40)
+    row = {"owner": "pm-rework-queued", "updated_at": _now_iso(minutes_ago=120),
+           "suppress_until": _future_iso(), "evidence_json": '{"head": "' + "f" * 40 + '"}'}
+    created, _, _ = _sync(pr, {"pr_admission": row})
+    assert {"pr": 201, "kind": "pr_admission"} in created
+
+
+def test_rework_queued_headless_row_expired_reraises_admission():
+    pr = _pr(202)
+    row = {"owner": "pm-rework-queued", "updated_at": _now_iso(minutes_ago=300),
+           "suppress_until": _now_iso(minutes_ago=5), "evidence_json": "{}"}
+    created, _, _ = _sync(pr, {"pr_admission": row})
+    assert {"pr": 202, "kind": "pr_admission"} in created
+
+
+def test_12b_block_comment_on_current_head_is_rework_queued():
+    head = "1234567" + "0" * 33
+    pr = _pr(203, head=head)
+    pr["comments"] = [{"body": "PM_OPUS_REVIEW: BLOCK @1234567 - missing guard"}]
+    created, up, _ = _sync(pr, {})
+    assert created == [] and not up.called
+    assert prsnap.classify_pr(pr)["next"] == prsnap.REWORK_QUEUED
+    pr["headRefOid"] = "9" * 40  # new head -> back to review-admit
+    assert prsnap.classify_pr(pr)["next"] == "PM 12b review"
+    created, _, _ = _sync(pr, {})
+    assert {"pr": 203, "kind": "pr_admission"} in created
+
+
+def test_ci_exempt_with_pending_merge_ask_is_not_review_admit():
+    pr = _pr(204)
+    pr["files"] = [{"path": "docs-site/pages/faq.mdx"}]
+    ask = {"owner": "pr-merges", "updated_at": _now_iso(minutes_ago=200),
+           "suppress_until": None, "evidence_json": '{"head": "' + "a" * 40 + '"}'}
+    created, up, res = _sync(pr, {"pr_merge_ask": ask})
+    assert created == [] and not up.called
+    assert "pr_merge_ask" not in {c.kwargs["kind"] for c in res.call_args_list}
+    hold = prsnap.admission_hold(pr, {"pr_merge_ask": ask})
+    assert hold == prsnap.MERGE_ASK_PENDING
+    assert prsnap.classify_pr(pr, holds={204: hold})["next"] == "merge-ask-pending"
+
+
+def test_ci_exempt_without_ask_raises_merge_ask_not_admission():
+    pr = _pr(205)
+    pr["files"] = [{"path": "docs-site/pages/faq.mdx"}]
+    created, _, res = _sync(pr, {})
+    assert created == [{"pr": 205, "kind": "pr_merge_ask"}]
+    assert "pr_admission" in {c.kwargs["kind"] for c in res.call_args_list}
+    assert prsnap.classify_pr(pr)["next"] == "CI-exempt -> merge ask"

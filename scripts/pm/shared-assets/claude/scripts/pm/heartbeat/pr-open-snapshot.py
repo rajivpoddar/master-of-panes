@@ -35,9 +35,18 @@ CODEX_BLOCKING = re.compile(r"\bP[01]\b")  # "![P1 Badge]" etc.
 MOP_URL = "http://127.0.0.1:3100/slots"
 # Paths that never need real CI/E2E (Rajiv 2026-09-28/29): a PR touching only
 # these gets a direct CI-exempt merge ask instead of sitting in the PM 12b queue.
-CI_EXEMPT_PREFIXES = ("benchmarks/", "website/", "scripts/ci/hetzner/", "docs/")
+CI_EXEMPT_PREFIXES = ("benchmarks/", "website/", "scripts/ci/hetzner/", "docs/", "docs-site/", "blog/")
 DO_NOT_MERGE_RE = re.compile(r"do not merge", re.IGNORECASE)
 PM_12B_PASS_RE = re.compile(r"PM[ _-]?12b|PM_OPUS_REVIEW:\s*PASS", re.IGNORECASE)
+PM_12B_BLOCK_RE = re.compile(r"PM_OPUS_REVIEW:\s*(BLOCK|REVISE|REQUEST_CHANGES)|PM[ _-]?12b[^\n]{0,40}\b(BLOCK|REVISE)\b", re.IGNORECASE)
+# Rajiv 2026-10-01 13:17 IST (C0ALZJHGE49/1790840684.251169): "why are so many
+# pr's stuck at pm 12b review? is there a workflow gap somewhere?" -- PRs whose
+# 12b already BLOCKed (rework queued) or whose CI-exempt merge ask is already
+# with PR Merges were re-reported as review-admit every pass. These states are
+# now reported as such and never re-raise pr_admission until the head moves.
+REWORK_QUEUED = "rework-queued (no slot)"
+MERGE_ASK_PENDING = "merge-ask-pending"
+REWORK_OWNER_RE = re.compile(r"rework|block|revise", re.IGNORECASE)
 
 # --- Deterministic every-turn open-PR obligations (Rajiv 2026-09-30 00:58/01:00
 # IST, thread C0ALZJHGE49/1790707604.948989: "the pr's should never get
@@ -139,7 +148,7 @@ def _existing_obligation(kind: str, pr: int) -> dict | None:
         con.row_factory = sqlite3.Row
         row = con.execute(
             """
-            SELECT owner, updated_at FROM obligations
+            SELECT owner, updated_at, suppress_until, evidence_json FROM obligations
             WHERE status='open' AND kind=? AND pr=?
             ORDER BY id DESC LIMIT 1
             """,
@@ -169,6 +178,68 @@ def _is_fresh_owner_claim(row: dict | None) -> bool:
     except Exception:
         return False
     return 0 <= age <= OWNER_CLAIM_TTL_SECONDS
+
+
+def _row_holds_head(row: dict | None, head: str) -> bool:
+    """True when a non-PM owner's open row still holds the PR at this head.
+
+    A row recording a head holds only that head (a new head re-raises). A row
+    without a head holds while its suppress_until is in the future.
+    """
+    if not row:
+        return False
+    owner = (row.get("owner") or "").strip()
+    if not owner or owner.lower() == "pm":
+        return False
+    try:
+        row_head = (json.loads(row.get("evidence_json") or "{}") or {}).get("head") or ""
+    except Exception:
+        row_head = ""
+    if row_head:
+        return bool(head) and row_head == head
+    until = row.get("suppress_until")
+    if not isinstance(until, str) or not until:
+        return False
+    try:
+        parsed = datetime.datetime.fromisoformat(until.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    except Exception:
+        return False
+    return parsed > datetime.datetime.now(datetime.timezone.utc)
+
+
+def _has_12b_block(pr: dict, head: str) -> bool:
+    head_short = head[:7]
+    return any(
+        PM_12B_BLOCK_RE.search(c.get("body") or "") and head_short and head_short in (c.get("body") or "")
+        for c in (pr.get("comments") or [])
+    )
+
+
+def _is_ci_exempt(pr: dict) -> bool:
+    files = [f.get("path", "") for f in (pr.get("files") or [])]
+    return bool(files) and all(any(f.startswith(p) for p in CI_EXEMPT_PREFIXES) for f in files)
+
+
+def admission_hold(pr: dict, rows: dict | None = None) -> str | None:
+    """REWORK_QUEUED / MERGE_ASK_PENDING when an un-admitted PR must not be
+    re-raised as review-admit at its current head, else None.
+
+    `rows` maps obligation kind -> latest open row for this PR (or None).
+    """
+    rows = rows or {}
+    head = pr.get("headRefOid") or ""
+    adm = rows.get("pr_admission")
+    if _has_12b_block(pr, head):
+        return REWORK_QUEUED
+    if adm and REWORK_OWNER_RE.search(adm.get("owner") or "") and _row_holds_head(adm, head):
+        return REWORK_QUEUED
+    if _is_ci_exempt(pr) and (
+        _row_holds_head(rows.get("pr_merge_ask"), head) or _row_holds_head(adm, head)
+    ):
+        return MERGE_ASK_PENDING
+    return None
 
 
 def _obligation_resolve(*, kind: str, pr: int, reason: str) -> None:
@@ -222,8 +293,19 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
         gates = gate_state(pr)
 
         if not admitted:
-            if _is_fresh_owner_claim(_existing_obligation("pr_admission", number)):
-                pass  # claimed by an agent within the TTL: leave it alone, don't re-flag
+            adm_row = _existing_obligation("pr_admission", number)
+            hold = admission_hold(pr, {"pr_admission": adm_row, "pr_merge_ask": _existing_obligation("pr_merge_ask", number)})
+            if hold or _is_fresh_owner_claim(adm_row):
+                pass  # 12b BLOCK / rework queued / merge ask pending / fresh claim at this head
+            elif _is_ci_exempt(pr):
+                # CI-exempt paths need a direct merge ask, not 12b admission.
+                _obligation_resolve(kind="pr_admission", pr=number, reason="ci_exempt_merge_ask")
+                _obligation_upsert(
+                    kind="pr_merge_ask", pr=number, head=head,
+                    title=f"PR #{number} CI-exempt, no merge ask: {title}",
+                    action="send the CI-exempt exact-head merge ask now; then claim with --owner pr-merges",
+                )
+                created.append({"pr": number, "kind": "pr_merge_ask"})
             else:
                 _obligation_upsert(
                     kind="pr_admission", pr=number, head=head, title=f"PR #{number} not admitted: {title}",
@@ -257,6 +339,8 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
                     action="send the exact-head merge ask to CTO now",
                 )
                 created.append({"pr": number, "kind": "pr_merge_ask"})
+        elif not admitted and _is_ci_exempt(pr):
+            pass  # CI-exempt merge ask row is owned by the not-admitted branch above
         else:
             _obligation_resolve(kind="pr_merge_ask", pr=number, reason="not_green_or_not_admitted")
 
@@ -367,7 +451,7 @@ def codex_threads(threads: list[dict] | None) -> dict | None:
     return {"live": live, "outdated": outdated}
 
 
-def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None) -> dict:
+def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int, str] | None = None) -> dict:
     """Pure: one PR -> state/owner/next from live head checks, labels, body and comments.
 
     Priority order for `next` (Rajiv 2026-09-29: too many PRs were reported as
@@ -466,8 +550,11 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None) -> dict:
             PM_12B_PASS_RE.search(c.get("body") or "") and (not head_short or head_short in (c.get("body") or ""))
             for c in comments
         )
+        hold = (holds or {}).get(pr.get("number")) or (REWORK_QUEUED if _has_12b_block(pr, head) else None)
         if dnm:
             nxt = "blocked: DO NOT MERGE in PR body"
+        elif hold:
+            nxt = hold
         elif ci_exempt:
             nxt = "CI-exempt -> merge ask"
         elif has_12b_pass:
@@ -566,8 +653,15 @@ def main() -> int:
         created = sync_pr_obligations(raw_prs, mop_owned_prs)
         print(json.dumps({"obligations_synced": created}, indent=2))
         return 0
+    holds = {}
+    for pr in raw_prs:
+        number = pr.get("number")
+        if isinstance(number, int):
+            hold = admission_hold(pr, {k: _existing_obligation(k, number) for k in ("pr_admission", "pr_merge_ask")})
+            if hold:
+                holds[number] = hold
     rows = sorted(
-        (classify_pr(pr, mop_owned_prs) for pr in raw_prs),
+        (classify_pr(pr, mop_owned_prs, holds) for pr in raw_prs),
         key=lambda r: -int(r["number"]),
     )
     if args.text:
