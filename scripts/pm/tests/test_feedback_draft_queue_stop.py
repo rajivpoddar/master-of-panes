@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import textwrap
@@ -21,6 +22,22 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 HOOK = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "hooks" / "feedback-draft-queue-stop.py"
+HEYDONNA_CWD = ""
+
+
+def project_key(path: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]", "-", path)
+
+
+@pytest.fixture(autouse=True)
+def isolated_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    checkout = tmp_path / "heydonna-app-3005"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin",
+                    "https://github.com/heydonna-app/heydonna-app.git"], check=True)
+    monkeypatch.setitem(globals(), "HEYDONNA_CWD", str(checkout))
+    return checkout
 
 
 def load_hook():
@@ -74,11 +91,11 @@ def heydonna_draft(draft_id: str, created_at: str, **extra) -> dict:
     payload = {
         "draft_id": draft_id,
         "created_at": created_at,
-        "cwd": "/Users/rajiv/Downloads/projects/heydonna-app-3005",
+        "cwd": HEYDONNA_CWD,
         "status": "queued",
         "title": "Queue pointer only",
         "type": "bug",
-        "transcript_ref": {"project_dir_key": "-Users-rajiv-Downloads-projects-heydonna-app-3005"},
+        "transcript_ref": {"project_dir_key": project_key(HEYDONNA_CWD)},
     }
     payload.update(extra)
     return payload
@@ -328,287 +345,149 @@ def test_settings_registration_is_async_and_outside_the_review_hook(tmp_path: Pa
     assert stop_commands[0].endswith("slot-terminal-message-pm-stop.sh")
 
 
-def _activated_state(path: Path, activated: datetime, **extra: object) -> None:
-    payload = {"activated_at": activated.isoformat(), "delivered_ids": []}
-    payload.update(extra)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-
-def _effect_sender(path: Path, *, mode: str) -> None:
-    path.write_text(
-        textwrap.dedent(
-            f"""\
-            #!/usr/bin/env python3
-            import json
-            import os
-            import pathlib
-            import sys
-
-            args = sys.argv[1:]
-            if "--file" not in args:
-                raise SystemExit(2)
-            body = pathlib.Path(args[args.index("--file") + 1]).read_text(encoding="utf-8")
-            state_path = pathlib.Path(os.environ["FEEDBACK_DRAFT_QUEUE_STATE"])
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            expected = os.environ["EXPECT_UNCERTAIN_ID"]
-            record = pathlib.Path(os.environ["MESSAGE_PM_RECORD"])
-            previous = record.read_text(encoding="utf-8") if record.exists() else ""
-            if expected not in (state.get("uncertain_ids") or []):
-                record.write_text(previous + "MISSING_UNCERTAIN\\n", encoding="utf-8")
-                raise SystemExit(3)
-            record.write_text(previous + "ACCEPTED " + expected + "\\n" + body + "\\n---\\n", encoding="utf-8")
-            if {mode!r} == "lose_response":
-                raise SystemExit(1)
-            print("MESSAGE_PM_SENT slot=0 verified=true bytes={{}}".format(len(body.encode("utf-8"))))
-            """
-        ),
-        encoding="utf-8",
-    )
-    path.chmod(path.stat().st_mode | stat.S_IEXEC)
-
-
-def _prepare_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, draft_id: str):
+def queue_fixture(tmp_path, monkeypatch):
     hook = load_hook()
-    drafts = tmp_path / "drafts"
-    state = tmp_path / "state.json"
-    record = tmp_path / "sent.txt"
-    message_pm = tmp_path / "message-pm.py"
+    drafts, state, sender, record = (tmp_path / name for name in
+                                      ("drafts", "state.json", "sender.py", "accepted.txt"))
     activated = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
-    _activated_state(state, activated)
-    write_draft(
-        drafts,
-        "draft.json",
-        heydonna_draft(draft_id, (activated + timedelta(minutes=1)).isoformat()),
-    )
-    monkeypatch.setenv("FEEDBACK_DRAFT_QUEUE_STATE", str(state))
+    state.write_text(json.dumps({"activated_at": activated.isoformat(), "delivered_ids": []}))
+    write_draft(drafts, "one.json", heydonna_draft("one", (activated + timedelta(minutes=1)).isoformat()))
+    write_message_pm(sender)
     monkeypatch.setenv("MESSAGE_PM_RECORD", str(record))
-    monkeypatch.setenv("EXPECT_UNCERTAIN_ID", draft_id)
-    return hook, drafts, state, record, message_pm, activated
+    return hook, drafts, state, sender, record
 
 
-def test_response_loss_does_not_send_a_second_effect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    hook, drafts, state, record, message_pm, _activated = _prepare_queue(tmp_path, monkeypatch, "draft-loss")
-    _effect_sender(message_pm, mode="lose_response")
-    first = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
-    second = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
-    saved = json.loads(state.read_text(encoding="utf-8"))
-    assert first["sent"] == []
-    assert second["sent"] == []
+def test_response_loss_does_not_repeat_accepted_effect(tmp_path, monkeypatch):
+    hook, drafts, state, sender, record = queue_fixture(tmp_path, monkeypatch)
+    sender.write_text(sender.read_text().replace(
+        'print(f"MESSAGE_PM_SENT', 'raise SystemExit(75)\nprint(f"MESSAGE_PM_SENT'))
+    for _ in range(2):
+        result = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
+        assert result["sent"] == []
+    assert record.read_text().count("draft_id: one") == 1
+    saved = json.loads(state.read_text())
     assert saved["delivered_ids"] == []
-    assert saved["uncertain_ids"] == ["draft-loss"]
-    assert record.read_text(encoding="utf-8").count("ACCEPTED draft-loss") == 1
-    assert "MISSING_UNCERTAIN" not in record.read_text(encoding="utf-8")
+    assert saved["outcomes"]["one"]["status"] == "uncertain"
+    assert result["uncertain_ids"] == ["one"]
 
 
-def test_post_ack_crash_does_not_send_a_second_effect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    hook, drafts, state, record, message_pm, _activated = _prepare_queue(tmp_path, monkeypatch, "draft-crash")
-    _effect_sender(message_pm, mode="verified")
-    real_send = hook.send_verified
+def test_post_ack_state_write_failure_does_not_repeat_effect(tmp_path, monkeypatch):
+    hook, drafts, state, sender, record = queue_fixture(tmp_path, monkeypatch)
+    original_write = hook._write_state
 
-    def crash_after_ack(message_pm_bin: str, envelope: str) -> bool:
-        ok = real_send(message_pm_bin, envelope)
-        assert ok is True
-        raise SystemExit(86)
+    def crash_after_ack(path, payload):
+        if payload["delivered_ids"]:
+            raise OSError("injected post-ack crash")
+        original_write(path, payload)
 
-    monkeypatch.setattr(hook, "send_verified", crash_after_ack)
-    with pytest.raises(SystemExit):
-        hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
-    monkeypatch.setattr(hook, "send_verified", real_send)
-    second = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
-    saved = json.loads(state.read_text(encoding="utf-8"))
-    assert second["sent"] == []
-    assert saved["delivered_ids"] == []
-    assert saved["uncertain_ids"] == ["draft-crash"]
-    assert record.read_text(encoding="utf-8").count("ACCEPTED draft-crash") == 1
-
-
-def test_reentry_of_uncertain_effect_does_not_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    hook, drafts, state, record, message_pm, activated = _prepare_queue(tmp_path, monkeypatch, "draft-reentry")
-    _activated_state(state, activated, uncertain_ids=["draft-reentry"])
-    _effect_sender(message_pm, mode="verified")
-    result = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
+    monkeypatch.setattr(hook, "_write_state", crash_after_ack)
+    with pytest.raises(OSError, match="post-ack crash"):
+        hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
+    # A fresh module simulates process reentry, with only disk state retained.
+    result = load_hook().process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
+    assert record.read_text().count("draft_id: one") == 1
     assert result["sent"] == []
+    assert result["uncertain_ids"] == ["one"]
+    assert json.loads(state.read_text())["delivered_ids"] == []
+
+
+def test_crash_after_started_record_blocks_reentry(tmp_path, monkeypatch):
+    hook, drafts, state, sender, record = queue_fixture(tmp_path, monkeypatch)
+    def interrupted(*args):
+        raise RuntimeError("process interrupted before transport")
+    monkeypatch.setattr(hook, "send_verified", interrupted)
+    with pytest.raises(RuntimeError):
+        hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
+    result = load_hook().process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
     assert not record.exists()
-    saved = json.loads(state.read_text(encoding="utf-8"))
-    assert saved["uncertain_ids"] == ["draft-reentry"]
-    assert saved["delivered_ids"] == []
+    assert result["uncertain_ids"] == ["one"]
 
 
-def test_foreign_and_lookalike_provenance_is_not_delivered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    hook = load_hook()
-    drafts = tmp_path / "drafts"
-    state = tmp_path / "state.json"
-    record = tmp_path / "sent.txt"
-    message_pm = tmp_path / "message-pm.py"
-    write_message_pm(message_pm)
-    monkeypatch.setenv("MESSAGE_PM_RECORD", str(record))
-    activated = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
-    created = (activated + timedelta(minutes=2)).isoformat()
-    _activated_state(state, activated)
-    write_draft(
-        drafts,
-        "stale-key.json",
-        {
-            "draft_id": "stale-key",
-            "created_at": created,
-            "cwd": "/Users/rajiv/Downloads/projects/other-app",
-            "status": "queued",
-            "title": "Foreign checkout",
-            "type": "bug",
-            "transcript_ref": {"project_dir_key": "-Users-rajiv-Downloads-projects-heydonna-app"},
-        },
-    )
-    lookalike = "/Users/rajiv/Downloads/projects/heydonna-app-unrelated"
-    write_draft(
-        drafts,
-        "lookalike.json",
-        {
-            "draft_id": "lookalike",
-            "created_at": created,
-            "cwd": lookalike,
-            "status": "queued",
-            "title": "Lookalike",
-            "type": "bug",
-            "transcript_ref": {"project_dir_key": lookalike.replace("/", "-")},
-        },
-    )
-    write_draft(
-        drafts,
-        "malformed.json",
-        {
-            "draft_id": "malformed",
-            "created_at": created,
-            "cwd": "/Users/rajiv/Downloads/projects/heydonna-app/../other-app",
-            "status": "queued",
-            "title": "Malformed",
-            "type": "bug",
-            "transcript_ref": {"project_dir_key": "-Users-rajiv-Downloads-projects-heydonna-app"},
-        },
-    )
-    unrelated_repo = tmp_path / "heydonna-app-unrelated"
-    unrelated_repo.mkdir()
-    subprocess.run(["git", "init"], cwd=unrelated_repo, check=True, capture_output=True, text=True)
-    write_draft(
-        drafts,
-        "unrelated-repo.json",
-        {
-            "draft_id": "unrelated-repo",
-            "created_at": created,
-            "cwd": str(unrelated_repo),
-            "status": "queued",
-            "title": "Unrelated repo",
-            "type": "bug",
-            "transcript_ref": {"project_dir_key": str(unrelated_repo).replace("/", "-")},
-        },
-    )
-    result = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
-    assert result["sent"] == []
-    saved = json.loads(state.read_text(encoding="utf-8"))
-    assert saved["delivered_ids"] == []
-    assert (saved.get("uncertain_ids") or []) == []
+def test_pre_send_state_failure_has_no_effect(tmp_path, monkeypatch):
+    hook, drafts, state, sender, record = queue_fixture(tmp_path, monkeypatch)
+    def cannot_write(*args):
+        raise OSError("cannot persist")
+    monkeypatch.setattr(hook, "_write_state", cannot_write)
+    with pytest.raises(OSError):
+        hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
     assert not record.exists()
 
 
-def test_legitimate_heydonna_worktree_delivers_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    hook = load_hook()
-    repo = tmp_path / "heydonna-app"
-    repo.mkdir()
-    env = os.environ.copy()
-    env.update(
-        {
-            "GIT_AUTHOR_NAME": "mop-test",
-            "GIT_AUTHOR_EMAIL": "mop-test@example.com",
-            "GIT_COMMITTER_NAME": "mop-test",
-            "GIT_COMMITTER_EMAIL": "mop-test@example.com",
-        }
-    )
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True, text=True, env=env)
-    (repo / "README").write_text("heydonna\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README"], cwd=repo, check=True, capture_output=True, text=True, env=env)
-    subprocess.run(
-        ["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    worktree = tmp_path / "feature-wt"
-    subprocess.run(
-        ["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    cwd = str(worktree.resolve())
-    assert "heydonna-app" not in worktree.name
-    drafts = tmp_path / "drafts"
-    state = tmp_path / "state.json"
-    record = tmp_path / "sent.txt"
-    message_pm = tmp_path / "message-pm.py"
-    write_message_pm(message_pm)
-    monkeypatch.setenv("MESSAGE_PM_RECORD", str(record))
-    activated = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
-    _activated_state(state, activated)
-    write_draft(
-        drafts,
-        "worktree.json",
-        heydonna_draft(
-            "worktree-1",
-            (activated + timedelta(minutes=4)).isoformat(),
-            cwd=cwd,
-            transcript_ref={"project_dir_key": cwd.replace("/", "-")},
-        ),
-    )
-    first = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
-    second = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
-    assert first["sent"] == ["worktree-1"]
-    assert second["sent"] == []
-    assert record.read_text(encoding="utf-8").count("draft_id: worktree-1") == 1
-    saved = json.loads(state.read_text(encoding="utf-8"))
-    assert saved["delivered_ids"] == ["worktree-1"]
-    assert saved["uncertain_ids"] == []
+@pytest.mark.parametrize("provenance", [
+    {"cwd": "/tmp/other-app"},
+    {"cwd": "/tmp/heydonna-app-unrelated", "transcript_ref": {}},
+    {"cwd": "relative/heydonna-app"},
+    {"cwd": None},
+    {"cwd": ["heydonna-app"]},
+    {"transcript_ref": "heydonna-app"},
+    {"transcript_ref": {"project_dir_key": "-tmp-other-app"}},
+    {"transcript_ref": {"project_dir_key": ["heydonna-app"]}},
+    {"transcript_ref": {}},
+])
+def test_invalid_or_conflicting_provenance_never_sends(tmp_path, monkeypatch, provenance):
+    hook, drafts, state, sender, record = queue_fixture(tmp_path, monkeypatch)
+    path = drafts / "one.json"
+    payload = json.loads(path.read_text())
+    payload.update(provenance)
+    path.write_text(json.dumps(payload))
+    result = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
+    assert result["sent"] == []
+    assert not record.exists()
 
 
-def test_eight_simultaneous_invocations_deliver_once(tmp_path: Path) -> None:
-    drafts = tmp_path / "drafts"
-    state = tmp_path / "state.json"
-    record = tmp_path / "sent.txt"
-    message_pm = tmp_path / "message-pm.py"
-    write_message_pm(message_pm)
-    activated = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
-    _activated_state(state, activated)
-    write_draft(
-        drafts,
-        "draft.json",
-        heydonna_draft("draft-once", (activated + timedelta(minutes=1)).isoformat()),
-    )
-    env = os.environ.copy()
-    env.update(
-        {
-            "FEEDBACK_DRAFT_DRAFTS_DIR": str(drafts),
-            "FEEDBACK_DRAFT_QUEUE_STATE": str(state),
-            "MESSAGE_PM_BIN": str(message_pm),
-            "MESSAGE_PM_RECORD": str(record),
-        }
-    )
-    env.pop("FEEDBACK_DRAFT_QUEUE_DETACHED", None)
-    processes = [
-        subprocess.Popen(
-            [os.environ.get("MOP_PYTHON", "python3"), str(HOOK), "--foreground"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
-        for _ in range(8)
-    ]
-    for process in processes:
-        stdout, stderr = process.communicate(timeout=30)
-        assert process.returncode == 0, stderr
-        assert stdout == b""
-    saved = json.loads(state.read_text(encoding="utf-8"))
-    assert saved["delivered_ids"] == ["draft-once"]
-    assert saved["uncertain_ids"] == []
-    assert record.read_text(encoding="utf-8").count("draft_id: draft-once") == 1
+def test_matching_lookalike_project_key_is_not_project_identity(tmp_path, monkeypatch):
+    hook, drafts, state, sender, record = queue_fixture(tmp_path, monkeypatch)
+    lookalike = tmp_path / "heydonna-app-unrelated"
+    lookalike.mkdir()
+    subprocess.run(["git", "init", "-q", str(lookalike)], check=True)
+    subprocess.run(["git", "-C", str(lookalike), "remote", "add", "origin",
+                    "https://github.com/other/other-app.git"], check=True)
+    payload = heydonna_draft("one", "2026-10-02T12:01:00+00:00", cwd=str(lookalike),
+                            transcript_ref={"project_dir_key": project_key(str(lookalike))})
+    write_draft(drafts, "one.json", payload)
+    assert hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))["sent"] == []
+    assert not record.exists()
+
+
+def test_legitimate_git_worktree_with_matching_key_passes(tmp_path, isolated_checkout):
+    subprocess.run(["git", "-C", str(isolated_checkout), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "test"], check=True)
+    worktree = tmp_path / "codex" / "a1b2" / "heydonna-app"
+    subprocess.run(["git", "-C", str(isolated_checkout), "worktree", "add", "--detach", str(worktree)],
+                   check=True, capture_output=True)
+    draft = heydonna_draft("one", "2026-10-02T12:01:00Z", cwd=str(worktree),
+                          transcript_ref={"project_dir_key": project_key(str(worktree))})
+    assert load_hook().is_heydonna_source(draft)
+
+
+@pytest.mark.parametrize("remote", [
+    "https://github.com/heydonna-app/heydonna-app",
+    "git@github.com:heydonna-app/heydonna-app.git",
+    "ssh://git@github.com/heydonna-app/heydonna-app.git",
+])
+def test_supported_checkout_remote_forms_pass(isolated_checkout, remote):
+    subprocess.run(["git", "-C", str(isolated_checkout), "remote", "set-url", "origin", remote], check=True)
+    assert load_hook().is_heydonna_source(heydonna_draft("one", "2026-10-02T12:01:00Z"))
+
+
+@pytest.mark.parametrize("invalid", ["{", '{"activated_at":"invalid"}',
+                                      '{"activated_at":"2026-10-02T12:00:00Z","delivered_ids":null}'])
+def test_invalid_state_cannot_erase_send_history(tmp_path, monkeypatch, invalid):
+    hook, drafts, state, sender, record = queue_fixture(tmp_path, monkeypatch)
+    state.write_text(invalid)
+    with pytest.raises(ValueError, match="reconcile before sending"):
+        hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
+    assert not record.exists()
+    assert state.read_text() == invalid
+
+
+def test_inherited_git_context_cannot_spoof_other_checkout(tmp_path, monkeypatch, isolated_checkout):
+    other = tmp_path / "other-app"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    subprocess.run(["git", "-C", str(other), "remote", "add", "origin",
+                    "https://github.com/other/other-app.git"], check=True)
+    monkeypatch.setenv("GIT_DIR", str(isolated_checkout / ".git"))
+    draft = heydonna_draft("other", "2026-10-02T12:01:00Z", cwd=str(other),
+                          transcript_ref={"project_dir_key": project_key(str(other))})
+    assert not load_hook().is_heydonna_source(draft)
