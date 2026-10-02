@@ -10,6 +10,8 @@ Drafts created before the hook is activated are left queued. A draft id that
 was already verified is not sent again. The id is persisted as started/uncertain
 before the transport runs and becomes delivered only after a verified receipt.
 An uncertain effect is not sent again.
+The compatible outcomes ledger is retained verbatim; its recorded IDs also
+remain suppressed. Invalid or unknown state is never reset automatically.
 """
 
 from __future__ import annotations
@@ -111,6 +113,7 @@ def _is_linked_worktree_of_supported_checkout(cwd: str) -> bool:
             capture_output=True,
             text=True,
             timeout=2,
+            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -148,9 +151,22 @@ def is_heydonna_source(draft: dict) -> bool:
     key = ref.get("project_dir_key")
     if not isinstance(key, str) or key != project_dir_key_for(cwd):
         return False
-    if _supported_checkout_name(cwd):
-        return True
-    return _is_linked_worktree_of_supported_checkout(cwd)
+    if not (_supported_checkout_name(cwd) or _is_linked_worktree_of_supported_checkout(cwd)):
+        return False
+    # Retain the newer checkout/common-dir restriction and the approved sibling's
+    # exact origin restriction. Neither a name nor inherited Git context suffices.
+    try:
+        origin = subprocess.run(
+            ["git", "--no-optional-locks", "-C", cwd, "config", "--local", "--get", "remote.origin.url"],
+            check=False, capture_output=True, text=True, timeout=2,
+            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return origin.returncode == 0 and re.fullmatch(
+        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+        r"heydonna-app/heydonna-app(?:\.git)?", origin.stdout.strip()
+    ) is not None
 
 
 def build_pointer(draft: dict, path: Path) -> str | None:
@@ -195,38 +211,38 @@ def _empty_state(now: datetime) -> dict:
 
 
 def _id_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, str) and item]
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item or item != item.strip() for item in value):
+        raise ValueError("queue IDs invalid; reconcile before sending")
+    return list(value)
 
 
 def _read_state(path: Path, now: datetime) -> tuple[dict, bool]:
-    if not path.is_file():
+    if not path.exists():
         return _empty_state(now), True
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return _empty_state(now), True
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("queue state unreadable; reconcile before sending") from exc
     if not isinstance(payload, dict) or parse_timestamp(payload.get("activated_at")) is None:
-        return _empty_state(now), True
-    delivered = payload.get("delivered_ids")
-    if not isinstance(delivered, list):
-        delivered = []
-    clean = _id_list(delivered)
-    raw_uncertain = payload.get("uncertain_ids", None)
-    uncertain = _id_list(raw_uncertain)
-    delivered_set = set(clean)
-    uncertain = [item for item in uncertain if item not in delivered_set]
-    changed = clean != delivered
-    if isinstance(raw_uncertain, list):
-        changed = changed or uncertain != raw_uncertain
-    elif raw_uncertain is not None:
-        changed = True
-    return {
-        "activated_at": payload["activated_at"],
-        "delivered_ids": clean,
-        "uncertain_ids": uncertain,
-    }, changed
+        raise ValueError("queue state invalid; reconcile before sending")
+    if set(payload) - {"activated_at", "delivered_ids", "uncertain_ids", "outcomes"}:
+        raise ValueError("queue state unrecognized; reconcile before sending")
+    _id_list(payload.get("delivered_ids"))
+    uncertain = _id_list(payload.get("uncertain_ids", []))
+    outcomes = payload.get("outcomes", {})
+    if not isinstance(outcomes, dict):
+        raise ValueError("queue outcomes invalid; reconcile before sending")
+    for draft_id, outcome in outcomes.items():
+        if (not isinstance(draft_id, str) or not draft_id or draft_id != draft_id.strip() or not isinstance(outcome, dict)
+                or outcome.get("status") not in ("uncertain", "delivered")):
+            raise ValueError("queue outcome unrecognized; reconcile before sending")
+        if outcome["status"] == "uncertain" and draft_id not in uncertain:
+            uncertain.append(draft_id)
+    # Preserve both histories and all recorded metadata, including overlap.
+    # A recorded outcome is never promoted to a verified delivered ID here.
+    state = dict(payload)
+    state["uncertain_ids"] = uncertain
+    return state, state != payload
 
 
 def _write_state(path: Path, state: dict) -> None:
@@ -237,6 +253,11 @@ def _write_state(path: Path, state: dict) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _log(state_path: Path, line: str) -> None:
@@ -300,7 +321,7 @@ def process_queue(
             return {"activated": True, "activated_at": state["activated_at"], "sent": [], "delivered_ids": list(state["delivered_ids"])}
         delivered = list(state["delivered_ids"])
         uncertain = list(state.get("uncertain_ids") or [])
-        seen = set(delivered)
+        seen = set(delivered) | set(state.get("outcomes", {}))
         uncertain_seen = set(uncertain)
         for path, draft in load_drafts(drafts_dir):
             draft_id = draft["draft_id"]

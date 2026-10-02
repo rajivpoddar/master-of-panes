@@ -105,7 +105,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-feedback-draft-queue-stop",
-      "sha256": "3da9e0ccb033250507af6b5ea029ed31bfca1e25a05def8eaa15d39f44dc922d",
+      "sha256": "12f3040b8116fa8498c18b38c092ae9789bcffab90024d8b0012a9c32b9e2c49",
       "source_path": "claude/hooks/feedback-draft-queue-stop.py"
     },
     {

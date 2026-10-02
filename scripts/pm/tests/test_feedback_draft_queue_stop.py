@@ -21,6 +21,18 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 HOOK = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "hooks" / "feedback-draft-queue-stop.py"
+HEYDONNA_CWD = ""
+
+
+@pytest.fixture(autouse=True)
+def isolated_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    checkout = tmp_path / "heydonna-app-3005"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin",
+                    "https://github.com/heydonna-app/heydonna-app.git"], check=True)
+    monkeypatch.setitem(globals(), "HEYDONNA_CWD", str(checkout))
+    return checkout
 
 
 def load_hook():
@@ -74,11 +86,11 @@ def heydonna_draft(draft_id: str, created_at: str, **extra) -> dict:
     payload = {
         "draft_id": draft_id,
         "created_at": created_at,
-        "cwd": "/Users/rajiv/Downloads/projects/heydonna-app-3005",
+        "cwd": HEYDONNA_CWD,
         "status": "queued",
         "title": "Queue pointer only",
         "type": "bug",
-        "transcript_ref": {"project_dir_key": "-Users-rajiv-Downloads-projects-heydonna-app-3005"},
+        "transcript_ref": {"project_dir_key": HEYDONNA_CWD.replace("/", "-")},
     }
     payload.update(extra)
     return payload
@@ -523,6 +535,8 @@ def test_legitimate_heydonna_worktree_delivers_once(tmp_path: Path, monkeypatch:
         }
     )
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True, text=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                    "https://github.com/heydonna-app/heydonna-app.git"], check=True)
     (repo / "README").write_text("heydonna\n", encoding="utf-8")
     subprocess.run(["git", "add", "README"], cwd=repo, check=True, capture_output=True, text=True, env=env)
     subprocess.run(
@@ -612,3 +626,86 @@ def test_eight_simultaneous_invocations_deliver_once(tmp_path: Path) -> None:
     assert saved["delivered_ids"] == ["draft-once"]
     assert saved["uncertain_ids"] == []
     assert record.read_text(encoding="utf-8").count("draft_id: draft-once") == 1
+
+
+@pytest.mark.parametrize("history", [
+    {"uncertain_ids": ["held"], "outcomes": {}},
+    {"outcomes": {"held": {"status": "uncertain", "reason": "legacy_unknown_outcome"}}},
+    {"uncertain_ids": ["held"], "outcomes": {
+        "other-held": {"status": "uncertain", "started_at": "2026-10-02T12:00:00Z"},
+        "done-outcome": {"status": "delivered", "verified_at": "2026-10-02T12:00:00Z"}}},
+])
+def test_both_schema_histories_survive_send_and_fresh_reentry(tmp_path, monkeypatch, history):
+    hook, drafts, state, record, sender, activated = _prepare_queue(tmp_path, monkeypatch, "new")
+    _activated_state(state, activated, delivered_ids=["done"], **history)
+    before = json.loads(state.read_text())
+    for draft_id in ("held", "other-held", "done-outcome", "done"):
+        # Only create the IDs represented in this case's recorded history.
+        if draft_id not in before.get("uncertain_ids", []) and draft_id not in before.get("outcomes", {}) and draft_id != "done":
+            continue
+        write_draft(drafts, draft_id + ".json", heydonna_draft(draft_id, (activated + timedelta(minutes=1)).isoformat()))
+    _effect_sender(sender, mode="verified")
+    first = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
+    second = load_hook().process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
+    saved = json.loads(state.read_text())
+    assert first["sent"] == ["new"]
+    assert second["sent"] == []
+    assert record.read_text().count("ACCEPTED ") == 1
+    assert "MISSING_UNCERTAIN" not in record.read_text()
+    assert saved["activated_at"] == before["activated_at"]
+    assert saved["delivered_ids"] == ["done", "new"]
+    assert saved.get("outcomes", {}) == before.get("outcomes", {})
+    assert saved["uncertain_ids"][:len(before.get("uncertain_ids", []))] == before.get("uncertain_ids", [])
+    assert set(before.get("uncertain_ids", [])) <= set(saved["uncertain_ids"])
+    assert set(key for key, value in before.get("outcomes", {}).items() if value["status"] == "uncertain") <= set(saved["uncertain_ids"])
+
+
+@pytest.mark.parametrize("invalid", [
+    "{", "[]", '{"activated_at":"bad","delivered_ids":[]}',
+    '{"activated_at":"2026-10-02T12:00:00Z","delivered_ids":null}',
+    {"uncertain_ids": "held"}, {"uncertain_ids": [None]}, {"uncertain_ids": [" held "]},
+    {"outcomes": []}, {"outcomes": {"held": {"status": "unknown"}}},
+    {"outcomes": {"held": None}}, {"outcomes": {" held ": {"status": "uncertain"}}},
+    {"future_no_send_ids": ["held"]},
+])
+def test_malformed_or_unrecognized_history_never_sends_or_rewrites(tmp_path, monkeypatch, invalid):
+    hook, drafts, state, record, sender, activated = _prepare_queue(tmp_path, monkeypatch, "new")
+    if isinstance(invalid, dict):
+        payload = {"activated_at": activated.isoformat(), "delivered_ids": []}
+        payload.update(invalid)
+        state.write_text(json.dumps(payload))
+    else:
+        state.write_text(invalid)
+    before = state.read_bytes()
+    _effect_sender(sender, mode="verified")
+    with pytest.raises(ValueError, match="reconcile before sending"):
+        hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(sender))
+    assert state.read_bytes() == before
+    assert not record.exists()
+
+
+def test_supported_name_cannot_admit_foreign_git_origin(tmp_path, isolated_checkout):
+    subprocess.run(["git", "-C", str(isolated_checkout), "remote", "set-url", "origin",
+                    "https://github.com/other/other-app.git"], check=True)
+    assert not load_hook().is_heydonna_source(heydonna_draft("foreign", "2026-10-02T12:01:00Z"))
+
+
+def test_git_context_cannot_redirect_worktree_identity(tmp_path, monkeypatch, isolated_checkout):
+    # A caller's Git context must not make a lookalike path a supported worktree.
+    other = tmp_path / "heydonna-app-unrelated"
+    other.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(isolated_checkout / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    draft = heydonna_draft("foreign", "2026-10-02T12:01:00Z", cwd=str(other),
+                          transcript_ref={"project_dir_key": str(other).replace("/", "-")})
+    assert not load_hook().is_heydonna_source(draft)
+
+
+@pytest.mark.parametrize("remote", [
+    "https://github.com/heydonna-app/heydonna-app",
+    "git@github.com:heydonna-app/heydonna-app.git",
+    "ssh://git@github.com/heydonna-app/heydonna-app.git",
+])
+def test_supported_origin_forms_remain_eligible(isolated_checkout, remote):
+    subprocess.run(["git", "-C", str(isolated_checkout), "remote", "set-url", "origin", remote], check=True)
+    assert load_hook().is_heydonna_source(heydonna_draft("valid", "2026-10-02T12:01:00Z"))
