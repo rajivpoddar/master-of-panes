@@ -1122,7 +1122,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "5e00dbca3f08033a2c2007dc7eec7fb0c17dc2de17534baafc477a766b4555fb",
+      "sha256": "946ef58f62ee5931d37c317ccfaa94323bdc896a50407e15183b23a2f0ee5a77",
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md"
     },
     {

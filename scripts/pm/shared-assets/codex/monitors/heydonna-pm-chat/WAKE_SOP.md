@@ -126,6 +126,7 @@ Two self-contained skills are the entire PR conveyor: admission via
 `heydonna-cto-label-gated-ci`, merge via `heydonna-open-pr-status`. No
 shared-conveyor dependency, extra receipts, or PM-script gates. Decisions
 delegates the packet and consumes the result; it never runs either skill.
+- PM merge asks (Rajiv C0ALZJHGE49/thread `1790970314.767989`, message `1790971258.697169`): Every merge ask must include the Slack screenshot thread for the exact head being merged, or state `No user-visible UI change: <reason>` in one line; attaching a screenshot thread does not waive visual inspection, and backend-only changes do not need decorative screenshots.
 - Admit (PR Merges): bind the reviewed changed-file scope to the exact live
   head. An authoritative exact-head classifier receipt confirming marketing
   website/blog-only `site` scope, with no app code or shared app
