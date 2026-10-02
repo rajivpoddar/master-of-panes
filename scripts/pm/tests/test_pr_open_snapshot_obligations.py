@@ -112,7 +112,7 @@ def test_sync_creates_pr_red_unowned_when_required_gate_fails():
     assert "pr_admission" not in kinds  # ci-head label matches current head
 
 
-def test_sync_creates_pr_merge_ask_when_green_and_admitted():
+def test_sync_creates_pr_merge_ask_when_green_admitted_and_readiness_confirmed():
     head = "b" * 40
     pr = _pr(
         102,
@@ -123,6 +123,8 @@ def test_sync_creates_pr_merge_ask_when_green_and_admitted():
             _check("e2e", started="2026-09-29T10:00:00Z", completed="2026-09-29T10:20:00Z"),
         ],
     )
+    pr["ci_reconciliation"] = {"pr": "102", "head_sha": head,
+                               "status": "resolved", "resolution": "merge_ready"}
     with patch.object(prsnap, "_obligation_upsert") as up, patch.object(prsnap, "_obligation_resolve"), \
          patch.object(prsnap, "_resolve_stale_pr_obligations"):
         created = prsnap.sync_pr_obligations([pr], mop_owned_prs=set())

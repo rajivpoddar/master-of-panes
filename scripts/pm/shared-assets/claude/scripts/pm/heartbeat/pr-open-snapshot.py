@@ -336,6 +336,39 @@ def admission_hold(pr: dict, rows: dict | None = None) -> str | None:
     return None
 
 
+def merge_ask_next(pr: dict) -> str:
+    """Project the existing CI reconciliation disposition; green checks alone
+    prove CI, not product readiness. Missing evidence is unknown, not a hold
+    invented by this reporter or a new merge gate.
+    """
+    head = pr.get("headRefOid") or ""
+    if DO_NOT_MERGE_RE.search(pr.get("body") or ""):
+        return "blocked: DO NOT MERGE in PR body"
+    if _has_12b_block(pr, head):
+        return REWORK_QUEUED
+    receipt = pr.get("ci_reconciliation")
+    if not isinstance(receipt, dict) or not re.fullmatch(r"[0-9a-f]{40}", head):
+        return "PM readiness unverified"
+    if str(receipt.get("pr")) != str(pr.get("number")) or receipt.get("head_sha") != head:
+        return "PM readiness unverified"
+    if receipt.get("status") == "resolved":
+        if receipt.get("resolution") == "blocked":
+            return "PM readiness blocked: " + str(receipt.get("blocked_reason") or "unspecified")
+        if receipt.get("resolution") == "merge_ready":
+            return "CTO merge ask"
+    return "PM readiness unverified"
+
+
+def _read_ci_reconciliation(pr: dict) -> dict | None:
+    """Read the sentinel written by ci-success-reconciliation.py, never mutate it."""
+    directory = Path(__import__("os").environ.get("CI_SUCCESS_SENTINEL_DIR", "/tmp"))
+    try:
+        receipt = json.loads((directory / f"pm-required-ci-reconcile-{pr['number']}.json").read_text())
+    except (OSError, ValueError, KeyError):
+        return None
+    return receipt if isinstance(receipt, dict) else None
+
+
 def _obligation_resolve(*, kind: str, pr: int, reason: str) -> None:
     if not PM_OPS_CLI.is_file():
         return
@@ -431,7 +464,9 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
             _obligation_resolve(kind="pr_red_unowned", pr=number, reason="required_gates_not_red")
 
         if admitted and gates["green_ready"] and not gates["required_red"]:
-            if _is_fresh_owner_claim(_existing_obligation("pr_merge_ask", number)):
+            if merge_ask_next(pr) != "CTO merge ask":
+                _obligation_resolve(kind="pr_merge_ask", pr=number, reason="readiness_not_merge_ready")
+            elif _is_fresh_owner_claim(_existing_obligation("pr_merge_ask", number)):
                 pass
             else:
                 _obligation_upsert(
@@ -633,10 +668,9 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
         if not admitted:
             nxt = "not admitted: no merge ask"
         else:
-            # Admission already transferred ownership to PM; a lingering slot:* label is
-            # stale pre-admission ownership, not live authority, so it must not suppress
-            # the merge ask — emit the ask and a cleanup action for the stale label.
-            nxt = "CTO merge ask"
+            # Admission transfers ownership to PM, not product-proof readiness.
+            # Keep CI green while reporting the existing exact-head disposition.
+            nxt = (holds or {}).get(pr.get("number")) or merge_ask_next(pr)
             if slots:
                 actions.append(
                     f"stale slot:{slots[0]} label on admitted+green PR#{pr.get('number')}@{head} -> remove label"
@@ -717,6 +751,7 @@ def fetch_open_prs(with_threads: bool = True) -> list[dict]:
     threads = fetch_review_threads() if with_threads else None
     for pr in prs:
         pr["reviewThreads"] = None if threads is None else threads.get(pr.get("number"), [])
+        pr["ci_reconciliation"] = _read_ci_reconciliation(pr)
     return prs
 
 

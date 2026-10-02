@@ -165,9 +165,11 @@ def test_feedback_rows_window_and_link():
 HEAD = "a" * 40
 
 
-def _pr(checks, labels=(), draft=False, number=8400):
+def _pr(checks, labels=(), draft=False, number=8400, ready=False):
     return {"number": number, "headRefOid": HEAD, "isDraft": draft, "title": "t",
-            "labels": [{"name": x} for x in labels], "statusCheckRollup": checks}
+            "labels": [{"name": x} for x in labels], "statusCheckRollup": checks,
+            "ci_reconciliation": ({"pr": str(number), "head_sha": HEAD,
+                                   "status": "resolved", "resolution": "merge_ready"} if ready else None)}
 
 
 def _c(name, conclusion, status="COMPLETED", workflow="CI"):
@@ -179,8 +181,8 @@ def test_duplicate_skipped_placeholder_does_not_hide_success():
     assert s["green"] == ["e2e", "test"] and not s["red"]
 
 
-def test_green_gates_on_admitted_unslotted_head_is_merge_ask():
-    r = prsnap.classify_pr(_pr([_c("test", "SUCCESS"), _c("e2e", "SUCCESS")], [f"ci-head:{HEAD}"]))
+def test_green_gates_with_exact_head_readiness_is_merge_ask():
+    r = prsnap.classify_pr(_pr([_c("test", "SUCCESS"), _c("e2e", "SUCCESS")], [f"ci-head:{HEAD}"], ready=True))
     assert r["state"] == "CI+E2E green" and r["next"] == "CTO merge ask" and r["owner"] == "PM"
 
 
@@ -289,7 +291,7 @@ def _thread(author="chatgpt-codex-connector", body="![P1 Badge] bug", resolved=F
 
 
 def test_stale_codex_label_with_zero_live_threads_is_not_a_wait_and_emits_action():
-    pr = _pr([_c("test", "SUCCESS"), _c("e2e", "SUCCESS")], [f"ci-head:{HEAD}", "pm-blocked:codex"])
+    pr = _pr([_c("test", "SUCCESS"), _c("e2e", "SUCCESS")], [f"ci-head:{HEAD}", "pm-blocked:codex"], ready=True)
     pr["reviewThreads"] = [_thread(resolved=True), _thread(author="rajiv", body="P1 nit")]
     r = prsnap.classify_pr(pr)
     assert "codex" not in r["state"] and "codex" not in r["next"]
@@ -306,7 +308,7 @@ def test_unresolved_codex_p1_thread_is_a_wait_even_without_label():
 
 
 def test_outdated_codex_p1_is_owner_confirm_not_wait_and_p2_ignored():
-    pr = _pr([_c("test", "SUCCESS"), _c("e2e", "SUCCESS")], [f"ci-head:{HEAD}"])
+    pr = _pr([_c("test", "SUCCESS"), _c("e2e", "SUCCESS")], [f"ci-head:{HEAD}"], ready=True)
     pr["reviewThreads"] = [_thread(outdated=True), _thread(body="![P2 Badge] style")]
     r = prsnap.classify_pr(pr)
     assert "codex P1 outdated x1 — owner confirm" in r["state"] and r["next"] == "CTO merge ask"
@@ -320,11 +322,11 @@ def test_thread_fetch_failure_falls_back_to_label_hold():
 def test_advisory_check_red_does_not_block_merge_ask():
     checks = [_c("test", "SUCCESS"), _c("e2e", "SUCCESS"),
               _c("core-large-file-correctness", "FAILURE", workflow="E2E Large File Correctness")]
-    r = prsnap.classify_pr(_pr(checks, [f"ci-head:{HEAD}"]))
+    r = prsnap.classify_pr(_pr(checks, [f"ci-head:{HEAD}"], ready=True))
     assert r["next"] == "CTO merge ask"
     assert r["state"].startswith("CI+E2E green") and "advisory red: core-large-file-correctness" in r["state"]
     pend = [_c("test", "SUCCESS"), _c("e2e", "SUCCESS"), _c("core-large-file-correctness", None, "IN_PROGRESS")]
-    assert prsnap.classify_pr(_pr(pend, [f"ci-head:{HEAD}"]))["next"] == "CTO merge ask"
+    assert prsnap.classify_pr(_pr(pend, [f"ci-head:{HEAD}"], ready=True))["next"] == "CTO merge ask"
 
 
 # --- composer ------------------------------------------------------------
