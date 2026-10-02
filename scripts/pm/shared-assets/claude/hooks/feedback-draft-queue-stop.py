@@ -6,12 +6,13 @@ companion review, never prints a hook decision, and never submits a draft to
 Anthropic. It only forwards a pointer (draft id, path, title, type) through
 message-pm.sh, and only after that send is verified.
 
-Drafts created before the hook is activated are left queued. A draft id that
-was already verified is not sent again. The id is persisted as started/uncertain
-before the transport runs and becomes delivered only after a verified receipt.
-An uncertain effect is not sent again.
-The compatible outcomes ledger is retained verbatim; its recorded IDs also
-remain suppressed. Invalid or unknown state is never reset automatically.
+Drafts created before activation are left queued. Every send is durably marked
+uncertain before transport; only a verified receipt marks it delivered. An
+uncertain draft requires receipt reconciliation with PM and is never replayed
+automatically, including after a crash while saving the verified outcome.
+The outcomes ledger is retained verbatim. Recorded IDs stay suppressed, and
+uncertain outcome IDs are appended onto uncertain_ids without being promoted
+to delivered. Invalid or unknown state is never reset automatically.
 """
 
 from __future__ import annotations
@@ -62,106 +63,27 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-_SUPPORTED_CHECKOUT = re.compile(r"heydonna-app(?:-\d+)?\Z")
-
-
-def project_dir_key_for(cwd: str) -> str:
-    """Claude's project_dir_key is the absolute cwd with slashes turned into hyphens."""
-    return cwd.replace("/", "-")
-
-
-def normalize_draft_cwd(value: object) -> str | None:
-    """Absolute lexical cwd. Relative, empty, or non-canonical paths are malformed."""
-    if not isinstance(value, str) or not value or value != value.strip():
-        return None
-    if "\x00" in value or "\\" in value or not value.startswith("/"):
-        return None
-    if value.endswith("/") or "//" in value:
-        return None
-    parts = value.split("/")
-    if any(part in ("", ".", "..") for part in parts[1:]):
-        return None
-    return value
-
-
-def _supported_checkout_name(path: str) -> bool:
-    return _SUPPORTED_CHECKOUT.fullmatch(path.rsplit("/", 1)[-1]) is not None
-
-
-def _is_linked_worktree_of_supported_checkout(cwd: str) -> bool:
-    """True when cwd is a linked worktree whose common git dir is a supported checkout.
-
-    Directory names such as heydonna-app-unrelated are not accepted merely because
-    they contain the checkout name. A worktree of heydonna-app (or a numbered
-    slot clone) is accepted even when its own path does not.
-    """
-    if not Path(cwd).is_dir():
-        return False
-    try:
-        completed = subprocess.run(
-            [
-                "git",
-                "--no-optional-locks",
-                "-C",
-                cwd,
-                "rev-parse",
-                "--path-format=absolute",
-                "--show-toplevel",
-                "--git-common-dir",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    if completed.returncode != 0:
-        return False
-    lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
-    if len(lines) != 2:
-        return False
-    toplevel, common = lines
-    try:
-        if Path(toplevel).resolve() != Path(cwd).resolve():
-            return False
-        common_path = Path(common).resolve()
-    except OSError:
-        return False
-    if common_path.name != ".git":
-        return False
-    return _supported_checkout_name(str(common_path.parent))
-
-
 def is_heydonna_source(draft: dict) -> bool:
-    """Supported HeyDonna checkout or linked worktree, with consistent provenance.
-
-    cwd and transcript_ref.project_dir_key must describe the same absolute
-    checkout. Contradictory, lookalike, and malformed provenance stays unsent.
-    """
-    if not isinstance(draft, dict):
-        return False
-    cwd = normalize_draft_cwd(draft.get("cwd"))
-    if cwd is None:
-        return False
+    """Bind the recorded project key to a real HeyDonna Git checkout/worktree."""
+    cwd = draft.get("cwd")
     ref = draft.get("transcript_ref")
-    if not isinstance(ref, dict):
+    if not isinstance(cwd, str) or not isinstance(ref, dict):
         return False
     key = ref.get("project_dir_key")
-    if not isinstance(key, str) or key != project_dir_key_for(cwd):
+    if (not cwd or not Path(cwd).is_absolute() or os.path.normpath(cwd) != cwd
+            or not isinstance(key, str) or key != re.sub(r"[^a-zA-Z0-9]", "-", cwd)):
         return False
-    if not (_supported_checkout_name(cwd) or _is_linked_worktree_of_supported_checkout(cwd)):
-        return False
-    # Retain the newer checkout/common-dir restriction and the approved sibling's
-    # exact origin restriction. Neither a name nor inherited Git context suffices.
+    # -C must resolve the draft's checkout, even when the hook inherits Git
+    # context from a different caller. No network or repository mutation.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        origin = subprocess.run(
-            ["git", "--no-optional-locks", "-C", cwd, "config", "--local", "--get", "remote.origin.url"],
-            check=False, capture_output=True, text=True, timeout=2,
-            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        inside = subprocess.run(["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+                                capture_output=True, text=True, check=False, env=env, timeout=5)
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return False
+        origin = subprocess.run(["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+                                capture_output=True, text=True, check=False, env=env, timeout=5)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
     return origin.returncode == 0 and re.fullmatch(
         r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
@@ -207,7 +129,7 @@ def load_drafts(directory: Path) -> list[tuple[Path, dict]]:
 
 
 def _empty_state(now: datetime) -> dict:
-    return {"activated_at": now.isoformat(), "delivered_ids": [], "uncertain_ids": []}
+    return {"activated_at": now.isoformat(), "delivered_ids": [], "uncertain_ids": [], "outcomes": {}}
 
 
 def _id_list(value: object) -> list[str]:
@@ -233,8 +155,8 @@ def _read_state(path: Path, now: datetime) -> tuple[dict, bool]:
     if not isinstance(outcomes, dict):
         raise ValueError("queue outcomes invalid; reconcile before sending")
     for draft_id, outcome in outcomes.items():
-        if (not isinstance(draft_id, str) or not draft_id or draft_id != draft_id.strip() or not isinstance(outcome, dict)
-                or outcome.get("status") not in ("uncertain", "delivered")):
+        if (not isinstance(draft_id, str) or not draft_id or draft_id != draft_id.strip()
+                or not isinstance(outcome, dict) or outcome.get("status") not in ("uncertain", "delivered")):
             raise ValueError("queue outcome unrecognized; reconcile before sending")
         if outcome["status"] == "uncertain" and draft_id not in uncertain:
             uncertain.append(draft_id)
@@ -242,6 +164,8 @@ def _read_state(path: Path, now: datetime) -> tuple[dict, bool]:
     # A recorded outcome is never promoted to a verified delivered ID here.
     state = dict(payload)
     state["uncertain_ids"] = uncertain
+    if "outcomes" not in state:
+        state["outcomes"] = outcomes
     return state, state != payload
 
 
@@ -295,6 +219,16 @@ def send_verified(message_pm: str, envelope: str) -> bool:
     return completed.returncode == 0 and "MESSAGE_PM_SENT" in stdout and "verified=true" in stdout
 
 
+def _uncertain_members(outcomes: dict, uncertain_ids: list[str], delivered: list[str]) -> list[str]:
+    """IDs still suppressed as uncertain. Delivered receipts are not listed."""
+    members = [key for key, value in outcomes.items() if value.get("status") == "uncertain"]
+    delivered_set = set(delivered)
+    for item in uncertain_ids:
+        if item not in members and item not in delivered_set:
+            members.append(item)
+    return members
+
+
 def process_queue(
     *,
     drafts_dir: Path | None = None,
@@ -320,12 +254,11 @@ def process_queue(
             _log(state_path, f"activated_at={state['activated_at']} sent=0")
             return {"activated": True, "activated_at": state["activated_at"], "sent": [], "delivered_ids": list(state["delivered_ids"])}
         delivered = list(state["delivered_ids"])
-        uncertain = list(state.get("uncertain_ids") or [])
-        seen = set(delivered) | set(state.get("outcomes", {}))
-        uncertain_seen = set(uncertain)
+        outcomes = state["outcomes"]
+        seen = set(delivered) | set(outcomes) | set(state.get("uncertain_ids") or [])
         for path, draft in load_drafts(drafts_dir):
             draft_id = draft["draft_id"]
-            if draft_id in seen or draft_id in uncertain_seen:
+            if draft_id in seen:
                 continue
             if draft.get("status") != "queued":
                 continue
@@ -337,25 +270,22 @@ def process_queue(
             envelope = build_pointer(draft, path)
             if envelope is None:
                 continue
-            if not message_pm or not Path(message_pm).is_file():
-                _log(state_path, f"not_started draft_id={draft_id}")
-                continue
-            # Started/uncertain is durable before the transport. A lost response
-            # or a crash after the effect must not send this id again.
-            uncertain.append(draft_id)
-            uncertain_seen.add(draft_id)
-            state["uncertain_ids"] = uncertain
+            # Persist before the first possible transport effect. If anything
+            # fails afterward, this durable record forbids a second send.
+            outcomes[draft_id] = {"status": "uncertain", "started_at": now.isoformat(),
+                                  "path": str(path), "reason": "send_started"}
             _write_state(state_path, state)
-            if not send_verified(message_pm, envelope):
-                _log(state_path, f"uncertain draft_id={draft_id}")
-                continue
-            uncertain.remove(draft_id)
-            uncertain_seen.remove(draft_id)
-            delivered.append(draft_id)
             seen.add(draft_id)
+            if not send_verified(message_pm, envelope):
+                outcomes[draft_id]["reason"] = "unverified_transport"
+                _write_state(state_path, state)
+                _log(state_path, f"uncertain draft_id={draft_id}; reconcile PM receipt; no automatic replay")
+                continue
+            delivered.append(draft_id)
             sent.append(draft_id)
+            outcomes[draft_id].update(status="delivered", verified_at=utc_now().isoformat(),
+                                      reason="verified_receipt")
             state["delivered_ids"] = delivered
-            state["uncertain_ids"] = uncertain
             _write_state(state_path, state)
         _log(state_path, f"sent={len(sent)}")
         return {
@@ -363,6 +293,7 @@ def process_queue(
             "activated_at": state["activated_at"],
             "sent": sent,
             "delivered_ids": delivered,
+            "uncertain_ids": _uncertain_members(outcomes, state.get("uncertain_ids") or [], delivered),
         }
 
 
