@@ -160,6 +160,40 @@ def _existing_obligation(kind: str, pr: int) -> dict | None:
     return dict(row) if row else None
 
 
+def active_claim(row: dict | None, now: "datetime.datetime | None" = None) -> dict | None:
+    """Pure: {owner, until} when an open obligation row has a non-empty owner and a
+    suppress_until still in the future (PM bg-flow ownership, e.g. captures/agents)."""
+    if not row:
+        return None
+    owner = (row.get("owner") or "").strip()
+    until_raw = row.get("suppress_until")
+    if not owner or not isinstance(until_raw, str) or not until_raw:
+        return None
+    try:
+        until = datetime.datetime.fromisoformat(until_raw.replace("Z", "+00:00"))
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=datetime.timezone.utc)
+    except Exception:
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return {"owner": owner, "until": until} if until > now else None
+
+
+def fetch_live_claims(prs: list[dict]) -> dict[int, dict]:
+    """Read-only: PR number -> active_claim over open pr_* obligation rows."""
+    claims: dict[int, dict] = {}
+    for pr in prs:
+        number = pr.get("number")
+        if not isinstance(number, int):
+            continue
+        for kind in OBLIGATION_KINDS:
+            claim = active_claim(_existing_obligation(kind, number))
+            if claim:
+                claims[number] = claim
+                break
+    return claims
+
+
 def _is_fresh_owner_claim(row: dict | None) -> bool:
     """True when `row` records a non-PM owner claimed within the TTL."""
     if not row:
@@ -479,7 +513,8 @@ def codex_threads(threads: list[dict] | None) -> dict | None:
     return {"live": live, "outdated": outdated}
 
 
-def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int, str] | None = None) -> dict:
+def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int, str] | None = None,
+                claims: dict[int, dict] | None = None) -> dict:
     """Pure: one PR -> state/owner/next from live head checks, labels, body and comments.
 
     Priority order for `next` (Rajiv 2026-09-29: too many PRs were reported as
@@ -587,6 +622,12 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
             nxt = "12b done -> admit"
         else:
             nxt = "PM 12b review"
+    claim = (claims or {}).get(pr.get("number"))
+    if claim and (state.endswith(", unowned") or state in ("not admitted", "stale admission")):
+        # Owned by a PM background flow (pm-ops obligation owner + live suppress_until).
+        if state.endswith(", unowned"):
+            state = state[: -len(", unowned")]
+        owner = f"owner: {claim['owner']} (until {claim['until'].astimezone().strftime('%H:%M')})"
     if advisory_red:
         state += " (advisory red: " + ",".join(advisory_red[:3]) + ")"
     if codex and codex["outdated"]:
@@ -675,6 +716,7 @@ def main() -> int:
     args = parser.parse_args()
     mop_owned_prs = fetch_mop_owned_prs()
     raw_prs = fetch_open_prs(with_threads=not args.sync_obligations)
+    claims = {} if args.sync_obligations else fetch_live_claims(raw_prs)
     if args.sync_obligations:
         created = sync_pr_obligations(raw_prs, mop_owned_prs)
         print(json.dumps({"obligations_synced": created}, indent=2))
@@ -687,7 +729,7 @@ def main() -> int:
             if hold:
                 holds[number] = hold
     rows = sorted(
-        (classify_pr(pr, mop_owned_prs, holds) for pr in raw_prs),
+        (classify_pr(pr, mop_owned_prs, holds, claims) for pr in raw_prs),
         key=lambda r: -int(r["number"]),
     )
     if args.text:

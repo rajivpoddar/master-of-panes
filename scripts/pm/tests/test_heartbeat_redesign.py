@@ -211,6 +211,25 @@ def test_red_unowned_routes_to_repair():
     assert r["next"] == "e2e-failure-investigator"
 
 
+def test_pm_obligation_claim_counts_as_owned():
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    iso = lambda d: d.isoformat().replace("+00:00", "Z")
+    live = prsnap.active_claim({"owner": "pm-capture-8629", "suppress_until": iso(now + timedelta(minutes=30))}, now)
+    assert live and live["owner"] == "pm-capture-8629"
+    assert prsnap.active_claim({"owner": "pm-x", "suppress_until": iso(now - timedelta(minutes=1))}, now) is None
+    assert prsnap.active_claim({"owner": "", "suppress_until": iso(now + timedelta(minutes=30))}, now) is None
+    assert prsnap.active_claim({"owner": "pm-x", "suppress_until": None}, now) is None
+    pr = _pr([_c("test", "FAILURE")], number=8629)
+    r = prsnap.classify_pr(pr, claims={8629: live})
+    assert r["state"] == "red: test"
+    assert r["owner"].startswith("owner: pm-capture-8629 (until ")
+    assert "unowned" not in prsnap.format_line(r)
+    assert "unowned" in prsnap.classify_pr(pr, claims={1: live})["state"]
+    r = prsnap.classify_pr(_pr([_c("test", "SUCCESS")], number=8629), claims={8629: live})
+    assert r["owner"].startswith("owner: pm-capture-8629")
+
+
 def test_running_on_admitted_head():
     r = prsnap.classify_pr(_pr([_c("typescript", None, "IN_PROGRESS")], [f"ci-head:{HEAD}"]))
     assert r["state"] == "CI running" and r["admitted"]
