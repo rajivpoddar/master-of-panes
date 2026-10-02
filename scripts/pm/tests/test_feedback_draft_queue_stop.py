@@ -326,3 +326,289 @@ def test_settings_registration_is_async_and_outside_the_review_hook(tmp_path: Pa
         assert matches[0]["command"] == hook.HOOK_COMMAND
     stop_commands = [inner["command"] for entry in settings["hooks"]["Stop"] for inner in entry["hooks"]]
     assert stop_commands[0].endswith("slot-terminal-message-pm-stop.sh")
+
+
+def _activated_state(path: Path, activated: datetime, **extra: object) -> None:
+    payload = {"activated_at": activated.isoformat(), "delivered_ids": []}
+    payload.update(extra)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _effect_sender(path: Path, *, mode: str) -> None:
+    path.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import json
+            import os
+            import pathlib
+            import sys
+
+            args = sys.argv[1:]
+            if "--file" not in args:
+                raise SystemExit(2)
+            body = pathlib.Path(args[args.index("--file") + 1]).read_text(encoding="utf-8")
+            state_path = pathlib.Path(os.environ["FEEDBACK_DRAFT_QUEUE_STATE"])
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            expected = os.environ["EXPECT_UNCERTAIN_ID"]
+            record = pathlib.Path(os.environ["MESSAGE_PM_RECORD"])
+            previous = record.read_text(encoding="utf-8") if record.exists() else ""
+            if expected not in (state.get("uncertain_ids") or []):
+                record.write_text(previous + "MISSING_UNCERTAIN\\n", encoding="utf-8")
+                raise SystemExit(3)
+            record.write_text(previous + "ACCEPTED " + expected + "\\n" + body + "\\n---\\n", encoding="utf-8")
+            if {mode!r} == "lose_response":
+                raise SystemExit(1)
+            print("MESSAGE_PM_SENT slot=0 verified=true bytes={{}}".format(len(body.encode("utf-8"))))
+            """
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def _prepare_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, draft_id: str):
+    hook = load_hook()
+    drafts = tmp_path / "drafts"
+    state = tmp_path / "state.json"
+    record = tmp_path / "sent.txt"
+    message_pm = tmp_path / "message-pm.py"
+    activated = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    _activated_state(state, activated)
+    write_draft(
+        drafts,
+        "draft.json",
+        heydonna_draft(draft_id, (activated + timedelta(minutes=1)).isoformat()),
+    )
+    monkeypatch.setenv("FEEDBACK_DRAFT_QUEUE_STATE", str(state))
+    monkeypatch.setenv("MESSAGE_PM_RECORD", str(record))
+    monkeypatch.setenv("EXPECT_UNCERTAIN_ID", draft_id)
+    return hook, drafts, state, record, message_pm, activated
+
+
+def test_response_loss_does_not_send_a_second_effect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hook, drafts, state, record, message_pm, _activated = _prepare_queue(tmp_path, monkeypatch, "draft-loss")
+    _effect_sender(message_pm, mode="lose_response")
+    first = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
+    second = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert first["sent"] == []
+    assert second["sent"] == []
+    assert saved["delivered_ids"] == []
+    assert saved["uncertain_ids"] == ["draft-loss"]
+    assert record.read_text(encoding="utf-8").count("ACCEPTED draft-loss") == 1
+    assert "MISSING_UNCERTAIN" not in record.read_text(encoding="utf-8")
+
+
+def test_post_ack_crash_does_not_send_a_second_effect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hook, drafts, state, record, message_pm, _activated = _prepare_queue(tmp_path, monkeypatch, "draft-crash")
+    _effect_sender(message_pm, mode="verified")
+    real_send = hook.send_verified
+
+    def crash_after_ack(message_pm_bin: str, envelope: str) -> bool:
+        ok = real_send(message_pm_bin, envelope)
+        assert ok is True
+        raise SystemExit(86)
+
+    monkeypatch.setattr(hook, "send_verified", crash_after_ack)
+    with pytest.raises(SystemExit):
+        hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
+    monkeypatch.setattr(hook, "send_verified", real_send)
+    second = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert second["sent"] == []
+    assert saved["delivered_ids"] == []
+    assert saved["uncertain_ids"] == ["draft-crash"]
+    assert record.read_text(encoding="utf-8").count("ACCEPTED draft-crash") == 1
+
+
+def test_reentry_of_uncertain_effect_does_not_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hook, drafts, state, record, message_pm, activated = _prepare_queue(tmp_path, monkeypatch, "draft-reentry")
+    _activated_state(state, activated, uncertain_ids=["draft-reentry"])
+    _effect_sender(message_pm, mode="verified")
+    result = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
+    assert result["sent"] == []
+    assert not record.exists()
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["uncertain_ids"] == ["draft-reentry"]
+    assert saved["delivered_ids"] == []
+
+
+def test_foreign_and_lookalike_provenance_is_not_delivered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hook = load_hook()
+    drafts = tmp_path / "drafts"
+    state = tmp_path / "state.json"
+    record = tmp_path / "sent.txt"
+    message_pm = tmp_path / "message-pm.py"
+    write_message_pm(message_pm)
+    monkeypatch.setenv("MESSAGE_PM_RECORD", str(record))
+    activated = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    created = (activated + timedelta(minutes=2)).isoformat()
+    _activated_state(state, activated)
+    write_draft(
+        drafts,
+        "stale-key.json",
+        {
+            "draft_id": "stale-key",
+            "created_at": created,
+            "cwd": "/Users/rajiv/Downloads/projects/other-app",
+            "status": "queued",
+            "title": "Foreign checkout",
+            "type": "bug",
+            "transcript_ref": {"project_dir_key": "-Users-rajiv-Downloads-projects-heydonna-app"},
+        },
+    )
+    lookalike = "/Users/rajiv/Downloads/projects/heydonna-app-unrelated"
+    write_draft(
+        drafts,
+        "lookalike.json",
+        {
+            "draft_id": "lookalike",
+            "created_at": created,
+            "cwd": lookalike,
+            "status": "queued",
+            "title": "Lookalike",
+            "type": "bug",
+            "transcript_ref": {"project_dir_key": lookalike.replace("/", "-")},
+        },
+    )
+    write_draft(
+        drafts,
+        "malformed.json",
+        {
+            "draft_id": "malformed",
+            "created_at": created,
+            "cwd": "/Users/rajiv/Downloads/projects/heydonna-app/../other-app",
+            "status": "queued",
+            "title": "Malformed",
+            "type": "bug",
+            "transcript_ref": {"project_dir_key": "-Users-rajiv-Downloads-projects-heydonna-app"},
+        },
+    )
+    unrelated_repo = tmp_path / "heydonna-app-unrelated"
+    unrelated_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=unrelated_repo, check=True, capture_output=True, text=True)
+    write_draft(
+        drafts,
+        "unrelated-repo.json",
+        {
+            "draft_id": "unrelated-repo",
+            "created_at": created,
+            "cwd": str(unrelated_repo),
+            "status": "queued",
+            "title": "Unrelated repo",
+            "type": "bug",
+            "transcript_ref": {"project_dir_key": str(unrelated_repo).replace("/", "-")},
+        },
+    )
+    result = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
+    assert result["sent"] == []
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["delivered_ids"] == []
+    assert (saved.get("uncertain_ids") or []) == []
+    assert not record.exists()
+
+
+def test_legitimate_heydonna_worktree_delivers_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hook = load_hook()
+    repo = tmp_path / "heydonna-app"
+    repo.mkdir()
+    env = os.environ.copy()
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "mop-test",
+            "GIT_AUTHOR_EMAIL": "mop-test@example.com",
+            "GIT_COMMITTER_NAME": "mop-test",
+            "GIT_COMMITTER_EMAIL": "mop-test@example.com",
+        }
+    )
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True, text=True, env=env)
+    (repo / "README").write_text("heydonna\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README"], cwd=repo, check=True, capture_output=True, text=True, env=env)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    worktree = tmp_path / "feature-wt"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    cwd = str(worktree.resolve())
+    assert "heydonna-app" not in worktree.name
+    drafts = tmp_path / "drafts"
+    state = tmp_path / "state.json"
+    record = tmp_path / "sent.txt"
+    message_pm = tmp_path / "message-pm.py"
+    write_message_pm(message_pm)
+    monkeypatch.setenv("MESSAGE_PM_RECORD", str(record))
+    activated = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    _activated_state(state, activated)
+    write_draft(
+        drafts,
+        "worktree.json",
+        heydonna_draft(
+            "worktree-1",
+            (activated + timedelta(minutes=4)).isoformat(),
+            cwd=cwd,
+            transcript_ref={"project_dir_key": cwd.replace("/", "-")},
+        ),
+    )
+    first = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
+    second = hook.process_queue(drafts_dir=drafts, state_path=state, message_pm=str(message_pm))
+    assert first["sent"] == ["worktree-1"]
+    assert second["sent"] == []
+    assert record.read_text(encoding="utf-8").count("draft_id: worktree-1") == 1
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["delivered_ids"] == ["worktree-1"]
+    assert saved["uncertain_ids"] == []
+
+
+def test_eight_simultaneous_invocations_deliver_once(tmp_path: Path) -> None:
+    drafts = tmp_path / "drafts"
+    state = tmp_path / "state.json"
+    record = tmp_path / "sent.txt"
+    message_pm = tmp_path / "message-pm.py"
+    write_message_pm(message_pm)
+    activated = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    _activated_state(state, activated)
+    write_draft(
+        drafts,
+        "draft.json",
+        heydonna_draft("draft-once", (activated + timedelta(minutes=1)).isoformat()),
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "FEEDBACK_DRAFT_DRAFTS_DIR": str(drafts),
+            "FEEDBACK_DRAFT_QUEUE_STATE": str(state),
+            "MESSAGE_PM_BIN": str(message_pm),
+            "MESSAGE_PM_RECORD": str(record),
+        }
+    )
+    env.pop("FEEDBACK_DRAFT_QUEUE_DETACHED", None)
+    processes = [
+        subprocess.Popen(
+            [os.environ.get("MOP_PYTHON", "python3"), str(HOOK), "--foreground"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        for _ in range(8)
+    ]
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=30)
+        assert process.returncode == 0, stderr
+        assert stdout == b""
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["delivered_ids"] == ["draft-once"]
+    assert saved["uncertain_ids"] == []
+    assert record.read_text(encoding="utf-8").count("draft_id: draft-once") == 1

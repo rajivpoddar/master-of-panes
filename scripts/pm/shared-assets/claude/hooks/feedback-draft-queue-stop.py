@@ -7,8 +7,9 @@ Anthropic. It only forwards a pointer (draft id, path, title, type) through
 message-pm.sh, and only after that send is verified.
 
 Drafts created before the hook is activated are left queued. A draft id that
-was already verified is not sent again. A send that is not verified is not
-marked delivered.
+was already verified is not sent again. The id is persisted as started/uncertain
+before the transport runs and becomes delivered only after a verified receipt.
+An uncertain effect is not sent again.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -58,14 +60,97 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_SUPPORTED_CHECKOUT = re.compile(r"heydonna-app(?:-\d+)?\Z")
+
+
+def project_dir_key_for(cwd: str) -> str:
+    """Claude's project_dir_key is the absolute cwd with slashes turned into hyphens."""
+    return cwd.replace("/", "-")
+
+
+def normalize_draft_cwd(value: object) -> str | None:
+    """Absolute lexical cwd. Relative, empty, or non-canonical paths are malformed."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    if "\x00" in value or "\\" in value or not value.startswith("/"):
+        return None
+    if value.endswith("/") or "//" in value:
+        return None
+    parts = value.split("/")
+    if any(part in ("", ".", "..") for part in parts[1:]):
+        return None
+    return value
+
+
+def _supported_checkout_name(path: str) -> bool:
+    return _SUPPORTED_CHECKOUT.fullmatch(path.rsplit("/", 1)[-1]) is not None
+
+
+def _is_linked_worktree_of_supported_checkout(cwd: str) -> bool:
+    """True when cwd is a linked worktree whose common git dir is a supported checkout.
+
+    Directory names such as heydonna-app-unrelated are not accepted merely because
+    they contain the checkout name. A worktree of heydonna-app (or a numbered
+    slot clone) is accepted even when its own path does not.
+    """
+    if not Path(cwd).is_dir():
+        return False
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                cwd,
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--git-common-dir",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if completed.returncode != 0:
+        return False
+    lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+    if len(lines) != 2:
+        return False
+    toplevel, common = lines
+    try:
+        if Path(toplevel).resolve() != Path(cwd).resolve():
+            return False
+        common_path = Path(common).resolve()
+    except OSError:
+        return False
+    if common_path.name != ".git":
+        return False
+    return _supported_checkout_name(str(common_path.parent))
+
+
 def is_heydonna_source(draft: dict) -> bool:
-    """HeyDonna checkouts only. Other products stay queued and unsent."""
-    parts = [str(draft.get("cwd") or "")]
+    """Supported HeyDonna checkout or linked worktree, with consistent provenance.
+
+    cwd and transcript_ref.project_dir_key must describe the same absolute
+    checkout. Contradictory, lookalike, and malformed provenance stays unsent.
+    """
+    if not isinstance(draft, dict):
+        return False
+    cwd = normalize_draft_cwd(draft.get("cwd"))
+    if cwd is None:
+        return False
     ref = draft.get("transcript_ref")
-    if isinstance(ref, dict):
-        parts.append(str(ref.get("project_dir_key") or ""))
-    blob = "\n".join(parts).lower()
-    return "heydonna-app" in blob
+    if not isinstance(ref, dict):
+        return False
+    key = ref.get("project_dir_key")
+    if not isinstance(key, str) or key != project_dir_key_for(cwd):
+        return False
+    if _supported_checkout_name(cwd):
+        return True
+    return _is_linked_worktree_of_supported_checkout(cwd)
 
 
 def build_pointer(draft: dict, path: Path) -> str | None:
@@ -106,7 +191,13 @@ def load_drafts(directory: Path) -> list[tuple[Path, dict]]:
 
 
 def _empty_state(now: datetime) -> dict:
-    return {"activated_at": now.isoformat(), "delivered_ids": []}
+    return {"activated_at": now.isoformat(), "delivered_ids": [], "uncertain_ids": []}
+
+
+def _id_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
 
 
 def _read_state(path: Path, now: datetime) -> tuple[dict, bool]:
@@ -121,15 +212,30 @@ def _read_state(path: Path, now: datetime) -> tuple[dict, bool]:
     delivered = payload.get("delivered_ids")
     if not isinstance(delivered, list):
         delivered = []
-    clean = [item for item in delivered if isinstance(item, str) and item]
+    clean = _id_list(delivered)
+    raw_uncertain = payload.get("uncertain_ids", None)
+    uncertain = _id_list(raw_uncertain)
+    delivered_set = set(clean)
+    uncertain = [item for item in uncertain if item not in delivered_set]
     changed = clean != delivered
-    return {"activated_at": payload["activated_at"], "delivered_ids": clean}, changed
+    if isinstance(raw_uncertain, list):
+        changed = changed or uncertain != raw_uncertain
+    elif raw_uncertain is not None:
+        changed = True
+    return {
+        "activated_at": payload["activated_at"],
+        "delivered_ids": clean,
+        "uncertain_ids": uncertain,
+    }, changed
 
 
 def _write_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(state, indent=2, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(temporary, path)
 
 
@@ -193,10 +299,12 @@ def process_queue(
             _log(state_path, f"activated_at={state['activated_at']} sent=0")
             return {"activated": True, "activated_at": state["activated_at"], "sent": [], "delivered_ids": list(state["delivered_ids"])}
         delivered = list(state["delivered_ids"])
+        uncertain = list(state.get("uncertain_ids") or [])
         seen = set(delivered)
+        uncertain_seen = set(uncertain)
         for path, draft in load_drafts(drafts_dir):
             draft_id = draft["draft_id"]
-            if draft_id in seen:
+            if draft_id in seen or draft_id in uncertain_seen:
                 continue
             if draft.get("status") != "queued":
                 continue
@@ -208,13 +316,25 @@ def process_queue(
             envelope = build_pointer(draft, path)
             if envelope is None:
                 continue
-            if not send_verified(message_pm, envelope):
-                _log(state_path, f"unverified draft_id={draft_id}")
+            if not message_pm or not Path(message_pm).is_file():
+                _log(state_path, f"not_started draft_id={draft_id}")
                 continue
+            # Started/uncertain is durable before the transport. A lost response
+            # or a crash after the effect must not send this id again.
+            uncertain.append(draft_id)
+            uncertain_seen.add(draft_id)
+            state["uncertain_ids"] = uncertain
+            _write_state(state_path, state)
+            if not send_verified(message_pm, envelope):
+                _log(state_path, f"uncertain draft_id={draft_id}")
+                continue
+            uncertain.remove(draft_id)
+            uncertain_seen.remove(draft_id)
             delivered.append(draft_id)
             seen.add(draft_id)
             sent.append(draft_id)
             state["delivered_ids"] = delivered
+            state["uncertain_ids"] = uncertain
             _write_state(state_path, state)
         _log(state_path, f"sent={len(sent)}")
         return {
