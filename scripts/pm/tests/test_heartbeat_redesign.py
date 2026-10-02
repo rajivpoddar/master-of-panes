@@ -209,6 +209,39 @@ def test_red_unowned_routes_to_repair():
     assert r["state"] == "red: test, unowned" and r["next"] == "ci-repair-agent"
     r = prsnap.classify_pr(_pr([_c("e2e", "FAILURE")], ["slot:2"]))
     assert r["next"] == "e2e-failure-investigator"
+    assert "unowned" not in r["state"]
+
+
+def test_red_is_unowned_only_without_slot_mop_or_pm_wait():
+    """Rajiv 2026-10-02 thread 1790937915.525459: a red PR a slot or a PM wait
+    (CI, review, capture) already owns is not unowned."""
+    assert prsnap.red_is_unowned(slot_label=False, mop_owned=False, pm_wait=False)
+    assert not prsnap.red_is_unowned(slot_label=True, mop_owned=False, pm_wait=False)
+    assert not prsnap.red_is_unowned(slot_label=False, mop_owned=True, pm_wait=False)
+    assert not prsnap.red_is_unowned(slot_label=False, mop_owned=False, pm_wait=True)
+    # Admitted red PR with a slot:N label used to be forced to owner PM, then unowned.
+    admitted = _pr([_c("e2e", "FAILURE")], ["slot:2", f"ci-head:{HEAD}"])
+    assert "unowned" not in prsnap.classify_pr(admitted)["state"]
+    # MoP slot owner.
+    red = _pr([_c("test", "FAILURE")])
+    assert "unowned" not in prsnap.classify_pr(red, mop_owned_prs={red["number"]})["state"]
+    # CI wait: a required gate is still running beside the red one.
+    running = _pr([_c("test", "FAILURE"), _c("e2e", None, "IN_PROGRESS")])
+    assert "unowned" not in prsnap.classify_pr(running)["state"]
+    # Review wait: head-bound 12b block.
+    review = _pr([_c("e2e", "FAILURE")])
+    review["comments"] = [{"body": f"PM_OPUS_REVIEW: BLOCK {HEAD[:7]}"}]
+    assert "unowned" not in prsnap.classify_pr(review)["state"]
+    # Capture wait whose suppress_until already lapsed, owner still names capture.
+    row = {"owner": "pm-wait-8716-then-recapture", "suppress_until": None}
+    wait = prsnap.pm_wait_from_row(row)
+    assert wait == {"owner": "pm-wait-8716-then-recapture", "until": None}
+    assert prsnap.pm_wait_from_row({"owner": "PM", "suppress_until": None}) is None
+    assert prsnap.pm_wait_from_row({"owner": "pm-x", "suppress_until": None}) is None
+    owned = prsnap.classify_pr(_pr([_c("e2e", "FAILURE")], number=8689), claims={8689: wait})
+    assert owned["state"] == "red: e2e"
+    assert owned["owner"] == "owner: pm-wait-8716-then-recapture"
+    assert "unowned" not in prsnap.format_line(owned)
 
 
 def test_pm_obligation_claim_counts_as_owned():

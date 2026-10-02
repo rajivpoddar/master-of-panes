@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Live open-PR snapshot shared by the hourly drive and the 3h heartbeat.
 
-State comes only from live GitHub (`gh pr list` statusCheckRollup on the
-current headRefOid). pm-ops rows and advisory pm-state labels are never used
-to decide state. Read-only; takes no PR actions.
+Gate color comes from live GitHub (`gh pr list` statusCheckRollup on the
+current headRefOid). A red PR is "unowned" only when it has no MoP slot
+owner, no slot:N label, and no PM-owned wait (CI still running, review hold,
+or a capture/CI/review obligation owner). Read-only; takes no PR actions.
 
 Output (JSON, or --text one line per PR):
   {number, head, title, draft, state, owner, next}
@@ -80,6 +81,12 @@ OBLIGATION_KINDS = ("pr_admission", "pr_red_unowned", "pr_merge_ask")
 # clobbers the claim on the next hourly/3h/every-stop sync pass. See
 # sync_pr_obligations().
 OWNER_CLAIM_TTL_SECONDS = 60 * 60
+# Open-row owners that are a PM wait even after suppress_until lapses.
+# Generic "PM" and unrelated names are not a wait.
+PM_WAIT_OWNER_RE = re.compile(
+    r"capture|replay|(?:^|[^a-z])ci(?:[^a-z]|$)|review|12b|admission",
+    re.IGNORECASE,
+)
 
 
 def _iso_duration_seconds(started: str, completed_at: str) -> float:
@@ -179,15 +186,47 @@ def active_claim(row: dict | None, now: "datetime.datetime | None" = None) -> di
     return {"owner": owner, "until": until} if until > now else None
 
 
+def pm_wait_from_row(row: dict | None, now: "datetime.datetime | None" = None) -> dict | None:
+    """Pure: a PM-owned wait on an open obligation row, or None.
+
+    A live suppress_until claim (any non-PM owner) is a wait. After that window
+    lapses, an owner that still names CI, review, or capture is a wait too.
+    Generic owner "PM" is not a wait.
+    """
+    if not row:
+        return None
+    live = active_claim(row, now)
+    if live and live["owner"].lower() != "pm":
+        return live
+    owner = (row.get("owner") or "").strip()
+    if not owner or owner.lower() == "pm":
+        return None
+    if owner.lower().startswith("slot:") or PM_WAIT_OWNER_RE.search(owner):
+        return {"owner": owner, "until": None}
+    return None
+
+
+def red_is_unowned(*, slot_label: bool, mop_owned: bool, pm_wait: bool) -> bool:
+    """Unowned iff no MoP slot owner, no slot:N label, and no PM-owned wait."""
+    return not slot_label and not mop_owned and not pm_wait
+
+
+def _claim_owner_label(claim: dict) -> str:
+    until = claim.get("until")
+    if until is not None:
+        return f"owner: {claim['owner']} (until {until.astimezone().strftime('%H:%M')})"
+    return f"owner: {claim['owner']}"
+
+
 def fetch_live_claims(prs: list[dict]) -> dict[int, dict]:
-    """Read-only: PR number -> active_claim over open pr_* obligation rows."""
+    """Read-only: PR number -> PM wait over open pr_* obligation rows."""
     claims: dict[int, dict] = {}
     for pr in prs:
         number = pr.get("number")
         if not isinstance(number, int):
             continue
         for kind in OBLIGATION_KINDS:
-            claim = active_claim(_existing_obligation(kind, number))
+            claim = pm_wait_from_row(_existing_obligation(kind, number))
             if claim:
                 claims[number] = claim
                 break
@@ -576,7 +615,16 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
         state = "red: " + ",".join(required_red)
         e2e = any("e2e" in n for n in required_red)
         nxt = "e2e-failure-investigator" if e2e else "ci-repair-agent"
-        if owner == "PM":
+        # Unowned means nobody is on it: no MoP slot, no slot:N label, and no
+        # PM wait (CI still running, review hold, or a capture/CI/review claim).
+        number = pr.get("number")
+        claim_now = (claims or {}).get(number)
+        review_hold = bool((holds or {}).get(number)) or _has_12b_block(pr, head)
+        if red_is_unowned(
+            slot_label=bool(slots),
+            mop_owned=number in mop_owned_prs,
+            pm_wait=bool(claim_now) or gates_pending or review_hold,
+        ):
             state += ", unowned"
     elif gates_pending or (admitted and not gates_green and checks["pending"]):
         state, nxt = "CI running", "CI running" if stale_admission else "await terminal"
@@ -623,11 +671,15 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
         else:
             nxt = "PM 12b review"
     claim = (claims or {}).get(pr.get("number"))
-    if claim and (state.endswith(", unowned") or state in ("not admitted", "stale admission")):
-        # Owned by a PM background flow (pm-ops obligation owner + live suppress_until).
+    if claim and (
+        state.endswith(", unowned")
+        or state.startswith("red:")
+        or state in ("not admitted", "stale admission")
+    ):
+        # Owned by a PM wait (live suppress_until claim, or a CI/review/capture owner).
         if state.endswith(", unowned"):
             state = state[: -len(", unowned")]
-        owner = f"owner: {claim['owner']} (until {claim['until'].astimezone().strftime('%H:%M')})"
+        owner = _claim_owner_label(claim)
     if advisory_red:
         state += " (advisory red: " + ",".join(advisory_red[:3]) + ")"
     if codex and codex["outdated"]:
