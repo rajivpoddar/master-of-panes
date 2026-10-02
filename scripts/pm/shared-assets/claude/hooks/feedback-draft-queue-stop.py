@@ -6,9 +6,10 @@ companion review, never prints a hook decision, and never submits a draft to
 Anthropic. It only forwards a pointer (draft id, path, title, type) through
 message-pm.sh, and only after that send is verified.
 
-Drafts created before the hook is activated are left queued. A draft id that
-was already verified is not sent again. A send that is not verified is not
-marked delivered.
+Drafts created before activation are left queued. Every send is durably marked
+uncertain before transport; only a verified receipt marks it delivered. An
+uncertain draft requires receipt reconciliation with PM and is never replayed
+automatically, including after a crash while saving the verified outcome.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -59,13 +61,31 @@ def utc_now() -> datetime:
 
 
 def is_heydonna_source(draft: dict) -> bool:
-    """HeyDonna checkouts only. Other products stay queued and unsent."""
-    parts = [str(draft.get("cwd") or "")]
+    """Bind the recorded project key to a real HeyDonna Git checkout/worktree."""
+    cwd = draft.get("cwd")
     ref = draft.get("transcript_ref")
-    if isinstance(ref, dict):
-        parts.append(str(ref.get("project_dir_key") or ""))
-    blob = "\n".join(parts).lower()
-    return "heydonna-app" in blob
+    if not isinstance(cwd, str) or not isinstance(ref, dict):
+        return False
+    key = ref.get("project_dir_key")
+    if (not cwd or not Path(cwd).is_absolute() or os.path.normpath(cwd) != cwd
+            or not isinstance(key, str) or key != re.sub(r"[^a-zA-Z0-9]", "-", cwd)):
+        return False
+    # -C must resolve the draft's checkout, even when the hook inherits Git
+    # context from a different caller. No network or repository mutation.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        inside = subprocess.run(["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+                                capture_output=True, text=True, check=False, env=env, timeout=5)
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return False
+        origin = subprocess.run(["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+                                capture_output=True, text=True, check=False, env=env, timeout=5)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    return origin.returncode == 0 and re.fullmatch(
+        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+        r"heydonna-app/heydonna-app(?:\.git)?", origin.stdout.strip()
+    ) is not None
 
 
 def build_pointer(draft: dict, path: Path) -> str | None:
@@ -106,7 +126,7 @@ def load_drafts(directory: Path) -> list[tuple[Path, dict]]:
 
 
 def _empty_state(now: datetime) -> dict:
-    return {"activated_at": now.isoformat(), "delivered_ids": []}
+    return {"activated_at": now.isoformat(), "delivered_ids": [], "outcomes": {}}
 
 
 def _read_state(path: Path, now: datetime) -> tuple[dict, bool]:
@@ -114,23 +134,35 @@ def _read_state(path: Path, now: datetime) -> tuple[dict, bool]:
         return _empty_state(now), True
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return _empty_state(now), True
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("queue state unreadable; reconcile before sending") from exc
     if not isinstance(payload, dict) or parse_timestamp(payload.get("activated_at")) is None:
-        return _empty_state(now), True
+        raise ValueError("queue state invalid; reconcile before sending")
     delivered = payload.get("delivered_ids")
-    if not isinstance(delivered, list):
-        delivered = []
-    clean = [item for item in delivered if isinstance(item, str) and item]
-    changed = clean != delivered
-    return {"activated_at": payload["activated_at"], "delivered_ids": clean}, changed
+    outcomes = payload.get("outcomes", {})
+    if (not isinstance(delivered, list) or any(not isinstance(item, str) or not item for item in delivered)
+            or not isinstance(outcomes, dict)
+            or any(not isinstance(key, str) or not key or not isinstance(value, dict)
+                   or value.get("status") not in ("uncertain", "delivered")
+                   for key, value in outcomes.items())):
+        raise ValueError("queue outcomes invalid; reconcile before sending")
+    return {"activated_at": payload["activated_at"], "delivered_ids": delivered,
+            "outcomes": outcomes}, "outcomes" not in payload
 
 
 def _write_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(state, indent=2, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(temporary, path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _log(state_path: Path, line: str) -> None:
@@ -193,7 +225,8 @@ def process_queue(
             _log(state_path, f"activated_at={state['activated_at']} sent=0")
             return {"activated": True, "activated_at": state["activated_at"], "sent": [], "delivered_ids": list(state["delivered_ids"])}
         delivered = list(state["delivered_ids"])
-        seen = set(delivered)
+        outcomes = state["outcomes"]
+        seen = set(delivered) | set(outcomes)
         for path, draft in load_drafts(drafts_dir):
             draft_id = draft["draft_id"]
             if draft_id in seen:
@@ -208,12 +241,21 @@ def process_queue(
             envelope = build_pointer(draft, path)
             if envelope is None:
                 continue
+            # Persist before the first possible transport effect. If anything
+            # fails afterward, this durable record forbids a second send.
+            outcomes[draft_id] = {"status": "uncertain", "started_at": now.isoformat(),
+                                  "path": str(path), "reason": "send_started"}
+            _write_state(state_path, state)
+            seen.add(draft_id)
             if not send_verified(message_pm, envelope):
-                _log(state_path, f"unverified draft_id={draft_id}")
+                outcomes[draft_id]["reason"] = "unverified_transport"
+                _write_state(state_path, state)
+                _log(state_path, f"uncertain draft_id={draft_id}; reconcile PM receipt; no automatic replay")
                 continue
             delivered.append(draft_id)
-            seen.add(draft_id)
             sent.append(draft_id)
+            outcomes[draft_id].update(status="delivered", verified_at=utc_now().isoformat(),
+                                      reason="verified_receipt")
             state["delivered_ids"] = delivered
             _write_state(state_path, state)
         _log(state_path, f"sent={len(sent)}")
@@ -222,6 +264,7 @@ def process_queue(
             "activated_at": state["activated_at"],
             "sent": sent,
             "delivered_ids": delivered,
+            "uncertain_ids": [key for key, value in outcomes.items() if value["status"] == "uncertain"],
         }
 
 
