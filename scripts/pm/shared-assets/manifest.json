@@ -100,6 +100,15 @@
       "source_path": "claude/hooks/block-raw-clear-outside-mop.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/hooks/feedback-draft-queue-stop.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-feedback-draft-queue-stop",
+      "sha256": "5879757896187df354d11d165ae8f838aa7999f428c9548cd5c2759657c1911a",
+      "source_path": "claude/hooks/feedback-draft-queue-stop.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/block-invalid-issue-contract-ledger.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1311,7 +1320,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 142,
+    "selected_count": 143,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1386,7 +1395,8 @@
       "~/.claude/scripts/pm/heartbeat/heartbeat-error-map.py",
       "~/.claude/scripts/pm/heartbeat/pr-open-snapshot.py",
       "~/.claude/scripts/pm/heartbeat/support-inbox-snapshot.py",
-      "~/.claude/scripts/pm/heartbeat/heartbeat-known-codes.json"
+      "~/.claude/scripts/pm/heartbeat/heartbeat-known-codes.json",
+      "~/.claude/hooks/feedback-draft-queue-stop.py"
     ]
   },
   "owner": "master-of-panes",
