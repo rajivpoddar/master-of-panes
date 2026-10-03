@@ -18,6 +18,12 @@ import type { LogManager } from "./logs.js";
 import type { TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
 import { isValidDevSlot } from "./slotConfig.js";
+import {
+  API_STALL_NUDGE_MESSAGE,
+  ApiStallTracker,
+  classifyApiStallTail,
+  type ApiStallSlotStatus,
+} from "./apiStall.js";
 
 function debugLog(line: string): void {
   void appendFile(
@@ -264,39 +270,10 @@ export class StuckDetector {
   // Companion: feedback_mop_bg_script_failure_compact_misfire_2026_05_17.md
   private readonly BG_SCRIPT_COMPACT_LOG_STALE_MS = 30 * 60 * 1000; // 5 → 30 min (Rajiv directive 2026-05-25 13:28 IST channel C0ALZJHGE49 thread 1779695516.850089 — slot 4 false-positive compacts during long-thinking bursts that exceed 5min)
 
-  // ─── API 500 backoff detector ───────────────────────────────────────────
-  // Colocated with autocompact detector per Rajiv directive 2026-05-17 07:59 IST
-  // thread `1778957625.997439`: *"note that mop also detects context limit
-  // reached and injects 'continue your work' after autocompact. this change
-  // should do in the same place."*
-  //
-  // Prior bg-script path (check-slot-bg.sh Step 1a → INJECT_DECISION:mop-
-  // direct-nudge marker → hooks.ts handleApi500MopDirectNudge) had a fatal
-  // flaw: MoP skips check-slot-bg.sh when slot is `idle:true` (between tool
-  // calls). When a slot is stuck at an API 500 error waiting for retry, the
-  // slot IS idle from MoP's view → bg-script never runs → marker never emitted
-  // → nudge never sent. Slots 1+3 stayed stuck 1h+ on 2026-05-17 morning
-  // through that path.
-  //
-  // This detector colocates with checkContextOverflow — same setInterval timer,
-  // same tmux capture-pane mechanism, same direct-injection delivery. Runs
-  // regardless of slot idle state since the timer doesn't gate on idleness.
-  //
-  // Backoff schedule (cumulative from first_seen_ts):
-  //   retry 0: nudge at +120s (2m suppress)
-  //   retry 1: nudge at +360s (next 4m suppress; cumulative 6m)
-  //   retry 2: nudge at +840s (next 8m suppress; cumulative 14m)
-  //   retry 3: nudge at +1800s (next 16m suppress; cumulative 30m)
-  //   retry 4: nudge at +3720s (next 32m suppress; cumulative 62m)
-  //   retry ≥5: cap → PM-surfaced as bg-script API_500_PERSISTENT
-  //
-  // State file: /tmp/slot-N-api500-state.json
-  //   {first_seen_ts, retry_count, next_nudge_at, last_500_ts, last_nudge_at}
-  //   Cleared when tmux scrollback no longer shows the error (recovery).
-  private readonly API_500_PATTERN =
-    /API Error: 500|API Error: 529|Internal server error/;
-  private readonly API_500_BACKOFF_SCHEDULE = [120, 360, 840, 1800, 3720];
-  private readonly API_500_RETRY_CAP = 5;
+  // ─── Transient model-API stall nudge ─────────────────────────────────────
+  // Colocated with autocompact (Rajiv 2026-05-17, thread 1778957625.997439);
+  // policy rewritten 2026-10-03 (thread 1791049473.052849). See apiStall.ts.
+  private readonly apiStall = new ApiStallTracker();
   private checkInFlight = false;
 
   constructor(
@@ -1401,208 +1378,75 @@ export class StuckDetector {
   }
 
   /**
-   * API 500 backoff detector — colocated with autocompact "continue your
-   * work" injection per Rajiv directive 2026-05-17 07:59 IST thread
-   * `1778957625.997439`.
-   *
-   * Tmux-grep input model (refactor 2026-05-17 07:40 IST):
-   *   tmux capture-pane -p -S -100 | grep -qE "API Error: 500|API Error:
-   *   529|Internal server error"
-   *
-   * On detection:
-   *   - First seen: initialize state {first_seen_ts, retry_count: 0,
-   *     next_nudge_at: now + 120s, last_500_ts}; suppress this tick.
-   *   - In backoff window (now < next_nudge_at): suppress.
-   *   - Window expired (now >= next_nudge_at) AND retry_count < cap:
-   *     inject "continue your work or remind pm if blocked" through the guarded
-   *     async relay. On success, bump retry_count + reschedule next_nudge_at
-   *     against the next backoff index. On failure, do NOT bump — the next 60s
-   *     tick will retry the injection.
-   *   - retry_count >= cap: log PERSISTENT line; don't auto-nudge.
-   *
-   * On non-detection AND state file exists: slot recovered (error scrolled
-   * out or slot resumed rendering tool output). Clear state file.
-   *
-   * State file: /tmp/slot-N-api500-state.json
-   * Forensic log: /tmp/mop-api500-nudges.log
+   * Transient model-API stall nudge (replaces the 2026-05-17 API-500 backoff).
+   * Rajiv 2026-10-03 23:19 IST (C0ALZJHGE49 / 1791049473.052849): "Can mop
+   * detect these stalls and nudge the slots?" Occupied + hook-idle turn + pane
+   * tail ending on a transient API failure -> after a grace period, ONE nudge
+   * per stall via the guarded relay. Three consecutive nudges that each
+   * re-stall within 10 min -> stop and alert PM once. Policy lives in
+   * apiStall.ts (pure, unit-tested).
    */
   private async checkApi500Backoff(slot: SlotState): Promise<void> {
     const slotNum = slot.slot;
-    const stateFile = `/tmp/slot-${slotNum}-api500-state.json`;
-    const logFile = `/tmp/mop-api500-nudges.log`;
-
-    // 1. Capture last 100 lines of slot's tmux pane scrollback.
-    let pane = "";
-    try {
-      const result = await execShell(`tmux capture-pane -t 0:0.${slotNum} -p -S -100`, {
-        timeout: 5_000,
+    const turnIdle = this.isIdleByHookState(slot).idle;
+    let classification = classifyApiStallTail("");
+    if (turnIdle) {
+      try {
+        const result = await execShell(`tmux capture-pane -t 0:0.${slotNum} -p -S -60`, { timeout: 5_000 });
+        classification = classifyApiStallTail(result.stdout);
+      } catch {
+        return; // capture failure: try again next tick
+      }
+    }
+    const before = this.apiStall.status(slotNum).state;
+    const action = this.apiStall.observe(slotNum, Date.now(), {
+      occupied: slot.occupied,
+      turnIdle,
+      epoch: slot.assignment_epoch ?? null,
+      classification,
+    });
+    if (action.kind === "wait" && before === "clear") {
+      this.db.logEvent(slotNum, "api_stall_detected", "Stuck", null, {
+        signature: classification.signature,
+        error_text: classification.errorText,
+        assignment_epoch: slot.assignment_epoch,
+        grace_remaining_ms: action.remainingMs,
       });
-      pane = result.stdout;
-    } catch {
-      return; // capture failure — try again next tick
-    }
-
-    const detected = this.API_500_PATTERN.test(pane);
-    const nowEpoch = Math.floor(Date.now() / 1000);
-
-    // 2. Load existing state file (if any).
-    let state: {
-      first_seen_ts: number;
-      retry_count: number;
-      next_nudge_at: number;
-      last_500_ts: number;
-      last_nudge_at?: number;
-    } | null = null;
-    try {
-      if (await pathExists(stateFile)) {
-        const parsed = JSON.parse(await readFile(stateFile, "utf8"));
-        if (parsed && typeof parsed === "object" &&
-            typeof parsed.first_seen_ts === "number") {
-          state = parsed;
-        }
-      }
-    } catch {
-      state = null;
-    }
-
-    // 3. Recovery branch — error string no longer in scrollback.
-    if (!detected) {
-      if (state) {
-        try {
-          await unlink(stateFile);
-        } catch { /* non-fatal */ }
-        const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} RECOVERED — error string no longer in scrollback; state file cleared`;
-        debugLog(msg);
-        try {
-          await appendFile(logFile, msg + "\n");
-        } catch { /* non-fatal */ }
-      }
       return;
     }
-
-    // 4. Detected. Initialize state if missing.
-    if (!state) {
-      state = {
-        first_seen_ts: nowEpoch,
-        retry_count: 0,
-        next_nudge_at: nowEpoch + this.API_500_BACKOFF_SCHEDULE[0],
-        last_500_ts: nowEpoch,
-      };
-      try {
-        await writeFile(stateFile, JSON.stringify(state));
-      } catch { /* non-fatal */ }
-      const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} FIRST_SEEN — state initialized retry_count=0 next_nudge_at=${state.next_nudge_at} (in ${this.API_500_BACKOFF_SCHEDULE[0]}s)`;
-      debugLog(msg);
-      try {
-        await appendFile(logFile, msg + "\n");
-      } catch { /* non-fatal */ }
-      return;
-    }
-
-    // 5. State exists. Refresh last_500_ts (metadata only).
-    if (nowEpoch > (state.last_500_ts || 0)) {
-      state.last_500_ts = nowEpoch;
-      try {
-        await writeFile(stateFile, JSON.stringify(state));
-      } catch { /* non-fatal */ }
-    }
-
-    // 6. Cap check — already past retry limit.
-    if (state.retry_count >= this.API_500_RETRY_CAP) {
-      const firstSeenAge = nowEpoch - state.first_seen_ts;
-      const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} PERSISTENT — retry_count=${state.retry_count} (past cap of ${this.API_500_RETRY_CAP}) first_seen_age=${firstSeenAge}s; auto-nudge no longer applies, PM triage required`;
-      debugLog(msg);
-      // Only log to file once per minute to avoid spam.
-      try {
-        const lastLog = state.last_nudge_at || 0;
-        if (nowEpoch - lastLog > 60) {
-          await appendFile(logFile, msg + "\n");
-          state.last_nudge_at = nowEpoch;
-          await writeFile(stateFile, JSON.stringify(state));
-        }
-      } catch { /* non-fatal */ }
-      return;
-    }
-
-    // 7. In suppression window — skip injection.
-    if (nowEpoch < (state.next_nudge_at || 0)) {
-      const remaining = state.next_nudge_at - nowEpoch;
-      debugLog(
-        `[api500-nudge] slot=${slotNum} backoff window (retry_count=${state.retry_count} next_nudge_in=${remaining}s) — suppress`
+    if (action.kind === "cap_alert") {
+      this.db.logEvent(slotNum, "api_stall_nudge_capped", "Stuck", null, {
+        signature: classification.signature,
+        consecutive_nudges: action.consecutive,
+        assignment_epoch: slot.assignment_epoch,
+      });
+      this.relay.injectToPM(
+        `# ⚠️ slot ${slotNum} keeps ending turns on transient model API errors ` +
+        `(${classification.signature}); ${action.consecutive} MoP nudges each re-stalled within 10 min. ` +
+        `Auto-nudge stopped; PM triage required.`
       );
       return;
     }
+    if (action.kind !== "nudge") return;
 
-    // 8. Window expired and under cap — inject the guarded continuation.
-    // The final helper re-reads DND/ownership at the delivery boundary.
     const delivery = await this.sendContinueIfAllowed(
       slotNum,
-      undefined,
-      "continue your work or remind pm if blocked",
-      true,
+      { assignment_epoch: slot.assignment_epoch, assigned_at: slot.assigned_at },
+      API_STALL_NUDGE_MESSAGE,
     );
-    if (
-      delivery.reason === "dnd" ||
-      delivery.reason === "released" ||
-      delivery.reason === "slot_missing" ||
-      delivery.reason === "identity_changed" ||
-      delivery.reason === "release_in_progress"
-    ) {
-      const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} SKIPPED (reason=${delivery.reason} occupied=${!!delivery.slot?.occupied} dnd=${!!delivery.slot?.dnd}) retry=${state.retry_count}`;
-      debugLog(msg);
-      try {
-        await appendFile(logFile, msg + "\n");
-      } catch { /* non-fatal */ }
-      return;
-    }
+    if (delivery.sent) this.apiStall.recordNudge(slotNum, Date.now());
+    this.db.logEvent(slotNum, delivery.sent ? "api_stall_nudge" : "api_stall_nudge_failed", "Stuck", null, {
+      signature: classification.signature,
+      error_text: classification.errorText,
+      consecutive_nudges: action.consecutive,
+      assignment_epoch: slot.assignment_epoch,
+      reason: delivery.reason ?? null,
+    });
+  }
 
-    // 9. The guarded delivery uses the normal async relay path. DND is never
-    //    overridden by stuck recovery.
-    const ok = delivery.sent;
-
-    if (!ok) {
-      const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} FAILED (sendToSlot returned false) retry=${state.retry_count} — state NOT ticked; will retry next tick`;
-      debugLog(msg);
-      try {
-        await appendFile(logFile, msg + "\n");
-      } catch { /* non-fatal */ }
-      return;
-    }
-
-    // 10. Success — bump retry_count + reschedule next_nudge_at against the
-    //     NEXT backoff index. Cumulative from first_seen_ts.
-    state.retry_count = (state.retry_count || 0) + 1;
-    state.last_nudge_at = nowEpoch;
-    if (state.retry_count >= this.API_500_RETRY_CAP) {
-      // Just crossed cap — write final state, no further scheduling.
-    } else {
-      const delta =
-        this.API_500_BACKOFF_SCHEDULE[state.retry_count] ||
-        this.API_500_BACKOFF_SCHEDULE[this.API_500_BACKOFF_SCHEDULE.length - 1];
-      // Schedule cumulatively from first_seen_ts to preserve
-      // 2m/6m/14m/30m/62m semantics across ticks.
-      state.next_nudge_at = state.first_seen_ts + delta;
-    }
-    try {
-      await writeFile(stateFile, JSON.stringify(state));
-    } catch { /* non-fatal */ }
-
-    const msg = `[api500-nudge] ${new Date().toISOString()} slot ${slotNum} OK retry_count=${state.retry_count} next_nudge_at=${state.next_nudge_at} (cumulative from first_seen_ts=${state.first_seen_ts})`;
-    debugLog(msg);
-    try {
-      await appendFile(logFile, msg + "\n");
-    } catch { /* non-fatal */ }
-
-    // Log MoP DB event for forensic timeline (mirrors prior
-    // slot_idle_suppressed_api500_mop_direct event shape).
-    try {
-      this.db.logEvent(slotNum, "api500_direct_nudge", "Stuck", null, {
-        relay_path: "stuck.checkApi500Backoff",
-        retry_count: state.retry_count,
-        first_seen_ts: state.first_seen_ts,
-        next_nudge_at: state.next_nudge_at,
-      });
-    } catch { /* non-fatal */ }
+  /** PM-visible per-slot stall status (surfaced on GET /slots as api_stall). */
+  getApiStallStatus(slotNum: number): ApiStallSlotStatus {
+    return this.apiStall.status(slotNum);
   }
 
   /**

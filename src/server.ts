@@ -901,7 +901,10 @@ app.post("/hooks/slot/:slotNum", async (c) => {
 
 /** Get all slot statuses */
 app.get("/slots", (c) => {
-  const slots = db.getAllSlots();
+  const slots = db.getAllSlots().map((s) => ({
+    ...s,
+    api_stall: stuckDetector.getApiStallStatus(s.slot),
+  }));
   return c.json({ slots });
 });
 
