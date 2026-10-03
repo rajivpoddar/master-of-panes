@@ -1238,6 +1238,8 @@ export class TmuxRelay {
     opts: {
       expectedPaneId: string;
       recheck: (stage: "pre_paste" | "pre_enter", capture: () => Promise<string | null>) => Promise<string | null>;
+      /** Synchronous fence run with no await before the paste and the Enter effect. */
+      finalCheck?: (stage: "pre_paste" | "pre_enter") => string | null;
       timing?: { dwellMs?: number; pollMs?: number; payloadGraceMs?: number; payloadStableMs?: number; clearGraceMs?: number };
     },
   ): Promise<GuardedSlotDelivery> {
@@ -1269,12 +1271,16 @@ export class TmuxRelay {
       try {
         await fs.writeFile(tmpFile, command);
         await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 3_000 });
+        const prePasteFence = opts.finalCheck?.("pre_paste") ?? null;
+        if (prePasteFence) return { outcome: "refused_pre_effect", reason: prePasteFence, paneId };
         effectAttempted = true;
         await this.runShell(`tmux paste-buffer -b ${bufName} -t ${paneId} -d`, { timeout: 3_000 });
         const submit = await submitWithComposerCheck(command, {
           capture,
           pressSubmit: async () => {
             preEnterRefusal = await opts.recheck("pre_enter", capture);
+            if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
+            preEnterRefusal = opts.finalCheck?.("pre_enter") ?? null;
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
             await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: 3_000 });
           },

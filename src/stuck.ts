@@ -1459,11 +1459,10 @@ export class StuckDetector {
 
     const fingerprint = classification.fingerprint;
     const expected = { assignment_epoch: slot.assignment_epoch, assigned_at: slot.assigned_at };
-    // Re-run inside the serialized send lock before paste and before Enter.
-    const recheck = async (
-      _stage: "pre_paste" | "pre_enter",
-      capture: () => Promise<string | null>,
-    ): Promise<string | null> => {
+    // Synchronous owner/epoch/turn fence. Runs with no await between it and
+    // the effect (CTO REVISE 00:48, C0ALZJHGE49/1791049473.052849), so a hook
+    // that flips the turn during an awaited capture is always seen.
+    const finalCheck = (_stage: "pre_paste" | "pre_enter"): string | null => {
       const cur = this.db.getSlot(slotNum);
       if (!cur?.occupied) return "released";
       if (cur.dnd) return "dnd";
@@ -1471,18 +1470,25 @@ export class StuckDetector {
         return "identity_changed";
       }
       if (!this.isIdleByHookState(cur).idle) return "turn_active";
+      return null;
+    };
+    // Async observation first; the owner/turn fence is evaluated after it.
+    const recheck = async (
+      stage: "pre_paste" | "pre_enter",
+      capture: () => Promise<string | null>,
+    ): Promise<string | null> => {
       const text = await capture();
       if (text === null) return "pane_unreadable";
       const now = classifyApiStallTail(text);
       if (!now.stalled || now.fingerprint !== fingerprint) return `stall_changed:${now.reason}`;
-      return null;
+      return finalCheck(stage);
     };
     const delivery = await this.sendContinueIfAllowed(
       slotNum,
       expected,
       API_STALL_NUDGE_MESSAGE,
       false,
-      { expectedPaneId: observedPaneId, recheck },
+      { expectedPaneId: observedPaneId, recheck, finalCheck },
     );
     const outcome = delivery.outcome ?? (delivery.sent ? "delivered" : "refused_pre_effect");
     // Fence: an attempted or uncertain delivery consumes this stall episode;

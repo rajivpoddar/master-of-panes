@@ -42,6 +42,11 @@ type Pane = {
   silentEnter?: boolean;
   onIdentity?: (n: number) => void;
   onPaste?: () => void;
+  /** Fires while a capture-pane is in flight (async observation window). */
+  onCapture?: (n: number) => void;
+  captures?: number;
+  capturesAtPaste?: number;
+  capturesAtEnter?: number;
   identityCalls: number;
 };
 
@@ -60,7 +65,11 @@ function fakeShell(p: Pane) {
     if (command.startsWith("git -C")) return { stdout: `${CHECKOUT}\n`, stderr: "" };
     if (command.startsWith("tmux capture-pane")) {
       if (p.ackLoss && p.enters > 0) throw Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
-      return { stdout: render(p), stderr: "" };
+      p.captures = (p.captures ?? 0) + 1;
+      const out = render(p);
+      await new Promise((r) => setImmediate(r));
+      p.onCapture?.(p.captures);
+      return { stdout: out, stderr: "" };
     }
     if (command.startsWith("tmux load-buffer")) {
       const file = command.match(/'([^']+)'\s*$/)?.[1] ?? "";
@@ -69,12 +78,14 @@ function fakeShell(p: Pane) {
     }
     if (command.startsWith("tmux paste-buffer")) {
       p.pastes += 1;
+      p.capturesAtPaste = p.captures ?? 0;
       p.composer = p.buffer;
       p.onPaste?.();
       return { stdout: "", stderr: "" };
     }
     if (/^tmux send-keys .* Enter$/.test(command)) {
       p.enters += 1;
+      p.capturesAtEnter = p.captures ?? 0;
       if (p.ackLoss) throw Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
       if (p.silentEnter) return { stdout: "", stderr: "" };
       p.composer = "";
@@ -275,4 +286,33 @@ test("capped stall: exactly one PM escalation and ZERO generic idle continuation
   } finally {
     Date.now = originalNow;
   }
+});
+
+test("turn starts DURING the pre-Enter capture: zero Enter (fence runs after async observation)", async () => {
+  // Measure, on an identical control run, which capture is the final one
+  // awaited right before Enter; then flip the turn while exactly that one is in flight.
+  const ctl = harness();
+  await ctl.check();
+  assert.equal(ctl.p.enters, 1);
+  const finalCapture = ctl.p.capturesAtEnter!;
+  assert.ok(finalCapture > ctl.p.capturesAtPaste!);
+  const h = harness();
+  h.p.onCapture = (n) => { if (n === finalCapture) h.slot.active_turn_state = "active"; };
+  await h.check();
+  assert.equal(h.p.pastes, 1);
+  assert.equal(h.p.enters, 0, "never press Enter when a turn started while the final capture was awaited");
+  assert.ok(h.types().includes("api_stall_nudge_uncertain"));
+});
+
+test("turn starts DURING the pre-paste captures: zero paste, zero Enter", async () => {
+  // Flip while the last pre-paste capture (the composer read) is in flight.
+  const ctl = harness();
+  await ctl.check();
+  const lastPrePaste = ctl.p.capturesAtPaste!;
+  const h = harness();
+  h.p.onCapture = (n) => { if (n === lastPrePaste) h.slot.active_turn_state = "active"; };
+  await h.check();
+  assert.equal(h.p.pastes, 0, "never paste when a turn started during an awaited capture");
+  assert.equal(h.p.enters, 0);
+  assert.ok(h.types().includes("api_stall_nudge_refused"));
 });

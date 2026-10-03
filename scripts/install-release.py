@@ -148,11 +148,17 @@ def refuse_claude_plugin_cache(path: Path, *, label: str) -> None:
     included) from under the running server.  Releases and the current pointer
     must live in a MoP-owned root such as ~/.local/share/master-of-panes.
     """
+    # Check the literal path AND its symlink-resolved destination (parents
+    # included), so an alias outside the cache that resolves into it is refused.
     absolute = Path(os.path.abspath(os.path.expanduser(str(path))))
-    if absolute == CLAUDE_PLUGIN_CACHE or CLAUDE_PLUGIN_CACHE in absolute.parents:
-        raise InstallerError(
-            f"{label} must not live in the Claude Code plugin cache (it is garbage-collected): {absolute}"
-        )
+    resolved = Path(os.path.realpath(absolute))
+    caches = {CLAUDE_PLUGIN_CACHE, Path(os.path.realpath(CLAUDE_PLUGIN_CACHE))}
+    for candidate in (absolute, resolved):
+        if any(candidate == cache or cache in candidate.parents for cache in caches):
+            raise InstallerError(
+                f"{label} must not live in the Claude Code plugin cache (it is garbage-collected): "
+                f"{absolute} -> {resolved}"
+            )
 
 
 def stage_release(

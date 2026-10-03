@@ -185,6 +185,25 @@ class PluginCacheRootTests(unittest.TestCase):
         with self.assertRaisesRegex(module.InstallerError, "plugin cache"):
             module.refuse_claude_plugin_cache(cache_root, label="--release-root")
 
+    def test_refuses_symlink_outside_cache_that_resolves_into_it(self):
+        tmp = Path(tempfile.mkdtemp())
+        fake_cache = tmp / "plugins" / "cache"
+        (fake_cache / "mop" / "releases").mkdir(parents=True)
+        outside = tmp / "share"
+        outside.mkdir()
+        (outside / "releases").symlink_to(fake_cache / "mop" / "releases")
+        (outside / "parent-alias").symlink_to(fake_cache / "mop")
+        saved = module.CLAUDE_PLUGIN_CACHE
+        module.CLAUDE_PLUGIN_CACHE = fake_cache
+        try:
+            with self.assertRaisesRegex(module.InstallerError, "plugin cache"):
+                module.refuse_claude_plugin_cache(outside / "releases", label="--release-root")
+            with self.assertRaisesRegex(module.InstallerError, "plugin cache"):
+                module.refuse_claude_plugin_cache(outside / "parent-alias" / "current", label="--current")
+            module.refuse_claude_plugin_cache(outside / "real-releases", label="--release-root")
+        finally:
+            module.CLAUDE_PLUGIN_CACHE = saved
+
     def test_main_refuses_cache_current_before_any_mode_runs(self):
         stable = Path(tempfile.mkdtemp())
         cache_current = module.CLAUDE_PLUGIN_CACHE / "rajiv-plugins" / "master-of-panes" / "current"
