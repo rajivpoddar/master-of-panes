@@ -2747,47 +2747,58 @@ function parseVerdict(reviewType, text) {
     VERIFIED: 2,
   };
   const verdicts = Object.keys(order);
-  // Look for a verdict heading first. Codex commonly emits variants such as
-  // "VERDICT: REVISE", "**Verdict: REVISE**", and "1. Verdict: revise".
-  const explicit = text.match(
-    new RegExp(
-      "^[\\s>*#_`-]*(?:\\d{1,2}[.)]\\s*)?(?:\\*\\*)?VERDICT(?:\\*\\*)?\\s*[:\\-]\\s*(?:\\*\\*|`)?(" +
-        verdicts.join("|") +
-        ")\\b",
-      "im",
-    ),
+  // Only the CURRENT author's own lines can declare the verdict. Markdown
+  // block-quoted lines ("> APPROVE", "> VERDICT: APPROVE") are quoted history
+  // and must never override the opening verdict (CTO REVISE on MoP 662fb4f,
+  // thread 1791016590.458369: a quoted historical APPROVE overrode the current
+  // opening REJECT and published a passing marker).
+  const authorText = String(text || "")
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*>/.test(line))
+    .join("\n");
+  // Verdict declarations: structured "VERDICT: X" fields (Codex variants such
+  // as "**Verdict: REVISE**" and "1. Verdict: revise"), bare verdict lines
+  // ("**APPROVE**"), and an opening bold verdict followed by prose
+  // ("**APPROVE** - the revised plan closes ..."). Prose that merely mentions
+  // a verdict word is not a declaration (#8751, #8605 plan round 2).
+  const declared = [];
+  const explicitRe = new RegExp(
+    "^[\\s*#_`-]*(?:\\d{1,2}[.)]\\s*)?(?:\\*\\*)?VERDICT(?:\\*\\*)?\\s*[:\\-]\\s*(?:\\*\\*|`)?(" +
+      verdicts.join("|") +
+      ")\\b",
+    "gim",
   );
-  if (explicit) verdict = explicit[1].toUpperCase();
-  // A bare verdict line ("**APPROVE**") is the reviewer's own verdict. It must
-  // win over prose that merely mentions a verdict word (#8751: "adds no reject
-  // ... path" parsed as REJECT against an APPROVE body).
-  let headerBodyDisagreement = null;
-  if (true) {
-    const standalone = text.match(
+  for (const m of authorText.matchAll(explicitRe)) {
+    declared.push({ source: "VERDICT line", verdict: m[1].toUpperCase() });
+  }
+  const standaloneRe = new RegExp(
+    "^[\\s*#_`-]*(" + verdicts.join("|") + ")[\\s*_`.]*$",
+    "gm",
+  );
+  for (const m of authorText.matchAll(standaloneRe)) {
+    declared.push({ source: "bare verdict line", verdict: m[1] });
+  }
+  const lead = authorText
+    .replace(/^(?:\s*\n)+/, "")
+    .match(
       new RegExp(
-        "^[\\s>*#_`-]*(" + verdicts.join("|") + ")[\\s*_`.]*$",
-        "m",
+        "^[\\s#_`-]*(?:\\*\\*|__)(" + verdicts.join("|") + ")(?:\\*\\*|__)\\s*(?:[\u2014\u2013:.-]|$)",
       ),
     );
-    if (standalone && !verdict) verdict = standalone[1];
-    else if (standalone && explicit && standalone[1] !== explicit[1].toUpperCase()) {
+  if (lead) declared.push({ source: "opening verdict", verdict: lead[1] });
+  let headerBodyDisagreement = null;
+  if (declared.length) {
+    verdict = declared[0].verdict;
+    const other = declared.find((d) => d.verdict !== verdict);
+    if (other) {
+      // Genuinely contradictory author verdicts are untrusted: refuse rather
+      // than pick one (never publish a passing marker). Keep the parsed
+      // verdict at the most restrictive declaration for any reader.
+      for (const d of declared) if (order[d.verdict] < order[verdict]) verdict = d.verdict;
       headerBodyDisagreement =
-        `VERDICT_HEADER_BODY_DISAGREEMENT: VERDICT line says ${explicit[1].toUpperCase()} ` +
-        `but the review body's bare verdict line says ${standalone[1]}; refusing to pick one silently.`;
+        `VERDICT_HEADER_BODY_DISAGREEMENT: ${declared[0].source} says ${declared[0].verdict} ` +
+        `but the review's ${other.source} says ${other.verdict}; refusing to pick one silently.`;
     }
-  }
-  // A review that OPENS with a bold verdict followed by prose ("**APPROVE** -
-  // the revised plan closes ...") states its own verdict. Prose later in the
-  // body mentioning a prior "REJECT" must not override it (#8605 plan round 2).
-  if (!verdict) {
-    const lead = text
-      .replace(/^(?:\s*\n)+/, "")
-      .match(
-        new RegExp(
-          "^[\\s>#_`-]*(?:\\*\\*|__)(" + verdicts.join("|") + ")(?:\\*\\*|__)\\s*(?:[\u2014\u2013:.-]|$)",
-        ),
-      );
-    if (lead) verdict = lead[1];
   }
   // Otherwise scan standalone words and pick the most-restrictive. Hyphen
   // neighbors are excluded: hyphenated check-names such as HARD-REJECT must
@@ -2932,9 +2943,25 @@ function parseVerdict(reviewType, text) {
     BLOCKING_REVIEW_VERDICTS.has(verdict) &&
     findings.length > 0 &&
     findings.every((finding) => finding.priority === "P2") &&
-    severityOverride !== "P1" &&
+    !severityOverride &&
     !hasExplicitOpenBlocker;
   if (p2OnlyBlocking) verdict = "APPROVE";
+  // A P0/P1 SEVERITY_OVERRIDE or an explicit OPEN blocker is always blocking.
+  // An approving verdict carrying one is contradictory and untrusted: refuse
+  // instead of publishing a passing marker (CTO REVISE on MoP 662fb4f).
+  if (
+    !headerBodyDisagreement &&
+    order[verdict] === 2 &&
+    (severityOverride || hasExplicitOpenBlocker)
+  ) {
+    const why = severityOverride
+      ? `SEVERITY_OVERRIDE: ${severityOverride}`
+      : "an OPEN blocker";
+    headerBodyDisagreement =
+      `VERDICT_HEADER_BODY_DISAGREEMENT: verdict ${verdict} contradicts ${why}; ` +
+      `a P0/P1 override or open blocker is always blocking; refusing to publish a passing marker.`;
+    verdict = "REQUEST_CHANGES";
+  }
   const blockers = parseBlockers(text, findings, verdict);
 
   // Exit code mapping
@@ -3034,6 +3061,9 @@ function verifyMarkerTerminal(markerText, { head, number, reviewType } = {}) {
   }
   const body = lines.slice(outIdx + 1).join("\n");
   const reparsed = parseVerdict(reviewType || "code", body);
+  if (reparsed.headerBodyDisagreement) {
+    return terminalRefusal("TERMINAL_BODY_MISMATCH", reparsed.headerBodyDisagreement);
+  }
   if (reparsed.verdict !== verdict) {
     return terminalRefusal("TERMINAL_BODY_MISMATCH", `header=${verdict} body=${reparsed.verdict}`);
   }
