@@ -138,6 +138,23 @@ def _verify_required_runtime_files(root: Path, records: Iterable[dict[str, Any]]
             raise InstallerError(f"required runtime file is absent from release manifest: {path}")
 
 
+CLAUDE_PLUGIN_CACHE = Path.home() / ".claude" / "plugins" / "cache"
+
+
+def refuse_claude_plugin_cache(path: Path, *, label: str) -> None:
+    """Claude Code garbage-collects its plugin cache on relaunch.
+
+    On 2026-10-03 a relaunch removed the whole releases/ tree (active release
+    included) from under the running server.  Releases and the current pointer
+    must live in a MoP-owned root such as ~/.local/share/master-of-panes.
+    """
+    absolute = Path(os.path.abspath(os.path.expanduser(str(path))))
+    if absolute == CLAUDE_PLUGIN_CACHE or CLAUDE_PLUGIN_CACHE in absolute.parents:
+        raise InstallerError(
+            f"{label} must not live in the Claude Code plugin cache (it is garbage-collected): {absolute}"
+        )
+
+
 def stage_release(
     *,
     repo: Path,
@@ -1064,6 +1081,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--canary-url", default="http://127.0.0.1:3100")
     args = parser.parse_args(argv)
     try:
+        refuse_claude_plugin_cache(args.release_root, label="--release-root")
+        refuse_claude_plugin_cache(args.current, label="--current")
         if args.mode == "stage":
             if not args.repo or not args.candidate or not args.base or not args.patch_id:
                 raise InstallerError("stage requires --repo, --candidate, --base, and --patch-id")

@@ -179,5 +179,24 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual(os.readlink(dangling), str(missing))
 
 
+class PluginCacheRootTests(unittest.TestCase):
+    def test_refuses_release_root_inside_claude_plugin_cache(self):
+        cache_root = module.CLAUDE_PLUGIN_CACHE / "rajiv-plugins" / "master-of-panes" / "releases"
+        with self.assertRaisesRegex(module.InstallerError, "plugin cache"):
+            module.refuse_claude_plugin_cache(cache_root, label="--release-root")
+
+    def test_main_refuses_cache_current_before_any_mode_runs(self):
+        stable = Path(tempfile.mkdtemp())
+        cache_current = module.CLAUDE_PLUGIN_CACHE / "rajiv-plugins" / "master-of-panes" / "current"
+        code = module.main([
+            "check", "--release-root", str(stable / "releases"), "--current", str(cache_current),
+            "--rollback-bundle", str(stable / "rb"),
+        ])
+        self.assertNotEqual(code, 0)
+
+    def test_allows_mop_owned_root(self):
+        module.refuse_claude_plugin_cache(Path.home() / ".local" / "share" / "master-of-panes" / "releases", label="x")
+
+
 if __name__ == "__main__":
     unittest.main()
