@@ -24,17 +24,24 @@ function withDb(run: (db: MoPDatabase) => void): void {
   }
 }
 
-function mint(db: MoPDatabase, tuple: Partial<AssignmentTupleInput>): void {
+function mint(
+  db: MoPDatabase,
+  tuple: Partial<AssignmentTupleInput>,
+  opts: { state?: "planned" | "pending_delivery" | "delivered"; kind?: string } = {},
+): void {
   seq += 1;
+  const state = opts.state ?? "delivered";
   const desired: AssignmentTupleInput = {
     repository_id: REPO, issue: null, pr: null, branch: null, head_sha: null,
     work_kind: null, handoff_id: null, claimed_at: null, ...tuple,
   };
   const result = db.mintAssignmentEffectIntent({
     effect_id: `effect-${seq}`, request_digest: `digest-${seq}`, slot: 1,
-    selection_class: "new_issue", before_epoch: seq, desired_tuple: desired, task_digest: "t",
+    selection_class: opts.kind ?? "new_issue", before_epoch: seq, desired_tuple: desired, task_digest: "t",
   });
   assert.equal(result.ok, true);
+  if (state !== "planned") db.markAssignmentEffectCommitted(`effect-${seq}`, seq + 1);
+  if (state === "delivered") db.markAssignmentEffectDelivered(`effect-${seq}`, "receipt");
 }
 
 test("pr match resolves the issue", () => withDb((db) => {
@@ -82,4 +89,27 @@ test("a PR number recorded as the issue (repro shape) is ignored", () => withDb(
   mint(db, { issue: 8594, pr: 8619 });
   mint(db, { issue: 8619, pr: 8619 });
   assert.deepEqual(db.resolveIssueForPr(REPO, 8619, null), { issue: 8594, source: "pr", ambiguous: false });
+}));
+
+test("CTO P1-1: planned and pending_delivery intents are not evidence", () => withDb((db) => {
+  mint(db, { issue: 8760, pr: 8761, branch: "p" }, { state: "planned" });
+  mint(db, { issue: 8762, pr: 8763, branch: "q" }, { state: "pending_delivery" });
+  assert.deepEqual(db.resolveIssueForPr(REPO, 8761, "p"), { issue: null, source: null, ambiguous: false });
+  assert.deepEqual(db.resolveIssueForPr(REPO, 8763, "q"), { issue: null, source: null, ambiguous: false });
+}));
+
+test("CTO P1-2: branch reused by a rework for a different PR refuses", () => withDb((db) => {
+  mint(db, { issue: 8798, branch: "reused" });
+  mint(db, { issue: 8798, pr: 8799, branch: "reused" }, { kind: "rework" });
+  assert.deepEqual(db.resolveIssueForPr(REPO, 8802, "reused"), { issue: null, source: "branch", ambiguous: true });
+}));
+
+test("CTO P1-2: branch fallback ignores non-new_issue lineage", () => withDb((db) => {
+  mint(db, { issue: 8770, branch: "r" }, { kind: "repro" });
+  assert.deepEqual(db.resolveIssueForPr(REPO, 8771, "r"), { issue: null, source: null, ambiguous: false });
+}));
+
+test("branch fallback accepts a new_issue row already carrying the requested pr", () => withDb((db) => {
+  mint(db, { issue: 8780, branch: "s" });
+  assert.equal(db.resolveIssueForPr(REPO, 8781, "s").issue, 8780);
 }));

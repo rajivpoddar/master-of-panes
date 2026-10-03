@@ -141,3 +141,25 @@ def test_existing_closing_ref_unchanged_and_mop_not_consulted(tmp_path):
     assert "issue:close" in fake.effects
     (receipt,) = json.loads((tmp_path / "r.json").read_text()).values()
     assert receipt["request"]["issue_authoritative"] is False
+
+
+def test_cto_branch_conflict_refusal_has_zero_issue_effects(tmp_path):
+    # MoP refuses a branch reused for a different PR (ambiguous, source=branch).
+    fake = Fake(pr_payload(), mop={"issue": None, "source": "branch", "ambiguous": True})
+    assert run(issue_less_request(), tmp_path, fake)["success"] is True
+    assert not [e for e in fake.effects if e.startswith("issue:")]
+
+
+def test_cto_no_delivered_evidence_has_zero_issue_effects(tmp_path):
+    # Planned/pending intents resolve to no issue in MoP.
+    fake = Fake(pr_payload(), mop={"issue": None, "source": None, "ambiguous": False})
+    assert run(issue_less_request(), tmp_path, fake)["success"] is True
+    assert not [e for e in fake.effects if e.startswith("issue:")]
+
+
+def test_delivered_new_issue_closes_exactly_once_across_replay(tmp_path):
+    fake = Fake(pr_payload(), mop={"issue": 8800, "source": "branch", "ambiguous": False})
+    assert run(issue_less_request(), tmp_path, fake)["success"] is True
+    replay = run(issue_less_request(), tmp_path, fake)
+    assert replay["success"] is True and replay["idempotent"] is True
+    assert fake.effects.count("issue:close") == 1

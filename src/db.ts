@@ -1438,23 +1438,41 @@ export class MoPDatabase {
     branch: string | null,
   ): { issue: number | null; source: "pr" | "branch" | null; ambiguous: boolean } {
     const repoId = repository.startsWith("github:") ? repository : `github:${repository}`;
-    const lookup = (field: "pr" | "branch", value: number | string): number[] => {
-      const rows = this.db.prepare(`
-        SELECT DISTINCT json_extract(desired_tuple, '$.issue') AS issue
-        FROM assignment_effect_intents
-        WHERE json_extract(desired_tuple, '$.repository_id') = ?
-          AND json_extract(desired_tuple, '$.${field}') = ?
-          AND json_extract(desired_tuple, '$.issue') IS NOT NULL
-          AND (? IS NULL OR json_extract(desired_tuple, '$.issue') != ?)
-      `).all(repoId, value, pr, pr) as Array<{ issue: number }>;
-      return rows.map((row) => Number(row.issue));
+    // Only established delivery is evidence (CTO REVISE 2026-10-03 09:01 IST):
+    // planned / pending_delivery intents never resolve an issue.
+    const rows = (field: "pr" | "branch", value: number | string) => this.db.prepare(`
+      SELECT selection_class,
+             json_extract(desired_tuple, '$.issue') AS issue,
+             json_extract(desired_tuple, '$.pr') AS pr
+      FROM assignment_effect_intents
+      WHERE state = 'delivered' AND committed_epoch IS NOT NULL
+        AND json_extract(desired_tuple, '$.repository_id') = ?
+        AND json_extract(desired_tuple, '$.${field}') = ?
+    `).all(repoId, value) as Array<{ selection_class: string; issue: number | null; pr: number | null }>;
+    const decide = (issues: number[], source: "pr" | "branch") => {
+      const distinct = [...new Set(issues)];
+      if (distinct.length === 1) return { issue: distinct[0], source, ambiguous: false };
+      if (distinct.length > 1) return { issue: null, source, ambiguous: true };
+      return null;
     };
-    const attempts: Array<["pr" | "branch", number | string | null]> = [["pr", pr], ["branch", branch]];
-    for (const [field, value] of attempts) {
-      if (value === null || value === undefined || value === "") continue;
-      const issues = lookup(field, value);
-      if (issues.length === 1) return { issue: issues[0], source: field, ambiguous: false };
-      if (issues.length > 1) return { issue: null, source: field, ambiguous: true };
+    if (pr !== null && pr !== undefined) {
+      const byPr = rows("pr", pr)
+        .filter((r) => r.issue !== null && Number(r.issue) !== pr)
+        .map((r) => Number(r.issue));
+      const hit = decide(byPr, "pr");
+      if (hit) return hit;
+    }
+    if (branch) {
+      const onBranch = rows("branch", branch);
+      // A branch reused for a different recorded PR is stale/conflicting.
+      if (onBranch.some((r) => r.pr !== null && Number(r.pr) !== pr)) {
+        return { issue: null, source: "branch", ambiguous: true };
+      }
+      const lineage = onBranch
+        .filter((r) => r.selection_class === "new_issue" && r.issue !== null && Number(r.issue) !== pr)
+        .map((r) => Number(r.issue));
+      const hit = decide(lineage, "branch");
+      if (hit) return hit;
     }
     return { issue: null, source: null, ambiguous: false };
   }
