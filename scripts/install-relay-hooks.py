@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 
 PLUGIN = "master-of-panes@rajiv-plugins"
 DEFAULT_SCRIPTS = os.path.expanduser("~/.local/share/master-of-panes/current/scripts")
@@ -35,12 +36,24 @@ def desired_hooks(scripts_dir):
     return hooks
 
 
+def is_mop_command(cmd, scripts_dir):
+    return scripts_dir in cmd or MARK in cmd
+
+
 def apply(settings, scripts_dir):
+    """Replace only MoP-owned hook commands; keep every other command and
+    each group's metadata (matcher etc.) intact."""
     hooks = settings.setdefault("hooks", {})
     for ev, entry in desired_hooks(scripts_dir).items():
-        groups = [g for g in hooks.get(ev, [])
-                  if not any(scripts_dir in h.get("command", "") or MARK in h.get("command", "")
-                             for h in g.get("hooks", []))]
+        groups = []
+        for g in hooks.get(ev, []):
+            inner = g.get("hooks", [])
+            kept = [h for h in inner if not is_mop_command(h.get("command", ""), scripts_dir)]
+            if len(kept) == len(inner):
+                groups.append(g)
+            elif kept:
+                groups.append({**g, "hooks": kept})
+            # a group whose only commands were MoP-owned is replaced below
         groups.append(entry)
         hooks[ev] = groups
     settings.setdefault("enabledPlugins", {})[PLUGIN] = False
@@ -62,10 +75,14 @@ def main():
         return
     if os.path.exists(a.settings) and not os.path.exists(a.settings + ".bak-noplugin"):
         shutil.copy2(a.settings, a.settings + ".bak-noplugin")
+    # Keep the existing mode; create absent files 0600 (settings hold permissions).
+    mode = stat.S_IMODE(os.stat(a.settings).st_mode) if os.path.exists(a.settings) else 0o600
     tmp = a.settings + ".tmp"
-    with open(tmp, "w") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(new, f, indent=2)
         f.write("\n")
+    os.chmod(tmp, mode)
     os.replace(tmp, a.settings)
     print(f"updated {a.settings}")
 

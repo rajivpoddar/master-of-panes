@@ -43,6 +43,53 @@ class InstallRelayHooksTest(unittest.TestCase):
             self.assertTrue(any("--cleanup-session" in c for c in stop))
             self.assertEqual(len(stop), 3)
 
+    def test_mixed_group_keeps_non_mop_commands_and_metadata(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "settings.local.json")
+            mop_old = 'bash "/x/master-of-panes/current/scripts/hook-relay.sh" Stop'
+            orig = {"hooks": {
+                "Stop": [{"matcher": "keep-matcher", "hooks": [
+                    {"type": "command", "command": "pm-stop-validator.sh", "timeout": 8},
+                    {"type": "command", "command": mop_old, "timeout": 5}]}],
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "safety.sh"}]}],
+                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "audit.sh"},
+                                                {"type": "command", "command": "bash \"/old/master-of-panes/current/scripts/hook-relay.sh\" UserPromptSubmit"}]}],
+            }}
+            with open(p, "w") as f:
+                json.dump(orig, f)
+            s1 = self.run_it(p)
+            s2 = self.run_it(p)
+            self.assertEqual(s1, s2)
+            stop0 = s1["hooks"]["Stop"][0]
+            self.assertEqual(stop0["matcher"], "keep-matcher")
+            self.assertEqual(stop0["hooks"], [{"type": "command", "command": "pm-stop-validator.sh", "timeout": 8}])
+            self.assertEqual(s1["hooks"]["PreToolUse"], orig["hooks"]["PreToolUse"])
+            ups = [h["command"] for g in s1["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
+            self.assertIn("audit.sh", ups)
+            self.assertFalse(any("/old/" in c for c in ups))
+            stop = [h["command"] for g in s1["hooks"]["Stop"] for h in g["hooks"]]
+            self.assertEqual(sum("hook-relay.sh" in c for c in stop), 1)
+
+    def test_mode_retained_and_new_files_created_0600(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "settings.local.json")
+            with open(p, "w") as f:
+                json.dump({}, f)
+            os.chmod(p, 0o600)
+            self.run_it(p)
+            self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+            os.chmod(p, 0o640)
+            with open(p) as f:
+                data = json.load(f)
+            data["enabledPlugins"]["master-of-panes@rajiv-plugins"] = True
+            with open(p, "w") as f:
+                json.dump(data, f)
+            self.run_it(p)
+            self.assertEqual(os.stat(p).st_mode & 0o777, 0o640)
+            fresh = os.path.join(d, "new.json")
+            self.run_it(fresh)
+            self.assertEqual(os.stat(fresh).st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()
