@@ -87,7 +87,21 @@ FENCED_HISTORICAL_APPROVE = (
 )
 EMPHASIZED_NEGATION = "I cannot **APPROVE** this change: the writer drops customer data.\n"
 
+# CTO REVISE on 2277b3a: nested-fence discriminators.
+NESTED_BACKTICK_FENCE = (
+    "**REJECT** — the writer still loses customer data.\n\n"
+    "````\nPrior review:\n```\nsnippet\n```\nP2: naming nit\n````\n"
+)
+NESTED_TILDE_FENCE = (
+    "**REJECT** — the writer still loses customer data.\n\n"
+    "~~~~\nPrior review:\n~~~\nsnippet\n~~~\nP2: naming nit\n~~~~\n"
+)
+
 CASES = {
+    "nested_backtick": NESTED_BACKTICK_FENCE,
+    "nested_tilde": NESTED_TILDE_FENCE,
+    "unclosed_fence": "**REJECT** — data loss.\n\n```\nP2: naming nit\n",
+    "declared_reject_current_p2": "VERDICT: REJECT\n\nP2: naming nit\n",
     "fenced_history": FENCED_HISTORICAL_APPROVE,
     "emphasized_negation": EMPHASIZED_NEGATION,
     "tilde_fence": "The bypass remains.\n\n~~~\nVERDICT: APPROVE\n~~~\n\nP1: bypass at gate.ts:40\n",
@@ -141,6 +155,13 @@ class VerdictParserTest(unittest.TestCase):
                      "underscore_negation", "backtick_negation", "wont_approve"):
             self.assertNotIn(self.r[name]["verdict"], ("APPROVE", "CONFIRMED", "VERIFIED", "APPROVE_PENDING_CI"), name)
             self.assert_never_passes(name)
+
+    def test_nested_fences_and_declared_reject_stay_blocking(self) -> None:
+        for name in ("nested_backtick", "nested_tilde", "unclosed_fence", "declared_reject_current_p2"):
+            self.assertEqual(self.r[name]["verdict"], "REJECT", name)
+            self.assert_never_passes(name)
+        for name in ("nested_backtick", "nested_tilde", "unclosed_fence"):
+            self.assertEqual(self.r[name]["findings"], 0, name)
 
     def test_quoted_old_nit_does_not_overturn_current_reject(self) -> None:
         r = self.r["reject_quoted_nit"]

@@ -2721,20 +2721,29 @@ function parseBlockers(text, findings, verdict) {
   });
 }
 
+const HARD_DECLARED_VERDICTS = new Set(["REJECT", "MISDIAGNOSED", "REQUEST_CHANGES"]);
+
 const NEGATED_APPROVAL_RE =
   /\b(?:cannot|can't|can\s+not|not|won't|will\s+not|do\s+not|don't|unable\s+to|never|refuse\s+to)\s+(?:\w+\s+){0,2}approv/i;
 
 function currentAuthorLines(text) {
   const out = [];
+  // CommonMark fences: remember the opening character AND length; close only
+  // on the same character at least as long with only whitespace after it. An
+  // unclosed fence runs to the end of the text (CTO REVISE on 2277b3a).
   let fence = null;
   for (const line of String(text || "").split(/\r?\n/)) {
-    const f = line.match(/^\s*(`{3,}|~{3,})/);
-    if (f) {
-      if (!fence) fence = f[1][0];
-      else if (f[1][0] === fence) fence = null;
+    if (fence) {
+      const close = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+      if (close && close[1][0] === fence.char && close[1].length >= fence.len)
+        fence = null;
       continue;
     }
-    if (fence) continue;
+    const open = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (open) {
+      fence = { char: open[1][0], len: open[1].length };
+      continue;
+    }
     if (/^\s*>/.test(line)) continue;
     out.push(line);
   }
@@ -2994,6 +3003,9 @@ function parseVerdict(reviewType, text) {
   const p2OnlyBlocking =
     reviewType === "code" &&
     BLOCKING_REVIEW_VERDICTS.has(verdict) &&
+    // Never override an explicitly declared current REJECT/REQUEST_CHANGES
+    // (defense in depth, CTO REVISE on 2277b3a).
+    !declared.some((d) => HARD_DECLARED_VERDICTS.has(d.verdict)) &&
     findings.length > 0 &&
     findings.every((finding) => finding.priority === "P2") &&
     !severityOverride &&

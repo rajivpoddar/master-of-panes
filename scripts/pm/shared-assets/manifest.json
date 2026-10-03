@@ -764,7 +764,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "8a3a98ad48482134c62ed66e10d5459763cdc3163e9e2f8a8ae4433be18d5209",
+      "sha256": "78907e97a4b0d5784cd87a7bbb8acdfc7b63a8608abfd4d0057a6ebd06441385",
       "source_path": "claude/skills/codex-review-companion/codex-review-companion.mjs"
     },
     {
