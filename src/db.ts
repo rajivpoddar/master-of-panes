@@ -1429,7 +1429,8 @@ export class MoPDatabase {
    * Read-only: which issue did MoP assign for this PR? Matches recorded
    * assignment tuples by pr first, then by branch (covers `new_issue`
    * assignments minted before the slot opened its PR). More than one distinct
-   * issue is ambiguous and yields no issue.
+   * issue is ambiguous and yields no issue. A row whose issue equals the PR
+   * number (repro/rework lanes keyed by PR) is not an issue link and is skipped.
    */
   resolveIssueForPr(
     repository: string,
@@ -1444,7 +1445,8 @@ export class MoPDatabase {
         WHERE json_extract(desired_tuple, '$.repository_id') = ?
           AND json_extract(desired_tuple, '$.${field}') = ?
           AND json_extract(desired_tuple, '$.issue') IS NOT NULL
-      `).all(repoId, value) as Array<{ issue: number }>;
+          AND (? IS NULL OR json_extract(desired_tuple, '$.issue') != ?)
+      `).all(repoId, value, pr, pr) as Array<{ issue: number }>;
       return rows.map((row) => Number(row.issue));
     };
     const attempts: Array<["pr" | "branch", number | string | null]> = [["pr", pr], ["branch", branch]];

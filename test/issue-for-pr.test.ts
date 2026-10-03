@@ -77,3 +77,9 @@ test("no match and other repository return no issue", () => withDb((db) => {
   mint(db, { repository_id: "github:other/repo", issue: 1, pr: 2 });
   assert.deepEqual(db.resolveIssueForPr(REPO, 2, null), { issue: null, source: null, ambiguous: false });
 }));
+
+test("a PR number recorded as the issue (repro shape) is ignored", () => withDb((db) => {
+  mint(db, { issue: 8594, pr: 8619 });
+  mint(db, { issue: 8619, pr: 8619 });
+  assert.deepEqual(db.resolveIssueForPr(REPO, 8619, null), { issue: 8594, source: "pr", ambiguous: false });
+}));
