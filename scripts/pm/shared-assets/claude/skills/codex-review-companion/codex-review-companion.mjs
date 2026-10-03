@@ -2721,6 +2721,34 @@ function parseBlockers(text, findings, verdict) {
   });
 }
 
+const NEGATED_APPROVAL_RE =
+  /\b(?:cannot|can't|can\s+not|not|won't|will\s+not|do\s+not|don't|unable\s+to|never|refuse\s+to)\s+(?:\w+\s+){0,2}approv/i;
+
+function currentAuthorLines(text) {
+  const out = [];
+  let fence = null;
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const f = line.match(/^\s*(`{3,}|~{3,})/);
+    if (f) {
+      if (!fence) fence = f[1][0];
+      else if (f[1][0] === fence) fence = null;
+      continue;
+    }
+    if (fence) continue;
+    if (/^\s*>/.test(line)) continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+function stripMarkdownEmphasis(text) {
+  return String(text || "")
+    .replace(/(\*\*|__)(.+?)\1/g, "$2")
+    .replace(/(^|[^\w*])\*(?!\s)([^*\n]+?)\*(?![\w*])/g, "$1$2")
+    .replace(/(^|[^\w])_(?!\s)([^_\n]+?)_(?!\w)/g, "$1$2")
+    .replace(/`/g, "");
+}
+
 function parseVerdict(reviewType, text) {
   const findings = [];
   let verdict = null;
@@ -2752,10 +2780,13 @@ function parseVerdict(reviewType, text) {
   // and must never override the opening verdict (CTO REVISE on MoP 662fb4f,
   // thread 1791016590.458369: a quoted historical APPROVE overrode the current
   // opening REJECT and published a passing marker).
-  const authorText = String(text || "")
-    .split(/\r?\n/)
-    .filter((line) => !/^\s*>/.test(line))
-    .join("\n");
+  // Normalize to CURRENT author text before any verdict/finding parsing
+  // (CTO REVISE on 3afda32): drop fenced code blocks (``` and ~~~) and
+  // block-quoted lines (history), then strip Markdown emphasis/code markers so
+  // "cannot **APPROVE**" reads as a negation. authorRaw keeps emphasis only for
+  // the opening-bold-verdict detector.
+  const authorRaw = currentAuthorLines(text);
+  const authorText = stripMarkdownEmphasis(authorRaw);
   // Verdict declarations: structured "VERDICT: X" fields (Codex variants such
   // as "**Verdict: REVISE**" and "1. Verdict: revise"), bare verdict lines
   // ("**APPROVE**"), and an opening bold verdict followed by prose
@@ -2778,7 +2809,7 @@ function parseVerdict(reviewType, text) {
   for (const m of authorText.matchAll(standaloneRe)) {
     declared.push({ source: "bare verdict line", verdict: m[1] });
   }
-  const lead = authorText
+  const lead = authorRaw
     .replace(/^(?:\s*\n)+/, "")
     .match(
       new RegExp(
@@ -2824,6 +2855,7 @@ function parseVerdict(reviewType, text) {
       }
     }
   }
+  const verdictFromFallback = declared.length === 0 && verdict !== null;
   if (!verdict) verdict = "UNKNOWN";
 
   const effortM = text.match(
@@ -2940,6 +2972,18 @@ function parseVerdict(reviewType, text) {
     if (findings.length > 20) findings.length = 20;
   }
 
+  // An undeclared (fallback-scanned) approval is trusted only when the
+  // current text has no P0/P1 finding and no refusal/negation of approval;
+  // otherwise fail closed to UNKNOWN (CTO REVISE on 3afda32).
+  if (
+    verdictFromFallback &&
+    order[verdict] === 2 &&
+    (findings.some((f) => f.priority !== "P2") ||
+      NEGATED_APPROVAL_RE.test(authorText))
+  ) {
+    verdict = "UNKNOWN";
+  }
+
   // P2-only blocking verdicts are non-blocking by contract: publish the
   // marker as APPROVE with the P2 findings listed (#8605/#8708), instead of
   // exiting 3 with no marker. Explicit reviewer-emitted OPEN blockers or a
@@ -2962,14 +3006,11 @@ function parseVerdict(reviewType, text) {
     !headerBodyDisagreement &&
     order[verdict] === 2 &&
     (severityOverride ||
-      hasExplicitOpenBlocker ||
-      (!declared.length && findings.some((f) => f.priority !== "P2")))
+      hasExplicitOpenBlocker)
   ) {
     const why = severityOverride
       ? `SEVERITY_OVERRIDE: ${severityOverride}`
-      : hasExplicitOpenBlocker
-        ? "an OPEN blocker"
-        : "a current P0/P1 finding with no declared verdict";
+      : "an OPEN blocker";
     headerBodyDisagreement =
       `VERDICT_HEADER_BODY_DISAGREEMENT: verdict ${verdict} contradicts ${why}; ` +
       `a P0/P1 override or open blocker is always blocking; refusing to publish a passing marker.`;

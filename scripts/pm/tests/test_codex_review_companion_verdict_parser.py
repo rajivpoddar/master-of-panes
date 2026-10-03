@@ -79,7 +79,21 @@ REJECT_WITH_QUOTED_OLD_NIT = (
     "> P2: naming nit\n"
 )
 
+# CTO REVISE on 3afda32 (same thread): literal regressions plus siblings.
+FENCED_HISTORICAL_APPROVE = (
+    "I cannot approve this change; the writer still drops data.\n\n"
+    "Previous round, for reference:\n```\nVERDICT: APPROVE\n```\n\n"
+    "P1: writer drops customer data at save.ts:88\n"
+)
+EMPHASIZED_NEGATION = "I cannot **APPROVE** this change: the writer drops customer data.\n"
+
 CASES = {
+    "fenced_history": FENCED_HISTORICAL_APPROVE,
+    "emphasized_negation": EMPHASIZED_NEGATION,
+    "tilde_fence": "The bypass remains.\n\n~~~\nVERDICT: APPROVE\n~~~\n\nP1: bypass at gate.ts:40\n",
+    "underscore_negation": "We can't __APPROVE__ this yet.\n",
+    "backtick_negation": "Unable to `APPROVE`: the guard is bypassed.\n",
+    "wont_approve": "I won't approve this. APPROVE is withheld until the bypass is fixed.\n",
     "negated_quoted": NEGATED_APPROVE_WITH_QUOTED_HISTORY,
     "reject_quoted_nit": REJECT_WITH_QUOTED_OLD_NIT,
     "negated_upper": "We do not APPROVE this.\n\nP1: guard bypass\n",
@@ -92,6 +106,8 @@ CASES = {
         "VERDICT: APPROVE\n\nBLOCKER_ID: PROOF-001\nBLOCKER_STATUS: OPEN\nBLOCKER_REASON: missing proof\n"
     ),
     "clean_approve": "VERDICT: APPROVE\n\nNo findings.\n",
+    "bold_approve": "**APPROVE** — the revised plan closes every blocker.\n",
+    "fallback_approve": "Looks good overall. APPROVE.\n",
     "p2_followup": "VERDICT: REVISE\n\nP2: rename helper for clarity\n",
     "p1_blocking": "VERDICT: REVISE\n\nP1: guard bypass in writer\n",
     "conflicting": "VERDICT: APPROVE\n\nSummary.\n\n**REJECT**\n",
@@ -117,6 +133,12 @@ class VerdictParserTest(unittest.TestCase):
 
     def test_negated_approval_and_quoted_history_never_approve(self) -> None:
         for name in ("negated_quoted", "negated_upper"):
+            self.assertNotIn(self.r[name]["verdict"], ("APPROVE", "CONFIRMED", "VERIFIED", "APPROVE_PENDING_CI"), name)
+            self.assert_never_passes(name)
+
+    def test_fenced_history_and_emphasized_negation_never_approve(self) -> None:
+        for name in ("fenced_history", "emphasized_negation", "tilde_fence",
+                     "underscore_negation", "backtick_negation", "wont_approve"):
             self.assertNotIn(self.r[name]["verdict"], ("APPROVE", "CONFIRMED", "VERIFIED", "APPROVE_PENDING_CI"), name)
             self.assert_never_passes(name)
 
@@ -157,6 +179,9 @@ class VerdictParserTest(unittest.TestCase):
         self.assertEqual((clean["verdict"], clean["exitCode"], clean["contractError"]), ("APPROVE", 0, None))
         self.assertTrue(clean["forgedApproveMarkerOk"])
         self.assertTrue(clean["publishedPassing"])
+        for name in ("bold_approve", "fallback_approve"):
+            self.assertEqual(self.r[name]["verdict"], "APPROVE", name)
+            self.assertTrue(self.r[name]["publishedPassing"], name)
         p2 = self.r["p2_followup"]
         self.assertEqual((p2["verdict"], p2["exitCode"], p2["contractError"]), ("APPROVE", 0, None))
         self.assertEqual(p2["findings"], 1)
