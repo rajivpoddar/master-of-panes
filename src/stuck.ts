@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { execShell } from "./asyncCommand.js";
 import { slotAssignmentTuple, type MoPDatabase } from "./db.js";
 import type { LogManager } from "./logs.js";
-import type { TmuxRelay } from "./relay.js";
+import type { GuardedSlotDelivery, TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
 import { isValidDevSlot } from "./slotConfig.js";
 
@@ -87,9 +87,16 @@ function parseDbTimestampMs(timestamp: string): number {
 
 type ContinueDeliveryResult = {
   sent: boolean;
-  reason: "sent" | "send_failed" | "slot_missing" | "released" | "dnd" | "identity_changed" | "release_in_progress";
+  reason:
+    | "sent" | "send_failed" | "slot_missing" | "released" | "dnd" | "identity_changed" | "release_in_progress"
+    | "guarded_refused" | "guarded_uncertain" | "guarded_unavailable";
   slot: SlotState | null;
+  /** Set only for guarded deliveries. */
+  outcome?: GuardedSlotDelivery["outcome"];
+  detail?: string;
 };
+
+type GuardedSendOptions = Parameters<TmuxRelay["deliverGuardedToSlot"]>[2];
 
 type IdleOccupiedUrgency = "REMINDER" | "FOLLOW_UP" | "URGENT" | "ESCALATION";
 
@@ -471,10 +478,19 @@ export class StuckDetector {
     // Do not compete with a more specific recovery path for this idle episode.
     if (await pathExists(`/tmp/slot-${slot.slot}-api500-state.json`)) return;
     if (this.compactInFlightAt.has(slot.slot)) return;
+    // An API-stall episode (pending, nudged, uncertain or capped) for this
+    // assignment owns recovery: capped means ZERO automatic continuation.
+    const stall = this.apiStall.status(slot.slot);
+    if (stall.state !== "clear" && stall.assignment_epoch === (slot.assignment_epoch ?? null)) return;
     const specializedEvents = [
       "context_overflow_detected",
       "compact_dispatched",
       "api500_direct_nudge",
+      "api_stall_detected",
+      "api_stall_nudge",
+      "api_stall_nudge_uncertain",
+      "api_stall_nudge_refused",
+      "api_stall_nudge_capped",
       "block_dispatched",
       "slot_promised_action_continue_injected",
       "continue_injected",
@@ -793,6 +809,7 @@ export class StuckDetector {
     expected?: { assignment_epoch?: number; assigned_at?: string | null },
     command = "continue your work or remind pm if blocked",
     allowActiveTurn = false,
+    guarded?: GuardedSendOptions,
   ): Promise<ContinueDeliveryResult> {
     const current = this.db.getSlot(slotNum) ?? null;
     let reason: ContinueDeliveryResult["reason"] | null = null;
@@ -882,6 +899,20 @@ export class StuckDetector {
     }
 
     try {
+      if (guarded) {
+        if (typeof this.relay.deliverGuardedToSlot !== "function") {
+          return { sent: false, reason: "guarded_unavailable", slot: current, outcome: "refused_pre_effect" };
+        }
+        const result = await this.relay.deliverGuardedToSlot(slotNum, command, guarded);
+        return {
+          sent: result.outcome === "delivered",
+          reason: result.outcome === "delivered" ? "sent"
+            : result.outcome === "uncertain" ? "guarded_uncertain" : "guarded_refused",
+          slot: current,
+          outcome: result.outcome,
+          detail: result.outcome === "delivered" ? undefined : result.reason,
+        };
+      }
       const sent = await this.relay.sendToSlotAsync(
         slotNum,
         command,
@@ -1384,13 +1415,16 @@ export class StuckDetector {
     const slotNum = slot.slot;
     const turnIdle = this.isIdleByHookState(slot).idle;
     let classification = classifyApiStallTail("");
+    let observedPaneId: string | null = null;
     if (turnIdle) {
-      try {
-        const result = await execShell(`tmux capture-pane -t 0:0.${slotNum} -p -S -60`, { timeout: 5_000 });
-        classification = classifyApiStallTail(result.stdout);
-      } catch {
-        return; // capture failure: try again next tick
-      }
+      // Observe through the verified immutable pane id; delivery is pinned to
+      // the same id (CTO REVISE P1, 1791049473.052849).
+      const observed = typeof this.relay.observeSlotPane === "function"
+        ? await this.relay.observeSlotPane(slotNum)
+        : null;
+      if (!observed) return; // identity/capture failure: try again next tick
+      observedPaneId = observed.paneId;
+      classification = classifyApiStallTail(observed.text);
     }
     const before = this.apiStall.status(slotNum).state;
     const action = this.apiStall.observe(slotNum, Date.now(), {
@@ -1421,20 +1455,49 @@ export class StuckDetector {
       );
       return;
     }
-    if (action.kind !== "nudge") return;
+    if (action.kind !== "nudge" || !observedPaneId) return;
 
+    const fingerprint = classification.fingerprint;
+    const expected = { assignment_epoch: slot.assignment_epoch, assigned_at: slot.assigned_at };
+    // Re-run inside the serialized send lock before paste and before Enter.
+    const recheck = async (
+      _stage: "pre_paste" | "pre_enter",
+      capture: () => Promise<string | null>,
+    ): Promise<string | null> => {
+      const cur = this.db.getSlot(slotNum);
+      if (!cur?.occupied) return "released";
+      if (cur.dnd) return "dnd";
+      if (cur.assignment_epoch !== expected.assignment_epoch || cur.assigned_at !== expected.assigned_at) {
+        return "identity_changed";
+      }
+      if (!this.isIdleByHookState(cur).idle) return "turn_active";
+      const text = await capture();
+      if (text === null) return "pane_unreadable";
+      const now = classifyApiStallTail(text);
+      if (!now.stalled || now.fingerprint !== fingerprint) return `stall_changed:${now.reason}`;
+      return null;
+    };
     const delivery = await this.sendContinueIfAllowed(
       slotNum,
-      { assignment_epoch: slot.assignment_epoch, assigned_at: slot.assigned_at },
+      expected,
       API_STALL_NUDGE_MESSAGE,
+      false,
+      { expectedPaneId: observedPaneId, recheck },
     );
-    if (delivery.sent) this.apiStall.recordNudge(slotNum, Date.now());
-    this.db.logEvent(slotNum, delivery.sent ? "api_stall_nudge" : "api_stall_nudge_failed", "Stuck", null, {
+    const outcome = delivery.outcome ?? (delivery.sent ? "delivered" : "refused_pre_effect");
+    // Fence: an attempted or uncertain delivery consumes this stall episode;
+    // only a proven pre-effect refusal leaves it eligible.
+    if (outcome !== "refused_pre_effect") this.apiStall.recordNudge(slotNum, Date.now());
+    const eventType = outcome === "delivered" ? "api_stall_nudge"
+      : outcome === "uncertain" ? "api_stall_nudge_uncertain" : "api_stall_nudge_refused";
+    this.db.logEvent(slotNum, eventType, "Stuck", null, {
       signature: classification.signature,
       error_text: classification.errorText,
       consecutive_nudges: action.consecutive,
       assignment_epoch: slot.assignment_epoch,
+      pane_id: observedPaneId,
       reason: delivery.reason ?? null,
+      detail: delivery.detail ?? null,
     });
   }
 
@@ -1977,6 +2040,7 @@ const API_ERROR_LINE = /^\s*(?:[⏺●]\s*)?API Error:/;
 const RESUMED_LINE = /^\s*(?:[⏺●]\s*\S|[❯>]\s+\S)/;
 
 const TAIL_LINES = 25;
+const COMPOSER_PROMPT_LINE = /^\s*[❯>](\s|$)/;
 
 export interface ApiStallClassification {
   stalled: boolean;
@@ -1993,7 +2057,12 @@ export interface ApiStallClassification {
 }
 
 export function classifyApiStallTail(pane: string): ApiStallClassification {
-  const all = pane.replace(/\r/g, "").split("\n");
+  let all = pane.replace(/\r/g, "").split("\n");
+  // Ignore the live composer (last prompt line and below) so text typed or
+  // pasted into it never reads as resumed work or changes the fingerprint.
+  for (let i = all.length - 1; i >= 0; i--) {
+    if (COMPOSER_PROMPT_LINE.test(all[i])) { all = all.slice(0, i); break; }
+  }
   const nonBlank = all.filter((l) => l.trim().length > 0);
   const tail = nonBlank.slice(-TAIL_LINES);
   const none = (reason: ApiStallClassification["reason"]): ApiStallClassification => ({

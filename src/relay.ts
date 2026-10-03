@@ -1205,6 +1205,116 @@ export class TmuxRelay {
   }
 
   /**
+   * Observe a numbered slot through its verified immutable pane id. Detectors
+   * that later deliver into the slot must pass the returned paneId to
+   * deliverGuardedToSlot so observation and effect target the same pane.
+   */
+  async observeSlotPane(slotNum: number, lines = GUARDED_CAPTURE_LINES): Promise<{ paneId: string; text: string } | null> {
+    const identity = await verifyPaneIdentity(slotNum, this.runShell);
+    if (!identity.ok) return null;
+    const paneId = identity.snapshot.paneId;
+    try {
+      const result = await this.runShell(`tmux capture-pane -t ${paneId} -p -S -${lines}`, { timeout: 5_000 });
+      return { paneId, text: result.stdout };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Single-attempt, fenced recovery delivery (CTO REVISE on b054f319,
+   * C0ALZJHGE49/1791049473.052849):
+   * - refuses unless the verified pane id equals the observed pane id;
+   * - runs the caller's recheck (owner/turn/stall) inside the per-slot send
+   *   lock before paste AND again immediately before the one Enter;
+   * - never retries or repastes once the paste was attempted, and presses
+   *   Enter at most once;
+   * - reports refused_pre_effect only when no keystroke reached the pane, and
+   *   uncertain for any outcome after the paste was attempted.
+   */
+  async deliverGuardedToSlot(
+    slotNum: number,
+    command: string,
+    opts: {
+      expectedPaneId: string;
+      recheck: (stage: "pre_paste" | "pre_enter", capture: () => Promise<string | null>) => Promise<string | null>;
+      timing?: { dwellMs?: number; pollMs?: number; payloadGraceMs?: number; payloadStableMs?: number; clearGraceMs?: number };
+    },
+  ): Promise<GuardedSlotDelivery> {
+    if (slotNum === 0) return { outcome: "refused_pre_effect", reason: "pm_pane_not_supported", paneId: null };
+    const identity = await verifyPaneIdentity(slotNum, this.runShell);
+    if (!identity.ok) return { outcome: "refused_pre_effect", reason: `pane_identity:${identity.reason}`, paneId: null };
+    const paneId = identity.snapshot.paneId;
+    if (paneId !== opts.expectedPaneId) {
+      return { outcome: "refused_pre_effect", reason: "pane_changed_since_observation", paneId };
+    }
+    const capture = async (): Promise<string | null> => {
+      try {
+        return (await this.runShell(`tmux capture-pane -t ${paneId} -p -S -${GUARDED_CAPTURE_LINES}`, { timeout: 5_000 })).stdout;
+      } catch {
+        return null;
+      }
+    };
+    const result = await withSlotSendLock(slotNum, async (): Promise<GuardedSlotDelivery> => {
+      const prePaste = await opts.recheck("pre_paste", capture);
+      if (prePaste) return { outcome: "refused_pre_effect", reason: prePaste, paneId };
+      const before = await capture();
+      const prePasteComposer = composerText(before);
+      if (prePasteComposer === null) return { outcome: "refused_pre_effect", reason: "composer_unreadable", paneId };
+      if (prePasteComposer !== "") return { outcome: "refused_pre_effect", reason: "composer_not_empty", paneId };
+      const tmpFile = `/tmp/mop-guarded-${slotNum}-${Date.now()}.txt`;
+      const bufName = `mop-guarded-${slotNum}`;
+      let effectAttempted = false;
+      let preEnterRefusal: string | null = null;
+      try {
+        await fs.writeFile(tmpFile, command);
+        await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 3_000 });
+        effectAttempted = true;
+        await this.runShell(`tmux paste-buffer -b ${bufName} -t ${paneId} -d`, { timeout: 3_000 });
+        const submit = await submitWithComposerCheck(command, {
+          capture,
+          pressSubmit: async () => {
+            preEnterRefusal = await opts.recheck("pre_enter", capture);
+            if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
+            await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: 3_000 });
+          },
+          sleep,
+          prePasteComposer,
+          maxEnterPresses: 1,
+          ...opts.timing,
+        });
+        this.db?.logEvent(slotNum, "send_submit_check", null, null, {
+          command: command.slice(0, 200),
+          guarded: true,
+          payload_seen: submit.payloadSeen,
+          payload_stable: submit.payloadStable,
+          cleared: submit.cleared,
+          enter_presses: submit.enterPresses,
+        });
+        const confirmed = submit.payloadSeen === true && submit.payloadStable === true
+          && (submit.cleared === true || submit.queued === true) && submit.enterPresses === 1;
+        if (confirmed) return { outcome: "delivered", paneId };
+        return {
+          outcome: "uncertain",
+          reason: submit.enterPresses === 0 ? "pasted_not_submitted" : "submit_unconfirmed",
+          paneId,
+        };
+      } catch (err) {
+        if (err instanceof GuardedEnterRefused) {
+          return { outcome: "uncertain", reason: `pre_enter_refused:${err.reason}`, paneId };
+        }
+        return effectAttempted
+          ? { outcome: "uncertain", reason: "effect_error", paneId }
+          : { outcome: "refused_pre_effect", reason: "load_buffer_failed", paneId };
+      } finally {
+        await fs.unlink(tmpFile).catch(() => undefined);
+      }
+    });
+    this.db?.logEvent(slotNum, "guarded_delivery", null, null, { ...result, command: command.slice(0, 200) });
+    return result;
+  }
+
+  /**
    * Check if a slot is currently active (processing).
    * is-active.sh communicates via exit codes: 0=ACTIVE, 1=IDLE, 2=ERROR.
    * Existing boolean callers retain their historical behavior; watchdogs that
@@ -1303,3 +1413,17 @@ function simpleHash(str: string): string {
   }
   return (hash >>> 0).toString(36);
 }
+
+export type GuardedSlotDelivery =
+  | { outcome: "delivered"; paneId: string }
+  | { outcome: "refused_pre_effect"; reason: string; paneId: string | null }
+  | { outcome: "uncertain"; reason: string; paneId: string };
+
+class GuardedEnterRefused extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+  }
+}
+
+/** Observation and guarded-delivery rechecks must read the same window. */
+const GUARDED_CAPTURE_LINES = 60;

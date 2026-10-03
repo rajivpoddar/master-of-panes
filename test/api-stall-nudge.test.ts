@@ -176,6 +176,7 @@ test("StuckDetector delivers the nudge via the guarded relay, logs it, and surfa
   const relay = {
     sendToSlot: async (_n: number, text: string) => { sent.push(text); return true; },
     injectToPM: (t: string) => pmAlerts.push(t),
+    observeSlotPane: async () => ({ paneId: "%1", text: STREAM_STALL }),
   } as unknown as TmuxRelay;
   const det = new StuckDetector(db, {} as LogManager, relay) as unknown as {
     apiStall: ApiStallTracker;

@@ -293,6 +293,8 @@ export type SubmitCheckDeps = {
   payloadStableGraceMs?: number;
   clearGraceMs?: number;
   pollMs?: number;
+  /** Upper bound on Enter presses; guarded recovery nudges pass 1. Default 2. */
+  maxEnterPresses?: number;
 };
 
 /**
@@ -370,7 +372,8 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
   let queued = false;
   // One Enter, then verify; retry Enter once only if the exact pasted composer
   // is still sitting there (Enter was swallowed), never after it changed.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const maxEnterPresses = Math.min(2, Math.max(1, deps.maxEnterPresses ?? 2));
+  for (let attempt = 0; attempt < maxEnterPresses; attempt++) {
     await deps.pressSubmit();
     enterPresses++;
     let lastComposer: string | null = null;
