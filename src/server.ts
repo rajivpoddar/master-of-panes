@@ -905,6 +905,18 @@ app.get("/slots", (c) => {
   return c.json({ slots });
 });
 
+/** Read-only: resolve the issue MoP assigned for a PR (pr, then branch). */
+app.get("/issue-for-pr", (c) => {
+  const repo = c.req.query("repo") || "heydonna-app/heydonna-app";
+  const prRaw = c.req.query("pr");
+  const pr = prRaw && /^\d+$/.test(prRaw) ? Number(prRaw) : null;
+  const branch = c.req.query("branch")?.trim() || null;
+  if (pr === null && branch === null) {
+    return c.json({ error: "pr or branch required" }, 400);
+  }
+  return c.json({ repo, pr, branch, ...db.resolveIssueForPr(String(repo), pr, branch) });
+});
+
 /** Get a single slot's status */
 app.get("/slots/:slotNum", (c) => {
   const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));

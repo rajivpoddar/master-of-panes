@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 from contextlib import contextmanager
@@ -38,6 +39,8 @@ STALE_LABEL_PREFIXES = (
     "ci-", "ci:", "cleanup-", "cleanup:", "pm-cleanup:",
     "slot:", "status:", "pm-state:", "pm-blocked:",
 )
+MOP_URL = os.environ.get("MOP_URL", "http://127.0.0.1:3100")
+TRACKING_LABEL = "pm-nonclaimable:tracking"
 LINKED_ISSUE_MODE = "linked_issue"
 ISSUE_LESS_MODE = "merged_pr_issue_less"
 
@@ -240,10 +243,18 @@ class External:
             raise CleanupError("github_response_ambiguous", ambiguous=True) from exc
 
     def read_pr(self, request: dict[str, Any]) -> dict[str, Any]:
-        return self._gh(["pr", "view", str(request["pr"]), "--repo", request["repository"], "--json", "number,state,mergedAt,mergeCommit,headRefOid,closingIssuesReferences,labels"])
+        return self._gh(["pr", "view", str(request["pr"]), "--repo", request["repository"], "--json", "number,state,mergedAt,mergeCommit,headRefOid,headRefName,body,closingIssuesReferences,labels"])
 
     def read_issue(self, request: dict[str, Any]) -> dict[str, Any]:
         return self._gh(["issue", "view", str(request["issue"]), "--repo", request["repository"], "--json", "number,state,stateReason,labels"])
+
+    def mop_issue_for_pr(self, repository: str, pr: int, branch: str | None) -> dict[str, Any]:
+        from urllib.parse import urlencode
+        query = {"repo": repository, "pr": str(pr)}
+        if branch:
+            query["branch"] = branch
+        with build_opener(_NoRedirect).open(f"{MOP_URL}/issue-for-pr?{urlencode(query)}", timeout=5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
 
     def add_pr_label(self, request: dict[str, Any], label: str) -> None:
         self._gh([
@@ -331,6 +342,57 @@ def _closing_ref_names_issue(pr: dict[str, Any], issue: int | None) -> bool:
         isinstance(refs, list)
         and any(isinstance(item, dict) and item.get("number") == issue for item in refs)
     )
+
+
+def _validate_pr_for_request(request: dict[str, Any], pr: dict[str, Any]) -> list[str]:
+    """MoP-authoritative issue: the PR must still carry no closing ref."""
+    if request.get("issue_authoritative"):
+        return _validate_issue_less_snapshot(request, pr)
+    return _validate_merged_snapshot(request, pr)
+
+
+def _validate_terminal_for_request(request: dict[str, Any], pr: dict[str, Any], issue: dict[str, Any]) -> None:
+    if not request.get("issue_authoritative"):
+        _validate_label_only_terminal(request, pr, issue)
+        return
+    if str(issue.get("state", "")).upper() != "CLOSED" or str(issue.get("stateReason", "")).upper() != "COMPLETED":
+        raise CleanupError("linked_issue_not_terminal")
+
+
+def _resolve_mop_issue(raw: Any, ext: Any) -> Any:
+    """Upgrade an issue-less request to an authoritative linked-issue terminal.
+
+    Rajiv 2026-10-03 (C0ALZJHGE49/1790995117.258909): a merged PR with no
+    closing reference closes the issue MoP's own assignment tuples name for
+    it (pr match, then branch). Ambiguity, "Part of #N", a tracking label, or
+    any lookup failure keeps today's labels-only cleanup.
+    """
+    if not isinstance(raw, dict) or raw.get("cleanup_mode") != ISSUE_LESS_MODE:
+        return raw
+    lookup = getattr(ext, "mop_issue_for_pr", None)
+    if lookup is None:
+        return raw
+    try:
+        probe = {"repository": raw["repository"], "pr": int(raw["pr"])}
+        pr = ext.read_pr(probe)
+        if not isinstance(pr, dict) or pr.get("closingIssuesReferences") != []:
+            return raw
+        found = lookup(probe["repository"], probe["pr"], pr.get("headRefName") or None)
+        issue = found.get("issue") if isinstance(found, dict) and not found.get("ambiguous") else None
+        if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
+            return raw
+        if re.search(rf"\bpart\s+of\s+#{issue}\b", str(pr.get("body") or ""), re.IGNORECASE):
+            return raw
+        snapshot = ext.read_issue({**probe, "issue": issue})
+        if not isinstance(snapshot, dict) or TRACKING_LABEL in _labels(snapshot.get("labels")):
+            return raw
+    except Exception:  # noqa: BLE001 - lookup is advisory; fall back to labels-only
+        return raw
+    return {
+        "repository": raw["repository"], "pr": raw["pr"], "issue": issue,
+        "head": raw.get("head"), "merge_commit": raw.get("merge_commit"),
+        "thread_reply": False, "post_merge_terminal": True, "issue_authoritative": True,
+    }
 
 
 def _validate_issue_less_snapshot(request: dict[str, Any], pr: dict[str, Any]) -> list[str]:
@@ -468,7 +530,8 @@ def run(
     external: External | None = None,
     cto_slack_token: str | None = None,
 ) -> dict[str, Any]:
-    supplied = _validate_request(raw_request)
+    ext = external or External()
+    supplied = _validate_request(_resolve_mop_issue(raw_request, ext))
     caller_thread_ts = supplied.get("_caller_thread_ts")
     request = _cleanup_identity(supplied)
     request["cleanup_mode"] = supplied["cleanup_mode"]
@@ -481,7 +544,6 @@ def run(
         request["_caller_thread_ts"] = caller_thread_ts
     mapping_file = mapping_path or Path(os.environ.get("MOP_TRANSITION_RECEIPT_PATH", str(DEFAULT_MAPPING))).expanduser()
     receipt_file = receipt_path or Path(os.environ.get("MOP_CLEANUP_RECEIPT_PATH", str(DEFAULT_RECEIPT))).expanduser()
-    ext = external or External()
     with _locked(receipt_file):
         receipts = _load_json(receipt_file, {})
         if not isinstance(receipts, dict):
@@ -572,11 +634,11 @@ def run(
                 plan = _label_plan("pr", pr_labels, "pm-state:closed-clean")
             elif post_merge:
                 pr_snapshot = ext.read_pr(request)
-                pr_labels = _validate_merged_snapshot(request, pr_snapshot)
+                pr_labels = _validate_pr_for_request(request, pr_snapshot)
                 issue_snapshot = ext.read_issue(request)
                 issue_labels = _validate_issue_snapshot(request, issue_snapshot)
                 try:
-                    _validate_label_only_terminal(request, pr_snapshot, issue_snapshot)
+                    _validate_terminal_for_request(request, pr_snapshot, issue_snapshot)
                 except CleanupError as exc:
                     if exc.reason != "linked_issue_not_terminal":
                         raise
@@ -664,7 +726,7 @@ def run(
                 elif receipt.get("issue_residue") == "named-issue-unreconciled":
                     labels = _validate_merged_snapshot_without_ref(request, ext.read_pr(request))
                 else:
-                    labels = _validate_merged_snapshot(request, ext.read_pr(request))
+                    labels = _validate_pr_for_request(request, ext.read_pr(request))
             else:
                 labels = _validate_issue_snapshot(request, ext.read_issue(request))
             return (label in labels) if operation == "add" else (label not in labels)
@@ -745,10 +807,10 @@ def run(
             raise CleanupError("cleanup_ambiguous", ambiguous=True)
         if receipt.get("thread_reply") is False and supplied["cleanup_mode"] == LINKED_ISSUE_MODE:
             terminal_pr = ext.read_pr(request)
-            _validate_merged_snapshot(request, terminal_pr)
+            _validate_pr_for_request(request, terminal_pr)
             terminal_issue = ext.read_issue(request)
             _validate_issue_snapshot(request, terminal_issue)
-            _validate_label_only_terminal(request, terminal_pr, terminal_issue)
+            _validate_terminal_for_request(request, terminal_pr, terminal_issue)
         if receipt.get("issue_residue") == "named-issue-unreconciled":
             residue_pr = ext.read_pr(request)
             _validate_merged_snapshot_without_ref(request, residue_pr)

@@ -492,7 +492,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "6375cf8cfb620f49584a426efbc4286684695e7c62fbb8e2c8493334ca862713",
+      "sha256": "ee8c1769fd9c917c3cbf8eb4dbefb1d584e875689e52b20910eb707452273430",
       "source_path": "claude/scripts/pm-cleanup-pr.py"
     },
     {

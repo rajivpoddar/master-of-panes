@@ -1425,6 +1425,38 @@ export class MoPDatabase {
     return owners.map((owner) => owner.slot);
   }
 
+  /**
+   * Read-only: which issue did MoP assign for this PR? Matches recorded
+   * assignment tuples by pr first, then by branch (covers `new_issue`
+   * assignments minted before the slot opened its PR). More than one distinct
+   * issue is ambiguous and yields no issue.
+   */
+  resolveIssueForPr(
+    repository: string,
+    pr: number | null,
+    branch: string | null,
+  ): { issue: number | null; source: "pr" | "branch" | null; ambiguous: boolean } {
+    const repoId = repository.startsWith("github:") ? repository : `github:${repository}`;
+    const lookup = (field: "pr" | "branch", value: number | string): number[] => {
+      const rows = this.db.prepare(`
+        SELECT DISTINCT json_extract(desired_tuple, '$.issue') AS issue
+        FROM assignment_effect_intents
+        WHERE json_extract(desired_tuple, '$.repository_id') = ?
+          AND json_extract(desired_tuple, '$.${field}') = ?
+          AND json_extract(desired_tuple, '$.issue') IS NOT NULL
+      `).all(repoId, value) as Array<{ issue: number }>;
+      return rows.map((row) => Number(row.issue));
+    };
+    const attempts: Array<["pr" | "branch", number | string | null]> = [["pr", pr], ["branch", branch]];
+    for (const [field, value] of attempts) {
+      if (value === null || value === undefined || value === "") continue;
+      const issues = lookup(field, value);
+      if (issues.length === 1) return { issue: issues[0], source: field, ambiguous: false };
+      if (issues.length > 1) return { issue: null, source: field, ambiguous: true };
+    }
+    return { issue: null, source: null, ambiguous: false };
+  }
+
   /** Advance a minted intent to pending-delivery once ownership is committed. */
   markAssignmentEffectCommitted(effectId: string, committedEpoch: number): void {
     this.db.prepare(`
