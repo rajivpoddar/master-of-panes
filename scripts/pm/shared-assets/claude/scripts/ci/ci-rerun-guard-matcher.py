@@ -241,7 +241,9 @@ def classify_segment(words):
         return ""
     rest = [text for text, _ in core[1:]]
     if rest[:2] == ["run", "rerun"]:
-        return "naked gh run rerun"
+        # rerun-after-local-proof.sh deprecated (Rajiv 2026-10-03); PM reruns
+        # failed CI runs directly with gh run rerun --failed.
+        return ""
     if rest[:2] == ["workflow", "run"]:
         for token in rest[2:]:
             if token.startswith("-"):

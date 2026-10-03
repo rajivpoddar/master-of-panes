@@ -1181,26 +1181,8 @@ def pr_patch_text(pr_number):
     return text
 
 def pr_requires_fresh_capture_before_ci(pr_number):
-    if not Path(capture_required_script).is_file():
-        return False
-    try:
-        proc = subprocess.run(
-            [
-                "python3",
-                capture_required_script,
-                "--pr",
-                str(pr_number),
-                "--repo",
-                gh_repo,
-                "--json",
-            ],
-            text=True,
-            capture_output=True,
-            timeout=25,
-        )
-    except Exception:
-        return False
-    return proc.returncode == 0
+    # capture-required.py deprecated (Rajiv 2026-10-03): never gate CI on a capture precheck.
+    return False
 
 def local_preflight_proof_status(pr_number, head, *, failure_specific=False):
     candidates = [
@@ -1610,8 +1592,7 @@ def ci_required_action_line(pr, reason, workflow_state, ci_run, e2e_run, issue, 
             bad_run = str(bucket.get("run_id"))
             break
     rerun_wrapper = (
-        f"/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ci/rerun-after-local-proof.sh\\ "
-        f"--pr\\ {n}\\ --run\\ {bad_run or '<failed-run>'}"
+        f"gh\\ run\\ rerun\\ {bad_run or '<failed-run>'}\\ --failed"
     )
     fields = (
         f"ci_class={pressure['ci_class']} current_head_bad={pressure['current_head_bad']} "
@@ -4816,7 +4797,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 plan = f"/tmp/affected-test-plan-{n}-{head_oid}.json"
                 print(
                     f"PR_OVERRIDE_VERIFICATION_REQUIRED PR#{n} reason=resolved_override_requires_current_head_proof "
-                    f"{marker} affected_test_plan={plan} issue=#{issue or 'unknown'} branch={branch} "
+                    f"{marker} issue=#{issue or 'unknown'} branch={branch} "
                     f"head={head_oid[:10]} "
                     f"command=cd\\ {CONTROL_PLANE_ROOT}\\ &&\\ PYTHONPATH={CONTROL_PLANE_ROOT}\\ python3\\ -m\\ {FAMILY2_MODULE}\\ --transition-type\\ pm_review\\ --issue\\ {issue or 'unknown'}\\ --pr\\ {n}\\ --review-evidence\\ {marker_path}"
                 )
@@ -5807,7 +5788,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr capture job/local repro green; capped same-head CI/E2E rerun" \
-          --action "Capture-green means formatting reached terminal output and fresh fixtures were written; it is only a pre-CI artifact, not readiness. Run at most one same-head rerun of the original failed CI/E2E run through /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ci/rerun-after-local-proof.sh --pr $pr --run <failed-run> (no sealed proof required; Rajiv 1786812200.371389), then swap pm-blocked:capture back to pm-blocked:ci. Skipped/dummy checks do not satisfy readiness." \
+          --action "Capture-green means formatting reached terminal output and fresh fixtures were written; it is only a pre-CI artifact, not readiness. Run at most one same-head rerun of the original failed CI/E2E run through gh run rerun <failed-run> --failed (rerun-after-local-proof.sh deprecated 2026-10-03) (no sealed proof required; Rajiv 1786812200.371389), then swap pm-blocked:capture back to pm-blocked:ci. Skipped/dummy checks do not satisfy readiness." \
           --blocker "capture_complete_ci_rerun_after_preflight" \
           --evidence "$line"
         ;;
@@ -5868,7 +5849,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr capped same-head CI/E2E retry (infra/flake/shared class)" \
-          --action "Run at most one same-head rerun of the failed CI/E2E run through /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ci/rerun-after-local-proof.sh --pr $pr --run <failed-run> (no sealed proof required; Rajiv 1786812200.371389). The wrapper enforces the one-retry cap and refuses product classes; on a non-infra refusal, UNSUPPORTED_LIFECYCLE_ACTION:block-pr, then dispatch rework only through Skill(direct-assign). Never toggle CI labels on the same head." \
+          --action "Run at most one same-head rerun of the failed CI/E2E run through gh run rerun <failed-run> --failed (rerun-after-local-proof.sh deprecated 2026-10-03) (no sealed proof required; Rajiv 1786812200.371389). The wrapper enforces the one-retry cap and refuses product classes; on a non-infra refusal, UNSUPPORTED_LIFECYCLE_ACTION:block-pr, then dispatch rework only through Skill(direct-assign). Never toggle CI labels on the same head." \
           --blocker "ci_rerun_after_preflight" \
           --evidence "$line"
         ;;
@@ -5883,7 +5864,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr current-head CI/E2E red; at most one capped same-head retry" \
-          --action "Run at most one same-head rerun of the failed CI/E2E run through /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ci/rerun-after-local-proof.sh --pr $pr --run <failed-run> (no sealed proof required; Rajiv 1786812200.371389). The wrapper enforces the one-retry cap and refuses product classes; on a non-infra refusal, UNSUPPORTED_LIFECYCLE_ACTION:block-pr and UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity (dispatch rework only through Skill(direct-assign) with the exact failed-run packet). Never toggle CI labels on the same head." \
+          --action "Run at most one same-head rerun of the failed CI/E2E run through gh run rerun <failed-run> --failed (rerun-after-local-proof.sh deprecated 2026-10-03) (no sealed proof required; Rajiv 1786812200.371389). The wrapper enforces the one-retry cap and refuses product classes; on a non-infra refusal, UNSUPPORTED_LIFECYCLE_ACTION:block-pr and UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity (dispatch rework only through Skill(direct-assign) with the exact failed-run packet). Never toggle CI labels on the same head." \
           --blocker "ci_rerun_after_preflight" \
           --evidence "$line"
         ;;
@@ -5919,7 +5900,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr has stale/superseded CI churn, not current-head proof" \
-          --action "Do not dispatch product rework from stale-head failures alone. Once the head is stable, run the affected local test/E2E preflight on the current head before any label-gated CI/E2E retry; if the stale failure is a flake/pre-existing issue, file or cite that follow-up issue first." \
+          --action "Do not dispatch product rework from stale-head failures alone. Once the head is stable, run the exact changed + nearest owning tests (and local E2E preflight where a spec failed) on the current head before any label-gated CI/E2E retry; if the stale failure is a flake/pre-existing issue, file or cite that follow-up issue first." \
           --blocker "ci_stale_head_churn" \
           --evidence "$line"
         ;;

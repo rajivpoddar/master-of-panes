@@ -86,7 +86,7 @@ def is_heydonna_source(draft: dict) -> bool:
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
     return origin.returncode == 0 and re.fullmatch(
-        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+        r"(?:https://(?:[^@/\s]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)"
         r"heydonna-app/heydonna-app(?:\.git)?", origin.stdout.strip()
     ) is not None
 

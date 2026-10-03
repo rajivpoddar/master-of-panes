@@ -120,7 +120,7 @@ or a mismatched branch, and computes the diff as `origin/<base>...HEAD`. This is
 intentional: code review grades the current slot branch, not a remote branch
 name that may be stale or a PM clone HEAD that belongs to another issue.
 
-All review types default to `gpt-5.5` with `effort: high` unless explicitly
+All review types default to `gpt-6.1-sol` with `effort: high` unless explicitly
 overridden with `--model` or `--effort`.
 
 ## Timeout contract
@@ -226,7 +226,7 @@ node ~/.claude/skills/codex-review-companion/codex-review-companion.mjs \
   --review-type code --pr <PR> --issue <N> \
   --previous-head <prior-review-head-sha> \
   --rework-items "delta since prior head" \
-  --model gpt-5.5 --effort high --output-format json --verbose
+  --model gpt-6.1-sol --effort high --output-format json --verbose
 ```
 
 This starts a GENUINE new Codex invocation and the companion writes a fresh

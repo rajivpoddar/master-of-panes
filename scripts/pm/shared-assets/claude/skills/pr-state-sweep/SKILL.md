@@ -54,7 +54,7 @@ work before dispatching new issue work through `Skill(direct-assign)`.
   `PR_CAPTURE_BEFORE_CI_REQUIRED`.
 - `qa-passed-awaiting-ci` PRs whose only red evidence is stale/superseded-head CI
   churn. These now emit `PR_LOCAL_PREFLIGHT_REQUIRED` until the current head has
-  affected-test/local-repro PASS proof; stale evidence must not authorize a fresh
+  local-repro PASS proof; stale evidence must not authorize a fresh
   CI run by itself.
 - `qa-passed-awaiting-ci` PRs with terminal green CI/test + E2E-style checks and
   clean mergeability; these must be processed through the readiness/merge-ready
@@ -256,7 +256,7 @@ the readiness contract, write the merge-ready proof with exact current
 executes.
 `PR_PM_REVIEW_REQUIRED` means PM must start or finish PM Claude
 phase-A review; return `UNSUPPORTED_LIFECYCLE_ACTION:pm-review` when review
-is in flight. Merge-ready uses `pm-readiness-contract`, not PM Claude review.
+is in flight. Readiness is satisfied at 12b admission; green exact-head CI+E2E means merge-ask due, with no post-green readiness check.
 `PR_PM_REVIEW_SLOT_RELEASE_REQUIRED` means a dev slot is still held
 while PM owns review; drain/release that slot through `Skill(direct-release)`
 and only reassign if review returns slot-owned rework. `PR_PM_REVIEW_COMPLETE_REQUIRED` means a phase-A marker passed
@@ -353,7 +353,7 @@ are treated as PR-local stuck/slow regressions until local proof or a fresh
 capture proves the real path. Flake/pre-existing/no-local-equivalent exceptions
 only count if the proof cites a follow-up issue. `PR_CI_RERUN_AFTER_PREFLIGHT_REQUIRED`
 means that proof exists; rerun label-gated CI only with
-`/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ci/rerun-after-local-proof.sh --pr <PR> --run <RUN_ID> --proof <proof>`.
+gh run rerun <RUN_ID> --failed`.
 Stale/superseded bad evidence
 does not authorize a fresh CI run without current-head local preflight proof.
 `PR_CAPTURE_BEFORE_CI_REQUIRED` means prompt/proofread/SC/format or LLM-proxy

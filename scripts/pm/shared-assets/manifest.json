@@ -69,7 +69,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-ci-rerun-guard",
-      "sha256": "c6858e63d23c8e78f600714cd6948c8d1bf12c0b8ed7f7b550260c59d20bad86",
+      "sha256": "8bb6aded568550c56fec41309fdbb27e1a5cb51672adfdd467f34670af4d61bd",
       "source_path": "claude/hooks/block-ci-rerun-without-local-proof.sh"
     },
     {
@@ -105,7 +105,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-feedback-draft-queue-stop",
-      "sha256": "169e7b2ad47b5cdd9c710671fdb12360843c2b1de9d1582c886af376874074a5",
+      "sha256": "3410c62a46759db1dd3129f2a83330bd910b102cee58cea94e624664f56c713e",
       "source_path": "claude/hooks/feedback-draft-queue-stop.py"
     },
     {
@@ -294,7 +294,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-ci-rerun-guard",
-      "sha256": "d791968bef20b49592a7609324d0af19a0db87421a1194f6e2cb8deec176ce0b",
+      "sha256": "bd62beefff61284050bb6c3af6e391ecf497bef63f752a7ec53359ea9c810de3",
       "source_path": "claude/scripts/ci/ci-rerun-guard-matcher.py"
     },
     {
@@ -314,15 +314,6 @@
       "ownership_class": "shared-claude-ci-failure-triage-contract",
       "sha256": "39cf06aacfa5e1df53b1fe791a34c2e3eb0c8028c183e77adf07d7d533ef33a1",
       "source_path": "claude/scripts/ci/required-ci-jobs.json"
-    },
-    {
-      "canonical_target": "/Users/rajiv/.claude/control-plane/current/claude/scripts/ci/rerun-after-local-proof.sh",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 493,
-      "ownership_class": "shared-claude-ci-rerun-consumer",
-      "sha256": "106c0ad8cfa09e9ecc5002aec51ea8d3cd7096b1e89ab3ad523984ef2445f8b9",
-      "source_path": "claude/scripts/ci/rerun-after-local-proof.sh"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/codex-companion-broker-freshness.py",
@@ -764,7 +755,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "f64d62bfd4b34993afc922f60777ee44a01c52ba21f6cbb75e3d5b2572a64e12",
+      "sha256": "74db62e8a44999280df79e0cffc839fe62de9e48d1d47bb6c003607c67283f11",
       "source_path": "claude/skills/codex-review-companion/SKILL.md"
     },
     {
@@ -773,7 +764,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "ff24c1a257862403a807faf8951f8cdb1effe1752f623ab325e183075caad186",
+      "sha256": "e091094a666c09b7bf8ecde72cbbf5fc62df061590c2888dcc3e5bb1935ade45",
       "source_path": "claude/skills/codex-review-companion/codex-review-companion.mjs"
     },
     {
@@ -881,7 +872,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pr-state-sweep",
-      "sha256": "ea6db4d76cf9bf412c29f04867c9f05744b09ef507f6ff2f0879c6581d28269d",
+      "sha256": "6552a3e3e9fdb82dd3ab3e7cbf73bcde96191deb8d0c92aca31fdade725f82bd",
       "source_path": "claude/skills/pr-state-sweep/SKILL.md"
     },
     {
@@ -890,7 +881,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pr-state-sweep",
-      "sha256": "750e447c0a3cc1c25940bc691ef5ddc603a3f13cc66a52d7d0a33605c3e16d99",
+      "sha256": "482f3da0125eafa40464a9357eefacde9361665c7893a690c42c9507c098d88c",
       "source_path": "claude/skills/pr-state-sweep/scripts/sweep.sh"
     },
     {
@@ -1320,7 +1311,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 143,
+    "selected_count": 142,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1332,7 +1323,6 @@
       "~/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
       "~/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
       "~/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
-      "~/.claude/control-plane/current/claude/scripts/ci/rerun-after-local-proof.sh",
       "~/.claude/scripts/launch-dev-slot-claude.sh",
       "~/.claude/scripts/launch-slot-1.sh",
       "~/.claude/scripts/launch-slot-2.sh",

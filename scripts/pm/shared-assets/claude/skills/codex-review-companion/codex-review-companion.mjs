@@ -58,7 +58,7 @@ import process from "node:process";
 
 const HOME = os.homedir();
 const REVIEW_TYPES = new Set(["arch", "plan", "code", "qa"]);
-export const DEFAULT_MODEL = "gpt-6-luna";
+export const DEFAULT_MODEL = "gpt-6.1-sol";
 export const DEFAULT_REVIEW_EFFORT = "high";
 const DIFF_TRUNCATE_AT = 800_000; // chars
 const DEFAULT_CODEX_BIN = "/opt/homebrew/bin/codex";
@@ -1117,6 +1117,13 @@ function exactQaPrHeadBinding(reviewType, prData, resolvedHead) {
   return { branch, head };
 }
 
+// Merge-base SHA the three-dot diff is actually computed against; recorded in
+// the marker so a stale base is visible (#7792).
+function resolveDiffBaseSha(repoRoot, baseRef, headRef, runner = sh) {
+  const mb = runner("git", ["merge-base", baseRef, headRef], { cwd: repoRoot });
+  return mb.code === 0 && mb.stdout.trim() ? mb.stdout.trim() : null;
+}
+
 function resolveDiff(args) {
   let baseRef, headRef;
   if (args.pr) {
@@ -1131,7 +1138,12 @@ function resolveDiff(args) {
     const j = JSON.parse(r.stdout);
     baseRef = `origin/${j.baseRefName}`;
     // Fetch the base ref to avoid "bad revision" failures.
-    sh("git", ["fetch", "origin", j.baseRefName], { cwd: args.repoRoot });
+    const baseFetch = sh("git", ["fetch", "origin", j.baseRefName], {
+      cwd: args.repoRoot,
+    });
+    if (baseFetch.code !== 0) {
+      fail(`git fetch origin ${j.baseRefName} failed: ${baseFetch.stderr}`);
+    }
     args._prData = j;
 
     if (args.reviewType === "code") {
@@ -1232,6 +1244,22 @@ function resolveDiff(args) {
       sh("git", ["fetch", "origin", "main"], { cwd: args.repoRoot });
       baseRef = "origin/main";
       headRef = `origin/${args.branch}`;
+      // Prefer the LOCAL head when it has unpushed commits on top of the
+      // remote head (#8372: reviewing origin/<branch> silently dropped the
+      // slot's local commits). Diverged or behind local keeps the remote head.
+      const localHead = sh("git", ["rev-parse", "--verify", args.branch], {
+        cwd: args.repoRoot,
+      });
+      if (localHead.code === 0 && localHead.stdout.trim()) {
+        const remoteIsAncestor = sh(
+          "git",
+          ["merge-base", "--is-ancestor", `origin/${args.branch}`, args.branch],
+          { cwd: args.repoRoot },
+        );
+        if (remoteIsAncestor.code === 0) {
+          headRef = args.branch;
+        }
+      }
     } else {
       // Local-only branch (e.g., plan review before push). Use local refs.
       const localCheck = sh("git", ["rev-parse", "--verify", args.branch], {
@@ -1240,9 +1268,15 @@ function resolveDiff(args) {
       if (localCheck.code !== 0) {
         fail(`Branch '${args.branch}' not found locally or on origin`);
       }
-      // Refresh local main so the diff is computed against an up-to-date base.
-      sh("git", ["fetch", "origin", "main"], { cwd: args.repoRoot });
-      baseRef = "main";
+      // Always diff against freshly fetched origin/main, never the slot's
+      // stale LOCAL main (#7792: local main 9df656d7 produced an 800k diff).
+      const mainFetch = sh("git", ["fetch", "origin", "main"], {
+        cwd: args.repoRoot,
+      });
+      if (mainFetch.code !== 0) {
+        fail(`git fetch origin main failed: ${mainFetch.stderr}`);
+      }
+      baseRef = "origin/main";
       headRef = args.branch;
     }
     const headCheck = sh("git", ["rev-parse", "--verify", headRef], {
@@ -1277,6 +1311,7 @@ function resolveDiff(args) {
 
   args._diffBaseRef = baseRef;
   args._diffHeadRef = headRef;
+  args._diffBaseSha = resolveDiffBaseSha(args.repoRoot, baseRef, headRef);
 
   let diff = r.stdout;
   if (diff.length > DIFF_TRUNCATE_AT) {
@@ -2723,13 +2758,45 @@ function parseVerdict(reviewType, text) {
     ),
   );
   if (explicit) verdict = explicit[1].toUpperCase();
+  // A bare verdict line ("**APPROVE**") is the reviewer's own verdict. It must
+  // win over prose that merely mentions a verdict word (#8751: "adds no reject
+  // ... path" parsed as REJECT against an APPROVE body).
+  let headerBodyDisagreement = null;
+  if (true) {
+    const standalone = text.match(
+      new RegExp(
+        "^[\\s>*#_`-]*(" + verdicts.join("|") + ")[\\s*_`.]*$",
+        "m",
+      ),
+    );
+    if (standalone && !verdict) verdict = standalone[1];
+    else if (standalone && explicit && standalone[1] !== explicit[1].toUpperCase()) {
+      headerBodyDisagreement =
+        `VERDICT_HEADER_BODY_DISAGREEMENT: VERDICT line says ${explicit[1].toUpperCase()} ` +
+        `but the review body's bare verdict line says ${standalone[1]}; refusing to pick one silently.`;
+    }
+  }
+  // A review that OPENS with a bold verdict followed by prose ("**APPROVE** -
+  // the revised plan closes ...") states its own verdict. Prose later in the
+  // body mentioning a prior "REJECT" must not override it (#8605 plan round 2).
+  if (!verdict) {
+    const lead = text
+      .replace(/^(?:\s*\n)+/, "")
+      .match(
+        new RegExp(
+          "^[\\s>#_`-]*(?:\\*\\*|__)(" + verdicts.join("|") + ")(?:\\*\\*|__)\\s*(?:[\u2014\u2013:.-]|$)",
+        ),
+      );
+    if (lead) verdict = lead[1];
+  }
   // Otherwise scan standalone words and pick the most-restrictive. Hyphen
   // neighbors are excluded: hyphenated check-names such as HARD-REJECT must
   // never read as a verdict (obligation 18346: an APPROVE body echoing that
   // check name with zero findings parsed as REJECT, exit 2).
   if (!verdict) {
     for (const v of verdicts) {
-      const re = new RegExp(`(^|[^\\w-])${v}([^\\w-]|$)`, "gi");
+      // Case-sensitive: only the uppercase verdict token counts, never prose.
+      const re = new RegExp(`(^|[^\\w-])${v}([^\\w-]|$)`, "g");
       if (re.test(text)) {
         if (verdict === null || order[v] < order[verdict]) {
           verdict = v;
@@ -2853,13 +2920,22 @@ function parseVerdict(reviewType, text) {
     if (findings.length > 20) findings.length = 20;
   }
 
-  const blockers = parseBlockers(text, findings, verdict);
+  // P2-only blocking verdicts are non-blocking by contract: publish the
+  // marker as APPROVE with the P2 findings listed (#8605/#8708), instead of
+  // exiting 3 with no marker. Explicit reviewer-emitted OPEN blockers or a
+  // P1 severity override keep the verdict negative.
+  const hasExplicitOpenBlocker = parseBlockers(text, findings, "APPROVE").some(
+    (b) => b.status === "OPEN",
+  );
   const p2OnlyBlocking =
     reviewType === "code" &&
     BLOCKING_REVIEW_VERDICTS.has(verdict) &&
     findings.length > 0 &&
     findings.every((finding) => finding.priority === "P2") &&
-    severityOverride !== "P1";
+    severityOverride !== "P1" &&
+    !hasExplicitOpenBlocker;
+  if (p2OnlyBlocking) verdict = "APPROVE";
+  const blockers = parseBlockers(text, findings, verdict);
 
   // Exit code mapping
   const exitCode = {
@@ -2890,6 +2966,7 @@ function parseVerdict(reviewType, text) {
     severityOverride,
     severityOverrideReason,
     p2OnlyBlocking,
+    headerBodyDisagreement,
   };
 }
 
@@ -2996,12 +3073,10 @@ function resolveTerminalVerdict({ markerPath, head, number, reviewType } = {}) {
 }
 
 function verdictContractError(parsed) {
-  if (!parsed?.p2OnlyBlocking) return null;
-  return (
-    "P2_ONLY_BLOCKING_VERDICT_INVALID: P2 findings are non-blocking. " +
-    "Approve with bounded follow-ups, or emit SEVERITY_OVERRIDE: P1 and " +
-    "SEVERITY_OVERRIDE_REASON with concrete runtime/release evidence."
-  );
+  // P2-only verdicts are downgraded to APPROVE inside parseVerdict; the only
+  // remaining contract violation is a header that disagrees with the body's
+  // own bare verdict line (typed failure, never a silent REJECT).
+  return parsed?.headerBodyDisagreement || null;
 }
 
 // ---------- marker file ----------
@@ -3025,6 +3100,7 @@ function writeMarker(args, parsed, codexText) {
     args._currentHead ? `HEAD_SHA: ${args._currentHead}` : null,
     args._currentHead ? `headRefOid: ${args._currentHead}` : null,
     args._diffBaseRef ? `DIFF_BASE: ${args._diffBaseRef}` : null,
+    args._diffBaseSha ? `DIFF_BASE_SHA: ${args._diffBaseSha}` : null,
     args._prOwnedBase ? `PR_OWNED_BASE: ${args._prOwnedBase}` : null,
     args._diffHeadRef ? `DIFF_HEAD: ${args._diffHeadRef}` : null,
     args._reviewBaselineHead
@@ -3352,6 +3428,7 @@ async function main() {
           branch: args._currentBranch || args.branch || null,
           head_sha: args._currentHead || null,
           diff_base: args._diffBaseRef || null,
+          diff_base_sha: args._diffBaseSha || null,
           pr_owned_base: args._prOwnedBase || null,
           diff_head: args._diffHeadRef || null,
           previous_review_head: args._reviewBaselineHead || null,
@@ -3429,6 +3506,8 @@ export {
   latestApprovedReviewEvent,
   liveReviewThreadState,
   parseVerdict,
+  verdictContractError,
+  resolveDiffBaseSha,
   verifyMarkerTerminal,
   resolveTerminalVerdict,
   planReviewBudgetPreflight,
@@ -3444,7 +3523,6 @@ export {
   sourceRequirementError,
   terminationDiagnostic,
   validatePriorBlockerCarryForward,
-  verdictContractError,
   writeReviewCapPacket,
   writeMarker,
 };

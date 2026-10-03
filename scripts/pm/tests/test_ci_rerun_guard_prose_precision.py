@@ -52,21 +52,21 @@ def test_bare_and_absolute_pm_state_replace_arm_block() -> None:
 
 
 def test_control_keyword_command_heads_block() -> None:
-    assert verdict("if true; then gh run rerun 1; fi") == 2
-    assert verdict("for i in 1; do gh run rerun $i; done") == 2
-    assert verdict("if false; then :; else gh run rerun 1; fi") == 2
+    assert verdict("if true; then gh workflow run ci.yml; fi") == 2
+    assert verdict("for i in 1; do gh workflow run ci.yml; done") == 2
+    assert verdict("if false; then :; else gh workflow run ci.yml; fi") == 2
 
 
 def test_hash_inside_a_word_is_not_a_comment() -> None:
-    assert verdict("echo a#b; gh run rerun 1") == 2
+    assert verdict("echo a#b; gh workflow run ci.yml") == 2
 
 
 def test_here_string_is_not_a_heredoc() -> None:
-    assert verdict("echo hi <<<x; gh run rerun 1") == 2
+    assert verdict("echo hi <<<x; gh workflow run ci.yml") == 2
 
 
 def test_quoted_command_position_still_blocks() -> None:
-    assert verdict('gh "run" rerun 1') == 2
+    assert verdict('gh "workflow" run ci.yml') == 2
     assert verdict('gh workflow "run" ci.yml') == 2
 
 
@@ -75,7 +75,7 @@ def test_hash_comment_at_word_start_still_allows() -> None:
 
 
 def test_command_after_heredoc_terminator_blocks_rerun() -> None:
-    assert verdict("cat <<EOF\nbody\nEOF\ngh run rerun 1") == 2
+    assert verdict("cat <<EOF\nbody\nEOF\ngh workflow run ci.yml") == 2
 
 
 def test_command_after_heredoc_terminator_blocks_workflow_run() -> None:
@@ -83,7 +83,7 @@ def test_command_after_heredoc_terminator_blocks_workflow_run() -> None:
 
 
 def test_redirected_heredoc_then_rerun_blocks() -> None:
-    assert verdict("cat > /tmp/n.md <<EOF\nbody\nEOF\ngh run rerun 42") == 2
+    assert verdict("cat > /tmp/n.md <<EOF\nbody\nEOF\ngh workflow run ci.yml") == 2
 
 
 def test_missing_matcher_blocks_fail_closed() -> None:
@@ -110,7 +110,7 @@ def test_prose_naming_prohibited_commands_allows() -> None:
 
 
 def test_genuine_rerun_still_blocks() -> None:
-    assert verdict("gh run rerun 34597650181") == 2
+    assert verdict("gh workflow run ci.yml") == 2
 
 
 def test_genuine_workflow_dispatch_still_blocks() -> None:
@@ -126,7 +126,7 @@ def test_genuine_quoted_label_arm_still_blocks() -> None:
 
 
 def test_genuine_compound_invocations_still_block() -> None:
-    assert verdict("echo ok && gh run rerun 1") == 2
+    assert verdict("echo ok && gh workflow run ci.yml") == 2
     assert verdict("echo start; gh workflow run e2e.yml") == 2
 
 
@@ -156,16 +156,22 @@ def test_single_quoted_prose_allows() -> None:
 
 
 def test_sh_c_wrapper_genuine_still_blocks() -> None:
-    assert verdict("sh -c 'gh run rerun 5'") == 2
+    assert verdict("sh -c 'gh workflow run ci.yml'") == 2
 
 
 def test_wrapper_mention_in_comment_does_not_allowlist_genuine_rerun() -> None:
-    assert verdict("gh run rerun 9 # see request-label-gated-ci.sh docs") == 2
+    assert verdict("gh workflow run ci.yml # see request-label-gated-ci.sh docs") == 2
 
 
 def test_rtk_prefixed_rerun_still_blocks() -> None:
-    assert verdict("rtk gh run rerun 5") == 2
+    assert verdict("rtk gh workflow run ci.yml") == 2
 
 
 def test_sudo_prefixed_rerun_still_blocks() -> None:
-    assert verdict("sudo gh run rerun 5") == 2
+    assert verdict("sudo gh workflow run ci.yml") == 2
+
+
+def test_naked_gh_run_rerun_is_allowed_after_deprecation() -> None:
+    # rerun-after-local-proof.sh deprecated (Rajiv 2026-10-03): PM reruns
+    # failed CI directly with gh run rerun --failed.
+    assert verdict("gh run rerun 34597650181 --failed") == 0

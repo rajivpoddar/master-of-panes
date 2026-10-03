@@ -19,7 +19,7 @@ SOURCE_PATH = "claude/skills/codex-review-companion/codex-review-companion.mjs"
 TARGET = "/Users/rajiv/.claude/skills/codex-review-companion/codex-review-companion.mjs"
 CANONICAL = "/opt/homebrew/bin/codex"
 MISSING_BUNDLE = "/Applications/ChatGPT.app/Contents/Resources/codex"
-LIVE_MODEL = "gpt-6-luna"
+LIVE_MODEL = "gpt-6.1-sol"
 LIVE_CONFIG = pathlib.Path("/Users/rajiv/.codex/config.toml")
 
 NODE_PROBE = r"""

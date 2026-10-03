@@ -81,7 +81,7 @@ ERR
   exit 2
 fi
 cat >&2 <<'ERR'
-BLOCKED: label-gated CI/E2E is CTO-owned; PM cannot arm or rerun GitHub CI directly.
+BLOCKED: label-gated CI/E2E is CTO-owned; PM cannot arm label-gated CI directly.
 
 CI is a gate, not the dev-slot test loop. Arming label-gated CI/E2E is a
 CTO-owned trigger. Request the CTO (Abhijit) to arm exact-head label-gated CI
@@ -91,7 +91,7 @@ for the PR; the CTO runs:
 
 Ordinary PR/issue label additions, removals, and replacements remain allowed,
 including pm-blocked:*, merge-ready, status:*, priority:*, and ownership labels.
-Blocked here are only `gh run rerun`, `gh workflow run` for CI/E2E, manual
+Blocked here are only `gh workflow run` for CI/E2E, manual
 `pm-state:qa-passed-awaiting-ci` label edits, and direct `gh api` mutations of
 that CI-trigger label. Raw capture-workflow dispatch stays blocked.
 ERR
