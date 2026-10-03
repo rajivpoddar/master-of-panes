@@ -27,7 +27,7 @@ PROJECT_HOME = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-h
 DB_PATH = Path(os.environ.get("PM_OPS_DB", str(PROJECT_HOME / "state/pm-ops.db")))
 TODO_PATH = PROJECT_HOME / "memory/pm-todo.md"
 ARCHIVE_DIR = PROJECT_HOME / "memory/archive"
-MOP_DB = Path.home() / ".claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/data/mop.db"
+MOP_DB = Path.home() / ".local/share/master-of-panes/data/mop.db"
 REPO = "heydonna-app/heydonna-app"
 _REPO_OWNER, _REPO_NAME = REPO.split("/", 1)
 

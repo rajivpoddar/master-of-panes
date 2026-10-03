@@ -36,7 +36,7 @@ from typing import Any
 
 OUT_JSON = Path("/tmp/stale-process-cleanup-latest.json")
 PROJECT_BASE = Path("/Users/rajiv/Downloads/projects")
-MOP_DB = Path("/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/data/mop.db")
+MOP_DB = Path("/Users/rajiv/.local/share/master-of-panes/data/mop.db")
 SLOT_NUMBERS = tuple(range(1, 7))
 
 

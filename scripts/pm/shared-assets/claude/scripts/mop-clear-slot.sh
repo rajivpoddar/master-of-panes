@@ -17,7 +17,7 @@
 set -euo pipefail
 
 BASE_URL="${MOP_BASE_URL:-http://127.0.0.1:3100}"
-DB_PATH="${MOP_DB_PATH:-$HOME/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/data/mop.db}"
+DB_PATH="${MOP_DB_PATH:-$HOME/.local/share/master-of-panes/data/mop.db}"
 SOURCE="${MOP_CLEAR_SOURCE:-mop_clear_slot_http_fallback}"
 STALE_MINUTES="${MOP_PM_CLEAR_STALE_REPAIR_MINUTES:-10}"
 REPAIR_PM_PENDING=0

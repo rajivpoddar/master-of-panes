@@ -456,7 +456,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-clear-slot",
-      "sha256": "c79fad24ec1e0bf6cbce676dbf4b2a29751f669c7e2de1ebf41c957a91cf1416",
+      "sha256": "27a37b53a1b55ba5a9ed09b30cc3b9b3704485e80cdc52c8ccd01c4198e74978",
       "source_path": "claude/scripts/mop-clear-slot.sh"
     },
     {
@@ -501,7 +501,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops",
-      "sha256": "0bd602d9ae97f1896775503a82074daf81789f949a844d84bb74ff6f078e56d1",
+      "sha256": "555bc8703c258f0ef1f01bfe6c99a29cf4aa49471a0741c4ba75e1742f398b81",
       "source_path": "claude/scripts/pm-ops-legacy.py"
     },
     {
@@ -629,7 +629,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "60ab48acd6cc026411f70de306419feabfec585f9ad577257ac94c7027a78ad0",
+      "sha256": "53653b94c7feb9713b369492760ef1fb6549bd4655826e955b458fad8006b7ac",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
