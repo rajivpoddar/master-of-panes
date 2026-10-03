@@ -2804,14 +2804,23 @@ function parseVerdict(reviewType, text) {
   // neighbors are excluded: hyphenated check-names such as HARD-REJECT must
   // never read as a verdict (obligation 18346: an APPROVE body echoing that
   // check name with zero findings parsed as REJECT, exit 2).
+  // Only current-author lines are scanned (quoted history never supplies a
+  // missing declaration), and a negated approval ("cannot APPROVE", "not
+  // APPROVE") never counts as approval (CTO REVISE on d79389d).
   if (!verdict) {
     for (const v of verdicts) {
       // Case-sensitive: only the uppercase verdict token counts, never prose.
-      const re = new RegExp(`(^|[^\\w-])${v}([^\\w-]|$)`, "g");
-      if (re.test(text)) {
-        if (verdict === null || order[v] < order[verdict]) {
-          verdict = v;
+      const re = new RegExp(`(^|[^\\w-])${v}(?=[^\\w-]|$)`, "g");
+      for (const m of authorText.matchAll(re)) {
+        if (order[v] === 2) {
+          const before = authorText
+            .slice(Math.max(0, m.index - 40), m.index + m[1].length)
+            .split(/\n/)
+            .pop();
+          if (/\b(?:not|cannot|can't|can not|won't|will not|do not|don't|never|no)\b[\s\w]{0,20}$/i.test(before))
+            continue;
         }
+        if (verdict === null || order[v] < order[verdict]) verdict = v;
       }
     }
   }
@@ -2890,7 +2899,7 @@ function parseVerdict(reviewType, text) {
   // Findings: P0/P1/P2 markers (code-review) — primary format
   const findingRe = /^[\s>*\-]*(P[012])[\s:.\-]+([^\n]+)$/gm;
   let m;
-  while ((m = findingRe.exec(text)) !== null) {
+  while ((m = findingRe.exec(authorText)) !== null) {
     findings.push({
       priority: m[1].toUpperCase(),
       description: m[2].trim().slice(0, 500),
@@ -2916,7 +2925,7 @@ function parseVerdict(reviewType, text) {
     // line of the numbered item (description), trim trailing dots.
     const numberedRe = /^[\s>*\-]*(\d{1,2})[.)][\s]+(.+?)$/gm;
     let nm;
-    while ((nm = numberedRe.exec(text)) !== null) {
+    while ((nm = numberedRe.exec(authorText)) !== null) {
       const desc = nm[2].trim().replace(/[.:]+$/, "");
       // Skip noise: very short items, citations like "10. " in a sentence,
       // and lines that look like list-item continuation (start with lowercase
@@ -2952,11 +2961,15 @@ function parseVerdict(reviewType, text) {
   if (
     !headerBodyDisagreement &&
     order[verdict] === 2 &&
-    (severityOverride || hasExplicitOpenBlocker)
+    (severityOverride ||
+      hasExplicitOpenBlocker ||
+      (!declared.length && findings.some((f) => f.priority !== "P2")))
   ) {
     const why = severityOverride
       ? `SEVERITY_OVERRIDE: ${severityOverride}`
-      : "an OPEN blocker";
+      : hasExplicitOpenBlocker
+        ? "an OPEN blocker"
+        : "a current P0/P1 finding with no declared verdict";
     headerBodyDisagreement =
       `VERDICT_HEADER_BODY_DISAGREEMENT: verdict ${verdict} contradicts ${why}; ` +
       `a P0/P1 override or open blocker is always blocking; refusing to publish a passing marker.`;

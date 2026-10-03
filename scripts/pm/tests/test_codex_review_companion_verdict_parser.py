@@ -17,7 +17,12 @@ ROOT = pathlib.Path(__file__).parents[3]
 SRC = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "skills" / "codex-review-companion" / "codex-review-companion.mjs"
 
 PROBE = r"""
+import fs from "node:fs";
 const c = await import(process.argv[2]);
+// Real marker writer, kept in memory: capture its writes instead of touching disk.
+const written = new Map();
+fs.writeFileSync = (p, data) => { written.set(String(p), String(data)); };
+fs.mkdirSync = () => {};
 const cases = JSON.parse(process.argv[3]);
 const out = {};
 for (const [name, text] of Object.entries(cases)) {
@@ -30,7 +35,17 @@ for (const [name, text] of Object.entries(cases)) {
     "--- Findings (0) ---", "--- Review Output ---", text,
   ].join("\n");
   const forged = c.verifyMarkerTerminal(marker, { head, number: 1, reviewType: "code" });
+  const head2 = "b".repeat(40);
+  const markerFile = `/mem/codex-app-code-review-1-${name}.txt`;
+  const blocked = p.exitCode !== 0 || c.verdictContractError(p);
+  let realMarker = null, realVerify = null;
+  if (!blocked) {
+    c.writeMarker({ reviewType: "code", pr: 1, markerFile, _currentHead: head2 }, p, text);
+    realMarker = written.get(markerFile);
+    realVerify = c.verifyMarkerTerminal(realMarker, { head: head2, number: 1, reviewType: "code" }).ok;
+  }
   out[name] = {
+    publishedPassing: !blocked && realVerify === true,
     verdict: p.verdict,
     exitCode: p.exitCode,
     contractError: c.verdictContractError(p),
@@ -53,7 +68,21 @@ P0_SEVERITY_OVERRIDE = (
     "SEVERITY_OVERRIDE: P0\nSEVERITY_OVERRIDE_REASON: data loss in prod\n"
 )
 
+# CTO REVISE on d79389d (same thread): literal regressions.
+NEGATED_APPROVE_WITH_QUOTED_HISTORY = (
+    "I cannot approve this change; the bypass remains.\n\n"
+    "> APPROVE\n\n"
+    "P1: bypass path still reachable at gate.ts:40\n"
+)
+REJECT_WITH_QUOTED_OLD_NIT = (
+    "**REJECT** — the bypass remains in the writer.\n\n"
+    "> P2: naming nit\n"
+)
+
 CASES = {
+    "negated_quoted": NEGATED_APPROVE_WITH_QUOTED_HISTORY,
+    "reject_quoted_nit": REJECT_WITH_QUOTED_OLD_NIT,
+    "negated_upper": "We do not APPROVE this.\n\nP1: guard bypass\n",
     "quoted_approve": QUOTED_HISTORICAL_APPROVE,
     "quoted_field": QUOTED_HISTORICAL_VERDICT_FIELD,
     "p0_override": P0_SEVERITY_OVERRIDE,
@@ -84,6 +113,17 @@ class VerdictParserTest(unittest.TestCase):
         blocked = r["exitCode"] != 0 or r["contractError"] is not None
         self.assertTrue(blocked, r)
         self.assertFalse(r["forgedApproveMarkerOk"], r)
+        self.assertFalse(r["publishedPassing"], r)
+
+    def test_negated_approval_and_quoted_history_never_approve(self) -> None:
+        for name in ("negated_quoted", "negated_upper"):
+            self.assertNotIn(self.r[name]["verdict"], ("APPROVE", "CONFIRMED", "VERIFIED", "APPROVE_PENDING_CI"), name)
+            self.assert_never_passes(name)
+
+    def test_quoted_old_nit_does_not_overturn_current_reject(self) -> None:
+        r = self.r["reject_quoted_nit"]
+        self.assertEqual((r["verdict"], r["findings"]), ("REJECT", 0), r)
+        self.assert_never_passes("reject_quoted_nit")
 
     def test_quoted_historical_approve_does_not_override_opening_reject(self) -> None:
         self.assertEqual(self.r["quoted_approve"]["verdict"], "REJECT")
@@ -116,9 +156,11 @@ class VerdictParserTest(unittest.TestCase):
         clean = self.r["clean_approve"]
         self.assertEqual((clean["verdict"], clean["exitCode"], clean["contractError"]), ("APPROVE", 0, None))
         self.assertTrue(clean["forgedApproveMarkerOk"])
+        self.assertTrue(clean["publishedPassing"])
         p2 = self.r["p2_followup"]
         self.assertEqual((p2["verdict"], p2["exitCode"], p2["contractError"]), ("APPROVE", 0, None))
         self.assertEqual(p2["findings"], 1)
+        self.assertTrue(p2["publishedPassing"])
 
 
 if __name__ == "__main__":
