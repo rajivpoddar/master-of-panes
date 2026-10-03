@@ -5,7 +5,7 @@ import {
   API_STALL_NUDGE_MESSAGE,
   ApiStallTracker,
   classifyApiStallTail,
-} from "../src/apiStall.js";
+} from "../src/stuck.js";
 import type { MoPDatabase } from "../src/db.js";
 import type { LogManager } from "../src/logs.js";
 import type { TmuxRelay } from "../src/relay.js";
