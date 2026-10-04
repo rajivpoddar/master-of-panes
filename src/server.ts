@@ -27,6 +27,11 @@ import {
   evaluateRespawnTurnPersistence,
   respawnTurnPersistenceRemedy,
 } from "./respawnTurnGuard.js";
+import {
+  createRespawnWhenIdleTicker,
+  registerRespawnWhenIdleRoutes,
+  RESPAWN_WHEN_IDLE_TICK_MS,
+} from "./respawnWhenIdle.js";
 import { createGhIssueOwnershipProjection } from "./issueProjection.js";
 import { registerFamily2Routes } from "./family2Routes.js";
 import { registerAssignmentEffectRoutes } from "./assignmentEffectRoutes.js";
@@ -1687,6 +1692,33 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   });
 });
 
+// ─── Respawn When Idle (one-shot --continue respawn at next natural idle) ──
+const respawnWhenIdleDeps = {
+  db,
+  devSlots: devSlots(DEFAULT_DEV_SLOT_COUNT),
+  isSlotActive: (slot: number) => relay.isSlotActive(slot),
+  respawn: async (slot: number) => {
+    const res = await app.request(`/slots/${slot}/respawn`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ continue_session: true }),
+    });
+    const body = await res.json().catch(() => ({}));
+    return { status: res.status, body };
+  },
+  injectToPM: (text: string) => relay.injectToPM(text),
+};
+registerRespawnWhenIdleRoutes(app, respawnWhenIdleDeps);
+const respawnWhenIdleTicker = createRespawnWhenIdleTicker(respawnWhenIdleDeps);
+let respawnWhenIdleTicking = false;
+const respawnWhenIdleTimer = setInterval(() => {
+  if (respawnWhenIdleTicking) return;
+  respawnWhenIdleTicking = true;
+  void respawnWhenIdleTicker.tick().finally(() => {
+    respawnWhenIdleTicking = false;
+  });
+}, RESPAWN_WHEN_IDLE_TICK_MS);
+
 // ─── Send Command to Slot (Single Gateway) ─────────────
 
 /**
@@ -2895,6 +2927,7 @@ process.on("SIGINT", () => {
   clearInterval(rotationTimer);
   clearInterval(eventLoopLagTimer);
   clearInterval(eventRetentionTimer);
+  clearInterval(respawnWhenIdleTimer);
   eventLoopHist.disable();
   logManager.disableLogging(config.slotCount);
   db.close();
@@ -2911,6 +2944,7 @@ process.on("SIGTERM", () => {
   clearInterval(rotationTimer);
   clearInterval(eventLoopLagTimer);
   clearInterval(eventRetentionTimer);
+  clearInterval(respawnWhenIdleTimer);
   eventLoopHist.disable();
   logManager.disableLogging(config.slotCount);
   db.close();
