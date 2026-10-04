@@ -39,7 +39,8 @@ function slot(overrides: Partial<SlotState> = {}): SlotState {
 }
 
 function harness(s: SlotState, opts: {
-  output: string; activity?: "idle" | "busy"; silentMin: number;
+  output: string; activity?: "idle" | "busy" | "unknown"; silentMin: number;
+  mtimeMissing?: boolean; mtimeThrows?: boolean; probeThrows?: boolean;
   guarded?: "delivered" | "uncertain" | "refused_pre_effect"; subagent?: boolean;
 }) {
   const events: EventLogEntry[] = [];
@@ -63,7 +64,12 @@ function harness(s: SlotState, opts: {
     },
   } as unknown as MoPDatabase;
   const relay = {
-    captureOutput: async () => ({ output: opts.output, activity: opts.activity ?? "idle" }),
+    captureOutput: async () => ({ output: opts.output, activity: opts.activity === "busy" ? "busy" : "idle" }),
+    getSlotActivityState: async () => {
+      if (opts.probeThrows) throw new Error("probe failed");
+      const a = opts.activity ?? "idle";
+      return a === "busy" ? "active" : a;
+    },
     sendToSlotAsync: async () => { throw new Error("unguarded send must not be used"); },
     observeSlotPane: async () => ({ paneId: "%4", text: opts.output }),
     deliverGuardedToSlot: async (_n: number, cmd: string, g: { recheck: (st: "pre_paste" | "pre_enter", c: () => Promise<string | null>) => Promise<string | null> }) => {
@@ -75,7 +81,10 @@ function harness(s: SlotState, opts: {
     },
   } as unknown as TmuxRelay;
   const logManager = {
-    getLogMtime: async () => new Date(NOW - opts.silentMin * 60_000),
+    getLogMtime: async () => {
+      if (opts.mtimeThrows) throw new Error("stat failed");
+      return opts.mtimeMissing ? null : new Date(NOW - opts.silentMin * 60_000);
+    },
   } as unknown as LogManager;
   return { detector: new StuckDetector(db, logManager, relay), events, sends };
 }
@@ -150,4 +159,21 @@ test("active subagent suppresses the stale-active nudge", async () => {
   const h = harness(slot(), { output: PM_OWNER_PANE, silentMin: 30, subagent: true });
   await atNow(() => h.detector.checkStaleActiveTurn(slot()));
   assert.equal(h.sends.length, 0);
+});
+
+test("CTO REVISE 880774e: unknown or unreadable activity never counts as idle", async () => {
+  const cases = [
+    { activity: "unknown" as const },
+    { probeThrows: true },
+    { mtimeMissing: true },
+    { mtimeThrows: true },
+  ];
+  for (const c of cases) {
+    const h = harness(slot(), { output: PM_OWNER_PANE, silentMin: 30, ...c });
+    await atNow(() => h.detector.checkStaleActiveTurn(slot()));
+    assert.equal(h.sends.length, 0, JSON.stringify(c));
+  }
+  const failed = harness(slot(), { output: "[capture failed: Error: tmux]", silentMin: 30 });
+  await atNow(() => failed.detector.checkStaleActiveTurn(slot()));
+  assert.equal(failed.sends.length, 0, "capture failure");
 });

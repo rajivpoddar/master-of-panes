@@ -628,14 +628,30 @@ export class StuckDetector {
     const stall = this.apiStall.status(slot.slot);
     if (stall.state !== "clear" && stall.assignment_epoch === (slot.assignment_epoch ?? null)) return;
 
-    const mtime = await this.logManager.getLogMtime(slot.slot);
-    if (!mtime) return;
+    // CTO REVISE on 880774e: only POSITIVELY proven idle qualifies. Unknown
+    // or unreadable activity (missing/unreadable log mtime, is-active probe
+    // error, capture failure) is treated as NOT idle: no nudge.
+    let mtime: Date | null = null;
+    try {
+      mtime = await this.logManager.getLogMtime(slot.slot);
+    } catch {
+      return;
+    }
+    if (!mtime || !Number.isFinite(mtime.getTime())) return;
     const silentMs = Date.now() - mtime.getTime();
     if (!Number.isFinite(silentMs) || silentMs <= this.IDLE_OCCUPIED_THRESHOLD_MS) return;
 
     if (typeof this.relay.captureOutput !== "function") return;
-    const { output, activity } = await this.relay.captureOutput(slot.slot, 60);
-    if (activity !== "idle") return;
+    if (typeof this.relay.getSlotActivityState !== "function") return;
+    let output: string;
+    try {
+      // captureOutput maps a probe error to "idle"; use the tri-state probe.
+      if ((await this.relay.getSlotActivityState(slot.slot)) !== "idle") return;
+      ({ output } = await this.relay.captureOutput(slot.slot, 60));
+    } catch {
+      return;
+    }
+    if (typeof output !== "string" || output.startsWith("[capture failed")) return;
     if (composerText(output) !== "") return;
     const pmOwner = this.PM_OWNER_PATTERN.test(output);
     if (!pmOwner && silentMs < this.STALE_ACTIVE_IDLE_MS) return;
@@ -878,6 +894,8 @@ export class StuckDetector {
   private readonly FREE_SLOT_PM_NUDGE_MS = 10 * 60 * 1000;
 
   async checkFreeSlotsPmNudge(slots: SlotState[]): Promise<void> {
+    // CTO REVISE on 880774e: OFF unless MOP_FREE_SLOT_NUDGE_ENABLED=1.
+    if (process.env.MOP_FREE_SLOT_NUDGE_ENABLED !== "1") return;
     if (process.env.MOP_PM_WAIT_NUDGES_DISABLED === "1") return;
     if (this.db.getExitPending()) return;
     const due: Array<{ slot: SlotState; anchor: string; freeMin: number }> = [];
@@ -898,6 +916,15 @@ export class StuckDetector {
       }
       due.push({ slot, anchor: anchor.timestamp, freeMin: Math.floor(freeMs / 60_000) });
     }
+    if (due.length === 0) return;
+    // CTO REVISE on 880774e: re-read each slot immediately before sending and
+    // drop any slot assigned (or epoch-changed) since detection this tick.
+    const stillFree = due.filter((d) => {
+      const cur = this.db.getSlot(d.slot.slot);
+      return !!cur && !cur.occupied && !cur.dnd &&
+        (cur.assignment_epoch ?? null) === (d.slot.assignment_epoch ?? null);
+    });
+    due.splice(0, due.length, ...stillFree);
     if (due.length === 0) return;
     const list = due.map((d) => `S${d.slot.slot} (${d.slot.name}) free ${d.freeMin}m`).join(", ");
     const message =
