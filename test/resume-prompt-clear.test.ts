@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { MoPDatabase } from "../src/db.js";
-import { HookProcessor } from "../src/hooks.js";
+import { DEFAULT_PM_CONTINUATION_PROMPT, HookProcessor } from "../src/hooks.js";
 import type { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 import { findSessionStartClearEvent, waitForSessionStartClear } from "../src/sessionStartClearWait.js";
@@ -98,11 +98,11 @@ test("SessionStart source=clear consume-once: a later SessionStart source=clear 
     // not resend the prior prompt.
     db.setPendingClear(0);
     await processor.process(0, { type: "SessionStart", source: "clear", session_id: "pm-b" });
-    assert.deepEqual(injected, ["resume once only"]);
+    assert.deepEqual(injected, ["resume once only", DEFAULT_PM_CONTINUATION_PROMPT]);
     assert.equal(db.getEvents(0, 10, "resume_prompt_injected").length, 1);
   }));
 
-test("SessionStart source=clear for slot 0 with no persisted resume_prompt is unchanged (no injection, no new event)", () =>
+test("SessionStart source=clear for slot 0 with no persisted resume_prompt injects the PM continuation prompt once (Rajiv 2026-10-04)", () =>
   withDb(async (db) => {
     db.setPendingClear(0);
     const injected: string[] = [];
@@ -110,12 +110,39 @@ test("SessionStart source=clear for slot 0 with no persisted resume_prompt is un
 
     await processor.process(0, { type: "SessionStart", source: "clear", session_id: "pm-3" });
 
-    assert.deepEqual(injected, []);
+    assert.deepEqual(injected, [DEFAULT_PM_CONTINUATION_PROMPT]);
+    assert.match(injected[0], /pm-continuation-note\.md/);
     assert.equal(db.getEvents(0, 5, "resume_prompt_injected").length, 0);
+    assert.equal(db.getEvents(0, 5, "pm_continuation_injected").length, 1);
     // Existing clear-ack behavior is untouched.
     assert.equal(db.hasPendingClear(0), false);
     assert.equal(db.getEvents(0, 5, "clear_pending_executed").length, 1);
     assert.equal(db.getEvents(0, 5, "slot_cleared").length, 1);
+
+    // Duplicate hook delivery for the same cleared session: no re-send.
+    await processor.process(0, { type: "SessionStart", source: "clear", session_id: "pm-3" });
+    assert.equal(injected.length, 1);
+
+    // A later /clear (new session) gets its own continuation.
+    await processor.process(0, { type: "SessionStart", source: "clear", session_id: "pm-4" });
+    assert.equal(injected.length, 2);
+  }));
+
+test("an explicit resume_prompt replaces the default PM continuation (no double injection)", () =>
+  withDb(async (db) => {
+    db.setResumePrompt(0, "explicit resume");
+    const injected: string[] = [];
+    const processor = new HookProcessor(db, fakeRelay(injected));
+    await processor.process(0, { type: "SessionStart", source: "clear", session_id: "pm-5" });
+    assert.deepEqual(injected, ["explicit resume"]);
+  }));
+
+test("a dev slot SessionStart(source=clear) never injects the PM continuation", () =>
+  withDb(async (db) => {
+    const injected: string[] = [];
+    const processor = new HookProcessor(db, fakeRelay(injected));
+    await processor.process(2, { type: "SessionStart", source: "clear", session_id: "slot-2" });
+    assert.deepEqual(injected, []);
   }));
 
 test("a resume_prompt persisted for slot 0 is not injected by an unrelated slot's SessionStart(source=clear)", () =>

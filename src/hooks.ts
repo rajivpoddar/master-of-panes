@@ -45,6 +45,19 @@ function classifyBashCommand(cmd: string): string | null {
   return null;
 }
 
+/**
+ * PM continuation prompt injected after every PM /clear that carries no
+ * explicit resume_prompt. Overridable with MOP_PM_CONTINUATION_PROMPT.
+ */
+export const DEFAULT_PM_CONTINUATION_PROMPT =
+  "Session cleared. Continue PM work: read /Users/rajiv/Downloads/projects/heydonna-app/data/pm-continuation-note.md " +
+  "and memory MEMORY-session-handoff-current.md, reconcile live pm-ops.db, MoP slots and open PRs, then resume the next actions.";
+
+export function pmContinuationPrompt(): string {
+  const override = process.env.MOP_PM_CONTINUATION_PROMPT?.trim();
+  return override || DEFAULT_PM_CONTINUATION_PROMPT;
+}
+
 export class HookProcessor {
   /**
    * Pending plan-ready notifications, keyed by slot number.
@@ -1381,6 +1394,27 @@ export class HookProcessor {
             via: "SessionStart:clear",
           });
           debugLog(`[hooks] SessionStart:clear slot=0 (PM) — resume_prompt injected=${injected}`);
+        } else {
+          // Default PM continuation (Rajiv 2026-10-04 16:54 IST, DM thread
+          // 1791113070.804099: "as soon as the clear is done, the
+          // continuation prompt shoudl be sent."). Every PM /clear, including
+          // latch/session-age clears that carry no resume_prompt, gets the
+          // continuation prompt once per cleared session (idempotent on
+          // session_id so a duplicate hook delivery never re-sends it).
+          const epochKey = payload.session_id || confirmedAt;
+          if (this.db.getConfig("pm_continuation_injected_for") !== epochKey) {
+            this.db.setConfig("pm_continuation_injected_for", epochKey);
+            const prompt = pmContinuationPrompt();
+            const injected = this.relay.injectToPM(prompt, "pm-continuation-after-clear");
+            this.db.logEvent(0, "pm_continuation_injected", "SessionStart", null, {
+              name: "PM",
+              chars: prompt.length,
+              injected,
+              session_id: payload.session_id ?? null,
+              via: "SessionStart:clear",
+            });
+            debugLog(`[hooks] SessionStart:clear slot=0 (PM) — continuation injected=${injected}`);
+          }
         }
         return {};
       }
