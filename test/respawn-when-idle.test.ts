@@ -13,6 +13,7 @@ import {
 } from "../src/respawnWhenIdle.js";
 import { MoPDatabase } from "../src/db.js";
 import type { MoPConfig } from "../src/types.js";
+import { expectedCheckoutPath } from "../src/paneIdentity.js";
 
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "mop-respawn-when-idle-"));
@@ -25,6 +26,9 @@ function fixture() {
     legacyRepositoryId: null,
   };
   const db = new MoPDatabase(config);
+  for (const slot of [1, 2, 3, 4]) db.logEvent(slot, "Stop", "Stop", null, {
+    session_id: `session-${slot}`, cwd: expectedCheckoutPath(slot),
+  });
   const state = {
     live: false,
     calls: [] as number[],
@@ -34,7 +38,10 @@ function fixture() {
   const deps = {
     db,
     devSlots: [1, 2, 3, 4],
-    isSlotActive: async () => state.live,
+    verifyPaneIdentity: async (slot: number) => ({ ok: true as const, snapshot: {
+      slot, address: `0:0.${slot}`, paneId: `%${slot}`, currentPath: expectedCheckoutPath(slot)!, expectedPath: expectedCheckoutPath(slot)!,
+    } }),
+    getSlotActivityState: async () => state.live ? "active" as const : "idle" as const,
     respawn: async (slot: number) => {
       state.calls.push(slot);
       return state.next.shift() ?? { status: 200, body: { success: true } };
@@ -155,7 +162,7 @@ test("a restart after scheduling satisfies the request without a second respawn"
   const f = fixture();
   try {
     await post(f.app, 4);
-    f.db.logEvent(4, "SessionStart", "SessionStart", null, {});
+    f.db.logEvent(4, "SessionStart", "SessionStart", null, { source: "resume", session_id: "session-4", cwd: expectedCheckoutPath(4) });
     assert.equal(await f.ticker.tickSlot(4), "satisfied");
     assert.deepEqual(f.state.calls, []);
     assert.equal(getRespawnWhenIdle(f.db, 4), null);
@@ -167,7 +174,7 @@ test("a restart after scheduling satisfies the request without a second respawn"
 test("a SessionStart before scheduling does not satisfy the request", async () => {
   const f = fixture();
   try {
-    f.db.logEvent(4, "SessionStart", "SessionStart", null, {});
+    f.db.logEvent(4, "SessionStart", "SessionStart", null, { source: "resume", session_id: "session-4", cwd: expectedCheckoutPath(4) });
     await post(f.app, 4);
     assert.equal(await f.ticker.tickSlot(4), "fired");
     assert.deepEqual(f.state.calls, [4]);

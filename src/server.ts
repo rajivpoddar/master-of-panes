@@ -31,6 +31,8 @@ import {
   createRespawnWhenIdleTicker,
   registerRespawnWhenIdleRoutes,
   RESPAWN_WHEN_IDLE_TICK_MS,
+  deliverRespawnExit,
+  type RespawnWhenIdleRequest,
 } from "./respawnWhenIdle.js";
 import { createGhIssueOwnershipProjection } from "./issueProjection.js";
 import { registerFamily2Routes } from "./family2Routes.js";
@@ -1518,6 +1520,11 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   // forever (its owning session never emits Stop/SessionEnd), so the respawn
   // result below is conditional on that exact turn actually settling.
   const preRespawnTurnId = slotState?.active_turn_id ?? null;
+  const readPinnedCommand = async () => {
+    const command = await healthChecker.getPaneCommandPublic(slotNum);
+    const current = await verifyPaneIdentity(slotNum);
+    return current.ok && current.snapshot.paneId === paneTarget ? command : null;
+  };
   if (slotState && slotState.occupied && !slotState.idle) {
     return c.json({
       error: `Slot ${slotNum} is busy (not idle). Wait for idle before respawning.`,
@@ -1533,14 +1540,31 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   };
 
   // Mark as PM-initiated to suppress crash notifications.
-  healthChecker.markPmInitiatedRespawn(slotNum);
-  recordStep("marked_pm_initiated");
   let respawnCompleted = false;
+  let markedByThisRespawn = false;
 
   try {
     // Step 1: Inject /exit into the Claude Code session.
     try {
-      await execShell(`tmux send-keys -t ${paneTarget} "/exit" Enter`, { timeout: 5_000 });
+      const exit = await deliverRespawnExit({
+        db, relay, slot: slotNum, pane: identity.snapshot, verifyPaneIdentity,
+        request: body.idle_request as RespawnWhenIdleRequest | undefined,
+        beforeEffect: () => {
+          if (healthChecker.isPmInitiatedRespawn(slotNum)) return "slot_busy_respawn_refused";
+          healthChecker.markPmInitiatedRespawn(slotNum);
+          markedByThisRespawn = true;
+          recordStep("marked_pm_initiated");
+          return null;
+        },
+      });
+      // /exit can remove the TUI before its composer-clear readback. A single
+      // Enter was attempted for submit_unconfirmed; the existing shell wait
+      // below must prove that exit before ANY launch effect. Never retry Enter.
+      if (exit.outcome !== "delivered" && !(exit.outcome === "uncertain" && exit.reason === "submit_unconfirmed")) {
+        if (exit.reason === "respawn_already_satisfied") return c.json({ success: true, already_satisfied: true });
+        return c.json({ error: "Respawn /exit was not confirmed", reason: exit.outcome === "uncertain"
+          ? "respawn_exit_uncertain" : exit.reason, steps }, exit.outcome === "uncertain" ? 500 : 409);
+      }
       recordStep("sent_exit");
     } catch (err) {
       healthChecker.clearPmInitiatedRespawn(slotNum);
@@ -1557,7 +1581,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     let exited = false;
     while (Date.now() < exitDeadline) {
       await sleep(500);
-      const cmd = await healthChecker.getPaneCommandPublic(slotNum);
+      const cmd = await readPinnedCommand();
       if (cmd && SHELL_COMMANDS.has(cmd)) {
         exited = true;
         recordStep("claude_exited", `shell=${cmd}`);
@@ -1582,6 +1606,10 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     if (continueSession) parts.push("--continue");
     const launchCmd = parts.join(" ");
     try {
+      const current = db.getSlot(slotNum);
+      if (!current || current.assignment_epoch !== slotState?.assignment_epoch) {
+        return c.json({ error: "Assignment changed after /exit", reason: "respawn_assignment_drift", steps }, 409);
+      }
       await execShell(
         `tmux send-keys -t ${paneTarget} '${launchCmd}' Enter`,
         { timeout: 10_000 },
@@ -1605,7 +1633,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     let bootCommand = "";
     while (Date.now() < bootDeadline) {
       await sleep(500);
-      const cmd = await healthChecker.getPaneCommandPublic(slotNum);
+      const cmd = await readPinnedCommand();
       if (cmd && AGENT_COMMANDS.has(cmd)) {
         booted = true;
         bootCommand = cmd;
@@ -1645,7 +1673,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
       // same slot a second time and bypass the controlled respawn receipt.
       healthChecker.completePmInitiatedRespawn(slotNum);
       recordStep("completed_pm_initiated_with_cooldown");
-    } else {
+    } else if (markedByThisRespawn) {
       healthChecker.clearPmInitiatedRespawn(slotNum);
       recordStep("cleared_pm_initiated_after_failure");
     }
@@ -1696,12 +1724,13 @@ app.post("/slots/:slotNum/respawn", async (c) => {
 const respawnWhenIdleDeps = {
   db,
   devSlots: devSlots(DEFAULT_DEV_SLOT_COUNT),
-  isSlotActive: (slot: number) => relay.isSlotActive(slot),
-  respawn: async (slot: number) => {
+  verifyPaneIdentity,
+  getSlotActivityState: (slot: number, paneId: string) => relay.getSlotActivityState(slot, paneId),
+  respawn: async (slot: number, request: RespawnWhenIdleRequest) => {
     const res = await app.request(`/slots/${slot}/respawn`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ continue_session: true }),
+      body: JSON.stringify({ continue_session: true, idle_request: request }),
     });
     const body = await res.json().catch(() => ({}));
     return { status: res.status, body };
