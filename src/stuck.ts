@@ -612,6 +612,9 @@ export class StuckDetector {
   private readonly PM_OWNER_PATTERN = /Owner\s*\/\s*next action:\s*\**\s*PM\b/i;
 
   async checkStaleActiveTurn(slot: SlotState): Promise<void> {
+    // CTO REVISE on 5742c0d (C0ALZJHGE49/1791105162.268429): OFF by default
+    // until CTO reviews the guarded path. Enable with MOP_STALE_ACTIVE_NUDGE_ENABLED=1.
+    if (process.env.MOP_STALE_ACTIVE_NUDGE_ENABLED !== "1") return;
     if (process.env.MOP_PM_WAIT_NUDGES_DISABLED === "1") return;
     if (!isValidDevSlot(slot.slot)) return;
     if (!slot.occupied || slot.dnd) return;
@@ -619,6 +622,11 @@ export class StuckDetector {
     if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
     if (this.hasActiveReleaseIntent(slot)) return;
     if (this.compactInFlightAt.has(slot.slot)) return;
+    // Same exclusions as checkIdleOccupied: active subagent, and any API-stall
+    // episode (incl. capped = zero automatic continuation) for this epoch.
+    if (this.db.hasRecentSubagentDispatch(slot.slot, this.IDLE_OCCUPIED_SUBAGENT_LOOKBACK_SEC)) return;
+    const stall = this.apiStall.status(slot.slot);
+    if (stall.state !== "clear" && stall.assignment_epoch === (slot.assignment_epoch ?? null)) return;
 
     const mtime = await this.logManager.getLogMtime(slot.slot);
     if (!mtime) return;
@@ -633,8 +641,9 @@ export class StuckDetector {
     if (!pmOwner && silentMs < this.STALE_ACTIVE_IDLE_MS) return;
 
     const anchor = new Date(mtime.getTime()).toISOString();
-    const prior = this.db.getEvents(slot.slot, 1, "stale_active_stall_nudge_injected")[0];
-    if (prior) {
+    for (const eventType of ["stale_active_stall_nudge_injected", "stale_active_stall_nudge_uncertain"]) {
+      const prior = this.db.getEvents(slot.slot, 1, eventType)[0];
+      if (!prior) continue;
       try {
         const p = JSON.parse(prior.payload) as { assignment_epoch?: number; idle_anchor?: string };
         if (p.assignment_epoch === slot.assignment_epoch && p.idle_anchor === anchor) return;
@@ -657,16 +666,46 @@ export class StuckDetector {
       "classification-only or \"will continue\" prose is a violation. API timeouts " +
       "and interrupted local work are not PM waits.";
 
+    if (typeof this.relay.observeSlotPane !== "function") return;
+    const observed = await this.relay.observeSlotPane(slot.slot);
+    if (!observed || composerText(observed.text) !== "") return;
+    const expected = { assignment_epoch: slot.assignment_epoch, assigned_at: slot.assigned_at };
+    const finalCheck = (_stage: "pre_paste" | "pre_enter"): string | null => {
+      const cur = this.db.getSlot(slot.slot);
+      if (!cur?.occupied) return "released";
+      if (cur.dnd) return "dnd";
+      if (cur.assignment_epoch !== expected.assignment_epoch || cur.assigned_at !== expected.assigned_at) {
+        return "identity_changed";
+      }
+      if (cur.active_turn_state !== "active") return "turn_state_changed";
+      return null;
+    };
+    const recheck = async (
+      stage: "pre_paste" | "pre_enter",
+      capture: () => Promise<string | null>,
+    ): Promise<string | null> => {
+      const text = await capture();
+      if (text === null) return "pane_unreadable";
+      if (stage === "pre_paste" && composerText(text) !== "") return "composer_not_empty";
+      if (this.db.hasRecentSubagentDispatch(slot.slot, this.IDLE_OCCUPIED_SUBAGENT_LOOKBACK_SEC)) {
+        return "subagent_active";
+      }
+      return finalCheck(stage);
+    };
     const delivery = await this.sendContinueIfAllowed(
       slot.slot,
-      { assignment_epoch: slot.assignment_epoch, assigned_at: slot.assigned_at },
+      expected,
       command,
       true,
+      { expectedPaneId: observed.paneId, recheck, finalCheck },
     );
-    if (delivery.reason !== "sent" && delivery.reason !== "send_failed") return;
+    const outcome = delivery.outcome ?? (delivery.sent ? "delivered" : "refused_pre_effect");
+    // Only a proven pre-effect refusal leaves the episode eligible; an
+    // uncertain send consumes it (no retry).
+    if (outcome === "refused_pre_effect") return;
     this.db.logEvent(
       slot.slot,
-      delivery.sent ? "stale_active_stall_nudge_injected" : "stale_active_stall_nudge_failed",
+      outcome === "delivered" ? "stale_active_stall_nudge_injected" : "stale_active_stall_nudge_uncertain",
       "Stuck",
       null,
       {
@@ -678,10 +717,13 @@ export class StuckDetector {
         pm_owner: pmOwner,
         urgency,
         turn_state: "active_stale",
+        pane_id: observed.paneId,
+        reason: delivery.reason ?? null,
+        detail: delivery.detail ?? null,
       },
     );
     debugLog(
-      `[stale-active] slot=${slot.slot} ${delivery.sent ? "injected" : "failed"} ` +
+      `[stale-active] slot=${slot.slot} ${outcome} ` +
       `epoch=${slot.assignment_epoch} anchor=${anchor} pm_owner=${pmOwner}`
     );
   }
@@ -862,20 +904,19 @@ export class StuckDetector {
       `[MoP] Free dev slot(s) unassigned 10+ min: ${list}. ` +
       "Assign the next existing-PR rework or Ready Pool todo via mop-assign-slot, " +
       "or record the typed reason no work is eligible.";
+    // PM pane only (never a slot pane), via the observation-bound PM submit
+    // path. Any attempt consumes the free stretch: no retry on an uncertain send.
     const sent = await this.relay.sendToSlotAsync(PM_SLOT, message, false);
-    if (!sent) {
-      debugLog(`[free-slots-pm] send failed slots=${due.map((d) => d.slot.slot).join(",")}`);
-      return;
-    }
     for (const d of due) {
       this.db.logEvent(d.slot.slot, "free_slot_pm_nudge_sent", "Stuck", null, {
+        delivered: sent,
         free_anchor: d.anchor,
         free_minutes: d.freeMin,
         assignment_epoch: d.slot.assignment_epoch,
         message,
       });
     }
-    debugLog(`[free-slots-pm] sent slots=${due.map((d) => d.slot.slot).join(",")}`);
+    debugLog(`[free-slots-pm] ${sent ? "sent" : "uncertain"} slots=${due.map((d) => d.slot.slot).join(",")}`);
   }
 
   private async readFreeSlotAssignmentGate(

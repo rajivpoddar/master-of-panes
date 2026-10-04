@@ -80,9 +80,11 @@ test("occupied, dnd and non-dev slots never trigger", async () => {
   assert.equal(h.sends.length, 0);
 });
 
-test("failed send records nothing so the next tick retries", async () => {
+test("uncertain PM send consumes the free stretch (no retry)", async () => {
   const slots = [slot(1)];
   const h = harness(slots, { 1: 15 }, false);
   await h.detector.checkFreeSlotsPmNudge(slots);
-  assert.equal(h.events.filter((e) => e.event_type === "free_slot_pm_nudge_sent").length, 0);
+  await h.detector.checkFreeSlotsPmNudge(slots);
+  assert.equal(h.sends.length, 1);
+  assert.ok(h.sends.every((x) => x.slot === 0), "free-slot nudge goes to PM only");
 });

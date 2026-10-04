@@ -11,6 +11,7 @@ import type { EventLogEntry, SlotState } from "../src/types.js";
 // "Owner / next action: PM ..." plus an Interrupted prompt with an empty
 // composer, yet /slots/4 kept active_turn_state=active, so no stall nudge.
 process.env.MOP_PM_WAIT_NUDGE_INTERVAL_MS = "300000";
+process.env.MOP_STALE_ACTIVE_NUDGE_ENABLED = "1";
 
 const NOW = Date.parse("2026-10-04T09:30:00.000Z");
 const RULE = "─".repeat(40);
@@ -37,7 +38,10 @@ function slot(overrides: Partial<SlotState> = {}): SlotState {
   } as SlotState;
 }
 
-function harness(s: SlotState, opts: { output: string; activity?: "idle" | "busy"; silentMin: number }) {
+function harness(s: SlotState, opts: {
+  output: string; activity?: "idle" | "busy"; silentMin: number;
+  guarded?: "delivered" | "uncertain" | "refused_pre_effect"; subagent?: boolean;
+}) {
   const events: EventLogEntry[] = [];
   const sends: string[] = [];
   let id = 1;
@@ -47,7 +51,7 @@ function harness(s: SlotState, opts: { output: string; activity?: "idle" | "busy
     hasActiveNativeReleaseIntent: () => false,
     claimNativeReleaseIntent: () => true,
     clearNativeReleaseIntent: () => undefined,
-    hasRecentSubagentDispatch: () => null,
+    hasRecentSubagentDispatch: () => (opts.subagent ? { taskTs: "x" } : null),
     getSlot: () => s,
     getAllSlots: () => [s],
     getEvents: (_slot: number, limit: number, type?: string) =>
@@ -60,7 +64,15 @@ function harness(s: SlotState, opts: { output: string; activity?: "idle" | "busy
   } as unknown as MoPDatabase;
   const relay = {
     captureOutput: async () => ({ output: opts.output, activity: opts.activity ?? "idle" }),
-    sendToSlotAsync: async (_n: number, cmd: string) => { sends.push(cmd); return true; },
+    sendToSlotAsync: async () => { throw new Error("unguarded send must not be used"); },
+    observeSlotPane: async () => ({ paneId: "%4", text: opts.output }),
+    deliverGuardedToSlot: async (_n: number, cmd: string, g: { recheck: (st: "pre_paste" | "pre_enter", c: () => Promise<string | null>) => Promise<string | null> }) => {
+      const veto = await g.recheck("pre_paste", async () => opts.output);
+      if (veto) return { outcome: "refused_pre_effect", reason: veto, paneId: "%4" };
+      sends.push(cmd);
+      const outcome = opts.guarded ?? "delivered";
+      return { outcome, reason: outcome === "delivered" ? undefined : "x", paneId: "%4" };
+    },
   } as unknown as TmuxRelay;
   const logManager = {
     getLogMtime: async () => new Date(NOW - opts.silentMin * 60_000),
@@ -112,5 +124,30 @@ test("inactive turns are left to checkIdleOccupied", async () => {
   const s = slot({ active_turn_state: "inactive" });
   const h = harness(s, { output: PM_OWNER_PANE, silentMin: 30 });
   await atNow(() => h.detector.checkStaleActiveTurn(s));
+  assert.equal(h.sends.length, 0);
+});
+
+test("flag off (default) disables the stale-active nudge", async () => {
+  delete process.env.MOP_STALE_ACTIVE_NUDGE_ENABLED;
+  try {
+    const h = harness(slot(), { output: PM_OWNER_PANE, silentMin: 30 });
+    await atNow(() => h.detector.checkStaleActiveTurn(slot()));
+    assert.equal(h.sends.length, 0);
+  } finally {
+    process.env.MOP_STALE_ACTIVE_NUDGE_ENABLED = "1";
+  }
+});
+
+test("uncertain guarded send consumes the episode (no retry)", async () => {
+  const h = harness(slot(), { output: PM_OWNER_PANE, silentMin: 30, guarded: "uncertain" });
+  await atNow(() => h.detector.checkStaleActiveTurn(slot()));
+  await atNow(() => h.detector.checkStaleActiveTurn(slot()));
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.events.filter((e) => e.event_type === "stale_active_stall_nudge_uncertain").length, 1);
+});
+
+test("active subagent suppresses the stale-active nudge", async () => {
+  const h = harness(slot(), { output: PM_OWNER_PANE, silentMin: 30, subagent: true });
+  await atNow(() => h.detector.checkStaleActiveTurn(slot()));
   assert.equal(h.sends.length, 0);
 });
