@@ -30,6 +30,8 @@ export interface RespawnWhenIdleRequest {
   slot: number;
   requested_at: string;
   assignment_epoch: number | null;
+  /** Latest event id at schedule time; a later SessionStart means the slot already restarted. */
+  scheduled_event_id?: number | null;
 }
 
 export interface RespawnResult {
@@ -84,10 +86,22 @@ export function createRespawnWhenIdleTicker(deps: RespawnWhenIdleDeps) {
   const inflight = new Set<number>();
   const lastDeferReason = new Map<number, string>();
 
-  async function tickSlot(slot: number): Promise<"none" | "deferred" | "fired" | "failed"> {
+  async function tickSlot(slot: number): Promise<"none" | "deferred" | "fired" | "failed" | "satisfied"> {
     const request = getRespawnWhenIdle(deps.db, slot);
     if (!request) return "none";
     if (inflight.has(slot)) return "deferred";
+    // A restart that happened after scheduling (manual, watchdog, direct respawn)
+    // already reloaded the session: never fire a second respawn on top of it.
+    const restarted = deps.db.getEvents(slot, 1, "SessionStart")[0];
+    if (restarted && request.scheduled_event_id != null && restarted.id > request.scheduled_event_id) {
+      clearRequest(deps.db, slot);
+      lastDeferReason.delete(slot);
+      deps.db.logEvent(slot, "respawn_when_idle_satisfied", null, null, {
+        reason: "session_restarted_after_schedule",
+        session_start_event_id: restarted.id,
+      });
+      return "satisfied";
+    }
     if (!slotAtNaturalIdle(deps.db, slot) || (await deps.isSlotActive(slot))) return "deferred";
     inflight.add(slot);
     try {
@@ -158,6 +172,7 @@ export function registerRespawnWhenIdleRoutes(app: Hono, deps: RespawnWhenIdleDe
       slot,
       requested_at: (deps.now?.() ?? new Date()).toISOString(),
       assignment_epoch: deps.db.getSlot(slot)?.assignment_epoch ?? null,
+      scheduled_event_id: deps.db.getEvents(undefined, 1)[0]?.id ?? 0,
     };
     deps.db.setConfig(`${KEY_PREFIX}${slot}`, JSON.stringify(request));
     deps.db.logEvent(slot, "respawn_when_idle_scheduled", null, null, { ...request });

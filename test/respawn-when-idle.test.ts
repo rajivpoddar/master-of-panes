@@ -150,3 +150,28 @@ test("cancel clears a pending request", async () => {
     f.cleanup();
   }
 });
+
+test("a restart after scheduling satisfies the request without a second respawn", async () => {
+  const f = fixture();
+  try {
+    await post(f.app, 4);
+    f.db.logEvent(4, "SessionStart", "SessionStart", null, {});
+    assert.equal(await f.ticker.tickSlot(4), "satisfied");
+    assert.deepEqual(f.state.calls, []);
+    assert.equal(getRespawnWhenIdle(f.db, 4), null);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a SessionStart before scheduling does not satisfy the request", async () => {
+  const f = fixture();
+  try {
+    f.db.logEvent(4, "SessionStart", "SessionStart", null, {});
+    await post(f.app, 4);
+    assert.equal(await f.ticker.tickSlot(4), "fired");
+    assert.deepEqual(f.state.calls, [4]);
+  } finally {
+    f.cleanup();
+  }
+});
