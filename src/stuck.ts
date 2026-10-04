@@ -18,6 +18,7 @@ import type { LogManager } from "./logs.js";
 import type { GuardedSlotDelivery, TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
 import { isValidDevSlot } from "./slotConfig.js";
+import { composerText } from "./composer.js";
 
 function debugLog(line: string): void {
   void appendFile(
@@ -401,6 +402,7 @@ export class StuckDetector {
     // the PM input queue. Specialized recovery paths above take precedence.
     for (const slot of slots) {
       await this.runPhase(`idle-occupied:${slot.slot}`, () => this.checkIdleOccupied(slot));
+      await this.runPhase(`stale-active:${slot.slot}`, () => this.checkStaleActiveTurn(slot));
     }
 
     // Phase 1e: a free slot cannot ask PM for work on its own. Wake it once
@@ -591,6 +593,93 @@ export class StuckDetector {
       `[idle-occupied] slot=${slot.slot} ${sent ? "injected" : "failed"} ` +
       `epoch=${slot.assignment_epoch} idle_anchor=${idleAnchor.timestamp} ` +
       `wait_anchor=${waitAnchor.timestamp}`
+    );
+  }
+
+  /**
+   * Stale-active stall fallback (slot 4 incident 2026-10-04 ~08:50Z): a turn
+   * that ended on "Owner / next action: PM" plus an interrupted prompt left
+   * active_turn_state=active, so checkIdleOccupied never fired. When hook
+   * state still says active but the pane is provably idle (is-active.sh idle,
+   * empty composer) and the slot log has been silent for
+   * STALE_ACTIVE_IDLE_MS (or the nudge interval when the last turn names PM
+   * as the owner), send the same PM stall nudge once per silent episode.
+   */
+  private readonly STALE_ACTIVE_IDLE_MS = 20 * 60 * 1000;
+  private readonly PM_OWNER_PATTERN = /Owner\s*\/\s*next action:\s*\**\s*PM\b/i;
+
+  async checkStaleActiveTurn(slot: SlotState): Promise<void> {
+    if (process.env.MOP_PM_WAIT_NUDGES_DISABLED === "1") return;
+    if (!isValidDevSlot(slot.slot)) return;
+    if (!slot.occupied || slot.dnd) return;
+    if (slot.active_turn_state !== "active") return;
+    if (this.db.getExitPending() || this.db.hasPendingClear(slot.slot)) return;
+    if (this.hasActiveReleaseIntent(slot)) return;
+    if (this.compactInFlightAt.has(slot.slot)) return;
+
+    const mtime = await this.logManager.getLogMtime(slot.slot);
+    if (!mtime) return;
+    const silentMs = Date.now() - mtime.getTime();
+    if (!Number.isFinite(silentMs) || silentMs <= this.IDLE_OCCUPIED_THRESHOLD_MS) return;
+
+    if (typeof this.relay.captureOutput !== "function") return;
+    const { output, activity } = await this.relay.captureOutput(slot.slot, 60);
+    if (activity !== "idle") return;
+    if (composerText(output) !== "") return;
+    const pmOwner = this.PM_OWNER_PATTERN.test(output);
+    if (!pmOwner && silentMs < this.STALE_ACTIVE_IDLE_MS) return;
+
+    const anchor = new Date(mtime.getTime()).toISOString();
+    const prior = this.db.getEvents(slot.slot, 1, "stale_active_stall_nudge_injected")[0];
+    if (prior) {
+      try {
+        const p = JSON.parse(prior.payload) as { assignment_epoch?: number; idle_anchor?: string };
+        if (p.assignment_epoch === slot.assignment_epoch && p.idle_anchor === anchor) return;
+      } catch {
+        // Malformed historical diagnostics must not suppress a current nudge.
+      }
+    }
+
+    const waitAgeMinutes = Math.max(5, Math.floor(silentMs / 60_000));
+    const urgency = this.idleOccupiedUrgency(waitAgeMinutes);
+    const command =
+      `Use Skill(pm-wait-nudge) now with slot=${slot.slot} ` +
+      `assignment_epoch=${slot.assignment_epoch} pr=${slot.pr ?? "unknown"} ` +
+      `issue=${slot.issue ?? "unknown"} branch=${slot.branch ?? "unknown"} ` +
+      `head=${slot.head_sha ?? "unknown"} wait_started_at=${anchor} ` +
+      `wait_age_minutes=${waitAgeMinutes} urgency=${urgency}. ` +
+      "Classify PM_WAIT vs LOCAL_CONTINUE. If LOCAL_CONTINUE, continue the exact " +
+      "unfinished phase NOW: edits → affected tests → commit → push; do not end " +
+      "the turn without a new head, a typed blocker, or a terminal receipt; " +
+      "classification-only or \"will continue\" prose is a violation. API timeouts " +
+      "and interrupted local work are not PM waits.";
+
+    const delivery = await this.sendContinueIfAllowed(
+      slot.slot,
+      { assignment_epoch: slot.assignment_epoch, assigned_at: slot.assigned_at },
+      command,
+      true,
+    );
+    if (delivery.reason !== "sent" && delivery.reason !== "send_failed") return;
+    this.db.logEvent(
+      slot.slot,
+      delivery.sent ? "stale_active_stall_nudge_injected" : "stale_active_stall_nudge_failed",
+      "Stuck",
+      null,
+      {
+        command,
+        assignment_epoch: slot.assignment_epoch,
+        idle_anchor: anchor,
+        idle_anchor_source: "log_mtime",
+        silent_ms: silentMs,
+        pm_owner: pmOwner,
+        urgency,
+        turn_state: "active_stale",
+      },
+    );
+    debugLog(
+      `[stale-active] slot=${slot.slot} ${delivery.sent ? "injected" : "failed"} ` +
+      `epoch=${slot.assignment_epoch} anchor=${anchor} pm_owner=${pmOwner}`
     );
   }
 
