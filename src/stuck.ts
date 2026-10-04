@@ -17,7 +17,7 @@ import { slotAssignmentTuple, type MoPDatabase } from "./db.js";
 import type { LogManager } from "./logs.js";
 import type { GuardedSlotDelivery, TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
-import { isValidDevSlot } from "./slotConfig.js";
+import { isValidDevSlot, PM_SLOT } from "./slotConfig.js";
 import { composerText } from "./composer.js";
 
 function debugLog(line: string): void {
@@ -412,6 +412,9 @@ export class StuckDetector {
     for (const slot of slots) {
       await this.runPhase(`idle-free:${slot.slot}`, () => this.checkIdleFree(slot));
     }
+
+    // Phase 1f: tell PM directly when slots sit free (unassigned) 10+ min.
+    await this.runPhase("free-slots-pm", () => this.checkFreeSlotsPmNudge(slots));
 
     for (const slot of slots) {
       // RETIRED (2026-03-24): Plan approval watchdog disabled.
@@ -820,6 +823,59 @@ export class StuckDetector {
       `[idle-free] slot=${slot.slot} ${sent ? "injected" : "failed"} ` +
       `anchor=${anchor.timestamp} ready_pool_size=${gate.ready_pool_size}`
     );
+  }
+
+  /**
+   * Free-slot PM nudge (Rajiv 2026-10-04 14:47 IST: S1/S6 sat free and
+   * unassigned with no PM nudge). checkIdleFree only wakes the slot when the
+   * obligation gate proves work exists; this phase tells PM directly when any
+   * dev slot has been free for FREE_SLOT_PM_NUDGE_MS, once per free stretch
+   * (keyed by the free anchor), grouping all newly due slots into one message.
+   * Free slots cannot carry DND (server rejects it), so no hold applies.
+   */
+  private readonly FREE_SLOT_PM_NUDGE_MS = 10 * 60 * 1000;
+
+  async checkFreeSlotsPmNudge(slots: SlotState[]): Promise<void> {
+    if (process.env.MOP_PM_WAIT_NUDGES_DISABLED === "1") return;
+    if (this.db.getExitPending()) return;
+    const due: Array<{ slot: SlotState; anchor: string; freeMin: number }> = [];
+    for (const slot of slots) {
+      if (!isValidDevSlot(slot.slot) || slot.occupied || slot.dnd) continue;
+      if (this.db.hasPendingClear(slot.slot)) continue;
+      const anchor = this.getOrCreateFreeAnchor(slot);
+      if (!anchor) continue;
+      const freeMs = Date.now() - anchor.timestampMs;
+      if (!Number.isFinite(freeMs) || freeMs < this.FREE_SLOT_PM_NUDGE_MS) continue;
+      const prior = this.db.getEvents(slot.slot, 1, "free_slot_pm_nudge_sent")[0];
+      if (prior) {
+        try {
+          if ((JSON.parse(prior.payload) as { free_anchor?: string }).free_anchor === anchor.timestamp) continue;
+        } catch {
+          // Malformed diagnostics must not suppress a current free stretch.
+        }
+      }
+      due.push({ slot, anchor: anchor.timestamp, freeMin: Math.floor(freeMs / 60_000) });
+    }
+    if (due.length === 0) return;
+    const list = due.map((d) => `S${d.slot.slot} (${d.slot.name}) free ${d.freeMin}m`).join(", ");
+    const message =
+      `[MoP] Free dev slot(s) unassigned 10+ min: ${list}. ` +
+      "Assign the next existing-PR rework or Ready Pool todo via mop-assign-slot, " +
+      "or record the typed reason no work is eligible.";
+    const sent = await this.relay.sendToSlotAsync(PM_SLOT, message, false);
+    if (!sent) {
+      debugLog(`[free-slots-pm] send failed slots=${due.map((d) => d.slot.slot).join(",")}`);
+      return;
+    }
+    for (const d of due) {
+      this.db.logEvent(d.slot.slot, "free_slot_pm_nudge_sent", "Stuck", null, {
+        free_anchor: d.anchor,
+        free_minutes: d.freeMin,
+        assignment_epoch: d.slot.assignment_epoch,
+        message,
+      });
+    }
+    debugLog(`[free-slots-pm] sent slots=${due.map((d) => d.slot.slot).join(",")}`);
   }
 
   private async readFreeSlotAssignmentGate(
