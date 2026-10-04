@@ -703,6 +703,9 @@ export class StuckDetector {
       const text = await capture();
       if (text === null) return "pane_unreadable";
       if (stage === "pre_paste" && composerText(text) !== "") return "composer_not_empty";
+      if (await this.relay.getSlotActivityState(slot.slot, observed.paneId) !== "idle") {
+        return "pane_not_idle";
+      }
       if (this.db.hasRecentSubagentDispatch(slot.slot, this.IDLE_OCCUPIED_SUBAGENT_LOOKBACK_SEC)) {
         return "subagent_active";
       }

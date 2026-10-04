@@ -1221,6 +1221,41 @@ export class TmuxRelay {
     }
   }
 
+  /** Activity evidence for a previously verified immutable pane, never a
+   * numeric address or is-active.sh's error-as-idle exit status. Missing
+   * capture/prompt or an unrecognized foreground color is unknown. */
+  async getPaneActivityState(paneId: string): Promise<SlotActivityState> {
+    if (!/^%\d+$/.test(paneId)) return "unknown";
+    try {
+      const { stdout } = await this.runShell(`tmux capture-pane -e -t ${paneId} -p`, { timeout: 5_000 });
+      const plain = stdout.replace(/\x1b\[[0-9;]*m/g, "");
+      if (composerText(plain) === null) return "unknown";
+      const line = stdout.split("\n").reverse().find(l => /^\s*❯(?:\s|$)/.test(l.replace(/\x1b\[[0-9;]*m/g, "")));
+      if (!line) return "unknown";
+      let color = "default";
+      // Foreground can be inherited from a preceding line; process the full
+      // capture prefix, not just the prompt line's explicit SGR codes.
+      const prefix = stdout.slice(0, stdout.lastIndexOf(line) + line.indexOf("❯"));
+      for (const match of prefix.matchAll(/\x1b\[([0-9;]*)m/g)) {
+        const codes = (match[1] || "0").split(";").map(Number);
+        for (let i = 0; i < codes.length; i++) {
+          if (codes[i] === 0 || codes[i] === 39) color = "default";
+          else if (codes[i] === 38 && codes[i + 1] === 2) {
+            color = codes.slice(i + 2, i + 5).join(";"); i += 4;
+          } else if (codes[i] === 38 && codes[i + 1] === 5) {
+            color = `indexed:${codes[i + 2]}`; i += 2;
+          } else if ((codes[i] >= 30 && codes[i] <= 37) || (codes[i] >= 90 && codes[i] <= 97)) {
+            color = String(codes[i]);
+          }
+        }
+      }
+      if (color === "153;153;153") return "active";
+      return ["default", "37", "97", "255;255;255"].includes(color) ? "idle" : "unknown";
+    } catch {
+      return "unknown";
+    }
+  }
+
   /**
    * Single-attempt, fenced recovery delivery (CTO REVISE on b054f319,
    * C0ALZJHGE49/1791049473.052849):
@@ -1330,7 +1365,9 @@ export class TmuxRelay {
     return (await this.getSlotActivityState(slotNum)) === "active";
   }
 
-  async getSlotActivityState(slotNum: number): Promise<SlotActivityState> {
+  async getSlotActivityState(slotNum: number, expectedPaneId?: string): Promise<SlotActivityState> {
+    // Guarded recovery pins activity to the pane already observed/verified.
+    if (expectedPaneId !== undefined) return this.getPaneActivityState(expectedPaneId);
     try {
       await execShell(
         `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`,
