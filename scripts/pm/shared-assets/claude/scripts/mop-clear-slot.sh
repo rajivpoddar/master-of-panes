@@ -5,7 +5,7 @@
 # script is the canonical fallback for contexts where mop_clear_slot is not
 # loadable. It uses the MoP HTTP clear endpoint, never raw tmux /clear.
 #
-# OPERATOR-ONLY FOR DEV SLOTS. A clear targeting S1-S6 is refused by default.
+# OPERATOR-ONLY FOR DEV SLOTS. A clear targeting S1-S8 is refused by default.
 # Dev slots are cleared only at the new-issue assignment boundary, inside the
 # atomic assignment operation:
 #     python3 /Users/rajiv/.claude/scripts/mop-assign-slot.py --slot N --class new_issue ...
@@ -32,7 +32,7 @@ usage() {
 Usage: mop-clear-slot.sh [options] <slot>
 
 Slots:
-  1|2|3|4|5|6   Clear one dev slot through MoP logging
+  1|2|3|4|5|6|7|8   Clear one dev slot through MoP logging
   pm|0      Clear PM through MoP logging
   all       Clear PM and all dev slots through MoP logging
 
@@ -43,7 +43,7 @@ Options:
   --require-terminal               Clear only if terminal; exit 20 if active, without queuing
   --operator-confirm-dev-slot-clear
                                    Required acknowledgement to clear a dev slot
-                                   (S1-S6); does not affect pm|0. Refusal without
+                                   (S1-S8); does not affect pm|0. Refusal without
                                    it names mop-assign-slot as the sanctioned path
   --repair-stale-pm-pending        Repair stale PM clear latch before requesting PM/all
   --repair-stale-pm-pending-only   Only run the stale PM latch repair
@@ -109,7 +109,7 @@ normalize_slot() {
   case "$1" in
     0|pm|PM) printf 'pm' ;;
     all|ALL) printf 'all' ;;
-    1|2|3|4|5|6) printf '%s' "$1" ;;
+    1|2|3|4|5|6|7|8) printf '%s' "$1" ;;
     *) return 1 ;;
   esac
 }
@@ -238,16 +238,16 @@ if [ -z "$NORMALIZED_SLOT" ]; then
   exit 2
 fi
 
-# Dev-slot guard: S1-S6 are never cleared by a cadence, a fallback, or a plain
+# Dev-slot guard: S1-S8 are never cleared by a cadence, a fallback, or a plain
 # operator invocation. Clearing belongs to the new-issue assignment boundary.
 # --require-terminal is explicitly NOT an acknowledgement.
 case "$NORMALIZED_SLOT" in
-  1|2|3|4|5|6|all)
+  1|2|3|4|5|6|7|8|all)
     if [ "$OPERATOR_CONFIRM_DEV_SLOT_CLEAR" -ne 1 ]; then
       cat >&2 <<'REFUSED'
 REFUSED: dev-slot clearing is not a cadence or fallback action.
 
-Slots S1-S6 are cleared only at the new-issue assignment boundary, which owns
+Slots S1-S8 are cleared only at the new-issue assignment boundary, which owns
 that step inside the atomic assignment operation:
     python3 /Users/rajiv/.claude/scripts/mop-assign-slot.py --slot N --class new_issue ...
 

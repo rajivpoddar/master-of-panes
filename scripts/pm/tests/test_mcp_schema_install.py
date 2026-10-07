@@ -42,7 +42,7 @@ def digest(path: Path) -> str:
 
 
 class McpSchemaInstallTests(unittest.TestCase):
-    def test_manifest_binds_complete_six_slot_mcp_runtime(self) -> None:
+    def test_manifest_binds_complete_eight_slot_mcp_runtime(self) -> None:
         manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
         entries = {
             Path(entry["source_path"]).name: entry
@@ -60,11 +60,11 @@ class McpSchemaInstallTests(unittest.TestCase):
 
         mcp = (MANIFEST_PATH.parent / entries["mcp.js"]["source_path"]).read_text(encoding="utf-8")
         types = (MANIFEST_PATH.parent / entries["types.js"]["source_path"]).read_text(encoding="utf-8")
-        self.assertIn("1-6", mcp)
+        self.assertIn("1-8", mcp)
         self.assertIn("0-6", mcp)
         self.assertNotIn("1-4", mcp)
         self.assertNotIn("0-4", mcp)
-        self.assertIn("slotCount: 6", types)
+        self.assertIn("slotCount: 8", types)
 
     def test_disposable_install_replaces_stale_schema_and_dependencies(self) -> None:
         installer = load_installer()

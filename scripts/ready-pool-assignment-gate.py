@@ -62,8 +62,8 @@ def configured_slot_numbers() -> tuple[int, ...]:
     except (OSError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError("slot identity manifest unavailable or malformed") from exc
     expected = tuple(range(1, count + 1)) if isinstance(count, int) else ()
-    if count != 6 or slots != expected:
-        raise RuntimeError("slot identity manifest must enumerate exactly slots 1 through 6")
+    if count != 8 or slots != expected:
+        raise RuntimeError("slot identity manifest must enumerate exactly slots 1 through 8")
     return slots
 
 

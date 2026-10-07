@@ -84,6 +84,13 @@ require click-time validation, the error state on the offending control
 for it. `disabled={isSubmitting}` for the action's own in-flight guard is
 allowed. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No unmetered LLM calls (Mandatory - Rajiv product rule 2026-10-07)
+
+Source: Rajiv, C0ALZJHGE49/1791347751.497949 ts 1791355336.754869: "no lllm calls should go unmetered. it will open us to abuse. chat support is the only exception." Rule: `~/.claude/rules/40-heydonna-no-unmetered-llm-calls.md`.
+- Every new/changed LLM call must usage-record a priced `providerCostUsd` (`providerPricing` row for the exact model; $0/null = unmetered) and reserve/settle credits via `checkAndReserveMeteredLlm` / `settleActual`. Only support chat is exempt.
+- Plans name the metering path (feature key, pricing row, reserve/settle). BLOCK / REQUEST_CHANGES a diff that bypasses the metered helper or routes to an unpriced model.
+- Required tests: source-inspection that every LLM call site uses the metered helper (allowlist: support chat), and every routed model has a `providerPricing` row.
+
 ## Review Source Invariant
 
 Before reading PR files, producing a verdict, or writing any `/tmp` patch/packet,
@@ -433,3 +440,4 @@ packet_type: <none | instruction | test-harness>
 
 For `PASS`, all rows above must be concrete. For `BLOCKED`, name the exact
 missing proof or required rework.
+

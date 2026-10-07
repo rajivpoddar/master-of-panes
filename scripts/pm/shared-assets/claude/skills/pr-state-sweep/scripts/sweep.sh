@@ -858,7 +858,7 @@ def state_drift_reason(pr):
 def slot_labels(pr):
     out = []
     for label in labels(pr):
-        m = re.fullmatch(r"slot:([1-4])", label)
+        m = re.fullmatch(r"slot:([1-8])", label)
         if m:
             out.append(int(m.group(1)))
     return out
@@ -1980,7 +1980,7 @@ def issue_has_label(issue, name):
 def issue_slot_labels(issue):
     out = []
     for label in issue_labels(issue):
-        m = re.fullmatch(r"slot:([1-4])", label)
+        m = re.fullmatch(r"slot:([1-8])", label)
         if m:
             out.append(int(m.group(1)))
     return out

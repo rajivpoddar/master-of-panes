@@ -30,7 +30,7 @@ function isPmControlCommand(command: string): boolean {
 }
 
 export const mopReleaseSlotInputShape = {
-  slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
+  slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-8)"),
   reason: z.string().optional().describe("Optional operator reason recorded in the release audit row"),
 };
 
@@ -47,8 +47,8 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_slot_status",
-    "Get the authoritative hook-derived state of a specific dev slot (1-6). Returns status, task, issue, branch, DND flag, and last activity.",
-    { slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)") },
+    "Get the authoritative hook-derived state of a specific dev slot (1-8). Returns status, task, issue, branch, DND flag, and last activity.",
+    { slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-8)") },
     async ({ slot }) => {
       // REST-only: no direct DB read from the MCP process. Same server path as GET /slots/:n.
       try {
@@ -105,7 +105,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "mop_slot_history",
     "Get recent events for a specific slot. Returns the last N events from the event log.",
     {
-      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
+      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-8)"),
       limit: z.number().int().min(1).max(200).default(20).describe("Max events to return"),
     },
     async ({ slot, limit }) => {
@@ -317,7 +317,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "mop_set_dnd",
     "Set or clear Do Not Disturb on a slot. DND slots are skipped by hook processing.",
     {
-      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
+      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-8)"),
       dnd: z.boolean().describe("true to enable DND, false to clear"),
     },
     async ({ slot, dnd }) => {
@@ -392,7 +392,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
 
   server.tool(
     "mop_exit_status",
-    "Check exit_pending flag status and which slots have cycled through exit. Slot 0 = PM, slots 1-6 = dev.",
+    "Check exit_pending flag status and which slots have cycled through exit. Slot 0 = PM, slots 1-8 = dev.",
     {},
     async () => {
       // REST-only: same server path as GET /exit-status. No direct DB read.
@@ -422,7 +422,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "mop_capture_output",
     "Capture live tmux pane output from a dev slot. Returns the last N lines of output and whether the slot is busy or idle. Use this instead of raw tmux commands to see what a slot is actually doing.",
     {
-      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
+      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-8)"),
       lines: z.number().int().min(5).max(200).default(30).describe("Number of lines to capture (default 30)"),
     },
     async ({ slot, lines }) => {
@@ -457,7 +457,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "mop_approve_plan",
     "Approve or reject a slot's implementation plan. Wraps the approve-plan HTTP endpoint which handles prompt detection, retry (up to 3x), and verification. Use this instead of mop_send_to_slot for plan approvals.",
     {
-      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
+      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-8)"),
       option: z.enum(["2", "4"]).default("2").describe("2 = approve, 4 = comment/reject"),
       comment: z.string().optional().describe("Comment text when option is 4 (reject/revise)"),
     },
@@ -504,7 +504,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "mop_stream_slot",
     "DEPRECATED for REST-only: periodic screenshots are not coordinator-owned. Use one-shot capture via GET /slots/:n/capture (mop CLI `mop capture`) in a caller-side loop instead.",
     {
-      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-6)"),
+      slot: z.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT).describe("Slot number (1-8)"),
       enable: z.boolean().describe("true to start streaming, false to stop"),
       thread_ts: z.string().optional().describe("Slack thread timestamp (required when enabling)"),
       channel_id: z.string().optional().describe("Slack channel ID"),
@@ -558,7 +558,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
       .filter((slot) => isValidRuntimeSlot(slot, config.slotCount));
     const results: ClearSlotResult[] = [];
 
-    // Process dev slots (1-6) first, PM (0) last. The HTTP clear endpoint is
+    // Process dev slots (1-8) first, PM (0) last. The HTTP clear endpoint is
     // the single authority for clear delivery, duplicate suppression, and
     // SessionStart acknowledgement. Do not duplicate tmux injection here.
     const devSlots = normalizedTargets.filter((s) => s !== 0);

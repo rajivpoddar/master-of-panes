@@ -11,7 +11,7 @@ while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --spark-profile)
       if [[ "$#" -lt 2 ]]; then
-        echo "ERROR: --spark-profile requires ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, or opus55" >&2
+        echo "ERROR: --spark-profile requires ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, gpt6luna, or opus55" >&2
         exit 2
       fi
       SPARK_PROFILE="$2"
@@ -40,7 +40,9 @@ case "$SLOT_NUMBER" in
   4) SLOT_NAME="Chitra" ;;
   5) SLOT_NAME="Revati" ;;
   6) SLOT_NAME="Pushya" ;;
-  *) echo "Usage: launch-dev-slot-claude.sh <1|2|3|4|5|6> [claude args...]" >&2; exit 2 ;;
+  7) SLOT_NAME="Swati" ;;
+  8) SLOT_NAME="Anuradha" ;;
+  *) echo "Usage: launch-dev-slot-claude.sh <1|2|3|4|5|6|7|8> [claude args...]" >&2; exit 2 ;;
 esac
 
 SLOT_CLONE="/Users/rajiv/Downloads/projects/heydonna-app-300${SLOT_NUMBER}"
@@ -54,6 +56,19 @@ case "$SPARK_PROFILE" in
     SPARK_MAX_CONTEXT_TOKENS="1000000"
     SPARK_MAX_OUTPUT_TOKENS="32000"
     SPARK_MAX_THINKING_TOKENS="32000"
+    ;;
+  gpt6luna)
+    # GPT-6 Luna through the local CLIProxyAPI (Anthropic-compatible surface).
+    # The client key lives outside the repo in the CLIProxy env file.
+    SPARK_MODEL="${GPT6LUNA_SPARK_MODEL:-gpt-6-luna}"
+    SPARK_BASE_URL="${GPT6LUNA_SPARK_BASE_URL:-http://127.0.0.1:8317}"
+    SPARK_KEY_ENV_FILE="${GPT6LUNA_SPARK_KEY_ENV_FILE:-/Users/rajiv/.config/cliproxyapi/client.env}"
+    SPARK_EXPECTED_MODEL="$SPARK_MODEL"
+    SPARK_READINESS_TIMEOUT_SECONDS="10"
+    SPARK_API_TIMEOUT_MS="1200000"
+    SPARK_MAX_CONTEXT_TOKENS="200000"
+    SPARK_MAX_OUTPUT_TOKENS="32000"
+    SPARK_MAX_THINKING_TOKENS="2048"
     ;;
   muse13-contributor)
     SPARK_MODEL="muse-spark-1.3-contributor"
@@ -231,7 +246,7 @@ case "$SPARK_PROFILE" in
     SPARK_MAX_THINKING_TOKENS="0"
     ;;
   *)
-    echo "ERROR: unsupported profile '$SPARK_PROFILE'; expected ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, or opus55" >&2
+    echo "ERROR: unsupported profile '$SPARK_PROFILE'; expected ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, gpt6luna, or opus55" >&2
     exit 2
     ;;
 esac
@@ -247,6 +262,8 @@ case "$SLOT_NUMBER" in
   4) IDENTITY_RULE="22-slot-chitra.md" ;;
   5) IDENTITY_RULE="22-slot-revati.md" ;;
   6) IDENTITY_RULE="22-slot-pushya.md" ;;
+  7) IDENTITY_RULE="22-slot-swati.md" ;;
+  8) IDENTITY_RULE="22-slot-anuradha.md" ;;
 esac
 IDENTITY_RULE_PATH="$DEV_SLOT_RULES/$IDENTITY_RULE"
 
@@ -419,6 +436,10 @@ fi
 SLOT_EFFORT="${DEV_SLOT_EFFORT:-low}"
 if [[ "$SPARK_PROFILE" == "qwen38-next" || "$SPARK_MODEL" == "qwen3.8-flash-next" ]]; then
   SLOT_EFFORT="${DEV_SLOT_EFFORT:-xhigh}"
+fi
+# GPT-6 Luna lanes run at high (matches the live S1-S6 launches, 2026-10-07).
+if [[ "$SPARK_PROFILE" == "gpt6luna" ]]; then
+  SLOT_EFFORT="${DEV_SLOT_EFFORT:-high}"
 fi
 # Opus 5.5 matches the PM launcher's opus55 lane: xhigh.
 if [[ "$SPARK_PROFILE" == "opus55" ]]; then

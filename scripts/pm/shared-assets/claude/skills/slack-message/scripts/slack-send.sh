@@ -396,6 +396,11 @@ fi
 if [ -z "$SLACK_BOT_TOKEN" ] && [ -f "$PM_ENV" ]; then
   SLACK_BOT_TOKEN=$(grep '^SLACK_BOT_TOKEN=' "$PM_ENV" | cut -d= -f2)
 fi
+# SLACK_SEND_AS=alerts posts as the HeyDonna Alerts bot (Rajiv 2026-10-07:
+# hourly/heartbeat reports must come from the alerts id so PM processes them).
+if [ "${SLACK_SEND_AS:-}" = "alerts" ] && [ -f "$PM_ENV" ]; then
+  SLACK_BOT_TOKEN=$(grep '^SLACK_ALERTS_BOT_TOKEN=' "$PM_ENV" | cut -d= -f2)
+fi
 
 if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
   echo "ERROR: SLACK_BOT_TOKEN not set in $ENV_FILE" >&2
@@ -407,7 +412,7 @@ fi
 #   Dev slot (heydonna-app-300N/) → #heydonna-dev (C0ALZJHGE49)
 # Rationale: dev-slot bot tokens don't have access to Rajiv's DM (channel_not_found).
 # See 21-lessons.md: "Dev slots should post to the active thread in #heydonna-dev"
-if [[ "${PWD}" =~ heydonna-app-300[1-6] ]] || [[ "${SLOT_ENV:-}" =~ heydonna-app-300[1-6] ]]; then
+if [[ "${PWD}" =~ heydonna-app-300[1-8] ]] || [[ "${SLOT_ENV:-}" =~ heydonna-app-300[1-8] ]]; then
   CHANNEL="C0ALZJHGE49"  # #heydonna-dev
   CHANNEL_DEFAULT=true
 else
@@ -947,3 +952,4 @@ else:
     print(f'ERROR: {r.get(\"error\", \"unknown\")}')
     sys.exit(1)
 " <<< "$RESULT"
+

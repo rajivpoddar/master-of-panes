@@ -6,7 +6,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "82557dc6852508babf0851a68d9d1bb1e8d4e44bde0d9f0abd5b52685273d8eb",
+      "sha256": "1f65976f2e8c530b3fc82e7bf67ce1d8ef891d30972312c784960d5f8e6bc7c3",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "e51fae824e0a4a0af2f49cab4c72ebc780a50d7970ce56b97ad4972cfd217166",
+      "sha256": "d2bd6a626adafb05b80072d65dfbb1cbfe730d177458026561a8f662d8632ad0",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "22dba78cf79e3a7341e9f4de75e66acd6572861c1f802910a708a1f7da11bcfd",
+      "sha256": "a702e7e17fbc19b697cd98855f99f8b98506d2542cea903cdac6b1166d85e7e6",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -46,6 +46,15 @@
       "source_path": "claude/control_plane/runtime_observation.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/dev-slot-rules/22-slot-anuradha.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-identity",
+      "sha256": "c15ca2cffff7e2a0b67c2439b1ddf3324690834efa1bb9749340a715e42a070d",
+      "source_path": "claude/dev-slot-rules/22-slot-anuradha.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/dev-slot-rules/22-slot-pushya.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -62,6 +71,15 @@
       "ownership_class": "shared-claude-slot-identity",
       "sha256": "049a18dfd1bf185995721c22ef2c524c7e31dbb63135d35ec6e4d74add742ac6",
       "source_path": "claude/dev-slot-rules/22-slot-revati.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/dev-slot-rules/22-slot-swati.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-identity",
+      "sha256": "1fd04131bff263811c9265da8bcae8b05ab8d814a3cd714f51c5a4959334154c",
+      "source_path": "claude/dev-slot-rules/22-slot-swati.md"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/hooks/block-ci-rerun-without-local-proof.sh",
@@ -96,7 +114,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-raw-clear-guard",
-      "sha256": "fa0b3c708b45a41088f5eacb3b44924ac087a79c90497830622dd7282495e1e2",
+      "sha256": "3c566c148cc54613c91e83970692bd32a22d32f749c613623f4720ebcd38fe9d",
       "source_path": "claude/hooks/block-raw-clear-outside-mop.sh"
     },
     {
@@ -177,7 +195,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-mop-mcp-schema",
-      "sha256": "e4e98ff5e3aeb1ac87060489af7b44cae9ca2a85092f2a6ef007ae04d83dabcc",
+      "sha256": "429e7112c228ed0df2509a298cf08adf6a25e3c8056372a52ad1963bfcebf8ba",
       "source_path": "claude/plugins/master-of-panes/1.0.0/dist/mcp.js"
     },
     {
@@ -204,7 +222,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-mop-mcp-runtime",
-      "sha256": "96baa0147015fa6bec9e47cf0ec8938b5205436a3df3e1602497f54abd512982",
+      "sha256": "e0d2fbca7f86ebf1c7770d4c3217517a12bcb7f0836724cc6e2ae77acb439e67",
       "source_path": "claude/plugins/master-of-panes/1.0.0/dist/slotConfig.js"
     },
     {
@@ -213,7 +231,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-mop-mcp-runtime",
-      "sha256": "a17df685a9218086bb6dac0dbea8e4dc98846e2c89d6fb2a7a55ce6b4efa3947",
+      "sha256": "f64f94e5f8fe7523fc8ef37dc9c3c93be80d4b5f5b4e5823f7bcea7142d9bd56",
       "source_path": "claude/plugins/master-of-panes/1.0.0/dist/types.js"
     },
     {
@@ -231,7 +249,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-plugin-hook-relay",
-      "sha256": "b9056135eac4182753ee0616f1a0538cb8f3f49e78a1bb1faba74ed9fa5a75f6",
+      "sha256": "cdf3f6106a4befb61e22314f5203f5a0c297976008540a56027a904b8a7f0001",
       "source_path": "claude/plugins/master-of-panes/scripts/hook-relay.sh"
     },
     {
@@ -240,7 +258,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "15fbd2c27335e0bba542fa190ed4fa9d0aaf99e4bf86531ffc7c57df697ec771",
+      "sha256": "4d7f843db7133d1d5f976bd19f42e51cd7f5140092f4bd43176c8ae85f5ed33f",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -249,7 +267,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "b4120bfc2ef890a6a9c3702824413f88a93b18d0279c5f3f8a16257cd8e6b656",
+      "sha256": "0aa998852f9f3edebcc125d0488f861eac7cbf72f26a8cc614958766c8a2ccaf",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
@@ -339,7 +357,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-heartbeat-session-age-clear",
-      "sha256": "9c4c11585fb9a442b9aa367ef573587e5b4383316ce5664e92126902a096389e",
+      "sha256": "f4980f2c31b8616c8e76cbe133a0e1d4ec6aa9e397edfd99102cf3502e1c15fb",
       "source_path": "claude/scripts/heartbeat-session-age-clear.py"
     },
     {
@@ -366,7 +384,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "bfec7bbcfe7abe2b01ac7566ae44fe58152a223efc7a5fbfa17c0e4e9bce4e84",
+      "sha256": "b6e865b1784dcf4b00b95b529ff2bc942e2104bf2480dcf8747e03ec93cd47ee",
       "source_path": "claude/scripts/launch-dev-slot-claude.sh"
     },
     {
@@ -375,7 +393,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "f8e3177038cdb79ecd5e4050014e2842dbfbec7915c54272617df2ce9581be7d",
+      "sha256": "ca5f1d2489502b563f366588b1425957b0ef6b7b04b47490a68d1be68b18d855",
       "source_path": "claude/scripts/launch-slot-1.sh"
     },
     {
@@ -384,7 +402,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "1c036cbdec749acd84fdb9fe12509315e773d2b2f048d11c1029150d36012105",
+      "sha256": "78a5073ad2b16f717afbbe47c5ed67300996a6e01ebdc5944b474b19f12624a1",
       "source_path": "claude/scripts/launch-slot-2.sh"
     },
     {
@@ -393,7 +411,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "53d2445ae7b1e0ac85d798534a8d2478a9527bcea980a125ca97ac64eec602c6",
+      "sha256": "71d4fdbee3bf7242773535e6af0e4306c5ecf68cca17ab4dcaf8b35e14406172",
       "source_path": "claude/scripts/launch-slot-3.sh"
     },
     {
@@ -402,7 +420,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "a688d18b4a990b4bd9c38799ae900d3898ba688143979a3283d1b19f28f38510",
+      "sha256": "b899c6e2900c981d18b54fc2a6bac0500a361f793c35938c895eebcaf18da26f",
       "source_path": "claude/scripts/launch-slot-4.sh"
     },
     {
@@ -411,7 +429,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "a4c4b66c8e4fa067dcdd9dc9ebb741e0d43e7237cfab03ddf2e8b65275a1e802",
+      "sha256": "983a0b651ae2e6b0ddf01af54460f3659ddff991d7b7e9ca432b58fb73eac0fa",
       "source_path": "claude/scripts/launch-slot-5.sh"
     },
     {
@@ -420,8 +438,26 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "c89f52dcf894f7c560e08dc50c2ff59d6f08f0db16ca5e91a640fe645ebb1458",
+      "sha256": "1a608c48760fe34ea8a48958f9d195beb1aebf827bc68461fabe55770e884e85",
       "source_path": "claude/scripts/launch-slot-6.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/launch-slot-7.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-launcher",
+      "sha256": "bdc227c02380253a1493ca5b5148d8a3d875ab62f4a86f72cc588b483d7d1048",
+      "source_path": "claude/scripts/launch-slot-7.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/launch-slot-8.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-launcher",
+      "sha256": "410888d094d4accbe0e0e17a0d0f897d554d83f8d1cce7e88d3d35fc5ea2b1d0",
+      "source_path": "claude/scripts/launch-slot-8.sh"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/mop",
@@ -456,7 +492,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-clear-slot",
-      "sha256": "27a37b53a1b55ba5a9ed09b30cc3b9b3704485e80cdc52c8ccd01c4198e74978",
+      "sha256": "8a4e7edc0146ebc082ebd2ef2fd65fcfb6c11a9d6cf618e0c7ee903868f3d501",
       "source_path": "claude/scripts/mop-clear-slot.sh"
     },
     {
@@ -465,7 +501,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-respawn-client",
-      "sha256": "996927262a5c37a639f84493330938c4d6cb73319cf36094c23a795aaa90bbbb",
+      "sha256": "4b56bc51721d124011fd343589d04a19a0920c4d4c7cfa4f23c909e786a37458",
       "source_path": "claude/scripts/mop-slot-respawn.sh"
     },
     {
@@ -537,7 +573,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
-      "sha256": "058fa3c580b8ddd81269005cd2f2c8fe13769f5a558da75b3b0df156029d563f",
+      "sha256": "f23facee70cdd9f7cf9bbc35444637744b7f880e7b9c662231cc786c0ff802b8",
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py"
     },
     {
@@ -555,7 +591,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "bd4eef794aae8a8580cc5d6e439001323bee01262134f53477be9d994ef64a92",
+      "sha256": "6986774697c99f9c99fab5d684e564af2ce484f38222da43f793ae0e9a04b48f",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -638,7 +674,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "53653b94c7feb9713b369492760ef1fb6549bd4655826e955b458fad8006b7ac",
+      "sha256": "74785bf00fc8423992da6f66c636019636f625ecccb83a3c912af1b9fe1e525d",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
@@ -647,7 +683,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
-      "sha256": "545dd1ac73ca385553a09348fa853c481e3db9995719026063cae3bf31be6530",
+      "sha256": "5590b214bf166809254aef8969a0798a3c76bd52cb940a93293c1d9b80e9ea36",
       "source_path": "claude/scripts/sync-dev-slot-skill-allowlist.mjs"
     },
     {
@@ -692,7 +728,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "1eb52bca674ae174431683c11c48ec9bf3c946bda0ee6088a1c1af9f85707bb5",
+      "sha256": "bce3f63a1b1eb66beaec698a76f8db7fdba0835c6c8a45763bb0e3bc8f14f2d2",
       "source_path": "claude/skills/cleanup-pr/SKILL.md"
     },
     {
@@ -809,7 +845,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heartbeat-tasks",
-      "sha256": "d3786160f3be80e457479958b04413d47dabf500a3481aa7d487fd5620d62875",
+      "sha256": "8132759dd03841aed3b4bfbaed1e3365674d58d8e819078ef8b4952cc5018cd0",
       "source_path": "claude/skills/heartbeat-tasks/SKILL.md"
     },
     {
@@ -827,7 +863,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "13b2ded258c17d2b5cf54de50780693157d1df96b703087887c96d9ae6f43750",
+      "sha256": "a1da9b21690bebdd33a610e210fdc76a1dc50b0fddf2171cce60089166fe3019",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
@@ -854,7 +890,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-message-slot",
-      "sha256": "eb3d46461c72e756d65cafa643ccb676afe6d3df30a1804860a2c2973f16c187",
+      "sha256": "3ca48059002a2f1a74985368c9ddde366683826d872ac22cd2d9c53bea9e251d",
       "source_path": "claude/skills/message-slot/SKILL.md"
     },
     {
@@ -863,7 +899,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-message-slot",
-      "sha256": "8b3950bf50e9ae4c978262a5dcb7d3598696fae8ef331c032fd84e1d19d45ebe",
+      "sha256": "57060392d93b6f0b7b84ccd93e3bc284f99f408f63339aee9c8c9860bddea881",
       "source_path": "claude/skills/message-slot/scripts/message-slot.sh"
     },
     {
@@ -890,7 +926,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pr-state-sweep",
-      "sha256": "482f3da0125eafa40464a9357eefacde9361665c7893a690c42c9507c098d88c",
+      "sha256": "8ff73a497865f95dedf18ad3ae1a987e7b71694029939f77d92ada38b7bad9e7",
       "source_path": "claude/skills/pr-state-sweep/scripts/sweep.sh"
     },
     {
@@ -933,7 +969,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
-      "sha256": "953e2ab30edea6643e4a504db7554c6744b7d1298cab0def9620de97e29b3e6a",
+      "sha256": "9661a274cf85ffdeb7a70d4a2be87f33154b24c17755d343ab6cb8fb3728533d",
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {
@@ -942,7 +978,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-tmux-slot-command",
-      "sha256": "04fcbec292a90bad4dcd656974dba273416c056b10e8a15370a57baab58509d7",
+      "sha256": "50ce295a6d220115b922d59c98cecf14a1d6457a61427c47c06d9c1566192ad3",
       "source_path": "claude/skills/tmux-slot-command/scripts/send-to-slot.sh"
     },
     {
@@ -1320,7 +1356,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 143,
+    "selected_count": 147,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1396,7 +1432,11 @@
       "~/.claude/scripts/pm/heartbeat/support-inbox-snapshot.py",
       "~/.claude/scripts/pm/heartbeat/heartbeat-known-codes.json",
       "~/.claude/hooks/feedback-draft-queue-stop.py",
-      "~/.claude/scripts/spark-run-monitor.sh"
+      "~/.claude/scripts/spark-run-monitor.sh",
+      "~/.claude/scripts/launch-slot-7.sh",
+      "~/.claude/scripts/launch-slot-8.sh",
+      "~/.claude/dev-slot-rules/22-slot-swati.md",
+      "~/.claude/dev-slot-rules/22-slot-anuradha.md"
     ]
   },
   "owner": "master-of-panes",

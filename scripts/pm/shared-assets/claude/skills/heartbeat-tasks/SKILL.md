@@ -3,7 +3,7 @@ name: heartbeat-tasks
 description: |
   3h Sakshi heartbeat, triggered by MoP every 3 hours. PM launches one
   background agent. The agent composes a product-signal post (Axiom errors,
-  support inbox, open PRs), posts it as one new top-level message in
+  support inbox, active users, Claude + Codex usage), posts it as one new top-level message in
   #heydonna-dev, and runs the remaining housekeeping silently.
   Use when: MoP asks PM to invoke `Skill(heartbeat-tasks)`, or a heartbeat is
   requested manually.
@@ -62,7 +62,7 @@ STEP 2 — sanity check before posting:
   _Ops:_ footer already names the failure.
 
 STEP 3 — post ONE new top-level message in #heydonna-dev (no -t):
-  bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-3h-post.txt
+  SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-3h-post.txt
   Record the `OK ts=...` readback. Never post to a DM or an old thread.
 
 STEP 4 — silent housekeeping (see "Housekeeping" below). Output nothing unless
@@ -99,7 +99,8 @@ Scripts are MoP-installed at `~/.claude/scripts/pm/heartbeat/` (Axiom queries in
 | Axiom errors | `axiom-activity-report.py --hours 3 --errors-by-code --compare` (codes, distinct users, prior 3h, 7-day same-slot median) |
 | Code → issue | `heartbeat-error-map.py` (open GitHub issues/PRs, open pm-ops rows, `docs/investigations/`); unmapped = `NEW` |
 | Support | `support-inbox-snapshot.py` (C0A56RX6FNW + C0AGWPQFKHA via the PM bot token; in-app `feedback` via `npx convex data feedback --prod`, PM-only per rule 11c) |
-| Open PRs | `pr-open-snapshot.py` (live `gh` checks on `headRefOid`; never pm-ops rows or pm-state labels) |
+| Usage | `~/.claude/scripts/usage-snapshot.py` (Claude + Codex weekly %, reset, burn/ETA); ALWAYS in the 3h post |
+| Open PRs / slots | NOT in the 3h post (Rajiv 2026-10-07 12:25 IST, C0ALZJHGE49 thread 1791355967.794539: "drop the open pr and slots report from 3h weekly hearbeat. make sure that codex and claude usage are always there."). They stay in the hourly report. `pr-open-snapshot.py --sync-obligations` still runs for obligations. |
 
 Rules the composer enforces:
 - One-sentence TL;DR on line 1, after the CTO mention.
@@ -131,7 +132,7 @@ Needs a human (one `_Ops:_` thread reply each):
 
 ### Session-age policy (unchanged contract)
 
-Dev slots S1-S6 are NEVER cleared on a cadence. A numbered slot's session is
+Dev slots S1-S8 are NEVER cleared on a cadence. A numbered slot's session is
 cleared only at the new-issue assignment boundary, inside the atomic assignment
 operation (`Skill(direct-assign)` / `mop-assign-slot`). The heartbeat must not
 produce, consume, or act on a per-slot pending row, and must not invoke
@@ -169,7 +170,11 @@ the agent must copy into its return value, not just post text.
 
 ## Proof of done
 
-A run is done when: the post is ≤ ~24 lines, has all five blocks (Axiom
-errors, support inbox, open PRs, active users, slot occupancy), starts with
+A run is done when: the post is ≤ ~24 lines, has its blocks (Axiom
+errors, support inbox, active users, Claude + Codex usage; no open PRs or slots), starts with
 the CTO mention, contains no housekeeping lines, and the `OK ts=` readback is
 recorded. Target: zero CTO "heartbeat correction" replies over 4 runs.
+
+
+Note: top-level report posts MUST use `SLACK_SEND_AS=alerts` (posts as HeyDonna Alerts so PM processes them as events). Rajiv 2026-10-07 14:17 IST, C0ALZJHGE49 thread 1791362688.821369: "it should come from alerts id so that it's processed by pm correctly."
+

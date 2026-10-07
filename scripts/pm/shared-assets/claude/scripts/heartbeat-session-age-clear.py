@@ -176,12 +176,12 @@ def main() -> int:
     read_errors: dict[str, str] = {}
 
     if slots is None:
-        numbered = [str(n) for n in range(1, 7)]
-        read_errors["_mop"] = "mop_slots_unreachable; using default 1..6 inventory"
+        numbered = [str(n) for n in range(1, 9)]
+        read_errors["_mop"] = "mop_slots_unreachable; using default 1..8 inventory"
     else:
         numbered = sorted({str(s["slot"]) for s in slots if "slot" in s}, key=int)
         if not numbered:
-            numbered = [str(n) for n in range(1, 7)]
+            numbered = [str(n) for n in range(1, 9)]
     inventory = ["pm"] + numbered
 
     results: dict[str, dict] = {}

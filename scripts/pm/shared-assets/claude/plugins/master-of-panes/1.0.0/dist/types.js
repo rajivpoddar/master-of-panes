@@ -11,7 +11,7 @@ export const DEFAULT_CONFIG = {
     mcpTransport: "stdio",
     dbPath: "./data/mop.db",
     pmPaneAddress: "0:0.0",
-    slotCount: 6,
+    slotCount: 8,
     legacyRepositoryId: null,
 };
 //# sourceMappingURL=types.js.map

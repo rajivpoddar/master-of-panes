@@ -15,9 +15,9 @@ SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 RUNNER = SHARED / "claude" / "scripts" / "mop-slot-respawn.sh"
 
 
-def test_canonical_runner_delegates_the_complete_six_slot_respawn_to_mop() -> None:
+def test_canonical_runner_delegates_the_complete_eight_slot_respawn_to_mop() -> None:
     body = RUNNER.read_text(encoding="utf-8")
-    for slot in range(1, 7):
+    for slot in range(1, 9):
         assert f"heydonna-app-300{slot}) SLOT={slot}" in body
         assert f'"$MOP_BASE_URL/slots/$SLOT/respawn"' in body
     assert "tmux send-keys" not in body
@@ -37,10 +37,17 @@ def test_each_slot_installs_the_same_thin_skill_and_canonical_runner_wrapper() -
     runner_target = "/Users/rajiv/.claude/scripts/mop-slot-respawn.sh"
     assert runner_target in by_target
 
-    for slot in range(1, 7):
+    for slot in range(1, 9):
         source_root = SHARED / "claude" / "slot-skills" / f"slot{slot}" / "respawn"
         skill_bodies.add((source_root / "SKILL.md").read_bytes())
         wrapper_bodies.add((source_root / "scripts" / "respawn.sh").read_bytes())
+        target_root = f"/Users/rajiv/Downloads/projects/heydonna-app-300{slot}/.claude/skills/respawn"
+        if slot >= 7:
+            # S7/S8 clones are provisioned later; a manifest entry now would make
+            # install-release mkdir inside the not-yet-cloned checkout path and
+            # block the clone. Add these entries once the clones exist.
+            assert f"{target_root}/SKILL.md" not in by_target
+            continue
         target_root = f"/Users/rajiv/Downloads/projects/heydonna-app-300{slot}/.claude/skills/respawn"
         assert f"{target_root}/SKILL.md" in by_target
         assert f"{target_root}/scripts/respawn.sh" in by_target

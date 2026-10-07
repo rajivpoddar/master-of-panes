@@ -358,8 +358,10 @@ def test_3h_full_post_shape():
     assert "|---" not in out  # no tables
     assert "NEW → launch customer-artifact-investigator" in out
     assert "NEEDS REPLY (95m) ⚠" in out
-    assert lines[-1] == "*Asks:* merge ask: #8425@4c15294"
-    assert out.index("#8430") < out.index("#8425")  # red first
+    # Rajiv 2026-10-07 12:25 IST (thread 1791355967.794539): the 3h post drops
+    # open PRs/slots and always carries Claude + Codex usage.
+    assert "*Usage (Claude + Codex):*" in out
+    assert "#8425" not in out and "merge ask" not in out
 
 
 def test_1h_mentions_cto_only_with_asks():
@@ -692,3 +694,18 @@ def test_lane_start_from_events_uses_newest_contiguous_run():
               ev("2026-10-06T20:00:00", 1)]
     assert compose.lane_start_from_events(events, 1) == "2026-10-07T01:00:00"
     assert compose.lane_start_from_events(events, 3) is None
+
+
+def test_slot_block_shows_unprovisioned_s7_s8_without_idle_actions(monkeypatch):
+    monkeypatch.setattr(compose, "slot_provisioned", lambda n: int(n) <= 6)
+    doc = {"slots": [
+        {"slot": 6, "name": "Pushya", "occupied": False, "last_activity": "2026-09-29T00:00:00Z"},
+        {"slot": 7, "name": "Swati", "occupied": False, "last_activity": None},
+        {"slot": 8, "name": "Anuradha", "occupied": False, "last_activity": None},
+    ]}
+    lines, _, actions = compose.slot_block(doc, NOW)
+    text = "\n".join(lines)
+    assert "S7 Swati: not provisioned" in text
+    assert "S8 Anuradha: not provisioned" in text
+    assert not any("S7" in a or "S8" in a for a in actions)
+    assert any("S6" in a for a in actions)

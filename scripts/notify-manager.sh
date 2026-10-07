@@ -73,6 +73,10 @@ if [ -z "$PANE_NUM" ]; then
     *heydonna-app-3002*) PANE_NUM=2 ;;
     *heydonna-app-3003*) PANE_NUM=3 ;;
     *heydonna-app-3004*) PANE_NUM=4 ;;
+    *heydonna-app-3005*) PANE_NUM=5 ;;
+    *heydonna-app-3006*) PANE_NUM=6 ;;
+    *heydonna-app-3007*) PANE_NUM=7 ;;
+    *heydonna-app-3008*) PANE_NUM=8 ;;
     *) ;;
   esac
   if [ -n "$PANE_NUM" ]; then

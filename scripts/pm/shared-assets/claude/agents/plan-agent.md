@@ -121,6 +121,13 @@ state. If the issue or an AC asks for a disabled precondition button, plan the
 error-state pattern and note the correction. Full rule:
 `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No unmetered LLM calls (Mandatory - Rajiv product rule 2026-10-07)
+
+Source: Rajiv, C0ALZJHGE49/1791347751.497949 ts 1791355336.754869: "no lllm calls should go unmetered. it will open us to abuse. chat support is the only exception." Rule: `~/.claude/rules/40-heydonna-no-unmetered-llm-calls.md`.
+- Every new/changed LLM call must usage-record a priced `providerCostUsd` (`providerPricing` row for the exact model; $0/null = unmetered) and reserve/settle credits via `checkAndReserveMeteredLlm` / `settleActual`. Only support chat is exempt.
+- Plans name the metering path (feature key, pricing row, reserve/settle). BLOCK / REQUEST_CHANGES a diff that bypasses the metered helper or routes to an unpriced model.
+- Required tests: source-inspection that every LLM call site uses the metered helper (allowlist: support chat), and every routed model has a `providerPricing` row.
+
 ## Input
 
 You will receive:
@@ -740,3 +747,4 @@ architecture.
 ## No hard rejects except content corruption (Rajiv 2026-09-28 + 2026-09-29, mandatory blocking CHECK)
 
 Enumerate EVERY new or changed `raise`, validator failure, strict-parse reject, retry/BoN/fallback trigger, withhold / "refusing to publish" path, and failed-status write in the plan (as a mandatory `## Hard-reject ledger` section). Classify each as exactly one of the 6 content-corruption classes: (1) empty output from non-empty input, (2) provider truncation, (3) material word/content loss, (4) hallucinated insertion or runaway repetition, (5) extreme shrink/expansion, (6) structure so malformed that transcript semantics are destroyed. Anything else (placeholder/unfilled `{{TOKEN}}`, speaker/Q-A/formatting quality, residual raw labels, ordering/ranking, confidence proxies, preference) is a BLOCKING finding (plan fails self-review): require the soft_warn / quality_warning pattern plus a test proving the transcript publishes with the warning. A hard reject always triggers a retry, so a non-corruption reject wastes tokens as well as withholding the transcript. An unclassified item counts as a failure of this check. Sources: Rajiv 2026-09-28 thread 1790565390.460619; 2026-09-29 thread 1790647403.075549 ("The hard rejects are only for content corruption. It's always followed by retry as well. We do not want to waste tokens unnecessarily."). Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md` (precedent #8407).
+

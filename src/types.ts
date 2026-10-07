@@ -67,7 +67,7 @@ export interface HookResponse {
 export type SlotStatus = "free" | "active" | "dnd";
 
 export interface SlotState {
-  /** Slot number (1-6) */
+  /** Slot number (1-8) */
   slot: number;
   /** Tmux pane address */
   address: string;
@@ -198,6 +198,6 @@ export const DEFAULT_CONFIG: MoPConfig = {
   mcpTransport: "stdio",
   dbPath: "./data/mop.db",
   pmPaneAddress: "0:0.0",
-  slotCount: 6,
+  slotCount: 8,
   legacyRepositoryId: null,
 };

@@ -109,7 +109,7 @@ status notes.
 
 ## Safety Rules
 
-1. Target slot must be `1`, `2`, `3`, `4`, `5`, or `6`.
+1. Target slot must be `1` through `8`.
 2. Messages are prefixed automatically as `[UTC_ISO_TIMESTAMP] <sender> -> slot N:`.
 3. Slash-command-looking messages are rejected by default.
 4. File-reference mode rejects empty files and slash-command-looking files by default.

@@ -7,11 +7,11 @@
 set -e
 
 SESSION="${1:-claude}"
-NUM_PANES="${2:-6}"
+NUM_PANES="${2:-8}"
 
 case "$NUM_PANES" in
-  1|2|3|4|5|6) ;;
-  *) echo "ERROR: num_dev_panes must be between 1 and 6" >&2; exit 2 ;;
+  1|2|3|4|5|6|7|8) ;;
+  *) echo "ERROR: num_dev_panes must be between 1 and 8" >&2; exit 2 ;;
 esac
 
 # Source lib for shared helpers

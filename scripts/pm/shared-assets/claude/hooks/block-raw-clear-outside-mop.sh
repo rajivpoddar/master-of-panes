@@ -5,9 +5,9 @@
 # MoP event-log evidence. The slash is required: prose such as "clear error"
 # is not a lifecycle command.
 #
-# Dev slots S1-S6 are NOT cleared on a cadence or by an injected /clear: their
+# Dev slots S1-S8 are NOT cleared on a cadence or by an injected /clear: their
 # clearing belongs to the new-issue assignment boundary inside the atomic
-# mop-assign-slot operation. This hook therefore points S1-S6 callers at
+# mop-assign-slot operation. This hook therefore points S1-S8 callers at
 # mop-assign-slot, and at the distinct operator acknowledgement
 # (--operator-confirm-dev-slot-clear) for a genuine manual dev-slot clear. PM
 # self-clear is unchanged. This hook governs /clear INJECTION only; direct
@@ -35,13 +35,13 @@ case "$TOOL_NAME" in
       if [ "$target" = "pm" ]; then
         json_block "BLOCKED: do not send /clear through mop_send_to_slot. PM self-clear uses the MoP-logged path: mop_clear_slot(slot: \"pm\") when loadable, or bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/mop-clear-slot.sh pm."
       else
-        json_block "BLOCKED: do not send /clear through mop_send_to_slot. Dev slots S1-S6 are never cleared by an injected /clear. Clearing belongs to the new-issue assignment boundary: run the mop-assign-slot operation (python3 /Users/rajiv/.claude/scripts/mop-assign-slot.py --slot N --class new_issue ... --task-file <file>). A genuine operator clear of a dev slot requires the distinct explicit acknowledgement: bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/mop-clear-slot.sh \"${target:-N}\" --operator-confirm-dev-slot-clear."
+        json_block "BLOCKED: do not send /clear through mop_send_to_slot. Dev slots S1-S8 are never cleared by an injected /clear. Clearing belongs to the new-issue assignment boundary: run the mop-assign-slot operation (python3 /Users/rajiv/.claude/scripts/mop-assign-slot.py --slot N --class new_issue ... --task-file <file>). A genuine operator clear of a dev slot requires the distinct explicit acknowledgement: bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/mop-clear-slot.sh \"${target:-N}\" --operator-confirm-dev-slot-clear."
       fi
     fi
     ;;
   Bash)
     if is_clear_command "$COMMAND" && printf '%s' "$COMMAND" | grep -Eq '(tmux[[:space:]]+send-keys|send-to-slot\.sh|run-and-wait\.sh|(^|[[:space:];|&])mop([[:space:]]+send)?[[:space:]]+.*--command.*|mop[[:space:]]+send[[:space:]])'; then
-      json_block "BLOCKED: do not inject /clear with raw tmux, slot scripts, or mop send (REST CLI). Dev slots S1-S6 are never cleared by an injected /clear; clearing belongs to the new-issue assignment boundary via mop-assign-slot (python3 /Users/rajiv/.claude/scripts/mop-assign-slot.py --slot N --class new_issue ... --task-file <file>). PM self-clear uses mop clear --slot pm (REST CLI) / mop-clear-slot.sh pm. A genuine operator clear of a dev slot requires the distinct explicit acknowledgement --operator-confirm-dev-slot-clear."
+      json_block "BLOCKED: do not inject /clear with raw tmux, slot scripts, or mop send (REST CLI). Dev slots S1-S8 are never cleared by an injected /clear; clearing belongs to the new-issue assignment boundary via mop-assign-slot (python3 /Users/rajiv/.claude/scripts/mop-assign-slot.py --slot N --class new_issue ... --task-file <file>). PM self-clear uses mop clear --slot pm (REST CLI) / mop-clear-slot.sh pm. A genuine operator clear of a dev slot requires the distinct explicit acknowledgement --operator-confirm-dev-slot-clear."
     fi
     ;;
 esac

@@ -15,6 +15,8 @@ case "$(basename "$PWD")" in
   heydonna-app-3004) SLOT=4 ;;
   heydonna-app-3005) SLOT=5 ;;
   heydonna-app-3006) SLOT=6 ;;
+  heydonna-app-3007) SLOT=7 ;;
+  heydonna-app-3008) SLOT=8 ;;
   *)
     echo "ERROR: /respawn is restricted to HeyDonna numbered-slot checkouts" >&2
     exit 64

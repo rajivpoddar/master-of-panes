@@ -71,7 +71,7 @@ const devPluginOverrides = {
   "master-of-panes@rajiv-plugins": true,
 };
 
-const defaultSlotRoots = [1, 2, 3, 4, 5, 6].map(
+const defaultSlotRoots = [1, 2, 3, 4, 5, 6, 7, 8].map(
   (slot) => `/Users/rajiv/Downloads/projects/heydonna-app-300${slot}`,
 );
 const slotRoots = process.env.HEYDONNA_DEV_SLOT_ROOTS

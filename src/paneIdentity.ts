@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import type { ExecShellResult } from "./asyncCommand.js";
 import { execShell } from "./asyncCommand.js";
-import { runtimeIdentity } from "./slotConfig.js";
+import { DEFAULT_DEV_SLOT_COUNT, runtimeIdentity } from "./slotConfig.js";
 
 export type PaneIdentitySnapshot = {
   slot: number;
@@ -156,7 +156,7 @@ export async function verifyPaneIdentity(
 
 export function validatePaneLayout(
   paneAddresses: readonly string[],
-  slotCount = 6,
+  slotCount = DEFAULT_DEV_SLOT_COUNT,
 ): { ok: true } | { ok: false; reason: string } {
   const expected = Array.from({ length: slotCount + 1 }, (_, index) => `0:0.${index}`);
   const actual = [...paneAddresses];

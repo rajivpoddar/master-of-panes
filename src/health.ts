@@ -17,6 +17,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { execShell } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import { recentJsonlActivity } from "./jsonlActivity.js";
@@ -129,6 +130,12 @@ export class ProcessHealthChecker {
     private db: MoPDatabase,
     private relay: TmuxRelay,
   ) {}
+
+  /** PM is always provisioned; a dev slot is provisioned once its checkout exists. */
+  private isSlotProvisioned(slot: number): boolean {
+    const identity = SLOT_RUNTIME_IDENTITIES[slot];
+    return slot === 0 || (identity !== undefined && existsSync(identity.checkoutPath));
+  }
 
   // ─── PM-Initiated Respawn Tracking ─────────────────────
 
@@ -476,10 +483,10 @@ export class ProcessHealthChecker {
   // ─── Main Check Loop ──────────────────────────────────
 
   /**
-   * Check all slots (0-6) for dead processes and restart if needed.
+   * Check all slots (0-8) for dead processes and restart if needed.
    *
    * Slot 0 = PM (claude-pm)
-   * Slots 1-6 = isolated dev runtimes.
+   * Slots 1-8 = isolated dev runtimes.
    */
   async checkAll(): Promise<void> {
     const now = Date.now();
@@ -500,6 +507,11 @@ export class ProcessHealthChecker {
       // Skip both auto-restart AND notification while flag is set.
       // (Rajiv directive 2026-04-05: "not send slot crash events to pm" during respawn)
       if (this.pmInitiatedRespawns.has(slot)) continue;
+
+      // A configured slot whose checkout is not provisioned yet (S7/S8 before
+      // their clone exists) has an empty shell pane by design: never treat it
+      // as a dead process, launch into it, or alert PM about it.
+      if (!this.isSlotProvisioned(slot)) continue;
 
       const paneCommand = await this.getPaneCommand(slot);
 

@@ -93,7 +93,7 @@ class StaleProcessCleanupTests(unittest.TestCase):
             finally:
                 MODULE.MOP_DB = original_db
         self.assertIsNone(error)
-        self.assertEqual(len(states), 6)
+        self.assertEqual(len(states), 8)
         self.assertEqual(states[6]["task"], "held line 1\nheld line 2")
 
     def process_rows(self, cwd: str, *, held_slot: int = 6) -> dict[str, object]:

@@ -184,7 +184,7 @@ class SakshiContinuationJoinTests(unittest.TestCase):
         self.assertEqual(rows["7591"]["lane"], "dependency-blocked")
         sessions = [
             {"label": label, "jsonl": "/tmp/session", "age_seconds": 1}
-            for label in ("PM", "S1", "S2", "S3", "S4", "S5", "S6")
+            for label in ("PM", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
         ]
         self.assertEqual(
             MODULE.validate({
@@ -377,7 +377,7 @@ class SakshiContinuationJoinTests(unittest.TestCase):
 
     def test_runtime_validate_rejects_pr_audit_row_mismatch_and_placeholders(self) -> None:
         sessions = [{"label": label, "jsonl": "/tmp/session", "age_seconds": 1}
-                    for label in ("PM", "S1", "S2", "S3", "S4", "S5", "S6")]
+                    for label in ("PM", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")]
         audit = {
             "ok": True,
             "open_pr_count": 2,

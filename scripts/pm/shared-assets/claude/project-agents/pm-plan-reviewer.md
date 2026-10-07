@@ -84,6 +84,13 @@ when a plan or AC adds a precondition-gated disabled button; require the
 click-time error-state pattern plus a test that clicks the enabled button with
 the precondition unmet. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No unmetered LLM calls (Mandatory - Rajiv product rule 2026-10-07)
+
+Source: Rajiv, C0ALZJHGE49/1791347751.497949 ts 1791355336.754869: "no lllm calls should go unmetered. it will open us to abuse. chat support is the only exception." Rule: `~/.claude/rules/40-heydonna-no-unmetered-llm-calls.md`.
+- Every new/changed LLM call must usage-record a priced `providerCostUsd` (`providerPricing` row for the exact model; $0/null = unmetered) and reserve/settle credits via `checkAndReserveMeteredLlm` / `settleActual`. Only support chat is exempt.
+- Plans name the metering path (feature key, pricing row, reserve/settle). BLOCK / REQUEST_CHANGES a diff that bypasses the metered helper or routes to an unpriced model.
+- Required tests: source-inspection that every LLM call site uses the metered helper (allowlist: support chat), and every routed model has a `providerPricing` row.
+
 ## Review Source Invariant
 
 Before reading the plan file, adjudicating the plan, or writing a `/tmp` plan
@@ -296,3 +303,4 @@ For `PATCHED`, write a unified diff patch to
 `/tmp/pm-plan-patch-<issue>-<plan_sha>.patch`. The patch may touch only the plan
 file under `docs/plans/` and only plan, acceptance criteria, proof, scope, or
 runtime-control-point text.
+

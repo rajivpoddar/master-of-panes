@@ -3,7 +3,7 @@
 
 This script owns hard-gate checks that should not depend on an LLM agent:
 session age, MoP health/slot state, process sweep, basic PR-label drift, and
-queue-motion signals. External checks may be UNKNOWN, but PM/S1-S6 session-age
+queue-motion signals. External checks may be UNKNOWN, but PM/S1-S8 session-age
 rows must always be present before a report can claim clean state.
 """
 
@@ -207,6 +207,16 @@ OUT_TEXT = Path("/tmp/sakshi-heartbeat.txt")
 
 CONTROL_PLANE_HOURS = 3
 
+
+def _slot_unprovisioned(row: dict[str, Any]) -> bool:
+    """A configured dev slot whose checkout does not exist yet (S7/S8 before
+    provisioning) has no session by design; it is not an UNKNOWN age."""
+    slot_id = str(row.get("id") or "")
+    if not slot_id.isdigit() or slot_id == "0":
+        return False
+    return not Path(f"/Users/rajiv/Downloads/projects/heydonna-app-300{slot_id}").is_dir()
+
+
 SESSIONS = [
     {"id": "pm", "label": "PM", "pane": 0, "project": "-Users-rajiv-Downloads-projects-heydonna-app"},
     {"id": "1", "label": "S1", "pane": 1, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3001"},
@@ -215,6 +225,8 @@ SESSIONS = [
     {"id": "4", "label": "S4", "pane": 4, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3004"},
     {"id": "5", "label": "S5", "pane": 5, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3005"},
     {"id": "6", "label": "S6", "pane": 6, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3006"},
+    {"id": "7", "label": "S7", "pane": 7, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3007"},
+    {"id": "8", "label": "S8", "pane": 8, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3008"},
 ]
 
 
@@ -294,7 +306,7 @@ def analyze_session(
     mop_row: dict[str, Any] | None = None,
     mop_events: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    is_omp_session = entry["id"] in {"pm", "1", "2", "3", "4", "5", "6"}
+    is_omp_session = entry["id"] in {"pm", "1", "2", "3", "4", "5", "6", "7", "8"}
     omp_dir = OMP_SESSIONS_ROOT / f"heydonna-slot{entry['id']}"
     if entry["id"] == "pm":
         omp_dir = OMP_SESSIONS_ROOT / "heydonna-pm"
@@ -413,7 +425,7 @@ def apply_clear_policy(sessions: list[dict[str, Any]], slots: dict[str, dict[str
         row["pm_clear_candidate"] = False
         if row.get("clear_due"):
             row["clear_due"] = True
-            # Dev slots S1-S6 are never cleared on a cadence: their clearing belongs
+            # Dev slots S1-S8 are never cleared on a cadence: their clearing belongs
             # to the new-issue assignment boundary. Only the PM row keeps the clear
             # handoff fields, so the age read above stays observation-only for dev
             # slots - no reason text, no candidate flag, nothing actionable.
@@ -2349,7 +2361,7 @@ def collect_queue(slots: dict[str, dict[str, Any]]) -> dict[str, Any]:
             continue
         pr_match = re.search(r"\bPR#(\d+)\b", line)
         issue_match = re.search(r"\bissue=#(\d+)\b", line)
-        slot_match = re.search(r"\bslot:([1-6])\b", line)
+        slot_match = re.search(r"\bslot:([1-8])\b", line)
         packet_match = re.search(r"\bpacket=(\S+)", line)
         branch_match = re.search(r"\bbranch=(\S+)", line)
         head_match = re.search(r"\bhead=(\S+)", line)
@@ -2827,7 +2839,8 @@ def format_session_age(sessions: list[dict[str, Any]]) -> list[str]:
     unknown = [
         row
         for row in sessions
-        if row.get("severity") == "unknown" or not row.get("present")
+        if (row.get("severity") == "unknown" or not row.get("present"))
+        and not _slot_unprovisioned(row)
     ]
     clear_due = [row for row in sessions if row.get("clear_due")]
     already_requested = [row for row in sessions if row.get("clear_already_requested")]
@@ -2838,7 +2851,7 @@ def format_session_age(sessions: list[dict[str, Any]]) -> list[str]:
         )
         lines = [f"*Session age:* UNKNOWN - {unknown_text}."]
     elif not flags:
-        return ["*Session age:* clean - PM/S1-S6 JSONL rows present."]
+        return ["*Session age:* clean - PM/S1-S8 JSONL rows present."]
     else:
         flag_text = ", ".join(f"{row['label']} {row.get('age', 'unknown')} {row.get('severity')}" for row in flags)
         lines = [f"*Session age:* {flag_text}."]
@@ -3158,7 +3171,7 @@ def build_report(data: dict[str, Any]) -> str:
     actions.extend(open_pr_activity_action_lines(data.get("open_pr_activity_audit")))
     for row in clear_due:
         if str(row.get("id") or "") != "pm":
-            # Dev slots S1-S6 are never cleared on a cadence and no directive is
+            # Dev slots S1-S8 are never cleared on a cadence and no directive is
             # emitted for them; their clearing belongs to the assignment boundary.
             continue
         if row.get("clear_already_requested"):
@@ -3188,8 +3201,8 @@ def build_report(data: dict[str, Any]) -> str:
 def validate(data: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     sessions = data.get("sessions")
-    if not isinstance(sessions, list) or len(sessions) != 7:
-        errors.append("session table must contain PM plus S1-S6")
+    if not isinstance(sessions, list) or len(sessions) != 9:
+        errors.append("session table must contain PM plus S1-S8")
         return errors
     labels = {row.get("label") for row in sessions}
     missing = {"PM", "S1", "S2", "S3", "S4", "S5", "S6"} - labels

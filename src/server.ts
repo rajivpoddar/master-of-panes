@@ -98,7 +98,7 @@ const config: MoPConfig = {
   ...DEFAULT_CONFIG,
   httpPort: parseInt(process.env.MOP_PORT ?? "3100", 10),
   dbPath: process.env.MOP_DB_PATH ?? DEFAULT_CONFIG.dbPath,
-  // Production is intentionally fixed at six numbered dev slots. Migration
+  // Production is intentionally fixed at eight numbered dev slots. Migration
   // fixtures may still open older four-slot databases; no runtime env knob can
   // make health, hooks, or routes disagree with this bound.
   slotCount: DEFAULT_DEV_SLOT_COUNT,
@@ -1090,7 +1090,7 @@ app.post("/slots/:slotNum/dnd", async (c) => {
   }
   const slot = slotParse.data;
   if (slot < 1 || slot > DEFAULT_DEV_SLOT_COUNT) {
-    return c.json({ error: "DND applies to dev slots 1-6" }, 400);
+    return c.json({ error: "DND applies to dev slots 1-8" }, 400);
   }
   let body: { dnd?: boolean } = {};
   try {
@@ -1147,7 +1147,7 @@ app.get("/slots/:slotNum/capture", async (c) => {
   }
   const slot = slotParse.data;
   if (slot < 1 || slot > DEFAULT_DEV_SLOT_COUNT) {
-    return c.json({ error: "Capture applies to dev slots 1-6" }, 400);
+    return c.json({ error: "Capture applies to dev slots 1-8" }, 400);
   }
   const rawLines = c.req.query("lines") ?? "30";
   const parsed = parseInt(rawLines, 10);

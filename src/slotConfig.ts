@@ -1,6 +1,6 @@
 /** Canonical numbered-slot configuration shared by every MoP control surface. */
 export const PM_SLOT = 0;
-export const DEFAULT_DEV_SLOT_COUNT = 6;
+export const DEFAULT_DEV_SLOT_COUNT = 8;
 export const DEV_SLOT_NUMBERS: readonly number[] = Object.freeze(
   Array.from({ length: DEFAULT_DEV_SLOT_COUNT }, (_, index) => index + 1),
 );
@@ -30,7 +30,7 @@ export type SlotRuntimeIdentity = {
   checkoutPath: string;
   jsonlPath: string;
   launchScript: string;
-  /** Read-only verified legacy bindings are preserved; only S5/S6 are provisioned. */
+  /** Read-only verified legacy bindings are preserved; S5-S8 are provisioned. */
   legacyConvexDeployment?: string;
   legacyConvexProject?: string;
   convexDeployment?: string;
@@ -50,6 +50,8 @@ export const DEV_SLOT_NAMES: Readonly<Record<number, string>> = Object.freeze({
   4: "Chitra",
   5: "Revati",
   6: "Pushya",
+  7: "Swati",
+  8: "Anuradha",
 });
 
 /** Explicit per-slot identities; values are configuration, not a state store. */

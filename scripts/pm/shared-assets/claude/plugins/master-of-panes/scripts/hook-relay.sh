@@ -30,7 +30,7 @@ except Exception:
 
 # Determine slot number from cwd: heydonna-app-300N → N, or heydonna-app (no suffix) → 0
 cwd = data.get('cwd', '')
-m = re.search(r'heydonna-app-300([1-6])', cwd)
+m = re.search(r'heydonna-app-300([1-8])', cwd)
 if m:
     slot = m.group(1)
 elif re.search(r'heydonna-app(?!-300)', cwd):

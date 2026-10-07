@@ -63,7 +63,7 @@ STEP 2 — check: first line is "*Hourly — HH:MM IST*", or starts with
   exists. ≤ ~20 lines, no tables. Do not hand-edit blocks.
 
 STEP 3 — post ONE NEW TOP-LEVEL message (no -t):
-  bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-1h-post.txt
+  SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-1h-post.txt
   From the readback `OK ts=<ts>` record the thread:
   /Users/rajiv/.claude/scripts/hourly-thread-ts --set <ts>
 
@@ -151,3 +151,7 @@ different rule.)
 - Scripts (MoP-installed, read-only) in `~/.claude/scripts/pm/heartbeat/`: `heartbeat-compose.py`,
   `heartbeat-axiom.py --hours 1 --errors-by-code --compare` / `--active-users`,
   `heartbeat-error-map.py`, `pr-open-snapshot.py`, plus MoP `/slots` (read-only GET).
+
+
+Note: top-level report posts MUST use `SLACK_SEND_AS=alerts` (posts as HeyDonna Alerts so PM processes them as events). Rajiv 2026-10-07 14:17 IST, C0ALZJHGE49 thread 1791362688.821369: "it should come from alerts id so that it's processed by pm correctly."
+

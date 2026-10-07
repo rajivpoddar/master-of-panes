@@ -268,7 +268,7 @@ Also clean up any local branch in the PM clone and any dev slot clone:
 git branch -D "$BRANCH" 2>/dev/null || true
 
 # Dev slot clones — each slot has its own clone at heydonna-app-3001..3004
-for N in 1 2 3 4; do
+for N in 1 2 3 4 5 6 7 8; do
   git -C "$HOME/Downloads/projects/heydonna-app-300$N" branch -D "$BRANCH" 2>/dev/null || true
 done
 ```
@@ -1088,7 +1088,7 @@ Slots invoke `codex-review-companion.mjs` during Phase 2 (plan-review) and Phase
 
 ```bash
 # 1. Identify slot(s) that worked on this PR via labels.
-SLOT_LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name | select(test("^slot:[1-6]$"))')
+SLOT_LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name | select(test("^slot:[1-8]$"))')
 # Fallback: if labels were stripped at cleanup, resolve the issue ONLY from the
 # authoritative closing-issue set. No title inference, no prose inference.
 if [ -z "$SLOT_LABELS" ]; then
@@ -1099,7 +1099,7 @@ if [ -z "$SLOT_LABELS" ]; then
   if [ -z "$ISSUE" ]; then
     echo "Step 9.55.b: no authoritative closing issue and no slot:N label — skipping companion read (no title inference)." >&2
   else
-    SLOT_LABELS=$(gh issue view "$ISSUE" --json timelineItems --jq '.timelineItems[] | .label.name? // empty | select(test("^slot:[1-6]$"))' 2>/dev/null | sort -u)
+    SLOT_LABELS=$(gh issue view "$ISSUE" --json timelineItems --jq '.timelineItems[] | .label.name? // empty | select(test("^slot:[1-8]$"))' 2>/dev/null | sort -u)
   fi
 fi
 

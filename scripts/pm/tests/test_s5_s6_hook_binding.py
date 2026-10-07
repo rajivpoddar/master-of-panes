@@ -30,5 +30,5 @@ def test_s5_s6_are_relayable_by_the_versioned_hook() -> None:
     text = RELAY.read_text(encoding="utf-8")
     match = re.search(r"heydonna-app-300\((\[[^]]+\])\)", text)
     assert match is not None
-    assert match.group(1) == "[1-6]"
+    assert match.group(1) == "[1-8]"
     assert "hook-relay.sh" in HOOKS.read_text(encoding="utf-8")

@@ -200,6 +200,14 @@ def slot_transitions(slots_doc: dict | None, now: datetime, prev: dict | None) -
     return changed, state
 
 
+def slot_provisioned(n) -> bool:
+    """A dev slot is provisioned once its checkout exists (S7/S8 come later)."""
+    try:
+        return os.path.isdir(f"/Users/rajiv/Downloads/projects/heydonna-app-300{int(n)}")
+    except (TypeError, ValueError):
+        return True
+
+
 def slot_block(slots_doc: dict | None, now: datetime, release_seen: dict | None = None) -> tuple[list[str], str, list[str]]:
     """Return (lines, tldr, pm_actions). Rajiv 2026-09-29 13:23 IST:
     "add the slot status to this hourly report as well. idle slots have to be checked."
@@ -211,6 +219,10 @@ def slot_block(slots_doc: dict | None, now: datetime, release_seen: dict | None 
     for s in sorted(slots, key=lambda s: s.get("slot", 0)):
         n = s.get("slot")
         label = f"S{n} {s.get('name') or '?'}"
+        if not s.get("occupied") and not slot_provisioned(n):
+            # Configured but not provisioned yet (no checkout): never an idle action.
+            cells.append(f"{label}: not provisioned")
+            continue
         work = ""
         if s.get("occupied"):
             work = f"#{s['issue']}" if s.get("issue") else "#?"
@@ -293,6 +305,7 @@ def compose(
     slots: dict | None = None,
     include_slots: bool = False,
     release_seen: dict | None = None,
+    usage_lines: list[str] | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -312,8 +325,17 @@ def compose(
         sup_lines, sup_tldr = support_block(support, window)
         parts.append(sup_tldr)
         body += ["", *sup_lines]
-    parts.append(pr_tldr)
-    body += ["", *pr_lines]
+    # 3h heartbeat: no open-PR or slots report; Claude + Codex usage always
+    # (Rajiv 2026-10-07 12:25 IST, C0ALZJHGE49 thread 1791355967.794539).
+    if mode == "3h":
+        include_slots = False
+        merge_asks = []
+        ul = [u for u in (usage_lines or []) if u.strip()]
+        body += ["", "*Usage (Claude + Codex):*", *(["• " + u for u in ul] or ["• unavailable (usage-snapshot failed)"])]
+        parts.append("usage " + ("ok" if ul else "unavailable"))
+    else:
+        parts.append(pr_tldr)
+        body += ["", *pr_lines]
     slot_actions: list[str] = []
     if include_slots:
         sl_lines, sl_tldr, slot_actions = slot_block(slots, now, release_seen)
@@ -334,7 +356,7 @@ def compose(
     lines = [first, *body]
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
-    pm_actions = [a for r in (prs or []) for a in r.get("actions") or []] + slot_actions
+    pm_actions = ([] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]) + slot_actions
     if pm_actions:
         lines.append("*ACTIONS (PM):* " + "; ".join(pm_actions))
     if failures:
@@ -480,11 +502,21 @@ def main() -> int:
         for name, value in (("axiom", axiom), ("map", mapping_doc), ("support", support), ("prs", prs), ("active", active), ("slots", slots), ("actions", pm_actions)):
             (out / f"{name}.json").write_text(json.dumps(value, indent=2))
 
+    usage_lines = None
+    if args.mode == "3h":
+        try:
+            up = subprocess.run([py, str(Path.home() / ".claude/scripts/usage-snapshot.py")], capture_output=True, text=True, timeout=120)
+            usage_lines = [l for l in up.stdout.splitlines() if l.strip()]
+            if up.returncode != 0 and not usage_lines:
+                failures.append(f"usage: rc={up.returncode}")
+        except Exception as exc:
+            failures.append(f"usage: {exc}")
     print(compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
+        usage_lines=usage_lines,
     ))
     if pm_actions:
         print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)
@@ -493,3 +525,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

@@ -37,7 +37,7 @@ from typing import Any
 OUT_JSON = Path("/tmp/stale-process-cleanup-latest.json")
 PROJECT_BASE = Path("/Users/rajiv/Downloads/projects")
 MOP_DB = Path("/Users/rajiv/.local/share/master-of-panes/data/mop.db")
-SLOT_NUMBERS = tuple(range(1, 7))
+SLOT_NUMBERS = tuple(range(1, 9))
 
 
 def run(args: list[str], timeout: int = 5) -> subprocess.CompletedProcess[str]:
@@ -112,7 +112,7 @@ def slot_root(slot: int) -> str:
 
 
 def load_slot_inventory() -> tuple[dict[int, dict[str, Any]], str | None]:
-    """Read the complete canonical six-slot inventory before cleanup eligibility.
+    """Read the complete canonical eight-slot inventory before cleanup eligibility.
 
     A missing, unreadable, malformed, or incomplete inventory is an authority
     failure. Apply mode must refuse before it enumerates kill candidates.

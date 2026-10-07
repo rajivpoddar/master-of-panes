@@ -26,7 +26,7 @@ Usage: send-to-slot.sh <slot> <command> [--wait] [--force] [--raw]
        send-to-slot.sh <slot> --file <filepath> [--force]
        send-to-slot.sh -h | --help          (print this help; sends nothing)
 
-  <slot>      1-6 (dev slot number)
+  <slot>      1-8 (dev slot number)
   <command>   text or slash command delivered via MoP POST /slots/N/send
   --wait      wait for the slot to return idle after sending
   --force     send immediately even if the slot is active

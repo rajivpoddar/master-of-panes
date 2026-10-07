@@ -9,7 +9,7 @@ PANE_STATE_DIR="$HOME/.claude/tmux-panes"
 _PANE_LOCK_DIR=""
 
 # Config defaults — overridden by load_config() if config.json exists.
-NUM_DEV_PANES=6
+NUM_DEV_PANES=8
 MANAGER_PANE="0:0.0"
 
 # Newline-separated list of dev pane addresses (bash 3.x safe, no arrays).
@@ -54,20 +54,22 @@ load_config() {
 
   # Build default dev pane list if config didn't provide one
   if [ -z "$_DEV_PANE_LIST" ] || [ "$NUM_DEV_PANES" -eq 0 ]; then
-    NUM_DEV_PANES=6
+    NUM_DEV_PANES=8
     _DEV_PANE_LIST="0:0.1
 0:0.2
 0:0.3
 0:0.4
 0:0.5
-0:0.6"
+0:0.6
+0:0.7
+0:0.8"
   fi
 
-  # Validate against the same fixed six-slot production boundary. Refuse the
-  # entire pane operation on an invalid configured count so pane 7 can never
+  # Validate against the same fixed eight-slot production boundary. Refuse the
+  # entire pane operation on an invalid configured count so pane 9 can never
   # reach tmux through a partially accepted configuration.
-  if ! [[ "$NUM_DEV_PANES" =~ ^[0-9]+$ ]] || [ "$NUM_DEV_PANES" -lt 1 ] || [ "$NUM_DEV_PANES" -gt 6 ]; then
-    echo "ERROR: dev pane count must be between 1 and 6; got '$NUM_DEV_PANES'" >&2
+  if ! [[ "$NUM_DEV_PANES" =~ ^[0-9]+$ ]] || [ "$NUM_DEV_PANES" -lt 1 ] || [ "$NUM_DEV_PANES" -gt 8 ]; then
+    echo "ERROR: dev pane count must be between 1 and 8; got '$NUM_DEV_PANES'" >&2
     NUM_DEV_PANES=0
     _DEV_PANE_LIST=""
     return 2
@@ -219,8 +221,8 @@ pane_exists() {
 validate_layout_shape() {
   local window="$1"
   local dev_count="${2:-$NUM_DEV_PANES}"
-  if ! [[ "$dev_count" =~ ^[1-6]$ ]]; then
-    echo "ERROR: layout dev count must be between 1 and 6; got '$dev_count'" >&2
+  if ! [[ "$dev_count" =~ ^[1-8]$ ]]; then
+    echo "ERROR: layout dev count must be between 1 and 8; got '$dev_count'" >&2
     return 2
   fi
   local expected_count=$((dev_count + 1))

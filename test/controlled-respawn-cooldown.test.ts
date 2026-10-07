@@ -164,3 +164,45 @@ test("only verified restarts consume the hourly crash limit", async () => {
   assert.equal(internals.restartCounts.get(4)?.count, 3);
   assert.equal(events.slice(fourthResultStart).includes("process_dead"), false);
 });
+
+test("an unprovisioned slot's empty shell is never launched or reported", async () => {
+  const events: string[] = [];
+  const notifications: string[] = [];
+  const checker = new ProcessHealthChecker(
+    {
+      logEvent: (_slot: number, event: string) => events.push(event),
+      getExitPending: () => false,
+      getSlot: () => ({ task: null }),
+    } as never,
+    {
+      injectToPM: (message: string) => notifications.push(message),
+    } as never,
+  );
+  const internals = checker as unknown as {
+    startTime: number;
+    getPaneCommand: (slot: number) => Promise<string | null>;
+    restartSlot: (slot: number) => Promise<{ success: boolean; reason: string }>;
+    scheduleContinueInjection: (slot: number) => void;
+    isSlotProvisioned: (slot: number) => boolean;
+  };
+  internals.startTime = 0;
+  const paneReads: number[] = [];
+  internals.getPaneCommand = async (slot) => {
+    paneReads.push(slot);
+    return slot === 7 || slot === 8 ? "zsh" : null;
+  };
+  internals.isSlotProvisioned = (slot) => slot !== 7;
+  const launched: number[] = [];
+  internals.restartSlot = async (slot) => {
+    launched.push(slot);
+    return { success: true, reason: "agent boot verified (claude)" };
+  };
+  internals.scheduleContinueInjection = () => undefined;
+
+  await checker.checkAll();
+
+  assert.equal(paneReads.includes(7), false);
+  assert.deepEqual(launched, [8]);
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0], /slot 8 process died/);
+});

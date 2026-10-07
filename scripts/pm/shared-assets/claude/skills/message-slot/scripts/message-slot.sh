@@ -160,8 +160,8 @@ PY
 }
 
 case "$TARGET_SLOT" in
-  1|2|3|4|5|6) ;;
-  *) fail 2 "target_slot_must_be_1_2_3_4_5_or_6" ;;
+  1|2|3|4|5|6|7|8) ;;
+  *) fail 2 "target_slot_must_be_1_through_8" ;;
 esac
 
 if [ -n "$FILE" ] && [ -n "$MESSAGE" ]; then
@@ -282,6 +282,10 @@ infer_sender() {
       heydonna-app-3002) slot_num="2" ;;
       heydonna-app-3003) slot_num="3" ;;
       heydonna-app-3004) slot_num="4" ;;
+      heydonna-app-3005) slot_num="5" ;;
+      heydonna-app-3006) slot_num="6" ;;
+      heydonna-app-3007) slot_num="7" ;;
+      heydonna-app-3008) slot_num="8" ;;
     esac
   fi
 

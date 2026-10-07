@@ -498,7 +498,7 @@ export class NativeSlotReleaseCoordinator {
     ) {
       return result(
         "invalid_request",
-        "A slot number (1-6) is required.",
+        "A slot number (1-8) is required.",
         this.dependencies.db.getSlot(request.slot),
         "Resend the request with a valid slot number.",
       );

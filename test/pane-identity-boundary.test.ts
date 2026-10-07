@@ -11,13 +11,13 @@ import {
   verifyPaneIdentity,
 } from "../src/paneIdentity.js";
 
-test("authoritative six-pane layout is one-to-one and rejects aliases/missing panes", () => {
+test("authoritative eight-pane layout is one-to-one and rejects aliases/missing panes", () => {
   assert.deepEqual(
-    validatePaneLayout(["0:0.0", "0:0.1", "0:0.2", "0:0.3", "0:0.4", "0:0.5", "0:0.6"]),
+    validatePaneLayout(["0:0.0", "0:0.1", "0:0.2", "0:0.3", "0:0.4", "0:0.5", "0:0.6", "0:0.7", "0:0.8"]),
     { ok: true },
   );
-  assert.equal(validatePaneLayout(["0:0.0", "0:0.1", "0:0.2", "0:0.3", "0:0.4", "0:0.4", "0:0.6"]).ok, false);
-  assert.equal(validatePaneLayout(["0:0.0", "0:0.1", "0:0.2", "0:0.3", "0:0.4", "0:0.5"]).ok, false);
+  assert.equal(validatePaneLayout(["0:0.0", "0:0.1", "0:0.2", "0:0.3", "0:0.4", "0:0.4", "0:0.6", "0:0.7", "0:0.8"]).ok, false);
+  assert.equal(validatePaneLayout(["0:0.0", "0:0.1", "0:0.2", "0:0.3", "0:0.4", "0:0.5", "0:0.6"]).ok, false);
   assert.equal(paneAddress(4), "0:0.4");
 });
 
@@ -131,7 +131,7 @@ test("pane identity fails closed when tmux is unavailable or slot is unknown", a
   });
   assert.equal(unavailable.ok, false);
   if (!unavailable.ok) assert.equal(unavailable.reason, "pane_unavailable");
-  const unknown = await verifyPaneIdentity(7, async () => ({ stdout: "", stderr: "" }));
+  const unknown = await verifyPaneIdentity(9, async () => ({ stdout: "", stderr: "" }));
   assert.equal(unknown.ok, false);
   if (!unknown.ok) assert.equal(unknown.reason, "unknown_slot");
 });
