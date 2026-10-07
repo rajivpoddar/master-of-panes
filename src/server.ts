@@ -80,7 +80,14 @@ import {
 } from "./sessionStartClearWait.js";
 import { paneInputModeRefusalReason, type PaneInputModeRefusalReason } from "./paneInputMode.js";
 import { requestPmClearOnce, waitForPmIdleDrain } from "./pmClearLatch.js";
-import { interruptLiveTurnBeforeClear, type InterruptBeforeClearResult } from "./interruptBeforeClear.js";
+import {
+  interruptLiveTurnBeforeClear,
+  pinDrift,
+  type InterruptBeforeClearResult,
+  type OperationPin,
+  type PaneObservation,
+  type SlotRowLike,
+} from "./interruptBeforeClear.js";
 import { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } from "./assignmentTaskPacket.js";
 
 // ─── Config ──────────────────────────────────────────────
@@ -450,21 +457,61 @@ async function sendClearViaMopSendPath(
   }
 }
 
+/** Immutable pane id + checkout for the operation fence; null = unobservable. */
+async function observeSlotPane(slotNum: number): Promise<PaneObservation | null> {
+  const identity = await verifyPaneIdentity(slotNum);
+  return identity.ok ? { paneId: identity.snapshot.paneId, checkout: identity.snapshot.currentPath } : null;
+}
+
+/** Hook-session generation token: the latest SessionStart event id. */
+function slotSessionToken(slotNum: number): string {
+  return String(latestSessionStartEventId(db, slotNum));
+}
+
+function slotRowWithSession(slotNum: number): SlotRowLike | null {
+  const row = db.getSlot(slotNum);
+  return row ? { ...row, session_id: slotSessionToken(slotNum) } : null;
+}
+
+/** Fence: re-observe the pane and re-read the row; null when nothing drifted. */
+async function fenceSlotOperation(slotNum: number, pin: OperationPin, stage: string): Promise<string | null> {
+  const pane = await observeSlotPane(slotNum);
+  const drift = pinDrift(pin, slotRowWithSession(slotNum), pane);
+  return drift ? `${drift}@${stage}` : null;
+}
+
 /**
  * Interrupt a numbered slot's live/indeterminate turn and verify it is
- * inactive (pane idle AND turn row inactive) BEFORE any clear or delivery.
- * Rajiv 2026-10-07 (thread 1791348298.888079): "fix MoP to trigger interrupt
- * automatically before clear." Fails closed with interrupt_unverified.
+ * inactive BEFORE any clear or delivery, as ONE pinned operation (pane id,
+ * checkout, hook session, epoch + owner, turn). Rajiv 2026-10-07 (thread
+ * 1791348298.888079): "fix MoP to trigger interrupt automatically before
+ * clear." CTO REVISE d85ede4: unknown is not idle; keys are single-attempt
+ * and never replayed; terminalization is a CAS on the original turn.
  */
 async function interruptSlotBeforeClear(slotNum: number, source: string): Promise<InterruptBeforeClearResult> {
   return interruptLiveTurnBeforeClear({
-    readTurn: () => {
-      const row = db.getSlot(slotNum);
-      return row ? { active_turn_id: row.active_turn_id, active_turn_state: row.active_turn_state } : null;
+    observePane: () => observeSlotPane(slotNum),
+    readRow: () => slotRowWithSession(slotNum),
+    paneActivity: (paneId) => relay.getSlotActivityState(slotNum, paneId),
+    recordPossibleEffect: (key, pin) => {
+      db.logEvent(slotNum, "interrupt_key_possible_effect", null, null, {
+        key, pane_id: pin.paneId, turn_id: pin.turnId, assignment_epoch: pin.epoch, via: source,
+      });
     },
-    paneActivity: () => relay.getSlotActivityState(slotNum),
-    sendKey: (key) => relay.sendToSlotAsync(slotNum, key, true, true),
-    terminalizeTurn: (prior) => {
+    sendKeyOnce: async (paneId, key) => {
+      // Exactly one attempt, pinned to the immutable pane id. A timeout or
+      // error may still have applied: report uncertain, never replay.
+      try {
+        await execShell(`tmux send-keys -t ${shellEscape(paneId)} ${key}`, { timeout: 5_000 });
+        return "sent";
+      } catch {
+        return "uncertain";
+      }
+    },
+    casTerminalize: (pin) => {
+      // Synchronous compare-and-set: no await between the read and the write.
+      const drift = pinDrift(pin, slotRowWithSession(slotNum));
+      if (drift) return false;
       db.updateSlot(slotNum, {
         active_turn_id: null,
         active_turn_started_at: null,
@@ -472,12 +519,15 @@ async function interruptSlotBeforeClear(slotNum: number, source: string): Promis
         idle: true,
       });
       db.logEvent(slotNum, "turn_terminalized_by_interrupt_before_clear", null, null, {
-        prior_turn_id: prior.active_turn_id,
-        prior_turn_state: prior.active_turn_state,
+        prior_turn_id: pin.turnId,
+        prior_turn_state: pin.turnState,
+        assignment_epoch: pin.epoch,
+        pane_id: pin.paneId,
         via: source,
       });
+      return true;
     },
-    afterInterrupt: () => clearComposerResidueAfterReleaseInterrupt(slotNum),
+    afterInterrupt: (paneId) => clearComposerResidueAfterReleaseInterrupt(slotNum, paneId),
     log: (event, data) => db.logEvent(slotNum, event, null, null, { ...data, via: source }),
     sleep,
     now: () => Date.now(),
@@ -502,12 +552,11 @@ async function clearSlotsThroughMopHttp(
   const includePmSlot = normalizedTargets.includes(0);
 
   for (const slotNum of devSlots) {
-    const isActive = await relay.isSlotActive(slotNum);
-    db.updateSlot(slotNum, { idle: !isActive });
+    const activity = await relay.getSlotActivityState(slotNum);
+    if (activity !== "unknown") db.updateSlot(slotNum, { idle: activity === "idle" });
 
     const slotState = db.getSlot(slotNum);
     const name = slotState?.name ?? `slot-${slotNum}`;
-    const isIdle = slotState?.idle ?? true;
 
     if (slotState?.occupied) {
       db.clearPendingClear(slotNum);
@@ -522,13 +571,36 @@ async function clearSlotsThroughMopHttp(
       continue;
     }
 
-    if (isIdle) {
-      try {
-        const sent = await sendClearViaMopSendPath(slotNum, options.source);
-        if (!sent.success) {
-          throw new Error(sent.error ?? sent.reason ?? `send failed status=${sent.status}`);
-        }
+    const rowIdle = !!slotState
+      && slotState.active_turn_id === null && slotState.active_turn_state === "inactive";
+    if (options.terminalOnly && !(activity === "idle" && rowIdle)) {
+      // Terminal-only never interrupts; unknown evidence is not terminal.
+      db.logEvent(slotNum, "clear_terminal_only_skipped", null, null, {
+        name,
+        checked_at: new Date().toISOString(),
+        reason: `Slot is not verifiably idle (pane=${activity}); terminal-only clear did not arm a pending clear`,
+        via: options.source,
+        delivery: "http_clear_endpoint",
+      });
+      results.push({ slot: slotNum, name, status: "active (not terminal; no clear queued)" });
+      await sleep(500);
+      continue;
+    }
 
+    // Never queue a clear behind a live turn and never treat unknown as
+    // idle: one pinned operation interrupts (if live) and verifies, then the
+    // clear is fenced to the same pane/session/epoch/owner/turn.
+    const op = await interruptSlotBeforeClear(slotNum, options.source);
+    const drift = op.ok && op.pin ? await fenceSlotOperation(slotNum, op.pin, "pre_clear") : null;
+    if (!op.ok || !op.pin || drift) {
+      results.push({
+        slot: slotNum,
+        name,
+        status: `failed: ${drift ? `operation_drift (${drift})` : `${op.reason} (${op.detail ?? op.steps.join(",")})`}`,
+      });
+    } else {
+      const sent = await sendClearViaMopSendPath(slotNum, options.source);
+      if (sent.success) {
         db.clearPendingClear(slotNum);
         db.logEvent(slotNum, "slot_cleared", null, null, {
           name,
@@ -536,47 +608,15 @@ async function clearSlotsThroughMopHttp(
           immediate: true,
           via: options.source,
           delivery: "mop_send_to_slot",
+          interrupt: { ok: op.ok, reason: op.reason, steps: op.steps },
         });
-
-        results.push({ slot: slotNum, name, status: "cleared (idle)" });
-      } catch (err) {
-        results.push({ slot: slotNum, name, status: `failed: ${err}` });
-      }
-    } else if (options.terminalOnly) {
-      db.logEvent(slotNum, "clear_terminal_only_skipped", null, null, {
-        name,
-        checked_at: new Date().toISOString(),
-        reason: "Slot is active; terminal-only clear did not arm a pending clear",
-        via: options.source,
-        delivery: "http_clear_endpoint",
-      });
-      results.push({ slot: slotNum, name, status: "active (not terminal; no clear queued)" });
-    } else {
-      // Never queue /clear behind a live turn: interrupt first, verify
-      // inactive, then clear (Rajiv 2026-10-07, thread 1791348298.888079).
-      const interrupted = await interruptSlotBeforeClear(slotNum, options.source);
-      if (!interrupted.ok) {
         results.push({
           slot: slotNum,
           name,
-          status: `failed: interrupt_unverified (${interrupted.detail ?? interrupted.steps.join(",")})`,
+          status: op.reason === "no_live_turn" ? "cleared (idle)" : "cleared (interrupted live turn first)",
         });
       } else {
-        const sent = await sendClearViaMopSendPath(slotNum, options.source);
-        if (sent.success) {
-          db.clearPendingClear(slotNum);
-          db.logEvent(slotNum, "slot_cleared", null, null, {
-            name,
-            cleared_at: new Date().toISOString(),
-            immediate: true,
-            via: options.source,
-            delivery: "mop_send_to_slot",
-            interrupt: { ok: interrupted.ok, reason: interrupted.reason, steps: interrupted.steps },
-          });
-          results.push({ slot: slotNum, name, status: "cleared (interrupted live turn first)" });
-        } else {
-          results.push({ slot: slotNum, name, status: `failed: ${sent.error ?? sent.reason ?? `send failed status=${sent.status}`}` });
-        }
+        results.push({ slot: slotNum, name, status: `failed: ${sent.error ?? sent.reason ?? `send failed status=${sent.status}`}` });
       }
     }
 
@@ -1456,8 +1496,11 @@ registerAssignmentEffectRoutes(app, {
     return {
       ok: r.ok,
       reason: r.ok ? `${r.reason}${r.steps.length ? `;${r.steps.join(";")}` : ""}` : `${r.reason};${r.detail ?? ""}`,
+      pin: r.pin,
     };
   },
+  observePane: (slotNum) => observeSlotPane(slotNum),
+  readSession: (slotNum) => slotSessionToken(slotNum),
   // Read-only dirty/clean observation for the audit row. The worktree is
   // never reset by an assignment.
   observeWorktree: async (slotNum) => {
@@ -1849,8 +1892,9 @@ async function readCheckoutMovement(
  */
 async function clearComposerResidueAfterReleaseInterrupt(
   slotNum: number,
+  pinnedPaneId?: string,
 ): Promise<"empty" | "cleared" | "unreadable" | "mode_refused" | "not_cleared"> {
-  const address = paneAddress(slotNum);
+  const address = pinnedPaneId ?? paneAddress(slotNum);
   let sawText = false;
   for (let i = 0; i < 12; i += 1) {
     await sleep(250);

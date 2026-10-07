@@ -13,6 +13,7 @@ import {
   type AssignmentEffectClearResult,
   type AssignmentEffectDeliveryResult,
 } from "../src/assignmentEffectRoutes.js";
+import { pinFrom } from "../src/interruptBeforeClear.js";
 
 const REPO = "github:heydonna-app/heydonna-app";
 
@@ -85,7 +86,13 @@ function harness(): Harness {
     },
     interruptTurn: async (slot) => {
       state.interruptCalls.push(slot);
-      return state.interruptResult;
+      // The operation pin is the live row at verification time (no
+      // observePane/readSession deps here: pane and session are not fenced).
+      const live = db.getSlot(slot)!;
+      return {
+        ...state.interruptResult,
+        pin: pinFrom({ paneId: "%1", checkout: "/fake" }, { ...live, session_id: null }),
+      };
     },
     observeWorktree: async () => state.worktreeResult,
     issueProjection: {

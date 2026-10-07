@@ -16,6 +16,7 @@ import {
   type IssueProjectionOutcome,
 } from "./issueProjection.js";
 import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
+import { pinDrift, pinFrom, type OperationPin, type PaneObservation, type SlotRowLike } from "./interruptBeforeClear.js";
 
 const assignmentEffectSlotParamSchema = z.coerce
   .number()
@@ -70,7 +71,14 @@ export interface AssignmentEffectDependencies {
    * and verify the pane and turn row are inactive. Runs BEFORE the clear.
    * ok=false (interrupt_unverified) fails the assignment closed.
    */
-  interruptTurn: (slot: number) => Promise<{ ok: boolean; reason: string }>;
+  interruptTurn: (slot: number) => Promise<{ ok: boolean; reason: string; pin?: OperationPin }>;
+  /**
+   * Re-observe the slot's immutable pane id + checkout for the operation
+   * fence (CTO REVISE d85ede4). null = unobservable (fails closed).
+   */
+  observePane?: (slot: number) => Promise<PaneObservation | null>;
+  /** Hook-session generation token (latest SessionStart event id). */
+  readSession?: (slot: number) => string | null;
   /**
    * Read-only observation of the pane worktree dirty/clean state for the
   * displacement audit row. Never mutates; null clean means unobserved.
@@ -661,6 +669,34 @@ export function registerAssignmentEffectRoutes(
       }
     }
 
+    // One operation authority (CTO REVISE d85ede4): the pin captured by the
+    // verified interrupt fences every later effect. Re-checked after every
+    // await; any drift refuses with no later-generation effect.
+    let opPin: OperationPin | null = null;
+    const liveRow = (): SlotRowLike | null => {
+      const row = db.getSlot(slotNum);
+      return row ? { ...row, session_id: dependencies.readSession ? dependencies.readSession(slotNum) : null } : null;
+    };
+    const fence = async (
+      stage: string,
+      opts: { allowSessionChange?: boolean } = {},
+    ): Promise<string | null> => {
+      if (!opPin) return `drift:unpinned@${stage}`;
+      const pane = dependencies.observePane ? await dependencies.observePane(slotNum) : undefined;
+      const drift = pinDrift(opPin, liveRow(), pane, opts);
+      return drift ? `${drift}@${stage}` : null;
+    };
+    const driftRefusal = (reason: string) => {
+      db.logEvent(slotNum, "assignment_effect_operation_drift", null, null, {
+        effect_id: request.effect_id,
+        reason,
+      });
+      return c.json(
+        { ...refusal("ownership", "operation_drift", slotStateSummary(db.getSlot(slotNum))), drift: reason },
+        409,
+      );
+    };
+
     if (ownershipPending) {
       // Interrupt BEFORE clear (Rajiv 2026-10-07, thread 1791348298.888079:
       // "fix MoP to trigger interrupt automatically before clear"). The
@@ -671,6 +707,10 @@ export function registerAssignmentEffectRoutes(
       try {
         const interrupted = await dependencies.interruptTurn(slotNum);
         displacement.interrupt = { ok: interrupted.ok, reason: interrupted.reason };
+        opPin = interrupted.ok ? interrupted.pin ?? null : null;
+        if (interrupted.ok && !opPin) {
+          displacement.interrupt = { ok: false, reason: "interrupt_unpinned" };
+        }
       } catch (error) {
         displacement.interrupt = {
           ok: false,
@@ -694,11 +734,19 @@ export function registerAssignmentEffectRoutes(
     }
 
     if (ownershipPending && request.selection_class === "new_issue") {
+      const preClear = await fence("pre_clear");
+      if (preClear) return driftRefusal(preClear);
       const cleared = await dependencies.clearSlot(slotNum);
       displacement.clear = {
         ok: cleared.ok,
         reason: cleared.ok ? cleared.reason : `recorded:${cleared.reason}`,
       };
+      // /clear legitimately starts a new hook session; everything else
+      // (pane, checkout, epoch, owner, turn) must be unchanged.
+      const postClear = await fence("post_clear", { allowSessionChange: true });
+      if (postClear) return driftRefusal(postClear);
+      const fresh = liveRow();
+      if (opPin && fresh) opPin = { ...opPin, sessionId: fresh.session_id };
     }
 
     if (ownershipPending) {
@@ -721,6 +769,10 @@ export function registerAssignmentEffectRoutes(
     let releaseProjection: IssueProjectionOutcome | null = null;
     let assignProjection: IssueProjectionOutcome | null = null;
     if (ownershipPending) {
+      // Observe-worktree is an await too: re-fence, then commit with no
+      // await between the row check and the ownership write (CAS).
+      const preCommit = await fence("pre_commit");
+      if (preCommit) return driftRefusal(preCommit);
       const current = db.getSlot(slotNum);
       if (!current) {
         return c.json(refusal("ownership", "slot_not_found", slotStateSummary(null)), 404);
@@ -770,6 +822,11 @@ export function registerAssignmentEffectRoutes(
         displacement.conflicting_owner_slots = assigned.owner_slots ?? [];
       }
       db.markAssignmentEffectCommitted(request.effect_id, committedEpoch ?? 0);
+      // Re-pin to the generation this operation just committed.
+      const committedRow = liveRow();
+      if (opPin && committedRow) {
+        opPin = pinFrom({ paneId: opPin.paneId, checkout: opPin.checkout }, committedRow);
+      }
       db.logEvent(slotNum, "assignment_effect_ownership_bound", null, null, {
         effect_id: request.effect_id,
         selection_class: request.selection_class,
@@ -818,6 +875,10 @@ export function registerAssignmentEffectRoutes(
     // is committed and read back. Otherwise a failed delivery is still a
     // NAMED recoverable state, never a silent success or implicit rollback.
     const needsDelivery = request.task.trim() !== "" && request.task_file !== "";
+    if (needsDelivery && opPin) {
+      const preDelivery = await fence("pre_delivery");
+      if (preDelivery) return driftRefusal(preDelivery);
+    }
     const delivery = needsDelivery
       ? await dependencies.deliverTaskFile(slotNum, request.task_file)
       : { verified: true, receipt: { slot: slotNum, skipped: "no_task_text", verified: true } };
