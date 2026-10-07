@@ -386,5 +386,39 @@ class LiveDriftGateTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
 
 
+    def _sync_with_hook(self, hook) -> int:
+        original = getattr(module, "_before_sync_write_hook", None)
+        module._before_sync_write_hook = hook
+        try:
+            return self.cli("drift-check", "--sync-drift", "--repo", str(self.repo))
+        finally:
+            if original is None:
+                del module._before_sync_write_hook
+            else:
+                module._before_sync_write_hook = original
+
+    def test_sync_refuses_receiver_edit_made_during_sync(self) -> None:
+        self.dep(self.T1).write_text("live\n")
+        receiver = self.src(self.repo, "guard.sh")
+
+        def edit_receiver(path: Path) -> None:
+            if path == receiver:
+                receiver.write_text("fresh source\n")
+
+        self.assertEqual(self._sync_with_hook(edit_receiver), 2)
+        self.assertEqual(receiver.read_text(), "fresh source\n")
+
+    def test_sync_fails_when_source_manifest_and_deployed_disagree(self) -> None:
+        self.dep(self.T1).write_text("live\n")
+        deployed = self.dep(self.T1)
+
+        def edit_deployed(path: Path) -> None:
+            if path.name == "guard.sh":
+                deployed.write_text("later live\n")
+
+        self.assertEqual(self._sync_with_hook(edit_deployed), 2)
+        self.assertEqual(deployed.read_text(), "later live\n")
+
+
 if __name__ == "__main__":
     unittest.main()

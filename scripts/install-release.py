@@ -546,12 +546,14 @@ def sync_live_drift(*, repo: Path, drift: list[dict[str, Any]]) -> list[dict[str
     and re-hashed.  Unselected/unrelated files in the tree are never touched.
     """
     manifest_path = repo / SHARED_ASSET_MANIFEST
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes.decode("utf-8"))
     by_target: dict[str, dict[str, Any]] = {}
     for entry in manifest.get("entries", []):
         for target_name in _shared_entry_targets(entry):
             by_target[target_name] = entry
-    plan: dict[str, tuple[dict[str, Any], bytes, str]] = {}
+    plan: dict[str, tuple[dict[str, Any], bytes, str, str | None]] = {}
+    deployed_paths: dict[str, list[str]] = {}
     for item in drift:
         entry = by_target.get(item["target"])
         if entry is None:
@@ -572,19 +574,42 @@ def sync_live_drift(*, repo: Path, drift: list[dict[str, Any]]) -> list[dict[str
                 f"REFUSE: receiving source has uncommitted edits: {receiver} has={receiver_digest} "
                 f"manifest={entry.get('sha256')} deployed={digest}"
             )
-        plan[source] = (entry, data, digest)
+        plan[source] = (entry, data, digest, receiver_digest)
+        deployed_paths.setdefault(source, []).append(item["deployed_path"])
     synced: list[dict[str, Any]] = []
-    for source, (entry, data, digest) in sorted(plan.items()):
+    for source, (entry, data, digest, receiver_preimage) in sorted(plan.items()):
         destination = repo / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(f".{destination.name}.sync.{os.getpid()}.tmp")
         temporary.write_bytes(data)
         os.chmod(temporary, entry["mode"])
+        _before_sync_write_hook(destination)
+        if _current_digest(destination) != receiver_preimage:
+            temporary.unlink()
+            raise InstallerError(
+                f"REFUSE: receiving source changed during sync: {destination}; kept the fresh bytes "
+                f"(synced so far: {[item['source_path'] for item in synced]})"
+            )
         os.replace(temporary, destination)
         entry["sha256"] = digest
         synced.append({"source_path": source, "sha256": digest})
     if synced:
+        _before_sync_write_hook(manifest_path)
+        if manifest_path.read_bytes() != manifest_bytes:
+            raise InstallerError(f"REFUSE: source manifest changed during sync: {manifest_path}")
         _write_json_preserving_mode(manifest_path, manifest)
+    # Post-write proof: source bytes == manifest digest == deployed bytes, or fail.
+    written = {entry.get("source_path"): entry.get("sha256") for entry in json.loads(manifest_path.read_text("utf-8")).get("entries", [])}
+    mismatches = []
+    for source, (_, _, digest, _) in sorted(plan.items()):
+        destination = repo / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(source)
+        observed = {"source": _current_digest(destination), "manifest": written.get(source)}
+        for index, deployed in enumerate(deployed_paths[source]):
+            observed[f"deployed[{index}]"] = _current_digest(Path(deployed))
+        if any(value != digest for value in observed.values()):
+            mismatches.append(f"{source} expected={digest} observed={observed}")
+    if mismatches:
+        raise InstallerError("REFUSE: sync-back verification mismatch: " + "; ".join(mismatches))
     return synced
 
 
@@ -594,6 +619,10 @@ def _write_json_preserving_mode(path: Path, value: dict[str, Any]) -> None:
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(temporary, mode)
     os.replace(temporary, path)
+
+
+def _before_sync_write_hook(path: Path) -> None:
+    """Test seam: called immediately before a sync-back receiver/manifest preimage recheck."""
 
 
 def _before_replace_hook(target: Path) -> None:
