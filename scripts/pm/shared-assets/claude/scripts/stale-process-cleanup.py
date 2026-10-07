@@ -125,7 +125,7 @@ def load_slot_inventory() -> tuple[dict[int, dict[str, Any]], str | None]:
                 "sqlite3",
                 "-json",
                 str(MOP_DB),
-                "SELECT slot,status,occupied,idle,dnd,activity,issue,task,repository_id,branch,branch_ref,pr,head_sha,work_kind,handoff_id,claimed_at,active_turn_state,active_turn_id,last_activity FROM slots WHERE slot BETWEEN 1 AND 6 ORDER BY slot;",
+                "SELECT slot,status,occupied,idle,dnd,activity,issue,task,repository_id,branch,branch_ref,pr,head_sha,work_kind,handoff_id,claimed_at,active_turn_state,active_turn_id,last_activity FROM slots WHERE slot BETWEEN 1 AND 8 ORDER BY slot;",
             ],
             timeout=3,
         )
