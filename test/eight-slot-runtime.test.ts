@@ -226,3 +226,17 @@ test("assignment HTTP accepts S8 and refuses S9 before mutation", async () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("slot panes are bound by the explicit layout map, not the index formula", async () => {
+  const { paneAddress } = await import("../src/paneIdentity.js");
+  const { defaultPaneTargetForSlot } = await import("../src/sessionDelivery.js");
+  const expected: Record<number, string> = {
+    1: "0:0.1", 2: "0:0.2", 3: "0:0.3", 4: "0:0.4", 5: "0:0.5", 6: "0:0.7", 7: "0:0.6", 8: "0:0.8",
+  };
+  for (const slot of DEV_SLOT_NUMBERS) {
+    assert.equal(SLOT_RUNTIME_IDENTITIES[slot].paneAddress, expected[slot]);
+    assert.equal(paneAddress(slot), expected[slot]);
+    assert.equal(defaultPaneTargetForSlot(slot), expected[slot]);
+  }
+  assert.equal(new Set(Object.values(expected)).size, 8);
+});

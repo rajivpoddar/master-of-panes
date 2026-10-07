@@ -366,7 +366,9 @@ class RuntimeObservationAdapter:
 
     @staticmethod
     def _pane_target(slot: str) -> str:
-        pane = "0" if slot == "pm" else slot
+        # Panes are numbered by screen position: S6 sits below S5 (index 7)
+        # and S7 beside S5 (index 6). Rajiv 2026-10-07.
+        pane = "0" if slot == "pm" else {"6": "7", "7": "6"}.get(slot, slot)
         return f"0:0.{pane}"
 
     @classmethod

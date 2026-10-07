@@ -11,6 +11,7 @@
 
 import { open, stat, writeFile } from "node:fs/promises";
 import { execShell } from "./asyncCommand.js";
+import { paneAddress as resolvePaneAddress } from "./paneIdentity.js";
 
 export class LogManager {
   private readonly MAX_LOG_SIZE = 100 * 1024; // 100KB per slot
@@ -104,7 +105,7 @@ export class LogManager {
         await writeFile(logPath, "", { flag: "a" });
 
         // Enable pipe-pane — streams all output to log file
-        await execShell(`tmux pipe-pane -t "0:0.${i}" -o 'cat >> ${logPath}'`, {
+        await execShell(`tmux pipe-pane -t "${resolvePaneAddress(i)}" -o 'cat >> ${logPath}'`, {
           timeout: 5_000,
         });
       } catch (err) {
@@ -120,7 +121,7 @@ export class LogManager {
   async disableLogging(slotCount: number): Promise<void> {
     for (let i = 1; i <= slotCount; i++) {
       try {
-        await execShell(`tmux pipe-pane -t "0:0.${i}"`, { timeout: 5_000 });
+        await execShell(`tmux pipe-pane -t "${resolvePaneAddress(i)}"`, { timeout: 5_000 });
       } catch {
         // Ignore — pane may not exist
       }

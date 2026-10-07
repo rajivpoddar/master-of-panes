@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { paneAddress } from "./paneIdentity.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -21,7 +22,7 @@ export function isValidPaneTarget(target: unknown): target is string {
 
 // Same slot->pane convention the server already uses for capture-pane reads.
 export function defaultPaneTargetForSlot(slot: number): string {
-  return `0:0.${slot}`;
+  return paneAddress(slot);
 }
 
 async function realPaneCheck(target: string): Promise<PaneCheckResult> {

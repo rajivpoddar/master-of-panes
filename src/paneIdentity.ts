@@ -20,7 +20,7 @@ export type PaneIdentityResult =
 export type PaneCommandRunner = (command: string, options?: { timeout?: number }) => Promise<ExecShellResult>;
 
 export function paneAddress(slot: number): string {
-  return `0:0.${slot}`;
+  return runtimeIdentity(slot)?.paneAddress ?? `0:0.${slot}`;
 }
 
 function shellEscape(value: string): string {

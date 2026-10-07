@@ -13,6 +13,7 @@ import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 import type { HookPayload, HookResponse, SlotState } from "./types.js";
 import { isValidDevSlot } from "./slotConfig.js";
+import { paneAddress as resolvePaneAddress } from "./paneIdentity.js";
 
 const execFileAsync = promisify(execFile);
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
@@ -963,7 +964,7 @@ export class HookProcessor {
     // log content without the TUI prompt.)
     let output = "";
     try {
-      const raw = await execShell(`tmux capture-pane -t 0:0.${slotNum} -p -S -20`, { timeout: 5_000 });
+      const raw = await execShell(`tmux capture-pane -t ${resolvePaneAddress(slotNum)} -p -S -20`, { timeout: 5_000 });
       output = raw.stdout;
     } catch { output = ""; }
     const hasPrompt = /Would you like to proceed|❯\s*1\.\s*Yes|ctrl-g to edit/i.test(output);
@@ -1051,7 +1052,7 @@ export class HookProcessor {
       const captureFile = `/tmp/slot-${slotNum}-active-capture.txt`;
       try {
         const capture = await execShell(
-          `tmux capture-pane -t 0:0.${slotNum} -p -S -15`,
+          `tmux capture-pane -t ${resolvePaneAddress(slotNum)} -p -S -15`,
           { timeout: 5_000 }
         );
         await writeFile(captureFile, capture.stdout);
@@ -1213,7 +1214,7 @@ export class HookProcessor {
         const captureFile = `/tmp/slot-${slotNum}-idle-capture.txt`;
         try {
           const capture = await execShell(
-            `tmux capture-pane -t 0:0.${slotNum} -p -S -30`,
+            `tmux capture-pane -t ${resolvePaneAddress(slotNum)} -p -S -30`,
             { timeout: 5_000 }
           );
           await writeFile(captureFile, capture.stdout);

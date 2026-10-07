@@ -41,7 +41,25 @@ export type SlotRuntimeIdentity = {
   browserProfile: string;
   modalSuffix: string;
   envPath: string;
+  /** Explicit tmux address; panes are numbered by position, not by slot. */
+  paneAddress: string;
 };
+
+/**
+ * Physical tmux layout (Rajiv 2026-10-07: S6 sits below S5, so tmux index 7).
+ * Panes are numbered by screen position, so a slot's address is configuration,
+ * never the index formula 0:0.N.
+ */
+export const DEV_SLOT_PANE_ADDRESSES: Readonly<Record<number, string>> = Object.freeze({
+  1: "0:0.1",
+  2: "0:0.2",
+  3: "0:0.3",
+  4: "0:0.4",
+  5: "0:0.5",
+  6: "0:0.7",
+  7: "0:0.6",
+  8: "0:0.8",
+});
 
 export const DEV_SLOT_NAMES: Readonly<Record<number, string>> = Object.freeze({
   1: "Rohini",
@@ -73,6 +91,7 @@ export const SLOT_RUNTIME_IDENTITIES: Readonly<Record<number, SlotRuntimeIdentit
       browserProfile: `/Users/rajiv/.agent-browser/profiles/admin-slot${slot}`,
       modalSuffix: `-slot${slot}`,
       envPath: `/Users/rajiv/Downloads/projects/heydonna-app-300${slot}/.env.local`,
+      paneAddress: DEV_SLOT_PANE_ADDRESSES[slot],
     } satisfies SlotRuntimeIdentity])) as Record<number, SlotRuntimeIdentity>);
 
 export function runtimeIdentity(slot: number): SlotRuntimeIdentity | null {

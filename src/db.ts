@@ -648,7 +648,7 @@ export class MoPDatabase {
 
     for (const i of devSlots(this.config.slotCount)) {
       const name = runtimeIdentity(i)?.name ?? null;
-      insertSlot.run(i, `0:0.${i}`, name);
+      insertSlot.run(i, runtimeIdentity(i)?.paneAddress ?? `0:0.${i}`, name);
       if (name) fillMissingSlotName.run(name, i);
     }
   }

@@ -14,7 +14,7 @@ import type { MoPDatabase } from "./db.js";
 import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
-import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { composerText, INJECT_ENTER_DELAY_MS, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 
@@ -1393,7 +1393,7 @@ export class TmuxRelay {
     // Claude Code TUI prompts (plan approval, status bar) that pipe-pane logs miss.
     // (Rajiv directive 2026-03-18: "change it to use tmux capture pane instead")
     let output = "";
-    const paneAddress = `0:0.${slotNum}`;
+    const paneAddress = resolvePaneAddress(slotNum);
     try {
       const raw = await execShell(
         `tmux capture-pane -t ${paneAddress} -p -S -${lines}`,

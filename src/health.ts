@@ -23,7 +23,7 @@ import type { MoPDatabase } from "./db.js";
 import { recentJsonlActivity } from "./jsonlActivity.js";
 import type { TmuxRelay } from "./relay.js";
 import { DEV_SLOT_NUMBERS, RUNTIME_SLOT_NUMBERS, SLOT_RUNTIME_IDENTITIES } from "./slotConfig.js";
-import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 
 // ─── Restart Commands ──────────────────────────────────────
 // These are shell aliases defined in ~/.zshrc. Since tmux panes
@@ -349,7 +349,7 @@ export class ProcessHealthChecker {
   }
 
   private async capturePaneFingerprint(slotNum: number): Promise<string | null> {
-    const paneAddress = `0:0.${slotNum}`;
+    const paneAddress = resolvePaneAddress(slotNum);
     try {
       const result = await execShell(
         `tmux capture-pane -t ${paneAddress} -p -S -80`,

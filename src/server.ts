@@ -72,7 +72,7 @@ import {
 import type { HookPayload, MoPConfig } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
 import { runtimeIdentity } from "./slotConfig.js";
-import { paneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import {
   clearSlotForAssignmentWithReadyWait,
   latestSessionStartEventId,
@@ -2922,7 +2922,7 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
     // which doesn't contain the TUI prompt. (Bug fix 2026-03-18)
     let output = "";
     try {
-      const raw = await execShell(`tmux capture-pane -t 0:0.${slotNum} -p -S -20`, { timeout: 5_000 });
+      const raw = await execShell(`tmux capture-pane -t ${resolvePaneAddress(slotNum)} -p -S -20`, { timeout: 5_000 });
       output = raw.stdout;
     } catch { output = ""; }
     if (promptPattern.test(output)) {

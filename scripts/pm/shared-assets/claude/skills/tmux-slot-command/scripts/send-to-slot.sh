@@ -83,7 +83,12 @@ if [ -z "$COMMAND" ] && [ -z "$FILE" ]; then
   exit 1
 fi
 
-PANE="0:0.$SLOT"
+# Panes are numbered by screen position: S6 is index 7, S7 is index 6 (Rajiv 2026-10-07).
+case "$SLOT" in
+  6) PANE="0:0.7" ;;
+  7) PANE="0:0.6" ;;
+  *) PANE="0:0.$SLOT" ;;
+esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MOP_PORT="${MOP_PORT:-3100}"
 

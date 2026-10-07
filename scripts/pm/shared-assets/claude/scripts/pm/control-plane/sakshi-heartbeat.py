@@ -224,8 +224,8 @@ SESSIONS = [
     {"id": "3", "label": "S3", "pane": 3, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3003"},
     {"id": "4", "label": "S4", "pane": 4, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3004"},
     {"id": "5", "label": "S5", "pane": 5, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3005"},
-    {"id": "6", "label": "S6", "pane": 6, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3006"},
-    {"id": "7", "label": "S7", "pane": 7, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3007"},
+    {"id": "6", "label": "S6", "pane": 7, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3006"},
+    {"id": "7", "label": "S7", "pane": 6, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3007"},
     {"id": "8", "label": "S8", "pane": 8, "project": "-Users-rajiv-Downloads-projects-heydonna-app-3008"},
 ]
 
