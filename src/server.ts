@@ -2962,7 +2962,7 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
       const approvalLanded = slotAfter?.activity !== "awaiting_plan_approval";
 
       try {
-        await execShell(`${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`, { timeout: 5000 });
+        if ((await relay.getSlotActivityState(slotNum)) !== "active") throw new Error("slot not active");
         // Pane is active — approval landed. The pane becoming active IS the success signal.
         // Don't re-check MoP activity state — it may not have updated yet (race condition).
         // (Bug fix 2026-03-21: MoP reported failure after 3 retries even though attempt 1 succeeded,

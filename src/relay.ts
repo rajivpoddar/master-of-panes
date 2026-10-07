@@ -1364,15 +1364,20 @@ export class TmuxRelay {
    * can inject input must use getSlotActivityState() and fail closed on unknown.
    */
   async isSlotActive(slotNum: number): Promise<boolean> {
-    return (await this.getSlotActivityState(slotNum)) === "active";
+    // Fail closed: an unknown/missing/rebound pane identity is never "idle".
+    return (await this.getSlotActivityState(slotNum)) !== "idle";
   }
 
   async getSlotActivityState(slotNum: number, expectedPaneId?: string): Promise<SlotActivityState> {
     // Guarded recovery pins activity to the pane already observed/verified.
     if (expectedPaneId !== undefined) return this.getPaneActivityState(expectedPaneId);
+    // Unpinned callers bind to the same verified immutable pane id the
+    // writers use (checkout-bound), never the numeric 0:0.N address.
+    const identity = await verifyPaneIdentity(slotNum, this.runShell);
+    if (!identity.ok) return "unknown";
     try {
-      await execShell(
-        `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum}`,
+      await this.runShell(
+        `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum} --pane-id ${identity.snapshot.paneId}`,
         { timeout: 5_000 }
       );
       return "active";

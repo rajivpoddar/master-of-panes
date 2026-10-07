@@ -903,6 +903,15 @@
       "source_path": "claude/skills/message-slot/scripts/message-slot.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/skills/pane-video/scripts/record-pane.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-pane-video",
+      "sha256": "dce44457cfe6314ad8427136512cdbd6652321dcbe2ba7593189d3f172b61259",
+      "source_path": "claude/skills/pane-video/scripts/record-pane.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/pm-cleanup-pr/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -973,13 +982,49 @@
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/skills/tmux-pane-screenshot/scripts/pane-screenshot.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-tmux-pane-screenshot",
+      "sha256": "df642f392856d750bb42a29ab2f0947481cd58071825c91878ddb981da0888f0",
+      "source_path": "claude/skills/tmux-pane-screenshot/scripts/pane-screenshot.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/tmux-slot-command/scripts/is-active.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-tmux-slot-command",
+      "sha256": "4479517389e63ba8e6df3fecd7b938c16079322685d92c14de9947df29c617d2",
+      "source_path": "claude/skills/tmux-slot-command/scripts/is-active.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/tmux-slot-command/scripts/run-and-wait.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-tmux-slot-command",
+      "sha256": "c0fd62a75b17341b0b6a798b4f8bfe0df9a6ed6e9b6ab079ef35fc1d05a33cee",
+      "source_path": "claude/skills/tmux-slot-command/scripts/run-and-wait.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/tmux-slot-command/scripts/send-to-slot.sh",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-tmux-slot-command",
-      "sha256": "a31a8aacaf1f1de9c74eeb8ea6862368f9b362db651471c3cd93d0dc822cb68b",
+      "sha256": "c2a604f9b5f39320747dc77f66aebfd4dc1ea54d72fefc655202b7de406bc3e9",
       "source_path": "claude/skills/tmux-slot-command/scripts/send-to-slot.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/tmux-slot-command/scripts/slot-pane.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-tmux-slot-command",
+      "sha256": "905c0ee7bb2e373fa00b41580e1605103cd41864749f0baa50b57ba3e4dc2bae",
+      "source_path": "claude/skills/tmux-slot-command/scripts/slot-pane.sh"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/todo-prioritize/SKILL.md",
@@ -1392,7 +1437,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 151,
+    "selected_count": 156,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1474,7 +1519,12 @@
       "~/.claude/scripts/launch-slot-7.sh",
       "~/.claude/scripts/launch-slot-8.sh",
       "~/.claude/dev-slot-rules/22-slot-swati.md",
-      "~/.claude/dev-slot-rules/22-slot-anuradha.md"
+      "~/.claude/dev-slot-rules/22-slot-anuradha.md",
+      "~/.claude/skills/pane-video/scripts/record-pane.sh",
+      "~/.claude/skills/tmux-pane-screenshot/scripts/pane-screenshot.sh",
+      "~/.claude/skills/tmux-slot-command/scripts/is-active.sh",
+      "~/.claude/skills/tmux-slot-command/scripts/run-and-wait.sh",
+      "~/.claude/skills/tmux-slot-command/scripts/slot-pane.sh"
     ]
   },
   "owner": "master-of-panes",

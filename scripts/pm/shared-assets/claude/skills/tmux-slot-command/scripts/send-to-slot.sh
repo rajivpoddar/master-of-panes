@@ -83,18 +83,18 @@ if [ -z "$COMMAND" ] && [ -z "$FILE" ]; then
   exit 1
 fi
 
-# Panes are numbered by screen position: S6 is index 7, S7 is index 6 (Rajiv 2026-10-07).
-case "$SLOT" in
-  6) PANE="0:0.7" ;;
-  7) PANE="0:0.6" ;;
-  *) PANE="0:0.$SLOT" ;;
-esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Verified immutable pane id bound to the slot checkout (never 0:0.N).
+PANE=$("$SCRIPT_DIR/slot-pane.sh" "$SLOT" 2>/dev/null)
 MOP_PORT="${MOP_PORT:-3100}"
 
 # Raw mode: send tmux key sequences directly (Escape, BTab, C-c, etc.)
 # These are UI control sequences, not slot communication — bypass MoP.
 if [ "$RAW" = "--raw" ]; then
+  if [ -z "$PANE" ]; then
+    echo "ERROR: slot $SLOT pane identity unknown; refusing raw keys" >&2
+    exit 2
+  fi
   # shellcheck disable=SC2086
   tmux send-keys -t "$PANE" $COMMAND
   echo "✓ Sent raw keys to slot $SLOT: $COMMAND"
@@ -102,8 +102,10 @@ if [ "$RAW" = "--raw" ]; then
 fi
 
 # Delegate activity check to is-active.sh (color-only detection, no word matching)
+# Exit 2 (identity unknown) counts as active: fail closed, never idle.
 is_claude_active() {
   "$SCRIPT_DIR/is-active.sh" "$SLOT" 2>/dev/null
+  [ $? -ne 1 ]
 }
 
 # Function to wait for Claude to become idle
@@ -130,6 +132,7 @@ wait_for_idle() {
 wait_for_prompt() {
   local max_wait=${1:-60}
   local count=0
+  [ -n "$PANE" ] || return 1
   while [ $count -lt $max_wait ]; do
     if tmux capture-pane -t "$PANE" -p | tail -5 | grep -q '^❯' && \
        tmux capture-pane -t "$PANE" -p | tail -3 | grep -q 'INSERT'; then

@@ -646,10 +646,19 @@ export class MoPDatabase {
       WHERE slot = ? AND (name IS NULL OR trim(name) = '')
     `);
 
+    // Display metadata only: keep the configured pane address in step with the
+    // layout map (S6 moved to 0:0.7 on 2026-10-07). Never touches ownership,
+    // issue or assignment_epoch; effects always pin the verified pane id.
+    const syncSlotAddress = this.db.prepare(`
+      UPDATE slots SET address = ? WHERE slot = ? AND address IS NOT ?
+    `);
+
     for (const i of devSlots(this.config.slotCount)) {
       const name = runtimeIdentity(i)?.name ?? null;
-      insertSlot.run(i, runtimeIdentity(i)?.paneAddress ?? `0:0.${i}`, name);
+      const configured = runtimeIdentity(i)?.paneAddress;
+      insertSlot.run(i, configured ?? `0:0.${i}`, name);
       if (name) fillMissingSlotName.run(name, i);
+      if (configured) syncSlotAddress.run(configured, i, configured);
     }
   }
 
