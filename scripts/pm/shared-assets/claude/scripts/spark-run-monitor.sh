@@ -2,14 +2,21 @@
 # Spark run monitor (Rajiv 2026-10-04 16:49 IST): posts compact stats to a Slack thread every --interval s.
 # Usage: spark-run-monitor.sh --run-name N --log /remote/log [--thread-ts TS] [--interval 900] [--max-hours H]
 #        [--proc-pattern PGREP_PATTERN] [--floor-mib 16384] [--channel C0ALZJHGE49] [--host dgx-spark]
-#        [--enforce-container EXACT_DOCKER_NAME]
+#        [--enforce-container EXACT_DOCKER_NAME] [--stats-json REMOTE_PATH] [--guard-receipt REMOTE_PATH]
+#        [--projected-hours H] [--dry-run]
+# --stats-json: the run's stats JSON (preferred source for loss/memory/errors/log_tail_metrics).
+# --guard-receipt: guard_receipt.json (cuda_free min, guard state, stop reason). CUDA free is N/A on GB10 unified memory.
+# --projected-hours: the guard/plan projection for the whole run; the message flags it when the measured ETA disagrees.
+# --dry-run: one fetch+render, print the message to stdout, post nothing, enforce nothing.
+# Test hooks: --fixture-log/--fixture-stats/--fixture-guard FILE read local canned files instead of ssh (implies --dry-run).
+# Values that legitimately do not exist yet render as "pending (...)", never "n/a".
 # No --thread-ts: posts a new top-level parent, prints its ts. Never mentions CTO. Never prints secrets.
 # Disclosure (CTO review 2026-10-07): posts ONLY allowlisted numeric fields and CLASSIFIED error codes,
 # never raw log text. Enforcement is report-only by default; only --enforce-container stops a container,
 # and only after revalidating its name + docker id + State.StartedAt (generation) captured at start, at most
 # ONCE per monitor (the attempt is consumed before the stop is issued), confirming the stop via inspect.
 exec python3 - "$@" <<'PY'
-import argparse, re, subprocess, sys, time, os, shlex, math
+import argparse, re, subprocess, sys, time, os, shlex, math, json, traceback
 ap = argparse.ArgumentParser()
 ap.add_argument("--run-name", required=True); ap.add_argument("--log", required=True)
 ap.add_argument("--thread-ts"); ap.add_argument("--interval", type=float, default=900)
@@ -17,11 +24,18 @@ ap.add_argument("--max-hours", type=float, default=48); ap.add_argument("--proc-
 ap.add_argument("--floor-mib", type=float, default=16384); ap.add_argument("--channel", default="C0ALZJHGE49")
 ap.add_argument("--host", default="dgx-spark"); ap.add_argument("--heartbeat"); ap.add_argument("--total", type=int)
 ap.add_argument("--enforce-container")
+ap.add_argument("--stats-json"); ap.add_argument("--guard-receipt"); ap.add_argument("--projected-hours", type=float)
+ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--log-every", type=int, default=10)
+ap.add_argument("--fixture-log"); ap.add_argument("--fixture-stats"); ap.add_argument("--fixture-guard")
 a = ap.parse_args()
+FIXTURE = bool(a.fixture_log)
+DRY = a.dry_run or FIXTURE
 SEND = os.environ.get("SPARK_MONITOR_SEND") or os.path.expanduser("~/.claude/skills/slack-message/scripts/slack-send.sh")
 RUN = re.sub(r"[^\w.:-]", "_", a.run_name)[:80]
 
 def post(text, thread=None):
+    if DRY:
+        print(text, flush=True); return "dry"
     cmd = ["bash", SEND, "-c", a.channel] + (["-t", thread] if thread else []) + ["-f"]
     r = subprocess.run(cmd, input=text, capture_output=True, text=True)
     m = re.search(r"ts=(\d+\.\d+)", r.stdout or "")
@@ -32,16 +46,24 @@ def ssh(cmd, timeout=60):
     return subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", a.host, cmd],
                           capture_output=True, text=True, timeout=timeout)
 
-REMOTE = ("L=%s; P=%s; H=%s; echo '##TAIL'; tail -c 30000 \"$L\" 2>&1 | tr '\\r' '\\n' | tail -n 400; grep -o \"{.loss.: [^}]*}\" \"$L\" 2>/dev/null | tail -1;"
+REMOTE = ("L=%s; P=%s; H=%s; S=%s; G=%s; echo '##TAIL'; tail -c 30000 \"$L\" 2>&1 | tr '\\r' '\\n' | tail -n 400; grep -o \"{.loss.: [^}]*}\" \"$L\" 2>/dev/null | tail -1;"
           " echo '##MTIME'; stat -c %%Y \"$L\" 2>&1; date +%%s;"
           " echo '##SMI'; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader 2>&1;"
           " echo '##MEM'; grep MemAvailable /proc/meminfo;"
           " echo '##HB'; [ -n \"$H\" ] && cat \"$H\" 2>/dev/null; echo;"
           " echo '##START'; [ -n \"$P\" ] && docker inspect -f '{{.State.StartedAt}}' \"$P\" 2>/dev/null; date -u +%%s;"
+          " echo '##STATS'; [ -n \"$S\" ] && cat \"$S\" 2>/dev/null; echo;"
+          " echo '##GUARD'; [ -n \"$G\" ] && cat \"$G\" 2>/dev/null; echo;"
           " echo '##PROC'; if [ -n \"$P\" ]; then pgrep -fc -- \"$P\" || true; else echo NA; fi")
 
 def gather():
-    cmd = REMOTE % (shlex.quote(a.log), shlex.quote(a.proc_pattern or ""), shlex.quote(a.heartbeat or ""))
+    if FIXTURE:
+        rd = lambda p: open(p).read() if p else ""
+        tail = rd(a.fixture_log).replace("\r", "\n").splitlines()[-400:]
+        return {"TAIL": tail, "MTIME": ["1", "2"], "SMI": ["[N/A], [N/A], 0 %"], "MEM": ["MemAvailable:   97124864 kB"],
+                "STATS": rd(a.fixture_stats).splitlines(), "GUARD": rd(a.fixture_guard).splitlines(), "PROC": ["1"]}
+    cmd = REMOTE % (shlex.quote(a.log), shlex.quote(a.proc_pattern or ""), shlex.quote(a.heartbeat or ""),
+                    shlex.quote(a.stats_json or ""), shlex.quote(a.guard_receipt or ""))
     r = ssh(cmd)
     if r.returncode != 0 and "##TAIL" not in r.stdout: raise RuntimeError("ssh rc=%d" % r.returncode)
     sec = {}; cur = None
@@ -61,6 +83,7 @@ def classify(ln, table):
         if re.search(pat, ln, re.I if code in ("OOM", "NONFINITE") else 0): return code
     return None
 
+PEND = "pending: first loss at step %d (logging every %d)" % (a.log_every, a.log_every)
 num = r"(-?\d+(?:\.\d+)?(?:e-?\d+)?)"
 def parse(tail):
     d = {"step": None, "total": None, "loss": None, "gn": None, "lr": None, "spi": None, "errs": {}, "terminal": None, "mins": []}
@@ -91,10 +114,13 @@ def errs_line(errs):
 def first(sec, k, i=0, default=""):
     v = sec.get(k, []); return v[i] if len(v) > i else default
 def fmt_eta(s):
-    if s is None or s < 0: return "n/a"
+    if s is None or s < 0: return "pending (no step rate yet)"
     h, m = int(s // 3600), int(s % 3600 // 60); return "%dh%02dm" % (h, m) if h else "%dm" % m
-def f(v, spec="%s"):
-    return "n/a" if v is None or (isinstance(v, float) and not math.isfinite(v)) else spec % v
+def f(v, spec="%s", pending="pending (no loss logged yet)"):
+    return pending if v is None or (isinstance(v, float) and not math.isfinite(v)) else spec % v
+def jload(lines):
+    try: return json.loads("\n".join(lines)) if "".join(lines).strip() else {}
+    except Exception: return {}
 
 # Enforcement target identity, captured once at start (exact name + full docker id + State.StartedAt generation).
 # Never rebound: a restarted/new container generation is a different identity and is refused.
@@ -136,6 +162,7 @@ def enforce():
 
 t0 = time.time(); deadline = t0 + a.max_hours * 3600
 thread = a.thread_ts
+if DRY: thread = thread or "dry-run"
 if not thread:
     thread = post("*Spark run started: %s*\nmonitor every %ds (stats replies below)" % (RUN, a.interval))
     if not thread: sys.exit("could not create parent thread")
@@ -147,14 +174,25 @@ while True:
         d = parse([l for l in sec.get("TAIL", []) if "Loading weights" not in l and "Loading checkpoint" not in l])
         hb = re.search(r'"global_step"\s*:\s*(\d+)', "\n".join(sec.get("HB", [])))
         if hb: d["step"] = int(hb[1])
+        stats = jload(sec.get("STATS", [])); guard = jload(sec.get("GUARD", []))
+        if stats:
+            tl = [l for arm in (stats.get("arms") or {}).values() for l in (arm.get("log_tail_metrics") or [])]
+            ds = parse(tl)
+            for k in ("step", "total", "loss", "gn", "lr", "spi"):
+                if ds[k] is not None and (k in ("loss", "gn", "lr") or d[k] is None): d[k] = ds[k]
+            for k, v in ds["errs"].items(): d["errs"][k] = max(d["errs"].get(k, 0), v)
+            mm = (stats.get("minima_since_stats_start") or {}).get("memavail_min")
+            if mm: d["mins"].append(float(mm))
+            if stats.get("memavail_now_mib"): d["mins"].append(float(stats["memavail_now_mib"]))
+            if not a.total and stats.get("total_steps_this_leg"): a.total = int(stats["total_steps_this_leg"])
         if a.total: d["total"] = a.total
         mem = re.search(r"(\d+)", first(sec, "MEM")); avail = int(mem[1]) / 1024 if mem else None
-        smi = first(sec, "SMI"); gpu = "n/a (unified memory)"
+        smi = first(sec, "SMI"); gpu = "unified memory (GB10, no CUDA-free counter)"
         sm = re.match(r"\s*(\d+) MiB,\s*(\d+) MiB,\s*(\d+) %", smi)
         if sm: gpu = "%s/%s MiB, util %s%%" % sm.groups()
         else:
             m2 = re.search(r",\s*(\d+)\s*%\s*$", smi)
-            if m2: gpu = "mem n/a (unified), util %s%%" % m2[1]
+            if m2: gpu = "unified memory (GB10, no CUDA-free counter), util %s%%" % m2[1]
         cands = [x for x in [avail] + d["mins"] if x is not None]
         if cands: min_avail = min(cands + ([min_avail] if min_avail is not None else []))
         mt = first(sec, "MTIME", 0)
@@ -163,13 +201,14 @@ while True:
         eta = None
         if d["step"] is not None and d["total"]:
             rem = d["total"] - d["step"]
-            obs.append((time.time(), d["step"])); obs[:] = [o for o in obs if o[0] > time.time() - 3600]
-            if obs[0][1] < d["step"]: eta = rem * (time.time() - obs[0][0]) / (d["step"] - obs[0][1])
-            elif d["spi"]: eta = rem * d["spi"]
+            if d["spi"]: eta = rem * d["spi"]
+            else:
+                obs.append((time.time(), d["step"])); obs[:] = [o for o in obs if o[0] > time.time() - 3600]
+                if obs[0][1] < d["step"]: eta = rem * (time.time() - obs[0][0]) / (d["step"] - obs[0][1])
         proc = first(sec, "PROC"); proc_gone = proc.strip() == "0"
         ended = bool(d["terminal"]) or proc_gone
         floor = a.floor_mib
-        fl = "n/a" if min_avail is None else "%d MiB (%s floor %d)" % (min_avail, "BELOW" if min_avail < floor else "above", floor)
+        fl = "pending (no sample yet)" if min_avail is None else "%d MiB (%s floor %d)" % (min_avail, "BELOW" if min_avail < floor else "above", floor)
         end_line = ("ended: %s" % d["terminal"]) if d["terminal"] else ("process no longer running" if proc_gone else "")
         if a.heartbeat:
             import datetime as _dt
@@ -190,11 +229,18 @@ while True:
                      "GPU util %s | free RAM (unified) %s GiB, min %s GiB, floor %d GiB" % ((gpu.split("util ")[-1] if "util" in gpu else "?"), "?" if avail is None else "%.0f" % (avail/1024), "?" if min_avail is None else "%.0f" % (min_avail/1024), floor/1024)]
         else:
             lines = [("*[%s] run ended*" if ended else "*[%s]*") % RUN if not os.environ.get("MONITOR_TEST") else "*[TEST - monitor self-test, ignore] %s*" % RUN,
-                     "step %s/%s | loss %s | grad_norm %s | lr %s | ETA %s" % (f(d["step"]), d["total"] or "n/a",
-                        f(d["loss"]), f(d["gn"]), f(d["lr"], "%.2e"), fmt_eta(eta)),
-                     "GPU %s | MemAvailable %s MiB | min-so-far %s" % (gpu, "n/a" if avail is None else "%d" % avail, fl)]
+                     "step %s/%s | %s s/it | ETA %s" % (f(d["step"], pending="pending (no step logged yet)"), d["total"] or "pending (--total not set)",
+                        f(d["spi"], "%.1f", "pending (no step rate yet)"), fmt_eta(eta)),
+                     "loss %s | grad_norm %s | lr %s" % (f(d["loss"], pending=PEND), f(d["gn"], pending=PEND), f(d["lr"], "%.2e", PEND))]
+            lines += [
+                     "GPU %s | MemAvailable %s MiB | min-so-far %s" % (gpu, "pending (no sample yet)" if avail is None else "%d" % avail, fl)]
+            if guard:
+                lines.append("guard: %s%s" % (guard.get("state", "pending (no state yet)"), (" - " + str(guard.get("reason"))) if guard.get("reason") else ""))
+            if eta is not None and a.projected_hours and eta / 3600 > 1.25 * a.projected_hours:
+                lines.append("WARN: measured ETA %s (%.1f s/it) is %.1fx the projected %.1fh" % (fmt_eta(eta), d["spi"] or 0, eta / 3600 / a.projected_hours, a.projected_hours))
             if stale >= 3 and not ended: lines.append("warn: log not updated for %d checks" % stale)
         lines.append(errs_line(d["errs"])); lines.append(end_line)
+        if guard.get("state", "").startswith("STOPPED"): ended = True
         # Resource/health warning. Report-only unless --enforce-container names a validated target.
         harm = None
         if avail is not None and avail < floor: harm = "LOW_MEM"
@@ -212,8 +258,10 @@ while True:
                 else:
                     msg, stopped = enforce(); lines.append(msg)
         post("\n".join(l for l in lines if l), thread)
-        if ended or stopped: break
+        if ended or stopped or DRY: break
     except Exception as e:
+        traceback.print_exc()
+        if DRY: sys.exit(1)
         if not unreachable_posted:
             post("monitor: Spark unreachable (%s); retrying every %ds" % (type(e).__name__, a.interval), thread); unreachable_posted = True
     if time.time() + a.interval > deadline:
