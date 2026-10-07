@@ -1099,6 +1099,42 @@
       "source_path": "claude/slot-skills/slot6/respawn/scripts/respawn.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3007/.claude/skills/respawn/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-skill",
+      "sha256": "efb56efe58e0e805e40bf6c2da0224fe3e3a252dca90b44eb5c9a3c0867ce341",
+      "source_path": "claude/slot-skills/slot7/respawn/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3007/.claude/skills/respawn/scripts/respawn.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-skill-wrapper",
+      "sha256": "304e715d621e2a67fe0ee40d64e483b060db6405a28065b3314ef03a5ad55cda",
+      "source_path": "claude/slot-skills/slot7/respawn/scripts/respawn.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3008/.claude/skills/respawn/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-slot-skill",
+      "sha256": "efb56efe58e0e805e40bf6c2da0224fe3e3a252dca90b44eb5c9a3c0867ce341",
+      "source_path": "claude/slot-skills/slot8/respawn/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app-3008/.claude/skills/respawn/scripts/respawn.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-skill-wrapper",
+      "sha256": "304e715d621e2a67fe0ee40d64e483b060db6405a28065b3314ef03a5ad55cda",
+      "source_path": "claude/slot-skills/slot8/respawn/scripts/respawn.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/rules/33-heydonna-ui-product-rules.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1356,7 +1392,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 147,
+    "selected_count": 151,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1394,6 +1430,8 @@
       "~/Downloads/projects/heydonna-app-3004/.claude/skills/respawn",
       "~/Downloads/projects/heydonna-app-3005/.claude/skills/respawn",
       "~/Downloads/projects/heydonna-app-3006/.claude/skills/respawn",
+      "~/Downloads/projects/heydonna-app-3007/.claude/skills/respawn",
+      "~/Downloads/projects/heydonna-app-3008/.claude/skills/respawn",
       "~/.codex/skills/codex-stdio-send-message",
       "~/.codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",

@@ -42,13 +42,6 @@ def test_each_slot_installs_the_same_thin_skill_and_canonical_runner_wrapper() -
         skill_bodies.add((source_root / "SKILL.md").read_bytes())
         wrapper_bodies.add((source_root / "scripts" / "respawn.sh").read_bytes())
         target_root = f"/Users/rajiv/Downloads/projects/heydonna-app-300{slot}/.claude/skills/respawn"
-        if slot >= 7:
-            # S7/S8 clones are provisioned later; a manifest entry now would make
-            # install-release mkdir inside the not-yet-cloned checkout path and
-            # block the clone. Add these entries once the clones exist.
-            assert f"{target_root}/SKILL.md" not in by_target
-            continue
-        target_root = f"/Users/rajiv/Downloads/projects/heydonna-app-300{slot}/.claude/skills/respawn"
         assert f"{target_root}/SKILL.md" in by_target
         assert f"{target_root}/scripts/respawn.sh" in by_target
 
