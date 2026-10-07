@@ -422,3 +422,21 @@ test('placeholder plus foreign visible text refuses Enter, keeps content, no ret
     assert.equal(w.panes['%7'].composer, 'my draft [Pasted text #1 +12 lines]'); assert.equal(r.outcome, 'uncertain');
   } finally { await w.cleanup(); }
 });
+
+// CTO REVISE at edbc899 (ts 1791377258.369439): a short /exit never owns an opaque placeholder.
+test('/exit send + foreign 12-line human paste: zero Enter, content preserved, no retry', async () => {
+  const w = await world(); try {
+    w.afterPaste = () => { w.panes['%7'].composer = '[Pasted text #1 +12 lines]'; };
+    await w.tick();
+    assert.deepEqual(w.effects, ['%7:paste:/exit']);
+    assert.equal(w.panes['%7'].composer, '[Pasted text #1 +12 lines]'); assert.equal(w.cycled[6], true);
+    w.afterPaste = undefined; await w.tick(); assert.deepEqual(w.effects, ['%7:paste:/exit']);
+  } finally { await w.cleanup(); }
+});
+test('multiline packet with two placeholders refuses Enter', async () => {
+  const w = await world(); try {
+    w.afterPaste = () => { w.panes['%7'].composer = '[Pasted text #1 +12 lines] [Pasted text #2 +12 lines]'; };
+    await guarded(w);
+    assert.equal(w.effects.filter(e => e.endsWith(':Enter')).length, 0);
+  } finally { await w.cleanup(); }
+});

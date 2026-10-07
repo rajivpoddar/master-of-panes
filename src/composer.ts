@@ -409,3 +409,26 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
     ? { payloadSeen, payloadStable, cleared, queued: true, enterPresses }
     : { payloadSeen, payloadStable, cleared, enterPresses };
 }
+
+/**
+ * Pre-Enter ownership for a paste into a composer verified empty just before
+ * it: the composer holds exactly this payload, or - only for an eligible
+ * bracketed multiline send - exactly one newly created collapsed-paste
+ * placeholder attributable to this payload and nothing else. A short send
+ * (e.g. /exit) never owns an opaque placeholder: it may be a foreign paste.
+ */
+export function composerOwnsOnlyPayload(
+  composer: string | null,
+  payload: string,
+  opts: { allowOpaquePlaceholder: boolean; prePasteComposer?: string | null },
+): boolean {
+  if (composer === null) return false;
+  const expected = squash(payload.trim());
+  if (!expected) return false;
+  if (squash(composer.trim()) === expected) return true;
+  if (!opts.allowOpaquePlaceholder) return false;
+  return [...composer.matchAll(PLACEHOLDER_RE)].length === 1
+    && composerIsOnlyPastePlaceholders(composer)
+    && composerIsRefusedPasteContent(composer, payload)
+    && composerShowsNewPastePlaceholder(composer, opts.prePasteComposer ?? "");
+}

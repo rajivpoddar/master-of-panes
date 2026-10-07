@@ -15,7 +15,7 @@ import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
-import { composerText, composerIsOnlyPastePlaceholders, composerIsRefusedPasteContent, composerShowsNewPastePlaceholder, INJECT_ENTER_DELAY_MS, submitWithComposerCheck } from "./composer.js";
+import { composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
@@ -1332,15 +1332,13 @@ export class TmuxRelay {
             // Substring payload detection is insufficient for a recovery
             // command: foreign text alongside it must never be submitted.
             const submitComposer = composerText(await capture());
-            // Bracketed multiline task packets can render as a new collapsed
-            // paste. Preserve the existing arrival evidence only when no
-            // foreign visible text accompanies that owned placeholder.
-            const ownedPlaceholder = opts.bracketedPaste === true && command.includes("\n")
-              && submitComposer !== null && composerIsOnlyPastePlaceholders(submitComposer)
-              && composerIsRefusedPasteContent(submitComposer, command)
-              && composerShowsNewPastePlaceholder(submitComposer, prePasteComposer);
+            // Opaque collapsed placeholders are owned only by eligible bracketed
+            // multiline sends (assignment packets), never by short recovery sends.
             preEnterRefusal = submitComposer === null ? "composer_unreadable"
-              : !ownedPlaceholder && submitComposer.replace(/\s+/g, "") !== command.replace(/\s+/g, "") ? "composer_not_owned_by_send" : null;
+              : !composerOwnsOnlyPayload(submitComposer, command, {
+                allowOpaquePlaceholder: opts.bracketedPaste === true && command.includes("\n"),
+                prePasteComposer,
+              }) ? "composer_not_owned_by_send" : null;
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
             preEnterRefusal = opts.finalCheck?.("pre_enter") ?? null;
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
