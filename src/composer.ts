@@ -79,6 +79,7 @@ export function composerHoldsPayload(composer: string, payload: string): boolean
   return squash(composer).includes(expected);
 }
 
+
 const MIN_REFUSED_PASTE_PREFIX_LENGTH = 24;
 
 /**
@@ -408,4 +409,19 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
   return queued
     ? { payloadSeen, payloadStable, cleared, queued: true, enterPresses }
     : { payloadSeen, payloadStable, cleared, enterPresses };
+}
+
+/**
+ * Pre-Enter ownership for a paste into a composer verified empty just before
+ * it: the composer holds exactly this payload, or exactly one newly created
+ * collapsed-paste placeholder and nothing else. Any foreign visible text fails.
+ */
+export function composerOwnsOnlyPayload(composer: string | null, payload: string): boolean {
+  if (composer === null) return false;
+  const expected = squash(payload.trim());
+  if (!expected) return false;
+  if (squash(composer.trim()) === expected) return true;
+  const placeholders = [...composer.matchAll(PLACEHOLDER_RE)].length;
+  return placeholders === 1 && composerIsOnlyPastePlaceholders(composer)
+    && composerShowsNewPastePlaceholder(composer, "");
 }

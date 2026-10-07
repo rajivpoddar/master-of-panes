@@ -308,3 +308,48 @@ for (const mode of ['exit','empty']) for (const fail of [[2],[3],[2,3]]) test(`l
 test('readable later captures on an idle pane still prove idle', async () => {
   const w = await world(); try { assert.equal((await probeResult(w, 6)).status, 1); } finally { await w.cleanup(); }
 });
+
+// CTO REVISE on 71912da (C0ALZJHGE49/1791372028.387449 ts 1791375601.182929):
+// the guarded recovery writer re-reads the composer after every await.
+test('late draft typed during buffer load stays intact: zero paste, zero Enter', async () => {
+  const w = await world(); try {
+    w.afterLoad = () => { w.panes['%7'].composer = 'half typed draft'; };
+    await w.tick();
+    assert.equal(w.loads, 1); assert.deepEqual(w.effects, []);
+    assert.equal(w.panes['%7'].composer, 'half typed draft');
+  } finally { await w.cleanup(); }
+});
+test('foreign composer content after paste is never submitted', async () => {
+  const w = await world(); try {
+    w.afterPaste = () => { w.panes['%7'].composer = 'draft text /exit'; };
+    await w.tick();
+    assert.deepEqual(w.effects, ['%7:paste:/exit']); assert.equal(w.cycled[6], true);
+  } finally { await w.cleanup(); }
+});
+test('positive idle S6 delivery still pastes /exit and presses one Enter', async () => {
+  const w = await world(); try {
+    await w.tick();
+    assert.deepEqual(w.effects, ['%7:paste:/exit', '%7:Enter']); assert.equal(w.cycled[6], true);
+  } finally { await w.cleanup(); }
+});
+
+// CTO P2 on 249813f (ts 1791376219.975109): owned collapsed multiline packets still submit once.
+const packet = Array.from({ length: 13 }, (_, i) => `packet line ${i + 1}`).join('\n');
+const guarded = w => w.relay.deliverGuardedToSlot(6, packet, { expectedPaneId: '%7', recheck: async () => null, bracketedPaste: true,
+  timing: { dwellMs: 0, pollMs: 0, payloadGraceMs: 0, payloadStableMs: 0, clearGraceMs: 0 } });
+test('newly owned placeholder-only multiline packet submits exactly once', async () => {
+  const w = await world(); try {
+    w.afterPaste = () => { w.panes['%7'].composer = '[Pasted text #1 +12 lines]'; };
+    const r = await guarded(w);
+    assert.equal(w.effects.filter(e => e.endsWith(':Enter')).length, 1); assert.notEqual(r.outcome, 'refused_pre_effect');
+  } finally { await w.cleanup(); }
+});
+test('placeholder plus foreign visible text refuses Enter, keeps content, no retry', async () => {
+  const w = await world(); try {
+    w.afterPaste = () => { w.panes['%7'].composer = 'my draft [Pasted text #1 +12 lines]'; };
+    const r = await guarded(w);
+    assert.equal(w.effects.filter(e => e.endsWith(':Enter')).length, 0);
+    assert.equal(w.effects.filter(e => e.includes(':paste:')).length, 1);
+    assert.equal(w.panes['%7'].composer, 'my draft [Pasted text #1 +12 lines]'); assert.equal(r.outcome, 'uncertain');
+  } finally { await w.cleanup(); }
+});
