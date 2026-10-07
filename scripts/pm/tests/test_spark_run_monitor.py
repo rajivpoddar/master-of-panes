@@ -212,3 +212,49 @@ def test_g_generation_drift_after_local_check_refused_before_stop(tmp_path):
     assert state["stops"] == 0
     assert state["running"] is True
     assert not any("stopped target container (confirmed)" in post for post in posts)
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def fixture_run(tmp_path, log_text, stats=None):
+    logp = tmp_path / "train.log"; logp.write_text(log_text)
+    args = ["bash", str(SCRIPT), "--run-name", "hf", "--log", "/r/log", "--total", "400", "--fixture-log", str(logp)]
+    if stats is not None:
+        sp = tmp_path / "stats.json"; sp.write_text(json.dumps(stats)); args += ["--fixture-stats", str(sp)]
+    env = dict(os.environ); env.pop("MONITOR_TEST", None)
+    r = subprocess.run(args, env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def test_h_hf_trainer_log_is_primary_source_with_tqdm_interleaved(tmp_path):
+    out = fixture_run(tmp_path, (FIXTURES / "hf_trainer_tqdm.log").read_text(),
+                      stats={"arms": {"a": {"log_tail_metrics": ["{'loss': 9.9, 'grad_norm': 9.9, 'learning_rate': 9e-09}"]}}})
+    assert "loss 2.187 | grad_norm 2.953 | lr 1.00e-06 | epoch 0.01" in out, out
+    assert "step 4/400" in out
+
+
+def test_h_stats_json_is_fallback_when_log_has_no_dict(tmp_path):
+    out = fixture_run(tmp_path, "  1%|          | 3/400 [01:59<4:22:40, 39.75s/it]",
+                      stats={"arms": {"a": {"log_tail_metrics": ["{'loss': 1.5, 'grad_norm': 0.5, 'learning_rate': 2e-05}"]}}})
+    assert "loss 1.5 | grad_norm 0.5 | lr 2.00e-05" in out, out
+
+
+def test_h_before_first_log_line_pending_and_never_na(tmp_path):
+    out = fixture_run(tmp_path, "  0%|          | 0/400 [00:00<?, ?it/s]")
+    assert "loss pending (first log line)" in out
+    full = fixture_run(tmp_path, (FIXTURES / "hf_trainer_tqdm.log").read_text())
+    for text in (out, full):
+        assert "n/a" not in text.lower(), text
+
+
+def test_h_remote_grep_extracts_latest_hf_dict(tmp_path):
+    import re
+    src = SCRIPT.read_text()
+    line = [l for l in src.splitlines() if "##HF" in l][0]
+    shell = eval(line.strip().rstrip(";").strip())  # the python string literal fragment
+    logp = tmp_path / "train.log"; (logp).write_text((FIXTURES / "hf_trainer_tqdm.log").read_text())
+    r = subprocess.run(["bash", "-c", "L=%s;%s" % (logp, shell)], capture_output=True, text=True)
+    got = r.stdout.splitlines()
+    assert got[0] == "##HF" and re.fullmatch(r"\{'loss': 2\.1874, .*'epoch': 0\.01\}", got[1]), r.stdout

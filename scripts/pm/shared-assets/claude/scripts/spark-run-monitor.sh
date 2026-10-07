@@ -46,7 +46,8 @@ def ssh(cmd, timeout=60):
     return subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", a.host, cmd],
                           capture_output=True, text=True, timeout=timeout)
 
-REMOTE = ("L=%s; P=%s; H=%s; S=%s; G=%s; echo '##TAIL'; tail -c 30000 \"$L\" 2>&1 | tr '\\r' '\\n' | tail -n 400; grep -o \"{.loss.: [^}]*}\" \"$L\" 2>/dev/null | tail -1;"
+REMOTE = ("L=%s; P=%s; H=%s; S=%s; G=%s; echo '##TAIL'; tail -c 30000 \"$L\" 2>&1 | tr '\\r' '\\n' | tail -n 400; "
+          " echo '##HF'; grep -aoE \"[{]['\\\"]loss['\\\"]: [^}]*[}]\" \"$L\" 2>/dev/null | tail -1;"
           " echo '##MTIME'; stat -c %%Y \"$L\" 2>&1; date +%%s;"
           " echo '##SMI'; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader 2>&1;"
           " echo '##MEM'; grep MemAvailable /proc/meminfo;"
@@ -56,11 +57,28 @@ REMOTE = ("L=%s; P=%s; H=%s; S=%s; G=%s; echo '##TAIL'; tail -c 30000 \"$L\" 2>&
           " echo '##GUARD'; [ -n \"$G\" ] && cat \"$G\" 2>/dev/null; echo;"
           " echo '##PROC'; if [ -n \"$P\" ]; then pgrep -fc -- \"$P\" || true; else echo NA; fi")
 
+# HF Trainer log dict, e.g. {'loss': 1.23, 'grad_norm': 0.45, 'learning_rate': 2e-05, 'epoch': 0.1}.
+HF_RE = re.compile(r"""\{['"]loss['"]: [^}]*\}""")
+def parse_hf(lines):
+    """Latest HF Trainer log dict from the training log (primary loss/grad_norm/lr/epoch source)."""
+    out = {}
+    for ln in lines:
+        for blob in HF_RE.findall(ln):
+            cur = {}
+            for k, key in (("loss", "loss"), ("gn", "grad_norm"), ("lr", "learning_rate"), ("epoch", "epoch")):
+                m = re.search(r"['\"]" + key + r"['\"]\s*:\s*['\"]?(-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|nan|inf|-inf)", blob)
+                if m:
+                    try: cur[k] = float(m[1])
+                    except ValueError: pass
+            if "loss" in cur: out = cur
+    return out
+
 def gather():
     if FIXTURE:
         rd = lambda p: open(p).read() if p else ""
         tail = rd(a.fixture_log).replace("\r", "\n").splitlines()[-400:]
-        return {"TAIL": tail, "MTIME": ["1", "2"], "SMI": ["[N/A], [N/A], 0 %"], "MEM": ["MemAvailable:   97124864 kB"],
+        hfl = HF_RE.findall(rd(a.fixture_log))
+        return {"TAIL": tail, "HF": hfl[-1:], "MTIME": ["1", "2"], "SMI": ["[N/A], [N/A], 0 %"], "MEM": ["MemAvailable:   97124864 kB"],
                 "STATS": rd(a.fixture_stats).splitlines(), "GUARD": rd(a.fixture_guard).splitlines(), "PROC": ["1"]}
     cmd = REMOTE % (shlex.quote(a.log), shlex.quote(a.proc_pattern or ""), shlex.quote(a.heartbeat or ""),
                     shlex.quote(a.stats_json or ""), shlex.quote(a.guard_receipt or ""))
@@ -83,10 +101,10 @@ def classify(ln, table):
         if re.search(pat, ln, re.I if code in ("OOM", "NONFINITE") else 0): return code
     return None
 
-PEND = "pending: first loss at step %d (logging every %d)" % (a.log_every, a.log_every)
+PEND = "pending (first log line)"
 num = r"(-?\d+(?:\.\d+)?(?:e-?\d+)?)"
 def parse(tail):
-    d = {"step": None, "total": None, "loss": None, "gn": None, "lr": None, "spi": None, "errs": {}, "terminal": None, "mins": []}
+    d = {"step": None, "total": None, "epoch": None, "loss": None, "gn": None, "lr": None, "spi": None, "errs": {}, "terminal": None, "mins": []}
     for ln in tail:
         m = re.search(r"\b(\d+)/(\d+)\s*\[[^\]]*?(?:([\d.]+)s/it|([\d.]+)it/s)", ln)
         if m:
@@ -174,12 +192,15 @@ while True:
         d = parse([l for l in sec.get("TAIL", []) if "Loading weights" not in l and "Loading checkpoint" not in l])
         hb = re.search(r'"global_step"\s*:\s*(\d+)', "\n".join(sec.get("HB", [])))
         if hb: d["step"] = int(hb[1])
+        # Primary source: the latest HF Trainer dict in the training log itself (Rajiv 2026-10-08, thread 1791388344.871569).
+        hf = parse_hf(sec.get("HF", []) + sec.get("TAIL", []))
+        for k, v in hf.items(): d[k] = v
         stats = jload(sec.get("STATS", [])); guard = jload(sec.get("GUARD", []))
         if stats:
             tl = [l for arm in (stats.get("arms") or {}).values() for l in (arm.get("log_tail_metrics") or [])]
             ds = parse(tl)
             for k in ("step", "total", "loss", "gn", "lr", "spi"):
-                if ds[k] is not None and (k in ("loss", "gn", "lr") or d[k] is None): d[k] = ds[k]
+                if ds[k] is not None and d[k] is None: d[k] = ds[k]  # stats JSON is the fallback only
             for k, v in ds["errs"].items(): d["errs"][k] = max(d["errs"].get(k, 0), v)
             mm = (stats.get("minima_since_stats_start") or {}).get("memavail_min")
             if mm: d["mins"].append(float(mm))
@@ -231,7 +252,7 @@ while True:
             lines = [("*[%s] run ended*" if ended else "*[%s]*") % RUN if not os.environ.get("MONITOR_TEST") else "*[TEST - monitor self-test, ignore] %s*" % RUN,
                      "step %s/%s | %s s/it | ETA %s" % (f(d["step"], pending="pending (no step logged yet)"), d["total"] or "pending (--total not set)",
                         f(d["spi"], "%.1f", "pending (no step rate yet)"), fmt_eta(eta)),
-                     "loss %s | grad_norm %s | lr %s" % (f(d["loss"], pending=PEND), f(d["gn"], pending=PEND), f(d["lr"], "%.2e", PEND))]
+                     "loss %s | grad_norm %s | lr %s | epoch %s" % (f(d["loss"], "%.4g", PEND), f(d["gn"], "%.4g", PEND), f(d["lr"], "%.2e", PEND), f(d["epoch"], "%.3g", PEND))]
             lines += [
                      "GPU %s | MemAvailable %s MiB | min-so-far %s" % (gpu, "pending (no sample yet)" if avail is None else "%d" % avail, fl)]
             if guard:

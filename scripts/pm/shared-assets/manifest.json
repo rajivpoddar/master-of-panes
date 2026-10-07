@@ -665,7 +665,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-spark-run-monitor",
-      "sha256": "d105c502862d3f48149984dee8df99e0043c50592c581f20cf2424008e29e5cd",
+      "sha256": "852b891bcc1f481924baf8f6766209a3930eba15b9bfbd3aa5b8c364eaa95891",
       "source_path": "claude/scripts/spark-run-monitor.sh"
     },
     {
