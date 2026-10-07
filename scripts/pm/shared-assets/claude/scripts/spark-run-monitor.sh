@@ -121,10 +121,15 @@ def enforce():
     now = inspect_identity(target[0])
     if now != target: return "ENFORCE skipped: target identity missing or changed (id/name/StartedAt)", False
     stop_attempt_consumed = True  # consumed BEFORE issuing: success, failure or lost ack all count
+    expected = '%s /%s %s' % target
+    identity_format = '{{.Id}} {{.Name}} {{.State.StartedAt}}'
+    command = 'test "$(docker inspect -f %s %s)" = %s && docker stop %s' % (
+        shlex.quote(identity_format), target[0], shlex.quote(expected), target[0])
     try:
-        ssh("docker stop %s" % target[0], timeout=120)
-        st = ssh("docker inspect -f '{{.State.Running}}' %s" % target[0], timeout=30)
-        if st.returncode == 0 and st.stdout.strip() == "false": return "ENFORCE: stopped target container (confirmed)", True
+        stopped = ssh(command, timeout=120)
+        st = ssh("docker inspect -f %s %s" % (shlex.quote(identity_format + ' {{.State.Running}}'), target[0]), timeout=30)
+        if stopped.returncode == 0 and st.returncode == 0 and st.stdout.strip() == expected + ' false':
+            return "ENFORCE: stopped target container (confirmed)", True
     except Exception:
         pass
     return "ENFORCE: stop NOT confirmed for target container", False
