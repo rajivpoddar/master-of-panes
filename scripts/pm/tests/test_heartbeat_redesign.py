@@ -1,9 +1,10 @@
 """Unit tests for the 3h/1h heartbeat redesign scripts (pure functions only)."""
 
 import importlib.util
+import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -666,3 +667,28 @@ def test_answered_pm_threads_compose_without_needs_reply_or_overdue():
     lines, tldr = compose.support_block({"threshold_min": 60, "slack": [feedback, pm], "in_app": []}, "3h")
     assert tldr == "support answered"
     assert "NEEDS REPLY" not in "\n".join(lines) and "overdue" not in tldr
+
+
+def test_slot_block_shows_time_on_lane_and_flags_split_over_4h():
+    # Rajiv C0ALZJHGE49/1791337506.322739: "track how long has the slot been on the issue/pr".
+    doc = {"slots": [
+        {"slot": 1, "name": "Rohini", "occupied": True, "issue": 9013, "pr": None, "idle": False,
+         "active_turn_state": "active", "assigned_at": (NOW - timedelta(minutes=125)).isoformat()},
+        {"slot": 2, "name": "Hasta", "occupied": True, "issue": 8973, "pr": 9005, "idle": False,
+         "active_turn_state": "active", "assigned_at": None,
+         "lane_started_at": (NOW - timedelta(hours=5)).isoformat()},
+    ]}
+    lines, tldr, actions = compose.slot_block(doc, NOW)
+    text = "\n".join(lines)
+    assert "S1 Rohini: on #9013 for 2h 5m working" in text
+    assert "S2 Hasta: on #8973/PR#9005 for 5h 0m ⏱ working" in text
+    assert actions == ["split-check S2 on #8973/PR#9005 for 5h 0m ⏱"]
+    assert tldr == "slots busy, 1 lane(s) ≥4h"
+
+
+def test_lane_start_from_events_uses_newest_contiguous_run():
+    ev = lambda ts, issue: {"timestamp": ts, "payload": json.dumps({"issue_projection": {"issue": issue}})}
+    events = [ev("2026-10-07T02:00:00", 1), ev("2026-10-07T01:00:00", 1), ev("2026-10-06T23:00:00", 2),
+              ev("2026-10-06T20:00:00", 1)]
+    assert compose.lane_start_from_events(events, 1) == "2026-10-07T01:00:00"
+    assert compose.lane_start_from_events(events, 3) is None

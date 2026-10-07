@@ -138,6 +138,7 @@ def active_users_block(active: dict | None, window_label: str) -> tuple[list[str
 
 IDLE_SLOT_MIN = 20  # slots must not stay idle > 20 min (20-buddhi-pm.md rule 23)
 MOP_SLOTS_URL = "http://127.0.0.1:3100/slots"
+LANE_SPLIT_MIN = 240  # lanes over 4h get a split check (20-buddhi-pm.md 17 "Thin slices")
 
 
 def _parse_ts(value) -> datetime | None:
@@ -154,6 +155,31 @@ SLOT_STATE = Path(os.environ.get(
     "HEARTBEAT_SLOT_STATE",
     str(Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/heartbeat-slot-epochs.json"),
 ))
+
+
+def _fmt_dur(minutes: int) -> str:
+    return f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
+
+
+def lane_started(s: dict) -> datetime | None:
+    """When the slot took its current issue/PR lane: MoP assigned_at, else the
+    events-history fallback stamped by _fetch_slots (lane_started_at)."""
+    return _parse_ts(s.get("assigned_at")) or _parse_ts(s.get("lane_started_at"))
+
+
+def lane_start_from_events(events: list[dict], issue) -> str | None:
+    """Earliest assign-projection timestamp of the newest contiguous run on `issue`
+    (events newest-first). Fallback for rows assigned before MoP stamped assigned_at."""
+    start = None
+    for e in events:
+        try:
+            got = json.loads(e.get("payload") or "{}").get("issue_projection", {}).get("issue")
+        except (ValueError, AttributeError):
+            continue
+        if got != issue:
+            break
+        start = e.get("timestamp")
+    return start
 
 
 def slot_transitions(slots_doc: dict | None, now: datetime, prev: dict | None) -> tuple[dict, dict]:
@@ -190,6 +216,13 @@ def slot_block(slots_doc: dict | None, now: datetime, release_seen: dict | None 
             work = f"#{s['issue']}" if s.get("issue") else "#?"
             if s.get("pr"):
                 work += f"/PR#{s['pr']}"
+            started = lane_started(s)
+            if started:
+                lane_min = max(0, int((now - started).total_seconds() // 60))
+                work = f"on {work} for {_fmt_dur(lane_min)}"
+                if lane_min >= LANE_SPLIT_MIN:
+                    work += " ⏱"
+                    actions.append(f"split-check S{n} {work}")
         working = s.get("occupied") and s.get("active_turn_state") == "active" and not s.get("idle")
         if s.get("occupied"):
             last = _parse_ts(s.get("last_meaningful_work_at")) or _parse_ts(s.get("last_activity"))
@@ -214,7 +247,11 @@ def slot_block(slots_doc: dict | None, now: datetime, release_seen: dict | None 
     lines = [f"*Slots ({len(cells)}):*"]
     for i in range(0, len(cells), 2):
         lines.append("• " + " | ".join(cells[i:i + 2]))
-    tldr = f"{len(actions)} idle slot(s) ≥{IDLE_SLOT_MIN}m" if actions else "slots busy"
+    idle_n = sum(a.startswith("idle-slot") for a in actions)
+    tldr = f"{idle_n} idle slot(s) ≥{IDLE_SLOT_MIN}m" if idle_n else "slots busy"
+    split_n = len(actions) - idle_n
+    if split_n:
+        tldr += f", {split_n} lane(s) ≥{LANE_SPLIT_MIN // 60}h"
     return lines, tldr, actions
 
 
@@ -330,9 +367,21 @@ def _fetch_slots(url: str = MOP_SLOTS_URL, timeout: int = 5):
     import urllib.request
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:  # GET only
-            return json.loads(resp.read())
+            doc = json.loads(resp.read())
     except Exception:
         return None
+    slots = doc.get("slots", []) if isinstance(doc, dict) else doc
+    base = url.rsplit("/slots", 1)[0]
+    for s in slots:
+        if not s.get("occupied") or s.get("assigned_at") or not s.get("issue"):
+            continue
+        try:
+            q = f"{base}/events?slot={s['slot']}&type=assignment_effect_projection_completed&limit=50"
+            with urllib.request.urlopen(q, timeout=timeout) as resp:
+                s["lane_started_at"] = lane_start_from_events(json.loads(resp.read()).get("events", []), s["issue"])
+        except Exception:
+            pass
+    return doc
 
 
 def _load(path: str | None):

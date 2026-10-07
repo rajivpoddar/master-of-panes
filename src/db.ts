@@ -420,6 +420,20 @@ export interface NativeReleaseIntent {
   token: string;
 }
 
+/**
+ * Lane start time: kept when the same issue/PR lane is re-pinned, reset to now
+ * whenever the issue or PR changes (or it was never recorded).
+ */
+function laneAssignedAt(
+  current: { issue: number | null; pr: number | null; assigned_at: string | null },
+  desired: { issue: number | null; pr: number | null },
+): string {
+  if (current.assigned_at && current.issue === desired.issue && current.pr === desired.pr) {
+    return current.assigned_at;
+  }
+  return new Date().toISOString();
+}
+
 export class MoPDatabase {
   private db: Database.Database;
 
@@ -2019,7 +2033,7 @@ export class MoPDatabase {
           pr: desiredTuple.pr,
           head_sha: desiredTuple.head_sha,
           assignment_epoch: epoch + 1,
-          assigned_at: current.assigned_at,
+          assigned_at: laneAssignedAt(current, desiredTuple),
           work_kind: desiredTuple.work_kind,
           handoff_id: desiredTuple.handoff_id,
           claimed_at: desiredTuple.claimed_at,
@@ -2134,7 +2148,7 @@ export class MoPDatabase {
         pr: desiredTuple.pr,
         head_sha: desiredTuple.head_sha,
         assignment_epoch: epoch + 1,
-        assigned_at: current.assigned_at,
+        assigned_at: laneAssignedAt(current, desiredTuple),
         work_kind: desiredTuple.work_kind,
         handoff_id: desiredTuple.handoff_id,
         claimed_at: desiredTuple.claimed_at,
