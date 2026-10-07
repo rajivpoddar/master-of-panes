@@ -97,7 +97,7 @@ function latch(db: MoPDatabase, state = "sending", requestedAt = REQUESTED_AT): 
   db.setConfig("pm_clear_delivery_state", state);
 }
 
-function fenceFor(db: MoPDatabase, pm: ReturnType<typeof pmState>, stopFenced = true) {
+function fenceFor(db: MoPDatabase, pm: ReturnType<typeof pmState>, idle: () => boolean = () => true) {
   return makePmClearWriteFence({
     db,
     requestedAt: REQUESTED_AT,
@@ -105,8 +105,7 @@ function fenceFor(db: MoPDatabase, pm: ReturnType<typeof pmState>, stopFenced = 
     sessionToken: "41",
     currentGeneration: () => pm.generation,
     currentSessionToken: () => pm.session,
-    stopFenced,
-    idleProven: () => true,
+    idleProven: idle,
   });
 }
 
@@ -154,7 +153,7 @@ test("a PM turn that starts while the clear is queued behind another PM write ge
   }
 });
 
-test("a PM turn that starts after the paste never receives the Enter; our own paste is removed", async () => {
+test("a PM turn that starts after the paste never receives the Enter and is never labelled zero-effect", async () => {
   const { db, directory } = freshDb("mop-pmclear-afterpaste-");
   try {
     latch(db);
@@ -164,7 +163,8 @@ test("a PM turn that starts after the paste never receives the Enter; our own pa
     assert.equal(result.ok, false);
     assert.equal(effects(pane).enters.length, 0);
     assert.equal(pane.composer, "", "only our exact paste was cleared");
-    assert.equal(result.zeroEffect, true);
+    assert.equal(result.zeroEffect, false, "post-paste outcome is a possible effect");
+    assert.equal(result.busy, false);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -233,6 +233,7 @@ test("Stop submits a deferred clear once; a later stale drain never resubmits it
       settleMs: 0,
       wait: async () => {},
       isCurrent: () => true,
+      isIdleProven: () => true,
     });
     assert.equal(stop.kind, "sent");
     assert.equal(db.getConfig("pm_clear_delivery_state"), "awaiting_ack");
@@ -280,6 +281,7 @@ test("a lost Enter ACK keeps the possible-effect claim; Stop, drain, backoff and
       settleMs: 0,
       wait: async () => {},
       isCurrent: () => true,
+      isIdleProven: () => true,
     });
     assert.equal(first.kind, "uncertain");
     assert.equal(db.hasPendingClear(0), true, "ambiguous ACK must not erase the claim");
@@ -296,6 +298,7 @@ test("a lost Enter ACK keeps the possible-effect claim; Stop, drain, backoff and
           settleMs: 0,
           wait: async () => {},
           isCurrent: () => true,
+          isIdleProven: () => true,
         });
         assert.equal(stopRetry.kind, "skipped");
         const drain = await requestPmClearOnce({
@@ -374,6 +377,7 @@ test("Stop settle never adopts a replacement request, and settle never touches a
       settleMs: 2000,
       wait: async () => latch(db, "deferred_busy", replacedAt),
       isCurrent: () => true,
+      isIdleProven: () => true,
     });
     assert.equal(result.kind, "skipped");
     assert.equal(sends.n, 0);
@@ -408,5 +412,90 @@ test("compiled /send route routes every PM self-clear through the fenced writer 
   assert.doesNotMatch(route, /allowPmClear && relay\.isPMBusy\(\)/);
   for (const via of ["pm_status_stop_retry", "pm_status_stop", "options.source"]) {
     assert.ok(source.includes(`sendClearViaMopSendPath(0, ${via.includes(".") ? via : `"${via}"`}, {`), via);
+  }
+});
+
+test("fix 1: authority is revalidated after the buffer load, immediately before the paste", async () => {
+  const { db, directory } = freshDb("mop-pmclear-atpaste-");
+  try {
+    latch(db);
+    const pm = pmState();
+    const pane = fakePane();
+    const relay = relayFor(pane, db);
+    const origLoad = pane;
+    // A new PM turn starts while the file/buffer awaits are in flight.
+    const wrapped = (relay as unknown as { runShell: (c: string, o?: unknown) => Promise<{ stdout: string; stderr: string }> });
+    const inner = wrapped.runShell;
+    wrapped.runShell = async (c: string, o?: unknown) => {
+      const r = await inner(c, o);
+      if (c.startsWith("tmux load-buffer")) pm.generation += 1;
+      return r;
+    };
+    const result = await relay.writePMClearFenced({ paneId: "%1", check: fenceFor(db, pm) });
+    assert.equal(result.ok, false);
+    assert.equal(result.zeroEffect, true);
+    assert.deepEqual(effects(origLoad), { pastes: [], enters: [] });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fix 2: a same-generation Stop without proven idle never writes", async () => {
+  const { db, directory } = freshDb("mop-pmclear-stopidle-");
+  try {
+    latch(db);
+    const pm = pmState();
+    const pane = fakePane();
+    const result = await relayFor(pane, db).writePMClearFenced({ paneId: "%1", check: fenceFor(db, pm, () => false) });
+    assert.equal(result.ok, false);
+    assert.equal(result.busy, true);
+    assert.deepEqual(effects(pane), { pastes: [], enters: [] });
+
+    latch(db, "deferred_busy");
+    const sends = { n: 0 };
+    const retry = await retryDeferredPmClearOnStop({
+      ...latchOptions(db, Date.parse(REQUESTED_AT) + 60_000, sends),
+      backoffMs: 60_000,
+      settleMs: 0,
+      wait: async () => {},
+      isCurrent: () => true,
+      isIdleProven: () => false,
+    });
+    assert.equal(retry.kind, "deferred_busy");
+    assert.equal(sends.n, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fix 3: a post-paste refusal settles the latch as uncertain and is never resent", async () => {
+  const { db, directory } = freshDb("mop-pmclear-postpaste-latch-");
+  try {
+    latch(db, "deferred_busy");
+    const pm = pmState();
+    const pane = fakePane({ onPaste: () => { pm.generation += 1; } });
+    const relay = relayFor(pane, db);
+    const sends = { n: 0 };
+    const send = async () => {
+      sends.n += 1;
+      const w = await relay.writePMClearFenced({ paneId: "%1", check: fenceFor(db, pm) });
+      return { success: w.ok, busy: w.busy, zeroEffect: w.zeroEffect, error: w.reason };
+    };
+    const first = await requestPmClearOnce({ ...latchOptions(db, Date.now(), sends, send), isPMBusy: () => false });
+    assert.equal(first.kind, "uncertain");
+    assert.equal(db.getConfig("pm_clear_delivery_state"), "uncertain");
+    const again = await retryDeferredPmClearOnStop({
+      ...latchOptions(db, Date.now() + 120_000, sends, send),
+      backoffMs: 0,
+      settleMs: 0,
+      wait: async () => {},
+      isCurrent: () => true,
+      isIdleProven: () => true,
+    });
+    assert.equal(again.kind, "skipped");
+    assert.equal(sends.n, 1);
+    assert.equal(effects(pane).enters.length, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });

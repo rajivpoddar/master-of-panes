@@ -243,8 +243,6 @@ export function makePmClearWriteFence(deps: {
   sessionToken: string;
   currentGeneration: () => number;
   currentSessionToken: () => string;
-  /** True when the caller's generation is a PM Stop observation (idle proof). */
-  stopFenced: boolean;
   idleProven: () => boolean;
 }): () => PMClearFenceRefusal | null {
   return () => {
@@ -258,7 +256,7 @@ export function makePmClearWriteFence(deps: {
     }
     if (deps.currentGeneration() !== deps.generation) return { reason: "pm_turn_started", busy: true };
     if (deps.currentSessionToken() !== deps.sessionToken) return { reason: "pm_session_drift", busy: false };
-    if (!deps.stopFenced && !deps.idleProven()) return { reason: "pm_busy", busy: true };
+    if (!deps.idleProven()) return { reason: "pm_busy", busy: true };
     return null;
   };
 }
@@ -281,6 +279,8 @@ export async function retryDeferredPmClearOnStop(options: Omit<Parameters<typeof
   settleMs: number;
   wait: (ms: number) => Promise<void>;
   isCurrent: () => boolean;
+  /** Proven idle (debounced Stop drain); a same-generation Stop alone is not idle proof. */
+  isIdleProven: () => boolean;
 }): Promise<PMClearDelivery | { kind: "skipped"; reason: string }> {
   const { db } = options;
   if (!isPmClearUndelivered(db)) return { kind: "skipped", reason: "not_undelivered" };
@@ -303,7 +303,7 @@ export async function retryDeferredPmClearOnStop(options: Omit<Parameters<typeof
   return requestPmClearOnce({
     ...options,
     expectedRequestedAt: fencedRequestedAt,
-    isPMBusy: () => !options.isCurrent(),
+    isPMBusy: () => !options.isCurrent() || !options.isIdleProven(),
   });
 }
 

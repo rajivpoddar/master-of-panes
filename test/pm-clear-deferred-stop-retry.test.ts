@@ -28,6 +28,7 @@ function baseOptions(db: MoPDatabase, nowMs: number, counter: { sends: number },
     settleMs: 0,
     wait: async () => {},
     isCurrent: current,
+    isIdleProven: () => true,
     send: async () => {
       counter.sends += 1;
       return { success: true };

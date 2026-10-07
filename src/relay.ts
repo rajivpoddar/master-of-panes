@@ -795,6 +795,12 @@ export class TmuxRelay {
     try {
       await fs.writeFile(tmpFile, PM_CLEAR_COMMAND);
       await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+      // Revalidate authority after the file/buffer awaits, immediately before the paste.
+      const atPaste = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, "")) ?? fence.check();
+      if (atPaste) {
+        await this.runShell(`tmux delete-buffer -b ${bufName}`, { timeout: 5_000 }).catch(() => undefined);
+        return refuse(atPaste, true, "at_paste");
+      }
       pasteAttempted = true;
       await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${fence.paneId} -d`, { timeout: 10_000 });
       await sleep(PM_INJECT_ENTER_DELAY_MS);
@@ -802,12 +808,10 @@ export class TmuxRelay {
       const preEnter = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, PM_CLEAR_COMMAND)) ?? fence.check();
       if (preEnter) {
         // Remove only our own paste, and only while the composer holds exactly it.
+        // A paste happened: the outcome is never zero-effect (never rearmed).
         const owned = (await this.pmClearPaneRefusal(fence.paneId, PM_CLEAR_COMMAND)) === null;
         if (owned) {
           await this.runShell(`tmux send-keys -t ${fence.paneId} C-u`, { timeout: 10_000 });
-          await sleep(300);
-          const cleared = (await this.pmClearPaneRefusal(fence.paneId, "")) === null;
-          return refuse(preEnter, cleared, "pre_enter");
         }
         return refuse(preEnter, false, "pre_enter");
       }

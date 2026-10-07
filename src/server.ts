@@ -413,6 +413,7 @@ function retryUndeliveredPmClearOnStop(generation: number): void {
     settleMs: PM_CLEAR_STOP_RETRY_SETTLE_MS,
     wait: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
     isCurrent: () => generation === pmClearDrainGeneration,
+    isIdleProven: () => relay.isPMIdleProven(),
     send: ({ requestedAt: fencedRequestedAt }) =>
       sendClearViaMopSendPath(0, "pm_status_stop_retry", {
         requestedAt: fencedRequestedAt,
@@ -2555,7 +2556,6 @@ app.post("/slots/:slotNum/send", async (c) => {
         sessionToken,
         currentGeneration: () => pmClearDrainGeneration,
         currentSessionToken: () => slotSessionToken(0),
-        stopFenced: body.pm_stop_generation === generation,
         idleProven: () => relay.isPMIdleProven(),
       }),
     });
