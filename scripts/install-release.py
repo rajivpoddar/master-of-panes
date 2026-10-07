@@ -537,22 +537,51 @@ def assert_no_live_drift(**kwargs: Any) -> dict[str, set[str | None]]:
     return report["allowed"]
 
 
+def _file_preimage(path: Path) -> dict[str, Any]:
+    metadata = path.lstat()
+    return {**file_record(path, str(path)), "dev": metadata.st_dev, "ino": metadata.st_ino,
+            "mtime_ns": metadata.st_mtime_ns, "ctime_ns": metadata.st_ctime_ns,
+            "address": os.path.realpath(path.parent) + "/" + path.name}
+
+
+def _validate_receiver_path(repo: Path, path: Path) -> None:
+    relative = path.relative_to(repo)
+    if any((repo / Path(*relative.parts[:n])).is_symlink() for n in range(1, len(relative.parts) + 1)):
+        raise InstallerError(f"REFUSE: selected receiving path has symlink ancestry: {path}")
+    if not path.is_file():
+        raise InstallerError(f"REFUSE: selected receiving path is not a regular file: {path}")
+
+
+def _committed_receiver_digest(repo: Path, receiver: Path, held_digest: str | None) -> str | None:
+    if not (repo / ".git").exists():
+        return held_digest
+    relative = receiver.relative_to(repo).as_posix()
+    record = _run(["git", "ls-tree", "HEAD", "--", relative], cwd=repo).stdout.split()
+    if len(record) < 3 or record[0] not in {"100644", "100755"}:
+        return None
+    # Read committed bytes, never a locally edited manifest, as the source baseline.
+    result = subprocess.run(["git", "cat-file", "blob", record[2]], cwd=repo, capture_output=True, check=True)
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
 def sync_live_drift(*, repo: Path, drift: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Copy drifted deployed files back into the source tree and update manifest digests.
 
     Every selected receiver (source file) and alias is validated BEFORE any write:
-    one deployed version per source, the receiver must still hold the manifest
-    sha (no uncommitted edit to clobber), and the deployed bytes are snapshotted
+    one deployed version per source, the receiver must still hold committed/active
+    bytes or already equal the deployed bytes, and the deployed bytes are snapshotted
     and re-hashed.  Unselected/unrelated files in the tree are never touched.
     """
     manifest_path = repo / SHARED_ASSET_MANIFEST
+    _validate_receiver_path(repo, manifest_path)
+    manifest_preimage = _file_preimage(manifest_path)
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes.decode("utf-8"))
     by_target: dict[str, dict[str, Any]] = {}
     for entry in manifest.get("entries", []):
         for target_name in _shared_entry_targets(entry):
             by_target[target_name] = entry
-    plan: dict[str, tuple[dict[str, Any], bytes, str, str | None]] = {}
+    plan: dict[str, tuple[dict[str, Any], bytes, str, dict[str, Any]]] = {}
     deployed_paths: dict[str, list[str]] = {}
     for item in drift:
         entry = by_target.get(item["target"])
@@ -568,36 +597,40 @@ def sync_live_drift(*, repo: Path, drift: list[dict[str, Any]]) -> list[dict[str
         if source in plan and plan[source][2] != digest:
             raise InstallerError(f"REFUSE: conflicting live edits for one source across alias targets: {source}")
         receiver = repo / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(source)
-        receiver_digest = _current_digest(receiver)
-        if receiver_digest not in {entry.get("sha256"), digest}:
+        _validate_receiver_path(repo, receiver)
+        receiver_preimage = _file_preimage(receiver)
+        receiver_digest = receiver_preimage.get("sha256")
+        baseline_digest = _committed_receiver_digest(repo, receiver, item.get("active_sha256"))
+        if receiver_digest != digest and (baseline_digest is None or receiver_digest != baseline_digest):
             raise InstallerError(
                 f"REFUSE: receiving source has uncommitted edits: {receiver} has={receiver_digest} "
-                f"manifest={entry.get('sha256')} deployed={digest}"
+                f"committed_or_held={baseline_digest} deployed={digest}"
             )
-        plan[source] = (entry, data, digest, receiver_digest)
+        plan[source] = (entry, data, digest, receiver_preimage)
         deployed_paths.setdefault(source, []).append(item["deployed_path"])
     synced: list[dict[str, Any]] = []
     for source, (entry, data, digest, receiver_preimage) in sorted(plan.items()):
         destination = repo / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(f".{destination.name}.sync.{os.getpid()}.tmp")
-        temporary.write_bytes(data)
-        os.chmod(temporary, entry["mode"])
-        _before_sync_write_hook(destination)
-        if _current_digest(destination) != receiver_preimage:
-            temporary.unlink()
-            raise InstallerError(
-                f"REFUSE: receiving source changed during sync: {destination}; kept the fresh bytes "
-                f"(synced so far: {[item['source_path'] for item in synced]})"
-            )
-        os.replace(temporary, destination)
+        try:
+            temporary.write_bytes(data)
+            os.chmod(temporary, entry["mode"])
+            _before_sync_write_hook(destination)
+            _validate_receiver_path(repo, destination)
+            if _file_preimage(destination) != receiver_preimage:
+                raise InstallerError(
+                    f"REFUSE: receiving source changed during sync: {destination}; kept the fresh bytes "
+                    f"(synced so far: {[item['source_path'] for item in synced]})"
+                )
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
         entry["sha256"] = digest
         synced.append({"source_path": source, "sha256": digest})
     if synced:
-        _before_sync_write_hook(manifest_path)
-        if manifest_path.read_bytes() != manifest_bytes:
-            raise InstallerError(f"REFUSE: source manifest changed during sync: {manifest_path}")
-        _write_json_preserving_mode(manifest_path, manifest)
+        _write_json_preserving_mode(manifest_path, manifest, expected_preimage=manifest_preimage)
     # Post-write proof: source bytes == manifest digest == deployed bytes, or fail.
     written = {entry.get("source_path"): entry.get("sha256") for entry in json.loads(manifest_path.read_text("utf-8")).get("entries", [])}
     mismatches = []
@@ -613,12 +646,19 @@ def sync_live_drift(*, repo: Path, drift: list[dict[str, Any]]) -> list[dict[str
     return synced
 
 
-def _write_json_preserving_mode(path: Path, value: dict[str, Any]) -> None:
+def _write_json_preserving_mode(path: Path, value: dict[str, Any], *, expected_preimage: dict[str, Any]) -> None:
     mode = stat.S_IMODE(path.stat().st_mode)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    try:
+        temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(temporary, mode)
+        _before_sync_write_hook(path)
+        if _file_preimage(path) != expected_preimage:
+            raise InstallerError(f"REFUSE: source manifest changed during sync: {path}")
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists() or temporary.is_symlink():
+            temporary.unlink()
 
 
 def _before_sync_write_hook(path: Path) -> None:
@@ -856,6 +896,9 @@ def restore_rollback_bundle(bundle: Path, *, only_if_current: dict[str, str] | N
     manifest = json.loads((bundle / ROLLBACK_MANIFEST).read_text(encoding="utf-8"))
     compatibility_entries = manifest.get("compatibility_entries", [])
     normal_entries = manifest.get("entries", [])
+    if only_if_current is not None:
+        # Shared-install recovery owns only targets actually replaced this run.
+        compatibility_entries = [entry for entry in compatibility_entries if entry["path"] in only_if_current]
 
     # Preflight every backup, normal and compatibility, before touching any
     # target. A corrupt normal backup must never leave a compatibility (or any
@@ -898,10 +941,13 @@ def restore_rollback_bundle(bundle: Path, *, only_if_current: dict[str, str] | N
                 temporary.unlink()
     for entry in normal_entries:
         target = Path(entry["path"])
-        if only_if_current is not None and (
-            str(target) not in only_if_current or _current_digest(target) != only_if_current[str(target)]
-        ):
-            continue
+        current_preimage = None
+        if only_if_current is not None:
+            if str(target) not in only_if_current or not target.is_file() or target.is_symlink():
+                continue
+            current_preimage = _file_preimage(target)
+            if current_preimage.get("sha256") != only_if_current[str(target)]:
+                continue
         if not entry.get("present"):
             if target.exists() or target.is_symlink():
                 if target.is_dir() and not target.is_symlink():
@@ -910,14 +956,20 @@ def restore_rollback_bundle(bundle: Path, *, only_if_current: dict[str, str] | N
             continue
         payload = bundle / entry["payload"]
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() or target.is_symlink():
-            if target.is_dir() and not target.is_symlink():
-                raise InstallerError(f"cannot restore over directory: {target}")
-            target.unlink()
-        _copy_payload(payload, target)
-        if entry["kind"] == "file":
-            os.chmod(target, entry["mode"])
         expected = _rollback_entry_expected(entry)
+        temporary = target.with_name(f".{target.name}.restore.{os.getpid()}.tmp")
+        try:
+            _copy_payload(payload, temporary)
+            if entry["kind"] == "file":
+                os.chmod(temporary, entry["mode"])
+            _assert_rollback_payload(temporary, expected)
+            if current_preimage is not None and _file_preimage(target) != current_preimage:
+                continue
+            os.replace(temporary, target)
+            _fsync_directory(target.parent)
+        finally:
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
         if _rollback_payload_record(target, expected) != expected:
             raise InstallerError(f"rollback verification failed: {target}")
     return manifest

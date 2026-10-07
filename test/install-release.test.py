@@ -6,6 +6,7 @@ import os
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -418,6 +419,141 @@ class LiveDriftGateTests(unittest.TestCase):
 
         self.assertEqual(self._sync_with_hook(edit_deployed), 2)
         self.assertEqual(deployed.read_text(), "later live\n")
+
+
+class InstallerCorrectionBoundaryTests(unittest.TestCase):
+    T1 = LiveDriftGateTests.T1
+    T2 = LiveDriftGateTests.T2
+    ALIAS = LiveDriftGateTests.ALIAS
+    setUp = LiveDriftGateTests.setUp
+    tearDown = LiveDriftGateTests.tearDown
+    dep = LiveDriftGateTests.dep
+    src = LiveDriftGateTests.src
+    _release = LiveDriftGateTests._release
+    cli = LiveDriftGateTests.cli
+
+    def git_baseline(self):
+        module._run(["git", "init", "-q"], cwd=self.repo)
+        module._run(["git", "add", "."], cwd=self.repo)
+        module._run(["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                     "commit", "-qm", "baseline"], cwd=self.repo)
+
+    def state(self, *paths):
+        return {str(p): (module.file_record(p, str(p)), p.lstat().st_mtime_ns) for p in paths}
+
+    def sync(self):
+        return self.cli("drift-check", "--sync-drift", "--repo", str(self.repo))
+
+    def test_git_source_edit_and_locally_updated_manifest_refuse_without_writes(self):
+        self.git_baseline()
+        receiver = self.src(self.repo, "guard.sh")
+        receiver.write_text("selected local work\n")
+        manifest_path = self.repo / module.SHARED_ASSET_MANIFEST
+        manifest = json.loads(manifest_path.read_text())
+        manifest["entries"][0]["sha256"] = module.sha256(receiver)
+        manifest_path.write_text(json.dumps(manifest))
+        self.dep(self.T1).write_text("live\n")
+        self.dep(self.T2).write_text("other live\n")
+        other = self.src(self.repo, "zz-other.sh")
+        before = self.state(receiver, other, manifest_path)
+        self.assertEqual(self.sync(), 2)
+        self.assertEqual(self.state(receiver, other, manifest_path), before)
+
+    def test_manifest_edit_during_temp_chmod_is_retained(self):
+        self.dep(self.T1).write_text("live\n")
+        manifest_path = self.repo / module.SHARED_ASSET_MANIFEST
+        original = module.os.chmod
+        def edit(path, mode, *args, **kwargs):
+            result = original(path, mode, *args, **kwargs)
+            if Path(path).name.startswith(".manifest.json."):
+                manifest_path.write_text('{"fresh": "concurrent manifest work"}\n')
+            return result
+        with patch.object(module.os, "chmod", side_effect=edit):
+            self.assertEqual(self.sync(), 2)
+        self.assertEqual(manifest_path.read_text(), '{"fresh": "concurrent manifest work"}\n')
+
+    def test_recovery_copy_race_keeps_fresh_target(self):
+        candidate = self._release("candidate", {"guard.sh": "v2\n", "zz-other.sh": "o1\n"})
+        bundle = self.root / "recovery"
+        original = module._copy_payload
+        def edit(source, destination):
+            if source == bundle / "payload/0000":
+                self.dep(self.T1).write_text("fresh during recovery copy\n")
+            return original(source, destination)
+        with patch.object(module, "_copy_payload", side_effect=edit):
+            with self.assertRaises(module.InstallerError):
+                module.install_shared_assets(release_dir=candidate, target_root=self.target_root,
+                    rollback_bundle=bundle, fail_after=1)
+        self.assertEqual(self.dep(self.T1).read_text(), "fresh during recovery copy\n")
+        self.assertFalse(list(self.dep(self.T1).parent.glob("*.restore.*.tmp")))
+
+    def test_normal_recovery_restores_preimage(self):
+        candidate = self._release("candidate", {"guard.sh": "v2\n", "zz-other.sh": "o1\n"})
+        with self.assertRaises(module.InstallerError):
+            module.install_shared_assets(release_dir=candidate, target_root=self.target_root,
+                rollback_bundle=self.root / "recovery", fail_after=1)
+        self.assertEqual(self.dep(self.T1).read_text(), "v1\n")
+
+    def test_git_committed_selection_syncs_and_unrelated_dirt_is_untouched(self):
+        self.git_baseline()
+        unrelated = self.repo / "unrelated.txt"
+        unrelated.write_text("unrelated work\n")
+        before = self.state(unrelated)
+        self.dep(self.T1).write_text("live\n")
+        self.assertEqual(self.sync(), 0)
+        self.assertEqual(self.state(unrelated), before)
+        self.assertEqual(self.src(self.repo, "guard.sh").read_text(), "live\n")
+        module._load_shared_manifest(self.repo)
+
+    def test_already_equal_deployed_receiver_is_allowed(self):
+        self.git_baseline()
+        self.src(self.repo, "guard.sh").write_text("live\n")
+        self.dep(self.T1).write_text("live\n")
+        self.assertEqual(self.sync(), 0)
+        self.assertEqual(self.src(self.repo, "guard.sh").read_text(), "live\n")
+        module._load_shared_manifest(self.repo)
+
+    def test_selected_parent_alias_refuses_before_any_write(self):
+        self.git_baseline()
+        parent = self.src(self.repo, "guard.sh").parent
+        moved = parent.with_name("aliased")
+        parent.rename(moved)
+        parent.symlink_to(moved, target_is_directory=True)
+        self.dep(self.T1).write_text("live\n")
+        self.dep(self.T2).write_text("other live\n")
+        manifest_path = self.repo / module.SHARED_ASSET_MANIFEST
+        before = self.state(parent, self.src(self.repo, "guard.sh"), self.src(self.repo, "zz-other.sh"), manifest_path)
+        self.assertEqual(self.sync(), 2)
+        self.assertEqual(self.state(parent, self.src(self.repo, "guard.sh"), self.src(self.repo, "zz-other.sh"), manifest_path), before)
+
+    def test_receiving_manifest_alias_refuses_and_referent_is_retained(self):
+        manifest_path = self.repo / module.SHARED_ASSET_MANIFEST
+        other = self.root / "manifest-referent"
+        manifest_path.rename(other)
+        manifest_path.symlink_to(other)
+        self.dep(self.T1).write_text("live\n")
+        before = self.state(other, manifest_path, self.src(self.repo, "guard.sh"))
+        self.assertEqual(self.sync(), 2)
+        self.assertEqual(self.state(other, manifest_path, self.src(self.repo, "guard.sh")), before)
+
+    def test_held_active_bytes_support_non_git_fixture_with_mutated_manifest(self):
+        receiver = self.src(self.repo, "guard.sh")
+        receiver.write_text("local receiving edit\n")
+        manifest_path = self.repo / module.SHARED_ASSET_MANIFEST
+        manifest = json.loads(manifest_path.read_text())
+        manifest["entries"][0]["sha256"] = module.sha256(receiver)
+        manifest_path.write_text(json.dumps(manifest))
+        self.dep(self.T1).write_text("live\n")
+        before = self.state(receiver, manifest_path)
+        self.assertEqual(self.sync(), 2)
+        self.assertEqual(self.state(receiver, manifest_path), before)
+
+    def test_read_only_check_preserves_bytes_modes_links_and_mtime(self):
+        self.dep(self.T1).write_text("live\n")
+        manifest_path = self.repo / module.SHARED_ASSET_MANIFEST
+        before = self.state(self.dep(self.T1), self.src(self.repo, "guard.sh"), manifest_path, self.current)
+        self.assertEqual(self.cli("drift-check", "--repo", str(self.repo)), 3)
+        self.assertEqual(self.state(self.dep(self.T1), self.src(self.repo, "guard.sh"), manifest_path, self.current), before)
 
 
 if __name__ == "__main__":
