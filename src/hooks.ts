@@ -5,6 +5,7 @@
  * plan ready), updates slot state, and relays notifications to PM.
  */
 
+import { isPmClearUndelivered } from "./pmClearLatch.js";
 import { execFile } from "node:child_process";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -1453,6 +1454,17 @@ export class HookProcessor {
     // PM (slot 0) is not represented in the slots table. A pending clear is an
     // exactly-once delivery latch: repeated Stop events must not append more
     // /clear commands while the original waits for SessionStart:clear.
+    if (slotNum === 0 && isPmClearUndelivered(this.db)) {
+      // Deferred at a busy boundary and never delivered: /pm-status stop owns
+      // the bounded guarded retry. Do not claim it is awaiting acknowledgement.
+      this.db.logEvent(0, "clear_pending_undelivered_stop", "Stop", null, {
+        name: "PM",
+        reason: "PM clear latch is undelivered (deferred_busy); /pm-status stop retries the guarded send",
+        requested_at: this.db.getConfig(PM_CLEAR_REQUESTED_AT_KEY),
+        via: "hook_stop",
+      });
+      return {};
+    }
     if (slotNum === 0 && this.db.hasPendingClear(0)) {
       this.db.logEvent(0, "clear_pending_duplicate_suppressed", "Stop", null, {
         name: "PM",

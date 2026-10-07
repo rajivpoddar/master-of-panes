@@ -192,3 +192,42 @@ export async function requestPmClearOnce(options: Parameters<typeof claimPmClear
   options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "awaiting_ack");
   return { kind: "sent", requestedAt: claim.requestedAt };
 }
+
+const PM_CLEAR_STOP_RETRY_AT_KEY = "pm_clear_stop_retry_at";
+
+/** True when a PM clear is latched but was never delivered (deferred at a busy boundary). */
+export function isPmClearUndelivered(db: Pick<MoPDatabase, "hasPendingClear" | "getConfig">): boolean {
+  return db.hasPendingClear(0) && db.getConfig(PM_CLEAR_DELIVERY_STATE_KEY) === "deferred_busy";
+}
+
+/**
+ * On a PM Stop, retry an undelivered (deferred_busy) clear latch once.
+ * Delivered-awaiting-ack latches are never resent. The retry waits a short
+ * settle window, then requires the stop generation to still be current (no PM
+ * turn started since this Stop), and is bounded by a per-attempt backoff.
+ */
+export async function retryDeferredPmClearOnStop(options: Omit<Parameters<typeof requestPmClearOnce>[0], "isPMBusy"> & {
+  backoffMs: number;
+  settleMs: number;
+  wait: (ms: number) => Promise<void>;
+  isCurrent: () => boolean;
+}): Promise<PMClearDelivery | { kind: "skipped"; reason: string }> {
+  const { db } = options;
+  if (!isPmClearUndelivered(db)) return { kind: "skipped", reason: "not_undelivered" };
+  const lastMs = parseMoPIsoMs(db.getConfig(PM_CLEAR_STOP_RETRY_AT_KEY));
+  if (lastMs !== null && options.nowMs >= lastMs && options.nowMs - lastMs < options.backoffMs) {
+    return { kind: "skipped", reason: "backoff" };
+  }
+  if (options.settleMs > 0) await options.wait(options.settleMs);
+  if (!options.isCurrent() || !isPmClearUndelivered(db)) {
+    return { kind: "skipped", reason: "stop_generation_superseded" };
+  }
+  db.setConfig(PM_CLEAR_STOP_RETRY_AT_KEY, new Date(options.nowMs).toISOString());
+  db.logEvent(0, "clear_pending_stop_retry", null, null, {
+    name: "PM",
+    requested_at: db.getConfig(PM_CLEAR_REQUESTED_AT_KEY),
+    via: options.source,
+    reason: "Undelivered (deferred_busy) PM clear latch retried once on PM Stop",
+  });
+  return requestPmClearOnce({ ...options, isPMBusy: () => !options.isCurrent() });
+}

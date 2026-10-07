@@ -79,7 +79,7 @@ import {
   waitForSessionStartClearOnDb,
 } from "./sessionStartClearWait.js";
 import { paneInputModeRefusalReason, type PaneInputModeRefusalReason } from "./paneInputMode.js";
-import { requestPmClearOnce, waitForPmIdleDrain } from "./pmClearLatch.js";
+import { isPmClearUndelivered, requestPmClearOnce, retryDeferredPmClearOnStop, waitForPmIdleDrain } from "./pmClearLatch.js";
 import {
   interruptLiveTurnBeforeClear,
   pinDrift,
@@ -288,6 +288,8 @@ const PM_CLEAR_STALE_ACK_REPAIR_MS = parseInt(
 );
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
 let pmClearDrainGeneration = 0;
+const PM_CLEAR_STOP_RETRY_SETTLE_MS = parseInt(process.env.MOP_PM_CLEAR_STOP_RETRY_SETTLE_MS ?? "2000", 10);
+const PM_CLEAR_STOP_RETRY_BACKOFF_MS = parseInt(process.env.MOP_PM_CLEAR_STOP_RETRY_BACKOFF_MS ?? "60000", 10);
 
 // ─── resume_prompt fallback (bounded poll) ──────────────
 // The hook-driven injection in hooks.ts (SessionStart source=clear) is the
@@ -393,6 +395,34 @@ function findLaterPmLifecycleEvent(requestedAt: string | null) {
   }) ?? null;
 }
 
+/** Deferred-busy latch: retry the guarded /clear once on this Stop (stop-generation fenced, backoff bounded). */
+function retryUndeliveredPmClearOnStop(generation: number): void {
+  // Deferred-busy latch: retry the guarded send once on this Stop, fenced by
+  // the stop generation and bounded by backoff. Awaiting-ack latches never resend.
+  const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
+  void retryDeferredPmClearOnStop({
+    db,
+    source: "pm_status_stop_retry",
+    nowMs: Date.now(),
+    staleAfterMs: PM_CLEAR_STALE_ACK_REPAIR_MS,
+    recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
+    hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
+    laterLifecycleEvent: findLaterPmLifecycleEvent(requestedAt),
+    backoffMs: PM_CLEAR_STOP_RETRY_BACKOFF_MS,
+    settleMs: PM_CLEAR_STOP_RETRY_SETTLE_MS,
+    wait: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
+    isCurrent: () => generation === pmClearDrainGeneration,
+    send: async () => {
+      const sent = await sendClearViaMopSendPath(0, "pm_status_stop_retry", false, generation);
+      return {
+        success: sent.success,
+        busy: sent.busy,
+        error: sent.error ?? sent.reason ?? `send failed status=${sent.status}`,
+      };
+    },
+  }).catch((err) => console.error(`[pm-clear] stop retry failed: ${String(err)}`));
+}
+
 function retryPendingPmClearAfterDrain(stopEventId: number, generation: number): void {
   void waitForPmIdleDrain({
     afterEventId: stopEventId,
@@ -429,6 +459,7 @@ async function sendClearViaMopSendPath(
   slotNum: number,
   source: string,
   force = true,
+  pmStopGeneration?: number,
 ): Promise<{ success: boolean; busy?: boolean; status: number; reason?: string; error?: string }> {
   try {
     const res = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slotNum}/send`, {
@@ -439,6 +470,7 @@ async function sendClearViaMopSendPath(
         force,
         allow_pm_clear: slotNum === 0,
         source,
+        ...(pmStopGeneration === undefined ? {} : { pm_stop_generation: pmStopGeneration }),
       }),
     });
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -893,6 +925,9 @@ app.post("/pm-status", async (c) => {
       queued_before: before,
       drained: result.drained,
     });
+    if (isPmClearUndelivered(db)) {
+      retryUndeliveredPmClearOnStop(generation);
+    }
     if (db.hasPendingClear(0)) {
       retryPendingPmClearAfterDrain(idleDrainedEventId, generation);
     }
@@ -2694,7 +2729,12 @@ app.post("/slots/:slotNum/send", async (c) => {
         // Slot 0 is the PM pane. Submit through the relay so it can verify the
         // runtime is booted and apply runtime-specific paste/submit semantics.
         const bytes = Buffer.byteLength(command, "utf8");
-        if (allowPmClear && relay.isPMBusy()) {
+        // A Stop-fenced retry carries its stop generation: the PM Stop observation
+        // is the idle proof, valid only while no PM turn has started since.
+        const stopFenced =
+          typeof body.pm_stop_generation === "number" &&
+          body.pm_stop_generation === pmClearDrainGeneration;
+        if (allowPmClear && relay.isPMBusy() && !stopFenced) {
           db.logEvent(0, "clear_pending_deferred_busy", null, null, {
             via: body.source ?? "unknown",
             reason: "PM became busy before /clear reached the send boundary",

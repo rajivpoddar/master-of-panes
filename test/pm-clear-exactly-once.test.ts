@@ -304,6 +304,8 @@ test("PM status Stop schedules retry after drain and keeps explicit retry distin
   assert.doesNotMatch(route, /requestPmClearOnce\(/);
   assert.doesNotMatch(route, /sendClearViaMopSendPath\(/);
   assert.match(route, /retryPendingPmClearAfterDrain\(idleDrainedEventId, generation\)/);
+  assert.match(route, /retryUndeliveredPmClearOnStop\(generation\)/);
+  assert.match(source, /sendClearViaMopSendPath\(0, "pm_status_stop_retry", false, generation\)/);
   assert.match(source, /getEvents\(0, 1, "pm_debounce_drain_fired"\)/);
   assert.match(source, /sendClearViaMopSendPath\(0, "pm_status_stop", false\)/);
   assert.match(source, /isPMBusy: \(\) => relay\.isPMBusy\(\)/);
@@ -313,7 +315,7 @@ test("PM status Stop schedules retry after drain and keeps explicit retry distin
 
   const sendRouteStart = source.indexOf('app.post("/slots/:slotNum/send"');
   const pmSubmit = source.indexOf("const submitted = await relay.submitToPM(command)", sendRouteStart);
-  const busyGuard = source.indexOf("if (allowPmClear && relay.isPMBusy())", sendRouteStart);
+  const busyGuard = source.indexOf("if (allowPmClear && relay.isPMBusy() && !stopFenced)", sendRouteStart);
   assert.ok(sendRouteStart >= 0);
   assert.ok(busyGuard >= 0 && busyGuard < pmSubmit, "PM clear busy guard must precede the actual submit");
 });
