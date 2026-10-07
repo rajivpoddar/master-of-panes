@@ -12,6 +12,8 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / "shared-assets/claude/scripts/spark-run-monitor.sh"
 A_ID = "a" * 64
 B_ID = "b" * 64
+S1 = "2026-10-07T00:00:00.000000001Z"
+S2 = "2026-10-07T05:00:00.000000002Z"
 
 FAKE_SSH = textwrap.dedent(r'''
     #!/usr/bin/env python3
@@ -38,7 +40,9 @@ FAKE_SSH = textwrap.dedent(r'''
         print(cfg.get("running_after_stop", "true"))
     elif "df -Pk" in cmd:
         print("/dev/x 1 1 %d 1%% /home/user" % cfg.get("disk_free_kb", 10**9))
-    elif "docker stop" in cmd or "docker ps" in cmd:
+    elif "docker stop" in cmd:
+        if cfg.get("stop_ack_lost"): sys.exit(255)
+    elif "docker ps" in cmd:
         pass
 ''').lstrip()
 
@@ -72,7 +76,7 @@ LOW_MEM_KB = 1024 * 1024  # 1 GiB < 16 GiB floor
 def test_a_default_is_report_only_never_stops_unrelated_trainer(tmp_path):
     cfg = {"tail": DECODE_TAIL + '\n{"loss": nan, "grad_norm": inf}', "mem_kb": LOW_MEM_KB,
            "hb": '{"global_step": 40}', "start": "2026-10-07T00:00:00Z", "now": "7200",
-           "disk_free_kb": 1, "identities": [B_ID + " /trainer-b"]}
+           "disk_free_kb": 1, "identities": [B_ID + " /trainer-b " + S1]}
     calls, posts = run(tmp_path, cfg, "--heartbeat", "/r/hb", "--total", "100", "--proc-pattern", "decode-a")
     assert "docker stop" not in calls and "docker ps" not in calls
     assert "WARN: LOW_MEM (report-only)" in posts
@@ -88,14 +92,14 @@ def test_b_enforce_missing_target_no_stop(tmp_path):
 
 def test_b_enforce_changed_identity_no_stop(tmp_path):
     cfg = {"tail": "step 5/10", "mem_kb": LOW_MEM_KB,
-           "identities": [A_ID + " /train-a", B_ID + " /train-a"]}
+           "identities": [A_ID + " /train-a " + S1, B_ID + " /train-a " + S1]}
     calls, posts = run(tmp_path, cfg, "--enforce-container", "train-a")
     assert "docker stop" not in calls
     assert "identity missing or changed" in posts and "stopped target" not in posts
 
 
 def test_b_enforce_stop_not_confirmed_no_false_claim(tmp_path):
-    cfg = {"tail": "step 5/10", "mem_kb": LOW_MEM_KB, "identities": [A_ID + " /train-a"],
+    cfg = {"tail": "step 5/10", "mem_kb": LOW_MEM_KB, "identities": [A_ID + " /train-a " + S1],
            "running_after_stop": "true"}
     calls, posts = run(tmp_path, cfg, "--enforce-container", "train-a")
     assert "docker stop %s" % A_ID in calls
@@ -103,7 +107,7 @@ def test_b_enforce_stop_not_confirmed_no_false_claim(tmp_path):
 
 
 def test_b_enforce_confirmed_stop_targets_exact_id_only(tmp_path):
-    cfg = {"tail": "step 5/10", "mem_kb": LOW_MEM_KB, "identities": [A_ID + " /train-a"],
+    cfg = {"tail": "step 5/10", "mem_kb": LOW_MEM_KB, "identities": [A_ID + " /train-a " + S1],
            "running_after_stop": "false"}
     calls, posts = run(tmp_path, cfg, "--enforce-container", "train-a")
     stops = [l for l in calls.splitlines() if "docker stop" in l]
@@ -132,3 +136,20 @@ def test_d_decode_format_unchanged(tmp_path):
     assert first[1] == "40/100 windows (40%) | elapsed 2h00m | 0.33 windows/min (avg since start) | ETA 2h59m"
     assert first[2] == "GPU util 87% | free RAM (unified) 64 GiB, min 64 GiB, floor 16 GiB"
     assert len(first) == 3
+
+
+def test_e_lost_ack_then_continuing_ticks_at_most_one_stop(tmp_path):
+    cfg = {"tail": "step 5/10", "mem_kb": LOW_MEM_KB, "identities": [A_ID + " /train-a " + S1],
+           "running_after_stop": "true", "stop_ack_lost": True}
+    calls, posts = run(tmp_path, cfg, "--enforce-container", "train-a", "--max-hours", "0.0003")
+    assert calls.count("##TAIL") >= 2, "need a continuing tick"
+    assert len([l for l in calls.splitlines() if "docker stop" in l]) == 1
+    assert "NOT confirmed" in posts and "already consumed" in posts
+
+
+def test_f_same_id_name_new_startedat_refused(tmp_path):
+    cfg = {"tail": "step 5/10", "mem_kb": LOW_MEM_KB,
+           "identities": [A_ID + " /train-a " + S1, A_ID + " /train-a " + S2], "running_after_stop": "false"}
+    calls, posts = run(tmp_path, cfg, "--enforce-container", "train-a")
+    assert "docker stop" not in calls
+    assert "identity missing or changed" in posts and "stopped target" not in posts

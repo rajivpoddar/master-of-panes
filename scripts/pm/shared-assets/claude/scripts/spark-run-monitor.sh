@@ -6,7 +6,8 @@
 # No --thread-ts: posts a new top-level parent, prints its ts. Never mentions CTO. Never prints secrets.
 # Disclosure (CTO review 2026-10-07): posts ONLY allowlisted numeric fields and CLASSIFIED error codes,
 # never raw log text. Enforcement is report-only by default; only --enforce-container stops a container,
-# and only after revalidating its name + docker id captured at start and confirming the stop via inspect.
+# and only after revalidating its name + docker id + State.StartedAt (generation) captured at start, at most
+# ONCE per monitor (the attempt is consumed before the stop is issued), confirming the stop via inspect.
 exec python3 - "$@" <<'PY'
 import argparse, re, subprocess, sys, time, os, shlex, math
 ap = argparse.ArgumentParser()
@@ -95,26 +96,31 @@ def fmt_eta(s):
 def f(v, spec="%s"):
     return "n/a" if v is None or (isinstance(v, float) and not math.isfinite(v)) else spec % v
 
-# Enforcement target identity, captured once at start (exact name + full docker id).
+# Enforcement target identity, captured once at start (exact name + full docker id + State.StartedAt generation).
+# Never rebound: a restarted/new container generation is a different identity and is refused.
 def inspect_identity(ref):
     try:
-        r = ssh("docker inspect -f '{{.Id}} {{.Name}}' %s" % shlex.quote(ref), timeout=30)
+        r = ssh("docker inspect -f '{{.Id}} {{.Name}} {{.State.StartedAt}}' %s" % shlex.quote(ref), timeout=30)
     except Exception:
         return None
     parts = (r.stdout or "").strip().split()
-    if r.returncode != 0 or len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]): return None
-    return parts[0], parts[1].lstrip("/")
+    if r.returncode != 0 or len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]): return None
+    return parts[0], parts[1].lstrip("/"), parts[2]
 target = None
 if a.enforce_container:
     target = inspect_identity(a.enforce_container)
     if not target or target[1] != a.enforce_container:
         print("enforce target not found at start; enforcement disabled (report-only)", file=sys.stderr); target = None
 
+stop_attempt_consumed = False
 def enforce():
-    """Stop ONLY the captured target. Returns a status line; 'stopped' only on inspect-confirmed state."""
+    """Stop ONLY the captured target, at most once. Returns a status line; 'stopped' only on inspect-confirmed state."""
+    global stop_attempt_consumed
     if not target: return "ENFORCE skipped: no validated target (report-only)", False
+    if stop_attempt_consumed: return "ENFORCE skipped: single stop attempt already consumed", False
     now = inspect_identity(target[0])
-    if now != target: return "ENFORCE skipped: target identity missing or changed", False
+    if now != target: return "ENFORCE skipped: target identity missing or changed (id/name/StartedAt)", False
+    stop_attempt_consumed = True  # consumed BEFORE issuing: success, failure or lost ack all count
     try:
         ssh("docker stop %s" % target[0], timeout=120)
         st = ssh("docker inspect -f '{{.State.Running}}' %s" % target[0], timeout=30)
