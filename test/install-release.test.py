@@ -218,9 +218,12 @@ class PluginCacheRootTests(unittest.TestCase):
 
 
 class LiveDriftGateTests(unittest.TestCase):
-    """Rajiv 2026-10-07 (DM 1791376793.611059): installs must not overwrite live edits."""
+    """Rajiv 2026-10-07 (DM 1791376793.611059) + CTO REVISE ts 1791382000.456239:
+    installs and sync-back must never overwrite fresh bytes. Driven through the CLI on temp dirs."""
 
-    TARGET = "/opt/claude/scripts/guard.sh"
+    T1 = "/opt/claude/scripts/guard.sh"
+    T2 = "/opt/claude/scripts/zz-other.sh"
+    ALIAS = "/opt/claude/alias/guard.sh"
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -228,106 +231,159 @@ class LiveDriftGateTests(unittest.TestCase):
         self.target_root = self.root / "deployed"
         self.releases = self.root / "releases"
         self.current = self.root / "current"
-        self.active = self._release("active", "v1\n")
+        self.active = self._release("active", {"guard.sh": "v1\n", "zz-other.sh": "o1\n"})
         os.symlink(self.active, self.current)
-        self.repo = self._release("repo", "v1\n")
-        self.deployed = self.target_root / self.TARGET.lstrip("/")
-        self.deployed.parent.mkdir(parents=True)
-        self.deployed.write_text("v1\n")
-        self.deployed.chmod(0o755)
+        self.repo = self._release("repo", {"guard.sh": "v1\n", "zz-other.sh": "o1\n"})
+        for target, body in ((self.T1, "v1\n"), (self.ALIAS, "v1\n"), (self.T2, "o1\n")):
+            path = self.dep(target)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body)
+            path.chmod(0o755)
+        self.bundles = 0
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def _release(self, name: str, body: str) -> Path:
+    def dep(self, target: str) -> Path:
+        return self.target_root / target.lstrip("/")
+
+    def src(self, release: Path, name: str) -> Path:
+        return release / Path(module.SHARED_ASSET_MANIFEST).parent / "scripts" / name
+
+    def _release(self, name: str, bodies: dict) -> Path:
         root = self.releases / name
-        shared = root / Path(module.SHARED_ASSET_MANIFEST).parent
-        (shared / "scripts").mkdir(parents=True)
-        source = shared / "scripts" / "guard.sh"
-        source.write_text(body)
-        source.chmod(0o755)
+        (root / Path(module.SHARED_ASSET_MANIFEST).parent / "scripts").mkdir(parents=True)
+        entries = []
+        for file_name, body in sorted(bodies.items()):
+            source = self.src(root, file_name)
+            source.write_text(body)
+            source.chmod(0o755)
+            entry = {
+                "canonical_target": f"/opt/claude/scripts/{file_name}",
+                "dependencies": [],
+                "dependency_status": "closed",
+                "mode": 0o755,
+                "sha256": module.sha256(source),
+                "source_path": f"scripts/{file_name}",
+            }
+            if file_name == "guard.sh":
+                entry["additional_targets"] = [self.ALIAS]
+            entries.append(entry)
         manifest = {
             "schema": "mop_shared_operational_assets",
             "version": 1,
-            "inventory": {"selected_count": 1},
-            "entries": [
-                {
-                    "canonical_target": self.TARGET,
-                    "dependencies": [],
-                    "dependency_status": "closed",
-                    "mode": 0o755,
-                    "sha256": module.sha256(source),
-                    "source_path": "scripts/guard.sh",
-                }
-            ],
+            "inventory": {"selected_count": len(entries)},
+            "entries": entries,
         }
         (root / module.SHARED_ASSET_MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         return root
 
-    def _drift(self, **extra):
-        return module.detect_live_drift(
-            active_release=self.current.resolve(), candidate_root=self.repo, target_root=self.target_root, **extra
+    def cli(self, mode: str, *extra: str, candidate: Path | None = None) -> int:
+        self.bundles += 1
+        argv = [mode, "--release-root", str(self.releases), "--current", str(self.current),
+                "--shared-assets-root", str(self.target_root)]
+        if candidate is not None:
+            argv += ["--candidate", candidate.name]
+        if mode != "drift-check":
+            argv += ["--rollback-bundle", str(self.root / f"rb{self.bundles}")]
+        return module.main([*argv, *extra])
+
+    def snapshot(self) -> dict:
+        return {str(p): p.read_bytes() for base in (self.target_root, self.repo) for p in sorted(base.rglob("*")) if p.is_file()}
+
+    # --- positive / no-op ---
+    def test_no_drift_installs_candidate(self) -> None:
+        cand = self._release("cand", {"guard.sh": "v2\n", "zz-other.sh": "o1\n"})
+        self.assertEqual(self.cli("drift-check", "--repo", str(self.repo)), 0)
+        self.assertEqual(self.cli("shared-install", candidate=cand), 0)
+        self.assertEqual(self.dep(self.T1).read_text(), "v2\n")
+        self.assertEqual(self.dep(self.ALIAS).read_text(), "v2\n")
+
+    def test_drift_check_is_read_only(self) -> None:
+        self.dep(self.T1).write_text("live\n")
+        before = self.snapshot()
+        self.assertEqual(self.cli("drift-check", "--repo", str(self.repo)), 3)
+        self.assertEqual(self.snapshot(), before)
+
+    # --- refuse + exact accept + second-target protection ---
+    def test_live_edit_refuses_and_accept_must_name_each_target(self) -> None:
+        cand = self._release("cand", {"guard.sh": "v2\n", "zz-other.sh": "o2\n"})
+        self.dep(self.T1).write_text("live1\n")
+        self.dep(self.T2).write_text("live2\n")
+        self.assertEqual(self.cli("shared-install", candidate=cand), 2)
+        self.assertEqual(self.cli("shared-install", "--accept-overwrite", self.T1, candidate=cand), 2)
+        self.assertEqual(self.dep(self.T1).read_text(), "live1\n")
+        self.assertEqual(self.dep(self.T2).read_text(), "live2\n")
+        self.assertEqual(
+            self.cli("shared-install", "--accept-overwrite", self.T1, "--accept-overwrite", self.T2, candidate=cand), 0
         )
+        self.assertEqual(self.dep(self.T2).read_text(), "o2\n")
 
-    def _shared_install(self, candidate: Path, *extra: str) -> int:
-        return module.main(
-            [
-                "shared-install",
-                "--release-root", str(self.releases),
-                "--candidate", candidate.name,
-                "--current", str(self.current),
-                "--shared-assets-root", str(self.target_root),
-                "--rollback-bundle", str(self.root / f"rb-{candidate.name}-{len(extra)}"),
-                *extra,
-            ]
-        )
+    # --- gap 1: late edit at the replacement boundary ---
+    def test_late_target_edit_keeps_fresh_bytes_and_restores_only_what_was_written(self) -> None:
+        cand = self._release("cand", {"guard.sh": "v2\n", "zz-other.sh": "o2\n"})
+        original = module._before_replace_hook
 
-    def test_no_drift_is_noop(self) -> None:
-        self.assertEqual(self._drift(), [])
-        self.assertEqual(module.sync_live_drift(repo=self.repo, drift=[]), [])
-        self.assertEqual(self._shared_install(self.repo), 0)
-        self.assertEqual(self.deployed.read_text(), "v1\n")
+        def late_edit(target: Path) -> None:
+            if target == self.dep(self.T2):
+                target.write_text("fresh\n")
 
-    def test_live_edit_makes_install_refuse(self) -> None:
-        self.deployed.write_text("live edit\n")
-        drift = self._drift()
-        self.assertEqual([item["target"] for item in drift], [self.TARGET])
-        with self.assertRaisesRegex(module.InstallerError, "REFUSE: live drift"):
-            module.assert_no_live_drift(
-                active_release=self.current.resolve(), candidate_root=self.repo, target_root=self.target_root
-            )
-        self.assertEqual(self._shared_install(self.repo), 2)
-        self.assertEqual(self.deployed.read_text(), "live edit\n")
-        exit_code = module.main(
-            ["drift-check", "--release-root", str(self.releases), "--current", str(self.current),
-             "--shared-assets-root", str(self.target_root)]
-        )
-        self.assertEqual(exit_code, 3)
+        module._before_replace_hook = late_edit
+        try:
+            self.assertEqual(self.cli("shared-install", candidate=cand), 2)
+        finally:
+            module._before_replace_hook = original
+        self.assertEqual(self.dep(self.T2).read_text(), "fresh\n")
+        self.assertEqual(self.dep(self.T1).read_text(), "v1\n")
+        self.assertEqual(self.dep(self.ALIAS).read_text(), "v1\n")
 
-    def test_accept_overwrite_must_name_the_file(self) -> None:
-        self.deployed.write_text("live edit\n")
-        self.assertEqual(self._drift(accept_overwrite=["/opt/other"]) != [], True)
-        self.assertEqual(self._drift(accept_overwrite=[self.TARGET]), [])
-        self.assertEqual(self._shared_install(self.repo, "--accept-overwrite", self.TARGET), 0)
-        self.assertEqual(self.deployed.read_text(), "v1\n")
+    # --- gap 2: unknown baseline ---
+    def test_unknown_baseline_refuses_existing_nonmatching_target(self) -> None:
+        cand = self._release("cand", {"guard.sh": "v2\n", "zz-other.sh": "o1\n"})
+        self.current.unlink()
+        os.symlink(self.root / "releases" / "gone", self.current)
+        self.assertEqual(self.cli("drift-check"), 2)
+        self.assertEqual(self.cli("shared-install", candidate=cand), 2)
+        self.assertEqual(self.dep(self.T1).read_text(), "v1\n")
+        # absent first-install targets + candidate-equal files are fine; explicit accepts are exact
+        self.dep(self.ALIAS).unlink()
+        self.assertEqual(self.cli("shared-install", "--accept-overwrite", self.T1, candidate=cand), 0)
+        self.assertEqual(self.dep(self.T1).read_text(), "v2\n")
+        self.assertEqual(self.dep(self.ALIAS).read_text(), "v2\n")
 
-    def test_sync_drift_brings_edit_into_source_then_install_keeps_it(self) -> None:
-        self.deployed.write_text("live edit\n")
-        exit_code = module.main(
-            ["drift-check", "--sync-drift", "--repo", str(self.repo), "--release-root", str(self.releases),
-             "--current", str(self.current), "--shared-assets-root", str(self.target_root)]
-        )
-        self.assertEqual(exit_code, 0)
-        source = self.repo / Path(module.SHARED_ASSET_MANIFEST).parent / "scripts" / "guard.sh"
-        self.assertEqual(source.read_text(), "live edit\n")
+    # --- gap 3: sync-back ---
+    def test_sync_drift_metadata_then_install_keeps_edit_and_unrelated_dirt(self) -> None:
+        self.dep(self.T1).write_text("live\n")
+        unrelated = self.repo / "notes.txt"
+        unrelated.write_text("dirty\n")
+        self.assertEqual(self.cli("drift-check", "--sync-drift", "--repo", str(self.repo)), 0)
+        source = self.src(self.repo, "guard.sh")
+        self.assertEqual(source.read_text(), "live\n")
         self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o755)
         manifest = json.loads((self.repo / module.SHARED_ASSET_MANIFEST).read_text())
-        self.assertEqual(manifest["entries"][0]["sha256"], module.sha256(self.deployed))
-        # "Committed" candidate: the gate now passes on the first run and the edit survives install.
-        self.assertEqual(self._drift(), [])
+        self.assertEqual(manifest["entries"][0]["sha256"], module.sha256(self.dep(self.T1)))
+        self.assertEqual(unrelated.read_text(), "dirty\n")
         module._load_shared_manifest(self.repo)
-        self.assertEqual(self._shared_install(self.repo), 0)
-        self.assertEqual(self.deployed.read_text(), "live edit\n")
+        self.assertEqual(self.cli("drift-check", "--repo", str(self.repo)), 0)
+        self.assertEqual(self.cli("shared-install", candidate=self.repo), 0)
+        self.assertEqual(self.dep(self.T1).read_text(), "live\n")
+        self.assertEqual(self.dep(self.ALIAS).read_text(), "live\n")
+
+    def test_sync_refuses_receiver_edit_before_any_write(self) -> None:
+        self.dep(self.T1).write_text("live\n")
+        self.dep(self.T2).write_text("live2\n")
+        self.src(self.repo, "zz-other.sh").write_text("uncommitted\n")
+        before = self.snapshot()
+        self.assertEqual(self.cli("drift-check", "--sync-drift", "--repo", str(self.repo)), 2)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_sync_refuses_alias_conflict_before_any_write(self) -> None:
+        self.dep(self.T2).write_text("live2\n")
+        self.dep(self.T1).write_text("liveA\n")
+        self.dep(self.ALIAS).write_text("liveB\n")
+        before = self.snapshot()
+        self.assertEqual(self.cli("drift-check", "--sync-drift", "--repo", str(self.repo)), 2)
+        self.assertEqual(self.snapshot(), before)
 
 
 if __name__ == "__main__":

@@ -442,86 +442,162 @@ def _active_release(current: Path | None) -> Path | None:
         return None
 
 
-def detect_live_drift(
+def _shared_baseline(active_release: Path | None) -> dict[str, str] | None:
+    """Target -> sha the ACTIVE release installed; None when that identity is unknown."""
+    if active_release is None or not (active_release / SHARED_ASSET_MANIFEST).is_file():
+        return None
+    baseline: dict[str, str] = {}
+    for entry in _read_shared_entries(active_release):
+        for target_name in _shared_entry_targets(entry):
+            baseline[target_name] = entry.get("sha256", "")
+    return baseline
+
+
+def live_drift_report(
     *,
     active_release: Path | None,
     candidate_root: Path | None,
     target_root: Path | None,
     accept_overwrite: Iterable[str] = (),
-) -> list[dict[str, Any]]:
-    """Find deployed shared assets that were edited live after the active install.
+) -> dict[str, Any]:
+    """Classify every deployed shared-asset target before anything is overwritten.
 
-    A deployed file is drift when its hash matches neither the sha the ACTIVE
-    release installed nor the candidate's source sha for the same target (the
-    latter means the live edit is already committed).  Missing targets and
-    targets new in the candidate have no baseline and are not drift.
+    A deployed target is acceptable when it is absent, equals the sha the ACTIVE
+    release installed, equals the candidate source sha (already committed), or is
+    named in ``accept_overwrite``.  Anything else is drift.  When the active
+    identity/manifest is unknown (dangling pointer, missing manifest) there is no
+    baseline: every existing non-candidate-equal target is drift.  The candidate
+    is never used as the old baseline.
+
+    Returns ``drift`` records plus ``allowed``: target path -> set of digests
+    (None = absent) the writer may replace at its last replacement point.
     """
     accepted = {str(Path(value)) for value in accept_overwrite}
+    baseline = _shared_baseline(active_release)
     candidate_sha: dict[str, str] = {}
+    sources: dict[str, str | None] = {}
     for entry in _read_shared_entries(candidate_root):
         for target_name in _shared_entry_targets(entry):
             candidate_sha[target_name] = entry.get("sha256", "")
+            sources[target_name] = entry.get("source_path")
+    if baseline is None and candidate_root is None:
+        raise InstallerError(
+            "REFUSE: unknown baseline: the active release identity/shared manifest is missing and no "
+            "candidate was given; cannot prove deployed files are unedited"
+        )
+    if baseline:
+        for entry in _read_shared_entries(active_release):
+            for target_name in _shared_entry_targets(entry):
+                sources.setdefault(target_name, entry.get("source_path"))
     drift: list[dict[str, Any]] = []
-    for entry in _read_shared_entries(active_release):
-        for target_name in _shared_entry_targets(entry):
-            target = _shared_target_path(target_name, target_root)
-            if not target.is_file() or target.is_symlink():
-                continue
-            deployed = sha256(target)
-            allowed = {entry.get("sha256"), candidate_sha.get(target_name)}
-            if deployed in allowed or target_name in accepted or str(target) in accepted:
-                continue
+    allowed: dict[str, set[str | None]] = {}
+    for target_name in sorted(set(candidate_sha) | set(baseline or {})):
+        target = _shared_target_path(target_name, target_root)
+        active_sha = (baseline or {}).get(target_name)
+        deployed = _current_digest(target)
+        permitted: set[str | None] = {None}
+        for digest in (active_sha, candidate_sha.get(target_name)):
+            if digest:
+                permitted.add(digest)
+        if deployed is not None and (target_name in accepted or str(target) in accepted):
+            permitted.add(deployed)
+        allowed[str(target)] = permitted
+        if deployed not in permitted:
             drift.append(
                 {
                     "target": target_name,
                     "deployed_path": str(target),
-                    "source_path": entry.get("source_path"),
+                    "source_path": sources.get(target_name),
                     "deployed_sha256": deployed,
-                    "active_sha256": entry.get("sha256"),
+                    "active_sha256": active_sha,
+                    "baseline": "known" if baseline is not None else "unknown",
                 }
             )
-    return drift
+    return {"drift": drift, "allowed": allowed, "baseline_known": baseline is not None}
 
 
-def assert_no_live_drift(**kwargs: Any) -> None:
-    drift = detect_live_drift(**kwargs)
+def detect_live_drift(**kwargs: Any) -> list[dict[str, Any]]:
+    return live_drift_report(**kwargs)["drift"]
+
+
+def assert_no_live_drift(**kwargs: Any) -> dict[str, set[str | None]]:
+    """Refuse on drift; return the per-target allowed preimages for the writer."""
+    report = live_drift_report(**kwargs)
+    drift = report["drift"]
     if drift:
         lines = "; ".join(
-            f"{item['target']} deployed={item['deployed_sha256']} active={item['active_sha256']}" for item in drift
+            f"{item['target']} deployed={item['deployed_sha256']} active={item['active_sha256']}"
+            f" baseline={item['baseline']}"
+            for item in drift
         )
         raise InstallerError(
             f"REFUSE: live drift ({len(drift)} file(s)): {lines}. Run drift-check --sync-drift --repo <worktree>, "
             "commit the synced files to main, then rerun; or pass --accept-overwrite <target> per file."
         )
+    return report["allowed"]
 
 
 def sync_live_drift(*, repo: Path, drift: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Copy drifted deployed files back into the source tree and update manifest digests."""
+    """Copy drifted deployed files back into the source tree and update manifest digests.
+
+    Every selected receiver (source file) and alias is validated BEFORE any write:
+    one deployed version per source, the receiver must still hold the manifest
+    sha (no uncommitted edit to clobber), and the deployed bytes are snapshotted
+    and re-hashed.  Unselected/unrelated files in the tree are never touched.
+    """
     manifest_path = repo / SHARED_ASSET_MANIFEST
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     by_target: dict[str, dict[str, Any]] = {}
     for entry in manifest.get("entries", []):
         for target_name in _shared_entry_targets(entry):
             by_target[target_name] = entry
-    chosen: dict[str, str] = {}
-    synced: list[dict[str, Any]] = []
+    plan: dict[str, tuple[dict[str, Any], bytes, str]] = {}
     for item in drift:
         entry = by_target.get(item["target"])
         if entry is None:
-            raise InstallerError(f"drifted target is no longer in the source manifest: {item['target']}")
+            raise InstallerError(f"REFUSE: drifted target is not in the source manifest: {item['target']}")
+        if item.get("deployed_sha256") is None:
+            raise InstallerError(f"REFUSE: drifted target vanished: {item['target']}")
         source = entry["source_path"]
-        if chosen.get(source, item["deployed_sha256"]) != item["deployed_sha256"]:
-            raise InstallerError(f"conflicting live edits for one source across targets: {source}")
-        chosen[source] = item["deployed_sha256"]
+        data = Path(item["deployed_path"]).read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != item["deployed_sha256"]:
+            raise InstallerError(f"REFUSE: deployed file changed during sync: {item['target']}")
+        if source in plan and plan[source][2] != digest:
+            raise InstallerError(f"REFUSE: conflicting live edits for one source across alias targets: {source}")
+        receiver = repo / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(source)
+        receiver_digest = _current_digest(receiver)
+        if receiver_digest not in {entry.get("sha256"), digest}:
+            raise InstallerError(
+                f"REFUSE: receiving source has uncommitted edits: {receiver} has={receiver_digest} "
+                f"manifest={entry.get('sha256')} deployed={digest}"
+            )
+        plan[source] = (entry, data, digest)
+    synced: list[dict[str, Any]] = []
+    for source, (entry, data, digest) in sorted(plan.items()):
         destination = repo / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(item["deployed_path"], destination)
-        os.chmod(destination, entry["mode"])
-        entry["sha256"] = sha256(destination)
-        synced.append({"target": item["target"], "source_path": source, "sha256": entry["sha256"]})
+        temporary = destination.with_name(f".{destination.name}.sync.{os.getpid()}.tmp")
+        temporary.write_bytes(data)
+        os.chmod(temporary, entry["mode"])
+        os.replace(temporary, destination)
+        entry["sha256"] = digest
+        synced.append({"source_path": source, "sha256": digest})
     if synced:
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _write_json_preserving_mode(manifest_path, manifest)
     return synced
+
+
+def _write_json_preserving_mode(path: Path, value: dict[str, Any]) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+
+
+def _before_replace_hook(target: Path) -> None:
+    """Test seam: called immediately before the last-moment preimage check."""
 
 
 def install_shared_assets(
@@ -530,8 +606,15 @@ def install_shared_assets(
     target_root: Path | None,
     rollback_bundle: Path,
     fail_after: int | None = None,
+    allowed_preimages: dict[str, set[str | None]] | None = None,
 ) -> dict[str, Any]:
-    """Atomically install only manifest-listed files; never prune unlisted files."""
+    """Atomically install only manifest-listed files; never prune unlisted files.
+
+    Each target is re-hashed at the last replacement point and must still equal
+    the preimage captured in the rollback bundle (and, when given, one of the
+    drift-gate ``allowed_preimages``).  A target edited after the gate or after
+    the backup is refused, and recovery only restores targets this run wrote.
+    """
     manifest = _load_shared_manifest(release_dir)
     target_records = [
         (entry, target_name, _shared_target_path(target_name, target_root))
@@ -567,6 +650,10 @@ def install_shared_assets(
             )
         rollback_manifest["compatibility_entries"] = compatibility_records
         _write_json(rollback_manifest_path, rollback_manifest)
+    backed_up: dict[str, str | None] = {}
+    for record in rollback.get("entries", []):
+        backed_up[record["path"]] = record.get("sha256") if record.get("present") else None
+    written: dict[str, str] = {}
     staged: list[Path] = []
     replaced = 0
     try:
@@ -582,7 +669,17 @@ def install_shared_assets(
                 destination.flush()
                 os.fsync(destination.fileno())
             os.chmod(temporary, entry["mode"])
+            _before_replace_hook(target)
+            current = _current_digest(target)
+            if current != backed_up.get(str(target), "<not-backed-up>") or (
+                allowed_preimages is not None and current not in allowed_preimages.get(str(target), set())
+            ):
+                raise InstallerError(
+                    f"REFUSE: live drift at replacement: {target} changed after the drift gate/backup "
+                    f"(now={current} backup={backed_up.get(str(target))}); kept the fresh bytes"
+                )
             os.replace(temporary, target)
+            written[str(target)] = entry["sha256"]
             _fsync_directory(target.parent)
             replaced += 1
             observed = file_record(target, target_name)
@@ -598,8 +695,10 @@ def install_shared_assets(
             "rollback_bundle": str(rollback_bundle),
         }
     except Exception as exc:
-        restore_rollback_bundle(rollback_bundle)
-        raise InstallerError(f"shared asset installation failed and baseline restored: {exc}") from exc
+        restore_rollback_bundle(rollback_bundle, only_if_current=written)
+        raise InstallerError(
+            f"shared asset installation failed; targets this run wrote were restored, fresh bytes kept: {exc}"
+        ) from exc
     finally:
         for temporary in staged:
             if temporary.exists() or temporary.is_symlink():
@@ -708,7 +807,23 @@ def _assert_rollback_payload(payload: Path, expected: dict[str, Any]) -> None:
         raise InstallerError(f"rollback payload mismatch: {expected['path']}")
 
 
-def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
+def _current_digest(path: Path) -> str | None:
+    """sha256 of a regular file, or None when absent (other kinds get a sentinel)."""
+    if not (path.exists() or path.is_symlink()):
+        return None
+    if path.is_symlink() or not path.is_file():
+        return "<non-regular>"
+    return sha256(path)
+
+
+def restore_rollback_bundle(bundle: Path, *, only_if_current: dict[str, str] | None = None) -> dict[str, Any]:
+    """Restore a rollback bundle.
+
+    With ``only_if_current`` (target path -> digest this run wrote), restore a
+    normal entry only when the target still holds exactly what this run wrote.
+    A target that was never replaced, or was changed again after replacement,
+    keeps its fresh bytes: recovery must never overwrite them with an older backup.
+    """
     manifest = json.loads((bundle / ROLLBACK_MANIFEST).read_text(encoding="utf-8"))
     compatibility_entries = manifest.get("compatibility_entries", [])
     normal_entries = manifest.get("entries", [])
@@ -754,6 +869,10 @@ def restore_rollback_bundle(bundle: Path) -> dict[str, Any]:
                 temporary.unlink()
     for entry in normal_entries:
         target = Path(entry["path"])
+        if only_if_current is not None and (
+            str(target) not in only_if_current or _current_digest(target) != only_if_current[str(target)]
+        ):
+            continue
         if not entry.get("present"):
             if target.exists() or target.is_symlink():
                 if target.is_dir() and not target.is_symlink():
@@ -1241,7 +1360,7 @@ def main(argv: list[str] | None = None) -> int:
             if release_dir is None:
                 raise InstallerError("shared asset modes require --candidate")
             if args.mode == "shared-install":
-                assert_no_live_drift(
+                allowed = assert_no_live_drift(
                     active_release=_active_release(current_pointer),
                     candidate_root=release_dir,
                     target_root=args.shared_assets_root,
@@ -1251,6 +1370,7 @@ def main(argv: list[str] | None = None) -> int:
                     release_dir=release_dir,
                     target_root=args.shared_assets_root,
                     rollback_bundle=args.rollback_bundle,
+                    allowed_preimages=allowed,
                 )
             else:
                 result = check_shared_assets(release_dir=release_dir, target_root=args.shared_assets_root)
