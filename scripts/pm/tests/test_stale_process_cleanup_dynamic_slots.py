@@ -90,12 +90,24 @@ class DynamicSlotSetTests(unittest.TestCase):
             self.assertEqual(MODULE.slot_root(9, "0:0.9"), "/Users/rajiv/Downloads/projects/heydonna-app-3009")
 
 
+FREE = dict(status="free", occupied=0, idle=1, activity=None, issue=None, task=None, repository_id=None, branch=None,
+            branch_ref=None, work_kind=None, handoff_id=None, claimed_at=None, active_turn_state="inactive",
+            active_turn_id=None)
+
+
 class DuplicateDevServerTests(unittest.TestCase):
-    """Slot 2 clone, slot busy (active turn): duplicates are still reaped."""
+    """Slot 2 clone. Duplicates are reaped only on a proven free+idle slot;
+    otherwise they are report-only (CTO REVISE 1791393355.881389)."""
 
     CLONE = "/Users/rajiv/Downloads/projects/heydonna-app-3002"
 
-    def collect(self, procs, ports):
+    def state(self, free: bool, **overrides):
+        base = {**record(2), **(FREE if free else {}), **overrides}
+        st = {**base, "root": self.CLONE, "port": 3002}
+        st["free_idle"] = st["status"] == "free" and st["occupied"] == 0 and st["idle"] == 1
+        return {2: st}
+
+    def collect(self, procs, ports, states=None):
         ps = "".join(f"{pid} {ppid} {UID} {etime} {cmd}\n" for pid, ppid, etime, cmd in procs)
 
         def fake_run(args, timeout=5):
@@ -106,7 +118,7 @@ class DuplicateDevServerTests(unittest.TestCase):
                 return completed("".join(f"n*:{p}\n" for p in ports.get(pid, [])))
             return completed("", 1)
 
-        states = {2: {**record(2), "root": self.CLONE, "port": 3002, "free_idle": False}}
+        states = self.state(True) if states is None else states
         with patch.object(MODULE, "run", side_effect=fake_run), patch.object(
             MODULE, "get_cwd", return_value=self.CLONE
         ), patch.object(MODULE, "get_start_time", return_value=START):
@@ -116,19 +128,30 @@ class DuplicateDevServerTests(unittest.TestCase):
         node = f"node {self.CLONE}/node_modules/.bin/next dev"
         return [(root, 900, etime, node), (root + 1, root, etime, "next-server (v15.5.26)")]
 
-    def test_second_tree_in_clone_is_flagged_and_slot_server_is_not(self) -> None:
+    def test_second_tree_in_free_clone_is_flagged_and_slot_server_is_not(self) -> None:
         result = self.collect(self.tree(100, "02:00:00") + self.tree(200, "30:00"), {101: [3002], 201: [3000]})
         flagged = {row["pid"]: row for row in result["candidates"]}
         self.assertEqual(set(flagged), {200, 201})
         self.assertEqual(flagged[200]["policy"], "duplicate_dev_server")
         self.assertIn("wrong_port_dev_server", flagged[201]["reap_reason"])
-        self.assertNotIn(100, flagged)
-        self.assertNotIn(101, flagged)
 
     def test_duplicate_not_listening_is_flagged_when_keeper_exists(self) -> None:
         result = self.collect(self.tree(100, "02:00:00") + self.tree(200, "30:00"), {101: [3002]})
         self.assertEqual({row["pid"] for row in result["candidates"]}, {200, 201})
         self.assertIn("keeper_pid=100", result["candidates"][0]["reap_reason"])
+
+    def test_busy_unknown_and_missing_row_duplicates_are_report_only(self) -> None:
+        cases = {
+            "busy": self.state(False),
+            "unknown": self.state(False, status="UNKNOWN", occupied=0, idle=0, active_turn_state="unknown"),
+            "missing_row": {},
+        }
+        for name, states in cases.items():
+            with self.subTest(name):
+                result = self.collect(self.tree(100, "02:00:00") + self.tree(200, "30:00"), {101: [3002], 201: [3000]}, states)
+                self.assertEqual(result["candidates"], [])
+                self.assertEqual({item["pid"] for item in result["report_only"]}, {200, 201})
+                self.assertTrue(all(item["associated_slot"] == 2 for item in result["report_only"]))
 
     def test_single_slot_server_is_not_flagged(self) -> None:
         result = self.collect(self.tree(100, "02:00:00"), {101: [3002]})
@@ -138,19 +161,72 @@ class DuplicateDevServerTests(unittest.TestCase):
         result = self.collect(self.tree(100, "02:00:00") + self.tree(200, "05:00"), {101: [3002], 201: [3000]})
         self.assertEqual(result["candidates"], [])
 
+    def row(self, pid, ppid, policy="duplicate_dev_server"):
+        return {"pid": pid, "ppid": ppid, "uid": UID, "category": "nextjs",
+                "command_identity": ("nextjs", "next-server" if ppid != 900 else f"{self.CLONE}/node_modules/.bin/next"),
+                "start_time": START, "cwd": self.CLONE, "associated_slot": 2, "policy": policy,
+                "owner_proof": "mop_free_idle_inactive_no_assignment"}
+
+    def kill(self, members, live_children, ports, lsof_timeout=()):
+        def fake_run(args, timeout=5):
+            if args[:2] == ["ps", "-axo"]:
+                return completed("".join(f"{c} {p}\n" for p, cs in live_children.items() for c in cs))
+            if args[0] == "lsof" and "-iTCP" in args:
+                pid = int(args[args.index("-p") + 1])
+                if pid in lsof_timeout:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                out = "".join(f"n*:{p}\n" for p in ports.get(pid, []))
+                return completed(out, 0 if out else 1)
+            return completed("", 1)
+
+        by_pid = {m["pid"]: m for m in members}
+        with patch.object(MODULE, "run", side_effect=fake_run), patch.object(
+            MODULE, "_process_snapshot", side_effect=lambda pid: dict(by_pid[pid])
+        ), patch.object(MODULE, "load_slot_inventory", return_value=(self.state(True), None)), patch.object(
+            MODULE, "alive", return_value=False
+        ), patch.object(MODULE, "time"), patch.object(MODULE.os, "kill") as kill:
+            outcomes = MODULE.kill_candidates(members, 0)
+        return outcomes, kill
+
+    def test_parent_with_canonical_child_is_preserved(self) -> None:
+        outcomes, kill = self.kill([self.row(200, 900)], {200: [201]}, {201: [3002]})
+        kill.assert_not_called()
+        self.assertEqual(outcomes[0]["outcome"], "refused")
+
+    def test_lsof_timeout_preserves_tree(self) -> None:
+        members = [self.row(200, 900), self.row(201, 200)]
+        outcomes, kill = self.kill(members, {200: [201]}, {}, lsof_timeout=(201,))
+        kill.assert_not_called()
+        self.assertEqual({o["outcome"] for o in outcomes}, {"refused"})
+
+    def test_revalidation_refuses_on_unreadable_listener(self) -> None:
+        outcomes, kill = self.kill([self.row(201, 1)], {}, {}, lsof_timeout=(201,))
+        kill.assert_not_called()
+        self.assertEqual(outcomes[0]["outcome"], "refused")
+
+    def test_proven_orphan_tree_is_still_terminated(self) -> None:
+        members = [self.row(200, 900), self.row(201, 200)]
+        outcomes, kill = self.kill(members, {200: [201]}, {201: [3000]})
+        self.assertEqual(kill.call_count, 2)
+        self.assertEqual({o["outcome"] for o in outcomes}, {"terminated"})
+
     def test_revalidation_refuses_when_duplicate_now_owns_slot_port(self) -> None:
-        row = {"pid": 201, "ppid": 200, "uid": UID, "category": "nextjs", "command_identity": ("nextjs", "next-server"),
-               "start_time": START, "cwd": self.CLONE, "associated_slot": 2, "policy": "duplicate_dev_server"}
-        snap = {**row}
-        states = {2: {**record(2), "root": self.CLONE, "port": 3002}}
-        with patch.object(MODULE, "_process_snapshot", return_value={**snap, "ppid": 1}), patch.object(
-            MODULE, "load_slot_inventory", return_value=(states, None)
-        ), patch.object(MODULE, "listen_ports", return_value=[3002]):
-            self.assertEqual(MODULE.revalidate_candidate(row), (False, "duplicate_now_owns_slot_port"))
-        with patch.object(MODULE, "_process_snapshot", return_value={**snap, "ppid": 1}), patch.object(
-            MODULE, "load_slot_inventory", return_value=(states, None)
-        ), patch.object(MODULE, "listen_ports", return_value=[3000]):
-            self.assertEqual(MODULE.revalidate_candidate(row), (True, "duplicate_dev_server_identity_match"))
+        row = self.row(201, 200)
+        states = self.state(True)
+        for ports, expected in (([3002], (False, "duplicate_now_owns_slot_port")),
+                                ([3000], (True, "duplicate_dev_server_identity_match"))):
+            out = "".join(f"n*:{p}\n" for p in ports)
+            with patch.object(MODULE, "_process_snapshot", return_value={**row, "ppid": 1}), patch.object(
+                MODULE, "load_slot_inventory", return_value=(states, None)
+            ), patch.object(MODULE, "run", return_value=completed(out)):
+                self.assertEqual(MODULE.revalidate_candidate(row), expected)
+
+    def test_revalidation_refuses_duplicate_when_slot_became_busy(self) -> None:
+        row = self.row(201, 200)
+        with patch.object(MODULE, "_process_snapshot", return_value=dict(row)), patch.object(
+            MODULE, "load_slot_inventory", return_value=(self.state(False), None)
+        ), patch.object(MODULE, "run", return_value=completed("n*:3000\n")):
+            self.assertEqual(MODULE.revalidate_candidate(row), (False, "slot_owner_evidence_changed"))
 
     def test_young_pm_worktree_is_never_eligible(self) -> None:
         ps = f"300 1 {UID} 45:00 /opt/agent-browser --remote-debugging-port=9222\n"

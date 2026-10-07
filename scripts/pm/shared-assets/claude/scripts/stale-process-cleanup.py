@@ -386,6 +386,49 @@ def listen_ports(pid: int) -> list[int]:
     return sorted(ports)
 
 
+def listen_ports_strict(pid: int) -> list[int] | None:
+    """LISTEN ports for a signal decision; None when the read fails or times out.
+
+    lsof exits 1 with no output when the process has no matching sockets; any
+    exception, other exit code, or stderr is unreadable and must fail closed.
+    """
+    try:
+        result = run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:LISTEN", "-Fn"], timeout=2)
+    except Exception:
+        return None
+    if (result.stderr or "").strip():
+        return None
+    if result.returncode not in (0, 1) or (result.returncode == 1 and (result.stdout or "").strip()):
+        return None
+    ports: set[int] = set()
+    for line in (result.stdout or "").splitlines():
+        match = re.match(r"n.*:(\d+)$", line)
+        if match:
+            ports.add(int(match.group(1)))
+    return sorted(ports)
+
+
+def live_children_map() -> dict[int, list[int]] | None:
+    """Current {ppid: [pid]} from the process table; None when unreadable."""
+    try:
+        result = run(["ps", "-axo", "pid=,ppid="], timeout=5)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    children: dict[int, list[int]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    return children
+
+
 def duplicate_dev_server_reasons(rows: list[dict[str, Any]]) -> dict[int, str]:
     """Return {pid: reason} for Next.js dev-server trees to reap in slot clones.
 
@@ -560,14 +603,34 @@ def collect_processes(
         }
         rows.append(row)
 
+    report_only: list[dict[str, Any]] = []
     if not inventory_error:
         duplicate_reasons = duplicate_dev_server_reasons(rows)
         for row in rows:
             reason = duplicate_reasons.get(row["pid"])
-            if reason and row["start_time"] and not row["eligible"]:
-                row.update(eligible=True, policy="duplicate_dev_server", reap_reason=reason, skip_reason=None)
-            elif reason and row["eligible"]:
+            if not reason:
+                continue
+            if row["eligible"]:
                 row["reap_reason"] = reason
+                continue
+            # Duplicate/wrong-port status never overrides the ownership hold.
+            # Age does not prove non-use: unless the slot is proven free+idle
+            # with no assignment, the tree is retained and only reported.
+            proven_free = bool(
+                row["start_time"]
+                and row["slot_free_idle"]
+                and row["owner_proof"]
+                and not row["slot_state_missing"]
+                and row["skip_reason"] != "pm_worktree_younger_than_60m"
+            )
+            if proven_free:
+                row.update(eligible=True, policy="duplicate_dev_server", reap_reason=reason, skip_reason=None)
+            else:
+                row["report_only_reason"] = reason
+                report_only.append(
+                    {"pid": row["pid"], "associated_slot": row["associated_slot"], "reason": reason,
+                     "hold": row["skip_reason"] or "slot_not_proven_free_idle"}
+                )
 
     candidates = [row for row in rows if row["eligible"]]
     skipped = [row for row in rows if not row["eligible"]]
@@ -579,6 +642,7 @@ def collect_processes(
         "rows": rows,
         "candidates": candidates,
         "skipped": skipped,
+        "report_only": report_only,
     }
 
 
@@ -655,7 +719,12 @@ def revalidate_candidate(row: dict[str, Any], allow_slotless_attested: bool = Fa
     if duplicate:
         if not slot_state or slot_state.get("slot") != row.get("associated_slot"):
             return False, "slot_owner_changed"
-        if slot_port(int(row["associated_slot"])) in listen_ports(pid):
+        if not stale_owner_evidence(slot_state):
+            return False, "slot_owner_evidence_changed"
+        ports = listen_ports_strict(pid)
+        if ports is None:
+            return False, "listener_read_failed"
+        if slot_port(int(row["associated_slot"])) in ports:
             return False, "duplicate_now_owns_slot_port"
         return True, "duplicate_dev_server_identity_match"
     if row.get("associated_slot") is None:
@@ -698,7 +767,88 @@ def attestation_metadata(path: Path) -> tuple[dict[str, Any] | None, str | None]
     )
 
 
+def candidate_trees(candidates: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group candidates into trees (a candidate whose parent is a candidate joins it)."""
+    by_pid = {int(row["pid"]): row for row in candidates}
+    def root_of(pid: int) -> int:
+        seen = set()
+        while by_pid[pid].get("ppid") in by_pid and pid not in seen:
+            seen.add(pid)
+            pid = int(by_pid[pid]["ppid"])
+        return pid
+    trees: dict[int, list[dict[str, Any]]] = {}
+    for row in candidates:
+        trees.setdefault(root_of(int(row["pid"])), []).append(row)
+    return list(trees.values())
+
+
+def revalidate_tree(
+    members: list[dict[str, Any]], allow_slotless_attested: bool = False
+) -> tuple[bool, str, int | None, str | None]:
+    """Fail-closed check of a whole selected tree before its FIRST signal.
+
+    Every candidate member must still match its identity (incl. start time)
+    and ownership. Every PID in the live tree (members plus their current
+    descendants) must have a readable listener set, and none may listen on
+    the slot's canonical port. Any failure skips the whole tree.
+    """
+    for row in members:
+        valid, reason = revalidate_candidate(row, allow_slotless_attested)
+        if not valid:
+            return False, f"tree_member_refused:pid={row['pid']}:{reason}", int(row["pid"]), reason
+    children = live_children_map()
+    if children is None:
+        return False, "tree_process_table_unreadable", None, None
+    tree_pids: set[int] = set()
+    stack = [int(row["pid"]) for row in members]
+    while stack:
+        pid = stack.pop()
+        if pid in tree_pids:
+            continue
+        tree_pids.add(pid)
+        stack.extend(children.get(pid, []))
+    slots = {row.get("associated_slot") for row in members if row.get("associated_slot") is not None}
+    canonical = {slot_port(int(slot)) for slot in slots}
+    for pid in sorted(tree_pids):
+        ports = listen_ports_strict(pid)
+        if ports is None:
+            return False, f"tree_listener_read_failed:pid={pid}", None, None
+        hit = canonical.intersection(ports)
+        if hit:
+            return False, f"tree_contains_canonical_listener:pid={pid}:port={min(hit)}", None, None
+    return True, "tree_identity_owner_listener_ok", None, None
+
+
 def kill_candidates(
+    candidates: list[dict[str, Any]],
+    wait_s: float,
+    allow_slotless_attested: bool = False,
+) -> list[dict[str, Any]]:
+    """Revalidate each candidate tree as a whole, then signal its members."""
+    results: list[dict[str, Any]] = []
+    for members in candidate_trees(candidates):
+        ok, reason, bad_pid, bad_reason = revalidate_tree(members, allow_slotless_attested)
+        if not ok:
+            for row in members:
+                status, why = "tree_refused", reason
+                if int(row["pid"]) == bad_pid:
+                    why = bad_reason
+                    status = (
+                        "attestation_required_refused"
+                        if bad_reason == "slotless_reap_not_attested"
+                        else "identity_or_owner_refused"
+                    )
+                results.append({
+                    "pid": int(row["pid"]), "category": row["category"],
+                    "associated_slot": row.get("associated_slot"), "term_sent": False, "kill_sent": False,
+                    "status": status, "reason": why, "tree_reason": reason, "outcome": "refused",
+                })
+            continue
+        results.extend(_kill_members(members, wait_s, allow_slotless_attested))
+    return results
+
+
+def _kill_members(
     candidates: list[dict[str, Any]],
     wait_s: float,
     allow_slotless_attested: bool = False,
@@ -798,7 +948,16 @@ def kill_candidates(
     return results
 
 
-def write_status(path: Path, *, mode: str, refused: bool, reason: str | None, summary: dict[str, Any] | None) -> None:
+def write_status(
+    path: Path,
+    *,
+    mode: str,
+    refused: bool,
+    reason: str | None,
+    summary: dict[str, Any] | None,
+    report_only: list[dict[str, Any]] | None = None,
+    tree_refused: list[dict[str, Any]] | None = None,
+) -> None:
     """Status line the hourly heartbeat reads (heartbeat-compose.py)."""
     doc = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -807,6 +966,10 @@ def write_status(path: Path, *, mode: str, refused: bool, reason: str | None, su
         "error": bool(summary and summary.get("errors")),
         "reason": reason,
         "summary": summary,
+        # Retained duplicate/wrong-port trees on slots not proven free+idle.
+        "report_only": report_only or [],
+        # Trees skipped by the whole-tree fail-closed check before any signal.
+        "tree_refused": tree_refused or [],
     }
     try:
         path.write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
@@ -904,7 +1067,7 @@ def _main() -> int:
             "dev_tool_min": args.dev_tool_min,
             "slot_scoped_free_idle_required": ["agent-browser", "nextjs", "convex", "tsc"],
             "slot_set": "MoP slots rows with slot >= 1 (no hard-coded range)",
-            "duplicate_dev_server": "per slot clone keep the tree on PORT 3000+N; reap other trees and wrong-port trees older than 10m",
+            "duplicate_dev_server": "per slot clone keep the tree on PORT 3000+N; reap other trees and wrong-port trees older than 10m only when the slot is proven free+idle; otherwise report-only. Whole tree revalidated (identity, owner, readable listeners, no canonical listener) before its first signal",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],
@@ -931,6 +1094,7 @@ def _main() -> int:
             "after_candidates": after_count,
             "slotless_reap_attested": bool(args.attest_slotless_reap),
         },
+        "report_only": before.get("report_only", []),
         "after": after,
     }
     Path(args.output).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -942,6 +1106,11 @@ def _main() -> int:
         refused=refusal is not None,
         reason=refusal or (f"{len(errors)} kill errors" if errors else None),
         summary=data["summary"],
+        report_only=data["report_only"],
+        tree_refused=[
+            {"pid": item["pid"], "associated_slot": item.get("associated_slot"), "reason": item.get("tree_reason") or item.get("reason")}
+            for item in refused if item.get("tree_reason")
+        ],
     )
 
     print(f"STALE_PROCESS_CANDIDATES count={before_count} proof={args.output}")
