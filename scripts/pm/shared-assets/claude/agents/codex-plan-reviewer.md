@@ -139,6 +139,14 @@ Source: Rajiv, C0ALZJHGE49/1791347751.497949 ts 1791355336.754869: "no lllm call
 - Plans name the metering path (feature key, pricing row, reserve/settle). BLOCK / REQUEST_CHANGES a diff that bypasses the metered helper or routes to an unpriced model.
 - Required tests: source-inspection that every LLM call site uses the metered helper (allowlist: support chat), and every routed model has a `providerPricing` row.
 
+## No-live-Clerk-in-E2E gate (Mandatory - Rajiv product rule 2026-10-08)
+
+Source: Rajiv, C0ALZJHGE49 thread 1791398195.877809, ts 1791398300.792659: "Note that clerk has to be bypassed in e2e. We should not hit live clerk api." Rule: `~/.claude/rules/41-heydonna-e2e-no-live-clerk.md`.
+
+- E2E (CI and local preflight) authenticates only through the synthetic-JWT lane (`SYNTH_JWT_*`). It makes zero live Clerk API calls in provisioning, establish-run-auth, global setup, cleanup or Playwright auth state.
+- REQUEST_CHANGES on any diff or plan that adds, retries or polls a live Clerk call (`clerk.signIn`, Backend API user create/list/lookup, `@clerk/testing` against the real instance) under `scripts/ci/**`, `tests/e2e/**` or E2E global setup, including as an auth-flake fix.
+- Required test: a source-inspection check that there are no live Clerk calls on E2E paths, plus zero egress to `api.clerk.com` during E2E.
+
 ## How you work
 
 1. Receive: issue number (REQUIRED) and the branch the plan is on (REQUIRED for pre-PR — `--pr` only works after the PR exists).

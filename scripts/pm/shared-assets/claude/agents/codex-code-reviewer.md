@@ -581,6 +581,14 @@ the error state. `disabled={isSubmitting}` / `disabled={isPending}` guarding
 the action's own in-flight request is allowed. Full rule:
 `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No-live-Clerk-in-E2E gate (Mandatory - Rajiv product rule 2026-10-08)
+
+Source: Rajiv, C0ALZJHGE49 thread 1791398195.877809, ts 1791398300.792659: "Note that clerk has to be bypassed in e2e. We should not hit live clerk api." Rule: `~/.claude/rules/41-heydonna-e2e-no-live-clerk.md`.
+
+- E2E (CI and local preflight) authenticates only through the synthetic-JWT lane (`SYNTH_JWT_*`). It makes zero live Clerk API calls in provisioning, establish-run-auth, global setup, cleanup or Playwright auth state.
+- REQUEST_CHANGES on any diff or plan that adds, retries or polls a live Clerk call (`clerk.signIn`, Backend API user create/list/lookup, `@clerk/testing` against the real instance) under `scripts/ci/**`, `tests/e2e/**` or E2E global setup, including as an auth-flake fix.
+- Required test: a source-inspection check that there are no live Clerk calls on E2E paths, plus zero egress to `api.clerk.com` during E2E.
+
 ## No unmetered LLM calls (Mandatory - Rajiv product rule 2026-10-07)
 
 Source: Rajiv, C0ALZJHGE49/1791347751.497949 ts 1791355336.754869: "no lllm calls should go unmetered. it will open us to abuse. chat support is the only exception." Rule: `~/.claude/rules/40-heydonna-no-unmetered-llm-calls.md`.
