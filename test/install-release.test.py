@@ -217,5 +217,118 @@ class PluginCacheRootTests(unittest.TestCase):
         module.refuse_claude_plugin_cache(Path.home() / ".local" / "share" / "master-of-panes" / "releases", label="x")
 
 
+class LiveDriftGateTests(unittest.TestCase):
+    """Rajiv 2026-10-07 (DM 1791376793.611059): installs must not overwrite live edits."""
+
+    TARGET = "/opt/claude/scripts/guard.sh"
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.target_root = self.root / "deployed"
+        self.releases = self.root / "releases"
+        self.current = self.root / "current"
+        self.active = self._release("active", "v1\n")
+        os.symlink(self.active, self.current)
+        self.repo = self._release("repo", "v1\n")
+        self.deployed = self.target_root / self.TARGET.lstrip("/")
+        self.deployed.parent.mkdir(parents=True)
+        self.deployed.write_text("v1\n")
+        self.deployed.chmod(0o755)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _release(self, name: str, body: str) -> Path:
+        root = self.releases / name
+        shared = root / Path(module.SHARED_ASSET_MANIFEST).parent
+        (shared / "scripts").mkdir(parents=True)
+        source = shared / "scripts" / "guard.sh"
+        source.write_text(body)
+        source.chmod(0o755)
+        manifest = {
+            "schema": "mop_shared_operational_assets",
+            "version": 1,
+            "inventory": {"selected_count": 1},
+            "entries": [
+                {
+                    "canonical_target": self.TARGET,
+                    "dependencies": [],
+                    "dependency_status": "closed",
+                    "mode": 0o755,
+                    "sha256": module.sha256(source),
+                    "source_path": "scripts/guard.sh",
+                }
+            ],
+        }
+        (root / module.SHARED_ASSET_MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        return root
+
+    def _drift(self, **extra):
+        return module.detect_live_drift(
+            active_release=self.current.resolve(), candidate_root=self.repo, target_root=self.target_root, **extra
+        )
+
+    def _shared_install(self, candidate: Path, *extra: str) -> int:
+        return module.main(
+            [
+                "shared-install",
+                "--release-root", str(self.releases),
+                "--candidate", candidate.name,
+                "--current", str(self.current),
+                "--shared-assets-root", str(self.target_root),
+                "--rollback-bundle", str(self.root / f"rb-{candidate.name}-{len(extra)}"),
+                *extra,
+            ]
+        )
+
+    def test_no_drift_is_noop(self) -> None:
+        self.assertEqual(self._drift(), [])
+        self.assertEqual(module.sync_live_drift(repo=self.repo, drift=[]), [])
+        self.assertEqual(self._shared_install(self.repo), 0)
+        self.assertEqual(self.deployed.read_text(), "v1\n")
+
+    def test_live_edit_makes_install_refuse(self) -> None:
+        self.deployed.write_text("live edit\n")
+        drift = self._drift()
+        self.assertEqual([item["target"] for item in drift], [self.TARGET])
+        with self.assertRaisesRegex(module.InstallerError, "REFUSE: live drift"):
+            module.assert_no_live_drift(
+                active_release=self.current.resolve(), candidate_root=self.repo, target_root=self.target_root
+            )
+        self.assertEqual(self._shared_install(self.repo), 2)
+        self.assertEqual(self.deployed.read_text(), "live edit\n")
+        exit_code = module.main(
+            ["drift-check", "--release-root", str(self.releases), "--current", str(self.current),
+             "--shared-assets-root", str(self.target_root)]
+        )
+        self.assertEqual(exit_code, 3)
+
+    def test_accept_overwrite_must_name_the_file(self) -> None:
+        self.deployed.write_text("live edit\n")
+        self.assertEqual(self._drift(accept_overwrite=["/opt/other"]) != [], True)
+        self.assertEqual(self._drift(accept_overwrite=[self.TARGET]), [])
+        self.assertEqual(self._shared_install(self.repo, "--accept-overwrite", self.TARGET), 0)
+        self.assertEqual(self.deployed.read_text(), "v1\n")
+
+    def test_sync_drift_brings_edit_into_source_then_install_keeps_it(self) -> None:
+        self.deployed.write_text("live edit\n")
+        exit_code = module.main(
+            ["drift-check", "--sync-drift", "--repo", str(self.repo), "--release-root", str(self.releases),
+             "--current", str(self.current), "--shared-assets-root", str(self.target_root)]
+        )
+        self.assertEqual(exit_code, 0)
+        source = self.repo / Path(module.SHARED_ASSET_MANIFEST).parent / "scripts" / "guard.sh"
+        self.assertEqual(source.read_text(), "live edit\n")
+        self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o755)
+        manifest = json.loads((self.repo / module.SHARED_ASSET_MANIFEST).read_text())
+        self.assertEqual(manifest["entries"][0]["sha256"], module.sha256(self.deployed))
+        # "Committed" candidate: the gate now passes on the first run and the edit survives install.
+        self.assertEqual(self._drift(), [])
+        module._load_shared_manifest(self.repo)
+        self.assertEqual(self._shared_install(self.repo), 0)
+        self.assertEqual(self.deployed.read_text(), "live edit\n")
+
+
 if __name__ == "__main__":
     unittest.main()

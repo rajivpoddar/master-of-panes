@@ -170,8 +170,17 @@ def stage_release(
     release_root: Path,
     bun: str = "bun",
     node_bin: str | None = None,
+    current: Path | None = None,
+    shared_target_root: Path | None = None,
+    accept_overwrite: Iterable[str] = (),
 ) -> dict[str, Any]:
     tree = assert_clean_source(repo, candidate)
+    assert_no_live_drift(
+        active_release=_active_release(current if current is not None else release_root.parent / "current"),
+        candidate_root=repo,
+        target_root=shared_target_root,
+        accept_overwrite=accept_overwrite,
+    )
     if not node_bin:
         raise InstallerError("stage requires --node-bin for the pinned native runtime rebuild")
     release_root.mkdir(parents=True, exist_ok=True)
@@ -408,6 +417,111 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _read_shared_entries(root: Path | None) -> list[dict[str, Any]]:
+    """Lightweight read of a shared-asset manifest's entries (no validation)."""
+    if root is None:
+        return []
+    path = root / SHARED_ASSET_MANIFEST
+    if not path.is_file():
+        return []
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8")).get("entries", [])
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InstallerError(f"shared asset manifest is not valid JSON: {path}") from exc
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _active_release(current: Path | None) -> Path | None:
+    if current is None or not (current.exists() or current.is_symlink()):
+        return None
+    try:
+        return current.resolve(strict=True)
+    except OSError:
+        return None
+
+
+def detect_live_drift(
+    *,
+    active_release: Path | None,
+    candidate_root: Path | None,
+    target_root: Path | None,
+    accept_overwrite: Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    """Find deployed shared assets that were edited live after the active install.
+
+    A deployed file is drift when its hash matches neither the sha the ACTIVE
+    release installed nor the candidate's source sha for the same target (the
+    latter means the live edit is already committed).  Missing targets and
+    targets new in the candidate have no baseline and are not drift.
+    """
+    accepted = {str(Path(value)) for value in accept_overwrite}
+    candidate_sha: dict[str, str] = {}
+    for entry in _read_shared_entries(candidate_root):
+        for target_name in _shared_entry_targets(entry):
+            candidate_sha[target_name] = entry.get("sha256", "")
+    drift: list[dict[str, Any]] = []
+    for entry in _read_shared_entries(active_release):
+        for target_name in _shared_entry_targets(entry):
+            target = _shared_target_path(target_name, target_root)
+            if not target.is_file() or target.is_symlink():
+                continue
+            deployed = sha256(target)
+            allowed = {entry.get("sha256"), candidate_sha.get(target_name)}
+            if deployed in allowed or target_name in accepted or str(target) in accepted:
+                continue
+            drift.append(
+                {
+                    "target": target_name,
+                    "deployed_path": str(target),
+                    "source_path": entry.get("source_path"),
+                    "deployed_sha256": deployed,
+                    "active_sha256": entry.get("sha256"),
+                }
+            )
+    return drift
+
+
+def assert_no_live_drift(**kwargs: Any) -> None:
+    drift = detect_live_drift(**kwargs)
+    if drift:
+        lines = "; ".join(
+            f"{item['target']} deployed={item['deployed_sha256']} active={item['active_sha256']}" for item in drift
+        )
+        raise InstallerError(
+            f"REFUSE: live drift ({len(drift)} file(s)): {lines}. Run drift-check --sync-drift --repo <worktree>, "
+            "commit the synced files to main, then rerun; or pass --accept-overwrite <target> per file."
+        )
+
+
+def sync_live_drift(*, repo: Path, drift: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy drifted deployed files back into the source tree and update manifest digests."""
+    manifest_path = repo / SHARED_ASSET_MANIFEST
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    by_target: dict[str, dict[str, Any]] = {}
+    for entry in manifest.get("entries", []):
+        for target_name in _shared_entry_targets(entry):
+            by_target[target_name] = entry
+    chosen: dict[str, str] = {}
+    synced: list[dict[str, Any]] = []
+    for item in drift:
+        entry = by_target.get(item["target"])
+        if entry is None:
+            raise InstallerError(f"drifted target is no longer in the source manifest: {item['target']}")
+        source = entry["source_path"]
+        if chosen.get(source, item["deployed_sha256"]) != item["deployed_sha256"]:
+            raise InstallerError(f"conflicting live edits for one source across targets: {source}")
+        chosen[source] = item["deployed_sha256"]
+        destination = repo / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(source)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(item["deployed_path"], destination)
+        os.chmod(destination, entry["mode"])
+        entry["sha256"] = sha256(destination)
+        synced.append({"target": item["target"], "source_path": source, "sha256": entry["sha256"]})
+    if synced:
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return synced
 
 
 def install_shared_assets(
@@ -1069,7 +1183,9 @@ def _check_launchd(*, current: Path, service: str) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("stage", "activate", "check", "shared-install", "shared-check", "shared-retire"))
+    parser.add_argument(
+        "mode", choices=("stage", "activate", "check", "shared-install", "shared-check", "shared-retire", "drift-check")
+    )
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--candidate")
     parser.add_argument("--base")
@@ -1078,7 +1194,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-root", type=Path, required=True)
     parser.add_argument("--current", type=Path)
     parser.add_argument("--expected-old", type=Path)
-    parser.add_argument("--rollback-bundle", type=Path, required=True)
+    parser.add_argument("--rollback-bundle", type=Path)
+    parser.add_argument("--sync-drift", action="store_true", help="drift-check: copy live edits back into --repo")
+    parser.add_argument("--accept-overwrite", action="append", default=[], help="explicit target to overwrite")
     parser.add_argument("--shared-assets-root", type=Path)
     parser.add_argument("--inventory", type=Path)
     parser.add_argument("--installed-root", type=Path, action="append", default=[])
@@ -1089,10 +1207,26 @@ def main(argv: list[str] | None = None) -> int:
     try:
         refuse_claude_plugin_cache(args.release_root, label="--release-root")
         refuse_claude_plugin_cache(args.current, label="--current")
+        if args.mode != "drift-check" and args.rollback_bundle is None:
+            raise InstallerError("--rollback-bundle is required")
+        current_pointer = args.current if args.current is not None else args.release_root.parent / "current"
+        if args.mode == "drift-check":
+            if args.sync_drift and not args.repo:
+                raise InstallerError("--sync-drift requires --repo (a clean worktree to receive the edits)")
+            drift = detect_live_drift(
+                active_release=_active_release(current_pointer),
+                candidate_root=args.repo,
+                target_root=args.shared_assets_root,
+                accept_overwrite=args.accept_overwrite,
+            )
+            synced = sync_live_drift(repo=args.repo, drift=drift) if args.sync_drift and drift else []
+            result = {"status": "DRIFT" if drift else "NO_DRIFT", "drift": drift, "synced": synced}
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 3 if drift and not args.sync_drift else 0
         if args.mode == "stage":
             if not args.repo or not args.candidate or not args.base or not args.patch_id:
                 raise InstallerError("stage requires --repo, --candidate, --base, and --patch-id")
-            result = stage_release(repo=args.repo, candidate=args.candidate, base=args.base, patch_id=args.patch_id, release_root=args.release_root, node_bin=args.node_bin)
+            result = stage_release(repo=args.repo, candidate=args.candidate, base=args.base, patch_id=args.patch_id, release_root=args.release_root, node_bin=args.node_bin, current=current_pointer, shared_target_root=args.shared_assets_root, accept_overwrite=args.accept_overwrite)
         elif args.mode == "shared-retire":
             release_dir = args.release_root / args.candidate if args.candidate else None
             if release_dir is None:
@@ -1107,6 +1241,12 @@ def main(argv: list[str] | None = None) -> int:
             if release_dir is None:
                 raise InstallerError("shared asset modes require --candidate")
             if args.mode == "shared-install":
+                assert_no_live_drift(
+                    active_release=_active_release(current_pointer),
+                    candidate_root=release_dir,
+                    target_root=args.shared_assets_root,
+                    accept_overwrite=args.accept_overwrite,
+                )
                 result = install_shared_assets(
                     release_dir=release_dir,
                     target_root=args.shared_assets_root,
@@ -1123,6 +1263,12 @@ def main(argv: list[str] | None = None) -> int:
                 if not args.current or not args.expected_old or not args.inventory or not args.repo:
                     raise InstallerError("activate requires --repo, --current, --expected-old, and explicit --inventory")
                 delete_targets = _inventory_paths(args.inventory, "DELETE", args.installed_root)
+                assert_no_live_drift(
+                    active_release=_active_release(args.current),
+                    candidate_root=release_dir,
+                    target_root=args.shared_assets_root,
+                    accept_overwrite=args.accept_overwrite,
+                )
                 verify_staged(repo=args.repo, release_dir=release_dir, candidate=args.candidate)
                 result = activate(release_dir=release_dir, current=args.current, expected_old=args.expected_old, delete_targets=delete_targets, rollback_bundle=args.rollback_bundle, restart=lambda: _default_restart(args.service), health=lambda: _default_health(args.health_url), canary=lambda: _default_canary(args.canary_url))
             else:
