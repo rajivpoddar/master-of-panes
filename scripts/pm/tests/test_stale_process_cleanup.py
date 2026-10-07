@@ -59,6 +59,33 @@ def inventory(*, held_slot: int | None = None) -> dict[int, dict[str, object]]:
 
 
 class StaleProcessCleanupTests(unittest.TestCase):
+    # main() writes its heartbeat status to STATUS_JSON by default. Redirect it
+    # so test runs never overwrite the live /tmp status the hourly heartbeat
+    # reads (a fixture refusal leaked there and was reported as a live REFUSED).
+    def setUp(self) -> None:
+        self._status_dir = tempfile.TemporaryDirectory()
+        self.status_path = Path(self._status_dir.name) / "status.json"
+        patcher = patch.object(MODULE, "STATUS_JSON", self.status_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._status_dir.cleanup)
+
+    def test_main_status_default_is_isolated_from_live_heartbeat_path(self) -> None:
+        live = Path("/tmp/stale-process-cleanup-status.json")
+        live_before = live.read_bytes() if live.exists() else None
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "proof.json"
+            with patch.object(MODULE, "load_slot_inventory", return_value=({}, None)), patch.object(
+                MODULE, "collect_processes", side_effect=AssertionError("must refuse before enumeration")
+            ), patch.object(
+                sys, "argv",
+                ["stale-process-cleanup.py", "--apply", "--attestation-file", str(Path(temp) / "x"), "--output", str(output)],
+            ), patch.object(sys, "stdout", new_callable=io.StringIO):
+                self.assertEqual(MODULE.main(), 2)
+        status = json.loads(self.status_path.read_text(encoding="utf-8"))
+        self.assertIn("attestation_file_requires_attest_slotless_reap", status["reason"])
+        self.assertEqual(live.read_bytes() if live.exists() else None, live_before)
+
     def test_inventory_parses_structured_multiline_slot_rows(self) -> None:
         records = []
         for slot in TEST_SLOTS:
