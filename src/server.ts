@@ -80,6 +80,7 @@ import {
 } from "./sessionStartClearWait.js";
 import { paneInputModeRefusalReason, type PaneInputModeRefusalReason } from "./paneInputMode.js";
 import { requestPmClearOnce, waitForPmIdleDrain } from "./pmClearLatch.js";
+import { interruptLiveTurnBeforeClear, type InterruptBeforeClearResult } from "./interruptBeforeClear.js";
 import { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } from "./assignmentTaskPacket.js";
 
 // ─── Config ──────────────────────────────────────────────
@@ -449,6 +450,40 @@ async function sendClearViaMopSendPath(
   }
 }
 
+/**
+ * Interrupt a numbered slot's live/indeterminate turn and verify it is
+ * inactive (pane idle AND turn row inactive) BEFORE any clear or delivery.
+ * Rajiv 2026-10-07 (thread 1791348298.888079): "fix MoP to trigger interrupt
+ * automatically before clear." Fails closed with interrupt_unverified.
+ */
+async function interruptSlotBeforeClear(slotNum: number, source: string): Promise<InterruptBeforeClearResult> {
+  return interruptLiveTurnBeforeClear({
+    readTurn: () => {
+      const row = db.getSlot(slotNum);
+      return row ? { active_turn_id: row.active_turn_id, active_turn_state: row.active_turn_state } : null;
+    },
+    paneActivity: () => relay.getSlotActivityState(slotNum),
+    sendKey: (key) => relay.sendToSlotAsync(slotNum, key, true, true),
+    terminalizeTurn: (prior) => {
+      db.updateSlot(slotNum, {
+        active_turn_id: null,
+        active_turn_started_at: null,
+        active_turn_state: "inactive",
+        idle: true,
+      });
+      db.logEvent(slotNum, "turn_terminalized_by_interrupt_before_clear", null, null, {
+        prior_turn_id: prior.active_turn_id,
+        prior_turn_state: prior.active_turn_state,
+        via: source,
+      });
+    },
+    afterInterrupt: () => clearComposerResidueAfterReleaseInterrupt(slotNum),
+    log: (event, data) => db.logEvent(slotNum, event, null, null, { ...data, via: source }),
+    sleep,
+    now: () => Date.now(),
+  });
+}
+
 async function clearSlotsThroughMopHttp(
   targetSlots: number[],
   options: { clearExistingPendingForTargets: boolean; source: string; terminalOnly: boolean },
@@ -517,15 +552,32 @@ async function clearSlotsThroughMopHttp(
       });
       results.push({ slot: slotNum, name, status: "active (not terminal; no clear queued)" });
     } else {
-      db.setPendingClear(slotNum);
-      db.logEvent(slotNum, "clear_pending_queued", null, null, {
-        name,
-        queued_at: new Date().toISOString(),
-        reason: "Slot is active - will clear on next idle notification",
-        via: options.source,
-        delivery: "http_clear_endpoint",
-      });
-      results.push({ slot: slotNum, name, status: "queued (active - will clear on next idle)" });
+      // Never queue /clear behind a live turn: interrupt first, verify
+      // inactive, then clear (Rajiv 2026-10-07, thread 1791348298.888079).
+      const interrupted = await interruptSlotBeforeClear(slotNum, options.source);
+      if (!interrupted.ok) {
+        results.push({
+          slot: slotNum,
+          name,
+          status: `failed: interrupt_unverified (${interrupted.detail ?? interrupted.steps.join(",")})`,
+        });
+      } else {
+        const sent = await sendClearViaMopSendPath(slotNum, options.source);
+        if (sent.success) {
+          db.clearPendingClear(slotNum);
+          db.logEvent(slotNum, "slot_cleared", null, null, {
+            name,
+            cleared_at: new Date().toISOString(),
+            immediate: true,
+            via: options.source,
+            delivery: "mop_send_to_slot",
+            interrupt: { ok: interrupted.ok, reason: interrupted.reason, steps: interrupted.steps },
+          });
+          results.push({ slot: slotNum, name, status: "cleared (interrupted live turn first)" });
+        } else {
+          results.push({ slot: slotNum, name, status: `failed: ${sent.error ?? sent.reason ?? `send failed status=${sent.status}`}` });
+        }
+      }
     }
 
     await sleep(500);
@@ -1397,18 +1449,14 @@ registerAssignmentEffectRoutes(app, {
   deliverTaskFile: (slotNum, filePath) => deliverTaskFileForAssignment(slotNum, filePath),
   // Best-effort Ctrl-C through the same relay seam the wedge-interrupt
   // route uses. Audited, never refusing.
+  // Interrupt-before-clear: Escape, then C-c, verify pane idle AND turn row
+  // inactive. ok=false fails the assignment closed before any clear.
   interruptTurn: async (slotNum) => {
-    try {
-      const sent = await relay.sendToSlotAsync(slotNum, WEDGE_INTERRUPT_KEY, true, true);
-      if (!sent) return { ok: false, reason: "interrupt_send_failed" };
-      const residue = await clearComposerResidueAfterReleaseInterrupt(slotNum);
-      return { ok: true, reason: `interrupt_sent;composer_${residue}` };
-    } catch (error) {
-      return {
-        ok: false,
-        reason: `interrupt_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
-      };
-    }
+    const r = await interruptSlotBeforeClear(slotNum, "mop_assign_slot");
+    return {
+      ok: r.ok,
+      reason: r.ok ? `${r.reason}${r.steps.length ? `;${r.steps.join(";")}` : ""}` : `${r.reason};${r.detail ?? ""}`,
+    };
   },
   // Read-only dirty/clean observation for the audit row. The worktree is
   // never reset by an assignment.

@@ -66,8 +66,9 @@ export interface AssignmentEffectDependencies {
     filePath: string,
   ) => Promise<AssignmentEffectDeliveryResult>;
   /**
-  * Best-effort interrupt of any live turn in the pane (Ctrl-C through the
-  * existing relay path). The outcome is audited and never refuses.
+   * Interrupt any live/indeterminate turn in the pane (Escape, then C-c)
+   * and verify the pane and turn row are inactive. Runs BEFORE the clear.
+   * ok=false (interrupt_unverified) fails the assignment closed.
    */
   interruptTurn: (slot: number) => Promise<{ ok: boolean; reason: string }>;
   /**
@@ -660,6 +661,38 @@ export function registerAssignmentEffectRoutes(
       }
     }
 
+    if (ownershipPending) {
+      // Interrupt BEFORE clear (Rajiv 2026-10-07, thread 1791348298.888079:
+      // "fix MoP to trigger interrupt automatically before clear"). The
+      // dependency interrupts any live/indeterminate turn and verifies the
+      // pane and the turn row are both inactive. A clear or packet is never
+      // queued behind a live turn: an unverified interrupt fails closed here,
+      // before any clear, ownership overwrite, or delivery.
+      try {
+        const interrupted = await dependencies.interruptTurn(slotNum);
+        displacement.interrupt = { ok: interrupted.ok, reason: interrupted.reason };
+      } catch (error) {
+        displacement.interrupt = {
+          ok: false,
+          reason: `interrupt_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
+        };
+      }
+      if (!displacement.interrupt.ok) {
+        db.logEvent(slotNum, "assignment_effect_interrupt_unverified", null, null, {
+          effect_id: request.effect_id,
+          selection_class: request.selection_class,
+          interrupt: displacement.interrupt,
+        });
+        return c.json(
+          {
+            ...refusal("ownership", "interrupt_unverified", slotStateSummary(db.getSlot(slotNum))),
+            interrupt: displacement.interrupt,
+          },
+          409,
+        );
+      }
+    }
+
     if (ownershipPending && request.selection_class === "new_issue") {
       const cleared = await dependencies.clearSlot(slotNum);
       displacement.clear = {
@@ -669,22 +702,6 @@ export function registerAssignmentEffectRoutes(
     }
 
     if (ownershipPending) {
-      // Interrupt any live turn in the pane before overwriting ownership.
-      // Best effort: the outcome is audited and never refuses.
-      const live = db.getSlot(slotNum);
-      if (live && (live.active_turn_id !== null || live.active_turn_state !== "inactive")) {
-        try {
-          const interrupted = await dependencies.interruptTurn(slotNum);
-          displacement.interrupt = { ok: interrupted.ok, reason: interrupted.reason };
-        } catch (error) {
-          displacement.interrupt = {
-            ok: false,
-            reason: `interrupt_threw:${error instanceof Error ? error.message.split("\n")[0].slice(0, 160) : String(error).slice(0, 160)}`,
-          };
-        }
-      } else {
-        displacement.interrupt = { ok: true, reason: "no_live_turn" };
-      }
       // Observe (never reset) the pane worktree for the audit row.
       try {
         displacement.worktree = await dependencies.observeWorktree(slotNum);
