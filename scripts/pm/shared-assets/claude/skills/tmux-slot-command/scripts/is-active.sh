@@ -1,123 +1,73 @@
 #!/bin/bash
-# Check if a Claude Code tmux slot is actively processing.
-#
-# Detection: Claude Code grays out the ❯ chevron when processing.
-#   - IDLE:   ❯ is white (default terminal color, no 38;2 color code)
-#   - ACTIVE: ❯ is gray (38;2;153;153;153)
-#
-# This is the most reliable single signal. We also keep content change
-# detection as a fallback for edge cases (background agents with no spinner).
-#
-# Usage:
-#   is-active.sh <slot>           # Exit 0 = active, 1 = idle
-#   is-active.sh <slot> -v        # Verbose: show what it sees
-#   is-active.sh <slot> --debug   # Full debug: dump raw ANSI of ❯ line
-#   is-active.sh <slot> --fast    # Chevron-only check (skip content change detection)
-
-#   is-active.sh <slot> [flag] --pane-id %N   # pin to an already verified pane
-#
-# v2 (MoP 2026-10-07): exit 0 = ACTIVE, 1 = IDLE, 2 = UNKNOWN. The pane is the
-# slot's verified immutable pane id from slot-pane.sh (checkout-bound), never
-# the index formula; an unknown, missing or rebound identity exits 2 so that
-# callers fail closed (2 is never "idle").
-
-SLOT="${1:?Usage: is-active.sh <slot> [-v|--debug|--fast] [--pane-id %N]}"
+# Read-only activity probe. 0=active, 1=proven idle, 2=unknown/error.
+# The shared slot-pane resolver verifies checkout and immutable pane identity.
+# Usage: is-active.sh <0-8> [-v|--debug|--fast] [--pane-id %N]
+SLOT="${1:-}"
+[ -n "$SLOT" ] || exit 2
 shift
 FLAG=""
 PIN=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --pane-id) PIN="${2:-}"; shift ;;
-    *) [ -z "$FLAG" ] && FLAG="$1" ;;
+    --pane-id) PIN="${2:-}"; [ -n "$PIN" ] || exit 2; shift ;;
+    -v|--debug|--fast) FLAG="$1" ;;
+    *) exit 2 ;;
   esac
   shift
 done
+[ -z "$PIN" ] || [[ "$PIN" =~ ^%[0-9]+$ ]] || exit 2
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -n "$PIN" ]; then
-  PANE=$("$SCRIPT_DIR/slot-pane.sh" "$SLOT" --pane-id "$PIN" 2>/dev/null)
-else
-  PANE=$("$SCRIPT_DIR/slot-pane.sh" "$SLOT" 2>/dev/null)
-fi
-if [ -z "$PANE" ]; then
-  [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "RESULT: UNKNOWN (slot $SLOT pane identity unverified)"
-  exit 2
-fi
-
-# Capture pane with ANSI escape codes
-output=$(tmux capture-pane -e -t "$PANE" -p 2>/dev/null)
-if [ -z "$output" ]; then
-  [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "ERROR: Could not capture pane $PANE"
-  exit 2
-fi
-
-# Find the ❯ chevron line (last occurrence)
-chevron_line=$(echo "$output" | grep '❯' | tail -1)
-
-if [ "$FLAG" = "--debug" ]; then
-  echo "=== Raw ❯ line ==="
-  echo "$chevron_line" | cat -v
-  echo ""
-fi
-
-# If no ❯ found at all, assume active (unusual state)
-if [ -z "$chevron_line" ]; then
-  [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "RESULT: ACTIVE (no ❯ found)"
-  exit 0
-fi
-
-# Method 1: Check if ❯ is grayed out (153;153;153 = active)
-# When idle, ❯ uses default terminal color (no 38;2 code before it).
-# When active, Claude Code explicitly sets it to gray 153;153;153.
-if echo "$chevron_line" | cat -v | grep -q '38;2;153;153;153.*M-bM-\^]M-/'; then
-  [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "RESULT: ACTIVE (gray ❯)"
-  exit 0
-else
-  if [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ]; then
-    echo "Chevron is white (idle)"
-  fi
-fi
-
-# Fast mode: skip content change detection
-if [ "$FLAG" = "--fast" ]; then
-  [ "$FLAG" = "-v" ] && echo "RESULT: IDLE"
-  exit 1
-fi
-
-# Method 2: Content change detection (catches background agents)
-# Capture content area twice, 1.5s apart. Exclude bottom 6 lines (status area).
-plain1=$(tmux capture-pane -t "$PANE" -p 2>/dev/null)
-total1=$(echo "$plain1" | wc -l | tr -d ' ')
-keep1=$((total1 - 6))
-if [ "$keep1" -gt 0 ]; then
-  hash1=$(echo "$plain1" | head -n "$keep1" | md5)
-else
-  hash1=$(echo "$plain1" | md5)
-fi
-
-sleep 1.5
-
-plain2=$(tmux capture-pane -t "$PANE" -p 2>/dev/null)
-total2=$(echo "$plain2" | wc -l | tr -d ' ')
-keep2=$((total2 - 6))
-if [ "$keep2" -gt 0 ]; then
-  hash2=$(echo "$plain2" | head -n "$keep2" | md5)
-else
-  hash2=$(echo "$plain2" | md5)
-fi
-
+resolve_pane() {
+  local got
+  got=$("$SCRIPT_DIR/slot-pane.sh" "$SLOT" 2>/dev/null) || return 2
+  [ -z "$PIN" ] || [ "$got" = "$PIN" ] || return 2
+  printf '%s\n' "$got"
+}
+PANE=$(resolve_pane) || exit 2
+same_pane() { local current; current=$(resolve_pane) && [ "$current" = "$PANE" ]; }
+output=$(tmux capture-pane -e -t "$PANE" -p 2>/dev/null) || exit 2
+[ -n "$output" ] && same_pane || exit 2
+chevron_line=$(printf '%s\n' "$output" | grep '❯' | tail -1)
+[ -n "$chevron_line" ] || exit 2
 if [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ]; then
-  echo ""
-  echo "=== Content change detection ==="
-  if [ "$FLAG" = "--debug" ]; then
-    echo "Hash T=0.0s: $hash1 (lines: $keep1)"
-    echo "Hash T=1.5s: $hash2 (lines: $keep2)"
-  fi
+  printf 'pane=%s\n%s\n' "$PANE" "$chevron_line"
 fi
+printf '%s\n' "$output" | python3 -c '
+import re,sys
+text=sys.stdin.read(); sgr=re.compile(r"\x1b\[([0-9;]*)m")
+lines=text.splitlines(); line=next((l for l in reversed(lines) if re.match(r"^\s*❯(?:\s|$)",sgr.sub("",l))),None)
+if line is None: sys.exit(2)
+color="default"
+# SGR foreground may be inherited from a preceding line.
+prefix=text[:text.rfind(line)+line.index("❯")]
+for match in sgr.finditer(prefix):
+    codes=[int(c) for c in (match[1] or "0").split(";")]; i=0
+    while i<len(codes):
+        c=codes[i]
+        if c in (0,39): color="default"
+        elif c==38 and i+1<len(codes) and codes[i+1]==2:
+            color=";".join(map(str,codes[i+2:i+5])); i+=4
+        elif c==38 and i+1<len(codes) and codes[i+1]==5:
+            color="indexed:"+str(codes[i+2]) if i+2<len(codes) else "unknown"; i+=2
+        elif 30<=c<=37 or 90<=c<=97: color=str(c)
+        i+=1
+sys.exit(0 if color=="153;153;153" else 1 if color in ("default","37","97","255;255;255") else 2)
+'
+activity=$?
+same_pane || exit 2
+[ "$activity" -eq 1 ] || exit "$activity"
+[ "$FLAG" = "--fast" ] && exit 1
 
-if [ "$hash1" != "$hash2" ]; then
-  [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "RESULT: ACTIVE (content changing)"
-  exit 0
-else
-  [ "$FLAG" = "-v" ] || [ "$FLAG" = "--debug" ] && echo "RESULT: IDLE"
-  exit 1
-fi
+# Retain content-change fallback, pinned to the same pane throughout.
+plain1=$(tmux capture-pane -t "$PANE" -p 2>/dev/null) || exit 2
+[ -n "$plain1" ] && same_pane || exit 2
+sleep 1.5
+plain2=$(tmux capture-pane -t "$PANE" -p 2>/dev/null) || exit 2
+[ -n "$plain2" ] && same_pane || exit 2
+content() {
+  local count
+  count=$(printf '%s\n' "$1" | wc -l | tr -d ' ')
+  if [ "$count" -gt 6 ]; then printf '%s\n' "$1" | head -n "$((count - 6))"; else printf '%s\n' "$1"; fi
+}
+if [ "$(content "$plain1")" != "$(content "$plain2")" ]; then exit 0; fi
+exit 1

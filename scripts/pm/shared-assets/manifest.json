@@ -996,7 +996,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-tmux-slot-command",
-      "sha256": "4479517389e63ba8e6df3fecd7b938c16079322685d92c14de9947df29c617d2",
+      "sha256": "66dcecba47a3ed7e4b8aea2c221d711687263b1e98cd94eac2df5bf02ea1c163",
       "source_path": "claude/skills/tmux-slot-command/scripts/is-active.sh"
     },
     {

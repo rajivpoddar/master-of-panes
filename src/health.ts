@@ -24,6 +24,8 @@ import { recentJsonlActivity } from "./jsonlActivity.js";
 import type { TmuxRelay } from "./relay.js";
 import { DEV_SLOT_NUMBERS, RUNTIME_SLOT_NUMBERS, SLOT_RUNTIME_IDENTITIES } from "./slotConfig.js";
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { pinFrom, pinDrift } from "./interruptBeforeClear.js";
+import { latestSessionStartEventId } from "./sessionStartClearWait.js";
 
 // ─── Restart Commands ──────────────────────────────────────
 // These are shell aliases defined in ~/.zshrc. Since tmux panes
@@ -652,22 +654,50 @@ export class ProcessHealthChecker {
       const cmd = await this.getPaneCommand(slot);
       if (!cmd || SHELL_COMMANDS.has(cmd)) continue;
 
-      // Slot must be idle (not actively processing)
-      if (await this.relay.isSlotActive(slot)) continue;
+      // Activity and effect must own the same immutable pane and generation.
+      const observed = await this.relay.observeSlotPane(slot);
+      if (!observed) continue;
+      const session = () => String(latestSessionStartEventId(this.db, slot));
+      const sessionId = session();
+      const row = slot > 0 ? this.db.getSlot(slot) : null;
+      if (slot > 0 && (!row || row.active_turn_state !== "inactive")) continue;
+      const pin = row ? pinFrom({ paneId: observed.paneId, checkout: SLOT_RUNTIME_IDENTITIES[slot].checkoutPath }, { ...row, session_id: sessionId }) : null;
+      const fence = (): string | null => {
+        if (!this.db.getExitPending() || this.db.getExitStatus().cycled[slot]) return "exit_pending_consumed";
+        if (session() !== sessionId) return "session_changed";
+        if (slot === 0) return null;
+        const fresh = this.db.getSlot(slot);
+        if (!fresh || fresh.dnd) return "slot_unavailable";
+        return pinDrift(pin!, { ...fresh, session_id: session() });
+      };
+      if ((await this.relay.getSlotActivityState(slot, observed.paneId)) !== "idle" || fence()) continue;
 
       // ─── Idle + alive + exit_pending + not cycled → send /exit ──
       const exitLabel = slot === 0 ? "PM" : `slot ${slot}`;
       console.log(`[health] exit_pending: ${exitLabel} already idle — sending /exit`);
-      this.relay.sendToSlot(slot, "/exit", true);
+      const delivered = await this.relay.deliverGuardedToSlot(slot, "/exit", {
+        expectedPaneId: observed.paneId,
+        recheck: async () => {
+          if ((await this.relay.getSlotActivityState(slot, observed.paneId)) !== "idle") return "pane_not_idle";
+          return fence();
+        },
+        finalCheck: fence,
+      });
+      if (delivered.outcome === "refused_pre_effect") continue;
+      // A possible paste/submit consumes this existing episode too; never retry
+      // an uncertain /exit on a subsequent health tick.
       this.db.markSlotExitCycled(slot);
       this.db.logEvent(slot, "exit_pending_triggered", null, null, {
         source: "health_check",
+        delivery: delivered.outcome,
         reason: `${exitLabel} was already idle when exit_pending was set`,
       });
       // Can't inject to PM when PM itself is the target — just log
       if (slot !== 0) {
         this.relay.injectToPM(
-          `# 🔄 slot ${slot} sent /exit (exit_pending — was already idle) — watchdog will restart`,
+          delivered.outcome === "delivered"
+            ? `# 🔄 slot ${slot} sent /exit (exit_pending — was already idle) — watchdog will restart`
+            : `# ⚠️ slot ${slot} /exit delivery uncertain — episode consumed; no automatic retry`,
         );
       }
     }
@@ -677,10 +707,10 @@ export class ProcessHealthChecker {
     const allCycled = Object.entries(updatedStatus.cycled).every(([, v]) => v);
     if (allCycled) {
       this.db.setExitPending(false);
-      this.relay.injectToPM("# ✅ All slots have cycled — exit_pending auto-cleared");
+      this.relay.injectToPM("# All exit_pending attempts consumed — flag auto-cleared; this is not restart verification");
       this.db.logEvent(0, "exit_pending_complete", null, null, {
         source: "health_check",
-        reason: "All slots (0-6) have cycled — flag cleared",
+        reason: "All runtime-slot exit attempts consumed — flag cleared",
       });
     }
   }

@@ -2164,6 +2164,8 @@ async function pastePayloadWithTmuxBuffer(
     requireEmptyComposerBeforePaste?: boolean;
     bracketedPaste?: boolean;
     clearOwnedComposerOnRefusal?: boolean;
+    activityPin?: OperationPin;
+    ensureInsertMode?: boolean;
   },
 ): Promise<{
   chunks: number;
@@ -2174,6 +2176,19 @@ async function pastePayloadWithTmuxBuffer(
   verify: { ok: boolean; reason?: string };
 }> {
   return withSlotSendLock(slotNum, async () => {
+    const checkActivityTarget = async (): Promise<void> => {
+      if (!meta.activityPin) return;
+      const drift = await fenceSlotOperation(slotNum, meta.activityPin, "activity_send");
+      const activity = await relay.getSlotActivityState(slotNum, meta.activityPin.paneId);
+      const lateDrift = slotOperationFence(slotNum, meta.activityPin)("activity_send");
+      if (drift || lateDrift || activity !== "idle") throw new Error(drift ?? lateDrift ?? "activity_not_idle");
+    };
+    await checkActivityTarget();
+    if (meta.ensureInsertMode) {
+      await execShell(`tmux send-keys -t ${paneAddress} i`, { timeout: 5000 });
+      await sleep(300);
+      await checkActivityTarget();
+    }
     const chunkSize = sendChunkSizeBytes();
     const bytes = payload.byteLength;
     const paneModeRefusal = await readPaneInputModeRefusal(paneAddress);
@@ -2223,6 +2238,7 @@ async function pastePayloadWithTmuxBuffer(
       // Stale collapsed-paste placeholders left by earlier refused sends would
       // block this delivery forever; clear them (C-u) before pasting.
       if (composerIsOnlyPastePlaceholders(composerText(preSnapshot))) {
+        await checkActivityTarget();
         await execShell(`tmux send-keys -t ${paneAddress} C-u`, { timeout: 10_000 });
         db.logEvent(slotNum, "send_stale_placeholder_cleared", null, null, { source: meta.source });
         await sleep(300);
@@ -2251,6 +2267,7 @@ async function pastePayloadWithTmuxBuffer(
       await writeFile(tmpFile, payload.subarray(start, end));
       try {
         await execShell(`tmux load-buffer -b ${shellEscape(bufName)} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+        await checkActivityTarget();
         await execShell(
           `tmux paste-buffer${meta.bracketedPaste ? " -p" : ""} -b ${shellEscape(bufName)} -t ${paneAddress} -d`,
           { timeout: 10_000 },
@@ -2280,6 +2297,7 @@ async function pastePayloadWithTmuxBuffer(
     const submit = await submitWithComposerCheck(payloadText, {
       capture: captureForSubmit,
       pressSubmit: async () => {
+        await checkActivityTarget();
         await execShell(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 10_000 });
       },
       sleep,
@@ -2297,6 +2315,7 @@ async function pastePayloadWithTmuxBuffer(
           capture: captureForSubmit,
           clearComposer: async () => {
             if (await readPaneInputModeRefusal(paneAddress)) return false;
+            await checkActivityTarget();
             await execShell(`tmux send-keys -t ${paneAddress} C-u`, { timeout: 10_000 });
             return true;
           },
@@ -2448,6 +2467,10 @@ app.post("/slots/:slotNum/send", async (c) => {
 
   // Check DND
   const slotState = db.getSlot(slotNum);
+  const activityGated = isValidDevSlot(slotNum, config.slotCount) && (!force || command.includes("/review-and-pr"));
+  const activityRow = activityGated ? slotRowWithSession(slotNum) : null;
+  if (activityGated && !activityRow) return c.json({ success: false, reason: "activity_identity_missing" }, 409);
+  const activityPin = activityRow ? pinFrom({ paneId: paneTarget, checkout: identity.snapshot.currentPath }, activityRow) : undefined;
   if (slotState?.dnd && !force) {
     return c.json(
       {
@@ -2463,9 +2486,9 @@ app.post("/slots/:slotNum/send", async (c) => {
   if (command.includes("/review-and-pr") && isValidDevSlot(slotNum, config.slotCount)) {
     let active = false;
     try {
-      active = await relay.isSlotActive(slotNum);
+      active = (await relay.getSlotActivityState(slotNum, paneTarget)) !== "idle";
     } catch {
-      active = false;
+      active = true;
     }
     if (active) {
       db.logEvent(slotNum, "send_rejected_review_active", null, null, {
@@ -2528,9 +2551,9 @@ app.post("/slots/:slotNum/send", async (c) => {
   if (!force && isValidDevSlot(slotNum, config.slotCount)) {
     let active = false;
     try {
-      active = await relay.isSlotActive(slotNum);
+      active = (await relay.getSlotActivityState(slotNum, paneTarget)) !== "idle";
     } catch {
-      active = false;
+      active = true;
     }
     if (active) {
       db.logEvent(slotNum, "send_rejected_force_required", null, null, {
@@ -2624,6 +2647,7 @@ app.post("/slots/:slotNum/send", async (c) => {
       const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, filePayload, {
         source: "file",
         label: filePath,
+        activityPin,
         clearOwnedComposerOnRefusal: true,
       });
       const verify = paste.verify;
@@ -2661,7 +2685,7 @@ app.post("/slots/:slotNum/send", async (c) => {
       const isInsert = /INSERT/.test(output);
       const isNormal = /NORMAL/.test(output);
 
-      if (isNormal) {
+      if (isNormal && !activityPin) {
         await execShell(`tmux send-keys -t ${paneTarget} i`, { timeout: 5000 });
         await sleep(300);
       }
@@ -2727,6 +2751,8 @@ app.post("/slots/:slotNum/send", async (c) => {
       const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, commandPayload, {
         source: "command",
         label: command.slice(0, 200),
+        activityPin,
+        ensureInsertMode: isNormal && !!activityPin,
         clearOwnedComposerOnRefusal: true,
       });
 
@@ -2810,6 +2836,18 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
     }, 409);
   }
   const paneTarget = identity.snapshot.paneId;
+  const planRow = slotRowWithSession(slotNum);
+  if (!planRow) return c.json({ success: false, reason: "activity_identity_missing" }, 409);
+  const planPin = pinFrom({ paneId: paneTarget, checkout: identity.snapshot.currentPath }, planRow);
+  const sendPlanKeys = async (keys: string): Promise<void> => {
+    await withSlotSendLock(slotNum, async () => {
+      const drift = await fenceSlotOperation(slotNum, planPin, "plan_choice");
+      if (drift) throw new Error(drift);
+      const lateDrift = slotOperationFence(slotNum, planPin)("plan_choice");
+      if (lateDrift) throw new Error(lateDrift);
+      await execShell(keys, { timeout: 5000 });
+    });
+  };
 
   // ── MoP Plan Review Verification (approvals only) ──────────
   // Constitutional Principle #1: Every plan approval must be backed by a real Codex review.
@@ -2922,7 +2960,7 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
     // which doesn't contain the TUI prompt. (Bug fix 2026-03-18)
     let output = "";
     try {
-      const raw = await execShell(`tmux capture-pane -t ${resolvePaneAddress(slotNum)} -p -S -20`, { timeout: 5_000 });
+      const raw = await execShell(`tmux capture-pane -t ${paneTarget} -p -S -20`, { timeout: 5_000 });
       output = raw.stdout;
     } catch { output = ""; }
     if (promptPattern.test(output)) {
@@ -2942,12 +2980,12 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
     try {
       // Send the option (2 = approve, 4 = comment)
       if (option === "4" && comment) {
-        await execShell(`tmux send-keys -t ${paneTarget} -l '4' && tmux send-keys -t ${paneTarget} Enter`, { timeout: 5000 });
+        await sendPlanKeys(`tmux send-keys -t ${paneTarget} -l '4' && tmux send-keys -t ${paneTarget} Enter`);
         await sleep(1000);
         const escaped = comment.replace(/'/g, "'\\''");
-        await execShell(`tmux send-keys -t ${paneTarget} -l '${escaped}' && tmux send-keys -t ${paneTarget} Enter`, { timeout: 5000 });
+        await sendPlanKeys(`tmux send-keys -t ${paneTarget} -l '${escaped}' && tmux send-keys -t ${paneTarget} Enter`);
       } else {
-        await execShell(`tmux send-keys -t ${paneTarget} -l '${option}' && tmux send-keys -t ${paneTarget} Enter`, { timeout: 5000 });
+        await sendPlanKeys(`tmux send-keys -t ${paneTarget} -l '${option}' && tmux send-keys -t ${paneTarget} Enter`);
       }
 
       // Wait longer for the approval to process — slot needs time to
@@ -2962,7 +3000,14 @@ app.post("/slots/:slotNum/approve-plan", async (c) => {
       const approvalLanded = slotAfter?.activity !== "awaiting_plan_approval";
 
       try {
-        if ((await relay.getSlotActivityState(slotNum)) !== "active") throw new Error("slot not active");
+        const activity = await relay.getSlotActivityState(slotNum, paneTarget);
+        if (activity === "unknown") return c.json({ success: false, reason: "activity_identity_unknown", status: "unconfirmed" }, 409);
+        if (activity !== "active") throw new Error("pane_still_idle");
+        const approvalRow = slotRowWithSession(slotNum);
+        // This choice may start its own turn, but never authorizes updating a
+        // different assignment/session that arrived during the awaited read.
+        const approvalDrift = approvalRow ? pinDrift({ ...planPin, turnId: approvalRow.active_turn_id, turnState: approvalRow.active_turn_state }, approvalRow) : "drift:row_missing";
+        if (approvalDrift) return c.json({ success: false, reason: approvalDrift, status: "unconfirmed" }, 409);
         // Pane is active — approval landed. The pane becoming active IS the success signal.
         // Don't re-check MoP activity state — it may not have updated yet (race condition).
         // (Bug fix 2026-03-21: MoP reported failure after 3 retries even though attempt 1 succeeded,

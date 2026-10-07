@@ -45,7 +45,11 @@ def _fake_tmux(tmp: Path, panes: dict[str, tuple[str, str]], active: set[str]) -
         f"    print('x\\n'+({ACTIVE!r} if p[0] in d['active'] else {IDLE!r}))\n"
     )
     tmux.chmod(tmux.stat().st_mode | stat.S_IEXEC)
-    return {**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}"}
+    # Do not inspect live numbered-slot checkouts in this offline identity proof.
+    git = tmp / "git"
+    git.write_text('#!/bin/bash\nprintf "%s\\n" "$2"\n')
+    git.chmod(git.stat().st_mode | stat.S_IEXEC)
+    return {**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}", "MOP_TMUX_BIN": str(tmux)}
 
 
 LIVE = {"0:0.6": ("%155", P(7)), "0:0.7": ("%7", P(6))}

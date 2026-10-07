@@ -1280,7 +1280,7 @@ export class TmuxRelay {
       timing?: { dwellMs?: number; pollMs?: number; payloadGraceMs?: number; payloadStableMs?: number; clearGraceMs?: number };
     },
   ): Promise<GuardedSlotDelivery> {
-    if (slotNum === 0) return { outcome: "refused_pre_effect", reason: "pm_pane_not_supported", paneId: null };
+    if (!isValidRuntimeSlot(slotNum)) return { outcome: "refused_pre_effect", reason: "unknown_slot", paneId: null };
     const identity = await verifyPaneIdentity(slotNum, this.runShell);
     if (!identity.ok) return { outcome: "refused_pre_effect", reason: `pane_identity:${identity.reason}`, paneId: null };
     const paneId = identity.snapshot.paneId;
@@ -1294,8 +1294,13 @@ export class TmuxRelay {
         return null;
       }
     };
+    const recheck = async (stage: "pre_paste" | "pre_enter"): Promise<string | null> => {
+      const current = await verifyPaneIdentity(slotNum, this.runShell);
+      if (!current.ok || current.snapshot.paneId !== paneId) return "pane_changed_since_observation";
+      return opts.recheck(stage, capture);
+    };
     const result = await withSlotSendLock(slotNum, async (): Promise<GuardedSlotDelivery> => {
-      const prePaste = await opts.recheck("pre_paste", capture);
+      const prePaste = await recheck("pre_paste");
       if (prePaste) return { outcome: "refused_pre_effect", reason: prePaste, paneId };
       const before = await capture();
       const prePasteComposer = composerText(before);
@@ -1308,6 +1313,8 @@ export class TmuxRelay {
       try {
         await fs.writeFile(tmpFile, command);
         await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 3_000 });
+        const loadedRefusal = await recheck("pre_paste");
+        if (loadedRefusal) return { outcome: "refused_pre_effect", reason: loadedRefusal, paneId };
         const prePasteFence = opts.finalCheck?.("pre_paste") ?? null;
         if (prePasteFence) return { outcome: "refused_pre_effect", reason: prePasteFence, paneId };
         effectAttempted = true;
@@ -1315,7 +1322,7 @@ export class TmuxRelay {
         const submit = await submitWithComposerCheck(command, {
           capture,
           pressSubmit: async () => {
-            preEnterRefusal = await opts.recheck("pre_enter", capture);
+            preEnterRefusal = await recheck("pre_enter");
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
             preEnterRefusal = opts.finalCheck?.("pre_enter") ?? null;
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
@@ -1359,33 +1366,22 @@ export class TmuxRelay {
 
   /**
    * Check if a slot is currently active (processing).
-   * is-active.sh communicates via exit codes: 0=ACTIVE, 1=IDLE, 2=ERROR.
-   * Existing boolean callers retain their historical behavior; watchdogs that
-   * can inject input must use getSlotActivityState() and fail closed on unknown.
+   * Activity comes from the verified immutable pane, not an installed helper.
+   * Unknown activity is conservatively busy for legacy boolean callers.
+   * Writers must also carry the observed pane id through their send lock.
    */
   async isSlotActive(slotNum: number): Promise<boolean> {
-    // Fail closed: an unknown/missing/rebound pane identity is never "idle".
     return (await this.getSlotActivityState(slotNum)) !== "idle";
   }
 
   async getSlotActivityState(slotNum: number, expectedPaneId?: string): Promise<SlotActivityState> {
-    // Guarded recovery pins activity to the pane already observed/verified.
-    if (expectedPaneId !== undefined) return this.getPaneActivityState(expectedPaneId);
-    // Unpinned callers bind to the same verified immutable pane id the
-    // writers use (checkout-bound), never the numeric 0:0.N address.
     const identity = await verifyPaneIdentity(slotNum, this.runShell);
-    if (!identity.ok) return "unknown";
-    try {
-      await this.runShell(
-        `${process.env.HOME}/.claude/skills/tmux-slot-command/scripts/is-active.sh ${slotNum} --pane-id ${identity.snapshot.paneId}`,
-        { timeout: 5_000 }
-      );
-      return "active";
-    } catch (err) {
-      const code = (err as { code?: string | number })?.code;
-      if (code === 1 || code === "1") return "idle";
-      return "unknown";
-    }
+    if (!identity.ok || (expectedPaneId !== undefined && identity.snapshot.paneId !== expectedPaneId)) return "unknown";
+    const paneId = identity.snapshot.paneId;
+    const activity = await this.getPaneActivityState(paneId);
+    // Capture is awaited: do not return evidence for a pane rebound meanwhile.
+    const after = await verifyPaneIdentity(slotNum, this.runShell);
+    return after.ok && after.snapshot.paneId === paneId ? activity : "unknown";
   }
 
   /**
@@ -1416,7 +1412,7 @@ export class TmuxRelay {
   /**
    * Check if a slot is actively producing output based on log mtime.
    * If log was modified in the last 5 seconds, the slot is actively working.
-   * Falls back to is-active.sh if no LogManager.
+   * Falls back to verified pane activity if no LogManager.
    */
   async isSlotActiveFromLog(slotNum: number): Promise<boolean> {
     if (!this.logManager) return this.isSlotActive(slotNum);
@@ -1428,7 +1424,7 @@ export class TmuxRelay {
     if (ageMs < 5_000) return true; // Log modified recently → active
 
     // Log is stale, but slot might be waiting for input (no output)
-    // Fall back to is-active.sh as secondary check
+    // Fall back to verified pane activity as secondary check
     return this.isSlotActive(slotNum);
   }
 }
