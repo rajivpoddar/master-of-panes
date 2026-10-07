@@ -250,8 +250,8 @@ def classify_segment(words):
                 continue
             if basename(token) in CI_WORKFLOWS or token in CI_WORKFLOWS:
                 return "raw CI/E2E workflow dispatch"
-            if basename(token) in CAPTURE_WORKFLOWS or token in CAPTURE_WORKFLOWS:
-                return "raw manual capture workflow dispatch"
+            # Capture dispatch is PM-owned (Rajiv 2026-10-07 18:21 IST,
+            # C0ALZJHGE49 thread 1791377379.732689: "remvoe the block from the hook").
         return ""
     if len(rest) >= 2 and rest[0] in ("pr", "issue") and "edit" in rest[1:]:
         value = invoked_value(core, "--add-label")

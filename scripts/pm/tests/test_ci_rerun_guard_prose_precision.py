@@ -175,3 +175,11 @@ def test_naked_gh_run_rerun_is_allowed_after_deprecation() -> None:
     # rerun-after-local-proof.sh deprecated (Rajiv 2026-10-03): PM reruns
     # failed CI directly with gh run rerun --failed.
     assert verdict("gh run rerun 34597650181 --failed") == 0
+
+
+def test_capture_workflow_dispatch_is_pm_owned_and_allowed() -> None:
+    """Rajiv 2026-10-07 18:21 IST, C0ALZJHGE49/1791377379.732689: capture dispatch block removed."""
+    assert verdict("gh workflow run e2e-llm-proxy-capture.yml --ref main -f pr=9000") == 0
+    assert verdict('gh workflow run "E2E LLM Proxy Capture (manual)" --ref main') == 0
+    # CI/E2E dispatch stays blocked.
+    assert verdict("gh workflow run e2e.yml --ref main") == 2

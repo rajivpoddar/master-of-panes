@@ -79,7 +79,7 @@ import {
   waitForSessionStartClearOnDb,
 } from "./sessionStartClearWait.js";
 import { paneInputModeRefusalReason, type PaneInputModeRefusalReason } from "./paneInputMode.js";
-import { isPmClearUndelivered, requestPmClearOnce, retryDeferredPmClearOnStop, waitForPmIdleDrain } from "./pmClearLatch.js";
+import { isPmClearUndelivered, requestPmClearOnce, retryDeferredPmClearOnStop, touchPmClearRequestedMarker, waitForPmIdleDrain } from "./pmClearLatch.js";
 import {
   interruptLiveTurnBeforeClear,
   pinDrift,
@@ -722,6 +722,7 @@ async function clearSlotsThroughMopHttp(
         };
       },
     });
+    touchPmClearRequestedMarker(delivery.kind);
 
     if (delivery.kind === "pending") {
       results.push({ slot: 0, name: "PM", status: "skipped (PM clear already requested)" });

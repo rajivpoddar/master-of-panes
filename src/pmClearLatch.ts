@@ -1,3 +1,5 @@
+import { closeSync, openSync, utimesSync } from "node:fs";
+
 import type { MoPDatabase } from "./db.js";
 
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
@@ -230,4 +232,26 @@ export async function retryDeferredPmClearOnStop(options: Omit<Parameters<typeof
     reason: "Undelivered (deferred_busy) PM clear latch retried once on PM Stop",
   });
   return requestPmClearOnce({ ...options, isPMBusy: () => !options.isCurrent() });
+}
+
+/**
+ * Marker read by the PM `pm-self-clear-stop.sh` Stop hook: while a fresh PM
+ * clear request is waiting for PM to go idle, the hook lets Stop through
+ * instead of blocking (which would keep PM busy and deadlock the clear).
+ */
+export const PM_SELF_CLEAR_MARKER_PATH = "/tmp/pm-self-clear-requested";
+
+export function touchPmClearRequestedMarker(
+  kind: PMClearDelivery["kind"],
+  markerPath: string = PM_SELF_CLEAR_MARKER_PATH,
+): boolean {
+  if (kind !== "sent" && kind !== "deferred_busy" && kind !== "pending") return false;
+  try {
+    closeSync(openSync(markerPath, "a"));
+    const now = new Date();
+    utimesSync(markerPath, now, now);
+    return true;
+  } catch {
+    return false;
+  }
 }

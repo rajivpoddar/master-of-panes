@@ -150,7 +150,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-self-clear-stop",
-      "sha256": "bd024f9adae4d85da7d9e76969a3081bd289ae9e383843d3d289f991e98ef410",
+      "sha256": "acc2619a2ef8f3984cd5463677b6b8efbc77755706e87bd1e4ea2d587e492898",
       "source_path": "claude/hooks/pm-self-clear-stop.sh"
     },
     {
@@ -312,7 +312,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-ci-rerun-guard",
-      "sha256": "bd62beefff61284050bb6c3af6e391ecf497bef63f752a7ec53359ea9c810de3",
+      "sha256": "3f210a5cded950ef056c4742000d54ac88db33933954cf880aff58bc1eabb401",
       "source_path": "claude/scripts/ci/ci-rerun-guard-matcher.py"
     },
     {

@@ -139,6 +139,24 @@ def main() -> int:
             "obligation_id": int(row["id"]),
         }, sort_keys=True))
         return 0
+    # Deadlock guard (2026-10-07): once PM has requested the MoP clear
+    # (POST /slots/pm/clear touches this marker), MoP defers the clear until
+    # PM goes idle. Blocking Stop here would keep PM busy forever, so let the
+    # Stop through while a fresh request is pending.
+    marker = Path("/tmp/pm-self-clear-requested")
+    try:
+        if marker.exists() and (
+            datetime.now(timezone.utc).timestamp() - marker.stat().st_mtime
+        ) < 30 * 60:
+            print(json.dumps({
+                "kind": "pm-self-clear",
+                "status": "deferred",
+                "reason": "mop_clear_requested_awaiting_idle",
+                "obligation_id": int(row["id"]),
+            }, sort_keys=True))
+            return 0
+    except OSError:
+        pass
     action = row["required_action"] or (
         "At next safe Stop boundary, self-clear context and prove a fresh boundary before resuming work"
     )
