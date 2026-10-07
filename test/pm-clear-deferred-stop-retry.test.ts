@@ -79,7 +79,7 @@ test("deferred-busy retry is fenced by the stop generation and bounded by backof
     assert.equal(counter.sends, 0);
 
     // A send that hits a busy PM re-defers; a Stop inside the backoff does not resend.
-    const busySend = { ...baseOptions(db, now + 1000, counter), send: async () => { counter.sends += 1; return { success: false, busy: true }; } };
+    const busySend = { ...baseOptions(db, now + 1000, counter), send: async () => { counter.sends += 1; return { success: false, busy: true, zeroEffect: true }; } };
     const deferred = await retryDeferredPmClearOnStop(busySend);
     assert.equal(deferred.kind, "deferred_busy");
     assert.equal(counter.sends, 1);

@@ -79,7 +79,7 @@ import {
   waitForSessionStartClearOnDb,
 } from "./sessionStartClearWait.js";
 import { paneInputModeRefusalReason, type PaneInputModeRefusalReason } from "./paneInputMode.js";
-import { isPmClearUndelivered, requestPmClearOnce, retryDeferredPmClearOnStop, touchPmClearRequestedMarker, waitForPmIdleDrain } from "./pmClearLatch.js";
+import { isPmClearUndelivered, makePmClearWriteFence, requestPmClearOnce, retryDeferredPmClearOnStop, touchPmClearRequestedMarker, waitForPmIdleDrain, type PMClearSendResult } from "./pmClearLatch.js";
 import {
   interruptLiveTurnBeforeClear,
   pinDrift,
@@ -397,6 +397,7 @@ function findLaterPmLifecycleEvent(requestedAt: string | null) {
 
 /** Deferred-busy latch: retry the guarded /clear once on this Stop (stop-generation fenced, backoff bounded). */
 function retryUndeliveredPmClearOnStop(generation: number): void {
+  const sessionToken = slotSessionToken(0);
   // Deferred-busy latch: retry the guarded send once on this Stop, fenced by
   // the stop generation and bounded by backoff. Awaiting-ack latches never resend.
   const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
@@ -412,18 +413,18 @@ function retryUndeliveredPmClearOnStop(generation: number): void {
     settleMs: PM_CLEAR_STOP_RETRY_SETTLE_MS,
     wait: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
     isCurrent: () => generation === pmClearDrainGeneration,
-    send: async () => {
-      const sent = await sendClearViaMopSendPath(0, "pm_status_stop_retry", false, generation);
-      return {
-        success: sent.success,
-        busy: sent.busy,
-        error: sent.error ?? sent.reason ?? `send failed status=${sent.status}`,
-      };
-    },
+    send: ({ requestedAt: fencedRequestedAt }) =>
+      sendClearViaMopSendPath(0, "pm_status_stop_retry", {
+        requestedAt: fencedRequestedAt,
+        generation,
+        sessionToken,
+        stopFenced: true,
+      }),
   }).catch((err) => console.error(`[pm-clear] stop retry failed: ${String(err)}`));
 }
 
 function retryPendingPmClearAfterDrain(stopEventId: number, generation: number): void {
+  const sessionToken = slotSessionToken(0);
   void waitForPmIdleDrain({
     afterEventId: stopEventId,
     getDrainEvent: () => db.getEvents(0, 1, "pm_debounce_drain_fired")[0] ?? null,
@@ -442,20 +443,20 @@ function retryPendingPmClearAfterDrain(stopEventId: number, generation: number):
         hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
         laterLifecycleEvent: findLaterPmLifecycleEvent(requestedAt),
         isPMBusy: () => relay.isPMBusy(),
-        send: async () => {
-          const sent = await sendClearViaMopSendPath(0, "pm_status_stop", false);
-          return {
-            success: sent.success,
-            busy: sent.busy,
-            error: sent.error ?? sent.reason ?? `send failed status=${sent.status}`,
-          };
-        },
+        send: ({ requestedAt: fencedRequestedAt }) =>
+          sendClearViaMopSendPath(0, "pm_status_stop", {
+            requestedAt: fencedRequestedAt,
+            generation,
+            sessionToken,
+            stopFenced: false,
+          }),
       });
     },
   });
 }
 
-async function sendClearViaMopSendPath(
+/** Dev-slot session clear through the existing /send path (never PM: PM uses the fenced writer). */
+async function sendDevSlotClearViaMopSendPath(
   slotNum: number,
   source: string,
   force = true,
@@ -489,6 +490,50 @@ async function sendClearViaMopSendPath(
       error: String(err),
     };
   }
+}
+
+/** Route reasons returned before any PM pane write: proven zero effect. */
+const PM_CLEAR_ZERO_EFFECT_ROUTE_REASONS = new Set([
+  "pane_identity_mismatch",
+  "pane_not_found",
+  "pm_control_command_blocked",
+]);
+
+/** Send the PM self-clear through the guarded /send writer, carrying the original authority. */
+async function sendClearViaMopSendPath(
+  slotNum: 0,
+  source: string,
+  authority: { requestedAt: string; generation: number; sessionToken: string; stopFenced: boolean },
+): Promise<PMClearSendResult> {
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slotNum}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        command: "/clear",
+        force: false,
+        allow_pm_clear: true,
+        source,
+        pm_clear_requested_at: authority.requestedAt,
+        pm_clear_generation: authority.generation,
+        pm_session_token: authority.sessionToken,
+        ...(authority.stopFenced ? { pm_stop_generation: authority.generation } : {}),
+      }),
+    });
+  } catch (err) {
+    // The request may have reached the writer: never proven zero effect.
+    return { success: false, error: `mop_send_path_error: ${String(err)}` };
+  }
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const reason = typeof data.reason === "string" ? data.reason : undefined;
+  const zeroEffect = data.zero_effect === true || (reason !== undefined && PM_CLEAR_ZERO_EFFECT_ROUTE_REASONS.has(reason));
+  return {
+    success: res.ok && data.success === true,
+    busy: reason === "pm_busy_deferred",
+    zeroEffect: !(res.ok && data.success === true) && zeroEffect,
+    error: (typeof data.error === "string" ? data.error : undefined) ?? reason ?? `send failed status=${res.status}`,
+  };
 }
 
 /** Immutable pane id + checkout for the operation fence; null = unobservable. */
@@ -703,6 +748,9 @@ async function clearSlotsThroughMopHttp(
 
   if (includePmSlot) {
     const nowMs = Date.now();
+    // Pin the PM turn/session observed at request time into the writer.
+    const operatorGeneration = pmClearDrainGeneration;
+    const operatorSessionToken = slotSessionToken(0);
     const delivery = await requestPmClearOnce({
       db,
       source: options.source,
@@ -713,14 +761,13 @@ async function clearSlotsThroughMopHttp(
       laterLifecycleEvent: findLaterPmLifecycleEvent(db.getConfig(PM_CLEAR_REQUESTED_AT_KEY)),
       operatorReRequest: options.clearExistingPendingForTargets,
       isPMBusy: () => relay.isPMBusy(),
-      send: async () => {
-        const sent = await sendClearViaMopSendPath(0, options.source, false);
-        return {
-          success: sent.success,
-          busy: sent.busy,
-          error: sent.error ?? sent.reason ?? `send failed status=${sent.status}`,
-        };
-      },
+      send: ({ requestedAt: fencedRequestedAt }) =>
+        sendClearViaMopSendPath(0, options.source, {
+          requestedAt: fencedRequestedAt,
+          generation: operatorGeneration,
+          sessionToken: operatorSessionToken,
+          stopFenced: false,
+        }),
     });
     touchPmClearRequestedMarker(delivery.kind);
 
@@ -741,6 +788,11 @@ async function clearSlotsThroughMopHttp(
 
     if (delivery.kind === "failed") {
       results.push({ slot: 0, name: "PM", status: `failed: ${delivery.error}` });
+      return results;
+    }
+
+    if (delivery.kind === "uncertain") {
+      results.push({ slot: 0, name: "PM", status: `uncertain (no automatic resend): ${delivery.error}` });
       return results;
     }
 
@@ -1448,7 +1500,7 @@ async function clearSlotForAssignment(
     getBaselineEventId: (slot) => latestSessionStartEventId(db, slot),
     sendClear: (slot) => pin
       ? sendPinnedClear(slot, pin, "mop_assign_slot_new_issue")
-      : sendClearViaMopSendPath(slot, "mop_assign_slot_new_issue"),
+      : sendDevSlotClearViaMopSendPath(slot, "mop_assign_slot_new_issue"),
     logSlotCleared: (slot) =>
       db.logEvent(slot, "slot_cleared", null, null, {
         cleared_at: new Date().toISOString(),
@@ -2480,6 +2532,52 @@ app.post("/slots/:slotNum/send", async (c) => {
       force,
       via: body.source ?? "unknown",
     });
+    // The PM self-clear carries its original request id, PM turn generation
+    // and hook session into the one serialized, pane-id-pinned writer.
+    const requestedAt = typeof body.pm_clear_requested_at === "string" ? body.pm_clear_requested_at : "";
+    const generation = typeof body.pm_clear_generation === "number" ? body.pm_clear_generation : Number.NaN;
+    const sessionToken = typeof body.pm_session_token === "string" ? body.pm_session_token : "";
+    if (!requestedAt || !Number.isInteger(generation) || !sessionToken) {
+      db.logEvent(0, "pm_clear_write_refused", null, null, { stage: "route", reason: "pm_clear_authority_missing", zero_effect: true });
+      return c.json({
+        success: false,
+        zero_effect: true,
+        error: "PM clear refused: request id, PM turn generation and session are required.",
+        reason: "pm_clear_authority_missing",
+      }, 409);
+    }
+    const written = await relay.writePMClearFenced({
+      paneId: paneTarget,
+      check: makePmClearWriteFence({
+        db,
+        requestedAt,
+        generation,
+        sessionToken,
+        currentGeneration: () => pmClearDrainGeneration,
+        currentSessionToken: () => slotSessionToken(0),
+        stopFenced: body.pm_stop_generation === generation,
+        idleProven: () => relay.isPMIdleProven(),
+      }),
+    });
+    if (written.ok) {
+      db.logEvent(0, "send_command", null, null, {
+        command,
+        force,
+        paste: "buffer",
+        submit: "Enter",
+        verified: true,
+        verification: "pm_clear_fenced_writer",
+        requested_at: requestedAt,
+        pane_id: paneTarget,
+      });
+      return c.json({ success: true, mode: "command", slot: 0, submit: "Enter", verification: "pm_clear_fenced_writer" });
+    }
+    return c.json({
+      success: false,
+      zero_effect: written.zeroEffect,
+      error: `PM clear refused (${written.reason ?? "unknown"}).`,
+      reason: written.busy ? "pm_busy_deferred" : written.reason ?? "pm_clear_refused",
+    }, written.zeroEffect ? 409 : 502);
   }
 
   // ── GATE 1: pane existence ─────────────────────────────
@@ -2730,22 +2828,6 @@ app.post("/slots/:slotNum/send", async (c) => {
         // Slot 0 is the PM pane. Submit through the relay so it can verify the
         // runtime is booted and apply runtime-specific paste/submit semantics.
         const bytes = Buffer.byteLength(command, "utf8");
-        // A Stop-fenced retry carries its stop generation: the PM Stop observation
-        // is the idle proof, valid only while no PM turn has started since.
-        const stopFenced =
-          typeof body.pm_stop_generation === "number" &&
-          body.pm_stop_generation === pmClearDrainGeneration;
-        if (allowPmClear && relay.isPMBusy() && !stopFenced) {
-          db.logEvent(0, "clear_pending_deferred_busy", null, null, {
-            via: body.source ?? "unknown",
-            reason: "PM became busy before /clear reached the send boundary",
-          });
-          return c.json({
-            success: false,
-            error: "PM is busy; the pending clear was retained for retry when idle.",
-            reason: "pm_busy_deferred",
-          }, 409);
-        }
         const submitted = await relay.submitToPM(command);
         if (!submitted.ok) {
           db.logEvent(slotNum, "send_error", null, null, {

@@ -17,6 +17,7 @@ import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./sl
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
+import type { PMClearFenceRefusal } from "./pmClearLatch.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
@@ -221,6 +222,10 @@ export function decidePMSubmitKey(
   if (runtime === "claude") return "Enter";
   return pmBusy === false ? "Enter" : "C-q";
 }
+
+export const PM_CLEAR_COMMAND = "/" + "clear";
+
+export type PMClearWriteResult = { ok: boolean; zeroEffect: boolean; busy: boolean; reason?: string };
 
 export class TmuxRelay {
   private pmPaneAddress: string;
@@ -726,6 +731,95 @@ export class TmuxRelay {
     }
     const row = this.enqueuePMMessage(message, eventTypeOverride, "submitToPM");
     return this.deliverPMRow(row);
+  }
+
+  /**
+   * The ONLY writer for a PM self-clear. It is serialized with every other PM
+   * pane write, targets the verified immutable pane id (never the mutable
+   * PM address), never enqueues for a later turn, and rechecks the caller's
+   * authority (request id, turn generation, session, idle), pane identity and
+   * a readable composer immediately before the paste AND the single Enter.
+   * Any refusal makes no new effect; `zeroEffect` is true only when proven.
+   */
+  writePMClearFenced(fence: {
+    paneId: string;
+    check: () => PMClearFenceRefusal | null;
+  }): Promise<PMClearWriteResult> {
+    const run = (): Promise<PMClearWriteResult> => this.writePMClearFencedNow(fence);
+    const result = this.directInjectChain.then(run, run);
+    this.directInjectChain = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async pmClearPaneRefusal(paneId: string, expectComposer: string): Promise<PMClearFenceRefusal | null> {
+    try {
+      const resolved = await this.runShell(
+        `tmux display-message -t ${this.pmPaneAddress} -p '#{pane_id}|#{pane_current_command}'`,
+        { timeout: 5_000 },
+      );
+      const [currentPaneId, command] = resolved.stdout.trim().split("|", 2);
+      if (currentPaneId !== paneId) return { reason: "pm_pane_identity_drift", busy: false };
+      if (command !== (this.pmRuntime === "omp" ? "omp" : "claude")) return { reason: "pm_pane_not_ready", busy: false };
+      const snapshot = await this.runShell(`tmux capture-pane -p -t ${paneId}`, { timeout: 5_000 });
+      const composer = composerText(snapshot.stdout);
+      if (composer === null) return { reason: "pm_composer_unreadable", busy: false };
+      if (composer !== expectComposer) {
+        return { reason: expectComposer === "" ? "pm_composer_not_empty" : "pm_composer_drift", busy: false };
+      }
+      return null;
+    } catch {
+      return { reason: "pm_pane_unobservable", busy: false };
+    }
+  }
+
+  private async writePMClearFencedNow(fence: {
+    paneId: string;
+    check: () => PMClearFenceRefusal | null;
+  }): Promise<PMClearWriteResult> {
+    const refuse = (refusal: PMClearFenceRefusal, zeroEffect: boolean, stage: string): PMClearWriteResult => {
+      this.db?.logEvent(0, "pm_clear_write_refused", null, null, {
+        stage,
+        reason: refusal.reason,
+        zero_effect: zeroEffect,
+        pane_id: fence.paneId,
+      });
+      return { ok: false, zeroEffect, busy: zeroEffect && refusal.busy, reason: refusal.reason };
+    };
+    const prePaste = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, "")) ?? fence.check();
+    if (prePaste) return refuse(prePaste, true, "pre_paste");
+
+    const seq = ++this.directInjectSeq;
+    const tmpFile = `/tmp/mop-pm-clear-${Date.now()}-${process.pid}-${seq}.txt`;
+    const bufName = `mop-pm-clear-${process.pid}-${seq}`;
+    let pasteAttempted = false;
+    try {
+      await fs.writeFile(tmpFile, PM_CLEAR_COMMAND);
+      await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+      pasteAttempted = true;
+      await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${fence.paneId} -d`, { timeout: 10_000 });
+      await sleep(PM_INJECT_ENTER_DELAY_MS);
+
+      const preEnter = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, PM_CLEAR_COMMAND)) ?? fence.check();
+      if (preEnter) {
+        // Remove only our own paste, and only while the composer holds exactly it.
+        const owned = (await this.pmClearPaneRefusal(fence.paneId, PM_CLEAR_COMMAND)) === null;
+        if (owned) {
+          await this.runShell(`tmux send-keys -t ${fence.paneId} C-u`, { timeout: 10_000 });
+          await sleep(300);
+          const cleared = (await this.pmClearPaneRefusal(fence.paneId, "")) === null;
+          return refuse(preEnter, cleared, "pre_enter");
+        }
+        return refuse(preEnter, false, "pre_enter");
+      }
+      await this.runShell(`tmux send-keys -t ${fence.paneId} Enter`, { timeout: 10_000 });
+      this.pmBusy = null;
+      this.db?.logEvent(0, "pm_clear_write_submitted", null, null, { pane_id: fence.paneId });
+      return { ok: true, zeroEffect: false, busy: false };
+    } catch (err) {
+      return refuse({ reason: `pm_clear_write_error:${String(err).slice(0, 120)}`, busy: false }, !pasteAttempted, "write");
+    } finally {
+      await fs.unlink(tmpFile).catch(() => undefined);
+    }
   }
 
   private injectDirectWithSubmitKey(message: string, submitKey: PMSubmitKey): Promise<DirectSubmitResult> {

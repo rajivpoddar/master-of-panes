@@ -4,7 +4,6 @@ import type { MoPDatabase } from "./db.js";
 
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
 const PM_CLEAR_DELIVERY_STATE_KEY = "pm_clear_delivery_state";
-const PM_CLEAR_REARMED_REQUESTED_AT_KEY = "pm_clear_rearmed_requested_at";
 const PM_CLEAR_ACK_MISSING_FOR_KEY = "pm_clear_ack_missing_for";
 
 type PendingClearEvent = {
@@ -14,7 +13,7 @@ type PendingClearEvent = {
 };
 
 export type PMClearClaim =
-  | { kind: "send"; requestedAt: string; repaired?: PendingClearEvent }
+  | { kind: "send"; requestedAt: string }
   | { kind: "pending" }
   | { kind: "recent" };
 
@@ -22,7 +21,12 @@ export type PMClearDelivery =
   | PMClearClaim
   | { kind: "sent"; requestedAt: string }
   | { kind: "deferred_busy"; requestedAt: string }
+  | { kind: "uncertain"; requestedAt: string; error: string }
   | { kind: "failed"; error: string };
+
+/** Outcome of one guarded PM clear write. `zeroEffect` is set ONLY when the
+ * writer proves nothing reached the PM composer (or its own paste was removed). */
+export type PMClearSendResult = { success: boolean; busy?: boolean; zeroEffect?: boolean; error?: string };
 
 export async function waitForPmIdleDrain(options: {
   afterEventId: number;
@@ -54,7 +58,7 @@ function parseMoPIsoMs(value: string | null | undefined): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-/** Claim one PM self-clear send, reopening only an old latch crossed by a later PM lifecycle event. */
+/** Claim one PM self-clear send. Only a proven zero-effect deferred_busy latch is ever resent. */
 export function claimPmClearRequest(options: {
   db: Pick<MoPDatabase, "hasPendingClear" | "getConfig" | "clearPendingClear" | "setPendingClear" | "setConfig" | "logEvent">;
   source: string;
@@ -64,10 +68,11 @@ export function claimPmClearRequest(options: {
   hasRecentClearEvent: boolean;
   laterLifecycleEvent: PendingClearEvent | null;
   operatorReRequest?: boolean;
+  /** Fence: only this exact request may be sent; a replacement is refused. */
+  expectedRequestedAt?: string;
 }): PMClearClaim {
   const { db, source, nowMs, staleAfterMs, recentSuppressMs } = options;
   const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
-  let repaired: PendingClearEvent | undefined;
 
   if (db.hasPendingClear(0)) {
     const requestedMs = parseMoPIsoMs(requestedAt);
@@ -80,51 +85,47 @@ export function claimPmClearRequest(options: {
       evidenceMs !== null &&
       evidenceMs > requestedMs;
 
-    const deferredBusy =
-      requestedAt !== null &&
-      db.getConfig(PM_CLEAR_DELIVERY_STATE_KEY) === "deferred_busy";
-
-    if (deferredBusy) {
+    const deliveryState = db.getConfig(PM_CLEAR_DELIVERY_STATE_KEY);
+    if (requestedAt !== null && deliveryState === "deferred_busy") {
+      // A replacement request must never be adopted by a caller that was
+      // fenced to an earlier request (Stop settle, drain observation).
+      if (options.expectedRequestedAt !== undefined && options.expectedRequestedAt !== requestedAt) {
+        db.logEvent(0, "clear_pending_replaced_refused", null, null, {
+          name: "PM",
+          via: source,
+          expected_requested_at: options.expectedRequestedAt,
+          requested_at: requestedAt,
+        });
+        return { kind: "pending" };
+      }
       return { kind: "send", requestedAt };
     }
 
-    if (!stale) {
-      db.logEvent(0, "clear_pending_duplicate_suppressed", null, null, {
-        name: "PM",
-        via: source,
-        reason: "pm_clear_already_requested",
+    // Every other latched state (claimed, sending, awaiting_ack, uncertain,
+    // or a legacy latch with no state) may already have reached the PM pane.
+    // It is ONE durable consumed/possible-effect claim shared by Stop, drain
+    // and restart: never automatically re-armed. Only SessionStart:clear or
+    // an explicit operator re-request (which clears the latch first) ends it.
+    if (stale && requestedAt !== null && db.getConfig(PM_CLEAR_ACK_MISSING_FOR_KEY) !== requestedAt) {
+      db.setConfig(PM_CLEAR_ACK_MISSING_FOR_KEY, requestedAt);
+      db.logEvent(0, "pm_clear_ack_missing", null, null, {
         requested_at: requestedAt,
+        delivery_state: deliveryState,
+        observed_at: new Date(nowMs).toISOString(),
+        later_lifecycle_event_id: evidence?.id ?? null,
+        later_lifecycle_event_type: evidence?.event_type ?? null,
+        reason: "A possibly delivered PM clear was not acknowledged by SessionStart source=clear; automatic resends stay suppressed.",
+        via: source,
       });
-      return { kind: "pending" };
     }
-
-    if (requestedAt !== null && db.getConfig(PM_CLEAR_REARMED_REQUESTED_AT_KEY) === requestedAt) {
-      if (db.getConfig(PM_CLEAR_ACK_MISSING_FOR_KEY) !== requestedAt) {
-        db.setConfig(PM_CLEAR_ACK_MISSING_FOR_KEY, requestedAt);
-        db.logEvent(0, "pm_clear_ack_missing", null, null, {
-          requested_at: requestedAt,
-          observed_at: new Date(nowMs).toISOString(),
-          later_lifecycle_event_id: evidence.id,
-          later_lifecycle_event_type: evidence.event_type,
-          reason: "The single stale-latch re-arm was not acknowledged by SessionStart source=clear; further automatic sends are suppressed.",
-          via: source,
-        });
-      }
-      return { kind: "pending" };
-    }
-
-    repaired = evidence;
-    db.clearPendingClear(0);
-    db.logEvent(0, "clear_pending_stale_repaired", null, null, {
+    db.logEvent(0, "clear_pending_duplicate_suppressed", null, null, {
       name: "PM",
-      requested_at: requestedAt,
-      repaired_at: new Date(nowMs).toISOString(),
-      later_lifecycle_event_id: evidence.id,
-      later_lifecycle_event_type: evidence.event_type,
-      later_lifecycle_event_timestamp: evidence.timestamp,
       via: source,
-      reason: "Old clear latch crossed a later PM lifecycle event without SessionStart:clear acknowledgement; clearing only the latch before a new explicit request.",
+      reason: "pm_clear_already_requested",
+      requested_at: requestedAt,
+      delivery_state: deliveryState,
     });
+    return { kind: "pending" };
   }
 
   const confirmedAt = db.getConfig("pm_clear_confirmed_at");
@@ -150,49 +151,116 @@ export function claimPmClearRequest(options: {
 
   const nextRequestedAt = new Date(nowMs).toISOString();
   if (options.operatorReRequest) {
-    db.setConfig(PM_CLEAR_REARMED_REQUESTED_AT_KEY, "");
     db.setConfig(PM_CLEAR_ACK_MISSING_FOR_KEY, "");
+  }
+  if (options.expectedRequestedAt !== undefined) {
+    // A fenced retry may only resend its own latched request, never mint one.
+    return { kind: "pending" };
   }
   db.setPendingClear(0);
   db.setConfig(PM_CLEAR_REQUESTED_AT_KEY, nextRequestedAt);
   db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "claimed");
-  if (repaired) db.setConfig(PM_CLEAR_REARMED_REQUESTED_AT_KEY, nextRequestedAt);
-  return { kind: "send", requestedAt: nextRequestedAt, repaired };
+  return { kind: "send", requestedAt: nextRequestedAt };
 }
 
 export async function requestPmClearOnce(options: Parameters<typeof claimPmClearRequest>[0] & {
   isPMBusy: () => boolean;
-  send: () => Promise<{ success: boolean; busy?: boolean; error?: string }>;
+  send: (request: { requestedAt: string }) => Promise<PMClearSendResult>;
 }): Promise<PMClearDelivery> {
+  const { db } = options;
   const claim = claimPmClearRequest(options);
   if (claim.kind !== "send") return claim;
 
-  options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "sending");
+  // Synchronous with the claim: from here this request is consumed. Any
+  // concurrent Stop/drain caller sees "sending" and stays suppressed.
+  db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "sending");
   if (options.isPMBusy()) {
-    options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "deferred_busy");
-    options.db.logEvent(0, "clear_pending_deferred_busy", null, null, {
+    db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "deferred_busy");
+    db.logEvent(0, "clear_pending_deferred_busy", null, null, {
       requested_at: claim.requestedAt,
       reason: "PM is busy at clear-send boundary; latch retained for retry when idle",
     });
     return { kind: "deferred_busy", requestedAt: claim.requestedAt };
   }
 
-  const result = await options.send();
-  if (result.busy) {
-    options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "deferred_busy");
-    options.db.logEvent(0, "clear_pending_deferred_busy", null, null, {
-      requested_at: claim.requestedAt,
-      reason: "PM became busy before the send endpoint; latch retained for retry when idle",
-    });
+  let result: PMClearSendResult;
+  try {
+    result = await options.send({ requestedAt: claim.requestedAt });
+  } catch (err) {
+    result = { success: false, error: String(err) };
+  }
+  // Settle only our own request. If an operator replaced the latch while the
+  // write was in flight, leave the replacement untouched.
+  const ownsLatch =
+    db.hasPendingClear(0) && db.getConfig(PM_CLEAR_REQUESTED_AT_KEY) === claim.requestedAt;
+  if (result.success) {
+    if (ownsLatch) db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "awaiting_ack");
+    return { kind: "sent", requestedAt: claim.requestedAt };
+  }
+  if (result.zeroEffect && result.busy) {
+    if (ownsLatch) {
+      db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "deferred_busy");
+      db.logEvent(0, "clear_pending_deferred_busy", null, null, {
+        requested_at: claim.requestedAt,
+        reason: "PM became busy before the guarded write; zero effect proven, latch retained for retry when idle",
+      });
+    }
     return { kind: "deferred_busy", requestedAt: claim.requestedAt };
   }
-  if (!result.success) {
-    options.db.clearPendingClear(0);
-    options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "failed");
-    return { kind: "failed", error: result.error ?? "PM clear send failed" };
+  if (result.zeroEffect) {
+    // Proven zero effect, not a busy refusal (identity/session drift,
+    // unreadable composer): release the latch without retrying.
+    if (ownsLatch) {
+      db.clearPendingClear(0);
+      db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "failed");
+    }
+    return { kind: "failed", error: result.error ?? "PM clear refused before any effect" };
   }
-  options.db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "awaiting_ack");
-  return { kind: "sent", requestedAt: claim.requestedAt };
+  // Anything else may have reached the pane: keep the claim forever-suppressed.
+  if (ownsLatch) {
+    db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "uncertain");
+    db.logEvent(0, "pm_clear_delivery_uncertain", null, null, {
+      requested_at: claim.requestedAt,
+      error: result.error ?? null,
+      reason: "PM clear write outcome is not proven zero-effect; automatic resends are suppressed",
+    });
+  }
+  return { kind: "uncertain", requestedAt: claim.requestedAt, error: result.error ?? "PM clear outcome uncertain" };
+}
+
+/** A fence refusal: `busy` marks a PM-turn/busy refusal (deferrable). */
+export type PMClearFenceRefusal = { reason: string; busy: boolean };
+
+/**
+ * Build the authority the serialized PM writer rechecks at paste and at the
+ * single Enter: the original request id (still latched and in "sending"), the
+ * PM turn generation pinned by the caller, the PM hook session, and idle.
+ */
+export function makePmClearWriteFence(deps: {
+  db: Pick<MoPDatabase, "hasPendingClear" | "getConfig">;
+  requestedAt: string;
+  generation: number;
+  sessionToken: string;
+  currentGeneration: () => number;
+  currentSessionToken: () => string;
+  /** True when the caller's generation is a PM Stop observation (idle proof). */
+  stopFenced: boolean;
+  idleProven: () => boolean;
+}): () => PMClearFenceRefusal | null {
+  return () => {
+    const { db } = deps;
+    if (
+      !db.hasPendingClear(0) ||
+      db.getConfig(PM_CLEAR_REQUESTED_AT_KEY) !== deps.requestedAt ||
+      db.getConfig(PM_CLEAR_DELIVERY_STATE_KEY) !== "sending"
+    ) {
+      return { reason: "pm_clear_request_replaced", busy: false };
+    }
+    if (deps.currentGeneration() !== deps.generation) return { reason: "pm_turn_started", busy: true };
+    if (deps.currentSessionToken() !== deps.sessionToken) return { reason: "pm_session_drift", busy: false };
+    if (!deps.stopFenced && !deps.idleProven()) return { reason: "pm_busy", busy: true };
+    return null;
+  };
 }
 
 const PM_CLEAR_STOP_RETRY_AT_KEY = "pm_clear_stop_retry_at";
@@ -220,8 +288,9 @@ export async function retryDeferredPmClearOnStop(options: Omit<Parameters<typeof
   if (lastMs !== null && options.nowMs >= lastMs && options.nowMs - lastMs < options.backoffMs) {
     return { kind: "skipped", reason: "backoff" };
   }
+  const fencedRequestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY) ?? "";
   if (options.settleMs > 0) await options.wait(options.settleMs);
-  if (!options.isCurrent() || !isPmClearUndelivered(db)) {
+  if (!options.isCurrent() || !isPmClearUndelivered(db) || db.getConfig(PM_CLEAR_REQUESTED_AT_KEY) !== fencedRequestedAt) {
     return { kind: "skipped", reason: "stop_generation_superseded" };
   }
   db.setConfig(PM_CLEAR_STOP_RETRY_AT_KEY, new Date(options.nowMs).toISOString());
@@ -231,7 +300,11 @@ export async function retryDeferredPmClearOnStop(options: Omit<Parameters<typeof
     via: options.source,
     reason: "Undelivered (deferred_busy) PM clear latch retried once on PM Stop",
   });
-  return requestPmClearOnce({ ...options, isPMBusy: () => !options.isCurrent() });
+  return requestPmClearOnce({
+    ...options,
+    expectedRequestedAt: fencedRequestedAt,
+    isPMBusy: () => !options.isCurrent(),
+  });
 }
 
 /**
