@@ -1315,6 +1315,11 @@ export class TmuxRelay {
         await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 3_000 });
         const loadedRefusal = await recheck("pre_paste");
         if (loadedRefusal) return { outcome: "refused_pre_effect", reason: loadedRefusal, paneId };
+        // File/buffer loading and the caller's fence can yield to a new draft.
+        // Read the composer again after those awaits, before the paste effect.
+        const loadedComposer = composerText(await capture());
+        if (loadedComposer === null) return { outcome: "refused_pre_effect", reason: "composer_unreadable", paneId };
+        if (loadedComposer !== "") return { outcome: "refused_pre_effect", reason: "composer_not_empty", paneId };
         const prePasteFence = opts.finalCheck?.("pre_paste") ?? null;
         if (prePasteFence) return { outcome: "refused_pre_effect", reason: prePasteFence, paneId };
         effectAttempted = true;
@@ -1323,6 +1328,12 @@ export class TmuxRelay {
           capture,
           pressSubmit: async () => {
             preEnterRefusal = await recheck("pre_enter");
+            if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
+            // Substring payload detection is insufficient for a recovery
+            // command: foreign text alongside it must never be submitted.
+            const submitComposer = composerText(await capture());
+            preEnterRefusal = submitComposer === null ? "composer_unreadable"
+              : submitComposer.replace(/\s+/g, "") !== command.replace(/\s+/g, "") ? "composer_not_owned_by_send" : null;
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
             preEnterRefusal = opts.finalCheck?.("pre_enter") ?? null;
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);

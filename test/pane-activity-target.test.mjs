@@ -67,7 +67,7 @@ async function world() {
     }
     if (command.startsWith('tmux paste-buffer')) {
       const target = command.match(/-t (\S+)/)?.[1]; const id = w.address[target] ?? target;
-      w.effects.push(`${id}:paste:${w.buffer}`); w.panes[id].composer = w.buffer;
+      w.effects.push(`${id}:paste:${w.buffer}`); w.panes[id].composer += w.buffer;
       w.afterPaste?.(); return { stdout: '', stderr: '' };
     }
     if (command.startsWith('tmux send-keys')) {
@@ -159,6 +159,39 @@ test('health post-paste unknown consumes the episode without Enter or retry', as
     w.afterPaste = () => { w.panes['%7'].unreadable = true; };
     await w.tick(); assert.deepEqual(w.effects, ['%7:paste:/exit']); assert.equal(w.cycled[6], true);
     w.pending = true; await w.tick(); assert.deepEqual(w.effects, ['%7:paste:/exit']);
+  } finally { await w.cleanup(); }
+});
+test('health late draft after buffer load refuses paste and preserves draft', async () => {
+  const w = await world(); try {
+    w.afterLoad = () => { w.panes['%7'].composer = 'SYNTHETIC_PENDING_DRAFT'; };
+    await w.tick();
+    assert.deepEqual(w.effects, []); assert.equal(w.cycled[6], false);
+    assert.equal(w.panes['%7'].composer, 'SYNTHETIC_PENDING_DRAFT');
+  } finally { await w.cleanup(); }
+});
+test('health unreadable composer after buffer load refuses before paste', async () => {
+  const w = await world(); try {
+    w.afterLoad = () => { w.panes['%7'].unreadable = true; };
+    await w.tick(); assert.deepEqual(w.effects, []); assert.equal(w.cycled[6], false);
+  } finally { await w.cleanup(); }
+});
+for (const arrival of ['after_paste', 'pre_enter_recheck']) test(`health foreign draft ${arrival} refuses Enter and consumes uncertainty once`, async () => {
+  const w = await world(); try {
+    let pasted = false;
+    w.afterPaste = () => {
+      pasted = true;
+      if (arrival === 'after_paste') w.panes['%7'].composer = 'SYNTHETIC_PENDING_DRAFT' + w.panes['%7'].composer;
+    };
+    w.onCommand = command => {
+      if (arrival === 'pre_enter_recheck' && pasted && command.startsWith('tmux capture-pane -e ')) {
+        w.panes['%7'].composer = 'SYNTHETIC_PENDING_DRAFT/exit';
+      }
+    };
+    await w.tick(); assert.deepEqual(w.effects, ['%7:paste:/exit']);
+    assert.equal(w.panes['%7'].composer, 'SYNTHETIC_PENDING_DRAFT/exit');
+    assert.equal(w.cycled[6], true);
+    w.pending = true; await w.tick(); assert.deepEqual(w.effects, ['%7:paste:/exit']);
+    assert.equal(w.panes['%7'].composer, 'SYNTHETIC_PENDING_DRAFT/exit');
   } finally { await w.cleanup(); }
 });
 test('configured numeric address rebound resolves the owning checkout, not the neighboring pane', async () => {
