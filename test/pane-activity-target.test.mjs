@@ -20,6 +20,8 @@ const { pinFrom, pinDrift } = await load('interruptBeforeClear');
 const { withSlotSendLock } = await load('slotSendLock');
 const { isValidDevSlot } = await load('slotConfig');
 const composer = await load('composer');
+const { pinnedGuardedSend } = await load('pinnedWriters');
+const { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } = await load('assignmentTaskPacket');
 const checkout = slot => `/Users/rajiv/Downloads/projects/heydonna-app${slot ? `-300${slot}` : ''}`;
 const rule = '──────────────────────────';
 const render = p => `${p.prefix ?? ''}${rule}\n${p.active ? '\x1b[38;2;153;153;153m' : ''}❯\x1b[0m ${p.composer}\n${rule}\n  ⏵⏵ bypass permissions on`;
@@ -67,7 +69,7 @@ async function world() {
     }
     if (command.startsWith('tmux paste-buffer')) {
       const target = command.match(/-t (\S+)/)?.[1]; const id = w.address[target] ?? target;
-      w.effects.push(`${id}:paste:${w.buffer}`); w.panes[id].composer = w.buffer;
+      w.effects.push(`${id}:paste:${w.buffer}`); w.panes[id].composer += w.buffer;
       w.afterPaste?.(); return { stdout: '', stderr: '' };
     }
     if (command.startsWith('tmux send-keys')) {
@@ -161,6 +163,39 @@ test('health post-paste unknown consumes the episode without Enter or retry', as
     w.pending = true; await w.tick(); assert.deepEqual(w.effects, ['%7:paste:/exit']);
   } finally { await w.cleanup(); }
 });
+test('health late draft after buffer load refuses paste and preserves draft', async () => {
+  const w = await world(); try {
+    w.afterLoad = () => { w.panes['%7'].composer = 'SYNTHETIC_PENDING_DRAFT'; };
+    await w.tick();
+    assert.deepEqual(w.effects, []); assert.equal(w.cycled[6], false);
+    assert.equal(w.panes['%7'].composer, 'SYNTHETIC_PENDING_DRAFT');
+  } finally { await w.cleanup(); }
+});
+test('health unreadable composer after buffer load refuses before paste', async () => {
+  const w = await world(); try {
+    w.afterLoad = () => { w.panes['%7'].unreadable = true; };
+    await w.tick(); assert.deepEqual(w.effects, []); assert.equal(w.cycled[6], false);
+  } finally { await w.cleanup(); }
+});
+for (const arrival of ['after_paste', 'pre_enter_recheck']) test(`health foreign draft ${arrival} refuses Enter and consumes uncertainty once`, async () => {
+  const w = await world(); try {
+    let pasted = false;
+    w.afterPaste = () => {
+      pasted = true;
+      if (arrival === 'after_paste') w.panes['%7'].composer = 'SYNTHETIC_PENDING_DRAFT' + w.panes['%7'].composer;
+    };
+    w.onCommand = command => {
+      if (arrival === 'pre_enter_recheck' && pasted && command.startsWith('tmux capture-pane -e ')) {
+        w.panes['%7'].composer = 'SYNTHETIC_PENDING_DRAFT/exit';
+      }
+    };
+    await w.tick(); assert.deepEqual(w.effects, ['%7:paste:/exit']);
+    assert.equal(w.panes['%7'].composer, 'SYNTHETIC_PENDING_DRAFT/exit');
+    assert.equal(w.cycled[6], true);
+    w.pending = true; await w.tick(); assert.deepEqual(w.effects, ['%7:paste:/exit']);
+    assert.equal(w.panes['%7'].composer, 'SYNTHETIC_PENDING_DRAFT/exit');
+  } finally { await w.cleanup(); }
+});
 test('configured numeric address rebound resolves the owning checkout, not the neighboring pane', async () => {
   const w = await world(); try {
     w.address = { '0:0.7': '%6', '0:0.6': '%7' }; w.panes['%7'].active = true;
@@ -196,6 +231,40 @@ test('idle verified PM retains the existing exit-pending target and never uses a
     w.address['0:0.0']='%0';w.panes['%0']={slot:0,active:false,composer:''};w.cycled[6]=true;w.cycled[0]=false;
     await w.tick();assert.deepEqual(w.effects,['%0:paste:/exit','%0:Enter']);assert.equal(w.cycled[0],true);
   }finally{await w.cleanup();}
+});
+
+for (const foreign of ['', '\nSYNTHETIC_PENDING_DRAFT', '\n[Pasted text #2 +12 lines]']) test(`actual pinned assignment owned collapsed packet ${foreign ? 'with foreign content ' + JSON.stringify(foreign) + ' refuses' : 'submits once'}`, async () => {
+  const w = await world(); try {
+    const file = join(w.dir, 'assignment.md');
+    const payload = Array.from({length:12}, (_, i) => `Task line ${i + 1}: fixture`).join('\n');
+    await writeFile(file, payload);
+    const pin = pinFrom({paneId:'%7',checkout:checkout(6)},w.row);
+    const placeholder = '[Pasted text #1 +12 lines]';
+    w.afterPaste = () => { w.panes['%7'].composer = placeholder + foreign; };
+    const send = extractFunction('deliverTaskFileForAssignment', {
+      verifyPaneIdentity: slot => verifyPaneIdentity(slot,w.shell), readFile,
+      ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket, pinnedGuardedSend,
+      relay: w.relay, slotOperationFence: () => () => pinDrift(pin,w.row), sleep: async () => {},
+    });
+    const result = await send(6,file,pin);
+    assert.equal(result.verified, !foreign);
+    assert.deepEqual(w.effects, [`%7:paste:${payload}`, ...(!foreign ? ['%7:Enter'] : [])]);
+    assert.equal(w.panes['%7'].composer, foreign ? placeholder + foreign : '');
+    if (foreign) {
+      assert.match(result.reason, /uncertain:pre_enter_refused:composer_not_owned_by_send/);
+      assert.equal(result.receipt.outcome, 'uncertain');
+      // The existing one-shot writer does not repaste or send a second Enter.
+      assert.equal(w.loads,1);
+    }
+  } finally { await w.cleanup(); }
+});
+test('single-line recovery refuses a collapsed placeholder as unowned and never retries', async () => {
+  const w=await world();try {
+    w.afterPaste=()=>{w.panes['%7'].composer='[Pasted text #1 +12 lines]';};
+    await w.tick();assert.deepEqual(w.effects,['%7:paste:/exit']);assert.equal(w.cycled[6],true);
+    w.pending=true;await w.tick();assert.deepEqual(w.effects,['%7:paste:/exit']);
+    assert.equal(w.panes['%7'].composer,'[Pasted text #1 +12 lines]');
+  } finally { await w.cleanup(); }
 });
 
 function writer(w) {

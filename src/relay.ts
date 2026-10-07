@@ -15,7 +15,7 @@ import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
-import { composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, submitWithComposerCheck } from "./composer.js";
+import { composerText, composerIsOnlyPastePlaceholders, composerIsRefusedPasteContent, composerShowsNewPastePlaceholder, INJECT_ENTER_DELAY_MS, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
@@ -1315,11 +1315,11 @@ export class TmuxRelay {
         await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 3_000 });
         const loadedRefusal = await recheck("pre_paste");
         if (loadedRefusal) return { outcome: "refused_pre_effect", reason: loadedRefusal, paneId };
-        // A draft typed during the awaited buffer work must not get the
-        // payload appended: re-read the composer after every await.
-        const finalComposer = composerText(await capture());
-        if (finalComposer === null) return { outcome: "refused_pre_effect", reason: "composer_unreadable", paneId };
-        if (finalComposer !== "") return { outcome: "refused_pre_effect", reason: "composer_not_empty", paneId };
+        // File/buffer loading and the caller's fence can yield to a new draft.
+        // Read the composer again after those awaits, before the paste effect.
+        const loadedComposer = composerText(await capture());
+        if (loadedComposer === null) return { outcome: "refused_pre_effect", reason: "composer_unreadable", paneId };
+        if (loadedComposer !== "") return { outcome: "refused_pre_effect", reason: "composer_not_empty", paneId };
         const prePasteFence = opts.finalCheck?.("pre_paste") ?? null;
         if (prePasteFence) return { outcome: "refused_pre_effect", reason: prePasteFence, paneId };
         effectAttempted = true;
@@ -1329,11 +1329,19 @@ export class TmuxRelay {
           pressSubmit: async () => {
             preEnterRefusal = await recheck("pre_enter");
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
-            // Never submit foreign content: the composer must hold exactly the payload.
-            if (!composerOwnsOnlyPayload(composerText(await capture()), command)) {
-              preEnterRefusal = "composer_foreign_content";
-              throw new GuardedEnterRefused(preEnterRefusal);
-            }
+            // Substring payload detection is insufficient for a recovery
+            // command: foreign text alongside it must never be submitted.
+            const submitComposer = composerText(await capture());
+            // Bracketed multiline task packets can render as a new collapsed
+            // paste. Preserve the existing arrival evidence only when no
+            // foreign visible text accompanies that owned placeholder.
+            const ownedPlaceholder = opts.bracketedPaste === true && command.includes("\n")
+              && submitComposer !== null && composerIsOnlyPastePlaceholders(submitComposer)
+              && composerIsRefusedPasteContent(submitComposer, command)
+              && composerShowsNewPastePlaceholder(submitComposer, prePasteComposer);
+            preEnterRefusal = submitComposer === null ? "composer_unreadable"
+              : !ownedPlaceholder && submitComposer.replace(/\s+/g, "") !== command.replace(/\s+/g, "") ? "composer_not_owned_by_send" : null;
+            if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
             preEnterRefusal = opts.finalCheck?.("pre_enter") ?? null;
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
             await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: 3_000 });
