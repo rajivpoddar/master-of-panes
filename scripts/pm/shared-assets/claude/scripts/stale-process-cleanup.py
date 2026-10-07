@@ -37,7 +37,13 @@ from typing import Any
 OUT_JSON = Path("/tmp/stale-process-cleanup-latest.json")
 PROJECT_BASE = Path("/Users/rajiv/Downloads/projects")
 MOP_DB = Path("/Users/rajiv/.local/share/master-of-panes/data/mop.db")
-SLOT_NUMBERS = tuple(range(1, 9))
+STATUS_JSON = Path("/tmp/stale-process-cleanup-status.json")
+PM_WORKTREE_PREFIX = "/private/tmp/claude-501/wt-"
+PM_WORKTREE_MIN_AGE_S = 60 * 60
+DUPLICATE_DEV_MIN_AGE_S = 10 * 60
+# No hard-coded slot range (Rajiv 2026-10-07 22:03 IST, DM D0AMF0XE6TS thread
+# 1791389413.287779: "also remove remove the hardcoded slot range."). The slot
+# set is every MoP ``slots`` row with slot >= 1.
 
 
 def run(args: list[str], timeout: int = 5) -> subprocess.CompletedProcess[str]:
@@ -107,15 +113,38 @@ def get_start_time(pid: int) -> str | None:
     return value or None
 
 
-def slot_root(slot: int) -> str:
-    return str(PROJECT_BASE / f"heydonna-app-300{slot}")
+def slot_port(slot: int) -> int:
+    return 3000 + slot
+
+
+def slot_root(slot: int, address: str | None = None) -> str:
+    """Clone root for a slot: the pane cwd's heydonna-app-NNNN root when tmux
+    reports one, else the heydonna-app-<3000+slot> convention."""
+    pane = pane_root(address) if address else None
+    return pane or str(PROJECT_BASE / f"heydonna-app-{slot_port(slot)}")
+
+
+def pane_root(address: str) -> str | None:
+    try:
+        result = run(["tmux", "display-message", "-p", "-t", address, "#{pane_current_path}"], timeout=2)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    path = Path(result.stdout.strip())
+    try:
+        first = path.relative_to(PROJECT_BASE).parts[0]
+    except (ValueError, IndexError):
+        return None
+    return str(PROJECT_BASE / first) if re.fullmatch(r"heydonna-app-\d+", first) else None
 
 
 def load_slot_inventory() -> tuple[dict[int, dict[str, Any]], str | None]:
-    """Read the complete canonical eight-slot inventory before cleanup eligibility.
+    """Read the MoP slot inventory (every row with slot >= 1) before cleanup.
 
-    A missing, unreadable, malformed, or incomplete inventory is an authority
-    failure. Apply mode must refuse before it enumerates kill candidates.
+    A missing, unreadable or malformed inventory, or any malformed slot row, is
+    an authority failure. Apply mode must refuse before it enumerates kill
+    candidates.
     """
     if not MOP_DB.exists():
         return {}, f"missing:{MOP_DB}"
@@ -125,7 +154,7 @@ def load_slot_inventory() -> tuple[dict[int, dict[str, Any]], str | None]:
                 "sqlite3",
                 "-json",
                 str(MOP_DB),
-                "SELECT slot,status,occupied,idle,dnd,activity,issue,task,repository_id,branch,branch_ref,pr,head_sha,work_kind,handoff_id,claimed_at,active_turn_state,active_turn_id,last_activity FROM slots WHERE slot BETWEEN 1 AND 8 ORDER BY slot;",
+                "SELECT slot,address,status,occupied,idle,dnd,activity,issue,task,repository_id,branch,branch_ref,pr,head_sha,work_kind,handoff_id,claimed_at,active_turn_state,active_turn_id,last_activity FROM slots WHERE slot >= 1 ORDER BY slot;",
             ],
             timeout=3,
         )
@@ -141,13 +170,14 @@ def load_slot_inventory() -> tuple[dict[int, dict[str, Any]], str | None]:
         return {}, "malformed_json_shape"
     states: dict[int, dict[str, Any]] = {}
     required_fields = (
-        "slot", "status", "occupied", "idle", "dnd", "activity", "issue", "task",
+        "slot", "address", "status", "occupied", "idle", "dnd", "activity", "issue", "task",
         "repository_id", "branch", "branch_ref", "pr", "head_sha", "work_kind",
         "handoff_id", "claimed_at", "active_turn_state", "active_turn_id", "last_activity",
     )
     for record in records:
         if not isinstance(record, dict) or any(field not in record for field in required_fields):
-            return {}, "malformed_row"
+            ident = record.get("slot") if isinstance(record, dict) else None
+            return {}, f"malformed_row:slot={ident}"
         try:
             slot = record["slot"]
             occupied = record["occupied"]
@@ -156,15 +186,20 @@ def load_slot_inventory() -> tuple[dict[int, dict[str, Any]], str | None]:
             if any(isinstance(value, bool) or not isinstance(value, int) for value in (slot, occupied, idle, dnd)):
                 raise ValueError
         except (KeyError, TypeError, ValueError):
-            return {}, "malformed_identity"
-        if slot not in SLOT_NUMBERS or slot in states:
-            return {}, "invalid_or_duplicate_slot"
+            return {}, f"malformed_identity:slot={record.get('slot')}"
+        if slot < 1 or slot in states:
+            return {}, f"invalid_or_duplicate_slot:{slot}"
         status = record["status"]
         if not isinstance(status, str) or not status:
-            return {}, "malformed_status"
+            return {}, f"malformed_status:slot={slot}"
+        address = record["address"]
+        if not isinstance(address, str) or not address:
+            return {}, f"malformed_address:slot={slot}"
         states[slot] = {
             "slot": slot,
-            "root": slot_root(slot),
+            "address": address,
+            "root": slot_root(slot, address),
+            "port": slot_port(slot),
             "status": status,
             "occupied": occupied,
             "idle": idle,
@@ -185,9 +220,8 @@ def load_slot_inventory() -> tuple[dict[int, dict[str, Any]], str | None]:
             "last_activity": record["last_activity"] or None,
             "free_idle": status == "free" and occupied == 0 and idle == 1,
         }
-    missing = sorted(set(SLOT_NUMBERS) - set(states))
-    if missing:
-        return {}, f"incomplete_slots:{','.join(map(str, missing))}"
+    if not states:
+        return {}, "no_slots"
     return states, None
 
 
@@ -207,36 +241,39 @@ def under(path: str | None, root: str) -> bool:
 
 
 def associated_slot(cwd: str | None, states: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
-    for slot in SLOT_NUMBERS:
-        root = slot_root(slot)
-        if under(cwd, root):
-            return states.get(
-                slot,
-                {
-                    "slot": slot,
-                    "root": root,
-                    "status": None,
-                    "occupied": None,
-                    "idle": None,
-                    "dnd": None,
-                    "activity": None,
-                    "issue": None,
-                    "task": None,
-                    "repository_id": None,
-                    "branch": None,
-                    "branch_ref": None,
-                    "pr": None,
-                    "head_sha": None,
-                    "work_kind": None,
-                    "handoff_id": None,
-                    "claimed_at": None,
-                    "active_turn_state": None,
-                    "active_turn_id": None,
-                    "last_activity": None,
-                    "free_idle": False,
-                    "state_missing": True,
-                },
-            )
+    for state in states.values():
+        if under(cwd, state["root"]):
+            return state
+    # A slot-convention clone with no readable MoP row is still a slot
+    # checkout: keep it fail-closed rather than treating it as slot-less.
+    match = re.match(re.escape(str(PROJECT_BASE)) + r"/heydonna-app-(\d+)(?:/|$)", str(cwd or ""))
+    if match and int(match.group(1)) > 3000:
+        slot = int(match.group(1)) - 3000
+        return {
+            "slot": slot,
+            "root": str(PROJECT_BASE / f"heydonna-app-{match.group(1)}"),
+            "port": slot_port(slot),
+            "status": None,
+            "occupied": None,
+            "idle": None,
+            "dnd": None,
+            "activity": None,
+            "issue": None,
+            "task": None,
+            "repository_id": None,
+            "branch": None,
+            "branch_ref": None,
+            "pr": None,
+            "head_sha": None,
+            "work_kind": None,
+            "handoff_id": None,
+            "claimed_at": None,
+            "active_turn_state": None,
+            "active_turn_id": None,
+            "last_activity": None,
+            "free_idle": False,
+            "state_missing": True,
+        }
     return None
 
 
@@ -309,6 +346,8 @@ def command_identity(command: str) -> tuple[str, str] | None:
         match = re.search(r"(?<!\S)(\S*/?convex)\s+dev(?:\s|$)", lower)
         return (category, match.group(1)) if match else None
     if category == "nextjs":
+        if lower.startswith("next-server"):
+            return (category, "next-server")
         match = re.search(
             r"(?<!\S)(\S*(?:next-server|node_modules/(?:\.bin/next|next/(?:dist/)?bin/next)))\s+(?:dev|start)(?:\s|$)",
             lower,
@@ -331,6 +370,75 @@ def sanitize_command(command: str) -> str:
         r"\1<redacted>",
         bounded,
     )
+
+
+def listen_ports(pid: int) -> list[int]:
+    """TCP ports the process is LISTENing on (empty when none or unreadable)."""
+    try:
+        result = run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:LISTEN", "-Fn"], timeout=2)
+    except Exception:
+        return []
+    ports: set[int] = set()
+    for line in result.stdout.splitlines():
+        match = re.match(r"n.*:(\d+)$", line)
+        if match:
+            ports.add(int(match.group(1)))
+    return sorted(ports)
+
+
+def duplicate_dev_server_reasons(rows: list[dict[str, Any]]) -> dict[int, str]:
+    """Return {pid: reason} for Next.js dev-server trees to reap in slot clones.
+
+    A tree is a top-most nextjs process plus its nextjs descendants (for
+    example ``node .../next dev`` and its ``next-server`` child). Per slot clone:
+      (a) when one tree listens on the slot PORT (3000+N), every other tree in
+          that clone is a duplicate;
+      (b) a tree listening only on ports other than the slot PORT (a stray
+          :3000) is reaped even without a keeper.
+    A tree younger than DUPLICATE_DEV_MIN_AGE_S is never flagged (a live turn
+    may have just started it; a live Claude turn's active command is not
+    reliably detectable from the process table, so the age floor is the guard).
+    """
+    nextjs = {row["pid"]: row for row in rows if row["category"] == "nextjs" and row.get("associated_slot")}
+    children: dict[int, list[int]] = {}
+    for pid, row in nextjs.items():
+        children.setdefault(row["ppid"], []).append(pid)
+    trees: dict[int, list[dict[str, Any]]] = {}
+    for pid, row in nextjs.items():
+        if row["ppid"] in nextjs:
+            continue
+        members, stack = [], [pid]
+        while stack:
+            current = stack.pop()
+            members.append(nextjs[current])
+            stack.extend(children.get(current, []))
+        trees[pid] = members
+    by_slot: dict[int, list[tuple[int, list[dict[str, Any]], set[int]]]] = {}
+    for root, members in trees.items():
+        ports = {port for member in members for port in member.get("listen_ports") or []}
+        by_slot.setdefault(nextjs[root]["associated_slot"], []).append((root, members, ports))
+    reasons: dict[int, str] = {}
+    for slot, slot_trees in by_slot.items():
+        port = slot_port(slot)
+        keepers = [root for root, _members, ports in slot_trees if port in ports]
+        # Keep the oldest tree when the OS reports more than one on the PORT.
+        keeper = max(keepers, key=lambda r: nextjs[r]["age_seconds"]) if keepers else None
+        for root, members, ports in slot_trees:
+            if root == keeper:
+                continue
+            if min(m["age_seconds"] for m in members) < DUPLICATE_DEV_MIN_AGE_S:
+                continue
+            if port in ports:
+                reason = f"duplicate_dev_server:slot={slot}:second_tree_on_port_{port}:keeper_pid={keeper}"
+            elif ports:
+                reason = f"wrong_port_dev_server:slot={slot}:listening={','.join(map(str, sorted(ports)))}:slot_port={port}"
+            elif keeper is not None:
+                reason = f"duplicate_dev_server:slot={slot}:not_listening:keeper_pid={keeper}"
+            else:
+                continue
+            for member in members:
+                reasons[member["pid"]] = reason
+    return reasons
 
 
 def collect_processes(
@@ -421,6 +529,9 @@ def collect_processes(
         elif known_checkout and slot_state and not slot_free_idle:
             eligible = False
             skip_reason = "held_or_preserved_slot_checkout"
+        if cwd and cwd.startswith(PM_WORKTREE_PREFIX) and age_seconds < PM_WORKTREE_MIN_AGE_S:
+            eligible = False
+            skip_reason = "pm_worktree_younger_than_60m"
         row = {
             "pid": pid,
             "ppid": ppid,
@@ -444,8 +555,19 @@ def collect_processes(
             "eligible": eligible,
             "skip_reason": skip_reason,
             "command": sanitize_command(command),
+            "policy": "stale_owner" if eligible else None,
+            "listen_ports": listen_ports(pid) if category == "nextjs" and slot_number else [],
         }
         rows.append(row)
+
+    if not inventory_error:
+        duplicate_reasons = duplicate_dev_server_reasons(rows)
+        for row in rows:
+            reason = duplicate_reasons.get(row["pid"])
+            if reason and row["start_time"] and not row["eligible"]:
+                row.update(eligible=True, policy="duplicate_dev_server", reap_reason=reason, skip_reason=None)
+            elif reason and row["eligible"]:
+                row["reap_reason"] = reason
 
     candidates = [row for row in rows if row["eligible"]]
     skipped = [row for row in rows if not row["eligible"]]
@@ -518,13 +640,24 @@ def revalidate_candidate(row: dict[str, Any], allow_slotless_attested: bool = Fa
         return False, "process_executable_identity_changed"
     if current.get("command_identity") is None:
         return False, "process_shape_unavailable"
+    duplicate = row.get("policy") == "duplicate_dev_server"
     for key in ("pid", "ppid", "uid", "start_time", "cwd"):
+        # Reaping a duplicate tree root first reparents its children to
+        # launchd; that is our own effect, not an identity change.
+        if duplicate and key == "ppid" and current.get(key) == 1:
+            continue
         if current.get(key) != row.get(key):
             return False, f"process_identity_changed:{key}"
     states, inventory_error = load_slot_inventory()
     if inventory_error:
         return False, f"slot_inventory_unavailable:{inventory_error}"
     slot_state = associated_slot(current.get("cwd"), states)
+    if duplicate:
+        if not slot_state or slot_state.get("slot") != row.get("associated_slot"):
+            return False, "slot_owner_changed"
+        if slot_port(int(row["associated_slot"])) in listen_ports(pid):
+            return False, "duplicate_now_owns_slot_port"
+        return True, "duplicate_dev_server_identity_match"
     if row.get("associated_slot") is None:
         if slot_state is not None:
             return False, "slot_owner_changed"
@@ -665,7 +798,31 @@ def kill_candidates(
     return results
 
 
+def write_status(path: Path, *, mode: str, refused: bool, reason: str | None, summary: dict[str, Any] | None) -> None:
+    """Status line the hourly heartbeat reads (heartbeat-compose.py)."""
+    doc = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "mode": mode,
+        "refused": refused,
+        "error": bool(summary and summary.get("errors")),
+        "reason": reason,
+        "summary": summary,
+    }
+    try:
+        path.write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def main() -> int:
+    try:
+        return _main()
+    except Exception as exc:
+        write_status(STATUS_JSON, mode="unknown", refused=True, reason=f"crash:{type(exc).__name__}:{str(exc)[:200]}", summary=None)
+        raise
+
+
+def _main() -> int:
     parser = argparse.ArgumentParser(description="Scan/apply stale allowlisted process cleanup")
     parser.add_argument("--apply", action="store_true", help="send TERM then KILL to eligible allowlisted PIDs")
     parser.add_argument("--output", default=str(OUT_JSON), help="proof JSON output path")
@@ -673,6 +830,7 @@ def main() -> int:
     parser.add_argument("--nextjs-min", type=int, default=360)
     parser.add_argument("--dev-tool-min", type=int, default=30)
     parser.add_argument("--term-wait-s", type=float, default=3.0)
+    parser.add_argument("--status-output", default=str(STATUS_JSON), help="heartbeat status JSON path")
     parser.add_argument(
         "--attest-slotless-reap",
         action="store_true",
@@ -745,6 +903,8 @@ def main() -> int:
             "nextjs_min": args.nextjs_min,
             "dev_tool_min": args.dev_tool_min,
             "slot_scoped_free_idle_required": ["agent-browser", "nextjs", "convex", "tsc"],
+            "slot_set": "MoP slots rows with slot >= 1 (no hard-coded range)",
+            "duplicate_dev_server": "per slot clone keep the tree on PORT 3000+N; reap other trees and wrong-port trees older than 10m",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],
@@ -775,12 +935,24 @@ def main() -> int:
     }
     Path(args.output).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
+    refusal = None if before.get("ok") else str(before.get("error", "unknown"))
+    write_status(
+        Path(args.status_output),
+        mode=data["mode"],
+        refused=refusal is not None,
+        reason=refusal or (f"{len(errors)} kill errors" if errors else None),
+        summary=data["summary"],
+    )
+
     print(f"STALE_PROCESS_CANDIDATES count={before_count} proof={args.output}")
-    for row in before.get("candidates", [])[:20]:
+    if refusal:
+        print(f"STALE_PROCESS_CLEANUP_REFUSED reason={refusal}")
+    for row in before.get("candidates", [])[:50]:
         print(
             f"PROCESS pid={row['pid']} category={row['category']} age={row['age']} "
             f"cwd={row.get('cwd') or 'unknown'} slot={row.get('associated_slot') or 'none'} "
-            f"slot_free_idle={row['slot_free_idle']}"
+            f"slot_free_idle={row['slot_free_idle']} policy={row.get('policy')} "
+            f"reason={row.get('reap_reason') or row.get('owner_proof') or 'stale_owner'}"
         )
     if args.apply:
         if not before.get("ok"):

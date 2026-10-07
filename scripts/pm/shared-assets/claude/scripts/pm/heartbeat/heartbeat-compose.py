@@ -306,6 +306,7 @@ def compose(
     include_slots: bool = False,
     release_seen: dict | None = None,
     usage_lines: list[str] | None = None,
+    cleanup_alert: str | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -359,6 +360,8 @@ def compose(
     pm_actions = ([] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]) + slot_actions
     if pm_actions:
         lines.append("*ACTIONS (PM):* " + "; ".join(pm_actions))
+    if cleanup_alert:
+        lines.append(f"*ALERT:* {cleanup_alert}")
     if failures:
         lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:80] for f in failures[:2]))
     return "\n".join(lines)
@@ -404,6 +407,20 @@ def _fetch_slots(url: str = MOP_SLOTS_URL, timeout: int = 5):
         except Exception:
             pass
     return doc
+
+
+CLEANUP_STATUS = Path("/tmp/stale-process-cleanup-status.json")
+
+
+def cleanup_status_alert(path: Path = CLEANUP_STATUS) -> str | None:
+    """'stale-process-cleanup REFUSED: <reason>' when the last run refused or errored."""
+    try:
+        doc = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not (doc.get("refused") or doc.get("error")):
+        return None
+    return f"stale-process-cleanup REFUSED: {doc.get('reason') or 'unknown'}"
 
 
 def _load(path: str | None):
@@ -516,7 +533,7 @@ def main() -> int:
         support=support, failures=failures, escalations=args.escalation,
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
-        usage_lines=usage_lines,
+        usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
     ))
     if pm_actions:
         print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)

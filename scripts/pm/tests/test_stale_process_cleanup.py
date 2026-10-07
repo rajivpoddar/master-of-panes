@@ -21,13 +21,16 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+TEST_SLOTS = tuple(range(1, 9))
+
+
 def completed(stdout: str = "", returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(["fixture"], returncode, stdout, stderr)
 
 
 def inventory(*, held_slot: int | None = None) -> dict[int, dict[str, object]]:
     result: dict[int, dict[str, object]] = {}
-    for slot in MODULE.SLOT_NUMBERS:
+    for slot in TEST_SLOTS:
         held = slot == held_slot
         result[slot] = {
             "slot": slot,
@@ -58,11 +61,12 @@ def inventory(*, held_slot: int | None = None) -> dict[int, dict[str, object]]:
 class StaleProcessCleanupTests(unittest.TestCase):
     def test_inventory_parses_structured_multiline_slot_rows(self) -> None:
         records = []
-        for slot in MODULE.SLOT_NUMBERS:
+        for slot in TEST_SLOTS:
             held = slot == 6
             records.append(
                 {
                     "slot": slot,
+                    "address": f"0:0.{slot}",
                     "status": "active" if held else "free",
                     "occupied": 1 if held else 0,
                     "idle": 0 if held else 1,
