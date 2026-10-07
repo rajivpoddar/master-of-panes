@@ -83,11 +83,13 @@ import { requestPmClearOnce, waitForPmIdleDrain } from "./pmClearLatch.js";
 import {
   interruptLiveTurnBeforeClear,
   pinDrift,
+  pinFrom,
   type InterruptBeforeClearResult,
   type OperationPin,
   type PaneObservation,
   type SlotRowLike,
 } from "./interruptBeforeClear.js";
+import { pinnedComposerCleanup, pinnedGuardedSend, type OperationFence } from "./pinnedWriters.js";
 import { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } from "./assignmentTaskPacket.js";
 
 // ─── Config ──────────────────────────────────────────────
@@ -527,11 +529,44 @@ async function interruptSlotBeforeClear(slotNum: number, source: string): Promis
       });
       return true;
     },
-    afterInterrupt: (paneId) => clearComposerResidueAfterReleaseInterrupt(slotNum, paneId),
+    afterInterrupt: (paneId, fence) => clearComposerResidueAfterReleaseInterrupt(slotNum, paneId, fence),
     log: (event, data) => db.logEvent(slotNum, event, null, null, { ...data, via: source }),
     sleep,
     now: () => Date.now(),
   });
+}
+
+/** Sync row fence for a pinned writer (pane is pinned by the writer's target). */
+function slotOperationFence(slotNum: number, pin: OperationPin): OperationFence {
+  return (stage) => {
+    const drift = pinDrift(pin, slotRowWithSession(slotNum));
+    return drift ? `${drift}@${stage}` : null;
+  };
+}
+
+/**
+ * Send the session clear to the PINNED pane through the guarded writer: the
+ * fence and an idle check run inside the send lock before the paste, and the
+ * fence again immediately before the one Enter.
+ */
+async function sendPinnedClear(
+  slotNum: number,
+  pin: OperationPin,
+  source: string,
+): Promise<{ success: boolean; reason?: string; error?: string; status?: number }> {
+  const sent = await pinnedGuardedSend({
+    relay,
+    slot: slotNum,
+    paneId: pin.paneId,
+    text: "/clear",
+    fence: slotOperationFence(slotNum, pin),
+    requireIdle: true,
+    sleep,
+  });
+  db.logEvent(slotNum, "pinned_clear_send", null, null, { ...sent, via: source, assignment_epoch: pin.epoch });
+  return sent.outcome === "delivered"
+    ? { success: true, status: 200 }
+    : { success: false, reason: `${sent.outcome}:${sent.reason}`, status: 409 };
 }
 
 async function clearSlotsThroughMopHttp(
@@ -571,35 +606,44 @@ async function clearSlotsThroughMopHttp(
       continue;
     }
 
-    const rowIdle = !!slotState
-      && slotState.active_turn_id === null && slotState.active_turn_state === "inactive";
-    if (options.terminalOnly && !(activity === "idle" && rowIdle)) {
-      // Terminal-only never interrupts; unknown evidence is not terminal.
-      db.logEvent(slotNum, "clear_terminal_only_skipped", null, null, {
-        name,
-        checked_at: new Date().toISOString(),
-        reason: `Slot is not verifiably idle (pane=${activity}); terminal-only clear did not arm a pending clear`,
-        via: options.source,
-        delivery: "http_clear_endpoint",
-      });
-      results.push({ slot: slotNum, name, status: "active (not terminal; no clear queued)" });
-      await sleep(500);
-      continue;
+    let pin: OperationPin | null = null;
+    let refusal: string | null = null;
+    let interruptInfo: { ok: boolean; reason: string; steps: string[] } | null = null;
+    if (options.terminalOnly) {
+      // Non-interrupting path: pin only a verifiably idle slot (same pane,
+      // readable idle prompt, present inactive row). A turn that starts
+      // later is refused by the writer's in-lock idle check and fence; it
+      // never gains interrupt authority.
+      const pane = await observeSlotPane(slotNum);
+      const paneActivity = pane ? await relay.getSlotActivityState(slotNum, pane.paneId) : "unknown";
+      const fresh = slotRowWithSession(slotNum);
+      if (!pane || !fresh || paneActivity !== "idle"
+          || fresh.active_turn_id !== null || fresh.active_turn_state !== "inactive") {
+        db.logEvent(slotNum, "clear_terminal_only_skipped", null, null, {
+          name,
+          checked_at: new Date().toISOString(),
+          reason: `Slot is not verifiably idle (pane=${paneActivity}); terminal-only clear did not arm a pending clear`,
+          via: options.source,
+          delivery: "http_clear_endpoint",
+        });
+        results.push({ slot: slotNum, name, status: "active (not terminal; no clear queued)" });
+        await sleep(500);
+        continue;
+      }
+      pin = pinFrom(pane, fresh);
+    } else {
+      // Never queue a clear behind a live turn and never treat unknown as
+      // idle: one pinned operation interrupts (if live) and verifies.
+      const op = await interruptSlotBeforeClear(slotNum, options.source);
+      interruptInfo = { ok: op.ok, reason: op.reason, steps: op.steps };
+      if (op.ok && op.pin) pin = op.pin;
+      else refusal = `${op.reason} (${op.detail ?? op.steps.join(",")})`;
     }
 
-    // Never queue a clear behind a live turn and never treat unknown as
-    // idle: one pinned operation interrupts (if live) and verifies, then the
-    // clear is fenced to the same pane/session/epoch/owner/turn.
-    const op = await interruptSlotBeforeClear(slotNum, options.source);
-    const drift = op.ok && op.pin ? await fenceSlotOperation(slotNum, op.pin, "pre_clear") : null;
-    if (!op.ok || !op.pin || drift) {
-      results.push({
-        slot: slotNum,
-        name,
-        status: `failed: ${drift ? `operation_drift (${drift})` : `${op.reason} (${op.detail ?? op.steps.join(",")})`}`,
-      });
+    if (!pin) {
+      results.push({ slot: slotNum, name, status: `failed: ${refusal ?? "unpinned"}` });
     } else {
-      const sent = await sendClearViaMopSendPath(slotNum, options.source);
+      const sent = await sendPinnedClear(slotNum, pin, options.source);
       if (sent.success) {
         db.clearPendingClear(slotNum);
         db.logEvent(slotNum, "slot_cleared", null, null, {
@@ -607,16 +651,18 @@ async function clearSlotsThroughMopHttp(
           cleared_at: new Date().toISOString(),
           immediate: true,
           via: options.source,
-          delivery: "mop_send_to_slot",
-          interrupt: { ok: op.ok, reason: op.reason, steps: op.steps },
+          delivery: "pinned_guarded_send",
+          interrupt: interruptInfo,
         });
         results.push({
           slot: slotNum,
           name,
-          status: op.reason === "no_live_turn" ? "cleared (idle)" : "cleared (interrupted live turn first)",
+          status: !interruptInfo || interruptInfo.reason === "no_live_turn"
+            ? "cleared (idle)"
+            : "cleared (interrupted live turn first)",
         });
       } else {
-        results.push({ slot: slotNum, name, status: `failed: ${sent.error ?? sent.reason ?? `send failed status=${sent.status}`}` });
+        results.push({ slot: slotNum, name, status: `failed: ${sent.reason ?? "pinned_clear_refused"}` })
       }
     }
 
@@ -1359,11 +1405,14 @@ app.post("/slots/:slotNum/abandon-turn", async (c) => {
  */
 async function clearSlotForAssignment(
   slotNum: number,
+  pin?: OperationPin,
 ): Promise<{ ok: boolean; reason: string; detail?: string }> {
   return clearSlotForAssignmentWithReadyWait(slotNum, {
     clearPendingClear: (slot) => db.clearPendingClear(slot),
     getBaselineEventId: (slot) => latestSessionStartEventId(db, slot),
-    sendClear: (slot) => sendClearViaMopSendPath(slot, "mop_assign_slot_new_issue"),
+    sendClear: (slot) => pin
+      ? sendPinnedClear(slot, pin, "mop_assign_slot_new_issue")
+      : sendClearViaMopSendPath(slot, "mop_assign_slot_new_issue"),
     logSlotCleared: (slot) =>
       db.logEvent(slot, "slot_cleared", null, null, {
         cleared_at: new Date().toISOString(),
@@ -1397,6 +1446,7 @@ async function clearSlotForAssignment(
 async function deliverTaskFileForAssignment(
   slotNum: number,
   filePath: string,
+  pin?: OperationPin,
 ): Promise<{ verified: boolean; receipt: Record<string, unknown>; reason?: string }> {
   const identity = await verifyPaneIdentity(slotNum);
   if (!identity.ok) {
@@ -1407,6 +1457,13 @@ async function deliverTaskFileForAssignment(
     };
   }
   const paneTarget = identity.snapshot.paneId;
+  if (pin && paneTarget !== pin.paneId) {
+    return {
+      verified: false,
+      reason: "operation_drift",
+      receipt: { slot: slotNum, verified: false, detail: `drift:pane@pre_delivery ${pin.paneId}->${paneTarget}` },
+    };
+  }
   let filePayload: Buffer;
   try {
     filePayload = await readFile(filePath);
@@ -1437,6 +1494,32 @@ async function deliverTaskFileForAssignment(
     }
   }
   const packet = buildAssignmentTaskPacket(deliveryPath, filePayload);
+  if (pin) {
+    // Pinned path (CTO REVISE d15f074): the fence runs inside the send lock
+    // immediately before the paste and the Enter, after the composer wait.
+    const sent = await pinnedGuardedSend({
+      relay,
+      slot: slotNum,
+      paneId: pin.paneId,
+      text: packet.payload.toString("utf8"),
+      fence: slotOperationFence(slotNum, pin),
+      requireIdle: true,
+      bracketedPaste: true,
+      sleep,
+    });
+    const receipt = {
+      slot: slotNum,
+      pane: pin.paneId,
+      mode: packet.mode,
+      bytes: packet.taskBytes,
+      sha256: packet.taskSha256,
+      outcome: sent.outcome,
+      verified: sent.outcome === "delivered",
+    };
+    return sent.outcome === "delivered"
+      ? { verified: true, receipt }
+      : { verified: false, reason: `${sent.outcome}:${sent.reason}`, receipt };
+  }
   const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, packet.payload, {
     source: packet.mode === "file_ref" ? "file_ref" : "file",
     label: filePath,
@@ -1485,8 +1568,8 @@ registerAssignmentRoute(app, db, issueProjection);
 // rolls ownership back implicitly.
 registerAssignmentEffectRoutes(app, {
   db,
-  clearSlot: (slotNum) => clearSlotForAssignment(slotNum),
-  deliverTaskFile: (slotNum, filePath) => deliverTaskFileForAssignment(slotNum, filePath),
+  clearSlot: (slotNum, pin) => clearSlotForAssignment(slotNum, pin),
+  deliverTaskFile: (slotNum, filePath, pin) => deliverTaskFileForAssignment(slotNum, filePath, pin),
   // Best-effort Ctrl-C through the same relay seam the wedge-interrupt
   // route uses. Audited, never refusing.
   // Interrupt-before-clear: Escape, then C-c, verify pane idle AND turn row
@@ -1893,23 +1976,19 @@ async function readCheckoutMovement(
 async function clearComposerResidueAfterReleaseInterrupt(
   slotNum: number,
   pinnedPaneId?: string,
-): Promise<"empty" | "cleared" | "unreadable" | "mode_refused" | "not_cleared"> {
+  fence: OperationFence = () => null,
+): Promise<string> {
   const address = pinnedPaneId ?? paneAddress(slotNum);
-  let sawText = false;
-  for (let i = 0; i < 12; i += 1) {
-    await sleep(250);
-    const composer = composerText(await capturePaneSnapshot(address));
-    if (composer === null) return sawText ? "not_cleared" : "unreadable";
-    if (composer === "") {
-      if (sawText) return "cleared";
-      if (i >= 5) return "empty";
-      continue;
-    }
-    sawText = true;
-    if (await readPaneInputModeRefusal(address)) return "mode_refused";
-    await execShell(`tmux send-keys -t ${address} C-u`, { timeout: 10_000 });
-  }
-  return sawText ? "not_cleared" : "empty";
+  return pinnedComposerCleanup({
+    slot: slotNum,
+    capture: () => capturePaneSnapshot(address),
+    modeRefused: async () => (await readPaneInputModeRefusal(address)) !== null,
+    sendCtrlU: async () => {
+      await execShell(`tmux send-keys -t ${address} C-u`, { timeout: 10_000 });
+    },
+    fence,
+    sleep,
+  });
 }
 
 async function capturePaneSnapshot(paneAddress: string): Promise<string | null> {

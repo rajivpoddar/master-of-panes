@@ -1275,6 +1275,8 @@ export class TmuxRelay {
       recheck: (stage: "pre_paste" | "pre_enter", capture: () => Promise<string | null>) => Promise<string | null>;
       /** Synchronous fence run with no await before the paste and the Enter effect. */
       finalCheck?: (stage: "pre_paste" | "pre_enter") => string | null;
+      /** Bracketed paste (-p) so a multi-line payload cannot submit early. */
+      bracketedPaste?: boolean;
       timing?: { dwellMs?: number; pollMs?: number; payloadGraceMs?: number; payloadStableMs?: number; clearGraceMs?: number };
     },
   ): Promise<GuardedSlotDelivery> {
@@ -1309,7 +1311,7 @@ export class TmuxRelay {
         const prePasteFence = opts.finalCheck?.("pre_paste") ?? null;
         if (prePasteFence) return { outcome: "refused_pre_effect", reason: prePasteFence, paneId };
         effectAttempted = true;
-        await this.runShell(`tmux paste-buffer -b ${bufName} -t ${paneId} -d`, { timeout: 3_000 });
+        await this.runShell(`tmux paste-buffer${opts.bracketedPaste ? " -p" : ""} -b ${bufName} -t ${paneId} -d`, { timeout: 3_000 });
         const submit = await submitWithComposerCheck(command, {
           capture,
           pressSubmit: async () => {

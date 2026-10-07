@@ -101,8 +101,12 @@ export interface InterruptBeforeClearDeps {
    * the pinned turn, epoch, owner and session. Returns whether it wrote.
    */
   casTerminalize: (pin: OperationPin) => boolean;
-  /** Optional composer cleanup on the pinned pane after the turn stopped. */
-  afterInterrupt?: (paneId: string) => Promise<string>;
+  /**
+   * Optional composer cleanup on the pinned pane after the turn stopped. The
+   * writer must call `fence` inside its send lock immediately before each
+   * C-u and return "refused:<reason>" without the key when it trips.
+   */
+  afterInterrupt?: (paneId: string, fence: (stage: string) => string | null) => Promise<string>;
   log: (event: string, data: Record<string, unknown>) => void;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
@@ -208,7 +212,9 @@ export async function interruptLiveTurnBeforeClear(
 
   if (deps.afterInterrupt) {
     try {
-      steps.push(`composer:${await deps.afterInterrupt(pin.paneId)}`);
+      const cleaned = await deps.afterInterrupt(pin.paneId, (stage) => boundTurnDrift(`cleanup_${stage}`));
+      steps.push(`composer:${cleaned}`);
+      if (cleaned.startsWith("refused:")) return fail("operation_drift", cleaned.slice("refused:".length));
     } catch (error) {
       steps.push(`composer:threw:${String(error).slice(0, 80)}`);
     }

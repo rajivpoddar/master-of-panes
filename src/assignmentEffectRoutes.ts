@@ -60,11 +60,12 @@ export interface AssignmentEffectDeliveryResult {
 export interface AssignmentEffectDependencies {
   db: MoPDatabase;
   /** Session clear through the existing clear path (new_issue class only). */
-  clearSlot: (slot: number) => Promise<AssignmentEffectClearResult>;
+  clearSlot: (slot: number, pin?: OperationPin) => Promise<AssignmentEffectClearResult>;
   /** Literal task delivery through the existing message-slot/file-send path. */
   deliverTaskFile: (
     slot: number,
     filePath: string,
+    pin?: OperationPin,
   ) => Promise<AssignmentEffectDeliveryResult>;
   /**
    * Interrupt any live/indeterminate turn in the pane (Escape, then C-c)
@@ -736,7 +737,7 @@ export function registerAssignmentEffectRoutes(
     if (ownershipPending && request.selection_class === "new_issue") {
       const preClear = await fence("pre_clear");
       if (preClear) return driftRefusal(preClear);
-      const cleared = await dependencies.clearSlot(slotNum);
+      const cleared = await dependencies.clearSlot(slotNum, opPin ?? undefined);
       displacement.clear = {
         ok: cleared.ok,
         reason: cleared.ok ? cleared.reason : `recorded:${cleared.reason}`,
@@ -880,7 +881,7 @@ export function registerAssignmentEffectRoutes(
       if (preDelivery) return driftRefusal(preDelivery);
     }
     const delivery = needsDelivery
-      ? await dependencies.deliverTaskFile(slotNum, request.task_file)
+      ? await dependencies.deliverTaskFile(slotNum, request.task_file, opPin ?? undefined)
       : { verified: true, receipt: { slot: slotNum, skipped: "no_task_text", verified: true } };
     if (!delivery.verified) {
       return c.json(
