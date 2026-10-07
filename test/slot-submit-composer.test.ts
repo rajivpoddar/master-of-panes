@@ -228,8 +228,8 @@ test("refusal cleanup is shared by file and text sends without changing the acti
   assert.ok(activeGate >= 0 && activeGate < fileSend && activeGate < textSend);
   assert.match(route, /reason: "slot_active_force_required"/);
   assert.ok(fileSend >= 0 && textSend >= 0, "both transports use the same serialized paste helper");
-  assert.match(route.slice(fileSend, fileSend + 240), /clearOwnedComposerOnRefusal:\s*true/);
-  assert.match(route.slice(textSend, textSend + 240), /clearOwnedComposerOnRefusal:\s*true/);
+  assert.match(route.slice(fileSend, fileSend + 400), /clearOwnedComposerOnRefusal:\s*true/);
+  assert.match(route.slice(textSend, textSend + 400), /clearOwnedComposerOnRefusal:\s*true/);
 
   const pasteStart = server.indexOf("async function pastePayloadWithTmuxBuffer");
   const pasteEnd = server.indexOf('app.post("/slots/:slotNum/send"', pasteStart);

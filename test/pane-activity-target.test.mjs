@@ -113,8 +113,8 @@ async function world() {
 async function probeResult(w, slot, fast = false) {
   const bin = join(w.dir, 'bin'); await mkdir(bin, { recursive: true });
   // Fake tmux/git/sleep are child-process boundary fixtures, never host tmux.
-  const state = join(w.dir, 'state.json'); await writeFile(state, JSON.stringify(w));
-  const fixture = `#!/usr/bin/env node\nconst fs=require('fs');const s=JSON.parse(fs.readFileSync(process.env.MOP_FAKE_STATE));const args=process.argv.slice(2);const cmd=args[0];const target=args[args.indexOf('-t')+1];const id=s.address[target]||target;const p=s.panes[id];if(cmd==='display-message'){if(!p)process.exit(2);console.log(id+'|'+(${checkout.toString()})(p.slot));}else if(cmd==='list-panes'){for(const [id,p] of Object.entries(s.panes))console.log(id+'|'+(${checkout.toString()})(p.slot));}else if(cmd==='capture-pane'){if(!p)process.exit(2);if(!p.unreadable)console.log((${render.toString()})(p));}else process.exit(2);`;
+  const state = join(w.dir, 'state.json'); await writeFile(state, JSON.stringify(w)); await rm(state + '.captures', { force: true });
+  const fixture = `#!/usr/bin/env node\nconst fs=require('fs');const s=JSON.parse(fs.readFileSync(process.env.MOP_FAKE_STATE));const args=process.argv.slice(2);const cmd=args[0];const target=args[args.indexOf('-t')+1];const id=s.address[target]||target;const p=s.panes[id];if(cmd==='display-message'){if(!p)process.exit(2);console.log(id+'|'+(${checkout.toString()})(p.slot));}else if(cmd==='list-panes'){for(const [id,p] of Object.entries(s.panes))console.log(id+'|'+(${checkout.toString()})(p.slot));}else if(cmd==='capture-pane'){if(!p)process.exit(2);const cf=process.env.MOP_FAKE_STATE+'.captures';const n=(fs.existsSync(cf)?Number(fs.readFileSync(cf,'utf8')):0)+1;fs.writeFileSync(cf,String(n));const lf=(s.laterCaptureFail||{})[n];if(lf==='exit')process.exit(1);if(lf==='empty')process.exit(0);if(!p.unreadable)console.log((${render.toString()})(p));}else process.exit(2);`;
   // render's rule constant is serialized as a literal in this fake executable.
   await writeFile(join(bin, 'tmux'), fixture.replace('const fs=require', `const rule=${JSON.stringify(rule)};const fs=require`));
   await writeFile(join(bin, 'git'), '#!/bin/bash\nprintf "%s\\n" "$2"\n');
@@ -292,4 +292,19 @@ test('actual plan success cannot update a later assignment after the activity re
     const result=await route(w,'/slots/:slotNum/approve-plan')(context({option:'4'}));
     assert.equal(result.body.success,false);assert.equal(result.body.status,'unconfirmed');assert.equal(w.row.activity,'awaiting_plan_approval');assert.deepEqual(w.effects,['%7:Enter']);
   }finally{await w.cleanup();}
+});
+
+// CTO P1 (C0ALZJHGE49/1791372028.387449 ts 1791375065.803519): a readable first
+// capture followed by failed/empty later captures must be UNKNOWN, never IDLE.
+for (const mode of ['exit','empty']) for (const fail of [[2],[3],[2,3]]) test(`later capture ${fail.join('+')} ${mode} is unknown: no paste, Enter or cycle`, async () => {
+  const w = await world(); try {
+    w.laterCaptureFail = Object.fromEntries(fail.map(n => [n, mode]));
+    assert.equal((await probeResult(w, 6)).status, 2);
+    w.relay.getSlotActivityState = async () => { const r = await probeResult(w, 6); return r.status === 0 ? 'active' : r.status === 1 ? 'idle' : 'unknown'; };
+    await w.tick();
+    assert.deepEqual(w.effects, []); assert.equal(w.loads, 0); assert.equal(w.cycled[6], false);
+  } finally { await w.cleanup(); }
+});
+test('readable later captures on an idle pane still prove idle', async () => {
+  const w = await world(); try { assert.equal((await probeResult(w, 6)).status, 1); } finally { await w.cleanup(); }
 });
