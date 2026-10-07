@@ -95,14 +95,14 @@ export interface InterruptBeforeClearDeps {
   /** Called synchronously immediately before a key send; durable audit. */
   recordPossibleEffect: (key: "Escape" | "C-c", pin: OperationPin) => void;
   /** Exactly one send attempt to the pinned pane id. Any error = uncertain. */
-  sendKeyOnce: (paneId: string, key: "Escape" | "C-c") => Promise<KeySendOutcome>;
+  sendKeyOnce: (paneId: string, key: "Escape" | "C-c", pin: OperationPin) => Promise<KeySendOutcome>;
   /**
    * Synchronous CAS: mark the turn inactive ONLY if the row still carries
    * the pinned turn, epoch, owner and session. Returns whether it wrote.
    */
   casTerminalize: (pin: OperationPin) => boolean;
   /** Optional composer cleanup on the pinned pane after the turn stopped. */
-  afterInterrupt?: (paneId: string) => Promise<string>;
+  afterInterrupt?: (paneId: string, pin: OperationPin) => Promise<string>;
   log: (event: string, data: Record<string, unknown>) => void;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
@@ -185,7 +185,7 @@ export async function interruptLiveTurnBeforeClear(
     deps.recordPossibleEffect(key, pin);
     let sent: KeySendOutcome;
     try {
-      sent = await deps.sendKeyOnce(pin.paneId, key);
+      sent = await deps.sendKeyOnce(pin.paneId, key, pin);
     } catch {
       sent = "uncertain";
     }
@@ -208,9 +208,13 @@ export async function interruptLiveTurnBeforeClear(
 
   if (deps.afterInterrupt) {
     try {
-      steps.push(`composer:${await deps.afterInterrupt(pin.paneId)}`);
+      const stoppedRow = deps.readRow();
+      const cleanupPin = stoppedRow && rowInactive(stoppedRow) ? { ...pin, turnId: null, turnState: "inactive" } : pin;
+      const cleanup = await deps.afterInterrupt(pin.paneId, cleanupPin);
+      steps.push(`composer:${cleanup}`);
+      if (cleanup !== "empty" && cleanup !== "cleared") return fail("interrupt_unverified", "cleanup_unverified");
     } catch (error) {
-      steps.push(`composer:threw:${String(error).slice(0, 80)}`);
+      return fail("interrupt_unverified", `composer:threw:${String(error).slice(0, 80)}`);
     }
     drift = boundTurnDrift("post_cleanup");
     if (drift) return fail("operation_drift", drift);

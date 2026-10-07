@@ -60,11 +60,12 @@ export interface AssignmentEffectDeliveryResult {
 export interface AssignmentEffectDependencies {
   db: MoPDatabase;
   /** Session clear through the existing clear path (new_issue class only). */
-  clearSlot: (slot: number) => Promise<AssignmentEffectClearResult>;
+  clearSlot: (slot: number, pin?: OperationPin) => Promise<AssignmentEffectClearResult>;
   /** Literal task delivery through the existing message-slot/file-send path. */
   deliverTaskFile: (
     slot: number,
     filePath: string,
+    pin?: OperationPin,
   ) => Promise<AssignmentEffectDeliveryResult>;
   /**
    * Interrupt any live/indeterminate turn in the pane (Escape, then C-c)
@@ -736,7 +737,7 @@ export function registerAssignmentEffectRoutes(
     if (ownershipPending && request.selection_class === "new_issue") {
       const preClear = await fence("pre_clear");
       if (preClear) return driftRefusal(preClear);
-      const cleared = await dependencies.clearSlot(slotNum);
+      const cleared = await dependencies.clearSlot(slotNum, opPin ?? undefined);
       displacement.clear = {
         ok: cleared.ok,
         reason: cleared.ok ? cleared.reason : `recorded:${cleared.reason}`,
@@ -745,6 +746,9 @@ export function registerAssignmentEffectRoutes(
       // (pane, checkout, epoch, owner, turn) must be unchanged.
       const postClear = await fence("post_clear", { allowSessionChange: true });
       if (postClear) return driftRefusal(postClear);
+      if (!cleared.ok && /operation_|drift:/.test(cleared.detail ?? cleared.reason)) {
+        return c.json(refusal("ownership", cleared.reason, slotStateSummary(db.getSlot(slotNum))), 409);
+      }
       const fresh = liveRow();
       if (opPin && fresh) opPin = { ...opPin, sessionId: fresh.session_id };
     }
@@ -868,6 +872,14 @@ export function registerAssignmentEffectRoutes(
           409,
         );
       }
+      if (dependencies.observePane) {
+        const resumeRow = liveRow();
+        const resumePane = await dependencies.observePane(slotNum);
+        if (!resumeRow || !resumePane) return driftRefusal("drift:resume_unobservable");
+        opPin = pinFrom(resumePane, resumeRow);
+        const resumeDrift = await fence("resume_delivery");
+        if (resumeDrift) return driftRefusal(resumeDrift);
+      }
     }
 
     // Delivery is required only when the caller gave the slot something to
@@ -880,7 +892,7 @@ export function registerAssignmentEffectRoutes(
       if (preDelivery) return driftRefusal(preDelivery);
     }
     const delivery = needsDelivery
-      ? await dependencies.deliverTaskFile(slotNum, request.task_file)
+      ? await dependencies.deliverTaskFile(slotNum, request.task_file, opPin ?? undefined)
       : { verified: true, receipt: { slot: slotNum, skipped: "no_task_text", verified: true } };
     if (!delivery.verified) {
       return c.json(
@@ -891,6 +903,8 @@ export function registerAssignmentEffectRoutes(
     const after = db.getSlot(slotNum);
     const readbackOk = !!after
       && after.occupied === true
+      && after.assignment_epoch === committedEpoch
+      && desiredTupleAlreadyCommitted(after, desiredTuple)
       && after.issue === desiredTuple.issue
       && (!needsDelivery || (typeof after.task === "string" && after.task.trim() !== ""));
     if (!readbackOk) {

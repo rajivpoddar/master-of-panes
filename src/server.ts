@@ -83,6 +83,7 @@ import { requestPmClearOnce, waitForPmIdleDrain } from "./pmClearLatch.js";
 import {
   interruptLiveTurnBeforeClear,
   pinDrift,
+  pinFrom,
   type InterruptBeforeClearResult,
   type OperationPin,
   type PaneObservation,
@@ -427,6 +428,7 @@ async function sendClearViaMopSendPath(
   slotNum: number,
   source: string,
   force = true,
+  pin?: OperationPin,
 ): Promise<{ success: boolean; busy?: boolean; status: number; reason?: string; error?: string }> {
   try {
     const res = await fetch(`http://127.0.0.1:${config.httpPort}/slots/${slotNum}/send`, {
@@ -437,6 +439,7 @@ async function sendClearViaMopSendPath(
         force,
         allow_pm_clear: slotNum === 0,
         source,
+        operation_pin: pin,
       }),
     });
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -474,9 +477,9 @@ function slotRowWithSession(slotNum: number): SlotRowLike | null {
 }
 
 /** Fence: re-observe the pane and re-read the row; null when nothing drifted. */
-async function fenceSlotOperation(slotNum: number, pin: OperationPin, stage: string): Promise<string | null> {
+async function fenceSlotOperation(slotNum: number, pin: OperationPin, stage: string, options: { allowSessionChange?: boolean } = {}): Promise<string | null> {
   const pane = await observeSlotPane(slotNum);
-  const drift = pinDrift(pin, slotRowWithSession(slotNum), pane);
+  const drift = pinDrift(pin, slotRowWithSession(slotNum), pane, options);
   return drift ? `${drift}@${stage}` : null;
 }
 
@@ -498,16 +501,19 @@ async function interruptSlotBeforeClear(slotNum: number, source: string): Promis
         key, pane_id: pin.paneId, turn_id: pin.turnId, assignment_epoch: pin.epoch, via: source,
       });
     },
-    sendKeyOnce: async (paneId, key) => {
+    sendKeyOnce: async (paneId, key, pin) => withSlotSendLock(slotNum, async () => {
       // Exactly one attempt, pinned to the immutable pane id. A timeout or
       // error may still have applied: report uncertain, never replay.
       try {
+        if (await relay.getSlotActivityState(slotNum, paneId) === "unknown"
+          || await fenceSlotOperation(slotNum, pin, "interrupt_key")
+          || pinDrift(pin, slotRowWithSession(slotNum))) return "uncertain";
         await execShell(`tmux send-keys -t ${shellEscape(paneId)} ${key}`, { timeout: 5_000 });
         return "sent";
       } catch {
         return "uncertain";
       }
-    },
+    }),
     casTerminalize: (pin) => {
       // Synchronous compare-and-set: no await between the read and the write.
       const drift = pinDrift(pin, slotRowWithSession(slotNum));
@@ -527,7 +533,7 @@ async function interruptSlotBeforeClear(slotNum: number, source: string): Promis
       });
       return true;
     },
-    afterInterrupt: (paneId) => clearComposerResidueAfterReleaseInterrupt(slotNum, paneId),
+    afterInterrupt: (paneId, pin) => clearComposerResidueAfterReleaseInterrupt(slotNum, paneId, pin),
     log: (event, data) => db.logEvent(slotNum, event, null, null, { ...data, via: source }),
     sleep,
     now: () => Date.now(),
@@ -543,7 +549,7 @@ async function clearSlotsThroughMopHttp(
   const results: ClearSlotResult[] = [];
 
   if (options.clearExistingPendingForTargets) {
-    for (const slotNum of normalizedTargets) {
+    for (const slotNum of normalizedTargets.filter(slot => slot === 0)) {
       db.clearPendingClear(slotNum);
     }
   }
@@ -552,14 +558,11 @@ async function clearSlotsThroughMopHttp(
   const includePmSlot = normalizedTargets.includes(0);
 
   for (const slotNum of devSlots) {
-    const activity = await relay.getSlotActivityState(slotNum);
-    if (activity !== "unknown") db.updateSlot(slotNum, { idle: activity === "idle" });
-
     const slotState = db.getSlot(slotNum);
+    const originalRow = slotRowWithSession(slotNum);
     const name = slotState?.name ?? `slot-${slotNum}`;
 
     if (slotState?.occupied) {
-      db.clearPendingClear(slotNum);
       db.logEvent(slotNum, "clear_refused_native_release_required", null, null, {
         name,
         assignment_epoch: slotState.assignment_epoch,
@@ -573,12 +576,12 @@ async function clearSlotsThroughMopHttp(
 
     const rowIdle = !!slotState
       && slotState.active_turn_id === null && slotState.active_turn_state === "inactive";
-    if (options.terminalOnly && !(activity === "idle" && rowIdle)) {
+    if (options.terminalOnly && !rowIdle) {
       // Terminal-only never interrupts; unknown evidence is not terminal.
       db.logEvent(slotNum, "clear_terminal_only_skipped", null, null, {
         name,
         checked_at: new Date().toISOString(),
-        reason: `Slot is not verifiably idle (pane=${activity}); terminal-only clear did not arm a pending clear`,
+        reason: "Slot turn is not inactive; terminal-only clear did not arm a pending clear",
         via: options.source,
         delivery: "http_clear_endpoint",
       });
@@ -590,7 +593,24 @@ async function clearSlotsThroughMopHttp(
     // Never queue a clear behind a live turn and never treat unknown as
     // idle: one pinned operation interrupts (if live) and verifies, then the
     // clear is fenced to the same pane/session/epoch/owner/turn.
-    const op = await interruptSlotBeforeClear(slotNum, options.source);
+    let op: InterruptBeforeClearResult;
+    if (options.terminalOnly) {
+      // Bind the original inactive generation. Never call the interrupt
+      // helper here: a turn starting during this request grants no key authority.
+      const pane = await observeSlotPane(slotNum);
+      if (!pane || !originalRow) {
+        results.push({ slot: slotNum, name, status: "failed: evidence_missing" });
+        continue;
+      }
+      const pin = pinFrom(pane, originalRow);
+      const freshActivity = await relay.getSlotActivityState(slotNum, pin.paneId);
+      const drift = await fenceSlotOperation(slotNum, pin, "terminal_only");
+      op = freshActivity === "idle" && !drift
+        ? { ok: true, reason: "no_live_turn", steps: [], pin }
+        : { ok: false, reason: "operation_drift", steps: [], detail: drift ?? "pane_not_idle" };
+    } else {
+      op = await interruptSlotBeforeClear(slotNum, options.source);
+    }
     const drift = op.ok && op.pin ? await fenceSlotOperation(slotNum, op.pin, "pre_clear") : null;
     if (!op.ok || !op.pin || drift) {
       results.push({
@@ -599,8 +619,9 @@ async function clearSlotsThroughMopHttp(
         status: `failed: ${drift ? `operation_drift (${drift})` : `${op.reason} (${op.detail ?? op.steps.join(",")})`}`,
       });
     } else {
-      const sent = await sendClearViaMopSendPath(slotNum, options.source);
-      if (sent.success) {
+      const sent = await sendClearViaMopSendPath(slotNum, options.source, true, op.pin);
+      const postClearDrift = sent.success ? await fenceSlotOperation(slotNum, op.pin, "standalone_clear_done", { allowSessionChange: true }) : null;
+      if (sent.success && !postClearDrift) {
         db.clearPendingClear(slotNum);
         db.logEvent(slotNum, "slot_cleared", null, null, {
           name,
@@ -616,7 +637,7 @@ async function clearSlotsThroughMopHttp(
           status: op.reason === "no_live_turn" ? "cleared (idle)" : "cleared (interrupted live turn first)",
         });
       } else {
-        results.push({ slot: slotNum, name, status: `failed: ${sent.error ?? sent.reason ?? `send failed status=${sent.status}`}` });
+        results.push({ slot: slotNum, name, status: `failed: ${postClearDrift ?? sent.error ?? sent.reason ?? `send failed status=${sent.status}`}` });
       }
     }
 
@@ -1359,18 +1380,20 @@ app.post("/slots/:slotNum/abandon-turn", async (c) => {
  */
 async function clearSlotForAssignment(
   slotNum: number,
+  pin?: OperationPin,
 ): Promise<{ ok: boolean; reason: string; detail?: string }> {
-  return clearSlotForAssignmentWithReadyWait(slotNum, {
-    clearPendingClear: (slot) => db.clearPendingClear(slot),
+  const result = await clearSlotForAssignmentWithReadyWait(slotNum, {
+    clearPendingClear: (slot) => { if (!pin) db.clearPendingClear(slot); },
     getBaselineEventId: (slot) => latestSessionStartEventId(db, slot),
-    sendClear: (slot) => sendClearViaMopSendPath(slot, "mop_assign_slot_new_issue"),
-    logSlotCleared: (slot) =>
-      db.logEvent(slot, "slot_cleared", null, null, {
+    sendClear: (slot) => sendClearViaMopSendPath(slot, "mop_assign_slot_new_issue", true, pin),
+    logSlotCleared: (slot) => {
+      if (!pin) db.logEvent(slot, "slot_cleared", null, null, {
         cleared_at: new Date().toISOString(),
         immediate: true,
         via: "mop_assign_slot_new_issue",
         delivery: "mop_send_to_slot",
-      }),
+      });
+    },
     waitForReady: (slot, baselineEventId) =>
       waitForSessionStartClearOnDb(db, slot, baselineEventId, {
         timeoutMs: ASSIGNMENT_CLEAR_READY_TIMEOUT_MS,
@@ -1385,6 +1408,13 @@ async function clearSlotForAssignment(
         via: "mop_assign_slot_new_issue",
       }),
   });
+  if (pin && result.ok) {
+    const drift = await fenceSlotOperation(slotNum, pin, "clear_ready", { allowSessionChange: true });
+    if (drift) return { ok: false, reason: "operation_drift", detail: drift };
+    db.clearPendingClear(slotNum);
+    db.logEvent(slotNum, "slot_cleared", null, null, { via: "mop_assign_slot_new_issue", pane_id: pin.paneId });
+  }
+  return result;
 }
 
 /**
@@ -1397,6 +1427,7 @@ async function clearSlotForAssignment(
 async function deliverTaskFileForAssignment(
   slotNum: number,
   filePath: string,
+  pin?: OperationPin,
 ): Promise<{ verified: boolean; receipt: Record<string, unknown>; reason?: string }> {
   const identity = await verifyPaneIdentity(slotNum);
   if (!identity.ok) {
@@ -1442,6 +1473,7 @@ async function deliverTaskFileForAssignment(
     label: filePath,
     requireEmptyComposerBeforePaste: true,
     bracketedPaste: true,
+    operationPin: pin,
   });
   const verify = paste.verify;
   if (!verify.ok) {
@@ -1485,8 +1517,8 @@ registerAssignmentRoute(app, db, issueProjection);
 // rolls ownership back implicitly.
 registerAssignmentEffectRoutes(app, {
   db,
-  clearSlot: (slotNum) => clearSlotForAssignment(slotNum),
-  deliverTaskFile: (slotNum, filePath) => deliverTaskFileForAssignment(slotNum, filePath),
+  clearSlot: (slotNum, pin) => clearSlotForAssignment(slotNum, pin),
+  deliverTaskFile: (slotNum, filePath, pin) => deliverTaskFileForAssignment(slotNum, filePath, pin),
   // Best-effort Ctrl-C through the same relay seam the wedge-interrupt
   // route uses. Audited, never refusing.
   // Interrupt-before-clear: Escape, then C-c, verify pane idle AND turn row
@@ -1893,12 +1925,16 @@ async function readCheckoutMovement(
 async function clearComposerResidueAfterReleaseInterrupt(
   slotNum: number,
   pinnedPaneId?: string,
+  pin?: OperationPin,
 ): Promise<"empty" | "cleared" | "unreadable" | "mode_refused" | "not_cleared"> {
   const address = pinnedPaneId ?? paneAddress(slotNum);
+  const run = async (): Promise<"empty" | "cleared" | "unreadable" | "mode_refused" | "not_cleared"> => {
   let sawText = false;
   for (let i = 0; i < 12; i += 1) {
     await sleep(250);
+    if (pin && await fenceSlotOperation(slotNum, pin, "cleanup_wait")) return "not_cleared";
     const composer = composerText(await capturePaneSnapshot(address));
+    if (pin && await fenceSlotOperation(slotNum, pin, "cleanup_capture")) return "not_cleared";
     if (composer === null) return sawText ? "not_cleared" : "unreadable";
     if (composer === "") {
       if (sawText) return "cleared";
@@ -1907,9 +1943,17 @@ async function clearComposerResidueAfterReleaseInterrupt(
     }
     sawText = true;
     if (await readPaneInputModeRefusal(address)) return "mode_refused";
+    if (pin) {
+      if (await relay.getSlotActivityState(slotNum, pin.paneId) !== "idle"
+        || await fenceSlotOperation(slotNum, pin, "cleanup_key")
+        || pinDrift(pin, slotRowWithSession(slotNum))) return "not_cleared";
+    }
     await execShell(`tmux send-keys -t ${address} C-u`, { timeout: 10_000 });
+    if (pin && await fenceSlotOperation(slotNum, pin, "cleanup_key_done")) return "not_cleared";
   }
   return sawText ? "not_cleared" : "empty";
+  };
+  return pin ? withSlotSendLock(slotNum, run) : run();
 }
 
 async function capturePaneSnapshot(paneAddress: string): Promise<string | null> {
@@ -2085,6 +2129,7 @@ async function pastePayloadWithTmuxBuffer(
     requireEmptyComposerBeforePaste?: boolean;
     bracketedPaste?: boolean;
     clearOwnedComposerOnRefusal?: boolean;
+    operationPin?: OperationPin;
   },
 ): Promise<{
   chunks: number;
@@ -2097,7 +2142,24 @@ async function pastePayloadWithTmuxBuffer(
   return withSlotSendLock(slotNum, async () => {
     const chunkSize = sendChunkSizeBytes();
     const bytes = payload.byteLength;
+    let effectAttempted = false;
+    const refused = (reason: string) => ({
+      chunks: 0, bytes, chunkSize,
+      submit: { payloadSeen: false, payloadStable: false, cleared: null, enterPresses: 0 },
+      verify: { ok: false, reason },
+    });
+    const operationRefusal = async (stage: string): Promise<string | null> => {
+      const pin = meta.operationPin;
+      if (!pin) return null;
+      if (paneAddress !== pin.paneId) return "operation_drift:writer_target";
+      const activity = await relay.getSlotActivityState(slotNum, pin.paneId);
+      if (activity !== "idle") return `operation_drift:pane_${activity}`;
+      return await fenceSlotOperation(slotNum, pin, stage) ?? pinDrift(pin, slotRowWithSession(slotNum));
+    };
+    try {
     const paneModeRefusal = await readPaneInputModeRefusal(paneAddress);
+    const entryRefusal = await operationRefusal("writer_entry");
+    if (entryRefusal) return refused(entryRefusal);
     if (paneModeRefusal) {
       db.logEvent(slotNum, "send_precheck_refused", null, null, {
         source: meta.source,
@@ -2117,7 +2179,7 @@ async function pastePayloadWithTmuxBuffer(
       ? resolveAssignmentInjectEnterDelayMs()
       : INJECT_ENTER_DELAY_MS;
     let preSnapshot: string;
-    if (meta.requireEmptyComposerBeforePaste) {
+    if (meta.requireEmptyComposerBeforePaste || meta.operationPin) {
       const readiness = await waitForEmptyComposer({
         capture: () => capturePaneSnapshot(paneAddress),
         sleep,
@@ -2150,6 +2212,8 @@ async function pastePayloadWithTmuxBuffer(
         preSnapshot = (await capturePaneSnapshot(paneAddress)) ?? "";
       }
     }
+    const readyRefusal = await operationRefusal("writer_composer_ready");
+    if (readyRefusal) return refused(readyRefusal);
     const chunks = Math.max(1, Math.ceil(bytes / chunkSize));
     const bufName = `mop-send-${slotNum}-${Date.now()}`;
 
@@ -2172,10 +2236,21 @@ async function pastePayloadWithTmuxBuffer(
       await writeFile(tmpFile, payload.subarray(start, end));
       try {
         await execShell(`tmux load-buffer -b ${shellEscape(bufName)} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+        const pasteRefusal = await operationRefusal("writer_pre_paste");
+        if (pasteRefusal) return refused(pasteRefusal);
+        if (meta.operationPin && index === 0) {
+          const freshComposer = composerText(await capturePaneSnapshot(paneAddress));
+          if (freshComposer !== "") return refused("operation_drift:composer_not_empty");
+        }
+        const finalPasteRefusal = meta.operationPin ? pinDrift(meta.operationPin, slotRowWithSession(slotNum)) : null;
+        if (finalPasteRefusal) return refused(finalPasteRefusal);
+        effectAttempted = true;
         await execShell(
           `tmux paste-buffer${meta.bracketedPaste ? " -p" : ""} -b ${shellEscape(bufName)} -t ${paneAddress} -d`,
           { timeout: 10_000 },
         );
+        const afterPaste = meta.operationPin ? await fenceSlotOperation(slotNum, meta.operationPin, "writer_post_paste") : null;
+        if (afterPaste) return refused(`operation_uncertain:${afterPaste}`);
         db.logEvent(slotNum, "send_buffer_chunk", null, null, {
           source: meta.source,
           chunk: index + 1,
@@ -2201,16 +2276,21 @@ async function pastePayloadWithTmuxBuffer(
     const submit = await submitWithComposerCheck(payloadText, {
       capture: captureForSubmit,
       pressSubmit: async () => {
+        const enterRefusal = await operationRefusal("writer_pre_enter");
+        if (enterRefusal) throw new Error(enterRefusal);
+        const finalEnterRefusal = meta.operationPin ? pinDrift(meta.operationPin, slotRowWithSession(slotNum)) : null;
+        if (finalEnterRefusal) throw new Error(finalEnterRefusal);
         await execShell(`tmux send-keys -t ${paneAddress} Enter`, { timeout: 10_000 });
       },
       sleep,
       prePasteComposer,
       dwellMs: submitDwellMs,
+      maxEnterPresses: meta.operationPin ? 1 : undefined,
     });
     // Enter pressed but the composer still holds the paste = never submitted.
     const unsubmitted = submit.enterPresses === 0
       || (submit.cleared === false && submit.queued !== true);
-    const cleanup = meta.clearOwnedComposerOnRefusal && unsubmitted
+    const cleanup = !meta.operationPin && meta.clearOwnedComposerOnRefusal && unsubmitted
       ? await clearOwnedRefusedPasteComposer(payloadText, {
           prePasteComposer,
           lastObservedComposer,
@@ -2246,6 +2326,10 @@ async function pastePayloadWithTmuxBuffer(
     await sleep(600);
     const verify = await deliveryConfirmed(paneAddress, preSnapshot, submit);
     return { chunks, bytes, chunkSize, submit, cleanup, verify };
+    } catch (error) {
+      if (!meta.operationPin) throw error;
+      return refused(`${effectAttempted ? "operation_uncertain" : "operation_refused"}:${String(error).slice(0, 160)}`);
+    }
   });
 }
 
@@ -2283,6 +2367,21 @@ app.post("/slots/:slotNum/send", async (c) => {
   // Pin all sends, pastes, retries, and post-send reads in this request to
   // the pane id captured by the one identity probe.
   const paneTarget = identity.snapshot.paneId;
+  if (body.operation_pin !== undefined) {
+    // Internal clear continuation carries the original authority into the
+    // actual writer; force never permits rebinding it to a later generation.
+    if (slotNum === 0 || command !== "/clear" || raw || filePath) {
+      return c.json({ success: false, reason: "operation_pin_invalid_command" }, 409);
+    }
+    const pin = body.operation_pin as OperationPin;
+    if (!pin || paneTarget !== pin.paneId || await fenceSlotOperation(slotNum, pin, "http_clear")) {
+      return c.json({ success: false, reason: "operation_drift" }, 409);
+    }
+    const paste = await pastePayloadWithTmuxBuffer(slotNum, paneTarget, Buffer.from(command), {
+      source: "command", label: command, operationPin: pin,
+    });
+    return c.json({ success: paste.verify.ok, reason: paste.verify.reason, slot: slotNum, verified: paste.verify.ok }, paste.verify.ok ? 200 : 409);
+  }
 
   const messageSlotWrapper = command ? parseMessageSlotWrapper(command) : null;
   if (messageSlotWrapper) {
