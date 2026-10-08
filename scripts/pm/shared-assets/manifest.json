@@ -890,7 +890,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-message-slot",
-      "sha256": "57060392d93b6f0b7b84ccd93e3bc284f99f408f63339aee9c8c9860bddea881",
+      "sha256": "1336b538032fe3df4a924b02d99155b41be61d603c42c8ec47377ec97b231a4c",
       "source_path": "claude/skills/message-slot/scripts/message-slot.sh"
     },
     {

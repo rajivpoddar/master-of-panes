@@ -323,11 +323,23 @@ assert_pm_delivery_has_slot_owner() {
   if printf '%s\n' "$candidate" | grep -Eq '^HEALTH_PING([[:space:]]|$)'; then
     return 0
   fi
-  snapshot="$(curl -sS -m 4 "$MOP_BASE/slots/${TARGET_SLOT}" 2>/dev/null || true)"
-  occupied="$(printf '%s' "$snapshot" | jq -r '.occupied | if . == true then "true" elif . == false then "false" else empty end' 2>/dev/null || true)"
+  # The MoP server's event loop can stall for 10-20s (seen 2026-10-08 16:45Z:
+  # an 18.8s stall). A single 4s read then returned nothing and every PM
+  # delivery failed closed with exit 46. Retry the read across a ~30s window
+  # before failing closed; the fail-closed contract itself is unchanged.
+  local attempt attempts="${MESSAGE_SLOT_AUTHORITY_ATTEMPTS:-4}"
+  local read_timeout="${MESSAGE_SLOT_AUTHORITY_TIMEOUT:-6}" backoff="${MESSAGE_SLOT_AUTHORITY_BACKOFF:-2}"
+  for attempt in $(seq 1 "$attempts"); do
+    snapshot="$(curl -sS -m "$read_timeout" "$MOP_BASE/slots/${TARGET_SLOT}" 2>/dev/null || true)"
+    occupied="$(printf '%s' "$snapshot" | jq -r '.occupied | if . == true then "true" elif . == false then "false" else empty end' 2>/dev/null || true)"
+    epoch="$(printf '%s' "$snapshot" | jq -r '.assignment_epoch // empty' 2>/dev/null || true)"
+    if [ -n "$occupied" ] && [[ "$epoch" =~ ^[0-9]+$ ]]; then
+      break
+    fi
+    [ "$attempt" -lt "$attempts" ] && sleep "$backoff"
+  done
   issue="$(printf '%s' "$snapshot" | jq -r '.issue // empty' 2>/dev/null || true)"
   pr="$(printf '%s' "$snapshot" | jq -r '.pr // empty' 2>/dev/null || true)"
-  epoch="$(printf '%s' "$snapshot" | jq -r '.assignment_epoch // empty' 2>/dev/null || true)"
   [ "$occupied" = "true" ] && return 0
   if [ "$occupied" != "false" ] || ! [[ "$epoch" =~ ^[0-9]+$ ]]; then
     fail 46 "mop_slot_authority_unavailable_use_native_mop_operator"
