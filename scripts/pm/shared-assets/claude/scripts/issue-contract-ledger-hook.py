@@ -316,7 +316,7 @@ def raw_issue_create_targets_heydonna(command: str) -> bool:
         )
         if api_endpoint:
             repo = f"{api_endpoint.group(1)}/{api_endpoint.group(2)}"
-            if repo.lower() != HEYDONNA_REPO:
+            if repo.lower() != HEYDONNA_REPO.lower():
                 continue
             if (
                 re.search(

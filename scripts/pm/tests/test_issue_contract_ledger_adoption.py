@@ -14,6 +14,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parents[3]
 HOME_WRAPPER = ROOT / "scripts/pm/shared-assets/claude/hooks/block-invalid-issue-contract-ledger.sh"
 APP_WRAPPER = ROOT / "scripts/pm/shared-assets/claude/hooks/heydonna-app-block-invalid-issue-contract-ledger.sh"
@@ -105,6 +107,36 @@ def test_genuine_mutation_still_blocks(tmp_path) -> None:
     for wrapper in (HOME_WRAPPER, APP_WRAPPER):
         out = run(wrapper, PARSER, val, gh, tmp_path, QUOTED_TEMPLATE.format(body=body_file(tmp_path)))
         assert blocked(out) and "Issue Contract Ledger" in out.get("message", ""), out
+
+
+@pytest.mark.parametrize("repo", ["Scribie/heydonna-app", "scribie/heydonna-app", "SCRIBIE/HEYDONNA-APP", "sCrIbIe/HeyDonna-App"])
+@pytest.mark.parametrize("mutation", ["-X POST", "-f title=synthetic-review -f body=invalid"])
+def test_both_wrappers_block_raw_rest_issue_create_case_insensitively(tmp_path, repo, mutation) -> None:
+    gh, val = shims(tmp_path, validator_ok=True)
+    command = f"gh api repos/{repo}/issues {mutation}"
+    for wrapper in (HOME_WRAPPER, APP_WRAPPER):
+        out = run(wrapper, PARSER, val, gh, tmp_path, command)
+        assert blocked(out) and "unsupported_raw_api_issue_create" in out.get("message", ""), out
+
+
+@pytest.mark.parametrize("command", [
+    "gh api repos/Scribie/heydonna-app/issues -X GET",
+    "gh api repos/unrelated/project/issues -X POST -f title=synthetic-review -f body=invalid",
+])
+def test_both_wrappers_leave_other_rest_operations_alone(tmp_path, command) -> None:
+    gh, val = shims(tmp_path, validator_ok=True)
+    for wrapper in (HOME_WRAPPER, APP_WRAPPER):
+        assert not blocked(run(wrapper, PARSER, val, gh, tmp_path, command))
+
+
+@pytest.mark.parametrize("operation", ["create --title synthetic-review", "edit 7925"])
+@pytest.mark.parametrize("validator_ok", [False, True])
+def test_both_wrappers_preserve_ordinary_issue_validation(tmp_path, operation, validator_ok) -> None:
+    gh, val = shims(tmp_path, validator_ok=validator_ok)
+    command = f"gh issue {operation} --repo Scribie/heydonna-app --body-file {body_file(tmp_path)}"
+    for wrapper in (HOME_WRAPPER, APP_WRAPPER):
+        out = run(wrapper, PARSER, val, gh, tmp_path, command)
+        assert blocked(out) == (not validator_ok), out
 
 
 def run_raw(wrapper: Path, env_extra: dict, payload: str):
