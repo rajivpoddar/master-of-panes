@@ -21,7 +21,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-REPO = "heydonna-app/heydonna-app"
+REPO = "Scribie/heydonna-app"
 RED = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
 PENDING = {"", "PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "EXPECTED", "REQUESTED"}
 # Required merge gates: the CI `test` aggregate job (ci.yml) and the E2E `e2e` job

@@ -34,7 +34,7 @@ ROOT = Path(__file__).parents[3]
 SHARED = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "hooks"
 AUDIT_HOOK = Path(os.environ.get("AUDIT_HOOK_PATH", SHARED / "pre-issue-create-audit.sh"))
 LEDGER_HOOK = SHARED / "block-invalid-issue-contract-ledger.sh"
-REPO = "heydonna-app/heydonna-app"
+REPO = "Scribie/heydonna-app"
 
 VALID_BODY = """<!-- ready-pool:
 priority: P2

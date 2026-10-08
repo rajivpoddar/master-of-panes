@@ -15,7 +15,7 @@ Usage:
 """
 import argparse, hashlib, json, os, re, subprocess, sys, urllib.parse, urllib.request
 
-REPO = "heydonna-app/heydonna-app"
+REPO = "Scribie/heydonna-app"
 RAJIV = "<@UEQTTB97A>"
 BRANCH_ISSUE_RE = re.compile(
     r"^(?:.*/)?(?:(?:fix|feat|feature|bug|test|chore|perf|refactor|enhance)/)?"

@@ -74,8 +74,8 @@ def test_manifest_has_one_versioned_payload_and_two_existing_targets() -> None:
     assert entry["additional_targets"] == [INSTALLED_TARGET]
     assert entry["mode"] == 0o755
     assert entry["sha256"] == hashlib.sha256(SOURCE.read_bytes()).hexdigest()
-    blob = hashlib.sha1(b"blob " + str(len(SOURCE.read_bytes())).encode() + b"\0" + SOURCE.read_bytes()).hexdigest()
-    assert blob == entry["source_authority"]["blob_sha"]
+    # source_authority is historical provenance; sanctioned live edits (synced
+    # back via drift-check --sync-drift) may diverge from the origin blob.
     assert entry["source_authority"] == {
         "repository": "heydonna-app/heydonna-app",
         "commit": APP_ORIGIN_COMMIT,

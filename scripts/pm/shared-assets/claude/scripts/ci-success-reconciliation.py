@@ -17,7 +17,7 @@ import time
 from typing import Any
 
 
-DEFAULT_REPO = "heydonna-app/heydonna-app"
+DEFAULT_REPO = "Scribie/heydonna-app"
 DEFAULT_GUARD = (
     "/Users/rajiv/Downloads/projects/heydonna-app/"
     "scripts/ci/pre-merge-current-head-ci-guard.sh"

@@ -359,7 +359,7 @@ def compose(
         lines += ["", "*Asks:* " + " | ".join(asks)]
     pm_actions = ([] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]) + slot_actions
     if pm_actions:
-        lines.append("*ACTIONS (PM):* " + "; ".join(pm_actions))
+        lines += ["", "*ACTIONS (PM):* " + "; ".join(pm_actions)]
     if cleanup_alert:
         lines.append(f"*ALERT:* {cleanup_alert}")
     if failures:

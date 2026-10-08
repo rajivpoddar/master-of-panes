@@ -51,7 +51,7 @@ PR_STATE_SWEEP = Path(
 )
 SLACK_SEND = Path("/Users/rajiv/.claude/scripts/slack-send.sh")
 READY_POOL_AUTHORITY = [
-    "gh", "issue", "list", "--repo", "heydonna-app/heydonna-app", "--state", "open",
+    "gh", "issue", "list", "--repo", "Scribie/heydonna-app", "--state", "open",
     "--label", "status:todo", "--limit", "1000", "--json", "number,title,body,labels",
 ]
 READY_POOL_AUDIT_DIR = Path(
@@ -71,11 +71,11 @@ AXIOM_PROD_FILTER = (
 # Read-only open-PR execution audit.  This deliberately treats labels, holds,
 # historical runs, skipped shells, and queued jobs without a runner as no
 # execution lane; only exact-head work that is demonstrably executing counts.
-OPEN_PR_AUDIT_REPOSITORY = "heydonna-app/heydonna-app"
+OPEN_PR_AUDIT_REPOSITORY = "Scribie/heydonna-app"
 OPEN_PR_AUDIT_MIN_QUEUED_SECONDS = 15 * 60
 OPEN_PR_AUDIT_WORKFLOWS = {"CI", "E2E Smoke Tests"}
 OPEN_PR_AUDIT_CAPTURE_WORKFLOW_MARKERS = ("capture", "llm proxy")
-RUNNER_CAPACITY_ALERT_REPOSITORY = "heydonna-app/heydonna-app"
+RUNNER_CAPACITY_ALERT_REPOSITORY = "Scribie/heydonna-app"
 RUNNER_CAPACITY_ALERT_MIN_QUEUED_SECONDS = 15 * 60
 RUNNER_CAPACITY_ALERT_WORKFLOWS = {"CI", "E2E Smoke Tests"}
 RUNNER_CAPACITY_ALERT_STATE = Path("/tmp/sakshi-runnerless-capacity-alerts.json")

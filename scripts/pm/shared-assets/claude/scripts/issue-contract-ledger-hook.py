@@ -17,7 +17,7 @@ COMMAND = os.environ.get("CMD_TEXT", "")
 VALIDATOR = os.environ.get("VALIDATOR", "")
 GH_BIN = os.environ.get("GH_BIN", "gh")
 HOOK_CWD = os.environ.get("HOOK_CWD", "")
-HEYDONNA_REPO = "heydonna-app/heydonna-app"
+HEYDONNA_REPO = "Scribie/heydonna-app"
 MUTATION_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])(?:/[^\s;&|()]+/)?gh\s+issue\s+(create|edit)\b"
 )
@@ -131,8 +131,8 @@ def current_repo() -> str:
 def targets_heydonna(parts: list[str]) -> bool:
     explicit = repo_arg(parts)
     if explicit is not None:
-        return explicit.lower() == HEYDONNA_REPO
-    return current_repo().lower() == HEYDONNA_REPO
+        return explicit.lower() == HEYDONNA_REPO.lower()
+    return current_repo().lower() == HEYDONNA_REPO.lower()
 
 
 def shell_commands(command: str) -> list[list[str]]:
@@ -393,7 +393,7 @@ def live_issue(target: str) -> dict[str, object] | None:
                 "view",
                 match.group(1),
                 "--repo",
-                "heydonna-app/heydonna-app",
+                "Scribie/heydonna-app",
                 "--json",
                 "body,labels",
             ],

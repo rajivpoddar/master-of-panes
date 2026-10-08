@@ -158,7 +158,7 @@ def followup_issue_contract_error(issue: dict[str, object]) -> str | None:
 def validate_live_followup_issue(
     value: str,
     *,
-    repo: str = "heydonna-app/heydonna-app",
+    repo: str = "Scribie/heydonna-app",
     cwd: str | None = None,
     gh_bin: str | None = None,
 ) -> dict[str, object]:
@@ -202,7 +202,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("validate-followup",))
     parser.add_argument("--issue", required=True)
-    parser.add_argument("--repo", default="heydonna-app/heydonna-app")
+    parser.add_argument("--repo", default="Scribie/heydonna-app")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 

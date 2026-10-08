@@ -23,8 +23,8 @@ POLICY = ROOT / "scripts/pm/shared-assets/claude/scripts/control_plane_issue_pol
 
 PROSE = ('python3 /Users/rajiv/.claude/scripts/pm-ops.py obligation-resolve --kind ci_rework --target-id 18218 '
          '--external-state "reworded prose mentioning gh issue edit 7945 --repo heydonna-app/heydonna-app as history only"')
-VARIABLE = "gh issue edit $ISSUE --repo heydonna-app/heydonna-app --body-file /tmp/body.md"
-QUOTED_TEMPLATE = 'gh issue edit "7925" --repo heydonna-app/heydonna-app --body-file {body}'
+VARIABLE = "gh issue edit $ISSUE --repo Scribie/heydonna-app --body-file /tmp/body.md"
+QUOTED_TEMPLATE = 'gh issue edit "7925" --repo Scribie/heydonna-app --body-file {body}'
 
 
 def shims(tmp: Path, *, validator_ok: bool):
@@ -119,7 +119,7 @@ def decision_of(done, label: str) -> dict:
 
 
 def literal_command(tmp_path: Path) -> str:
-    return "gh issue edit 7925 --repo heydonna-app/heydonna-app --body-file " + body_file(tmp_path)
+    return "gh issue edit 7925 --repo Scribie/heydonna-app --body-file " + body_file(tmp_path)
 
 
 def test_crashing_parser_blocks_both_wrappers(tmp_path) -> None:

@@ -22,7 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = "heydonna-app/heydonna-app"
+REPO = "Scribie/heydonna-app"
 REPO_ROOT = Path(os.environ.get("HEYDONNA_REPO", str(Path.home() / "Downloads/projects/heydonna-app")))
 PM_OPS_DB = Path(
     os.environ.get(
