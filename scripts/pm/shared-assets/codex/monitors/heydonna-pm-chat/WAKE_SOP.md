@@ -229,6 +229,82 @@ delegates the packet and consumes the result; it never runs either skill.
   never gate; one guarded label edge per wake max. Full cycle detail →
   procedures WHEN-steering-release (on-demand only).
 
+## Social media ownership and accounts (Rajiv 2026-10-09)
+
+Rajiv directed: "setup a task for all social media related work and update
+the decisions SOP. add the account details to SOP as well."
+Dedicated execution owner: **HeyDonna Social Media**
+`01a11e3d-d8bb-73c1-8593-8ff56019d842` (local; output directory
+`/Users/rajiv/Documents/Codex/2026-10-09/heydonna-social-media/outputs`).
+Route ALL NEW HeyDonna/Donna social-account/page, profile, social-content and
+media-asset, publication, authorized engagement/follow, and reporting briefs
+to this owner through the existing independent-delegation transport. Do not
+route new social execution to CTO DM or create another social/browser owner.
+Decisions retains scope and reserved decisions; new briefs name CTO Returns
+as their terminal consumer. Rajiv DM decisions remain with CTO DM
+`01a0911a-a718-7743-b37e-e785f24f3708`; unrelated access/credential/media
+chains remain unchanged. Already accepted tuples retain their original owner,
+consumer and receipts unless explicitly handed off per assignment; never copy
+queues, replay completed work or reset no-retry state. Creating this task is
+not authorization for a new post, follow, signup, generation or monitor.
+
+Nonsecret account register, last observed through UI on 2026-10-08; this SOP
+edit is not a fresh live-account/security verification. Company contact is
+`donna@heydonna.law`; site is `https://heydonna.law`. Donna is HeyDonna's AI
+assistant, not a real person or lawyer. Canonical requested handle is
+`@heydonnalaw`; preserve actual platform slugs below rather than inventing a
+match. Public display names observed are Donna Law except LinkedIn HeyDonna.
+
+| Platform | Actual public account | Nonsecret identity and access |
+| --- | --- | --- |
+| Instagram | `https://www.instagram.com/heydonnalaw/` | Donna Law; professional Software company; Instagram ID `17841416427413199`; Meta asset `1335462252985823`; linked to the intended Facebook Page. |
+| Facebook | `https://www.facebook.com/heydonnalaw/` | Donna Law COMPANY PAGE, ID `61594830797882`; Meta asset `1325961353940349`; observed business ID `2210706939849389`; authorized existing human admin Yukti Yatish. Never create a personal Donna profile or alter Yukti's personal auth/profile. |
+| YouTube | `https://www.youtube.com/@heydonnalaw` | Donna Law; channel ID `UCVQ6gLX-P2biC1G9ugjr2Kw`. |
+| X | `https://x.com/heydonnalaw` | Donna Law; `@heydonnalaw`. |
+| LinkedIn | `https://www.linkedin.com/company/heydonna-law/` | HeyDonna COMPANY PAGE, ID `143949032`; actual slug `heydonna-law`, not `heydonnalaw`; existing admin Rajiv Poddar. Use company actor, never Rajiv's personal posting/following identity. |
+
+Selected circular Donna DP is intentional:
+`/Users/rajiv/Downloads/donna-dp-1024-A.png`, 1024x1024 PNG, SHA256
+`9b8b9e45f1a2f7e9f71293b8dfbecd005c31bfd4a73f48a478e153e3dba3cb0a`.
+Preserve the round artwork. Instagram's website field remains a mobile-only
+gap: desktop reported "Editing links only available on mobile"; do not claim
+the link was saved or bypass it. Company-mailbox verification, platform 2FA
+completion and company-vault item references are not established by these
+profile/publication receipts. Do not label all accounts secured. Secrets and
+recovery material belong only in a verified company vault, never this SOP,
+prompts, repo/plaintext files, logs or Slack; no personal-admin auth changes.
+
+Completed work is evidence, not a replay instruction:
+- Profile terminal `heydonna-social-profile-only:1791471852.439169:terminal:v1`;
+  private UI proof directory
+  `/Users/rajiv/.codex/monitors/cto-dms/private/social-profile-1791471852/`.
+- Launch terminal `heydonna-donna-social-launch:1791473349.661969:terminal:v1`,
+  Returns queue `01a11c4f-3c57-7693-b4b8-50ec8f2495db`; all FIVE launch posts
+  were UI-published. PARTIAL reflects permalink/allowed-skip/profile-link
+  gaps, not authority to repost. Private proof directory
+  `/Users/rajiv/.codex/monitors/cto-dms/private/social-launch-1791473349/`.
+- Posted identities: Instagram Reel `DePRzaIxL0C`; Facebook Content Library
+  post `122107745679494359` (public permalink not obtained; do not invent it);
+  YouTube Short `9XgiVyJ09mk`; X post `2108226411064594470`; LinkedIn
+  `urn:li:ugcPost:7513992539717234689`.
+- Oct8 completed 17 new follows/subscriptions (IG4, FB5, YT2, X5, LI1);
+  prior LinkedIn NCRA follow retained. Veritext, eScribers, Ditto and Neal R.
+  Gross remain HELD. Prior 5-8/platform/day, max15/day is a ceiling, not
+  autonomous cadence authority; use actual current-day state and a named
+  approved brief. No invented handles, paid ads/verification, customer
+  material, unapproved claims or automatic engagement.
+
+For browser work, load the actually enabled native in-app browser API
+documentation, verify the company actor, preserve unrelated tabs and active
+work, and consume each external action once with bounded readback. No
+side-channel driver, hidden authenticated API, uncertain retry or duplicate
+owner. Existing guarded Abhijit Slack identity, source threading, Returns
+closure, no-poll and reserved-decision rules remain in force. Actual posts or
+file captions that satisfy a source effect receive no duplicate completion
+post. The obsolete handle alternatives/TikTok/cadence in
+`docs/marketing/social-channels-setup.md` do not override this register or a
+current approved brief.
+
 ## Execution owners (lookup; verify liveness before new work)
 
 Rescues (`01a0b3b9-cb21-7200-b426-469defef65dd`) / backup (`01a095ce-4e47-7a42-b3e5-a0bb53dc017c`) / standby (`01a0986b-9951-7b01-a47b-af3b9a1309ca`): bounded rescue work outside PR-red CI/E2E terminal processing

@@ -979,7 +979,7 @@ def live_evaluate(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pr", type=int, required=True)
-    parser.add_argument("--repo", default="Scribie/heydonna-app")
+    parser.add_argument("--repo", default="heydonna-app/heydonna-app")
     parser.add_argument("--expect-head", default="")
     parser.add_argument("--skip-artifact-availability", action="store_true")
     parser.add_argument("--json", action="store_true")

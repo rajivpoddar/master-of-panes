@@ -485,17 +485,26 @@ function repeatedOpenBlockerClass(records, issue) {
   return [...counts.entries()].find(([, count]) => count >= 2)?.[0] || null;
 }
 
-function completedPlanRecords(directory, issue) {
+function sameHead(a, b) {
+  const x = String(a || "").toLowerCase();
+  const y = String(b || "").toLowerCase();
+  return x.length >= 7 && y.length >= 7 && (x.startsWith(y) || y.startsWith(x));
+}
+
+// A round counts only if the reviewer ran and returned a verdict on THIS head.
+// Rounds recorded against another head/plan sha never carry over.
+function completedPlanRecords(directory, issue, head) {
   return historyFiles(directory, issue).filter((file) => {
     const text = fs.readFileSync(file, "utf8");
     if (!validPlanMarker(text, issue)) {
       throw new Error(`PLAN_REVIEW_HISTORY_RECORD_INVALID: ${file}`);
     }
-    return true;
+    if (!head) return true;
+    return sameHead(markerFieldFromText(text, "HEAD_SHA"), head);
   });
 }
 
-function liveReservationFiles(directory) {
+function liveReservationFiles(directory, head) {
   if (!fs.existsSync(directory)) return [];
   const reservations = fs
     .readdirSync(directory, { withFileTypes: true })
@@ -519,6 +528,7 @@ function liveReservationFiles(directory) {
         fs.unlinkSync(file);
         continue;
       }
+      if (head && record.head && !sameHead(record.head, head)) continue;
       live.push(file);
     } catch {
       // A malformed reservation is fail-closed and remains counted.
@@ -549,8 +559,8 @@ function reservePlanReviewOverride(args, runner = sh) {
       const directory = path.join(root, key);
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
       importRetainedPlanMarkers(args, directory);
-      const completed = completedPlanRecords(directory, args.issue);
-      const reservations = liveReservationFiles(directory);
+      const completed = completedPlanRecords(directory, args.issue, args._currentHead);
+      const reservations = liveReservationFiles(directory, args._currentHead);
       if (reservations.length) {
         return {
           ok: false,
@@ -609,7 +619,7 @@ function runReviewBudget(args, runner = sh, { publish = false } = {}) {
       const directory = path.join(root, key);
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
       importRetainedPlanMarkers(args, directory);
-      const completed = completedPlanRecords(directory, args.issue);
+      const completed = completedPlanRecords(directory, args.issue, args._currentHead);
       const repeatedClass = repeatedOpenBlockerClass(completed, args.issue);
       if (publish) {
         if (
@@ -644,10 +654,11 @@ function runReviewBudget(args, runner = sh, { publish = false } = {}) {
           },
         };
       }
-      const reservations = liveReservationFiles(directory);
+      const reservations = liveReservationFiles(directory, args._currentHead);
       const rounds = completed.length;
       const reserved = reservations.length;
-      const repeatedBlocker = Boolean(repeatedClass);
+      // Never cap before PLAN_REVIEW_CAP real completed rounds on this head.
+      const repeatedBlocker = Boolean(repeatedClass) && rounds >= PLAN_REVIEW_CAP;
       const capped = repeatedBlocker || rounds + reserved >= PLAN_REVIEW_CAP;
       const baseBudget = {
         decision: capped ? "rescue_required" : "allowed",

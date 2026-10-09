@@ -6,7 +6,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "a654444cacdfaa7bcb9224310f0668c38b7477713282aee4742942cc33580629",
+      "sha256": "1a2de5ffb9e90e5e853a330b9bb975170601b1040cdd820d2a5eacc2f09f6ea5",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "2e81f307552617abde56004f864e61ef0382125dd6a3449bec0817ed633bc81f",
+      "sha256": "cd4c69552048e00e6c9c030810b378f05b5a94338f75522d882e3f4ef95708a6",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "526714144d01b09d728d05d819b64f9457695d5f62d7fa0dc23204d2476f2000",
+      "sha256": "af9e39a44faa5e4edf7d198ab5886ac7c54a7a6171a8ca7a5d97f8f3612b8363",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -258,7 +258,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "3ea80395bcc360b9bb52c1ca547ad5f8d457ffb7e102198a0f7e9dbc17cf129b",
+      "sha256": "8a79cd01a3622a45cf3e041b7ec9461edeb263b5a039cbe8020206ef24e28dbb",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -267,7 +267,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "6c1ac2cb0ee8115ee9a93c51b3b139c4bf147c4ac26d5f00f8227ac4523d91e2",
+      "sha256": "7153d5160ae130de214fb6a620caa47d703cba18726f91847a8a630233e6b411",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
@@ -591,7 +591,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "910bfbcc98cbc0ea3ace7a2047277365810cf0167eb65d2d0ed0ee567d3744f3",
+      "sha256": "6f9f2689508bd12fe03e07e11ca8bbbdef45b55d70847de77434556b3d47e42f",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -639,7 +639,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-visual-proof-gate",
-      "sha256": "3c71661fff0e580fbe5cced665d58262ae33673e1dba854f4938c2752636b23b",
+      "sha256": "b4bec34c5b7d8490072367a4a8841a0f1e64854716456c118522ba55e9f1667c",
       "source_authority": {
         "blob_sha": "fd3604644ad9bb48c4cf06f6eb99e4abcf508693",
         "commit": "26c592065a1584bfdd6bc7ba0272149c5ed88612",
@@ -800,7 +800,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "78907e97a4b0d5784cd87a7bbb8acdfc7b63a8608abfd4d0057a6ebd06441385",
+      "sha256": "6aa2c755a64fa175900a4416df99191d80b7b073e3ad77feee91b6b53a4db83c",
       "source_path": "claude/skills/codex-review-companion/codex-review-companion.mjs"
     },
     {
@@ -836,7 +836,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heartbeat-tasks",
-      "sha256": "6042cd8e50d91b7470606c682bce7a20f09bdc498791d9ccb039a77021ff5683",
+      "sha256": "062d8a9a0a1fb70d52c32b0a356826dd9a4bd29a5180b5b28067aaf505bb25cc",
       "source_path": "claude/skills/heartbeat-tasks/SKILL.md"
     },
     {
@@ -1176,7 +1176,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heydonna-product-rules",
-      "sha256": "fd3dedc5be235a246d454cd98bac3bdfd57912779a342d891063b41874f78558",
+      "sha256": "9e2a7e5d75e335955db3e13c7046ad712d327e35bc68f56ef35498dc89f629a1",
       "source_path": "claude/user-rules/33-heydonna-ui-product-rules.md"
     },
     {
@@ -1230,7 +1230,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "946ef58f62ee5931d37c317ccfaa94323bdc896a50407e15183b23a2f0ee5a77",
+      "sha256": "b14df83655f3e84d0890abd287b9d0cbd78fca4f1dea90693b2a0668dc3d0dc9",
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md"
     },
     {

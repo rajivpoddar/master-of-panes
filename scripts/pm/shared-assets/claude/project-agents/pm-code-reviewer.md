@@ -84,6 +84,10 @@ require click-time validation, the error state on the offending control
 for it. `disabled={isSubmitting}` for the action's own in-flight guard is
 allowed. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No-inline-menu-error gate
+Source: Rajiv 2026-10-09, C0ALZJHGE49 thread 1791537587.688969 ts 1791537815.457389: *"why is the error message in the menu item? that's an anti pattern. it should only be in the toast"*.
+Menu/menubar/context-menu actions: a refused action shows a TOAST ONLY. BLOCK/REQUEST_CHANGES on any inline error text, `role="alert"`, or `aria-invalid` rendered inside a menu item, or a menu held open to show an error. The item stays enabled (the no-disabled-precondition rule still applies). Required test: click the enabled item with the precondition unmet, then assert toast shown, no inline alert in the menu, and the action not run. Rule: `~/.claude/rules/33-heydonna-ui-product-rules.md` "Menu-action errors go in the toast only".
+
 ## No unmetered LLM calls (Mandatory - Rajiv product rule 2026-10-07)
 
 Source: Rajiv, C0ALZJHGE49/1791347751.497949 ts 1791355336.754869: "no lllm calls should go unmetered. it will open us to abuse. chat support is the only exception." Rule: `~/.claude/rules/40-heydonna-no-unmetered-llm-calls.md`.

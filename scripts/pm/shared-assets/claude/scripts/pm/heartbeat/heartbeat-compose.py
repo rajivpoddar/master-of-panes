@@ -307,6 +307,7 @@ def compose(
     release_seen: dict | None = None,
     usage_lines: list[str] | None = None,
     cleanup_alert: str | None = None,
+    email_lines: list[str] | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -334,6 +335,10 @@ def compose(
         ul = [u for u in (usage_lines or []) if u.strip()]
         body += ["", "*Usage (Claude + Codex):*", *(["• " + u for u in ul] or ["• unavailable (usage-snapshot failed)"])]
         parts.append("usage " + ("ok" if ul else "unavailable"))
+        # Email digest lives only in the 3h heartbeat; the DM is removed (Rajiv 2026-10-09 12:06 IST,
+        # DM D0AMF0XE6TS 1791527801.053979). Shared channel: sender + subject only, previews stripped.
+        el = [e.rsplit(" — ", 1)[0] if e.startswith("• ") else e for e in (email_lines or []) if e.strip()][:8]
+        body += ["", *(el or ["*Email digest (last 3h):* unavailable"])]
     else:
         parts.append(pr_tldr)
         body += ["", *pr_lines]
@@ -528,12 +533,20 @@ def main() -> int:
                 failures.append(f"usage: rc={up.returncode}")
         except Exception as exc:
             failures.append(f"usage: {exc}")
+    email_lines = None
+    if args.mode == "3h":
+        try:
+            ep = subprocess.run([py, str(Path(__file__).with_name("email-digest.py")), "--hours", "3"], capture_output=True, text=True, timeout=120)
+            email_lines = [l for l in ep.stdout.splitlines() if l.strip()]
+        except Exception as exc:
+            failures.append(f"email: {exc}")
     print(compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
+        email_lines=email_lines,
     ))
     if pm_actions:
         print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)

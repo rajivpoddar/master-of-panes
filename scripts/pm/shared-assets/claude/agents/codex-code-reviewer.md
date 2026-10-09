@@ -581,6 +581,10 @@ the error state. `disabled={isSubmitting}` / `disabled={isPending}` guarding
 the action's own in-flight request is allowed. Full rule:
 `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No-inline-menu-error gate (Mandatory)
+Source: Rajiv 2026-10-09, C0ALZJHGE49 thread 1791537587.688969 ts 1791537815.457389: *"why is the error message in the menu item? that's an anti pattern. it should only be in the toast"*.
+Menu/menubar/context-menu actions: a refused action shows a TOAST ONLY. BLOCK/REQUEST_CHANGES on any inline error text, `role="alert"`, or `aria-invalid` rendered inside a menu item, or a menu held open to show an error. The item stays enabled (the no-disabled-precondition rule still applies). Required test: click the enabled item with the precondition unmet, then assert toast shown, no inline alert in the menu, and the action not run. Rule: `~/.claude/rules/33-heydonna-ui-product-rules.md` "Menu-action errors go in the toast only".
+
 ## No-live-Clerk-in-E2E gate (Mandatory - Rajiv product rule 2026-10-08)
 
 Source: Rajiv, C0ALZJHGE49 thread 1791398195.877809, ts 1791398300.792659: "Note that clerk has to be bypassed in e2e. We should not hit live clerk api." Rule: `~/.claude/rules/41-heydonna-e2e-no-live-clerk.md`.

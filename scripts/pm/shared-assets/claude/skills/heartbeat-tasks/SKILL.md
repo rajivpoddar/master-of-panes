@@ -63,19 +63,16 @@ STEP 2 — sanity check before posting:
 
 STEP 3 — post ONE new top-level message in #heydonna-dev (no -t):
   SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-3h-post.txt
-  Record the `OK ts=...` readback. Never post the heartbeat itself to a DM or an old thread (STEP 3b's email digest is the only DM).
+  Record the `OK ts=...` readback. Never post the heartbeat or the email digest to a DM or an old thread.
 
-STEP 3b — email digest (Rajiv 2026-10-08, DM D0AMF0XE6TS thread 1791446658.671909:
-  "add an digest for my emails to the 3h hearbeat message. use gws cli").
-  PRIVACY: Rajiv's mail is personal. NEVER put the digest in #heydonna-dev or any
-  shared channel. Fail-open: never blocks STEPS 1-3.
-  python3 /Users/rajiv/.claude/scripts/pm/heartbeat/email-digest.py --hours 3 > /tmp/heartbeat-3h-email.txt
-  Then send it as its OWN top-level DM (no -t):
-    bash /Users/rajiv/.claude/scripts/slack-send.sh -c D0AMF0XE6TS -f < /tmp/heartbeat-3h-email.txt
-  (the script prints "email digest unavailable: <reason>" on gws auth/API failure; send that line instead.)
-  Then post ONE thread reply under the STEP 3 message with only:
-    "Email digest sent to Rajiv's DM"   (or "email digest unavailable: <reason>")
-  Do not paste any digest content into the heydonna-dev thread.
+STEP 3b — email digest lives INSIDE the heartbeat post only. NO DM.
+  (Rajiv 2026-10-09 12:06 IST, DM D0AMF0XE6TS 1791527801.053979: "remvoe this dm. update
+  the 3h hearbeat skill and add the digest there.") heartbeat-compose.py adds the
+  "*Email digest (last 3h):*" block to the STEP 3 post (email-digest.py --hours 3):
+  a count, plus one line per item that needs Rajiv, as sender name + subject only.
+  No body snippets, attachments or addresses (shared channel). Fail-open: on gws
+  failure the block reads "email digest unavailable: <reason>". Never send a
+  separate email DM and never post a "digest sent" thread reply.
 
 STEP 4 — silent housekeeping (see "Housekeeping" below). Output nothing unless
   a job failed or needs a human; then post ONE thread reply under the STEP 3

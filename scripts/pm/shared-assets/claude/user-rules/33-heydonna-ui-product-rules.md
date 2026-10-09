@@ -34,3 +34,27 @@ button's own in-flight request. Not allowed: `disabled` driven by form
 validity, missing selections, unchecked consent, or any other precondition.
 Tests must click the enabled button with the precondition unmet and assert
 the error state renders and the action does not run.
+
+## Menu-action errors go in the toast only
+
+Rajiv 2026-10-09 (C0ALZJHGE49 thread 1791537587.688969, ts 1791537815.457389): *"why is the error message in the menu item? that's an anti pattern. it should only be in the toast"*.
+
+For menu / menubar / context-menu actions, a refused action shows a toast ONLY. Never render inline error text inside the menu item, and don't hold the menu open for an error. The item stays enabled (the no-disabled-precondition rule still applies). The inline field-error pattern above is for form controls, not menu items.
+
+Violation:
+
+```tsx
+<MenuItem onSelect={(e)=>{ if(!ok){ e.preventDefault(); setErr(msg); return; } run(); }}>
+  Remove Errata section {err && <span role="alert">{err}</span>}
+</MenuItem>
+```
+
+Required pattern:
+
+```tsx
+<MenuItem onSelect={()=>{ if(!ok){ toast({ title: msg, variant: "destructive" }); return; } run(); }}>
+  Remove Errata section
+</MenuItem>
+```
+
+Tests: click the enabled item with the precondition unmet; assert the toast shows, no `role="alert"`/`aria-invalid` renders inside the menu, and the action does not run.

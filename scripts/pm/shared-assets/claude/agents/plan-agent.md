@@ -141,6 +141,10 @@ Source: Rajiv, C0ALZJHGE49 thread 1791398195.877809, ts 1791398300.792659: "Note
 Source: Rajiv 2026-10-08, DM D0AMF0XE6TS/1791420692.072699; rule `~/.claude/rules/42-heydonna-docs-sync-editor-features.md`. Editor-feature docs sync: a PR that adds/renames/removes/changes behavior, default or location of a user-facing editor feature (Editor Settings, menu bar/toolbar/Tools, keyboard shortcuts) must update `docs-site/pages/editor/*.mdx` and regenerate `app/api/chat/support/docs-context.generated.ts` + `convex/lib/docs-context.generated.ts` in the SAME PR (Donna answers only from them).
 Plan must name the docs page and snapshot regeneration; flag a plan that omits them when the diff changes such a feature with no docs-site update or snapshot regeneration. Required: docs page entry + regenerated snapshots; test `docs-site/__tests__/editor-features-docs-sync.test.ts` passes.
 
+## No-Inline-Menu-Error Planning Gate
+Source: Rajiv 2026-10-09, C0ALZJHGE49 thread 1791537587.688969 ts 1791537815.457389: *"why is the error message in the menu item? that's an anti pattern. it should only be in the toast"*.
+Menu/menubar/context-menu actions: a refused action shows a TOAST ONLY. BLOCK/REQUEST_CHANGES on any inline error text, `role="alert"`, or `aria-invalid` rendered inside a menu item, or a menu held open to show an error. The item stays enabled (the no-disabled-precondition rule still applies). Required test: click the enabled item with the precondition unmet, then assert toast shown, no inline alert in the menu, and the action not run. Rule: `~/.claude/rules/33-heydonna-ui-product-rules.md` "Menu-action errors go in the toast only".
+
 ## Input
 
 You will receive:

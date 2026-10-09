@@ -709,3 +709,16 @@ def test_slot_block_shows_unprovisioned_s7_s8_without_idle_actions(monkeypatch):
     assert "S8 Anuradha: not provisioned" in text
     assert not any("S7" in a or "S8" in a for a in actions)
     assert any("S6" in a for a in actions)
+
+
+def test_3h_email_digest_inline_sender_subject_only_and_fail_open():
+    # Rajiv 2026-10-09 12:06 IST (DM D0AMF0XE6TS 1791527801.053979): digest moves into the
+    # 3h heartbeat (no DM); shared channel, so the " — preview" tail is stripped.
+    lines = ["*Email digest (last 3h):* 2 need you", "• Alice — Contract question — please call me re: secret terms"]
+    out = compose.compose("3h", NOW, {"events": 0, "users": 0, "top": []}, {}, [], support={"slack": [], "in_app": []}, email_lines=lines)
+    assert "*Email digest (last 3h):* 2 need you" in out
+    assert "• Alice — Contract question" in out and "secret terms" not in out
+    down = compose.compose("3h", NOW, {"events": 0, "users": 0, "top": []}, {}, [], support={"slack": [], "in_app": []})
+    assert "*Email digest (last 3h):* unavailable" in down
+    hourly = compose.compose("1h", NOW, {"events": 0, "users": 0, "top": []}, {}, [], email_lines=lines)
+    assert "Email digest" not in hourly
