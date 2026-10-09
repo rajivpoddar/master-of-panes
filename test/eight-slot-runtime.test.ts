@@ -83,8 +83,8 @@ test("all eight versioned launch wrappers pin the GPT-6 Luna profile and preserv
       "utf8",
     );
     assert.match(wrapper, /set -euo pipefail/);
-    // Every slot runs GPT-6 Luna (live S1-S6 processes, 2026-10-07); an explicit profile still overrides.
-    assert.match(wrapper, /DEV_SLOT_SPARK_PROFILE="\$\{DEV_SLOT_SPARK_PROFILE:-gpt6luna\}"/);
+    // Every slot runs GPT-6.1 Sol (Rajiv GO 2026-10-09); an explicit profile still overrides.
+    assert.match(wrapper, /DEV_SLOT_SPARK_PROFILE="\$\{DEV_SLOT_SPARK_PROFILE:-gpt61sol\}"/);
     assert.match(
       wrapper,
       new RegExp(`exec /Users/rajiv/\\.claude/scripts/launch-dev-slot-claude\\.sh ${slot} "\\$@"`),
@@ -108,6 +108,7 @@ test("all eight versioned launch wrappers pin the GPT-6 Luna profile and preserv
   assert.match(launcher, /22-slot-swati\.md/);
   assert.match(launcher, /22-slot-anuradha\.md/);
   assert.match(launcher, /SPARK_MODEL="\$\{GPT6LUNA_SPARK_MODEL:-gpt-6-luna\}"/);
+  assert.match(launcher, /SPARK_MODEL="\$\{GPT61SOL_SPARK_MODEL:-gpt-6\.1-sol\}"/);
   assert.match(launcher, /SPARK_KEY_ENV_FILE="\$\{GPT6LUNA_SPARK_KEY_ENV_FILE:-\/Users\/rajiv\/\.config\/cliproxyapi\/client\.env\}"/);
   assert.match(launcher, /CLAUDE_CODE_SUBAGENT_MODEL="\$\{SPARK_MODEL%\\\[1m\\\]\}"/);
   assert.match(launcher, /SPARK_PROFILE="\$\{DEV_SLOT_SPARK_PROFILE:-ornith\}"/);

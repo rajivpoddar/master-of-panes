@@ -11,7 +11,7 @@ while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --spark-profile)
       if [[ "$#" -lt 2 ]]; then
-        echo "ERROR: --spark-profile requires ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, gpt6luna, or opus55" >&2
+        echo "ERROR: --spark-profile requires ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, gpt6luna, gpt61sol, or opus55" >&2
         exit 2
       fi
       SPARK_PROFILE="$2"
@@ -56,6 +56,18 @@ case "$SPARK_PROFILE" in
     SPARK_MAX_CONTEXT_TOKENS="1000000"
     SPARK_MAX_OUTPUT_TOKENS="32000"
     SPARK_MAX_THINKING_TOKENS="32000"
+    ;;
+  gpt61sol)
+    # GPT-6.1 Sol through the local CLIProxyAPI (Rajiv GO 2026-10-09, C0ALZJHGE49/1791527549.296399).
+    SPARK_MODEL="${GPT61SOL_SPARK_MODEL:-gpt-6.1-sol}"
+    SPARK_BASE_URL="${GPT61SOL_SPARK_BASE_URL:-http://127.0.0.1:8317}"
+    SPARK_KEY_ENV_FILE="${GPT61SOL_SPARK_KEY_ENV_FILE:-/Users/rajiv/.config/cliproxyapi/client.env}"
+    SPARK_EXPECTED_MODEL="$SPARK_MODEL"
+    SPARK_READINESS_TIMEOUT_SECONDS="10"
+    SPARK_API_TIMEOUT_MS="1200000"
+    SPARK_MAX_CONTEXT_TOKENS="200000"
+    SPARK_MAX_OUTPUT_TOKENS="32000"
+    SPARK_MAX_THINKING_TOKENS="2048"
     ;;
   gpt6luna)
     # GPT-6 Luna through the local CLIProxyAPI (Anthropic-compatible surface).
@@ -246,7 +258,7 @@ case "$SPARK_PROFILE" in
     SPARK_MAX_THINKING_TOKENS="0"
     ;;
   *)
-    echo "ERROR: unsupported profile '$SPARK_PROFILE'; expected ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, gpt6luna, or opus55" >&2
+    echo "ERROR: unsupported profile '$SPARK_PROFILE'; expected ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, gpt6luna, gpt61sol, or opus55" >&2
     exit 2
     ;;
 esac
@@ -438,7 +450,7 @@ if [[ "$SPARK_PROFILE" == "qwen38-next" || "$SPARK_MODEL" == "qwen3.8-flash-next
   SLOT_EFFORT="${DEV_SLOT_EFFORT:-xhigh}"
 fi
 # GPT-6 Luna lanes run at high (matches the live S1-S6 launches, 2026-10-07).
-if [[ "$SPARK_PROFILE" == "gpt6luna" ]]; then
+if [[ "$SPARK_PROFILE" == "gpt6luna" || "$SPARK_PROFILE" == "gpt61sol" ]]; then
   SLOT_EFFORT="${DEV_SLOT_EFFORT:-high}"
 fi
 # Opus 5.5 matches the PM launcher's opus55 lane: xhigh.
