@@ -337,8 +337,9 @@ def compose(
         parts.append("usage " + ("ok" if ul else "unavailable"))
         # Email digest lives only in the 3h heartbeat; the DM is removed (Rajiv 2026-10-09 12:06 IST,
         # DM D0AMF0XE6TS 1791527801.053979). Shared channel: sender + subject only, previews stripped.
-        el = [e.rsplit(" — ", 1)[0] if e.startswith("• ") else e for e in (email_lines or []) if e.strip()][:8]
-        body += ["", *(el or ["*Email digest (last 3h):* unavailable"])]
+        # CONTAINMENT (CTO REVISE, C0ALZJHGE49 1791527549.296399 / 1791540308.774289): the producer's
+        # free-text rows leaked snippets/raw addresses through delimiter parsing. Fail closed: no email block.
+        del email_lines
     else:
         parts.append(pr_tldr)
         body += ["", *pr_lines]
@@ -533,13 +534,7 @@ def main() -> int:
                 failures.append(f"usage: rc={up.returncode}")
         except Exception as exc:
             failures.append(f"usage: {exc}")
-    email_lines = None
-    if args.mode == "3h":
-        try:
-            ep = subprocess.run([py, str(Path(__file__).with_name("email-digest.py")), "--hours", "3"], capture_output=True, text=True, timeout=120)
-            email_lines = [l for l in ep.stdout.splitlines() if l.strip()]
-        except Exception as exc:
-            failures.append(f"email: {exc}")
+    email_lines = None  # containment: email-digest.py is not invoked
     print(compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,

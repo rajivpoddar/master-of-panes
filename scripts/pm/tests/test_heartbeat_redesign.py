@@ -711,14 +711,9 @@ def test_slot_block_shows_unprovisioned_s7_s8_without_idle_actions(monkeypatch):
     assert any("S6" in a for a in actions)
 
 
-def test_3h_email_digest_inline_sender_subject_only_and_fail_open():
-    # Rajiv 2026-10-09 12:06 IST (DM D0AMF0XE6TS 1791527801.053979): digest moves into the
-    # 3h heartbeat (no DM); shared channel, so the " — preview" tail is stripped.
-    lines = ["*Email digest (last 3h):* 2 need you", "• Alice — Contract question — please call me re: secret terms"]
-    out = compose.compose("3h", NOW, {"events": 0, "users": 0, "top": []}, {}, [], support={"slack": [], "in_app": []}, email_lines=lines)
-    assert "*Email digest (last 3h):* 2 need you" in out
-    assert "• Alice — Contract question" in out and "secret terms" not in out
-    down = compose.compose("3h", NOW, {"events": 0, "users": 0, "top": []}, {}, [], support={"slack": [], "in_app": []})
-    assert "*Email digest (last 3h):* unavailable" in down
-    hourly = compose.compose("1h", NOW, {"events": 0, "users": 0, "top": []}, {}, [], email_lines=lines)
-    assert "Email digest" not in hourly
+def test_3h_email_block_contained_fail_closed():
+    # CTO REVISE (C0ALZJHGE49 1791527549.296399): shared-channel output carries NO email block.
+    lines = ["*Email digest (last 3h):* 2 need you", "• bob@example.com — Subj — snippet — with dash secret"]
+    for mode in ("3h", "1h"):
+        out = compose.compose(mode, NOW, {"events": 0, "users": 0, "top": []}, {}, [], support={"slack": [], "in_app": []}, email_lines=lines)
+        assert "Email digest" not in out and "bob@example.com" not in out and "secret" not in out
