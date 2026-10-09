@@ -711,9 +711,49 @@ def test_slot_block_shows_unprovisioned_s7_s8_without_idle_actions(monkeypatch):
     assert any("S6" in a for a in actions)
 
 
-def test_3h_email_block_contained_fail_closed():
-    # CTO REVISE (C0ALZJHGE49 1791527549.296399): shared-channel output carries NO email block.
-    lines = ["*Email digest (last 3h):* 2 need you", "• bob@example.com — Subj — snippet — with dash secret"]
-    for mode in ("3h", "1h"):
-        out = compose.compose(mode, NOW, {"events": 0, "users": 0, "top": []}, {}, [], support={"slack": [], "in_app": []}, email_lines=lines)
-        assert "Email digest" not in out and "bob@example.com" not in out and "secret" not in out
+EMAIL_EMPTY = ({"events": 0, "users": 0, "top": []}, {}, [])
+
+
+def _digest_rows(msgs, snippets):
+    digest = _load("email-digest")
+    return digest.collect(msgs, lambda m: snippets.get(m["id"], ""))
+
+
+def test_email_producer_snippet_with_em_dash_never_emitted():
+    # CTO REVISE (C0ALZJHGE49 1791527549.296399): snippets may contain " — "; producer emits name+subject only.
+    msgs = [{"id": "1", "from": "Alice Synth <alice@synthetic.invalid>", "subject": "Contract question?"}]
+    rows = _digest_rows(msgs, {"1": "call me — SNIPPETSECRET — re terms"})
+    assert rows == [{"name": "Alice Synth", "subject": "Contract question?"}]
+    out = compose.compose("3h", NOW, *EMAIL_EMPTY, support={"slack": [], "in_app": []}, email_doc={"status": "ok", "total": 1, "items": rows})
+    assert "• Alice Synth — Contract question?" in out
+    assert "SNIPPETSECRET" not in out and "alice@synthetic.invalid" not in out
+
+
+def test_email_missing_display_name_uses_placeholder_never_address():
+    msgs = [{"id": "2", "from": "bob@synthetic.invalid", "subject": "Need your reply"},
+            {"id": "3", "from": "\"carol@synthetic.invalid\" <carol@synthetic.invalid>", "subject": "ping dave@synthetic.invalid?"}]
+    rows = _digest_rows(msgs, {})
+    assert [r["name"] for r in rows] == ["(unknown sender)", "(unknown sender)"]
+    assert "dave@synthetic.invalid" not in json.dumps(rows)
+    # Composer is independently safe even if a producer row carries an address.
+    doc = {"status": "ok", "total": 1, "items": [{"name": "eve@synthetic.invalid", "subject": "x — y@synthetic.invalid", "snippet": "LEAK"}]}
+    out = compose.compose("3h", NOW, *EMAIL_EMPTY, support={"slack": [], "in_app": []}, email_doc=doc)
+    assert "• (unknown sender) — x — [address]" in out
+    assert "@synthetic.invalid" not in out and "LEAK" not in out
+
+
+def test_email_ordinary_name_subject_and_hourly_has_no_block():
+    doc = {"status": "ok", "total": 2, "items": [{"name": "Frank Synth", "subject": "Invoice due"}, {"name": "Grace", "subject": "Lunch?"}]}
+    out = compose.compose("3h", NOW, *EMAIL_EMPTY, support={"slack": [], "in_app": []}, email_doc=doc)
+    assert "*Email digest (last 3h):* 2 unread need your attention" in out
+    assert "• Frank Synth — Invoice due" in out and "• Grace — Lunch?" in out
+    hourly = compose.compose("1h", NOW, *EMAIL_EMPTY, email_doc=doc)
+    assert "Email digest" not in hourly and "Frank Synth" not in hourly
+
+
+def test_email_absent_or_malformed_input_fails_open():
+    for doc in (None, {}, {"status": "unavailable", "items": []}, {"status": "ok", "items": "• raw — text — snippet"}, ["x"]):
+        out = compose.compose("3h", NOW, *EMAIL_EMPTY, support={"slack": [], "in_app": []}, email_doc=doc)
+        assert "*Email digest (last 3h):* unavailable" in out
+    empty = compose.compose("3h", NOW, *EMAIL_EMPTY, support={"slack": [], "in_app": []}, email_doc={"status": "ok", "total": 0, "items": []})
+    assert "nothing unread needs your attention" in empty

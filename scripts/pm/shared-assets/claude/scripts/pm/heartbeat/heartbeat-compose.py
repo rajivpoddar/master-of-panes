@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -291,6 +292,35 @@ def pr_block(prs: list[dict] | None, max_prs: int = MAX_PRS) -> tuple[list[str],
     return lines, tldr, merge
 
 
+EMAIL_UNKNOWN_SENDER = "(unknown sender)"
+_EMAIL_ADDR = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def _email_field(value, limit: int) -> str:
+    text = re.sub(r"\s+", " ", value if isinstance(value, str) else "").strip()
+    text = _EMAIL_ADDR.sub("[address]", text)
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def email_block(doc: dict | None, limit: int = 8) -> list[str]:
+    """Shared-channel email block (CTO REVISE, C0ALZJHGE49 1791527549.296399).
+    Consumes ONLY the producer's structured name/subject fields; never parses free text,
+    so no snippet or raw address can reach the channel. Absent/malformed input fails open."""
+    if not isinstance(doc, dict) or doc.get("status") != "ok" or not isinstance(doc.get("items"), list):
+        return ["*Email digest (last 3h):* unavailable"]
+    rows = []
+    for item in doc["items"][:limit]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") if isinstance(item.get("name"), str) else ""
+        name = EMAIL_UNKNOWN_SENDER if (not name.strip() or "@" in name) else _email_field(name, 28)
+        rows.append(f"• {name} — {_email_field(item.get('subject'), 70) or '(no subject)'}")
+    total = doc.get("total") if isinstance(doc.get("total"), int) else len(rows)
+    if not rows:
+        return ["*Email digest (last 3h):* nothing unread needs your attention."]
+    return [f"*Email digest (last 3h):* {total} unread need your attention", *rows]
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -307,7 +337,7 @@ def compose(
     release_seen: dict | None = None,
     usage_lines: list[str] | None = None,
     cleanup_alert: str | None = None,
-    email_lines: list[str] | None = None,
+    email_doc: dict | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -337,9 +367,7 @@ def compose(
         parts.append("usage " + ("ok" if ul else "unavailable"))
         # Email digest lives only in the 3h heartbeat; the DM is removed (Rajiv 2026-10-09 12:06 IST,
         # DM D0AMF0XE6TS 1791527801.053979). Shared channel: sender + subject only, previews stripped.
-        # CONTAINMENT (CTO REVISE, C0ALZJHGE49 1791527549.296399 / 1791540308.774289): the producer's
-        # free-text rows leaked snippets/raw addresses through delimiter parsing. Fail closed: no email block.
-        del email_lines
+        body += ["", *email_block(email_doc)]
     else:
         parts.append(pr_tldr)
         body += ["", *pr_lines]
@@ -534,14 +562,20 @@ def main() -> int:
                 failures.append(f"usage: rc={up.returncode}")
         except Exception as exc:
             failures.append(f"usage: {exc}")
-    email_lines = None  # containment: email-digest.py is not invoked
+    email_doc = None
+    if args.mode == "3h":
+        try:
+            ep = subprocess.run([py, str(Path(__file__).with_name("email-digest.py")), "--hours", "3", "--json"], capture_output=True, text=True, timeout=120)
+            email_doc = json.loads(ep.stdout)
+        except Exception as exc:
+            failures.append(f"email: {type(exc).__name__}")
     print(compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
-        email_lines=email_lines,
+        email_doc=email_doc,
     ))
     if pm_actions:
         print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)

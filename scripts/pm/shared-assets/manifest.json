@@ -559,6 +559,15 @@
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/email-digest.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "46906461ada68190a18540b42eaeffe533e1178bacb06f3c240e2808d8879f80",
+      "source_path": "claude/scripts/pm/heartbeat/email-digest.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-axiom.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -573,7 +582,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "abb9b75e65cbaceec1659a64c35f5125786907337ac6211e5a8f1fa7486db07a",
+      "sha256": "cf3eac3bdd524bbc9a436caaa20496ae4e65c89a134eb58b6255a9ac583083ec",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -1410,7 +1419,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 153,
+    "selected_count": 154,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1481,6 +1490,7 @@
       "~/.claude/scripts/sakshi-heartbeat.sh",
       "~/.claude/scripts/pm/heartbeat/heartbeat-axiom.py",
       "~/.claude/scripts/pm/heartbeat/heartbeat-compose.py",
+      "~/.claude/scripts/pm/heartbeat/email-digest.py",
       "~/.claude/scripts/pm/heartbeat/heartbeat-error-map.py",
       "~/.claude/scripts/pm/heartbeat/pr-open-snapshot.py",
       "~/.claude/scripts/pm/heartbeat/support-inbox-snapshot.py",
