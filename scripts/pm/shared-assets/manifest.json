@@ -298,15 +298,6 @@
       "source_path": "claude/scripts/ci-success-reconciliation.py"
     },
     {
-      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 493,
-      "ownership_class": "shared-claude-ci-failure-triage",
-      "sha256": "2ca5638de77f31b5073dde0929cacb362178a24747530895e3956e352ee63f16",
-      "source_path": "claude/scripts/ci/ci-fast-triage.py"
-    },
-    {
       "canonical_target": "/Users/rajiv/.claude/scripts/ci/ci-rerun-guard-matcher.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -314,15 +305,6 @@
       "ownership_class": "shared-claude-ci-rerun-guard",
       "sha256": "3f210a5cded950ef056c4742000d54ac88db33933954cf880aff58bc1eabb401",
       "source_path": "claude/scripts/ci/ci-rerun-guard-matcher.py"
-    },
-    {
-      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 420,
-      "ownership_class": "shared-claude-ci-verdict-producer",
-      "sha256": "0377c424f10dfc252cd3157123a52abc1f653d7741afe903d87adbb67d54e705",
-      "source_path": "claude/scripts/ci/publish-ci-verdict.py"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
@@ -1428,7 +1410,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 155,
+    "selected_count": 153,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1437,9 +1419,7 @@
       "~/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh",
       "~/.claude/scripts/axiom-activity-report.py",
       "~/.claude/scripts/ci-success-reconciliation.py",
-      "~/Downloads/projects/heydonna-app/scripts/ci/ci-fast-triage.py",
       "~/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
-      "~/Downloads/projects/heydonna-app/scripts/ci/publish-ci-verdict.py",
       "~/.claude/scripts/launch-dev-slot-claude.sh",
       "~/.claude/scripts/launch-slot-1.sh",
       "~/.claude/scripts/launch-slot-2.sh",
