@@ -497,7 +497,7 @@ def resolve_pr_issue_from_metadata(pr: dict[str, Any], *, pr_number: int = 0) ->
     raise RuntimeError("cannot resolve implementation issue from read-only PR metadata")
 
 
-EXPECTED_CHANGE_SCOPE_RULES_SHA256 = "c2db802cb7d8bd20d8fb09c391285cca8fcd4a6988a157077b5f928d5879455e"
+EXPECTED_CHANGE_SCOPE_RULES_SHA256 = "dfd770c1b30706d3d7701ee6ed98a41bfba878458784b9b4026ea397c0be2c2c"
 ALLOWED_CHANGE_SCOPE_SCOPES = {
     "control_plane_only",
     "mixed",

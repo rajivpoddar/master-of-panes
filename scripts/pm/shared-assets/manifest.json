@@ -621,7 +621,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-visual-proof-gate",
-      "sha256": "b4bec34c5b7d8490072367a4a8841a0f1e64854716456c118522ba55e9f1667c",
+      "sha256": "5a498e91233055f01cbda34b80c9c3d3d8d950b3e62d53222d9f1432672b8734",
       "source_authority": {
         "blob_sha": "fd3604644ad9bb48c4cf06f6eb99e4abcf508693",
         "commit": "26c592065a1584bfdd6bc7ba0272149c5ed88612",
