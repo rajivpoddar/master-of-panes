@@ -348,7 +348,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "7f4b35bb578d433f44aa6d08ae192e5a4db144de1129c215bc69a88e0b388887",
+      "sha256": "624922da268f8c9de6bdfeee8914008e9f2efa8a81d0a9c1ca5a1df00b8a39fd",
       "source_path": "claude/scripts/cto-relay-snapshot.py"
     },
     {

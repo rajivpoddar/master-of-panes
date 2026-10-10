@@ -26,6 +26,7 @@ DEFAULT_CLAIM_TTL_SECONDS = 120.0
 DEFAULT_DELIVERY_RECEIPTS_FILES = (
     Path("/tmp/cto-ipc-delivery-receipts.jsonl"),
     Path("/tmp/cto-app-server-delivery-receipts.jsonl"),
+    Path("/tmp/cto-ipc-monitor-trigger-receipts.jsonl"),
 )
 ROUTE_TABLE_BEGIN = "<!-- CTO_SLACK_ROUTE_TABLE_V2"
 ROUTE_TABLE_END = "CTO_SLACK_ROUTE_TABLE_END -->"
@@ -304,7 +305,9 @@ def receipt_handled_keys(paths: list[Path]) -> set[str]:
             if not isinstance(receipt, dict):
                 raise SnapshotError(f"delivery receipt must be an object: {path}")
             key = receipt.get("receipt_key")
-            if isinstance(key, str) and receipt.get("status") in {"delivered", "queued", "uncertain"}:
+            # A successful monitor trigger is not destination acceptance.
+            statuses = {"uncertain"} if path.name == "cto-ipc-monitor-trigger-receipts.jsonl" else {"delivered", "queued", "uncertain"}
+            if isinstance(key, str) and receipt.get("status") in statuses:
                 handled.add(key)
     return handled
 

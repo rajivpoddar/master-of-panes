@@ -191,3 +191,89 @@ console.log('6 actual ingress/origin discriminators PASS; fake delivery=0');
 """
     run = subprocess.run(["/opt/homebrew/bin/node", "-e", code], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
+
+
+@pytest.mark.parametrize("expired_claim", [False, True])
+def test_actual_fallback_unknown_is_not_reselected(tmp_path, monkeypatch, expired_claim):
+    sop = configured_sop(tmp_path)
+    source = event(sop)
+    frozen = snapshot(tmp_path, sop, [source])[0]
+    # The bridge's asRoutedEnvelope binds the helper invocation's claim owner.
+    frozen["claim_owner"] = json.loads((tmp_path / "claims.json").read_text())[source["dedup_key"]]["owner"]
+    envelope_file = tmp_path / "frozen.json"
+    envelope_file.write_text(json.dumps(frozen))
+    journal = tmp_path / "cto-ipc-monitor-trigger-receipts.jsonl"
+    code = r"""
+const fs = require('node:fs'), assert = require('node:assert/strict');
+const {transformSync} = require('/Users/rajiv/Downloads/projects/tmux-slack-bridge/node_modules/esbuild/lib/main.js');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.indexOf('function appendReceipt(');
+const end = source.indexOf('async function drainAppServer()', start);
+assert.ok(start >= 0 && end > start);
+const js = transformSync(source.slice(start, end), {loader:'ts'}).code;
+const envelope = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const journal = process.argv[3], claims = process.argv[4];
+let primary = 0, fallback = 0, release = 0;
+const bindings = {
+ appendFileSync: fs.appendFileSync, MONITOR_TRIGGER_RECEIPTS_FILE: journal,
+ SLACK_MONITOR_THREAD_ID: '019fd9df-23ad-7500-8b3e-53ce9341a140',
+ SLACK_MONITOR_SOP: 'synthetic-SOP', IPC_SENDER: 'fake-never-executed',
+ ipcOwnerDiscoveryArgs: () => [],
+ runPython: async (args) => {
+  fallback++; assert.equal(args[args.indexOf('--success-receipt-file')+1], journal);
+  return {code:3, stdout:JSON.stringify({deliveryState:'uncertain'}), stderr:'synthetic UNKNOWN'};
+ },
+ appServerClient: {deliver:async () => {primary++; return {status:'not_sent', detail:'synthetic pre-submit'};}},
+ updateClaim: async (action,key,owner) => {
+  assert.equal(action,'release'); assert.equal(key,envelope.dedup_key); assert.equal(owner,envelope.claim_owner);
+  const state = JSON.parse(fs.readFileSync(claims,'utf8')); delete state[key];
+  fs.writeFileSync(claims,JSON.stringify(state)); release++; return true;
+ },
+ setInterval: () => ({unref(){}}), clearInterval: () => {}, CLAIM_RENEW_INTERVAL_MS: 30000,
+ log: () => {}, formatError: String, process: {stdout:{write(){}}},
+};
+const deliver = new Function(...Object.keys(bindings), js+'\nreturn deliverClaimedEnvelope;')(...Object.values(bindings));
+(async () => {
+ assert.equal(await deliver(envelope), 'pending');
+ assert.deepEqual([primary,fallback,release],[1,1,1]);
+ const receipt = JSON.parse(fs.readFileSync(journal,'utf8').trim());
+ assert.equal(receipt.status,'uncertain'); assert.equal(receipt.receipt_key,envelope.dedup_key);
+ console.log('actual writer: primary not_sent -> claim released -> fallback UNKNOWN journal');
+})().catch(error => {console.error(error); process.exitCode=1;});
+"""
+    run = subprocess.run([
+        "/opt/homebrew/bin/node", "-e", code,
+        str(ASSETS / "bridge/cto-bridge.ts"), str(envelope_file), str(journal),
+        str(tmp_path / "claims.json"),
+    ], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    receipt_bytes = journal.read_bytes()
+    assert json.loads((tmp_path / "claims.json").read_text()) == {}
+    if expired_claim:
+        (tmp_path / "claims.json").write_text(json.dumps({source["dedup_key"]: {
+            "owner": frozen["claim_owner"], "expires_at_epoch": 1,
+        }}))
+    # Remap the ACTUAL default journals to a fake filesystem, not a custom
+    # receipt list that could conceal an omitted production journal.
+    monkeypatch.setattr(MOD, "DEFAULT_DELIVERY_RECEIPTS_FILES", tuple(
+        tmp_path / path.name for path in MOD.DEFAULT_DELIVERY_RECEIPTS_FILES
+    ))
+    args = [str(HELPER), "--route-sop", str(sop), "--limit", "1"]
+    for option, filename in [
+        ("--events-file", "events.json"), ("--ack-file", "ack.json"),
+        ("--claims-file", "claims.json"), ("--output", "output.json"),
+        ("--heartbeat-file", "heartbeat"), ("--lock-file", "lock"),
+    ]:
+        args += [option, str(tmp_path / filename)]
+    monkeypatch.setattr(sys, "argv", args)
+    assert MOD.main() == 0
+    assert json.loads((tmp_path / "output.json").read_text()) == []
+    assert journal.read_bytes() == receipt_bytes
+    assert json.loads((tmp_path / "ack.json").read_text()) == {"handled": []}
+
+
+@pytest.mark.parametrize("status", ["delivered", "queued"])
+def test_successful_monitor_trigger_is_not_destination_acceptance(tmp_path, status):
+    journal = tmp_path / "cto-ipc-monitor-trigger-receipts.jsonl"
+    journal.write_text(json.dumps({"receipt_key": "synthetic-key", "status": status}) + "\n")
+    assert MOD.receipt_handled_keys([journal]) == set()
