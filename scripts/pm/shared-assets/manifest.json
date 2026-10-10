@@ -1,6 +1,15 @@
 {
   "entries": [
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/tmux-slack-bridge/cto-bridge.ts",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-cto-slack-routing",
+      "sha256": "fa73b5cea648844cd21c1251171a2ea2d562d48f234adccb55fd4a97322af4a1",
+      "source_path": "bridge/cto-bridge.ts"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/agents/codex-code-reviewer.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -332,6 +341,15 @@
       "ownership_class": "shared-claude-issue-contract-ledger",
       "sha256": "debba5220ed852182f41c0d2e03c8ef5cf480380ad477b8b6edb6a10c9772051",
       "source_path": "claude/scripts/control_plane_issue_policy.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/cto-relay-snapshot.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-cto-slack-routing",
+      "sha256": "7f4b35bb578d433f44aa6d08ae192e5a4db144de1129c215bc69a88e0b388887",
+      "source_path": "claude/scripts/cto-relay-snapshot.py"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/heartbeat-session-age-clear.py",
@@ -1198,6 +1216,15 @@
       "source_path": "codex/automations/pr-merges-residency-heartbeat/prompt.template"
     },
     {
+      "canonical_target": "/Users/rajiv/.codex/monitors/cto-slack-relay/WAKE_SOP.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-cto-slack-routing",
+      "sha256": "2ab5b3461cb81b63a78cfaf68fe921cd1ec91c8465e63be4b47680a1e3c2004b",
+      "source_path": "codex/monitors/cto-slack-relay/WAKE_SOP.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1221,8 +1248,17 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "b14df83655f3e84d0890abd287b9d0cbd78fca4f1dea90693b2a0668dc3d0dc9",
+      "sha256": "5440debb3caf56ffa4736c820cf0b6ab01952b02e8fd2cda885f765460caf7fb",
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-cto-slack-routing",
+      "sha256": "69d38ca52d53d60a0804aa0928310a1a49f04b355da76bf8421ca36f30ca00c7",
+      "source_path": "codex/monitors/heydonna-social-media/WAKE_SOP.md"
     },
     {
       "canonical_target": "/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md",
@@ -1419,7 +1455,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 154,
+    "selected_count": 158,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1504,7 +1540,11 @@
       "~/.claude/skills/tmux-pane-screenshot/scripts/pane-screenshot.sh",
       "~/.claude/skills/tmux-slot-command/scripts/is-active.sh",
       "~/.claude/skills/tmux-slot-command/scripts/run-and-wait.sh",
-      "~/.claude/skills/tmux-slot-command/scripts/slot-pane.sh"
+      "~/.claude/skills/tmux-slot-command/scripts/slot-pane.sh",
+      "/Users/rajiv/Downloads/projects/tmux-slack-bridge/cto-bridge.ts",
+      "/Users/rajiv/.claude/scripts/cto-relay-snapshot.py",
+      "/Users/rajiv/.codex/monitors/cto-slack-relay/WAKE_SOP.md",
+      "/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md"
     ]
   },
   "owner": "master-of-panes",

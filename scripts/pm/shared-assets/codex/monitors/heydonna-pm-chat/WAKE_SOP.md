@@ -28,6 +28,14 @@ display names. Direct CTO DMs and Superproofer continue on their separate
 existing routes. This is the CTO consumer rule; bridge filtering and its SOP
 remain MoP-owned.
 
+Rajiv `C0C7U35LBKR/1791638989.669329`: NEW eligible current-source CTO mentions
+in #heydonna-growth route directly to existing Social Media task
+`01a11e3d-d8bb-73c1-8593-8ff56019d842` under the relay SOP's admission cutoff;
+they do not invoke this Decisions consumer. Existing accepted/claimed/uncertain
+events retain their original owner/dedup. Dev, CTO DMs and Superproofer keep
+their existing routes; Social Media's own action and reserved-decision boundaries
+continue to apply.
+
 For a compact Slack wake (`Sender`, `Channel`, `Timestamp`, `Slack thread ID`,
 `Queue depth`, optional `Parent message preview`, and `Message` or legacy `Message preview`), first run
 `python3 /Users/rajiv/.codex/monitors/cto-slack-relay/read-frozen-wake.py --sender <Sender> --channel <Channel> --timestamp <Timestamp> --thread-id <Slack thread ID>`.
