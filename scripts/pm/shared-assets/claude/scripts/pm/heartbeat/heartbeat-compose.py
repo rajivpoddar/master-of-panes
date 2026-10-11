@@ -87,18 +87,20 @@ def support_block(support: dict | None, window_label: str) -> tuple[list[str], s
         return [f"*Support ({window_label}):* quiet"], "support quiet"
     needs = [t for t in slack if t["state"] == "needs_reply"]
     answered = [t for t in slack if t["state"] == "answered"]
+    requester_resolved = any(t.get("answered_by") is None for t in answered)
     lines = [f"*Support ({window_label}):* {len(slack)} Slack thread(s), {len(in_app)} in-app"]
     for t in sorted(needs, key=lambda t: -t["age_min"])[:MAX_SUPPORT]:
         flag = " ⚠" if t["age_min"] >= threshold else ""
         link = f" — linked #{t['links'][0]}" if t.get("links") else ""
         lines.append(f"• {t['channel']} — \"{t['summary'][:50]}\" — {'OVERDUE' if t.get('overdue') else 'NEEDS REPLY'} ({t['age_min']}m){link}{flag}")
     if len(answered) > 3:
-        lines.append(f"• {len(answered)} answered")
+        lines.append(f"• {len(answered)} {'answered/resolved' if requester_resolved else 'answered'}")
     else:
         for t in answered:
             at = datetime.fromtimestamp(t["answered_at"], IST).strftime("%H:%M") if t.get("answered_at") else ""
             link = f" — linked #{t['links'][0]}" if t.get("links") else ""
-            lines.append(f"• {t['channel']} — \"{t['summary'][:50]}\" — answered by {t['answered_by']} {at}{link}")
+            attribution = f"answered by {t['answered_by']}" if t.get("answered_by") else "resolved by requester"
+            lines.append(f"• {t['channel']} — \"{t['summary'][:50]}\" — {attribution} {at}{link}")
     for f in in_app[:3]:
         state = f"linked #{f['links'][0]}" if f.get("links") else f["state"].replace("_", " ")
         auto = " (auto)" if f.get("auto") else ""
@@ -107,6 +109,8 @@ def support_block(support: dict | None, window_label: str) -> tuple[list[str], s
         lines.append(f"• +{len(in_app) - 3} more in-app")
     overdue = [t for t in needs if t["age_min"] >= threshold]
     tldr = f"{len(needs)} support thread(s) need a reply" if needs else "support answered"
+    if not needs and requester_resolved:
+        tldr = "support answered/resolved" if any(t.get("answered_by") for t in answered) else "support resolved"
     if overdue:
         tldr += f" ({len(overdue)} overdue, oldest {max(t['age_min'] for t in overdue)}m)"
     return lines, tldr

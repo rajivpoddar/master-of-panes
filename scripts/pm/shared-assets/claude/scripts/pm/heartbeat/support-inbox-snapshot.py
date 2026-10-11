@@ -60,6 +60,11 @@ CLOSING_CUE_RE = re.compile(
     r"all set|(?:was|were) able to|that did it|all good|(?:working|fine|good) now|will reach out if|found it)\b",
     re.IGNORECASE,
 )
+SELF_RESOLUTION_RE = re.compile(
+    r"\b(found it|worked|went through|fixed|resolved|solved|sorted|all set|"
+    r"(?:was|were) able to|that did it|all good|(?:working|fine|good) now)\b",
+    re.IGNORECASE,
+)
 REOPEN_CUE_RE = re.compile(
     r"\?|n['\u2019]t\b|\b(but|however|although|though|still|not|never|nothing|cannot|unable|fail\w*|"
     r"error|broken|wrong|issue|problem|stuck|yet|also|another|please|pls|need|want)\b|\b(can|could|would) you\b",
@@ -134,7 +139,10 @@ def classify_thread(messages: list[dict], now_ts: float) -> dict | None:
         and effective[-1].get("user") == requester
         and is_closing_ack(effective[-1].get("text") or "")
     ):
-        self_closed_ts = self_closed_ts or float(effective[-1]["ts"])
+        # Gratitude alone cannot resolve an unanswered ask or a reopened issue.
+        body = " ".join(MENTION_RE.sub(" ", effective[-1].get("text") or "").split())
+        if SELF_RESOLUTION_RE.search(body) and not REOPEN_CUE_RE.search(body):
+            self_closed_ts = self_closed_ts or float(effective[-1]["ts"])
         effective.pop()
     last = effective[-1]
     team_answered = last.get("user") != requester and is_team(last)

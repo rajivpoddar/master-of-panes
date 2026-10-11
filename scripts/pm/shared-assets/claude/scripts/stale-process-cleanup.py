@@ -590,8 +590,8 @@ def apply_idle_orphan_policy(
     * idle agent-browser: a daemon whose CPU counter has been flat for
       ab_idle_min, plus its Chrome tree (descendants, and reparented Chrome for
       Testing helpers in the same cwd started within 5 min of the daemon). This
-      applies even when the owning slot is active: the daemon restarts on the
-      next agent-browser command, an idle one only wastes CPU/RAM.
+      is eligible only when none of its owning slots has a live session.
+      Flat CPU alone does not prove that the browser is unused.
     * orphan dev tool: vitest/tsc whose parent is init (parent shell/session is
       dead), older than dev_tool_min, plus their descendants. A live parent
       (a session, npm, a shell) always protects the process.
@@ -602,6 +602,13 @@ def apply_idle_orphan_policy(
         kids.setdefault(r["ppid"], []).append(r["pid"])
 
     def mark(root: dict[str, Any], members: list[dict[str, Any]], policy: str, reason: str) -> None:
+        if policy == "idle_agent_browser" and any(
+            m.get("associated_slot") is not None and slot_has_live_session(int(m["associated_slot"]))
+            for m in members
+        ):
+            for m in members:
+                m.update(eligible=False, skip_reason="slot_session_alive", policy=None)
+            return
         for m in members:
             if not m.get("start_time") or m.get("command_identity") is None:
                 continue
@@ -1018,8 +1025,11 @@ def revalidate_candidate(row: dict[str, Any], allow_slotless_attested: bool = Fa
             continue
         if current.get(key) != row.get(key):
             return False, f"process_identity_changed:{key}"
+    if row.get("category") == "agent-browser" and row.get("associated_slot") is not None \
+            and slot_has_live_session(int(row["associated_slot"])):
+        return False, "slot_session_alive"
     if idle_orphan:
-        # Does not depend on slot ownership: idleness / orphanhood is the proof.
+        # Browser ownership was rechecked above, including every tree helper.
         if row["policy"] == "idle_agent_browser" and row.get("is_daemon"):
             now_cpu = cpu_times().get(pid)
             if now_cpu is None or now_cpu != row.get("cpu_centis"):
@@ -1397,12 +1407,14 @@ def run_self_test() -> int:
     idle_seconds_for_daemons({}, hist, 9999)
     assert hist["daemons"] == {}
 
-    # idle daemon tree is reaped even under an active slot; busy/young daemon is kept
+    # Slot-less idle daemon tree remains eligible; busy/young daemon is kept.
     chrome_main = row(11, 10, "agent-browser", 300, cmd="Google Chrome for Testing --remote-debugging-port=0")
     helper = row(12, 1, "agent-browser", 300, cmd="Google Chrome for Testing Helper")
     other_cwd_helper = row(13, 1, "agent-browser", 300, cwd="/other", cmd="Google Chrome for Testing Helper")
     d_idle = row(10, 1, "agent-browser", 300, daemon=True)
     rows = [d_idle, chrome_main, helper, other_cwd_helper]
+    for r in rows:
+        r["associated_slot"] = None
     apply_idle_orphan_policy(rows, {10: 7300}, 120, 30)
     assert [r["eligible"] for r in rows] == [True, True, True, False], rows
     assert d_idle["policy"] == "idle_agent_browser"
