@@ -683,7 +683,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
-      "sha256": "5590b214bf166809254aef8969a0798a3c76bd52cb940a93293c1d9b80e9ea36",
+      "sha256": "d29cb2c31061493f2f6ad8f0d4b070ed8f2302fdf687d1139c36654acf73e529",
       "source_path": "claude/scripts/sync-dev-slot-skill-allowlist.mjs"
     },
     {

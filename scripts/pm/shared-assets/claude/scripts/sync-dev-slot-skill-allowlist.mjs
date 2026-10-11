@@ -18,6 +18,8 @@ const allowlist = new Set([
   "codex-app-qa-review",
   "codex-qa-review",
   "qa-brief",
+  "self-qa",
+  "review-and-pr",
   "proofshot",
   "macos-word-window-screenshot",
   "heydonna-agent-browser",
