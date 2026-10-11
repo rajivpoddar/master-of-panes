@@ -37,6 +37,77 @@ App, mixed, or unknown scope requires the genuine exact-head CI/E2E pair;
 unknown or mismatched scope is never exempt. Site-only completion is not
 dual-green and is not a red-app-workflow waiver.
 
+## Ordinary and authorized emergency merges
+
+PR Merges remains the sole merge executor. Ordinary merges use this skill's
+`scripts/merge.py`: require genuine exact-head required CI/E2E execution green
+or its supported exact-head classifier exemption, plus the existing review,
+product-safety and later-main overlap checks. Do not invoke retired `.claude`
+PM-conveyor or pre-merge guard layers.
+
+An emergency exception requires verified current human Rajiv authority
+(`UEQTTB97A`), bound to the source channel/thread/event, requested PR, approved
+full 40-character head and exact scope. Distinguish two independent permissions:
+
+- A CI/E2E waiver permits only the explicitly authorized merge with those
+  checks running, missing or red as scoped. It does not grant `--admin`.
+- An additional explicit admin authorization permits `--admin` to override
+  native branch protection for that same PR/head/scope. It does not by itself
+  waive CI/E2E. A generic CTO/PM merge request, old waiver or protection
+  refusal is not admin authority. Never infer a future blanket override.
+
+For a verified emergency waiver, use the manual head-pinned command path
+below; the ordinary helper intentionally has no waiver/admin flags. Keep all
+non-waived review/product-safety gates and later-main overlap checks. Do not
+repeat review on unchanged product code or wait for CI waived by Rajiv, and
+never make skill repair a prerequisite for urgent recovery.
+For admin authority without a CI/E2E waiver, obtain the ordinary helper's
+read-only `READY_TO_MERGE` proof first; only the native-protection override
+differs. Admin authority never converts running or red checks to green.
+
+Before any merge command, reconcile previously issued, merged or uncertain
+effects for the exact tuple through existing receipts and one bounded PR
+readback. An issued/uncertain attempt is not permission to resend. An already
+merged tuple needs no action; unresolved delivery/effect ambiguity stops the
+mutation. Do not re-key an uncertain effect or automatically retry.
+
+Set `PR` and `APPROVED_HEAD` from the verified scoped authorization. Immediately
+before the single action, read current head and require equality; a moved head
+does not inherit authority:
+
+```bash
+HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid) || exit 1
+test "$HEAD" = "$APPROVED_HEAD" || exit 1
+```
+
+For a CI/E2E waiver WITHOUT explicit admin permission:
+
+```bash
+gh pr merge "$PR" --squash --delete-branch --match-head-commit "$HEAD"
+```
+
+Only WITH verified additional admin permission for this exact tuple:
+
+```bash
+gh pr merge "$PR" --squash --admin --delete-branch --match-head-commit "$HEAD"
+```
+
+Use one action and one bounded readback, never polling or waiting for CI:
+
+```bash
+gh pr view "$PR" --json headRefOid,state,mergedAt,mergeCommit
+```
+
+Record actual command outcome, head, merge commit/readback, scoped human
+authorization and real workflow run IDs/statuses (including running/red,
+never relabeled green). A timeout, response loss or unconfirmed readback
+remains uncertain: reconcile it, never blindly repeat or upgrade the command.
+A definitive native protection refusal without explicit admin authority
+requires that authority, not an automatic `--admin` retry. No standing
+protection edit or force push is authorized here. Post-merge red becomes a
+PM-owned follow-up, not automatic rollback merely for red; proven runtime
+harm still warrants mitigation under the applicable authority.
+
 ## Transition contract
 
 1. Preserve `CAPTURE_IN_PROGRESS` only for an accepted exact-head capture that
@@ -54,7 +125,7 @@ If no protected state is proven, finish the transition in this same wake:
 
 - exact-head review/product gates clear and either app/mixed/unknown CI/E2E is
   dual-green, or confirmed marketing-only site scope has its required exact-head
-  site proof: run the canonical guard and head-pinned merge. A site-only result
+  site proof: use the ordinary head-pinned merge path above. A site-only result
   is not reported as dual-green;
 - completed review/capture/rework with no active lane: merge current main into
   the PR branch non-force, resolve a concrete conflict/product blocker through
@@ -65,8 +136,8 @@ If no protected state is proven, finish the transition in this same wake:
   failure once, then create or resume exactly one active or durable queued
   repro/rework packet; never blind rerun;
 - exact-head fixture identity miss: begin one duplicate-fenced capture lane;
-- process-only refusal: use the existing guarded one-refusal direct fallback
-  once, then read back its terminal edge.
+- process-only refusal: reconcile the attempted effect and use only a
+  verified scoped emergency exception above; a refusal grants no new authority.
 
 An unresolved merge conflict, product/data/security blocker, or unavailable
 authoritative owner must become `REPRO_REWORK_IN_PROGRESS` or
