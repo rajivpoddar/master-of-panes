@@ -41,6 +41,12 @@ STATUS_JSON = Path("/tmp/stale-process-cleanup-status.json")
 PM_WORKTREE_PREFIX = "/private/tmp/claude-501/wt-"
 PM_WORKTREE_MIN_AGE_S = 60 * 60
 DUPLICATE_DEV_MIN_AGE_S = 10 * 60
+HISTORY_JSON = Path("/Users/rajiv/.claude/state-stale-cleanup-history.json")
+AB_IDLE_MIN_DEFAULT = 120  # agent-browser daemon with no CPU progress this long is idle
+REPLAYD_CPU_THRESHOLD = 50.0
+REPLAYD_STREAK_RESTART = 2
+IDLE_ORPHAN_POLICIES = ("idle_agent_browser", "orphan_dev_tool", "dead_slot_session")
+PERSIST_HISTORY = False
 # No hard-coded slot range (Rajiv 2026-10-07 22:03 IST, DM D0AMF0XE6TS thread
 # 1791389413.287779: "also remove remove the hardcoded slot range."). The slot
 # set is every MoP ``slots`` row with slot >= 1.
@@ -320,6 +326,10 @@ def classify(command: str) -> str | None:
     lower = command.lower()
     if "skycomputeruseclient" in lower:
         return None
+    if "chrome-headless-shell" in lower or "ms-playwright" in lower or re.search(
+        r"(^|[/\s])playwright(?:/cli\.js|/lib/\S+)?\s+(test|run-server|test-server)(\s|$)|playwright/lib/(?:cli|common)", lower
+    ):
+        return "playwright"
     if "chrome for testing" in lower or re.search(r"(^|/|\s)agent-browser([-\s/]|$)", lower):
         return "agent-browser"
     if "chromium" in lower and ("--remote-debugging" in lower or "playwright" in lower):
@@ -333,6 +343,8 @@ def classify(command: str) -> str | None:
         return "convex"
     if re.search(r"(^|[/\s])tsc(\s|$)|typescript/bin/tsc", lower) and "--noemit" in lower:
         return "tsc"
+    if re.search(r"\(vitest(?: \d+)?\)|(^|[/\s])vitest(\s|$)|node_modules/vitest/", lower):
+        return "vitest"
     return None
 
 
@@ -356,6 +368,10 @@ def command_identity(command: str) -> tuple[str, str] | None:
     if category == "tsc":
         match = re.search(r"(?<!\S)(\S*(?:tsc|typescript/bin/tsc))(?:\s|$)", lower)
         return (category, match.group(1)) if match and "--noemit" in lower else None
+    if category == "vitest":
+        return (category, "vitest")
+    if category == "playwright":
+        return (category, "playwright")
     if "chrome for testing" in lower:
         return (category, "chrome-for-testing")
     match = re.search(r"(?<!\S)(\S*agent-browser\S*|\S*chromium\S*)(?:\s|$)", lower)
@@ -484,12 +500,224 @@ def duplicate_dev_server_reasons(rows: list[dict[str, Any]]) -> dict[int, str]:
     return reasons
 
 
+def parse_cpu_time(value: str) -> int | None:
+    """ps TIME ([H:]MM:SS.cc) to centiseconds."""
+    try:
+        parts = value.strip().split(":")
+        secs = float(parts[-1])
+        mins = int(parts[-2]) if len(parts) >= 2 else 0
+        hours = int(parts[-3]) if len(parts) >= 3 else 0
+        return int(round((hours * 3600 + mins * 60 + secs) * 100))
+    except (ValueError, IndexError):
+        return None
+
+
+def cpu_times() -> dict[int, int]:
+    """{pid: cumulative CPU centiseconds} for all processes."""
+    try:
+        result = run(["ps", "-axo", "pid=,time="], timeout=5)
+    except Exception:
+        return {}
+    out: dict[int, int] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        cs = parse_cpu_time(parts[1])
+        if cs is not None:
+            out[pid] = cs
+    return out
+
+
+def is_agent_browser_daemon(command: str) -> bool:
+    lower = command.lower()
+    if "chrome for testing" in lower or "chromium" in lower:
+        return False
+    return "agent-browser-darwin" in lower or "agent-browser-linux" in lower or "/agent-browser/bin/" in lower
+
+
+def load_history(path: Path = HISTORY_JSON) -> dict[str, Any]:
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        return doc if isinstance(doc, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_history(doc: dict[str, Any], path: Path = HISTORY_JSON) -> None:
+    try:
+        path.write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def idle_seconds_for_daemons(
+    daemons: dict[str, int], history: dict[str, Any], now: float
+) -> dict[str, int]:
+    """Idle seconds per daemon key ``pid:start`` = time since its cumulative CPU last changed.
+
+    The daemon only burns CPU while it serves commands, so a flat CPU counter is
+    the idle signal. History is mutated in place (new keys start idle at 0;
+    dead keys are pruned).
+    """
+    tracked = history.setdefault("daemons", {})
+    for key in [k for k in tracked if k not in daemons]:
+        del tracked[key]
+    idle: dict[str, int] = {}
+    for key, cpu in daemons.items():
+        entry = tracked.get(key)
+        if not isinstance(entry, dict) or entry.get("cpu") != cpu:
+            tracked[key] = {"cpu": cpu, "changed": now}
+            idle[key] = 0
+        else:
+            idle[key] = int(max(0, now - float(entry.get("changed", now))))
+    return idle
+
+
+def apply_idle_orphan_policy(
+    rows: list[dict[str, Any]],
+    idle_by_pid: dict[int, int],
+    ab_idle_min: int,
+    dev_tool_min: int,
+    dead_session_min: int = 60,
+) -> None:
+    """Mark agent-browser idle-daemon trees and orphaned vitest/tsc trees eligible.
+
+    * idle agent-browser: a daemon whose CPU counter has been flat for
+      ab_idle_min, plus its Chrome tree (descendants, and reparented Chrome for
+      Testing helpers in the same cwd started within 5 min of the daemon). This
+      applies even when the owning slot is active: the daemon restarts on the
+      next agent-browser command, an idle one only wastes CPU/RAM.
+    * orphan dev tool: vitest/tsc whose parent is init (parent shell/session is
+      dead), older than dev_tool_min, plus their descendants. A live parent
+      (a session, npm, a shell) always protects the process.
+    """
+    by_pid = {r["pid"]: r for r in rows}
+    kids: dict[int, list[int]] = {}
+    for r in rows:
+        kids.setdefault(r["ppid"], []).append(r["pid"])
+
+    def mark(root: dict[str, Any], members: list[dict[str, Any]], policy: str, reason: str) -> None:
+        for m in members:
+            if not m.get("start_time") or m.get("command_identity") is None:
+                continue
+            if m["category"] == "agent-browser" and "google chrome.app/contents/macos/google chrome" in m["command"].lower():
+                continue
+            m.update(eligible=True, skip_reason=None, policy=policy, reap_reason=reason,
+                     tree_root=root["pid"])
+
+    def descendants(pid: int) -> list[dict[str, Any]]:
+        out, stack, seen = [], list(kids.get(pid, [])), set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen or cur not in by_pid:
+                continue
+            seen.add(cur)
+            out.append(by_pid[cur])
+            stack.extend(kids.get(cur, []))
+        return out
+
+    for r in rows:
+        if r.get("is_daemon") and r["pid"] in idle_by_pid and idle_by_pid[r["pid"]] >= ab_idle_min * 60 \
+                and r["age_seconds"] >= ab_idle_min * 60:
+            members = [r] + descendants(r["pid"])
+            member_pids = {m["pid"] for m in members}
+            for o in rows:
+                if (o["pid"] not in member_pids and o["category"] == "agent-browser" and o["ppid"] == 1
+                        and not o.get("is_daemon") and o["cwd"] == r["cwd"]
+                        and abs(o["age_seconds"] - r["age_seconds"]) <= 300
+                        and "chrome for testing" in o["command"].lower()):
+                    members.append(o)
+            mark(r, members, "idle_agent_browser",
+                 f"idle_agent_browser_daemon:cpu_flat={idle_by_pid[r['pid']] // 60}m")
+    for r in rows:
+        if r["category"] == "playwright" and r["ppid"] == 1 and r["age_seconds"] >= PLAYWRIGHT_ORPHAN_MIN * 60:
+            members = [r] + [d for d in descendants(r["pid"]) if d["category"] == "playwright"]
+            mark(r, members, "orphan_dev_tool", f"orphan_playwright:ppid=1:age={r['age']}")
+    for r in rows:
+        if (r["category"] in ("nextjs", "convex", "tsc") and r.get("associated_slot") and not r.get("eligible")
+                and not r.get("slot_free_idle") and r["age_seconds"] >= dead_session_min * 60
+                and not slot_has_live_session(r["associated_slot"])):
+            mark(r, [r], "dead_slot_session", f"no_live_session_in_slot_{r['associated_slot']}:age={r['age']}")
+    for r in rows:
+        if r["category"] in ("vitest", "tsc") and r["ppid"] == 1 and r["age_seconds"] >= dev_tool_min * 60:
+            members = [r] + [d for d in descendants(r["pid"]) if d["category"] in ("vitest", "tsc")]
+            mark(r, members, "orphan_dev_tool", f"orphan_{r['category']}:ppid=1:age={r['age']}")
+
+
+def replayd_streak_update(history: dict[str, Any], pid: int | None, start: str | None, cpu: float | None) -> int:
+    """Consecutive-run high-CPU counter for replayd; resets on low CPU or a new pid."""
+    entry = history.setdefault("replayd", {})
+    if pid is None or cpu is None:
+        entry.clear()
+        return 0
+    key = f"{pid}:{start}"
+    if entry.get("key") != key:
+        entry.clear()
+        entry["key"] = key
+        entry["streak"] = 0
+    entry["streak"] = int(entry.get("streak", 0)) + 1 if cpu > REPLAYD_CPU_THRESHOLD else 0
+    return entry["streak"]
+
+
+def find_replayd() -> tuple[int | None, str | None, float | None]:
+    """User-level replayd (pid, lstart, %cpu); never a different user's or any other process."""
+    try:
+        result = run(["ps", "-axo", "pid=,uid=,%cpu=,command="], timeout=5)
+    except Exception:
+        return None, None, None
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 4 or parts[3].strip() != "/usr/libexec/replayd":
+            continue
+        try:
+            pid, uid, cpu = int(parts[0]), int(parts[1]), float(parts[2])
+        except ValueError:
+            continue
+        if uid == os.getuid():
+            return pid, get_start_time(pid), cpu
+    return None, None, None
+
+
+def replayd_check(history: dict[str, Any], apply: bool) -> dict[str, Any]:
+    pid, start, cpu = find_replayd()
+    if not apply:
+        return {"pid": pid, "cpu": cpu, "action": "scan_only"}
+    streak = replayd_streak_update(history, pid, start, cpu)
+    info: dict[str, Any] = {"pid": pid, "cpu": cpu, "streak": streak, "action": "none"}
+    if pid is not None and streak >= REPLAYD_STREAK_RESTART:
+        snap = _process_snapshot(pid)
+        if snap and snap["command"].strip() == "/usr/libexec/replayd" and snap["uid"] == os.getuid() \
+                and snap["start_time"] == start:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                info["action"] = "restarted_sigterm"
+                time.sleep(2)
+                if alive(pid) and _process_snapshot(pid) and _process_snapshot(pid)["start_time"] == start:
+                    os.kill(pid, signal.SIGKILL)
+                    info["action"] = "restarted_sigkill"
+                history["replayd"] = {}
+            except (ProcessLookupError, PermissionError) as exc:
+                info["action"] = f"restart_failed:{type(exc).__name__}"
+        else:
+            info["action"] = "restart_refused_identity"
+    return info
+
+
 def collect_processes(
     agent_browser_min: int,
     nextjs_min: int,
     dev_tool_min: int,
     slot_inventory: tuple[dict[int, dict[str, Any]], str | None] | None = None,
+    ab_idle_min: int = AB_IDLE_MIN_DEFAULT,
+    dev_tool_min_orphan: int | None = None,
 ) -> dict[str, Any]:
+    if dev_tool_min_orphan is None:
+        dev_tool_min_orphan = dev_tool_min
     result = run(["ps", "-axo", "pid=,ppid=,uid=,etime=,command="], timeout=8)
     rows: list[dict[str, Any]] = []
     if result.returncode != 0:
@@ -503,6 +731,7 @@ def collect_processes(
 
     current_uid = os.getuid()
     states, inventory_error = slot_inventory or load_slot_inventory()
+    cpu_map = cpu_times()
     for line in result.stdout.splitlines():
         parts = line.strip().split(None, 4)
         if len(parts) < 5:
@@ -536,6 +765,10 @@ def collect_processes(
             threshold_min = dev_tool_min
         skip_reason = None
         eligible = True
+        if category == "vitest":
+            # Only an orphaned vitest tree is ever eligible (apply_idle_orphan_policy).
+            eligible = False
+            skip_reason = "vitest_parent_alive_or_young"
         if known_checkout and inventory_error:
             eligible = False
             skip_reason = f"slot_inventory_unavailable:{inventory_error}"
@@ -600,8 +833,27 @@ def collect_processes(
             "command": sanitize_command(command),
             "policy": "stale_owner" if eligible else None,
             "listen_ports": listen_ports(pid) if category == "nextjs" and slot_number else [],
+            "is_daemon": category == "agent-browser" and is_agent_browser_daemon(command),
+            "cpu_centis": cpu_map.get(pid),
         }
         rows.append(row)
+
+    daemons = {
+        f"{r['pid']}:{r['start_time']}": r["cpu_centis"]
+        for r in rows if r["is_daemon"] and r["cpu_centis"] is not None and r["start_time"]
+    }
+    history = load_history()
+    idle_by_key = idle_seconds_for_daemons(daemons, history, time.time())
+    if PERSIST_HISTORY:
+        history["updated"] = datetime.now(timezone.utc).isoformat()
+        save_history(history)
+    idle_by_pid = {
+        r["pid"]: idle_by_key.get(f"{r['pid']}:{r['start_time']}", 0) for r in rows if r["is_daemon"]
+    }
+    for r in rows:
+        if r["is_daemon"]:
+            r["idle_seconds"] = idle_by_pid[r["pid"]]
+    apply_idle_orphan_policy(rows, idle_by_pid, ab_idle_min, dev_tool_min_orphan, nextjs_min)
 
     report_only: list[dict[str, Any]] = []
     if not inventory_error:
@@ -611,7 +863,8 @@ def collect_processes(
             if not reason:
                 continue
             if row["eligible"]:
-                row["reap_reason"] = reason
+                if row.get("policy") not in IDLE_ORPHAN_POLICIES:
+                    row["reap_reason"] = reason
                 continue
             # Duplicate/wrong-port status never overrides the ownership hold.
             # Age does not prove non-use: unless the slot is proven free+idle
@@ -683,6 +936,55 @@ def _process_snapshot(pid: int) -> dict[str, Any] | None:
     }
 
 
+_LIVE_OWNER_RE = re.compile(r"claude|codex|master-of-panes|mop|slack-bridge|cto-bridge|tmux", re.I)
+
+
+PLAYWRIGHT_ORPHAN_MIN = 60
+_SESSION_RE = re.compile(r"(^|/)(claude|openclaude)(\s|$)|codex-darwin|/bin/codex(\s|$)")
+
+
+def slot_has_live_session(slot: int) -> bool:
+    """True if any claude/openclaude/codex process has its cwd in the slot checkout.
+    Fails closed (True) when the process list or a cwd cannot be read."""
+    root = slot_root(slot)
+    try:
+        out = run(["ps", "-axo", "pid=,uid=,command="], timeout=5).stdout
+    except Exception:
+        return True
+    for line in out.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3 or not _SESSION_RE.search(parts[2].split(" --")[0]):
+            continue
+        if int(parts[1]) != os.getuid():
+            continue
+        cwd = get_cwd(int(parts[0]))
+        if cwd and under(cwd, root):
+            return True
+    return False
+
+
+def _owner_dead(pid: int) -> bool:
+    """True when no ancestor of pid is a live agent/session/service process."""
+    seen = set()
+    cur = pid
+    while cur > 1 and cur not in seen:
+        seen.add(cur)
+        try:
+            out = run(["ps", "-p", str(cur), "-o", "ppid=,command="], timeout=2).stdout.strip()
+        except Exception:
+            return False
+        if not out:
+            break
+        ppid_s, _, cmd = out.partition(" ")
+        if cur != pid and _LIVE_OWNER_RE.search(cmd) and "agent-browser" not in cmd.lower():
+            return False
+        try:
+            cur = int(ppid_s)
+        except ValueError:
+            return False
+    return True
+
+
 def revalidate_candidate(row: dict[str, Any], allow_slotless_attested: bool = False) -> tuple[bool, str]:
     """Recheck process and slot ownership immediately before each signal.
 
@@ -705,13 +1007,28 @@ def revalidate_candidate(row: dict[str, Any], allow_slotless_attested: bool = Fa
     if current.get("command_identity") is None:
         return False, "process_shape_unavailable"
     duplicate = row.get("policy") == "duplicate_dev_server"
+    idle_orphan = row.get("policy") in IDLE_ORPHAN_POLICIES
     for key in ("pid", "ppid", "uid", "start_time", "cwd"):
+        # A tree member reparents to launchd once its parent is reaped.
+        if idle_orphan and key == "ppid" and current.get(key) == 1:
+            continue
         # Reaping a duplicate tree root first reparents its children to
         # launchd; that is our own effect, not an identity change.
         if duplicate and key == "ppid" and current.get(key) == 1:
             continue
         if current.get(key) != row.get(key):
             return False, f"process_identity_changed:{key}"
+    if idle_orphan:
+        # Does not depend on slot ownership: idleness / orphanhood is the proof.
+        if row["policy"] == "idle_agent_browser" and row.get("is_daemon"):
+            now_cpu = cpu_times().get(pid)
+            if now_cpu is None or now_cpu != row.get("cpu_centis"):
+                return False, "daemon_no_longer_idle"
+        if row["policy"] == "dead_slot_session" and slot_has_live_session(int(row["associated_slot"])):
+            return False, "slot_session_alive"
+        if row["policy"] == "orphan_dev_tool" and row.get("tree_root") == pid and current.get("ppid") != 1:
+            return False, "orphan_gained_parent"
+        return True, f"{row['policy']}_identity_match"
     states, inventory_error = load_slot_inventory()
     if inventory_error:
         return False, f"slot_inventory_unavailable:{inventory_error}"
@@ -734,6 +1051,9 @@ def revalidate_candidate(row: dict[str, Any], allow_slotless_attested: bool = Fa
             return False, "slot_owner_evidence_changed"
         if not allow_slotless_attested:
             return False, "slotless_reap_not_attested"
+        # Owner must be dead: no live claude/codex/agent/bridge/MoP ancestor.
+        if not _owner_dead(pid):
+            return False, "slotless_owner_alive"
         return True, "slotless_attested_identity_match"
     if not slot_state or slot_state.get("slot") != row.get("associated_slot"):
         return False, "slot_owner_changed"
@@ -882,7 +1202,7 @@ def _kill_members(
             item["outcome"] = "refused"
             results.append(item)
             continue
-        if row.get("associated_slot") is None:
+        if row.get("associated_slot") is None and row.get("policy") not in IDLE_ORPHAN_POLICIES:
             item["attestation"] = {
                 "basis": "operator_attested_slotless_reap",
                 "slot_association": None,
@@ -977,6 +1297,152 @@ def write_status(
         pass
 
 
+RUNAWAY_MIN_AGE_S = 5 * 60
+RUNAWAY_TOOLS = {"grep", "ggrep", "egrep", "fgrep", "rg", "ripgrep", "ugrep", "find", "bfs", "fd", "fdfind"}
+RUNAWAY_NEVER = {"git", "node", "tsc", "vitest", "npm", "npx", "bun", "python", "python3", "next", "convex"}
+RUNAWAY_HOME = "/Users/rajiv"
+
+
+def runaway_classify(command: str, age_seconds: int | None) -> str | None:
+    """Return a reason when `command` is a recursive grep/rg/find/fd under $HOME running > 5 min."""
+    import shlex
+    if age_seconds is None or age_seconds < RUNAWAY_MIN_AGE_S:
+        return None
+    try:
+        toks = shlex.split(command)
+    except ValueError:
+        toks = command.split()
+    if not toks:
+        return None
+    name = os.path.basename(toks[0])
+    if name in RUNAWAY_NEVER or name not in RUNAWAY_TOOLS:
+        return None
+    args = toks[1:]
+    if name in {"grep", "ggrep", "egrep", "fgrep"}:
+        recursive = any(a in ("--recursive", "--dereference-recursive") or
+                        (a.startswith("-") and not a.startswith("--") and re.search("[rR]", a)) for a in args)
+    else:
+        recursive = True  # rg/find/fd recurse by default
+    if not recursive:
+        return None
+    if not any(a == RUNAWAY_HOME or a.startswith(RUNAWAY_HOME + "/") or a == "~" or a.startswith("~/")
+               or a.startswith("$HOME") for a in args):
+        return None
+    return f"{name}_recursive_under_home_over_{RUNAWAY_MIN_AGE_S // 60}m"
+
+
+def runaway_scan(apply: bool, term_wait_s: float = 3.0) -> dict[str, Any]:
+    """Independent of slot ownership: kill runaway recursive scans (SIGTERM then SIGKILL)."""
+    out: dict[str, Any] = {"class": "runaway_scan", "found": [], "terminated": [], "errors": []}
+    try:
+        ps = run(["ps", "-axo", "pid=,ppid=,etime=,command="], timeout=10).stdout
+    except Exception as exc:  # noqa: BLE001
+        out["errors"].append(f"ps_failed:{type(exc).__name__}")
+        return out
+    me = os.getpid()
+    for line in ps.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 4 or not parts[0].isdigit() or int(parts[0]) == me:
+            continue
+        pid, command = int(parts[0]), parts[3]
+        reason = runaway_classify(command, parse_etime(parts[2]))
+        if not reason:
+            continue
+        rec = {"pid": pid, "ppid": int(parts[1]), "etime": parts[2], "command": command[:300],
+               "reason": reason, "term_sent": False, "kill_sent": False}
+        out["found"].append(rec)
+        if not apply:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            rec["term_sent"] = True
+            deadline = time.time() + term_wait_s
+            while time.time() < deadline and alive(pid):
+                time.sleep(0.2)
+            if alive(pid):
+                os.kill(pid, signal.SIGKILL)
+                rec["kill_sent"] = True
+            out["terminated"].append(rec)
+        except ProcessLookupError:
+            rec["already_exited"] = True
+        except OSError as exc:
+            out["errors"].append(f"{pid}:{exc}")
+    return out
+
+
+def run_self_test() -> int:
+    """Pure-function policy tests (no process is touched)."""
+    def row(pid, ppid, cat, age_min, cwd="/x", daemon=False, cmd=None, cpu=100):
+        return {"pid": pid, "ppid": ppid, "category": cat, "age_seconds": age_min * 60, "age": fmt_age(age_min * 60),
+                "cwd": cwd, "start_time": "t", "command": cmd or cat, "command_identity": (cat, cat),
+                "eligible": False, "skip_reason": "held_or_preserved_slot_checkout", "policy": None,
+                "is_daemon": daemon, "cpu_centis": cpu, "associated_slot": 7}
+
+    # classification
+    assert classify("node (vitest 1)") == "vitest"
+    assert classify("node (vitest)") == "vitest"
+    assert classify("npm exec vitest run foo.test.ts") == "vitest"
+    assert classify("node /a/node_modules/vitest/dist/cli.js run") == "vitest"
+    assert classify("node /a/node_modules/.bin/tsc --noEmit") == "tsc"
+    assert classify("/usr/libexec/replayd") is None
+    assert is_agent_browser_daemon("/x/lib/node_modules/agent-browser/bin/agent-browser-darwin-arm64")
+    assert not is_agent_browser_daemon("/Users/x/.agent-browser/browsers/c/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing")
+    assert parse_cpu_time("0:07.27") == 727 and parse_cpu_time("1:02:03.50") == 372350
+
+    # idle history
+    hist: dict[str, Any] = {}
+    assert idle_seconds_for_daemons({"1:a": 5}, hist, 1000) == {"1:a": 0}
+    assert idle_seconds_for_daemons({"1:a": 5}, hist, 1000 + 7300) == {"1:a": 7300}
+    assert idle_seconds_for_daemons({"1:a": 6}, hist, 1000 + 7400) == {"1:a": 0}  # CPU moved: active again
+    idle_seconds_for_daemons({}, hist, 9999)
+    assert hist["daemons"] == {}
+
+    # idle daemon tree is reaped even under an active slot; busy/young daemon is kept
+    chrome_main = row(11, 10, "agent-browser", 300, cmd="Google Chrome for Testing --remote-debugging-port=0")
+    helper = row(12, 1, "agent-browser", 300, cmd="Google Chrome for Testing Helper")
+    other_cwd_helper = row(13, 1, "agent-browser", 300, cwd="/other", cmd="Google Chrome for Testing Helper")
+    d_idle = row(10, 1, "agent-browser", 300, daemon=True)
+    rows = [d_idle, chrome_main, helper, other_cwd_helper]
+    apply_idle_orphan_policy(rows, {10: 7300}, 120, 30)
+    assert [r["eligible"] for r in rows] == [True, True, True, False], rows
+    assert d_idle["policy"] == "idle_agent_browser"
+    d_busy = row(20, 1, "agent-browser", 300, daemon=True)
+    c_busy = row(21, 20, "agent-browser", 300)
+    apply_idle_orphan_policy([d_busy, c_busy], {20: 600}, 120, 30)
+    assert not d_busy["eligible"] and not c_busy["eligible"]
+
+    # orphan vitest/tsc: ppid 1 + age; live parent or young never
+    v_root = row(30, 1, "vitest", 45)
+    v_kid = row(31, 30, "vitest", 45)
+    t_orphan = row(32, 1, "tsc", 90)
+    t_live = row(33, 999, "tsc", 90)
+    v_young = row(34, 1, "vitest", 10)
+    rows = [v_root, v_kid, t_orphan, t_live, v_young]
+    apply_idle_orphan_policy(rows, {}, 120, 30)
+    assert [r["eligible"] for r in rows] == [True, True, True, False, False], rows
+
+    # replayd streak: 2 consecutive high runs, reset on low CPU or new pid
+    h: dict[str, Any] = {}
+    assert replayd_streak_update(h, 5, "s", 80.0) == 1
+    assert replayd_streak_update(h, 5, "s", 80.0) == 2
+    assert replayd_streak_update(h, 5, "s", 10.0) == 0
+    assert replayd_streak_update(h, 5, "s", 80.0) == 1
+    assert replayd_streak_update(h, 6, "s2", 80.0) == 1
+    # runaway_scan classification
+    g = "grep -R -l -E 'a|b' /Users/rajiv/Downloads/projects"
+    assert runaway_classify(g, 400)
+    assert not runaway_classify(g, 100)  # too young
+    assert runaway_classify("rg foo /Users/rajiv/Downloads", 900)
+    assert runaway_classify("find /Users/rajiv -name x", 900)
+    assert not runaway_classify("grep foo /Users/rajiv/file.txt", 900)  # not recursive
+    assert not runaway_classify("grep -r foo /tmp/x", 900)  # root not under HOME
+    for never in ("git grep -r foo /Users/rajiv/x", "node /Users/rajiv/a.js", "tsc --noEmit /Users/rajiv/x",
+                  "vitest run /Users/rajiv/x"):
+        assert not runaway_classify(never, 9000), never
+    print("SELF_TEST ok")
+    return 0
+
+
 def main() -> int:
     try:
         return _main()
@@ -990,8 +1456,11 @@ def _main() -> int:
     parser.add_argument("--apply", action="store_true", help="send TERM then KILL to eligible allowlisted PIDs")
     parser.add_argument("--output", default=str(OUT_JSON), help="proof JSON output path")
     parser.add_argument("--agent-browser-min", type=int, default=60)
-    parser.add_argument("--nextjs-min", type=int, default=360)
+    parser.add_argument("--nextjs-min", type=int, default=60)
     parser.add_argument("--dev-tool-min", type=int, default=30)
+    parser.add_argument("--ab-idle-min", type=int, default=AB_IDLE_MIN_DEFAULT,
+                        help="reap an agent-browser daemon (+Chrome tree) whose CPU counter has been flat this long")
+    parser.add_argument("--self-test", action="store_true", help="run built-in policy tests and exit")
     parser.add_argument("--term-wait-s", type=float, default=3.0)
     parser.add_argument("--status-output", default=str(STATUS_JSON), help="heartbeat status JSON path")
     parser.add_argument(
@@ -1008,6 +1477,10 @@ def _main() -> int:
         help="optional operator attestation file; its path, size and sha256 are recorded in the proof",
     )
     args = parser.parse_args()
+    if args.self_test:
+        return run_self_test()
+    global PERSIST_HISTORY
+    PERSIST_HISTORY = bool(args.apply)
 
     attestation: dict[str, Any] | None = None
     attestation_error: str | None = None
@@ -1042,15 +1515,20 @@ def _main() -> int:
         }
         after = before
     else:
-        before = collect_processes(args.agent_browser_min, args.nextjs_min, args.dev_tool_min, inventory)
+        before = collect_processes(args.agent_browser_min, args.nextjs_min, args.dev_tool_min, inventory, args.ab_idle_min)
         if args.apply and before.get("ok"):
             outcomes = kill_candidates(
                 before.get("candidates", []),
                 args.term_wait_s,
                 allow_slotless_attested=args.attest_slotless_reap,
             )
-        after = collect_processes(args.agent_browser_min, args.nextjs_min, args.dev_tool_min)
+        after = collect_processes(args.agent_browser_min, args.nextjs_min, args.dev_tool_min, None, args.ab_idle_min)
 
+    runaway = runaway_scan(args.apply, args.term_wait_s)
+    history = load_history()
+    replayd = replayd_check(history, args.apply)
+    if args.apply:
+        save_history(history)
     terminated = [item for item in outcomes if item.get("outcome") == "terminated"]
     refused = [item for item in outcomes if item.get("outcome") == "refused"]
     already_exited = [item for item in outcomes if item.get("outcome") == "already_exited"]
@@ -1068,6 +1546,12 @@ def _main() -> int:
             "slot_scoped_free_idle_required": ["agent-browser", "nextjs", "convex", "tsc"],
             "slot_set": "MoP slots rows with slot >= 1 (no hard-coded range)",
             "duplicate_dev_server": "per slot clone keep the tree on PORT 3000+N; reap other trees and wrong-port trees older than 10m only when the slot is proven free+idle; otherwise report-only. Whole tree revalidated (identity, owner, readable listeners, no canonical listener) before its first signal",
+            "ab_idle_min": args.ab_idle_min,
+            "idle_agent_browser": "daemon CPU counter flat >= ab_idle_min (history in state-stale-cleanup-history.json, written on apply runs) -> reap daemon + Chrome tree even when the slot is active",
+            "dead_slot_session": "nextjs/convex/tsc in a HELD slot checkout older than nextjs_min when no claude/openclaude/codex process has its cwd in that checkout (revalidated before signal)",
+            "orphan_playwright": "playwright runner / chrome-headless-shell / ms-playwright chromium with ppid 1 older than 60m (+descendants)",
+            "orphan_dev_tool": "vitest/tsc with ppid 1 older than dev_tool_min (+descendants); a live parent protects",
+            "replayd": "user-level /usr/libexec/replayd SIGTERM (launchd restarts it) after >50% CPU on 2 consecutive apply runs",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],
@@ -1095,6 +1579,8 @@ def _main() -> int:
             "slotless_reap_attested": bool(args.attest_slotless_reap),
         },
         "report_only": before.get("report_only", []),
+        "replayd": replayd,
+        "runaway_scan": runaway,
         "after": after,
     }
     Path(args.output).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1123,6 +1609,7 @@ def _main() -> int:
             f"slot_free_idle={row['slot_free_idle']} policy={row.get('policy')} "
             f"reason={row.get('reap_reason') or row.get('owner_proof') or 'stale_owner'}"
         )
+    print(f"REPLAYD pid={replayd.get('pid')} cpu={replayd.get('cpu')} streak={replayd.get('streak')} action={replayd['action']}")
     if args.apply:
         if not before.get("ok"):
             print(f"STALE_PROCESS_CLEANUP refused={before.get('error', 'unknown')} proof={args.output}")

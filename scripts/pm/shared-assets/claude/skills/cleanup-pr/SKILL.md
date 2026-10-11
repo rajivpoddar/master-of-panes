@@ -586,6 +586,8 @@ CUSTOMER_UPDATE_DETAIL=""
 
 If the closed issue was triggered by a customer report (Slack thread, support email, in-app feedback), post a merge update to the originating thread per the `external-comms-investigation` protocol.
 
+**Feature requests count too** (Rajiv 2026-10-11, C0ALZJHGE49 thread 1791704102.913769, ts 1791704175.229729: "has san been informed about this feature release? do we track feature requets to completion in our workflow?"). Any issue labelled `customer-feedback`, `enhancement` or `Feature request`, or whose body cites a requester's Slack thread (including a relay such as Abi relaying San), gets a release note in that originating thread once Step 6.5 confirms the deploy. Tag the original requester and the relayer. Give two plain sentences: what is live and where to find it, with no PR or issue numbers. Record `FEATURE_REQUESTER_NOTIFIED=<ts>` in the receipt. A missing requester thread is a receipt gap, not a skip.
+
 **Procedure:**
 
 1. Detect the originator. Sources, in priority order:

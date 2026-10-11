@@ -145,6 +145,12 @@ Plan must name the docs page and snapshot regeneration; flag a plan that omits t
 Source: Rajiv 2026-10-09, C0ALZJHGE49 thread 1791537587.688969 ts 1791537815.457389: *"why is the error message in the menu item? that's an anti pattern. it should only be in the toast"*.
 Menu/menubar/context-menu actions: a refused action shows a TOAST ONLY. BLOCK/REQUEST_CHANGES on any inline error text, `role="alert"`, or `aria-invalid` rendered inside a menu item, or a menu held open to show an error. The item stays enabled (the no-disabled-precondition rule still applies). Required test: click the enabled item with the precondition unmet, then assert toast shown, no inline alert in the menu, and the action not run. Rule: `~/.claude/rules/33-heydonna-ui-product-rules.md` "Menu-action errors go in the toast only".
 
+## UX-GUIDELINES-43 Planning Gate (Mandatory)
+Source: Rajiv, C0ALZJHGE49 thread 1791547057.448289 (ts 1791550580.947979, 1791550844.134379); rule `~/.claude/rules/43-heydonna-ux-guidelines.md`.
+Full list: see rule 43 (full list), 17 rules. Includes: no disabled buttons, show the error on click (rule 10; only the in-flight guard may disable); in all modals/dialogs the preferred action button is the RIGHT-MOST (rule 11). BLOCK a diff that violates either.
+
+A new or substantially changed user-facing surface needs a Rajiv-approved mock cited in the plan, and the design must satisfy the 17 UX rules (one primary action, plain one-sentence status, risky actions behind 'More options', no stacked banners, 44px targets, inline/toast errors).
+
 ## Input
 
 You will receive:

@@ -91,7 +91,7 @@ def support_block(support: dict | None, window_label: str) -> tuple[list[str], s
     for t in sorted(needs, key=lambda t: -t["age_min"])[:MAX_SUPPORT]:
         flag = " ⚠" if t["age_min"] >= threshold else ""
         link = f" — linked #{t['links'][0]}" if t.get("links") else ""
-        lines.append(f"• {t['channel']} — \"{t['summary'][:50]}\" — NEEDS REPLY ({t['age_min']}m){link}{flag}")
+        lines.append(f"• {t['channel']} — \"{t['summary'][:50]}\" — {'OVERDUE' if t.get('overdue') else 'NEEDS REPLY'} ({t['age_min']}m){link}{flag}")
     if len(answered) > 3:
         lines.append(f"• {len(answered)} answered")
     else:
@@ -364,7 +364,16 @@ def compose(
         merge_asks = []
         ul = [u for u in (usage_lines or []) if u.strip()]
         body += ["", "*Usage (Claude + Codex):*", *(["• " + u for u in ul] or ["• unavailable (usage-snapshot failed)"])]
-        parts.append("usage " + ("ok" if ul else "unavailable"))
+        _bad = any("UNAVAILABLE" in u or "unavailable" in u for u in ul) or not any(u.startswith("Claude") or u.startswith("WARN Claude") for u in ul)
+        _warn = any(u.startswith("WARN") for u in ul)
+        if _warn:
+            import re as _re
+            _w = next(u for u in ul if u.startswith("WARN"))
+            _acct = _re.sub(r"^WARN\s+", "", _w).split(":")[0]
+            _m = _re.search(r"ETA 100% in (\S+(?: \S+)?) \(BEFORE reset\)", _w)
+            parts.append(f"usage WARN: {_acct} projects 100% in {_m.group(1)} before reset" if _m else f"usage WARN: {_acct} at or above 80% used")
+        else:
+            parts.append("usage " + ("Claude UNAVAILABLE" if _bad else "ok"))
         # Email digest lives only in the 3h heartbeat; the DM is removed (Rajiv 2026-10-09 12:06 IST,
         # DM D0AMF0XE6TS 1791527801.053979). Shared channel: sender + subject only, previews stripped.
         body += ["", *email_block(email_doc)]

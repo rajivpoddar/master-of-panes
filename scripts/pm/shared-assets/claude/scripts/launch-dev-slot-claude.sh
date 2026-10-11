@@ -449,8 +449,10 @@ SLOT_EFFORT="${DEV_SLOT_EFFORT:-low}"
 if [[ "$SPARK_PROFILE" == "qwen38-next" || "$SPARK_MODEL" == "qwen3.8-flash-next" ]]; then
   SLOT_EFFORT="${DEV_SLOT_EFFORT:-xhigh}"
 fi
-# GPT-6 Luna lanes run at high (matches the live S1-S6 launches, 2026-10-07).
-if [[ "$SPARK_PROFILE" == "gpt6luna" || "$SPARK_PROFILE" == "gpt61sol" ]]; then
+# GPT-6 Luna lanes run at high. GPT-6.1 Sol runs at LOW (Rajiv 2026-10-09 C0ALZJHGE49 ts 1791551071.854279: "set the effort to low on all slots").
+if [[ "$SPARK_PROFILE" == "gpt61sol" ]]; then
+  SLOT_EFFORT="${DEV_SLOT_EFFORT:-low}"
+elif [[ "$SPARK_PROFILE" == "gpt6luna" ]]; then
   SLOT_EFFORT="${DEV_SLOT_EFFORT:-high}"
 fi
 # Opus 5.5 matches the PM launcher's opus55 lane: xhigh.

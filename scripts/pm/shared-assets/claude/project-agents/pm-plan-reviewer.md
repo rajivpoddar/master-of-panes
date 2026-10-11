@@ -108,6 +108,12 @@ Source: Rajiv, C0ALZJHGE49 thread 1791398195.877809, ts 1791398300.792659: "Note
 Source: Rajiv 2026-10-08, DM D0AMF0XE6TS/1791420692.072699; rule `~/.claude/rules/42-heydonna-docs-sync-editor-features.md`. Editor-feature docs sync: a PR that adds/renames/removes/changes behavior, default or location of a user-facing editor feature (Editor Settings, menu bar/toolbar/Tools, keyboard shortcuts) must update `docs-site/pages/editor/*.mdx` and regenerate `app/api/chat/support/docs-context.generated.ts` + `convex/lib/docs-context.generated.ts` in the SAME PR (Donna answers only from them).
 BLOCK the plan when the diff changes such a feature with no docs-site update or snapshot regeneration. Required: docs page entry + regenerated snapshots; test `docs-site/__tests__/editor-features-docs-sync.test.ts` passes.
 
+## UX-GUIDELINES-43 gate (Mandatory)
+Source: Rajiv, C0ALZJHGE49 thread 1791547057.448289 (ts 1791550580.947979, 1791550844.134379); rule `~/.claude/rules/43-heydonna-ux-guidelines.md`.
+Full list: see rule 43 (full list), 17 rules. Includes: no disabled buttons, show the error on click (rule 10; only the in-flight guard may disable); in all modals/dialogs the preferred action button is the RIGHT-MOST (rule 11). BLOCK a diff that violates either.
+
+REQUEST_CHANGES/BLOCK a UI diff that breaks the 17 UX rules (more than 1 status line + 1 primary button, stacked/contradicting banners, internal jargon, destructive adjacent to safe at equal weight, targets under 44px) or a new/changed surface with no Rajiv-approved mock. Required: ux-reviewer heuristic pass (rule, then Nielsen + WCAG 2.2 AA).
+
 ## Review Source Invariant
 
 Before reading the plan file, adjudicating the plan, or writing a `/tmp` plan

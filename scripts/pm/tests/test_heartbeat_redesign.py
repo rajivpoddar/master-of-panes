@@ -138,7 +138,7 @@ def test_old_open_thread_outside_lookback_is_carried_forward_until_answered(tmp_
 
     threads = support.carry_forward([], ["1000.000000"], fetch)
     assert fetched == ["1000.000000"] and threads[0]["state"] == "needs_reply"
-    assert support.select_items(threads, 1000 + 27 * 3600) == threads
+    assert support.select_items(threads, 1000 + 27 * 3600) == [dict(threads[0], overdue=True)]
     path = tmp_path / "open.json"
     support.save_open_state({"C1": support.open_roots(threads)}, path)
     assert support.load_open_state(path) == {"C1": {"1000.000000": 0.0}}  # legacy list format still loads
@@ -521,7 +521,7 @@ def test_answered_thread_is_tracked_and_reopens_on_new_customer_reply(tmp_path):
     threads = support.carry_forward([], prev, lambda ts: fetched.append(ts) or reopened)
     assert fetched == [answered["ts"]]
     assert threads[0]["state"] == "needs_reply"
-    assert support.select_items(threads, 5900) == threads
+    assert support.select_items(threads, 5900) == [dict(threads[0], overdue=True)]
 
 
 def test_tracked_roots_retains_stale_answered_and_open():
@@ -653,10 +653,13 @@ def test_thanks_with_new_problem_after_pm_reply_stays_needs_reply():
     assert support.classify_thread(msgs, 2000)["state"] == "needs_reply"
 
 
-def test_closing_thanks_without_any_team_reply_does_not_answer():
-    # A lone customer "thanks" must not be swallowed when nobody on the team ever replied.
-    msgs = [_req(CUST, 1000, "export blank"), _req(CUST, 1100, "thanks")]
-    assert support.classify_thread(msgs, 2000)["state"] == "needs_reply"
+def test_requester_self_closing_ack_without_team_reply_answers():
+    # Live edit (synced): a requester self-resolving ("Thanks. Found it") closes the thread
+    # even with no team reply; answered_at is the self-close ts, answered_by stays None.
+    msgs = [_req(CUST, 1000, "export blank"), _req(CUST, 1100, "Thanks. Found it")]
+    item = support.classify_thread(msgs, 2000)
+    assert item["state"] == "answered"
+    assert item["answered_by"] is None and item["answered_at"] == 1100.0
 
 
 def test_answered_pm_threads_compose_without_needs_reply_or_overdue():

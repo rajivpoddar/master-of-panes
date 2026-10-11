@@ -132,8 +132,8 @@ def test_managed_route_declares_existing_social_owner():
     table = MOD.extract_route_table(SOP)
     route = table["exact_channel_routes"][GROWTH]
     assert route["destination_thread_id"] == SOCIAL
-    # An unstamped source candidate cannot accidentally cut over runtime.
-    assert route["admitted_after_epoch"] is None
+    # Runtime cutover is stamped live (synced from the deployed SOP); unstamped is also valid.
+    assert route["admitted_after_epoch"] is None or float(route["admitted_after_epoch"]) > 0
 
 
 def test_actual_envelope_writer_retains_current_growth_blocks(tmp_path):

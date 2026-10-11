@@ -23,7 +23,7 @@ consistent. The helper fails closed if the table is missing or malformed.
       "project": "heydonna",
       "destination_thread_id": "01a11e3d-d8bb-73c1-8593-8ff56019d842",
       "consumer_sop_path": "/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md",
-      "admitted_after_epoch": null
+      "admitted_after_epoch": 1791644828.031685
     },
     "C09TYQC1DEF": {
       "project": "superproofer",

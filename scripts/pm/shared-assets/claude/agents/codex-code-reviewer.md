@@ -585,6 +585,12 @@ the action's own in-flight request is allowed. Full rule:
 Source: Rajiv 2026-10-09, C0ALZJHGE49 thread 1791537587.688969 ts 1791537815.457389: *"why is the error message in the menu item? that's an anti pattern. it should only be in the toast"*.
 Menu/menubar/context-menu actions: a refused action shows a TOAST ONLY. BLOCK/REQUEST_CHANGES on any inline error text, `role="alert"`, or `aria-invalid` rendered inside a menu item, or a menu held open to show an error. The item stays enabled (the no-disabled-precondition rule still applies). Required test: click the enabled item with the precondition unmet, then assert toast shown, no inline alert in the menu, and the action not run. Rule: `~/.claude/rules/33-heydonna-ui-product-rules.md` "Menu-action errors go in the toast only".
 
+## UX-GUIDELINES-43 gate (Mandatory)
+Source: Rajiv, C0ALZJHGE49 thread 1791547057.448289 (ts 1791550580.947979, 1791550844.134379); rule `~/.claude/rules/43-heydonna-ux-guidelines.md`.
+Full list: see rule 43 (full list), 17 rules. Includes: no disabled buttons, show the error on click (rule 10; only the in-flight guard may disable); in all modals/dialogs the preferred action button is the RIGHT-MOST (rule 11). BLOCK a diff that violates either.
+
+REQUEST_CHANGES/BLOCK a UI diff that breaks the 17 UX rules (more than 1 status line + 1 primary button, stacked/contradicting banners, internal jargon, destructive adjacent to safe at equal weight, targets under 44px) or a new/changed surface with no Rajiv-approved mock. Required: ux-reviewer heuristic pass (rule, then Nielsen + WCAG 2.2 AA).
+
 ## No-live-Clerk-in-E2E gate (Mandatory - Rajiv product rule 2026-10-08)
 
 Source: Rajiv, C0ALZJHGE49 thread 1791398195.877809, ts 1791398300.792659: "Note that clerk has to be bypassed in e2e. We should not hit live clerk api." Rule: `~/.claude/rules/41-heydonna-e2e-no-live-clerk.md`.

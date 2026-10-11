@@ -57,7 +57,7 @@ ACK_RE = re.compile(
 MENTION_RE = re.compile(r"<[@!][^>]*>")
 CLOSING_CUE_RE = re.compile(
     r"\b(thanks?|thank you|thx|cheers|appreciate\w*|worked|went through|fixed|resolved|solved|sorted|"
-    r"all set|(?:was|were) able to|that did it)\b",
+    r"all set|(?:was|were) able to|that did it|all good|(?:working|fine|good) now|will reach out if|found it)\b",
     re.IGNORECASE,
 )
 REOPEN_CUE_RE = re.compile(
@@ -126,16 +126,19 @@ def classify_thread(messages: list[dict], now_ts: float) -> dict | None:
         return None
     humans = [m for m in messages if is_human(m)]
     # Drop trailing requester acknowledgements ("Great! It worked") that follow a team reply.
+    # A requester self-resolving with no team reply ("Thanks. Found it") is also closed.
     effective = list(humans)
+    self_closed_ts = None
     while (
         len(effective) > 1
         and effective[-1].get("user") == requester
         and is_closing_ack(effective[-1].get("text") or "")
-        and any(is_team(m) and m.get("user") != requester for m in effective[:-1])
     ):
+        self_closed_ts = self_closed_ts or float(effective[-1]["ts"])
         effective.pop()
     last = effective[-1]
-    answered = last.get("user") != requester and is_team(last)
+    team_answered = last.get("user") != requester and is_team(last)
+    answered = team_answered or self_closed_ts is not None
     text = " ".join(m.get("text") or "" for m in messages)
     links = sorted({int(a or b) for a, b in LINK_RE.findall(text)})
     last_requester_ts = max(float(m["ts"]) for m in effective if m.get("user") == requester)
@@ -143,19 +146,28 @@ def classify_thread(messages: list[dict], now_ts: float) -> dict | None:
         "ts": root["ts"],
         "requester": requester,
         "state": "answered" if answered else "needs_reply",
-        "answered_by": team_name(last) if answered else None,
-        "answered_at": float(last["ts"]) if answered else None,
+        "answered_by": team_name(last) if team_answered else None,
+        "answered_at": float(last["ts"]) if team_answered else self_closed_ts,
         "age_min": int((now_ts - last_requester_ts) / 60),
         "links": links,
         "summary": re.sub(r"<@[A-Z0-9]+>|\s+", " ", root.get("text") or "").strip()[:70],
         "last_activity": float(messages[-1]["ts"]),
+        "last_requester_ts": last_requester_ts,
     }
 
 
 def select_items(threads: list[dict], window_start: float) -> list[dict]:
-    """Pure: keep threads active in the window, plus every open needs_reply
-    (a reopened answered thread is needs_reply, so it is always kept)."""
-    return [t for t in threads if t["last_activity"] >= window_start or t["state"] == "needs_reply"]
+    """Pure: keep threads active in the window, plus every still-unanswered needs_reply.
+    A needs_reply whose latest customer message predates the window is flagged overdue=True
+    (rendered "OVERDUE"). Answered threads (latest message ours) never surface outside the window."""
+    out = []
+    for t in threads:
+        if t["state"] == "needs_reply":
+            t = dict(t, overdue=t.get("last_requester_ts", t["last_activity"]) < window_start)
+            out.append(t)
+        elif t["last_activity"] >= window_start:
+            out.append(t)
+    return out
 
 
 def slack_get(token: str, method: str, params: dict) -> dict:
@@ -173,8 +185,17 @@ def slack_get(token: str, method: str, params: dict) -> dict:
     raise RuntimeError(f"slack {method}: ratelimited")
 
 
+def parent_thread_ts(msg: dict) -> str | None:
+    """Pure: parent root ts when msg is a thread reply (incl. a reply broadcast to the channel)."""
+    t = msg.get("thread_ts")
+    return t if t and t != msg.get("ts") else None
+
+
 def fetch_thread(token: str, channel: str, ts: str, now_ts: float) -> dict | None:
     replies = slack_get(token, "conversations.replies", {"channel": channel, "ts": ts, "limit": 200})
+    parent = parent_thread_ts(replies.get("messages", [{}])[0])
+    if parent:
+        replies = slack_get(token, "conversations.replies", {"channel": channel, "ts": parent, "limit": 200})
     item = classify_thread(replies.get("messages", []), now_ts)
     if item:
         item["channel"] = CHANNELS.get(channel, channel)
@@ -184,7 +205,17 @@ def fetch_thread(token: str, channel: str, ts: str, now_ts: float) -> dict | Non
 def fetch_channel(token: str, channel: str, oldest: float, now_ts: float) -> list[dict]:
     hist = slack_get(token, "conversations.history", {"channel": channel, "oldest": f"{oldest:.6f}", "limit": 200})
     out = []
+    seen_roots: set[str] = set()
     for root in hist.get("messages", []):
+        # A reply broadcast to the channel shows up in history as its own message; judge the
+        # whole thread via its parent, never the reply alone (it would look unanswered).
+        parent = parent_thread_ts(root)
+        if parent:
+            if parent in seen_roots:
+                continue
+            seen_roots.add(parent)
+            root = slack_get(token, "conversations.replies", {"channel": channel, "ts": parent, "limit": 1})["messages"][0]
+        seen_roots.add(root["ts"])
         messages = [root]
         if root.get("reply_count"):
             replies = slack_get(token, "conversations.replies", {"channel": channel, "ts": root["ts"], "limit": 200})
