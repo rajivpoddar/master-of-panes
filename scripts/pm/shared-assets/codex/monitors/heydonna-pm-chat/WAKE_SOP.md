@@ -189,10 +189,17 @@ delegates the packet and consumes the result; it never runs either skill.
   admission; otherwise reproduce/rework on a slot). PM asks CTO only for exact-
   head admission or final merge; PR Merges executes those edges. PM keeps
   capacity filled by requesting admission for each independently eligible
-  exact-head PR as a gate request, never exceeding five genuine E2E
+  exact-head PR as a gate request, never exceeding ten genuine E2E
   workflow runs queued/running across PR, main, and capture workloads sharing
   the E2E pool. Count actual E2E workflow runs, not stale no-job records,
-  labels, status contexts, or task-queue receipts. If fewer than four safe
+  labels, status contexts, or task-queue receipts. Ten is ONE aggregate ceiling,
+  not a per-owner allowance, confirmed by Rajiv in C0ALZJHGE49/thread
+  `1791812764.517959`, events `1791813497.644479` and `1791813568.874909`
+  ("memorise this e2e capacity"), and CTO decision `1791815113.945459`.
+  Preserve unique leases, actually healthy/free backend availability, existing
+  autoscaler VM/operating-budget limits and pool membership; the ceiling is
+  not proof of available capacity or authority to provision, change CI
+  concurrency, or start another admission pair. If fewer than four safe
   candidates can move, route every eligible one and state each concrete hold;
   never fabricate an assignment. This capacity limit changes no review,
   visual-QA, exact-head, CI, causal-red, or head-pinned merge gate. No polling,
