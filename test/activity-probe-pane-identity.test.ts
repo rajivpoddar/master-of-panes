@@ -107,3 +107,21 @@ test("boot syncs stale S6 address metadata to 0:0.7 without touching issue or ep
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// 2026-10-13: S2 assign refused 4x with pane_activity_unknown. Live Claude
+// panes render the busy chevron as 256-colour 38;5;246 (no truecolor), which
+// was classified unknown instead of active.
+test("256-colour busy chevron (38;5;246) is active, not unknown", async () => {
+  const runShell = async (command: string) => {
+    if (command.startsWith("tmux display-message")) return { stdout: `%120|${P(2)}\n`, stderr: "" };
+    const git = command.match(/^git -C '([^']+)' rev-parse --show-toplevel/);
+    if (git) return { stdout: `${git[1]}\n`, stderr: "" };
+    if (command === "tmux capture-pane -e -t %120 -p") {
+      return { stdout: "\x1b[38;5;244m────────────────────────────\n\x1b[39m\x1b[38;5;246m❯ \x1b[39m\n\x1b[38;5;244m────────────────────────────\x1b[39m\n", stderr: "" };
+    }
+    return { stdout: "", stderr: "" };
+  };
+  const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell });
+  assert.equal(await relay.getSlotActivityState(2), "active");
+  assert.equal(await relay.getPaneActivityState("%120"), "active");
+});

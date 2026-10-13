@@ -1347,7 +1347,9 @@ export class TmuxRelay {
           }
         }
       }
-      if (color === "153;153;153") return "active";
+      // Claude renders the busy chevron as truecolor 153;153;153, or as its
+      // 256-colour quantization 246 when the terminal lacks truecolor (2026-10-13).
+      if (color === "153;153;153" || color === "indexed:246") return "active";
       return ["default", "37", "97", "255;255;255"].includes(color) ? "idle" : "unknown";
     } catch {
       return "unknown";

@@ -51,7 +51,7 @@ for match in sgr.finditer(prefix):
             color="indexed:"+str(codes[i+2]) if i+2<len(codes) else "unknown"; i+=2
         elif 30<=c<=37 or 90<=c<=97: color=str(c)
         i+=1
-sys.exit(0 if color=="153;153;153" else 1 if color in ("default","37","97","255;255;255") else 2)
+sys.exit(0 if color in ("153;153;153","indexed:246") else 1 if color in ("default","37","97","255;255;255") else 2)
 '
 activity=$?
 same_pane || exit 2

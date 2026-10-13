@@ -303,9 +303,9 @@ test('retained shell probe uses the mapped immutable S6 target, refuses missing 
     w.panes['%7'].unreadable=true; assert.equal((await probeResult(w,6,true)).status,2);
   } finally { await w.cleanup(); }
 });
-for(const [color,state,exit] of [['153;153;153','active',0],['10;20;30','unknown',2]]) test(`native and retained probe honor inherited ${state} foreground`,async()=>{
+for(const [color,state,exit] of [['2;153;153;153','active',0],['5;246','active',0],['2;10;20;30','unknown',2],['5;244','unknown',2]]) test(`native and retained probe honor inherited ${state} foreground ${color}`,async()=>{
   const w=await world();try{
-    w.panes['%7'].prefix=`\x1b[38;2;${color}m`;
+    w.panes['%7'].prefix=`\x1b[38;${color}m`;
     assert.equal(await w.relay.getSlotActivityState(6),state);assert.equal((await probeResult(w,6,true)).status,exit);
   }finally{await w.cleanup();}
 });
