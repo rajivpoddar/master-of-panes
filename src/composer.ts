@@ -28,6 +28,27 @@ export function resolveAssignmentInjectEnterDelayMs(configured = INJECT_ENTER_DE
   return Math.max(2000, configured);
 }
 
+/**
+ * Slash commands (Rajiv 2026-10-15, Claude Code 2.1.300): typing `/exit` opens
+ * an autocomplete menu that swallows an immediate Enter, leaving the text
+ * buffered. Slash-command delivery therefore clears the composer (Escape + C-u),
+ * types the command, waits MOP_SLASH_COMMAND_ENTER_DELAY_MS (default 1000) and
+ * sends Enter separately, retrying Enter once only if the exact text is still
+ * buffered.
+ */
+export function isSlashCommand(command: string): boolean {
+  return /^\/[A-Za-z][\w:-]*(?: [^\n]*)?$/.test(command);
+}
+
+export function resolveSlashCommandEnterDelayMs(raw = process.env.MOP_SLASH_COMMAND_ENTER_DELAY_MS): number {
+  return parseDelay(raw) ?? 1000;
+}
+
+/** Composer contents a slash-command send may clear: empty, or our own command left buffered. */
+export function slashComposerClearable(composer: string | null, command: string): boolean {
+  return composer !== null && (composer === "" || composer.trim() === command.trim());
+}
+
 const RULE_LINE = /^\s*─{20,}\s*$/;
 /** Claude Code hints shown while prompts sit in the queued-message area. */
 const QUEUED_INPUT_PLACEHOLDER = /^press\s+up\s+to\s+edit\s+queued\s+messages$/i;

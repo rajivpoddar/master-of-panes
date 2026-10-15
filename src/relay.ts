@@ -15,7 +15,7 @@ import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
-import { composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, submitWithComposerCheck } from "./composer.js";
+import { composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, isSlashCommand, resolveSlashCommandEnterDelayMs, slashComposerClearable, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 import type { PMClearFenceRefusal } from "./pmClearLatch.js";
 
@@ -1203,11 +1203,19 @@ export class TmuxRelay {
           await fs.writeFile(tmpFile, command);
           try {
             let prePasteComposer: string | null = null;
-            try {
-              const before = await this.runShell(`tmux capture-pane -t ${paneTarget} -p`, { timeout: 5_000 });
-              prePasteComposer = composerText(before.stdout);
-            } catch {
-              // Unknown composer state must not be followed by Enter.
+            const readComposer = async (): Promise<string | null> => {
+              try {
+                const before = await this.runShell(`tmux capture-pane -t ${paneTarget} -p`, { timeout: 5_000 });
+                return composerText(before.stdout);
+              } catch {
+                // Unknown composer state must not be followed by Enter.
+                return null;
+              }
+            };
+            prePasteComposer = await readComposer();
+            const slash = isSlashCommand(command);
+            if (slash && slashComposerClearable(prePasteComposer, command)) {
+              prePasteComposer = await this.clearComposerForSlash(paneTarget, readComposer);
             }
             await this.runShell(
               `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
@@ -1230,11 +1238,12 @@ export class TmuxRelay {
               },
               sleep,
               prePasteComposer,
+              ...(slash ? this.slashSubmitTiming() : {}),
             });
             if (this.db) {
               this.db.logEvent(slotNum, "send_submit_check", null, null, {
                 command: command.slice(0, 200),
-                dwell_ms: INJECT_ENTER_DELAY_MS,
+                dwell_ms: slash ? this.slashSubmitTiming().dwellMs : INJECT_ENTER_DELAY_MS,
                 payload_seen: submit.payloadSeen,
                 payload_stable: submit.payloadStable,
                 cleared: submit.cleared,
@@ -1246,7 +1255,7 @@ export class TmuxRelay {
             return submit.payloadSeen === true
               && submit.payloadStable === true
               && (submit.cleared === true || submit.queued === true)
-              && submit.enterPresses === 1;
+              && (submit.enterPresses === 1 || (slash && submit.enterPresses === 2));
           } finally {
             await fs.unlink(tmpFile).catch(() => undefined);
           }
@@ -1300,6 +1309,29 @@ export class TmuxRelay {
       });
     }
     return false;
+  }
+
+  /** Dwell before the separate slash-command Enter (MOP_SLASH_COMMAND_ENTER_DELAY_MS). */
+  private slashSubmitTiming(): { dwellMs: number; payloadStableMs: number } {
+    const ms = resolveSlashCommandEnterDelayMs();
+    return { dwellMs: ms, payloadStableMs: ms };
+  }
+
+  /** Escape (dismiss any autocomplete menu) then C-u (clear the line); return the re-read composer. */
+  private async clearComposerForSlash(paneTarget: string, read: () => Promise<string | null>): Promise<string | null> {
+    try {
+      await this.runShell(`tmux send-keys -t ${paneTarget} Escape`, { timeout: 3_000 });
+      await this.runShell(`tmux send-keys -t ${paneTarget} C-u`, { timeout: 3_000 });
+    } catch {
+      return null;
+    }
+    let composer: string | null = null;
+    for (let waited = 0; waited <= 1_000; waited += 250) {
+      await sleep(250);
+      composer = await read();
+      if (composer === "") return composer;
+    }
+    return composer;
   }
 
   /**
@@ -1403,7 +1435,11 @@ export class TmuxRelay {
       const prePaste = await recheck("pre_paste");
       if (prePaste) return { outcome: "refused_pre_effect", reason: prePaste, paneId };
       const before = await capture();
-      const prePasteComposer = composerText(before);
+      let prePasteComposer = composerText(before);
+      const slash = isSlashCommand(command);
+      if (slash && slashComposerClearable(prePasteComposer, command)) {
+        prePasteComposer = await this.clearComposerForSlash(paneId, async () => composerText(await capture()));
+      }
       if (prePasteComposer === null) return { outcome: "refused_pre_effect", reason: "composer_unreadable", paneId };
       if (prePasteComposer !== "") return { outcome: "refused_pre_effect", reason: "composer_not_empty", paneId };
       const tmpFile = `/tmp/mop-guarded-${slotNum}-${Date.now()}.txt`;
@@ -1446,7 +1482,10 @@ export class TmuxRelay {
           },
           sleep,
           prePasteComposer,
-          maxEnterPresses: 1,
+          // Slash commands: one Enter retry only while the exact text is still
+          // buffered (autocomplete swallowed the first Enter).
+          maxEnterPresses: slash ? 2 : 1,
+          ...(slash ? this.slashSubmitTiming() : {}),
           ...opts.timing,
         });
         this.db?.logEvent(slotNum, "send_submit_check", null, null, {
@@ -1458,7 +1497,8 @@ export class TmuxRelay {
           enter_presses: submit.enterPresses,
         });
         const confirmed = submit.payloadSeen === true && submit.payloadStable === true
-          && (submit.cleared === true || submit.queued === true) && submit.enterPresses === 1;
+          && (submit.cleared === true || submit.queued === true)
+          && (submit.enterPresses === 1 || (slash && submit.enterPresses === 2));
         if (confirmed) return { outcome: "delivered", paneId };
         return {
           outcome: "uncertain",

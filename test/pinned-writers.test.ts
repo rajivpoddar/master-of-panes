@@ -98,11 +98,12 @@ function setup(paneOver: Partial<Pane> = {}) {
   return { p, world, send };
 }
 
-test("writer positive: pinned clear pastes and presses Enter once on the pinned pane", async () => {
+test("writer positive: pinned clear clears the composer, pastes and presses Enter once on the pinned pane", async () => {
   const h = setup();
   const r = await h.send(CLEAR_TEXT);
   assert.equal(r.outcome, "delivered");
-  assert.deepEqual(h.p.effects, [`%50:paste:${CLEAR_TEXT}`, "%50:Enter"]);
+  // Slash commands dismiss the autocomplete menu (Escape) and clear the line (C-u) first.
+  assert.deepEqual(h.p.effects, ["%50:Escape", "%50:C-u", `%50:paste:${CLEAR_TEXT}`, "%50:Enter"]);
 });
 
 test("writer: pane rebound %50 -> %51 before the lock: zero effects anywhere", async () => {

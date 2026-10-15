@@ -1822,7 +1822,8 @@ app.post("/slots/:slotNum/respawn", async (c) => {
       });
       // /exit can remove the TUI before its composer-clear readback. A single
       // Enter was attempted for submit_unconfirmed; the existing shell wait
-      // below must prove that exit before ANY launch effect. Never retry Enter.
+      // below must prove that exit before ANY launch effect. Enter is retried at
+      // most once, and only while the exact /exit is still buffered.
       if (exit.outcome !== "delivered" && !(exit.outcome === "uncertain" && exit.reason === "submit_unconfirmed")) {
         if (exit.reason === "respawn_already_satisfied") return c.json({ success: true, already_satisfied: true });
         return c.json({ error: "Respawn /exit was not confirmed", reason: exit.outcome === "uncertain"
