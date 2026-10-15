@@ -107,7 +107,7 @@ def test_open_pr_ownership_has_only_two_pm_responsibilities() -> None:
     assert "PM owns PR CI/E2E diagnosis and fixes" in wake
     assert "PM owns the complete PR CI/E2E terminal loop" in monitor
     assert "PM requests CTO Decisions only at an exact-head pair" in wake
-    assert "PR Merges executes admission/merge" in wake
+    assert "PR Merges executes admission" in wake
     assert "direct PM to fire label-gated" not in combined
     assert "PM releases the stuck slot" not in combined
     assert "PM must force terminalization" not in monitor

@@ -21,10 +21,11 @@ import {
   type SlackIngressEventType,
 } from "./cto-ingress-policy.ts";
 import {
-  findPreviousThreadMessage,
+  findThreadRoot,
   type PreviousThreadMessage,
   type SlackThreadMessage,
 } from "./cto-thread-context.ts";
+import { getDb } from "./db.ts";
 import { ipcOwnerDiscoveryArgs } from "./cto-ipc-policy.ts";
 import { materializeSlackImages, type MaterializedAttachment, type SlackFile } from "./cto-file-materialization.ts";
 import { buildCtoDurableEnvelope, hasDurableEnvelopeKey } from "./cto-envelope-queue.ts";
@@ -691,6 +692,29 @@ type ThreadSnapshot = {
   previousThreadMessage: PreviousThreadMessage | null;
 };
 
+const threadRootCache = new Map<string, PreviousThreadMessage | null>();
+
+/** Thread root: bridge.db first (inbound + slack-send outbound rows), else the fetched replies page; cached. */
+function resolveThreadRoot(channel: string, threadTs: string, messages: SlackThreadMessage[]): PreviousThreadMessage | null {
+  const key = `${channel}:${threadTs}`;
+  if (threadRootCache.has(key)) return threadRootCache.get(key)!;
+  let root: PreviousThreadMessage | null = null;
+  try {
+    const row = getDb()
+      .prepare("SELECT user_name, body FROM messages WHERE channel_id = ? AND ts = ? LIMIT 1")
+      .get(channel, threadTs) as { user_name: string; body: string } | undefined;
+    if (row) root = { ts: threadTs, user: null, bot_id: null, text: row.body, author: row.user_name };
+  } catch (error) {
+    log(`thread-root-db-error ${formatError(error)}`);
+  }
+  if (!root) {
+    root = findThreadRoot(messages, threadTs);
+    if (root) root.author = root.user ?? root.bot_id ?? null;
+  }
+  if (root) threadRootCache.set(key, root);
+  return root;
+}
+
 async function fetchThreadSnapshot(tuple: EventTuple): Promise<ThreadSnapshot> {
   try {
     if (!tuple.thread_ts) {
@@ -747,7 +771,7 @@ async function fetchThreadSnapshot(tuple: EventTuple): Promise<ThreadSnapshot> {
         event_found: messages.some((message) => message.ts === tuple.ts),
         response_metadata_present: responseMetadataPresent,
       },
-      previousThreadMessage: findPreviousThreadMessage(messages, tuple.ts),
+      previousThreadMessage: resolveThreadRoot(tuple.channel, tuple.thread_ts, messages),
     };
   } catch (error) {
     return {

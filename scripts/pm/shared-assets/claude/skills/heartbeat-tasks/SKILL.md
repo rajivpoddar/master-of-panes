@@ -20,7 +20,7 @@ Spec: `docs/pm/heartbeat-redesign-2026-09-29.md`. Rajiv, thread
 `C0ALZJHGE49/1790659381.537339`: *"we need to redo the 3h hearbeat report ...
 it should focus on axiom errors, support requests and open prs."* Approved
 2026-09-29 10:58 IST: *"build it. note that it has to have an cto at mention."*
-So the 3h post ALWAYS starts with `<@U0BNFGX2UAX>`. (The 1h post has different
+UPDATE 2026-10-14: the CTO-mention guard blocks mentions without a ladder row, so the 3h post carries NO CTO mention; strip it before posting (re-add only for a merge/admission ask, which is exempt). (The 1h post has different
 mention rules; see `hourly-heartbeat`.)
 
 The original 910-line v2.2.1 skill is backed up next to the live target as
@@ -55,7 +55,7 @@ STEP 1 — compose (prints the post; never posts):
   Inputs land in /tmp/heartbeat-3h-latest/{axiom,map,support,prs}.json.
 
 STEP 2 — sanity check before posting:
-  - first line starts with "<@U0BNFGX2UAX> *Heartbeat"
+  - first line starts with "*Heartbeat" (strip any leading CTO mention with sed 's/^<@[A-Z0-9]*> //' before posting)
   - at most ~24 lines (five blocks incl. slot occupancy), no tables, no
     housekeeping lines
   Do not hand-edit block content. If a block says "unavailable", keep it; the

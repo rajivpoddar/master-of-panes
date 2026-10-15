@@ -496,6 +496,14 @@ else
   MESSAGE=""
 fi
 
+# Refuse bodies that are just an rtk output-filter artifact (Rajiv 2026-10-13,
+# stray "0 matches for '^ACTIONS:'" post). Real messages never consist solely of this.
+if printf '%s' "$MESSAGE" | /usr/bin/grep -Eq '^[[:space:]]*[0-9]+ matches for .*$' \
+   && [ "$(printf '%s' "$MESSAGE" | /usr/bin/grep -cv '^[[:space:]]*$')" -le 1 ]; then
+  echo "ERROR: slack-send.sh refused: body looks like an rtk filter artifact ('N matches for ...'). NOTHING was sent." >&2
+  exit 4
+fi
+
 # Some PM-generated thread replies accidentally pipe a standalone `reply`
 # marker before the real body. Drop only that complete first line; do not
 # rewrite legitimate prose such as "Reply requested" or "reply with details".
@@ -940,11 +948,28 @@ if has_routing:
         print(f'MoP routing failed: {e}', file=sys.stderr)
 " "$PAYLOAD" || true
 
-# Parse result
-python3 -c "
-import json, sys
+# Parse result (also records the outgoing message in the bridge DB; fail-open)
+SLACK_SEND_PAYLOAD="$PAYLOAD" python3 -c "
+import json, sys, os
 r = json.load(sys.stdin)
 if r.get('ok'):
+    try:
+        import sqlite3
+        db = os.environ.get('BRIDGE_DB') or os.path.expanduser('~/Downloads/projects/tmux-slack-bridge/bridge.db')
+        if os.path.exists(db):
+            pl = json.loads(os.environ.get('SLACK_SEND_PAYLOAD') or '{}')
+            m = r.get('message') or {}
+            text = m.get('text') or pl.get('text') or ''
+            ch = r.get('channel', '')
+            tts = pl.get('thread_ts') or m.get('thread_ts')
+            uid = m.get('user') or m.get('bot_id') or 'BOT'
+            ctype = 'dm' if ch.startswith('D') else 'channel'
+            con = sqlite3.connect(db, timeout=2)
+            con.execute('PRAGMA busy_timeout=2000')
+            con.execute(\"INSERT OR IGNORE INTO messages (ts, thread_ts, channel_id, channel_type, user_id, user_name, direction, body) VALUES (?,?,?,?,?,?,'outbound',?)\", (r.get('ts',''), tts, ch, ctype, uid, 'slack-send.sh', text))
+            con.commit(); con.close()
+    except Exception as e:
+        print(f'bridge-db record skipped: {e}', file=sys.stderr)
     ts = r.get('ts', '')
     channel = r.get('channel', '')
     print(f'OK ts={ts} channel={channel}')

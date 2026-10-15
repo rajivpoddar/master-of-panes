@@ -185,18 +185,19 @@ template — both must read plan-agent-first with no `/handoff` step.
 
 Every dispatched `task` **whose acceptance criteria require browser testing**
 — a real editor/UI path, a real-browser reproduction, a visual/screenshot proof,
-or an end-to-end user gesture — MUST name the **`qa-tester` agent** in its
+or an end-to-end user gesture — MUST name the **`remote-qa-runner` agent** (headless, ephemeral remote box;
+Rajiv DM D0AMF0XE6TS thread 1791918319.027339; host `qa-tester` is fallback only) in its
 `self-QA` step, so the slot performs browser self-QA through that agent rather
 than improvising a harness. State it explicitly in the task message, e.g.:
 
 ```text
-… → implement → self-QA (use the `qa-tester` agent for the browser/UI leg) → Codex code review → PR
+… → implement → self-QA (use the `remote-qa-runner` agent for the browser/UI leg; `remote-test-runner` for tests) → Codex code review → PR
 ```
 
 Where browser testing is **not** required (pure unit / integration / docs /
 tooling lanes), the `self-QA` step stays as-is — do not add the agent by rote.
 The test is whether the AC's required proof includes a browser, visual, or
-end-to-end surface; if it does, naming `qa-tester` is mandatory, not optional.
+end-to-end surface; if it does, naming `remote-qa-runner` is mandatory, not optional.
 
 This is part of the literal `task` message the skill POSTs, not a separate
 delivery. Keep it in sync with the MoP-side dispatch/handoff template.

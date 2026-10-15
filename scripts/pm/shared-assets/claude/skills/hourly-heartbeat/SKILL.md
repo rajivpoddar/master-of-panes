@@ -101,6 +101,14 @@ STEP 5 — return exactly:
   - ...            (or "ACTIONS: none")
 ```
 
+## Mandatory: same-turn `hourly-report-processing` (incl. slot checkout review)
+
+[HIGH] Rajiv 2026-10-14, C0ALZJHGE49 thread 1791945910.806879, ts 1791946284.802109: *"are slot checkouts being reviewed on this alert? S1, S3 and S4 are in interrupted state. S5 and S8 are idle"*, then ts 1791946355.104529: *"why was it missed? is there a gap in the workflow?"* The gap: this skill's agent only composes and posts the report. PM read the agent's summary as "done" and never ran `Skill(hourly-report-processing)` on the posted report, so Step 3 (the all-slot checkout review) never ran.
+
+Rule: when the heartbeat agent returns `HOURLY_POSTED ts=…`, PM MUST in that same turn launch `Skill(hourly-report-processing)` against that ts, including the Step 3 all-slot checkout review in ONE bg agent (slot state, pane, branch vs assigned lane, intervene via message-slot). The heartbeat agent's "items needing PM action" list does not replace it. A turn that ends after a heartbeat with no Step 3 agent launched is a process miss.
+
+Also: a `new_issue` assign via `mop-assign-slot.py` MUST pass `--task-file` with the full packet. Assigning without one leaves the slot with a null task after its clear (S2/S6/S7 on 2026-10-14).
+
 ## PM follow-through (the open-PR drive)
 
 PM owns all CI/E2E/capture terminals, on PRs and on main (rule 14):

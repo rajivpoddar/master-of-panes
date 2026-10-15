@@ -79,13 +79,22 @@ consumes candidates/verdicts/terminals, reconciles duplicates, continues
 routine authorized work through the same owners, and closes chains with one
 material source-thread completion (five-minute history-backed delivery
 check, one same-owner reminder for a proven missing return, quiet
-otherwise). Under Rajiv's 2026-09-27 PR-terminal direction, PM owns open-PR
+otherwise). Final-merge exception (Rajiv 2026-10-15): the actual
+`heydonna-cto-pr-merge` executor posts its outcome directly to the original
+merge-ask Slack thread with guarded Abhijit identity/readback, then sends Returns
+the internal terminal with that receipt or typed delivery failure. Source
+delivery does not wait for Returns; Returns must not duplicate a delivered
+terminal or retry an uncertain post. This overrides older sole-poster briefs
+for in-flight final merges, not completed-outcome replay or other chains.
+Under Rajiv's 2026-09-27 PR-terminal direction, PM owns open-PR
 CI/E2E terminal reads, causal classification, CI fixes through a PM background
 agent or slot, E2E reproduction/rework through a slot, proven-flake evidence,
 and hourly continuity. PM requests CTO Decisions only at an exact-head pair
 admission or final head-pinned merge boundary; Decisions routes those requests
-through the two PR skills to PR Merges. PR Merges executes admission/merge,
-not PR-red investigation or fixes; Rescues is not a PR-red owner. Direct
+through the scope-appropriate installed skills: admission stays with PR Merges;
+Returns coordinates final-merge distribution under the roster rule below,
+not merge execution. Merge executors do not own PR-red investigation or fixes;
+Rescues is not a PR-red owner. Direct
 CTO-DM-owned chains stay with CTO DM `01a0911a-a718-7743-b37e-e785f24f3708`;
 later moves need an explicit per-assignment handoff — never queue
 copying/replay/deletion/broadcast.
@@ -105,8 +114,9 @@ execution. Task creation/rotation only on explicit request.
   `Ev0C20LL3YBU`): native `codex_app.send_message_to_thread` with exact
   threadId + prompt, no overrides. Record only actual receipt fields;
   delivery is not consumption; uncertain delivery ends the attempt — no
-  retry, fallback, replay, or second owner. This is the sole exception to
-  the Decisions native-tool ban (no read/wait/list/create/fork/handoff or
+  retry, fallback, replay, or second owner. This and the single bounded
+  final-merge roster snapshot below are the only exceptions to the Decisions
+  native-tool ban (otherwise no read/wait/list/create/fork/handoff or
   IPC-CLI substitution).
 - Independent delegations and terminal returns: installed
   `codex-stdio-send-message` with exact destination, complete message, and
@@ -118,7 +128,7 @@ execution. Task creation/rotation only on explicit request.
   (Returns for new chains) and its review/terminal boundary.
 - Never poll GitHub in any task: one bounded snapshot at wake consumption
   or terminal action only; all progress arrives by event/receipt. No `gh run watch`, no polling heartbeat/automation. An external wait ends the turn;
-  resume on the event, not a timer. PR Merges briefs must carry the
+  resume on the event, not a timer. All admission and final-merge briefs carry the
   no-poll/no-sleep disposition (Rajiv `Ev0C2GQKDWJK`).
 - Never ask any task to poll/watch GitHub (Rajiv 2026-09-26, thread
   1790361233.031889 ts 1790365676.832649). CI/E2E/deploy terminal events
@@ -128,12 +138,60 @@ execution. Task creation/rotation only on explicit request.
   next step is triggered by the Slack terminal event as a new wake. Write
   gated follow-ons as "on the <event> wake, do X", never as a wait.
 
+## Final merge distribution (Rajiv 2026-10-15)
+
+Rajiv UEQTTB97A, C0ALZJHGE49/root `1792042802.243849`: directive
+`1792046703.058939`, "use all available tasks for merges. It's holding up the
+workflow"; skill authority `1792043405.284529`; SOP update `1792047172.413009`.
+Final merges are not exclusive to PR Merges. Use ALL available suitable existing
+HeyDonna tasks in this pool, respecting each request's availability and affinity:
+
+| Executor | Existing task ID |
+| --- | --- |
+| PR Merges | `01a0324b-68e0-7491-988f-e7e1549f16f7` |
+| Rescues | `01a0b3b9-cb21-7200-b426-469defef65dd` |
+| Standby | `01a0986b-9951-7b01-a47b-af3b9a1309ca` |
+| Backup | `01a095ce-4e47-7a42-b3e5-a0bb53dc017c` |
+| Hotfixes | `01a095ce-4e47-7a42-b3e5-a09fbd1ed60a` |
+| CP Repairs | `01a08f69-45db-71c2-b433-678419139ed7` |
+| PR Reviews | `01a0b53e-3316-77d3-9610-1c0c58d4ba5b` |
+
+Decisions owns intake, verdict and the exact brief; Returns coordinates
+distribution/reconciliation and consumes terminals, never another merge
+executor. Route independent eligible exact-head requests to an available suitable
+executor instead of stacking behind a busy sole queue; reuse an eligible free
+same owner. Preserve active/queued unrelated work; no personal/product task is
+commandeered and no task is permanently assumed idle. A Hotfixes-named task doing
+merge-only work does not enter hotfix implementation or trigger a full suite.
+
+ONE bounded native task-availability snapshot of this roster is allowed only as
+needed for final-merge assignment selection under this directive. This narrow
+exception permits roster selection, not continuing task/GitHub polling or
+read/list access for unrelated work; no wait, task creation or fork is implied.
+Each PR has one exact-head owner; independent PR verification may run in parallel.
+Before each mutation, refresh main/non-overlap and pin the authorized full head.
+Accepted tuples stay with their owner unless an exact handoff retires the old
+UNISSUED authority. Already-issued/uncertain effects are reconciliation-only,
+never a second command; already-terminal retirement needs no new ceremony.
+Preserve original dedups, source threads and Returns terminal; no blanket queue
+clearing/copy/replay. Blocked PRs return to PM correction, not verdict-shopping.
+
+This is capacity routing, not a waiver of genuine exact-head workflows/classifier,
+reviews, applicable visual evidence or concrete safety holds. Preserve no-poll,
+no-blind-retry and single-flight. Admission remains the dedicated installed
+`heydonna-cto-label-gated-ci` / PR Merges path. PM retains PR-red diagnosis,
+integration, reproduction, slot, prod and deploy ownership; no capture, admin,
+production or review authority is broadened. Distribution adds no gate or paid
+workflow/test and does not reopen unchanged reviews.
+
 ## Release conveyor (normative path per section)
 
-Two self-contained skills are the entire PR conveyor: admission via
-`heydonna-cto-label-gated-ci`, merge via `heydonna-open-pr-status`. No
-shared-conveyor dependency, extra receipts, or PM-script gates. Decisions
-delegates the packet and consumes the result; it never runs either skill.
+Use the installed admission/final-merge paths only: admission via
+`heydonna-cto-label-gated-ci`; ordinary final merge via `heydonna-cto-pr-merge`;
+valid classifier/site-exempt final merges retain `heydonna-open-pr-status`
+exempt handling, never invented dual-green. No shared-conveyor dependency,
+extra receipts or PM-script gates. Decisions delegates the packet and consumes
+the result; it never runs these skills.
 - PM merge asks (Rajiv C0ALZJHGE49/thread `1790970314.767989`, message `1790971258.697169`): Every merge ask must include the Slack screenshot thread for the exact head being merged, or state `No user-visible UI change: <reason>` in one line; attaching a screenshot thread does not waive visual inspection, and backend-only changes do not need decorative screenshots.
 - Admit (PR Merges): bind the reviewed changed-file scope to the exact live
   head. An authoritative exact-head classifier receipt confirming marketing
@@ -154,12 +212,12 @@ delegates the packet and consumes the result; it never runs either skill.
   routes the pair. Every PR-origin exact-head pair, including hotfix/Rescues-
   origin PRs, goes through CTO-requested PR Merges admission; the separate
   main-branch emergency/hotfix path remains unchanged.
-- Merge (PR Merges): confirmed marketing-only site scope requires its
+- Merge (assigned distributed executor): confirmed marketing-only site scope requires its
   authoritative exact-head site receipt and relevant site proof, not app
   CI/E2E; do not describe it as dual-green or a red-app-workflow waiver. App,
   mixed, or unknown scope requires genuine exact-head CI+E2E green. Then
   perform relevant-only later-main inspection, visual-QA match for UI, and
-  head-pinned merge. Relevant/ambiguous movement → integrate + fresh
+  head-pinned merge. Relevant/ambiguous movement → PM integration + requested fresh
   scope-appropriate admission/proof; unrelated movement preserves exact-head
   proof/pair.
 - Degraded path: at most five minutes on broken tooling, then the smallest
@@ -187,7 +245,8 @@ delegates the packet and consumes the result; it never runs either skill.
   PRs moving — PM reads/classifies and fixes PR CI/E2E reds (CI correction
   through a PM background agent or slot; E2E proven flake → request one
   admission; otherwise reproduce/rework on a slot). PM asks CTO only for exact-
-  head admission or final merge; PR Merges executes those edges. PM keeps
+  head admission or final merge; PR Merges executes admission and the assigned
+  distributed executor performs final merge. PM keeps
   capacity filled by requesting admission for each independently eligible
   exact-head PR as a gate request, never exceeding ten genuine E2E
   workflow runs queued/running across PR, main, and capture workloads sharing
@@ -217,8 +276,9 @@ delegates the packet and consumes the result; it never runs either skill.
   older PR-red ownership rows in `release-conveyor-contract.md` pending its
   affinity-owned update. PM owns PR CI/E2E terminal processing and hourly
   continuity; only exact-head admission/merge requests route through CTO
-  Decisions to PR Merges. PM uses background agents or slots for fixes,
-  reproduction, and proof; the two admission/merge skills stay off-slot. PM
+  Decisions: admission to PR Merges, final merges distributed with Returns
+  coordination. PM uses background agents or slots for fixes,
+  reproduction and proof; the scope-appropriate admission/merge skills stay off-slot. PM
   owns Abi intake end-to-end plus every numbered-slot
   release/clear/assign/refill/delivery (CTO supplies packets, never mutates
   slots — Rajiv 2026-09-13, `Ev0C1CSJM3BQ`, superseding all older CTO slot
@@ -228,17 +288,17 @@ delegates the packet and consumes the result; it never runs either skill.
   `pm-transition.sh`, `pm-state-replace.sh`, `pm-transition-alert.sh`,
   `slot-dispatch-sweep` and legacy `.claude/scripts/pm-*` are retired — never
   restore/depend/instruct; their absence is not a defect. PM state labels are
-  advisory projections and gate nothing; the conveyor is the two installed
-  skills plus direct MoP/slot REST routes; helper cleanup routes once to MoP; every nonterminal wake carries `next_action`, `next_owner`,
+  advisory projections and gate nothing; the conveyor is the scope-appropriate
+  installed skills plus direct MoP/slot REST routes; helper cleanup routes once to MoP; every nonterminal wake carries `next_action`, `next_owner`,
   `wake`. PM terminals arrive as one `PM_CTO_TERMINAL` envelope per
   type+PR/head/receipt. Only an explicit exact-head admission or final-merge
   request is consumed and delegated in the same wake; investigation, repro,
   rework, and status terminals remain PM continuity (hourly audit repairs one
   missed eligible gate wake once, then `TERMINAL_CONTINUITY_BREACH`).
 - Release state machine: PM retains PR-red terminal ownership through
-  capture/CI/E2E diagnosis and correction; CTO/PR Merges enter only for
-  requested exact-head admission or final head-pinned merge, or a concrete
-  reserved decision outside this policy.
+  capture/CI/E2E diagnosis and correction; Decisions/Returns route only requested
+  exact-head admission to PR Merges or final head-pinned merge to the assigned
+  distributed executor, or a concrete reserved decision outside this policy.
   Refresh later main only on materially relevant diff; stuck queued runs
   with a proven provisioning loop take the bounded escape; stale labels
   never gate; one guarded label edge per wake max. Full cycle detail →
@@ -331,9 +391,11 @@ control-plane hotfixes; full canonical suite on final bytes. CP Repairs
 affinity (never capture app-CI code; never numbered slots); installed-skill
 edits go here or MoP by affinity, never the DM lane. MoP (`01a0d779-9a74-7f52-89ad-167910930d27`): every MoP/PM-Operator change. PR Reviews (`01a0b53e-3316-77d3-9610-1c0c58d4ba5b`):
 single functionality-first review; adjudication consumes, never re-reviews.
-PR Merges (`01a0324b-68e0-7491-988f-e7e1549f16f7`): admission and
-head-pinned merge execution on CTO request, with only integration needed for
-those gates; never PR-red investigation or fixes.
+PR Merges (`01a0324b-68e0-7491-988f-e7e1549f16f7`): dedicated admission,
+including only integration required by its admission skill; also one of the
+seven final-merge executors above, never PR-red investigation or fixes. All
+seven retain their normal affinities outside an explicitly assigned merge-only
+request; Returns coordinates and consumes, never merges.
 Superseded PM Operator task `01a03c74-fc97-7a62-bb47-001ac7fb0710` receives nothing. Accepted owners
 keep their tuples; rework/approval returns to that same owner; PM has no
 review/approval/marker or direct-admission role; proven-flake admission is
@@ -390,8 +452,9 @@ Envelope (required): `sop_path`, `fingerprint`, `class`, `action_kind`,
   once and end the wake; `RAJIV_DECISION` → verified packet with options +
   recommendation to Rajiv DM `D0BPG55FG72` (`<@UEQTTB97A>`, source
   thread_ts); `PM_CORRECTION` → one exact correction to PM in
-  `#heydonna-dev` only. `MERGE_READY` → forward to PR Merges once (merge
-  task alone runs the skill + pre-effect checks); `MERGE_READY_INVALID` →
+  `#heydonna-dev` only. `MERGE_READY` → exact brief for Returns-coordinated
+  distribution to one suitable available merge executor (that assigned owner
+  runs the applicable skill + pre-effect checks); `MERGE_READY_INVALID` →
   post only the correction. At most one concise `#heydonna-dev` post when
   PM coordination requires it; never `#heydonna-pm`/`#heydonna-feedback`.
   Record fingerprint/tuple/action/skill/authority/result/closure in the
@@ -403,8 +466,9 @@ Envelope (required): `sop_path`, `fingerprint`, `class`, `action_kind`,
   reproduction/rework to a slot unless evidence proves a flake. Only then may
   PM request one exact-head pair admission through CTO Decisions; final green
   heads similarly request head-pinned merge. No blind rerun, lost green leg,
-  red merge, or notifier-prose inference. PR Merges executes admission/merge,
-  not investigation; Rescues owns no PR-red work. Main-branch P0/hotfix and
+  red merge, or notifier-prose inference. PR Merges executes admission; the
+  assigned distributed executor performs final merge, not investigation;
+  Rescues owns no PR-red work. Main-branch P0/hotfix and
   production-deploy exceptions remain on their separate established paths.
 - Slack (only for concrete ambiguity): resolve channel/ts/thread_ts;
   read via postback skill + bot token; authoritative newer replies count;
@@ -454,7 +518,8 @@ Envelope (required): `sop_path`, `fingerprint`, `class`, `action_kind`,
   E2E_FAILURE_REPORT_PENDING / CI_TEST_FAILURE_RECOVERY_COMPLETE /
   E2E_FAILURE_REPORT_COMPLETE / CI_E2E_RUNNER_STUCK → PM-owned PR terminal
   loop above; only explicit exact-head admission or merge requests route to
-  CTO Decisions and PR Merges;
+  CTO Decisions: admission to PR Merges; final merge via Returns-coordinated
+  assignment to one available suitable executor;
   PM_REPLY → quiet ACKs, delegate material; TRANSPORT_FAILURE → verify
   alternate delivery; IGNORE → ledger suppression only. Rescue binds
   issue/PR/head/directive/control point/paths/proof/rollback/PM

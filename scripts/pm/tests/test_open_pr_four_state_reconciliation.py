@@ -96,7 +96,7 @@ class OpenPrFourStateContractTests(unittest.TestCase):
         # exact-head admission / head-pinned merge boundary, PR Merges executes.
         self.assertIn("routine PM ACKs/progress are ledger-only", combined)
         self.assertIn("exact-head pair\nadmission or final head-pinned merge boundary", combined)
-        self.assertIn("PR Merges executes admission/merge", combined)
+        self.assertIn("PR Merges executes admission", combined)
 
     def test_transition_fixtures_finish_exactly_once(self):
         fixtures = [

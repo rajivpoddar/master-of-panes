@@ -390,3 +390,269 @@ LinkedIn remains under its existing blog dependency and separate merge scope.
 Already-published X/YT, the approved48s asset/video disclosure chip, original
 actors, all uncertainties and Tuesday cancellation stay intact. This caption
 correction grants no feed/inbox/follow pass, profile edit or new publication.
+
+## LinkedIn ceiling from 14 October 2026 09:30 IST
+
+Rajiv's approval `C0C7U35LBKR/1791944172.119799` of the proposal
+`1791943899.995879`, conveyed by PM `1791944182.292809` in thread
+`1791942209.016969`, raises LinkedIn to **30 confirmed follows per actual
+scheduled three-hour cycle**, beginning with the nominal **14 October 2026
+09:30 IST** event and later unconsumed cycles. This supersedes the older
+LinkedIn10/20 limits prospectively. X25, Instagram20 and YouTube15 stay unchanged.
+
+Keep the approved Rajiv LinkedIn actor and existing US digital-reporter,
+CER/CET and legal-transcription gates; skip steno-only profiles. Preserve all
+restrictions, original effect IDs, UNKNOWN no-retry fences, and report receipts.
+The completed 06:30 cycle retains its original20 ceiling and20 confirmed
+follows; this amendment supplies no additional headroom or continuation there.
+This is configuration only and starts no social pass or extra wake. Cadence,
+owner and report destination stay unchanged.
+
+## Approved LinkedIn connection notes and accepted-request introduction
+
+Rajiv approved proposal `1791944570.052559` at
+`C0C7U35LBKR/1791944641.488989`, conveyed by PM `1791944653.910659` in
+thread `1791942209.016969`. Apply from the next actual nominal **14 October
+2026 09:30 IST** cycle. This is the scoped exception to older follows-only,
+no-note and personal-introduction holds for these approved targets only.
+
+As the natively verified existing Rajiv profile, send at most15 confirmed
+connection requests per actual IST day to already-followed, verified US
+digital reporters/CER-CET professionals. This implements the approved
+approximately15/day sizing; it is separate from30 confirmed follows/cycle.
+Use the existing state's actual confirmed-follow cohort, not a fabricated
+count of30 targets. Native current role, following and connection/invitation
+state plus all old effect/assignment receipts must be checked before submission.
+The old confirmed Follow is eligibility proof; request and introduction effects
+have separate dedup keys. Never re-follow or reopen an old UNKNOWN invitation.
+Skip stenos, existing connections, pending/consumed/UNKNOWN requests and
+unverified identities. Prepare the exact note, replacing only `{first}` with
+the person's actually observed native given name:
+
+"Hi {first}, I'm building tools for digital court reporters and would love to connect and learn how you handle your transcript workflow. — Rajiv"
+
+No pitch or link in the note. If the native note flow or length is unavailable,
+hold the request; never shorten, omit the note, pay or switch transport.
+Record the original target/action and intended exact text before one Send,
+then take one bounded immediate native readback. Native Pending/Request sent
+confirms SENT only; it does not confirm acceptance. UNKNOWN is consumed and
+never retried or rekeyed. Reconcile actual-day sent usage once; preserve
+history and keep UNKNOWN separate from confirmed-only counting.
+
+During existing scheduled passes only, inspect a finite acceptance/reply subset
+bound to these actual outgoing request receipts. Once native acceptance or
+first-degree state is verified for that request, send one brief Rajiv-voice DM
+introducing HeyDonna as an AI-assisted transcript editor for digital reporters,
+free to try at `https://heydonna.law`. The existing state contains prepared copy
+within this approved scope; the source approved its purpose, claims and link,
+not an exact DM sentence. Reconcile existing outgoing/consumed introductions
+before one send. A Message button alone or unrelated existing connection is
+not proof of acceptance. Pending/uncertain acceptance gets no introduction.
+For this scoped introduction use the prepared Rajiv-voice copy rather than
+the general inbound Donna introduction. Report new replies without sending
+another introduction; substantive responses retain their existing approval
+scope and commercial-review rules.
+
+Quote each relevant new authored reply verbatim for Rajiv in the scheduled
+growth digest with author/link/observed timezone and necessary explicit
+redactions. Pricing, partnership, press and unapproved factual claims go to
+Rajiv before any response or introduction. Log sent, accepted, introduction-
+sent and replied counts separately in the existing state and growth-log.md;
+keep private inbound bodies/attachments out of those local ledgers/indexes.
+Existing company inbound DM text and unrelated personal-account restrictions
+remain. This configuration sends no request/DM, starts no pass/monitor, changes
+no cadence/owner/destination and does not reopen the closed06:30 cycle.
+
+## 14 October 09:30 prospecting priority
+
+PM `C0C7U35LBKR/1791944995.840689`, thread `1791942209.016969`,
+prioritizes the already-approved LinkedIn requests and follows ahead of X/YT
+prospecting from the next actual09:30 cycle. After the due original-actor
+morning UNKNOWN reconciliation and standing company feed-plus-topic
+engagement-first phase, work the approved already-followed US digital-reporter
+connection queue (15 confirmed sent/IST day), then eligible LinkedIn follow
+prospects (30 confirmed/native cycle). Keep the exact approved note,
+post-acceptance DM gate, no-steno/identity rules and all no-retry receipts.
+
+This prospecting priority does not omit required company/community feed,
+inbound or metric coverage, or the due09:30 full summary. X/YT prospecting is
+secondary; do not repeat zero-yield name matching or fill caps. The closed
+06:30 cycle and its actual LI20/IG1/IG UNKNOWN1/X0/YT0 receipts remain intact.
+This configuration starts no social pass or additional wake.
+
+## Legal-transcription BPO lane from 14 October 12:30 IST
+
+PM `C0C7U35LBKR/1791953046.157229`, thread `1791951585.029899`,
+corrects the offshore exclusion, with Rajiv's corroborating reply
+`1791953211.908539`: BPOs employ freelancers and are open to productivity
+tools. From the actual nominal **14 October 2026 12:30 IST** pass, include
+legal/deposition-transcription BPO companies and their relevant current staff,
+including offshore providers. This scoped lane supersedes the older US-only
+and offshore-BPO exclusion for these companies/staff. Medical-only providers,
+general call-center BPOs and steno-only profiles remain excluded.
+
+In each actual eligible finite scheduled pass, after the standing engagement
+phase, include a bounded LinkedIn company-search subset for `legal transcription`
+or `deposition transcription`, rotating India, Philippines, Kenya and the US.
+Do not run an exhaustive country/query grid or fill capacity. Verify actual
+company identity and legal/deposition-transcription services before following
+the company, then inspect linked staff with current titles transcriptionist,
+proofreader, QA or operations manager and a verified current relationship to
+that company. Generic job titles, search snippets or offshore location alone
+do not qualify. Use the verified HeyDonna company actor for supported company
+follows and the existing approved Rajiv actor for staff follows; unavailable
+actor/control coverage is reported honestly, without account substitution.
+
+This lane shares the existing LinkedIn ceiling of30 confirmed follows per
+actual three-hour cycle; it adds no capacity or connection/DM authority.
+Preserve all held targets, existing follows, pending/UNKNOWN effects, historical
+receipts and no-retry fences. Reconcile actual current-cycle usage once.
+Before each effect record source `bpo`, company/staff identity, native source
+anchor, company-role evidence, actual actor/cycle and the original effect key.
+Take one bounded immediate native readback; UNKNOWN remains consumed/no-retry.
+
+Log separate company and staff candidate, verified, already-followed/held,
+confirmed-new and UNKNOWN counts per source in the existing action ledger and
+growth-log.md. A discovered candidate is not a confirmed follow or qualified
+sales lead. Configuration creates zero new leads/follows and starts no pass,
+wake, task, schedule or monitoring loop. Other ICP lanes retain their current
+gates; cadence, owner, report destination and publication dedup remain intact.
+
+## Approved growth attribution and weekly visitor reporting
+
+Rajiv approved the tracking proposal `C0C7U35LBKR/1791959371.189239` at
+`1791959461.738869`, conveyed by PM `1791959481.046439` in thread
+`1791954946.298799`. This is a scoped exception to older profile-edit holds
+for company website attribution links only. Preserve existing profile copy,
+disclosures, identities, privacy, authentication and all publication receipts.
+
+Use `https://heydonna.law/?source=donna_<platform>_bio` for existing company
+profile website/bio links, with platform x, ig, yt, li or fb. Preserve any
+necessary existing path, query and fragment when constructing a tagged URL;
+replace the existing source parameter rather than duplicating it. LinkedIn
+company Page143949032 is included; unrelated personal profile edits are not.
+For every future separately approved company post/comment that contains an
+owned destination link, use `source=donna_<platform>_<approved-post-slug>`.
+Tagging does not approve new content, add links to a no-link draft, authorize
+outreach or permit replay/editing of consumed historical publications.
+
+Before the one original publication, record the exact tagged destination and
+tagged-link count alongside its original post/effect key. After readback log
+the actual tagged-link count per native post in growth-log.md, including zero
+for approved posts with no link. Keep profile-link placements separate from
+post counts; plans and link-in-bio references are not confirmed post links.
+An unavailable native editor is a human handoff, not permission for hidden APIs.
+
+Cloudflare Web Analytics was independently verified on14October as already
+collecting for both heydonna.law and app.heydonna.law under the existing
+heydonna.law automatic setup. Its existing EU exclusion was preserved; no
+duplicate beacon, DNS change, redeploy, token or access grant was necessary.
+Use the approved nonsecret weekly-referrer reporting option. Include one
+bounded rolling-seven-day analytics observation during the existing Wednesday
+09:30 full-summary cycle, writing the dated totals/referrer/hostname aggregate
+to growth-log.md for the growth report. No new automation or between-cycle
+inspection. The first14October snapshot is delivered in the approval thread.
+
+Report Cloudflare's actual metric name **visits**, selected interval/timezone,
+host coverage and displayed sampling/rounding honestly; do not call these
+unique visitors, sign-ups or conversions. Distinguish direct/unknown referrer
+from measured social attribution. Cloudflare Web Analytics does not retain
+query strings, so source-tag visitor/sign-up/conversion rows remain UNAVAILABLE
+until the separately owned beacon/first-touch implementation supplies proof.
+Never store customer editor/project paths, private telemetry bodies or API
+credentials in social state, screenshots shared externally, or growth logs.
+
+
+## LinkedIn note-cap decision settled — 14 October 2026
+
+Rajiv's direct "go" C0C7U35LBKR/1791966388.595689 approves the proposal
+1791966355.208719; PM1791966397.776539 conveys it in thread1791965722.366239.
+This supersedes the prior mandatory-note/hold-on-exhaustion rule for this scope.
+As the verified Rajiv profile, send up to15 confirmed connection requests per
+actual IST day to already-followed verified US digital reporters/CER-CET or
+deposition/legal transcriptionists; verified legal-transcription BPO staff are
+also allowed. Skip steno-only, existing connections, pending/consumed/UNKNOWN
+requests and unverified identities. Preserve every old effect key/no-retry fence.
+
+Use the exact previously approved personalized note while the free allowance
+remains. After it is exhausted, use the native request without a note; no paid
+upgrade, shortening, alternate text or transport. Reconcile actual-day usage
+once:14October already has3confirmed noted requests, not0. UNKNOWN is separate
+and never retried. Log each intended target/actor/exact note or explicit no-note
+before one submit, then one immediate native readback; Pending/sent confirms
+request submission only. Source tag li_connect in existing state/growth-log.md.
+
+After native acceptance/first-degree proof bound to an approved outgoing request,
+send ONE Rajiv-voice HeyDonna introduction with free-trial link
+https://heydonna.law/?source=donna_li_dm. Use the prepared copy in the existing
+active directive, replacing only the observed first name. Reconcile old outgoing
+introduction/consumed/UNKNOWN state first. Message button alone is not acceptance.
+Pricing/partnership/press questions go to Rajiv before any introduction/response.
+Report relevant new replies verbatim in the scheduled digest; private inbound
+bodies/attachments remain excluded from local indices/logs. No unrelated inbox.
+
+The exact routed source authorizes one finite networking continuation in the
+current12:30 chain, starting now; afterward use only existing eligible scheduled
+passes. It creates no new feed/metrics/digest pass, task, schedule or monitor;
+no original publication replay, new follows or public personal engagement.
+
+
+## Next scheduled networking/BPO staff priority — source1791967822.045099
+
+PM C0C7U35LBKR/1791967822.045099 in thread1791965722.366239 sets
+prospecting order for the next actual eligible unconsumed scheduled cycle.
+After standing actor/cap readiness and company engagement-first coverage,
+prioritize the approved already-followed digital-reporter connection cohort
+where actual IST-day capacity remains; then eligible regular follow work,
+starting with current staff rosters of the five verified BPO companies below.
+The routing wake itself authorizes no new browser/feed/inbox/follow/digest pass.
+
+The message's count3 was accurate before networking source1791966397.776539
+completed. That source has now sent12confirmed no-note requests: actual
+14October total15/15, remaining0. Do not send12again, reset the daily counter,
+or reopen the closed12:30 follow cycle at30/30. Its Slack result remains
+UNKNOWN/stored_text_mismatch and consumed/no-retry; configuration is not a
+resend allowance. Future actual-day capacity derives from original receipts.
+
+Staff-source anchors (candidate discovery only):
+- Umritun Transcription & General VA Services — https://www.linkedin.com/company/umritun-transcription-services/
+- Cheetah Transcription — https://www.linkedin.com/company/cheetahtranscription/
+- Transcription Plus, LLC — https://www.linkedin.com/company/transcription-plus-llc/
+- Transcription for Everyone - Legal, General and Torah Transcription Experts — https://www.linkedin.com/company/transcription-for-everyone/
+- ScribeNet Inc. — https://www.linkedin.com/company/scribenet-inc-/
+
+Verify each actual current staff profile/company relationship, relevant
+transcription/proofreading/QA/operations title, current state and old consumed
+keys before one eligible effect. Keep source bpo for staff follows and
+li_connect for requests/acceptances/introductions. Company follows already
+confirmed are never repeated. Retain30confirmed follows/cycle,15confirmed
+requests/ISTday, exact note while available and approved no-note afterward.
+One Rajiv-voice tagged HeyDonna introduction only after native receipt-bound
+acceptance; Message button alone insufficient, commercial questions to Rajiv.
+Keep existing cadence/owner/destination, company actors, all UNKNOWN fences,
+privacy and publication dedup. No new automation or result-triggered pass.
+
+
+## Native non-search LinkedIn priority — source1791975544.044939
+
+PM C0C7U35LBKR/1791975544.044939 in thread1791973674.639269
+sets the next actual eligible scheduled cycle's prospecting priority after
+standing actor/cap readiness and company engagement-first coverage: native
+company People tabs and verified current staff first. Rotate TFE, GMR and
+Transcription HUB roster depth plus the approved agency People rosters. Use
+company → People cards; do not use Search more employees or the capped people
+search. Native People access does not clear the monthly search restriction.
+Drop li_adjacent for future cycles because the observed finite subset yielded0.
+Retain current-title/ICP and current BPO-company relationship gates, approved
+actors, source bpo/agency,30confirmed LI follows/native cycle, every old
+consumed/UNKNOWN key, privacy and no-retry history. Facebook Helpline replies
+remain HELD for Rajiv. No upgrade, actor substitution, hidden API, additional
+automation or result-triggered pass.
+
+This exact source separately authorizes one finite current15:30-cycle remainder
+of at most4new confirmed follows from the82saved unverified public links, with
+approved BPO/agency People cards and Magna/Transcription Plus roster fallback.
+Starting confirmed26/30, remaining4; do not replay the prior26 or reset the
+cycle. Current14October connections15/15, so no requests, notes or DMs here.
+End after that finite remainder and one guarded source-thread result; no new
+feed/inbox/metrics/digest pass. Configuration alone starts no social work.
