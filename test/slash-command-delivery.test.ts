@@ -124,3 +124,17 @@ test("sendToSlot plain text is unchanged: no Escape/C-u", async () => {
   assert.equal(await relayFor(p).sendToSlotAsync(6, "hello slot"), true);
   assert.deepEqual(p.keys, ["paste", "Enter"]);
 });
+
+test("guarded /exit whose retry is refused after the first Enter (TUI exiting) reports submit_unconfirmed", async () => {
+  const p: Pane = { composer: "", buffer: "", keys: [], swallowEnters: 1 };
+  let enters = 0;
+  const relay = relayFor(p);
+  const result = await relay.deliverGuardedToSlot(6, "/exit", {
+    expectedPaneId: "%16",
+    recheck: async (stage) => (stage === "pre_enter" && enters++ > 0 ? "pane_not_idle" : null),
+    timing: { pollMs: 1, clearGraceMs: 20, payloadGraceMs: 20 },
+  });
+  assert.equal(result.outcome, "uncertain");
+  assert.equal(result.reason, "submit_unconfirmed");
+  assert.equal(p.keys.filter(k => k === "Enter").length, 1, "never a second Enter into a non-idle pane");
+});

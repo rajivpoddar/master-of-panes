@@ -1445,6 +1445,7 @@ export class TmuxRelay {
       const tmpFile = `/tmp/mop-guarded-${slotNum}-${Date.now()}.txt`;
       const bufName = `mop-guarded-${slotNum}`;
       let effectAttempted = false;
+      let enterSent = 0;
       let preEnterRefusal: string | null = null;
       try {
         await fs.writeFile(tmpFile, command);
@@ -1478,6 +1479,7 @@ export class TmuxRelay {
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
             preEnterRefusal = opts.finalCheck?.("pre_enter") ?? null;
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
+            enterSent++;
             await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: 3_000 });
           },
           sleep,
@@ -1507,6 +1509,10 @@ export class TmuxRelay {
         };
       } catch (err) {
         if (err instanceof GuardedEnterRefused) {
+          // A refused slash-command retry after the first Enter already reached
+          // the pane (e.g. /exit is tearing the TUI down) is an unconfirmed
+          // submit, not a pre-Enter refusal: callers prove the effect themselves.
+          if (enterSent > 0) return { outcome: "uncertain", reason: "submit_unconfirmed", paneId };
           return { outcome: "uncertain", reason: `pre_enter_refused:${err.reason}`, paneId };
         }
         return effectAttempted
