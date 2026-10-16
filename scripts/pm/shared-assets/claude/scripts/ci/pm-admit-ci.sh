@@ -183,10 +183,6 @@ if [ "$NO_UPDATE" = 0 ]; then
 fi
 read -r HEAD MERGEABLE <<<"$(gh pr view "$PR" --repo "$REPO" --json headRefOid,mergeable --jq '.headRefOid+" "+.mergeable')"
 echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
-# Read requirements only after update-branch, bound to the new live head.
-# ci-head remains the CI request; the app workflow consumes the same classifier.
-REQUIREMENTS=$(python3 "$HOME/.codex/scripts/classifier_requirements.py" --pr "$PR" --head "$HEAD")
-echo "workflow requirements: $REQUIREMENTS"
 [ "$MERGEABLE" = "CONFLICTING" ] && { echo "REFUSE: conflict with main; route to slot"; exit 2; }
 # Priority mirroring is best-effort and must never block admission.
 mirror_priority() {

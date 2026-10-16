@@ -307,13 +307,13 @@
       "source_path": "claude/scripts/ci/ci-rerun-guard-matcher.py"
     },
     {
-      "source_path": "claude/scripts/ci/pm-admit-ci.sh",
       "canonical_target": "/Users/rajiv/.claude/scripts/ci/pm-admit-ci.sh",
-      "ownership_class": "shared-ci-admission",
-      "mode": 493,
-      "sha256": "4396cb5418392915cc89bad7715811d8230574614bbeff23ebb05e8c8b38c79a",
+      "dependencies": [],
       "dependency_status": "closed",
-      "dependencies": []
+      "mode": 493,
+      "ownership_class": "shared-ci-admission",
+      "sha256": "63e3f26a76131d564ac72d61de347b1479e36d16845e3e2f5890187878762f16",
+      "source_path": "claude/scripts/ci/pm-admit-ci.sh"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
@@ -1261,13 +1261,13 @@
       "source_path": "codex/monitors/heydonna-social-media/WAKE_SOP.md"
     },
     {
-      "source_path": "codex/scripts/classifier_requirements.py",
       "canonical_target": "/Users/rajiv/.codex/scripts/classifier_requirements.py",
-      "ownership_class": "shared-ci-admission",
-      "mode": 420,
-      "sha256": "e5670b9bde5e9f3bbe21f334da91b99c00164c03e8ada8b88184ac76def1a7b4",
+      "dependencies": [],
       "dependency_status": "closed",
-      "dependencies": []
+      "mode": 420,
+      "ownership_class": "shared-ci-admission",
+      "sha256": "e5670b9bde5e9f3bbe21f334da91b99c00164c03e8ada8b88184ac76def1a7b4",
+      "source_path": "codex/scripts/classifier_requirements.py"
     },
     {
       "canonical_target": "/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md",
