@@ -393,6 +393,10 @@ type PendingVerify = {
   due_key: string;
   injected_at: string;
   retried: boolean;
+  /** Re-send claimed synchronously and its write is still in flight. */
+  inflight?: boolean;
+  /** Proven pre-paste zero-effect refusals already released (max 1). */
+  zero_effect_releases?: number;
   session_id?: string | null;
 };
 
@@ -500,7 +504,10 @@ export function classifyTranscript(
   }
   if (!sawSessionRecord) return "incomplete";
   // A truncated tail must still start before the inject to prove absence.
-  if (tail.truncated && earliestMs > sinceMs - VERIFY_GRACE_MS) return "incomplete";
+  // Absence needs temporal coverage regardless of file size: a replaced or
+  // compacted session file whose same-session records start after the
+  // inject cannot prove the prompt was never accepted (CTO REVISE of 02aa84e4).
+  if (earliestMs > sinceMs) return "incomplete";
   return "absent";
 }
 
@@ -528,6 +535,7 @@ export async function verifyPMCadenceDelivery(
       db.setConfig(pendingKey(taskName), "");
       continue;
     }
+    if (pending.inflight) continue;
     const injectedMs = Date.parse(pending.injected_at);
     if (!Number.isFinite(injectedMs) || now.getTime() - injectedMs < VERIFY_GRACE_MS) continue;
     // Wrong-session or unknown-session Stops are never evidence.
@@ -551,8 +559,9 @@ export async function verifyPMCadenceDelivery(
       db.logEvent(0, "pm_cadence_delivery_unverified", "Stop", null, details);
       continue;
     }
-    // Bind to the proven session before any write.
-    armDeliveryVerification(db, taskName, pending.due_key, pending.injected_at, false, stopSession);
+    // Bind to the proven session before any write (synchronous; no await
+    // between the read above and the claim inside redeliverFenced).
+    db.setConfig(pendingKey(taskName), JSON.stringify({ ...pending, session_id: stopSession }));
     const sent = await redeliverFenced(db, relay, taskName, pending.due_key, stopSession);
     if (!sent && idleRetryMs > 0) {
       // One bounded retry after the idle debounce window, same fence.
@@ -573,7 +582,10 @@ async function redeliverFenced(
   const raw = db.getConfig(pendingKey(taskName));
   if (!raw) return false;
   const pending = JSON.parse(raw) as PendingVerify;
-  if (pending.retried || pending.due_key !== dueKey) return false;
+  if (pending.retried || pending.inflight || pending.due_key !== dueKey) return false;
+  // Claim synchronously, before the first await: at most one submission.
+  const claimed: PendingVerify = { ...pending, retried: true, inflight: true, session_id: sessionId };
+  db.setConfig(pendingKey(taskName), JSON.stringify(claimed));
   const check = () => {
     if (!relay.isPMIdleProven()) return { reason: "pm_idle_not_proven", busy: true };
     if (db.getConfig(CFG_PM_STOP_SESSION) !== sessionId) return { reason: "pm_session_changed", busy: false };
@@ -581,9 +593,19 @@ async function redeliverFenced(
   };
   const task = TASKS[taskName];
   const result = await relay.writePMPromptFenced(task.commandDescription, check);
-  // Only a provably zero-effect refusal leaves the re-send available.
-  if (result.ok || !result.zeroEffect) {
-    armDeliveryVerification(db, taskName, dueKey, new Date().toISOString(), true, sessionId);
+  const releases = pending.zero_effect_releases ?? 0;
+  if (!result.ok && result.zeroEffect && releases < 1) {
+    // Proven pre-paste, zero-effect refusal: release the claim for one retry.
+    db.setConfig(pendingKey(taskName), JSON.stringify({
+      ...pending, retried: false, inflight: false, session_id: sessionId, zero_effect_releases: releases + 1,
+    }));
+  } else {
+    // Submitted, post-paste refusal (even if guarded cleanup removed the text),
+    // or a second zero-effect refusal: CONSUMED, never re-sent.
+    const injectedAt = result.ok ? new Date().toISOString() : pending.injected_at;
+    db.setConfig(pendingKey(taskName), JSON.stringify({
+      ...pending, injected_at: injectedAt, retried: true, inflight: false, session_id: sessionId,
+    }));
   }
   db.logEvent(0, result.ok ? "pm_cadence_redelivered" : "pm_cadence_redeliver_refused", "Stop", null, {
     task: taskName,
@@ -591,6 +613,7 @@ async function redeliverFenced(
     session_id: sessionId,
     reason: result.reason ?? null,
     zero_effect: result.zeroEffect,
+    consumed: result.ok || !result.zeroEffect || releases >= 1,
   });
   return result.ok;
 }

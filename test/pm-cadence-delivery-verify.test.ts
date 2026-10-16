@@ -171,3 +171,89 @@ test("a non-idle claude pane gets no Enter; the re-send stays available", () =>
     const pending = JSON.parse(db.getConfig("pm_cadence_hourly_heartbeat_pending_verify")!);
     assert.equal(pending.retried, false);
   }));
+
+// ─── CTO REVISE of 02aa84e4 (thread 1792122734.658139, ts 1792123850.776859) ───
+
+const PENDING_KEY = "pm_cadence_hourly_heartbeat_pending_verify";
+
+test("small replaced/compacted session file whose records start after the inject stays pending", () =>
+  withDir(async (path) => {
+    const db = new FakeMopDb();
+    const injectedAt = await armHourly(db);
+    // Not truncated, but coverage starts after injected_at.
+    writeFileSync(path, userRec(new Date(injectedAt.getTime() + 2_000), "post-compaction prompt"));
+    const pane: Pane = { composer: "", buffer: "", commands: [] };
+    await verifyPMCadenceDelivery(db as never, fencedRelay(pane, true), { sessionId: SESSION, transcriptPath: path }, later(10_000), 0);
+    assert.equal(pane.commands.length, 0);
+    assert.equal(JSON.parse(db.getConfig(PENDING_KEY)!).retried, false, "still pending, not consumed");
+  }));
+
+test("overlapping Stops produce at most one Enter", () =>
+  withDir(async (path) => {
+    const db = new FakeMopDb();
+    const injectedAt = await armHourly(db);
+    writeFileSync(path, userRec(new Date(injectedAt.getTime() - 60_000), "earlier") + userRec(injectedAt, "unrelated"));
+    const pane: Pane = { composer: "", buffer: "", commands: [] };
+    const relay = fencedRelay(pane, true);
+    const stop = { sessionId: SESSION, transcriptPath: path };
+    await Promise.all([
+      verifyPMCadenceDelivery(db as never, relay, stop, later(10_000), 0),
+      verifyPMCadenceDelivery(db as never, relay, stop, later(10_000), 0),
+      verifyPMCadenceDelivery(db as never, relay, stop, later(10_000), 0),
+    ]);
+    assert.equal(enterCount(pane), 1);
+    assert.equal(pane.commands.filter((c) => c.startsWith("tmux paste-buffer")).length, 1);
+  }));
+
+test("a post-paste refusal is CONSUMED and never re-sent", () =>
+  withDir(async (path) => {
+    const db = new FakeMopDb();
+    const injectedAt = await armHourly(db);
+    writeFileSync(path, userRec(new Date(injectedAt.getTime() - 60_000), "earlier") + userRec(injectedAt, "unrelated"));
+    const pane: Pane = { composer: "", buffer: "", commands: [] };
+    const relay = fencedRelay(pane, true);
+    // Idle is lost right after the paste: the pre-Enter recheck refuses.
+    const realRun = (relay as unknown as { runShell: (c: string) => Promise<unknown> }).runShell;
+    (relay as unknown as { runShell: (c: string, o?: unknown) => Promise<unknown> }).runShell = async (c: string, o?: unknown) => {
+      const r = await (realRun as (c: string, o?: unknown) => Promise<unknown>)(c, o);
+      if (c.startsWith("tmux paste-buffer")) (relay as unknown as { pmBusy: boolean | null }).pmBusy = true;
+      return r;
+    };
+    const stop = { sessionId: SESSION, transcriptPath: path };
+    await verifyPMCadenceDelivery(db as never, relay, stop, later(10_000), 0);
+    assert.equal(enterCount(pane), 0);
+    assert.equal(pane.commands.filter((c) => c.startsWith("tmux paste-buffer")).length, 1);
+    assert.equal(JSON.parse(db.getConfig(PENDING_KEY)!).retried, true, "consumed");
+
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = false;
+    await verifyPMCadenceDelivery(db as never, relay, stop, later(60_000), 0);
+    assert.equal(pane.commands.filter((c) => c.startsWith("tmux paste-buffer")).length, 1, "never re-sent");
+  }));
+
+test("a pre-paste zero-effect refusal can retry exactly once", () =>
+  withDir(async (path) => {
+    const db = new FakeMopDb();
+    const injectedAt = await armHourly(db);
+    writeFileSync(path, userRec(new Date(injectedAt.getTime() - 60_000), "earlier") + userRec(injectedAt, "unrelated"));
+    const pane: Pane = { composer: "", buffer: "", commands: [] };
+    const relay = fencedRelay(pane, false);
+    const stop = { sessionId: SESSION, transcriptPath: path };
+    await verifyPMCadenceDelivery(db as never, relay, stop, later(10_000), 0);
+    assert.equal(JSON.parse(db.getConfig(PENDING_KEY)!).retried, false, "released once");
+
+    (relay as unknown as { pmBusy: boolean | null }).pmBusy = false;
+    await verifyPMCadenceDelivery(db as never, relay, stop, later(20_000), 0);
+    assert.equal(enterCount(pane), 1, "the one retry submits");
+
+    const pane2: Pane = { composer: "", buffer: "", commands: [] };
+    const db2 = new FakeMopDb();
+    const injected2 = await armHourly(db2);
+    writeFileSync(path, userRec(new Date(injected2.getTime() - 60_000), "earlier") + userRec(injected2, "unrelated"));
+    const busy = fencedRelay(pane2, false);
+    await verifyPMCadenceDelivery(db2 as never, busy, stop, later(10_000), 0);
+    await verifyPMCadenceDelivery(db2 as never, busy, stop, later(20_000), 0);
+    assert.equal(JSON.parse(db2.getConfig(PENDING_KEY)!).retried, true, "second zero-effect refusal consumes");
+    (busy as unknown as { pmBusy: boolean | null }).pmBusy = false;
+    await verifyPMCadenceDelivery(db2 as never, busy, stop, later(30_000), 0);
+    assert.equal(enterCount(pane2), 0, "no third attempt");
+  }));
