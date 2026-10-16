@@ -33,15 +33,10 @@ class ReviewCapPolicyTests(unittest.TestCase):
 
     def test_both_cap_routes_keep_slot_ownership_held(self):
         policy = " ".join(RULE.read_text(encoding="utf-8").split())
-        plan_route = policy.split("When `PLAN_REVIEW_CAP_REACHED` reports", 1)[1].split(
-            " When `CODE_REVIEW_CAP_REACHED` reports", 1
-        )[0]
-        code_route = policy.split("When `CODE_REVIEW_CAP_REACHED` reports", 1)[1].split(
-            " For other cap packet types", 1
-        )[0]
-        self.assertIn(SLOT_HOLD, plan_route)
-        self.assertIn(SLOT_HOLD, code_route)
-        self.assertEqual(policy.count(SLOT_HOLD), 2)
+        self.assertIn("PLAN_REVIEW_CAP_REACHED supported_route=cto_plan_adjudication", policy)
+        self.assertIn("CODE_REVIEW_CAP_REACHED supported_route=cto_review_adjudication", policy)
+        self.assertIn("BOTH keep slot HELD: ownership/branch/worktree unchanged", policy)
+        self.assertIn("NO release/reassign/pm-blocked:cto", policy)
 
     def test_manifest_maps_exact_rule_target_and_source_bytes(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))

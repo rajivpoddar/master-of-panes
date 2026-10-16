@@ -3,7 +3,7 @@ name: pm-code-reviewer
 description: |
   PM-owned cross-check reviewer for PRs after rework.
 tools: Bash, Read, Grep, Glob
-model: claude-opus-5-5
+model: sonnet
 background: true
 color: blue
 memory: project

@@ -258,7 +258,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "1aff5437ed273532bb0f4aecc69c6b218480e8507e3217d0bcb49743ddf25daf",
+      "sha256": "3cabd7ba305107bee93cd4c133f336a86e6660b12f58fd003a08d765e9e2c480",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -267,7 +267,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "bce707c44dea4321e51ab2273943d07d36b46d6ba39da93bb13f37235d946da0",
+      "sha256": "1b92775ab25aec7e51ccf9d4db8f27c62e40b3d44249b67ac84c96769cd89447",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
@@ -276,7 +276,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-cap-policy",
-      "sha256": "b91440cdf992a57aa9b25e5bacff859384bb8fda879e8aa45c1a471f6ac898aa",
+      "sha256": "948f3397a30a26b3811bc91b2ad5e58cb69b36e213608e3eaf40749fea879437",
       "source_path": "claude/rules/99-pm-fable-review-cap.md"
     },
     {

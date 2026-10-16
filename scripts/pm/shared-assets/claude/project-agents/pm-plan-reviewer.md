@@ -3,7 +3,7 @@ name: pm-plan-reviewer
 description: |
   PM-owned plan adjudicator for HeyDonna plan-review loops.
 tools: Bash, Read, Grep, Glob
-model: claude-opus-5-5
+model: sonnet
 background: true
 color: blue
 memory: project
