@@ -374,16 +374,29 @@ export class PMCadenceScheduler {
 // ─── Delivery verification (Rajiv 2026-10-16, DM D0AMF0XE6TS thread
 // 1792121896.574029: "why are these getting dropped?"). The 08:13 IST hourly
 // inject on 2026-10-16 reported injected=true but never reached the PM
-// transcript (the paste landed while PM was mid-turn and was swallowed), and
-// the due_key was already marked done. After every direct inject we now check,
-// at the next PM Stop, that the cadence prompt appears in the PM transcript
-// (transcript_path from the Stop payload). If it is missing, re-submit it once
-// for that due_key. ───
+// transcript, and the due_key was already marked done.
+//
+// CTO REVISE (C0ALZJHGE49 thread 1792122734.658139, ts 1792123311.071369):
+// - Only a user-role message or a queued-command/queue-enqueue record in the
+//   SAME PM session counts as acceptance; assistant/tool quotations never do.
+// - Absence is proof only when the Stop belongs to the bound session and the
+//   read window provably covers the inject time. Anything else stays PENDING
+//   and is NOT re-sent.
+// - The re-send uses the pane-id-pinned, composer-fenced writer and refuses
+//   Enter unless PM idle is proven in the same session. ───
 
 const VERIFY_GRACE_MS = 5_000;
 const TRANSCRIPT_TAIL_BYTES = 8 * 1024 * 1024;
+const REDELIVER_IDLE_RETRY_MS = parseInt(process.env.MOP_PM_CADENCE_REDELIVER_RETRY_MS ?? "35000", 10);
 
-type PendingVerify = { due_key: string; injected_at: string; retried: boolean };
+type PendingVerify = {
+  due_key: string;
+  injected_at: string;
+  retried: boolean;
+  session_id?: string | null;
+};
+
+const CFG_PM_STOP_SESSION = "pm_cadence_last_stop_session";
 
 function pendingKey(taskName: PMCadenceTaskName): string {
   return configKey(TASKS[taskName], "pending_verify");
@@ -395,12 +408,13 @@ function armDeliveryVerification(
   dueKey: string,
   injectedAt: string,
   retried = false,
+  sessionId: string | null = db.getConfig(CFG_PM_STOP_SESSION),
 ): void {
-  const pending: PendingVerify = { due_key: dueKey, injected_at: injectedAt, retried };
+  const pending: PendingVerify = { due_key: dueKey, injected_at: injectedAt, retried, session_id: sessionId };
   db.setConfig(pendingKey(taskName), JSON.stringify(pending));
 }
 
-function readTail(path: string, maxBytes: number): string | null {
+function readTail(path: string, maxBytes: number): { text: string; truncated: boolean } | null {
   let fd: number | null = null;
   try {
     fd = openSync(path, "r");
@@ -408,7 +422,7 @@ function readTail(path: string, maxBytes: number): string | null {
     const start = Math.max(0, size - maxBytes);
     const buf = Buffer.alloc(size - start);
     readSync(fd, buf, 0, buf.length, start);
-    return buf.toString("utf8");
+    return { text: buf.toString("utf8"), truncated: start > 0 };
   } catch {
     return null;
   } finally {
@@ -416,34 +430,94 @@ function readTail(path: string, maxBytes: number): string | null {
   }
 }
 
-/** True when a transcript record at/after `sinceMs` carries the cadence prompt. */
-export function transcriptHasPrompt(transcript: string, prompt: string, sinceMs: number): boolean {
+type TranscriptRecord = {
+  type?: string;
+  operation?: string;
+  timestamp?: string;
+  sessionId?: string;
+  content?: unknown;
+  message?: { role?: string; content?: unknown };
+  attachment?: { type?: string; prompt?: unknown };
+};
+
+function textOf(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (part && typeof part === "object" && (part as { type?: string }).type === "text"
+        ? String((part as { text?: unknown }).text ?? "")
+        : ""))
+      .join("\n");
+  }
+  return "";
+}
+
+/** The user/queue-acceptance text of a record, or null for any other record. */
+function acceptedPromptText(record: TranscriptRecord): string | null {
+  if (record.type === "user" && record.message?.role === "user") {
+    // tool_result blocks are user-role but are tool output, not a prompt.
+    return textOf(record.message.content);
+  }
+  if (record.type === "queue-operation" && record.operation === "enqueue") return textOf(record.content);
+  if (record.type === "attachment" && record.attachment?.type === "queued_command") {
+    return textOf(record.attachment.prompt);
+  }
+  return null;
+}
+
+export type TranscriptVerdict = "accepted" | "absent" | "incomplete";
+
+/**
+ * accepted: a same-session user/queue record carrying the prompt at/after the inject.
+ * absent: the window provably covers the inject time and no such record exists.
+ * incomplete: the read window may not cover the inject; never a basis to re-send.
+ */
+export function classifyTranscript(
+  tail: { text: string; truncated: boolean },
+  prompt: string,
+  sinceMs: number,
+  sessionId: string,
+): TranscriptVerdict {
   const needle = prompt.split("\n")[0];
-  for (const line of transcript.split("\n")) {
-    if (!line.includes(needle)) continue;
-    let record: { timestamp?: string };
+  let earliestMs = Number.POSITIVE_INFINITY;
+  let sawSessionRecord = false;
+  for (const line of tail.text.split("\n")) {
+    if (!line.trim()) continue;
+    let record: TranscriptRecord;
     try {
-      record = JSON.parse(line);
+      record = JSON.parse(line) as TranscriptRecord;
     } catch {
       continue;
     }
+    if (record.sessionId !== sessionId) continue;
     const ts = record.timestamp ? Date.parse(record.timestamp) : NaN;
-    // Records without a timestamp (e.g. last-prompt) cannot prove this inject.
-    if (Number.isFinite(ts) && ts >= sinceMs - VERIFY_GRACE_MS) return true;
+    if (!Number.isFinite(ts)) continue;
+    sawSessionRecord = true;
+    earliestMs = Math.min(earliestMs, ts);
+    if (ts < sinceMs - VERIFY_GRACE_MS) continue;
+    const text = acceptedPromptText(record);
+    if (text !== null && text.trim().startsWith(needle)) return "accepted";
   }
-  return false;
+  if (!sawSessionRecord) return "incomplete";
+  // A truncated tail must still start before the inject to prove absence.
+  if (tail.truncated && earliestMs > sinceMs - VERIFY_GRACE_MS) return "incomplete";
+  return "absent";
 }
 
+type RedeliverRelay = Pick<TmuxRelay, "writePMPromptFenced" | "isPMIdleProven">;
+
 /**
- * Called on every PM Stop. For each cadence task with a pending verification,
- * confirm the prompt reached the PM transcript; otherwise re-submit it once.
+ * Called on every PM Stop with that Stop's session_id and transcript_path.
  */
 export async function verifyPMCadenceDelivery(
   db: MoPDatabase,
-  relay: Pick<TmuxRelay, "submitToPM">,
-  transcriptPath: string | undefined,
+  relay: RedeliverRelay,
+  stop: { sessionId?: string; transcriptPath?: string },
   now: Date = new Date(),
+  idleRetryMs: number = REDELIVER_IDLE_RETRY_MS,
 ): Promise<void> {
+  const stopSession = stop.sessionId ?? null;
+  if (stopSession) db.setConfig(CFG_PM_STOP_SESSION, stopSession);
   for (const taskName of Object.keys(TASKS) as PMCadenceTaskName[]) {
     const raw = db.getConfig(pendingKey(taskName));
     if (!raw) continue;
@@ -455,39 +529,68 @@ export async function verifyPMCadenceDelivery(
       continue;
     }
     const injectedMs = Date.parse(pending.injected_at);
-    // A Stop right after the paste can belong to the turn already in flight.
     if (!Number.isFinite(injectedMs) || now.getTime() - injectedMs < VERIFY_GRACE_MS) continue;
-    if (!transcriptPath) continue;
-    const transcript = readTail(transcriptPath, TRANSCRIPT_TAIL_BYTES);
-    if (transcript === null) continue;
+    // Wrong-session or unknown-session Stops are never evidence.
+    if (!stopSession || !stop.transcriptPath) continue;
+    if (pending.session_id && pending.session_id !== stopSession) continue;
+    if (!stop.transcriptPath.endsWith(`${stopSession}.jsonl`)) continue;
+    const tail = readTail(stop.transcriptPath, TRANSCRIPT_TAIL_BYTES);
+    if (tail === null) continue;
 
     const task = TASKS[taskName];
-    const details = { task: taskName, due_key: pending.due_key, transcript_path: transcriptPath };
-    if (transcriptHasPrompt(transcript, task.commandDescription, injectedMs)) {
+    const details = { task: taskName, due_key: pending.due_key, session_id: stopSession };
+    const verdict = classifyTranscript(tail, task.commandDescription, injectedMs, stopSession);
+    if (verdict === "accepted") {
       db.setConfig(pendingKey(taskName), "");
       db.logEvent(0, "pm_cadence_delivery_verified", "Stop", null, { ...details, retried: pending.retried });
       continue;
     }
+    if (verdict === "incomplete") continue;
     if (pending.retried) {
       db.setConfig(pendingKey(taskName), "");
       db.logEvent(0, "pm_cadence_delivery_unverified", "Stop", null, details);
-      console.log(`[pm-cadence] redelivery not seen in transcript task=${taskName} due_key=${pending.due_key}`);
       continue;
     }
-    // Mark retried before awaiting so a concurrent Stop cannot double-send.
-    const retryAt = new Date().toISOString();
-    armDeliveryVerification(db, taskName, pending.due_key, retryAt, true);
-    const submitted = await relay.submitToPM(
-      task.commandDescription,
-      `${cadenceEventType(taskName, pending.due_key)}:redeliver`,
-    );
-    db.logEvent(0, "pm_cadence_redelivered", "Stop", null, {
-      ...details,
-      ok: submitted.ok,
-      queued: submitted.queued === true,
-    });
-    console.log(
-      `[pm-cadence] prompt missing from PM transcript; re-submitted once task=${taskName} due_key=${pending.due_key} ok=${submitted.ok}`,
-    );
+    // Bind to the proven session before any write.
+    armDeliveryVerification(db, taskName, pending.due_key, pending.injected_at, false, stopSession);
+    const sent = await redeliverFenced(db, relay, taskName, pending.due_key, stopSession);
+    if (!sent && idleRetryMs > 0) {
+      // One bounded retry after the idle debounce window, same fence.
+      setTimeout(() => {
+        void redeliverFenced(db, relay, taskName, pending.due_key, stopSession);
+      }, idleRetryMs).unref?.();
+    }
   }
+}
+
+async function redeliverFenced(
+  db: MoPDatabase,
+  relay: RedeliverRelay,
+  taskName: PMCadenceTaskName,
+  dueKey: string,
+  sessionId: string,
+): Promise<boolean> {
+  const raw = db.getConfig(pendingKey(taskName));
+  if (!raw) return false;
+  const pending = JSON.parse(raw) as PendingVerify;
+  if (pending.retried || pending.due_key !== dueKey) return false;
+  const check = () => {
+    if (!relay.isPMIdleProven()) return { reason: "pm_idle_not_proven", busy: true };
+    if (db.getConfig(CFG_PM_STOP_SESSION) !== sessionId) return { reason: "pm_session_changed", busy: false };
+    return null;
+  };
+  const task = TASKS[taskName];
+  const result = await relay.writePMPromptFenced(task.commandDescription, check);
+  // Only a provably zero-effect refusal leaves the re-send available.
+  if (result.ok || !result.zeroEffect) {
+    armDeliveryVerification(db, taskName, dueKey, new Date().toISOString(), true, sessionId);
+  }
+  db.logEvent(0, result.ok ? "pm_cadence_redelivered" : "pm_cadence_redeliver_refused", "Stop", null, {
+    task: taskName,
+    due_key: dueKey,
+    session_id: sessionId,
+    reason: result.reason ?? null,
+    zero_effect: result.zeroEffect,
+  });
+  return result.ok;
 }

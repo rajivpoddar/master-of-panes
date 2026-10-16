@@ -772,12 +772,34 @@ export class TmuxRelay {
     }
   }
 
+  /**
+   * Fenced PM prompt write for MoP-originated re-deliveries (pmCadence.ts).
+   * Same serialized, pane-id-pinned, composer-checked writer as the PM
+   * self-clear: the caller's check (idle proven + same PM session) is
+   * re-evaluated before the paste and before the single Enter, and Enter is
+   * refused unless the composer holds exactly our text.
+   */
+  async writePMPromptFenced(text: string, check: () => PMClearFenceRefusal | null): Promise<PMClearWriteResult> {
+    let paneId: string;
+    try {
+      const resolved = await this.runShell(`tmux display-message -t ${this.pmPaneAddress} -p '#{pane_id}'`, { timeout: 5_000 });
+      paneId = resolved.stdout.trim();
+    } catch {
+      return { ok: false, zeroEffect: true, busy: false, reason: "pm_pane_unobservable" };
+    }
+    if (!paneId) return { ok: false, zeroEffect: true, busy: false, reason: "pm_pane_unobservable" };
+    const run = (): Promise<PMClearWriteResult> => this.writePMClearFencedNow({ paneId, check }, text, "pm_prompt");
+    const result = this.directInjectChain.then(run, run);
+    this.directInjectChain = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
   private async writePMClearFencedNow(fence: {
     paneId: string;
     check: () => PMClearFenceRefusal | null;
-  }): Promise<PMClearWriteResult> {
+  }, text: string = PM_CLEAR_COMMAND, label: string = "pm_clear"): Promise<PMClearWriteResult> {
     const refuse = (refusal: PMClearFenceRefusal, zeroEffect: boolean, stage: string): PMClearWriteResult => {
-      this.db?.logEvent(0, "pm_clear_write_refused", null, null, {
+      this.db?.logEvent(0, `${label}_write_refused`, null, null, {
         stage,
         reason: refusal.reason,
         zero_effect: zeroEffect,
@@ -789,11 +811,11 @@ export class TmuxRelay {
     if (prePaste) return refuse(prePaste, true, "pre_paste");
 
     const seq = ++this.directInjectSeq;
-    const tmpFile = `/tmp/mop-pm-clear-${Date.now()}-${process.pid}-${seq}.txt`;
-    const bufName = `mop-pm-clear-${process.pid}-${seq}`;
+    const tmpFile = `/tmp/mop-${label}-${Date.now()}-${process.pid}-${seq}.txt`;
+    const bufName = `mop-${label}-${process.pid}-${seq}`;
     let pasteAttempted = false;
     try {
-      await fs.writeFile(tmpFile, PM_CLEAR_COMMAND);
+      await fs.writeFile(tmpFile, text);
       await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
       // Revalidate authority after the file/buffer awaits, immediately before the paste.
       const atPaste = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, "")) ?? fence.check();
@@ -805,11 +827,11 @@ export class TmuxRelay {
       await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${fence.paneId} -d`, { timeout: 10_000 });
       await sleep(PM_INJECT_ENTER_DELAY_MS);
 
-      const preEnter = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, PM_CLEAR_COMMAND)) ?? fence.check();
+      const preEnter = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, text)) ?? fence.check();
       if (preEnter) {
         // Remove only our own paste, and only while the composer holds exactly it.
         // A paste happened: the outcome is never zero-effect (never rearmed).
-        const owned = (await this.pmClearPaneRefusal(fence.paneId, PM_CLEAR_COMMAND)) === null;
+        const owned = (await this.pmClearPaneRefusal(fence.paneId, text)) === null;
         if (owned) {
           await this.runShell(`tmux send-keys -t ${fence.paneId} C-u`, { timeout: 10_000 });
         }
@@ -817,10 +839,10 @@ export class TmuxRelay {
       }
       await this.runShell(`tmux send-keys -t ${fence.paneId} Enter`, { timeout: 10_000 });
       this.pmBusy = null;
-      this.db?.logEvent(0, "pm_clear_write_submitted", null, null, { pane_id: fence.paneId });
+      this.db?.logEvent(0, `${label}_write_submitted`, null, null, { pane_id: fence.paneId });
       return { ok: true, zeroEffect: false, busy: false };
     } catch (err) {
-      return refuse({ reason: `pm_clear_write_error:${String(err).slice(0, 120)}`, busy: false }, !pasteAttempted, "write");
+      return refuse({ reason: `${label}_write_error:${String(err).slice(0, 120)}`, busy: false }, !pasteAttempted, "write");
     } finally {
       await fs.unlink(tmpFile).catch(() => undefined);
     }

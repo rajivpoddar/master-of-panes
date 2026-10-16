@@ -1455,7 +1455,7 @@ export class HookProcessor {
     if (slotNum === 0) {
       // Cadence inject delivery check: re-submit a reported-ok cadence prompt
       // once when it never reached the PM transcript (pmCadence.ts).
-      void verifyPMCadenceDelivery(this.db, this.relay, payload.transcript_path).catch((err) => {
+      void verifyPMCadenceDelivery(this.db, this.relay, { sessionId: payload.session_id, transcriptPath: payload.transcript_path }).catch((err) => {
         debugLog(`[hooks] pm cadence delivery verify failed: ${String(err)}`);
       });
     }
