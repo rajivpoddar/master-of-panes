@@ -12,6 +12,8 @@
  * config keys so restarts do not double-fire within the same cadence bucket.
  */
 
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 
@@ -312,6 +314,7 @@ export class PMCadenceScheduler {
     const ts = new Date().toISOString();
     if (injected) {
       this.db.setConfig(configKey(task, "last_due_key"), dueKey);
+      armDeliveryVerification(this.db, taskName, dueKey, ts);
     }
     this.db.setConfig(configKey(task, "last_run_ts"), ts);
     this.db.setConfig(configKey(task, "last_run_reason"), reason);
@@ -365,5 +368,126 @@ export class PMCadenceScheduler {
       return false;
     }
     return morningBriefDueKey(now) !== lastDueKey;
+  }
+}
+
+// ─── Delivery verification (Rajiv 2026-10-16, DM D0AMF0XE6TS thread
+// 1792121896.574029: "why are these getting dropped?"). The 08:13 IST hourly
+// inject on 2026-10-16 reported injected=true but never reached the PM
+// transcript (the paste landed while PM was mid-turn and was swallowed), and
+// the due_key was already marked done. After every direct inject we now check,
+// at the next PM Stop, that the cadence prompt appears in the PM transcript
+// (transcript_path from the Stop payload). If it is missing, re-submit it once
+// for that due_key. ───
+
+const VERIFY_GRACE_MS = 5_000;
+const TRANSCRIPT_TAIL_BYTES = 8 * 1024 * 1024;
+
+type PendingVerify = { due_key: string; injected_at: string; retried: boolean };
+
+function pendingKey(taskName: PMCadenceTaskName): string {
+  return configKey(TASKS[taskName], "pending_verify");
+}
+
+function armDeliveryVerification(
+  db: MoPDatabase,
+  taskName: PMCadenceTaskName,
+  dueKey: string,
+  injectedAt: string,
+  retried = false,
+): void {
+  const pending: PendingVerify = { due_key: dueKey, injected_at: injectedAt, retried };
+  db.setConfig(pendingKey(taskName), JSON.stringify(pending));
+}
+
+function readTail(path: string, maxBytes: number): string | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, "r");
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - maxBytes);
+    const buf = Buffer.alloc(size - start);
+    readSync(fd, buf, 0, buf.length, start);
+    return buf.toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/** True when a transcript record at/after `sinceMs` carries the cadence prompt. */
+export function transcriptHasPrompt(transcript: string, prompt: string, sinceMs: number): boolean {
+  const needle = prompt.split("\n")[0];
+  for (const line of transcript.split("\n")) {
+    if (!line.includes(needle)) continue;
+    let record: { timestamp?: string };
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const ts = record.timestamp ? Date.parse(record.timestamp) : NaN;
+    // Records without a timestamp (e.g. last-prompt) cannot prove this inject.
+    if (Number.isFinite(ts) && ts >= sinceMs - VERIFY_GRACE_MS) return true;
+  }
+  return false;
+}
+
+/**
+ * Called on every PM Stop. For each cadence task with a pending verification,
+ * confirm the prompt reached the PM transcript; otherwise re-submit it once.
+ */
+export async function verifyPMCadenceDelivery(
+  db: MoPDatabase,
+  relay: Pick<TmuxRelay, "submitToPM">,
+  transcriptPath: string | undefined,
+  now: Date = new Date(),
+): Promise<void> {
+  for (const taskName of Object.keys(TASKS) as PMCadenceTaskName[]) {
+    const raw = db.getConfig(pendingKey(taskName));
+    if (!raw) continue;
+    let pending: PendingVerify;
+    try {
+      pending = JSON.parse(raw) as PendingVerify;
+    } catch {
+      db.setConfig(pendingKey(taskName), "");
+      continue;
+    }
+    const injectedMs = Date.parse(pending.injected_at);
+    // A Stop right after the paste can belong to the turn already in flight.
+    if (!Number.isFinite(injectedMs) || now.getTime() - injectedMs < VERIFY_GRACE_MS) continue;
+    if (!transcriptPath) continue;
+    const transcript = readTail(transcriptPath, TRANSCRIPT_TAIL_BYTES);
+    if (transcript === null) continue;
+
+    const task = TASKS[taskName];
+    const details = { task: taskName, due_key: pending.due_key, transcript_path: transcriptPath };
+    if (transcriptHasPrompt(transcript, task.commandDescription, injectedMs)) {
+      db.setConfig(pendingKey(taskName), "");
+      db.logEvent(0, "pm_cadence_delivery_verified", "Stop", null, { ...details, retried: pending.retried });
+      continue;
+    }
+    if (pending.retried) {
+      db.setConfig(pendingKey(taskName), "");
+      db.logEvent(0, "pm_cadence_delivery_unverified", "Stop", null, details);
+      console.log(`[pm-cadence] redelivery not seen in transcript task=${taskName} due_key=${pending.due_key}`);
+      continue;
+    }
+    // Mark retried before awaiting so a concurrent Stop cannot double-send.
+    const retryAt = new Date().toISOString();
+    armDeliveryVerification(db, taskName, pending.due_key, retryAt, true);
+    const submitted = await relay.submitToPM(
+      task.commandDescription,
+      `${cadenceEventType(taskName, pending.due_key)}:redeliver`,
+    );
+    db.logEvent(0, "pm_cadence_redelivered", "Stop", null, {
+      ...details,
+      ok: submitted.ok,
+      queued: submitted.queued === true,
+    });
+    console.log(
+      `[pm-cadence] prompt missing from PM transcript; re-submitted once task=${taskName} due_key=${pending.due_key} ok=${submitted.ok}`,
+    );
   }
 }

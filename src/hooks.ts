@@ -5,6 +5,7 @@
  * plan ready), updates slot state, and relays notifications to PM.
  */
 
+import { verifyPMCadenceDelivery } from "./pmCadence.js";
 import { isPmClearUndelivered } from "./pmClearLatch.js";
 import { execFile } from "node:child_process";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
@@ -1451,6 +1452,13 @@ export class HookProcessor {
   // ─── Stop Hook ─────────────────────────────────────────
 
   private async handleStop(slotNum: number, payload: HookPayload): Promise<HookResponse> {
+    if (slotNum === 0) {
+      // Cadence inject delivery check: re-submit a reported-ok cadence prompt
+      // once when it never reached the PM transcript (pmCadence.ts).
+      void verifyPMCadenceDelivery(this.db, this.relay, payload.transcript_path).catch((err) => {
+        debugLog(`[hooks] pm cadence delivery verify failed: ${String(err)}`);
+      });
+    }
     // PM (slot 0) is not represented in the slots table. A pending clear is an
     // exactly-once delivery latch: repeated Stop events must not append more
     // /clear commands while the original waits for SessionStart:clear.
