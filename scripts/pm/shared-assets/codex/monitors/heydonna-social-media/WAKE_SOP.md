@@ -656,3 +656,38 @@ Starting confirmed26/30, remaining4; do not replay the prior26 or reset the
 cycle. Current14October connections15/15, so no requests, notes or DMs here.
 End after that finite remainder and one guarded source-thread result; no new
 feed/inbox/metrics/digest pass. Configuration alone starts no social work.
+
+
+## AAERT directory dropped — source1792117334.367419
+
+Rajiv D0AMF0XE6TS/1792117320.489799, conveyed by PM
+C0C7U35LBKR/1792117334.367419 in thread1792113408.609409, removes the
+AAERT certificant/CER-CET directory from all future passes, effective now.
+Do not read, refresh, query, retry, register, log in, email AAERT or contact
+its administrator to recover this directory source. The earlier read-only go
+is superseded for this source. Preserve all previous access, action and Slack
+receipts, including the completed unavailable-access continuation1792116990.256659.
+
+This cancellation applies to the directory. Separately authorized public
+AAERT social/topic/follower sources retain their own current scopes and holds.
+Keep the existing cadence, owner, actors, caps and other queued source order.
+This configuration starts no browser inspection, social pass or publication.
+
+
+## Approved19October LinkedIn InMailv6 — source1792119320.158209
+
+PM C0C7U35LBKR/1792119320.158209 conveys Rajiv approval
+D0AMF0XE6TS/1792119302.477629 for exactly6InMail-sectionv6 rows in
+`docs/marketing/outbound/linkedin/2026-10-19-batch.md`. Exact subjects/bodies,
+recipient URLs and hashes are pinned in existing state under
+`active_executor_directives.LinkedIn_InMail_batch_2026_10_19_v6`.
+Send only19October in each approved window after native current role/actor,
+OpenProfile/free-path,credit balance,60-day outreach history and original
+consumed/UNKNOWN checks. No altered copy or uncertain-send retry/fallback.
+
+Block1 fiveET/CT rows:17:30–19:30IST; existing18:30cycle fits.
+Block2 DianaGish:20:00–21:00IST; no existing native cycle fits. Requires an
+explicitly routed execution wake within that window. No new timer,automation,
+cadence change,early/late send or residency-triggered action. Connect notes
+continue under their standing per-cycle rule and independent receipts.
+This approval intake sends nothing and starts no social pass.

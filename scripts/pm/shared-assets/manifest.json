@@ -1248,7 +1248,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "1aa4138b33552dd6ed70734bbd0e64f7bf6b1c44093938a829d941e3c4e9ac26",
+      "sha256": "74e8be96788dc87948a1756c02549002d0a0c6349b5495b5f30123a285808b05",
       "source_path": "codex/monitors/heydonna-social-media/WAKE_SOP.md"
     },
     {
