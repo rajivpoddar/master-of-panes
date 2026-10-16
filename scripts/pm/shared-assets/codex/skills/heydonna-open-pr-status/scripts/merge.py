@@ -7,6 +7,10 @@ import json
 import re
 import subprocess
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+from classifier_requirements import classify as workflow_requirements
 
 REPO = "heydonna-app/heydonna-app"
 WORKFLOWS = {"ci.yml": ("typescript", "python", "test"), "e2e.yml": ("e2e",)}
@@ -425,7 +429,12 @@ def merge(number, head, apply=False, unrelated_main=None):
         test_only = ci_proof.get("app_test_only")
         e2e_proof = app_test_only_e2e_proof(pr, test_only) if test_only else None
         if e2e_proof is None:
-            e2e_proof = workflow_proof(pr, "e2e.yml", WORKFLOWS["e2e.yml"])
+            required = workflow_requirements(number, head)
+            if required["e2e_required"]:
+                e2e_proof = workflow_proof(pr, "e2e.yml", WORKFLOWS["e2e.yml"])
+            else:
+                e2e_proof = {**required, "required": False, "skipped": True,
+                             "source": "canonical_main_classifier"}
         proof = {"ci.yml": ci_proof, "e2e.yml": e2e_proof}
     main = api("git/ref/heads/main")["object"]["sha"]
     comparison = api(f"compare/{head}...{main}")

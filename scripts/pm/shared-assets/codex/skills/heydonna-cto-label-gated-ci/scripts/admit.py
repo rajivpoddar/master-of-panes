@@ -8,6 +8,10 @@ import re
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+from classifier_requirements import classify as workflow_requirements
 
 REPO = "heydonna-app/heydonna-app"
 WORKFLOWS = ("ci.yml", "e2e.yml")
@@ -58,7 +62,10 @@ def existing(pr):
         result["label"] = f"ci-head:{head}"
     unresolved_runs = []
     completed_runs = []
+    required = workflow_requirements(pr["number"], head)
     for workflow in WORKFLOWS:
+        if workflow == "e2e.yml" and not required["e2e_required"]:
+            continue
         pages = json.loads(command("gh", "api", "--paginate", "--slurp",
             f"repos/{REPO}/actions/workflows/{workflow}/runs?event=pull_request&head_sha={head}&per_page=100"))
         for run in [run for page in pages for run in page["workflow_runs"]]:

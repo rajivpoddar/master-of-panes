@@ -307,6 +307,15 @@
       "source_path": "claude/scripts/ci/ci-rerun-guard-matcher.py"
     },
     {
+      "source_path": "claude/scripts/ci/pm-admit-ci.sh",
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/pm-admit-ci.sh",
+      "ownership_class": "shared-ci-admission",
+      "mode": 493,
+      "sha256": "4396cb5418392915cc89bad7715811d8230574614bbeff23ebb05e8c8b38c79a",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1252,6 +1261,15 @@
       "source_path": "codex/monitors/heydonna-social-media/WAKE_SOP.md"
     },
     {
+      "source_path": "codex/scripts/classifier_requirements.py",
+      "canonical_target": "/Users/rajiv/.codex/scripts/classifier_requirements.py",
+      "ownership_class": "shared-ci-admission",
+      "mode": 420,
+      "sha256": "e5670b9bde5e9f3bbe21f334da91b99c00164c03e8ada8b88184ac76def1a7b4",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "canonical_target": "/Users/rajiv/.codex/skills/_shared/release-conveyor-contract.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1338,7 +1356,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "1ad9c0440cefe2d3e2acc61e189eb904f45b61646da22331d7ca7613efb1b6fb",
+      "sha256": "2daed2921ee797df5a8ecfdc9d011636cb9aee37e830f290dfbc678af65dd378",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py"
     },
     {
@@ -1374,7 +1392,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "676166f88b84bf3b6a8dea89d18db552c5519731b4f9a1b3b101766161652b11",
+      "sha256": "e7c1b8be8717630422241eb60657d0b1d308229941c81c7c4e54c1e943c7c120",
       "source_path": "codex/skills/heydonna-open-pr-status/scripts/merge.py"
     },
     {
@@ -1446,7 +1464,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 157,
+    "selected_count": 159,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
