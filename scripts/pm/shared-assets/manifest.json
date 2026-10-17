@@ -1378,6 +1378,15 @@
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/test_admit_fetch_timeout.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-cto-pr-merge/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-codex-skill",
+      "sha256": "9a7aa57e1f10b152d42d64b93995b4fdd1c4aaafb9fde34c38419a9d7045e891",
+      "source_path": "codex/skills/heydonna-cto-pr-merge/SKILL.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1473,7 +1482,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 160,
+    "selected_count": 161,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
