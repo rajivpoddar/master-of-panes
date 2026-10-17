@@ -519,7 +519,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "ee8c1769fd9c917c3cbf8eb4dbefb1d584e875689e52b20910eb707452273430",
+      "sha256": "6836996ba1c3fa41758336d74f47d9b27757ab589506dd3427583358408891dd",
       "source_path": "claude/scripts/pm-cleanup-pr.py"
     },
     {
@@ -537,7 +537,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops",
-      "sha256": "f419dbe7795618e5905b2d94f4c29394cb72b58996850f9925def5cf9282a129",
+      "sha256": "5ae2787c9b34630b83334d54111d95fc1a66d5514ee8d5d82f9fce816e861653",
       "source_path": "claude/scripts/pm-ops-legacy.py"
     },
     {
@@ -638,6 +638,15 @@
       "ownership_class": "shared-claude-hourly-heartbeat",
       "sha256": "d0d7de3cf828fb2980c416e99a899c99c50fb81e7758a9cb30caba84ac6c650d",
       "source_path": "claude/scripts/pm/heartbeat/support-inbox-snapshot.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/pr-delivery-retro.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-delivery-retro",
+      "sha256": "fb4a91c73fadb911b908253ecf6b42a5066e97ec0d0751adef38466e0ee39112",
+      "source_path": "claude/scripts/pr-delivery-retro.py"
     },
     {
       "additional_targets": [
@@ -1464,7 +1473,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 159,
+    "selected_count": 160,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1553,7 +1562,8 @@
       "/Users/rajiv/Downloads/projects/tmux-slack-bridge/cto-bridge.ts",
       "/Users/rajiv/.claude/scripts/cto-relay-snapshot.py",
       "/Users/rajiv/.codex/monitors/cto-slack-relay/WAKE_SOP.md",
-      "/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md"
+      "/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md",
+      "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/pr-delivery-retro.py"
     ]
   },
   "owner": "master-of-panes",

@@ -50,10 +50,11 @@ def _now_iso() -> str:
 
 
 class CleanupError(Exception):
-    def __init__(self, reason: str, *, ambiguous: bool = False) -> None:
+    def __init__(self, reason: str, *, ambiguous: bool = False, details: dict[str, Any] | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
         self.ambiguous = ambiguous
+        self.details = details or {}
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -345,9 +346,14 @@ def _closing_ref_names_issue(pr: dict[str, Any], issue: int | None) -> bool:
 
 
 def _validate_pr_for_request(request: dict[str, Any], pr: dict[str, Any]) -> list[str]:
-    """MoP-authoritative issue: the PR must still carry no closing ref."""
+    """Use a real closing reference when present, otherwise the MoP issue tuple."""
     if request.get("issue_authoritative"):
-        return _validate_issue_less_snapshot(request, pr)
+        if pr.get("closingIssuesReferences") == []:
+            return _validate_issue_less_snapshot(request, pr)
+        labels = _validate_merged_snapshot(request, pr)
+        if len(pr["closingIssuesReferences"]) != 1:
+            raise CleanupError("linked_issue_not_unique")
+        return labels
     return _validate_merged_snapshot(request, pr)
 
 
@@ -506,6 +512,44 @@ def _label_plan(scope: str, labels: list[str], terminal: str) -> list[dict[str, 
     return plan
 
 
+def _validate_plan(plan: list[dict[str, str]]) -> None:
+    """Validate the entire existing journal plan before its first effect."""
+    names: set[str] = set()
+    for step in plan:
+        if not isinstance(step, dict) or not all(isinstance(step.get(k), str) for k in ("name", "scope", "operation", "label")):
+            raise CleanupError("cleanup_receipt_plan_invalid", ambiguous=True)
+        name, scope, operation, label = (step[k] for k in ("name", "scope", "operation", "label"))
+        valid = (
+            scope in {"pr", "issue"} and operation in {"add", "remove"}
+            and bool(label) and name == f"{scope}_label_{operation}:{label}"
+        ) or (name, scope, operation, label) in {
+            ("issue_close", "issue", "close", ""), ("thread_reply", "slack", "reply", ""),
+        }
+        if not valid or name in names:
+            raise CleanupError("cleanup_receipt_plan_invalid", ambiguous=True)
+        names.add(name)
+
+
+def _failure(reason: str, receipt: dict[str, Any], key: str, *, ambiguous: bool,
+             receipt_write_confirmed: bool = True) -> CleanupError:
+    steps = receipt.get("steps") if isinstance(receipt.get("steps"), dict) else {}
+    completed = [name for name, step in steps.items() if isinstance(step, dict) and step.get("status") == "completed"]
+    unknown = [name for name, step in steps.items() if isinstance(step, dict) and step.get("status") in {"effect_started", "ambiguous"}]
+    ambiguity = receipt.get("ambiguous_steps") if isinstance(receipt.get("ambiguous_steps"), list) else []
+    unknown = list(dict.fromkeys(unknown + [name for name in ambiguity
+                                          if isinstance(name, str)]))
+    completed = [name for name in completed if name not in unknown]
+    plan = receipt.get("plan") if isinstance(receipt.get("plan"), list) else []
+    return CleanupError(reason, ambiguous=ambiguous, details={
+        "status": "ambiguous" if ambiguous else ("partial" if completed else "refused"),
+        "cleanup_key": key, "completed_steps": completed, "ambiguous_steps": unknown,
+        "remaining_steps": [step["name"] for step in plan
+                            if isinstance(step, dict) and isinstance(step.get("name"), str)
+                            and step["name"] not in completed and step["name"] not in unknown],
+        "receipt_write_confirmed": receipt_write_confirmed,
+    })
+
+
 def _live_closing_refs_absent(external: External, request: dict[str, Any]) -> bool:
     """True when live closing refs provably do not name the issue.
 
@@ -607,12 +651,24 @@ def run(
                 if prior.get("issue_residue") is not None:
                     completed["issue_residue"] = prior["issue_residue"]
                 return completed
+            if not isinstance(prior.get("steps"), dict):
+                raise _failure("cleanup_receipt_steps_invalid", prior, key, ambiguous=True)
+            if any(not isinstance(step, dict) or step.get("status") not in {"reserved", "effect_started", "completed", "ambiguous"}
+                   for step in prior["steps"].values()):
+                raise _failure("cleanup_receipt_steps_invalid", prior, key, ambiguous=True)
+            if prior.get("status") == "ambiguous" or prior.get("ambiguous_steps") or any(
+                isinstance(step, dict) and step.get("status") in {"effect_started", "ambiguous"}
+                for step in (prior.get("steps") or {}).values()
+            ):
+                # Preserve the original receipt byte-for-byte; never retry its
+                # unknown step or continue later mutations on a repeated call.
+                raise _failure("cleanup_ambiguous", prior, key, ambiguous=True)
             if prior.get("thread_reply") is False and supplied["cleanup_mode"] == LINKED_ISSUE_MODE and not post_merge:
                 resume_pr = ext.read_pr(request)
-                _validate_merged_snapshot(request, resume_pr)
+                _validate_pr_for_request(request, resume_pr)
                 resume_issue = ext.read_issue(request)
                 _validate_issue_snapshot(request, resume_issue)
-                _validate_label_only_terminal(request, resume_pr, resume_issue)
+                _validate_terminal_for_request(request, resume_pr, resume_issue)
 
         token = cto_slack_token or os.environ.get("SLACK_CTO_BOT_TOKEN", "")
         if isinstance(prior, dict):
@@ -655,10 +711,10 @@ def run(
                     ]
             elif label_only:
                 pr_snapshot = ext.read_pr(request)
-                pr_labels = _validate_merged_snapshot(request, pr_snapshot)
+                pr_labels = _validate_pr_for_request(request, pr_snapshot)
                 issue_snapshot = ext.read_issue(request)
                 issue_labels = _validate_issue_snapshot(request, issue_snapshot)
-                _validate_label_only_terminal(request, pr_snapshot, issue_snapshot)
+                _validate_terminal_for_request(request, pr_snapshot, issue_snapshot)
                 plan = (
                     _label_plan("pr", pr_labels, "pm-state:closed-clean")
                     + _label_plan("issue", issue_labels, "status:done")
@@ -713,11 +769,24 @@ def run(
                 "issue_residue": receipt_residue,
             }
             receipts[key] = receipt
-            _write_json(receipt_file, receipts)
+
+        try:
+            _validate_plan(plan)
+        except CleanupError as exc:
+            raise _failure(exc.reason, receipt, key, ambiguous=exc.ambiguous) from exc
 
         def persist() -> None:
             receipts[key] = receipt
-            _write_json(receipt_file, receipts)
+            try:
+                _write_json(receipt_file, receipts)
+            except (OSError, TypeError, ValueError) as exc:
+                started = any(step.get("status") in {"effect_started", "completed", "ambiguous"}
+                              for step in receipt["steps"].values())
+                raise _failure("cleanup_receipt_write_failed", receipt, key, ambiguous=started,
+                               receipt_write_confirmed=False) from exc
+
+        if not isinstance(prior, dict):
+            persist()
 
         def label_readback(scope: str, operation: str, label: str) -> bool:
             if scope == "pr":
@@ -747,7 +816,7 @@ def run(
                 if name not in ambiguous_steps:
                     ambiguous_steps.append(name)
                 persist()
-                return
+                raise _failure("cleanup_ambiguous", receipt, key, ambiguous=True)
 
             receipt["status"] = "processing"
             receipt["steps"][name] = {"status": "reserved"}
@@ -784,20 +853,19 @@ def run(
                     raise CleanupError(f"cleanup_unknown_step:{name}")
                 if not verified:
                     raise CleanupError(f"{name}_readback_mismatch", ambiguous=True)
-            except CleanupError as exc:
+            except (CleanupError, OSError, TypeError, ValueError) as exc:
+                reason = exc.reason if isinstance(exc, CleanupError) else "cleanup_effect_exception"
                 receipt["status"] = "ambiguous"
-                receipt["steps"][name] = {"status": "ambiguous", "error": exc.reason}
+                receipt["steps"][name] = {"status": "ambiguous", "error": reason}
                 ambiguous_steps = receipt.setdefault("ambiguous_steps", [])
                 if name not in ambiguous_steps:
                     ambiguous_steps.append(name)
                 persist()
-                return
+                raise _failure("cleanup_ambiguous", receipt, key, ambiguous=True) from exc
             receipt["steps"][name] = {"status": "completed"}
             persist()
 
         for step_spec in plan:
-            if not isinstance(step_spec, dict) or not all(key in step_spec for key in ("name", "scope", "operation", "label")):
-                raise CleanupError("cleanup_receipt_plan_invalid", ambiguous=True)
             run_step(step_spec)
 
         ambiguous_steps = receipt.get("ambiguous_steps") or []
@@ -805,17 +873,24 @@ def run(
             receipt["status"] = "ambiguous"
             persist()
             raise CleanupError("cleanup_ambiguous", ambiguous=True)
-        if receipt.get("thread_reply") is False and supplied["cleanup_mode"] == LINKED_ISSUE_MODE:
-            terminal_pr = ext.read_pr(request)
-            _validate_pr_for_request(request, terminal_pr)
-            terminal_issue = ext.read_issue(request)
-            _validate_issue_snapshot(request, terminal_issue)
-            _validate_terminal_for_request(request, terminal_pr, terminal_issue)
-        if receipt.get("issue_residue") == "named-issue-unreconciled":
-            residue_pr = ext.read_pr(request)
-            _validate_merged_snapshot_without_ref(request, residue_pr)
-            if "pm-state:closed-clean" not in _labels(residue_pr.get("labels")):
-                raise CleanupError("pr_terminal_readback_mismatch", ambiguous=True)
+        try:
+            if receipt.get("thread_reply") is False and supplied["cleanup_mode"] == LINKED_ISSUE_MODE:
+                terminal_pr = ext.read_pr(request)
+                _validate_pr_for_request(request, terminal_pr)
+                terminal_issue = ext.read_issue(request)
+                _validate_issue_snapshot(request, terminal_issue)
+                _validate_terminal_for_request(request, terminal_pr, terminal_issue)
+            if receipt.get("issue_residue") == "named-issue-unreconciled":
+                residue_pr = ext.read_pr(request)
+                _validate_merged_snapshot_without_ref(request, residue_pr)
+                if "pm-state:closed-clean" not in _labels(residue_pr.get("labels")):
+                    raise CleanupError("pr_terminal_readback_mismatch", ambiguous=True)
+        except (CleanupError, OSError, TypeError, ValueError) as exc:
+            reason = exc.reason if isinstance(exc, CleanupError) else "cleanup_terminal_readback_failed"
+            receipt["status"] = "ambiguous"
+            receipt["terminal_error"] = reason
+            persist()
+            raise _failure(reason, receipt, key, ambiguous=True) from exc
         receipt["status"] = "completed"
         persist()
         result = {
@@ -849,7 +924,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = run(json.load(__import__("sys").stdin), mapping_path=args.mapping_path, receipt_path=args.receipt_path)
     except CleanupError as exc:
-        print(json.dumps({"success": False, "error": exc.reason, "ambiguous": exc.ambiguous}, separators=(",", ":")))
+        print(json.dumps({"success": False, "error": exc.reason, "ambiguous": exc.ambiguous, **exc.details}, separators=(",", ":")))
         return 2
     print(json.dumps(result, separators=(",", ":")))
     return 0

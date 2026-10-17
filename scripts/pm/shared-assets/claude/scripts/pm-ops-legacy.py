@@ -2422,9 +2422,8 @@ def print_status(args: argparse.Namespace) -> None:
     print(f"PM ops SQLite ledger needs sync: {', '.join(status['reasons'])}")
     print(f"DB: {status['db']}")
     print(f"pm-todo.md lines: {status['pm_todo_lines']}; open obligations: {status['open_obligations']}")
-    print("Run the live sync as a background job (never inline):")
-    print("bash /Users/rajiv/.claude/scripts/pm-ops-sync-bg.sh --detach")
-    print("Use --no-live only as a degraded manual fallback when GitHub/MoP are unavailable.")
+    print("Reconcile through the current PM workflow using MoP/GitHub and the supported heartbeat views.")
+    print("Legacy background sync orchestration is retired; this status does not authorize a sweep.")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 
