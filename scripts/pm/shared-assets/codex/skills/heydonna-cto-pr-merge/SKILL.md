@@ -184,6 +184,38 @@ failed applicable visual proof blocks. Do not take fresh screenshots or use
 a browser from a merge-only request; return the missing evidence to its
 existing PM/UI owner.
 
+**SHELL_CHECK (within this visual verdict):** For an in-app page UI change,
+inspect at least one applicable existing screenshot showing page context.
+Compare the surrounding shell with the established applicable route/layout and
+a sibling page at matching route-family, viewport and state. Bind these
+references to the captured revision and exact-head authored bytes as above;
+an existing reference may be reused when its applicable layout is unchanged.
+For dashboard-family pages, verify the actual Donna branding/logo,
+`DashboardSideBar` and `DashboardTopNav` integration, respecting responsive
+collapse and visibility. Do not treat a collapsed mobile sidebar as missing.
+Auth, editor and other intentionally distinct app layouts use their own
+established shell, not dashboard chrome. Marketing/blog/docs/benchmark viewers
+are not in-app dashboard pages.
+
+A cropped modal/component image alone does not prove page-shell integration.
+Reuse sufficient existing images; not every screenshot must repeat chrome.
+If page context or the applicable sibling/layout reference is missing, return
+the exact missing context to the existing PM/UI owner, without a new browser
+capture or review stage. Missing or replaced required navigation/branding is
+a concrete integration defect and blocks merge. Only explicit recorded approval
+of an intentional different layout for this page/layout change is an exception;
+a mock omitting chrome or approval of inner content is not a shell waiver.
+Verify the actual approval source; do not invent it.
+
+Record a concise `SHELL_CHECK` result and applicable reference or approved
+exception inside the existing visual verdict, not a new receipt, schema,
+status, label, artifact or gate. This extends the same image pass because
+content matching alone missed absent app navigation/branding (#9482; Rajiv
+C0ALZJHGE49/1792245657.474269, rule 43 #21). Target at most two added minutes
+using one reusable sibling/layout comparison, no paid tests or browser session.
+Remove this standalone wording if an equivalent canonical visual checklist
+fully subsumes it; never run duplicate checks.
+
 When no user-visible UI/layout change exists, record `VISUAL_NOT_APPLICABLE`
 with the actual changed-path/behavior reason. Do not require decorative
 screenshots for backend, workflow or test-only work. DOCX/Word/PDF artifact

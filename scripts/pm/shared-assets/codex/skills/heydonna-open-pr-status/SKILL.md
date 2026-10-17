@@ -41,6 +41,14 @@ App, mixed, or unknown scope requires the genuine exact-head CI/E2E pair;
 unknown or mismatched scope is never exempt. Site-only completion is not
 dual-green and is not a red-app-workflow waiver.
 
+For an in-app UI final merge in a supported lane, apply the existing visual
+verdict, including `SHELL_CHECK`, in
+[heydonna-cto-pr-merge section 4](../heydonna-cto-pr-merge/SKILL.md#4-visual-proof-matches-the-shipped-ui).
+That section is the single shell-check rule, not another review stage. Its
+applicability does not turn site/marketing/blog/docs/benchmark-only exemptions
+into dashboard-shell or repeated image-inspection requirements, and non-UI
+`VISUAL_NOT_APPLICABLE` remains unchanged.
+
 ## Ordinary and authorized emergency merges
 
 PR Merges remains the sole merge executor. Ordinary merges use this skill's

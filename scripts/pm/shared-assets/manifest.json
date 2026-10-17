@@ -1383,7 +1383,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "9a7aa57e1f10b152d42d64b93995b4fdd1c4aaafb9fde34c38419a9d7045e891",
+      "sha256": "66b82bb66d23050f7f5b27944bec275cc9592f635f2cbc68952e659a111aa390",
       "source_path": "codex/skills/heydonna-cto-pr-merge/SKILL.md"
     },
     {
@@ -1392,7 +1392,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "113ca1cda21c1f24f15a6d37a8f9583deef016b3cf2bba7e5f48c7236900c88d",
+      "sha256": "799c97a30753875e3ac1ebf9a589fc3b781bfa57455e38e5b80c1f63752eecb0",
       "source_path": "codex/skills/heydonna-open-pr-status/SKILL.md"
     },
     {
