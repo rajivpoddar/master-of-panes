@@ -239,6 +239,65 @@ class DuplicateDevServerTests(unittest.TestCase):
 
 
 class StatusFileTests(unittest.TestCase):
+    # MODULE.main(--apply) continues past a slot-inventory refusal into runaway_scan, replayd_check
+    # and codex_renderer_check, which scan the host's real `ps`, may os.kill real processes
+    # (Codex renderers, runaways, replayd) and persist streaks to the live history file. Mirror the
+    # isolation in test_stale_process_cleanup.py and fail loudly if any of it is ever reached.
+    def setUp(self) -> None:
+        def fail_signal(*args, **kwargs):
+            raise AssertionError(f"test main() must never signal a process: os.kill{args!r}")
+
+        def fail_ps(*args, **kwargs):
+            raise AssertionError(f"test main() must never run a host command: run{args!r}")
+
+        kill_patcher = patch.object(os, "kill", side_effect=fail_signal)
+        self.kill = kill_patcher.start()
+        self.addCleanup(kill_patcher.stop)
+        run_patcher = patch.object(MODULE, "run", side_effect=fail_ps)
+        self.run_mock = run_patcher.start()
+        self.addCleanup(run_patcher.stop)
+        self.load_history = patch.object(MODULE, "load_history", side_effect=lambda *a, **k: {}).start()
+        self.save_history = patch.object(MODULE, "save_history").start()
+        self.runaway_scan = patch.object(
+            MODULE, "runaway_scan", return_value={"class": "runaway_scan", "found": [], "terminated": [], "errors": []}
+        ).start()
+        self.replayd_check = patch.object(
+            MODULE, "replayd_check", return_value={"pid": None, "cpu": None, "streak": 0, "action": "none"}
+        ).start()
+        self.codex_renderer_check = patch.object(
+            MODULE,
+            "codex_renderer_check",
+            return_value={"class": "codex_renderer", "observed": 0, "over_threshold": 0, "pending": 0,
+                          "found": [], "terminated": [], "refused": [], "errors": []},
+        ).start()
+        self.addCleanup(patch.stopall)
+
+    def test_apply_main_cannot_reach_live_ps_signals_or_history(self) -> None:
+        live_history = MODULE.HISTORY_JSON
+        history_before = live_history.read_bytes() if live_history.exists() else None
+        with tempfile.TemporaryDirectory() as temp:
+            argv = ["x", "--apply", "--output", str(Path(temp) / "proof.json"),
+                    "--status-output", str(Path(temp) / "status.json")]
+            with patch.object(MODULE, "load_slot_inventory", return_value=({}, "malformed_row:slot=4")), patch.object(
+                sys, "argv", argv
+            ), patch.object(sys, "stdout", new_callable=io.StringIO):
+                self.assertEqual(MODULE.main(), 2)
+        # main() did reach the host-touching steps with apply=True, but only the isolated stubs ran.
+        self.assertTrue(self.runaway_scan.call_args.args[0])
+        self.assertTrue(self.replayd_check.call_args.args[1])
+        self.assertTrue(self.codex_renderer_check.call_args.args[1])
+        self.kill.assert_not_called()
+        self.run_mock.assert_not_called()
+        self.save_history.assert_called_once()
+        # The saved history went to the stub, and the live file was not touched.
+        history_after = live_history.read_bytes() if live_history.exists() else None
+        self.assertEqual(history_before, history_after)
+        # The guards are armed: a real signal or host command would raise.
+        with self.assertRaises(AssertionError):
+            os.kill(1, 0)
+        with self.assertRaises(AssertionError):
+            MODULE.run(["ps"])
+
     def test_refusal_writes_status_file_and_heartbeat_alerts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             status = Path(temp) / "status.json"
