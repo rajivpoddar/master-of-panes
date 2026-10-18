@@ -69,6 +69,22 @@ class StaleProcessCleanupTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self._status_dir.cleanup)
+        # The Codex renderer policy scans the host's real `ps` and persists streaks in the
+        # live history file. Isolate both so a runaway renderer on the test host cannot
+        # add an unexpected os.kill (or advance a live streak) during a run.
+        # load/save_history bind HISTORY_JSON as a default argument, so patch the functions.
+        for name, kwargs in (("load_history", {"side_effect": lambda *a, **k: {}}), ("save_history", {})):
+            history_patcher = patch.object(MODULE, name, **kwargs)
+            history_patcher.start()
+            self.addCleanup(history_patcher.stop)
+        renderer_patcher = patch.object(
+            MODULE,
+            "codex_renderer_check",
+            return_value={"class": "codex_renderer", "observed": 0, "over_threshold": 0, "pending": 0,
+                          "found": [], "terminated": [], "refused": [], "errors": []},
+        )
+        renderer_patcher.start()
+        self.addCleanup(renderer_patcher.stop)
 
     def test_main_status_default_is_isolated_from_live_heartbeat_path(self) -> None:
         live = Path("/tmp/stale-process-cleanup-status.json")
