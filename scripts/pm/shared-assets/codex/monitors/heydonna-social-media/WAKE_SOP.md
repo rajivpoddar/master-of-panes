@@ -63,6 +63,25 @@ receipt and growth log. Existing effect keys, restrictions, caps and no-retry
 history remain in force. Editing or loading this SOP grants no immediate feed,
 inbox, discovery, engagement or reporting pass.
 
+### Native browser runtime recovery — 19 October 2026
+
+Rajiv explicitly requested native browser repair and the bounded LinkedIn
+continuation in this owner chat. The installed native runtime works through
+`mcp__node_repl__js` even when `mcp__cua_repl` is not exposed. A missing
+`control-in-app-browser/SKILL.md` companion file alone does not establish that
+the native browser is unavailable. Locate the installed bundled browser
+`scripts/browser-client.mjs`, use its documented `setupBrowserRuntime()`
+bootstrap in the existing Node REPL, select `agent.browsers.get("iab")`, and
+read the COMPLETE returned `browser.documentation()` before interacting.
+The verified installed client is currently
+`/Users/rajiv/.codex/plugins/cache/openai-bundled/browser/26.1013.40934/scripts/browser-client.mjs`.
+Use the actual returned browser ID and supported API, not a stale ID or an
+external driver. Reuse the initialized runtime; preserve unrelated tabs,
+sessions, actors and original receipts. If the actual bounded native access
+attempt fails, retain the existing stop/report rule. Do not change browser
+security, authentication, processes or account sessions to recover access.
+This note supplies no new social pass, send, follow, retry or timer authority.
+
 ## Current ICP: digital court reporters and legal transcriptionists
 
 Rajiv's directive `C0C7U35LBKR/1791738997.244519`, conveyed by PM

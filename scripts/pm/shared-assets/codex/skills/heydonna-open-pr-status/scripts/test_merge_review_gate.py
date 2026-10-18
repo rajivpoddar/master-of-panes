@@ -197,6 +197,89 @@ def t8_review_gate_symbols_and_marker_lookup_are_gone():
         assert token not in source, token
 
 
+# ---- app test-only classifier receipt (canonical + legacy spelling) ----
+import hashlib  # noqa: E402
+import json  # noqa: E402
+
+BASE = "1" * 40
+WFSHA = "2" * 40
+RULES_BYTES = b'{"schema_version": 1}'
+RULES_SHA = hashlib.sha256(RULES_BYTES).hexdigest()
+TEST_FILE = "scripts/ci/tests/test_nysd_migration_scope_gate.py"
+CANONICAL = {"schema_version": 1, "scope": "test_only", "test_only": True,
+             "control_plane_only": False, "paid_ci_exempt": False,
+             "product_changed": False, "ci_required": True, "e2e_required": False,
+             "rules_sha256": RULES_SHA, "changed_files": [TEST_FILE]}
+LEGACY = {"schema_version": 1, "scope": "app_test_only", "app_test_only": True,
+          "control_plane_only": False, "paid_ci_exempt": False,
+          "product_changed": False, "ci_required": True, "e2e_required": False,
+          "rules_sha256": RULES_SHA}
+
+
+def classifier_proof(receipt, head_in_log=HEAD, rules_bytes=RULES_BYTES, pr_files=(TEST_FILE,),
+                     legacy_globs=None, no_receipt=False):
+    lines = ["2026-10-18T19:36:11.0Z " + json.dumps(receipt)] if not no_receipt else ["no receipt"]
+    lines += [f"BASE_SHA: {BASE}", f"HEAD_SHA: {head_in_log}", f"WORKFLOW_SHA: {WFSHA}",
+              "EVENT_NAME: pull_request", f"PR_NUMBER: {NUMBER}"]
+    merge.job_log = lambda job_id: "\n".join(lines)
+    merge.api = lambda path: {"parents": [{"sha": BASE}, {"sha": HEAD}]}
+    merge.contents_identity = lambda path, ref: (
+        ("blob-" + path, rules_bytes) if path.endswith("change-scope-rules.json")
+        else ("blob-" + path, b""))
+    rules = dict(json.loads(RULES_BYTES), **({"app_test_only": legacy_globs} if legacy_globs else {}))
+    if legacy_globs:
+        merge.contents_identity = lambda path, ref: (
+            ("blob-" + path, json.dumps(rules).encode()) if path.endswith("change-scope-rules.json")
+            else ("blob-" + path, b""))
+    merge.command = lambda *args: json.dumps([[{"filename": name} for name in pr_files]])
+    pr = make_pr()
+    run = workflow_run("ci.yml", "success")
+    scope = {"id": 7, "status": "completed", "conclusion": "success"}
+    return merge.app_test_only_classifier_proof(pr, "ci.yml", run, scope)
+
+
+def t9_canonical_test_only_receipt_is_accepted():
+    proof = classifier_proof(dict(CANONICAL))
+    assert proof is not None and proof["exempt"] == "test_only", proof
+    assert proof["head"] == HEAD and proof["rules_sha256"] == RULES_SHA, proof
+
+
+def t10_legacy_app_test_only_receipt_is_still_accepted():
+    receipt = dict(LEGACY, rules_sha256=hashlib.sha256(
+        json.dumps(dict(json.loads(RULES_BYTES), app_test_only=["scripts/ci/tests/**"])).encode()
+    ).hexdigest())
+    proof = classifier_proof(receipt, legacy_globs=["scripts/ci/tests/**"])
+    assert proof is not None and proof["exempt"] == "app_test_only", proof
+
+
+def t11_product_changed_true_is_refused():
+    assert classifier_proof(dict(CANONICAL, product_changed=True)) is None
+
+
+def t12_e2e_required_true_is_refused():
+    assert classifier_proof(dict(CANONICAL, e2e_required=True)) is None
+
+
+def t13_ci_not_required_or_paid_exempt_is_refused():
+    assert classifier_proof(dict(CANONICAL, ci_required=False)) is None
+    assert classifier_proof(dict(CANONICAL, paid_ci_exempt=True)) is None
+    assert classifier_proof(dict(CANONICAL, test_only=False)) is None
+
+
+def t14_head_or_rules_mismatch_is_refused():
+    assert classifier_proof(dict(CANONICAL), head_in_log=OTHER) is None
+    assert classifier_proof(dict(CANONICAL, rules_sha256="f" * 64)) is None
+
+
+def t15_missing_receipt_is_refused():
+    assert classifier_proof(dict(CANONICAL), no_receipt=True) is None
+
+
+def t16_receipt_files_must_equal_pr_files():
+    assert classifier_proof(dict(CANONICAL), pr_files=(TEST_FILE, "app/page.tsx")) is None
+    assert classifier_proof(dict(CANONICAL, changed_files=[TEST_FILE, "app/page.tsx"])) is None
+
+
 def _tests():
     return sorted((k, v) for k, v in list(globals().items())
                   if len(k) > 1 and k[0] == "t" and k[1].isdigit() and callable(v))

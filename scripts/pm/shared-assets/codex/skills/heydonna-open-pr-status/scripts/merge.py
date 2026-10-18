@@ -101,7 +101,8 @@ def workflow_proof(pr, workflow, names):
 
 # ---------- classifier exemption (control-plane-only PRs) ----------
 CLASSIFIER_JOB_NAME = "classify-change-scope"
-TEST_ONLY_SCOPE = "app_test_only"
+TEST_ONLY_SCOPE = "app_test_only"  # legacy receipt spelling, still accepted
+CANONICAL_TEST_ONLY_SCOPE = "test_only"  # canonical classifier receipt: scope=test_only, test_only=true
 EXEMPTION_RECEIPT = {
     "schema_version": 1,
     "paid_ci_exempt": True,
@@ -261,9 +262,16 @@ def app_test_only_classifier_proof(pr, workflow, run, scope):
     if workflow != "ci.yml" or not successful(run) or not successful(scope):
         return None
     lines = strip_log_framing(job_log(scope["id"]))
-    receipt = classifier_receipt_object(lines, TEST_ONLY_SCOPE)
-    if receipt is None or receipt.get("app_test_only") is not True:
-        return None
+    receipt = classifier_receipt_object(lines, CANONICAL_TEST_ONLY_SCOPE)
+    scope_name = CANONICAL_TEST_ONLY_SCOPE
+    if receipt is not None:
+        if receipt.get("test_only") is not True:
+            return None
+    else:
+        receipt = classifier_receipt_object(lines, TEST_ONLY_SCOPE)
+        scope_name = TEST_ONLY_SCOPE
+        if receipt is None or receipt.get("app_test_only") is not True:
+            return None
     expected = {"control_plane_only": False, "paid_ci_exempt": False,
                 "product_changed": False, "ci_required": True, "e2e_required": False}
     if any(receipt.get(key) is not value for key, value in expected.items()):
@@ -299,11 +307,47 @@ def app_test_only_classifier_proof(pr, workflow, run, scope):
     import hashlib
     if hashlib.sha256(rules[1]).hexdigest() != rules_sha:
         return None
-    if not paths_confined(pr, rules[1], (TEST_ONLY_SCOPE,)):
+    if scope_name == CANONICAL_TEST_ONLY_SCOPE:
+        # The classifier decides test_only in code (is_unit_test_path), not via a
+        # rules glob list, so bind the trusted receipt's changed_files to the
+        # exact PR file set instead.
+        if not receipt_files_match_pr(pr, receipt):
+            return None
+    elif not paths_confined(pr, rules[1], (TEST_ONLY_SCOPE,)):
         return None
     return {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head,
             "scope_job_id": scope["id"], "workflow_sha": workflow_sha,
-            "rules_sha256": rules_sha, "exempt": TEST_ONLY_SCOPE}
+            "rules_sha256": rules_sha, "exempt": scope_name}
+
+
+def receipt_files_match_pr(pr, receipt):
+    """True only when receipt changed_files equals the complete PR file set."""
+    try:
+        changed = receipt.get("changed_files")
+        if (not isinstance(changed, list) or not changed
+                or not all(isinstance(path, str) and path for path in changed)):
+            return False
+        pages_json = json.loads(command(
+            "gh", "api", "--paginate", "--slurp",
+            f"repos/{REPO}/pulls/{pr['number']}/files?per_page=100"))
+        if not isinstance(pages_json, list) or not pages_json:
+            return False
+        paths = set()
+        for page in pages_json:
+            if not isinstance(page, list):
+                return False
+            for item in page:
+                if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
+                    return False
+                paths.add(item["filename"])
+                previous = item.get("previous_filename")
+                if previous is not None:
+                    if not isinstance(previous, str):
+                        return False
+                    paths.add(previous)
+        return bool(paths) and paths == set(changed)
+    except (KeyError, TypeError, ValueError, Refusal, OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def app_test_only_e2e_proof(pr, classifier_proof):

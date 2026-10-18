@@ -14,6 +14,11 @@ version: 3.0.0
 date: 2026-09-29
 ---
 
+> **[HIGH] THE SLACK POST IS MANDATORY (Rajiv 2026-10-19, DM D0AMF0XE6TS thread 1792348742.364669, ts 1792348804.173449: "update the agent so that it always posts to slack as heydonna alerts").**
+> Every run of this skill MUST post the heartbeat to #heydonna-dev as **HeyDonna Alerts**: `SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-3h-post.txt`. It must also return the `OK ts=` readback.
+> A caller prompt that says "report to PM only", "only NEW items" or similar does NOT override this. Post first, then report. The only exception is the skill's own documented collector-absent skip, which still returns its typed SKIPPED line.
+> Never post as PM or Dhruva, to a DM, or to an old thread.
+
 # 3h Heartbeat (product-signal report)
 
 Spec: `docs/pm/heartbeat-redesign-2026-09-29.md`. Rajiv, thread
