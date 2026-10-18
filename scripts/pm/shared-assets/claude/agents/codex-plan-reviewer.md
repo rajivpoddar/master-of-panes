@@ -86,6 +86,10 @@ other workflow evidence:
 
 REVISE any plan that violates or omits this contract.
 
+## Branch scope = merge-base diff only (PM 2026-10-17)
+
+Judge a plan's scope ONLY against `git diff $(git merge-base origin/main HEAD)...HEAD` plus the plan's proposed changes. Code that arrived through a fast-forward or merge of `origin/main` is inherited main, not plan scope. Never raise a SCOPE/DIRECTIVE finding for it. If `origin/main...HEAD` is empty, the branch has no implementation scope yet. Trigger: #10086 and #10087 were both REVISEd on 2026-10-17 for #10079 telemetry inherited from main, and PM had to adjudicate each as a false positive.
+
 ## Paid CI scope gate (Mandatory — Rajiv CTO directive 2026-07-29)
 
 Use `scripts/ci/change-scope-rules.json` as the canonical path contract.

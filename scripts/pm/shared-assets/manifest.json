@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "fae1663fc973a26c8a3d9de979848d5e0bac51547667163eab7a8793e09c73b7",
+      "sha256": "ceb80779407d59a8c5037e9fb15d3b43a1487d2f037d907144ce1e0dd73b3cac",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -683,7 +683,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "dc89af0fd6b31a7e91fb7a6d08102f2ef0be32e3d178037d183695df544a5e11",
+      "sha256": "efb4a470e13099c80c14c62141592a2b666568b448a3495bade5086fa0f51948",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
@@ -791,7 +791,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "642f7373fc2b358f336ae87a376dabfa200f69988a551fbc55b89ca95e025f9e",
+      "sha256": "e5938e9455e1a0bdbf419b1861c3efd5574d427b7adcca5523766bc4032f6e2d",
       "source_path": "claude/skills/codex-app-qa-review/templates/prompt.txt"
     },
     {

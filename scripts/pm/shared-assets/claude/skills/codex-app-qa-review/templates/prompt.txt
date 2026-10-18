@@ -283,3 +283,6 @@ QA-reviewer specifics:
 - Deterministic provider fixtures remain fine. Real-runtime proof is needed for a runtime-sensitive
   boundary, not for every pure helper change.
 - Missing unexecuted evidence stays explicit; never report it as PASS.
+
+<!-- Codex meta-analysis 2026-10-18 PR #10210 trigger: permission-transition-direction; QA CHECK 47. -->
+For changed role/permission consequence summaries, verify directional assertions through the production helper: broad-to-own is a restriction, own-to-broad is an expansion, and unchanged grants are unchanged. Boolean truthiness and tests endorsing reversed confirmation copy are insufficient. Use existing focused CI/remote proof, not a new host test or browser gate.

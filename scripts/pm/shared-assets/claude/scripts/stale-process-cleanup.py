@@ -1380,6 +1380,139 @@ def runaway_scan(apply: bool, term_wait_s: float = 3.0) -> dict[str, Any]:
     return out
 
 
+CODEX_RENDERER_MIN_AGE_S = 60 * 60
+CODEX_RENDERER_CPU_THRESHOLD = 50.0
+CODEX_RENDERER_STREAK = 2
+CODEX_RENDERER_MAX_KILLS = 5
+CODEX_RENDERER_TERM_WAIT_S = 10.0
+
+
+def codex_renderer_classify(command: str) -> bool:
+    """Only the ChatGPT-bundled Codex renderer executable, never a CLI or service."""
+    executable = re.match(
+        r"^/Applications/ChatGPT\.app/Contents/Frameworks/Codex Framework\.framework/"
+        r"Versions/[^/\s]+/Helpers/Codex \(Renderer\)\.app/Contents/MacOS/"
+        r"Codex \(Renderer\)(?=\s|$)",
+        command,
+    )
+    return bool(executable and re.search(r"(?:^|\s)--type=renderer(?:\s|$)", command[executable.end():]))
+
+
+def _codex_renderer_row(line: str) -> dict[str, Any] | None:
+    """Read PID/start/args together so a reused PID cannot inherit a CPU streak."""
+    parts = line.strip().split(None, 9)
+    if len(parts) != 10 or not codex_renderer_classify(parts[9]):
+        return None
+    try:
+        pid, uid, cpu = int(parts[0]), int(parts[1]), float(parts[3])
+    except ValueError:
+        return None
+    age = parse_etime(parts[2])
+    if uid != os.getuid() or age is None or pid == os.getpid():
+        return None
+    return {"pid": pid, "uid": uid, "etime": parts[2], "age_seconds": age,
+            "cpu": cpu, "start_time": " ".join(parts[4:9]), "command": parts[9]}
+
+
+def codex_renderer_check(history: dict[str, Any], apply: bool) -> dict[str, Any]:
+    """Separate approved runaway policy; does not relax any live-owner guard.
+
+    Only apply passes persist streaks; a dry run previews the next pass without
+    changing history. Low CPU, young/missing processes and new starts reset it.
+    """
+    out: dict[str, Any] = {"class": "codex_renderer", "observed": 0, "over_threshold": 0,
+                           "pending": 0, "found": [], "terminated": [], "refused": [], "errors": []}
+    fields = "pid=,uid=,etime=,%cpu=,lstart=,command="
+    try:
+        result = run(["ps", "-axo", fields], timeout=10)
+    except Exception as exc:
+        out["errors"].append(f"ps_failed:{type(exc).__name__}")
+        if apply:
+            history["codex_renderers"] = {}
+        return out
+    if result.returncode != 0:
+        out["errors"].append("ps_failed")
+        if apply:
+            history["codex_renderers"] = {}
+        return out
+    previous = history.get("codex_renderers", {})
+    if not isinstance(previous, dict):
+        previous = {}
+    tracked: dict[str, Any] = {}
+    for line in result.stdout.splitlines():
+        row = _codex_renderer_row(line)
+        if row is None:
+            continue
+        out["observed"] += 1
+        if not (row["age_seconds"] > CODEX_RENDERER_MIN_AGE_S and row["cpu"] > CODEX_RENDERER_CPU_THRESHOLD):
+            continue
+        out["over_threshold"] += 1
+        key = f"{row['pid']}:{row['start_time']}"
+        entry = previous.get(key, {})
+        prior_streak = entry.get("streak", 0) if isinstance(entry, dict) else 0
+        if not isinstance(prior_streak, int) or prior_streak < 0:
+            prior_streak = 0
+        row["streak"] = min(prior_streak + 1, CODEX_RENDERER_STREAK)
+        tracked[key] = {"streak": row["streak"]}
+        if row["streak"] < CODEX_RENDERER_STREAK:
+            out["pending"] += 1
+        elif len(out["found"]) < CODEX_RENDERER_MAX_KILLS:
+            row.update(term_sent=False, kill_sent=False, action="scan_only" if not apply else "none")
+            out["found"].append(row)
+    if apply:
+        history["codex_renderers"] = tracked
+    if not apply:
+        return out
+
+    def revalidate(row: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            snap = run(["ps", "-p", str(row["pid"]), "-o", fields], timeout=2)
+        except Exception:
+            return None
+        current = _codex_renderer_row(snap.stdout) if snap.returncode == 0 else None
+        if current and all(current[k] == row[k] for k in ("pid", "uid", "start_time", "command")):
+            return current
+        return None
+
+    for row in out["found"]:
+        pid = row["pid"]
+        current = revalidate(row)
+        if not current or not (current["age_seconds"] > CODEX_RENDERER_MIN_AGE_S
+                               and current["cpu"] > CODEX_RENDERER_CPU_THRESHOLD):
+            row["action"] = "refused_identity_or_threshold"
+            out["refused"].append(row)
+            tracked.pop(f"{pid}:{row['start_time']}", None)
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            row["term_sent"] = True
+            time.sleep(CODEX_RENDERER_TERM_WAIT_S)
+            if alive(pid):
+                if not revalidate(row):
+                    row["action"] = "refused_identity_before_kill"
+                    out["refused"].append(row)
+                    continue
+                os.kill(pid, signal.SIGKILL)
+                row["kill_sent"] = True
+                time.sleep(0.5)
+            if alive(pid):
+                row["action"] = "still_alive"
+                out["errors"].append(f"{pid}:still_alive")
+            else:
+                row["action"] = "killed" if row["kill_sent"] else "terminated"
+                out["terminated"].append(row)
+                tracked.pop(f"{pid}:{row['start_time']}", None)
+        except ProcessLookupError:
+            row["action"] = "terminated_after_term" if row["term_sent"] else "already_exited"
+            if row["term_sent"]:
+                out["terminated"].append(row)
+            tracked.pop(f"{pid}:{row['start_time']}", None)
+        except OSError as exc:
+            row["action"] = f"signal_failed:{type(exc).__name__}"
+            out["errors"].append(f"{pid}:{exc}")
+    return out
+
+
 def run_self_test() -> int:
     """Pure-function policy tests (no process is touched)."""
     def row(pid, ppid, cat, age_min, cwd="/x", daemon=False, cmd=None, cpu=100):
@@ -1539,6 +1672,7 @@ def _main() -> int:
     runaway = runaway_scan(args.apply, args.term_wait_s)
     history = load_history()
     replayd = replayd_check(history, args.apply)
+    codex_renderers = codex_renderer_check(history, args.apply)
     if args.apply:
         save_history(history)
     terminated = [item for item in outcomes if item.get("outcome") == "terminated"]
@@ -1564,6 +1698,7 @@ def _main() -> int:
             "orphan_playwright": "playwright runner / chrome-headless-shell / ms-playwright chromium with ppid 1 older than 60m (+descendants)",
             "orphan_dev_tool": "vitest/tsc with ppid 1 older than dev_tool_min (+descendants); a live parent protects",
             "replayd": "user-level /usr/libexec/replayd SIGTERM (launchd restarts it) after >50% CPU on 2 consecutive apply runs",
+            "codex_renderer": "ChatGPT-bundled Codex (Renderer).app --type=renderer only: age >60m AND CPU >50% on 2 consecutive apply passes keyed by PID+start; max 5 per pass; revalidate PID/start/args before TERM and KILL, with 10s grace; dry run does not persist",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],
@@ -1593,6 +1728,7 @@ def _main() -> int:
         "report_only": before.get("report_only", []),
         "replayd": replayd,
         "runaway_scan": runaway,
+        "codex_renderer": codex_renderers,
         "after": after,
     }
     Path(args.output).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1622,6 +1758,17 @@ def _main() -> int:
             f"reason={row.get('reap_reason') or row.get('owner_proof') or 'stale_owner'}"
         )
     print(f"REPLAYD pid={replayd.get('pid')} cpu={replayd.get('cpu')} streak={replayd.get('streak')} action={replayd['action']}")
+    print(
+        f"CODEX_RENDERER observed={codex_renderers['observed']} over_threshold={codex_renderers['over_threshold']} "
+        f"pending={codex_renderers['pending']} candidates={len(codex_renderers['found'])} "
+        f"terminated={len(codex_renderers['terminated'])} refused={len(codex_renderers['refused'])} "
+        f"errors={len(codex_renderers['errors'])} action={'apply' if args.apply else 'scan_only'}"
+    )
+    for row in codex_renderers["found"]:
+        print(
+            f"CODEX_RENDERER_PROCESS pid={row['pid']} etime={row['etime']} cpu={row['cpu']} "
+            f"streak={row['streak']} action={row['action']}"
+        )
     if args.apply:
         if not before.get("ok"):
             print(f"STALE_PROCESS_CLEANUP refused={before.get('error', 'unknown')} proof={args.output}")
