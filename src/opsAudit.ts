@@ -25,8 +25,9 @@
  *        Then relay.injectToPM(clean) is called. INJECT_DECISION remains the
  *        internal bg-script → scheduler control channel — PM never sees it.
  *   5. Write last-run/status to DB config keys.
- *   6. Bound total wall-clock at BG_SCRIPT_TIMEOUT_MS (default 180s, allowing
- *      Codex 120s + overhead).
+ *   6. Bound total wall-clock at BG_SCRIPT_TIMEOUT_MS (default 300s: the
+ *      pr-state-sweep preflight alone takes 60-95s with ~25 open PRs and the
+ *      rest of the input gathering 40-80s; 180s killed loaded runs).
  *
  * Failure modes (all logged to mop-server log + DB events):
  *   - bg_script_not_found     — missing or non-executable bg-script
@@ -70,6 +71,8 @@ const CFG_LAST_RUN_ELAPSED_MS = "ops_audit_last_run_elapsed_ms";
 const CFG_LAST_RUN_PAYLOAD_BYTES = "ops_audit_last_run_payload_bytes";
 const OPS_AUDIT_JOB_KIND = "ops-audit";
 const OPS_AUDIT_TRACE_PATH = "/tmp/mop-ops-audit.log";
+/** Default wall-clock bound for the bg-script (override: MOP_OPS_AUDIT_BG_TIMEOUT_MS). */
+export const DEFAULT_OPS_AUDIT_BG_TIMEOUT_MS = 300 * 1000;
 
 export type OpsAuditTickReason = "scheduled" | "manual" | "boot";
 
@@ -103,9 +106,9 @@ export class OpsAuditScheduler {
     process.env.MOP_OPS_AUDIT_INTERVAL_MS ?? `${60 * 60 * 1000}`,
     10
   );
-  // bg-script + Codex (Codex bounded at 120s inside bg-script).
+  // bg-script wall-clock bound (preflights + input gathering + optional Codex review).
   private readonly BG_SCRIPT_TIMEOUT_MS: number = parseInt(
-    process.env.MOP_OPS_AUDIT_BG_TIMEOUT_MS ?? `${180 * 1000}`,
+    process.env.MOP_OPS_AUDIT_BG_TIMEOUT_MS ?? `${DEFAULT_OPS_AUDIT_BG_TIMEOUT_MS}`,
     10
   );
   // Inject payload hard cap (truncate above this).
