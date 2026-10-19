@@ -270,6 +270,14 @@ class StatusFileTests(unittest.TestCase):
             return_value={"class": "codex_renderer", "observed": 0, "over_threshold": 0, "pending": 0,
                           "found": [], "terminated": [], "refused": [], "errors": []},
         ).start()
+        self.codex_broker_check = patch.object(
+            MODULE,
+            "codex_broker_orphan_check",
+            return_value={"class": "codex_broker_orphan", "min_hours": 6.0, "action": "apply",
+                          "roots": 0, "before": 0, "killed": 0, "exiting": 0, "after": 0,
+                          "skipped_protected": 0, "skipped_young": 0, "found": [], "skipped": [],
+                          "terminated": [], "exiting_pids": [], "refused": [], "errors": []},
+        ).start()
         self.addCleanup(patch.stopall)
 
     def test_apply_main_cannot_reach_live_ps_signals_or_history(self) -> None:
@@ -286,6 +294,7 @@ class StatusFileTests(unittest.TestCase):
         self.assertTrue(self.runaway_scan.call_args.args[0])
         self.assertTrue(self.replayd_check.call_args.args[1])
         self.assertTrue(self.codex_renderer_check.call_args.args[1])
+        self.assertTrue(self.codex_broker_check.call_args.args[0])
         self.kill.assert_not_called()
         self.run_mock.assert_not_called()
         self.save_history.assert_called_once()

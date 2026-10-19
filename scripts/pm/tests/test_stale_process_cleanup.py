@@ -85,6 +85,18 @@ class StaleProcessCleanupTests(unittest.TestCase):
         )
         renderer_patcher.start()
         self.addCleanup(renderer_patcher.stop)
+        # The orphaned Codex review-server scan also reads the host's real `ps` and, with
+        # --apply, would KILL real processes. Stub it like the renderer check.
+        broker_patcher = patch.object(
+            MODULE,
+            "codex_broker_orphan_check",
+            return_value={"class": "codex_broker_orphan", "min_hours": 6.0, "action": "apply",
+                          "roots": 0, "before": 0, "killed": 0, "exiting": 0, "after": 0,
+                          "skipped_protected": 0, "skipped_young": 0, "found": [], "skipped": [],
+                          "terminated": [], "exiting_pids": [], "refused": [], "errors": []},
+        )
+        broker_patcher.start()
+        self.addCleanup(broker_patcher.stop)
 
     def test_main_status_default_is_isolated_from_live_heartbeat_path(self) -> None:
         live = Path("/tmp/stale-process-cleanup-status.json")
@@ -329,6 +341,10 @@ class StaleProcessCleanupTests(unittest.TestCase):
                 "refused": 1,
                 "slotless_reap_attested": True,
                 "terminated": 1,
+                "codex_broker_orphan": {
+                    "roots": 0, "before": 0, "killed": 0, "exiting": 0, "after": 0,
+                    "skipped_protected": 0, "skipped_young": 0,
+                },
             },
         )
         self.assertIn("terminated=1 refused=1", stdout.getvalue())
