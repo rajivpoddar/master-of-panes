@@ -107,6 +107,15 @@ dispatched until receipt is verified.
 Use both send proof and receipt proof in hourly ops audit proof blocks or PM
 status notes.
 
+### Stuck composer recovery
+
+When a send fails with `delivery not verified`, MoP now leaves the composer
+clean where it can prove the text is its own paste, and refuses a later send
+BEFORE pasting while the composer still holds text (reason `composer not empty`;
+nothing is appended). The sanctioned recovery is
+`~/.claude/scripts/mop clear-composer --slot N` (C-u only, never Enter), then
+resend. Never use raw tmux send-keys.
+
 ## Safety Rules
 
 1. Target slot must be `1` through `8`.

@@ -10,6 +10,7 @@ Usage: mop <subcommand> [options]
   send --slot N --command CMD [--no-force] [--raw] [--file F]
   release --slot N [--reason R] | respawn --slot N [--no-continue] [--model M]
   clear --slot N|pm|all | dnd --slot N --on|--off
+  clear-composer --slot N [--no-force]   (empty a stuck composer; C-u only, never Enter)
   exit-pending --on|--off | exit-status | capture --slot N [--lines N]
   approve-plan --slot N [--option 2|4] [--comment T]
   ops-audit run|status|job|pause | pm-cadence status|run|pause
@@ -100,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("clear", help="POST /slots/:label/clear")
     p.add_argument("--slot", required=True, help="N, pm, or all")
 
+    p = sub.add_parser("clear-composer", help="POST /slots/:n/clear-composer")
+    p.add_argument("--slot", type=int, required=True)
+    p.add_argument("--no-force", action="store_true")
+
     p = sub.add_parser("dnd", help="POST /slots/:n/dnd")
     p.add_argument("--slot", type=int, required=True)
     g = p.add_mutually_exclusive_group(required=True)
@@ -173,6 +178,12 @@ def main(argv: list[str] | None = None) -> int:
         label = str(args.slot)
         code, data = http_json("POST", f"{base}/slots/{label}/clear", {"source": "mop-cli"})
         return emit(data, 0 if code == 200 else 1)
+    if cmd == "clear-composer":
+        code, data = http_json(
+            "POST", f"{base}/slots/{args.slot}/clear-composer", {"force": not args.no_force}
+        )
+        ok = code == 200 and isinstance(data, dict) and data.get("success") is True
+        return emit(data, 0 if ok else 1)
     if cmd == "dnd":
         code, data = http_json("POST", f"{base}/slots/{args.slot}/dnd", {"dnd": bool(args.on)})
         return emit(data, 0 if code == 200 else 1)

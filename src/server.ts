@@ -56,6 +56,8 @@ import {
   type SubmitCheckResult,
   type RefusedPasteCleanupResult,
   composerIsOnlyPastePlaceholders,
+  clearComposerText,
+  shouldUseBracketedPaste,
 } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 import { DEFAULT_CONFIG } from "./types.js";
@@ -2335,6 +2337,29 @@ async function pastePayloadWithTmuxBuffer(
         preSnapshot = (await capturePaneSnapshot(paneAddress)) ?? "";
       }
     }
+    // Refuse BEFORE any pasted byte when the composer already holds text (a
+    // stale draft or an earlier refused send). The submit check never presses
+    // Enter over a non-empty composer, so pasting would only append to it and
+    // leave the pane worse (slot 6, 2026-10-19: three PM sends concatenated).
+    const preComposer = composerText(preSnapshot);
+    if (preComposer !== null && preComposer !== "") {
+      const reason = "composer not empty before paste (stale draft or earlier refused send); nothing was pasted. "
+        + `Empty it with POST /slots/${slotNum}/clear-composer (mop clear-composer --slot ${slotNum}), then resend`;
+      db.logEvent(slotNum, "send_precheck_refused", null, null, {
+        source: meta.source,
+        bytes,
+        composer_chars: preComposer.length,
+        reason: "composer_not_empty",
+      });
+      return {
+        chunks: 0,
+        bytes,
+        chunkSize,
+        submit: { payloadSeen: false, payloadStable: false, cleared: null, enterPresses: 0 },
+        verify: { ok: false, reason },
+      };
+    }
+    const bracketedPaste = meta.bracketedPaste ?? shouldUseBracketedPaste(payload);
     const chunks = Math.max(1, Math.ceil(bytes / chunkSize));
     const bufName = `mop-send-${slotNum}-${Date.now()}`;
 
@@ -2359,7 +2384,7 @@ async function pastePayloadWithTmuxBuffer(
         await execShell(`tmux load-buffer -b ${shellEscape(bufName)} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
         await checkActivityTarget();
         await execShell(
-          `tmux paste-buffer${meta.bracketedPaste ? " -p" : ""} -b ${shellEscape(bufName)} -t ${paneAddress} -d`,
+          `tmux paste-buffer${bracketedPaste ? " -p" : ""} -b ${shellEscape(bufName)} -t ${paneAddress} -d`,
           { timeout: 10_000 },
         );
         db.logEvent(slotNum, "send_buffer_chunk", null, null, {
@@ -2436,6 +2461,80 @@ async function pastePayloadWithTmuxBuffer(
     return { chunks, bytes, chunkSize, submit, cleanup, verify };
   });
 }
+
+/**
+ * Sanctioned composer recovery for a dev slot: empties the input box (C-u
+ * only; never Enter, Escape or Ctrl-C) after a refused or concatenated send
+ * left text behind. Same pane-identity pin, send lock and active-slot gate as
+ * /send. POST /slots/:slotNum/clear-composer { force?: boolean }
+ */
+app.post("/slots/:slotNum/clear-composer", async (c) => {
+  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
+  if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
+  const slotNum = slotParse.data;
+  if (!isValidDevSlot(slotNum, config.slotCount)) {
+    return c.json({ success: false, error: "clear-composer is only available for dev slots", reason: "not_a_dev_slot" }, 400);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const force = body.force === true;
+
+  const identity = await verifyPaneIdentity(slotNum);
+  if (!identity.ok) {
+    db.logEvent(slotNum, "clear_composer_refused", null, null, { reason: "pane_identity_mismatch", detail: identity.detail });
+    return c.json({
+      success: false,
+      error: `Refused composer clear for slot ${slotNum}: ${identity.detail}`,
+      reason: "pane_identity_mismatch",
+    }, 409);
+  }
+  const paneTarget = identity.snapshot.paneId;
+  if (!force) {
+    let active = false;
+    try {
+      active = (await relay.getSlotActivityState(slotNum, paneTarget)) !== "idle";
+    } catch {
+      active = true;
+    }
+    if (active) {
+      db.logEvent(slotNum, "clear_composer_refused", null, null, { reason: "slot_active_force_required" });
+      return c.json({
+        success: false,
+        error: `Slot ${slotNum} is active and force=false. Pass force: true to clear the composer anyway, or wait for idle.`,
+        reason: "slot_active_force_required",
+      }, 409);
+    }
+  }
+  const modeRefusal = await readPaneInputModeRefusal(paneTarget);
+  if (modeRefusal) {
+    db.logEvent(slotNum, "clear_composer_refused", null, null, { reason: modeRefusal });
+    return c.json({ success: false, error: `Composer clear refused: ${modeRefusal}`, reason: modeRefusal }, 409);
+  }
+
+  const result = await withSlotSendLock(slotNum, () => clearComposerText({
+    capture: () => capturePaneSnapshot(paneTarget),
+    clearComposer: async () => {
+      if (await readPaneInputModeRefusal(paneTarget)) return false;
+      await execShell(`tmux send-keys -t ${paneTarget} C-u`, { timeout: 10_000 });
+      return true;
+    },
+    sleep,
+  }));
+  db.logEvent(slotNum, "clear_composer", null, null, {
+    cleared: result.cleared,
+    presses: result.presses,
+    reason: result.reason,
+    before_chars: result.beforeChars,
+    force,
+  });
+  return c.json({
+    success: result.cleared,
+    slot: slotNum,
+    cleared: result.cleared,
+    presses: result.presses,
+    reason: result.reason,
+    before_chars: result.beforeChars,
+  }, result.cleared ? 200 : 409);
+});
 
 app.post("/slots/:slotNum/send", async (c) => {
   const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));

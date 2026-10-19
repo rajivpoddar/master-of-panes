@@ -106,7 +106,8 @@ const MIN_REFUSED_PASTE_PREFIX_LENGTH = 24;
  * True only when the visible composer is attributable to this refused paste:
  * the pre-paste composer was empty, and the post-paste text is either a
  * collapsed paste placeholder (with any visible tail matching this payload)
- * or a sufficiently long visible prefix of this payload. This is cleanup
+ * or a sufficiently long visible slice (prefix, scrolled-window tail) of this
+ * payload. This is cleanup
  * ownership, not proof that the whole payload arrived.
  */
 export function composerIsRefusedPasteContent(composer: string, payload: string): boolean {
@@ -122,7 +123,12 @@ export function composerIsRefusedPasteContent(composer: string, payload: string)
   }
 
   const visible = squash(composer.trim());
-  return visible.length >= MIN_REFUSED_PASTE_PREFIX_LENGTH && expected.startsWith(visible);
+  if (visible.length < MIN_REFUSED_PASTE_PREFIX_LENGTH) return false;
+  // A long paste in a narrow pane overflows the TUI's capped composer window:
+  // only the TAIL of the payload stays visible (the head scrolls out of view),
+  // and a partly C-u-cleared composer shows a middle slice. Any contiguous
+  // slice of at least MIN_REFUSED_PASTE_PREFIX_LENGTH characters is this paste.
+  return expected.includes(visible);
 }
 
 const PLACEHOLDER_RE = /\[Pasted text(?:\s+#(\d+))?(?:\s+\+\d+\s+lines?)?\]/gi;
@@ -278,26 +284,105 @@ export async function clearOwnedRefusedPasteComposer(
     return { attempted: false, cleared: false, reason: "composer_not_owned_by_send" };
   }
 
-  let clearSent: boolean;
-  try {
-    clearSent = await deps.clearComposer();
-  } catch {
-    return { attempted: true, cleared: false, reason: "clear_key_outcome_unknown" };
-  }
-  if (!clearSent) {
-    return { attempted: false, cleared: false, reason: "pane_mode_refused" };
-  }
+  // C-u only deletes back to the start of the current input line, so a
+  // multi-line paste needs one press per line. Re-press only while the
+  // composer is still readable and still attributable to this paste.
+  for (let presses = 0; ; presses++) {
+    let clearSent: boolean;
+    try {
+      clearSent = await deps.clearComposer();
+    } catch {
+      return { attempted: true, cleared: false, reason: "clear_key_outcome_unknown" };
+    }
+    if (!clearSent) {
+      return presses === 0
+        ? { attempted: false, cleared: false, reason: "pane_mode_refused" }
+        : { attempted: true, cleared: false, reason: "composer_empty_not_confirmed" };
+    }
 
-  const empty = await waitForEmptyComposer({
-    capture: deps.capture,
-    sleep: deps.sleep,
-    stableMs: deps.stableMs ?? 250,
-    timeoutMs: deps.timeoutMs ?? 1000,
-    pollMs: deps.pollMs ?? 250,
-  });
-  return empty.ready
-    ? { attempted: true, cleared: true, reason: "composer_cleared" }
-    : { attempted: true, cleared: false, reason: "composer_empty_not_confirmed" };
+    const empty = await waitForEmptyComposer({
+      capture: deps.capture,
+      sleep: deps.sleep,
+      stableMs: deps.stableMs ?? 250,
+      timeoutMs: deps.timeoutMs ?? 1000,
+      pollMs: deps.pollMs ?? 250,
+    });
+    if (empty.ready) return { attempted: true, cleared: true, reason: "composer_cleared" };
+    const remaining = composerText(empty.snapshot);
+    if (
+      presses + 1 >= MAX_COMPOSER_CLEAR_PRESSES
+      || remaining === null
+      || (!composerIsRefusedPasteContent(remaining, payload) && !composerIsOnlyPastePlaceholders(remaining))
+    ) {
+      return { attempted: true, cleared: false, reason: "composer_empty_not_confirmed" };
+    }
+  }
+}
+
+/** Upper bound on C-u presses for one composer clear (one per input line). */
+export const MAX_COMPOSER_CLEAR_PRESSES = 60;
+
+export type ComposerClearResult = {
+  cleared: boolean;
+  presses: number;
+  reason: "already_empty" | "composer_unreadable" | "pane_mode_refused" | "composer_cleared" | "composer_empty_not_confirmed";
+  /** Characters that were in the composer before the clear (never the text itself). */
+  beforeChars: number;
+};
+
+/**
+ * Operator recovery: empty whatever sits in the composer, whoever put it
+ * there (stale refused pastes, concatenated sends). Only ever presses C-u
+ * (never Enter, never Escape, never Ctrl-C) and stops as soon as the composer
+ * reads empty and stays empty, so it cannot submit or cancel anything.
+ */
+export async function clearComposerText(deps: {
+  capture: () => Promise<string | null>;
+  /** Send one C-u; return false when the pane mode forbids it. */
+  clearComposer: () => Promise<boolean>;
+  sleep: (ms: number) => Promise<void>;
+  maxPresses?: number;
+  stableMs?: number;
+  timeoutMs?: number;
+  pollMs?: number;
+}): Promise<ComposerClearResult> {
+  const before = composerText(await deps.capture());
+  if (before === null) return { cleared: false, presses: 0, reason: "composer_unreadable", beforeChars: 0 };
+  const beforeChars = before.length;
+  if (before === "") return { cleared: true, presses: 0, reason: "already_empty", beforeChars };
+  const maxPresses = deps.maxPresses ?? MAX_COMPOSER_CLEAR_PRESSES;
+  let presses = 0;
+  while (presses < maxPresses) {
+    if (!(await deps.clearComposer())) {
+      return { cleared: false, presses, reason: presses === 0 ? "pane_mode_refused" : "composer_empty_not_confirmed", beforeChars };
+    }
+    presses++;
+    const empty = await waitForEmptyComposer({
+      capture: deps.capture,
+      sleep: deps.sleep,
+      stableMs: deps.stableMs ?? 250,
+      timeoutMs: deps.timeoutMs ?? 500,
+      pollMs: deps.pollMs ?? 250,
+    });
+    if (empty.ready) return { cleared: true, presses, reason: "composer_cleared", beforeChars };
+    if (composerText(empty.snapshot) === null) break;
+  }
+  return { cleared: false, presses, reason: "composer_empty_not_confirmed", beforeChars };
+}
+
+/**
+ * Long or many-line sends overflow the TUI's capped composer window in a
+ * narrow pane (the head scrolls out of view and can never be verified).
+ * Bracketed paste makes the TUI collapse them into one `[Pasted text #N]`
+ * placeholder, which the submit check accepts.
+ */
+export const BRACKETED_PASTE_MIN_BYTES = 600;
+export const BRACKETED_PASTE_MIN_LINES = 6;
+
+export function shouldUseBracketedPaste(payload: Buffer | string): boolean {
+  const text = typeof payload === "string" ? payload : payload.toString("utf8");
+  if (Buffer.byteLength(text, "utf8") >= BRACKETED_PASTE_MIN_BYTES) return true;
+  return text.split("\n").length > BRACKETED_PASTE_MIN_LINES;
 }
 
 export type SubmitCheckDeps = {

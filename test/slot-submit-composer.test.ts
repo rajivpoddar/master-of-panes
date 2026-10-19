@@ -263,7 +263,8 @@ test("assignment packets wait for a stable empty composer before the first paste
     "the composer readiness check must run before any tmux paste",
   );
   assert.match(pastePath, /const submitDwellMs = meta\.requireEmptyComposerBeforePaste[\s\S]*?resolveAssignmentInjectEnterDelayMs\(\)[\s\S]*?: INJECT_ENTER_DELAY_MS/);
-  assert.match(pastePath, /paste-buffer\$\{meta\.bracketedPaste \? " -p" : ""\}/);
+  assert.match(pastePath, /paste-buffer\$\{bracketedPaste \? " -p" : ""\}/);
+  assert.match(pastePath, /meta\.bracketedPaste \?\? shouldUseBracketedPaste\(payload\)/);
 });
 
 test("post-clear assignment submits a collapsed placeholder packet once", async () => {

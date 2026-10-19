@@ -510,7 +510,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-cli",
-      "sha256": "52d181b6de5b7e1231d5021896ee3a2bed39730e94153cd300dda28832ca50cc",
+      "sha256": "994b26d84d1741c49c451a16d7581381a8eb00152648fde918aaeeeec0e97b66",
       "source_path": "claude/scripts/mop.py"
     },
     {
@@ -899,7 +899,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-message-slot",
-      "sha256": "3ca48059002a2f1a74985368c9ddde366683826d872ac22cd2d9c53bea9e251d",
+      "sha256": "e722fc55c670070d610952a5788571d21ddd262b3ecaf5bf5c7cfd512404749c",
       "source_path": "claude/skills/message-slot/SKILL.md"
     },
     {
