@@ -683,7 +683,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "efb4a470e13099c80c14c62141592a2b666568b448a3495bade5086fa0f51948",
+      "sha256": "7cba8edafb687c41b81ddf43aaaee4f90047ad77ecc60bbde2c2b3c94af64d47",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
@@ -1410,7 +1410,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "f85c5a2c2c1acb03ff407458b998a8f2ed9c978bba15ac46382dab7141f3e800",
+      "sha256": "cf10b63036eda5d1ab2bfaa422b3ea6f48f8c4cf390a7180380ed068b9246469",
       "source_path": "codex/skills/heydonna-open-pr-status/scripts/merge.py"
     },
     {
@@ -1419,7 +1419,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-test",
-      "sha256": "438a9ea4a2a706cee9ae998fb118b068c37fa9619ae51ab67c9ff8a3cbf3a644",
+      "sha256": "e6828f1b55a5f48e28beb7a5953546a11901d91287f3409da9a9dc2cab683a1b",
       "source_path": "codex/skills/heydonna-open-pr-status/scripts/test_merge_review_gate.py"
     },
     {

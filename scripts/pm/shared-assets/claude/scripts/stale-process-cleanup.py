@@ -53,7 +53,7 @@ PERSIST_HISTORY = False
 
 
 def run(args: list[str], timeout: int = 5) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, text=True, capture_output=True, timeout=timeout)
+    return subprocess.run(args, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=timeout)
 
 
 def parse_etime(value: str) -> int | None:
@@ -1513,6 +1513,276 @@ def codex_renderer_check(history: dict[str, Any], apply: bool) -> dict[str, Any]
     return out
 
 
+# ---------------------------------------------------------------------------
+# Orphaned Codex review servers (Rajiv DM D0AMF0XE6TS thread 1792386583.556909,
+# ts 1792387134.624399: "add this to the process cleanup script"; PM manually
+# killed 122 processes on 2026-10-19, swap 47.4 -> 42.1 GB).
+#
+# Root shapes (strict, anchored):
+#   node .../.claude/plugins/cache/openai-codex/codex/<ver>/scripts/app-server-broker.mjs ...
+#   node .../bin/codex app-server                      (ONLY when reparented to launchd)
+#   .../@openai/codex-darwin-arm64/vendor/.../codex app-server   (ONLY when reparented)
+# The whole tree (root + every descendant) is signalled. These node processes
+# IGNORE SIGTERM, so KILL is required; under swap they linger in state E.
+# ---------------------------------------------------------------------------
+CODEX_BROKER_MIN_HOURS = 6.0
+CODEX_BROKER_POLL_S = 6.0
+
+_CODEX_BROKER_RE = re.compile(
+    r"^(?:\S*/)?node\s+\S*/\.claude/plugins/cache/openai-codex/codex/[^/\s]+/scripts/app-server-broker\.mjs(?:\s|$)"
+)
+_CODEX_ORPHAN_SERVER_RES = (
+    re.compile(r"^(?:\S*/)?node\s+\S*/bin/codex app-server$"),
+    re.compile(r"^\S*/@openai/codex-darwin-arm64/vendor/\S+/codex app-server$"),
+)
+_CODEX_LOOSE_RE = re.compile(r"app-server-broker\.mjs|codex\b.*\bapp-server\b")
+_CODEX_CHATGPT_RE = re.compile(r"ChatGPT\.app|Codex Framework|CodexCLI\.app|/Codex \(", re.I)
+_CODEX_PROTECTED_ANCESTOR_RE = re.compile(
+    r"(^|/)(claude|openclaude)(\s|$)|claude|tmux|ChatGPT|Codex\.app|Codex Framework|CodexCLI|codex|"
+    r"master-of-panes|slack-bridge|cto-bridge",
+    re.I,
+)
+
+
+def _codex_ps_row(line: str) -> dict[str, Any] | None:
+    parts = line.strip().split(None, 10)
+    if len(parts) != 11:
+        return None
+    try:
+        pid, ppid, uid = int(parts[0]), int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+    age = parse_etime(parts[3])
+    if age is None:
+        return None
+    return {"pid": pid, "ppid": ppid, "uid": uid, "etime": parts[3], "age_seconds": age,
+            "stat": parts[4], "start_time": " ".join(parts[5:10]), "command": parts[10]}
+
+
+def codex_broker_table() -> dict[int, dict[str, Any]] | None:
+    """One consistent process-table snapshot; None when ps is unreadable."""
+    try:
+        result = run(["ps", "-axo", "pid=,ppid=,uid=,etime=,stat=,lstart=,command="], timeout=10)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    table: dict[int, dict[str, Any]] = {}
+    for line in result.stdout.splitlines():
+        row = _codex_ps_row(line)
+        if row is not None:
+            table[row["pid"]] = row
+    return table
+
+
+def _codex_root_shape(command: str) -> str | None:
+    if _CODEX_BROKER_RE.match(command):
+        return "broker"
+    if any(rx.match(command) for rx in _CODEX_ORPHAN_SERVER_RES):
+        return "orphan_app_server"
+    return None
+
+
+def codex_broker_plan(
+    table: dict[int, dict[str, Any]], min_age_s: int, uid: int, self_pid: int
+) -> dict[str, Any]:
+    """Pure policy: which Codex review-server trees are orphaned and stale.
+
+    A root is eligible only when ALL hold: strict command shape; age > min_age_s;
+    its ancestor chain reaches launchd without a live claude/openclaude/tmux/
+    ChatGPT/Codex app/protected-owner process; it is not part of the ChatGPT
+    app's own tree; the tree does not contain this script or its ancestors.
+    Processes already exiting (stat E) or zombies (Z) are never signalled; they
+    are reported as ``exiting``.
+    """
+    kids: dict[int, list[int]] = {}
+    for row in table.values():
+        kids.setdefault(row["ppid"], []).append(row["pid"])
+
+    def chain(pid: int) -> list[dict[str, Any]]:
+        out, seen, cur = [], {pid}, table.get(pid, {}).get("ppid", 1)
+        while cur > 1 and cur not in seen and cur in table:
+            seen.add(cur)
+            out.append(table[cur])
+            cur = table[cur]["ppid"]
+        return out
+
+    def descendants(pid: int) -> list[dict[str, Any]]:
+        out, stack, seen = [], list(kids.get(pid, [])), set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen or cur not in table:
+                continue
+            seen.add(cur)
+            out.append(table[cur])
+            stack.extend(kids.get(cur, []))
+        return out
+
+    own = {self_pid} | {r["pid"] for r in chain(self_pid)}
+    roots: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    exiting: list[dict[str, Any]] = []
+    skipped_roots: dict[int, str] = {}
+
+    def skip(row: dict[str, Any], reason: str) -> None:
+        skipped.append({"pid": row["pid"], "ppid": row["ppid"], "age": fmt_age(row["age_seconds"]),
+                        "reason": reason, "command": sanitize_command(row["command"])[:200]})
+
+    for row in sorted(table.values(), key=lambda r: r["pid"]):
+        shape = _codex_root_shape(row["command"])
+        if shape is None or row["uid"] != uid:
+            continue
+        if shape == "orphan_app_server" and row["ppid"] != 1:
+            continue  # a child of a live process (often a broker): handled by its parent's tree or reported below
+        if row["stat"][:1] == "Z" or "E" in row["stat"]:
+            exiting.append(row)
+            continue
+        tree = descendants(row["pid"])
+        ancestors = chain(row["pid"])
+        if _CODEX_CHATGPT_RE.search(row["command"]) or any(_CODEX_CHATGPT_RE.search(a["command"]) for a in ancestors):
+            reason = "chatgpt_owned"
+        elif any(_CODEX_PROTECTED_ANCESTOR_RE.search(a["command"]) or _LIVE_OWNER_RE.search(a["command"])
+                 or _SESSION_RE.search(a["command"]) for a in ancestors):
+            reason = "protected_ancestor:" + ",".join(str(a["pid"]) for a in ancestors[:4])
+        elif own & ({row["pid"]} | {m["pid"] for m in tree}):
+            reason = "contains_self"
+        elif row["age_seconds"] <= min_age_s:
+            reason = f"younger_than_{min_age_s // 3600}h"
+        else:
+            members = [row] + [m for m in tree if m["uid"] == uid and "E" not in m["stat"] and m["stat"][:1] != "Z"]
+            exiting.extend(m for m in tree if "E" in m["stat"] or m["stat"][:1] == "Z")
+            roots.append({"root": row, "shape": shape, "members": members})
+            continue
+        skip(row, reason)
+        skipped_roots[row["pid"]] = reason
+        for m in tree:
+            skipped_roots.setdefault(m["pid"], f"tree_of_skipped_root:{row['pid']}")
+
+    # Loosely matching processes that are not eligible: report why they are kept.
+    in_roots = {m["pid"] for r in roots for m in r["members"]}
+    reported = {s["pid"] for s in skipped}
+    for row in sorted(table.values(), key=lambda r: r["pid"]):
+        if row["pid"] in in_roots or row["pid"] in reported or row["uid"] != uid:
+            continue
+        if not _CODEX_LOOSE_RE.search(row["command"]):
+            continue
+        if "E" in row["stat"] or row["stat"][:1] == "Z":
+            continue
+        ancestry = [row] + chain(row["pid"])
+        if any(_CODEX_CHATGPT_RE.search(a["command"]) for a in ancestry):
+            skip(row, "chatgpt_owned")
+        elif row["pid"] in skipped_roots:
+            skip(row, skipped_roots[row["pid"]])
+        else:
+            skip(row, "not_codex_broker_shape_or_live_parent")
+    protected_prefixes = ("chatgpt_owned", "protected_ancestor", "live_parent", "contains_self",
+                          "not_codex_broker_shape_or_live_parent", "tree_of_skipped_root")
+    return {
+        "roots": roots,
+        "members": [m for r in roots for m in r["members"]],
+        "skipped": skipped,
+        "skipped_protected": sum(1 for s in skipped if s["reason"].startswith(protected_prefixes)),
+        "skipped_young": sum(1 for s in skipped if s["reason"].startswith("younger_than_")),
+        "exiting": exiting,
+    }
+
+
+def _codex_identity(row: dict[str, Any]) -> tuple[int, int, str, str]:
+    return (row["pid"], row["uid"], row["start_time"], row["command"])
+
+
+def codex_broker_orphan_check(apply: bool, min_hours: float, term_wait_s: float) -> dict[str, Any]:
+    """Scan (and with apply, reap) orphaned stale Codex review-server trees."""
+    min_age_s = int(min_hours * 3600)
+    out: dict[str, Any] = {
+        "class": "codex_broker_orphan", "min_hours": min_hours, "action": "apply" if apply else "scan_only",
+        "roots": 0, "before": 0, "killed": 0, "exiting": 0, "after": 0,
+        "skipped_protected": 0, "skipped_young": 0,
+        "found": [], "skipped": [], "terminated": [], "exiting_pids": [], "refused": [], "errors": [],
+    }
+    table = codex_broker_table()
+    if table is None:
+        out["errors"].append("ps_failed")
+        out["after"] = "unknown"
+        return out
+    uid = os.getuid()
+    plan = codex_broker_plan(table, min_age_s, uid, os.getpid())
+    out.update(roots=len(plan["roots"]), before=len(plan["members"]),
+               skipped_protected=plan["skipped_protected"], skipped_young=plan["skipped_young"],
+               skipped=plan["skipped"], exiting_before=len(plan["exiting"]))
+    out["found"] = [
+        {"pid": r["root"]["pid"], "shape": r["shape"], "age": fmt_age(r["root"]["age_seconds"]),
+         "members": len(r["members"]), "member_pids": [m["pid"] for m in r["members"]],
+         "command": sanitize_command(r["root"]["command"])[:200]}
+        for r in plan["roots"]
+    ]
+    if not apply:
+        out["after"] = out["before"]
+        return out
+
+    targets: dict[int, dict[str, Any]] = {}
+    for tree in plan["roots"]:
+        # Revalidate this tree on a fresh snapshot before its FIRST signal.
+        fresh = codex_broker_table()
+        if fresh is None:
+            out["refused"].append({"pid": tree["root"]["pid"], "reason": "ps_unreadable"})
+            continue
+        fresh_plan = codex_broker_plan(fresh, min_age_s, uid, os.getpid())
+        same = [r for r in fresh_plan["roots"] if _codex_identity(r["root"]) == _codex_identity(tree["root"])]
+        if not same:
+            out["refused"].append({"pid": tree["root"]["pid"], "reason": "no_longer_eligible_or_identity_changed"})
+            continue
+        for member in same[0]["members"]:
+            targets[member["pid"]] = member
+
+    def signal_phase(sig: int, key: str) -> None:
+        current = codex_broker_table() or {}
+        # Leaf-most first (higher pid / deeper); identity fenced by pid+start+command.
+        for pid in sorted(targets, reverse=True):
+            live = current.get(pid)
+            if live is None or _codex_identity(live) != _codex_identity(targets[pid]):
+                continue
+            if "E" in live["stat"] or live["stat"][:1] == "Z":
+                continue
+            try:
+                os.kill(pid, sig)
+                targets[pid][key] = True
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                out["errors"].append(f"{pid}:{key}:{type(exc).__name__}")
+
+    if targets:
+        signal_phase(signal.SIGTERM, "term_sent")
+        time.sleep(term_wait_s)
+        signal_phase(signal.SIGKILL, "kill_sent")  # these processes ignore SIGTERM
+        deadline = time.time() + CODEX_BROKER_POLL_S
+        while time.time() < deadline:
+            current = codex_broker_table() or {}
+            pending = [p for p, t in targets.items()
+                       if p in current and _codex_identity(current[p]) == _codex_identity(t)
+                       and "E" not in current[p]["stat"] and current[p]["stat"][:1] != "Z"]
+            if not pending:
+                break
+            time.sleep(0.5)
+    final = codex_broker_table() or {}
+    for pid, target in targets.items():
+        live = final.get(pid)
+        same_proc = live is not None and _codex_identity(live) == _codex_identity(target)
+        entry = {"pid": pid, "term_sent": bool(target.get("term_sent")), "kill_sent": bool(target.get("kill_sent"))}
+        if not same_proc:
+            out["terminated"].append({**entry, "status": "terminated"})
+        elif "E" in live["stat"] or live["stat"][:1] == "Z":
+            out["exiting_pids"].append({**entry, "status": "exiting", "stat": live["stat"]})
+        else:
+            out["errors"].append(f"{pid}:still_alive")
+    after_plan = codex_broker_plan(final, min_age_s, uid, os.getpid()) if final else None
+    out["killed"] = len(out["terminated"])
+    out["exiting"] = len(out["exiting_pids"])
+    out["after"] = len(after_plan["members"]) if after_plan else "unknown"
+    return out
+
+
 def run_self_test() -> int:
     """Pure-function policy tests (no process is touched)."""
     def row(pid, ppid, cat, age_min, cwd="/x", daemon=False, cmd=None, cpu=100):
@@ -1584,6 +1854,44 @@ def run_self_test() -> int:
     for never in ("git grep -r foo /Users/rajiv/x", "node /Users/rajiv/a.js", "tsc --noEmit /Users/rajiv/x",
                   "vitest run /Users/rajiv/x"):
         assert not runaway_classify(never, 9000), never
+    # codex orphan broker policy (pure; synthetic process table)
+    me = 501
+    def prow(pid, ppid, cmd, age_h, stat="S", uid=me):
+        return {"pid": pid, "ppid": ppid, "uid": uid, "etime": "x", "age_seconds": int(age_h * 3600),
+                "stat": stat, "start_time": f"t{pid}", "command": cmd}
+    BR = "/opt/homebrew/Cellar/node/24.9.0_1/bin/node /Users/rajiv/.claude/plugins/cache/openai-codex/codex/1.0.1/scripts/app-server-broker.mjs serve --cwd /x"
+    NS = "node /opt/homebrew/bin/codex app-server"
+    VS = "/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex app-server"
+    NR = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
+    tbl = {r["pid"]: r for r in [
+        prow(1, 0, "/sbin/launchd", 99),
+        prow(100, 1, BR, 20), prow(101, 100, NS, 20), prow(102, 101, VS, 20), prow(103, 102, NR, 20, stat="E"),
+        prow(104, 102, NR, 20),                                  # old orphan tree: root 100 + 101,102,104; 103 exiting
+        prow(110, 1, BR, 2), prow(111, 110, NS, 2),             # young broker: skipped
+        prow(120, 50, BR, 20),                                   # broker under a live claude: protected
+        prow(50, 1, "/Users/rajiv/.local/bin/claude --foo", 30),
+        prow(60, 1, "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT", 40),
+        prow(61, 60, "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server --listen stdio://", 40),
+        prow(62, 61, NR, 40),
+        prow(130, 1, NS + " --stdio", 20),                        # not a strict shape: kept
+        prow(140, 1, BR, 20, uid=999),                           # other user: never touched
+        prow(150, 1, NS, 20), prow(151, 150, VS, 20),            # orphan app-server whose broker died
+    ]}
+    plan = codex_broker_plan(tbl, 6 * 3600, me, 9999)
+    roots = sorted(r["root"]["pid"] for r in plan["roots"])
+    assert roots == [100, 150], roots
+    assert sorted(m["pid"] for m in plan["members"]) == [100, 101, 102, 104, 150, 151], plan["members"]
+    assert {e["pid"] for e in plan["exiting"]} == {103}
+    reasons = {s["pid"]: s["reason"] for s in plan["skipped"]}
+    assert reasons[110].startswith("younger_than_") and reasons[111].startswith("tree_of_skipped_root")
+    assert reasons[120].startswith("protected_ancestor"), reasons
+    assert reasons[61] == "chatgpt_owned" and reasons[130].startswith("not_codex_broker_shape")
+    assert 140 not in reasons and 60 not in reasons and 62 not in reasons
+    assert plan["skipped_young"] == 1 and plan["skipped_protected"] >= 4, plan["skipped_protected"]
+    # a tree containing the running script is never signalled
+    assert 100 not in [r["root"]["pid"] for r in codex_broker_plan(tbl, 6 * 3600, me, 104)["roots"]]
+    # the threshold is configurable
+    assert sorted(r["root"]["pid"] for r in codex_broker_plan(tbl, 1 * 3600, me, 9999)["roots"]) == [100, 110, 150]
     print("SELF_TEST ok")
     return 0
 
@@ -1607,6 +1915,10 @@ def _main() -> int:
                         help="reap an agent-browser daemon (+Chrome tree) whose CPU counter has been flat this long")
     parser.add_argument("--self-test", action="store_true", help="run built-in policy tests and exit")
     parser.add_argument("--term-wait-s", type=float, default=3.0)
+    parser.add_argument(
+        "--codex-broker-min-hours", type=float, default=CODEX_BROKER_MIN_HOURS,
+        help="orphaned Codex review-server (app-server-broker.mjs) trees older than this many hours are eligible (default 6)",
+    )
     parser.add_argument("--status-output", default=str(STATUS_JSON), help="heartbeat status JSON path")
     parser.add_argument(
         "--attest-slotless-reap",
@@ -1673,6 +1985,7 @@ def _main() -> int:
     history = load_history()
     replayd = replayd_check(history, args.apply)
     codex_renderers = codex_renderer_check(history, args.apply)
+    codex_brokers = codex_broker_orphan_check(args.apply, args.codex_broker_min_hours, args.term_wait_s)
     if args.apply:
         save_history(history)
     terminated = [item for item in outcomes if item.get("outcome") == "terminated"]
@@ -1699,6 +2012,7 @@ def _main() -> int:
             "orphan_dev_tool": "vitest/tsc with ppid 1 older than dev_tool_min (+descendants); a live parent protects",
             "replayd": "user-level /usr/libexec/replayd SIGTERM (launchd restarts it) after >50% CPU on 2 consecutive apply runs",
             "codex_renderer": "ChatGPT-bundled Codex (Renderer).app --type=renderer only: age >60m AND CPU >50% on 2 consecutive apply passes keyed by PID+start; max 5 per pass; revalidate PID/start/args before TERM and KILL, with 10s grace; dry run does not persist",
+            "codex_broker_orphan": f"orphaned Codex review servers: node .../.claude/plugins/cache/openai-codex/codex/<ver>/scripts/app-server-broker.mjs (+ reparented `codex app-server` roots) older than {args.codex_broker_min_hours}h whose ancestor chain reaches launchd without a live claude/openclaude/tmux/ChatGPT/Codex app/protected owner; never ChatGPT-owned trees; whole tree TERM then KILL (node ignores TERM), processes in state E/Z are counted as exiting, not failed; independent of slots",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],
@@ -1724,11 +2038,16 @@ def _main() -> int:
             "errors": len(errors),
             "after_candidates": after_count,
             "slotless_reap_attested": bool(args.attest_slotless_reap),
+            "codex_broker_orphan": {
+                key: codex_brokers[key]
+                for key in ("roots", "before", "killed", "exiting", "after", "skipped_protected", "skipped_young")
+            },
         },
         "report_only": before.get("report_only", []),
         "replayd": replayd,
         "runaway_scan": runaway,
         "codex_renderer": codex_renderers,
+        "codex_broker_orphan": codex_brokers,
         "after": after,
     }
     Path(args.output).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1769,6 +2088,17 @@ def _main() -> int:
             f"CODEX_RENDERER_PROCESS pid={row['pid']} etime={row['etime']} cpu={row['cpu']} "
             f"streak={row['streak']} action={row['action']}"
         )
+    print(
+        f"CODEX_BROKER_ORPHAN min_hours={codex_brokers['min_hours']} roots={codex_brokers['roots']} "
+        f"before={codex_brokers['before']} killed={codex_brokers['killed']} exiting={codex_brokers['exiting']} "
+        f"after={codex_brokers['after']} skipped_protected={codex_brokers['skipped_protected']} "
+        f"skipped_young={codex_brokers['skipped_young']} refused={len(codex_brokers['refused'])} "
+        f"errors={len(codex_brokers['errors'])} action={codex_brokers['action']}"
+    )
+    for row in codex_brokers["found"]:
+        print(f"CODEX_BROKER_ROOT pid={row['pid']} shape={row['shape']} age={row['age']} members={row['members']}")
+    for row in codex_brokers["skipped"]:
+        print(f"CODEX_BROKER_SKIPPED pid={row['pid']} age={row['age']} reason={row['reason']}")
     if args.apply:
         if not before.get("ok"):
             print(f"STALE_PROCESS_CLEANUP refused={before.get('error', 'unknown')} proof={args.output}")
@@ -1776,7 +2106,10 @@ def _main() -> int:
             print(
                 f"STALE_PROCESS_CLEANUP terminated={len(terminated)} refused={len(refused)} "
                 f"already_exited={len(already_exited)} errors={len(errors)} "
-                f"after_candidates={after_count} killed={len(terminated)} proof={args.output}"
+                f"after_candidates={after_count} killed={len(terminated)} "
+                f"codex_broker_before={codex_brokers['before']} codex_broker_killed={codex_brokers['killed']} "
+                f"codex_broker_exiting={codex_brokers['exiting']} codex_broker_after={codex_brokers['after']} "
+                f"proof={args.output}"
             )
     return 0 if before.get("ok") else 2
 

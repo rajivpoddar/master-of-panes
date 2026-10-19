@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 from classifier_requirements import classify as workflow_requirements
 
 REPO = "heydonna-app/heydonna-app"
+SAME_REPO_NAMES = {REPO.lower(), "scribie/heydonna-app"}
 WORKFLOWS = {"ci.yml": ("typescript", "python", "test"), "e2e.yml": ("e2e",)}
 SITE_EXEMPTION_WORKFLOW = "ci-dummy.yml"
 SITE_CLASSIFIER_JOB_NAME = "detect-docs-only"
@@ -46,7 +47,12 @@ def pr_at(number, head):
         return pr
     if pr["state"] != "open" or pr["draft"]:
         raise Refusal("PR_NOT_OPEN_NON_DRAFT")
-    if pr["base"]["ref"] != "main" or (pr["head"].get("repo") or {}).get("full_name") != REPO:
+    # GitHub resolves the heydonna-app/heydonna-app alias to the canonical Scribie/heydonna-app.
+    head_repo = pr["head"].get("repo") or {}
+    base_repo = pr["base"].get("repo") or {}
+    same_repo = (head_repo.get("full_name") or "").lower() in SAME_REPO_NAMES and (
+        head_repo.get("id") is None or base_repo.get("id") is None or head_repo.get("id") == base_repo.get("id"))
+    if pr["base"]["ref"] != "main" or not same_repo:
         raise Refusal("PR_MUST_TARGET_MAIN_IN_SAME_REPOSITORY")
     return pr
 
@@ -81,13 +87,22 @@ def workflow_proof(pr, workflow, names):
                 except (Refusal, OSError, ValueError, KeyError,
                         subprocess.TimeoutExpired):
                     test_only = None
-        if not successful(run) or not all(successful(by_name.get(name, {})) for name in names):
+        # A verified app-test-only receipt lets the classifier skip the python job.
+        required = [name for name in names
+                    if not (test_only is not None and name == "python"
+                            and by_name.get(name, {}).get("conclusion") == "skipped")]
+        if not successful(run) or not all(successful(by_name.get(name, {})) for name in required):
             raise Refusal(f"WORKFLOW_NOT_GREEN workflow={workflow} run={run['id']}")
         # These steps distinguish real test execution from successful wrapper jobs.
-        checks = (("typescript", "Unit tests"),) if workflow == "ci.yml" else (
-            ("e2e", "Run E2E auto-process-critical"),
-            ("e2e", "Run E2E core-rest shard 1/2"),
-            ("e2e", "Run E2E core-rest shard 2/2"))
+        # ci.yml runs unit tests in sharded "unit-tests (N)" jobs; legacy runs used typescript.
+        unit_shards = sorted(name for name in by_name if name.startswith("unit-tests ("))
+        if workflow == "ci.yml":
+            checks = tuple((name, "Unit tests") for name in unit_shards) or (("typescript", "Unit tests"),)
+        else:
+            checks = (
+                ("e2e", "Run E2E auto-process-critical"),
+                ("e2e", "Run E2E core-rest shard 1/2"),
+                ("e2e", "Run E2E core-rest shard 2/2"))
         for job_name, prefix in checks:
             if not any(step["name"].startswith(prefix) and successful(step)
                        for step in by_name[job_name].get("steps", [])):
@@ -117,6 +132,7 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TS = re.compile(r"^\s*\d{4}-\d\d-\d\dT[0-9:.]+Z\s?")
 # Real GitHub Actions log framing emits "KEY: value"; the "=" form is also accepted.
 BINDING = re.compile(r"^\s*([A-Z_]+)\s*[:=]\s*(\S+?)\s*$")
+PR_NUMBER_KEY = re.compile(r"^\s*PR_NUMBER\s*[:=]")
 
 
 def job_log(job_id):
@@ -180,13 +196,31 @@ def classifier_bindings(lines):
     for line in lines:
         match = BINDING.match(line)
         if match is None:
+            # A present-but-malformed PR_NUMBER line (empty value, extra tokens)
+            # must refuse, never read as absence that enables the native fallback.
+            if PR_NUMBER_KEY.match(line):
+                return None
             continue
         key, value = match.group(1), match.group(2)
         if key in seen:
             seen[key].add(value)
-    if any(len(values) != 1 for values in seen.values()):
+    # PR_NUMBER may be absent from older classifier logs; callers then require the
+    # run's native pull_requests association to name exactly this PR.
+    if any(len(values) != 1 for key, values in seen.items() if key != "PR_NUMBER"):
         return None
-    return {key: next(iter(values)) for key, values in seen.items()}
+    if len(seen["PR_NUMBER"]) > 1:
+        return None
+    if seen["PR_NUMBER"] and not next(iter(seen["PR_NUMBER"])).isdigit():
+        return None
+    return {key: (next(iter(values)) if values else None) for key, values in seen.items()}
+
+
+def pr_binding_ok(bindings, run, pr):
+    """Logged PR_NUMBER must match; if not logged, the run must be natively bound to only this PR."""
+    if bindings["PR_NUMBER"] is not None:
+        return bindings["PR_NUMBER"] == str(pr["number"])
+    numbers = [item.get("number") for item in (run.get("pull_requests") or [])]
+    return numbers == [pr["number"]]
 
 
 def contents_identity(path, ref):
@@ -220,7 +254,7 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
     workflow_sha, event = bindings["WORKFLOW_SHA"], bindings["EVENT_NAME"]
     if not (HEX40.match(base_sha) and HEX40.match(workflow_sha)):
         return None
-    if head_sha != head or event != "pull_request" or bindings["PR_NUMBER"] != str(pr["number"]):
+    if head_sha != head or event != "pull_request" or not pr_binding_ok(bindings, run, pr):
         return None
     commit = api(f"git/commits/{workflow_sha}")
     parents = [parent["sha"] for parent in commit.get("parents", [])]
@@ -290,7 +324,7 @@ def app_test_only_classifier_proof(pr, workflow, run, scope):
             or run.get("head_branch") != pr["head"]["ref"]
             or run.get("path", "").split("@")[0] != ".github/workflows/ci.yml"
             or bindings["EVENT_NAME"] != "pull_request"
-            or bindings["PR_NUMBER"] != str(pr["number"])):
+            or not pr_binding_ok(bindings, run, pr)):
         return None
     commit = api(f"git/commits/{workflow_sha}")
     if [parent["sha"] for parent in commit.get("parents", [])] != [base_sha, head_sha]:
@@ -374,8 +408,16 @@ def app_test_only_e2e_proof(pr, classifier_proof):
 
 
 def site_paths_confined(pr, rules_bytes):
-    """Require the complete PR file set to match the trusted site rule globs."""
-    return paths_confined(pr, rules_bytes, ("site",))
+    """Require the complete PR file set to match trusted site or control-plane globs.
+
+    The classifier receipt (scope=site, product_changed=false, ci/e2e not
+    required) is already verified by the caller. A site diff may carry
+    control_plane_only paths (docs/**, benchmarks/**, ...) alongside site paths;
+    the classifier exempts both. Any path outside both rule groups (app, product,
+    app_ci, fixtures) still fails closed.
+    """
+    return paths_confined(pr, rules_bytes,
+                          ("site", "control_plane_only", "control_plane_legacy"))
 
 
 def control_plane_paths_confined(pr, rules_bytes):

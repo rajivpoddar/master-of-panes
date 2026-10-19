@@ -280,6 +280,44 @@ def t16_receipt_files_must_equal_pr_files():
     assert classifier_proof(dict(CANONICAL, changed_files=[TEST_FILE, "app/page.tsx"])) is None
 
 
+# ---- site lane confinement accepts control-plane paths (PR #10394) ----
+SITE_RULES = json.dumps({
+    "schema_version": 1,
+    "control_plane_only": ["docs/**", "benchmarks/**", "*.md"],
+    "site": ["website/**", "docs-site/**", "blog/**", "video/**"],
+}).encode()
+
+
+def site_confined(pr_files, rules=SITE_RULES):
+    merge.command = lambda *args: json.dumps([[{"filename": name} for name in pr_files]])
+    return merge.site_paths_confined(make_pr(), rules)
+
+
+def t17_site_lane_accepts_control_plane_paths_beside_site_paths():
+    assert site_confined(["website/index.html", "benchmarks/proofreading/reports/a.md",
+                          "docs/plans/x.md", "docs-site/pages/a.mdx"]) is True
+    assert site_confined(["website/index.html"]) is True
+
+
+def t18_site_lane_refuses_app_product_ci_or_fixture_paths():
+    for extra in ("app/page.tsx", "lib/x.ts", "convex/a.ts", "scripts/ci/change_scope.py",
+                  ".github/workflows/ci.yml", "tests/e2e/specs/core/a.spec.ts",
+                  "scripts/ci/tests/test_x.py"):
+        assert site_confined(["website/index.html", "docs/plans/x.md", extra]) is False, extra
+
+
+def t19_site_lane_fails_closed_on_empty_or_missing_rules():
+    assert site_confined([]) is False
+    assert site_confined(["website/index.html"], rules=b'{"schema_version": 1}') is False
+    assert site_confined(["website/index.html"], rules=b"not json") is False
+
+
+def t20_site_lane_checks_renamed_previous_filename():
+    merge.command = lambda *args: json.dumps([[{"filename": "docs/b.md",
+                                               "previous_filename": "app/a.tsx"}]])
+    assert merge.site_paths_confined(make_pr(), SITE_RULES) is False
+
+
 def _tests():
     return sorted((k, v) for k, v in list(globals().items())
                   if len(k) > 1 and k[0] == "t" and k[1].isdigit() and callable(v))
