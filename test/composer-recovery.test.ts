@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+import { composerClearFence } from "../src/clearComposerFence.js";
+import { pinFrom, type SlotRowLike } from "../src/interruptBeforeClear.js";
 import {
   clearComposerText,
   clearOwnedRefusedPasteComposer,
@@ -58,12 +60,12 @@ test("incident shape: a long send in a narrow pane shows only its tail, so the f
   assert.equal(composerHoldsPayload(composer, LONG), false);
 });
 
-test("a refused long paste is owned by its visible tail and C-u presses empty the whole composer", async () => {
+test("an identical visible tail with a hidden foreign prefix is NOT owned: automatic clearing sends zero C-u", async () => {
   const pane = new NarrowPane();
-  pane.paste(LONG);
+  pane.paste(`operator draft that scrolled out of view\n${LONG}`);
   const capture = async (): Promise<string> => pane.snapshot();
-  let presses = 0;
   const observed = composerText(await capture());
+  let presses = 0;
   const result = await clearOwnedRefusedPasteComposer(LONG, {
     prePasteComposer: "",
     lastObservedComposer: observed,
@@ -75,23 +77,23 @@ test("a refused long paste is owned by its visible tail and C-u presses empty th
       return true;
     },
     sleep: async () => undefined,
-    stableMs: 250,
     timeoutMs: 250,
     pollMs: 250,
   });
-  assert.deepEqual(result, { attempted: true, cleared: true, reason: "composer_cleared" });
-  assert.ok(presses > 1, "multi-line paste needs one C-u per input line");
-  assert.equal(pane.text, "");
+  assert.equal(result.reason, "composer_not_owned_by_send");
+  assert.equal(result.attempted, false);
+  assert.equal(presses, 0);
+  assert.ok(pane.text.startsWith("operator draft"), "operator text untouched");
 });
 
-test("cleanup stops pressing when the composer stops being attributable to the send", async () => {
-  let composer = "operator typed this unrelated draft of reasonable length";
+test("a truncated prefix of the payload is not owned either", async () => {
+  const half = "Q0: read-only prod check " + "x".repeat(60);
   let presses = 0;
-  const result = await clearOwnedRefusedPasteComposer("completely different payload text here", {
+  const result = await clearOwnedRefusedPasteComposer(LONG, {
     prePasteComposer: "",
-    lastObservedComposer: composer,
+    lastObservedComposer: half,
     enterPresses: 0,
-    capture: async () => `${RULE}\n❯ ${composer}\n${RULE}\n`,
+    capture: async () => `${RULE}\n❯ ${half}\n${RULE}\n`,
     clearComposer: async () => {
       presses++;
       return true;
@@ -100,7 +102,164 @@ test("cleanup stops pressing when the composer stops being attributable to the s
   });
   assert.equal(result.reason, "composer_not_owned_by_send");
   assert.equal(presses, 0);
-  composer = "";
+});
+
+test("a complete multi-line payload is cleared line by line; a foreign edit mid-clear stops it", async () => {
+  const payload = "first line of the refused send\nsecond line of the refused send\nthird line of the refused send";
+  const capturePane = (text: string): string => [RULE, ...text.split("\n").map((l, i) => (i === 0 ? `❯ ${l}` : `  ${l}`)), RULE, ""].join("\n");
+
+  let text = payload;
+  let presses = 0;
+  const done = await clearOwnedRefusedPasteComposer(payload, {
+    prePasteComposer: "",
+    lastObservedComposer: composerText(capturePane(text)),
+    enterPresses: 0,
+    capture: async () => capturePane(text),
+    clearComposer: async () => {
+      presses++;
+      const at = text.lastIndexOf("\n");
+      text = at < 0 ? "" : text.slice(0, at);
+      return true;
+    },
+    sleep: async () => undefined,
+    timeoutMs: 250,
+    pollMs: 250,
+  });
+  assert.deepEqual(done, { attempted: true, cleared: true, reason: "composer_cleared" });
+  assert.equal(presses, 3);
+
+  text = payload;
+  presses = 0;
+  const stopped = await clearOwnedRefusedPasteComposer(payload, {
+    prePasteComposer: "",
+    lastObservedComposer: composerText(capturePane(text)),
+    enterPresses: 0,
+    capture: async () => capturePane(text),
+    clearComposer: async () => {
+      presses++;
+      text = "operator typed something else entirely in the meantime";
+      return true;
+    },
+    sleep: async () => undefined,
+    timeoutMs: 250,
+    pollMs: 250,
+  });
+  assert.equal(stopped.cleared, false);
+  assert.equal(presses, 1, "stops at the first remainder that is not the payload's own lines");
+});
+
+test("a complete payload and a bracketed-paste placeholder are still cleaned automatically", async () => {
+  for (const shown of ["short refused payload that is long enough", "[Pasted text #7 +12 lines]"]) {
+    let text = shown;
+    const payload = shown.startsWith("[") ? "a long multi line payload\nwith lines" : shown;
+    const result = await clearOwnedRefusedPasteComposer(payload, {
+      prePasteComposer: "",
+      lastObservedComposer: text,
+      enterPresses: 0,
+      capture: async () => `${RULE}\n❯ ${text}\n${RULE}\n`,
+      clearComposer: async () => {
+        text = "";
+        return true;
+      },
+      sleep: async () => undefined,
+      timeoutMs: 250,
+      pollMs: 250,
+    });
+    assert.deepEqual(result, { attempted: true, cleared: true, reason: "composer_cleared" }, shown);
+  }
+});
+
+// ---- generation fence -------------------------------------------------------------
+
+function slotRow(over: Partial<SlotRowLike> = {}): SlotRowLike {
+  return {
+    occupied: true, repository_id: "github:o/r", issue: 10342, pr: null, handoff_id: "h1", branch: "b",
+    assignment_epoch: 446, session_id: "77", active_turn_id: null, active_turn_state: "inactive", ...over,
+  };
+}
+
+function fenceWorld(force: boolean) {
+  const world = {
+    row: slotRow() as SlotRowLike | null,
+    pane: { paneId: "%7", checkout: "/p/3006" } as { paneId: string; checkout: string } | null,
+    activity: "idle" as "idle" | "active" | "unknown",
+  };
+  const pin = pinFrom(world.pane!, world.row!);
+  const deps = {
+    pin,
+    force,
+    observePane: async () => world.pane,
+    readRow: () => world.row,
+    activity: async () => world.activity,
+  };
+  return { world, deps };
+}
+
+test("fence: epoch, session, owner, pane and checkout changes all refuse, with or without force", async () => {
+  for (const force of [false, true]) {
+    const changes: Array<[string, (w: ReturnType<typeof fenceWorld>["world"]) => void, string]> = [
+      ["epoch", (w) => { w.row = slotRow({ assignment_epoch: 447 }); }, "drift:epoch"],
+      ["session", (w) => { w.row = slotRow({ session_id: "78" }); }, "drift:session"],
+      ["owner", (w) => { w.row = slotRow({ issue: 10999 }); }, "drift:owner"],
+      ["pane id", (w) => { w.pane = { paneId: "%155", checkout: "/p/3006" }; }, "drift:pane"],
+      ["checkout", (w) => { w.pane = { paneId: "%7", checkout: "/p/3007" }; }, "drift:checkout"],
+      ["row gone", (w) => { w.row = null; }, "drift:row_missing"],
+    ];
+    for (const [name, mutate, reason] of changes) {
+      const { world, deps } = fenceWorld(force);
+      assert.equal(await composerClearFence(deps, "t"), null, `${name} baseline`);
+      mutate(world);
+      const got = await composerClearFence(deps, "t");
+      assert.ok(got && got.startsWith(reason), `${name} force=${force}: ${got}`);
+    }
+  }
+});
+
+test("fence: idle->active refuses without force; force bypasses activity and turn, never identity", async () => {
+  const strict = fenceWorld(false);
+  strict.world.activity = "active";
+  assert.match((await composerClearFence(strict.deps, "t")) ?? "", /drift:activity_active/);
+  strict.world.activity = "idle";
+  strict.world.row = slotRow({ active_turn_id: "t9", active_turn_state: "active" });
+  assert.match((await composerClearFence(strict.deps, "t")) ?? "", /drift:turn/);
+
+  const forced = fenceWorld(true);
+  forced.world.activity = "active";
+  forced.world.row = slotRow({ active_turn_id: "t9", active_turn_state: "active" });
+  assert.equal(await composerClearFence(forced.deps, "t"), null);
+  forced.world.row = slotRow({ active_turn_id: "t9", active_turn_state: "active", assignment_epoch: 500 });
+  assert.match((await composerClearFence(forced.deps, "t")) ?? "", /drift:epoch/);
+});
+
+test("zero C-u reaches a newer target: queued-lock change, and a change between presses", async () => {
+  const multi = Array.from({ length: 6 }, (_, i) => `line ${i} of a stale composer ${"y".repeat(20)}`).join("\n");
+  for (const scenario of ["queued-lock epoch change", "idle->active between presses", "checkout change between presses"] as const) {
+    const { world, deps } = fenceWorld(scenario !== "idle->active between presses" ? true : false);
+    const pane = new NarrowPane();
+    pane.paste(multi);
+    if (scenario === "queued-lock epoch change") world.row = slotRow({ assignment_epoch: 447 });
+    let keys = 0;
+    const result = await clearComposerText({
+      capture: async () => pane.snapshot(),
+      clearComposer: async () => {
+        const drift = await composerClearFence(deps, "clear_composer_key");
+        if (drift) return drift;
+        keys++;
+        pane.ctrlU();
+        if (keys === 2 && scenario === "idle->active between presses") world.activity = "active";
+        if (keys === 2 && scenario === "checkout change between presses") world.pane = { paneId: "%7", checkout: "/p/3007" };
+        return true;
+      },
+      sleep: async () => undefined,
+      stableMs: 250,
+      timeoutMs: 250,
+      pollMs: 250,
+    });
+    assert.equal(result.cleared, false, scenario);
+    assert.equal(result.reason, "generation_fenced", scenario);
+    assert.ok(result.fenceReason, scenario);
+    assert.equal(keys, scenario === "queued-lock epoch change" ? 0 : 2, `${scenario}: no key after the change`);
+  }
 });
 
 test("clearComposerText empties concatenated sends line by line and never presses Enter", async () => {
@@ -199,7 +358,12 @@ test("send route wiring: refuse before paste, auto bracketed paste, sanctioned c
 
   const route = server.slice(end, server.indexOf('app.post("/slots/:slotNum/send"', end));
   assert.match(route, /verifyPaneIdentity\(slotNum\)/);
+  assert.match(route, /pinFrom\(/);
   assert.match(route, /withSlotSendLock\(slotNum/);
+  const lock = route.indexOf("withSlotSendLock(slotNum");
+  assert.ok(route.indexOf("composerClearFence(fenceDeps, \"clear_composer_lock\")") > lock, "revalidated inside the lock");
+  const keyFence = route.indexOf("composerClearFence(fenceDeps, \"clear_composer_key\")");
+  assert.ok(keyFence > lock && keyFence < route.indexOf("send-keys -t ${paneTarget} C-u"), "fenced immediately before each C-u");
   assert.match(route, /slot_active_force_required/);
   assert.match(route, /clearComposerText\(/);
   assert.doesNotMatch(route, /send-keys[^\n]*(Enter|Escape|C-c)/);

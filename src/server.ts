@@ -60,6 +60,7 @@ import {
   shouldUseBracketedPaste,
 } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
+import { composerClearFence } from "./clearComposerFence.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import {
   NativeSlotReleaseCoordinator,
@@ -2488,6 +2489,22 @@ app.post("/slots/:slotNum/clear-composer", async (c) => {
     }, 409);
   }
   const paneTarget = identity.snapshot.paneId;
+  // Pin the operation generation (pane id, checkout, hook session, epoch,
+  // owner, turn) BEFORE queuing on the send lock; it is revalidated inside the
+  // lock and immediately before each C-u. force bypasses activity, never this.
+  const pinRow = slotRowWithSession(slotNum);
+  if (!pinRow) {
+    db.logEvent(slotNum, "clear_composer_refused", null, null, { reason: "drift:row_missing" });
+    return c.json({ success: false, error: "Composer clear refused: slot row missing", reason: "drift:row_missing" }, 409);
+  }
+  const pin = pinFrom({ paneId: paneTarget, checkout: identity.snapshot.currentPath }, pinRow);
+  const fenceDeps = {
+    pin,
+    force,
+    observePane: () => observeSlotPane(slotNum),
+    readRow: () => slotRowWithSession(slotNum),
+    activity: () => relay.getSlotActivityState(slotNum, paneTarget),
+  };
   if (!force) {
     let active = false;
     try {
@@ -2510,21 +2527,32 @@ app.post("/slots/:slotNum/clear-composer", async (c) => {
     return c.json({ success: false, error: `Composer clear refused: ${modeRefusal}`, reason: modeRefusal }, 409);
   }
 
-  const result = await withSlotSendLock(slotNum, () => clearComposerText({
-    capture: () => capturePaneSnapshot(paneTarget),
-    clearComposer: async () => {
-      if (await readPaneInputModeRefusal(paneTarget)) return false;
-      await execShell(`tmux send-keys -t ${paneTarget} C-u`, { timeout: 10_000 });
-      return true;
-    },
-    sleep,
-  }));
+  const result = await withSlotSendLock(slotNum, async () => {
+    // Revalidate once the lock is held: a queued request may be stale.
+    const queuedDrift = await composerClearFence(fenceDeps, "clear_composer_lock");
+    if (queuedDrift) {
+      return { cleared: false, presses: 0, reason: "generation_fenced" as const, fenceReason: queuedDrift, beforeChars: 0 };
+    }
+    return clearComposerText({
+      capture: () => capturePaneSnapshot(paneTarget),
+      clearComposer: async () => {
+        const drift = await composerClearFence(fenceDeps, "clear_composer_key");
+        if (drift) return drift;
+        if (await readPaneInputModeRefusal(paneTarget)) return false;
+        await execShell(`tmux send-keys -t ${paneTarget} C-u`, { timeout: 10_000 });
+        return true;
+      },
+      sleep,
+    });
+  });
   db.logEvent(slotNum, "clear_composer", null, null, {
     cleared: result.cleared,
     presses: result.presses,
     reason: result.reason,
+    fence_reason: result.fenceReason ?? null,
     before_chars: result.beforeChars,
     force,
+    assignment_epoch: pin.epoch,
   });
   return c.json({
     success: result.cleared,
@@ -2532,6 +2560,7 @@ app.post("/slots/:slotNum/clear-composer", async (c) => {
     cleared: result.cleared,
     presses: result.presses,
     reason: result.reason,
+    ...(result.fenceReason ? { fence_reason: result.fenceReason } : {}),
     before_chars: result.beforeChars,
   }, result.cleared ? 200 : 409);
 });

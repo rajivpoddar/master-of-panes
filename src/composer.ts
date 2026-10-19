@@ -100,15 +100,14 @@ export function composerHoldsPayload(composer: string, payload: string): boolean
   return squash(composer).includes(expected);
 }
 
-const MIN_REFUSED_PASTE_PREFIX_LENGTH = 24;
-
 /**
  * True only when the visible composer is attributable to this refused paste:
- * the pre-paste composer was empty, and the post-paste text is either a
- * collapsed paste placeholder (with any visible tail matching this payload)
- * or a sufficiently long visible slice (prefix, scrolled-window tail) of this
- * payload. This is cleanup
- * ownership, not proof that the whole payload arrived.
+ * the pre-paste composer was empty, and the post-paste text is EITHER the
+ * complete payload OR a collapsed bracketed-paste placeholder (with any
+ * visible tail matching this payload). A visible slice, prefix or scrolled
+ * window tail is never ownership: a hidden foreign prefix can sit above an
+ * identical visible tail. Ambiguous or truncated text is left untouched for
+ * an explicit, generation-fenced clear-composer.
  */
 export function composerIsRefusedPasteContent(composer: string, payload: string): boolean {
   const expected = squash(payload.trim());
@@ -122,13 +121,23 @@ export function composerIsRefusedPasteContent(composer: string, payload: string)
     return visibleTail === "" || expected.endsWith(visibleTail);
   }
 
+  return squash(composer.trim()) === expected;
+}
+
+/**
+ * Mid-clear ownership: after some C-u presses a multi-line payload leaves
+ * exactly its first k whole lines. Anything else (foreign text, a partial
+ * line, a different order) is not ours and stops the clear.
+ */
+function composerIsPayloadLinePrefix(composer: string, payload: string): boolean {
   const visible = squash(composer.trim());
-  if (visible.length < MIN_REFUSED_PASTE_PREFIX_LENGTH) return false;
-  // A long paste in a narrow pane overflows the TUI's capped composer window:
-  // only the TAIL of the payload stays visible (the head scrolls out of view),
-  // and a partly C-u-cleared composer shows a middle slice. Any contiguous
-  // slice of at least MIN_REFUSED_PASTE_PREFIX_LENGTH characters is this paste.
-  return expected.includes(visible);
+  if (!visible) return false;
+  let acc = "";
+  for (const line of payload.trim().split("\n")) {
+    acc += squash(line);
+    if (acc === visible) return true;
+  }
+  return false;
 }
 
 const PLACEHOLDER_RE = /\[Pasted text(?:\s+#(\d+))?(?:\s+\+\d+\s+lines?)?\]/gi;
@@ -244,8 +253,11 @@ export type RefusedPasteCleanupDeps = {
   lastObservedComposer: string | null;
   enterPresses: number;
   capture: () => Promise<string | null>;
-  /** Return false when the pane mode changed and C-u must not be sent. */
-  clearComposer: () => Promise<boolean>;
+  /**
+   * Return true after sending C-u; false (or a refusal string) when the pane
+   * mode or the operation generation changed and C-u must not be sent.
+   */
+  clearComposer: () => Promise<boolean | string>;
   sleep: (ms: number) => Promise<void>;
   stableMs?: number;
   timeoutMs?: number;
@@ -285,16 +297,18 @@ export async function clearOwnedRefusedPasteComposer(
   }
 
   // C-u only deletes back to the start of the current input line, so a
-  // multi-line paste needs one press per line. Re-press only while the
-  // composer is still readable and still attributable to this paste.
+  // complete multi-line payload needs one press per payload line. Each press
+  // re-proves ownership: the remainder must be a placeholder or exactly the
+  // payload's first k whole lines. Never more presses than payload lines.
+  const maxPresses = Math.min(MAX_COMPOSER_CLEAR_PRESSES, Math.max(1, payload.trim().split("\n").length));
   for (let presses = 0; ; presses++) {
-    let clearSent: boolean;
+    let clearSent: boolean | string;
     try {
       clearSent = await deps.clearComposer();
     } catch {
       return { attempted: true, cleared: false, reason: "clear_key_outcome_unknown" };
     }
-    if (!clearSent) {
+    if (clearSent !== true) {
       return presses === 0
         ? { attempted: false, cleared: false, reason: "pane_mode_refused" }
         : { attempted: true, cleared: false, reason: "composer_empty_not_confirmed" };
@@ -310,9 +324,11 @@ export async function clearOwnedRefusedPasteComposer(
     if (empty.ready) return { attempted: true, cleared: true, reason: "composer_cleared" };
     const remaining = composerText(empty.snapshot);
     if (
-      presses + 1 >= MAX_COMPOSER_CLEAR_PRESSES
+      presses + 1 >= maxPresses
       || remaining === null
-      || (!composerIsRefusedPasteContent(remaining, payload) && !composerIsOnlyPastePlaceholders(remaining))
+      || (!composerIsPayloadLinePrefix(remaining, payload)
+        && !composerIsRefusedPasteContent(remaining, payload)
+        && !composerIsOnlyPastePlaceholders(remaining))
     ) {
       return { attempted: true, cleared: false, reason: "composer_empty_not_confirmed" };
     }
@@ -325,21 +341,29 @@ export const MAX_COMPOSER_CLEAR_PRESSES = 60;
 export type ComposerClearResult = {
   cleared: boolean;
   presses: number;
-  reason: "already_empty" | "composer_unreadable" | "pane_mode_refused" | "composer_cleared" | "composer_empty_not_confirmed";
+  reason:
+    | "already_empty" | "composer_unreadable" | "pane_mode_refused" | "generation_fenced"
+    | "composer_cleared" | "composer_empty_not_confirmed";
+  /** Typed drift reason when the generation fence refused a key. */
+  fenceReason?: string;
   /** Characters that were in the composer before the clear (never the text itself). */
   beforeChars: number;
 };
 
 /**
  * Operator recovery: empty whatever sits in the composer, whoever put it
- * there (stale refused pastes, concatenated sends). Only ever presses C-u
+ * there (stale refused pastes, concatenated sends), but only while the
+ * caller's generation fence holds before EACH key. Only ever presses C-u
  * (never Enter, never Escape, never Ctrl-C) and stops as soon as the composer
  * reads empty and stays empty, so it cannot submit or cancel anything.
  */
 export async function clearComposerText(deps: {
   capture: () => Promise<string | null>;
-  /** Send one C-u; return false when the pane mode forbids it. */
-  clearComposer: () => Promise<boolean>;
+  /**
+   * Send one C-u; return false when the pane mode forbids it, or a string
+   * (typed drift reason) when the generation fence refused the key.
+   */
+  clearComposer: () => Promise<boolean | string>;
   sleep: (ms: number) => Promise<void>;
   maxPresses?: number;
   stableMs?: number;
@@ -353,7 +377,11 @@ export async function clearComposerText(deps: {
   const maxPresses = deps.maxPresses ?? MAX_COMPOSER_CLEAR_PRESSES;
   let presses = 0;
   while (presses < maxPresses) {
-    if (!(await deps.clearComposer())) {
+    const sent = await deps.clearComposer();
+    if (typeof sent === "string") {
+      return { cleared: false, presses, reason: "generation_fenced", fenceReason: sent, beforeChars };
+    }
+    if (!sent) {
       return { cleared: false, presses, reason: presses === 0 ? "pane_mode_refused" : "composer_empty_not_confirmed", beforeChars };
     }
     presses++;
