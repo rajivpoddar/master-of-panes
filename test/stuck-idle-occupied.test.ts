@@ -904,6 +904,9 @@ test("nudges a free idle slot once per urgency tier with the total free time", a
 
     assert.equal(h.sends.length, 1);
     assert.match(h.sends[0], /mode=FREE_WAIT_ASSIGNMENT slot=2/);
+    // OBL23162: the nudge must not name the retired reconcile-capacity helper.
+    assert.doesNotMatch(h.sends[0], /reconcile-capacity/);
+    assert.match(h.sends[0], /Skill\(direct-assign\)\/Skill\(direct-release\)/);
     assert.match(h.sends[0], /wait_started_at=2026-07-27T02:24:00.000/);
     assert.match(h.sends[0], /wait_age_minutes=6 urgency=REMINDER/);
     assert.match(h.sends[0], /recommendation_kind=rework/);
@@ -1201,6 +1204,9 @@ test("nudges a free idle slot after a slot_cleared marker (no slot_released)", a
 
     assert.equal(h.sends.length, 1);
     assert.match(h.sends[0], /mode=FREE_WAIT_ASSIGNMENT slot=2/);
+    // OBL23162: the nudge must not name the retired reconcile-capacity helper.
+    assert.doesNotMatch(h.sends[0], /reconcile-capacity/);
+    assert.match(h.sends[0], /Skill\(direct-assign\)\/Skill\(direct-release\)/);
     assert.match(h.sends[0], /wait_started_at=2026-07-27T02:24:00.000/);
     assert.match(h.sends[0], /wait_age_minutes=6 urgency=REMINDER/);
     assert.equal(

@@ -492,7 +492,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-clear-slot",
-      "sha256": "8a4e7edc0146ebc082ebd2ef2fd65fcfb6c11a9d6cf618e0c7ee903868f3d501",
+      "sha256": "728c37cc35b5fdcc7118182f5c47214c2ab42a017c6ffc6c545cd54b3bddde53",
       "source_path": "claude/scripts/mop-clear-slot.sh"
     },
     {
@@ -935,7 +935,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pr-state-sweep",
-      "sha256": "6552a3e3e9fdb82dd3ab3e7cbf73bcde96191deb8d0c92aca31fdade725f82bd",
+      "sha256": "c1e64596d7bfa9bf172d2ec04429575ce5912f3a369e125e9ac5ec7f90f8792f",
       "source_path": "claude/skills/pr-state-sweep/SKILL.md"
     },
     {
@@ -944,7 +944,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pr-state-sweep",
-      "sha256": "8ff73a497865f95dedf18ad3ae1a987e7b71694029939f77d92ada38b7bad9e7",
+      "sha256": "c2ee5791cd4f75b8e6b359776e6bb92ddb147a7077f72f38db4d37e619c39f6b",
       "source_path": "claude/skills/pr-state-sweep/scripts/sweep.sh"
     },
     {

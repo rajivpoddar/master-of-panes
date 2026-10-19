@@ -78,7 +78,7 @@ sentinel_write_enabled() {
     0|false|FALSE|no|NO|off|OFF) return 1 ;;
   esac
   case "$TRIGGER" in
-    pm-stop|hourly-ops-audit|hourly-*|reconcile-capacity|slot-ready*|new-issue-filed|*-backlog-promoter)
+    pm-stop|hourly-ops-audit|hourly-*|slot-ready*|new-issue-filed|*-backlog-promoter)
       return 0
       ;;
   esac
@@ -205,7 +205,7 @@ data = {
     "updated_at": now.isoformat().replace("+00:00", "Z"),
     "trigger": os.environ.get("TRIGGER") or "unknown",
     "reason": "pr_state_sweep_actionable",
-    "required_command": "UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity",
+    "required_command": "Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple",
     "prs": pr_nums,
     "slots": slots,
     "actionable_output": current_actionable,
@@ -1620,7 +1620,7 @@ def ci_required_action_line(pr, reason, workflow_state, ci_run, e2e_run, issue, 
             f"reason={reason}_rescue_or_split_required "
             f"{fields} failed_run={bad_run} category={command_quote(category)} "
             f"signature={command_quote(signature)} "
-            f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+            f"command={block_pr_command(n, 'ci')}"
             f"\\ &&\\ dispatch_exact_head_local_diagnosis_then_require_rescue_split_or_rescope_packet_before_any_rerun"
         )
     if workflow_state == "terminal_bad" and pr_requires_fresh_capture_before_ci(n):
@@ -1674,7 +1674,7 @@ def ci_required_action_line(pr, reason, workflow_state, ci_run, e2e_run, issue, 
             return (
                 f"PR_CAPTURE_BEFORE_CI_REQUIRED PR#{n} reason={reason}_prompt_or_llm_path_requires_capture "
                 f"{fields} capture_status={command_quote(capture_detail)} "
-                f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                f"command={block_pr_command(n, 'capture')}"
             )
     if workflow_state == "terminal_bad" and pressure["current_head_bad"] > 0:
         verdict = latest_ci_verdict(n, head)
@@ -1685,7 +1685,7 @@ def ci_required_action_line(pr, reason, workflow_state, ci_run, e2e_run, issue, 
             return (
                 f"PR_CI_VERDICT_REWORK_REQUIRED PR#{n} reason={reason}_current_head_ci_verdict_requires_rework "
                 f"{fields} verdict_class={classification} verdict_run={verdict_run} verdict_comment={command_quote(comment_url)} "
-                f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                f"command={block_pr_command(n, 'ci')}"
             )
         # Sealed local-preflight envelopes are retired (Rajiv
         # 1786812200.371389). Non-rework current-head failures get AT MOST ONE
@@ -1695,7 +1695,7 @@ def ci_required_action_line(pr, reason, workflow_state, ci_run, e2e_run, issue, 
         return (
             f"PR_CI_CAPPED_RERUN_REQUIRED PR#{n} reason={reason}_current_head_failed "
             f"{fields} verdict_class={str(verdict.get('classification') or 'unclassified') if verdict else 'unclassified'} "
-            f"command={rerun_wrapper} (at most one same-head retry, no sealed proof); if the wrapper refuses with a non-infra classification, UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+            f"command={rerun_wrapper} (at most one same-head retry, no sealed proof); if the wrapper refuses with a non-infra classification, {block_pr_command(n, 'ci')}"
         )
     if workflow_state == "missing_or_skipped" and pressure["stale_bad"] > 0:
         # The live head has NO current-head runs while bad runs exist only at
@@ -2843,14 +2843,14 @@ def pm_review_done_receipt_line(pr_number, head, issue, branch, prefix):
             f"head={head} blocked_after_review={blocked.get('class')} "
             f"next_owner={blocked.get('next_owner') or 'PM'} wake={blocked.get('wake') or 'unknown'} "
             f"receipt={receipt.get('_receipt_path')} issue=#{issue or 'unknown'} branch={branch} "
-            f"command=execute_wake_then_resume_pm-review-done"
+            f"command=execute_wake_then_{pm_review_done_command(pr_number)}"
         )
     else:
         print(
             f"PR_PM_REVIEW_TERMINAL_RECEIPT_REQUIRED PR#{pr_number} reason={prefix}_review_terminal_receipt "
             f"handoff={handoff} head={head} receipt={receipt.get('_receipt_path')} "
             f"issue=#{issue or 'unknown'} branch={branch} "
-            f"command=UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done"
+            f"command={pm_review_done_command(pr_number)}"
         )
     return True
 
@@ -3555,8 +3555,41 @@ def live_capture_lease(slot, pr_number, head):
 def command_quote(s):
     return str(s).replace(" ", "\\ ")
 
+# Executable packets for rows whose lifecycle transitions were retired
+# (OBL23162 follow-up, CTO APPROVE thread 1792341469.668239). Every helper
+# returns a single whitespace-free command token (spaces escaped with a
+# backslash, the existing row convention). qa-passed-awaiting-ci is CTO-owned
+# label-gated CI: no helper ever emits a manual add of that label.
+def block_pr_command(n, reason, head="", dep_reason="", from_state=""):
+    cmd = f"gh\\ pr\\ edit\\ {n}\\ --add-label\\ pm-state:blocked-rework,pm-blocked:{reason}"
+    if from_state:
+        cmd += f"\\ --remove-label\\ {from_state}"
+    if reason == "dependency":
+        refs = re.findall(r"#(\d+)", str(dep_reason or ""))
+        blocked_on = ",".join(f'"#{r}"' for r in dict.fromkeys(refs)) or '"#<blocking-ref>"'
+        marker = (
+            '<!--\\ pm-dependency-watch:v1\\ '
+            + '{"pr":' + str(n) + ',"head":"' + str(head or "<exact-head>") + '","blocked_on":[' + blocked_on + ']}'
+            + '\\ -->'
+        )
+        cmd += f"\\ &&\\ gh\\ pr\\ comment\\ {n}\\ --body\\ '{marker}'"
+    return cmd
+
+def pm_review_command(n):
+    return f"gh\\ pr\\ edit\\ {n}\\ --add-label\\ pm-state:pm-review-pending\\ &&\\ Agent(pm-admission-reviewer)"
+
+def pm_review_done_command(n):
+    return f"post_the_PM_12b_PR_comment\\ &&\\ ~/.claude/scripts/ci/pm-admit-ci.sh\\ {n}"
+
+def capture_dispatch_command(n, branch):
+    return (
+        f"gh\\ workflow\\ run\\ e2e-llm-proxy-capture.yml\\ --ref\\ main\\ -f\\ pr_number={n}"
+        f"\\ -f\\ head_branch={branch}\\ -f\\ head_sha=<new-exact-head>\\ -f\\ control_sha=<main-sha>"
+        f"\\ -f\\ capture_profile=full"
+    )
+
 def dependency_unblocked_command(n, dep_reason=""):
-    return "UNSUPPORTED_LIFECYCLE_ACTION:dependency-unblocked"
+    return f"gh\\ pr\\ edit\\ {n}\\ --remove-label\\ pm-blocked:dependency\\ &&\\ Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
 
 for pr in sorted(merged_prs, key=lambda p: int(p.get("number") or 0), reverse=True):
     n = int(pr.get("number") or 0)
@@ -3803,7 +3836,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
             f"PR_DEPENDENCY_WEDGE_REQUIRED PR#{n} reason={state or 'no_state'}_dependency_label_without_current_head_machine_proof "
             f"age_min={dep_age} severity={wedge_severity} workflows={workflows} label=pm-blocked:dependency "
             f"issue=#{issue or 'unknown'} branch={branch} head={head[:10]} "
-            f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+            f"command={block_pr_command(n, 'dependency', head=head)}"
         )
         continue
 
@@ -3816,7 +3849,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 print(
                 f"PR_STATE_RECONCILE_REQUIRED PR#{n} slot:{slot} reason=capture_mop_owner_tuple_incomplete "
                 f"state={state or 'no_state'} issue=#{issue or 'unknown'} branch={branch} head={head[:10]} "
-                f"assignment_epoch={fuzzy_slot.get('assignment_epoch')} {owner_tokens(fuzzy_slot)} mop={slot_entry_summary(fuzzy_slot)} command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                f"assignment_epoch={fuzzy_slot.get('assignment_epoch')} {owner_tokens(fuzzy_slot)} mop={slot_entry_summary(fuzzy_slot)} command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                 )
             continue
         if active_slot and state == "pm-state:blocked-rework":
@@ -3829,7 +3862,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"obligation={rearm.get('id')} issue=#{issue or rearm.get('issue') or 'unknown'} "
                     f"branch={branch} head={head[:10]} main_head={str(rearm.get('main_head') or '')[:10]} "
                     f"mop={slot_entry_summary(active_slot)} "
-                    f"command=merge_authorized_main_release_slot_then_UNSUPPORTED_LIFECYCLE_ACTION:capture-remote-dispatch_on_new_exact_head"
+                    f"command=merge_authorized_main_release_slot_then_{capture_dispatch_command(n, branch)}"
                 )
                 continue
             capture_rework = capture_rework_watch(n, active_slot, branch)
@@ -3852,7 +3885,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"reason=capture_rework_authority_tuple_mismatch "
                     f"state={state} issue=#{issue or 'unknown'} branch={branch} head={head[:10]} "
                     f"mop={slot_entry_summary(active_slot)} "
-                    f"command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                    f"command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                 )
                 continue
             if not capture_rearm_authority_available:
@@ -3861,7 +3894,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"PR_STATE_RECONCILE_REQUIRED PR#{n} slot:{slot} "
                     f"reason=capture_rearm_authority_unavailable "
                     f"state={state} issue=#{issue or 'unknown'} branch={branch} head={head[:10]} "
-                    f"command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                    f"command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                 )
                 continue
         lease_slot = str((active_slot or {}).get("slot") or "")
@@ -3910,7 +3943,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
             print(
                 f"PR_CAPTURE_SLOT_RELEASE_REQUIRED PR#{n} slot:{slot} reason=capture_blocker_has_slot_label "
                 f"state={state or 'no_state'} issue=#{issue or 'unknown'} branch={branch} head={head[:10]} "
-                f"command=gh\\ pr\\ edit\\ {n}\\ --remove-label\\ slot:{slot}\\ &&\\ UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                f"command=gh\\ pr\\ edit\\ {n}\\ --remove-label\\ slot:{slot}\\ &&\\ Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
             )
             continue
 
@@ -3918,7 +3951,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
         print(
             f"PR_REBASE_REQUIRED PR#{n} reason=blocked_rework_blocked_by_merge_state "
             f"mergeStateStatus={merge_state} issue=#{issue or 'unknown'} branch={branch} "
-            f"head={head[:10]} command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+            f"head={head[:10]} command={block_pr_command(n, 'rebase')}"
         )
         continue
 
@@ -4008,7 +4041,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                         f"PR_CI_DEPENDENCY_BLOCKED_REQUIRED PR#{n} reason={state or 'no_state'}_ci_blocker_dependency_open "
                         f"{dep_reason} workflows={bad} label_missing={str(not has_label(pr, 'pm-blocked:dependency')).lower()} "
                         f"watch_ack={ack_path} ack_key={ack_key} head={head[:10]} "
-                        f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                        f"command={block_pr_command(n, 'dependency', head=str(pr.get('headRefOid') or ''), dep_reason=dep_reason)}"
                     )
                     continue
                 if dep_state == "unblocked":
@@ -4079,7 +4112,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
         print(
             f"PR_STATE_RECONCILE_REQUIRED PR#{n} reason={drift} "
             f"issue=#{issue or 'unknown'} branch={branch} head={head[:10]} "
-            f"command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+            f"command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
         )
         continue
 
@@ -4087,7 +4120,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
         print(
             f"PR_STATE_RECONCILE_REQUIRED PR#{n} reason=legacy_pm_state_merge_ready_label "
             f"issue=#{issue or 'unknown'} branch={branch} head={head[:10]} "
-            f"command=UNSUPPORTED_LIFECYCLE_ACTION:merge-ready"
+            f"command=gh\\ pr\\ edit\\ {n}\\ --remove-label\\ pm-state:merge-ready"
         )
         continue
 
@@ -4108,7 +4141,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 print(
                 f"PR_STATE_RECONCILE_REQUIRED PR#{n} slot:{slot} reason=qa_awaiting_ci_mop_owner_tuple_incomplete "
                 f"issue=#{issue or 'unknown'} branch={branch} head={head[:10]} "
-                f"assignment_epoch={fuzzy_slot.get('assignment_epoch')} {owner_tokens(fuzzy_slot)} mop={slot_entry_summary(fuzzy_slot)} command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                f"assignment_epoch={fuzzy_slot.get('assignment_epoch')} {owner_tokens(fuzzy_slot)} mop={slot_entry_summary(fuzzy_slot)} command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                 )
             continue
         if active_slot:
@@ -4116,7 +4149,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
             print(
                 f"PR_SLOT_RELEASE_BEFORE_CI_REQUIRED PR#{n} slot:{slot} reason=qa_passed_awaiting_ci_holds_dev_slot "
                 f"issue=#{issue or 'unknown'} branch={branch} head={head[:10]} mop={slot_entry_summary(active_slot)} "
-                f"remediation=release_slot_{slot}_via_Skill(direct-release)_with_the_complete_authoritative_tuple\\ &&\\ UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                f"remediation=release_slot_{slot}_via_Skill(direct-release)_with_the_complete_authoritative_tuple"
             )
             continue
         if slots_for_pr:
@@ -4124,7 +4157,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
             print(
                 f"PR_SLOT_RELEASE_BEFORE_CI_REQUIRED PR#{n} slot:{slot} reason=qa_passed_awaiting_ci_has_slot_label "
                 f"issue=#{issue or 'unknown'} branch={branch} head={head[:10]} "
-                f"command=gh\\ pr\\ edit\\ {n}\\ --repo\\ {gh_repo}\\ --remove-label\\ slot:{slot}\\ &&\\ UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                f"command=gh\\ pr\\ edit\\ {n}\\ --repo\\ {gh_repo}\\ --remove-label\\ slot:{slot}\\ &&\\ Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
             )
             continue
 
@@ -4148,7 +4181,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
         print(
             f"PR_REBASE_REQUIRED PR#{n} reason=qa_awaiting_ci_blocked_by_merge_state "
             f"mergeStateStatus={merge_state} issue=#{issue or 'unknown'} branch={branch} "
-            f"head={str(pr.get('headRefOid') or '')[:10]} command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+            f"head={str(pr.get('headRefOid') or '')[:10]} command={block_pr_command(n, 'rebase', from_state='pm-state:qa-passed-awaiting-ci')}"
         )
         continue
 
@@ -4162,7 +4195,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"PR_PM_REVIEW_CAPTURE_BYPASS_REQUIRED PR#{n} reason=qa_awaiting_ci_started_before_required_local_capture "
                     f"scope=phase-a marker={capture_marker} capture_status=local_capture_proof_missing "
                     f"issue=#{issue or 'unknown'} branch={branch} head={head[:10]} "
-                    f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                    f"command={block_pr_command(n, 'capture', from_state='pm-state:qa-passed-awaiting-ci')}"
                 )
                 continue
 
@@ -4212,7 +4245,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"PR_CAPTURE_LABEL_RECONCILE_REQUIRED PR#{n} reason=capture_verdict_has_generic_ci_blocker_local_proof_missing "
                     f"classification={capture_verdict.get('classification')} local_capture_proof=missing "
                     f"head={head[:10]} issue=#{issue or 'unknown'} branch={branch} "
-                    f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                    f"command={block_pr_command(n, 'capture')}"
                 )
                 continue
             watch_runs = [str(x) for x in (capture_verdict.get("watch_runs") or []) if str(x)]
@@ -4229,7 +4262,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"classification={capture_verdict.get('classification')} capture_run={capture_run or 'missing'} "
                     f"capture_status={capture_run_status} capture_conclusion={capture_conclusion or 'unknown'} "
                     f"head={head[:10]} issue=#{issue or 'unknown'} branch={branch} "
-                    f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                    f"command={block_pr_command(n, 'capture')}"
                 )
                 continue
         workflow_state, ci_run, e2e_run = workflow_summary(pr)
@@ -4286,7 +4319,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"PR_CI_DEPENDENCY_BLOCKED_REQUIRED PR#{n} reason=qa_awaiting_ci_ci_blocker_dependency_open "
                     f"{dep_reason} workflows={bad} label_missing={str(not has_label(pr, 'pm-blocked:dependency')).lower()} watch_ack={ack_path} ack_key={ack_key} "
                     f"head={str(pr.get('headRefOid') or '')[:10]} "
-                    f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                    f"command={block_pr_command(n, 'dependency', from_state='pm-state:qa-passed-awaiting-ci', head=str(pr.get('headRefOid') or ''), dep_reason=dep_reason)}"
                 )
                 continue
             if dep_state == "unblocked":
@@ -4342,7 +4375,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"PR_CI_DEPENDENCY_BLOCKED_REQUIRED PR#{n} reason=qa_awaiting_ci_required_workflow_missing_or_skipped_dependency_open "
                     f"{dep_reason} workflows={bad} label_missing={str(not has_label(pr, 'pm-blocked:dependency')).lower()} watch_ack={ack_path} ack_key={ack_key} "
                     f"head={str(pr.get('headRefOid') or '')[:10]} "
-                    f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                    f"command={block_pr_command(n, 'dependency', from_state='pm-state:qa-passed-awaiting-ci', head=str(pr.get('headRefOid') or ''), dep_reason=dep_reason)}"
                 )
                 continue
             if dep_state == "unblocked":
@@ -4419,7 +4452,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 print(
                     f"PR_CI_DEPENDENCY_BLOCKED_REQUIRED PR#{n} reason=qa_awaiting_ci_dependency_label_missing_or_invalid_proof "
                     f"workflows={bad} label_missing=false head={str(pr.get('headRefOid') or '')[:10]} "
-                    f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                    f"command={block_pr_command(n, 'dependency', from_state='pm-state:qa-passed-awaiting-ci', head=str(pr.get('headRefOid') or ''), dep_reason=dep_reason)}"
                 )
                 continue
             print(ci_required_action_line(
@@ -4463,7 +4496,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 f"success_count={success_count} skipped_count={skipped_count} "
                 f"phase_a={phase_a_status} proof_state={proof_state} "
                 f"ready_gate={ready_gate} ready_gate_reason={ready_gate_reason} "
-                f"command=run_pm_readiness_contract_then_UNSUPPORTED_LIFECYCLE_ACTION:validate-ready-proof"
+                f"command=run_pm_readiness_contract_then_ask_CTO_for_the_exact_head_merge_in_the_alert_thread"
             )
             continue
         if workflow_state == "missing_or_skipped" and merge_state == "CLEAN" and not draft:
@@ -4492,7 +4525,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 print(
                     f"PR_CI_DEPENDENCY_BLOCKED_REQUIRED PR#{n} reason=qa_awaiting_ci_missing_or_skipped_dependency_label_missing_or_invalid_proof "
                     f"workflows={bad} label_missing=false head={str(pr.get('headRefOid') or '')[:10]} "
-                    f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                    f"command={block_pr_command(n, 'dependency', from_state='pm-state:qa-passed-awaiting-ci', head=str(pr.get('headRefOid') or ''), dep_reason=dep_reason)}"
                 )
                 continue
             print(ci_required_action_line(
@@ -4517,7 +4550,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     print(
                     f"PR_STATE_RECONCILE_REQUIRED PR#{n} slot:{slot} reason=pm_review_capture_mop_owner_tuple_incomplete "
                     f"issue=#{issue or 'unknown'} branch={branch} head={str(pr.get('headRefOid') or '')[:10]} "
-                    f"assignment_epoch={fuzzy_slot.get('assignment_epoch')} {owner_tokens(fuzzy_slot)} mop={slot_entry_summary(fuzzy_slot)} command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                    f"assignment_epoch={fuzzy_slot.get('assignment_epoch')} {owner_tokens(fuzzy_slot)} mop={slot_entry_summary(fuzzy_slot)} command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                     )
                 continue
             if active_slot:
@@ -4534,7 +4567,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 print(
                     f"PR_CAPTURE_SLOT_RELEASE_REQUIRED PR#{n} slot:{slot} reason=capture_watch_has_slot_label "
                     f"issue=#{issue or 'unknown'} branch={branch} head={str(pr.get('headRefOid') or '')[:10]} "
-                    f"command=gh\\ pr\\ edit\\ {n}\\ --remove-label\\ slot:{slot}\\ &&\\ UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                    f"command=gh\\ pr\\ edit\\ {n}\\ --remove-label\\ slot:{slot}\\ &&\\ Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                 )
                 continue
             capture_head = str(pr.get("headRefOid") or "")
@@ -4554,7 +4587,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"PR_CAPTURE_COMPLETE_SLOT_READY_REQUIRED PR#{n} reason=capture_before_ci_local_proof_pending_slot_ready "
                     f"local_capture_proof={local_capture_proof} issue=#{issue or 'unknown'} branch={branch} "
                     f"head={str(pr.get('headRefOid') or '')[:10]} "
-                    f"remediation=consume_the_exact_local_capture_result\\ &&\\ gh\\ pr\\ edit\\ {n}\\ --remove-label\\ pm-blocked:capture\\ &&\\ UNSUPPORTED_LIFECYCLE_ACTION:slot-ready"
+                    f"remediation=consume_the_exact_local_capture_result\\ &&\\ gh\\ pr\\ edit\\ {n}\\ --remove-label\\ pm-blocked:capture\\ &&\\ Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                 )
                 continue
             if local_capture_ok:
@@ -4562,7 +4595,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"PR_CAPTURE_COMPLETE_PM_REVIEW_DONE_REQUIRED PR#{n} reason=capture_before_ci_local_proof_no_slot_packet "
                     f"local_capture_proof={local_capture_proof} issue=#{issue or 'unknown'} branch={branch} "
                     f"head={str(pr.get('headRefOid') or '')[:10]} "
-                    f"remediation=consume_the_exact_local_capture_result\\ &&\\ gh\\ pr\\ edit\\ {n}\\ --remove-label\\ pm-blocked:capture\\ &&\\ UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done"
+                    f"remediation=consume_the_exact_local_capture_result\\ &&\\ gh\\ pr\\ edit\\ {n}\\ --remove-label\\ pm-blocked:capture\\ &&\\ {pm_review_done_command(n)}"
                 )
                 continue
             capture_green, capture_detail = current_head_capture_green(n, capture_head)
@@ -4623,7 +4656,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 print(
                 f"PR_STATE_RECONCILE_REQUIRED PR#{n} slot:{slot} reason=pm_review_mop_owner_tuple_incomplete "
                 f"issue=#{issue or 'unknown'} branch={branch} head={str(pr.get('headRefOid') or '')[:10]} "
-                f"assignment_epoch={fuzzy_slot.get('assignment_epoch')} {owner_tokens(fuzzy_slot)} mop={slot_entry_summary(fuzzy_slot)} command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                f"assignment_epoch={fuzzy_slot.get('assignment_epoch')} {owner_tokens(fuzzy_slot)} mop={slot_entry_summary(fuzzy_slot)} command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                 )
             continue
         if active_slot:
@@ -4679,7 +4712,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                             f"scope=phase-a marker={marker_path} local_capture_proof={local_capture_proof} "
                             f"affected_test_proof={affected_test_proof} "
                             f"issue=#{issue or 'unknown'} branch={branch} head={str(pr.get('headRefOid') or '')[:10]} "
-                            f"remediation=consume_the_exact_local_capture_result\\ &&\\ gh\\ pr\\ edit\\ {n}\\ --remove-label\\ pm-blocked:capture\\ &&\\ UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done"
+                            f"remediation=consume_the_exact_local_capture_result\\ &&\\ gh\\ pr\\ edit\\ {n}\\ --remove-label\\ pm-blocked:capture\\ &&\\ {pm_review_done_command(n)}"
                         )
                         continue
                     capture_green, capture_detail = current_head_capture_green(n, str(pr.get("headRefOid") or ""))
@@ -4696,7 +4729,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                             f"PR_PM_REVIEW_CAPTURE_REQUIRED PR#{n} reason=pm_review_phase_a_capture_gated_before_ci "
                             f"scope=phase-a marker={marker_path} capture_status={capture_detail} "
                             f"issue=#{issue or 'unknown'} branch={branch} head={str(pr.get('headRefOid') or '')[:10]} "
-                            f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                            f"command={block_pr_command(n, 'capture')}"
                         )
                         continue
                     if "status=completed" in capture_detail and "conclusion=success" not in capture_detail:
@@ -4773,7 +4806,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 f"PR_PM_REVIEW_REQUIRED PR#{n} reason=pm_claude_blocked_apply_rework_state "
                 f"scope={scope} marker={marker_path} issue=#{issue or 'unknown'} branch={branch} "
                 f"head={str(pr.get('headRefOid') or '')[:10]} "
-                f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                f"command={block_pr_command(n, 'pm-gate')}"
             )
             continue
 
@@ -4784,7 +4817,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 f"PR_PM_REVIEW_REQUIRED PR#{n} reason=pm_review_pending_stale_or_missing_marker "
                 f"scope={scope} marker_status={marker_status} marker={marker_path}{age_part} "
                 f"issue=#{issue or 'unknown'} branch={branch} head={str(pr.get('headRefOid') or '')[:10]} "
-                f"command=run_pm_claude_code_review_then_UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done_or_rework"
+                f"command={pm_review_command(n)}\\ &&\\ on_PASS:\\ {pm_review_done_command(n)}\\ on_BLOCKED:\\ {block_pr_command(n, 'pm-gate')}"
             )
             continue
         continue
@@ -4909,7 +4942,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                     f"PR_PM_REVIEW_REQUIRED PR#{n} reason=blocked_rework_has_current_pm_review_blocked_marker "
                     f"scope={review_scope or 'phase-a'} marker={marker_path} issue=#{issue or 'unknown'} branch={branch} "
                     f"head={str(pr.get('headRefOid') or '')[:10]} "
-                    f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                    f"command={block_pr_command(n, 'pm-gate')}"
                 )
                 continue
 
@@ -4957,7 +4990,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                         f"PR_REWORK_DELIVERY_PENDING_REQUIRED PR#{n} slot:{slot} reason=packet_created_without_delivery_ack "
                         f"issue=#{issue or 'unknown'} branch={branch} packet={pending_delivery['packet']} "
                         f"age_min={pending_delivery['age_min']} "
-                        "command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                        "command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                     )
                 else:
                     reason = "blocked_rework_slot_idle_dnd" if dnd else "blocked_rework_slot_idle"
@@ -4999,7 +5032,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                             f"PR_REWORK_DELIVERY_PENDING_REQUIRED PR#{n} slot:{slot} reason=packet_created_without_delivery_ack "
                             f"issue=#{issue or 'unknown'} branch={branch} packet={pending_delivery['packet']} "
                             f"age_min={pending_delivery['age_min']} "
-                            "command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                            "command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                         )
                         continue
                     reason = "blocked_rework_slot_idle_dnd" if dnd else "blocked_rework_slot_idle"
@@ -5015,7 +5048,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 print(
                 f"PR_STATE_RECONCILE_REQUIRED PR#{n} slot:{slot} reason=blocked_rework_mop_owner_tuple_incomplete "
                 f"issue=#{issue or 'unknown'} branch={branch} assignment_epoch={fuzzy_slot.get('assignment_epoch')} {owner_tokens(fuzzy_slot)} mop={slot_entry_summary(fuzzy_slot)} "
-                f"command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                f"command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                 )
             continue
         if has_label(pr, "pm-blocked:product"):
@@ -5077,7 +5110,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 print(
                 f"PR_STATE_RECONCILE_REQUIRED PR#{n} slot:{slot} reason=active_draft_mop_owner_tuple_incomplete "
                 f"branch={branch} assignment_epoch={active_slot.get('assignment_epoch')} {owner_tokens(active_slot)} checks={check_state} mop={slot_entry_summary(active_slot)} "
-                f"command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                f"command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                 )
             continue
         # A released draft is not green merely because docs-only/dummy checks
@@ -5096,14 +5129,14 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 f"PR_PM_REVIEW_REQUIRED PR#{n} reason=pm_claude_blocked_apply_rework_state "
                 f"scope=phase-a marker={marker_path} issue=#{issue or 'unknown'} branch={branch} "
                 f"head={head[:10]} workflows={workflow_bad_summary(ci_run, e2e_run)} "
-                f"command=UNSUPPORTED_LIFECYCLE_ACTION:block-pr"
+                f"command={block_pr_command(n, 'pm-gate')}"
             )
             continue
         print(
             f"PR_STATE_LABEL_REQUIRED PR#{n} reason=draft_without_pm_state "
             f"branch={branch} workflows={workflow_bad_summary(ci_run, e2e_run)} "
             f"marker_status={marker_status} marker={marker_path} "
-            f"command=UNSUPPORTED_LIFECYCLE_ACTION:pm-review"
+            f"command={pm_review_command(n)}"
         )
         continue
 
@@ -5120,7 +5153,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
                 print(
                 f"PR_STATE_RECONCILE_REQUIRED PR#{n} slot:{slot} reason=active_open_mop_owner_tuple_incomplete "
                 f"branch={branch} assignment_epoch={active_slot.get('assignment_epoch')} {owner_tokens(active_slot)} checks={check_state} mop={slot_entry_summary(active_slot)} "
-                f"command=UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity"
+                f"command=Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple"
                 )
             continue
         # PM_REVIEW_DONE_TERMINAL_RECEIPT_V1 consumer: never schedule a fresh
@@ -5129,7 +5162,7 @@ for pr in sorted(prs, key=lambda p: int(p.get("number") or 0), reverse=True):
             continue
         print(
             f"PR_STATE_LABEL_REQUIRED PR#{n} reason=open_pr_without_pm_state "
-            f"branch={branch} checks={check_state} command=UNSUPPORTED_LIFECYCLE_ACTION:pm-review"
+            f"branch={branch} checks={check_state} command={pm_review_command(n)}"
         )
 
 open_pr_issues = {str(linked_issue(pr)) for pr in prs if linked_issue(pr)}
@@ -5391,7 +5424,7 @@ if [ -n "$ACTION_LINES" ]; then
             --owner pm \
             --horizon hourly \
             --title "PR #$pr green CI needs merge-ready readiness" \
-            --action "Run pm-readiness-contract; if PASS, write /tmp/pm-state-promotion-proof-$pr-merge-ready.ok with exact current headRefOid. Promotion transitions are retired (UNSUPPORTED_LIFECYCLE_ACTION:validate-ready-proof, UNSUPPORTED_LIFECYCLE_ACTION:merge-ready); no merge-ready flip executes. If BLOCKED, apply the blocker state instead of dispatching new work." \
+            --action "Run pm-readiness-contract; if PASS, write /tmp/pm-state-promotion-proof-$pr-merge-ready.ok with exact current headRefOid. If PASS, ask the CTO for the exact-head merge in the alert thread (head-pinned, with the screenshot thread or No user-visible UI change: <reason>); no merge-ready label flip executes. If BLOCKED, apply the blocker state with gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:<reason> instead of dispatching new work." \
             --blocker "qa_awaiting_ci_terminal_green_clean" \
             --evidence "$line" \
             --evidence "ready_gate=$ready_gate" \
@@ -5423,7 +5456,7 @@ if [ -n "$ACTION_LINES" ]; then
             --owner pm \
             --horizon hourly \
             --title "PR #$pr green CI needs merge-ready readiness" \
-            --action "Run pm-readiness-contract; if PASS, write /tmp/pm-state-promotion-proof-$pr-merge-ready.ok with exact current headRefOid. Promotion transitions are retired (UNSUPPORTED_LIFECYCLE_ACTION:validate-ready-proof, UNSUPPORTED_LIFECYCLE_ACTION:merge-ready); no merge-ready flip executes. If BLOCKED, apply the blocker state instead of dispatching new work." \
+            --action "Run pm-readiness-contract; if PASS, write /tmp/pm-state-promotion-proof-$pr-merge-ready.ok with exact current headRefOid. If PASS, ask the CTO for the exact-head merge in the alert thread (head-pinned, with the screenshot thread or No user-visible UI change: <reason>); no merge-ready label flip executes. If BLOCKED, apply the blocker state with gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:<reason> instead of dispatching new work." \
             --blocker "qa_awaiting_ci_terminal_green_clean" \
             --evidence "$line" \
             --evidence "ready_gate=blocked" \
@@ -5447,7 +5480,7 @@ if [ -n "$ACTION_LINES" ]; then
               --owner pm \
               --horizon hourly \
               --title "PR #$pr green CI needs merge-ready readiness" \
-              --action "Run pm-readiness-contract; if PASS, write /tmp/pm-state-promotion-proof-$pr-merge-ready.ok with exact current headRefOid. Promotion transitions are retired (UNSUPPORTED_LIFECYCLE_ACTION:validate-ready-proof, UNSUPPORTED_LIFECYCLE_ACTION:merge-ready); no merge-ready flip executes. If BLOCKED, apply the blocker state instead of dispatching new work." \
+              --action "Run pm-readiness-contract; if PASS, write /tmp/pm-state-promotion-proof-$pr-merge-ready.ok with exact current headRefOid. If PASS, ask the CTO for the exact-head merge in the alert thread (head-pinned, with the screenshot thread or No user-visible UI change: <reason>); no merge-ready label flip executes. If BLOCKED, apply the blocker state with gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:<reason> instead of dispatching new work." \
               --blocker "qa_awaiting_ci_terminal_green_clean" \
               --evidence "$line" \
               --evidence "ready_gate=blocked" \
@@ -5464,7 +5497,7 @@ if [ -n "$ACTION_LINES" ]; then
             fi
           # validate-ready-proof and merge-ready transitions are retired: refuse
           # without mutation so the existing FAILED path below carries the stop.
-          merge_output="UNSUPPORTED_LIFECYCLE_ACTION:validate-ready-proof"
+          merge_output="readiness_proof_recorded_for_exact_head;_no_label_flip_executes;_ask_CTO_for_the_exact_head_merge_in_the_alert_thread"
           merge_rc=3
           if false; then
             emit "PR_READY_PROMOTION_APPLIED PR#$pr head=$head issue=#${issue:-unknown} branch=${branch:-unknown} receipt=$(printf '%s' "$merge_output" | one_line_excerpt)"
@@ -5479,7 +5512,7 @@ if [ -n "$ACTION_LINES" ]; then
               --owner pm \
               --horizon hourly \
               --title "PR #$pr green CI needs merge-ready readiness" \
-              --action "Run pm-readiness-contract; if PASS, write /tmp/pm-state-promotion-proof-$pr-merge-ready.ok with exact current headRefOid. Promotion transitions are retired (UNSUPPORTED_LIFECYCLE_ACTION:validate-ready-proof, UNSUPPORTED_LIFECYCLE_ACTION:merge-ready); no merge-ready flip executes. If BLOCKED, apply the blocker state instead of dispatching new work." \
+              --action "Run pm-readiness-contract; if PASS, write /tmp/pm-state-promotion-proof-$pr-merge-ready.ok with exact current headRefOid. If PASS, ask the CTO for the exact-head merge in the alert thread (head-pinned, with the screenshot thread or No user-visible UI change: <reason>); no merge-ready label flip executes. If BLOCKED, apply the blocker state with gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:<reason> instead of dispatching new work." \
               --blocker "qa_awaiting_ci_terminal_green_clean" \
               --evidence "$line" \
               --evidence "ready_gate=pass" \
@@ -5515,7 +5548,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr needs PM Claude phase-A review transition" \
-          --action "Run/finish PM Claude phase-A review only. Review transitions are retired (UNSUPPORTED_LIFECYCLE_ACTION:pm-review, UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done); no review state changes execute. Merge-ready uses pm-readiness-contract, not pm-review --scope merge-ready." \
+          --action "Run/finish PM Claude phase-A review only. Mark review pending with gh pr edit $pr --add-label pm-state:pm-review-pending, run Agent(pm-admission-reviewer), then post the PM 12b PR comment, then run ~/.claude/scripts/ci/pm-admit-ci.sh $pr. Merge-ready uses pm-readiness-contract, not pm-review --scope merge-ready." \
           --blocker "pm_review_pending" \
           --evidence "$line"
         ;;
@@ -5532,7 +5565,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr review is terminal PASS but blocked after review ($blocked_class)" \
-          --action "Do not launch another same-head review (UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done stays retired) until the blocker clears. Execute the typed wake: ${wake:-see sweep row}. After the wake is satisfied, the resume stays retired; no duplicate terminal event/obligation/label event/CI wave." \
+          --action "Do not launch another same-head review until the blocker clears. Execute the typed wake: ${wake:-see sweep row}. After the wake is satisfied, post the PM 12b PR comment, then run ~/.claude/scripts/ci/pm-admit-ci.sh $pr; no duplicate terminal event/obligation/label event/CI wave." \
           --blocker "review_terminal_blocked_after_review" \
           --evidence "$line"
         ;;
@@ -5547,7 +5580,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr review is terminal PASS with an exact-head receipt" \
-          --action "The head-bound terminal receipt no longer resumes any transition (UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done). No second reviewer, no duplicate terminal event, obligation, label event, or CI wave; head drift invalidates reuse." \
+          --action "The head-bound terminal receipt is final for this head: post the PM 12b PR comment, then run ~/.claude/scripts/ci/pm-admit-ci.sh $pr. No second reviewer, no duplicate terminal event, obligation, label event, or CI wave; head drift invalidates reuse." \
           --blocker "review_terminal_receipt_resume" \
           --evidence "$line"
         ;;
@@ -5562,7 +5595,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr PM Claude review passed (affected-test proof retired)" \
-          --action "Affected-test proof is retired (Rajiv thread 1786811168.455449). The pm-review-done ownership release is retired (UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done); no move to qa-passed-awaiting-ci executes; do not rerun PM review." \
+          --action "Affected-test proof is retired (Rajiv thread 1786811168.455449). Release slot ownership only through Skill(direct-release)/Skill(direct-assign) with the complete authoritative tuple; qa-passed-awaiting-ci is CTO-owned label-gated CI, never add it manually; do not rerun PM review." \
           --blocker "pm_review_passed_legacy_affected_test_obligation" \
           --evidence "$line"
         ;;
@@ -5577,7 +5610,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr PM review passed while an exact-head workflow is active" \
-          --action "Do not duplicate or label-toggle the active workflow. Wait for every exact-head CI/E2E run to reach terminal and inspect any failure. The pm-review-done ownership release is retired (UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done); rerunning pr-state-sweep resumes no transition and performs no release." \
+          --action "Do not duplicate or label-toggle the active workflow. Wait for every exact-head CI/E2E run to reach terminal and inspect any failure. Release slot ownership only through Skill(direct-release)/Skill(direct-assign) with the complete authoritative tuple; rerunning pr-state-sweep performs no release." \
           --blocker "pm_review_passed_current_head_workflow_active" \
           --evidence "$line"
         ;;
@@ -5637,7 +5670,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr PM Claude review requires remote capture before CI" \
-	          --action "The pm-review-done and capture dispatch/consume transitions are retired (UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done, UNSUPPORTED_LIFECYCLE_ACTION:capture-remote-dispatch, UNSUPPORTED_LIFECYCLE_ACTION:capture-remote-pass). Local capture is diagnostic-only and never satisfies capture readiness." \
+	          --action "Dispatch exact-head capture with gh workflow run e2e-llm-proxy-capture.yml --ref main -f pr_number=$pr -f head_branch=<branch> -f head_sha=<exact-head> -f control_sha=<main-sha> -f capture_profile=full; capture green starts strict replay directly. Local capture is diagnostic-only and never satisfies capture readiness." \
           --blocker "pm_review_capture_gated" \
           --evidence "$line"
         ;;
@@ -5652,7 +5685,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr remote capture complete; consume PM Claude review" \
-	          --action "Exact-head remote capture is authoritative. Its consume transitions are retired (UNSUPPORTED_LIFECYCLE_ACTION:capture-remote-pass, UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done, UNSUPPORTED_LIFECYCLE_ACTION:ci-local-preflight-pass); no local-repro requirement is created and no readiness/CI is routed. The slot runs the canonical local repro and records the raw classification (no sealed envelope); CTO fires the next exact-head label-gated CI+E2E wave (cto_ci_wave_required)." \
+	          --action "Exact-head remote capture is authoritative. Strict replay starts directly from capture green; no local-repro requirement is created and no readiness/CI is routed by this row. The slot runs the canonical local repro and records the raw classification (no sealed envelope); CTO fires the next exact-head label-gated CI+E2E wave (cto_ci_wave_required)." \
           --blocker "pm_review_capture_complete_not_consumed" \
           --evidence "$line"
         ;;
@@ -5713,7 +5746,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr remote capture still required after local diagnostic" \
-          --action "The local diagnostic proof was recorded; it does not satisfy capture readiness. The authoritative remote-capture dispatch/consume transitions are retired (UNSUPPORTED_LIFECYCLE_ACTION:capture-remote-dispatch, UNSUPPORTED_LIFECYCLE_ACTION:capture-remote-pass)." \
+          --action "The local diagnostic proof was recorded; it does not satisfy capture readiness. The authoritative path is gh workflow run e2e-llm-proxy-capture.yml (capture, then direct strict replay)." \
           --blocker "capture_remote_watch" \
           --evidence "$line"
         ;;
@@ -5743,7 +5776,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr local capture proof ready; resume saved slot-ready transition" \
-          --action "The slot-ready transition is retired (UNSUPPORTED_LIFECYCLE_ACTION:slot-ready); no slot release, ownership assertion, or qa-passed-awaiting-ci application executes. Skipped/dummy contexts do not count as readiness." \
+          --action "Release the slot only through Skill(direct-release)/Skill(direct-assign) with the complete authoritative tuple; never add qa-passed-awaiting-ci manually (CTO-owned label-gated CI). Skipped/dummy contexts do not count as readiness." \
           --blocker "capture_complete_slot_ready_not_consumed" \
           --evidence "$line"
         ;;
@@ -5758,7 +5791,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr local capture proof ready; finish PM review transition" \
-          --action "The pm-review-done transition is retired (UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done); no slot release, ownership assertion, or label-gated CI start executes. Skipped/dummy contexts do not count as readiness." \
+          --action "Post the PM 12b PR comment, then run ~/.claude/scripts/ci/pm-admit-ci.sh $pr; release the slot only through Skill(direct-release). Skipped/dummy contexts do not count as readiness." \
           --blocker "capture_complete_pm_review_not_consumed" \
           --evidence "$line"
         ;;
@@ -5773,7 +5806,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr prompt/LLM-path CI failure requires capture before rerun" \
-	          --action "Return UNSUPPORTED_LIFECYCLE_ACTION:block-pr for the capture block. Run slot-local capture proof on the exact current PR head, consume it, then trigger label-gated CI directly. Do not dispatch generic local CI rework or rerun CI until local capture proof exists on the current head." \
+	          --action "Block the capture with gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:capture. Run slot-local capture proof on the exact current PR head, consume it, then trigger label-gated CI directly. Do not dispatch generic local CI rework or rerun CI until local capture proof exists on the current head." \
           --blocker "capture_before_ci" \
           --evidence "$line"
         ;;
@@ -5804,7 +5837,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr current-head CI verdict requires rework, not rerun" \
-          --action "Do not rerun capture/CI for this current-head failure. The latest ci-verdict marker says ${verdict_class:-current-head failure} needs code/prompt rework; keep/add pm-blocked:ci and dispatch the verdict comment to the owning slot or a free slot after reconcile-capacity." \
+          --action "Do not rerun capture/CI for this current-head failure. The latest ci-verdict marker says ${verdict_class:-current-head failure} needs code/prompt rework; keep/add pm-blocked:ci and dispatch the verdict comment to the owning slot or a free slot via Skill(direct-assign)." \
           --blocker "ci_verdict_rework_required" \
           --evidence "$line"
         ;;
@@ -5834,7 +5867,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr current-head CI/E2E failed; slot local repro + rework required" \
-          --action "Return UNSUPPORTED_LIFECYCLE_ACTION:block-pr for the CI block and UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity for capacity; dispatch rework only through Skill(direct-assign) with the exact failed-run packet to the first healthy free slot. The slot inspects the failed run logs/Modal cache, runs one focused local repro at the exact head, fixes any defect, and pushes a descendant head; the raw PASS/FAIL repro terminal is the classification (no sealed envelope; Rajiv 1786812200.371389). CTO fires the next exact-head label-gated CI+E2E wave. Do not raise wall budgets." \
+          --action "Block the CI failure with gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:ci and free capacity via Skill(direct-release)/Skill(direct-assign) with the complete authoritative tuple; dispatch rework only through Skill(direct-assign) with the exact failed-run packet to the first healthy free slot. The slot inspects the failed run logs/Modal cache, runs one focused local repro at the exact head, fixes any defect, and pushes a descendant head; the raw PASS/FAIL repro terminal is the classification (no sealed envelope; Rajiv 1786812200.371389). CTO fires the next exact-head label-gated CI+E2E wave. Do not raise wall budgets." \
           --blocker "ci_local_preflight_required" \
           --evidence "$line"
         ;;
@@ -5849,7 +5882,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr capped same-head CI/E2E retry (infra/flake/shared class)" \
-          --action "Run at most one same-head rerun of the failed CI/E2E run through gh run rerun <failed-run> --failed (rerun-after-local-proof.sh deprecated 2026-10-03) (no sealed proof required; Rajiv 1786812200.371389). The wrapper enforces the one-retry cap and refuses product classes; on a non-infra refusal, UNSUPPORTED_LIFECYCLE_ACTION:block-pr, then dispatch rework only through Skill(direct-assign). Never toggle CI labels on the same head." \
+          --action "Run at most one same-head rerun of the failed CI/E2E run through gh run rerun <failed-run> --failed (rerun-after-local-proof.sh deprecated 2026-10-03) (no sealed proof required; Rajiv 1786812200.371389). The wrapper enforces the one-retry cap and refuses product classes; on a non-infra refusal, run gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:ci, then dispatch rework only through Skill(direct-assign). Never toggle CI labels on the same head." \
           --blocker "ci_rerun_after_preflight" \
           --evidence "$line"
         ;;
@@ -5864,7 +5897,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr current-head CI/E2E red; at most one capped same-head retry" \
-          --action "Run at most one same-head rerun of the failed CI/E2E run through gh run rerun <failed-run> --failed (rerun-after-local-proof.sh deprecated 2026-10-03) (no sealed proof required; Rajiv 1786812200.371389). The wrapper enforces the one-retry cap and refuses product classes; on a non-infra refusal, UNSUPPORTED_LIFECYCLE_ACTION:block-pr and UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity (dispatch rework only through Skill(direct-assign) with the exact failed-run packet). Never toggle CI labels on the same head." \
+          --action "Run at most one same-head rerun of the failed CI/E2E run through gh run rerun <failed-run> --failed (rerun-after-local-proof.sh deprecated 2026-10-03) (no sealed proof required; Rajiv 1786812200.371389). The wrapper enforces the one-retry cap and refuses product classes; on a non-infra refusal, run gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:ci and free capacity via Skill(direct-release)/Skill(direct-assign) with the complete authoritative tuple (dispatch rework only through Skill(direct-assign) with the exact failed-run packet). Never toggle CI labels on the same head." \
           --blocker "ci_rerun_after_preflight" \
           --evidence "$line"
         ;;
@@ -5885,7 +5918,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr current head unclassified by superseded runs; start fresh label-gated CI" \
-          --action "Start FRESH initial label-gated CI for the CURRENT head through the typed CI-start path /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ci/request-label-gated-ci.sh --pr $pr (UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done stays retired even when review gates pass). No local-preflight proof is required (Rajiv 1786812200.371389); NEVER rerun the superseded run ${stale_run:-<stale-run>} via rerun-after-local-proof.sh (run_head_mismatch refusal) and do not dispatch product rework from superseded-head failures." \
+          --action "Start FRESH initial label-gated CI for the CURRENT head through the typed CI-start path /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ci/request-label-gated-ci.sh --pr $pr. No local-preflight proof is required (Rajiv 1786812200.371389); NEVER rerun the superseded run ${stale_run:-<stale-run>} via rerun-after-local-proof.sh (run_head_mismatch refusal) and do not dispatch product rework from superseded-head failures." \
           --blocker "ci_start_after_moved_head_classification" \
           --evidence "$line"
         ;;
@@ -5915,7 +5948,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr dependency blocker is terminal; resume capture/CI" \
-          --action "Resolve the GitHub dependency for PR $pr using the emitted proof, then run UNSUPPORTED_LIFECYCLE_ACTION:reconcile-capacity. The dependency-block marker no longer justifies a passive wait." \
+          --action "Resolve the GitHub dependency for PR $pr using the emitted proof, then free or assign capacity via Skill(direct-release)/Skill(direct-assign) with the complete authoritative tuple. The dependency-block marker no longer justifies a passive wait." \
           --blocker "dependency_blocker_terminal" \
           --evidence "$line"
         ;;
@@ -5931,7 +5964,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr dependency watch is missing current-head proof" \
-          --action "Do not treat pm-blocked:dependency as a passive wait until the blocker is machine-readable. Return UNSUPPORTED_LIFECYCLE_ACTION:block-pr for the dependency block, or remove pm-blocked:dependency and resume capture/CI. Current dependency label age_min=${age:-unknown}." \
+          --action "Do not treat pm-blocked:dependency as a passive wait until the blocker is machine-readable. Block the dependency with gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:dependency plus a head-bound pm-dependency-watch:v1 PR comment, or remove pm-blocked:dependency and resume capture/CI. Current dependency label age_min=${age:-unknown}." \
           --blocker "dependency_watch_missing_proof" \
           --evidence "$line"
         ;;
@@ -5965,7 +5998,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr is both product-blocked and actively slot-owned" \
-          --action "Decide which state is true. If Rajiv/product answered, resolve the current branch/head/expected epoch/repository/handoff and use the complete Skill(direct-assign) tuple for slot $slot; successful delivery clears pm-blocked:product and resolves product_decision_wait. If still waiting, return UNSUPPORTED_LIFECYCLE_ACTION:block-pr, then release the slot only through Skill(direct-release)." \
+          --action "Decide which state is true. If Rajiv/product answered, resolve the current branch/head/expected epoch/repository/handoff and use the complete Skill(direct-assign) tuple for slot $slot; successful delivery clears pm-blocked:product and resolves product_decision_wait. If still waiting, run gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:product, then release the slot only through Skill(direct-release)." \
           --blocker "product_wait_has_active_owner" \
           --evidence "$line"
         ;;
@@ -6082,7 +6115,7 @@ if [ -n "$ACTION_LINES" ]; then
           --pr "$pr" \
           --owner pm \
           --title "PR #$pr needs PM state reconciliation" \
-	          --action "Apply only supported transitions before dispatching fresh issue work. For PR_CI_DEPENDENCY_BLOCKED_REQUIRED, the blocker naming is retired (UNSUPPORTED_LIFECYCLE_ACTION:block-pr); wait until the dependency merges/closes before rerunning CI. For PR_READY_BEFORE_CI_REQUIRED, mark the PR ready first, then remove/re-add the CI-trigger label only if required workflows did not start on the current head." \
+	          --action "Apply only supported transitions before dispatching fresh issue work. For PR_CI_DEPENDENCY_BLOCKED_REQUIRED, name the blocker with gh pr edit $pr --add-label pm-state:blocked-rework,pm-blocked:dependency plus a head-bound pm-dependency-watch:v1 PR comment; wait until the dependency merges/closes before rerunning CI. For PR_READY_BEFORE_CI_REQUIRED, mark the PR ready first, then remove/re-add the CI-trigger label only if required workflows did not start on the current head." \
           --blocker "pr_state_reconcile" \
           --evidence "$line"
         ;;
@@ -6142,8 +6175,8 @@ if [ -n "$ACTION_LINES" ]; then
 	          --pr "$pr" \
 	          --owner pm \
 	          --horizon hourly \
-	          --title "PR #$pr override resolved; proceed to exact-head pm-review-done" \
-          --action "Affected-test verification is retired (Rajiv thread 1786811168.455449). The pm-review-done binding is retired (UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done); no Phase-A PASS marker binds CI start." \
+	          --title "PR #$pr override resolved; proceed to the exact-head PM 12b comment and pm-admit-ci.sh" \
+          --action "Affected-test verification is retired (Rajiv thread 1786811168.455449). CI start is requested through ~/.claude/scripts/ci/pm-admit-ci.sh $pr; no Phase-A PASS marker binds it." \
 	          --blocker "override_verification_required" \
 	          --evidence "$line"
 	        ;;

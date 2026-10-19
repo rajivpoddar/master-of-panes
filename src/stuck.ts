@@ -851,7 +851,7 @@ export class StuckDetector {
       `recommended_issue=${gate.recommended_issue ?? "unknown"} ` +
       `recommended_packet=${gate.recommended_packet ?? "unknown"}. ` +
       "Revalidate that this slot is still free and the recommended obligation is open, " +
-      "then remind PM once; do not assign work or run reconcile-capacity.";
+      "then remind PM once; do not assign work or reconcile capacity (assignment and release stay PM-owned via Skill(direct-assign)/Skill(direct-release)).";
 
     const sent = await this.relay.sendToSlotAsync(slot.slot, command, false);
     const payload = {

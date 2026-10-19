@@ -364,7 +364,7 @@ if existing.get("status") != "pending":
     }
 
 existing["slots"] = sorted({int(slot) for slot in existing.get("slots", []) if str(slot).isdigit()} | set(cleared_slots))
-command = "/Users/rajiv/.claude/scripts/pm-transition.sh reconcile-capacity"
+command = "Skill(direct-assign) with the complete authoritative tuple for the cleared slots"
 commands = [str(item) for item in existing.get("recommended_commands", []) if item]
 if command not in commands:
     commands.append(command)

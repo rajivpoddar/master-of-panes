@@ -75,22 +75,18 @@ def test_assignment_release_route_only_through_direct_skills() -> None:
     assert "Skill(direct-release)" in sweep_skill
 
 
-def test_retired_classes_become_typed_stops() -> None:
+def test_retired_classes_become_executable_packets() -> None:
+    """OBL23162: sweep rows carry current executable packets, never typed-stop text."""
     sweep = _read("pr-state-sweep/scripts/sweep.sh")
-    for class_name in (
-        "block-pr",
-        "reconcile-capacity",
-        "pm-review-done",
-        "pm-review",
-        "merge-ready",
-        "validate-ready-proof",
-        "slot-ready",
-        "capture-remote-dispatch",
-        "capture-remote-pass",
-        "ci-local-preflight-pass",
-        "dependency-unblocked",
+    assert "UNSUPPORTED_LIFECYCLE_ACTION" not in sweep
+    for helper in (
+        "def block_pr_command",
+        "def pm_review_command",
+        "def pm_review_done_command",
+        "def capture_dispatch_command",
     ):
-        assert f"UNSUPPORTED_LIFECYCLE_ACTION:{class_name}" in sweep, class_name
+        assert helper in sweep, helper
+    assert "Skill(direct-release)_or_Skill(direct-assign)_with_the_complete_authoritative_tuple" in sweep
     sweep_skill = _read("pr-state-sweep/SKILL.md")
     for class_name in ("rescope-pr", "park-issue"):
         assert f"UNSUPPORTED_LIFECYCLE_ACTION:{class_name}" in sweep_skill, class_name
@@ -171,7 +167,8 @@ def test_mutation_policy_matches_no_release_behavior() -> None:
     marker = "PR_PM_REVIEW_WORKFLOW_DRAIN_REQUIRED*)"
     assert marker in sweep
     block = sweep.split(marker, 1)[1].split(";;", 1)[0]
-    assert "UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done" in block
+    assert "UNSUPPORTED_LIFECYCLE_ACTION" not in block
+    assert "Skill(direct-release)" in block
     assert "processor can continue" not in block
 
 

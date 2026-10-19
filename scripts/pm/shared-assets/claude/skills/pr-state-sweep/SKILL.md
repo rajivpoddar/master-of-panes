@@ -112,7 +112,7 @@ work before dispatching new issue work through `Skill(direct-assign)`.
   If the decision has landed, dispatch `Skill(direct-assign)` with the
   durable current-head packet; successful delivery clears the product blocker
   and resolves `product_decision_wait`. If the decision is still pending,
-  return `UNSUPPORTED_LIFECYCLE_ACTION:block-pr` and release the slot only
+  run the block packet (`gh pr edit <PR> --add-label pm-state:blocked-rework,pm-blocked:<reason>`) and release the slot only
   through `Skill(direct-release)`.
 - `pm-state:blocked-rework` PRs that have hit the rework circuit breaker: a
   repeated same finding-class PM/Codex/CTO review marker on the current head, or
@@ -145,21 +145,20 @@ work before dispatching new issue work through `Skill(direct-assign)`.
   `PR_CI_DEPENDENCY_WATCHING` for visibility. If the visible
   `pm-blocked:dependency` label is missing, the sweep emits
   `PR_CI_DEPENDENCY_BLOCKED_REQUIRED` with the deterministic
-  `UNSUPPORTED_LIFECYCLE_ACTION:block-pr` typed stop (dependency class,
+  block packet (`gh pr edit <PR> --add-label pm-state:blocked-rework,pm-blocked:<reason>` with `pm-blocked:dependency` plus a head-bound `pm-dependency-watch:v1` PR comment;
   `<PR_OR_ISSUE>` recorded as evidence).
 - PRs carrying `pm-blocked:dependency` without current-head, machine-readable
   dependency proof. A plain human comment or label is not enough because it
   cannot self-invalidate when the head moves or when the blocker closes. The
-  sweep emits `PR_DEPENDENCY_WEDGE_REQUIRED` until PM returns
-  `UNSUPPORTED_LIFECYCLE_ACTION:block-pr` for the dependency naming or removes
+  sweep emits `PR_DEPENDENCY_WEDGE_REQUIRED` until PM runs
+  the dependency block packet (`gh pr edit <PR> --add-label pm-state:blocked-rework,pm-blocked:<reason>` plus the head-bound watch comment) or removes
   `pm-blocked:dependency` and resumes the normal capture/CI path. The dependency transition publishes a
   durable `pm-dependency-watch:v1` PR comment, parks the PR in
   `pm-state:blocked-rework`, and must not apply the CI-triggering
   `pm-state:qa-passed-awaiting-ci` label. When the named dependency reaches
   terminal state, the sweep emits `PR_DEPENDENCY_UNBLOCKED_REQUIRED` with the
-  typed stop:
-  `UNSUPPORTED_LIFECYCLE_ACTION:dependency-unblocked`; no clears, applies, or
-  reconciliation execute. PM must record that stop before claiming the board is quiet.
+  packet:
+  `gh pr edit <PR> --remove-label pm-blocked:dependency` then `Skill(direct-release)`/`Skill(direct-assign)` with the complete authoritative tuple. PM must record that stop before claiming the board is quiet.
 - `qa-passed-awaiting-ci` PRs with a deliberately classified same-head CI hold
   return `UNSUPPORTED_LIFECYCLE_ACTION:ci-watch` rather than any blocker
   transition; no state changes execute. The marker is valid
@@ -251,21 +250,20 @@ is the separately preserved family2 pm-review completion boundary.
 All other PR transitions are emitted as required PM actions and upserted into PM
 ops obligations. `PR_READY_PROMOTION_REQUIRED` is not an auto-flip: PM must run
 the readiness contract, write the merge-ready proof with exact current
-`headRefOid`, return `UNSUPPORTED_LIFECYCLE_ACTION:validate-ready-proof` and
-`UNSUPPORTED_LIFECYCLE_ACTION:merge-ready`; no readiness or merge-ready flip
-executes.
+`headRefOid`, ask the CTO for the exact-head merge in the alert thread (head-pinned, with the screenshot thread or
+`No user-visible UI change: <reason>`); no merge-ready label flip executes.
 `PR_PM_REVIEW_REQUIRED` means PM must start or finish PM Claude
-phase-A review; return `UNSUPPORTED_LIFECYCLE_ACTION:pm-review` when review
-is in flight. Readiness is satisfied at 12b admission; green exact-head CI+E2E means merge-ask due, with no post-green readiness check.
+phase-A review; mark `pm-state:pm-review-pending` with `gh pr edit <PR> --add-label pm-state:pm-review-pending` and run
+`Agent(pm-admission-reviewer)` when review is not already in flight. Readiness is satisfied at 12b admission; green exact-head CI+E2E means merge-ask due, with no post-green readiness check.
 `PR_PM_REVIEW_SLOT_RELEASE_REQUIRED` means a dev slot is still held
 while PM owns review; drain/release that slot through `Skill(direct-release)`
 and only reassign if review returns slot-owned rework. `PR_PM_REVIEW_COMPLETE_REQUIRED` means a phase-A marker passed
-and PM returns `UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done`; no move back
-to `qa-passed-awaiting-ci` executes. If the marker is
+and PM posts the PM 12b PR comment, then runs `~/.claude/scripts/ci/pm-admit-ci.sh <PR>`; never add
+`qa-passed-awaiting-ci` manually (CTO-owned label-gated CI). If the marker is
 capture-gated, the sweep emits `PR_PM_REVIEW_CAPTURE_REQUIRED` instead; PM must
 start/watch fresh-head capture first, and only after
 `PR_PM_REVIEW_CAPTURE_COMPLETE_REQUIRED` should PM remove `pm-blocked:capture`
-and return `UNSUPPORTED_LIFECYCLE_ACTION:pm-review-done`. If a PR already reached `qa-passed-awaiting-ci` before
+then post the PM 12b PR comment and run `~/.claude/scripts/ci/pm-admit-ci.sh <PR>`. If a PR already reached `qa-passed-awaiting-ci` before
 that required capture proof, the sweep emits
 `PR_PM_REVIEW_CAPTURE_BYPASS_REQUIRED`; PM must move it to
 `pm-blocked:capture` and ignore the wrongly-started CI until capture is green.
@@ -345,8 +343,8 @@ For issue-only work with no open PR, HOLD/STAND DOWN returns
 `UNSUPPORTED_LIFECYCLE_ACTION:park-issue`; no park transition executes and no
 ownership changes. Resume only through `status:todo` plus `Skill(direct-assign)`
 when a supported path exists.
-`PR_LOCAL_PREFLIGHT_REQUIRED` means latest-head CI/E2E failed. PM returns
-`UNSUPPORTED_LIFECYCLE_ACTION:block-pr` instead of blocking the PR, sends the
+`PR_LOCAL_PREFLIGHT_REQUIRED` means latest-head CI/E2E failed. PM runs
+the CI block packet (`gh pr edit <PR> --add-label pm-state:blocked-rework,pm-blocked:ci`), sends the
 failed suite/spec to the owning slot, and requires
 current-head local preflight PASS proof before rerunning CI. Wall-budget/timeouts
 are treated as PR-local stuck/slow regressions until local proof or a fresh
@@ -360,21 +358,20 @@ does not authorize a fresh CI run without current-head local preflight proof.
 changes require fresh-head capture before any CI rerun, and the original CI/E2E
 rerun after capture green still requires current-head local preflight proof.
 `PR_CI_DEPENDENCY_BLOCKED_REQUIRED` means the dependency wait is not yet visibly
-represented; PM returns `UNSUPPORTED_LIFECYCLE_ACTION:block-pr` instead of
-parking the PR; no state change, no slot action, and no CI trigger. PM still
+represented; PM runs the dependency block packet (`gh pr edit <PR> --add-label pm-state:blocked-rework,pm-blocked:<reason>` with
+`pm-blocked:dependency` plus a head-bound `pm-dependency-watch:v1` comment); no slot action and no CI trigger. PM still
 records current-head dependency proof in a PR comment and keeps watching the
 named dependency; label-gated CI starts only after it merges or closes. The same open watch
 remains visible as `PR_CI_DEPENDENCY_WATCHING`, but no longer blocks stop-hook
 completion once the visible label and payload exist.
 `PR_DEPENDENCY_WEDGE_REQUIRED` means the label exists but the current-head
 dependency proof is missing, stale, or unparsable. Stop-hook should treat that
-as actionable PM cleanup, not a quiet wait: PM must either return
-`UNSUPPORTED_LIFECYCLE_ACTION:block-pr` for the blocker naming or remove the
+as actionable PM cleanup, not a quiet wait: PM must either run
+the dependency block packet or remove the
 dependency label and continue capture/CI/rework.
 `PR_DEPENDENCY_UNBLOCKED_REQUIRED` is never suppressed and must fire immediately
 when the dependency reaches terminal state. PM action is
-`UNSUPPORTED_LIFECYCLE_ACTION:dependency-unblocked`; none of the clears,
-applies, resolves, or reconciliation execute.
+`gh pr edit <PR> --remove-label pm-blocked:dependency` then `Skill(direct-release)`/`Skill(direct-assign)` with the complete authoritative tuple.
 Already-classified
 `pm-state:blocked-rework + pm-blocked:ci` terminal-bad PRs are rework routing
 work, not CI classification work: keep live slot owners quiet, nudge idle
