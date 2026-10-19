@@ -55,7 +55,7 @@ class MopCliContractTest(unittest.TestCase):
         proc = subprocess.run([sys.executable, str(CLI), "--help"], capture_output=True, text=True, timeout=30)
         self.assertEqual(proc.returncode, 0)
         for sub in ["status", "send", "release", "clear", "dnd", "exit-pending",
-                    "exit-status", "capture", "approve-plan", "respawn"]:
+                    "exit-status", "capture", "approve-plan", "respawn", "clear-composer"]:
             self.assertIn(sub, proc.stdout, sub)
 
     def test_hook_matches_cli_and_parses(self):
