@@ -1526,7 +1526,6 @@ def codex_renderer_check(history: dict[str, Any], apply: bool) -> dict[str, Any]
 # IGNORE SIGTERM, so KILL is required; under swap they linger in state E.
 # ---------------------------------------------------------------------------
 CODEX_BROKER_MIN_HOURS = 6.0
-CODEX_BROKER_POLL_S = 6.0
 
 _CODEX_BROKER_RE = re.compile(
     r"^(?:\S*/)?node\s+\S*/\.claude/plugins/cache/openai-codex/codex/[^/\s]+/scripts/app-server-broker\.mjs(?:\s|$)"
@@ -1692,139 +1691,19 @@ def _codex_identity(row: dict[str, Any]) -> tuple[int, int, str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Liveness evidence (CTO REVISE 2026-10-20, thread 1792447479.870199): age +
-# PPID 1 + ancestry is NOT inactivity. The Codex plugin detaches brokers and
-# reuses them; socket clients and streams are not ancestors. A tree is
-# selectable ONLY on positive "inactive" evidence from lsof: no accepted client
-# connection on the broker's unix socket, no connected non-stdio unix peer, no
-# non-listening TCP connection, and no outside process holding the endpoint.
-# Anything else -- active OR unknown (lsof failed, pid unreadable) -- keeps it.
+# REPORT-ONLY (CTO verdict 2026-10-20, thread 1792447479.870199): this class
+# NEVER signals. Age + PPID 1 + ancestry is not inactivity, and even a socket-idle
+# broker can have an outstanding app-server turn or child tool running over
+# stdio/files after its client disconnects. Rather than try to prove quiescence
+# the signalling path was removed: every --apply entrypoint (launchd, the
+# heartbeat housekeeping, manual runs) only REPORTS candidates here. Only an
+# explicit CTO verdict clearing broker reaping may re-add a signalling path.
 # ---------------------------------------------------------------------------
-_CODEX_ENDPOINT_RE = re.compile(r"--endpoint(?:=|\s+)(?:unix:)?(\S+)")
-
-
-def codex_endpoint_path(command: str) -> str | None:
-    match = _CODEX_ENDPOINT_RE.search(command)
-    return match.group(1) if match and match.group(1).startswith("/") else None
-
-
-def codex_lsof_records(pids: list[int]) -> dict[int, list[dict[str, str]]] | None:
-    """pid -> open-fd records ({fd,type,name,tst}); None when lsof is unusable."""
-    if not pids:
-        return {}
-    try:
-        result = run(["lsof", "-nP", "-w", "-F", "pftnT", "-p", ",".join(str(p) for p in sorted(set(pids)))], timeout=20)
-    except Exception:
-        return None
-    if result.returncode not in (0, 1):  # 1 = some pid already gone
-        return None
-    records: dict[int, list[dict[str, str]]] = {}
-    pid: int | None = None
-    fd: dict[str, str] | None = None
-    for line in result.stdout.splitlines():
-        if not line:
-            continue
-        tag, value = line[0], line[1:]
-        if tag == "p":
-            try:
-                pid = int(value)
-            except ValueError:
-                return None
-            records.setdefault(pid, [])
-            fd = None
-        elif pid is None:
-            return None
-        elif tag == "f":
-            fd = {"fd": value, "type": "", "name": "", "tst": ""}
-            records[pid].append(fd)
-        elif fd is not None and tag == "t":
-            fd["type"] = value
-        elif fd is not None and tag == "n":
-            fd["name"] = value
-        elif fd is not None and tag == "T" and value.startswith("ST="):
-            fd["tst"] = value[3:]
-    return records
-
-
-def codex_endpoint_holders(path: str) -> set[int] | None:
-    """Pids holding the broker's socket path open; None when it cannot be read."""
-    if not os.path.exists(path):
-        return set()
-    try:
-        result = run(["lsof", "-nP", "-w", "-F", "p", "--", path], timeout=20)
-    except Exception:
-        return None
-    if result.returncode not in (0, 1):
-        return None
-    return {int(line[1:]) for line in result.stdout.splitlines() if line[:1] == "p" and line[1:].isdigit()}
-
-
-def codex_liveness_verdict(
-    members: list[dict[str, Any]],
-    records: dict[int, list[dict[str, str]]] | None,
-    holders: set[int] | None,
-    endpoint: str | None,
-) -> tuple[str, str]:
-    """("inactive"|"active"|"unknown", reason). Only "inactive" may be signalled."""
-    if records is None:
-        return "unknown", "lsof_unavailable"
-    member_pids = {m["pid"] for m in members}
-    for member in members:
-        if member["pid"] not in records or not records[member["pid"]]:
-            return "unknown", f"no_fd_evidence:{member['pid']}"
-    for pid in sorted(member_pids):
-        named: dict[str, int] = {}
-        for fd in records[pid]:
-            ftype, name, tst = fd["type"], fd["name"], fd["tst"]
-            if ftype in ("IPv4", "IPv6"):
-                if not tst:
-                    return "unknown", f"tcp_state_unreadable:{pid}"
-                if tst != "LISTEN":
-                    return "active", f"tcp_{tst.lower()}:{pid}"
-            elif ftype == "unix":
-                if name.startswith("/"):
-                    named[name] = named.get(name, 0) + 1
-                elif name.startswith("->") and fd["fd"].isdigit() and int(fd["fd"]) >= 3:
-                    return "active", f"unix_peer_fd{fd['fd']}:{pid}"
-        for name, count in named.items():
-            if count > 1:
-                return "active", f"client_connected:{pid}"
-    if endpoint is not None:
-        if holders is None:
-            return "unknown", "endpoint_holders_unreadable"
-        outside = sorted(holders - member_pids - {os.getpid()})
-        if outside:
-            return "active", "endpoint_held_by:" + ",".join(str(p) for p in outside[:4])
-    return "inactive", "no_client_or_stream"
-
-
-def codex_inactive_trees(
-    table: dict[int, dict[str, Any]], min_age_s: int, uid: int
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-    """(selectable inactive trees, kept-for-liveness rows, plan) on ONE snapshot."""
-    plan = codex_broker_plan(table, min_age_s, uid, os.getpid())
-    all_pids = [m["pid"] for r in plan["roots"] for m in r["members"]]
-    records = codex_lsof_records(all_pids) if all_pids else {}
-    selectable: list[dict[str, Any]] = []
-    kept: list[dict[str, Any]] = []
-    for tree in plan["roots"]:
-        endpoint = codex_endpoint_path(tree["root"]["command"])
-        holders = codex_endpoint_holders(endpoint) if endpoint else set()
-        state, reason = codex_liveness_verdict(tree["members"], records, holders, endpoint)
-        if state == "inactive":
-            selectable.append(tree)
-        else:
-            kept.append({"pid": tree["root"]["pid"], "age": fmt_age(tree["root"]["age_seconds"]),
-                         "state": state, "reason": reason, "members": len(tree["members"]),
-                         "command": sanitize_command(tree["root"]["command"])[:200]})
-    return selectable, kept, plan
-
-
 def codex_broker_orphan_check(apply: bool, min_hours: float, term_wait_s: float) -> dict[str, Any]:
-    """Scan (and with apply, reap) orphaned stale Codex review-server trees."""
+    """Scan and REPORT orphaned stale Codex review-server trees. Never signals."""
     min_age_s = int(min_hours * 3600)
     out: dict[str, Any] = {
-        "class": "codex_broker_orphan", "min_hours": min_hours, "action": "apply" if apply else "scan_only",
+        "class": "codex_broker_orphan", "min_hours": min_hours, "action": "report_only",
         "roots": 0, "before": 0, "killed": 0, "exiting": 0, "after": 0,
         "skipped_protected": 0, "skipped_young": 0,
         "found": [], "skipped": [], "terminated": [], "exiting_pids": [], "refused": [], "errors": [],
@@ -1834,104 +1713,17 @@ def codex_broker_orphan_check(apply: bool, min_hours: float, term_wait_s: float)
         out["errors"].append("ps_failed")
         out["after"] = "unknown"
         return out
-    uid = os.getuid()
-    selectable, kept, plan = codex_inactive_trees(table, min_age_s, uid)
-    out.update(roots=len(selectable), before=sum(len(t["members"]) for t in selectable),
+    plan = codex_broker_plan(table, min_age_s, os.getuid(), os.getpid())
+    out.update(roots=len(plan["roots"]), before=len(plan["members"]),
                skipped_protected=plan["skipped_protected"], skipped_young=plan["skipped_young"],
-               skipped=plan["skipped"], exiting_before=len(plan["exiting"]), kept_liveness=kept)
+               skipped=plan["skipped"], exiting_before=len(plan["exiting"]))
     out["found"] = [
         {"pid": r["root"]["pid"], "shape": r["shape"], "age": fmt_age(r["root"]["age_seconds"]),
          "members": len(r["members"]), "member_pids": [m["pid"] for m in r["members"]],
          "command": sanitize_command(r["root"]["command"])[:200]}
-        for r in selectable
+        for r in plan["roots"]
     ]
-    if not apply:
-        out["after"] = out["before"]
-        return out
-
-    targets: dict[int, dict[str, Any]] = {}
-    root_of: dict[int, int] = {}
-
-    def revalidated_trees(tree_list: list[dict[str, Any]], stage: str) -> dict[int, dict[str, Any]]:
-        """Fresh snapshot + fresh liveness evidence; root pid -> tree still safe to signal."""
-        fresh = codex_broker_table()
-        if fresh is None:
-            for tree in tree_list:
-                out["refused"].append({"pid": tree["root"]["pid"], "reason": f"ps_unreadable@{stage}"})
-            return {}
-        fresh_ok, fresh_kept, _ = codex_inactive_trees(fresh, min_age_s, uid)
-        by_identity = {_codex_identity(t["root"]): t for t in fresh_ok}
-        kept_pids = {k["pid"]: k for k in fresh_kept}
-        safe: dict[int, dict[str, Any]] = {}
-        for tree in tree_list:
-            same = by_identity.get(_codex_identity(tree["root"]))
-            if same is not None:
-                safe[tree["root"]["pid"]] = same
-            elif tree["root"]["pid"] in kept_pids:
-                k = kept_pids[tree["root"]["pid"]]
-                out["refused"].append({"pid": tree["root"]["pid"], "reason": f"liveness_{k['state']}@{stage}:{k['reason']}"})
-            elif stage == "pre_kill" and _codex_identity(tree["root"]) not in {_codex_identity(r) for r in fresh.values()}:
-                continue  # the tree already exited after SIGTERM: nothing left to signal
-            else:
-                out["refused"].append({"pid": tree["root"]["pid"], "reason": f"no_longer_eligible_or_identity_changed@{stage}"})
-        return safe
-
-    for root_pid, tree in revalidated_trees(selectable, "pre_term").items():
-        for member in tree["members"]:
-            targets[member["pid"]] = member
-            root_of[member["pid"]] = root_pid
-
-    def signal_phase(sig: int, key: str, allowed_roots: set[int]) -> None:
-        current = codex_broker_table() or {}
-        # Leaf-most first (higher pid / deeper); identity fenced by pid+start+command.
-        for pid in sorted(targets, reverse=True):
-            if root_of[pid] not in allowed_roots:
-                continue
-            live = current.get(pid)
-            if live is None or _codex_identity(live) != _codex_identity(targets[pid]):
-                continue
-            if "E" in live["stat"] or live["stat"][:1] == "Z":
-                continue
-            try:
-                os.kill(pid, sig)
-                targets[pid][key] = True
-            except ProcessLookupError:
-                pass
-            except OSError as exc:
-                out["errors"].append(f"{pid}:{key}:{type(exc).__name__}")
-
-    if targets:
-        term_roots = set(root_of.values())
-        signal_phase(signal.SIGTERM, "term_sent", term_roots)
-        time.sleep(term_wait_s)
-        # These processes ignore SIGTERM, so KILL follows -- but only for trees whose
-        # inactive evidence still holds on a fresh snapshot taken right now.
-        still = revalidated_trees([{"root": targets[r]} for r in sorted(term_roots)], "pre_kill")
-        signal_phase(signal.SIGKILL, "kill_sent", set(still))
-        deadline = time.time() + CODEX_BROKER_POLL_S
-        while time.time() < deadline:
-            current = codex_broker_table() or {}
-            pending = [p for p, t in targets.items() if root_of[p] in still
-                       and p in current and _codex_identity(current[p]) == _codex_identity(t)
-                       and "E" not in current[p]["stat"] and current[p]["stat"][:1] != "Z"]
-            if not pending:
-                break
-            time.sleep(0.5)
-    final = codex_broker_table() or {}
-    for pid, target in targets.items():
-        live = final.get(pid)
-        same_proc = live is not None and _codex_identity(live) == _codex_identity(target)
-        entry = {"pid": pid, "term_sent": bool(target.get("term_sent")), "kill_sent": bool(target.get("kill_sent"))}
-        if not same_proc:
-            out["terminated"].append({**entry, "status": "terminated"})
-        elif "E" in live["stat"] or live["stat"][:1] == "Z":
-            out["exiting_pids"].append({**entry, "status": "exiting", "stat": live["stat"]})
-        else:
-            out["errors"].append(f"{pid}:still_alive")
-    after_plan = codex_broker_plan(final, min_age_s, uid, os.getpid()) if final else None
-    out["killed"] = len(out["terminated"])
-    out["exiting"] = len(out["exiting_pids"])
-    out["after"] = len(after_plan["members"]) if after_plan else "unknown"
+    out["after"] = out["before"]
     return out
 
 
@@ -2069,7 +1861,7 @@ def _main() -> int:
     parser.add_argument("--term-wait-s", type=float, default=3.0)
     parser.add_argument(
         "--codex-broker-min-hours", type=float, default=CODEX_BROKER_MIN_HOURS,
-        help="orphaned Codex review-server (app-server-broker.mjs) trees older than this many hours are eligible (default 6)",
+        help="REPORT-ONLY: orphaned Codex review-server (app-server-broker.mjs) trees older than this many hours are listed as candidates; they are never signalled (default 6)",
     )
     parser.add_argument("--status-output", default=str(STATUS_JSON), help="heartbeat status JSON path")
     parser.add_argument(
@@ -2164,7 +1956,7 @@ def _main() -> int:
             "orphan_dev_tool": "vitest/tsc with ppid 1 older than dev_tool_min (+descendants); a live parent protects",
             "replayd": "user-level /usr/libexec/replayd SIGTERM (launchd restarts it) after >50% CPU on 2 consecutive apply runs",
             "codex_renderer": "ChatGPT-bundled Codex (Renderer).app --type=renderer only: age >60m AND CPU >50% on 2 consecutive apply passes keyed by PID+start; max 5 per pass; revalidate PID/start/args before TERM and KILL, with 10s grace; dry run does not persist",
-            "codex_broker_orphan": f"orphaned Codex review servers: node .../.claude/plugins/cache/openai-codex/codex/<ver>/scripts/app-server-broker.mjs (+ reparented `codex app-server` roots) older than {args.codex_broker_min_hours}h whose ancestor chain reaches launchd without a live claude/openclaude/tmux/ChatGPT/Codex app/protected owner; never ChatGPT-owned trees; whole tree TERM then KILL (node ignores TERM), processes in state E/Z are counted as exiting, not failed; independent of slots",
+            "codex_broker_orphan": f"orphaned Codex review servers: node .../.claude/plugins/cache/openai-codex/codex/<ver>/scripts/app-server-broker.mjs (+ reparented `codex app-server` roots) older than {args.codex_broker_min_hours}h whose ancestor chain reaches launchd without a live claude/openclaude/tmux/ChatGPT/Codex app/protected owner; never ChatGPT-owned trees; REPORT-ONLY, never signalled on any entrypoint (only an explicit CTO verdict may re-enable reaping); independent of slots",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],
@@ -2249,8 +2041,6 @@ def _main() -> int:
     )
     for row in codex_brokers["found"]:
         print(f"CODEX_BROKER_ROOT pid={row['pid']} shape={row['shape']} age={row['age']} members={row['members']}")
-    for row in codex_brokers.get("kept_liveness", []):
-        print(f"CODEX_BROKER_KEPT_LIVENESS pid={row['pid']} age={row['age']} state={row['state']} reason={row['reason']}")
     for row in codex_brokers["skipped"]:
         print(f"CODEX_BROKER_SKIPPED pid={row['pid']} age={row['age']} reason={row['reason']}")
     if args.apply:

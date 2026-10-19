@@ -683,7 +683,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "a0aee70deea159130ab148c5b355735a43e779d2b3a8e9b1c166113d6e009e62",
+      "sha256": "5e3a13a2eb44630fed9edade17986441ec770a8879972d66a8063b326e6bc6ea",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
@@ -854,7 +854,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heartbeat-tasks",
-      "sha256": "756fec6bb781cd66fb02e08398b95c223c25f07450fcb6af6a7d551a7bde3c16",
+      "sha256": "4adfc3b0c347484fa64d717e65359e3ad1f62cac605bb8f973a582a9d950e30f",
       "source_path": "claude/skills/heartbeat-tasks/SKILL.md"
     },
     {

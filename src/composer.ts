@@ -264,6 +264,37 @@ export type RefusedPasteCleanupDeps = {
   pollMs?: number;
 };
 
+type OwnedRepresentation =
+  | { kind: "plain" }
+  | { kind: "placeholder"; ids: Set<number> };
+
+function placeholderIds(text: string): Set<number> {
+  const ids = new Set<number>();
+  for (const m of text.matchAll(PLACEHOLDER_RE)) ids.add(m[1] ? Number(m[1]) : 1);
+  return ids;
+}
+
+/** Plaintext when no collapsed-paste placeholder is visible; else the exact placeholder IDs. */
+function recordOwnedRepresentation(composer: string): OwnedRepresentation {
+  return /\[Pasted text/i.test(composer) ? { kind: "placeholder", ids: placeholderIds(composer) } : { kind: "plain" };
+}
+
+/**
+ * After a press, what is left must still be exactly what the send owned:
+ * plaintext -> the payload's first k whole lines and NO placeholder at all;
+ * placeholder -> only placeholders whose IDs were recorded (nothing else).
+ */
+function remainderIsStillOwned(remaining: string, owned: OwnedRepresentation, payload: string): boolean {
+  if (owned.kind === "plain") {
+    return !/\[Pasted text/i.test(remaining) && composerIsPayloadLinePrefix(remaining, payload);
+  }
+  if (remaining.replace(PLACEHOLDER_RE, "").trim() !== "") return false;
+  for (const id of placeholderIds(remaining)) {
+    if (!owned.ids.has(id)) return false;
+  }
+  return true;
+}
+
 /**
  * Recover a refused paste only when the send began from a readable empty
  * composer, no Enter was sent, and a fresh read still matches the refused
@@ -296,11 +327,21 @@ export async function clearOwnedRefusedPasteComposer(
     return { attempted: false, cleared: false, reason: "composer_not_owned_by_send" };
   }
 
+  // Record the OWNED representation now, from the composer verified unchanged
+  // since the refused paste: either the complete plaintext payload, or the exact
+  // collapsed-paste placeholder IDs. Mid-clear ownership is judged against that
+  // record only: plaintext cleanup never becomes placeholder cleanup, and a new
+  // or different placeholder (a foreign paste) stops the clear.
+  const owned = recordOwnedRepresentation(currentComposer);
   // C-u only deletes back to the start of the current input line, so a
-  // complete multi-line payload needs one press per payload line. Each press
-  // re-proves ownership: the remainder must be a placeholder or exactly the
-  // payload's first k whole lines. Never more presses than payload lines.
-  const maxPresses = Math.min(MAX_COMPOSER_CLEAR_PRESSES, Math.max(1, payload.trim().split("\n").length));
+  // multi-line plaintext payload needs one press per payload line, and a
+  // placeholder form needs one per owned token plus one per visible line.
+  const maxPresses = Math.min(
+    MAX_COMPOSER_CLEAR_PRESSES,
+    owned.kind === "plain"
+      ? Math.max(1, payload.trim().split("\n").length)
+      : owned.ids.size + currentComposer.split("\n").length,
+  );
   for (let presses = 0; ; presses++) {
     let clearSent: boolean | string;
     try {
@@ -326,9 +367,7 @@ export async function clearOwnedRefusedPasteComposer(
     if (
       presses + 1 >= maxPresses
       || remaining === null
-      || (!composerIsPayloadLinePrefix(remaining, payload)
-        && !composerIsRefusedPasteContent(remaining, payload)
-        && !composerIsOnlyPastePlaceholders(remaining))
+      || !remainderIsStillOwned(remaining, owned, payload)
     ) {
       return { attempted: true, cleared: false, reason: "composer_empty_not_confirmed" };
     }

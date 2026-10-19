@@ -135,7 +135,7 @@ bash /Users/rajiv/.claude/scripts/sakshi-heartbeat.sh            # session-age p
 python3 /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/heartbeat-session-age-clear.py
 python3 /Users/rajiv/.claude/scripts/backlog-triage.py --surface heartbeat --recent-hours 72
 python3 /Users/rajiv/.claude/scripts/backlog-triage.py audit-ready-pool
-python3 /Users/rajiv/.claude/scripts/stale-process-cleanup.py --apply
+python3 /Users/rajiv/.claude/scripts/stale-process-cleanup.py --apply --codex-broker-min-hours 1000000   # Codex broker class is report-only; flag is belt-and-braces (CTO 2026-10-20)
 python3 /Users/rajiv/.claude/scripts/pm-ops.py snapshot --surface heartbeat --limit 12
 ```
 

@@ -60,7 +60,7 @@ import {
   shouldUseBracketedPaste,
 } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
-import { composerClearFence } from "./clearComposerFence.js";
+import { composerClearFence, makeComposerClearKeyWriter } from "./clearComposerFence.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import {
   NativeSlotReleaseCoordinator,
@@ -2535,13 +2535,11 @@ app.post("/slots/:slotNum/clear-composer", async (c) => {
     }
     return clearComposerText({
       capture: () => capturePaneSnapshot(paneTarget),
-      clearComposer: async () => {
-        const drift = await composerClearFence(fenceDeps, "clear_composer_key");
-        if (drift) return drift;
-        if (await readPaneInputModeRefusal(paneTarget)) return false;
-        await execShell(`tmux send-keys -t ${paneTarget} C-u`, { timeout: 10_000 });
-        return true;
-      },
+      clearComposer: makeComposerClearKeyWriter({
+        ...fenceDeps,
+        inputModeRefusal: () => readPaneInputModeRefusal(paneTarget),
+        sendKey: () => execShell(`tmux send-keys -t ${paneTarget} C-u`, { timeout: 10_000 }).then(() => undefined),
+      }),
       sleep,
     });
   });
