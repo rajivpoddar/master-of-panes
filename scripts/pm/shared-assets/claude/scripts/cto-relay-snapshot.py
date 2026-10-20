@@ -12,6 +12,9 @@ import tempfile
 import time
 import uuid
 import math
+import importlib.util
+import selectors
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,9 @@ DEFAULT_DELIVERY_RECEIPTS_FILES = (
 ROUTE_TABLE_BEGIN = "<!-- CTO_SLACK_ROUTE_TABLE_V2"
 ROUTE_TABLE_END = "CTO_SLACK_ROUTE_TABLE_END -->"
 CTO_MENTION = re.compile(r"<@(?P<user_id>[^|>\r\n]+)(?:\|[^>\r\n]*)?>")
+GROWTH_CHANNEL = "C0C7U35LBKR"
+QUEUE_RPC_HELPER = Path("/Users/rajiv/.codex/skills/codex-stdio-send-message/scripts/queue_preview.py")
+CODEX_BIN = "/opt/homebrew/bin/codex"
 
 
 class SnapshotError(RuntimeError):
@@ -84,6 +90,15 @@ def extract_route_table(path: Path) -> dict[str, Any]:
                 if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0):
                     raise SnapshotError(f"route SOP {channel}.{field} must be a positive epoch or null")
                 normalized_exact[channel][field] = value
+        if "availability_gate" in route:
+            gate = route["availability_gate"]
+            if channel != GROWTH_CHANNEL or not isinstance(gate, dict) or "admitted_after_epoch" not in gate:
+                raise SnapshotError("availability_gate is only supported for growth with an admission cutoff")
+            for field in ("admitted_after_epoch", "admitted_before_epoch"):
+                value = gate.get(field)
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0):
+                    raise SnapshotError(f"availability_gate.{field} must be a positive epoch or null")
+            normalized_exact[channel]["availability_gate"] = dict(gate)
     mention_only = table.get("mention_only_channels")
     if not isinstance(mention_only, dict):
         raise SnapshotError("route SOP mention_only_channels must be an object")
@@ -202,8 +217,85 @@ def event_eligible_for_route(event: dict[str, Any], table: dict[str, Any]) -> bo
     return not mention_user or event_has_current_user_mention(event, mention_user)
 
 
+def availability_from_snapshot(thread_id: str, thread: Any, queue: Any) -> dict[str, str]:
+    if not isinstance(thread, dict) or thread.get("id") != thread_id:
+        return {"state": "unknown", "reason": "native-thread-identity-unconfirmed"}
+    status = thread.get("status")
+    kind = status.get("type") if isinstance(status, dict) else None
+    if kind == "active":
+        return {"state": "busy", "reason": "native-thread-active"}
+    if kind != "idle":
+        return {"state": "unknown", "reason": "native-status-" + str(kind)}
+    if not isinstance(queue, dict) or not isinstance(queue.get("data"), list) or "nextCursor" not in queue:
+        return {"state": "unknown", "reason": "native-queue-unconfirmed"}
+    if queue["data"] or queue["nextCursor"] is not None:
+        return {"state": "busy", "reason": "native-queued-work"}
+    return {"state": "idle", "reason": "native-idle-and-empty-queue"}
+
+
+def snapshot_social_availability(thread_id: str) -> dict[str, Any]:
+    """One bounded native metadata/queue snapshot, never resume or send work."""
+    process = None
+    selector = None
+    methods: list[str] = []
+    try:
+        # Reuse the installed, manifest-mapped bounded JSON-RPC reader, not a
+        # task-history heuristic or a second transport implementation.
+        spec = importlib.util.spec_from_file_location("relay_queue_rpc", QUEUE_RPC_HELPER)
+        rpc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rpc)
+        deadline = time.monotonic() + 5.0
+        process = subprocess.Popen(
+            [CODEX_BIN, "app-server", "--stdio"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
+        )
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        def read(method: str, params: dict[str, Any]) -> Any:
+            methods.append(method)
+            request_id = len(methods)
+            rpc.write_json(process.stdin, {"id": request_id, "method": method, "params": params})
+            return rpc.read_response(process, selector, request_id, max(0, deadline - time.monotonic())).get("result")
+        read("initialize", {
+            "clientInfo": {"name": "codex-stdio-send-message", "version": "1.1.0"},
+            "capabilities": {"experimentalApi": True, "requestAttestation": False},
+        })
+        methods.append("initialized")
+        rpc.write_json(process.stdin, {"method": "initialized", "params": {}})
+        result = read("thread/read", {"threadId": thread_id, "includeTurns": False})
+        thread = result.get("thread") if isinstance(result, dict) else None
+        status = thread.get("status") if isinstance(thread, dict) else None
+        queue = None
+        if isinstance(status, dict) and status.get("type") == "idle" and thread.get("id") == thread_id:
+            queue = read("thread/queue/list", {"threadId": thread_id, "limit": 1})
+        availability = availability_from_snapshot(thread_id, thread, queue)
+    except Exception as error:
+        availability = {"state": "unknown", "reason": "native-snapshot-unavailable:" + type(error).__name__}
+    finally:
+        if process is not None:
+            try:
+                if process.stdin:
+                    process.stdin.close()
+                if process.poll() is None:
+                    process.terminate()  # Only this read-only client's owned child.
+                    process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                    process.wait(timeout=1)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            except OSError:
+                pass
+        if selector is not None:
+            selector.close()
+    return {**availability, "thread_id": thread_id, "methods": methods,
+            "observed_at_epoch": time.time()}
+
+
 def route_event(
-    event: dict[str, Any], table: dict[str, Any], route_sop_path: Path
+    event: dict[str, Any], table: dict[str, Any], route_sop_path: Path,
+    frozen_route: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     tuple_value = event.get("exact_tuple")
     if not isinstance(tuple_value, dict):
@@ -230,9 +322,19 @@ def route_event(
         if isinstance(source_evidence, dict)
         else None
     )
-    if channel in exact_routes and channel_override_applies(event, exact_routes[channel]):
+    availability = None
+    if frozen_route is not None:
+        selected = require_route(frozen_route, "frozen route")
+        route_match = frozen_route.get("match")
+    elif channel in exact_routes and channel_override_applies(event, exact_routes[channel]):
         selected = exact_routes[channel]
         route_match = "exact_channel"
+        gate = selected.get("availability_gate")
+        if gate and channel_override_applies(event, gate):
+            availability = snapshot_social_availability(selected["destination_thread_id"])
+            if availability.get("state") != "idle":
+                selected = table["direct_message_route"]
+            route_match = "growth_availability"
     elif slack_event_type == "message.im":
         selected = table["direct_message_route"]
         route_match = "direct_message"
@@ -240,12 +342,13 @@ def route_event(
         selected = table["default_route"]
         route_match = "default"
     routed = dict(event)
-    routed["relay_route"] = {
-        **selected,
+    routed["relay_route"] = frozen_route if frozen_route is not None else {
+        **require_route(selected, "selected route"),
         "match": route_match,
         "source_channel": channel,
         "classifier_sop_path": source_sop,
         "classifier_sop_sha256": table["sha256"],
+        **({"availability": availability} if availability is not None else {}),
     }
     routed["routed_wake_text"] = (
         f"SOP path: {selected['consumer_sop_path']}" + separator + remainder
@@ -328,6 +431,12 @@ def extract_claims(value: Any) -> dict[str, dict[str, Any]]:
             if not isinstance(claim["owner"], str) or not claim["owner"]:
                 raise SnapshotError(f"claim {key} has an invalid owner")
             normalized["owner"] = claim["owner"]
+        if "relay_route" in claim:
+            require_route(claim["relay_route"], f"claim {key} frozen route")
+            if not isinstance(claim.get("route_fingerprint"), str) or not claim["route_fingerprint"]:
+                raise SnapshotError(f"claim {key} missing route fingerprint")
+            normalized["relay_route"] = claim["relay_route"]
+            normalized["route_fingerprint"] = claim["route_fingerprint"]
         claims[key] = normalized
     return claims
 
@@ -365,8 +474,15 @@ def write_json_atomic(path: Path, value: Any) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(value, handle, indent=2)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.chmod(temporary, 0o600)
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -456,13 +572,17 @@ def main() -> int:
                         if claims[action_key].get("owner") != args.claim_owner:
                             raise SnapshotError(f"claim owner mismatch: {action_key}")
                         claims[action_key] = {
+                            **claims[action_key],
                             "expires_at_epoch": time.time() + args.claim_ttl_seconds,
                             "owner": args.claim_owner,
                         }
                     else:
                         if action_key in claims and claims[action_key].get("owner") != args.claim_owner:
                             raise SnapshotError(f"claim owner mismatch: {action_key}")
-                        claims.pop(action_key, None)
+                        if action_key in claims and "relay_route" in claims[action_key]:
+                            claims[action_key]["expires_at_epoch"] = 0
+                        else:
+                            claims.pop(action_key, None)
                     write_json_atomic(args.claims_file, claims)
                     print(json.dumps({
                         "status": "renewed" if args.renew_key else "released",
@@ -510,10 +630,11 @@ def main() -> int:
                         raise error
 
                 now_epoch = time.time()
+                prior_claims = claims
                 claims = {
                     key: claim
                     for key, claim in claims.items()
-                    if key not in handled and claim["expires_at_epoch"] > now_epoch
+                    if "relay_route" in claim or (key not in handled and claim["expires_at_epoch"] > now_epoch)
                 }
                 pending = pending_events(
                     events,
@@ -528,17 +649,28 @@ def main() -> int:
                 ]
                 if args.limit is not None:
                     eligible = eligible[: args.limit]
-                pending = [
-                    route_event(event, route_table, args.route_sop) for event in eligible
-                ]
+                pending = []
+                for event in eligible:
+                    channel = event["exact_tuple"].get("channel")
+                    gate = route_table["exact_channel_routes"].get(channel, {}).get("availability_gate")
+                    prior_claim = prior_claims.get(event["dedup_key"])
+                    if gate and channel_override_applies(event, gate) and prior_claim and "relay_route" not in prior_claim:
+                        raise SnapshotError("existing growth claim has no frozen destination; owner reconciliation required")
+                    claim = claims.get(event["dedup_key"], {})
+                    if "relay_route" in claim and claim["route_fingerprint"] != event["fingerprint"]:
+                        raise SnapshotError("frozen route fingerprint mismatch")
+                    pending.append(route_event(event, route_table, args.route_sop, claim.get("relay_route")))
                 if any(event is None for event in pending):
                     raise SnapshotError("route eligibility changed while freezing snapshot")
                 expires_at = now_epoch + args.claim_ttl_seconds
                 claim_owner = args.claim_owner or f"relay-{os.getpid()}-{uuid.uuid4().hex}"
                 for event in pending:
                     claims[str(event["dedup_key"])] = {
+                        **claims.get(str(event["dedup_key"]), {}),
                         "expires_at_epoch": expires_at,
                         "owner": claim_owner,
+                        **({"relay_route": event["relay_route"], "route_fingerprint": event["fingerprint"]}
+                           if event["relay_route"].get("match") == "growth_availability" else {}),
                     }
                 write_json_atomic(args.claims_file, claims)
                 write_json_atomic(args.output, pending)

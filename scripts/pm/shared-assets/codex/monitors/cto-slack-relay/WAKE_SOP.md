@@ -23,7 +23,8 @@ consistent. The helper fails closed if the table is missing or malformed.
       "project": "heydonna",
       "destination_thread_id": "01a11e3d-d8bb-73c1-8593-8ff56019d842",
       "consumer_sop_path": "/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md",
-      "admitted_after_epoch": 1791644828.031685
+      "admitted_after_epoch": 1791644828.031685,
+      "availability_gate": {"admitted_after_epoch": null}
     },
     "C09TYQC1DEF": {
       "project": "superproofer",
@@ -57,9 +58,16 @@ ignores the temporal fields and must never read an active override.
 Apply exactly one destination rule to each eligible event:
 
 1. For NEW growth admissions in `C0C7U35LBKR` whose current source message
-   explicitly mentions CTO `U0BNFGX2UAX`, send directly to existing Social Media
-   task `01a11e3d-d8bb-73c1-8593-8ff56019d842`; no Decisions hop, regardless of
-   content. Use `/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md`.
+   explicitly mentions CTO `U0BNFGX2UAX`, use the helper's one bounded native
+   activity snapshot at first selection. Choose existing Social Media task
+   `01a11e3d-d8bb-73c1-8593-8ff56019d842` ONLY when native `thread/read` reports
+   that exact task `idle` and `thread/queue/list` confirms an empty queue with
+   no next page. Use `/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md`.
+   Busy/queued, `notLoaded`, unavailable, malformed or otherwise unknown activity
+   selects existing CTO DMs `01a0911a-a718-7743-b37e-e785f24f3708`, using
+   `/Users/rajiv/.codex/monitors/cto-dms/WAKE_SOP.md`; record the reason, never
+   describe unknown as idle. No Decisions hop or content-based classification.
+   This is routing authority only, not social-publication authority.
    Full source envelope/context/attachments accompany this wake as data.
    Unmentioned chatter, quoted/code/parent-only mentions and empty previews
    cannot authorize a new growth delivery.
@@ -84,31 +92,38 @@ to a HeyDonna task or any HeyDonna event to the Godavari task.
 
 ### Activation and rollback boundary
 
-The source candidate's null `admitted_after_epoch` is inert. On approved scoped
-activation, stamp this one configuration value with the actual UTC epoch under
-the existing relay lock, immediately before atomic SOP replacement; record the
-rendered SOP hash and exact cutoff. The helper bytes remain the reviewed bytes.
-Both source timestamp and durable `queued_at` must be later than this cutoff.
-Old/missing timestamps retain the previous route. Do not copy or migrate queues,
-change keys/claims, acknowledge pending history, or replay any event at cutover.
+The new `availability_gate.admitted_after_epoch: null` is inert until approved
+scoped installation stamps the actual UTC epoch under the existing relay lock,
+immediately before atomic SOP replacement. Preserve the original channel
+`admitted_after_epoch` and its historical ownership interval. Record the rendered
+SOP hash and new cutoff; helper bytes remain reviewed bytes. BOTH source timestamp
+and durable `queued_at` must be later than the new cutoff to consult activity.
+Old/missing timestamps retain their previous route. Event `1792503685.073719`
+already belongs to CTO DMs; never redeliver it or migrate Social's backlog.
+Do not copy queues, change keys, acknowledge pending history or replay at cutover.
 Existing handled keys, active claims, and delivered/queued/uncertain transport
 receipts suppress delivery; uncertainty never authorizes another attempt.
 
-Rollback closes only this channel override by stamping `admitted_before_epoch`
-with the rollback cutoff under the same lock. Retain the lower cutoff: events
-admitted in the prior Social interval keep that owner, while later admissions
-use the prior default route. Do not erase this interval and reroute its backlog.
-Before publication/install, re-fence the captured helper/SOP preimages and
-managed source. Install only these routing assets. Restart only `com.heydonna.cto-bridge`
-after replacing its managed envelope writer so current-message blocks are
-retained; each claim invokes the helper and loads the SOP anew. Preserve all
-queue/ACK/receipt/claim files and the existing launcher/environment. Do not
-restart MoP or any pane. Use the existing installer on a staged manifest
-containing only the five affected assets; render the approved cutoff and update
-that staged manifest digest before validation. Keep the immutable reviewed
-source template and the exact rendered configuration separately recorded. Re-read the loaded
-route/config hash without claiming any live event. Future genuine delivery
-receipts provide end-to-end confirmation; a route probe alone does not.
+The helper records the first selected `relay_route`, activity reason and source
+fingerprint in the EXISTING claim record, under the relay lock and fsynced before
+publishing the deliverable snapshot. Claim expiry, renewal, release and process
+restart retain this choice: reuse it without re-reading activity. A different
+fingerprint for the same key stops, never transfers ownership. Existing accepted
+or uncertain receipts still suppress delivery, even if activity later changes.
+No task cancellation, recipient wait, fork or new task is permitted.
+
+Rollback closes only the availability gate with its nested `admitted_before_epoch`
+under the same lock, retaining the lower cutoff and frozen claim destinations.
+Keep the reviewed helper while any frozen route remains: restoring the old
+helper would discard these records. Do not erase the interval or reroute backlog.
+Capture both live asset preimages; re-fence them and canonical source before the
+approved publication/install. Install only helper and SOP via the existing scoped
+manifest/preimage gate, rendering the cutoff and staged SOP digest. No bridge,
+MoP, task or pane restart: every selection invokes the helper and reads the SOP
+anew. Preserve queue/ACK/receipt/claim files and launcher/environment. Record the
+immutable source template separately from rendered configuration. Verify installed
+hashes without claiming a live event; future real receipts, not a route probe,
+establish end-to-end delivery.
 
 ## One relay tick
 

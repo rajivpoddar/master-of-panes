@@ -348,7 +348,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "624922da268f8c9de6bdfeee8914008e9f2efa8a81d0a9c1ca5a1df00b8a39fd",
+      "sha256": "e4e473726b1ad987bdd7f1c3f2f5399e06bd62df3a23623eacf84b8133a2d603",
       "source_path": "claude/scripts/cto-relay-snapshot.py"
     },
     {
@@ -1230,7 +1230,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "b04948db5df3c6f04f3d7d7c44925077e0c99251b17f8571325742648c04d820",
+      "sha256": "d187fd12bcd399e66a131ba4be12661d4c68b6947a7d6260b95169002458f29f",
       "source_path": "codex/monitors/cto-slack-relay/WAKE_SOP.md"
     },
     {
