@@ -63,6 +63,18 @@ STEP 1 — compose (prints; never posts):
     --save-inputs /tmp/heartbeat-1h-latest > /tmp/heartbeat-1h-post.txt
   If PM passed ladder-approved escalations, add one `--escalation "<text>"` each.
 
+STEP 1b — Spark training line (Rajiv DM D0AMF0XE6TS ts 1792476770.692999: "add the
+  sindhu training stats to the hourly report"). For each live run monitor
+  (`pgrep -fl 'spark-run-monitor.sh --run-name'`; read --run-name and --thread-ts from
+  its args), read the newest monitor post in that thread from the bridge DB (read-only):
+    python3 -c "import sqlite3,sys;c=sqlite3.connect('file:/Users/rajiv/Downloads/projects/tmux-slack-bridge/bridge.db?mode=ro',uri=True);r=c.execute(\"select created_at,body from messages where thread_ts=? order by ts desc limit 1\",(sys.argv[1],)).fetchone();print(r)" <thread_ts>
+  Append ONE line per run to /tmp/heartbeat-1h-post.txt before posting:
+    "*Training:* <run-name> step <a>/<b> · loss <x> · ETA <eta> · MemAvailable min <m> MiB (as of HH:MM IST)"
+  If no monitor is running, or the newest post is >45 min old, write
+  "*Training:* <run-name> monitor STALE (last post HH:MM IST)" and add ACTION
+  "spark-monitor-stale <run-name>". No monitor process at all → omit the line.
+  Never SSH to Spark for this; the monitor post is the source.
+
 STEP 2 — check: first line is "*Hourly — HH:MM IST*", or starts with
   "<@U0BNFGX2UAX> " ONLY when an "*Asks:*" line (merge/admission/escalation)
   exists. ≤ ~20 lines, no tables. Do not hand-edit blocks.
