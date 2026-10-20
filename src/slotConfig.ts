@@ -46,9 +46,9 @@ export type SlotRuntimeIdentity = {
 };
 
 /**
- * Physical tmux layout (Rajiv 2026-10-07: S6 sits below S5, so tmux index 7).
- * Panes are numbered by screen position, so a slot's address is configuration,
- * never the index formula 0:0.N.
+ * Checkout-verified tmux layout as of 2026-10-20. The October 7 S6/S7
+ * position swap no longer matches the live panes. Addresses remain hints:
+ * every effect must verify the checkout and pin the immutable pane id.
  */
 export const DEV_SLOT_PANE_ADDRESSES: Readonly<Record<number, string>> = Object.freeze({
   1: "0:0.1",
@@ -56,8 +56,8 @@ export const DEV_SLOT_PANE_ADDRESSES: Readonly<Record<number, string>> = Object.
   3: "0:0.3",
   4: "0:0.4",
   5: "0:0.5",
-  6: "0:0.7",
-  7: "0:0.6",
+  6: "0:0.6",
+  7: "0:0.7",
   8: "0:0.8",
 });
 

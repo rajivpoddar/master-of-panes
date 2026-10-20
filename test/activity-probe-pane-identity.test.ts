@@ -83,7 +83,7 @@ test("rebound S6 address (two panes on S6 checkout / pane moved to other cwd) fa
 
 });
 
-test("boot syncs stale S6 address metadata to 0:0.7 without touching issue or epoch", async () => {
+test("boot repairs swapped S6/S7 addresses without changing either ownership tuple or epoch", async () => {
   const { mkdtempSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -94,15 +94,26 @@ test("boot syncs stale S6 address metadata to 0:0.7 without touching issue or ep
   try {
     new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: path }).close();
     const raw = new Database(path);
-    raw.prepare("UPDATE slots SET address='0:0.6', issue=9031, assignment_epoch=228 WHERE slot=6").run();
+    raw.prepare("UPDATE slots SET address='0:0.7', issue=9031, assignment_epoch=228 WHERE slot=6").run();
+    raw.prepare("UPDATE slots SET address='0:0.6', occupied=1, idle=0, repository_id='github:heydonna-app/heydonna-app', issue=10507, pr=10542, assignment_epoch=226, active_turn_state='active', active_turn_id='swati-live' WHERE slot=7").run();
+    const before = raw.prepare("SELECT * FROM slots WHERE slot IN (6,7) ORDER BY slot").all() as Array<Record<string, unknown>>;
     raw.close();
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: path });
     const s6 = db.getSlot(6)!;
-    assert.equal(s6.address, "0:0.7");
+    assert.equal(s6.address, "0:0.6");
     assert.equal(s6.issue, 9031);
     assert.equal(s6.assignment_epoch, 228);
-    assert.equal(db.getSlot(7)!.address, "0:0.6");
+    assert.equal(db.getSlot(7)!.address, "0:0.7");
     db.close();
+    const readback = new Database(path);
+    const after = readback.prepare("SELECT * FROM slots WHERE slot IN (6,7) ORDER BY slot").all() as Array<Record<string, unknown>>;
+    readback.close();
+    for (let i = 0; i < before.length; i++) {
+      const { address: oldAddress, ...oldState } = before[i];
+      const { address: newAddress, ...newState } = after[i];
+      assert.notEqual(oldAddress, newAddress);
+      assert.deepEqual(newState, oldState, "boot must only reconcile address metadata");
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

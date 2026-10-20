@@ -232,7 +232,7 @@ test("slot panes are bound by the explicit layout map, not the index formula", a
   const { paneAddress } = await import("../src/paneIdentity.js");
   const { defaultPaneTargetForSlot } = await import("../src/sessionDelivery.js");
   const expected: Record<number, string> = {
-    1: "0:0.1", 2: "0:0.2", 3: "0:0.3", 4: "0:0.4", 5: "0:0.5", 6: "0:0.7", 7: "0:0.6", 8: "0:0.8",
+    1: "0:0.1", 2: "0:0.2", 3: "0:0.3", 4: "0:0.4", 5: "0:0.5", 6: "0:0.6", 7: "0:0.7", 8: "0:0.8",
   };
   for (const slot of DEV_SLOT_NUMBERS) {
     assert.equal(SLOT_RUNTIME_IDENTITIES[slot].paneAddress, expected[slot]);
