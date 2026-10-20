@@ -1230,7 +1230,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "d187fd12bcd399e66a131ba4be12661d4c68b6947a7d6260b95169002458f29f",
+      "sha256": "6964bf13aa3113e0080534d664bf6a82b8beea7783d7ade5e6ea72ed68de97b2",
       "source_path": "codex/monitors/cto-slack-relay/WAKE_SOP.md"
     },
     {

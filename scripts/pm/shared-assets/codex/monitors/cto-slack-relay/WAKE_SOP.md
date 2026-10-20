@@ -92,9 +92,10 @@ to a HeyDonna task or any HeyDonna event to the Godavari task.
 
 ### Activation and rollback boundary
 
-The new `availability_gate.admitted_after_epoch: null` is inert until approved
-scoped installation stamps the actual UTC epoch under the existing relay lock,
-immediately before atomic SOP replacement. Preserve the original channel
+The new `availability_gate.admitted_after_epoch: null` stays inert throughout
+the two-phase cutover below. Only its final phase stamps the actual UTC epoch
+under the existing relay lock, immediately before atomic SOP replacement.
+Preserve the original channel
 `admitted_after_epoch` and its historical ownership interval. Record the rendered
 SOP hash and new cutoff; helper bytes remain reviewed bytes. BOTH source timestamp
 and durable `queued_at` must be later than the new cutoff to consult activity.
@@ -112,13 +113,71 @@ fingerprint for the same key stops, never transfers ownership. Existing accepted
 or uncertain receipts still suppress delivery, even if activity later changes.
 No task cancellation, recipient wait, fork or new task is permitted.
 
+#### Phase 1: inert helper installation
+
+After review/rollout authorization, use the existing scoped installer/preimage
+gate to atomically install the reviewed helper and SOP with the availability
+cutoff STILL NULL. Preserve the original growth interval and capture both live
+preimages. Record the replacement's UTC/monotonic boundary, helper inode/hash,
+SOP hash, and unchanged bounded-RPC dependency hash. No event probe or restart.
+
+The parent helper loads Python source BEFORE taking flock. A parent selection,
+renew or release already waiting for that lock can later erase frozen fields,
+even when selecting no events. Merely holding the lock during installation or
+seeing no deliverable event does NOT exclude this writer. No frozen availability
+route may be admitted until the following drain is proven.
+
+#### Phase 2: parent-writer drain and activation
+
+Use one bounded, event-driven drain with an absolute deadline (at most 15 seconds),
+not guessed sleep, repeated status polling, or a blanket restart:
+
+1. Qualify caller coverage from the managed bridge's `runPython` selection and
+   renew/release invocations plus this SOP's direct Python entrypoint: all execute
+   the canonical helper path, not a resident imported/cached copy. Verify parent
+   code does not fork, rewrite argv or retain a writer after its process exits.
+   Unexplained aliases, import/exec clients or incomplete visibility mean
+   `PARENT_WRITER_DRAIN_UNPROVEN`; keep the gate inert. Do not infer coverage from
+   process age or the fact that a new helper file is present.
+2. After atomic helper replacement, take a COMPLETE native process census with
+   full argv/path and kernel birth identity (PID plus birth seconds/microseconds,
+   e.g. Darwin libproc BSD info and KERN_PROCARGS2). Include selection, renew and
+   release clients, and conservatively include every matching client regardless
+   of whether it might already be running candidate code. Empty/truncated argv,
+   denied reads or incomplete enumeration are not evidence of absence. Bind each
+   possible parent identity to a Darwin kqueue `NOTE_EXIT` witness; recheck birth
+   identity around registration to handle exit/PID reuse, never signal the PID.
+3. Release the relay lock so preloaded parents can finish with the gate inert.
+   Do not activate while holding the lock that a parent needs to finish.
+   Collect exit witnesses for ALL possible parent identities before the absolute
+   deadline. A non-child disappearing from a process listing alone is not an
+   exit witness; use the kernel event/identity check. Any unknown/live identity or
+   deadline expiry ends this attempt INERT with `PARENT_WRITER_DRAIN_UNPROVEN`.
+4. Reacquire the existing relay lock with bounded acquisition. Take a second
+   complete census and require no unaccounted possible parent writer. Re-fence
+   the helper inode/hash, dependency hash and inert SOP preimage. Resolve the
+   source-load/exec race explicitly: an old source reader had already exec'd
+   Python with the helper argv before replacement and must be covered by the
+   census/exit barrier; a child not yet exec'd/opened at replacement can only
+   open candidate bytes afterward. If this premise or either census cannot be
+   established, do not stamp a cutoff. A single unqualified process snapshot is
+   never drain proof. New matching clients in the second census may conservatively
+   block activation; do not start another drain/wait loop in this wake.
+5. Only with all parent exits witnessed and the final fences intact, atomically
+   publish the active-cutoff SOP under that SAME lock, fsync, record rendered
+   hash/cutoff and installed readback, then release. Clients created after the
+   second census load candidate bytes; clients already in it must have been
+   excluded as old writers before activation. Preserve all queue/claim/receipt
+   state; never manufacture drain by killing a client or releasing its claim.
+
 Rollback closes only the availability gate with its nested `admitted_before_epoch`
 under the same lock, retaining the lower cutoff and frozen claim destinations.
 Keep the reviewed helper while any frozen route remains: restoring the old
 helper would discard these records. Do not erase the interval or reroute backlog.
 Capture both live asset preimages; re-fence them and canonical source before the
-approved publication/install. Install only helper and SOP via the existing scoped
-manifest/preimage gate, rendering the cutoff and staged SOP digest. No bridge,
+approved publication/install. Install only helper and INERT SOP via the existing
+scoped manifest/preimage gate; render the active SOP/staged digest only after the
+parent-writer drain above. No bridge,
 MoP, task or pane restart: every selection invokes the helper and reads the SOP
 anew. Preserve queue/ACK/receipt/claim files and launcher/environment. Record the
 immutable source template separately from rendered configuration. Verify installed

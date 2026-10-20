@@ -558,3 +558,127 @@ def test_unstamped_availability_gate_is_inert(tmp_path, monkeypatch, gate):
             '"admitted_after_epoch": 1000, "availability_gate": {"admitted_after_epoch": null}'))
     monkeypatch.setattr(MOD, "snapshot_social_availability", lambda _: pytest.fail("unstamped policy"))
     assert snapshot(tmp_path, sop, [event(sop)], in_process=True)[0]["relay_route"]["destination_thread_id"] == SOCIAL
+
+
+def test_cutover_contract_requires_inert_stage_and_parent_exit_barrier():
+    instructions = " ".join(SOP.read_text().split())
+    for required in (
+        "Phase 1: inert helper installation", "Phase 2: parent-writer drain and activation",
+        "source-load/exec race", "kernel birth identity", "NOTE_EXIT",
+        "second complete census", "PARENT_WRITER_DRAIN_UNPROVEN",
+        "Do not activate while holding the lock that a parent needs to finish",
+    ):
+        assert required in instructions
+
+
+@pytest.mark.parametrize("operation", ["select", "renew", "release"])
+def test_two_phase_cutover_drains_preloaded_parent_before_activation(tmp_path, operation):
+    import fcntl
+    import hashlib
+    import os
+    import select
+
+    source_path = "scripts/pm/shared-assets/claude/scripts/cto-relay-snapshot.py"
+    parent = subprocess.check_output(["git", "show", "b7fe860a648d0ab05645424e0bb744c861c93e04:" + source_path], cwd=ROOT)
+    staged_helper = tmp_path / "helper.py"
+    staged_helper.write_bytes(parent)
+    sop = availability_sop(tmp_path)
+    sop.write_text(sop.read_text().replace('"availability_gate": {"admitted_after_epoch": 1000}',
+        '"availability_gate": {"admitted_after_epoch": null}'))
+    key = "synthetic-parent"
+    initial_claim = {key: {"owner": "parent-owner", "expires_at_epoch": 9999999999}}
+    for name, value in [("events", {"events": []}), ("ack", {"handled": []}), ("claims", initial_claim)]:
+        (tmp_path / (name + ".json")).write_text(json.dumps(value))
+    (tmp_path / "receipts.jsonl").write_text("")
+    args = [str(staged_helper), "--route-sop", str(sop), "--limit", "1"]
+    for option, filename in [("--events-file", "events.json"), ("--ack-file", "ack.json"),
+        ("--claims-file", "claims.json"), ("--output", "output.json"),
+        ("--heartbeat-file", "heartbeat"), ("--lock-file", "lock"), ("--delivery-receipts-file", "receipts.jsonl")]:
+        args += [option, str(tmp_path / filename)]
+    if operation != "select":
+        args += ["--" + operation + "-key", key, "--claim-owner", "parent-owner"]
+
+    # The CHILD loads actual parent source before it asks for flock. Its pipe
+    # witness identifies those loaded bytes, not merely the current file path.
+    preload = '''
+import sys,os,pathlib,hashlib,fcntl,json
+source=pathlib.Path(sys.argv[1]).read_bytes()
+ns={'__name__':'preloaded_parent'}
+exec(compile(source,sys.argv[1],'exec'),ns)
+real_flock=fcntl.flock
+def witness(fd,operation):
+    os.write(int(os.environ['READY_FD']),json.dumps({'pid':os.getpid(),'loaded_sha':hashlib.sha256(source).hexdigest()}).encode()+b'\\n')
+    return real_flock(fd,operation)
+fcntl.flock=witness
+sys.argv=sys.argv[1:]
+sys.exit(ns['main']())
+'''
+    read_fd, write_fd = os.pipe()
+    lock = (tmp_path / "lock").open("a+")
+    process = None
+    activated = False
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        process = subprocess.Popen([sys.executable, "-c", preload, *args],
+            env={**os.environ, "READY_FD": str(write_fd)}, pass_fds=(write_fd,),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        os.close(write_fd)
+        write_fd = None
+        assert select.select([read_fd], [], [], 5)[0], "parent did not reach the temporary lock"
+        loaded = json.loads(os.read(read_fd, 4096))
+        assert loaded == {"pid": process.pid, "loaded_sha": hashlib.sha256(parent).hexdigest()}
+        assert process.poll() is None
+
+        replacement = tmp_path / "candidate.py"
+        replacement.write_bytes(HELPER.read_bytes())
+        os.replace(replacement, staged_helper)
+        table = MOD.extract_route_table(sop)
+        assert table["exact_channel_routes"][GROWTH]["availability_gate"]["admitted_after_epoch"] is None
+        assert process.poll() is None  # Installing new bytes did NOT drain old code.
+        assert not activated
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        out, err = process.communicate(timeout=5)  # Owned child's kernel exit/reap witness.
+        assert process.returncode == 0, err
+        parent_exit = (process.pid, process.returncode)
+
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        assert parent_exit == (loaded["pid"], 0)
+        assert process.poll() == 0
+        assert staged_helper.read_bytes() == HELPER.read_bytes()
+        assert MOD.extract_route_table(sop)["exact_channel_routes"][GROWTH]["availability_gate"]["admitted_after_epoch"] is None
+        active = sop.read_text().replace('"availability_gate": {"admitted_after_epoch": null}',
+            '"availability_gate": {"admitted_after_epoch": 1000}')
+        replacement.write_text(active)
+        os.replace(replacement, sop)
+        activated = True
+        fcntl.flock(lock, fcntl.LOCK_UN)
+
+        # A new, separate interpreter loads only staged candidate code. No real
+        # activity RPC, source event, queue, receipt or task is touched.
+        source = event(sop)
+        (tmp_path / "events.json").write_text(json.dumps({"events": [source]}))
+        candidate = '''
+import pathlib,sys
+ns={'__name__':'candidate'}
+exec(compile(pathlib.Path(sys.argv[1]).read_bytes(),sys.argv[1],'exec'),ns)
+ns['snapshot_social_availability']=lambda _: {'state':'busy','reason':'synthetic-active'}
+sys.argv=sys.argv[1:]
+sys.exit(ns['main']())
+'''
+        candidate_args = args if operation == "select" else args[:-4]
+        run = subprocess.run([sys.executable, "-c", candidate, *candidate_args], capture_output=True, text=True, timeout=5)
+        assert run.returncode == 0, run.stderr
+        stored = json.loads((tmp_path / "claims.json").read_text())[source["dedup_key"]]
+        assert stored["relay_route"]["destination_thread_id"] == DM
+        assert stored["route_fingerprint"] == source["fingerprint"]
+        assert process.poll() == 0  # Parent cannot write after activation.
+        assert activated
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+        os.close(read_fd)
+        if write_fd is not None:
+            os.close(write_fd)
+        if process is not None and process.poll() is None:
+            process.kill()  # Only a failed fixture's owned synthetic child.
+            process.communicate(timeout=5)
