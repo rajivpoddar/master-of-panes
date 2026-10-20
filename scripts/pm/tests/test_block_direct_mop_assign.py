@@ -170,9 +170,7 @@ class BlockDirectMopAssignTests(unittest.TestCase):
         self.assertEqual(manifest["inventory"]["selected_count"], len(manifest["entries"]))
 
     def test_sibling_registration_shape_is_the_shared_wrapper(self) -> None:
-        settings = Path("/Users/rajiv/.claude/settings.json")
-        if not settings.is_file():
-            self.skipTest("home settings.json unavailable")
+        settings = ROOT / "test/fixtures/home-hook-registration.json"
         data = json.loads(settings.read_text(encoding="utf-8"))
         commands = [
             h.get("command", "")

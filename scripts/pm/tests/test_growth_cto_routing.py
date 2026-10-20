@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import subprocess
+import shutil
 import sys
 from pathlib import Path
 
@@ -149,7 +150,7 @@ def test_actual_envelope_writer_retains_current_growth_blocks(tmp_path):
     bridge = ASSETS / "bridge/cto-bridge.ts"
     code = r"""
 const fs = require('node:fs');
-const {transformSync} = require('/Users/rajiv/Downloads/projects/tmux-slack-bridge/node_modules/esbuild/lib/main.js');
+const {transformSync} = require('esbuild');
 const source = fs.readFileSync(process.argv[1], 'utf8');
 const start = source.indexOf('  const tuple: EventTuple = {');
 const end = source.indexOf('  const attachments:', start);
@@ -159,7 +160,7 @@ const construct = new Function('event','channel','ts','user','botId','text',js);
 const blocks = [{type:'rich_text',elements:[{type:'rich_text_section',elements:[{type:'user',user_id:'U0BNFGX2UAX'}]}]}];
 console.log(JSON.stringify(construct({blocks,thread_ts:'1000.1'}, 'C0C7U35LBKR','1001.000001','UEQTTB97A',null,'')));
 """
-    result = subprocess.run(["/opt/homebrew/bin/node", "-e", code, str(bridge)], capture_output=True, text=True)
+    result = subprocess.run([shutil.which("node") or "node", "-e", code, str(bridge)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     sop = configured_sop(tmp_path)
     source = event(sop, text="")
@@ -177,12 +178,12 @@ def test_unknown_receipt_preserves_active_claim(tmp_path):
     assert json.loads((tmp_path / "claims.json").read_text()) == claim
 
 
-def test_actual_ingress_origin_and_loop_exclusions():
+def test_frozen_ingress_origin_and_loop_exclusions():
     code = r"""
 const fs = require('node:fs'), assert = require('node:assert/strict');
-const {transformSync} = require('/Users/rajiv/Downloads/projects/tmux-slack-bridge/node_modules/esbuild/lib/main.js');
+const {transformSync} = require('esbuild');
 function load(name) {
- const source = fs.readFileSync('/Users/rajiv/Downloads/projects/tmux-slack-bridge/'+name,'utf8');
+ const source = fs.readFileSync(require('node:path').join(process.argv[1],name),'utf8');
  const js = transformSync(source,{loader:'ts',format:'cjs'}).code;
  const module = {exports:{}}; new Function('module','exports',js)(module,module.exports); return module.exports;
 }
@@ -197,7 +198,7 @@ assert.equal(slackIngressEventType({channel:'C0ALZJHGE49',text:'status only'},'m
 assert.equal(slackIngressEventType({channel:'C09TYQC1DEF',text:'> <@U0BNFGX2UAX> quoted'},'message'),null);
 console.log('6 actual ingress/origin discriminators PASS; fake delivery=0');
 """
-    run = subprocess.run(["/opt/homebrew/bin/node", "-e", code], capture_output=True, text=True)
+    run = subprocess.run([shutil.which("node") or "node", "-e", code, str(ROOT / "test/fixtures/bridge")], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
 
 
@@ -213,7 +214,7 @@ def test_actual_fallback_unknown_is_not_reselected(tmp_path, monkeypatch, expire
     journal = tmp_path / "cto-ipc-monitor-trigger-receipts.jsonl"
     code = r"""
 const fs = require('node:fs'), assert = require('node:assert/strict');
-const {transformSync} = require('/Users/rajiv/Downloads/projects/tmux-slack-bridge/node_modules/esbuild/lib/main.js');
+const {transformSync} = require('esbuild');
 const source = fs.readFileSync(process.argv[1], 'utf8');
 const start = source.indexOf('function appendReceipt(');
 const end = source.indexOf('async function drainAppServer()', start);
@@ -250,7 +251,7 @@ const deliver = new Function(...Object.keys(bindings), js+'\nreturn deliverClaim
 })().catch(error => {console.error(error); process.exitCode=1;});
 """
     run = subprocess.run([
-        "/opt/homebrew/bin/node", "-e", code,
+        shutil.which("node") or "node", "-e", code,
         str(ASSETS / "bridge/cto-bridge.ts"), str(envelope_file), str(journal),
         str(tmp_path / "claims.json"),
     ], capture_output=True, text=True)

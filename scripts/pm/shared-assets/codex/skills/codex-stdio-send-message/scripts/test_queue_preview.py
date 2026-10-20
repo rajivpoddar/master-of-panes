@@ -58,7 +58,8 @@ for line in sys.stdin:
         elif mode == "error":
             reply = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "unavailable"}}
         else:
-            reply = {"jsonrpc": "2.0", "id": rid, "result": json.loads(os.environ["FAKE_RESULT"])}
+            with open(os.environ["FAKE_RESULT_FILE"]) as result_file:
+                reply = {"jsonrpc": "2.0", "id": rid, "result": json.load(result_file)}
     else:
         reply = {"jsonrpc": "2.0", "id": rid, "result": {}}
     print(json.dumps(reply), flush=True)
@@ -82,7 +83,9 @@ class QueuePreviewTests(unittest.TestCase):
         env = dict(os.environ)
         env.update({"FAKE_MODE": mode, "FAKE_AUDIT": str(self.audit)})
         if result is not None:
-            env["FAKE_RESULT"] = json.dumps(result)
+            result_file = self.root / "result.json"
+            result_file.write_text(json.dumps(result))
+            env["FAKE_RESULT_FILE"] = str(result_file)
         command = [sys.executable, str(HELPER), "--thread-id", thread_id,
                    "--codex-bin", str(self.fake), *[a for a in (extra or [])]]
         done = subprocess.run(command, capture_output=True, text=True, env=env, check=False, timeout=30)
@@ -187,7 +190,9 @@ class MalformedAndDeadlineTests(unittest.TestCase):
         env = dict(os.environ)
         env.update({"FAKE_MODE": mode, "FAKE_AUDIT": str(self.audit)})
         if result is not None:
-            env["FAKE_RESULT"] = json.dumps(result)
+            result_file = self.root / "result.json"
+            result_file.write_text(json.dumps(result))
+            env["FAKE_RESULT_FILE"] = str(result_file)
         cmd = [sys.executable, str(HELPER), "--thread-id", THREAD_ID,
                "--codex-bin", str(self.fake), *(extra or [])]
         done = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False, timeout=outer)

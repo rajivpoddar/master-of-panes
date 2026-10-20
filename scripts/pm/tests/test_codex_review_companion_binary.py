@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import tomllib
 
 ROOT = pathlib.Path(__file__).parents[3]
 SRC = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "skills" / "codex-review-companion" / "codex-review-companion.mjs"
@@ -253,13 +254,19 @@ class LiveConfigCompatibilityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result_json(result)["path"], CANONICAL)
 
-    def test_canonical_binary_parses_the_live_config(self):
-        if not pathlib.Path(CANONICAL).exists():
-            self.skipTest("canonical binary absent")
-        result = subprocess.run([CANONICAL, "login", "status"], capture_output=True, text=True, timeout=90)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Logged in", result.stdout + result.stderr)
-        self.assertTrue(LIVE_CONFIG.is_file())
+    def test_configured_binary_and_model_from_synthetic_config(self):
+        # Authentication is a live-environment probe, not a portable test.
+        # Exercise the existing config compatibility using a secret-free TOML
+        # fixture and actual resolver; never invoke a user's authenticated CLI.
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "codex"
+            write_executable(binary, "#!/bin/sh\nexit 64\n")
+            config = tomllib.loads(f'model = "{LIVE_MODEL}"\ncodex_binary = "{binary}"\n')
+            result = run_probe(SRC, "resolve", {"configuredBinary": config["codex_binary"],
+                                                "pathValue": "", "defaultBinary": None})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result_json(result)["path"], str(binary))
+            self.assertEqual(result_json(result)["model"], config["model"])
 
 
 if __name__ == "__main__":

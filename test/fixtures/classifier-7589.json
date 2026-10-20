@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "scope": "product",
+  "control_plane_only": false,
+  "product_changed": true,
+  "ci_required": true,
+  "e2e_required": true,
+  "ui_changed": false,
+  "changed_files": [
+    "scripts/ci/observability.py"
+  ],
+  "ownership": {
+    "scripts/ci/observability.py": "app_product"
+  },
+  "rules_sha256": "dfd770c1b30706d3d7701ee6ed98a41bfba878458784b9b4026ea397c0be2c2c",
+  "head": "f026a0094573fc10e9613d3dde1351d7724c103b"
+}

@@ -248,6 +248,10 @@ class StatusFileTests(unittest.TestCase):
             raise AssertionError(f"test main() must never signal a process: os.kill{args!r}")
 
         def fail_ps(*args, **kwargs):
+            if args == (["ps", "-axo", "pid=,ppid=,etime=,command="],) and kwargs == {"timeout": 10}:
+                # New preview pass may enumerate read-only processes. Empty
+                # synthetic output permits no tree selection or real ps call.
+                return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
             raise AssertionError(f"test main() must never run a host command: run{args!r}")
 
         kill_patcher = patch.object(os, "kill", side_effect=fail_signal)
@@ -296,7 +300,7 @@ class StatusFileTests(unittest.TestCase):
         self.assertTrue(self.codex_renderer_check.call_args.args[1])
         self.assertTrue(self.codex_broker_check.call_args.args[0])
         self.kill.assert_not_called()
-        self.run_mock.assert_not_called()
+        self.run_mock.assert_called_once_with(["ps", "-axo", "pid=,ppid=,etime=,command="], timeout=10)
         self.save_history.assert_called_once()
         # The saved history went to the stub, and the live file was not touched.
         history_after = live_history.read_bytes() if live_history.exists() else None
@@ -325,6 +329,24 @@ class StatusFileTests(unittest.TestCase):
             post = COMPOSE.compose("1h", COMPOSE.datetime.now(COMPOSE.timezone.utc), None, {}, [], include_active=False,
                                    cleanup_alert=alert)
             self.assertIn("stale-process-cleanup REFUSED: slot_inventory_unavailable", post)
+
+    def test_preview_report_only_retains_eligible_tree_without_effects(self) -> None:
+        def enumerate_only(args, *, timeout):
+            self.assertEqual(args, ["ps", "-axo", "pid=,ppid=,etime=,command="])
+            self.assertEqual(timeout, 10)
+            return subprocess.CompletedProcess(args, 0, stdout=(
+                "424242 1 2-00:00:00 python3 -m http.server --directory /tmp/fixture-preview\n"
+                "424243 424242 01:00:00 fixture-child\n"), stderr="")
+
+        self.run_mock.side_effect = enumerate_only
+        report = MODULE.preview_orphan_scan(apply=False)
+        self.assertEqual(report["found"][0]["tree"], [424242, 424243])
+        self.assertFalse(report["found"][0]["term_sent"])
+        self.assertFalse(report["found"][0]["kill_sent"])
+        self.assertEqual(report["terminated"], [])
+        self.assertEqual(report["errors"], [])
+        self.kill.assert_not_called()
+        self.save_history.assert_not_called()
 
     def test_clean_run_has_no_alert(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

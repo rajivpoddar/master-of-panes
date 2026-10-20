@@ -79,8 +79,17 @@ Internal engineering follow-up: the CI helper prints a stale summary line.
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    curl = fake_bin / "curl"
+    curl.write_text("#!/bin/sh\nprintf '%s\\n' '{\"ok\":false,\"events\":[]}'\n")
+    curl.chmod(0o755)
     return dict(
         os.environ,
+        PATH=f"{fake_bin}:{os.environ['PATH']}",
+        EXPLORE_ISSUE_LATCH_GUARD=str(ROOT / "test/fixtures/explore-issue-latch-guard.sh"),
+        EXPLORE_ISSUE_ENV_LOCAL=str(tmp_path / "no-credentials.env"),
+        SLACK_BOT_TOKEN="",
         EXPLORE_ISSUE_STATE_DIR=str(tmp_path / "state"),
         EXPLORE_ISSUE_PERMIT_DIR=str(tmp_path / "permit"),
         EXPLORE_ISSUE_CONSUMED_PERMIT_DIR=str(tmp_path / "consumed"),
@@ -91,9 +100,10 @@ def _env(tmp_path: Path) -> dict[str, str]:
     )
 
 
-def _run(hook: Path, command: str, env: dict[str, str]) -> tuple[int, str]:
+def _run(hook: Path, command: str, env: dict[str, str], *, unprivileged: bool = False) -> tuple[int, str]:
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": "/tmp"})
-    proc = subprocess.run(["bash", str(hook)], input=payload, capture_output=True, text=True, env=env, timeout=60)
+    options = {"user": 65534} if unprivileged and os.geteuid() == 0 else {}
+    proc = subprocess.run(["bash", str(hook)], input=payload, capture_output=True, text=True, env=env, timeout=60, **options)
     return proc.returncode, proc.stdout.strip()
 
 
@@ -193,16 +203,23 @@ def test_existing_but_unreadable_body_file_gets_the_same_typed_remedy(tmp_path):
     """
     env = _env(tmp_path)
     body = _body(tmp_path, "body-unreadable.md", VALID_BODY + "\n<!-- audit-bypass: internal-followup -->\n")
+    if os.geteuid() == 0:
+        # Root bypasses mode000. Exercise real permission denial as nobody;
+        # make only these disposable parent directories traversable.
+        for directory in [tmp_path, *tmp_path.parents]:
+            if directory == Path("/tmp"):
+                break
+            directory.chmod(directory.stat().st_mode | 0o111)
     body.chmod(0o000)
     try:
         cmd = _create_cmd(str(body))
-        rc, out = _run(AUDIT_HOOK, cmd, env)
+        rc, out = _run(AUDIT_HOOK, cmd, env, unprivileged=True)
         assert rc == 0
         message = _decision(out)["message"]
         assert "requires prior Codex architecture review" not in message
         assert "cannot be read when this hook runs" in message
         assert "existing file the hook may not read" in message
-        ledger_rc, ledger_out = _run(LEDGER_HOOK, cmd, env)
+        ledger_rc, ledger_out = _run(LEDGER_HOOK, cmd, env, unprivileged=True)
         assert ledger_rc == 0
         assert "valid Issue Contract Ledger" in _decision(ledger_out)["message"]
     finally:
@@ -290,12 +307,12 @@ def test_non_internal_originator_still_classifies_without_any_prose(tmp_path):
     cache_dir.mkdir(exist_ok=True)
     # The hook looks up one cache file per (channel, ts); write the fixture the
     # same way the Slack API would have.
-    import glob
     cmd = _create_cmd(str(body))
-    # Warm the lookup once so the cache path used by the hook exists.
-    _run(AUDIT_HOOK, cmd, env)
-    for path in glob.glob(str(cache_dir / "*")):
-        Path(path).write_text(json.dumps({"ok": True, "messages": [{"user": "U0CUSTOMER01"}]}), encoding="utf-8")
+    # Seed the exact cache key; a hermetic run has no Slack transport/token
+    # whose response would otherwise create this file as a side effect.
+    (cache_dir / "1785932534.656769.json").write_text(
+        json.dumps({"ok": True, "messages": [{"user": "U0CUSTOMER01"}]}), encoding="utf-8"
+    )
     rc, out = _run(AUDIT_HOOK, cmd, env)
     assert rc == 0
     message = _decision(out)["message"]

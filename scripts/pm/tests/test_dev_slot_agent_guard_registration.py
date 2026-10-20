@@ -30,9 +30,7 @@ SKILL_SYNC = (
     / "sync-dev-slot-skill-allowlist.mjs"
 )
 
-DEFAULT_AGENT_GUARD = Path(
-    "/Users/rajiv/.claude/hooks/force-dev-slot-foreground-agent.py"
-)
+DEFAULT_AGENT_GUARD = ROOT / "test/fixtures/foreground-agent-guard.py"
 
 # The exact tool_input recorded by the hanging S6 session: no run_in_background.
 RECORDED_AGENT_INPUT = {
@@ -130,10 +128,7 @@ def _run_guard(guard: Path, cwd: Path, stdin: str) -> subprocess.CompletedProces
 
 def test_registered_guard_selects_bounded_foreground_review(tmp_path: Path) -> None:
     guard = DEFAULT_AGENT_GUARD
-    if not guard.exists():
-        import pytest
-
-        pytest.skip(f"dev-slot Agent guard not installed at {guard}")
+    assert guard.is_file(), "committed foreground guard fixture required"
 
     slot_cwd = tmp_path / "heydonna-app-3006"
     slot_cwd.mkdir(parents=True)

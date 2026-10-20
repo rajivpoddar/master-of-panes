@@ -12,10 +12,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parents[3]
 MANIFEST_PATH = REPO_ROOT / "scripts" / "pm" / "shared-assets" / "manifest.json"
-STALE_MCP = Path(
-    "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/mcp.js"
-)
-STALE_MCP_SHA256 = "1265561cb760f5323c3ab38c1e2a7bae6d4e9195dfa62f6c3cb3d935347b809c"
+STALE_MCP = REPO_ROOT / "test/fixtures/legacy-four-slot-mcp.js"
 MCP_RUNTIME = {
     "asyncCommand.js",
     "assignmentAuthority.js",
@@ -73,6 +70,9 @@ class McpSchemaInstallTests(unittest.TestCase):
             release = root / "release"
             shutil.copytree(REPO_ROOT / "scripts" / "pm" / "shared-assets", release / "scripts" / "pm" / "shared-assets")
             targets = root / "targets"
+            stale_target = targets / "Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/mcp.js"
+            stale_target.parent.mkdir(parents=True)
+            shutil.copyfile(STALE_MCP, stale_target)
             result = installer.install_shared_assets(
                 release_dir=release,
                 target_root=targets,
@@ -87,9 +87,7 @@ class McpSchemaInstallTests(unittest.TestCase):
                 self.assertEqual(digest(target), digest(release / "scripts/pm/shared-assets/claude/plugins/master-of-panes/1.0.0/dist" / name))
                 self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
 
-    def test_red_snapshot_records_current_static_schema_when_present(self) -> None:
-        if not STALE_MCP.is_file() or digest(STALE_MCP) != STALE_MCP_SHA256:
-            self.skipTest("static 1.0.0 schema has already been replaced")
+    def test_red_fixture_records_the_retired_four_slot_schema(self) -> None:
         text = STALE_MCP.read_text(encoding="utf-8")
         self.assertIn("all 4 dev slots", text)
         self.assertIn("max(4)", text)

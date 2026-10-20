@@ -183,6 +183,8 @@ class StaleProcessCleanupTests(unittest.TestCase):
         self.assertEqual(len(result["candidates"]), 1)
         with patch.object(MODULE, "revalidate_candidate", return_value=(True, "identity_and_owner_match")), patch.object(
             MODULE, "alive", return_value=False
+        ), patch.object(MODULE, "live_children_map", return_value={}), patch.object(
+            MODULE, "listen_ports_strict", return_value=set()
         ), patch.object(MODULE.os, "kill") as kill:
             killed = MODULE.kill_candidates(result["candidates"], 0)
         self.assertEqual(killed[0]["status"], "terminated")
@@ -312,6 +314,8 @@ class StaleProcessCleanupTests(unittest.TestCase):
                 MODULE, "collect_processes", side_effect=[before, after]
             ), patch.object(MODULE, "revalidate_candidate", side_effect=revalidate), patch.object(
                 MODULE, "alive", return_value=False
+            ), patch.object(MODULE, "live_children_map", return_value={}), patch.object(
+                MODULE, "listen_ports_strict", return_value=set()
             ), patch.object(MODULE.os, "kill") as kill, patch.object(
                 sys, "argv",
                 [

@@ -98,7 +98,13 @@ def test_send_to_slot_treats_unknown_as_active():
 
 def test_no_index_formula_in_shared_pane_probes():
     formula = re.compile(r'0:0\.\$|0:0\.\$\{|0:0\.%s|"0:0\." *\+')
-    for path in (ASSETS / "claude/skills").rglob("*.sh"):
+    # Scan committed source only; dependency caches can contain binary *.sh.
+    paths = subprocess.check_output(
+        ["git", "ls-files", "scripts/pm/shared-assets/claude/skills/*.sh"], cwd=ROOT, text=True
+    ).splitlines()
+    assert paths, "pane-probe source inventory must not be empty"
+    for relative in paths:
+        path = ROOT / relative
         assert not formula.search(path.read_text()), path
 
 

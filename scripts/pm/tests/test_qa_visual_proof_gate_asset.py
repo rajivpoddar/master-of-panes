@@ -127,30 +127,12 @@ def test_non_ui_live_path_classifies_before_issue_resolution(monkeypatch: pytest
     assert classifier_calls[0][classifier_calls[0].index("--expected-head") + 1] == HEAD
 
 
-def test_authoritative_classifier_output_for_exact_7589_head_is_consumable(
+def test_frozen_classifier_output_for_exact_7589_head_is_consumable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    classifier = Path("/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/change_scope.py")
-    rules = classifier.with_name("change-scope-rules.json")
-    live_rules = hashlib.sha256(rules.read_bytes()).hexdigest()
-    if live_rules != RULES_SHA256:
-        # Live-environment probe of the heydonna-app checkout. heydonna-app #9183
-        # (2026-10-09) changed the rules; the gate pin must move in heydonna-app
-        # (source authority) first. Surface it instead of failing unrelated MoP work.
-        pytest.skip(f"heydonna-app change-scope rules drifted from gate pin: {live_rules}")
-    completed = subprocess.run(
-        [
-            "python3", str(classifier), "--rules", str(rules),
-            "--repo", "heydonna-app/heydonna-app",
-            "--path", "scripts/ci/observability.py",
-            "--expected-head", HEAD,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    scope = json.loads(completed.stdout)
+    # The app classifier is app-owned; MoP tests its frozen output contract.
+    # Never import an installed app checkout or silently skip on rule drift.
+    scope = json.loads((ROOT / "test/fixtures/classifier-7589.json").read_text())
     assert scope["head"] == HEAD
     assert scope["rules_sha256"] == RULES_SHA256
     gate = _load_gate(monkeypatch, tmp_path)

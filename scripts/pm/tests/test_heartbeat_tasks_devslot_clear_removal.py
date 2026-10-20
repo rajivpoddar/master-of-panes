@@ -282,10 +282,12 @@ class HeartbeatSessionAgeClearFoldTests(unittest.TestCase):
         self.assertIn('"materialized_only": True', self.source)
 
     def test_fold_is_docstring_only(self) -> None:
-        live = Path(HEARTBEAT_CLEAR_TARGET)
-        if not live.is_file():
-            self.skipTest("installed target absent; preimage comparison unavailable")
-        live_tree = ast.parse(live.read_text(encoding="utf-8"), filename=str(live))
+        # Compare with the committed parent, not an unrelated machine's install.
+        import subprocess
+        prior = subprocess.check_output([
+            "git", "show", "b0c23f01750856ef974b4ba7418490697192aa1e:scripts/pm/shared-assets/claude/scripts/heartbeat-session-age-clear.py"
+        ], cwd=ROOT).decode("utf-8")
+        live_tree = ast.parse(prior)
         self.assertEqual(
             _code_skeleton(self.tree),
             _code_skeleton(live_tree),
