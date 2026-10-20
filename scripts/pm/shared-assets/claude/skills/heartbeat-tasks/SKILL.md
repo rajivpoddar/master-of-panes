@@ -192,3 +192,10 @@ recorded. Target: zero CTO "heartbeat correction" replies over 4 runs.
 
 Note: top-level report posts MUST use `SLACK_SEND_AS=alerts` (posts as HeyDonna Alerts so PM processes them as events). Rajiv 2026-10-07 14:17 IST, C0ALZJHGE49 thread 1791362688.821369: "it should come from alerts id so that it's processed by pm correctly."
 
+
+
+## Thread replies are PM, never Alerts (Rajiv 2026-10-20)
+Source: C0ALZJHGE49 thread 1792510362.837119, ts 1792510805.167479: "note that the replies has to be posted by pm, not alerts. alerts just post the top level thread which the pm processes."
+- `SLACK_SEND_AS=alerts` is ONLY for the top-level report post.
+- Every reply/disposition IN the thread is posted as PM: plain `bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -t <thread_ts> -f < file` (no SLACK_SEND_AS).
+- A bg agent running this skill returns its disposition text to PM; PM (or the agent as PM identity) posts the thread reply the SAME turn.

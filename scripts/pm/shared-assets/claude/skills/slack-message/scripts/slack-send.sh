@@ -956,7 +956,10 @@ if r.get('ok'):
     try:
         import sqlite3
         db = os.environ.get('BRIDGE_DB') or os.path.expanduser('~/Downloads/projects/tmux-slack-bridge/bridge.db')
-        if os.path.exists(db):
+        # Alerts must be claimed by the bridge's inbound delivery path. An
+        # outbound row would suppress their first socket/poll event as a duplicate.
+        # Normal PM replies still pre-record to suppress their own echoes.
+        if os.environ.get('SLACK_SEND_AS') != 'alerts' and os.path.exists(db):
             pl = json.loads(os.environ.get('SLACK_SEND_PAYLOAD') or '{}')
             m = r.get('message') or {}
             text = m.get('text') or pl.get('text') or ''

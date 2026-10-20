@@ -1307,6 +1307,85 @@ def write_status(
         pass
 
 
+PREVIEW_SERVER_MIN_AGE_S = 24 * 60 * 60
+RENDER_SCRIPT_MIN_AGE_S = 60 * 60
+
+
+def preview_orphan_classify(command: str, ppid: int, age_seconds: int | None) -> str | None:
+    """Orphaned (ppid 1) preview/LAN http.server and astro/vite dev servers older than 24h, and
+    marketing-draft node render scripts older than 60m (they own headless Chrome trees)."""
+    if age_seconds is None:
+        return None
+    lower = command.lower()
+    if ppid == 1 and age_seconds >= PREVIEW_SERVER_MIN_AGE_S:
+        if re.search(r"python[\d.]*\S*\s+(?:-i\s+)?-m\s+http\.server", lower) or "python.app/contents/macos/python" in lower and "-m http.server" in lower:
+            m = re.search(r"--directory\s+(\S+)", command)
+            target = m.group(1) if m else None
+            # LAN viewers serving repo/Downloads content may be in use; reap only /tmp-served or vanished dirs.
+            if target and (target.startswith(("/tmp/", "/private/tmp/")) or not os.path.isdir(target)):
+                return "orphan_preview_http_server_over_24h"
+            return None
+        if re.search(r"node_modules/(?:astro/bin/astro\.mjs|vite/bin/vite\.js)\s+(dev|preview)", lower):
+            return "orphan_astro_vite_dev_over_24h"
+    if ppid == 1 and age_seconds >= RENDER_SCRIPT_MIN_AGE_S and re.search(r"(^|/)node\s+\S*/docs/marketing/drafts/\S+\.(?:m?js|cjs)", lower):
+        return "stale_marketing_render_script_over_60m"
+    return None
+
+
+def preview_orphan_scan(apply: bool, term_wait_s: float = 3.0) -> dict[str, Any]:
+    """Independent of slot ownership: reap orphan preview servers and stale render scripts (+descendants)."""
+    out: dict[str, Any] = {"class": "preview_orphan", "found": [], "terminated": [], "errors": []}
+    try:
+        ps = run(["ps", "-axo", "pid=,ppid=,etime=,command="], timeout=10).stdout
+    except Exception as exc:  # noqa: BLE001
+        out["errors"].append(f"ps_failed:{type(exc).__name__}")
+        return out
+    me = os.getpid()
+    rows = []
+    for line in ps.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 4 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        rows.append((int(parts[0]), int(parts[1]), parts[2], parts[3]))
+    children: dict[int, list[int]] = {}
+    for pid, ppid, _e, _c in rows:
+        children.setdefault(ppid, []).append(pid)
+    for pid, ppid, etime, command in rows:
+        if pid == me:
+            continue
+        reason = preview_orphan_classify(command, ppid, parse_etime(etime))
+        if not reason:
+            continue
+        tree, stack = [], [pid]
+        while stack:
+            cur = stack.pop()
+            tree.append(cur)
+            stack.extend(children.get(cur, []))
+        rec = {"pid": pid, "ppid": ppid, "etime": etime, "command": command[:300],
+               "reason": reason, "tree": tree, "term_sent": False, "kill_sent": False}
+        out["found"].append(rec)
+        if not apply:
+            continue
+        try:
+            for member in reversed(tree):
+                try:
+                    os.kill(member, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            rec["term_sent"] = True
+            deadline = time.time() + term_wait_s
+            while time.time() < deadline and any(alive(m) for m in tree):
+                time.sleep(0.2)
+            for member in tree:
+                if alive(member):
+                    os.kill(member, signal.SIGKILL)
+                    rec["kill_sent"] = True
+            out["terminated"].append(rec)
+        except OSError as exc:
+            out["errors"].append(f"{pid}:{exc}")
+    return out
+
+
 RUNAWAY_MIN_AGE_S = 5 * 60
 RUNAWAY_TOOLS = {"grep", "ggrep", "egrep", "fgrep", "rg", "ripgrep", "ugrep", "find", "bfs", "fd", "fdfind"}
 RUNAWAY_NEVER = {"git", "node", "tsc", "vitest", "npm", "npx", "bun", "python", "python3", "next", "convex"}
@@ -1926,6 +2005,7 @@ def _main() -> int:
         after = collect_processes(args.agent_browser_min, args.nextjs_min, args.dev_tool_min, None, args.ab_idle_min)
 
     runaway = runaway_scan(args.apply, args.term_wait_s)
+    preview_orphans = preview_orphan_scan(args.apply, args.term_wait_s)
     history = load_history()
     replayd = replayd_check(history, args.apply)
     codex_renderers = codex_renderer_check(history, args.apply)
@@ -1956,6 +2036,7 @@ def _main() -> int:
             "orphan_dev_tool": "vitest/tsc with ppid 1 older than dev_tool_min (+descendants); a live parent protects",
             "replayd": "user-level /usr/libexec/replayd SIGTERM (launchd restarts it) after >50% CPU on 2 consecutive apply runs",
             "codex_renderer": "ChatGPT-bundled Codex (Renderer).app --type=renderer only: age >60m AND CPU >50% on 2 consecutive apply passes keyed by PID+start; max 5 per pass; revalidate PID/start/args before TERM and KILL, with 10s grace; dry run does not persist",
+            "preview_orphan": "ppid-1 python -m http.server (only --directory under /tmp or vanished) / astro|vite dev older than 24h, and ppid-1 node docs/marketing/drafts render scripts older than 60m (+descendants); independent of slots",
             "codex_broker_orphan": f"orphaned Codex review servers: node .../.claude/plugins/cache/openai-codex/codex/<ver>/scripts/app-server-broker.mjs (+ reparented `codex app-server` roots) older than {args.codex_broker_min_hours}h whose ancestor chain reaches launchd without a live claude/openclaude/tmux/ChatGPT/Codex app/protected owner; never ChatGPT-owned trees; REPORT-ONLY, never signalled on any entrypoint (only an explicit CTO verdict may re-enable reaping); independent of slots",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
@@ -1990,6 +2071,7 @@ def _main() -> int:
         "report_only": before.get("report_only", []),
         "replayd": replayd,
         "runaway_scan": runaway,
+        "preview_orphan": preview_orphans,
         "codex_renderer": codex_renderers,
         "codex_broker_orphan": codex_brokers,
         "after": after,

@@ -683,7 +683,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "5e3a13a2eb44630fed9edade17986441ec770a8879972d66a8063b326e6bc6ea",
+      "sha256": "ac4979f08d84e7a3daeaf3577343c1beb557a23240306a5deca001ce190cdffc",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
@@ -755,7 +755,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "b39f993062483fedc63d7024a06ab6a0f0eeb0a3aacb6bb7ebbc965f7b8f831a",
+      "sha256": "268d9510691ae752cffe37d93114173701cc7cba13adbbed10f863a7eab855da",
       "source_path": "claude/skills/codex-app-code-review/templates/prompt.txt"
     },
     {
@@ -854,7 +854,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heartbeat-tasks",
-      "sha256": "4adfc3b0c347484fa64d717e65359e3ad1f62cac605bb8f973a582a9d950e30f",
+      "sha256": "e19c1bb8b95657f27b0405dcfb1ae2f3269e16e8b9fb8df87757da20f57a9ef2",
       "source_path": "claude/skills/heartbeat-tasks/SKILL.md"
     },
     {
@@ -872,7 +872,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "16e25b41cae2819d574abec2266e1b26e87d5b5e3cb38d28e5de031abf1b59f2",
+      "sha256": "170645db4b60827a71a2b9e9576adb5e446f090371bbee88f5dcb75514780b69",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
@@ -987,7 +987,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
-      "sha256": "de0bd19ad8149d6bab6aae24afb11f3cb133aa8df311f118876e8a6beb622b64",
+      "sha256": "c576cffb0034a4e12d6d0d2aee1aa8137598ed90273ef781a17e63b859abac89",
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {
