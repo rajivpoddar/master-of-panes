@@ -13,8 +13,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts/pm/shared-assets/claude/scripts/launch-dev-slot-claude.sh"
-# The launcher passes the slot identity rule as an appended system prompt (slot 5 = Revati).
-RULE = "/Users/rajiv/.claude/dev-slot-rules/22-slot-revati.md"
 
 
 class FreshSlotSessionTest(unittest.TestCase):
@@ -23,6 +21,14 @@ class FreshSlotSessionTest(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        self.rules = self.root / "dev-slot-rules"
+        self.project_rules = self.root / "project-rules"
+        self.rules.mkdir()
+        self.project_rules.mkdir()
+        (self.rules / "20-buddhi-dev.md").write_text("# Synthetic common slot rule\n")
+        self.rule = str(self.rules / "22-slot-revati.md")
+        Path(self.rule).write_bytes((ROOT / "scripts/pm/shared-assets/claude/dev-slot-rules/22-slot-revati.md").read_bytes())
+        (self.project_rules / "21-lessons.md").write_text("# Synthetic project lessons\n")
         self.log = self.root / "claude-argv.log"
         self.env_log = self.root / "claude-env.log"
         self.uuid_count = self.root / "uuid-count"
@@ -63,6 +69,8 @@ class FreshSlotSessionTest(unittest.TestCase):
             "CLAUDE_ENV_LOG": str(self.env_log),
             "CLAUDE_SLOT_BIN": str(self.bin / "claude"),
             "CLAUDE_SLOT_SKILL_SYNC": str(self.sync),
+            "CLAUDE_DEV_SLOT_RULES": str(self.rules),
+            "CLAUDE_PROJECT_RULES": str(self.project_rules),
             "DEV_SLOT_SPARK_API_KEY_FILE": str(self.key),
         }
 
@@ -86,11 +94,11 @@ class FreshSlotSessionTest(unittest.TestCase):
         argv = self.log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(argv, [
             "--model", "ornith-1.5-35b-a3b", "--effort", "low",
-            "--append-system-prompt-file", RULE,
+            "--append-system-prompt-file", self.rule,
             "--permission-mode", "bypassPermissions", "--session-id",
             "11111111-1111-4111-8111-111111111111",
             "--model", "ornith-1.5-35b-a3b", "--effort", "low",
-            "--append-system-prompt-file", RULE,
+            "--append-system-prompt-file", self.rule,
             "--permission-mode", "bypassPermissions", "--session-id",
             "22222222-2222-4222-8222-222222222222",
         ])
@@ -102,11 +110,11 @@ class FreshSlotSessionTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
             "--model", "ornith-1.5-35b-a3b", "--effort", "low",
-            "--append-system-prompt-file", RULE,
+            "--append-system-prompt-file", self.rule,
             "--permission-mode", "bypassPermissions", "--continue",
             "--session-id", "11111111-1111-4111-8111-111111111111",
             "--model", "ornith-1.5-35b-a3b", "--effort", "low",
-            "--append-system-prompt-file", RULE,
+            "--append-system-prompt-file", self.rule,
             "--permission-mode", "bypassPermissions", "--session-id",
             "22222222-2222-4222-8222-222222222222", "--continue",
         ])
@@ -116,7 +124,7 @@ class FreshSlotSessionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
             "--model", "ling-3.0-flash", "--effort", "low",
-            "--append-system-prompt-file", RULE,
+            "--append-system-prompt-file", self.rule,
             "--permission-mode", "bypassPermissions", "--continue",
         ])
         self.assertEqual(
@@ -129,7 +137,7 @@ class FreshSlotSessionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(encoding="utf-8").splitlines(), [
             "--model", "ornstein3.8-27b", "--effort", "low",
-            "--append-system-prompt-file", RULE,
+            "--append-system-prompt-file", self.rule,
             "--permission-mode", "bypassPermissions", "--continue",
         ])
         self.assertEqual(
