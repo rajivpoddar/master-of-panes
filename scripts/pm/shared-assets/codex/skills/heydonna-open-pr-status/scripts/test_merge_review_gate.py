@@ -114,6 +114,8 @@ def install(world=None):
     world = {} if world is None else world
     stub = Stub(world)
     merge.api, merge.pages, merge.command = stub.api, stub.pages, stub.command
+    # Ordinary fixture fallback requires E2E; never consult live canonical policy.
+    merge.workflow_requirements = lambda *_: {"e2e_required": True}
     return stub
 
 

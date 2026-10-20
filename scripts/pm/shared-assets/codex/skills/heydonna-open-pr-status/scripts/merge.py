@@ -133,6 +133,7 @@ TS = re.compile(r"^\s*\d{4}-\d\d-\d\dT[0-9:.]+Z\s?")
 # Real GitHub Actions log framing emits "KEY: value"; the "=" form is also accepted.
 BINDING = re.compile(r"^\s*([A-Z_]+)\s*[:=]\s*(\S+?)\s*$")
 PR_NUMBER_KEY = re.compile(r"^\s*PR_NUMBER\s*[:=]")
+EVENT_NAME_KEY = re.compile(r"^\s*EVENT_NAME\b")
 
 
 def job_log(job_id):
@@ -196,19 +197,19 @@ def classifier_bindings(lines):
     for line in lines:
         match = BINDING.match(line)
         if match is None:
-            # A present-but-malformed PR_NUMBER line (empty value, extra tokens)
-            # must refuse, never read as absence that enables the native fallback.
-            if PR_NUMBER_KEY.match(line):
+            # Malformed optional bindings must not enable an absence fallback.
+            if PR_NUMBER_KEY.match(line) or EVENT_NAME_KEY.match(line):
                 return None
             continue
         key, value = match.group(1), match.group(2)
         if key in seen:
             seen[key].add(value)
-    # PR_NUMBER may be absent from older classifier logs; callers then require the
-    # run's native pull_requests association to name exactly this PR.
-    if any(len(values) != 1 for key, values in seen.items() if key != "PR_NUMBER"):
+    # Older logs omit PR_NUMBER and/or EVENT_NAME. Callers bind their true absence
+    # to the same native run, never to a default or a different receipt.
+    optional = ("PR_NUMBER", "EVENT_NAME")
+    if any(len(values) != 1 for key, values in seen.items() if key not in optional):
         return None
-    if len(seen["PR_NUMBER"]) > 1:
+    if any(len(seen[key]) > 1 for key in optional):
         return None
     if seen["PR_NUMBER"] and not next(iter(seen["PR_NUMBER"])).isdigit():
         return None
@@ -219,8 +220,22 @@ def pr_binding_ok(bindings, run, pr):
     """Logged PR_NUMBER must match; if not logged, the run must be natively bound to only this PR."""
     if bindings["PR_NUMBER"] is not None:
         return bindings["PR_NUMBER"] == str(pr["number"])
-    numbers = [item.get("number") for item in (run.get("pull_requests") or [])]
-    return numbers == [pr["number"]]
+    return native_pr_binding_ok(run, pr)
+
+
+def native_pr_binding_ok(run, pr):
+    associations = run.get("pull_requests")
+    return (isinstance(associations, list) and len(associations) == 1
+            and isinstance(associations[0], dict)
+            and associations[0].get("number") == pr["number"])
+
+
+def event_binding_ok(bindings, run, pr):
+    if run.get("event") != "pull_request":
+        return False
+    if bindings["EVENT_NAME"] is not None:
+        return bindings["EVENT_NAME"] == run["event"]
+    return native_pr_binding_ok(run, pr)
 
 
 def contents_identity(path, ref):
@@ -251,10 +266,11 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
     if bindings is None:
         return None
     base_sha, head_sha = bindings["BASE_SHA"], bindings["HEAD_SHA"]
-    workflow_sha, event = bindings["WORKFLOW_SHA"], bindings["EVENT_NAME"]
+    workflow_sha = bindings["WORKFLOW_SHA"]
     if not (HEX40.match(base_sha) and HEX40.match(workflow_sha)):
         return None
-    if head_sha != head or event != "pull_request" or not pr_binding_ok(bindings, run, pr):
+    if (head_sha != head or not event_binding_ok(bindings, run, pr)
+            or not pr_binding_ok(bindings, run, pr)):
         return None
     commit = api(f"git/commits/{workflow_sha}")
     parents = [parent["sha"] for parent in commit.get("parents", [])]

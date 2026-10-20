@@ -15,6 +15,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SPEC = importlib.util.spec_from_file_location("merge_under_test", os.path.join(HERE, "merge.py"))
@@ -293,6 +294,8 @@ def install(world=None):
     world = {} if world is None else world
     stub = Stub(world)
     merge.api, merge.pages, merge.command = stub.api, stub.pages, stub.command
+    # Ordinary fixture fallback requires E2E; never consult live canonical policy.
+    merge.workflow_requirements = lambda *_: {"e2e_required": True}
     return stub
 
 
@@ -791,6 +794,209 @@ class RealColonFormLogTests(unittest.TestCase):
             with self.assertRaises(parent.Refusal) as ctx:
                 parent.workflow_proof(pr(), WORKFLOW, NAMES)
             self.assertIn("WORKFLOW_NOT_GREEN", str(ctx.exception))
+
+
+class NativeEventBindingTests(unittest.TestCase):
+    """Replay native site/docs receipts without any live command or write."""
+
+    @classmethod
+    def setUpClass(cls):
+        data = json.loads((pathlib.Path(HERE) / "fixtures/event-binding-native.json").read_text())
+        cls.fixtures = data["fixtures"]
+        cls.rules_content = data["rules_content"]
+
+    def verify(self, fixture, *, direct=False):
+        calls = []
+        run_row, scope, pull = fixture["run"], fixture["scope"], fixture["pr"]
+        expected_scope = "site" if fixture["number"] == 10522 else "control_plane_only"
+
+        def api(path):
+            calls.append(("GET", path))
+            if path not in fixture["responses"]:
+                raise merge.Refusal("UNRECORDED_READ")
+            row = copy.deepcopy(fixture["responses"][path])
+            if path.startswith("contents/"):
+                row["content"] = (fixture.get("rules_content", self.rules_content)
+                                  if "change-scope-rules.json?" in path else "")
+            return row
+
+        def pages(path, key):
+            calls.append(("GET", path))
+            if path.startswith("actions/workflows/ci-dummy.yml/runs?"):
+                self.assertEqual(key, "workflow_runs")
+                return [run_row]
+            self.assertEqual(path, f"actions/runs/{run_row['id']}/jobs?filter=latest&per_page=100")
+            self.assertEqual(key, "jobs")
+            return [scope]
+
+        def command(*args):
+            calls.append(args)
+            allowed_log = ("gh", "api", f"repos/{merge.REPO}/actions/jobs/{scope['id']}/logs")
+            allowed_files = ("gh", "api", "--paginate", "--slurp",
+                             f"repos/{merge.REPO}/pulls/{pull['number']}/files?per_page=100")
+            self.assertIn(args, (allowed_log, allowed_files))
+            return fixture["log"] if args == allowed_log else json.dumps(fixture["files"])
+
+        with mock.patch.object(merge, "api", api), mock.patch.object(merge, "pages", pages), \
+                mock.patch.object(merge, "command", command), \
+                mock.patch.object(merge.subprocess, "run", side_effect=AssertionError("LIVE_COMMAND")):
+            try:
+                if direct:
+                    result = merge.classifier_exemption(
+                        pull, "ci-dummy.yml", run_row, scope, expected_scope=expected_scope)
+                else:
+                    result = merge.ci_exemption_proof(pull, expected_scope)
+            except merge.Refusal:
+                result = None
+        self.assertTrue(all(call[0] in ("GET", "gh") for call in calls))
+        return result
+
+    def fixture(self):
+        return copy.deepcopy(self.fixtures[0])
+
+    @staticmethod
+    def append(fixture, line):
+        fixture["log"] += line + "\n"
+
+    @staticmethod
+    def change_receipt(fixture, **changes):
+        lines = fixture["log"].splitlines()
+        for index, line in enumerate(lines):
+            body = merge.strip_log_framing(line)[0]
+            if body.strip().startswith("{"):
+                receipt = json.loads(body)
+                receipt.update(changes)
+                lines[index] = json.dumps(receipt)
+        fixture["log"] = "\n".join(lines) + "\n"
+
+    def test_both_actual_absent_event_receipts_are_accepted(self):
+        for source in self.fixtures:
+            with self.subTest(pr=source["number"]):
+                fixture = copy.deepcopy(source)
+                self.assertNotIn("EVENT_NAME", fixture["log"])
+                self.assertNotIn("PR_NUMBER", fixture["log"])
+                result = self.verify(fixture)
+                self.assertIsNotNone(result)
+                self.assertEqual(result["head"], fixture["pr"]["head"]["sha"])
+                self.assertEqual(result["run"], fixture["run"]["id"])
+                self.assertEqual(result["scope_job_id"], fixture["scope"]["id"])
+
+    def test_valid_logged_event_agrees_with_native(self):
+        for source in self.fixtures:
+            fixture = copy.deepcopy(source)
+            self.append(fixture, "EVENT_NAME: pull_request")
+            self.assertIsNotNone(self.verify(fixture))
+
+    def test_present_malformed_or_conflicting_event_never_becomes_absence(self):
+        invalid = ("EVENT_NAME:", "EVENT_NAME=", "EVENT_NAME:   ",
+                   "EVENT_NAME: pull_request extra", "EVENT_NAME: pull_request\textra",
+                   "EVENT_NAME pull_request", "EVENT_NAME", "EVENT_NAME: push",
+                   "EVENT_NAME: workflow_dispatch", "EVENT_NAME: pull_request_target",
+                   "EVENT_NAME: pull_request\nEVENT_NAME: push",
+                   "EVENT_NAME: pull_request\nEVENT_NAME:")
+        for line in invalid:
+            with self.subTest(line=line):
+                fixture = self.fixture()
+                self.append(fixture, line)
+                self.assertIsNone(self.verify(fixture))
+
+    def test_native_event_required_even_when_log_event_is_valid(self):
+        for event in (None, "", "push", "workflow_dispatch", "pull_request_target", "unknown"):
+            for logged in (False, True):
+                with self.subTest(event=event, logged=logged):
+                    fixture = self.fixture()
+                    fixture["run"]["event"] = event
+                    if logged:
+                        self.append(fixture, "EVENT_NAME: pull_request")
+                    self.assertIsNone(self.verify(fixture, direct=True))
+
+    def test_absent_event_requires_only_this_native_pr_even_with_logged_pr_number(self):
+        associations = (None, [], {}, [{}], ["malformed"], [{"number": 1}],
+                        [{"number": 10522}, {"number": 10536}],
+                        [{"number": 10522}, {"number": 10522}])
+        for values in associations:
+            for logged_pr in (False, True):
+                with self.subTest(associations=values, logged_pr=logged_pr):
+                    fixture = self.fixture()
+                    fixture["run"]["pull_requests"] = values
+                    if logged_pr:
+                        self.append(fixture, "PR_NUMBER: 10522")
+                    self.assertIsNone(self.verify(fixture))
+
+    def test_logged_pr_number_rules_remain_unchanged(self):
+        for line in ("PR_NUMBER:", "PR_NUMBER: 10522 extra", "PR_NUMBER: nope",
+                     "PR_NUMBER: 10536", "PR_NUMBER: 10522\nPR_NUMBER: 10536"):
+            fixture = self.fixture()
+            self.append(fixture, line)
+            self.assertIsNone(self.verify(fixture))
+        fixture = self.fixture()
+        self.append(fixture, "PR_NUMBER: 10522")
+        self.assertIsNotNone(self.verify(fixture))
+        # A present valid log retains the existing logged-PR-number path.
+        self.append(fixture, "EVENT_NAME: pull_request")
+        fixture["run"]["pull_requests"] = []
+        self.assertIsNotNone(self.verify(fixture))
+
+    def test_mandatory_bindings_and_native_workflow_identity_still_refuse_drift(self):
+        for key in ("BASE_SHA", "HEAD_SHA", "WORKFLOW_SHA"):
+            for operation in ("missing", "wrong", "conflict"):
+                fixture = self.fixture()
+                if operation == "missing":
+                    fixture["log"] = "\n".join(
+                        line for line in fixture["log"].splitlines() if key + ":" not in line)
+                elif operation == "wrong":
+                    fixture["log"] = "\n".join(
+                        key + ": " + "0" * 40 if key + ":" in line else line
+                        for line in fixture["log"].splitlines())
+                else:
+                    self.append(fixture, key + ": " + "0" * 40)
+                self.assertIsNone(self.verify(fixture))
+        for key, value in (("head_sha", "0" * 40), ("head_branch", "another-branch"),
+                           ("path", ".github/workflows/ci.yml")):
+            fixture = self.fixture()
+            fixture["run"][key] = value
+            self.assertIsNone(self.verify(fixture))
+        fixture = self.fixture()
+        commit = next(row for key, row in fixture["responses"].items() if key.startswith("git/commits/"))
+        commit["parents"][1]["sha"] = "0" * 40
+        self.assertIsNone(self.verify(fixture))
+
+    def test_policy_identity_rules_digest_and_path_confinement_still_refuse(self):
+        for fragment in ("ci-dummy.yml", "change_scope.py", "change-scope-rules.json"):
+            fixture = self.fixture()
+            key = next(key for key in fixture["responses"] if fragment + "?" in key)
+            fixture["responses"][key]["sha"] = "0" * 40
+            self.assertIsNone(self.verify(fixture))
+        fixture = self.fixture()
+        self.change_receipt(fixture, rules_sha256="0" * 64)
+        self.assertIsNone(self.verify(fixture))
+        fixture = self.fixture()
+        fixture["rules_content"] = base64.b64encode(b"altered rules").decode()
+        self.assertIsNone(self.verify(fixture))
+        for item in ({"filename": "app/api/route.ts"},
+                     {"filename": "website/renamed.js", "previous_filename": "app/old.ts"}):
+            fixture = self.fixture()
+            fixture["files"][0].append(item)
+            self.assertIsNone(self.verify(fixture))
+
+    def test_product_mixed_and_unknown_scope_never_become_exempt(self):
+        for scope in ("product", "mixed", "unknown"):
+            fixture = self.fixture()
+            self.change_receipt(fixture, scope=scope)
+            self.assertIsNone(self.verify(fixture))
+        for key, value in (("product_changed", True), ("paid_ci_exempt", False),
+                           ("ci_required", True), ("e2e_required", True)):
+            fixture = self.fixture()
+            self.change_receipt(fixture, **{key: value})
+            self.assertIsNone(self.verify(fixture))
+
+    def test_event_fallback_does_not_expand_app_test_only_policy(self):
+        text = "\n".join(line for line in test_only_log().splitlines() if "EVENT_NAME" not in line)
+        install({"test_only_log": text})
+        native = test_only_run()
+        native["pull_requests"] = [{"number": TEST_ONLY_NUMBER}]
+        self.assertIsNone(merge.app_test_only_classifier_proof(
+            test_only_pr(), "ci.yml", native, test_only_jobs()[0]))
 
 
 class ManifestMappingTests(unittest.TestCase):
