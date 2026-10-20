@@ -156,6 +156,23 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertFalse(manifest["entries"][0]["present"])
         self.assertEqual(stat.S_IMODE(self.bundle.stat().st_mode), 0o700)
 
+    def test_symlink_backup_never_changes_referent_permissions(self):
+        self.delete_file.chmod(0o640)
+        before = module.file_record(self.delete_file, str(self.delete_file))
+        record = module.create_rollback_bundle([self.delete_link], self.bundle)
+        self.assertEqual(module.file_record(self.delete_file, str(self.delete_file)), before)
+        payload = self.bundle / record["entries"][0]["payload"]
+        self.assertTrue(payload.is_symlink())
+        self.assertEqual(os.readlink(payload), str(self.delete_file))
+
+    def test_dangling_symlink_backup_does_not_require_a_referent(self):
+        self.delete_file.unlink()
+        record = module.create_rollback_bundle([self.delete_link], self.bundle)
+        payload = self.bundle / record["entries"][0]["payload"]
+        self.assertTrue(payload.is_symlink())
+        self.assertFalse(payload.exists())
+        self.assertEqual(os.readlink(payload), str(self.delete_file))
+
     def test_activation_refuses_release_missing_required_helper_before_switch(self):
         helper = self.new / "scripts" / "release-slot-reset-and-ack.py"
         helper.unlink()
