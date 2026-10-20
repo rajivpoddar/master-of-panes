@@ -41,7 +41,9 @@ export interface IssueOwnershipProjection {
   onReleased(issue: number, slot: number, repositoryId: string | null | undefined): Promise<IssueProjectionOutcome>;
 }
 
-export const DEFAULT_PROJECTION_REPOSITORY = "heydonna-app/heydonna-app";
+export const DEFAULT_PROJECTION_REPOSITORY = "Scribie/heydonna-app";
+// Stored assignment identities predate the repository transfer; do not migrate them.
+const LEGACY_PROJECTION_REPOSITORY = "heydonna-app/heydonna-app";
 export const DEFAULT_LEGACY_REPOSITORY_ID = "992731533";
 
 /** Outcome used when no projector is wired (tests, non-PM deployments). */
@@ -127,6 +129,7 @@ export function createGhIssueOwnershipProjection(
   const legacyIds = new Set([
     process.env.MOP_LEGACY_REPOSITORY_ID ?? DEFAULT_LEGACY_REPOSITORY_ID,
     ...(options.legacyRepositoryIds ?? []),
+    LEGACY_PROJECTION_REPOSITORY,
     repository,
   ]);
 
