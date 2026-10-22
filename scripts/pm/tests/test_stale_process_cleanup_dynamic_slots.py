@@ -282,6 +282,13 @@ class StatusFileTests(unittest.TestCase):
                           "skipped_protected": 0, "skipped_young": 0, "found": [], "skipped": [],
                           "terminated": [], "exiting_pids": [], "refused": [], "errors": []},
         ).start()
+        self.codex_broker_cap = patch.object(
+            MODULE,
+            "codex_broker_policy_check",
+            return_value={"class": "codex_broker_cap", "action": "apply", "orphan_min": 20, "extra_min": 10, "idle_min": 30,
+                          "roots": 0, "before": 0, "killed": 0, "after": 0, "skipped": [], "found": [],
+                          "terminated": [], "refused": [], "errors": [], "rules": {}},
+        ).start()
         self.addCleanup(patch.stopall)
 
     def test_apply_main_cannot_reach_live_ps_signals_or_history(self) -> None:
@@ -299,6 +306,7 @@ class StatusFileTests(unittest.TestCase):
         self.assertTrue(self.replayd_check.call_args.args[1])
         self.assertTrue(self.codex_renderer_check.call_args.args[1])
         self.assertTrue(self.codex_broker_check.call_args.args[0])
+        self.assertTrue(self.codex_broker_cap.call_args.args[0])
         self.kill.assert_not_called()
         self.run_mock.assert_called_once_with(["ps", "-axo", "pid=,ppid=,etime=,command="], timeout=10)
         self.save_history.assert_called_once()

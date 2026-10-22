@@ -97,6 +97,17 @@ class StaleProcessCleanupTests(unittest.TestCase):
         )
         broker_patcher.start()
         self.addCleanup(broker_patcher.stop)
+        # The Codex broker cap policy (Rajiv 2026-10-22) also reads host `ps` and SIGNALS with
+        # --apply; isolate it here. Its own behavior is covered by test_codex_broker_cap_policy.py.
+        cap_patcher = patch.object(
+            MODULE,
+            "codex_broker_policy_check",
+            return_value={"class": "codex_broker_cap", "action": "apply", "orphan_min": 20, "extra_min": 10, "idle_min": 30,
+                          "roots": 0, "before": 0, "killed": 0, "after": 0, "skipped": [], "found": [],
+                          "terminated": [], "refused": [], "errors": [], "rules": {}},
+        )
+        cap_patcher.start()
+        self.addCleanup(cap_patcher.stop)
 
     def test_main_status_default_is_isolated_from_live_heartbeat_path(self) -> None:
         live = Path("/tmp/stale-process-cleanup-status.json")
@@ -349,6 +360,7 @@ class StaleProcessCleanupTests(unittest.TestCase):
                     "roots": 0, "before": 0, "killed": 0, "exiting": 0, "after": 0,
                     "skipped_protected": 0, "skipped_young": 0,
                 },
+                "codex_broker_cap": {"roots": 0, "before": 0, "killed": 0, "after": 0, "rules": {}},
             },
         )
         self.assertIn("terminated=1 refused=1", stdout.getvalue())

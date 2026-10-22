@@ -156,6 +156,9 @@ class CodexBrokerCleanupTests(unittest.TestCase):
                         patch.object(MODULE, "replayd_check", return_value={"pid": None, "cpu": None, "streak": 0, "action": "none"}), \
                         patch.object(MODULE, "codex_renderer_check", return_value={"class": "codex_renderer", "observed": 0, "over_threshold": 0, "pending": 0, "found": [], "terminated": [], "refused": [], "errors": []}), \
                         patch.object(MODULE, "codex_broker_table", side_effect=table), \
+                        patch.object(MODULE, "codex_broker_policy_check", return_value={
+                            "action": "scan_only", "roots": 0, "before": 0, "killed": 0, "after": 0, "rules": {},
+                            "found": [], "refused": [], "errors": []}), \
                         patch.object(MODULE, "_kill_members", side_effect=forbid("_kill_members")), \
                         patch.object(MODULE.os, "kill") as send, patch.object(MODULE, "alive", return_value=False), \
                         patch.object(MODULE.time, "sleep"), patch.object(MODULE, "run", side_effect=forbid("run")), \
