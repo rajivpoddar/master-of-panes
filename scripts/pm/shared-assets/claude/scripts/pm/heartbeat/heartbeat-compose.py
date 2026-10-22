@@ -9,8 +9,10 @@
 ONLY when the post carries a merge ask, an admission ask or a ladder
 escalation (Rajiv 11:02 IST same thread).
 
-Both: at most ~20 lines, no tables, "quiet" for empty blocks, housekeeping
-collapsed to one `_Ops:_` footer line only when something failed.
+Both: compact blocks, no tables, "quiet" for empty operational blocks, housekeeping
+collapsed to one `_Ops:_` footer line only when something failed. Decisions pending
+on Rajiv use the read-only ledger (up to 6 recent rows plus overflow/stale counts),
+with one blank spacer before the section. The 1h post also reports inactive agents.
 
 The composer never posts to Slack. It prints the message; the calling skill posts.
 Inputs are either collected live (default) or given as JSON files (--*-json)
@@ -23,8 +25,10 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -325,6 +329,144 @@ def email_block(doc: dict | None, limit: int = 8) -> list[str]:
     return [f"*Email digest (last 3h):* {total} unread need your attention", *rows]
 
 
+PM_PROJECT = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app"
+PM_OPS_DB = PM_PROJECT / "state/pm-ops.db"
+MAX_DECISIONS = 6
+MAX_INACTIVE_AGENTS = 4
+
+
+def _compact(value, limit: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# Rajiv C0ALZJHGE49/1792637124.844719, ts 1792637256.052779.
+def read_decisions(path: Path = PM_OPS_DB, now: datetime | None = None) -> dict | None:
+    """Read only open decision-kind / Rajiv-owned rows; never create or repair the ledger."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, kind, target_type, target_id, pr, issue, owner, title, required_action, created_at, updated_at "
+                "FROM obligations WHERE status='open' AND "
+                "(kind IN ('rajiv_decision','rajiv_decision_pending','decision_pending','product_decision') "
+                "OR owner='rajiv') ORDER BY updated_at DESC, id DESC"
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return None
+    items, stale = [], 0
+    for row in rows:
+        updated = _parse_ts(row["updated_at"])
+        if updated is not None and updated >= now - timedelta(days=7):
+            items.append(dict(row))
+        else:
+            stale += 1  # unknown freshness needs ledger triage too, never a current decision claim
+    return {"items": items, "stale": stale}
+
+
+def decision_block(doc: dict | None, now: datetime) -> list[str]:
+    head = "*Decisions pending on Rajiv:*"
+    if doc is None:
+        return [head + " unavailable"]
+    items = doc.get("items", [])
+    lines = [head] if items else [head + " None."]
+    for row in items[:MAX_DECISIONS]:
+        target = (f"PR#{row['pr']}" if row.get("pr") else f"#{row['issue']}" if row.get("issue")
+                  else f"{row.get('target_type') or 'row'}:{row.get('target_id') or row['id']}")
+        phrase = row.get("title") or row.get("required_action") or row.get("kind") or "Decision needed"
+        started = _parse_ts(row.get("created_at")) or _parse_ts(row.get("updated_at"))
+        minutes = max(0, int((now - started).total_seconds() // 60)) if started else None
+        age = (f"{minutes // 1440}d {minutes % 1440 // 60}h" if minutes is not None and minutes >= 1440
+               else _fmt_dur(minutes) if minutes is not None else "unknown")
+        route = "held by Rajiv" if row.get("owner") == "rajiv" else "via CTO"
+        lines.append(f"• {_compact(target, 60)} — {_compact(phrase, 92)} — age {age} — {route}")
+    if len(items) > MAX_DECISIONS:
+        lines.append(f"• +{len(items) - MAX_DECISIONS} more")
+    if doc.get("stale"):
+        lines.append(f"• +{doc['stale']} stale (ledger triage)")
+    return lines
+
+
+# Rajiv DM D0AMF0XE6TS/1792637361.212159, ts 1792638231.158209.
+def classify_agent(last_record: dict | None, modified_at: float, now: datetime) -> str:
+    """Pure transcript classifier, not a process-liveness or TaskStop decision."""
+    if not isinstance(last_record, dict) or not last_record.get("type"):
+        return "unknown"
+    if last_record.get("type") == "assistant" and (last_record.get("message") or {}).get("stop_reason") == "end_turn":
+        return "done"
+    idle_s = max(0, now.timestamp() - modified_at)
+    if idle_s > 24 * 3600:
+        return "expired"
+    return "inactive" if idle_s >= 3600 else "active"
+
+
+def _last_agent_record(path: Path) -> dict:
+    """Read only the final JSONL record, even when it is larger than a read chunk."""
+    with path.open("rb") as handle:
+        position = handle.seek(0, os.SEEK_END)
+        data = b""
+        while position:
+            size = min(position, 8192)
+            position -= size
+            handle.seek(position)
+            data = (handle.read(size) + data).rstrip(b"\r\n")
+            boundary = data.rfind(b"\n")
+            if boundary >= 0:
+                return json.loads(data[boundary + 1:])
+        return json.loads(data)
+
+
+def read_agents(root: Path = PM_PROJECT, now: datetime | None = None) -> dict | None:
+    """Read PM subagent tails and sibling metadata. Never stop or modify an agent."""
+    now = now or datetime.now(timezone.utc)
+    if not root.is_dir():
+        return None
+    running, inactive, unreadable = 0, [], 0
+    for path in root.glob("*/subagents/agent-*.jsonl"):
+        try:
+            modified_at = path.stat().st_mtime
+            if now.timestamp() - modified_at > 24 * 3600:
+                continue
+            state = classify_agent(_last_agent_record(path), modified_at, now)
+            if state == "unknown":
+                unreadable += 1
+            if state not in ("active", "inactive"):
+                continue
+            running += 1
+            if state == "inactive":
+                try:
+                    meta = json.loads(path.with_suffix(".meta.json").read_text())
+                except (OSError, ValueError):
+                    meta = {}
+                description = (meta.get("description") or meta.get("agentType") or path.stem) if isinstance(meta, dict) else path.stem
+                inactive.append({"description": str(description), "idle_min": int((now.timestamp() - modified_at) // 60)})
+        except FileNotFoundError:
+            continue  # transcript retired during collection, not a running-agent claim
+        except (OSError, ValueError, TypeError, AttributeError):
+            unreadable += 1
+    inactive.sort(key=lambda row: (-row["idle_min"], row["description"]))
+    return {"running": running, "inactive": inactive, "unreadable": unreadable}
+
+
+def agents_line(doc: dict | None) -> str:
+    if doc is None:
+        return "*Agents:* unavailable"
+    inactive = doc.get("inactive", [])
+    line = f"*Agents:* {doc['running']} running · "
+    if inactive:
+        names = [f"{_compact(row['description'], 64)} (idle {row['idle_min']}m)" for row in inactive[:MAX_INACTIVE_AGENTS]]
+        if len(inactive) > MAX_INACTIVE_AGENTS:
+            names.append(f"+{len(inactive) - MAX_INACTIVE_AGENTS} more")
+        line += f"{len(inactive)} inactive ≥60m: " + ", ".join(names)
+    else:
+        line += "none inactive"
+    if doc.get("unreadable"):
+        line += f" · {doc['unreadable']} unreadable"
+    return line
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -342,6 +484,8 @@ def compose(
     usage_lines: list[str] | None = None,
     cleanup_alert: str | None = None,
     email_doc: dict | None = None,
+    decisions: dict | None = None,
+    agents: dict | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -389,6 +533,10 @@ def compose(
         sl_lines, sl_tldr, slot_actions = slot_block(slots, now, release_seen)
         parts.append(sl_tldr)
         body += ["", *sl_lines]
+    if mode == "1h":
+        body.append(agents_line(agents))
+    # Exactly one empty spacer before this shared 1h/3h section.
+    body += ["", *decision_block(decisions, now)]
 
     asks = []
     if merge_asks:
@@ -484,6 +632,8 @@ def main() -> int:
     parser.add_argument("--active-json")
     parser.add_argument("--no-active-users", action="store_true")
     parser.add_argument("--slots-json")
+    parser.add_argument("--decisions-json")
+    parser.add_argument("--agents-json")
     parser.add_argument("--no-slots", action="store_true")
     parser.add_argument("--escalation", action="append", default=[], help="ladder-approved escalation line")
     parser.add_argument("--no-in-app", action="store_true")
@@ -491,6 +641,15 @@ def main() -> int:
     args = parser.parse_args()
 
     failures: list[str] = []
+    now = datetime.now(timezone.utc)
+    decisions = _load(args.decisions_json) if args.decisions_json else read_decisions(PM_OPS_DB, now)
+    agents = None
+    if args.mode == "1h":
+        agents = _load(args.agents_json) if args.agents_json else read_agents(PM_PROJECT, now)
+        if agents is None:
+            failures.append("agents: transcripts unavailable")
+    if decisions is None:
+        failures.append("decisions: ledger unavailable")
     hours = "3" if args.mode == "3h" else "1"
     py = sys.executable
     axiom = _load(args.axiom_json)
@@ -563,7 +722,7 @@ def main() -> int:
     if args.save_inputs:
         out = Path(args.save_inputs)
         out.mkdir(parents=True, exist_ok=True)
-        for name, value in (("axiom", axiom), ("map", mapping_doc), ("support", support), ("prs", prs), ("active", active), ("slots", slots), ("actions", pm_actions)):
+        for name, value in (("axiom", axiom), ("map", mapping_doc), ("support", support), ("prs", prs), ("active", active), ("slots", slots), ("actions", pm_actions), ("decisions", decisions), ("agents", agents)):
             (out / f"{name}.json").write_text(json.dumps(value, indent=2))
 
     usage_lines = None
@@ -588,7 +747,7 @@ def main() -> int:
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
-        email_doc=email_doc,
+        email_doc=email_doc, decisions=decisions, agents=agents,
     ))
     if pm_actions:
         print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)

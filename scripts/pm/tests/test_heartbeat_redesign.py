@@ -476,7 +476,7 @@ def test_slot_block_mop_unreachable_does_not_fail():
     assert lines == ["*Slots:* MoP unreachable"] and actions == []
 
 
-def test_compose_with_slots_and_active_users_stays_under_24_lines():
+def test_compose_with_slots_active_users_agents_and_empty_decisions_stays_under_27_lines():
     active = {"count": 3, "prior_count": 5, "internal": 1,
               "users": [{"user": f"u{i}***@x.com", "files": i, "actions": 1} for i in range(5)]}
     prs = [{"number": str(8000 + i), "head": "abc1234", "state": "open", "owner": "s1", "next": "wait"} for i in range(12)]
@@ -485,7 +485,8 @@ def test_compose_with_slots_and_active_users_stays_under_24_lines():
                           {}, prs, active=active, include_active=True, slots=six, include_slots=True)
     lines = msg.splitlines()
     assert "*ACTIONS (PM):* idle-slot S2 #8478 idle 25m; idle-slot S3 free idle 40m" in lines
-    assert len(lines) <= 24
+    # Rajiv's Agents line + the spacer and empty Decisions section add 3 lines.
+    assert len(lines) <= 27
 
 
 def test_known_codes_map_marks_code_mapped_not_new(tmp_path):

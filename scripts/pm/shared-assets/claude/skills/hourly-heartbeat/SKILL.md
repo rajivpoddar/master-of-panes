@@ -77,7 +77,18 @@ STEP 1b — Spark training line (Rajiv DM D0AMF0XE6TS ts 1792476770.692999: "add
 
 STEP 2 — check: first line is "*Hourly — HH:MM IST*", or starts with
   "<@U0BNFGX2UAX> " ONLY when an "*Asks:*" line (merge/admission/escalation)
-  exists. ≤ ~20 lines, no tables. Do not hand-edit blocks.
+  exists. Keep blocks compact, no tables. Do not hand-edit blocks.
+  - After Slots, verify the report-only "*Agents:*" line: PM-project subagent
+    transcripts written in the last 24h, excluding final assistant end_turn;
+    inactive means no write for ≥60m. Cap 4 descriptions, then "+N more";
+    otherwise "none inactive". This composer never stops agents.
+  - Verify "*Decisions pending on Rajiv:*" with ONE blank spacer line before it
+    (after Agents). Read-only pm-ops ledger: open decision-kind / Rajiv-owned
+    rows updated within 7 days, at most 6 target/phrase/age/held-by-Rajiv-or-via-CTO
+    lines plus "+N more"; older rows appear only as "+N stale (ledger triage)".
+    Show "None." when no recent rows, "unavailable" on a read failure.
+  Sources: Rajiv C0ALZJHGE49 thread 1792637124.844719, ts 1792637256.052779;
+  DM D0AMF0XE6TS thread 1792637361.212159, ts 1792638231.158209.
 
 STEP 3 — post ONE NEW TOP-LEVEL message (no -t):
   SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-1h-post.txt
