@@ -252,7 +252,10 @@ class LiveConfigCompatibilityTests(unittest.TestCase):
             "pathValue": os.environ.get("PATH", ""),
         })
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result_json(result)["path"], CANONICAL)
+        path_cli = shutil.which("codex", path=os.environ.get("PATH", ""))
+        self.assertIsNotNone(path_cli, "the current PATH must provide the CLI for this live compatibility check")
+        self.assertEqual(result_json(result)["path"], path_cli)
+        self.assertTrue(os.access(path_cli, os.X_OK))
 
     def test_configured_binary_and_model_from_synthetic_config(self):
         # Authentication is a live-environment probe, not a portable test.
