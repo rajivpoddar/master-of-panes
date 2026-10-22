@@ -1866,6 +1866,228 @@ def codex_broker_orphan_check(apply: bool, min_hours: float, term_wait_s: float)
     return out
 
 
+# ---------------------------------------------------------------------------
+# Codex broker cap policy (Rajiv 2026-10-22): the report-only 6h scan above never
+# freed anything while 65 plugin processes piled up. These rules DO signal, but
+# only same-user trees, never ChatGPT.app-owned ones, never the running script,
+# and never a broker with an in-flight companion review.
+#   (a) ppid-1 orphan broker / orphan app-server older than ORPHAN_MIN
+#   (b) per owning session (broker --cwd): keep the newest broker, kill extras older than EXTRA_MIN
+#   (c) broker with no socket client older than IDLE_MIN
+# ---------------------------------------------------------------------------
+CODEX_BROKER_ORPHAN_MIN = 20
+CODEX_BROKER_EXTRA_MIN = 10
+CODEX_BROKER_IDLE_MIN = 30
+_COMPANION_RE = re.compile(r"codex-review-companion\.mjs|codex-companion\.mjs")
+_ENDPOINT_RE = re.compile(r"--endpoint\s+(\S+)")
+_CWD_RE = re.compile(r"--cwd\s+(.+?)(?=\s+--[a-z-]+(?:\s|$)|$)")
+
+
+def codex_broker_endpoint_info(command: str) -> dict[str, str | None]:
+    m = _ENDPOINT_RE.search(command)
+    endpoint = m.group(1) if m else None
+    sock = endpoint[len("unix:"):] if endpoint and endpoint.startswith("unix:") else None
+    c = _CWD_RE.search(command)
+    return {"endpoint": endpoint, "socket": sock,
+            "session_dir": os.path.dirname(sock) if sock else None,
+            "cwd": c.group(1).strip() if c else None}
+
+
+def codex_broker_inflight(info: dict[str, str | None], companion_texts: list[str]) -> bool:
+    """True when a running companion process (argv or env) references this broker's socket/endpoint."""
+    needles = [v for v in (info["endpoint"], info["socket"], info["session_dir"]) if v]
+    return any(n in text for text in companion_texts for n in needles)
+
+
+def codex_companion_texts(table: dict[int, dict[str, Any]]) -> list[str] | None:
+    """argv+environment text of every running codex companion; None if it cannot be read."""
+    texts: list[str] = []
+    for row in table.values():
+        if not _COMPANION_RE.search(row["command"]) or "app-server-broker" in row["command"]:
+            continue
+        text = row["command"]
+        try:
+            res = run(["ps", "-E", "-ww", "-o", "command=", "-p", str(row["pid"])], timeout=5)
+            if res.returncode == 0:
+                text += " " + res.stdout
+        except Exception:
+            return None
+        texts.append(text)
+    return texts
+
+
+def codex_broker_has_client(pid: int, socket_path: str | None) -> bool | None:
+    """Accepted connections show the listener path in the broker's own fd table: >=2 entries = a client."""
+    if not socket_path:
+        return None
+    try:
+        res = run(["lsof", "-nP", "-a", "-p", str(pid), "-U"], timeout=8)
+    except Exception:
+        return None
+    if res.returncode not in (0, 1):
+        return None
+    return sum(1 for line in res.stdout.splitlines() if line.rstrip().endswith(socket_path)) >= 2
+
+
+def codex_broker_policy_plan(
+    table: dict[int, dict[str, Any]], uid: int, self_pid: int,
+    companion_texts: list[str], has_client: Callable[[int, str | None], bool | None],
+    orphan_min_s: int = CODEX_BROKER_ORPHAN_MIN * 60, extra_min_s: int = CODEX_BROKER_EXTRA_MIN * 60,
+    idle_min_s: int = CODEX_BROKER_IDLE_MIN * 60,
+) -> dict[str, Any]:
+    """Pure selection. Returns roots (with members + the rules that fired) and skipped reasons."""
+    kids: dict[int, list[int]] = {}
+    for r in table.values():
+        kids.setdefault(r["ppid"], []).append(r["pid"])
+
+    def chain(pid: int) -> list[dict[str, Any]]:
+        out, seen, cur = [], {pid}, table.get(pid, {}).get("ppid", 1)
+        while cur > 1 and cur not in seen and cur in table:
+            seen.add(cur)
+            out.append(table[cur])
+            cur = table[cur]["ppid"]
+        return out
+
+    def descendants(pid: int) -> list[dict[str, Any]]:
+        out, stack, seen = [], list(kids.get(pid, [])), set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen or cur not in table:
+                continue
+            seen.add(cur)
+            out.append(table[cur])
+            stack.extend(kids.get(cur, []))
+        return out
+
+    def gone(r: dict[str, Any]) -> bool:
+        return "E" in r["stat"] or r["stat"][:1] == "Z"
+
+    own = {self_pid} | {r["pid"] for r in chain(self_pid)}
+    skipped: list[dict[str, Any]] = []
+    cands: list[dict[str, Any]] = []
+    for row in sorted(table.values(), key=lambda r: r["pid"]):
+        shape = _codex_root_shape(row["command"])
+        if shape is None or row["uid"] != uid or gone(row):
+            continue
+        if shape == "orphan_app_server" and row["ppid"] != 1:
+            continue
+        if shape == "broker" and not re.search(r"app-server-broker\.mjs\s+serve(?:\s|$)", row["command"]):
+            continue
+        tree = descendants(row["pid"])
+        reason = None
+        if _CODEX_CHATGPT_RE.search(row["command"]) or any(_CODEX_CHATGPT_RE.search(a["command"]) for a in chain(row["pid"])):
+            reason = "chatgpt_owned"
+        elif own & ({row["pid"]} | {m["pid"] for m in tree}):
+            reason = "contains_self"
+        info = codex_broker_endpoint_info(row["command"]) if shape == "broker" else {"endpoint": None, "socket": None, "session_dir": None, "cwd": None}
+        if reason is None and shape == "broker" and codex_broker_inflight(info, companion_texts):
+            reason = "inflight_companion_review"
+        cands.append({"row": row, "shape": shape, "tree": tree, "info": info, "reason": reason})
+
+    # newest broker per owning session (cwd); in-flight/protected ones still count as "newest".
+    newest: dict[str, int] = {}
+    for c in cands:
+        if c["shape"] != "broker" or c["reason"] == "chatgpt_owned":
+            continue
+        key = c["info"]["cwd"] or f"pid:{c['row']['pid']}"
+        cur = newest.get(key)
+        if cur is None or (c["row"]["age_seconds"], -c["row"]["pid"]) < (table[cur]["age_seconds"], -cur):
+            newest[key] = c["row"]["pid"]
+
+    roots: list[dict[str, Any]] = []
+    for c in cands:
+        row, age = c["row"], c["row"]["age_seconds"]
+        if c["reason"]:
+            skipped.append({"pid": row["pid"], "age": fmt_age(age), "reason": c["reason"]})
+            continue
+        rules: list[str] = []
+        if row["ppid"] == 1 and age >= orphan_min_s:
+            rules.append("a_orphan_ppid1")
+        if c["shape"] == "broker":
+            key = c["info"]["cwd"] or f"pid:{row['pid']}"
+            if newest.get(key) != row["pid"] and age >= extra_min_s:
+                rules.append("b_extra_per_session")
+            if age >= idle_min_s and has_client(row["pid"], c["info"]["socket"]) is False:
+                rules.append("c_idle_no_client")
+        if not rules:
+            skipped.append({"pid": row["pid"], "age": fmt_age(age), "reason": "no_rule_matched"})
+            continue
+        members = [row] + [m for m in c["tree"] if m["uid"] == uid and not gone(m)]
+        roots.append({"root": row, "shape": c["shape"], "rules": rules, "members": members})
+    return {"roots": roots, "skipped": skipped, "members": [m for r in roots for m in r["members"]]}
+
+
+def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, extra_min: int, idle_min: int) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "class": "codex_broker_cap", "action": "apply" if apply else "scan_only",
+        "orphan_min": orphan_min, "extra_min": extra_min, "idle_min": idle_min,
+        "roots": 0, "before": 0, "killed": 0, "after": 0, "skipped": [], "found": [],
+        "terminated": [], "refused": [], "errors": [], "rules": {},
+    }
+    table = codex_broker_table()
+    texts = codex_companion_texts(table) if table is not None else None
+    if table is None or texts is None:
+        out["errors"].append("ps_failed" if table is None else "companion_scan_failed")
+        out["after"] = "unknown"
+        return out  # fail closed: never signal when in-flight state is unknown
+    uid, me = os.getuid(), os.getpid()
+    mins = (orphan_min * 60, extra_min * 60, idle_min * 60)
+    plan = codex_broker_policy_plan(table, uid, me, texts, codex_broker_has_client, *mins)
+    out.update(roots=len(plan["roots"]), before=len(plan["members"]), skipped=plan["skipped"])
+    for r in plan["roots"]:
+        for rule in r["rules"]:
+            out["rules"][rule] = out["rules"].get(rule, 0) + 1
+        out["found"].append({"pid": r["root"]["pid"], "shape": r["shape"], "rules": r["rules"],
+                             "age": fmt_age(r["root"]["age_seconds"]), "members": len(r["members"]),
+                             "cwd": codex_broker_endpoint_info(r["root"]["command"])["cwd"]})
+    out["after"] = out["before"]
+    if not apply or not plan["roots"]:
+        return out
+    # Re-plan on a fresh snapshot (re-reading in-flight companions) and signal only identity-stable members.
+    table2 = codex_broker_table()
+    texts2 = codex_companion_texts(table2) if table2 is not None else None
+    if table2 is None or texts2 is None:
+        out["errors"].append("recheck_failed")
+        return out
+    fresh = codex_broker_policy_plan(table2, uid, me, texts2, codex_broker_has_client, *mins)
+    fresh_ids = {_codex_identity(r["root"]) for r in fresh["roots"]}
+    targets: list[dict[str, Any]] = []
+    for r in plan["roots"]:
+        if _codex_identity(r["root"]) not in fresh_ids:
+            out["refused"].append({"pid": r["root"]["pid"], "reason": "root_no_longer_eligible"})
+            continue
+        fr = next(x for x in fresh["roots"] if _codex_identity(x["root"]) == _codex_identity(r["root"]))
+        targets.extend(fr["members"])
+    pids = {m["pid"]: m for m in targets}
+    for m in pids.values():
+        try:
+            os.kill(m["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            out["errors"].append(f"term:{m['pid']}:{type(exc).__name__}")
+    time.sleep(term_wait_s)
+    table3 = codex_broker_table() or {}
+    for pid, m in pids.items():
+        cur = table3.get(pid)
+        if cur is None:
+            out["terminated"].append(pid)
+        elif _codex_identity(cur) == _codex_identity(m):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                time.sleep(0.2)
+                (out["terminated"] if not alive(pid) else out["errors"]).append(pid if not alive(pid) else f"still_alive:{pid}")
+            except ProcessLookupError:
+                out["terminated"].append(pid)
+            except Exception as exc:
+                out["errors"].append(f"kill:{pid}:{type(exc).__name__}")
+        else:
+            out["refused"].append({"pid": pid, "reason": "identity_changed_before_kill"})
+    out["killed"] = len(out["terminated"])
+    out["after"] = max(0, out["before"] - out["killed"])
+    return out
+
+
 def run_self_test() -> int:
     """Pure-function policy tests (no process is touched)."""
     def row(pid, ppid, cat, age_min, cwd="/x", daemon=False, cmd=None, cpu=100):
@@ -1995,7 +2217,62 @@ def run_self_test() -> int:
     changed = {**detached, 104: {**detached[104], "ppid": 50}}
     assert not codex_broker_verify(entry, changed, 6 * 3600, me, 9999, tbl[104], True)[0]
     assert not codex_broker_verify(entry, None, 6 * 3600, me, 9999)[0]
-    print("SELF_TEST ok (including Codex broker apply fences)")
+    # --- codex broker cap policy (a)/(b)/(c), ChatGPT exemption, in-flight guard ---
+    def bcmd(sess, cwd):
+        return (f"/opt/homebrew/bin/node /Users/rajiv/.claude/plugins/cache/openai-codex/codex/1.0.1/scripts/app-server-broker.mjs "
+                f"serve --endpoint unix:/var/folders/x/cxc-{sess}/broker.sock --cwd {cwd} --pid-file /var/folders/x/cxc-{sess}/broker.pid")
+    m_ = 60  # minutes -> hours helper
+    def mrow(pid, ppid, cmd, age_min, stat="S", uid=me):
+        return prow(pid, ppid, cmd, age_min / 60, stat=stat, uid=uid)
+    CL = "/Users/rajiv/.local/bin/claude --foo"
+    base = [mrow(1, 0, "/sbin/launchd", 9999), mrow(50, 1, CL, 600)]
+    def pplan(rows, companions=(), client=lambda pid, sock: True, self_pid=9999):
+        t = {r["pid"]: r for r in base + rows}
+        return codex_broker_policy_plan(t, me, self_pid, list(companions), client)
+    def ids(p):
+        return sorted(r["root"]["pid"] for r in p["roots"])
+    # (a) ppid-1 orphan broker + app-server children >20m killable; 19m kept; live-parent broker not hit by (a)
+    p = pplan([mrow(200, 1, bcmd("a", "/s1"), 25), mrow(201, 200, NS, 25), mrow(202, 201, VS, 25),
+               mrow(210, 1, bcmd("b", "/s2"), 19), mrow(220, 50, bcmd("c", "/s3"), 300)])
+    assert ids(p) == [200], ids(p)
+    assert sorted(m["pid"] for m in p["members"]) == [200, 201, 202]
+    assert p["roots"][0]["rules"] == ["a_orphan_ppid1"]
+    # (a) orphan app-server whose broker died (ppid 1, >20m) is killable; one with a live parent is not
+    p = pplan([mrow(230, 1, NS, 30), mrow(231, 230, VS, 30), mrow(240, 50, NS, 30)])
+    assert ids(p) == [230] and 240 not in [m["pid"] for m in p["members"]]
+    # (b) keep newest per session, kill extras >10m, spare extras <=10m, other sessions untouched
+    p = pplan([mrow(300, 50, bcmd("o", "/s"), 120), mrow(301, 50, bcmd("n", "/s"), 15),
+               mrow(302, 50, bcmd("y", "/s"), 5), mrow(303, 50, bcmd("z", "/other"), 200)])
+    assert ids(p) == [300, 301], ids(p)
+    assert all(r["rules"] == ["b_extra_per_session"] for r in p["roots"])
+    p = pplan([mrow(310, 50, bcmd("o", "/s"), 8), mrow(311, 50, bcmd("n", "/s"), 3)])
+    assert ids(p) == []  # extra is under 10m
+    # (c) idle no-client >30m killable, <30m or with a client kept, unknown client (None) kept
+    live = [mrow(400, 50, bcmd("i", "/c1"), 45)]
+    assert ids(pplan(live, client=lambda pid, sock: False)) == [400]
+    assert pplan(live, client=lambda pid, sock: False)["roots"][0]["rules"] == ["c_idle_no_client"]
+    assert ids(pplan(live, client=lambda pid, sock: True)) == []
+    assert ids(pplan(live, client=lambda pid, sock: None)) == []
+    assert ids(pplan([mrow(401, 50, bcmd("j", "/c2"), 25)], client=lambda pid, sock: False)) == []
+    # ChatGPT.app-owned stays exempt under every rule
+    chat = [mrow(60, 1, "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT", 900),
+            mrow(500, 60, "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server --listen stdio://", 900),
+            mrow(501, 60, bcmd("g", "/g"), 900), mrow(502, 1, bcmd("g2", "/g"), 900)]
+    p = pplan(chat, client=lambda pid, sock: False)
+    assert 501 not in ids(p) and 500 not in [m["pid"] for m in p["members"]]
+    # in-flight companion review (argv references socket/endpoint/session dir) protects the broker
+    inflight = [mrow(600, 1, bcmd("f", "/f"), 120), mrow(601, 1, bcmd("h", "/h"), 120)]
+    comp = ["node /x/codex-review-companion.mjs --endpoint unix:/var/folders/x/cxc-f/broker.sock review"]
+    p = pplan(inflight, companions=comp, client=lambda pid, sock: False)
+    assert ids(p) == [601] and {"pid": 600, "age": fmt_age(7200), "reason": "inflight_companion_review"} in p["skipped"]
+    assert ids(pplan(inflight[:1], companions=["x CODEX_BROKER=/var/folders/x/cxc-f/ y"])) == []  # env text counts too
+    assert codex_broker_inflight(codex_broker_endpoint_info(bcmd("f", "/f")), comp)
+    assert not codex_broker_inflight(codex_broker_endpoint_info(bcmd("h", "/h")), comp)
+    # other users, exiting processes and the running script's own tree are never selected
+    assert ids(pplan([mrow(700, 1, bcmd("u", "/u"), 90, uid=999), mrow(701, 1, bcmd("e", "/e"), 90, stat="E")])) == []
+    assert ids(pplan([mrow(710, 1, bcmd("s", "/s9"), 90), mrow(711, 710, NS, 90)], self_pid=711)) == []
+    assert codex_broker_endpoint_info(bcmd("q", "/a b/c"))["cwd"] == "/a b/c"
+    print("SELF_TEST ok (including Codex broker apply fences and broker cap policy)")
     return 0
 
 
@@ -2022,6 +2299,12 @@ def _main() -> int:
         "--codex-broker-min-hours", type=float, default=CODEX_BROKER_MIN_HOURS,
         help="report ppid-1 Codex broker trees at least this many hours old; always report-only, including --apply (default 6)",
     )
+    parser.add_argument("--codex-broker-orphan-min", type=int, default=CODEX_BROKER_ORPHAN_MIN,
+                        help="kill ppid-1 Codex brokers / app-servers (+children) at least this many minutes old (default 20)")
+    parser.add_argument("--codex-broker-extra-min", type=int, default=CODEX_BROKER_EXTRA_MIN,
+                        help="per owning session keep only the newest broker; kill extras at least this many minutes old (default 10)")
+    parser.add_argument("--codex-broker-idle-min", type=int, default=CODEX_BROKER_IDLE_MIN,
+                        help="kill brokers with no socket client at least this many minutes old (default 30)")
     parser.add_argument("--status-output", default=str(STATUS_JSON), help="heartbeat status JSON path")
     parser.add_argument(
         "--attest-slotless-reap",
@@ -2090,6 +2373,8 @@ def _main() -> int:
     replayd = replayd_check(history, args.apply)
     codex_renderers = codex_renderer_check(history, args.apply)
     codex_brokers = codex_broker_orphan_check(args.apply, args.codex_broker_min_hours, args.term_wait_s)
+    broker_cap = codex_broker_policy_check(args.apply, args.term_wait_s, args.codex_broker_orphan_min,
+                                           args.codex_broker_extra_min, args.codex_broker_idle_min)
     if args.apply:
         save_history(history)
     terminated = [item for item in outcomes if item.get("outcome") == "terminated"]
@@ -2118,6 +2403,7 @@ def _main() -> int:
             "codex_renderer": "ChatGPT-bundled Codex (Renderer).app --type=renderer only: age >60m AND CPU >50% on 2 consecutive apply passes keyed by PID+start; max 5 per pass; revalidate PID/start/args before TERM and KILL, with 10s grace; dry run does not persist",
             "preview_orphan": "ppid-1 python -m http.server (only --directory under /tmp or vanished) / astro|vite dev older than 24h, and ppid-1 node docs/marketing/drafts render scripts older than 60m (+descendants); independent of slots",
             "codex_broker_orphan": f"REPORT ONLY even on --apply: same-user, ppid-1 Codex broker trees at least {args.codex_broker_min_hours}h old; identity and age do not establish quiescence; never signal broker roots or descendants",
+            "codex_broker_cap": f"KILLS on --apply (same-user, never ChatGPT.app-owned, never the running script, never a broker whose socket/endpoint is referenced by a running codex companion process, fail-closed if ps/companion scan fails): (a) ppid-1 broker / orphan app-server + children >= {args.codex_broker_orphan_min}m; (b) per session (--cwd) keep newest broker, kill extras >= {args.codex_broker_extra_min}m; (c) broker with no socket client >= {args.codex_broker_idle_min}m. Fresh re-plan and identity recheck before TERM/KILL.",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],
@@ -2143,6 +2429,7 @@ def _main() -> int:
             "errors": len(errors),
             "after_candidates": after_count,
             "slotless_reap_attested": bool(args.attest_slotless_reap),
+            "codex_broker_cap": {k: broker_cap[k] for k in ("roots", "before", "killed", "after", "rules")},
             "codex_broker_orphan": {
                 key: codex_brokers[key]
                 for key in ("roots", "before", "killed", "exiting", "after", "skipped_protected", "skipped_young")
@@ -2154,6 +2441,7 @@ def _main() -> int:
         "preview_orphan": preview_orphans,
         "codex_renderer": codex_renderers,
         "codex_broker_orphan": codex_brokers,
+        "codex_broker_cap": broker_cap,
         "after": after,
     }
     Path(args.output).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -2201,6 +2489,13 @@ def _main() -> int:
         f"skipped_young={codex_brokers['skipped_young']} refused={len(codex_brokers['refused'])} "
         f"errors={len(codex_brokers['errors'])} action={codex_brokers['action']}"
     )
+    print(
+        f"CODEX_BROKER_CAP action={broker_cap['action']} roots={broker_cap['roots']} before={broker_cap['before']} "
+        f"killed={broker_cap['killed']} after={broker_cap['after']} rules={broker_cap['rules']} "
+        f"refused={len(broker_cap['refused'])} errors={len(broker_cap['errors'])}"
+    )
+    for row in broker_cap["found"]:
+        print(f"CODEX_BROKER_CAP_ROOT pid={row['pid']} shape={row['shape']} age={row['age']} rules={','.join(row['rules'])} members={row['members']} cwd={row['cwd']}")
     for row in codex_brokers["found"]:
         print(f"CODEX_BROKER_ROOT pid={row['pid']} shape={row['shape']} age={row['age']} members={row['members']}")
     for row in codex_brokers["skipped"]:
