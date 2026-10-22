@@ -1908,8 +1908,9 @@ def codex_companion_texts(table: dict[int, dict[str, Any]]) -> list[str] | None:
         text = row["command"]
         try:
             res = run(["ps", "-E", "-ww", "-o", "command=", "-p", str(row["pid"])], timeout=5)
-            if res.returncode == 0:
-                text += " " + res.stdout
+            if res.returncode != 0 or not res.stdout.strip():
+                return None  # incomplete evidence fails closed
+            text += " " + res.stdout
         except Exception:
             return None
         texts.append(text)
@@ -2019,7 +2020,7 @@ def codex_broker_policy_plan(
 
 def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, extra_min: int, idle_min: int) -> dict[str, Any]:
     out: dict[str, Any] = {
-        "class": "codex_broker_cap", "action": "apply" if apply else "scan_only",
+        "class": "codex_broker_cap", "action": "report_only",
         "orphan_min": orphan_min, "extra_min": extra_min, "idle_min": idle_min,
         "roots": 0, "before": 0, "killed": 0, "after": 0, "skipped": [], "found": [],
         "terminated": [], "refused": [], "errors": [], "rules": {},
@@ -2041,50 +2042,11 @@ def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, 
                              "age": fmt_age(r["root"]["age_seconds"]), "members": len(r["members"]),
                              "cwd": codex_broker_endpoint_info(r["root"]["command"])["cwd"]})
     out["after"] = out["before"]
-    if not apply or not plan["roots"]:
-        return out
-    # Re-plan on a fresh snapshot (re-reading in-flight companions) and signal only identity-stable members.
-    table2 = codex_broker_table()
-    texts2 = codex_companion_texts(table2) if table2 is not None else None
-    if table2 is None or texts2 is None:
-        out["errors"].append("recheck_failed")
-        return out
-    fresh = codex_broker_policy_plan(table2, uid, me, texts2, codex_broker_has_client, *mins)
-    fresh_ids = {_codex_identity(r["root"]) for r in fresh["roots"]}
-    targets: list[dict[str, Any]] = []
-    for r in plan["roots"]:
-        if _codex_identity(r["root"]) not in fresh_ids:
-            out["refused"].append({"pid": r["root"]["pid"], "reason": "root_no_longer_eligible"})
-            continue
-        fr = next(x for x in fresh["roots"] if _codex_identity(x["root"]) == _codex_identity(r["root"]))
-        targets.extend(fr["members"])
-    pids = {m["pid"]: m for m in targets}
-    for m in pids.values():
-        try:
-            os.kill(m["pid"], signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except Exception as exc:
-            out["errors"].append(f"term:{m['pid']}:{type(exc).__name__}")
-    time.sleep(term_wait_s)
-    table3 = codex_broker_table() or {}
-    for pid, m in pids.items():
-        cur = table3.get(pid)
-        if cur is None:
-            out["terminated"].append(pid)
-        elif _codex_identity(cur) == _codex_identity(m):
-            try:
-                os.kill(pid, signal.SIGKILL)
-                time.sleep(0.2)
-                (out["terminated"] if not alive(pid) else out["errors"]).append(pid if not alive(pid) else f"still_alive:{pid}")
-            except ProcessLookupError:
-                out["terminated"].append(pid)
-            except Exception as exc:
-                out["errors"].append(f"kill:{pid}:{type(exc).__name__}")
-        else:
-            out["refused"].append({"pid": pid, "reason": "identity_changed_before_kill"})
-    out["killed"] = len(out["terminated"])
-    out["after"] = max(0, out["before"] - out["killed"])
+    # HARD REPORT-ONLY (CTO REVISE 2026-10-22, P1s on b0a214ff): selection by ppid1/age/extras/no-client does not
+    # prove quiescence, companion evidence can be incomplete, and signal-time fencing was weak. This class never
+    # signals under any --apply/attestation/age flag; it reports what WOULD be killed.
+    out["would_kill"] = [{"pid": m["pid"], "root": r["root"]["pid"], "rules": r["rules"]}
+                         for r in plan["roots"] for m in r["members"]]
     return out
 
 
@@ -2403,7 +2365,7 @@ def _main() -> int:
             "codex_renderer": "ChatGPT-bundled Codex (Renderer).app --type=renderer only: age >60m AND CPU >50% on 2 consecutive apply passes keyed by PID+start; max 5 per pass; revalidate PID/start/args before TERM and KILL, with 10s grace; dry run does not persist",
             "preview_orphan": "ppid-1 python -m http.server (only --directory under /tmp or vanished) / astro|vite dev older than 24h, and ppid-1 node docs/marketing/drafts render scripts older than 60m (+descendants); independent of slots",
             "codex_broker_orphan": f"REPORT ONLY even on --apply: same-user, ppid-1 Codex broker trees at least {args.codex_broker_min_hours}h old; identity and age do not establish quiescence; never signal broker roots or descendants",
-            "codex_broker_cap": f"KILLS on --apply (same-user, never ChatGPT.app-owned, never the running script, never a broker whose socket/endpoint is referenced by a running codex companion process, fail-closed if ps/companion scan fails): (a) ppid-1 broker / orphan app-server + children >= {args.codex_broker_orphan_min}m; (b) per session (--cwd) keep newest broker, kill extras >= {args.codex_broker_extra_min}m; (c) broker with no socket client >= {args.codex_broker_idle_min}m. Fresh re-plan and identity recheck before TERM/KILL.",
+            "codex_broker_cap": f"REPORT-ONLY, never signals under any flag (would apply: same-user, never ChatGPT.app-owned, never the running script, never a broker whose socket/endpoint is referenced by a running codex companion process, fail-closed if ps/companion scan fails): (a) ppid-1 broker / orphan app-server + children >= {args.codex_broker_orphan_min}m; (b) per session (--cwd) keep newest broker, kill extras >= {args.codex_broker_extra_min}m; (c) broker with no socket client >= {args.codex_broker_idle_min}m. Fresh re-plan and identity recheck before TERM/KILL.",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],
