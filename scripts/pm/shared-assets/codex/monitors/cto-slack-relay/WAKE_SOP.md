@@ -24,7 +24,7 @@ consistent. The helper fails closed if the table is missing or malformed.
       "destination_thread_id": "01a11e3d-d8bb-73c1-8593-8ff56019d842",
       "consumer_sop_path": "/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md",
       "admitted_after_epoch": 1791644828.031685,
-      "availability_gate": {"admitted_after_epoch": null}
+      "availability_gate": {"admitted_after_epoch": 1792508086.3273861}
     },
     "C09TYQC1DEF": {
       "project": "superproofer",

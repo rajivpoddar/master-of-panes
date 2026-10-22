@@ -683,7 +683,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "ac4979f08d84e7a3daeaf3577343c1beb557a23240306a5deca001ce190cdffc",
+      "sha256": "5edf8211acb0eab55663c0fee6e09e82584ea8bd557a6a186cd87748282d6914",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
@@ -1230,7 +1230,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "6964bf13aa3113e0080534d664bf6a82b8beea7783d7ade5e6ea72ed68de97b2",
+      "sha256": "9b23eb12879814f17fa1eb671f9eeed241bc782c682abf92781d41de963d6bdc",
       "source_path": "codex/monitors/cto-slack-relay/WAKE_SOP.md"
     },
     {
@@ -1329,7 +1329,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-stdio-send-message",
-      "sha256": "ddc1640ae5a7cf8de97b750454214efdbaf927ee26136ace1acc59bf3ecf9f6c",
+      "sha256": "9d3bf0c5aa0e163e9321061881bd4cc811f0a6c2c8706c7bee3d7cc1f66cd3cc",
       "source_path": "codex/skills/codex-stdio-send-message/scripts/test_queue_preview.py"
     },
     {
