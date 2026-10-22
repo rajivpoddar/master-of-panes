@@ -486,20 +486,30 @@ LANGSMITH_UNKNOWN = "LangSmith ingest: UNKNOWN (check failed)"
 
 
 def langsmith_line(rc: int | None, out: str) -> str:
-    """Pure: render the hourly LangSmith ingest line from reconcile exit code + stdout.
-    0 healthy, 2 uncomparable (OK with note), 1 failing (WARN with count); else UNKNOWN."""
+    """Pure strict renderer. Health is never inferred from a missing match: the producer's
+    own status token must agree with the exit code, else UNKNOWN. WARN only for measured
+    positive ingest errors; UNCOMPARABLE is an explicit non-healthy observation."""
     import re
-    m = re.search(r"traces (\d+) vs calls (\d+)", out or "")
-    tc = f"traces {m.group(1)} / calls {m.group(2)}" if m else "traces ? / calls ?"
-    errs = [(a, int(n)) for a, n in re.findall(r"([\w.\-/]+) (\d+) errors", out or "")]
+    first = (out or "").strip().splitlines()[0] if (out or "").strip() else ""
+    m = re.match(r"^LangSmith ingest: (OK|HEALTHY|FAILING|UNCOMPARABLE) \((.*)\)\s*$", first)
+    if rc not in (0, 1, 2) or not m:
+        return LANGSMITH_UNKNOWN
+    status, detail = m.group(1), m.group(2)
+    t = re.search(r"PROD [\d.]+h traces (\d+) vs calls (\d+)", detail)
+    tc = f"traces {t.group(1)} / calls {t.group(2)}" if t else None
+    errs = [(a, int(n)) for a, n in re.findall(r"([\w.\-]+/[\w.\-]+) (\d+) errors", detail)]
     k = sum(n for _, n in errs)
-    if rc in (0, 2) and k == 0:
-        note = ", uncomparable basis" if rc == 2 else ""
-        return f"*LangSmith ingest (1h):* OK — 0 ingest errors ({tc}{note})"
-    if rc == 1:
-        if errs:
+    if rc == 1 and status == "FAILING":
+        if k > 0:
             return f"*LangSmith ingest (1h):* WARN — {k} ingest errors (statuses {', '.join(f'{a} {n}' for a, n in errs[:4])})"
-        return f"*LangSmith ingest (1h):* WARN — check failing (query or credential problem; {tc})"
+        return LANGSMITH_UNKNOWN  # query/auth/partial failure without measured errors
+    if k > 0 or tc is None or (t.group(1) == "0" and t.group(2) == "0"):
+        return LANGSMITH_UNKNOWN  # conflicting or absent observations
+    if rc == 2 and status == "UNCOMPARABLE" and "0 observed prod ingest errors" in detail:
+        return (f"*LangSmith ingest (1h):* UNVERIFIED (not healthy) — 0 observed errors; coverage partial/"
+                f"emitter rollout unverified; counts incomparable ({tc})")
+    if rc == 0 and status in ("OK", "HEALTHY") and "0 observed prod ingest errors" in detail:
+        return f"*LangSmith ingest (1h):* OK — 0 observed ingest errors ({tc})"
     return LANGSMITH_UNKNOWN
 
 
