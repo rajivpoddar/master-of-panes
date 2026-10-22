@@ -1672,7 +1672,9 @@ def _codex_root_shape(command: str) -> str | None:
 def codex_broker_plan(
     table: dict[int, dict[str, Any]], min_age_s: int, uid: int, self_pid: int
 ) -> dict[str, Any]:
-    """Pure policy: which Codex review-server trees are orphaned and stale.
+    """Pure report selection: Codex trees matching orphan/age observations.
+
+    Report selection is not quiescence evidence or permission to signal.
 
     A root is eligible only when ALL hold: strict command shape; age >= min_age_s;
     its ancestor chain reaches launchd without a live claude/openclaude/tmux/
@@ -1784,7 +1786,7 @@ def codex_broker_verify(
     min_age_s: int, uid: int, self_pid: int,
     member: dict[str, Any] | None = None, after_term: bool = False,
 ) -> tuple[bool, str]:
-    """Pure signal fence, including PID reuse and our own TERM-induced reparenting."""
+    """Retained pure identity checks; success does not establish quiescence or authorize signals."""
     if table is None:
         return False, "ps_failed"
     root = entry["root"]
@@ -1829,12 +1831,16 @@ def codex_broker_verify(
     return True, "broker_tree_identity_match"
 
 
-# Rajiv 2026-10-22, DM D0AMF0XE6TS ts 1792631354.234869: restore guarded reaping.
 def codex_broker_orphan_check(apply: bool, min_hours: float, term_wait_s: float) -> dict[str, Any]:
-    """Report, or reverify and reap stale orphan serve-broker trees via _kill_members."""
+    """Always report broker trees, including under --apply.
+
+    Identity, parentage and age do not establish absence of active clients,
+    requests or descendant tools. No broker signal is authorized by this scan.
+    The apply/wait arguments remain compatible with the other cleanup classes.
+    """
     min_age_s = int(min_hours * 3600)
     out: dict[str, Any] = {
-        "class": "codex_broker_orphan", "min_hours": min_hours, "action": "apply" if apply else "report_only",
+        "class": "codex_broker_orphan", "min_hours": min_hours, "action": "report_only",
         "roots": 0, "before": 0, "killed": 0, "exiting": 0, "after": 0,
         "skipped_protected": 0, "skipped_young": 0,
         "found": [], "skipped": [], "terminated": [], "exiting_pids": [], "refused": [], "errors": [],
@@ -1857,46 +1863,6 @@ def codex_broker_orphan_check(apply: bool, min_hours: float, term_wait_s: float)
     out["after"] = out["before"]
     out["exiting_pids"] = sorted({r["pid"] for r in plan["exiting"]})
     out["exiting"] = len(out["exiting_pids"])
-    if not apply:
-        return out
-    outcomes = []
-    for entry in plan["roots"]:
-        valid, reason = codex_broker_verify(entry, codex_broker_table(), min_age_s, os.getuid(), os.getpid())
-        if not valid:
-            out["refused"].append({"pid": entry["root"]["pid"], "reason": reason})
-            continue
-        members = [{**m, "category": "codex-broker-orphan"} for m in reversed(entry["members"])]
-        outcomes.extend(_kill_members(
-            members, term_wait_s,
-            verifier=lambda row, after_term: codex_broker_verify(
-                entry, codex_broker_table(), min_age_s, os.getuid(), os.getpid(), row, after_term),
-        ))
-    final = codex_broker_table()
-    if final is None:
-        out["errors"].append("after_ps_failed")
-        out["after"] = "unknown"
-    else:
-        remaining, exiting = [], set(out["exiting_pids"])
-        for row in plan["members"]:
-            current = final.get(row["pid"])
-            if current and _codex_identity(current) == _codex_identity(row):
-                if "E" in current["stat"] or current["stat"].startswith("Z"):
-                    exiting.add(row["pid"])
-                else:
-                    remaining.append(row["pid"])
-        out["after"] = len(remaining)
-        out["exiting_pids"] = sorted(exiting)
-        out["exiting"] = len(exiting)
-    for item in outcomes:
-        if item["pid"] in out["exiting_pids"]:
-            continue  # Kernel teardown under swap pressure is not a failed reap.
-        if item["outcome"] == "terminated":
-            out["terminated"].append(item)
-        elif item["outcome"] == "refused":
-            out["refused"].append(item)
-        elif item["outcome"] == "error":
-            out["errors"].append(item)
-    out["killed"] = len(out["terminated"])
     return out
 
 
@@ -2009,7 +1975,7 @@ def run_self_test() -> int:
     assert 100 not in [r["root"]["pid"] for r in codex_broker_plan(tbl, 6 * 3600, me, 104)["roots"]]
     # the threshold is configurable
     assert sorted(r["root"]["pid"] for r in codex_broker_plan(tbl, 1 * 3600, me, 9999)["roots"]) == [100, 110, 150]
-    # Apply fencing: only an unchanged, same-user, ppid-1 serve broker tree.
+    # Retained identity checks only; broker reporting never authorizes signals.
     entry = next(r for r in plan["roots"] if r["root"]["pid"] == 100)
     assert codex_broker_verify(entry, tbl, 6 * 3600, me, 9999)[0]
     for key, value in (("ppid", 50), ("uid", 999), ("age_seconds", 6 * 3600 - 1),
@@ -2054,7 +2020,7 @@ def _main() -> int:
     parser.add_argument("--term-wait-s", type=float, default=3.0)
     parser.add_argument(
         "--codex-broker-min-hours", type=float, default=CODEX_BROKER_MIN_HOURS,
-        help="reap ppid-1 Codex serve-broker trees at least this many hours old on --apply (default 6)",
+        help="report ppid-1 Codex broker trees at least this many hours old; always report-only, including --apply (default 6)",
     )
     parser.add_argument("--status-output", default=str(STATUS_JSON), help="heartbeat status JSON path")
     parser.add_argument(
@@ -2151,7 +2117,7 @@ def _main() -> int:
             "replayd": "user-level /usr/libexec/replayd SIGTERM (launchd restarts it) after >50% CPU on 2 consecutive apply runs",
             "codex_renderer": "ChatGPT-bundled Codex (Renderer).app --type=renderer only: age >60m AND CPU >50% on 2 consecutive apply passes keyed by PID+start; max 5 per pass; revalidate PID/start/args before TERM and KILL, with 10s grace; dry run does not persist",
             "preview_orphan": "ppid-1 python -m http.server (only --directory under /tmp or vanished) / astro|vite dev older than 24h, and ppid-1 node docs/marketing/drafts render scripts older than 60m (+descendants); independent of slots",
-            "codex_broker_orphan": f"same-user, ppid-1 app-server-broker.mjs serve trees at least {args.codex_broker_min_hours}h old; preserve ChatGPT/live-owner/young/skipped-root protections; reverify PID/start/command/parent before TERM and survivor KILL via the shared helper; independent of slots; standalone app-server roots are report-only",
+            "codex_broker_orphan": f"REPORT ONLY even on --apply: same-user, ppid-1 Codex broker trees at least {args.codex_broker_min_hours}h old; identity and age do not establish quiescence; never signal broker roots or descendants",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],
