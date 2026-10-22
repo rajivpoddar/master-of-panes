@@ -97,16 +97,26 @@ def test_decisions_cap_routes_age_and_stale_count():
     ({"type": "assistant", "message": {"stop_reason": "tool_use"}}, 59, "active"),
     ({"type": "user", "message": {}}, 60, "inactive"),
     ({"type": "assistant", "message": {"stop_reason": None}}, 100, "inactive"),
-    ({"type": "api-request"}, 1440, "inactive"),
-    ({"type": "api-request"}, 1441, "expired"),
+    ({"type": "api-request"}, 360, "inactive"),
+    ({"type": "api-request"}, 360.01, "expired"),
     (None, 100, "unknown"),
 ])
 def test_agent_classifier_is_pure(record, minutes, state):
     assert composer.classify_agent(record, NOW.timestamp() - minutes * 60, NOW) == state
 
 
-def transcript(root, name, minutes, record, meta=None):
-    path = root / "session" / "subagents" / f"agent-{name}.jsonl"
+def pm_session(root, name="session", minutes=0):
+    path = root / f"{name}.jsonl"
+    path.write_text(json.dumps({"type": "user"}) + "\n")
+    stamp = NOW.timestamp() - minutes * 60
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def transcript(root, name, minutes, record, meta=None, session="session"):
+    if not (root / f"{session}.jsonl").exists():
+        pm_session(root, session)
+    path = root / session / "subagents" / f"agent-{name}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"type": "user"}) + "\n" + json.dumps(record) + "\n\n")
     stamp = NOW.timestamp() - minutes * 60
@@ -123,7 +133,7 @@ def test_agent_collector_reads_tail_and_metadata_without_mutation(tmp_path):
     before = (path.read_bytes(), path.stat().st_mtime_ns)
     transcript(tmp_path, "active", 10, active)
     transcript(tmp_path, "done", 100, done)
-    transcript(tmp_path, "expired", 1441, active)
+    transcript(tmp_path, "expired", 361, active)
     transcript(tmp_path, "fallback", 70, active, {"agentType": "specialist"})
     doc = composer.read_agents(tmp_path, NOW)
     assert doc["running"] == 3
@@ -131,6 +141,56 @@ def test_agent_collector_reads_tail_and_metadata_without_mutation(tmp_path):
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
     assert composer.agents_line(doc) == "*Agents:* 3 running · 2 inactive ≥60m: Review report (idle 85m), specialist (idle 70m)"
     assert composer.agents_line({"running": 2, "inactive": [], "unreadable": 0}) == "*Agents:* 2 running · none inactive"
+
+
+def test_only_newest_live_parent_session_counts_even_if_old_agents_wrote_more_recently(tmp_path):
+    active = {"type": "assistant", "message": {"stop_reason": "tool_use"}}
+    transcript(tmp_path, "yesterday-non-final", 0, active,
+               {"description": "DEAD SESSION"}, session="old")
+    pm_session(tmp_path, "old", minutes=10)
+    transcript(tmp_path, "unreadable-old", 0, {}, session="old").write_text("broken json\n")
+    transcript(tmp_path, "current-working", 5, active, session="current")
+    transcript(tmp_path, "current-idle", 60, active,
+               {"description": "Current review"}, session="current")
+    transcript(tmp_path, "current-six-hour-boundary", 360, active, session="current")
+    transcript(tmp_path, "current-expired", 360.01, active, session="current")
+    transcript(tmp_path, "current-done", 1,
+               {"type": "assistant", "message": {"stop_reason": "end_turn"}}, session="current")
+    pm_session(tmp_path, "current", minutes=2)
+    doc = composer.read_agents(tmp_path, NOW)
+    assert doc["running"] == 3
+    assert doc["unreadable"] == 0
+    assert [item["idle_min"] for item in doc["inactive"]] == [360, 60]
+    assert "DEAD SESSION" not in composer.agents_line(doc)
+
+
+@pytest.mark.parametrize("minutes,available", [(15, True), (15.01, False)])
+def test_parent_session_freshness_is_fifteen_minutes_inclusive(tmp_path, minutes, available):
+    transcript(tmp_path, "recent-child", 1, {"type": "user"})
+    pm_session(tmp_path, minutes=minutes)
+    doc = composer.read_agents(tmp_path, NOW)
+    if available:
+        assert doc["running"] == 1
+    else:
+        assert doc is None  # a recently written child cannot revive a dead parent
+
+
+def test_session_selection_requires_top_level_jsonl_not_directory_or_child_mtime(tmp_path):
+    transcript(tmp_path, "old-child", 1, {"type": "user"}, session="old")
+    pm_session(tmp_path, "old", minutes=5)
+    missing_parent = transcript(tmp_path, "orphan-child", 0, {"type": "user"}, session="orphan")
+    # Move the fixture's parent record out of the top-level *.jsonl namespace.
+    (tmp_path / "orphan.jsonl").rename(tmp_path / "orphan.session-record")
+    pm_session(tmp_path, "newest", minutes=1)  # no subagent directory: no fallback to old
+    doc = composer.read_agents(tmp_path, NOW)
+    assert doc == {"running": 0, "inactive": [], "unreadable": 0}
+    assert missing_parent.exists()
+
+
+def test_no_top_level_session_record_is_unavailable(tmp_path):
+    transcript(tmp_path, "orphan", 1, {"type": "user"})
+    (tmp_path / "session.jsonl").rename(tmp_path / "session.other")
+    assert composer.read_agents(tmp_path, NOW) is None
 
 
 def test_agent_line_caps_names_and_reports_unreadable_inputs(tmp_path):
@@ -191,6 +251,8 @@ def test_deployed_skill_contract_is_shipped_in_manifest():
     step2 = text.split("STEP 2 — check:", 1)[1].split("STEP 3", 1)[0]
     assert HEADER in step2 and "blank spacer" in step2 and "*Agents:*" in step2
     assert "read-only" in step2.lower() and "ledger triage" in step2
+    assert "top-level session" in step2 and "within 15 min" in step2
+    assert "last 6h" in step2 and "Ignore all earlier" in step2
     manifest = json.loads((ASSETS / "manifest.json").read_text())
     for path in (SOURCE, skill):
         entries = [e for e in manifest["entries"] if e["source_path"] == str(path.relative_to(ASSETS))]

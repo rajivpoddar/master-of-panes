@@ -333,6 +333,8 @@ PM_PROJECT = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-hey
 PM_OPS_DB = PM_PROJECT / "state/pm-ops.db"
 MAX_DECISIONS = 6
 MAX_INACTIVE_AGENTS = 4
+PM_SESSION_FRESH_S = 15 * 60
+AGENT_RECENT_S = 6 * 3600
 
 
 def _compact(value, limit: int) -> str:
@@ -397,7 +399,7 @@ def classify_agent(last_record: dict | None, modified_at: float, now: datetime) 
     if last_record.get("type") == "assistant" and (last_record.get("message") or {}).get("stop_reason") == "end_turn":
         return "done"
     idle_s = max(0, now.timestamp() - modified_at)
-    if idle_s > 24 * 3600:
+    if idle_s > AGENT_RECENT_S:
         return "expired"
     return "inactive" if idle_s >= 3600 else "active"
 
@@ -419,15 +421,27 @@ def _last_agent_record(path: Path) -> dict:
 
 
 def read_agents(root: Path = PM_PROJECT, now: datetime | None = None) -> dict | None:
-    """Read PM subagent tails and sibling metadata. Never stop or modify an agent."""
+    """Read only the newest live PM session's subagents; never stop or modify any."""
     now = now or datetime.now(timezone.utc)
     if not root.is_dir():
         return None
+    sessions = []
+    for session in root.glob("*.jsonl"):
+        try:
+            if session.is_file():
+                sessions.append((session.stat().st_mtime, session))
+        except OSError:
+            continue
+    if not sessions:
+        return None
+    modified, session = max(sessions, key=lambda row: (row[0], row[1].name))
+    if now.timestamp() - modified > PM_SESSION_FRESH_S:
+        return None  # fresh children cannot revive an earlier PM session
     running, inactive, unreadable = 0, [], 0
-    for path in root.glob("*/subagents/agent-*.jsonl"):
+    for path in (root / session.stem / "subagents").glob("agent-*.jsonl"):
         try:
             modified_at = path.stat().st_mtime
-            if now.timestamp() - modified_at > 24 * 3600:
+            if now.timestamp() - modified_at > AGENT_RECENT_S:
                 continue
             state = classify_agent(_last_agent_record(path), modified_at, now)
             if state == "unknown":
