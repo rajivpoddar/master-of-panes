@@ -481,6 +481,37 @@ def agents_line(doc: dict | None) -> str:
     return line
 
 
+LANGSMITH_RECONCILE = Path.home() / ".claude/scripts/langsmith-axiom-reconcile.py"
+LANGSMITH_UNKNOWN = "LangSmith ingest: UNKNOWN (check failed)"
+
+
+def langsmith_line(rc: int | None, out: str) -> str:
+    """Pure: render the hourly LangSmith ingest line from reconcile exit code + stdout.
+    0 healthy, 2 uncomparable (OK with note), 1 failing (WARN with count); else UNKNOWN."""
+    import re
+    m = re.search(r"traces (\d+) vs calls (\d+)", out or "")
+    tc = f"traces {m.group(1)} / calls {m.group(2)}" if m else "traces ? / calls ?"
+    errs = [(a, int(n)) for a, n in re.findall(r"([\w.\-/]+) (\d+) errors", out or "")]
+    k = sum(n for _, n in errs)
+    if rc in (0, 2) and k == 0:
+        note = ", uncomparable basis" if rc == 2 else ""
+        return f"*LangSmith ingest (1h):* OK — 0 ingest errors ({tc}{note})"
+    if rc == 1:
+        if errs:
+            return f"*LangSmith ingest (1h):* WARN — {k} ingest errors (statuses {', '.join(f'{a} {n}' for a, n in errs[:4])})"
+        return f"*LangSmith ingest (1h):* WARN — check failing (query or credential problem; {tc})"
+    return LANGSMITH_UNKNOWN
+
+
+def collect_langsmith(py: str, timeout: int = 60) -> str:
+    """Bounded (60s) reconcile call; any failure => UNKNOWN, never raises."""
+    try:
+        p = subprocess.run([py, str(LANGSMITH_RECONCILE), "--hours", "1"], capture_output=True, text=True, timeout=timeout)
+        return langsmith_line(p.returncode, p.stdout)
+    except Exception:
+        return LANGSMITH_UNKNOWN
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -500,6 +531,7 @@ def compose(
     email_doc: dict | None = None,
     decisions: dict | None = None,
     agents: dict | None = None,
+    langsmith: str | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -549,6 +581,8 @@ def compose(
         body += ["", *sl_lines]
     if mode == "1h":
         body.append(agents_line(agents))
+        if langsmith:
+            body.append(langsmith)
     # Exactly one empty spacer before this shared 1h/3h section.
     body += ["", *decision_block(decisions, now)]
 
@@ -755,13 +789,14 @@ def main() -> int:
             email_doc = json.loads(ep.stdout)
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")
+    langsmith = collect_langsmith(py) if args.mode == "1h" else None
     print(compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
-        email_doc=email_doc, decisions=decisions, agents=agents,
+        email_doc=email_doc, decisions=decisions, agents=agents, langsmith=langsmith,
     ))
     if pm_actions:
         print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)
