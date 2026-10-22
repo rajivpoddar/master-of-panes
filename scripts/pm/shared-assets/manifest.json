@@ -348,7 +348,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "e4e473726b1ad987bdd7f1c3f2f5399e06bd62df3a23623eacf84b8133a2d603",
+      "sha256": "8faa8bb1058da10e94713896cdfdc7c968c0da9de0027768ab58923f02d39cf3",
       "source_path": "claude/scripts/cto-relay-snapshot.py"
     },
     {
@@ -1230,7 +1230,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "9b23eb12879814f17fa1eb671f9eeed241bc782c682abf92781d41de963d6bdc",
+      "sha256": "4634e9a9c007990c52988596ffe560952d9e569fc27921d1656917a2e0eace70",
       "source_path": "codex/monitors/cto-slack-relay/WAKE_SOP.md"
     },
     {
@@ -1266,7 +1266,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "825492c51d62f823ea6a90b1363bae867fb621828409ae9fd2dae542730301c8",
+      "sha256": "948b6f67006e55fe2f8d90f80d5d52cde9fbbabc959aa9e32ac929213b66a83d",
       "source_path": "codex/monitors/heydonna-social-media/WAKE_SOP.md"
     },
     {

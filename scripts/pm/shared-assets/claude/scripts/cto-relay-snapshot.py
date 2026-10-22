@@ -90,15 +90,17 @@ def extract_route_table(path: Path) -> dict[str, Any]:
                 if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0):
                     raise SnapshotError(f"route SOP {channel}.{field} must be a positive epoch or null")
                 normalized_exact[channel][field] = value
-        if "availability_gate" in route:
-            gate = route["availability_gate"]
+        for gate_name in ("availability_gate", "all_messages_gate"):
+            if gate_name not in route:
+                continue
+            gate = route[gate_name]
             if channel != GROWTH_CHANNEL or not isinstance(gate, dict) or "admitted_after_epoch" not in gate:
-                raise SnapshotError("availability_gate is only supported for growth with an admission cutoff")
+                raise SnapshotError(f"{gate_name} is only supported for growth with an admission cutoff")
             for field in ("admitted_after_epoch", "admitted_before_epoch"):
                 value = gate.get(field)
                 if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0):
-                    raise SnapshotError(f"availability_gate.{field} must be a positive epoch or null")
-            normalized_exact[channel]["availability_gate"] = dict(gate)
+                    raise SnapshotError(f"{gate_name}.{field} must be a positive epoch or null")
+            normalized_exact[channel][gate_name] = dict(gate)
     mention_only = table.get("mention_only_channels")
     if not isinstance(mention_only, dict):
         raise SnapshotError("route SOP mention_only_channels must be an object")
@@ -204,6 +206,15 @@ def event_eligible_for_route(event: dict[str, Any], table: dict[str, Any]) -> bo
         return True
     mention_user = table["mention_only_channels"].get(channel)
     override = table["exact_channel_routes"].get(channel)
+    if override and "all_messages_gate" in override:
+        if channel_override_applies(event, override) and channel_override_applies(event, override["all_messages_gate"]):
+            return True
+        # Never admit historical unmentioned chatter through the default route,
+        # including envelopes without a usable ingress timestamp.
+        text, blocks = tuple_value.get("text"), tuple_value.get("blocks")
+        return (isinstance(text, str) and rendered_text_has_user_mention(text, mention_user)) or (
+            isinstance(blocks, list) and any(block_has_user_mention(block, mention_user) for block in blocks)
+        )
     if override and not channel_override_applies(event, override):
         return True  # Pre-cutover events retain their prior eligibility and route.
     if override and "admitted_after_epoch" in override:
@@ -303,7 +314,7 @@ def route_event(
     channel = tuple_value.get("channel")
     if not isinstance(channel, str) or not channel:
         raise SnapshotError("event exact_tuple.channel must be a non-empty string")
-    if not event_eligible_for_route(event, table):
+    if frozen_route is None and not event_eligible_for_route(event, table):
         return None
     source_sop = str(route_sop_path)
     if event.get("sop_path") != source_sop:
@@ -330,7 +341,10 @@ def route_event(
         selected = exact_routes[channel]
         route_match = "exact_channel"
         gate = selected.get("availability_gate")
-        if gate and channel_override_applies(event, gate):
+        all_messages = selected.get("all_messages_gate")
+        if all_messages and channel_override_applies(event, all_messages):
+            route_match = "growth_all_messages"
+        elif gate and channel_override_applies(event, gate):
             availability = snapshot_social_availability(selected["destination_thread_id"])
             if availability.get("state") != "idle":
                 selected = table["direct_message_route"]
@@ -645,7 +659,7 @@ def main() -> int:
                 )
                 eligible = [
                     event for event in pending
-                    if event_eligible_for_route(event, route_table)
+                    if "relay_route" in claims.get(event["dedup_key"], {}) or event_eligible_for_route(event, route_table)
                 ]
                 if args.limit is not None:
                     eligible = eligible[: args.limit]
@@ -653,8 +667,9 @@ def main() -> int:
                 for event in eligible:
                     channel = event["exact_tuple"].get("channel")
                     gate = route_table["exact_channel_routes"].get(channel, {}).get("availability_gate")
+                    all_messages = route_table["exact_channel_routes"].get(channel, {}).get("all_messages_gate")
                     prior_claim = prior_claims.get(event["dedup_key"])
-                    if gate and channel_override_applies(event, gate) and prior_claim and "relay_route" not in prior_claim:
+                    if any(g and channel_override_applies(event, g) for g in (gate, all_messages)) and prior_claim and "relay_route" not in prior_claim:
                         raise SnapshotError("existing growth claim has no frozen destination; owner reconciliation required")
                     claim = claims.get(event["dedup_key"], {})
                     if "relay_route" in claim and claim["route_fingerprint"] != event["fingerprint"]:
@@ -670,7 +685,7 @@ def main() -> int:
                         "expires_at_epoch": expires_at,
                         "owner": claim_owner,
                         **({"relay_route": event["relay_route"], "route_fingerprint": event["fingerprint"]}
-                           if event["relay_route"].get("match") == "growth_availability" else {}),
+                           if event["relay_route"].get("match") in {"growth_availability", "growth_all_messages"} else {}),
                     }
                 write_json_atomic(args.claims_file, claims)
                 write_json_atomic(args.output, pending)

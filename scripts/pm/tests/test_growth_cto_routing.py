@@ -202,6 +202,39 @@ console.log('6 actual ingress/origin discriminators PASS; fake delivery=0');
     assert run.returncode == 0, run.stderr
 
 
+def test_actual_growth_ingress_dedup_and_self_echo_without_side_effects():
+    code = r"""
+const fs = require('node:fs'), assert = require('node:assert/strict');
+const {transformSync} = require('esbuild');
+const source = fs.readFileSync(process.argv[1],'utf8');
+const start = source.indexOf('  const channel = event.channel ?? "";');
+const end = source.indexOf('  const tuple: EventTuple = {',start);
+assert.ok(start >= 0 && end > start);
+const fragment = transformSync(source.slice(start,end)+'\nreturn true;',{loader:'ts'}).code;
+const seen = new Set(); let admitted=0;
+const originSource = fs.readFileSync(process.argv[2],'utf8');
+const module = {exports:{}};
+new Function('module','exports',transformSync(originSource,{loader:'ts',format:'cjs'}).code)(module,module.exports);
+const receive = new Function('event','eventType','contextBotUserId','seen','appUserId','readHandledKeys','readQueuedKeys','remember','eventOriginIgnoreReason','log','requestAppServerDrain',fragment);
+function invoke(event,kind) {
+ const result = receive(event,kind,'synthetic-context-bot',seen,'U0BNFGX2UAX',()=>new Set(),()=>new Set(),k=>seen.add(k),module.exports.eventOriginIgnoreReason,()=>{},()=>{});
+ if(result) admitted++;
+}
+const original={channel:'C0C7U35LBKR',ts:'2001.1',user:'UEQTTB97A',text:'ordinary unmentioned growth message'};
+invoke(original,'message.group'); invoke(original,'app_mention'); assert.equal(admitted,1);
+invoke({...original,ts:'2001.2',user:'U0BNFGX2UAX'},'message.group');
+invoke({...original,ts:'2001.3',subtype:'message_changed'},'message.group');
+invoke({...original,ts:'2001.4',user:'synthetic-context-bot'},'message.group');
+assert.equal(admitted,1);
+invoke({...original,ts:'2001.5',user:'U0ALEAYCAUT',bot_id:'synthetic-pm-bot',subtype:'bot_message'},'message.group');
+assert.equal(admitted,2);
+console.log('actual pre-await channel:ts/origin boundary PASS; transport mutations=0');
+"""
+    run = subprocess.run([shutil.which("node") or "node", "-e", code,
+        str(ASSETS / "bridge/cto-bridge.ts"), str(ROOT / "test/fixtures/bridge/cto-event-policy.ts")], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+
+
 @pytest.mark.parametrize("expired_claim", [False, True])
 def test_actual_fallback_unknown_is_not_reselected(tmp_path, monkeypatch, expired_claim):
     sop = configured_sop(tmp_path)
@@ -298,6 +331,150 @@ def availability_sop(tmp_path):
         '"admitted_after_epoch": 1000, "availability_gate": {"admitted_after_epoch": 1000}',
     ))
     return sop
+
+
+def all_messages_sop(tmp_path, cutoff=2000):
+    sop = availability_sop(tmp_path)
+    text = sop.read_text()
+    before, rest = text.split(MOD.ROUTE_TABLE_BEGIN, 1)
+    data, after = rest.split(MOD.ROUTE_TABLE_END, 1)
+    table = json.loads(data)
+    table["exact_channel_routes"][GROWTH]["all_messages_gate"] = {
+        "admitted_after_epoch": cutoff,
+    }
+    sop.write_text(before + MOD.ROUTE_TABLE_BEGIN + json.dumps(table) + MOD.ROUTE_TABLE_END + after)
+    return sop
+
+
+def new_growth_event(sop, text="ordinary growth message", kind="message.group"):
+    return event(sop, ts="2001.000001", queued_at="1970-01-01T00:33:21Z", text=text, kind=kind)
+
+
+@pytest.mark.parametrize("activity", ["busy", "idle", "queued", "notLoaded", "unknown", "unavailable"])
+@pytest.mark.parametrize("text", ["ordinary growth message", "<@U0BNFGX2UAX> growth message"])
+def test_all_messages_future_growth_never_probes_activity(tmp_path, monkeypatch, activity, text):
+    sop = all_messages_sop(tmp_path)
+    def forbidden(_):
+        pytest.fail("new all-messages admission must not probe " + activity)
+    monkeypatch.setattr(MOD, "snapshot_social_availability", forbidden)
+    source = new_growth_event(sop, text)
+    source["exact_tuple"]["blocks"] = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    first = snapshot(tmp_path, sop, [source], in_process=True)[0]
+    assert first["relay_route"]["destination_thread_id"] == SOCIAL
+    assert first["relay_route"]["match"] == "growth_all_messages"
+    assert "availability" not in first["relay_route"]
+    assert first["exact_tuple"] == source["exact_tuple"]
+    assert first["attachments"] == source["attachments"]
+    assert json.dumps(source, ensure_ascii=False) in first["routed_wake_text"]
+    claims = json.loads((tmp_path / "claims.json").read_text())
+    assert claims[source["dedup_key"]]["relay_route"] == first["relay_route"]
+
+
+@pytest.mark.parametrize("user,kind", [("UEQTTB97A", "message.channel"), ("U0ALEAYCAUT", "message.group"), ("synthetic-bot", "message.group")])
+def test_all_messages_human_pm_bot_and_duplicate_event(tmp_path, user, kind):
+    sop = all_messages_sop(tmp_path)
+    source = new_growth_event(sop, kind=kind)
+    source["exact_tuple"]["user"] = user
+    source["source_evidence"]["explicit_cto_mention"] = False
+    assert snapshot(tmp_path, sop, [source])[0]["relay_route"]["destination_thread_id"] == SOCIAL
+    # Slack's message/app_mention copies share channel:ts; ACK/receipt wins.
+    duplicate = json.loads(json.dumps(source))
+    duplicate["source_evidence"]["slack_event_type"] = "app_mention"
+    assert snapshot(tmp_path, sop, [duplicate], handled=[source["dedup_key"]]) == []
+
+
+@pytest.mark.parametrize("ts,queued", [("1999.9", "1970-01-01T00:33:21Z"), ("2001.0", "1970-01-01T00:33:19Z"), ("2001.0", None)])
+def test_all_messages_does_not_drain_old_unmentioned_backlog(tmp_path, monkeypatch, ts, queued):
+    sop = all_messages_sop(tmp_path)
+    monkeypatch.setattr(MOD, "snapshot_social_availability", lambda _: pytest.fail("unmentioned history"))
+    source = event(sop, ts=ts, queued_at=queued, text="unmentioned old chatter", kind="message.group")
+    assert snapshot(tmp_path, sop, [source], in_process=True) == []
+
+
+def test_all_messages_frozen_dm_owner_and_unmentioned_social_survive_restart(tmp_path, monkeypatch):
+    sop = all_messages_sop(tmp_path)
+    monkeypatch.setattr(MOD, "snapshot_social_availability", lambda _: {"state": "unknown", "reason": "native-status-notLoaded"})
+    old = event(sop)
+    frozen = snapshot(tmp_path, sop, [old], in_process=True)[0]
+    claims = json.loads((tmp_path / "claims.json").read_text())
+    claims[old["dedup_key"]]["expires_at_epoch"] = 0
+    monkeypatch.setattr(MOD, "snapshot_social_availability", lambda _: pytest.fail("frozen owner"))
+    assert snapshot(tmp_path, sop, [old], claims=claims)[0]["relay_route"] == frozen["relay_route"]
+    assert frozen["relay_route"]["destination_thread_id"] == DM
+    source = new_growth_event(sop)
+    selected = snapshot(tmp_path, sop, [source])[0]
+    claims = json.loads((tmp_path / "claims.json").read_text())
+    claims[source["dedup_key"]]["expires_at_epoch"] = 0
+    # Closing only the future interval must not revoke a frozen unmentioned route.
+    sop.write_text(sop.read_text().replace('"admitted_after_epoch": 2000', '"admitted_after_epoch": 2000, "admitted_before_epoch": 2000.5'))
+    assert snapshot(tmp_path, sop, [source], claims=claims)[0]["relay_route"] == selected["relay_route"]
+
+
+@pytest.mark.parametrize("status", ["queued", "delivered", "uncertain"])
+def test_all_messages_existing_transport_history_never_replayed(tmp_path, status):
+    sop = all_messages_sop(tmp_path)
+    source = new_growth_event(sop)
+    receipt = {"receipt_key": source["dedup_key"], "status": status, "destination_thread_id": DM}
+    assert snapshot(tmp_path, sop, [source], receipts=[receipt]) == []
+    assert json.loads((tmp_path / "receipts.jsonl").read_text()) == receipt
+
+
+def test_all_messages_inert_and_non_growth_routes_unchanged(tmp_path, monkeypatch):
+    sop = all_messages_sop(tmp_path, None)
+    monkeypatch.setattr(MOD, "snapshot_social_availability", lambda _: pytest.fail("inert unmentioned/non-growth"))
+    assert snapshot(tmp_path, sop, [new_growth_event(sop)], in_process=True) == []
+    for channel, kind, dest in [("C0ALZJHGE49", "app_mention", DECISIONS), ("C09TYQC1DEF", "app_mention", "01a02002-6986-7953-ab5a-cc8087476873"), ("Dsynthetic", "message.im", DM)]:
+        source = event(sop, channel=channel, kind=kind)
+        assert snapshot(tmp_path, sop, [source], in_process=True)[0]["relay_route"]["destination_thread_id"] == dest
+    for channel in ["C0ALZJHGE49", "C09TYQC1DEF"]:
+        assert snapshot(tmp_path, sop, [event(sop, channel=channel, text="unmentioned")], in_process=True) == []
+
+
+@pytest.mark.parametrize("cutoff", [True, "2000", -1, float("nan"), float("inf")])
+def test_all_messages_malformed_cutoff_refuses(tmp_path, cutoff):
+    sop = all_messages_sop(tmp_path, cutoff)
+    with pytest.raises(MOD.SnapshotError, match="all_messages_gate"):
+        MOD.extract_route_table(sop)
+
+
+def test_all_messages_release_renew_and_output_failure_preserve_choice(tmp_path, monkeypatch):
+    sop = all_messages_sop(tmp_path)
+    source = new_growth_event(sop)
+    original_write = MOD.write_json_atomic
+    def fail_output(path, value):
+        if path.name == "output.json" and value:
+            raise OSError("synthetic output failure after claim fsync")
+        original_write(path, value)
+    monkeypatch.setattr(MOD, "write_json_atomic", fail_output)
+    with pytest.raises(AssertionError):
+        snapshot(tmp_path, sop, [source], in_process=True)
+    claims = json.loads((tmp_path / "claims.json").read_text())
+    chosen = claims[source["dedup_key"]]
+    assert chosen["relay_route"]["destination_thread_id"] == SOCIAL
+    monkeypatch.setattr(MOD, "write_json_atomic", original_write)
+    for action in ["renew", "release"]:
+        args = [sys.executable, str(HELPER), "--route-sop", str(sop), "--" + action + "-key", source["dedup_key"], "--claim-owner", chosen["owner"]]
+        for flag, name in [("--ack-file", "ack.json"), ("--claims-file", "claims.json"), ("--heartbeat-file", "heartbeat"), ("--lock-file", "lock")]:
+            args.extend([flag, str(tmp_path / name)])
+        result = subprocess.run(args, text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+        kept = json.loads((tmp_path / "claims.json").read_text())[source["dedup_key"]]
+        assert kept["relay_route"] == chosen["relay_route"]
+        assert kept["route_fingerprint"] == source["fingerprint"]
+
+
+def test_all_messages_managed_branch_and_cutover_contract():
+    table = MOD.extract_route_table(SOP)
+    growth = table["exact_channel_routes"][GROWTH]
+    assert growth["all_messages_gate"] == {"admitted_after_epoch": None}
+    assert growth["admitted_after_epoch"] == 1791644828.031685
+    assert growth["availability_gate"]["admitted_after_epoch"] == 1792508086.3273861
+    instructions = SOP.read_text().split("### Historical availability cutover", 1)[0]
+    for required in ["PROC_UID_ONLY=4", "second", "NOTE_EXIT", "INERT", "all_messages_gate.admitted_after_epoch", "all_messages_gate.admitted_before_epoch", "1792673034.611319", "1792675705.475119"]:
+        assert required in instructions
+    consumer = (ASSETS / "codex/monitors/heydonna-social-media/WAKE_SOP.md").read_text()
+    assert "with or without a CTO mention" in consumer
+    assert "No activity probe or CTO DM diversion" in consumer
 
 
 @pytest.mark.parametrize("state,expected", [
@@ -573,19 +750,23 @@ def test_cutover_contract_requires_inert_stage_and_parent_exit_barrier():
 
 
 @pytest.mark.parametrize("operation", ["select", "renew", "release"])
-def test_two_phase_cutover_drains_preloaded_parent_before_activation(tmp_path, operation):
+@pytest.mark.parametrize("policy", ["availability", "all_messages"])
+def test_two_phase_cutover_drains_preloaded_parent_before_activation(tmp_path, operation, policy):
     import fcntl
     import hashlib
     import os
     import select
 
     source_path = "scripts/pm/shared-assets/claude/scripts/cto-relay-snapshot.py"
-    parent = subprocess.check_output(["git", "show", "b7fe860a648d0ab05645424e0bb744c861c93e04:" + source_path], cwd=ROOT)
+    parent_commit = "320a7a7ca800160f43d94b2ba3393d3b62a4ee51" if policy == "all_messages" else "b7fe860a648d0ab05645424e0bb744c861c93e04"
+    parent = subprocess.check_output(["git", "show", parent_commit + ":" + source_path], cwd=ROOT)
     staged_helper = tmp_path / "helper.py"
     staged_helper.write_bytes(parent)
-    sop = availability_sop(tmp_path)
-    sop.write_text(sop.read_text().replace('"availability_gate": {"admitted_after_epoch": 1000}',
-        '"availability_gate": {"admitted_after_epoch": null}'))
+    gate_name = policy + "_gate"
+    cutoff = 2000 if policy == "all_messages" else 1000
+    sop = all_messages_sop(tmp_path) if policy == "all_messages" else availability_sop(tmp_path)
+    sop.write_text(sop.read_text().replace('"' + gate_name + '": {"admitted_after_epoch": ' + str(cutoff) + '}',
+        '"' + gate_name + '": {"admitted_after_epoch": null}'))
     key = "synthetic-parent"
     initial_claim = {key: {"owner": "parent-owner", "expires_at_epoch": 9999999999}}
     for name, value in [("events", {"events": []}), ("ack", {"handled": []}), ("claims", initial_claim)]:
@@ -634,7 +815,7 @@ sys.exit(ns['main']())
         replacement.write_bytes(HELPER.read_bytes())
         os.replace(replacement, staged_helper)
         table = MOD.extract_route_table(sop)
-        assert table["exact_channel_routes"][GROWTH]["availability_gate"]["admitted_after_epoch"] is None
+        assert table["exact_channel_routes"][GROWTH][gate_name]["admitted_after_epoch"] is None
         assert process.poll() is None  # Installing new bytes did NOT drain old code.
         assert not activated
         fcntl.flock(lock, fcntl.LOCK_UN)
@@ -646,9 +827,9 @@ sys.exit(ns['main']())
         assert parent_exit == (loaded["pid"], 0)
         assert process.poll() == 0
         assert staged_helper.read_bytes() == HELPER.read_bytes()
-        assert MOD.extract_route_table(sop)["exact_channel_routes"][GROWTH]["availability_gate"]["admitted_after_epoch"] is None
-        active = sop.read_text().replace('"availability_gate": {"admitted_after_epoch": null}',
-            '"availability_gate": {"admitted_after_epoch": 1000}')
+        assert MOD.extract_route_table(sop)["exact_channel_routes"][GROWTH][gate_name]["admitted_after_epoch"] is None
+        active = sop.read_text().replace('"' + gate_name + '": {"admitted_after_epoch": null}',
+            '"' + gate_name + '": {"admitted_after_epoch": ' + str(cutoff) + '}')
         replacement.write_text(active)
         os.replace(replacement, sop)
         activated = True
@@ -656,7 +837,7 @@ sys.exit(ns['main']())
 
         # A new, separate interpreter loads only staged candidate code. No real
         # activity RPC, source event, queue, receipt or task is touched.
-        source = event(sop)
+        source = new_growth_event(sop) if policy == "all_messages" else event(sop)
         (tmp_path / "events.json").write_text(json.dumps({"events": [source]}))
         candidate = '''
 import pathlib,sys
@@ -670,7 +851,7 @@ sys.exit(ns['main']())
         run = subprocess.run([sys.executable, "-c", candidate, *candidate_args], capture_output=True, text=True, timeout=5)
         assert run.returncode == 0, run.stderr
         stored = json.loads((tmp_path / "claims.json").read_text())[source["dedup_key"]]
-        assert stored["relay_route"]["destination_thread_id"] == DM
+        assert stored["relay_route"]["destination_thread_id"] == (SOCIAL if policy == "all_messages" else DM)
         assert stored["route_fingerprint"] == source["fingerprint"]
         assert process.poll() == 0  # Parent cannot write after activation.
         assert activated

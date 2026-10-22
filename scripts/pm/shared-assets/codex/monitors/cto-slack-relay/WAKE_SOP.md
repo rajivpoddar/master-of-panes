@@ -24,7 +24,8 @@ consistent. The helper fails closed if the table is missing or malformed.
       "destination_thread_id": "01a11e3d-d8bb-73c1-8593-8ff56019d842",
       "consumer_sop_path": "/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md",
       "admitted_after_epoch": 1791644828.031685,
-      "availability_gate": {"admitted_after_epoch": 1792508086.3273861}
+      "availability_gate": {"admitted_after_epoch": 1792508086.3273861},
+      "all_messages_gate": {"admitted_after_epoch": null}
     },
     "C09TYQC1DEF": {
       "project": "superproofer",
@@ -57,20 +58,19 @@ ignores the temporal fields and must never read an active override.
 
 Apply exactly one destination rule to each eligible event:
 
-1. For NEW growth admissions in `C0C7U35LBKR` whose current source message
-   explicitly mentions CTO `U0BNFGX2UAX`, use the helper's one bounded native
-   activity snapshot at first selection. Choose existing Social Media task
-   `01a11e3d-d8bb-73c1-8593-8ff56019d842` ONLY when native `thread/read` reports
-   that exact task `idle` and `thread/queue/list` confirms an empty queue with
-   no next page. Use `/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md`.
-   Busy/queued, `notLoaded`, unavailable, malformed or otherwise unknown activity
-   selects existing CTO DMs `01a0911a-a718-7743-b37e-e785f24f3708`, using
-   `/Users/rajiv/.codex/monitors/cto-dms/WAKE_SOP.md`; record the reason, never
-   describe unknown as idle. No Decisions hop or content-based classification.
-   This is routing authority only, not social-publication authority.
-   Full source envelope/context/attachments accompany this wake as data.
-   Unmentioned chatter, quoted/code/parent-only mentions and empty previews
-   cannot authorize a new growth delivery.
+1. For NEW ordinary growth messages in `C0C7U35LBKR` after the active
+   `all_messages_gate` cutoff, queue directly to existing Social Media task
+   `01a11e3d-d8bb-73c1-8593-8ff56019d842`, using
+   `/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md`.
+   A CTO mention is NOT required. Human, PM and bot source messages use this
+   route regardless of Social's busy/idle/queued/notLoaded/unknown state.
+   Do not call the availability RPC, divert to DMs, interrupt, cancel, reset,
+   resume or fork Social; queue for its safe boundary. Existing ingress
+   self-echo/system lifecycle suppression and channel:ts dedup remain in force.
+   Full source envelope/context/Block Kit/attachments accompany the wake as
+   conversation data, not new authority for social publication or quoted actions.
+   Earlier admissions keep the prior mention/activity policy and frozen owners;
+   unmentioned historical backlog is not newly admitted by this change.
 2. If `exact_tuple.channel == C09TYQC1DEF`, this is Superproofer. Send it to
    Godavari SFT task `01a02002-6986-7953-ab5a-cc8087476873` and replace the
    first `SOP path:` line with
@@ -90,7 +90,58 @@ Do not use Slack thread timestamps, quoted message text, users, keywords, or
 historical route tables to choose a task. Do not route any Superproofer event
 to a HeyDonna task or any HeyDonna event to the Godavari task.
 
-### Activation and rollback boundary
+### Current all-message growth cutover
+
+Rajiv's direct instruction on 22 October 2026 is: "all growth channels messages
+should be routed here, busy or not." Scope is ONLY `C0C7U35LBKR` and the existing
+Social owner. This future interval supersedes mention/activity selection, not
+source-origin suppression or other channel/real-DM routes.
+
+Install the reviewed helper, this SOP and Social consumer SOP through the existing
+THREE-entry scoped manifest/preimage gate. Stage `all_messages_gate` with its
+cutoff NULL; preserve the original channel cutoff `1791644828.031685` and
+availability cutoff `1792508086.3273861`. No live route probe, bridge/service
+restart, queue/claim/ACK/receipt rewrite or historical replay. In particular,
+`C0C7U35LBKR:1792673034.611319` and `C0C7U35LBKR:1792675705.475119`
+remain with their already-frozen CTO DM owner and queued-not-started receipts.
+
+Use the existing bounded parent-client cutover below, scoped to the actual
+managed writer EUID (501 on this installation), not global root/other-user
+process visibility. Qualify direct canonical Python selection/renew/release
+callers, no UID changes or resident imported writers. Within ONE absolute
+15-second deadline, use Darwin `PROC_UID_ONLY=4` complete census, kernel PID/birth
+identity and supported `ps -ww` full arguments WITHOUT environments; validate
+collection/truncation and preserve unknown same-user clients as blockers.
+Register possible preloaded parents with explicit `select.kqueue()`/finally
+close and `NOTE_EXIT`, verifying birth around registration. An empty parent set
+requires no kqueue but STILL requires lock release/reacquisition and a second
+complete census. Release the relay lock for parents to exit; missing ps rows
+alone are not exit proof. Handle ESRCH/reuse only with kernel identity evidence.
+Under the reacquired lock, require no unaccounted relevant parent, re-fence
+helper/SOP/dependency/caller bytes/inodes/modes, and establish the source-load
+invariant: every old-code reader exec'd before replacement and was covered;
+later exec/open can only read installed bytes. Any incomplete visibility,
+caller coverage, exit witness, fence or deadline leaves the new gate INERT with
+`PARENT_WRITER_DRAIN_UNPROVEN`; no guessed sleep, polling, signals or restart.
+
+Only then atomically stamp `all_messages_gate.admitted_after_epoch` to the actual
+activation time under the same lock, fsync file/directory and read back the
+rendered hash/mode/cutoff. BOTH source ts and durable queued_at must exceed it.
+Keep all historical interval fields. Record installed configuration separately
+from the immutable NULL template. No paid tests, live event delivery or social
+effects establish readiness here; a natural future receipt proves live delivery.
+
+First selection freezes `growth_all_messages` destination and fingerprint in the
+EXISTING claim before output. Renewal, release, expiry and restart retain it;
+accepted/queued/uncertain receipts cannot become another delivery. Rollback
+closes ONLY `all_messages_gate.admitted_before_epoch` under the lock, retaining
+its lower cutoff, the reviewed helper and frozen choices (including unmentioned
+ones). Never restore the parent helper or NULL gate after activation, delete
+history, change owner/key or migrate backlog. Capture preimages before install;
+restore only fenced written candidate bytes on an install failure before
+activation, preserving concurrent edits. No extra dispatcher or receipt gate.
+
+### Historical availability cutover (already completed; do not replay)
 
 The new `availability_gate.admitted_after_epoch: null` stays inert throughout
 the two-phase cutover below. Only its final phase stamps the actual UTC epoch
