@@ -737,7 +737,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "63d5b3445d38e26d84b448f79dddf6e5e6b8c56426a9f9452acd3dec4a1cedcf",
+      "sha256": "bae25cab6aa50e84c8b8bae53859de1564339f2ac1c0d158bbe71910397516c1",
       "source_path": "claude/skills/cleanup-pr/SKILL.md"
     },
     {
@@ -926,7 +926,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "1a1f11665ba34638f8b712c0510ba41476c960d71bf59eaaee1558b83ecd5403",
+      "sha256": "157e2cd5d476473cf639bac33d4937e3554a56b6471bd7905520e38e29d8ab1d",
       "source_path": "claude/skills/pm-cleanup-pr/SKILL.md"
     },
     {

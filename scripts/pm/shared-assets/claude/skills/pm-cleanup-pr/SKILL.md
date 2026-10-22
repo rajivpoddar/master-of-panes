@@ -41,3 +41,6 @@ readback with zero linked closing issues, then performs only journaled
 per-label PR cleanup and adds `pm-state:closed-clean`; it does not read or
 close an issue and does not post to Slack. Do not use this mode for a PR
 that has any linked issue.
+
+## Ledger reads: no /tmp copies (Rajiv 2026-10-22, C0ALZJHGE49 thread 1792652063.453549, ts 1792657702.281119 "fix cleanup pr runner")
+Read the live ledger with `sqlite3 -readonly` or `pm-ops.py` only. If a copy is unavoidable, make ONE in the session scratchpad and delete it (with -wal/-shm) before finishing. Never write *-ledger*.db / *pmops*.db to /tmp. Trigger: 110 abandoned 355 MB copies (25 GiB) filled the disk.

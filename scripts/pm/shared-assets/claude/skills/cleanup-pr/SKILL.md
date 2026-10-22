@@ -1421,3 +1421,6 @@ git branch --show-current  # MUST output: main
 If `git checkout main` fails because of uncommitted changes, surface to PM via Slack #heydonna-dev with the diff summary — do NOT force-discard. PM decides recovery.
 
 **Why:** PM clone is the home base. Rajiv expects it on main with latest. Bg-agents that operate in PM clone (cleanup-pr, infra fix, branch ops) leave the working tree on whatever branch they last touched. PM main thread doesn't auto-revert. This step closes the leak per Rajiv directive 2026-05-10 07:35 IST: *"add switch to main in cleanup pr"*.
+
+## Ledger reads: no /tmp copies (Rajiv 2026-10-22, C0ALZJHGE49 thread 1792652063.453549, ts 1792657702.281119 "fix cleanup pr runner")
+Read the live ledger with `sqlite3 -readonly` or `pm-ops.py` only. If a copy is unavoidable, make ONE in the session scratchpad and delete it (with -wal/-shm) before finishing. Never write *-ledger*.db / *pmops*.db to /tmp. Trigger: 110 abandoned 355 MB copies (25 GiB) filled the disk.
