@@ -82,7 +82,7 @@ STEP 2 — check: first line is "*Hourly — HH:MM IST*", or starts with
     C0ALZJHGE49 thread 1792770386.754829, ts 1792770807.935489: "fix the report
     to count the subagents correctly"). Count what the PM pane lists: DIRECT
     subagents (spawnDepth 1, not nested) of the session chain since the CURRENT PM
-    claude process started (last 24h cap), INCLUDING sessions before a /clear (a
+    claude process started (only transcripts written in the last 3h; completed agents only if their final write was within 60m, the pane's retention; inactive = unended, idle 60m-3h; older assumed dropped by TaskStop//clear), INCLUDING sessions before a /clear (a
     /clear starts a new JSONL but the pane keeps its agents), excluding prior
     processes and agents whose meta says finished (result already delivered). Classify each: running = transcript written in the last 60m and not
     ended; completed = last record is a final assistant end_turn (it still sits

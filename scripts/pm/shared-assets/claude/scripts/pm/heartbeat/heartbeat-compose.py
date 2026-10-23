@@ -335,7 +335,10 @@ MAX_DECISIONS = 6
 MAX_INACTIVE_AGENTS = 4
 PM_SESSION_FRESH_S = 15 * 60
 # Rajiv 2026-10-23 (C0ALZJHGE49 ts 1792770807.935489): count every subagent of the PM pane's sessions in the last 24h.
-AGENT_RECENT_S = 24 * 3600
+# Pane drops TaskStopped/cleared agents without marking them finished: anything unwritten for 3h is assumed gone
+# (PM correction 2026-10-23: ListAgents showed 11 vs 32). Completed agents stay listed only 60m.
+AGENT_RECENT_S = 3 * 3600
+AGENT_COMPLETED_S = 3600
 
 
 def _compact(value, limit: int) -> str:
@@ -522,7 +525,7 @@ def read_agents(root: Path = PM_PROJECT, now: datetime | None = None, process_st
                 elif state == "active":
                     running += 1
                 elif state == "done":
-                    if modified_at >= process_start:
+                    if modified_at >= process_start and now.timestamp() - modified_at <= AGENT_COMPLETED_S:
                         completed.append(_agent_row(path, now, modified_at))
                 elif state == "inactive":
                     inactive.append(_agent_row(path, now, modified_at))

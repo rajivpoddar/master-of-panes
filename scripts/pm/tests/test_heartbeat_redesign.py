@@ -482,7 +482,8 @@ def test_compose_with_slots_active_users_agents_and_empty_decisions_stays_under_
     prs = [{"number": str(8000 + i), "head": "abc1234", "state": "open", "owner": "s1", "next": "wait"} for i in range(12)]
     six = {"slots": SLOTS_FIXTURE["slots"] + [dict(SLOTS_FIXTURE["slots"][0], slot=5), dict(SLOTS_FIXTURE["slots"][0], slot=6)]}
     msg = compose.compose("1h", NOW, {"events": 3, "users": 1, "top": [{"code": "x", "events": 3, "users": 1}]},
-                          {}, prs, active=active, include_active=True, slots=six, include_slots=True)
+                          {}, prs, active=active, include_active=True, slots=six, include_slots=True,
+                          training=("*Training:* no run active", []))  # hermetic: never probe the live Spark
     lines = msg.splitlines()
     assert "*ACTIONS (PM):* idle-slot S2 #8478 idle 25m; idle-slot S3 free idle 40m" in lines
     # Rajiv's Agents line + the spacer and empty Decisions section add 3 lines.

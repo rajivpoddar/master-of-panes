@@ -97,8 +97,8 @@ def test_decisions_cap_routes_age_and_stale_count():
     ({"type": "assistant", "message": {"stop_reason": "tool_use"}}, 59, "active"),
     ({"type": "user", "message": {}}, 60, "inactive"),
     ({"type": "assistant", "message": {"stop_reason": None}}, 100, "inactive"),
-    ({"type": "api-request"}, 1440, "inactive"),
-    ({"type": "api-request"}, 1440.01, "expired"),
+    ({"type": "api-request"}, 180, "inactive"),
+    ({"type": "api-request"}, 180.01, "expired"),
     (None, 100, "unknown"),
 ])
 def test_agent_classifier_is_pure(record, minutes, state):
@@ -137,8 +137,8 @@ def test_agent_collector_reads_tail_and_metadata_without_mutation(tmp_path):
     path = transcript(tmp_path, "idle", 85, active, {"description": "Review\nreport", "agentType": "reviewer"})
     before = (path.read_bytes(), path.stat().st_mtime_ns)
     transcript(tmp_path, "active", 10, active)
-    transcript(tmp_path, "done", 100, done)
-    transcript(tmp_path, "expired", 1441, active)
+    transcript(tmp_path, "done", 30, done)
+    transcript(tmp_path, "expired", 181, active)
     transcript(tmp_path, "fallback", 70, active, {"agentType": "specialist"})
     doc = composer.read_agents(tmp_path, NOW, PROC)
     assert doc["running"] == 1
@@ -146,7 +146,7 @@ def test_agent_collector_reads_tail_and_metadata_without_mutation(tmp_path):
     assert [r["description"] for r in doc["inactive"]] == ["Review\nreport", "specialist"]
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
     assert composer.agents_line(doc) == ("*Agents:* 4 listed · 1 running · 1 completed · 2 inactive — PM stops C+I in Step 3c: "
-        "agent-done (completed, last write 100m ago), Review report (inactive 85m), specialist (inactive 70m)")
+        "agent-done (completed, last write 30m ago), Review report (inactive 85m), specialist (inactive 70m)")
     plain = composer.agents_line({"running": 2, "inactive": [], "unreadable": 0})
     assert plain == "*Agents:* 2 listed · 2 running · 0 completed · 0 inactive — PM stops C+I in Step 3c"
 
@@ -155,15 +155,15 @@ def test_all_pm_pane_sessions_in_24h_count_including_pre_clear(tmp_path):
     active = {"type": "assistant", "message": {"stop_reason": "tool_use"}}
     end = {"type": "assistant", "message": {"stop_reason": "end_turn"}}
     # Session before a /clear: still in the pane, must be counted.
-    transcript(tmp_path, "pre-clear-done", 300, end, {"description": "Pre clear done"}, session="old")
-    transcript(tmp_path, "pre-clear-idle", 200, active, {"description": "Pre clear idle"}, session="old")
+    transcript(tmp_path, "pre-clear-done", 40, end, {"description": "Pre clear done"}, session="old")
+    transcript(tmp_path, "pre-clear-idle", 170, active, {"description": "Pre clear idle"}, session="old")
     pm_session(tmp_path, "old", minutes=600)
     # Session older than 24h is excluded, as is any agent older than 24h.
     transcript(tmp_path, "ancient", 1500, active, session="ancient")
     pm_session(tmp_path, "ancient", minutes=1500, started_h=40)  # prior claude process
     transcript(tmp_path, "current-working", 5, active, session="current")
     transcript(tmp_path, "current-idle", 60, active, {"description": "Current review"}, session="current")
-    transcript(tmp_path, "current-too-old", 1441, active, session="current")
+    transcript(tmp_path, "current-too-old", 181, active, session="current")
     transcript(tmp_path, "current-done", 1, end, {"description": "Current done"}, session="current")
     transcript(tmp_path, "current-unreadable", 0, {}, session="current").write_text("broken json\n")
     pm_session(tmp_path, "current", minutes=2)
@@ -277,7 +277,7 @@ def test_deployed_skill_contract_is_shipped_in_manifest():
     assert "read-only" in step2.lower() and "ledger triage" in step2
     # Rajiv 2026-10-23 (C0ALZJHGE49 ts 1792770807.935489): count every subagent of the PM pane's
     # sessions in the last 24h, including sessions before a /clear.
-    assert "last 24h" in step2 and "/clear" in step2 and "completed" in step2
+    assert "last 3h" in step2 and "/clear" in step2 and "completed" in step2
     assert "none inactive" in step2 and "Never print" in step2
     manifest = json.loads((ASSETS / "manifest.json").read_text())
     for path in (SOURCE, skill):
@@ -319,3 +319,25 @@ def test_unknown_pm_process_start_is_unavailable_not_a_guess(tmp_path, monkeypat
     transcript(tmp_path, "a", 1, {"type": "user"})
     monkeypatch.setattr(composer, "pm_process_start", lambda *a, **k: None)
     assert composer.read_agents(tmp_path, NOW) is None
+
+
+def test_stale_stopped_agents_and_old_completed_are_assumed_dropped(tmp_path):
+    active = {"type": "assistant", "message": {"stop_reason": "tool_use"}}
+    end = {"type": "assistant", "message": {"stop_reason": "end_turn"}}
+    # TaskStopped / dropped-across-/clear agents never get meta.finished and never end_turn.
+    transcript(tmp_path, "stopped-4h", 240, active, {"description": "STOPPED 4H"}, session="cur")
+    transcript(tmp_path, "stopped-181m", 181, active, {"description": "STOPPED 181M"}, session="cur")
+    transcript(tmp_path, "idle-2h", 120, active, {"description": "Idle 2h"}, session="cur")
+    transcript(tmp_path, "idle-60m", 60, active, {"description": "Idle 60m"}, session="cur")
+    transcript(tmp_path, "running", 5, active, {"description": "Running"}, session="cur")
+    transcript(tmp_path, "done-61m", 61, end, {"description": "DONE 61M"}, session="cur")
+    transcript(tmp_path, "done-60m", 60, end, {"description": "Done 60m"}, session="cur")
+    transcript(tmp_path, "done-5m", 5, end, {"description": "Done 5m"}, session="cur")
+    pm_session(tmp_path, "cur", minutes=1, started_h=20)
+    doc = composer.read_agents(tmp_path, NOW, PROC)
+    assert doc["running"] == 1
+    assert sorted(r["description"] for r in doc["inactive"]) == ["Idle 2h", "Idle 60m"]
+    assert sorted(r["description"] for r in doc["completed"]) == ["Done 5m", "Done 60m"]
+    line = composer.agents_line(doc)
+    assert line.startswith("*Agents:* 5 listed · 1 running · 2 completed · 2 inactive")
+    assert "STOPPED" not in line and "DONE 61M" not in line

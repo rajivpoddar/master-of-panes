@@ -110,7 +110,7 @@ def list_processes() -> list[dict[str, Any]]:
     try:
         out = subprocess.run(
             ["ps", "-eo", "pid=,ppid=,lstart=,command="],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True, text=True, errors="replace", timeout=10, check=False,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return []
