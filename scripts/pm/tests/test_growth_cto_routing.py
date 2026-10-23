@@ -400,7 +400,7 @@ def test_all_messages_frozen_dm_owner_and_unmentioned_social_survive_restart(tmp
     claims[old["dedup_key"]]["expires_at_epoch"] = 0
     monkeypatch.setattr(MOD, "snapshot_social_availability", lambda _: pytest.fail("frozen owner"))
     assert snapshot(tmp_path, sop, [old], claims=claims)[0]["relay_route"] == frozen["relay_route"]
-    assert frozen["relay_route"]["destination_thread_id"] == DM
+    assert frozen["relay_route"]["destination_thread_id"] == SOCIAL
     source = new_growth_event(sop)
     selected = snapshot(tmp_path, sop, [source])[0]
     claims = json.loads((tmp_path / "claims.json").read_text())
@@ -421,8 +421,12 @@ def test_all_messages_existing_transport_history_never_replayed(tmp_path, status
 
 def test_all_messages_inert_and_non_growth_routes_unchanged(tmp_path, monkeypatch):
     sop = all_messages_sop(tmp_path, None)
-    monkeypatch.setattr(MOD, "snapshot_social_availability", lambda _: pytest.fail("inert unmentioned/non-growth"))
+    probes = []
+    # Inert growth and unmentioned messages must never probe. Direct messages now probe their own owner
+    # for overflow (Rajiv C0C7U35LBKR/1792670433.869629, ts 1792689875.791679) and stay put when idle.
+    monkeypatch.setattr(MOD, "snapshot_social_availability", lambda t: probes.append(t) or {"state": "idle", "reason": "synthetic"})
     assert snapshot(tmp_path, sop, [new_growth_event(sop)], in_process=True) == []
+    assert probes == []
     for channel, kind, dest in [("C0ALZJHGE49", "app_mention", DECISIONS), ("C09TYQC1DEF", "app_mention", "01a02002-6986-7953-ab5a-cc8087476873"), ("Dsynthetic", "message.im", DM)]:
         source = event(sop, channel=channel, kind=kind)
         assert snapshot(tmp_path, sop, [source], in_process=True)[0]["relay_route"]["destination_thread_id"] == dest
@@ -478,8 +482,8 @@ def test_all_messages_managed_branch_and_cutover_contract():
 
 
 @pytest.mark.parametrize("state,expected", [
-    ("idle", SOCIAL), ("busy", DM), ("notLoaded", DM),
-    ("unavailable", DM), ("unknown", DM),
+    ("idle", SOCIAL), ("busy", SOCIAL), ("notLoaded", SOCIAL),
+    ("unavailable", SOCIAL), ("unknown", SOCIAL),
 ])
 def test_new_growth_selects_only_authoritative_idle(tmp_path, monkeypatch, state, expected):
     sop = availability_sop(tmp_path)
@@ -493,7 +497,7 @@ def test_new_growth_selects_only_authoritative_idle(tmp_path, monkeypatch, state
     routed = snapshot(tmp_path, sop, [source], in_process=True)[0]
     assert routed["relay_route"]["destination_thread_id"] == expected
     assert routed["relay_route"]["availability"]["state"] == state
-    assert calls == [SOCIAL]
+    assert calls[0] == SOCIAL and (calls == [SOCIAL] or state != "idle")  # non-idle also probes the overflow pool (Rajiv 1792689875.791679); stub marks them non-idle so Social keeps it
     assert routed["attachments"] == source["attachments"]
     assert routed["exact_tuple"] == source["exact_tuple"]
     assert json.dumps(source, ensure_ascii=False) in routed["routed_wake_text"]
@@ -504,7 +508,7 @@ def test_new_growth_selects_only_authoritative_idle(tmp_path, monkeypatch, state
     assert claim["route_fingerprint"] == source["fingerprint"]
 
 
-@pytest.mark.parametrize("state,expected", [("idle", SOCIAL), ("busy", DM)])
+@pytest.mark.parametrize("state,expected", [("idle", SOCIAL), ("busy", SOCIAL)])
 def test_frozen_destination_survives_expiry_restart_and_activity_change(tmp_path, monkeypatch, state, expected):
     sop = availability_sop(tmp_path)
     monkeypatch.setattr(MOD, "snapshot_social_availability", lambda _: {"state": state, "reason": state}, raising=False)
@@ -587,6 +591,8 @@ for line in sys.stdin:
 ''')
     fake.chmod(0o755)
     monkeypatch.setattr(MOD, "CODEX_BIN", str(fake))
+    # Hermetic: notLoaded falls back to the persisted rollout lifecycle, which must not read the host's real Codex state.
+    monkeypatch.setattr(MOD, "persisted_activity", lambda _t: {"state": "unknown", "reason": "synthetic-no-persisted-state"})
     monkeypatch.setattr(MOD, "QUEUE_RPC_HELPER", ASSETS / "codex/skills/codex-stdio-send-message/scripts/queue_preview.py")
     actual = MOD.snapshot_social_availability(SOCIAL)
     assert actual["state"] == expected
@@ -621,7 +627,7 @@ def test_frozen_route_persisted_before_output_and_reused_after_failure(tmp_path,
     def fail_snapshot(path, value):
         if path == tmp_path / "output.json" and value:
             stored = json.loads((tmp_path / "claims.json").read_text())[source["dedup_key"]]
-            assert stored["relay_route"]["destination_thread_id"] == DM
+            assert stored["relay_route"]["destination_thread_id"] == SOCIAL
             raise OSError("synthetic output failure after durable choice")
         original(path, value)
     monkeypatch.setattr(MOD, "write_json_atomic", fail_snapshot)
@@ -633,7 +639,7 @@ def test_frozen_route_persisted_before_output_and_reused_after_failure(tmp_path,
     claims[source["dedup_key"]]["expires_at_epoch"] = 1
     monkeypatch.setattr(MOD, "write_json_atomic", original)
     monkeypatch.setattr(MOD, "snapshot_social_availability", lambda _: pytest.fail("choice must be reused"))
-    assert snapshot(tmp_path, sop, [source], claims=claims, in_process=True)[0]["relay_route"]["destination_thread_id"] == DM
+    assert snapshot(tmp_path, sop, [source], claims=claims, in_process=True)[0]["relay_route"]["destination_thread_id"] == SOCIAL
 
 
 def test_frozen_fingerprint_drift_refuses_without_reselection(tmp_path, monkeypatch, capsys):
@@ -851,7 +857,7 @@ sys.exit(ns['main']())
         run = subprocess.run([sys.executable, "-c", candidate, *candidate_args], capture_output=True, text=True, timeout=5)
         assert run.returncode == 0, run.stderr
         stored = json.loads((tmp_path / "claims.json").read_text())[source["dedup_key"]]
-        assert stored["relay_route"]["destination_thread_id"] == (SOCIAL if policy == "all_messages" else DM)
+        assert stored["relay_route"]["destination_thread_id"] == SOCIAL
         assert stored["route_fingerprint"] == source["fingerprint"]
         assert process.poll() == 0  # Parent cannot write after activation.
         assert activated

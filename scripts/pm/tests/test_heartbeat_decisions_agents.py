@@ -251,8 +251,10 @@ def test_deployed_skill_contract_is_shipped_in_manifest():
     step2 = text.split("STEP 2 — check:", 1)[1].split("STEP 3", 1)[0]
     assert HEADER in step2 and "blank spacer" in step2 and "*Agents:*" in step2
     assert "read-only" in step2.lower() and "ledger triage" in step2
-    assert "top-level session" in step2 and "within 15 min" in step2
-    assert "last 6h" in step2 and "Ignore all earlier" in step2
+    # Rajiv 2026-10-23 (C0ALZJHGE49 ts 1792770807.935489): count every subagent of the PM pane's
+    # sessions in the last 24h, including sessions before a /clear.
+    assert "last 24h" in step2 and "/clear" in step2 and "completed" in step2
+    assert "none inactive" in step2 and "Never print" in step2
     manifest = json.loads((ASSETS / "manifest.json").read_text())
     for path in (SOURCE, skill):
         entries = [e for e in manifest["entries"] if e["source_path"] == str(path.relative_to(ASSETS))]
