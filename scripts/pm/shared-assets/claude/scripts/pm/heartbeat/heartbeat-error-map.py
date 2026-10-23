@@ -71,7 +71,7 @@ def search_github(code: str) -> list[dict]:
     query = f'repo:{REPO} is:open "{code}"'
     proc = subprocess.run(
         ["gh", "api", "-X", "GET", "search/issues", "-f", f"q={query}", "-f", "per_page=5"],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, errors="replace", timeout=60,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"gh search failed: {proc.stderr.strip()[:200]}")

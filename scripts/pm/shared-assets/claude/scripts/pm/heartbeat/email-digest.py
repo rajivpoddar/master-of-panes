@@ -22,7 +22,7 @@ REDACT = [
 ]
 
 def run(cmd):
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout).strip().splitlines()[-1][:120] if (p.stderr or p.stdout).strip() else f"rc={p.returncode}")
     if p.stdout.lstrip().startswith("No messages found"):

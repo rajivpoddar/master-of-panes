@@ -244,7 +244,7 @@ def run_cmd(args: list[str], *, cwd: Path | None = None, timeout: int = 12, inpu
             args,
             cwd=str(cwd) if cwd else None,
             input=input_text,
-            text=True,
+            text=True, errors="replace",
             capture_output=True,
             timeout=timeout,
             env=env,

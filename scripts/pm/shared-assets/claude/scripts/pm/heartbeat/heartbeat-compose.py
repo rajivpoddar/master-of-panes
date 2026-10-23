@@ -452,11 +452,11 @@ def pm_process_start(pane: str = "0:0.0") -> float | None:
     """Start time (epoch) of the claude process attached to the PM pane's tty; None when unknown."""
     try:
         tty = subprocess.run(["tmux", "display", "-p", "-t", pane, "#{pane_tty}"],
-                             capture_output=True, text=True, timeout=5).stdout.strip()
+                             capture_output=True, text=True, errors="replace", timeout=5).stdout.strip()
         if not tty:
             return None
         out = subprocess.run(["ps", "-t", tty.replace("/dev/", ""), "-o", "lstart=,command="],
-                             capture_output=True, text=True, timeout=5).stdout
+                             capture_output=True, text=True, errors="replace", timeout=5).stdout
         for row in out.splitlines():
             if "claude" in row.split(maxsplit=5)[-1][:60] and "--model" in row:
                 return datetime.strptime(row[:24].strip(), "%a %b %d %H:%M:%S %Y").timestamp()
@@ -594,7 +594,7 @@ def langsmith_line(rc: int | None, out: str) -> str:
 def collect_langsmith(py: str, timeout: int = 60) -> str:
     """Bounded (60s) reconcile call; any failure => UNKNOWN, never raises."""
     try:
-        p = subprocess.run([py, str(LANGSMITH_RECONCILE), "--hours", "1"], capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run([py, str(LANGSMITH_RECONCILE), "--hours", "1"], capture_output=True, text=True, errors="replace", timeout=timeout)
         return langsmith_line(p.returncode, p.stdout)
     except Exception:
         return LANGSMITH_UNKNOWN
@@ -618,7 +618,7 @@ def spark_probe(timeout: int = 8) -> tuple[dict | None, str]:
     try:
         r = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", "dgx-spark", _SPARK_REMOTE],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return None, "ssh timeout"
@@ -649,11 +649,11 @@ def spark_probe(timeout: int = 8) -> tuple[dict | None, str]:
 
 def monitor_up() -> bool:
     try:
-        r = subprocess.run(["pgrep", "-f", "spark-run-monitor\\.sh"], capture_output=True, text=True, timeout=3)
+        r = subprocess.run(["pgrep", "-f", "spark-run-monitor\\.sh"], capture_output=True, text=True, errors="replace", timeout=3)
         own = os.getpid()
         pids = [int(x) for x in r.stdout.split() if x.isdigit() and int(x) != own]
         for pid in pids:
-            c = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=3).stdout
+            c = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, errors="replace", timeout=3).stdout
             if "spark-run-monitor.sh --run-name" in c or c.strip().startswith(("bash", "/bin/bash", "sh ")) and "spark-run-monitor" in c:
                 return True
         return False
@@ -796,7 +796,7 @@ def compose(
 
 def _run_json(cmd: list[str], failures: list[str], label: str, timeout: int = 300):
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         failures.append(f"{label}: timeout")
         return None
@@ -933,7 +933,7 @@ def main() -> int:
         try:
             subprocess.run(
                 [py, str(SCRIPTS / "pr-open-snapshot.py"), "--sync-obligations"],
-                capture_output=True, text=True, timeout=60, check=False,
+                capture_output=True, text=True, errors="replace", timeout=60, check=False,
             )
         except Exception:
             pass
@@ -955,7 +955,7 @@ def main() -> int:
     usage_lines = None
     if args.mode == "3h":
         try:
-            up = subprocess.run([py, str(Path.home() / ".claude/scripts/usage-snapshot.py")], capture_output=True, text=True, timeout=120)
+            up = subprocess.run([py, str(Path.home() / ".claude/scripts/usage-snapshot.py")], capture_output=True, text=True, errors="replace", timeout=120)
             usage_lines = [l for l in up.stdout.splitlines() if l.strip()]
             if up.returncode != 0 and not usage_lines:
                 failures.append(f"usage: rc={up.returncode}")
@@ -964,7 +964,7 @@ def main() -> int:
     email_doc = None
     if args.mode == "3h":
         try:
-            ep = subprocess.run([py, str(Path(__file__).with_name("email-digest.py")), "--hours", "3", "--json"], capture_output=True, text=True, timeout=120)
+            ep = subprocess.run([py, str(Path(__file__).with_name("email-digest.py")), "--hours", "3", "--json"], capture_output=True, text=True, errors="replace", timeout=120)
             email_doc = json.loads(ep.stdout)
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")

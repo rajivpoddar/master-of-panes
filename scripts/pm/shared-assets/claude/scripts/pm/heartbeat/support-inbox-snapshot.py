@@ -317,7 +317,7 @@ def classify_feedback_rows(rows: list[dict], window_start_ms: int) -> list[dict]
 def fetch_in_app(window_start_ms: int, limit: int = 50) -> list[dict]:
     proc = subprocess.run(
         ["npx", "convex", "data", "feedback", "--prod", "--limit", str(limit), "--order", "desc", "--format", "jsonl"],
-        capture_output=True, text=True, timeout=120, cwd=str(MAIN_CHECKOUT),
+        capture_output=True, text=True, errors="replace", timeout=120, cwd=str(MAIN_CHECKOUT),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"convex data feedback failed: {proc.stderr.strip()[-200:]}")

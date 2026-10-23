@@ -134,7 +134,7 @@ def _obligation_upsert(*, kind: str, pr: int, head: str, title: str, action: str
     if owner:
         argv += ["--owner", owner]
     try:
-        subprocess.run(argv, capture_output=True, text=True, timeout=20, check=False)
+        subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=20, check=False)
     except Exception:
         pass
 
@@ -382,7 +382,7 @@ def _obligation_resolve(*, kind: str, pr: int, reason: str) -> None:
                 "--pr", str(pr),
                 "--reason", reason,
             ],
-            capture_output=True, text=True, timeout=20, check=False,
+            capture_output=True, text=True, errors="replace", timeout=20, check=False,
         )
     except Exception:
         pass  # best-effort: no matching open row is not an error here
@@ -742,7 +742,7 @@ def fetch_open_prs(with_threads: bool = True) -> list[dict]:
             "gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "100",
             "--json", "number,headRefOid,title,isDraft,labels,statusCheckRollup,files,body,comments",
         ],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, errors="replace", timeout=120,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"gh pr list failed: {proc.stderr.strip()[:200]}")
@@ -773,7 +773,7 @@ def fetch_review_threads() -> dict[int, list[dict]] | None:
                    "-F", f"owner={owner}", "-F", f"name={name}"]
             if after:
                 cmd += ["-F", f"after={after}"]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=120)
             if proc.returncode != 0:
                 return None
             page = json.loads(proc.stdout)["data"]["repository"]["pullRequests"]
