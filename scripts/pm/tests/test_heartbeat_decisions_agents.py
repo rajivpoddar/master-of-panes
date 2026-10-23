@@ -105,9 +105,14 @@ def test_agent_classifier_is_pure(record, minutes, state):
     assert composer.classify_agent(record, NOW.timestamp() - minutes * 60, NOW) == state
 
 
-def pm_session(root, name="session", minutes=0):
+PROC = NOW.timestamp() - 30 * 3600  # PM claude process start
+
+
+def pm_session(root, name="session", minutes=0, started_h=2):
+    """started_h = hours before NOW that the session's first record was written."""
     path = root / f"{name}.jsonl"
-    path.write_text(json.dumps({"type": "user"}) + "\n")
+    stamp0 = datetime.fromtimestamp(NOW.timestamp() - started_h * 3600, timezone.utc).isoformat()
+    path.write_text(json.dumps({"type": "user", "timestamp": stamp0}) + "\n")
     stamp = NOW.timestamp() - minutes * 60
     os.utime(path, (stamp, stamp))
     return path
@@ -135,7 +140,7 @@ def test_agent_collector_reads_tail_and_metadata_without_mutation(tmp_path):
     transcript(tmp_path, "done", 100, done)
     transcript(tmp_path, "expired", 1441, active)
     transcript(tmp_path, "fallback", 70, active, {"agentType": "specialist"})
-    doc = composer.read_agents(tmp_path, NOW)
+    doc = composer.read_agents(tmp_path, NOW, PROC)
     assert doc["running"] == 1
     assert [r["description"] for r in doc["completed"]] == ["agent-done"]
     assert [r["description"] for r in doc["inactive"]] == ["Review\nreport", "specialist"]
@@ -155,14 +160,14 @@ def test_all_pm_pane_sessions_in_24h_count_including_pre_clear(tmp_path):
     pm_session(tmp_path, "old", minutes=600)
     # Session older than 24h is excluded, as is any agent older than 24h.
     transcript(tmp_path, "ancient", 1500, active, session="ancient")
-    pm_session(tmp_path, "ancient", minutes=1500)
+    pm_session(tmp_path, "ancient", minutes=1500, started_h=40)  # prior claude process
     transcript(tmp_path, "current-working", 5, active, session="current")
     transcript(tmp_path, "current-idle", 60, active, {"description": "Current review"}, session="current")
     transcript(tmp_path, "current-too-old", 1441, active, session="current")
     transcript(tmp_path, "current-done", 1, end, {"description": "Current done"}, session="current")
     transcript(tmp_path, "current-unreadable", 0, {}, session="current").write_text("broken json\n")
     pm_session(tmp_path, "current", minutes=2)
-    doc = composer.read_agents(tmp_path, NOW)
+    doc = composer.read_agents(tmp_path, NOW, PROC)
     assert doc["running"] == 1
     assert sorted(r["description"] for r in doc["completed"]) == ["Current done", "Pre clear done"]
     assert sorted(r["description"] for r in doc["inactive"]) == ["Current review", "Pre clear idle"]
@@ -183,7 +188,7 @@ def test_never_says_none_inactive_while_completed_agents_exist_and_caps_descript
 def test_parent_session_freshness_is_fifteen_minutes_inclusive(tmp_path, minutes, available):
     transcript(tmp_path, "recent-child", 1, {"type": "user"})
     pm_session(tmp_path, minutes=minutes)
-    doc = composer.read_agents(tmp_path, NOW)
+    doc = composer.read_agents(tmp_path, NOW, PROC)
     if available:
         assert doc["running"] == 1
     else:
@@ -197,7 +202,7 @@ def test_session_selection_requires_top_level_jsonl_not_directory_or_child_mtime
     # Move the fixture's parent record out of the top-level *.jsonl namespace.
     (tmp_path / "orphan.jsonl").rename(tmp_path / "orphan.session-record")
     pm_session(tmp_path, "newest", minutes=1)  # no subagent directory: no fallback to old
-    doc = composer.read_agents(tmp_path, NOW)
+    doc = composer.read_agents(tmp_path, NOW, PROC)
     # Every top-level session in 24h counts (old-child is a live pane session); the orphan has no session record.
     assert doc == {"running": 1, "completed": [], "inactive": [], "unreadable": 0}
     assert missing_parent.exists()
@@ -206,7 +211,7 @@ def test_session_selection_requires_top_level_jsonl_not_directory_or_child_mtime
 def test_no_top_level_session_record_is_unavailable(tmp_path):
     transcript(tmp_path, "orphan", 1, {"type": "user"})
     (tmp_path / "session.jsonl").rename(tmp_path / "session.other")
-    assert composer.read_agents(tmp_path, NOW) is None
+    assert composer.read_agents(tmp_path, NOW, PROC) is None
 
 
 def test_agent_line_caps_names_and_reports_unreadable_inputs(tmp_path):
@@ -216,10 +221,10 @@ def test_agent_line_caps_names_and_reports_unreadable_inputs(tmp_path):
     transcript(tmp_path, "bad", 80, {}).write_text("broken json\n")
     bad = tmp_path / "session/subagents/agent-bad.jsonl"
     os.utime(bad, (NOW.timestamp() - 4800,) * 2)
-    doc = composer.read_agents(tmp_path, NOW)
+    doc = composer.read_agents(tmp_path, NOW, PROC)
     assert doc["unreadable"] == 1 and doc["running"] == 0
     assert "1 unreadable" in composer.agents_line(doc)
-    assert composer.read_agents(tmp_path / "absent", NOW) is None
+    assert composer.read_agents(tmp_path / "absent", NOW, PROC) is None
     assert composer.agents_line(None) == "*Agents:* unavailable"
 
 
@@ -279,3 +284,38 @@ def test_deployed_skill_contract_is_shipped_in_manifest():
         entries = [e for e in manifest["entries"] if e["source_path"] == str(path.relative_to(ASSETS))]
         assert len(entries) == 1
         assert entries[0]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_only_current_process_direct_uncollected_agents_count(tmp_path):
+    active = {"type": "assistant", "message": {"stop_reason": "tool_use"}}
+    end = {"type": "assistant", "message": {"stop_reason": "end_turn"}}
+    # Old-process session (started before the PM claude process): excluded entirely, even if written recently.
+    transcript(tmp_path, "old-proc-done", 5, end, {"description": "OLD PROCESS"}, session="oldproc")
+    transcript(tmp_path, "old-proc-live", 5, active, {"description": "OLD PROCESS LIVE"}, session="oldproc")
+    pm_session(tmp_path, "oldproc", minutes=5, started_h=40)
+    # Current process: a /clear chain of two sessions.
+    transcript(tmp_path, "cur-done", 20, end, {"description": "Current completed", "spawnDepth": 1}, session="cur1")
+    transcript(tmp_path, "cur-run", 3, active, {"description": "Current running", "spawnDepth": 1}, session="cur2")
+    # Nested sub-subagent (spawnDepth 2) shares the dir but is not listed by the pane.
+    transcript(tmp_path, "nested", 3, active, {"description": "NESTED", "spawnDepth": 2}, session="cur2")
+    transcript(tmp_path, "nested-done", 3, end, {"description": "NESTED DONE", "spawnDepth": 2}, session="cur2")
+    # Result already delivered (meta.finished) => the pane dropped it.
+    transcript(tmp_path, "collected", 10, end, {"description": "COLLECTED", "finished": True, "spawnDepth": 1}, session="cur2")
+    # Finished before this process started (stale transcript in a current-process session) => not counted.
+    stale = transcript(tmp_path, "pre-proc-done", 31 * 60, end, {"description": "PRE PROC"}, session="cur1")
+    pm_session(tmp_path, "cur1", minutes=30, started_h=20)
+    pm_session(tmp_path, "cur2", minutes=2, started_h=1)
+    doc = composer.read_agents(tmp_path, NOW, PROC)
+    assert doc["running"] == 1
+    assert [r["description"] for r in doc["completed"]] == ["Current completed"]
+    assert doc["inactive"] == []
+    line = composer.agents_line(doc)
+    assert line.startswith("*Agents:* 2 listed · 1 running · 1 completed · 0 inactive")
+    for banned in ("OLD PROCESS", "NESTED", "COLLECTED", "PRE PROC"):
+        assert banned not in line
+
+
+def test_unknown_pm_process_start_is_unavailable_not_a_guess(tmp_path, monkeypatch):
+    transcript(tmp_path, "a", 1, {"type": "user"})
+    monkeypatch.setattr(composer, "pm_process_start", lambda *a, **k: None)
+    assert composer.read_agents(tmp_path, NOW) is None

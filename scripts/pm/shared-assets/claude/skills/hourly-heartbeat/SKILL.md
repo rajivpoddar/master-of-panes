@@ -80,10 +80,11 @@ STEP 2 — check: first line is "*Hourly — HH:MM IST*", or starts with
   exists. Keep blocks compact, no tables. Do not hand-edit blocks.
   - After Slots, verify the report-only "*Agents:*" line (Rajiv 2026-10-23,
     C0ALZJHGE49 thread 1792770386.754829, ts 1792770807.935489: "fix the report
-    to count the subagents correctly"). Count what the PM pane lists: every
-    subagent transcript of the PM pane's sessions in the last 24h, INCLUDING
-    sessions before a /clear (a /clear starts a new JSONL but the pane keeps its
-    agents). Classify each: running = transcript written in the last 60m and not
+    to count the subagents correctly"). Count what the PM pane lists: DIRECT
+    subagents (spawnDepth 1, not nested) of the session chain since the CURRENT PM
+    claude process started (last 24h cap), INCLUDING sessions before a /clear (a
+    /clear starts a new JSONL but the pane keeps its agents), excluding prior
+    processes and agents whose meta says finished (result already delivered). Classify each: running = transcript written in the last 60m and not
     ended; completed = last record is a final assistant end_turn (it still sits
     in the pane until PM TaskStops it); inactive = not ended, no write ≥60m.
     Print "*Agents:* N listed · R running · C completed · I inactive — PM stops

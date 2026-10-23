@@ -430,32 +430,91 @@ def _agent_row(path: Path, now: datetime, modified_at: float) -> dict:
     return {"description": str(description), "idle_min": int((now.timestamp() - modified_at) // 60)}
 
 
-def read_agents(root: Path = PM_PROJECT, now: datetime | None = None) -> dict | None:
-    """Count subagents of ALL PM-pane sessions written in the last 24h (a /clear starts a new
-    session JSONL but the pane keeps its agents). Never stops or modifies any.
-    running = written <60m, not ended; completed = final end_turn; inactive = not ended, >=60m idle."""
+def _is_listed_agent(path: Path) -> bool:
+    """The pane lists only DIRECT agents (nested sub-subagents share the dir with spawnDepth > 1) that
+    are not yet collected: meta.finished == true means the result was delivered and the pane dropped it."""
+    try:
+        meta = json.loads(path.with_suffix(".meta.json").read_text())
+    except (OSError, ValueError):
+        return True
+    if not isinstance(meta, dict):
+        return True
+    depth = meta.get("spawnDepth", 1)
+    if isinstance(depth, (int, float)) and depth > 1:
+        return False
+    return meta.get("finished") is not True
+
+
+def pm_process_start(pane: str = "0:0.0") -> float | None:
+    """Start time (epoch) of the claude process attached to the PM pane's tty; None when unknown."""
+    try:
+        tty = subprocess.run(["tmux", "display", "-p", "-t", pane, "#{pane_tty}"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        if not tty:
+            return None
+        out = subprocess.run(["ps", "-t", tty.replace("/dev/", ""), "-o", "lstart=,command="],
+                             capture_output=True, text=True, timeout=5).stdout
+        for row in out.splitlines():
+            if "claude" in row.split(maxsplit=5)[-1][:60] and "--model" in row:
+                return datetime.strptime(row[:24].strip(), "%a %b %d %H:%M:%S %Y").timestamp()
+    except Exception:
+        return None
+    return None
+
+
+def _session_started(path: Path) -> float | None:
+    """Epoch of a session JSONL's first timestamped record (birthtime fallback)."""
+    try:
+        with path.open("rb") as handle:
+            for _ in range(20):
+                line = handle.readline()
+                if not line:
+                    break
+                try:
+                    stamp = json.loads(line).get("timestamp")
+                except (ValueError, AttributeError):
+                    continue
+                if isinstance(stamp, str):
+                    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+        return getattr(path.stat(), "st_birthtime", None)
+    except OSError:
+        return None
+
+
+def read_agents(root: Path = PM_PROJECT, now: datetime | None = None, process_start: float | None = None) -> dict | None:
+    """Count what the CURRENT PM pane process lists (Rajiv 2026-10-23, ts 1792770807.935489).
+    Sessions = top-level JSONLs begun since the PM claude process started (chain across /clear);
+    only DIRECT subagents; completed only if finished within the process lifetime.
+    running = written <60m, not ended; completed = final end_turn; inactive = not ended, >=60m idle.
+    Unknown process start => None (unavailable), never a guess."""
     now = now or datetime.now(timezone.utc)
     if not root.is_dir():
+        return None
+    if process_start is None:
+        process_start = pm_process_start()
+    if process_start is None:
         return None
     sessions = []
     for session in root.glob("*.jsonl"):
         try:
-            if session.is_file():
-                sessions.append((session.stat().st_mtime, session))
+            if not session.is_file():
+                continue
+            started = _session_started(session)
+            sessions.append((session.stat().st_mtime, session, started))
         except OSError:
             continue
     if not sessions:
         return None
-    if now.timestamp() - max(m for m, _ in sessions) > PM_SESSION_FRESH_S:
+    if now.timestamp() - max(m for m, _, _ in sessions) > PM_SESSION_FRESH_S:
         return None  # fresh children cannot revive a dead PM pane
     running, completed, inactive, unreadable = 0, [], [], 0
-    for modified, session in sessions:
-        if now.timestamp() - modified > AGENT_RECENT_S:
-            continue
-        for path in (root / session.stem / "subagents").glob("agent-*.jsonl"):
+    for _modified, session, started in sessions:
+        if started is None or started < process_start:
+            continue  # prior claude process / restart
+        for path in (session.parent / session.stem / "subagents").glob("agent-*.jsonl"):
             try:
                 modified_at = path.stat().st_mtime
-                if now.timestamp() - modified_at > AGENT_RECENT_S:
+                if now.timestamp() - modified_at > AGENT_RECENT_S or not _is_listed_agent(path):
                     continue
                 state = classify_agent(_last_agent_record(path), modified_at, now)
                 if state == "unknown":
@@ -463,7 +522,8 @@ def read_agents(root: Path = PM_PROJECT, now: datetime | None = None) -> dict | 
                 elif state == "active":
                     running += 1
                 elif state == "done":
-                    completed.append(_agent_row(path, now, modified_at))
+                    if modified_at >= process_start:
+                        completed.append(_agent_row(path, now, modified_at))
                 elif state == "inactive":
                     inactive.append(_agent_row(path, now, modified_at))
             except FileNotFoundError:
