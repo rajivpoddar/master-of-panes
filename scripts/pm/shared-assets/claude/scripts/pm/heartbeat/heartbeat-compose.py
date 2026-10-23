@@ -334,7 +334,8 @@ PM_OPS_DB = PM_PROJECT / "state/pm-ops.db"
 MAX_DECISIONS = 6
 MAX_INACTIVE_AGENTS = 4
 PM_SESSION_FRESH_S = 15 * 60
-AGENT_RECENT_S = 6 * 3600
+# Rajiv 2026-10-23 (C0ALZJHGE49 ts 1792770807.935489): count every subagent of the PM pane's sessions in the last 24h.
+AGENT_RECENT_S = 24 * 3600
 
 
 def _compact(value, limit: int) -> str:
@@ -420,8 +421,19 @@ def _last_agent_record(path: Path) -> dict:
         return json.loads(data)
 
 
+def _agent_row(path: Path, now: datetime, modified_at: float) -> dict:
+    try:
+        meta = json.loads(path.with_suffix(".meta.json").read_text())
+    except (OSError, ValueError):
+        meta = {}
+    description = (meta.get("description") or meta.get("agentType") or path.stem) if isinstance(meta, dict) else path.stem
+    return {"description": str(description), "idle_min": int((now.timestamp() - modified_at) // 60)}
+
+
 def read_agents(root: Path = PM_PROJECT, now: datetime | None = None) -> dict | None:
-    """Read only the newest live PM session's subagents; never stop or modify any."""
+    """Count subagents of ALL PM-pane sessions written in the last 24h (a /clear starts a new
+    session JSONL but the pane keeps its agents). Never stops or modifies any.
+    running = written <60m, not ended; completed = final end_turn; inactive = not ended, >=60m idle."""
     now = now or datetime.now(timezone.utc)
     if not root.is_dir():
         return None
@@ -434,48 +446,51 @@ def read_agents(root: Path = PM_PROJECT, now: datetime | None = None) -> dict | 
             continue
     if not sessions:
         return None
-    modified, session = max(sessions, key=lambda row: (row[0], row[1].name))
-    if now.timestamp() - modified > PM_SESSION_FRESH_S:
-        return None  # fresh children cannot revive an earlier PM session
-    running, inactive, unreadable = 0, [], 0
-    for path in (root / session.stem / "subagents").glob("agent-*.jsonl"):
-        try:
-            modified_at = path.stat().st_mtime
-            if now.timestamp() - modified_at > AGENT_RECENT_S:
-                continue
-            state = classify_agent(_last_agent_record(path), modified_at, now)
-            if state == "unknown":
+    if now.timestamp() - max(m for m, _ in sessions) > PM_SESSION_FRESH_S:
+        return None  # fresh children cannot revive a dead PM pane
+    running, completed, inactive, unreadable = 0, [], [], 0
+    for modified, session in sessions:
+        if now.timestamp() - modified > AGENT_RECENT_S:
+            continue
+        for path in (root / session.stem / "subagents").glob("agent-*.jsonl"):
+            try:
+                modified_at = path.stat().st_mtime
+                if now.timestamp() - modified_at > AGENT_RECENT_S:
+                    continue
+                state = classify_agent(_last_agent_record(path), modified_at, now)
+                if state == "unknown":
+                    unreadable += 1
+                elif state == "active":
+                    running += 1
+                elif state == "done":
+                    completed.append(_agent_row(path, now, modified_at))
+                elif state == "inactive":
+                    inactive.append(_agent_row(path, now, modified_at))
+            except FileNotFoundError:
+                continue  # transcript retired during collection
+            except (OSError, ValueError, TypeError, AttributeError):
                 unreadable += 1
-            if state not in ("active", "inactive"):
-                continue
-            running += 1
-            if state == "inactive":
-                try:
-                    meta = json.loads(path.with_suffix(".meta.json").read_text())
-                except (OSError, ValueError):
-                    meta = {}
-                description = (meta.get("description") or meta.get("agentType") or path.stem) if isinstance(meta, dict) else path.stem
-                inactive.append({"description": str(description), "idle_min": int((now.timestamp() - modified_at) // 60)})
-        except FileNotFoundError:
-            continue  # transcript retired during collection, not a running-agent claim
-        except (OSError, ValueError, TypeError, AttributeError):
-            unreadable += 1
-    inactive.sort(key=lambda row: (-row["idle_min"], row["description"]))
-    return {"running": running, "inactive": inactive, "unreadable": unreadable}
+    for rows in (completed, inactive):
+        rows.sort(key=lambda row: (-row["idle_min"], row["description"]))
+    return {"running": running, "completed": completed, "inactive": inactive, "unreadable": unreadable}
 
 
 def agents_line(doc: dict | None) -> str:
     if doc is None:
         return "*Agents:* unavailable"
+    completed = doc.get("completed", [])
     inactive = doc.get("inactive", [])
-    line = f"*Agents:* {doc['running']} running · "
-    if inactive:
-        names = [f"{_compact(row['description'], 64)} (idle {row['idle_min']}m)" for row in inactive[:MAX_INACTIVE_AGENTS]]
-        if len(inactive) > MAX_INACTIVE_AGENTS:
-            names.append(f"+{len(inactive) - MAX_INACTIVE_AGENTS} more")
-        line += f"{len(inactive)} inactive ≥60m: " + ", ".join(names)
-    else:
-        line += "none inactive"
+    running = doc["running"]
+    listed = running + len(completed) + len(inactive)
+    line = (f"*Agents:* {listed} listed · {running} running · {len(completed)} completed · "
+            f"{len(inactive)} inactive — PM stops C+I in Step 3c")
+    names = [f"{_compact(r['description'], 64)} (completed, last write {r['idle_min']}m ago)" for r in completed]
+    names += [f"{_compact(r['description'], 64)} (inactive {r['idle_min']}m)" for r in inactive]
+    if names:
+        shown = names[:MAX_INACTIVE_AGENTS]
+        if len(names) > MAX_INACTIVE_AGENTS:
+            shown.append(f"+{len(names) - MAX_INACTIVE_AGENTS} more")
+        line += ": " + ", ".join(shown)
     if doc.get("unreadable"):
         line += f" · {doc['unreadable']} unreadable"
     return line
@@ -522,6 +537,93 @@ def collect_langsmith(py: str, timeout: int = 60) -> str:
         return LANGSMITH_UNKNOWN
 
 
+# ---------------------------------------------------------------------------
+# Spark training line (Rajiv 2026-10-23, C0ALZJHGE49 thread 1792694694.833149):
+# ALWAYS present in the hourly post; probes the Spark directly, read-only.
+# ---------------------------------------------------------------------------
+_SPARK_REMOTE = (
+    'C=$(docker ps --format "{{.Names}}" | grep -iE "train|sindhu" | head -1); '
+    'echo "##C $C"; [ -n "$C" ] || exit 0; '
+    'L=$(ls -t /home/user/*/native.log /home/user/*/*/native.log /home/user/*/*/*/native.log 2>/dev/null | head -1); '
+    '{ docker logs --tail 600 "$C" 2>&1; [ -n "$L" ] && tail -c 200000 "$L"; } | tr "\\r" "\\n" | tail -400'
+)
+
+
+def spark_probe(timeout: int = 8) -> tuple[dict | None, str]:
+    """Return (doc|None, reason). doc is {} when no trainer is running."""
+    import re as _re
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", "dgx-spark", _SPARK_REMOTE],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "ssh timeout"
+    except Exception as exc:
+        return None, type(exc).__name__
+    if r.returncode != 0 and "##C" not in r.stdout:
+        return None, f"ssh rc={r.returncode}"
+    out = r.stdout
+    m = _re.search(r"^##C (.*)$", out, _re.M)
+    name = (m.group(1).strip() if m else "")
+    if not name:
+        return {}, ""
+    doc: dict = {"run": name}
+    prog = None
+    for mm in _re.finditer(r"(\d+)/(\d+)\s*\[[^\]]*?([\d.]+)s/it", out):
+        if prog is None or int(mm[2]) >= int(prog[2]):
+            prog = mm
+    if prog:
+        doc.update(step=int(prog[1]), total=int(prog[2]), spi=float(prog[3]))
+    losses = _re.findall(r"'loss': '?([\d.]+)'?", out)
+    if losses:
+        doc["loss"] = losses[-1]
+    mins = _re.findall(r'"min_free_mib": ([\d.]+)', out)
+    if mins:
+        doc["mem_min"] = int(float(mins[-1]))
+    return doc, ""
+
+
+def monitor_up() -> bool:
+    try:
+        r = subprocess.run(["pgrep", "-f", "spark-run-monitor\\.sh"], capture_output=True, text=True, timeout=3)
+        own = os.getpid()
+        pids = [int(x) for x in r.stdout.split() if x.isdigit() and int(x) != own]
+        for pid in pids:
+            c = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=3).stdout
+            if "spark-run-monitor.sh --run-name" in c or c.strip().startswith(("bash", "/bin/bash", "sh ")) and "spark-run-monitor" in c:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def training_line(probe=None, mon_up=None) -> tuple[str, list[str]]:
+    """Never omitted. Returns (line, actions)."""
+    doc, reason = probe if probe is not None else spark_probe()
+    if doc is None:
+        return f"*Training:* UNAVAILABLE ({reason or 'probe failed'})", []
+    if not doc:
+        return "*Training:* no run active", []
+    up = monitor_up() if mon_up is None else mon_up
+    bits = [doc["run"]]
+    if doc.get("step") is not None:
+        pct = 100.0 * doc["step"] / doc["total"] if doc["total"] else 0
+        bits.append(f"{doc['step']}/{doc['total']} ({pct:.0f}%)")
+    else:
+        bits.append("step n/a")
+    bits.append(f"loss {doc.get('loss', 'n/a')}")
+    if doc.get("step") is not None and doc.get("spi"):
+        h = (doc["total"] - doc["step"]) * doc["spi"] / 3600
+        bits.append(f"ETA {h:.0f}h" if h < 48 else f"ETA {h/24:.1f}d")
+    else:
+        bits.append("ETA n/a")
+    bits.append(f"mem min {doc['mem_min']} MiB" if "mem_min" in doc else "mem min n/a")
+    bits.append(f"monitor {'up' if up else 'DOWN'}")
+    acts = [] if up else [f"spark-monitor DOWN while {doc['run']} active: restart spark-run-monitor.sh"]
+    return "*Training:* " + " · ".join(bits), acts
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -541,6 +643,7 @@ def compose(
     email_doc: dict | None = None,
     decisions: dict | None = None,
     agents: dict | None = None,
+    training: tuple | None = None,
     langsmith: str | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
@@ -593,6 +696,9 @@ def compose(
         body.append(agents_line(agents))
         if langsmith:
             body.append(langsmith)
+        tl, t_acts = training if training is not None else training_line()
+        body.append(tl)
+        slot_actions = slot_actions + t_acts
     # Exactly one empty spacer before this shared 1h/3h section.
     body += ["", *decision_block(decisions, now)]
 
@@ -799,6 +905,7 @@ def main() -> int:
             email_doc = json.loads(ep.stdout)
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")
+    training = training_line() if args.mode == "1h" else None
     langsmith = collect_langsmith(py) if args.mode == "1h" else None
     print(compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
@@ -806,8 +913,9 @@ def main() -> int:
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
-        email_doc=email_doc, decisions=decisions, agents=agents, langsmith=langsmith,
+        email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith,
     ))
+    pm_actions += (training[1] if training else [])
     if pm_actions:
         print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)
     return 0

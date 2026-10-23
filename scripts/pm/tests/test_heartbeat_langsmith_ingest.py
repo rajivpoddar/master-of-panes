@@ -73,3 +73,11 @@ def test_hourly_only_3h_excluded():
     now = datetime.now(timezone.utc)
     assert line in composer.compose("1h", now, None, {}, [], langsmith=line)
     assert line not in composer.compose("3h", now, None, {}, [], langsmith=line)
+
+
+def test_hourly_renders_both_langsmith_and_training_lines():
+    ls = "*LangSmith ingest (1h):* OK — 0 observed ingest errors (traces 5 / calls 5)"
+    tr = ("*Training:* run-x · 10/100 (10%) · loss 0.1 · ETA 1h · mem min 1 MiB · monitor up", [])
+    out = composer.compose("1h", datetime.now(timezone.utc), None, {}, [], langsmith=ls, training=tr)
+    assert ls in out and tr[0] in out
+    assert out.index(ls) < out.index(tr[0])
