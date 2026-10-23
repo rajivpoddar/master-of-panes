@@ -12,6 +12,7 @@
  * 5. Returns a HookResponse that Claude Code acts on
  */
 
+import { resolveBindHost } from "./bindHost.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -3386,6 +3387,7 @@ app.post("/api/slack-route", async (c) => {
 // ─── Start ───────────────────────────────────────────────
 
 const port = config.httpPort;
+const bindHost = resolveBindHost();
 
 console.log(`
 ╔══════════════════════════════════════════╗
@@ -3406,8 +3408,8 @@ console.log(`
 ╚══════════════════════════════════════════╝
 `);
 
-serve({ fetch: app.fetch, port }, (info) => {
-  console.log(`[mop] Server listening on port ${info.port}`);
+serve({ fetch: app.fetch, port, hostname: bindHost }, (info) => {
+  console.log(`[mop] Server listening on ${bindHost}:${info.port}`);
 });
 
 // ─── Graceful Shutdown ───────────────────────────────────
