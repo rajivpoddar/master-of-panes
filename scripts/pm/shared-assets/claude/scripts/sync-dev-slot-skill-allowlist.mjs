@@ -23,6 +23,7 @@ const allowlist = new Set([
   "proofshot",
   "macos-word-window-screenshot",
   "heydonna-agent-browser",
+  "remote-editor-screenshots",
   "playwright-testmatch-override-qa-only",
   "agent-browser",
   "agent-browser-auth-redirect-selector",

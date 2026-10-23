@@ -78,13 +78,18 @@ STEP 1b — Spark training line (Rajiv DM D0AMF0XE6TS ts 1792476770.692999: "add
 STEP 2 — check: first line is "*Hourly — HH:MM IST*", or starts with
   "<@U0BNFGX2UAX> " ONLY when an "*Asks:*" line (merge/admission/escalation)
   exists. Keep blocks compact, no tables. Do not hand-edit blocks.
-  - After Slots, verify the report-only "*Agents:*" line: use ONLY the current
-    live PM session, selected by the most recently written top-level session
-    JSONL in the PM project (within 15 min, never a subagent's mtime). Count only
-    that session's subagent transcripts written in the last 6h, excluding final
-    assistant end_turn; inactive means no write for ≥60m. Ignore all earlier
-    sessions. Cap 4 descriptions, then "+N more"; otherwise "none inactive".
-    No fresh parent session → "unavailable". This composer never stops agents.
+  - After Slots, verify the report-only "*Agents:*" line (Rajiv 2026-10-23,
+    C0ALZJHGE49 thread 1792770386.754829, ts 1792770807.935489: "fix the report
+    to count the subagents correctly"). Count what the PM pane lists: every
+    subagent transcript of the PM pane's sessions in the last 24h, INCLUDING
+    sessions before a /clear (a /clear starts a new JSONL but the pane keeps its
+    agents). Classify each: running = transcript written in the last 60m and not
+    ended; completed = last record is a final assistant end_turn (it still sits
+    in the pane until PM TaskStops it); inactive = not ended, no write ≥60m.
+    Print "*Agents:* N listed · R running · C completed · I inactive — PM stops
+    C+I in Step 3c", with up to 4 completed/inactive descriptions then "+N more".
+    Never print "none inactive" while completed agents are listed. No PM pane
+    session found → "unavailable". This composer never stops agents.
   - Verify "*Decisions pending on Rajiv:*" with ONE blank spacer line before it
     (after Agents). Read-only pm-ops ledger: open decision-kind / Rajiv-owned
     rows updated within 7 days, at most 6 target/phrase/age/held-by-Rajiv-or-via-CTO

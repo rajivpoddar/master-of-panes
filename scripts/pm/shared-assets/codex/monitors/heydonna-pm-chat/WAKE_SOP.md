@@ -156,6 +156,8 @@ HeyDonna tasks in this pool, respecting each request's availability and affinity
 | CP Repairs | `01a08f69-45db-71c2-b433-678419139ed7` |
 | PR Reviews | `01a0b53e-3316-77d3-9610-1c0c58d4ba5b` |
 
+Standby and Backup are also the Slack-relay overflow pool (cto-slack-relay SOP, Rajiv 2026-10-22 ts 1792689875.791679); the relay only uses them when idle.
+
 Decisions owns intake, verdict and the exact brief; Returns coordinates
 distribution/reconciliation and consumes terminals, never another merge
 executor. Route independent eligible exact-head requests to an available suitable
@@ -267,7 +269,7 @@ the result; it never runs these skills.
   or gate on capture-internal receipts (Rajiv 2026-09-15, `Ev0C20EDNKM0`,
   top-level over conflicting detail). Sole verdict: genuine exact-head
   `pull_request` E2E under strict fixtures; a typed fixture miss permits the
-  next bounded capture. Verification binds an observed run identity (workflow + run id + head); queue acceptance is delegation only, never 'in flight' (Rajiv 2026-09-20, `Ev0C39UU6HS8`); verify by `gh run view`, never a branch-filtered run list. PM owns PR-red capture diagnosis/coordination under the existing bounded exact-head capture path; no raw dispatch. Capture workflow/harness/test code is app-CI slot work via PM
+  next bounded capture. Verification binds an observed run identity (workflow + run id + head); queue acceptance is delegation only, never 'in flight' (Rajiv 2026-09-20, `Ev0C39UU6HS8`); verify by `gh run view`, never a branch-filtered run list. PM owns PR-red capture diagnosis/coordination under the existing bounded exact-head capture path; no raw dispatch by Decisions. PM triggers `e2e-llm-proxy-capture.yml` itself and CTO does not trigger capture (Rajiv C0ALZJHGE49 ts 1791976099.945419, S57); green capture goes straight to latest-head strict replay (S58). Capture workflow/harness/test code is app-CI slot work via PM
   (Rajiv 2026-09-18, `Ev0C3LAP5YM6`; promotion machinery removed,
   `Ev0C2T8R5T8S`). Post-merge, PM runs canonical `pm-cleanup-pr` within 15
   minutes until `pm-state:closed-clean` readback (Rajiv 2026-09-17,
@@ -406,6 +408,7 @@ Main advance allows one conflict-free identical-semantics replay only.
 
 ## Fast lanes and escalation
 
+- First main TEST red (Rajiv S77/S78/S79, DM D0AMF0XE6TS ts 1791791953.190459, C0ALZJHGE49 ts 1791906737.050279, DM ts 1791878034.480199): PM writes ONE skip PR + follow-up; the CTO admin ask needs no CI/E2E wait (toggle/merge/untoggle). Never debug or fix-forward first. Test-repair PRs take normal admission (S78 is skip-only).
 - Current-main red P0 (Rajiv 2026-08-22): genuine required `push` failure on
   exact current main never queues behind releases, ceremony, slots, or other
   repairs. PR Merges dispositions causally; proven hotfix goes to the roster

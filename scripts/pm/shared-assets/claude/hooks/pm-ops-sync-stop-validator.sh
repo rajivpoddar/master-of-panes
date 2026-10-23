@@ -41,6 +41,7 @@ fi
 STATUS_JSON=$(python3 "$PM_OPS" status --format json --read-only 2>>"$LOG" || echo '{}')
 
 python3 - "$STATUS_JSON" "$HOOK_INPUT" <<'PYEOF'
+from __future__ import annotations
 import json
 import sqlite3
 import sys

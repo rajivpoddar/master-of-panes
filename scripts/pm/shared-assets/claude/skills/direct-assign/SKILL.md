@@ -202,6 +202,15 @@ end-to-end surface; if it does, naming `remote-qa-runner` is mandatory, not opti
 This is part of the literal `task` message the skill POSTs, not a separate
 delivery. Keep it in sync with the MoP-side dispatch/handoff template.
 
+
+### Screenshots use Skill(remote-editor-screenshots) (Rajiv 2026-10-22, DM D0AMF0XE6TS thread 1792665412.130339, ts 1792665956.402069)
+Every new_issue/rework task with a visual/UI AC MUST carry this line verbatim:
+
+```text
+Screenshots: use Skill(remote-editor-screenshots): remote-browser-box.sh capture --requires-modal (+ --capture --synthetic-data-only when processing), seeded "[Test] E2E Seed - Medium Deposition (Frazier)" or a new UI project with job sheet + MP3, wait-ready on the box, exact-head 1440x900. "Visual proof NOT VIABLE" only after one correct logged attempt hits a concrete blocker.
+```
+Keep in sync with the MoP-side dispatch/handoff template.
+
 After successful `new_issue` assignment, post exactly one new top-level
 `#heydonna-dev` transition parent containing the issue, slot and assignment
 summary, with NO CTO @-mention (Rajiv 2026-09-28 15:34 IST, thread

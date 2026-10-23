@@ -914,7 +914,7 @@ if printf '%s' "$PAYLOAD" | grep -qE '<U[0-9A-Z]{8,}>'; then
   exit 1
 fi
 RESULT=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
-  -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+  --config <(printf 'header = "Authorization: Bearer %s"\n' "${SLACK_BOT_TOKEN}") \
   -H "Content-Type: application/json" \
   -d "$PAYLOAD")
 

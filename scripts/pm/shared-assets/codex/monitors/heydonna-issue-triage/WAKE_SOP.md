@@ -155,10 +155,10 @@ reason, owner, next action, wake condition, evidence, and fingerprint.
 
 Classify by runtime control point, not path name. App-CI producer/proof changes
 go to slots. Orchestration, admission, MoP, receipt, and autoscaler ownership is
-control-plane work. Rajiv-routed autoscaler obligations belong to the sole
-bounded control-plane implementation task `01a04154-c9c1-7bc1-8f7b-009a87bc7628`,
-never Todo. That task returns a candidate-only packet to CTO Decisions; it
-does not publish or deploy.
+control-plane work. Rajiv-routed autoscaler obligations belong to PM's `autoscaler-main-repair`
+background agent, never Todo and never a CTO task (Rajiv DM D0AMF0XE6TS
+`1792550649.679999`, S91; supersedes S82 CTO-first and the archived task
+`01a04154-c9c1-7bc1-8f7b-009a87bc7628`). PM deploys first and CTO reviews after.
 
 #### `CLOSE`
 

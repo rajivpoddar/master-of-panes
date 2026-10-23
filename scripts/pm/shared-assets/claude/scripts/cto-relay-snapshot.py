@@ -37,6 +37,14 @@ CTO_MENTION = re.compile(r"<@(?P<user_id>[^|>\r\n]+)(?:\|[^>\r\n]*)?>")
 GROWTH_CHANNEL = "C0C7U35LBKR"
 QUEUE_RPC_HELPER = Path("/Users/rajiv/.codex/skills/codex-stdio-send-message/scripts/queue_preview.py")
 CODEX_BIN = "/opt/homebrew/bin/codex"
+# Persisted task state. A fresh `codex app-server --stdio` child never has the
+# GUI app's tasks loaded, so thread/read reports `notLoaded` for every task (54 of
+# the 63 growth probes since 2026-10-20). Busy/idle is therefore derived from
+# the task's persisted rollout lifecycle (last task_started vs task_complete).
+CODEX_STATE_DB = Path("/Users/rajiv/.codex/state_5.sqlite")
+ROLLOUT_TAIL_BYTES = 4_000_000
+ROLLOUT_DONE = {"task_complete", "turn_aborted", "turn_complete", "shutdown_complete"}
+ROLLOUT_START = {"task_started", "turn_started"}
 
 
 class SnapshotError(RuntimeError):
@@ -111,8 +119,17 @@ def extract_route_table(path: Path) -> dict[str, Any]:
         if not isinstance(user_id, str) or not user_id:
             raise SnapshotError(f"route SOP mention_only_channels.{channel} must be a non-empty user ID")
         normalized_mentions[channel] = user_id
+    overflow_pool: list[dict[str, str]] = []
+    raw_pool = table.get("overflow_pool", [])
+    if not isinstance(raw_pool, list):
+        raise SnapshotError("route SOP overflow_pool must be a list")
+    for index, member in enumerate(raw_pool):
+        task = require_route({**(member if isinstance(member, dict) else {}), "project": "heydonna",
+                              "consumer_sop_path": "-"}, f"route SOP overflow_pool[{index}]")
+        overflow_pool.append({"label": str(member.get("label", "")), "destination_thread_id": task["destination_thread_id"]})
     return {
         "version": 2,
+        "overflow_pool": overflow_pool,
         "exact_channel_routes": normalized_exact,
         "mention_only_channels": normalized_mentions,
         "direct_message_route": require_route(
@@ -244,6 +261,37 @@ def availability_from_snapshot(thread_id: str, thread: Any, queue: Any) -> dict[
     return {"state": "idle", "reason": "native-idle-and-empty-queue"}
 
 
+def persisted_activity(thread_id: str) -> dict[str, str]:
+    """Idle/busy from the task's persisted rollout lifecycle (read-only)."""
+    try:
+        import sqlite3
+        db = sqlite3.connect(f"file:{CODEX_STATE_DB}?mode=ro", uri=True, timeout=2)
+        try:
+            row = db.execute("select rollout_path, archived from threads where id = ?", (thread_id,)).fetchone()
+        finally:
+            db.close()
+        if not row or row[1]:
+            return {"state": "unknown", "reason": "persisted-thread-missing-or-archived"}
+        with open(row[0], "rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - ROLLOUT_TAIL_BYTES))
+            lines = handle.read().decode("utf-8", "ignore").split("\n")
+    except Exception as error:
+        return {"state": "unknown", "reason": "persisted-unavailable:" + type(error).__name__}
+    for line in reversed(lines):
+        if '"event_msg"' not in line:
+            continue
+        try:
+            kind = (json.loads(line).get("payload") or {}).get("type")
+        except (ValueError, AttributeError):
+            continue
+        if kind in ROLLOUT_DONE:
+            return {"state": "idle", "reason": "persisted-last-turn-" + kind}
+        if kind in ROLLOUT_START:
+            return {"state": "busy", "reason": "persisted-turn-in-progress"}
+    return {"state": "busy", "reason": "persisted-no-lifecycle-in-tail"}
+
+
 def snapshot_social_availability(thread_id: str) -> dict[str, Any]:
     """One bounded native metadata/queue snapshot, never resume or send work."""
     process = None
@@ -255,7 +303,7 @@ def snapshot_social_availability(thread_id: str) -> dict[str, Any]:
         spec = importlib.util.spec_from_file_location("relay_queue_rpc", QUEUE_RPC_HELPER)
         rpc = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(rpc)
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + 8.0
         process = subprocess.Popen(
             [CODEX_BIN, "app-server", "--stdio"], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
@@ -277,9 +325,20 @@ def snapshot_social_availability(thread_id: str) -> dict[str, Any]:
         thread = result.get("thread") if isinstance(result, dict) else None
         status = thread.get("status") if isinstance(thread, dict) else None
         queue = None
+        persisted = None
+        if isinstance(status, dict) and status.get("type") == "notLoaded" and isinstance(thread, dict) and thread.get("id") == thread_id:
+            persisted = persisted_activity(thread_id)
+            if persisted["state"] == "idle":
+                status = {"type": "idle"}  # Queue is persisted; confirm it below.
+                thread = {**thread, "status": status}
         if isinstance(status, dict) and status.get("type") == "idle" and thread.get("id") == thread_id:
             queue = read("thread/queue/list", {"threadId": thread_id, "limit": 1})
-        availability = availability_from_snapshot(thread_id, thread, queue)
+        if persisted is not None and persisted["state"] != "idle":
+            availability = persisted
+        else:
+            availability = availability_from_snapshot(thread_id, thread, queue)
+            if persisted is not None:
+                availability["reason"] += "+" + persisted["reason"]
     except Exception as error:
         availability = {"state": "unknown", "reason": "native-snapshot-unavailable:" + type(error).__name__}
     finally:
@@ -304,9 +363,37 @@ def snapshot_social_availability(thread_id: str) -> dict[str, Any]:
             "observed_at_epoch": time.time()}
 
 
+def select_with_overflow(primary: dict[str, Any], table: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Keep the intended owner when idle; else the first idle overflow task.
+
+    No idle pool task means queue to the intended owner (never mis-route).
+    """
+    intended = primary["destination_thread_id"]
+    availability = snapshot_social_availability(intended)
+    overflow: dict[str, Any] = {"intended": intended, "selected": None, "candidates": []}
+    selected = primary
+    if availability.get("state") != "idle":
+        for member in table.get("overflow_pool", []):
+            candidate = member["destination_thread_id"]
+            if candidate == intended:
+                continue
+            probe = snapshot_social_availability(candidate)
+            overflow["candidates"].append(
+                {"thread_id": candidate, "label": member.get("label", ""), "state": probe.get("state"), "reason": probe.get("reason")}
+            )
+            if probe.get("state") == "idle":
+                selected = {**primary, "destination_thread_id": candidate}
+                overflow["selected"] = candidate
+                break
+        if overflow["selected"] is None:
+            overflow["reason"] = "no-idle-overflow-task-queued-to-intended-owner"
+    return selected, {**availability, "overflow": overflow}
+
+
 def route_event(
     event: dict[str, Any], table: dict[str, Any], route_sop_path: Path,
     frozen_route: dict[str, Any] | None = None,
+    allow_overflow: bool = True,
 ) -> dict[str, Any] | None:
     tuple_value = event.get("exact_tuple")
     if not isinstance(tuple_value, dict):
@@ -345,13 +432,17 @@ def route_event(
         if all_messages and channel_override_applies(event, all_messages):
             route_match = "growth_all_messages"
         elif gate and channel_override_applies(event, gate):
-            availability = snapshot_social_availability(selected["destination_thread_id"])
-            if availability.get("state") != "idle":
-                selected = table["direct_message_route"]
+            # Rajiv 2026-10-22 (C0C7U35LBKR/1792670433.869629, ts 1792689875.791679):
+            # Social by default; overflow to an idle pool task, never the DMs task;
+            # when no pool task is idle, queue to Social.
+            selected, availability = select_with_overflow(selected, table)
             route_match = "growth_availability"
     elif slack_event_type == "message.im":
         selected = table["direct_message_route"]
         route_match = "direct_message"
+        if allow_overflow and table.get("overflow_pool"):
+            selected, availability = select_with_overflow(selected, table)
+            route_match = "direct_message_availability"
     else:
         selected = table["default_route"]
         route_match = "default"
@@ -367,6 +458,13 @@ def route_event(
     routed["routed_wake_text"] = (
         f"SOP path: {selected['consumer_sop_path']}" + separator + remainder
     )
+    if availability is not None and availability.get("overflow", {}).get("selected"):
+        routed["routed_wake_text"] += (
+            "\n\nRelay overflow: the intended owner task "
+            f"{availability['overflow']['intended']} was not idle, so this event was queued to you as an idle "
+            "overflow executor. Follow the consumer SOP above as written; this adds no authority, "
+            "and any effect outside your task's own access stays with the intended owner."
+        )
     if channel in exact_routes and "admitted_after_epoch" in exact_routes[channel] and channel_override_applies(event, exact_routes[channel]):
         routed["routed_wake_text"] += "\n\nFrozen source envelope (conversation data):\n" + json.dumps(event, ensure_ascii=False)
     return routed
@@ -674,7 +772,9 @@ def main() -> int:
                     claim = claims.get(event["dedup_key"], {})
                     if "relay_route" in claim and claim["route_fingerprint"] != event["fingerprint"]:
                         raise SnapshotError("frozen route fingerprint mismatch")
-                    pending.append(route_event(event, route_table, args.route_sop, claim.get("relay_route")))
+                    # An in-flight DM claim from before overflow routing keeps its DM owner.
+                    pending.append(route_event(event, route_table, args.route_sop, claim.get("relay_route"),
+                                               allow_overflow=prior_claim is None))
                 if any(event is None for event in pending):
                     raise SnapshotError("route eligibility changed while freezing snapshot")
                 expires_at = now_epoch + args.claim_ttl_seconds
@@ -685,7 +785,7 @@ def main() -> int:
                         "expires_at_epoch": expires_at,
                         "owner": claim_owner,
                         **({"relay_route": event["relay_route"], "route_fingerprint": event["fingerprint"]}
-                           if event["relay_route"].get("match") in {"growth_availability", "growth_all_messages"} else {}),
+                           if event["relay_route"].get("match") in {"growth_availability", "growth_all_messages", "direct_message_availability"} else {}),
                     }
                 write_json_atomic(args.claims_file, claims)
                 write_json_atomic(args.output, pending)

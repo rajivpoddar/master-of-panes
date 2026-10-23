@@ -3,6 +3,54 @@
 Owner: existing Social Media task `01a11e3d-d8bb-73c1-8593-8ff56019d842`.
 Rajiv directive: `C0C7U35LBKR/1791638989.669329`.
 
+## Governing updates (2026-10-22 audit; these win over older sections below)
+
+`docs/marketing/GROWTH-PLAYBOOK.md` is the single source of truth for growth
+targets, caps, templates and approvals (newest explicit Rajiv directive wins) and
+`docs/marketing/do-not-contact.md` is checked FIRST before any outreach. Where an
+older section of this SOP conflicts, apply the following:
+
+- Relay overflow (Rajiv C0C7U35LBKR/1792670433.869629, ts 1792689875.791679):
+  the "busy or not" sentence below is superseded. When this task is busy the relay
+  queues the event to an idle overflow executor (Standby/Backup) and only queues
+  here when none is idle. The all-messages gate stays inert pending PM.
+  Overflow executors share the same in-app browser and Rajiv's logins (ts 1792695362.355229),
+  so they run this SOP fully, including publishing, within the same caps and ledger.
+- LinkedIn connection requests: 20/day, at most 100/week, about 12 reporters / 8 CET
+  (Rajiv `1792418964.851399`, `1792480303.000369`); replaces the 15/day sizing
+  and the 8/12/15 ramp below. Capacity counts confirmed sends plus UNKNOWN and held
+  reservations (playbook 3.1).
+- LinkedIn follows: at most 30 per 3h digest (Rajiv `1791874273.358789`,
+  `1791944172.119799`); the "LI10" cap in the older cycle text is superseded.
+- InMail: agencies only, Mon-Thu, no send window, approvals do not expire by time
+  of day (Rajiv `1792480303.000369`, `1792510374.784209`, `1792510687.777379`);
+  the 19 October v6 "approved window" blocks are historical only.
+- Errors: a generic or intermittent error skips the target and retries next cycle
+  (only if no unresolved effect) and persistent errors use the Chrome connector;
+  only a real restriction or invitation-limit warning pauses that lane; UNKNOWN
+  effects get readback, never a retry (Rajiv `1792464967.943359`, playbook 3.1).
+- Links: plain `https://heydonna.law/...` links with no tracking query; the
+  `?source=donna_*` links below are superseded (Rajiv `1792375784.137439`).
+- Every social post needs its own per-day calendar approval and a published paired
+  blog it links to (Rajiv `1792289024.607559`, `1792416788.915559`).
+- Native video (Rajiv C0C7U35LBKR/1792670433.869629, ts 1792695057.476639): every
+  publish step attaches the approved Short/video as NATIVE video on X, the LinkedIn
+  founder account, the LinkedIn Page, and FB/IG when available; a blog link card is
+  not a video. The blog link stays in the post text. Before pressing Publish confirm
+  the video is attached on that platform (preview shows the player) and record it
+  per platform in the receipt; if the packet lacks a video path for a platform, do
+  not publish, report back. Playbook section 5 governs.
+- Publisher video gate (Rajiv C0C7U35LBKR/1792670433.869629, ts 1792695057.476639):
+  REFUSE to publish any packet that lacks a per-channel video (a `video:` path for
+  X, LinkedIn founder, LinkedIn Page, YouTube Community, FB, IG, or an explicit
+  `held: <reason>`), or that does not cite a PASS from
+  `~/.claude/scripts/growth/validate-social-packet.py`. Reply to the thread with the
+  gap instead of posting text-only. Your receipt MUST list, per channel:
+  `<channel> | native video: yes | <post URL>`. A channel without `native video: yes`
+  is reported as not done, never as published. The next-day digest check flags it.
+- DNC: ACR, Remote Legal, the big agencies and TranscribeMe are excluded on every
+  channel (Rajiv `1792480449.354729`, `1792482716.767779`, `1792647318.554209`).
+
 Rajiv's direct instruction on 22 October 2026 is: "all growth channels messages
 should be routed here, busy or not." After the relay's prospective all-messages
 cutoff, every NEW ordinary #heydonna-growth (`C0C7U35LBKR`) source message enters

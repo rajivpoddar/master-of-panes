@@ -49,7 +49,7 @@ if [ -n "$THREAD_TS" ]; then
   CHANNEL="C0ALZJHGE49"
 
   RESPONSE=$(curl -s -X POST "https://slack.com/api/files.getUploadURLExternal" \
-    -H "Authorization: Bearer ${SLACK_TOKEN}" \
+    --config <(printf 'header = "Authorization: Bearer %s"\n' "${SLACK_TOKEN}") \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "filename=${FILENAME}&length=${FILESIZE}")
 
@@ -59,7 +59,7 @@ if [ -n "$THREAD_TS" ]; then
   curl -s -X POST "$UPLOAD_URL" -F "file=@${OUTPUT}" > /dev/null
 
   curl -s -X POST "https://slack.com/api/files.completeUploadExternal" \
-    -H "Authorization: Bearer ${SLACK_TOKEN}" \
+    --config <(printf 'header = "Authorization: Bearer %s"\n' "${SLACK_TOKEN}") \
     -H "Content-Type: application/json" \
     -d "{\"files\":[{\"id\":\"${FILE_ID}\",\"title\":\"${FILENAME}\"}],\"channel_id\":\"${CHANNEL}\",\"thread_ts\":\"${THREAD_TS}\",\"initial_comment\":\"Slot ${SLOT} pane screenshot\"}" > /dev/null
 

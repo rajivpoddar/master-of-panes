@@ -141,7 +141,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops-sync-stop-validator",
-      "sha256": "df3de256f4dbee89c3fb35d9273450fcc5cad6aebbee5d7e844b3dc844fded0d",
+      "sha256": "5820f05a801d84148ee47bfdd7be15c366b73b2615b51daaa68b9b9bc8dbc768",
       "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
     },
     {
@@ -348,7 +348,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "8faa8bb1058da10e94713896cdfdc7c968c0da9de0027768ab58923f02d39cf3",
+      "sha256": "4cbbbd20e64346cd7ea2160fe8bc201d4d0b1ae076af6b5c28a266ef8ef99787",
       "source_path": "claude/scripts/cto-relay-snapshot.py"
     },
     {
@@ -692,7 +692,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
-      "sha256": "d29cb2c31061493f2f6ad8f0d4b070ed8f2302fdf687d1139c36654acf73e529",
+      "sha256": "82dff31da892ea2eeaa974457084b3d8f43ef06eaf7be9316569269a66888c4e",
       "source_path": "claude/scripts/sync-dev-slot-skill-allowlist.mjs"
     },
     {
@@ -836,7 +836,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-direct-assign",
-      "sha256": "269cf43e1b19b7d417556ed7c2094d6ebef30b0462faab03cd2bf994b16b2d95",
+      "sha256": "47338ab2199ff6904fc2680c9ac1f4f9af74a74ac907588ce5f441065d09d83a",
       "source_path": "claude/skills/direct-assign/SKILL.md"
     },
     {
@@ -872,7 +872,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "cb745dff87e4e02d3cea724424b75bc86b566c8299eba4ffc4ec11207b962122",
+      "sha256": "ee3b8b3b4702959a934252430dbaf05cb6ce9e660c19dea860c752f0a5e8cc23",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
@@ -917,7 +917,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pane-video",
-      "sha256": "dce44457cfe6314ad8427136512cdbd6652321dcbe2ba7593189d3f172b61259",
+      "sha256": "53c9abad23e31665b7c302c9356e25af67060ca6c4fa8ba40d4644ee5e2052ea",
       "source_path": "claude/skills/pane-video/scripts/record-pane.sh"
     },
     {
@@ -987,7 +987,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
-      "sha256": "c576cffb0034a4e12d6d0d2aee1aa8137598ed90273ef781a17e63b859abac89",
+      "sha256": "afab9d4917c46a1c747e6d57561b50913fc1e30eeee510eadf67f733b1a31bde",
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {
@@ -996,7 +996,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-tmux-pane-screenshot",
-      "sha256": "df642f392856d750bb42a29ab2f0947481cd58071825c91878ddb981da0888f0",
+      "sha256": "ca6b9ea680c9b66c07bdad58a6481fc7793bcd9625f97fcaac8265cd59f4dd88",
       "source_path": "claude/skills/tmux-pane-screenshot/scripts/pane-screenshot.sh"
     },
     {
@@ -1230,7 +1230,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "4634e9a9c007990c52988596ffe560952d9e569fc27921d1656917a2e0eace70",
+      "sha256": "869c914544be86c9f14ae4f2a97636fa8f961a5c46afa25e861a748417f4ee64",
       "source_path": "codex/monitors/cto-slack-relay/WAKE_SOP.md"
     },
     {
@@ -1239,7 +1239,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "32ddd9ac923d90888dd51a5f0a8a55097e073886a709e4969493cf035f38669f",
+      "sha256": "adec13078aef912fd5ae4cfe1e2178db65f8d9a1368562942721a6527744a579",
       "source_path": "codex/monitors/heydonna-issue-triage/WAKE_SOP.md"
     },
     {
@@ -1257,7 +1257,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "39ba5bcd97bc4dc8fd0c5440147eb8acbba9d1b69036071d12b73025b599f375",
+      "sha256": "0cd2c895e8cbccaae2fdba2f26deb82306005f26da75ea6f3e3d113aa4e9e52d",
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md"
     },
     {
@@ -1266,7 +1266,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "948b6f67006e55fe2f8d90f80d5d52cde9fbbabc959aa9e32ac929213b66a83d",
+      "sha256": "337764f50d7450a3ed29ce603c644a393be2d43a4a5ba47eac207fd389032c58",
       "source_path": "codex/monitors/heydonna-social-media/WAKE_SOP.md"
     },
     {
