@@ -4,6 +4,7 @@
  * Owns PM scheduled cadence that used to be split across launchd scripts:
  * - 3h heartbeat: queues a normal PM prompt to invoke Skill(heartbeat-tasks)
  * - daily morning brief: queues a normal PM prompt to invoke Skill(morning-brief)
+ * - daily growth report (10:30 local): queues a PM prompt to invoke Skill(growth-daily)
  * - 1h hourly heartbeat (at :13 local): queues a normal PM prompt to invoke
  *   Skill(hourly-heartbeat). It replaces the PM session-only "HOURLY OPEN-PR
  *   DRIVE" cron (Rajiv 2026-09-29 11:02 IST, thread C0ALZJHGE49/1790659381.537339).
@@ -17,7 +18,7 @@ import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 
-export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat";
+export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat" | "growth-daily";
 export type PMCadenceTriggerReason = "scheduled" | "manual" | "boot";
 
 type PMCadenceTask = {
@@ -60,14 +61,27 @@ const HOURLY_HEARTBEAT_TASK: PMCadenceTask = {
   commandDescription: "MoP: run Skill(hourly-heartbeat) now with a background agent.",
 };
 
+// Rajiv C0C7U35LBKR thread 1792821492.101599, ts 1792823200.845199: "add it at
+// 10:30 am each day". Fires once per local (IST) day from 10:30, like morning-brief.
+const GROWTH_DAILY_TASK: PMCadenceTask = {
+  name: "growth-daily",
+  label: "growth daily",
+  configPrefix: "pm_cadence_growth_daily",
+  commandDescription:
+    "MoP: growth report due. Invoke Skill(growth-daily) now: launch the growth background agent with run_in_background=true (Mondays: Skill(growth-weekly)). Do not run it inline.",
+};
+
 const TASKS: Record<PMCadenceTaskName, PMCadenceTask> = {
   heartbeat: HEARTBEAT_TASK,
   "morning-brief": MORNING_BRIEF_TASK,
   "hourly-heartbeat": HOURLY_HEARTBEAT_TASK,
+  "growth-daily": GROWTH_DAILY_TASK,
 };
 
 const CFG_GLOBAL_PAUSED = "pm_cadence_paused";
 const LOCAL_MORNING_BRIEF_HOUR = 10;
+const GROWTH_DAILY_HOUR = 10;
+const GROWTH_DAILY_MINUTE = 30;
 // Offset from the top of the hour so the hourly post never races the 3h heartbeat.
 const HOURLY_HEARTBEAT_MINUTE = 13;
 
@@ -98,6 +112,14 @@ function morningBriefDueKey(now: Date): string {
 
 function isMorningBriefWindow(now: Date): boolean {
   return now.getHours() >= LOCAL_MORNING_BRIEF_HOUR;
+}
+
+function growthDailyDueKey(now: Date): string {
+  return localDayKey(now);
+}
+
+export function isGrowthDailyWindow(now: Date): boolean {
+  return now.getHours() * 60 + now.getMinutes() >= GROWTH_DAILY_HOUR * 60 + GROWTH_DAILY_MINUTE;
 }
 
 function configKey(task: PMCadenceTask, key: string): string {
@@ -168,6 +190,8 @@ export class PMCadenceScheduler {
       if (morningBrief) results.push(morningBrief);
       const hourly = await this.runIfDue("hourly-heartbeat", reason);
       if (hourly) results.push(hourly);
+      const growth = await this.runIfDue("growth-daily", reason);
+      if (growth) results.push(growth);
       return results;
     } finally {
       this.running = false;
@@ -354,6 +378,7 @@ export class PMCadenceScheduler {
   private currentDueKey(taskName: PMCadenceTaskName, now = new Date()): string {
     if (taskName === "heartbeat") return heartbeatDueKey(now);
     if (taskName === "hourly-heartbeat") return hourlyHeartbeatDueKey(now);
+    if (taskName === "growth-daily") return growthDailyDueKey(now);
     return morningBriefDueKey(now);
   }
 
@@ -363,6 +388,9 @@ export class PMCadenceScheduler {
     }
     if (taskName === "hourly-heartbeat") {
       return isHourlyHeartbeatWindow(now) && hourlyHeartbeatDueKey(now) !== lastDueKey;
+    }
+    if (taskName === "growth-daily") {
+      return isGrowthDailyWindow(now) && growthDailyDueKey(now) !== lastDueKey;
     }
     if (!isMorningBriefWindow(now)) {
       return false;

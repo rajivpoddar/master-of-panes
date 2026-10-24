@@ -1060,8 +1060,8 @@ app.post("/pm-cadence/run", async (c) => {
   } catch {
     return c.json({ success: false, error: "Body must be JSON: { task: 'heartbeat'|'morning-brief' }" }, 400);
   }
-  if (body.task !== "heartbeat" && body.task !== "morning-brief" && body.task !== "hourly-heartbeat") {
-    return c.json({ success: false, error: "task must be 'heartbeat', 'morning-brief' or 'hourly-heartbeat'" }, 400);
+  if (body.task !== "heartbeat" && body.task !== "morning-brief" && body.task !== "hourly-heartbeat" && body.task !== "growth-daily") {
+    return c.json({ success: false, error: "task must be 'heartbeat', 'morning-brief', 'hourly-heartbeat' or 'growth-daily'" }, 400);
   }
   const result = await pmCadenceScheduler.runManual(body.task);
   return c.json({ success: true, result, status: pmCadenceScheduler.getStatus() });
@@ -1077,8 +1077,8 @@ app.post("/pm-cadence/pause", async (c) => {
   if (typeof body.paused !== "boolean") {
     return c.json({ success: false, error: "paused must be boolean" }, 400);
   }
-  if (body.task !== undefined && body.task !== "heartbeat" && body.task !== "morning-brief" && body.task !== "hourly-heartbeat") {
-    return c.json({ success: false, error: "task must be 'heartbeat', 'morning-brief' or 'hourly-heartbeat' when provided" }, 400);
+  if (body.task !== undefined && body.task !== "heartbeat" && body.task !== "morning-brief" && body.task !== "hourly-heartbeat" && body.task !== "growth-daily") {
+    return c.json({ success: false, error: "task must be 'heartbeat', 'morning-brief', 'hourly-heartbeat' or 'growth-daily' when provided" }, 400);
   }
   pmCadenceScheduler.setPaused(body.paused, body.task);
   return c.json({ success: true, status: pmCadenceScheduler.getStatus() });
