@@ -1,0 +1,805 @@
+{
+  "provenance": "Sanitized native PR10992 run40075590949/a1 captured read-only; only transport metadata, bindings, receipt, exact job/step results and rules retained.",
+  "pr": {
+    "number": 10992,
+    "state": "open",
+    "draft": false,
+    "merged": false,
+    "head": {
+      "sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "ref": "chore/theme-c-brand-scripts",
+      "repo": {
+        "id": 992731533,
+        "full_name": "Scribie/heydonna-app"
+      }
+    },
+    "base": {
+      "sha": "7acec14445fd51de3ee4dafd24c02307210a1e92",
+      "ref": "main",
+      "repo": {
+        "id": 992731533,
+        "full_name": "Scribie/heydonna-app"
+      }
+    }
+  },
+  "run": {
+    "id": 40075590949,
+    "run_attempt": 1,
+    "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+    "event": "pull_request",
+    "head_branch": "chore/theme-c-brand-scripts",
+    "path": ".github/workflows/ci.yml",
+    "status": "completed",
+    "conclusion": "success",
+    "pull_requests": [
+      {
+        "url": "https://api.github.com/repos/Scribie/heydonna-app/pulls/10992",
+        "id": 4980550929,
+        "number": 10992,
+        "head": {
+          "ref": "chore/theme-c-brand-scripts",
+          "sha": "0393edb417b999759e8563c4c0fac259a68df476",
+          "repo": {
+            "id": 992731533,
+            "url": "https://api.github.com/repos/Scribie/heydonna-app",
+            "name": "heydonna-app"
+          }
+        },
+        "base": {
+          "ref": "main",
+          "sha": "7acec14445fd51de3ee4dafd24c02307210a1e92",
+          "repo": {
+            "id": 992731533,
+            "url": "https://api.github.com/repos/Scribie/heydonna-app",
+            "name": "heydonna-app"
+          }
+        }
+      }
+    ]
+  },
+  "jobs": [
+    {
+      "id": 120818110912,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "classify-change-scope",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-24T07:48:36Z",
+      "completed_at": "2026-10-24T07:48:48Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:48:39Z",
+          "completed_at": "2026-10-24T07:48:40Z"
+        },
+        {
+          "name": "Classify paid CI scope",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:48:40Z",
+          "completed_at": "2026-10-24T07:48:44Z"
+        },
+        {
+          "name": "Complete runner",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:48:44Z",
+          "completed_at": "2026-10-24T07:48:45Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:48:45Z",
+          "completed_at": "2026-10-24T07:48:45Z"
+        }
+      ]
+    },
+    {
+      "id": 120818154543,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "python",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-24T07:55:04Z",
+      "completed_at": "2026-10-24T08:03:04Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:55:05Z",
+          "completed_at": "2026-10-24T07:55:07Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:55:07Z",
+          "completed_at": "2026-10-24T07:55:28Z"
+        },
+        {
+          "name": "Setup Node",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:55:28Z",
+          "completed_at": "2026-10-24T07:55:43Z"
+        },
+        {
+          "name": "Setup Bun",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:55:43Z",
+          "completed_at": "2026-10-24T07:55:44Z"
+        },
+        {
+          "name": "Install dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:55:44Z",
+          "completed_at": "2026-10-24T07:55:47Z"
+        },
+        {
+          "name": "Lint Modal Python code",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:55:47Z",
+          "completed_at": "2026-10-24T07:55:54Z"
+        },
+        {
+          "name": "Install Python test dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:55:54Z",
+          "completed_at": "2026-10-24T07:56:26Z"
+        },
+        {
+          "name": "Proofreading scorer unit tests (#5992)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:56:26Z",
+          "completed_at": "2026-10-24T07:56:38Z"
+        },
+        {
+          "name": "SC benchmark parity unit tests (#8713)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:56:38Z",
+          "completed_at": "2026-10-24T07:56:54Z"
+        },
+        {
+          "name": "Run provider-failure episode aggregator (non-gating telemetry)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:56:54Z",
+          "completed_at": "2026-10-24T07:56:54Z"
+        },
+        {
+          "name": "Unit tests (format-SSE episode aggregator)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:56:54Z",
+          "completed_at": "2026-10-24T07:56:54Z"
+        },
+        {
+          "name": "Install ffmpeg (shared tests need transcoding)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:56:54Z",
+          "completed_at": "2026-10-24T07:56:54Z"
+        },
+        {
+          "name": "Modal cross-module unit tests",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:56:54Z",
+          "completed_at": "2026-10-24T07:58:36Z"
+        },
+        {
+          "name": "Modal shared unit tests",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T07:58:36Z",
+          "completed_at": "2026-10-24T08:00:25Z"
+        },
+        {
+          "name": "Modal PRM shared unit tests",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:00:25Z",
+          "completed_at": "2026-10-24T08:00:26Z"
+        },
+        {
+          "name": "Modal PRM reconstruction unit tests (AC1 gate)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:00:26Z",
+          "completed_at": "2026-10-24T08:00:30Z"
+        },
+        {
+          "name": "Modal PRM evidence unit tests (P0-8b)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:00:30Z",
+          "completed_at": "2026-10-24T08:00:31Z"
+        },
+        {
+          "name": "PRM probe-WER byte-compat tests",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:00:31Z",
+          "completed_at": "2026-10-24T08:00:32Z"
+        },
+        {
+          "name": "Modal shared projection integration suite (AC1/AC6/AC7)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:00:32Z",
+          "completed_at": "2026-10-24T08:00:37Z"
+        },
+        {
+          "name": "Unit tests (Modal GC)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:00:37Z",
+          "completed_at": "2026-10-24T08:00:48Z"
+        },
+        {
+          "name": "Unit tests (Hetzner autoscaler)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:00:48Z",
+          "completed_at": "2026-10-24T08:02:57Z"
+        },
+        {
+          "name": "Post Setup Bun",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:02:57Z",
+          "completed_at": "2026-10-24T08:02:58Z"
+        },
+        {
+          "name": "Post Setup Node",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:02:58Z",
+          "completed_at": "2026-10-24T08:02:58Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:02:58Z",
+          "completed_at": "2026-10-24T08:02:58Z"
+        },
+        {
+          "name": "Complete runner",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:02:58Z",
+          "completed_at": "2026-10-24T08:03:01Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:03:01Z",
+          "completed_at": "2026-10-24T08:03:01Z"
+        }
+      ]
+    },
+    {
+      "id": 120818154559,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "python-contracts",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-24T08:06:10Z",
+      "completed_at": "2026-10-24T08:21:10Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:06:12Z",
+          "completed_at": "2026-10-24T08:06:13Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:06:14Z",
+          "completed_at": "2026-10-24T08:06:15Z"
+        },
+        {
+          "name": "Setup Node",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:06:15Z",
+          "completed_at": "2026-10-24T08:06:33Z"
+        },
+        {
+          "name": "Setup Bun",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:06:33Z",
+          "completed_at": "2026-10-24T08:06:34Z"
+        },
+        {
+          "name": "Install dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:06:34Z",
+          "completed_at": "2026-10-24T08:06:39Z"
+        },
+        {
+          "name": "Install Python test dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:06:39Z",
+          "completed_at": "2026-10-24T08:07:38Z"
+        },
+        {
+          "name": "Contract test tooling",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:07:38Z",
+          "completed_at": "2026-10-24T08:09:19Z"
+        },
+        {
+          "name": "CI parallel workflow contracts",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:09:19Z",
+          "completed_at": "2026-10-24T08:21:01Z"
+        },
+        {
+          "name": "Post Setup Bun",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:21:01Z",
+          "completed_at": "2026-10-24T08:21:01Z"
+        },
+        {
+          "name": "Post Setup Node",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:21:01Z",
+          "completed_at": "2026-10-24T08:21:01Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:21:01Z",
+          "completed_at": "2026-10-24T08:21:02Z"
+        },
+        {
+          "name": "Complete runner",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:21:02Z",
+          "completed_at": "2026-10-24T08:21:07Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:21:07Z",
+          "completed_at": "2026-10-24T08:21:07Z"
+        }
+      ]
+    },
+    {
+      "id": 120818154574,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "python-modal (2)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-24T08:08:25Z",
+      "completed_at": "2026-10-24T08:14:22Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:08:26Z",
+          "completed_at": "2026-10-24T08:08:27Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:08:27Z",
+          "completed_at": "2026-10-24T08:08:45Z"
+        },
+        {
+          "name": "Install Python test dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:08:45Z",
+          "completed_at": "2026-10-24T08:09:16Z"
+        },
+        {
+          "name": "Modal audio unit tests",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:09:16Z",
+          "completed_at": "2026-10-24T08:14:17Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:14:17Z",
+          "completed_at": "2026-10-24T08:14:17Z"
+        },
+        {
+          "name": "Complete runner",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:14:17Z",
+          "completed_at": "2026-10-24T08:14:17Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:14:17Z",
+          "completed_at": "2026-10-24T08:14:17Z"
+        }
+      ]
+    },
+    {
+      "id": 120818154582,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "python-modal (1)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-24T08:13:12Z",
+      "completed_at": "2026-10-24T08:18:33Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:13:13Z",
+          "completed_at": "2026-10-24T08:13:14Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:13:14Z",
+          "completed_at": "2026-10-24T08:13:16Z"
+        },
+        {
+          "name": "Install Python test dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:13:16Z",
+          "completed_at": "2026-10-24T08:13:51Z"
+        },
+        {
+          "name": "Modal audio unit tests",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:13:51Z",
+          "completed_at": "2026-10-24T08:18:28Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:18:28Z",
+          "completed_at": "2026-10-24T08:18:29Z"
+        },
+        {
+          "name": "Complete runner",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:18:29Z",
+          "completed_at": "2026-10-24T08:18:29Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:18:29Z",
+          "completed_at": "2026-10-24T08:18:29Z"
+        }
+      ]
+    },
+    {
+      "id": 120818154596,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "python-docx",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-24T08:12:26Z",
+      "completed_at": "2026-10-24T08:24:17Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:12:27Z",
+          "completed_at": "2026-10-24T08:12:28Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:12:28Z",
+          "completed_at": "2026-10-24T08:12:47Z"
+        },
+        {
+          "name": "Setup Node",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:12:47Z",
+          "completed_at": "2026-10-24T08:13:00Z"
+        },
+        {
+          "name": "Setup Bun",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:13:00Z",
+          "completed_at": "2026-10-24T08:13:01Z"
+        },
+        {
+          "name": "Install dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:13:01Z",
+          "completed_at": "2026-10-24T08:13:03Z"
+        },
+        {
+          "name": "Install Python test dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:13:03Z",
+          "completed_at": "2026-10-24T08:13:37Z"
+        },
+        {
+          "name": "Modal docx unit tests",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:13:37Z",
+          "completed_at": "2026-10-24T08:24:11Z"
+        },
+        {
+          "name": "Post Setup Bun",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:24:11Z",
+          "completed_at": "2026-10-24T08:24:11Z"
+        },
+        {
+          "name": "Post Setup Node",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:24:11Z",
+          "completed_at": "2026-10-24T08:24:12Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:24:12Z",
+          "completed_at": "2026-10-24T08:24:12Z"
+        },
+        {
+          "name": "Complete runner",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:24:12Z",
+          "completed_at": "2026-10-24T08:24:14Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:24:14Z",
+          "completed_at": "2026-10-24T08:24:14Z"
+        }
+      ]
+    },
+    {
+      "id": 120818154625,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "python-modal (0)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-24T08:12:13Z",
+      "completed_at": "2026-10-24T08:28:00Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:12:14Z",
+          "completed_at": "2026-10-24T08:12:15Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:12:15Z",
+          "completed_at": "2026-10-24T08:12:35Z"
+        },
+        {
+          "name": "Install Python test dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:12:35Z",
+          "completed_at": "2026-10-24T08:13:07Z"
+        },
+        {
+          "name": "Modal audio unit tests",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:13:07Z",
+          "completed_at": "2026-10-24T08:27:55Z"
+        },
+        {
+          "name": "Post Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:27:55Z",
+          "completed_at": "2026-10-24T08:27:55Z"
+        },
+        {
+          "name": "Complete runner",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:27:55Z",
+          "completed_at": "2026-10-24T08:27:56Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:27:56Z",
+          "completed_at": "2026-10-24T08:27:56Z"
+        }
+      ]
+    },
+    {
+      "id": 120818155368,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "ci-infra",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-10-24T07:48:48Z",
+      "completed_at": "2026-10-24T07:48:48Z",
+      "steps": []
+    },
+    {
+      "id": 120818155696,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "unit-tests",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-10-24T07:48:48Z",
+      "completed_at": "2026-10-24T07:48:48Z",
+      "steps": []
+    },
+    {
+      "id": 120818155730,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "unit-tests-isolated",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-10-24T07:48:48Z",
+      "completed_at": "2026-10-24T07:48:48Z",
+      "steps": []
+    },
+    {
+      "id": 120818155944,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "typescript",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-10-24T07:48:48Z",
+      "completed_at": "2026-10-24T07:48:48Z",
+      "steps": []
+    },
+    {
+      "id": 120825864532,
+      "run_id": 40075590949,
+      "run_attempt": 1,
+      "head_sha": "0393edb417b999759e8563c4c0fac259a68df476",
+      "name": "test",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-24T08:28:02Z",
+      "completed_at": "2026-10-24T08:28:10Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:28:05Z",
+          "completed_at": "2026-10-24T08:28:05Z"
+        },
+        {
+          "name": "Require all CI phases",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:28:05Z",
+          "completed_at": "2026-10-24T08:28:06Z"
+        },
+        {
+          "name": "Complete runner",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:28:06Z",
+          "completed_at": "2026-10-24T08:28:06Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-24T08:28:06Z",
+          "completed_at": "2026-10-24T08:28:07Z"
+        }
+      ]
+    }
+  ],
+  "bindings": {
+    "BASE_SHA": "7acec14445fd51de3ee4dafd24c02307210a1e92",
+    "HEAD_SHA": "0393edb417b999759e8563c4c0fac259a68df476",
+    "WORKFLOW_SHA": "4692089d77a5d5ed79cc4c24506d175e620707b7",
+    "EVENT_NAME": "pull_request",
+    "PR_NUMBER": null
+  },
+  "log": "BASE_SHA=7acec14445fd51de3ee4dafd24c02307210a1e92\nHEAD_SHA=0393edb417b999759e8563c4c0fac259a68df476\nWORKFLOW_SHA=4692089d77a5d5ed79cc4c24506d175e620707b7\nEVENT_NAME=pull_request\n{\"app_ci_changed\": false, \"app_ci_matches\": [], \"app_test_fixture_changed\": false, \"app_test_fixture_matches\": [], \"changed_files\": [\"scripts/brand/donna-theme-c-build.py\", \"scripts/brand/donna-theme-c-fix-headband.py\"], \"ci_infra_scoped\": false, \"ci_required\": true, \"control_plane_ci_matches\": [], \"control_plane_matches\": [], \"control_plane_only\": false, \"convex_pool_eligible\": true, \"convex_runtime_changed\": false, \"convex_runtime_matches\": [], \"docs_sync_scoped\": false, \"e2e_required\": false, \"editor_changed\": false, \"editor_matches\": [], \"lfc_required\": false, \"maintenance_admin_only\": false, \"nysd_migration_matches\": [], \"nysd_migration_required\": false, \"ownership\": {\"scripts/brand/donna-theme-c-build.py\": \"app_product\", \"scripts/brand/donna-theme-c-fix-headband.py\": \"app_product\"}, \"paid_ci_exempt\": false, \"product_changed\": true, \"python_changed\": true, \"rules_sha256\": \"a86182893cd81b1b4544f18168f0e1f0b52fc3ed0616361dac7fc4ab7fb8cf09\", \"schema_version\": 1, \"scope\": \"product\", \"site_matches\": [], \"site_scoped\": false, \"style_only\": false, \"test_only\": false, \"ts_changed\": false, \"ui_changed\": false, \"ui_matches\": []}\n",
+  "parents": [
+    "7acec14445fd51de3ee4dafd24c02307210a1e92",
+    "0393edb417b999759e8563c4c0fac259a68df476"
+  ],
+  "blob_shas": {
+    "contents/.github/workflows/ci.yml?ref=7acec14445fd51de3ee4dafd24c02307210a1e92": "44c54d749edc682d8c4f04cd9295258ae7000a10",
+    "contents/.github/workflows/ci.yml?ref=4692089d77a5d5ed79cc4c24506d175e620707b7": "44c54d749edc682d8c4f04cd9295258ae7000a10",
+    "contents/scripts/ci/change_scope.py?ref=7acec14445fd51de3ee4dafd24c02307210a1e92": "6937d22e82bea437154dee28b4cdac64740b046f",
+    "contents/scripts/ci/change_scope.py?ref=4692089d77a5d5ed79cc4c24506d175e620707b7": "6937d22e82bea437154dee28b4cdac64740b046f",
+    "contents/scripts/ci/change-scope-rules.json?ref=7acec14445fd51de3ee4dafd24c02307210a1e92": "264250d9b7d71827d83712637a534cbade20e623",
+    "contents/scripts/ci/change-scope-rules.json?ref=4692089d77a5d5ed79cc4c24506d175e620707b7": "264250d9b7d71827d83712637a534cbade20e623"
+  },
+  "rules": "{\n  \"schema_version\": 1,\n  \"maintenance_admin_enabled\": true,\n  \"maintenance_admin_commands\": [\n    {\n      \"path\": \"convex/admin.ts\",\n      \"export\": \"adminRepointTranscriptHead\",\n      \"tests\": [\"convex/__tests__/admin-repoint-transcript-head.test.ts\"],\n      \"review_source\": \"C0ALZJHGE49/1792155908.335919; direct CLI maintenance, caller audit app/lib/convex/modal\"\n    }\n  ],\n  \"control_plane_only\": [\n    \".agents/**\",\n    \".claude/**\",\n    \"docs/**\",\n    \"eval/**\",\n    \"scripts/pm/**\",\n    \"AGENTS.md\",\n    \"*.md\",\n    \"benchmarks/**\"\n  ],\n  \"site\": [\n    \"website/**\",\n    \"docs-site/**\",\n    \"blog/**\",\n    \"video/**\"\n  ],\n  \"site_test_specs\": [\n    \"tests/e2e/specs/qa-tests/canonical-marketing-site.spec.ts\"\n  ],\n  \"site_workflows\": [\n    \".github/workflows/deploy-docs.yml\"\n  ],\n  \"control_plane_ci\": [\n    \"scripts/ci/notify-companion-select.sh\",\n    \"scripts/ci/pre-merge-current-head-ci-guard.sh\",\n    \"scripts/ci/promotion-current-head-ci-guard.sh\",\n    \"scripts/ci/publish-ci-verdict.py\",\n    \"scripts/ci/resolve-rerun-head.sh\",\n    \"scripts/ci/slot-clone-lease.sh\",\n    \"scripts/ci/validate-ci-action-packet.py\",\n    \"scripts/ci/test_notify_slack_companion.sh\",\n    \"scripts/ci/tests/test_ci_fast_triage.py\",\n    \"scripts/ci/tests/test_pre_merge_current_head_ci_guard.sh\",\n    \"scripts/ci/tests/test_promotion_current_head_ci_guard.sh\",\n    \"scripts/ci/tests/test_publish_ci_verdict.py\",\n    \"scripts/ci/tests/test_resolve_rerun_head.sh\",\n    \"scripts/ci/tests/test_slot_clone_lease.sh\",\n    \"scripts/ci/tests/test_validate_ci_action_packet.py\"\n  ],\n  \"app_ci\": [\n    \".github/**\",\n    \"scripts/ci/**\"\n  ],\n  \"ci_infra_full_ci\": [\n    \"scripts/ci/change_scope.py\",\n    \"scripts/ci/change-scope-rules.json\",\n    \".github/workflows/ci.yml\",\n    \".github/workflows/ci-dummy.yml\",\n    \"scripts/ci/*.ts\",\n    \"scripts/ci/*.js\",\n    \"scripts/ci/*.mjs\",\n    \"scripts/ci/*.cjs\",\n    \"scripts/ci/*.mts\",\n    \"scripts/ci/*.cts\",\n    \".github/workflows/deploy*.yml\",\n    \"scripts/ci/ci-fast-triage.py\",\n    \"scripts/ci/publish-staged-fixtures-bare.py\"\n  ],\n  \"ci_infra_e2e\": [\n    \".github/workflows/e2e*.yml\",\n    \"scripts/ci/hetzner/**\"\n  ],\n  \"e2e_run\": [\n    \"app/**\",\n    \"components/**\",\n    \"hooks/**\",\n    \"lib/**\",\n    \"convex/**\",\n    \"emails/**\",\n    \"types/**\",\n    \"modal/**\",\n    \"workers/**\",\n    \"public/**\",\n    \"assets/**\",\n    \"styles/**\",\n    \"packages/**\",\n    \"heydonna_audio/**\",\n    \"terms_extraction/**\",\n    \"patches/**\",\n    \"tests/e2e/**\",\n    \".github/workflows/e2e*.yml\",\n    \".github/workflows/ci*.yml\",\n    \".github/workflows/deploy*.yml\",\n    \".github/actions/**\",\n    \"scripts/ci/**\",\n    \"scripts/e2e/**\",\n    \"scripts/seed*\",\n    \"scripts/*preview*\",\n    \"scripts/install*\",\n    \"scripts/postinstall*\",\n    \"scripts/prebuild*\",\n    \"scripts/build*\",\n    \"scripts/deploy*\",\n    \"scripts/stage-ny-depo-rl-aug2026-asset.ts\",\n    \".husky/**\",\n    \"package.json\",\n    \"package-lock.json\",\n    \"npm-shrinkwrap.json\",\n    \"bun.lock*\",\n    \"pnpm-lock.yaml\",\n    \"yarn.lock\",\n    \"uv.lock\",\n    \"poetry.lock\",\n    \"Pipfile*\",\n    \"pyproject.toml\",\n    \"setup.py\",\n    \"setup.cfg\",\n    \"requirements*\",\n    \"tsconfig*\",\n    \"convex.json\",\n    \"middleware.*\",\n    \"instrumentation*\",\n    \"next.config.*\",\n    \"open-next.config.*\",\n    \"postcss.config.*\",\n    \"tailwind.config.*\",\n    \"playwright*.config.*\",\n    \"vitest*.config.*\",\n    \"jest-setup.*\",\n    \"wrangler.*\",\n    \".env.*\",\n    \".nvmrc\",\n    \"Dockerfile*\",\n    \"docker-compose*\"\n  ],\n  \"app_test_fixture\": [\n    \"__tests__/**\",\n    \"tests/**\"\n  ],\n  \"convex_runtime\": [\n    \"convex/**\",\n    \"lib/**\",\n    \"emails/**\",\n    \"types/**\",\n    \"package.json\",\n    \"bun.lock\",\n    \"convex.json\",\n    \"tsconfig*.json\"\n  ],\n  \"nysd_migration_carriers\": [\n    \"convex/__tests__/migrations-nysd-yaml.test.ts\",\n    \"convex/migrations.ts\",\n    \"convex/schema.ts\",\n    \"lib/formatter/ny-standard-depo-rules.ts\",\n    \"lib/formatter/rules-yaml-schema.ts\",\n    \"tests/fixtures/nysd-prior-6042-*.yml\",\n    \"__tests__/setup.ts\",\n    \"jest-setup.js\",\n    \"vitest.config.ts\",\n    \"vitest.unit.config.ts\",\n    \"scripts/ci/vitest-fork-heartbeat.ts\",\n    \"scripts/ci/run-vitest-with-fork-watchdog.py\",\n    \"package.json\",\n    \"bun.lock\"\n  ],\n  \"control_plane_legacy\": [\n    \"scripts/axiom-activity-report.py\",\n    \"scripts/tests/test_axiom_report_queries.py\",\n    \"scripts/__tests__/test_axiom_activity_*.py\"\n  ],\n  \"editor_product\": [\n    \"app/(pages)/dashboard/editor/**\",\n    \"components/editor/**\",\n    \"hooks/use-audio-highlighting.ts\",\n    \"hooks/use-transcript-cache.ts\",\n    \"hooks/use-transcript-data*.ts\",\n    \"hooks/use-transcript-editor.ts\",\n    \"hooks/use-transcript-save.ts\",\n    \"lib/editor/**\",\n    \"lib/utils/position-build-utils.ts\",\n    \"lib/utils/word-diff.ts\",\n    \"lib/workers/position-rebuild.worker.ts\",\n    \"lib/workers/position-rebuild-handler.ts\",\n    \"lib/workers/reconciliation.worker.ts\"\n  ],\n  \"ui_product\": [\n    \"app/*.css\",\n    \"app/*.tsx\",\n    \"app/**/*.css\",\n    \"app/**/*.tsx\",\n    \"components/*.css\",\n    \"components/*.ts\",\n    \"components/*.tsx\",\n    \"components/**/*.css\",\n    \"components/**/*.ts\",\n    \"components/**/*.tsx\",\n    \"hooks/*.ts\",\n    \"hooks/*.tsx\",\n    \"hooks/**/*.ts\",\n    \"hooks/**/*.tsx\",\n    \"lib/editor/**\",\n    \"styles/**\",\n    \"tailwind.config.*\"\n  ],\n  \"docs_sync_snapshots\": [\n    \"app/api/chat/support/docs-context.generated.ts\",\n    \"convex/lib/docs-context.generated.ts\"\n  ],\n  \"docs_sync_tests\": [\n    \"__tests__/docs/**\"\n  ],\n  \"python_paths\": [\n    \"modal/**\",\n    \"*.py\",\n    \"requirements*.txt\",\n    \"**/requirements*.txt\",\n    \"requirements*.in\",\n    \"**/requirements*.in\",\n    \"requirements*.lock\",\n    \"**/requirements*.lock\",\n    \"pyproject.toml\",\n    \"uv.lock\",\n    \"poetry.lock\",\n    \"Pipfile\",\n    \"Pipfile.lock\",\n    \"setup.cfg\",\n    \"pytest.ini\",\n    \"ruff.toml\",\n    \".ruff.toml\",\n    \".python-version\"\n  ],\n  \"ts_paths\": [\n    \"modal/*.[jt]s\",\n    \"modal/*.[jt]sx\",\n    \"modal/*.[cm][jt]s\",\n    \"modal/*.css\",\n    \"app/*.[jt]s\",\n    \"app/*.[jt]sx\",\n    \"app/*.[cm][jt]s\",\n    \"app/*.css\",\n    \"components/*.[jt]s\",\n    \"components/*.[jt]sx\",\n    \"components/*.[cm][jt]s\",\n    \"components/*.css\",\n    \"lib/*.[jt]s\",\n    \"lib/*.[jt]sx\",\n    \"lib/*.[cm][jt]s\",\n    \"lib/*.css\",\n    \"convex/*.[jt]s\",\n    \"convex/*.[jt]sx\",\n    \"convex/*.[cm][jt]s\",\n    \"convex/*.css\",\n    \"hooks/*.[jt]s\",\n    \"hooks/*.[jt]sx\",\n    \"hooks/*.[cm][jt]s\",\n    \"hooks/*.css\",\n    \"tests/*.[jt]s\",\n    \"tests/*.[jt]sx\",\n    \"tests/*.[cm][jt]s\",\n    \"tests/*.css\",\n    \"__tests__/*.[jt]s\",\n    \"__tests__/*.[jt]sx\",\n    \"__tests__/*.[cm][jt]s\",\n    \"__tests__/*.css\",\n    \"docs-site/**\"\n  ],\n  \"shared_language_paths\": [\n    \".github/**\",\n    \"scripts/ci/**\",\n    \"package.json\",\n    \"bun.lock\",\n    \"tsconfig*.json\",\n    \"__tests__/actions/docx-actions-line-number-sections.test.ts\",\n    \"__tests__/app/api/projects/projects-commission-joined-7435.test.ts\",\n    \"__tests__/convex/pipeline-http-routes.test.ts\",\n    \"__tests__/e2e/no-clerk-egress-observer.test.ts\",\n    \"__tests__/integration/9084-docx-import-page-breaks.integration.test.tsx\",\n    \"__tests__/lib/editor/insert-shortcuts.integration.test.ts\",\n    \"__tests__/lib/formatter/dsl-post-processing.test.ts\",\n    \"__tests__/lib/formatter/dsl-section-scoping.test.ts\",\n    \"__tests__/lib/formatter/proceedings-close.integration.test.ts\",\n    \"__tests__/lib/storage/test-utils.ts\",\n    \"__tests__/lib/utils/tiptap-export.test.ts\",\n    \"__tests__/scripts/capture-manifest.test.ts\",\n    \"__tests__/setup.ts\",\n    \"app/(pages)/dashboard/projects/actions.ts\",\n    \"app/actions/browser-log.ts\",\n    \"app/actions/docx-actions.ts\",\n    \"app/actions/formatting.ts\",\n    \"app/api/csp-report/route.ts\",\n    \"app/api/format/route.ts\",\n    \"convex/__tests__/callback-template-context.test.ts\",\n    \"convex/__tests__/chatActions-gemini-vertex-routing.test.ts\",\n    \"convex/__tests__/migrations-nysd-yaml.test.ts\",\n    \"convex/__tests__/modal-transcribe-payload.test.ts\",\n    \"convex/__tests__/patch-ny-depo-rl-aug2026-layout.test.ts\",\n    \"convex/__tests__/prm-validation-invariant.test.ts\",\n    \"convex/__tests__/transcriptionCallbacks.test.ts\",\n    \"convex/_seedAuditOpenCurrentE2E.ts\",\n    \"convex/actions.ts\",\n    \"convex/auth.config.ts\",\n    \"convex/autoprocess.ts\",\n    \"convex/creditsLedger.ts\",\n    \"convex/crons.ts\",\n    \"convex/http.ts\",\n    \"convex/hunkPayload.ts\",\n    \"convex/lib/__tests__/modal-transcribe-payload.test.ts\",\n    \"convex/lib/acrDepoMuRules.ts\",\n    \"convex/lib/calibrationMath.ts\",\n    \"convex/lib/modal_transcribe_payload.ts\",\n    \"convex/lib/userContextFormat.ts\",\n    \"convex/migrations.ts\",\n    \"convex/schema.ts\",\n    \"convex/stageRuns.ts\",\n    \"convex/supportChat.ts\",\n    \"convex/templates.ts\",\n    \"convex/test.ts\",\n    \"convex/transcripts.ts\",\n    \"hooks/use-transcript-save.ts\",\n    \"lib/actions.ts\",\n    \"lib/audit/rubric-compiler.ts\",\n    \"lib/editor/banner-reasons.ts\",\n    \"lib/editor/run-ai-edit-submit.tsx\",\n    \"lib/editor/section-styles.ts\",\n    \"lib/formatter/**\",\n    \"lib/template-utils.ts\",\n    \"lib/test-utils.ts\",\n    \"lib/types/transcript-layout.ts\",\n    \"lib/utils/document-generation.ts\",\n    \"lib/utils/prm/**\",\n    \"lib/utils/section-detection.ts\",\n    \"lib/workers/reconciliation.worker.ts\",\n    \"modal/agent_review/**\",\n    \"modal/audio/**\",\n    \"modal/docx/**\",\n    \"modal/editor_chat/**\",\n    \"modal/prm/**\",\n    \"modal/shared/**\",\n    \"modal/terms/processor.py\",\n    \"modal/tests/**\",\n    \"tests/e2e/establish-run-auth.ts\",\n    \"tests/e2e/global-setup.ts\",\n    \"tests/e2e/helpers/capture-record-status.ts\",\n    \"tests/e2e/helpers/format-model-override.ts\",\n    \"tests/e2e/helpers/perf-telemetry.ts\",\n    \"tests/e2e/helpers/project-test-utils.ts\",\n    \"tests/e2e/helpers/test-utils.ts\",\n    \"tests/e2e/qa-tests/auto-process-medex-filler.spec.ts\",\n    \"tests/e2e/qa-tests/user-dropdown-admin-item.spec.ts\",\n    \"tests/e2e/reporters/critical-ndjson-reporter.ts\",\n    \"tests/e2e/setup/test-setup.ts\",\n    \"tests/e2e/specs/core/acr-reapply-geometry.spec.ts\",\n    \"tests/e2e/specs/core/acr-template-auto-process.spec.ts\",\n    \"tests/e2e/specs/core/cfr-word-comments-seeding.spec.ts\",\n    \"tests/e2e/specs/core/critical/auto-process-regression.spec.ts\",\n    \"tests/e2e/specs/core/hearing-template-auto-process.spec.ts\",\n    \"tests/e2e/specs/core/smoke-ai-proofreading.spec.ts\",\n    \"tests/e2e/specs/core/smoke-cfr-audio-highlights.spec.ts\",\n    \"tests/e2e/specs/core/smoke-docx-export-version-history-guard.spec.ts\",\n    \"tests/e2e/specs/core/smoke-edit-with-ai-paragraphs.spec.ts\",\n    \"tests/e2e/specs/core/smoke-error-boundary.spec.ts\",\n    \"tests/e2e/specs/core/smoke-gemini-chat.spec.ts\",\n    \"tests/e2e/specs/core/smoke-general-project.spec.ts\",\n    \"tests/e2e/specs/core/smoke-large-file-perf.spec.ts\",\n    \"tests/e2e/specs/core/smoke-legal-deposition.spec.ts\",\n    \"tests/e2e/specs/core/template-creation-gutter.spec.ts\",\n    \"tests/e2e/specs/qa-tests/index-sections-capture.spec.ts\",\n    \"tests/e2e/specs/qa-tests/proofread-ladder-forced-rungs.spec.ts\",\n    \"tests/e2e/specs/qa-tests/template-placeholder-suggestions.spec.ts\",\n    \"tests/fixtures/**\",\n    \"tests/marketing-gate/**\",\n    \"scripts/produce-demo-video.py\",\n    \"benchmarks/proofreading/lineage.py\",\n    \"convex/_generated/**\",\n    \"convex/lib/**\",\n    \"__tests__/fixtures/**\",\n    \"package-lock.json\",\n    \"npm-shrinkwrap.json\",\n    \"bun.lockb\",\n    \"pnpm-lock.yaml\",\n    \"yarn.lock\",\n    \"patches/**\",\n    \"__tests__/e2e-env-independence.test.ts\",\n    \"app/(pages)/(auth)/auth-theme.css\",\n    \"app/(pages)/dashboard/_components/dashboard-side-bar.tsx\",\n    \"app/(pages)/dashboard/editor/[transcriptId]/editor-page.css\",\n    \"app/(pages)/dashboard/editor/[transcriptId]/page.tsx\",\n    \"app/(pages)/dashboard/layout.tsx\",\n    \"app/(pages)/dashboard/projects/[projectId]/page.tsx\",\n    \"app/(pages)/dashboard/projects/[projectId]/upload/page.tsx\",\n    \"app/(pages)/dashboard/projects/new/page.tsx\",\n    \"app/(pages)/dashboard/templates/editor/[templateId]/template-editor.css\",\n    \"app/(pages)/dashboard/templates/new/page.tsx\",\n    \"app/(pages)/workspaces/[workspaceId]/members/page.tsx\",\n    \"app/actions/audio.ts\",\n    \"app/actions/speaker-correction.ts\",\n    \"app/actions/speaker-name-suggestions.ts\",\n    \"app/actions/template-actions.ts\",\n    \"app/api/agent/review/route.ts\",\n    \"app/api/audit/route.ts\",\n    \"app/api/chat/support/log/route.ts\",\n    \"app/api/chat/support/route.ts\",\n    \"app/api/general-format/route.ts\",\n    \"app/api/projects/route.ts\",\n    \"app/globals.css\",\n    \"app/layout.tsx\",\n    \"benchmarks/requirements.txt\",\n    \"components/auth/auth-sync.tsx\",\n    \"components/editor/AudioEqDialog.tsx\",\n    \"components/editor/AudioWaveform.tsx\",\n    \"components/editor/ChatPanel.tsx\",\n    \"components/editor/EditorCriticalFailure.tsx\",\n    \"components/editor/EditorLoadContext.tsx\",\n    \"components/editor/EditorMenubar.tsx\",\n    \"components/editor/EditorSettingsContext.tsx\",\n    \"components/editor/EditorToolbar.tsx\",\n    \"components/editor/FindReplacePanel.tsx\",\n    \"components/editor/FindReplaceProvider.tsx\",\n    \"components/editor/StaleClientReloadDialog.tsx\",\n    \"components/editor/extensions/CSSPagination/CSSPagination.ts\",\n    \"components/editor/hooks/useFindReplace.ts\",\n    \"components/editor/hooks/useSpellcheck.ts\",\n    \"components/projects/TranscriptStatusBadge.tsx\",\n    \"components/rerun-auto-process-dialog.tsx\",\n    \"components/templates/RulesPanelV2.tsx\",\n    \"components/templates/template-editor-toolbar.tsx\",\n    \"components/ui/badge.tsx\",\n    \"components/ui/slider.tsx\",\n    \"convex/admin.ts\",\n    \"convex/agentRuns.ts\",\n    \"convex/audioAssets.ts\",\n    \"convex/auditJobs.ts\",\n    \"convex/chatActions.ts\",\n    \"convex/cloudImportAttempts.ts\",\n    \"convex/comments.ts\",\n    \"convex/communityBlobs.ts\",\n    \"convex/communityConfig.ts\",\n    \"convex/communityRetention.ts\",\n    \"convex/communityStorageMeasurement.ts\",\n    \"convex/conversations.ts\",\n    \"convex/editorSessions.ts\",\n    \"convex/externalApi.ts\",\n    \"convex/externalUploadAction.ts\",\n    \"convex/humanSaveAction.ts\",\n    \"convex/jobs.ts\",\n    \"convex/judgeAdmin.ts\",\n    \"convex/manualAiCredits.ts\",\n    \"convex/projectAccess.ts\",\n    \"convex/projectShares.ts\",\n    \"convex/projects.ts\",\n    \"convex/r2Actions.ts\",\n    \"convex/rulesChat.ts\",\n    \"convex/scribieIngestAction.ts\",\n    \"convex/scribieReuseRecovery.ts\",\n    \"convex/stageRunsValidation.ts\",\n    \"convex/subscriptions.ts\",\n    \"convex/testing.ts\",\n    \"convex/transcriptionCallbackComplete.ts\",\n    \"convex/transcriptionCallbacks.ts\",\n    \"convex/usageMetering.ts\",\n    \"convex/versionLabels.ts\",\n    \"convex/workspaceInvites.ts\",\n    \"convex/workspaceReports.ts\",\n    \"convex/workspacesPublic.ts\",\n    \"docs-site/components/support-chat.tsx\",\n    \"docs-site/pages/editor/ai-tools.mdx\",\n    \"docs-site/pages/editor/donna-chat.mdx\",\n    \"docs-site/pages/editor/keyboard-shortcuts.mdx\",\n    \"docs/investigations/2026-10-05-llm-metering-inventory.md\",\n    \"docs/specs/account-data-deletion-spec.md\",\n    \"docs/specs/editor-lock-overlay/tips.md\",\n    \"heydonna_audio/bon_ladder.py\",\n    \"heydonna_audio/cache_ops.py\",\n    \"hooks/use-audio-highlighting.ts\",\n    \"hooks/use-scroll-observer-sentinel.ts\",\n    \"hooks/use-template-editor.ts\",\n    \"hooks/use-transcript-cache.ts\",\n    \"hooks/use-transcript-data-enhanced.ts\",\n    \"hooks/use-transcript-editor.ts\",\n    \"lib/agent/apply-speaker-relabel.ts\",\n    \"lib/agent/phrase-cursor.ts\",\n    \"lib/agent/review-route-support.ts\",\n    \"lib/agent/review-worker.ts\",\n    \"lib/ai-error-mapper.ts\",\n    \"lib/ai/normalize-model.ts\",\n    \"lib/audit/judge.ts\",\n    \"lib/editor/extensions/AgentPhraseLock.ts\",\n    \"lib/editor/extensions/ByLineIndentExtension.ts\",\n    \"lib/editor/extensions/proofreader-shortcut.ts\",\n    \"lib/editor/extensions/word-paste-normalizer.ts\",\n    \"lib/editor/track-changes/operations/accept-change.ts\",\n    \"lib/editor/track-changes/operations/reject-change.ts\",\n    \"lib/errors/export-failure.ts\",\n    \"lib/storage/__tests__/fixtures/v4-sw.js\",\n    \"lib/storage/auth-error-handler.ts\",\n    \"lib/storage/indexed-db.ts\",\n    \"lib/storage/save-safety-observability.ts\",\n    \"lib/storage/sync-kernel-digest.ts\",\n    \"lib/storage/sync-manager.ts\",\n    \"lib/storage/upload-lease-db.ts\",\n    \"lib/utils/ai-operation-rollback.ts\",\n    \"lib/utils/template-matching.ts\",\n    \"modal/chat_tools/processor.py\",\n    \"modal/requirements.txt\",\n    \"modal/terms/requirements.txt\",\n    \"scripts/capture-7055-boundary-format.py\",\n    \"scripts/capture-7327-carrier-corpus.py\",\n    \"scripts/generate-video-posters.py\",\n    \"scripts/modal-mint-7327.py\",\n    \"tests/e2e/helpers/clerk-auth-flow.ts\",\n    \"tests/e2e/helpers/convex-run.ts\",\n    \"tests/e2e/specs/core/smoke-audio-playback.spec.ts\",\n    \"tests/e2e/specs/qa-tests/save-notices-messagebar.spec.ts\",\n    \"app/(pages)/community/_components/community-ui.tsx\",\n    \"app/(pages)/setups/page.tsx\",\n    \"app/r/[referralCode]/route.ts\",\n    \"components/editor/settings/AISettings.tsx\",\n    \"components/editor/settings/AudioSettings.tsx\",\n    \"components/editor/settings/AutocorrectSettings.tsx\",\n    \"components/editor/settings/DisplaySettings.tsx\",\n    \"components/editor/settings/EditorSettingsModal.tsx\",\n    \"components/editor/settings/SnippetSettings.tsx\",\n    \"components/editor/settings/SpellcheckSettings.tsx\",\n    \"components/editor/verified-recovery-banner.tsx\",\n    \"convex/_qa_seed_access_denial.ts\",\n    \"convex/communityTopics.ts\",\n    \"docs-site/pages/editor/audio-playback.mdx\",\n    \"docs-site/pages/editor/find-replace.mdx\",\n    \"docs-site/pages/editor/menus.mdx\",\n    \"docs-site/pages/editor/index.mdx\",\n    \"docs-site/pages/editor/settings.mdx\",\n    \"docs-site/pages/editor/speaker-correction.mdx\",\n    \"docs-site/pages/export/docx.mdx\",\n    \"docs-site/theme.config.tsx\",\n    \"hooks/use-play-word.ts\",\n    \"hooks/use-recovery-gate.ts\",\n    \"lib/editor/position-index-lifecycle.ts\",\n    \"lib/editor/store-reconciliation.ts\",\n    \"lib/editor/track-changes/operations/accept-all.ts\",\n    \"lib/editor/track-changes/operations/reject-all.ts\",\n    \"lib/utils/selection-toolbar-utils.ts\",\n    \"app/(pages)/community/error.tsx\",\n    \"app/(pages)/community/page.tsx\",\n    \"app/(pages)/community/u/[handle]/page.tsx\",\n    \"app/(pages)/dashboard/page.tsx\",\n    \"app/page.tsx\"\n  ]\n}\n",
+  "files": [
+    {
+      "filename": "scripts/brand/donna-theme-c-build.py",
+      "status": "added"
+    },
+    {
+      "filename": "scripts/brand/donna-theme-c-fix-headband.py",
+      "status": "added"
+    }
+  ]
+}

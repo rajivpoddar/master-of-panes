@@ -87,6 +87,12 @@ def workflow_proof(pr, workflow, names):
                 except (Refusal, OSError, ValueError, KeyError,
                         subprocess.TimeoutExpired):
                     test_only = None
+            if workflow == "ci.yml" and len(scope_jobs) == 1:
+                required_set = ci_required_set_proof(pr, run, scope)
+                if required_set is not None:
+                    verify_ci_required_jobs(run, jobs, required_set)
+                    return {"run": run["id"], "attempt": run.get("run_attempt", 1),
+                            "head": head, "classifier_required_set": required_set}
         # A verified app-test-only receipt lets the classifier skip the python job.
         required = [name for name in names
                     if not (test_only is not None and name == "python"
@@ -400,6 +406,111 @@ def receipt_files_match_pr(pr, receipt):
         return False
 
 
+def ci_required_set_proof(pr, run, scope):
+    """Bind language gates to the same trusted native CI receipt, never PR prose."""
+    lines = strip_log_framing(job_log(scope["id"]))
+    receipts = [classifier_receipt_object(lines, name)
+                for name in ("product", "mixed", "editor_product")]
+    receipt = next((item for item in receipts if item is not None), None)
+    if receipt is None:
+        return None
+    expected = {"ci_required": True, "paid_ci_exempt": False,
+                "control_plane_only": False, "product_changed": True,
+                "ci_infra_scoped": False}
+    if any(receipt.get(key) is not value for key, value in expected.items()):
+        return None
+    flags = ("ts_changed", "python_changed", "e2e_required")
+    if any(type(receipt.get(key)) is not bool for key in flags):
+        return None
+    if not (receipt["ts_changed"] or receipt["python_changed"]):
+        return None
+    bindings = classifier_bindings(lines)
+    if bindings is None:
+        return None
+    base, head, workflow = (bindings["BASE_SHA"], bindings["HEAD_SHA"],
+                            bindings["WORKFLOW_SHA"])
+    if not (HEX40.fullmatch(base) and HEX40.fullmatch(workflow)):
+        return None
+    if (head != pr["head"]["sha"] or run.get("head_sha") != head
+            or run.get("head_branch") != pr["head"]["ref"]
+            or run.get("path", "").split("@")[0] != ".github/workflows/ci.yml"
+            or not successful(run) or not successful(scope)
+            or not event_binding_ok(bindings, run, pr)
+            or not pr_binding_ok(bindings, run, pr)
+            or not native_pr_binding_ok(run, pr)):
+        return None
+    parents = api(f"git/commits/{workflow}").get("parents", [])
+    if [item["sha"] for item in parents] != [base, head]:
+        return None
+    for path in (".github/workflows/ci.yml", "scripts/ci/change_scope.py",
+                 "scripts/ci/change-scope-rules.json"):
+        before, selected = contents_identity(path, base), contents_identity(path, workflow)
+        if before is None or selected is None or before[0] != selected[0]:
+            return None
+    rules = contents_identity("scripts/ci/change-scope-rules.json", workflow)
+    import hashlib
+    if (rules is None or hashlib.sha256(rules[1]).hexdigest() != receipt.get("rules_sha256")
+            or not receipt_files_match_pr(pr, receipt)):
+        return None
+    return {"head": head, "run": run["id"], "attempt": run.get("run_attempt", 1),
+            "scope_job_id": scope["id"], "workflow_sha": workflow,
+            "rules_sha256": receipt["rules_sha256"],
+            **{key: receipt[key] for key in flags}}
+
+
+def verify_ci_required_jobs(run, jobs, required_set):
+    """Mirror the trusted CI language families; wrappers alone never prove execution."""
+    if (len({job["name"] for job in jobs}) != len(jobs)
+            or len({job.get("id") for job in jobs}) != len(jobs)):
+        raise Refusal(f"AMBIGUOUS_JOB_IDENTITY workflow=ci.yml run={run['id']}")
+    by_name = {job["name"]: job for job in jobs}
+    # No allowance for failed optional jobs, failed infra, or a job from another attempt.
+    for job in jobs:
+        if (job.get("run_id") != run["id"]
+                or job.get("run_attempt") != run.get("run_attempt", 1)
+                or job.get("head_sha") != required_set["head"]
+                or job.get("conclusion") not in ("success", "skipped")
+                or job.get("status") != "completed"):
+            raise Refusal(f"JOB_NOT_GREEN_OR_UNBOUND job={job['name']} run={run['id']}")
+    groups = {
+        "ts_changed": {"typescript": "Typecheck", "unit-tests-isolated": "Isolated unit tests",
+                       **{f"unit-tests ({i})": "Unit tests" for i in (1, 2, 3)}},
+        "python_changed": {"python": "Modal shared unit tests",
+                           "python-docx": "Modal docx unit tests",
+                           "python-contracts": "CI parallel workflow contracts",
+                           **{f"python-modal ({i})": "Modal audio unit tests" for i in (0, 1, 2)}},
+    }
+    for flag, phases in groups.items():
+        if required_set[flag]:
+            for name, step in phases.items():
+                job = by_name.get(name, {})
+                if not successful(job):
+                    raise Refusal(f"REQUIRED_JOB_NOT_GREEN job={name} run={run['id']}")
+                if not any(successful(s) and s["name"].startswith(step)
+                           for s in job.get("steps", [])):
+                    raise Refusal(f"TEST_EXECUTION_MISSING job={name} step={step} run={run['id']}")
+        else:
+            # A skipped matrix has one unexpanded native job; an executed matrix
+            # has the full shard set. Missing or partial families are not skips.
+            names = list(phases)
+            matrix = "unit-tests" if flag == "ts_changed" else "python-modal"
+            if matrix in by_name:
+                names = [name for name in names if not name.startswith(matrix + " (")]
+                names.append(matrix)
+                if any(name.startswith(matrix + " (") for name in by_name):
+                    raise Refusal(f"AMBIGUOUS_JOB_IDENTITY job={matrix} run={run['id']}")
+            for name in names:
+                job = by_name.get(name, {})
+                if not (successful(job) or (job.get("status") == "completed"
+                                            and job.get("conclusion") == "skipped")):
+                    raise Refusal(f"OPTIONAL_JOB_NOT_SUCCESS_OR_SKIPPED job={name} run={run['id']}")
+    aggregate = by_name.get("test", {})
+    if not successful(aggregate) or not any(
+            successful(step) and step["name"] == "Require all CI phases"
+            for step in aggregate.get("steps", [])):
+        raise Refusal(f"CI_AGGREGATE_NOT_EXECUTED run={run['id']}")
+
+
 def app_test_only_e2e_proof(pr, classifier_proof):
     """Allow E2E absence or an exact-head successful run with its E2E job skipped."""
     head = pr["head"]["sha"]
@@ -416,6 +527,13 @@ def app_test_only_e2e_proof(pr, classifier_proof):
     if not successful(run):
         return None
     jobs = pages(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100", "jobs")
+    if "ts_changed" in classifier_proof and any(
+            job.get("run_id") != run["id"]
+            or job.get("run_attempt") != run.get("run_attempt", 1)
+            or job.get("head_sha") != head
+            or job.get("status") != "completed"
+            or job.get("conclusion") not in ("success", "skipped") for job in jobs):
+        return None
     e2e_jobs = [job for job in jobs if job.get("name") == "e2e"]
     if len(e2e_jobs) != 1 or e2e_jobs[0].get("conclusion") != "skipped":
         return None
@@ -528,8 +646,16 @@ def merge(number, head, apply=False, unrelated_main=None):
         proof = {workflow: dict(exemption) for workflow in WORKFLOWS}
     else:
         ci_proof = workflow_proof(pr, "ci.yml", WORKFLOWS["ci.yml"])
+        required_set = ci_proof.get("classifier_required_set")
         test_only = ci_proof.get("app_test_only")
         e2e_proof = app_test_only_e2e_proof(pr, test_only) if test_only else None
+        if required_set is not None:
+            if required_set["e2e_required"]:
+                e2e_proof = workflow_proof(pr, "e2e.yml", WORKFLOWS["e2e.yml"])
+            else:
+                e2e_proof = app_test_only_e2e_proof(pr, required_set)
+                if e2e_proof is None:
+                    raise Refusal("UNREQUIRED_E2E_NOT_SUCCESSFULLY_SKIPPED")
         if e2e_proof is None:
             required = workflow_requirements(number, head)
             if required["e2e_required"]:
