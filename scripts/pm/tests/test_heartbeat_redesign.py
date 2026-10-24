@@ -487,7 +487,7 @@ def test_compose_with_slots_active_users_agents_and_empty_decisions_stays_under_
     lines = msg.splitlines()
     assert "*ACTIONS (PM):* idle-slot S2 #8478 idle 25m; idle-slot S3 free idle 40m" in lines
     # Rajiv's Agents line + the spacer and empty Decisions section add 3 lines.
-    assert len(lines) <= 27
+    assert len(lines) <= 28  # +1: blank line before Training (live edit, Rajiv 2026-10-24)
 
 
 def test_known_codes_map_marks_code_mapped_not_new(tmp_path):

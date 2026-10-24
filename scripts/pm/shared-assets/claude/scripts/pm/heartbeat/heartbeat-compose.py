@@ -756,11 +756,11 @@ def compose(
         parts.append(sl_tldr)
         body += ["", *sl_lines]
     if mode == "1h":
-        body.append(agents_line(agents))
-        if langsmith:
-            body.append(langsmith)
+        # Empty line before Agents and before Training; LangSmith ingest line dropped
+        # (Rajiv 2026-10-24, C0ALZJHGE49 thread 1792806307.991749, ts 1792806414.519859).
+        body += ["", agents_line(agents)]
         tl, t_acts = training if training is not None else training_line()
-        body.append(tl)
+        body += ["", tl]
         slot_actions = slot_actions + t_acts
     # Exactly one empty spacer before this shared 1h/3h section.
     body += ["", *decision_block(decisions, now)]
@@ -969,7 +969,7 @@ def main() -> int:
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")
     training = training_line() if args.mode == "1h" else None
-    langsmith = collect_langsmith(py) if args.mode == "1h" else None
+    langsmith = None  # LangSmith ingest dropped from the hourly (Rajiv ts 1792806414.519859)
     print(compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,

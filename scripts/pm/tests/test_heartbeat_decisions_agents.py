@@ -240,8 +240,11 @@ def test_shared_composer_orders_agents_and_exactly_one_decision_spacer(mode):
     assert "\n\n\n" + HEADER not in out
     if mode == "1h":
         # Training line (Rajiv 1792694694.833149) follows Agents, directly before the decisions spacer.
+        # Live edit (Rajiv 2026-10-24): blank line before Agents and before Training.
         assert lines[i - 2] == "*Training:* no run active"
-        assert lines[i - 3] == "*Agents:* 1 listed · 1 running · 0 completed · 0 inactive — PM stops C+I in Step 3c"
+        assert lines[i - 3] == ""
+        assert lines[i - 4] == "*Agents:* 1 listed · 1 running · 0 completed · 0 inactive — PM stops C+I in Step 3c"
+        assert lines[i - 5] == ""
         assert out.index("*Slots") < out.index("*Agents") < out.index(HEADER)
         assert not out.startswith(composer.CTO)
     else:
