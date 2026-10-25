@@ -145,10 +145,13 @@ def test_agent_collector_reads_tail_and_metadata_without_mutation(tmp_path):
     assert [r["description"] for r in doc["completed"]] == ["agent-done"]
     assert [r["description"] for r in doc["inactive"]] == ["Review\nreport", "specialist"]
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
-    assert composer.agents_line(doc) == ("*Agents:* 4 listed · 1 running · 1 completed · 2 inactive — PM stops C+I in Step 3c: "
+    # Live edit (Rajiv 2026-10-25): quiet >3h (<=24h) agents are reported as stale, not dropped.
+    assert [r["description"] for r in doc["stale"]] == ["agent-expired"]
+    assert composer.agents_line(doc) == ("*Agents:* 5 listed · 1 running · 1 completed · 2 inactive · 1 stale (quiet >3h or uncollected, oldest 3h)"
+        " — PM stops C+I+stale in Step 3c: "
         "agent-done (completed, last write 30m ago), Review report (inactive 85m), specialist (inactive 70m)")
     plain = composer.agents_line({"running": 2, "inactive": [], "unreadable": 0})
-    assert plain == "*Agents:* 2 listed · 2 running · 0 completed · 0 inactive — PM stops C+I in Step 3c"
+    assert plain == "*Agents:* 2 listed · 2 running · 0 completed · 0 inactive — PM stops C+I+stale in Step 3c"
 
 
 def test_all_pm_pane_sessions_in_24h_count_including_pre_clear(tmp_path):
@@ -173,7 +176,8 @@ def test_all_pm_pane_sessions_in_24h_count_including_pre_clear(tmp_path):
     assert sorted(r["description"] for r in doc["inactive"]) == ["Current review", "Pre clear idle"]
     assert doc["unreadable"] == 1
     line = composer.agents_line(doc)
-    assert line.startswith("*Agents:* 5 listed · 1 running · 2 completed · 2 inactive — PM stops C+I in Step 3c: ")
+    assert line.startswith("*Agents:* 6 listed · 1 running · 2 completed · 2 inactive · 1 stale (quiet >3h or uncollected, oldest 3h)"
+                           " — PM stops C+I+stale in Step 3c: ")
     assert "ancient" not in line
 
 
@@ -205,7 +209,7 @@ def test_session_selection_requires_top_level_jsonl_not_directory_or_child_mtime
     doc = composer.read_agents(tmp_path, NOW, PROC)
     # Every top-level session in 24h counts (old-child is a live pane session); the orphan has no session record.
     # Live edit: all subagent dirs are scanned, so the orphan child counts too.
-    assert doc == {"running": 2, "completed": [], "inactive": [], "unreadable": 0}
+    assert doc == {"running": 2, "completed": [], "inactive": [], "stale": [], "unreadable": 0}
     assert missing_parent.exists()
 
 
@@ -244,7 +248,7 @@ def test_shared_composer_orders_agents_and_exactly_one_decision_spacer(mode):
         # Live edit (Rajiv 2026-10-24): blank line before Agents and before Training.
         assert lines[i - 2] == "*Training:* no run active"
         assert lines[i - 3] == ""
-        assert lines[i - 4] == "*Agents:* 1 listed · 1 running · 0 completed · 0 inactive — PM stops C+I in Step 3c"
+        assert lines[i - 4] == "*Agents:* 1 listed · 1 running · 0 completed · 0 inactive — PM stops C+I+stale in Step 3c"
         assert lines[i - 5] == ""
         assert out.index("*Slots") < out.index("*Agents") < out.index(HEADER)
         assert not out.startswith(composer.CTO)
@@ -345,5 +349,7 @@ def test_stale_stopped_agents_and_old_completed_are_assumed_dropped(tmp_path):
     assert sorted(r["description"] for r in doc["inactive"]) == ["Idle 2h", "Idle 60m"]
     assert sorted(r["description"] for r in doc["completed"]) == ["Done 5m", "Done 60m"]
     line = composer.agents_line(doc)
-    assert line.startswith("*Agents:* 5 listed · 1 running · 2 completed · 2 inactive")
+    # Live edit (Rajiv 2026-10-25): quiet >3h and old completed are listed as stale (counted, not named).
+    assert sorted(r["description"] for r in doc["stale"]) == ["DONE 61M", "STOPPED 181M", "STOPPED 4H"]
+    assert line.startswith("*Agents:* 8 listed · 1 running · 2 completed · 2 inactive · 3 stale (quiet >3h or uncollected, oldest 4h)")
     assert "STOPPED" not in line and "DONE 61M" not in line
