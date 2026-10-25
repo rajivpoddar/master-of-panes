@@ -573,5 +573,114 @@ class InstallerCorrectionBoundaryTests(unittest.TestCase):
         self.assertEqual(self.state(self.dep(self.T1), self.src(self.repo, "guard.sh"), manifest_path, self.current), before)
 
 
+class StartupBudgetTests(ReleaseInstallerTests):
+    """Finite startup budget: one launchd owner, no premature recovery."""
+
+    # Inherit only the fixtures: drop the parent's test methods from this class.
+    for _name in [n for n in dir(ReleaseInstallerTests) if n.startswith("test_")]:
+        locals()[_name] = None
+    del _name
+
+    def fake_world(self, healthy_at):
+        """Mocked clock/sleep/probe; healthy_at=None means permanently failing."""
+        state = {"t": 0.0, "probes": 0, "sleeps": []}
+
+        def clock():
+            return state["t"]
+
+        def sleep(seconds):
+            state["sleeps"].append(seconds)
+            state["t"] += seconds
+
+        def probe(_url):
+            state["probes"] += 1
+            if healthy_at is not None and state["t"] >= healthy_at:
+                return {"status": 200}
+            raise OSError("connection refused")
+
+        return state, clock, sleep, probe
+
+    def health_with(self, state, clock, sleep, probe):
+        def health():
+            state["t"] = 0.0
+            return module._default_health("http://127.0.0.1:3100/health", probe=probe, clock=clock, sleep=sleep)
+
+        return health
+
+    def test_startup_budget_matches_healthcheck_grace(self):
+        self.assertEqual(module.STARTUP_GRACE_SECONDS, 150.0)
+        script = (Path(__file__).parents[1] / "scripts/pm/shared-assets/claude/scripts/mop-healthcheck.sh").read_text()
+        self.assertIn('MOP_STARTUP_GRACE_SECONDS:-150', script)
+
+    def test_100_second_startup_single_owner_no_premature_fallback(self):
+        state, clock, sleep, probe = self.fake_world(healthy_at=100)
+        result = self.run_activation(health=self.health_with(state, clock, sleep, probe))
+        self.assertEqual(result["status"], "ACTIVATED")
+        self.assertEqual(self.current.resolve(), self.new.resolve())
+        self.assertEqual(self.restart_count, 1, "one launchd start, no repeated kickstart")
+        self.assertEqual(result["health"]["status"], 200)
+        self.assertGreaterEqual(state["t"], 100)
+        self.assertLess(state["t"], module.STARTUP_GRACE_SECONDS)
+
+    def test_recovery_exactly_at_the_deadline_is_accepted(self):
+        state, clock, sleep, probe = self.fake_world(healthy_at=150)
+        result = self.run_activation(health=self.health_with(state, clock, sleep, probe))
+        self.assertEqual(result["status"], "ACTIVATED")
+        self.assertEqual(self.restart_count, 1)
+
+    def test_permanent_failure_is_bounded_and_rolls_back_with_one_restart_per_owner(self):
+        state, clock, sleep, probe = self.fake_world(healthy_at=None)
+        elapsed = []
+        inner = self.health_with(state, clock, sleep, probe)
+
+        def health():
+            try:
+                return inner()
+            finally:
+                elapsed.append(state["t"])
+
+        with self.assertRaises(module.InstallerError) as raised:
+            self.run_activation(health=health)
+        self.assertEqual(self.current.resolve(), self.old.resolve(), "exact-pointer rollback")
+        self.assertEqual(self.delete_file.read_text(), "legacy\n")
+        # Activation start + ONE recovery start: a started-but-unhealthy child is
+        # never kickstarted again inside the budget.
+        self.assertEqual(self.restart_count, 2)
+        self.assertEqual(len(elapsed), 2)
+        for seconds in elapsed:
+            self.assertGreaterEqual(seconds, module.STARTUP_GRACE_SECONDS)
+            self.assertLess(seconds, module.STARTUP_GRACE_SECONDS + 5)
+        self.assertIn("RECOVERY_FAILED", str(raised.exception))
+
+    def test_launchd_start_failure_still_gets_a_second_recovery_start(self):
+        calls = {"n": 0}
+
+        def restart():
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("launchctl start failed")
+
+        state, clock, sleep, probe = self.fake_world(healthy_at=None)
+
+        def health():
+            if calls["n"] >= 3:
+                return {"status": 200}
+            return self.health_with(state, clock, sleep, probe)()
+
+        with self.assertRaises(module.InstallerError):
+            module.activate(
+                release_dir=self.new,
+                current=self.current,
+                expected_old=self.old,
+                delete_targets=[self.delete_file, self.delete_link],
+                rollback_bundle=self.bundle,
+                restart=restart,
+                health=health,
+                canary=lambda: {"slots": []},
+            )
+        self.assertEqual(calls["n"], 3, "restart failure (not slow start) is the only reason to retry")
+        self.assertEqual(self.current.resolve(), self.old.resolve())
+
+
 if __name__ == "__main__":
     unittest.main()

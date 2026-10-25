@@ -41,6 +41,7 @@ import {
   NO_ISSUE_PROJECTION,
   type IssueOwnershipProjection,
   type IssueProjectionOutcome,
+  type ProjectionGuard,
 } from "./issueProjection.js";
 import {
   defaultPaneTargetForSlot,
@@ -188,6 +189,7 @@ async function projectOwnership(
   issue: number | null | undefined,
   slot: number,
   repositoryId: string | number | null | undefined,
+  guard?: ProjectionGuard,
 ): Promise<IssueProjectionOutcome | null> {
   const target = Number(issue);
   if (!Number.isInteger(target) || target <= 0) {
@@ -197,7 +199,7 @@ async function projectOwnership(
     ? null
     : String(repositoryId);
   try {
-    return await projection.onAssigned(target, slot, repositoryKey);
+    return await projection.onAssigned(target, slot, repositoryKey, guard);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return {
@@ -476,6 +478,14 @@ export function registerAssignmentRoute(
       updated?.issue ?? (body.issue as number),
       slotParse.data,
       updated?.repository_id ?? null,
+      // Committed issue + epoch must still be the live occupied owner.
+      () => {
+        const row = db.getSlot(slotParse.data);
+        return !!row
+          && row.occupied === true
+          && row.issue === updated?.issue
+          && row.assignment_epoch === result.assignment_epoch;
+      },
     );
     const clearance = predecessorClearance(result.predecessor);
     if (!clearance.cleared) {
@@ -575,6 +585,13 @@ export function registerAssignmentRoute(
         rebound?.issue ?? desiredTuple.issue,
         slotParse.data,
         rebound?.repository_id ?? desiredTuple.repository_id,
+        () => {
+          const row = db.getSlot(slotParse.data);
+          return !!row
+            && row.occupied === true
+            && row.issue === rebound?.issue
+            && row.assignment_epoch === rebound?.assignment_epoch;
+        },
       ),
     });
   });

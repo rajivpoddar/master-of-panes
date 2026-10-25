@@ -1,0 +1,173 @@
+#!/bin/bash
+# MoP HTTP server healthcheck + auto-restart
+#
+# Runs every 60s via launchd (com.heydonna.mop-healthcheck.plist).
+# - curl http://localhost:3100/health with 5s max timeout
+# - On failure: increment counter at /tmp/mop-healthcheck-fail-count.txt
+# - When counter >= 3 (~3 min down): trigger restart per mop-restart skill
+# - On success: reset counter to 0
+# - Logs to /tmp/mop-healthcheck.log (rotated at 1MB)
+#
+# Companion: ~/Library/LaunchAgents/com.heydonna.mop-healthcheck.plist
+# Created per Rajiv directive 2026-05-16 20:10 IST thread `1778941863.642439`
+# Diagnosis: /tmp/mop-idle-diagnosis-2026-05-16.md
+#
+# 2026-05-27: MoP is launchd-owned by com.heydonna.mop-server. The historical
+# /tmp/mop-server.pid file is no longer authoritative and must not be the first
+# restart target. Use launchctl kickstart for the launchd service, falling back
+# to lsof only when launchd is unavailable.
+
+set -u
+
+LOG_FILE="${MOP_HC_LOG_FILE:-/tmp/mop-healthcheck.log}"
+COUNTER_FILE="${MOP_HC_COUNTER_FILE:-/tmp/mop-healthcheck-fail-count.txt}"
+SERVER_LOG="${MOP_HC_SERVER_LOG:-/tmp/mop-server.log}"
+# Startup grace for the launchd child (seconds). Same default and env name as the
+# installer's finite health budget (scripts/install-release.py STARTUP_GRACE_SECONDS).
+STARTUP_GRACE="${MOP_STARTUP_GRACE_SECONDS:-150}"
+MOP_DIR="${MOP_HC_DIR:-$HOME/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0}"
+LAUNCHD_LABEL="com.heydonna.mop-server"
+THRESHOLD=3
+LOG_MAX_BYTES=1048576  # 1 MB
+
+log() {
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG_FILE"
+}
+
+# Rotate the log when it crosses 1 MB.
+if [ -f "$LOG_FILE" ]; then
+  SIZE=$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+  if [ "$SIZE" -gt "$LOG_MAX_BYTES" ]; then
+    mv "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
+    : > "$LOG_FILE"
+    log "ROTATED previous log (>${LOG_MAX_BYTES}B) to ${LOG_FILE}.1"
+  fi
+fi
+
+# Read current counter (default 0).
+COUNTER=0
+if [ -f "$COUNTER_FILE" ]; then
+  COUNTER=$(cat "$COUNTER_FILE" 2>/dev/null | head -1 | tr -d '[:space:]')
+  case "$COUNTER" in
+    ''|*[!0-9]*) COUNTER=0 ;;
+  esac
+fi
+
+# Health probe. -f makes non-2xx an error; --max-time 5s prevents launchd queue pile-up.
+#
+# Bind to 127.0.0.1 explicitly (Rajiv directive 2026-05-27 21:58 IST DM
+# thread `1779899308.449479` spec item 4) so we don't depend on DNS
+# resolution of `localhost` (some macOS configurations resolve to ::1
+# while the Hono server binds IPv4 by default).
+#
+# Classify failure shape for log analysis: `connect_refused` (curl exit 7)
+# = process gone or not bound. `timeout` (curl exit 28) = process alive
+# but event-loop wedged (the symptom this healthcheck refactor targets).
+PROBE_URL="http://127.0.0.1:3100/health"
+CURL_OUT=$(curl --max-time 5 -fs -o /dev/null -w '%{http_code}' "$PROBE_URL" 2>/dev/null)
+CURL_RC=$?
+if [ $CURL_RC -eq 0 ] && [ "$CURL_OUT" = "200" ]; then
+  # Healthy — reset counter only when we'd previously logged failures.
+  if [ "$COUNTER" -gt 0 ]; then
+    log "HEALTHY — resetting fail counter (was $COUNTER)"
+    echo 0 > "$COUNTER_FILE"
+  fi
+  exit 0
+fi
+
+# etime ([[dd-]hh:]mm:ss) -> seconds.
+etime_seconds() {
+  echo "$1" | awk -F'[-:]' '{ n=NF; s=$n+60*$(n-1); if (n>=3) s+=3600*$(n-2); if (n>=4) s+=86400*$(n-3); print s }'
+}
+
+# Startup grace: a launchd child that was started but has not bound yet is
+# "starting", not "down". Do not count it, kickstart it again, or spawn a
+# competing server until its grace window has elapsed.
+UID_NUM=$(id -u)
+CHILD_PID=$(launchctl print "gui/${UID_NUM}/${LAUNCHD_LABEL}" 2>/dev/null | awk '/^[[:space:]]*pid = [0-9]+/ {print $3; exit}')
+if [ -n "${CHILD_PID:-}" ]; then
+  CHILD_ETIME=$(ps -o etime= -p "$CHILD_PID" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$CHILD_ETIME" ]; then
+    CHILD_AGE=$(etime_seconds "$CHILD_ETIME")
+    if [ "${CHILD_AGE:-999999}" -lt "$STARTUP_GRACE" ]; then
+      log "STARTING launchd child pid=$CHILD_PID age=${CHILD_AGE}s < grace ${STARTUP_GRACE}s — not counting, no restart, no fallback"
+      echo 0 > "$COUNTER_FILE"
+      exit 0
+    fi
+  fi
+fi
+
+# Unhealthy — classify and increment.
+case "$CURL_RC" in
+  7)  FAIL_CLASS="connect_refused" ;;
+  28) FAIL_CLASS="timeout" ;;
+  6)  FAIL_CLASS="resolve_failed" ;;
+  *)  FAIL_CLASS="other_curl_rc=${CURL_RC}_http=${CURL_OUT}" ;;
+esac
+COUNTER=$((COUNTER + 1))
+echo "$COUNTER" > "$COUNTER_FILE"
+
+# Timeout means the MoP process may be alive but its Node event loop is
+# temporarily starved by slot classifiers/tmux probes. Do not restart-loop on
+# transient lag; only restart quickly on connect-refused/process-gone classes.
+TIMEOUT_THRESHOLD="${MOP_HEALTHCHECK_TIMEOUT_THRESHOLD:-10}"
+EFFECTIVE_THRESHOLD="$THRESHOLD"
+if [ "$FAIL_CLASS" = "timeout" ]; then
+  EFFECTIVE_THRESHOLD="$TIMEOUT_THRESHOLD"
+fi
+
+log "UNHEALTHY (${FAIL_CLASS}) — fail count now $COUNTER/$EFFECTIVE_THRESHOLD"
+
+if [ "$COUNTER" -lt "$EFFECTIVE_THRESHOLD" ]; then
+  exit 0
+fi
+
+# Threshold breached — restart per launchd. Process liveness is handled by
+# KeepAlive; this watchdog catches the "process alive but HTTP wedged" case.
+log "restart_triggered THRESHOLD BREACHED ($COUNTER >= $EFFECTIVE_THRESHOLD, last_class=${FAIL_CLASS}) — restarting MoP HTTP server via launchd"
+
+if launchctl print "gui/${UID_NUM}/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
+  if launchctl kickstart -k "gui/${UID_NUM}/${LAUNCHD_LABEL}" >>"$LOG_FILE" 2>&1; then
+    # Started successfully: launchd is the single owner. The child gets the full
+    # startup grace on the next ticks; no fallback server, no second kickstart.
+    log "  launchctl kickstart -k gui/${UID_NUM}/${LAUNCHD_LABEL} succeeded; waiting ${STARTUP_GRACE}s grace, no fallback"
+    echo 0 > "$COUNTER_FILE"
+    exit 0
+  fi
+  log "  WARNING: launchctl kickstart failed (start failure); will try lsof/nohup fallback"
+else
+  log "  launchd service ${LAUNCHD_LABEL} not loaded (launchd absent); will try lsof/nohup fallback"
+fi
+
+sleep 2
+
+# Fallback for machines where launchd has not loaded the service. This path is
+# intentionally lsof-first; /tmp/mop-server.pid can be stale under launchd.
+LSOF_PIDS=$(lsof -ti :3100 2>/dev/null || true)
+if [ -n "$LSOF_PIDS" ]; then
+  # shellcheck disable=SC2086
+  kill $LSOF_PIDS 2>/dev/null || true
+  log "  fallback killed lsof-detected PIDs on :3100 ($LSOF_PIDS)"
+fi
+sleep 1
+
+if [ ! -d "$MOP_DIR" ]; then
+  log "  ERROR: MOP_DIR not found at $MOP_DIR — cannot fallback-start"
+  exit 0
+fi
+
+cd "$MOP_DIR" || { log "  ERROR: cd to $MOP_DIR failed"; exit 0; }
+nohup node dist/server.js > "$SERVER_LOG" 2>&1 &
+NEW_PID=$!
+log "  fallback spawned server (PID $NEW_PID), waiting for /health to come up..."
+
+# Verify within 5s — don't fail-hard, the next tick will catch a still-dead server.
+sleep 2
+if curl --max-time 5 -fs http://localhost:3100/health >/dev/null 2>&1; then
+  log "  VERIFIED healthy after restart (PID $NEW_PID)"
+  echo 0 > "$COUNTER_FILE"
+else
+  log "  WARNING: /health still failing after 2s — counter NOT reset; next tick will retry"
+fi
+
+exit 0

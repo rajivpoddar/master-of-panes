@@ -1004,20 +1004,57 @@ def _default_restart(label: str) -> None:
     _run(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"])
 
 
-def _default_health(url: str) -> dict[str, Any]:
+# One finite startup budget shared by the installer and the launchd healthcheck
+# (~/.claude/scripts/mop-healthcheck.sh reads the same MOP_STARTUP_GRACE_SECONDS
+# default). A launchd child that was started but has not bound :3100 yet is
+# "starting", not "down", until this deadline passes.
+STARTUP_GRACE_SECONDS = 150.0
+HEALTH_PROBE_TIMEOUT_SECONDS = 5.0
+
+
+def startup_grace_seconds() -> float:
+    raw = os.environ.get("MOP_STARTUP_GRACE_SECONDS", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return STARTUP_GRACE_SECONDS
+    return value if value > 0 else STARTUP_GRACE_SECONDS
+
+
+def _probe_health(url: str) -> dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=HEALTH_PROBE_TIMEOUT_SECONDS) as response:
+        body = response.read().decode("utf-8", errors="replace")
+        if response.status != 200:
+            raise InstallerError(f"health status={response.status}")
+        return {"status": response.status, "body": body}
+
+
+def _default_health(
+    url: str,
+    *,
+    grace: float | None = None,
+    probe: Callable[[str], dict[str, Any]] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Poll until healthy or the finite startup deadline passes (never earlier)."""
+    budget = startup_grace_seconds() if grace is None else grace
+    probe = probe or _probe_health
+    started = clock()
+    deadline = started + budget
     last_error: Exception | None = None
-    for attempt in range(15):
+    attempt = 0
+    while True:
+        attempt += 1
         try:
-            with urllib.request.urlopen(url, timeout=5) as response:
-                body = response.read().decode("utf-8", errors="replace")
-                if response.status != 200:
-                    raise InstallerError(f"health status={response.status}")
-                return {"status": response.status, "body": body, "attempt": attempt + 1}
+            result = probe(url)
+            return {**result, "attempt": attempt}
         except (OSError, InstallerError) as exc:
             last_error = exc
-            if attempt < 14:
-                time.sleep(1)
-    raise InstallerError(f"health unavailable after bounded retry: {last_error}")
+        if clock() >= deadline:
+            break
+        sleep(min(1.0, max(0.0, deadline - clock())))
+    raise InstallerError(f"health unavailable after {budget:.0f}s startup budget ({attempt} probes): {last_error}")
 
 
 def _default_canary(url: str) -> dict[str, Any]:
@@ -1306,13 +1343,20 @@ def activate(
         service_errors: list[str] = []
         healthy_after = None
         for attempt in (1, 2):
+            started = False
             try:
                 restart()
+                started = True
                 health()
                 healthy_after = attempt
                 break
             except Exception as service_exc:
                 service_errors.append(f"attempt {attempt}: {type(service_exc).__name__}: {service_exc}")
+                if started:
+                    # launchd accepted the start and the full startup budget
+                    # elapsed unhealthy: another kickstart would only kill the
+                    # child that is still the single owner. Fail finitely.
+                    break
         if healthy_after is not None and pointer_restored:
             phases["service"] = f"prior release healthy after restart attempt {healthy_after}"
             raise InstallerError(
