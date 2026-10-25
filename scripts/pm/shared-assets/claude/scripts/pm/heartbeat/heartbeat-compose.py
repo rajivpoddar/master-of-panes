@@ -728,6 +728,7 @@ def compose(
     agents: dict | None = None,
     training: tuple | None = None,
     langsmith: str | None = None,
+    unblockable: list[str] | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -778,6 +779,8 @@ def compose(
     if mode == "1h":
         # Empty line before Agents and before Training; LangSmith ingest line dropped
         # (Rajiv 2026-10-24, C0ALZJHGE49 thread 1792806307.991749, ts 1792806414.519859).
+        if unblockable:
+            body += ["", *unblockable]
         body += ["", agents_line(agents)]
         tl, t_acts = training if training is not None else training_line()
         body += ["", tl]
@@ -808,6 +811,94 @@ def compose(
         lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:80] for f in failures[:2]))
     return "\n".join(lines)
 
+
+
+# ---------------------------------------------------------------------------
+# Unblockable now (Rajiv 2026-10-25, C0ALZJHGE49 ts 1792910836.320109):
+# "we need to unblock the dependencies, not fix the labels."
+# ---------------------------------------------------------------------------
+UNBLOCK_REPO = "heydonna-app/heydonna-app"
+UNBLOCK_CAP = 10
+_BLOCKER_LINE = re.compile(r"(?im)^[^\n]*?(?:\bblockers?\s*:|\bblocked on\b|\bunblock_condition\b)[^\n]*$")
+
+
+def _blocker_refs(body: str) -> list[int]:
+    refs: list[int] = []
+    for m in _BLOCKER_LINE.finditer(body or ""):
+        for n in re.findall(r"#(\d+)", m.group(0)):
+            if int(n) not in refs:
+                refs.append(int(n))
+    return refs
+
+
+def _issue_priority(labels: list[str], body: str) -> int:
+    for lab in labels:
+        m = re.fullmatch(r"(?:priority:\s*)?[Pp](\d)", lab.strip())
+        if m:
+            return int(m.group(1))
+    m = re.search(r"(?m)^priority:\s*P(\d)", body or "")
+    return int(m.group(1)) if m else 9
+
+
+def unblockable_items(issues: list[dict], resolve) -> list[dict]:
+    """Pure: open backlog/blocked issues whose cited blocker is CLOSED/MERGED.
+    resolve(n) -> {"resolved": bool, "date": "YYYY-MM-DD"} | None."""
+    out = []
+    for it in issues:
+        labs = [l["name"] if isinstance(l, dict) else l for l in it.get("labels", [])]
+        if not any(l in ("status:backlog", "status:blocked") or l.startswith("pm-blocked:") for l in labs):
+            continue
+        body = it.get("body") or ""
+        for ref in _blocker_refs(body):
+            if ref == it["number"]:
+                continue
+            r = resolve(ref)
+            if r and r.get("resolved"):
+                out.append({"issue": it["number"], "prio": _issue_priority(labs, body), "blocker": ref, "date": r.get("date", "?")})
+                break
+    out.sort(key=lambda x: (x["prio"], -x["issue"]))
+    return out
+
+
+def unblockable_block(failures: list[str], issues: list[dict] | None = None, resolve=None) -> list[str]:
+    try:
+        if issues is None:
+            r = subprocess.run(["gh", "issue", "list", "--repo", UNBLOCK_REPO, "--state", "open", "--limit", "500",
+                                "--json", "number,labels,body"], capture_output=True, text=True, errors="replace", timeout=120)
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr.strip()[:80] or f"rc={r.returncode}")
+            issues = json.loads(r.stdout)
+        cache: dict[int, dict | None] = {}
+
+        def _resolve(n: int):
+            if n not in cache:
+                try:
+                    q = subprocess.run(["gh", "api", f"repos/{UNBLOCK_REPO}/issues/{n}"], capture_output=True, text=True, errors="replace", timeout=30)
+                    d = json.loads(q.stdout) if q.returncode == 0 else {}
+                except Exception:
+                    d = {}
+                if d.get("state") != "closed":
+                    cache[n] = None
+                else:
+                    pr = d.get("pull_request")
+                    if pr is not None and not pr.get("merged_at"):
+                        cache[n] = None  # closed unmerged PR covers nothing
+                    else:
+                        cache[n] = {"resolved": True, "date": ((pr or {}).get("merged_at") or d.get("closed_at") or "?")[:10]}
+            return cache[n]
+
+        items = unblockable_items(issues, resolve or _resolve)
+    except Exception as exc:
+        failures.append(f"unblockable: {type(exc).__name__}")
+        return ["*Unblockable now:*", "• unavailable"]
+    lines = ["*Unblockable now:*"]
+    if not items:
+        return lines + ["• None."]
+    for it in items[:UNBLOCK_CAP]:
+        lines.append(f"• #{it['issue']} P{it['prio'] if it['prio'] != 9 else '?'}, blocker #{it['blocker']} resolved {it['date']}")
+    if len(items) > UNBLOCK_CAP:
+        lines.append(f"• +{len(items) - UNBLOCK_CAP} more")
+    return lines
 
 # ---------------------------------------------------------------------------
 # Live collection
@@ -989,6 +1080,7 @@ def main() -> int:
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")
     training = training_line() if args.mode == "1h" else None
+    unblockable = unblockable_block(failures) if args.mode == "1h" else None
     langsmith = None  # LangSmith ingest dropped from the hourly (Rajiv ts 1792806414.519859)
     print(compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
@@ -996,7 +1088,7 @@ def main() -> int:
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
-        email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith,
+        email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable,
     ))
     pm_actions += (training[1] if training else [])
     if pm_actions:

@@ -208,7 +208,7 @@ Source: C0ALZJHGE49 thread 1792510362.837119, ts 1792510805.167479: "note that t
 - Every reply/disposition IN the thread is posted as PM: plain `bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -t <thread_ts> -f < file` (no SLACK_SEND_AS).
 - A bg agent running this skill returns its disposition text to PM; PM (or the agent as PM identity) posts the thread reply the SAME turn.
 
-## Label-vs-MoP reconciliation (Rajiv 2026-10-25)
-Source: Rajiv D0AMF0XE6TS thread 1792479437.733669, ts 1792896156.118659. Trigger: #10637 and #10608 stalled.
+## Unblockable now (Rajiv 2026-10-25, C0ALZJHGE49 thread 1792910728.369929, ts 1792910836.320109)
+Rajiv: "why are highlighting stale MoP labels in hourly review? we need to unblock the dependencies, not fix the labels."
 
-STEP 1c (add to the composed report, read-only): list open issues labelled `slot:N`, `status:in-progress` or `status:in-review` whose live MoP owner (`curl -s http://127.0.0.1:3100/slots`, field `issue` per slot) is NOT that issue AND that have no open PR from an active owner. Print one line each: "*UNOWNED_STALE:* #N P<x> labelled <labels>, MoP owner <issue|none>, no live PR" and add ACTION "requeue-or-split #N". Do NOT edit labels (MoP projects them). Show "None." when empty.
+The 1h composer (`heartbeat-compose.py`) renders `*Unblockable now:*` itself: open issues in status:backlog, status:blocked or pm-blocked:* whose cited blocker (a #N in the body's `blockers:` / `Blocked on` / `unblock_condition` line) is now CLOSED or MERGED (a closed-unmerged PR does not count). One line each: issue, priority, blocker, resolved date; top 10 by priority, "+N more" beyond. Read-only; no label commentary in the report.
