@@ -1467,6 +1467,99 @@ def runaway_scan(apply: bool, term_wait_s: float = 3.0) -> dict[str, Any]:
     return out
 
 
+CONVEX_CLI_WRAPPERS = {"node", "npx", "bunx", "bun", "convex"}
+CONVEX_CLI_MAX_AGE_S = {"data": 3 * 60, "export": 3 * 60, "logs": 10 * 60, "run": 15 * 60}
+CONVEX_CLI_MAX_RSS_KB = {"data": 500 * 1024, "export": 500 * 1024}
+CONVEX_CLI_PROTECTED = {"dev", "deploy"}
+CONVEX_DEV_SERVER_RE = re.compile(r"(?:^|[\s/])(?:next(?:-server)?\s+dev|bun\s+(?:run\s+)?dev|npm\s+run\s+dev)\b|next-server")
+
+
+def convex_cli_subcommand(command: str) -> str | None:
+    """Return the convex CLI subcommand (data/logs/run/export/dev/deploy/...) or None if not a convex CLI process."""
+    import shlex
+    try:
+        toks = shlex.split(command)
+    except ValueError:
+        toks = command.split()
+    if not toks or os.path.basename(toks[0]) not in CONVEX_CLI_WRAPPERS:
+        return None
+    for i, tok in enumerate(toks[:4]):
+        if os.path.basename(tok) == "convex":
+            for nxt in toks[i + 1:]:
+                if not nxt.startswith("-"):
+                    return nxt
+            return None
+    return None
+
+
+def convex_cli_classify(command: str, age_seconds: int | None, rss_kb: int | None,
+                        ancestor_commands: list[str] | None = None) -> str | None:
+    """Reason to kill a runaway `convex data|logs|run|export` CLI; never dev/deploy or under a dev server."""
+    sub = convex_cli_subcommand(command)
+    if sub is None or sub in CONVEX_CLI_PROTECTED or sub not in CONVEX_CLI_MAX_AGE_S:
+        return None
+    for anc in ancestor_commands or []:
+        if CONVEX_DEV_SERVER_RE.search(anc) or convex_cli_subcommand(anc) in CONVEX_CLI_PROTECTED:
+            return None
+    limit_rss = CONVEX_CLI_MAX_RSS_KB.get(sub)
+    if limit_rss is not None and rss_kb is not None and rss_kb > limit_rss:
+        return f"convex_{sub}_rss_over_{limit_rss // 1024}mb"
+    limit_age = CONVEX_CLI_MAX_AGE_S[sub]
+    if age_seconds is not None and age_seconds > limit_age:
+        return f"convex_{sub}_over_{limit_age // 60}m"
+    return None
+
+
+def convex_cli_scan(apply: bool, term_wait_s: float = 3.0) -> dict[str, Any]:
+    """Independent of slot ownership: kill runaway convex CLI processes (SIGTERM then SIGKILL)."""
+    out: dict[str, Any] = {"class": "convex_cli_runaway", "found": [], "terminated": [], "errors": []}
+    try:
+        ps = run(["ps", "-axo", "pid=,ppid=,rss=,etime=,command="], timeout=10).stdout
+    except Exception as exc:  # noqa: BLE001
+        out["errors"].append(f"ps_failed:{type(exc).__name__}")
+        return out
+    rows: dict[int, tuple[int, int, str, str]] = {}
+    for line in ps.splitlines():
+        parts = line.strip().split(None, 4)
+        if len(parts) < 5 or not (parts[0].isdigit() and parts[1].isdigit() and parts[2].isdigit()):
+            continue
+        rows[int(parts[0])] = (int(parts[1]), int(parts[2]), parts[3], parts[4])
+    me = os.getpid()
+    for pid, (ppid, rss_kb, etime, command) in rows.items():
+        if pid == me or convex_cli_subcommand(command) is None:
+            continue
+        ancestors: list[str] = []
+        cur, seen = ppid, set()
+        while cur in rows and cur not in seen and cur > 1:
+            seen.add(cur)
+            ancestors.append(rows[cur][3])
+            cur = rows[cur][0]
+        age = parse_etime(etime)
+        reason = convex_cli_classify(command, age, rss_kb, ancestors)
+        if not reason:
+            continue
+        rec = {"pid": pid, "ppid": ppid, "etime": etime, "age_seconds": age, "rss_mb": round(rss_kb / 1024, 1),
+               "command": command[:120], "reason": reason, "term_sent": False, "kill_sent": False}
+        out["found"].append(rec)
+        if not apply:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            rec["term_sent"] = True
+            deadline = time.time() + term_wait_s
+            while time.time() < deadline and alive(pid):
+                time.sleep(0.2)
+            if alive(pid):
+                os.kill(pid, signal.SIGKILL)
+                rec["kill_sent"] = True
+            out["terminated"].append(rec)
+        except ProcessLookupError:
+            rec["already_exited"] = True
+        except OSError as exc:
+            out["errors"].append(f"{pid}:{exc}")
+    return out
+
+
 CODEX_RENDERER_MIN_AGE_S = 60 * 60
 CODEX_RENDERER_CPU_THRESHOLD = 50.0
 CODEX_RENDERER_STREAK = 2
@@ -2121,6 +2214,20 @@ def run_self_test() -> int:
     for never in ("git grep -r foo /Users/rajiv/x", "node /Users/rajiv/a.js", "tsc --noEmit /Users/rajiv/x",
                   "vitest run /Users/rajiv/x"):
         assert not runaway_classify(never, 9000), never
+    # convex_cli_runaway classification
+    D = "node ./node_modules/.bin/convex data transcripts --limit 3 --format jsonLines"
+    assert convex_cli_classify(D, 200, 100 * 1024) == "convex_data_over_3m"
+    assert convex_cli_classify(D, 30, 780 * 1024) == "convex_data_rss_over_500mb"
+    assert not convex_cli_classify(D, 30, 100 * 1024)
+    assert convex_cli_classify("node ./node_modules/.bin/convex export --path x", 200, 1)
+    assert convex_cli_classify("npx convex logs --history", 601, 1)
+    assert not convex_cli_classify("npx convex logs --history", 500, 1)
+    assert convex_cli_classify("node x/.bin/convex run foo:bar", 901, 1)
+    assert not convex_cli_classify("node x/.bin/convex run foo:bar", 800, 1)
+    for keep in ("node ./node_modules/.bin/convex dev", "npx convex deploy --yes", "grep convex data /x"):
+        assert not convex_cli_classify(keep, 99999, 9 * 1024 * 1024), keep
+    assert not convex_cli_classify(D, 99999, 9 * 1024 * 1024, ["node next dev -p 3002"])
+    assert not convex_cli_classify(D, 99999, 9 * 1024 * 1024, ["node ./node_modules/.bin/convex dev"])
     # codex orphan broker policy (pure; synthetic process table)
     me = 501
     def prow(pid, ppid, cmd, age_h, stat="S", uid=me):
@@ -2330,6 +2437,7 @@ def _main() -> int:
         after = collect_processes(args.agent_browser_min, args.nextjs_min, args.dev_tool_min, None, args.ab_idle_min)
 
     runaway = runaway_scan(args.apply, args.term_wait_s)
+    convex_cli = convex_cli_scan(args.apply, args.term_wait_s)
     preview_orphans = preview_orphan_scan(args.apply, args.term_wait_s)
     history = load_history()
     replayd = replayd_check(history, args.apply)
@@ -2400,6 +2508,7 @@ def _main() -> int:
         "report_only": before.get("report_only", []),
         "replayd": replayd,
         "runaway_scan": runaway,
+        "convex_cli_runaway": convex_cli,
         "preview_orphan": preview_orphans,
         "codex_renderer": codex_renderers,
         "codex_broker_orphan": codex_brokers,
@@ -2432,6 +2541,11 @@ def _main() -> int:
             f"slot_free_idle={row['slot_free_idle']} policy={row.get('policy')} "
             f"reason={row.get('reap_reason') or row.get('owner_proof') or 'stale_owner'}"
         )
+    print(f"CONVEX_CLI_RUNAWAY candidates={len(convex_cli['found'])} terminated={len(convex_cli['terminated'])} "
+          f"errors={len(convex_cli['errors'])} action={'apply' if args.apply else 'scan_only'}")
+    for row in convex_cli["found"]:
+        print(f"CONVEX_CLI_RUNAWAY_PROCESS pid={row['pid']} age={row['etime']} rss_mb={row['rss_mb']} "
+              f"reason={row['reason']} term={row['term_sent']} kill={row['kill_sent']} cmd={row['command']}")
     print(f"REPLAYD pid={replayd.get('pid')} cpu={replayd.get('cpu')} streak={replayd.get('streak')} action={replayd['action']}")
     print(
         f"CODEX_RENDERER observed={codex_renderers['observed']} over_threshold={codex_renderers['over_threshold']} "

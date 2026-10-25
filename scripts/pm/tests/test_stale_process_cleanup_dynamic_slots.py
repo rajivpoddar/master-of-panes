@@ -265,6 +265,10 @@ class StatusFileTests(unittest.TestCase):
         self.runaway_scan = patch.object(
             MODULE, "runaway_scan", return_value={"class": "runaway_scan", "found": [], "terminated": [], "errors": []}
         ).start()
+        self.convex_cli_scan = patch.object(
+            MODULE, "convex_cli_scan",
+            return_value={"class": "convex_cli_runaway", "found": [], "terminated": [], "errors": []}
+        ).start()
         self.replayd_check = patch.object(
             MODULE, "replayd_check", return_value={"pid": None, "cpu": None, "streak": 0, "action": "none"}
         ).start()
@@ -303,6 +307,7 @@ class StatusFileTests(unittest.TestCase):
                 self.assertEqual(MODULE.main(), 2)
         # main() did reach the host-touching steps with apply=True, but only the isolated stubs ran.
         self.assertTrue(self.runaway_scan.call_args.args[0])
+        self.assertTrue(self.convex_cli_scan.call_args.args[0])
         self.assertTrue(self.replayd_check.call_args.args[1])
         self.assertTrue(self.codex_renderer_check.call_args.args[1])
         self.assertTrue(self.codex_broker_check.call_args.args[0])

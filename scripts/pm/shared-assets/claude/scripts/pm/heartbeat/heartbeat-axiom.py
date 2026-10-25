@@ -29,8 +29,14 @@ def _apl_list(values) -> str:
 
 # Distinct error users: Clerk userId first; email only when userId is missing/sentinel.
 # Sentinel emails ("not_collected"/"none") never collapse distinct userIds into one user.
+# Routine non-error path (docs/investigations/2026-10-24-save-failed-spike-1315.md): counted separately.
+SUPERSEDED_CLASS = "superseded_local_completion"
+# messageClass is not a top-level field; it lives inside the JSON string in ['meta'].
+MESSAGE_CLASS_EXTEND = "| extend mclass = tostring(extract('\"messageClass\":\"([^\"]+)\"', 1, tostring(['meta']))) "
+SUPERSEDED_FILTER = f"{MESSAGE_CLASS_EXTEND}| where mclass == '{SUPERSEDED_CLASS}' "
 ERROR_CODE_EXTEND = (
     "| where ['level'] == 'error' "
+    f"{MESSAGE_CLASS_EXTEND}| where mclass != '{SUPERSEDED_CLASS}' "
     "| extend code = coalesce(tostring(['action']), tostring(['message']), 'unknown'), "
     "uid = tostring(['userId']), em = tostring(['email']) "
     f"| extend who = case(isnotempty(uid) and uid !in ({_apl_list(WHO_SENTINELS)}), uid, "
@@ -196,6 +202,13 @@ def query_error_totals(token: str, start_time: str, end_time: str) -> dict:
     rows = extract_aggregations(run_apl_query(token, apl, start_time, end_time))
     row = rows[0] if rows else {}
     return {"events": int(row.get("events") or 0), "users": int(row.get("users") or 0)}
+
+
+def query_superseded_saves(token: str, start_time: str, end_time: str) -> int:
+    """Error-level superseded-save events excluded from the error count (kept visible)."""
+    apl = f"['{DATASET}'] {PROD_FILTER} | where ['level'] == 'error' {SUPERSEDED_FILTER}| summarize events = count()"
+    rows = extract_aggregations(run_apl_query(token, apl, start_time, end_time))
+    return int((rows[0] if rows else {}).get("events") or 0)
 
 
 def normalize_error_code_rows(rows: list[dict]) -> list[dict]:
@@ -407,6 +420,8 @@ def main() -> int:
                 same_slot.append(query_error_totals(token, _fmt(sd), _fmt(ed)))
         report = build_error_code_report(codes, totals, prior, same_slot, top=a.top)
         report["all_codes"] = codes
+        time.sleep(QUERY_DELAY_SECONDS)
+        report["superseded_saves"] = query_superseded_saves(token, s, e)
     report["window"] = {"start": s, "end": e}
     if AXIOM_QUERY_FAILED:
         report["ops_error"] = f"axiom_query_failed statuses={sorted(set(AXIOM_QUERY_FAILED))}"

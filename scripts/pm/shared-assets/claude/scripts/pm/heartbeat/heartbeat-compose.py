@@ -59,8 +59,10 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
         compare.append(f"7-day same-slot median {_num(axiom['same_slot_median_events'])}")
     if compare:
         head += f" ({', '.join(compare)})"
+    sup = axiom.get("superseded_saves")
+    sup_line = [f"superseded saves: {sup}"] if sup is not None else []
     if not axiom.get("events"):
-        return [head + " — quiet"], "errors quiet", 0
+        return [head + " — quiet"] + sup_line, "errors quiet", 0
     lines = [head]
     new = 0
     for row in axiom.get("top", [])[:MAX_CODES]:
@@ -78,7 +80,7 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
     tldr = f"{axiom['events']} errors / {axiom['users']} users"
     if new:
         tldr += f" ({new} NEW code{'s' if new > 1 else ''})"
-    return lines, tldr, new
+    return lines + sup_line, tldr, new
 
 
 def support_block(support: dict | None, window_label: str) -> tuple[list[str], str]:
@@ -396,6 +398,22 @@ def decision_block(doc: dict | None, now: datetime) -> list[str]:
 
 
 # Rajiv DM D0AMF0XE6TS/1792637361.212159, ts 1792638231.158209.
+# Record types that mean the agent is mid-work or waiting on its OWN background shell/tool result
+# (Rajiv 2026-10-24, C0ALZJHGE49 ts 1792828089.120229: pane showed 8, heartbeat said 4). Such agents
+# write nothing for long stretches but stay listed as running in the pane.
+WAITING_TYPES = {"attachment", "queue-operation", "api-request", "api-request-blob", "progress", "system"}
+
+
+def _is_waiting_record(last_record: dict) -> bool:
+    kind = last_record.get("type")
+    if kind in WAITING_TYPES or kind == "user":
+        return True
+    if kind == "assistant":
+        content = (last_record.get("message") or {}).get("content")
+        return isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_use" for c in content)
+    return False
+
+
 def classify_agent(last_record: dict | None, modified_at: float, now: datetime) -> str:
     """Pure transcript classifier, not a process-liveness or TaskStop decision."""
     if not isinstance(last_record, dict) or not last_record.get("type"):
@@ -405,7 +423,9 @@ def classify_agent(last_record: dict | None, modified_at: float, now: datetime) 
     idle_s = max(0, now.timestamp() - modified_at)
     if idle_s > AGENT_RECENT_S:
         return "expired"
-    return "inactive" if idle_s >= 3600 else "active"
+    if idle_s < 3600 or _is_waiting_record(last_record):
+        return "active"  # waiting on its own background work still counts as running
+    return "inactive"
 
 
 def _last_agent_record(path: Path) -> dict:
@@ -433,7 +453,7 @@ def _agent_row(path: Path, now: datetime, modified_at: float) -> dict:
     return {"description": str(description), "idle_min": int((now.timestamp() - modified_at) // 60)}
 
 
-def _is_listed_agent(path: Path) -> bool:
+def _is_listed_agent(path: Path, include_nested: bool = True) -> bool:
     """The pane lists only DIRECT agents (nested sub-subagents share the dir with spawnDepth > 1) that
     are not yet collected: meta.finished == true means the result was delivered and the pane dropped it."""
     try:
@@ -443,7 +463,7 @@ def _is_listed_agent(path: Path) -> bool:
     if not isinstance(meta, dict):
         return True
     depth = meta.get("spawnDepth", 1)
-    if isinstance(depth, (int, float)) and depth > 1:
+    if isinstance(depth, (int, float)) and depth > 1 and not include_nested:
         return False
     return meta.get("finished") is not True
 
@@ -497,42 +517,42 @@ def read_agents(root: Path = PM_PROJECT, now: datetime | None = None, process_st
         process_start = pm_process_start()
     if process_start is None:
         return None
-    sessions = []
+    # Compaction/clear changes the PM session id and old session dirs may lose their top-level JSONL,
+    # so scan EVERY session's subagents dir and filter by the agent's own start time.
+    agent_paths = []
+    newest = 0.0
     for session in root.glob("*.jsonl"):
         try:
-            if not session.is_file():
-                continue
-            started = _session_started(session)
-            sessions.append((session.stat().st_mtime, session, started))
+            newest = max(newest, session.stat().st_mtime)
         except OSError:
             continue
-    if not sessions:
+    if not newest:
         return None
-    if now.timestamp() - max(m for m, _, _ in sessions) > PM_SESSION_FRESH_S:
+    if now.timestamp() - newest > PM_SESSION_FRESH_S:
         return None  # fresh children cannot revive a dead PM pane
     running, completed, inactive, unreadable = 0, [], [], 0
-    for _modified, session, started in sessions:
-        if started is None or started < process_start:
-            continue  # prior claude process / restart
-        for path in (session.parent / session.stem / "subagents").glob("agent-*.jsonl"):
-            try:
-                modified_at = path.stat().st_mtime
-                if now.timestamp() - modified_at > AGENT_RECENT_S or not _is_listed_agent(path):
-                    continue
-                state = classify_agent(_last_agent_record(path), modified_at, now)
-                if state == "unknown":
-                    unreadable += 1
-                elif state == "active":
-                    running += 1
-                elif state == "done":
-                    if modified_at >= process_start and now.timestamp() - modified_at <= AGENT_COMPLETED_S:
-                        completed.append(_agent_row(path, now, modified_at))
-                elif state == "inactive":
-                    inactive.append(_agent_row(path, now, modified_at))
-            except FileNotFoundError:
-                continue  # transcript retired during collection
-            except (OSError, ValueError, TypeError, AttributeError):
+    for path in root.glob("*/subagents/agent-*.jsonl"):
+        try:
+            modified_at = path.stat().st_mtime
+            if now.timestamp() - modified_at > AGENT_RECENT_S or not _is_listed_agent(path):
+                continue
+            started = _session_started(path)
+            if started is not None and started < process_start:
+                continue  # prior claude process / restart
+            state = classify_agent(_last_agent_record(path), modified_at, now)
+            if state == "unknown":
                 unreadable += 1
+            elif state == "active":
+                running += 1
+            elif state == "done":
+                if modified_at >= process_start and now.timestamp() - modified_at <= AGENT_COMPLETED_S:
+                    completed.append(_agent_row(path, now, modified_at))
+            elif state == "inactive":
+                inactive.append(_agent_row(path, now, modified_at))
+        except FileNotFoundError:
+            continue  # transcript retired during collection
+        except (OSError, ValueError, TypeError, AttributeError):
+            unreadable += 1
     for rows in (completed, inactive):
         rows.sort(key=lambda row: (-row["idle_min"], row["description"]))
     return {"running": running, "completed": completed, "inactive": inactive, "unreadable": unreadable}

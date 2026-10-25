@@ -1424,3 +1424,14 @@ If `git checkout main` fails because of uncommitted changes, surface to PM via S
 
 ## Ledger reads: no /tmp copies (Rajiv 2026-10-22, C0ALZJHGE49 thread 1792652063.453549, ts 1792657702.281119 "fix cleanup pr runner")
 Read the live ledger with `sqlite3 -readonly` or `pm-ops.py` only. If a copy is unavoidable, make ONE in the session scratchpad and delete it (with -wal/-shm) before finishing. Never write *-ledger*.db / *pmops*.db to /tmp. Trigger: 110 abandoned 355 MB copies (25 GiB) filled the disk.
+
+## Parent next-slice check (Rajiv 2026-10-25)
+Source: Rajiv D0AMF0XE6TS thread 1792479437.733669, ts 1792896156.118659. Trigger: #10637 and #10608 stalled.
+
+When the merged PR is a slice of a parent (body has `Part of #N`, or the closed child's parent issue still has open ACs), run this in Step 3.5 before the tracker:
+1. Read the parent `#N` body: count unchecked/unimplemented ACs and list its open child issues (`gh issue list --search "Part of #N" --state open`).
+2. If ANY AC remains, upsert a pm-ops obligation (do NOT rely on the parent being re-noticed):
+   `python3 ~/.claude/scripts/pm-ops.py obligation-upsert --kind parent_next_slice --target-type github_issue --target-id N --issue N --owner PM --horizon hourly --title "Parent #N has open ACs after #<child> merged" --action "<next child #M is READY: promote/assign | no ready next child: SPLIT the parent now>" --dedupe-group parent_next_slice:N`
+   (due by the next hourly; if the kind is rejected use the closest existing kind).
+3. If the parent has no ready next child (no open child with a full contract in the Ready Pool), the obligation action MUST say "split parent #N into the next child".
+4. The final cleanup tracker includes `parent_next_slice=<#N: obligation <id>, next child #M | split needed | none (parent complete)>`.

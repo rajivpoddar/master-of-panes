@@ -3,6 +3,20 @@
 Owner: existing Social Media task `01a11e3d-d8bb-73c1-8593-8ff56019d842`.
 Rajiv directive: `C0C7U35LBKR/1791638989.669329`.
 
+## Mandatory empty lines on every social surface — 25 October 2026
+
+Rajiv `C0C7U35LBKR/1792868474.190749`, conveyed by PM
+`1792868537.297209` in thread `1792863461.108979`; see the current
+`docs/marketing/GROWTH-PLAYBOOK.md` opening rule. This applies to posts,
+comments, replies, DMs/InMail and community text on every social platform.
+Drafts and approval packets show the actual empty lines and state
+`Empty lines: yes (N paragraphs)`. Type each paragraph in the native composer
+and press Enter twice between paragraphs; do not paste the whole block.
+Verify visible gaps before publishing or saving. Reload the live item and
+verify the rendered gaps, then report `Empty lines verified live: yes` only
+when actually observed. Matching words alone does not verify layout.
+This formatting rule adds no publication, audience, platform or retry authority.
+
 ## Governing updates (2026-10-22 audit; these win over older sections below)
 
 `docs/marketing/GROWTH-PLAYBOOK.md` is the single source of truth for growth

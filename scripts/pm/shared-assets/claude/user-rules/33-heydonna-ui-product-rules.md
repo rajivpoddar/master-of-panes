@@ -39,7 +39,9 @@ the error state renders and the action does not run.
 
 Rajiv 2026-10-09 (C0ALZJHGE49 thread 1791537587.688969, ts 1791537815.457389): *"why is the error message in the menu item? that's an anti pattern. it should only be in the toast"*.
 
-For menu / menubar / context-menu actions, a refused action shows a toast ONLY. Never render inline error text inside the menu item, and don't hold the menu open for an error. The item stays enabled (the no-disabled-precondition rule still applies). The inline field-error pattern above is for form controls, not menu items.
+Rajiv 2026-10-24 (DM D0AMF0XE6TS thread 1792847569.139939): *"menus should not have any error messages ... check the app for more such cases. all have to be fixed."* Trigger: the editor's floating selection toolbar showed an inline "Select text in the transcript before adding a comment." The scope below now explicitly includes toolbars.
+
+For menu / menubar / context-menu / dropdown / popover / floating or bubble toolbar / toolbar-button / command-palette actions, a refused action shows a toast ONLY. Never render inline error text inside the menu item, and don't hold the menu open for an error. The item stays enabled (the no-disabled-precondition rule still applies). The inline field-error pattern above is for form controls, not menu items.
 
 Violation:
 

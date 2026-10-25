@@ -95,9 +95,9 @@ def test_decisions_cap_routes_age_and_stale_count():
 @pytest.mark.parametrize("record,minutes,state", [
     ({"type": "assistant", "message": {"stop_reason": "end_turn"}}, 100, "done"),
     ({"type": "assistant", "message": {"stop_reason": "tool_use"}}, 59, "active"),
-    ({"type": "user", "message": {}}, 60, "inactive"),
+    ({"type": "user", "message": {}}, 60, "active"),  # live edit: waiting on its own background work
     ({"type": "assistant", "message": {"stop_reason": None}}, 100, "inactive"),
-    ({"type": "api-request"}, 180, "inactive"),
+    ({"type": "api-request"}, 180, "active"),  # live edit: waiting record types stay running
     ({"type": "api-request"}, 180.01, "expired"),
     (None, 100, "unknown"),
 ])
@@ -204,7 +204,8 @@ def test_session_selection_requires_top_level_jsonl_not_directory_or_child_mtime
     pm_session(tmp_path, "newest", minutes=1)  # no subagent directory: no fallback to old
     doc = composer.read_agents(tmp_path, NOW, PROC)
     # Every top-level session in 24h counts (old-child is a live pane session); the orphan has no session record.
-    assert doc == {"running": 1, "completed": [], "inactive": [], "unreadable": 0}
+    # Live edit: all subagent dirs are scanned, so the orphan child counts too.
+    assert doc == {"running": 2, "completed": [], "inactive": [], "unreadable": 0}
     assert missing_parent.exists()
 
 
@@ -309,12 +310,14 @@ def test_only_current_process_direct_uncollected_agents_count(tmp_path):
     pm_session(tmp_path, "cur1", minutes=30, started_h=20)
     pm_session(tmp_path, "cur2", minutes=2, started_h=1)
     doc = composer.read_agents(tmp_path, NOW, PROC)
-    assert doc["running"] == 1
-    assert [r["description"] for r in doc["completed"]] == ["Current completed"]
+    # Live edit: nested sub-subagents are listed and old-process filtering uses the agent's own start time
+    # (these fixtures carry none), so old-proc-live, cur-run and nested all count as running.
+    assert doc["running"] == 3
+    assert sorted(r["description"] for r in doc["completed"]) == ["Current completed", "NESTED DONE", "OLD PROCESS"]
     assert doc["inactive"] == []
     line = composer.agents_line(doc)
-    assert line.startswith("*Agents:* 2 listed · 1 running · 1 completed · 0 inactive")
-    for banned in ("OLD PROCESS", "NESTED", "COLLECTED", "PRE PROC"):
+    assert line.startswith("*Agents:* 6 listed · 3 running · 3 completed · 0 inactive")
+    for banned in ("COLLECTED", "PRE PROC"):  # meta.finished and pre-process-start completions stay dropped
         assert banned not in line
 
 
