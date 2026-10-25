@@ -341,6 +341,9 @@ PM_SESSION_FRESH_S = 15 * 60
 # (PM correction 2026-10-23: ListAgents showed 11 vs 32). Completed agents stay listed only 60m.
 AGENT_RECENT_S = 3 * 3600
 AGENT_COMPLETED_S = 3600
+# Rajiv 2026-10-25 (ts 1792914885.859829): unfinished agents the pane still lists but that went quiet >3h (up to 24h) are
+# reported as STALE instead of silently dropped, so the hourly count reconciles with the pane.
+AGENT_STALE_MAX_S = 24 * 3600
 
 
 def _compact(value, limit: int) -> str:
@@ -530,16 +533,20 @@ def read_agents(root: Path = PM_PROJECT, now: datetime | None = None, process_st
         return None
     if now.timestamp() - newest > PM_SESSION_FRESH_S:
         return None  # fresh children cannot revive a dead PM pane
-    running, completed, inactive, unreadable = 0, [], [], 0
+    running, completed, inactive, stale, unreadable = 0, [], [], [], 0
     for path in root.glob("*/subagents/agent-*.jsonl"):
         try:
             modified_at = path.stat().st_mtime
-            if now.timestamp() - modified_at > AGENT_RECENT_S or not _is_listed_agent(path):
+            age_s = now.timestamp() - modified_at
+            if age_s > AGENT_STALE_MAX_S or not _is_listed_agent(path):
                 continue
             started = _session_started(path)
             if started is not None and started < process_start:
                 continue  # prior claude process / restart
             state = classify_agent(_last_agent_record(path), modified_at, now)
+            if state == "expired" or (state == "done" and age_s > AGENT_COMPLETED_S):
+                stale.append(_agent_row(path, now, modified_at))  # listed by the pane, quiet or uncollected
+                continue
             if state == "unknown":
                 unreadable += 1
             elif state == "active":
@@ -553,9 +560,9 @@ def read_agents(root: Path = PM_PROJECT, now: datetime | None = None, process_st
             continue  # transcript retired during collection
         except (OSError, ValueError, TypeError, AttributeError):
             unreadable += 1
-    for rows in (completed, inactive):
+    for rows in (completed, inactive, stale):
         rows.sort(key=lambda row: (-row["idle_min"], row["description"]))
-    return {"running": running, "completed": completed, "inactive": inactive, "unreadable": unreadable}
+    return {"running": running, "completed": completed, "inactive": inactive, "stale": stale, "unreadable": unreadable}
 
 
 def agents_line(doc: dict | None) -> str:
@@ -564,9 +571,13 @@ def agents_line(doc: dict | None) -> str:
     completed = doc.get("completed", [])
     inactive = doc.get("inactive", [])
     running = doc["running"]
-    listed = running + len(completed) + len(inactive)
+    stale = doc.get("stale", [])
+    listed = running + len(completed) + len(inactive) + len(stale)
     line = (f"*Agents:* {listed} listed · {running} running · {len(completed)} completed · "
-            f"{len(inactive)} inactive — PM stops C+I in Step 3c")
+            f"{len(inactive)} inactive")
+    if stale:
+        line += f" · {len(stale)} stale (quiet >3h or uncollected, oldest {stale[0]['idle_min'] // 60}h)"
+    line += " — PM stops C+I+stale in Step 3c"
     names = [f"{_compact(r['description'], 64)} (completed, last write {r['idle_min']}m ago)" for r in completed]
     names += [f"{_compact(r['description'], 64)} (inactive {r['idle_min']}m)" for r in inactive]
     if names:
@@ -820,15 +831,37 @@ def compose(
 UNBLOCK_REPO = "heydonna-app/heydonna-app"
 UNBLOCK_CAP = 10
 _BLOCKER_LINE = re.compile(r"(?im)^[^\n]*?(?:\bblockers?\s*:|\bblocked on\b|\bunblock_condition\b)[^\n]*$")
+# Rajiv 2026-10-25 (C0ALZJHGE49 ts 1792914885.859829): tighten. Only a strict `blockers:` line counts.
+_STRICT_BLOCKERS = re.compile(r"(?im)^[ \t>*\-]*\**blockers?\**\s*:(?P<rest>[^\n]*)$")
+_WAKE_LINE = re.compile(r"(?im)^[ \t>*\-]*\**(?:wake(?:[ _]condition)?|unblock[_ ]condition)\**\s*[:=](?P<rest>[^\n]*)$")
+_CLAIM_TYPE = re.compile(r"claimable_slot_type\s*[:=]\s*`?([\w-]+)")
+_FILLER = {"pr", "prs", "issue", "issues", "and", "or", "merged", "closed", "resolved", "to", "main", "the", "is", "are", "on", "child", "parent"}
+UNBLOCK_FRESH_DAYS = 14
 
 
-def _blocker_refs(body: str) -> list[int]:
+def _pure_issue_refs(text: str) -> bool:
+    """True when text is only #N refs plus filler words (no Rajiv/CTO/recurrence/bench/deploy etc.)."""
+    rest = re.sub(r"#\d+", " ", text or "")
+    words = re.findall(r"[A-Za-z_]+", rest)
+    return all(w.lower() in _FILLER for w in words)
+
+
+def _blocker_refs(body: str) -> list[int] | None:
+    """Refs from the strict `blockers:` line; None when absent or the line carries anything but issue refs."""
     refs: list[int] = []
-    for m in _BLOCKER_LINE.finditer(body or ""):
-        for n in re.findall(r"#(\d+)", m.group(0)):
+    seen = False
+    for m in _STRICT_BLOCKERS.finditer(body or ""):
+        seen = True
+        if not _pure_issue_refs(m.group("rest")):
+            return None
+        for n in re.findall(r"#(\d+)", m.group("rest")):
             if int(n) not in refs:
                 refs.append(int(n))
-    return refs
+    return refs if seen and refs else None
+
+
+def _has_event_wake(body: str) -> bool:
+    return any(not _pure_issue_refs(m.group("rest")) for m in _WAKE_LINE.finditer(body or ""))
 
 
 def _issue_priority(labels: list[str], body: str) -> int:
@@ -840,22 +873,39 @@ def _issue_priority(labels: list[str], body: str) -> int:
     return int(m.group(1)) if m else 9
 
 
-def unblockable_items(issues: list[dict], resolve) -> list[dict]:
-    """Pure: open backlog/blocked issues whose cited blocker is CLOSED/MERGED.
+def unblockable_items(issues: list[dict], resolve, today: datetime | None = None) -> list[dict]:
+    """Pure: open backlog/blocked issues that are claimable, whose strict `blockers:` line cites ONLY
+    issues/PRs that are ALL closed/merged, with no non-issue wake condition, and resolved <=14d ago (or P0/P1).
     resolve(n) -> {"resolved": bool, "date": "YYYY-MM-DD"} | None."""
+    today = today or datetime.now(timezone.utc)
     out = []
     for it in issues:
         labs = [l["name"] if isinstance(l, dict) else l for l in it.get("labels", [])]
         if not any(l in ("status:backlog", "status:blocked") or l.startswith("pm-blocked:") for l in labs):
             continue
+        if any(l.startswith("pm-nonclaimable") or "tracking" in l.lower() for l in labs):
+            continue
         body = it.get("body") or ""
-        for ref in _blocker_refs(body):
-            if ref == it["number"]:
-                continue
-            r = resolve(ref)
-            if r and r.get("resolved"):
-                out.append({"issue": it["number"], "prio": _issue_priority(labs, body), "blocker": ref, "date": r.get("date", "?")})
-                break
+        types = _CLAIM_TYPE.findall(body)
+        if types and types[-1].lower() == "none":
+            continue
+        if re.search(r"TRACKING_ONLY", body):
+            continue
+        refs = [r for r in (_blocker_refs(body) or []) if r != it["number"]]
+        if not refs or _has_event_wake(body):
+            continue
+        res = [resolve(r) for r in refs]
+        if not all(r and r.get("resolved") for r in res):
+            continue
+        date = max(r.get("date", "?") for r in res)
+        prio = _issue_priority(labs, body)
+        try:
+            age = (today - datetime.fromisoformat(date).replace(tzinfo=timezone.utc)).days
+        except ValueError:
+            age = 0
+        if age > UNBLOCK_FRESH_DAYS and prio > 1:
+            continue
+        out.append({"issue": it["number"], "prio": prio, "blocker": refs[-1] if len(refs) == 1 else ",".join(f"#{r}" for r in refs).lstrip("#"), "date": date})
     out.sort(key=lambda x: (x["prio"], -x["issue"]))
     return out
 
