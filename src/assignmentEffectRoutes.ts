@@ -13,6 +13,7 @@ import {
 import {
   NO_ISSUE_PROJECTION,
   type IssueOwnershipProjection,
+  type ProjectionGuard,
   type IssueProjectionOutcome,
 } from "./issueProjection.js";
 import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
@@ -106,6 +107,7 @@ async function projectIssue(
   issue: number | null | undefined,
   slot: number,
   repositoryId: string | number | null | undefined,
+  guard?: ProjectionGuard,
 ): Promise<IssueProjectionOutcome | null> {
   const target = Number(issue);
   if (!Number.isInteger(target) || target <= 0) {
@@ -116,8 +118,8 @@ async function projectIssue(
     : String(repositoryId);
   try {
     return mode === "assigned"
-      ? await projection.onAssigned(target, slot, repositoryKey)
-      : await projection.onReleased(target, slot, repositoryKey);
+      ? await projection.onAssigned(target, slot, repositoryKey, guard)
+      : await projection.onReleased(target, slot, repositoryKey, guard);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return {
@@ -187,11 +189,27 @@ async function runProjectionsInBackground(
   desiredTuple: { issue: number | null; repository_id: string | number | null },
   recordedDisplaced: { issue: number; repository_id: string | null } | null,
   baseDeliveryReceipt: Record<string, unknown>,
+  committedEpoch: number | null,
 ): Promise<void> {
+  // Durable generation guards, re-read after every await and before every
+  // network write inside the projector. Assign is current only while this slot
+  // still holds the exact committed issue+epoch; releasing the displaced lane
+  // is current only while no slot owns that issue (else it is a successor's).
+  const assignGuard: ProjectionGuard = () => {
+    const row = db.getSlot(slotNum);
+    return !!row
+      && row.occupied === true
+      && row.issue === desiredTuple.issue
+      && (typeof committedEpoch !== "number" || row.assignment_epoch === committedEpoch);
+  };
+  const releaseGuard: ProjectionGuard = () => {
+    const displacedIssue = recordedDisplaced?.issue;
+    return !db.getAllSlots().some((row) => row.occupied === true && row.issue === displacedIssue);
+  };
   const release = recordedDisplaced
-    ? await projectIssue(projector, "released", recordedDisplaced.issue, slotNum, recordedDisplaced.repository_id)
+    ? await projectIssue(projector, "released", recordedDisplaced.issue, slotNum, recordedDisplaced.repository_id, releaseGuard)
     : null;
-  const assign = await projectIssue(projector, "assigned", desiredTuple.issue, slotNum, desiredTuple.repository_id);
+  const assign = await projectIssue(projector, "assigned", desiredTuple.issue, slotNum, desiredTuple.repository_id, assignGuard);
   const merged = mergeProjectionReceipt(baseDeliveryReceipt, assign, release);
   db.markAssignmentEffectDelivered(effectId, merged);
   db.logEvent(slotNum, "assignment_effect_projection_completed", null, null, {
@@ -575,6 +593,7 @@ export function registerAssignmentEffectRoutes(
         if (needsAssignKick || releaseKickTarget) {
           void runProjectionsInBackground(
             db, projector, request.effect_id, slotNum, desiredTuple, releaseKickTarget, stored.delivery,
+            existing.committed_epoch ?? null,
           ).catch((error) => {
             console.error(
               `[assignment-effect] background replay projection threw for effect ${request.effect_id}: `
@@ -945,6 +964,7 @@ export function registerAssignmentEffectRoutes(
     });
     void runProjectionsInBackground(
       db, projector, request.effect_id, slotNum, desiredTuple, recordedDisplaced, baseDeliveryReceipt,
+      typeof committedEpoch === "number" ? committedEpoch : null,
     ).catch((error) => {
       console.error(
         `[assignment-effect] background projection threw for effect ${request.effect_id}: `

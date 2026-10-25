@@ -326,7 +326,9 @@ export class NativeSlotReleaseCoordinator {
       return null;
     }
     try {
-      return await projection.onReleased(issue, slot, tuple?.repository_id ?? null);
+      // Stale once any slot owns the issue again: its labels then belong to the successor.
+      const guard = () => !this.dependencies.db.getAllSlots().some((row) => row.occupied === true && row.issue === issue);
+      return await projection.onReleased(issue, slot, tuple?.repository_id ?? null, guard);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       return {

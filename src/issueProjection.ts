@@ -36,9 +36,44 @@ export interface IssueProjectionOutcome {
   verified: boolean;
 }
 
+/**
+ * Synchronous durable-generation check supplied by the caller (a DB read of the
+ * committed owner/epoch). The projector re-evaluates it after every await and
+ * immediately before every network write; false means this plan was superseded
+ * and the projector stops without writing or certifying anything.
+ */
+export type ProjectionGuard = () => boolean;
+
+export const SUPERSEDED_REASON = "superseded_by_newer_ownership";
+
 export interface IssueOwnershipProjection {
-  onAssigned(issue: number, slot: number, repositoryId: string | null | undefined): Promise<IssueProjectionOutcome>;
-  onReleased(issue: number, slot: number, repositoryId: string | null | undefined): Promise<IssueProjectionOutcome>;
+  onAssigned(
+    issue: number,
+    slot: number,
+    repositoryId: string | null | undefined,
+    guard?: ProjectionGuard,
+  ): Promise<IssueProjectionOutcome>;
+  onReleased(
+    issue: number,
+    slot: number,
+    repositoryId: string | null | undefined,
+    guard?: ProjectionGuard,
+  ): Promise<IssueProjectionOutcome>;
+}
+
+// Per-issue write exclusion: an older plan's in-flight network write finishes
+// before a successor reads, so the successor always converges on live labels.
+const issueChains = new Map<number, Promise<unknown>>();
+async function withIssueLock<T>(issue: number, work: () => Promise<T>): Promise<T> {
+  const previous = issueChains.get(issue) ?? Promise.resolve();
+  const run = previous.then(work, work);
+  const tail = run.catch(() => undefined);
+  issueChains.set(issue, tail);
+  try {
+    return await run;
+  } finally {
+    if (issueChains.get(issue) === tail) issueChains.delete(issue);
+  }
 }
 
 export const DEFAULT_PROJECTION_REPOSITORY = "Scribie/heydonna-app";
@@ -168,27 +203,61 @@ export function createGhIssueOwnershipProjection(
   // REST, not `gh issue edit`: edit takes ~40s wall against this repo (GraphQL
   // metadata round trips), which exceeded the 20s runGh timeout so every label
   // write was killed and no assignment ever projected (2026-10-25 incident).
-  // The REST label endpoints answer in about a second.
-  async function applyLabels(issue: number, add: string[], remove: string[]): Promise<void> {
+  // The REST label endpoints answer in about a second. Each write is preceded
+  // by a fresh generation check; returns false when superseded.
+  async function applyLabels(
+    issue: number,
+    add: string[],
+    remove: string[],
+    live: () => boolean,
+    applied: { added: string[]; removed: string[] },
+  ): Promise<boolean> {
     const base = `repos/${repository}/issues/${issue}/labels`;
     if (add.length > 0) {
+      if (!live()) return false;
       await runGh(["api", "-X", "POST", base, ...add.flatMap((label) => ["-f", `labels[]=${label}`])]);
+      applied.added.push(...add);
     }
     for (const label of remove) {
+      if (!live()) return false;
       await runGh(["api", "-X", "DELETE", `${base}/${encodeURIComponent(label)}`]);
+      applied.removed.push(label);
     }
+    return true;
   }
 
-  async function project(
+  function project(
     issue: number,
     slot: number,
     repositoryId: string | null | undefined,
     mode: "assign" | "release",
+    guard?: ProjectionGuard,
   ): Promise<IssueProjectionOutcome> {
+    return withIssueLock(issue, () => projectLocked(issue, slot, repositoryId, mode, guard));
+  }
+
+  async function projectLocked(
+    issue: number,
+    slot: number,
+    repositoryId: string | null | undefined,
+    mode: "assign" | "release",
+    guard?: ProjectionGuard,
+  ): Promise<IssueProjectionOutcome> {
+    const live = (): boolean => {
+      try {
+        return guard ? guard() : true;
+      } catch {
+        return false;
+      }
+    };
+    const applied = { added: [] as string[], removed: [] as string[] };
+    const superseded = (): IssueProjectionOutcome =>
+      outcome("skipped", SUPERSEDED_REASON, repository, issue, slot, applied.added, applied.removed);
     const target = resolveRepository(repositoryId);
     if (target === null) {
       return outcome("skipped", "repository_unmapped", null, issue, slot);
     }
+    if (!live()) return superseded();
     const slotLabel = `slot:${slot}`;
     let before: IssueSnapshot;
     try {
@@ -196,6 +265,7 @@ export function createGhIssueOwnershipProjection(
     } catch (error) {
       return outcome("failed", reasonFor("issue_projection_read_failed", error), repository, issue, slot);
     }
+    if (!live()) return superseded();
 
     const add: string[] = [];
     const remove: string[] = [];
@@ -239,10 +309,11 @@ export function createGhIssueOwnershipProjection(
       return outcome("unchanged", null, repository, issue, slot, [], [], true);
     }
     try {
-      await applyLabels(issue, add, remove);
+      if (!(await applyLabels(issue, add, remove, live, applied))) return superseded();
     } catch (error) {
       return outcome("failed", reasonFor("issue_projection_write_failed", error), repository, issue, slot);
     }
+    if (!live()) return superseded();
 
     let after: IssueSnapshot;
     try {
@@ -258,6 +329,7 @@ export function createGhIssueOwnershipProjection(
         remove,
       );
     }
+    if (!live()) return superseded();
     const verified = add.every((label) => after.labels.includes(label))
       && remove.every((label) => !after.labels.includes(label));
     if (!verified) {
@@ -275,8 +347,8 @@ export function createGhIssueOwnershipProjection(
   }
 
   return {
-    onAssigned: (issue, slot, repositoryId) => project(issue, slot, repositoryId, "assign"),
-    onReleased: (issue, slot, repositoryId) => project(issue, slot, repositoryId, "release"),
+    onAssigned: (issue, slot, repositoryId, guard) => project(issue, slot, repositoryId, "assign", guard),
+    onReleased: (issue, slot, repositoryId, guard) => project(issue, slot, repositoryId, "release", guard),
   };
 }
 
