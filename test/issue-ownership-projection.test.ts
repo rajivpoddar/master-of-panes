@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { Hono } from "hono";
 
+import { applyLabelsApi } from "./gh-labels-api-stub.js";
+
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
 import { MoPDatabase, computeFamily2ReleaseDigest, slotAssignmentTuple } from "../src/db.js";
 import {
@@ -30,19 +32,12 @@ function fakeGh(initial: { state?: string; labels: string[] }) {
     if (args[0] === "issue" && args[1] === "view") {
       return JSON.stringify({ state, labels: labels.map((name) => ({ name })) });
     }
-    if (args[0] === "issue" && args[1] === "edit") {
+    if (args[0] === "api") {
       if (failure.failWrites) {
         throw new Error("gh: issue edit failed");
       }
       edits.push(args);
-      for (let index = 0; index < args.length; index += 1) {
-        if (args[index] === "--add-label") {
-          labels = [...new Set([...labels, args[index + 1]])];
-        }
-        if (args[index] === "--remove-label") {
-          labels = labels.filter((label) => label !== args[index + 1]);
-        }
-      }
+      labels = applyLabelsApi(args, labels);
       return "";
     }
     throw new Error(`unexpected gh invocation: ${args.join(" ")}`);
@@ -88,8 +83,31 @@ test("assignment projects status:in-progress and the exact slot label, preservin
   assert.deepEqual(outcome.added_labels, ["status:in-progress", "slot:3"]);
   assert.deepEqual(outcome.removed_labels, ["status:todo"]);
   assert.deepEqual([...gh.labels()].sort(), ["P1", "customer-feedback", "slot:3", "status:in-progress"].sort());
-  assert.equal(gh.edits.length, 1);
-  assert.ok(gh.edits[0].includes("--repo") && gh.edits[0].includes(REPO));
+  // One REST POST for the adds and one DELETE for status:todo; never `gh issue edit`
+  // (that command takes ~40s here and was killed by the 20s timeout: 2026-10-25 incident).
+  assert.equal(gh.edits.length, 2);
+  assert.ok(gh.edits.every((args) => args[0] === "api" && args[3].startsWith(`repos/${REPO}/issues/7952/labels`)));
+  assert.ok(gh.edits.every((args) => !args.includes("edit")));
+});
+
+test("a killed gh write is reported with the timeout reason and replays idempotently", async () => {
+  const gh = fakeGh({ labels: ["status:todo"] });
+  const real = gh.runner;
+  let kill = true;
+  const runner: GhRunner = async (args) => {
+    if (kill && args[0] === "api") {
+      kill = false;
+      throw Object.assign(new Error("Command failed: gh api"), { killed: true, stderr: "" });
+    }
+    return real(args);
+  };
+  const projection = createGhIssueOwnershipProjection({ runGh: runner, repository: REPO });
+  const first = await projection.onAssigned(7953, 2, null);
+  assert.equal(first.status, "failed");
+  assert.match(first.reason ?? "", /killed:timeout/);
+  const retry = await projection.onAssigned(7953, 2, null);
+  assert.equal(retry.status, "projected");
+  assert.deepEqual([...gh.labels()].sort(), ["slot:2", "status:in-progress"]);
 });
 
 test("assignment is idempotent for an already-projected claim and corrects a foreign slot label", async () => {

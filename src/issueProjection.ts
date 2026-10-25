@@ -165,15 +165,18 @@ export function createGhIssueOwnershipProjection(
     };
   }
 
+  // REST, not `gh issue edit`: edit takes ~40s wall against this repo (GraphQL
+  // metadata round trips), which exceeded the 20s runGh timeout so every label
+  // write was killed and no assignment ever projected (2026-10-25 incident).
+  // The REST label endpoints answer in about a second.
   async function applyLabels(issue: number, add: string[], remove: string[]): Promise<void> {
-    const args = ["issue", "edit", String(issue), "--repo", repository];
-    for (const label of add) {
-      args.push("--add-label", label);
+    const base = `repos/${repository}/issues/${issue}/labels`;
+    if (add.length > 0) {
+      await runGh(["api", "-X", "POST", base, ...add.flatMap((label) => ["-f", `labels[]=${label}`])]);
     }
     for (const label of remove) {
-      args.push("--remove-label", label);
+      await runGh(["api", "-X", "DELETE", `${base}/${encodeURIComponent(label)}`]);
     }
-    await runGh(args);
   }
 
   async function project(
@@ -279,5 +282,8 @@ export function createGhIssueOwnershipProjection(
 
 function reasonFor(prefix: string, error: unknown): string {
   const detail = error instanceof Error ? error.message : String(error);
-  return `${prefix}:${detail.split("\n")[0].slice(0, 200)}`;
+  // execFile errors put the useful stderr (or "killed" on timeout) after the first line.
+  const stderr = String((error as { stderr?: unknown } | null)?.stderr ?? "").trim().split("\n")[0];
+  const killed = (error as { killed?: unknown } | null)?.killed ? " [killed:timeout]" : "";
+  return `${prefix}:${detail.split("\n")[0].slice(0, 120)}${killed}${stderr ? ` | ${stderr.slice(0, 120)}` : ""}`;
 }

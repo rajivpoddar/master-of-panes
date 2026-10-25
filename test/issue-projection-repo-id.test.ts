@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { applyLabelsApi } from "./gh-labels-api-stub.js";
+
 import {
   createGhIssueOwnershipProjection,
   type GhRunner,
@@ -17,15 +19,8 @@ function stubGh(initialLabels: string[]) {
     if (args[0] === "issue" && args[1] === "view") {
       return JSON.stringify({ state: "OPEN", labels: labels.map((name) => ({ name })) });
     }
-    if (args[0] === "issue" && args[1] === "edit") {
-      for (let index = 0; index < args.length; index += 1) {
-        if (args[index] === "--add-label") {
-          labels = [...new Set([...labels, args[index + 1]])];
-        }
-        if (args[index] === "--remove-label") {
-          labels = labels.filter((label) => label !== args[index + 1]);
-        }
-      }
+    if (args[0] === "api") {
+      labels = applyLabelsApi(args, labels);
       return "";
     }
     throw new Error(`unexpected gh invocation: ${args.join(" ")}`);
