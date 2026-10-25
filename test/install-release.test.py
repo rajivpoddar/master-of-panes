@@ -682,5 +682,159 @@ class StartupBudgetTests(ReleaseInstallerTests):
         self.assertEqual(self.current.resolve(), self.old.resolve())
 
 
+class OneFileSharedInstallTests(LiveDriftGateTests):
+    """One-file healthcheck-style install: reviewed preimage binding, kept backup,
+    no blanket overwrite, and explicit (non-runtime) rollback."""
+
+    for _name in [n for n in dir(LiveDriftGateTests) if n.startswith("test_")]:
+        locals()[_name] = None
+    del _name
+
+    def one(self, cand: Path, *, target: str | None = None, sha: str | None = None, mode: str = "755") -> int:
+        target = target or self.T2
+        sha = sha or module.sha256(self.dep(target))
+        return self.cli("shared-install-one", "--target", target, "--expect-preimage-sha256", sha,
+                        "--expect-preimage-mode", mode, candidate=cand)
+
+    def test_one_file_install_binds_reviewed_preimage_replaces_only_that_file_and_keeps_backup(self):
+        cand = self._release("cand", {"guard.sh": "v2\n", "zz-other.sh": "o2\n"})
+        reviewed = module.sha256(self.dep(self.T2))
+        self.assertEqual(self.one(cand, sha=reviewed), 0)
+        self.assertEqual(self.dep(self.T2).read_text(), "o2\n")
+        self.assertEqual(self.dep(self.T1).read_text(), "v1\n", "no blanket overwrite")
+        self.assertEqual(self.dep(self.ALIAS).read_text(), "v1\n")
+        bundle = self.root / f"rb{self.bundles}"
+        self.assertTrue(bundle.is_dir(), "backup bundle is kept")
+        module.restore_rollback_bundle(bundle)
+        self.assertEqual(self.dep(self.T2).read_text(), "o1\n")
+
+    def test_one_file_install_refuses_a_preimage_that_differs_in_hash_or_mode(self):
+        cand = self._release("cand", {"guard.sh": "v2\n", "zz-other.sh": "o2\n"})
+        reviewed = module.sha256(self.dep(self.T2))
+        self.dep(self.T2).write_text("live edit\n")  # fresh bytes after review
+        before = self.snapshot()
+        self.assertEqual(self.one(cand, sha=reviewed), 2)
+        self.assertEqual(self.snapshot(), before)
+        self.dep(self.T2).write_text("o1\n")
+        self.assertEqual(self.one(cand, sha=reviewed, mode="700"), 2)  # mode is 755
+        self.assertEqual(self.dep(self.T2).read_text(), "o1\n")
+
+    def test_one_file_install_refuses_unlisted_target_and_late_edit(self):
+        cand = self._release("cand", {"guard.sh": "v2\n", "zz-other.sh": "o2\n"})
+        self.assertEqual(self.one(cand, target="/opt/claude/scripts/not-listed.sh", sha="0" * 64), 2)
+        original = module._before_replace_hook
+
+        def late_edit(target: Path) -> None:
+            target.write_text("fresh\n")
+
+        module._before_replace_hook = late_edit
+        try:
+            self.assertEqual(self.one(cand), 2)
+        finally:
+            module._before_replace_hook = original
+        self.assertEqual(self.dep(self.T2).read_text(), "fresh\n", "fresh bytes kept")
+
+    def test_runtime_pointer_rollback_does_not_restore_the_one_file_asset_the_bundle_does(self):
+        cand = self._release("cand", {"guard.sh": "v2\n", "zz-other.sh": "o2\n"})
+        self.assertEqual(self.one(cand), 0)
+        one_bundle = self.root / f"rb{self.bundles}"
+        new = self.releases / "runtime-new"
+        for release in (new,):
+            server = release / "dist" / "server.js"
+            server.parent.mkdir(parents=True)
+            server.write_text("server\n")
+            helper = release / "scripts" / "release-slot-reset-and-ack.py"
+            helper.parent.mkdir(parents=True)
+            helper.write_text("#!/usr/bin/env python3\n")
+            helper.chmod(0o755)
+        for release in (self.active,):
+            (release / "dist").mkdir(exist_ok=True)
+            (release / "dist" / "server.js").write_text("server\n")
+        calls = {"n": 0}
+
+        def health():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise module.InstallerError("new release never bound")
+            return {"status": 200}
+
+        with self.assertRaises(module.InstallerError):
+            module.activate(
+                release_dir=new, current=self.current, expected_old=self.active, delete_targets=[],
+                rollback_bundle=self.root / "rb-runtime", restart=lambda: None, health=health,
+                canary=lambda: {"slots": []},
+            )
+        self.assertEqual(self.current.resolve(), self.active.resolve(), "pointer restored")
+        self.assertEqual(self.dep(self.T2).read_text(), "o2\n",
+                         "runtime recovery keeps the NEW healthcheck baseline: it is not in that bundle")
+        module.restore_rollback_bundle(one_bundle)
+        self.assertEqual(self.dep(self.T2).read_text(), "o1\n", "the one-file bundle restores the reviewed preimage")
+        self.assertEqual(stat.S_IMODE(self.dep(self.T2).stat().st_mode), 0o755)
+
+
+class ListenerIdentityTests(unittest.TestCase):
+    """Readiness binds listener pid, cwd and release, not URL status alone."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.release = root / "releases" / "good"
+        self.other = root / "releases" / "other"
+        self.release.mkdir(parents=True)
+        self.other.mkdir(parents=True)
+        self.pointer = root / "current"
+        os.symlink(self.release, self.pointer)
+
+    def capture(self, *, child="4242", listeners=("4242",), cwd=None):
+        cwd = cwd or str(self.release)
+
+        def run(command):
+            if command[0] == "launchctl":
+                return f"service = x\n\tpid = {child}\n" if child else "service = x\n"
+            if "-Fp" in command:
+                return "".join(f"p{pid}\n" for pid in listeners)
+            return f"p{child}\nfcwd\nn{cwd}\n"
+
+        return run
+
+    def check(self, **kwargs):
+        return module.check_listener_identity(
+            label="svc", port=3100, release=self.pointer.resolve(), capture=self.capture(**kwargs), uid=501)
+
+    def test_matching_child_listener_and_release_cwd_binds(self):
+        self.assertEqual(self.check()["pid"], 4242)
+
+    def test_foreign_or_extra_listener_wrong_cwd_or_no_child_does_not_bind(self):
+        for kwargs in ({"listeners": ("999",)}, {"listeners": ("4242", "999")}, {"listeners": ()},
+                       {"cwd": str(self.other)}, {"child": None}):
+            with self.assertRaises(module.InstallerError, msg=str(kwargs)):
+                self.check(**kwargs)
+
+    def test_url_200_alone_is_not_ready_until_identity_binds_then_recovers_before_deadline(self):
+        t = {"now": 0.0}
+        state = {"bound_at": 100}
+
+        def identity():
+            if t["now"] < state["bound_at"]:
+                raise module.InstallerError("listener is not the launchd child")
+            return {"pid": 1}
+
+        result = module._default_health(
+            "http://x/health", probe=lambda _u: {"status": 200}, identity=identity,
+            clock=lambda: t["now"], sleep=lambda d: t.__setitem__("now", t["now"] + d))
+        self.assertEqual(result["identity"], {"pid": 1})
+        self.assertGreaterEqual(t["now"], 100)
+
+    def test_permanent_identity_mismatch_fails_at_the_deadline_despite_200(self):
+        t = {"now": 0.0}
+        with self.assertRaises(module.InstallerError):
+            module._default_health(
+                "http://x/health", probe=lambda _u: {"status": 200},
+                identity=lambda: (_ for _ in ()).throw(module.InstallerError("foreign listener")),
+                clock=lambda: t["now"], sleep=lambda d: t.__setitem__("now", t["now"] + d))
+        self.assertLess(t["now"], module.STARTUP_GRACE_SECONDS + 5)
+
+
 if __name__ == "__main__":
     unittest.main()

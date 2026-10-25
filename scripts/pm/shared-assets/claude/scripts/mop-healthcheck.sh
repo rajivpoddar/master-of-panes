@@ -14,18 +14,19 @@
 #
 # 2026-05-27: MoP is launchd-owned by com.heydonna.mop-server. The historical
 # /tmp/mop-server.pid file is no longer authoritative and must not be the first
-# restart target. Use launchctl kickstart for the launchd service, falling back
-# to lsof only when launchd is unavailable.
+# restart target. Use launchctl kickstart for the launchd service. A failed kickstart
+# of a still-loaded service is reported, never worked around (no port kill, no
+# second server); only proven launchd absence re-bootstraps the plist.
 
 set -u
 
 LOG_FILE="${MOP_HC_LOG_FILE:-/tmp/mop-healthcheck.log}"
 COUNTER_FILE="${MOP_HC_COUNTER_FILE:-/tmp/mop-healthcheck-fail-count.txt}"
-SERVER_LOG="${MOP_HC_SERVER_LOG:-/tmp/mop-server.log}"
+MOP_CURRENT="${MOP_HC_CURRENT:-$HOME/.local/share/master-of-panes/current}"
+MOP_PLIST="${MOP_HC_PLIST:-$HOME/Library/LaunchAgents/com.heydonna.mop-server.plist}"
 # Startup grace for the launchd child (seconds). Same default and env name as the
 # installer's finite health budget (scripts/install-release.py STARTUP_GRACE_SECONDS).
 STARTUP_GRACE="${MOP_STARTUP_GRACE_SECONDS:-150}"
-MOP_DIR="${MOP_HC_DIR:-$HOME/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0}"
 LAUNCHD_LABEL="com.heydonna.mop-server"
 THRESHOLD=3
 LOG_MAX_BYTES=1048576  # 1 MB
@@ -134,40 +135,38 @@ if launchctl print "gui/${UID_NUM}/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
     echo 0 > "$COUNTER_FILE"
     exit 0
   fi
-  log "  WARNING: launchctl kickstart failed (start failure); will try lsof/nohup fallback"
-else
-  log "  launchd service ${LAUNCHD_LABEL} not loaded (launchd absent); will try lsof/nohup fallback"
-fi
-
-sleep 2
-
-# Fallback for machines where launchd has not loaded the service. This path is
-# intentionally lsof-first; /tmp/mop-server.pid can be stale under launchd.
-LSOF_PIDS=$(lsof -ti :3100 2>/dev/null || true)
-if [ -n "$LSOF_PIDS" ]; then
-  # shellcheck disable=SC2086
-  kill $LSOF_PIDS 2>/dev/null || true
-  log "  fallback killed lsof-detected PIDs on :3100 ($LSOF_PIDS)"
-fi
-sleep 1
-
-if [ ! -d "$MOP_DIR" ]; then
-  log "  ERROR: MOP_DIR not found at $MOP_DIR — cannot fallback-start"
+  # launchd still owns the service, so a failed kickstart does NOT prove its
+  # child is gone. Preserve the single owner: no port kill, no second server.
+  # Report a bounded failure; the counter restarts, so the next attempt is one
+  # full threshold window away.
+  log "  RECOVERY_FAILED: kickstart failed while launchd still owns ${LAUNCHD_LABEL}; child not proven gone; no port kill, no fallback server"
+  echo 0 > "$COUNTER_FILE"
   exit 0
 fi
 
-cd "$MOP_DIR" || { log "  ERROR: cd to $MOP_DIR failed"; exit 0; }
-nohup node dist/server.js > "$SERVER_LOG" 2>&1 &
-NEW_PID=$!
-log "  fallback spawned server (PID $NEW_PID), waiting for /health to come up..."
-
-# Verify within 5s — don't fail-hard, the next tick will catch a still-dead server.
-sleep 2
-if curl --max-time 5 -fs http://localhost:3100/health >/dev/null 2>&1; then
-  log "  VERIFIED healthy after restart (PID $NEW_PID)"
+# launchd ownership must be PROVEN absent (neither print nor list knows the label).
+if launchctl list "${LAUNCHD_LABEL}" >/dev/null 2>&1; then
+  log "  launchd ownership of ${LAUNCHD_LABEL} unproven (list succeeds, print fails); no fallback"
+  echo 0 > "$COUNTER_FILE"
+  exit 0
+fi
+if [ -n "$(lsof -nP -iTCP:3100 -sTCP:LISTEN -t 2>/dev/null || true)" ]; then
+  log "  launchd absent but a foreign listener holds :3100; refusing to kill it or start a second server"
+  exit 0
+fi
+RELEASE=$(cd "$MOP_CURRENT" 2>/dev/null && pwd -P || true)
+if [ -z "$RELEASE" ] || [ ! -f "$RELEASE/dist/server.js" ] || [ ! -f "$MOP_PLIST" ]; then
+  log "  launchd absent but pointer-selected release ($MOP_CURRENT -> ${RELEASE:-unresolved}) or plist ($MOP_PLIST) is unusable; no fallback"
+  exit 0
+fi
+# Owner-absent fallback = re-establish launchd ownership from the plist, which pins
+# the runtime, env (MOP_DB_PATH) and WorkingDirectory=$MOP_CURRENT. Never a bare
+# nohup server and never the plugin-cache dist.
+log "  launchd absent (proven); bootstrapping ${LAUNCHD_LABEL} for pointer-selected release ${RELEASE}"
+if launchctl bootstrap "gui/${UID_NUM}" "$MOP_PLIST" >>"$LOG_FILE" 2>&1; then
   echo 0 > "$COUNTER_FILE"
 else
-  log "  WARNING: /health still failing after 2s — counter NOT reset; next tick will retry"
+  log "  WARNING: launchctl bootstrap failed; next window retries"
+  echo 0 > "$COUNTER_FILE"
 fi
-
 exit 0

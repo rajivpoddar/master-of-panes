@@ -499,9 +499,9 @@
       "canonical_target": "/Users/rajiv/.claude/scripts/mop-healthcheck.sh",
       "dependencies": [],
       "dependency_status": "closed",
-      "mode": 448,
+      "mode": 493,
       "ownership_class": "shared-claude-pm-report",
-      "sha256": "315b723ac864cebb5715fc3427dfe6c7e9734ba2f0d4dd497ace14bb6bd79b92",
+      "sha256": "c9ca9c8970cd7c77caff8f52f8e4715701963a47724b65d68961827377f29d10",
       "source_path": "claude/scripts/mop-healthcheck.sh"
     },
     {

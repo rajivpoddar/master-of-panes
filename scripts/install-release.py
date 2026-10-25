@@ -12,12 +12,14 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -774,6 +776,87 @@ def install_shared_assets(
                 temporary.unlink()
 
 
+def install_one_shared_asset(
+    *,
+    release_dir: Path,
+    target_root: Path | None,
+    target_name: str,
+    expected_preimage_sha256: str,
+    expected_preimage_mode: int,
+    rollback_bundle: Path,
+) -> dict[str, Any]:
+    """Install ONE manifest-listed shared asset bound to a reviewed preimage.
+
+    No blanket overwrite and no drift sync: the fresh deployed bytes and mode must
+    equal the reviewed preimage (hash AND mode) or the install refuses and changes
+    nothing. The reviewed preimage is backed up into ``rollback_bundle`` (kept), the
+    manifest replacement is bound by its manifest digest/mode, and the target is
+    re-hashed at the last replacement point. Runtime (pointer) rollback does NOT
+    restore this file; recovery is ``restore_rollback_bundle(rollback_bundle)``,
+    whose baseline is exactly the reviewed preimage.
+    """
+    manifest = _load_shared_manifest(release_dir)
+    matches = [
+        entry for entry in manifest["entries"]
+        if target_name in _shared_entry_targets(entry)
+    ]
+    if len(matches) != 1:
+        raise InstallerError(f"REFUSE: {target_name} is not exactly one manifest-listed shared asset")
+    entry = matches[0]
+    target = _shared_target_path(target_name, target_root)
+    if not target.is_file() or target.is_symlink():
+        raise InstallerError(f"REFUSE: one-file install target is not a regular file: {target}")
+    preimage = file_record(target, target_name)
+    if preimage.get("sha256") != expected_preimage_sha256 or preimage.get("mode") != expected_preimage_mode:
+        raise InstallerError(
+            f"REFUSE: preimage differs from the reviewed value for {target} "
+            f"(sha={preimage.get('sha256')} mode={oct(preimage.get('mode', 0))}; "
+            f"reviewed sha={expected_preimage_sha256} mode={oct(expected_preimage_mode)}); nothing changed"
+        )
+    source = release_dir / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(entry["source_path"])
+    create_rollback_bundle([target], rollback_bundle)
+    temporary = target.with_name(f".{target.name}.shared.{os.getpid()}.one.tmp")
+    written: dict[str, str] = {}
+    try:
+        if temporary.exists() or temporary.is_symlink():
+            temporary.unlink()
+        with source.open("rb") as source_handle, temporary.open("xb") as destination:
+            shutil.copyfileobj(source_handle, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(temporary, entry["mode"])
+        if file_record(temporary, target_name).get("sha256") != entry["sha256"]:
+            raise InstallerError("one-file replacement does not match its manifest digest")
+        _before_replace_hook(target)
+        fresh = file_record(target, target_name)
+        if fresh != preimage:
+            raise InstallerError(
+                f"REFUSE: live drift at replacement: {target} changed after the preimage check; kept the fresh bytes"
+            )
+        os.replace(temporary, target)
+        written[str(target)] = entry["sha256"]
+        _fsync_directory(target.parent)
+        expected = {"path": target_name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+        if file_record(target, target_name) != expected:
+            raise InstallerError(f"shared asset target readback mismatch: {target}")
+    except Exception as exc:
+        if written:
+            restore_rollback_bundle(rollback_bundle, only_if_current=written)
+        raise InstallerError(f"one-file shared install failed; backup kept at {rollback_bundle}: {exc}") from exc
+    finally:
+        if temporary.exists() or temporary.is_symlink():
+            temporary.unlink()
+    return {
+        "status": "SHARED_ONE_INSTALLED",
+        "target": str(target),
+        "preimage_sha256": preimage["sha256"],
+        "preimage_mode": preimage["mode"],
+        "installed_sha256": entry["sha256"],
+        "installed_mode": entry["mode"],
+        "rollback_bundle": str(rollback_bundle),
+    }
+
+
 def check_shared_assets(*, release_dir: Path, target_root: Path | None) -> dict[str, Any]:
     manifest = _load_shared_manifest(release_dir)
     checked: list[str] = []
@@ -1029,6 +1112,43 @@ def _probe_health(url: str) -> dict[str, Any]:
         return {"status": response.status, "body": body}
 
 
+def _capture(command: list[str]) -> str:
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise InstallerError(f"identity probe failed: {command[0]}: {exc}") from exc
+    return done.stdout if done.returncode == 0 else ""
+
+
+def check_listener_identity(
+    *,
+    label: str,
+    port: int,
+    release: Path,
+    capture: Callable[[list[str]], str] = _capture,
+    uid: int | None = None,
+) -> dict[str, Any]:
+    """Bind readiness to the process: the :port listener must be the launchd child
+    of ``label`` and its cwd must be the pointer-selected release (not just a 200)."""
+    uid = os.getuid() if uid is None else uid
+    printed = capture(["launchctl", "print", f"gui/{uid}/{label}"])
+    match = re.search(r"^\s*pid = (\d+)", printed, re.M)
+    if not match:
+        raise InstallerError(f"launchd service {label} has no running child pid")
+    child = int(match.group(1))
+    listeners = sorted({int(v) for v in re.findall(r"^p(\d+)", capture(
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"]), re.M)})
+    if listeners != [child]:
+        raise InstallerError(f"listener pid(s) {listeners} on :{port} are not the launchd child {child}")
+    cwd_match = re.search(r"^n(.+)$", capture(["lsof", "-a", "-p", str(child), "-d", "cwd", "-Fn"]), re.M)
+    if not cwd_match:
+        raise InstallerError(f"cannot read cwd of listener pid {child}")
+    cwd = Path(cwd_match.group(1))
+    if os.path.realpath(cwd) != os.path.realpath(release):
+        raise InstallerError(f"listener pid {child} cwd {cwd} is not the selected release {release}")
+    return {"pid": child, "cwd": str(cwd), "release": str(release)}
+
+
 def _default_health(
     url: str,
     *,
@@ -1036,8 +1156,10 @@ def _default_health(
     probe: Callable[[str], dict[str, Any]] | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    identity: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Poll until healthy or the finite startup deadline passes (never earlier)."""
+    """Poll until healthy AND (when given) the listener identity binds, or the
+    finite startup deadline passes (never earlier)."""
     budget = startup_grace_seconds() if grace is None else grace
     probe = probe or _probe_health
     started = clock()
@@ -1048,6 +1170,8 @@ def _default_health(
         attempt += 1
         try:
             result = probe(url)
+            if identity is not None:
+                result = {**result, "identity": identity()}
             return {**result, "attempt": attempt}
         except (OSError, InstallerError) as exc:
             last_error = exc
@@ -1055,6 +1179,17 @@ def _default_health(
             break
         sleep(min(1.0, max(0.0, deadline - clock())))
     raise InstallerError(f"health unavailable after {budget:.0f}s startup budget ({attempt} probes): {last_error}")
+
+
+def _bound_health(url: str, *, service: str, current: Path) -> dict[str, Any]:
+    """Production readiness: URL health plus listener pid/cwd/release binding to
+    whatever release the pointer selects at call time (so recovery binds the
+    restored release)."""
+    port = urllib.parse.urlparse(url).port or 80
+    return _default_health(
+        url,
+        identity=lambda: check_listener_identity(label=service, port=port, release=current.resolve(strict=True)),
+    )
 
 
 def _default_canary(url: str) -> dict[str, Any]:
@@ -1433,7 +1568,7 @@ def _check_launchd(*, current: Path, service: str) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=("stage", "activate", "check", "shared-install", "shared-check", "shared-retire", "drift-check")
+        "mode", choices=("stage", "activate", "check", "shared-install", "shared-install-one", "shared-check", "shared-retire", "drift-check")
     )
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--candidate")
@@ -1449,6 +1584,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shared-assets-root", type=Path)
     parser.add_argument("--inventory", type=Path)
     parser.add_argument("--installed-root", type=Path, action="append", default=[])
+    parser.add_argument("--target", help="shared-install-one: canonical target of the single manifest asset")
+    parser.add_argument("--expect-preimage-sha256", help="shared-install-one: reviewed preimage sha256")
+    parser.add_argument("--expect-preimage-mode", help="shared-install-one: reviewed preimage mode (octal, e.g. 700)")
     parser.add_argument("--service", default="com.heydonna.mop-server")
     parser.add_argument("--health-url", default="http://127.0.0.1:3100/health")
     parser.add_argument("--canary-url", default="http://127.0.0.1:3100")
@@ -1483,6 +1621,19 @@ def main(argv: list[str] | None = None) -> int:
             result = retire_shared_assets(
                 release_dir=release_dir,
                 installed_roots=args.installed_root,
+                rollback_bundle=args.rollback_bundle,
+            )
+        elif args.mode == "shared-install-one":
+            if not (args.candidate and args.target and args.expect_preimage_sha256 and args.expect_preimage_mode):
+                raise InstallerError(
+                    "shared-install-one requires --candidate, --target, --expect-preimage-sha256, --expect-preimage-mode"
+                )
+            result = install_one_shared_asset(
+                release_dir=args.release_root / args.candidate,
+                target_root=args.shared_assets_root,
+                target_name=args.target,
+                expected_preimage_sha256=args.expect_preimage_sha256,
+                expected_preimage_mode=int(args.expect_preimage_mode, 8),
                 rollback_bundle=args.rollback_bundle,
             )
         elif args.mode in {"shared-install", "shared-check"}:
@@ -1520,7 +1671,7 @@ def main(argv: list[str] | None = None) -> int:
                     accept_overwrite=args.accept_overwrite,
                 )
                 verify_staged(repo=args.repo, release_dir=release_dir, candidate=args.candidate)
-                result = activate(release_dir=release_dir, current=args.current, expected_old=args.expected_old, delete_targets=delete_targets, rollback_bundle=args.rollback_bundle, restart=lambda: _default_restart(args.service), health=lambda: _default_health(args.health_url), canary=lambda: _default_canary(args.canary_url))
+                result = activate(release_dir=release_dir, current=args.current, expected_old=args.expected_old, delete_targets=delete_targets, rollback_bundle=args.rollback_bundle, restart=lambda: _default_restart(args.service), health=lambda: _bound_health(args.health_url, service=args.service, current=args.current), canary=lambda: _default_canary(args.canary_url))
             else:
                 if not args.current or not args.inventory:
                     raise InstallerError("check requires --current and explicit --inventory")
@@ -1528,7 +1679,7 @@ def main(argv: list[str] | None = None) -> int:
                 keep_targets = _inventory_paths(args.inventory, "KEEP_IN_HEYDONNA_APP", args.installed_root)
                 result = check_install(release_dir=release_dir, current=args.current, delete_targets=delete_targets, keep_targets=keep_targets, rollback_bundle=args.rollback_bundle)
                 result["launchd"] = _check_launchd(current=args.current, service=args.service)
-                result["health"] = _default_health(args.health_url)
+                result["health"] = _bound_health(args.health_url, service=args.service, current=args.current)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except InstallerError as exc:
