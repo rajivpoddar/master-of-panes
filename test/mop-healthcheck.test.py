@@ -19,7 +19,8 @@ class Sandbox:
     watchdog timeline. The child "age" advances 60s per tick.
     """
 
-    def __init__(self, tmp: Path, *, loaded=True, list_ok=False, kickstart_ok=True, child_age=30, listener=False):
+    def __init__(self, tmp: Path, *, loaded=True, list_ok=False, kickstart_ok=True, child_age=30, listener=False,
+                 print_mode=None, list_mode=None, lsof_mode=None):
         self.root = tmp
         self.bin = tmp / "bin"
         self.bin.mkdir()
@@ -40,7 +41,13 @@ class Sandbox:
         os.symlink(self.release_b, self.current)
         self.plist = tmp / "server.plist"
         self.plist.write_text("<plist/>\n")
-        self.set(loaded=loaded, list_ok=list_ok, kickstart_ok=kickstart_ok, age=child_age, listener=listener)
+        self.set(kickstart_ok=kickstart_ok, age=child_age)
+        for name, value in (
+            ("print_mode", print_mode or ("loaded" if loaded else "not_found")),
+            ("list_mode", list_mode or ("found" if list_ok else "not_found")),
+            ("lsof_mode", lsof_mode or ("listener" if listener else "clean")),
+        ):
+            (self.state / name).write_text(value + "\n")
         sandbox_calls = self.calls
 
         def stub(name: str, body: str) -> None:
@@ -52,25 +59,44 @@ class Sandbox:
         stub(
             "launchctl",
             f'''echo "launchctl $*" >> "{sandbox_calls}"
+mode() {{ case "$1" in
+  found) return 0 ;;
+  not_found) echo "Could not find service" >&2; return 113 ;;
+  perm) echo "Operation not permitted" >&2; return 1 ;;
+  domain) echo "Could not find domain for gui/501" >&2; return 113 ;;
+  garbled) echo "???" ; return 7 ;;
+esac; }}
 case "$1" in
-  print) [ "$(cat {st}/loaded)" = 1 ] && printf "service = x\\n\\tpid = 4242\\n" || exit 113 ;;
-  list) [ "$(cat {st}/list_ok)" = 1 ] || exit 113 ;;
+  print) m=$(cat {st}/print_mode)
+    if [ "$m" = loaded ]; then printf "service = x\\n\\tpid = 4242\\n"; else mode "$m"; exit $?; fi ;;
+  list) mode "$(cat {st}/list_mode)"; exit $? ;;
   kickstart) [ "$(cat {st}/kickstart_ok)" = 1 ] || exit 1; echo 0 > {st}/age ;;
-  bootstrap) echo 1 > {st}/loaded ;;
+  bootstrap) echo loaded > {st}/print_mode ;;
 esac
 ''',
         )
         stub("ps", f'a=$(cat {st}/age); printf "%02d:%02d\\n" $((a/60)) $((a%60))\n')
         stub("curl", "exit 7\n")
         stub("sleep", "exit 0\n")
-        stub("lsof", f'echo "lsof $*" >> "{sandbox_calls}"; [ "$(cat {st}/listener)" = 1 ] && echo 999; exit 0\n')
+        stub(
+            "lsof",
+            f'''echo "lsof $*" >> "{sandbox_calls}"
+case "$(cat {st}/lsof_mode)" in
+  clean) exit 1 ;;
+  listener) echo 999; exit 0 ;;
+  error) echo "lsof: WARNING: can't stat() fs" >&2; exit 1 ;;
+  listener_error) echo 999; echo "lsof: permission denied" >&2; exit 1 ;;
+  silent_error) exit 2 ;;
+  empty0) exit 0 ;;
+esac
+''',
+        )
         stub("nohup", f'echo "nohup $*" >> "{sandbox_calls}"\n')
         stub("kill", f'echo "kill $*" >> "{sandbox_calls}"\n')
         stub("pkill", f'echo "pkill $*" >> "{sandbox_calls}"\n')
 
-    def set(self, *, loaded=None, list_ok=None, kickstart_ok=None, age=None, listener=None):
-        for name, value in (("loaded", loaded), ("list_ok", list_ok), ("kickstart_ok", kickstart_ok),
-                            ("age", age), ("listener", listener)):
+    def set(self, *, kickstart_ok=None, age=None):
+        for name, value in (("kickstart_ok", kickstart_ok), ("age", age)):
             if value is not None:
                 (self.state / name).write_text(f"{int(value)}\n")
 
@@ -107,7 +133,7 @@ class HealthcheckTests(unittest.TestCase):
     def test_script_has_no_bare_server_or_port_kill(self):
         text = SCRIPT.read_text()
         code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-        self.assertIsNone(re.search(r"(?m)^\s*(?:nohup|kill|pkill)\b|\$\(.*\bkill\b|plugins/cache", code))
+        self.assertIsNone(re.search(r"(?m)^\s*(?:nohup|kill|pkill)\b|xargs\s+kill|\bkill\s+\$|plugins/cache", code))
 
     def test_finite_grace_then_exactly_one_kickstart_across_ticks(self):
         box = self.sandbox(child_age=0)  # freshly started child that never binds
@@ -137,7 +163,7 @@ class HealthcheckTests(unittest.TestCase):
         self.assertEqual(box.count("kickstart"), 4)
         self.assertEqual(box.log().count("RECOVERY_FAILED"), 4)
         self.assertEqual(box.count("nohup") + box.count("bootstrap") + box.count("kill") + box.count("pkill"), 0)
-        self.assertEqual((box.state / "loaded").read_text().strip(), "1")
+        self.assertEqual((box.state / "print_mode").read_text().strip(), "loaded")
 
     def test_owner_absent_fallback_targets_the_pointer_selected_release(self):
         box = self.sandbox(loaded=False, list_ok=False)
@@ -174,6 +200,53 @@ class HealthcheckTests(unittest.TestCase):
         broken.counter.write_text("2\n")
         broken.tick()
         self.assertEqual(broken.count("bootstrap") + broken.count("nohup"), 0)
+
+    def assert_no_start_effect(self, box: Sandbox) -> None:
+        for token in ("bootstrap", "kickstart", "kill", "pkill", "nohup"):
+            self.assertEqual(box.count(token), 0, token)
+
+    def test_unknown_ownership_or_failed_port_read_never_authorizes_a_start(self):
+        cases = {
+            "print permission denied, listener present": dict(print_mode="perm", lsof_mode="listener"),
+            "print garbled exit": dict(print_mode="garbled", lsof_mode="clean"),
+            "print wrong domain (113 without service text)": dict(print_mode="domain", lsof_mode="clean"),
+            "list permission denied": dict(print_mode="not_found", list_mode="perm", lsof_mode="clean"),
+            "list garbled": dict(print_mode="not_found", list_mode="garbled", lsof_mode="clean"),
+            "lsof error with a listener present (empty read)": dict(print_mode="not_found", lsof_mode="error"),
+            "lsof error that still printed a listener": dict(print_mode="not_found", lsof_mode="listener_error"),
+            "lsof silent unexpected exit": dict(print_mode="not_found", lsof_mode="silent_error"),
+            "lsof exit 0 with no output": dict(print_mode="not_found", lsof_mode="empty0"),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name):
+                box = self.sandbox(**kwargs)
+                for _ in range(9):
+                    box.tick()
+                self.assert_no_start_effect(box)
+                # Inside the finite window: threshold reached every 3rd tick, reported each time.
+                self.assertEqual(box.log().count("RECOVERY_FAILED"), 3)
+                self.assertIn("UNKNOWN", box.log())
+
+    def test_unknown_state_recovers_with_a_bounded_later_retry_once_observations_become_explicit(self):
+        box = self.sandbox(print_mode="perm", lsof_mode="error")
+        for _ in range(3):
+            box.tick()
+        self.assertEqual(box.count("bootstrap"), 0)
+        # Observations become explicit: genuine not-found + a cleanly completed lsof.
+        (box.state / "print_mode").write_text("not_found\n")
+        (box.state / "lsof_mode").write_text("clean\n")
+        for _ in range(3):
+            box.tick()
+        self.assertEqual(box.count("bootstrap"), 1, "retried within the next window, not before")
+        self.assertIn(str(box.release_b.resolve()), box.log())
+
+    def test_genuine_not_found_and_clean_port_still_recovers(self):
+        box = self.sandbox(loaded=False, list_ok=False, lsof_mode="clean")
+        box.counter.write_text("2\n")
+        box.tick()
+        self.assertEqual(box.count("bootstrap"), 1)
+        self.assertEqual(box.count("lsof"), 1)
+        self.assertEqual(box.count("kill") + box.count("nohup"), 0)
 
 
 if __name__ == "__main__":

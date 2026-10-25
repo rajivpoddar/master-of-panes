@@ -501,7 +501,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-report",
-      "sha256": "c9ca9c8970cd7c77caff8f52f8e4715701963a47724b65d68961827377f29d10",
+      "sha256": "7024ee63a4292ff239de4c229179786b420f956334d871d90e30b9d2e5afcff3",
       "source_path": "claude/scripts/mop-healthcheck.sh"
     },
     {

@@ -85,7 +85,19 @@ etime_seconds() {
 # "starting", not "down". Do not count it, kickstart it again, or spawn a
 # competing server until its grace window has elapsed.
 UID_NUM=$(id -u)
-CHILD_PID=$(launchctl print "gui/${UID_NUM}/${LAUNCHD_LABEL}" 2>/dev/null | awk '/^[[:space:]]*pid = [0-9]+/ {print $3; exit}')
+PRINT_OUT=$(launchctl print "gui/${UID_NUM}/${LAUNCHD_LABEL}" 2>&1)
+PRINT_RC=$?
+if [ "$PRINT_RC" -eq 0 ]; then
+  PRINT_STATE=loaded
+elif [ "$PRINT_RC" -eq 113 ] && echo "$PRINT_OUT" | grep -q "Could not find service"; then
+  PRINT_STATE=not_found
+else
+  PRINT_STATE=unknown
+fi
+CHILD_PID=""
+if [ "$PRINT_STATE" = "loaded" ]; then
+  CHILD_PID=$(echo "$PRINT_OUT" | awk '/^[[:space:]]*pid = [0-9]+/ {print $3; exit}')
+fi
 if [ -n "${CHILD_PID:-}" ]; then
   CHILD_ETIME=$(ps -o etime= -p "$CHILD_PID" 2>/dev/null | tr -d '[:space:]')
   if [ -n "$CHILD_ETIME" ]; then
@@ -127,7 +139,7 @@ fi
 # KeepAlive; this watchdog catches the "process alive but HTTP wedged" case.
 log "restart_triggered THRESHOLD BREACHED ($COUNTER >= $EFFECTIVE_THRESHOLD, last_class=${FAIL_CLASS}) — restarting MoP HTTP server via launchd"
 
-if launchctl print "gui/${UID_NUM}/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
+if [ "$PRINT_STATE" = "loaded" ]; then
   if launchctl kickstart -k "gui/${UID_NUM}/${LAUNCHD_LABEL}" >>"$LOG_FILE" 2>&1; then
     # Started successfully: launchd is the single owner. The child gets the full
     # startup grace on the next ticks; no fallback server, no second kickstart.
@@ -144,25 +156,47 @@ if launchctl print "gui/${UID_NUM}/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
   exit 0
 fi
 
-# launchd ownership must be PROVEN absent (neither print nor list knows the label).
-if launchctl list "${LAUNCHD_LABEL}" >/dev/null 2>&1; then
-  log "  launchd ownership of ${LAUNCHD_LABEL} unproven (list succeeds, print fails); no fallback"
+# Ownership/port observations must each be EXPLICIT. Only a recognized
+# owner-not-found result (exit 113 + "Could not find service") for BOTH print and
+# list, plus a lsof that completed cleanly and saw no listener, authorizes a
+# bootstrap. Any other status (permission, unavailable, parse, unexpected exit)
+# is UNKNOWN: report RECOVERY_FAILED, take no start action, retry next window.
+unknown() {
+  log "  RECOVERY_FAILED: $1; ownership/port state UNKNOWN; no start action (no bootstrap, kickstart, kill or server)"
   echo 0 > "$COUNTER_FILE"
   exit 0
+}
+
+if [ "$PRINT_STATE" != "not_found" ]; then
+  unknown "launchctl print was inconclusive (rc=${PRINT_RC}: $(echo "$PRINT_OUT" | head -1))"
 fi
-if [ -n "$(lsof -nP -iTCP:3100 -sTCP:LISTEN -t 2>/dev/null || true)" ]; then
-  log "  launchd absent but a foreign listener holds :3100; refusing to kill it or start a second server"
-  exit 0
+LIST_OUT=$(launchctl list "${LAUNCHD_LABEL}" 2>&1)
+LIST_RC=$?
+if [ "$LIST_RC" -eq 0 ]; then
+  unknown "launchctl list still knows ${LAUNCHD_LABEL} (print says not found)"
+elif ! { [ "$LIST_RC" -eq 113 ] && echo "$LIST_OUT" | grep -q "Could not find service"; }; then
+  unknown "launchctl list was inconclusive (rc=${LIST_RC}: $(echo "$LIST_OUT" | head -1))"
+fi
+LSOF_ERR_FILE="${COUNTER_FILE}.lsof.err"
+LSOF_OUT=$(lsof -nP -iTCP:3100 -sTCP:LISTEN -t 2>"$LSOF_ERR_FILE")
+LSOF_RC=$?
+LSOF_ERR=$(cat "$LSOF_ERR_FILE" 2>/dev/null)
+rm -f "$LSOF_ERR_FILE"
+if [ "$LSOF_RC" -eq 0 ] && [ -n "$LSOF_OUT" ]; then
+  unknown "launchd absent but a listener (pid $(echo "$LSOF_OUT" | head -1)) holds :3100; refusing to kill it or start a second server"
+elif [ "$LSOF_RC" -ne 0 ] && ! { [ "$LSOF_RC" -eq 1 ] && [ -z "$LSOF_OUT" ] && [ -z "$LSOF_ERR" ]; }; then
+  unknown "lsof failed (rc=${LSOF_RC}: $(echo "$LSOF_ERR" | head -1)); an empty read is not a clean port"
+elif [ "$LSOF_RC" -eq 0 ]; then
+  unknown "lsof exited 0 without output; not a recognized clean-port result"
 fi
 RELEASE=$(cd "$MOP_CURRENT" 2>/dev/null && pwd -P || true)
 if [ -z "$RELEASE" ] || [ ! -f "$RELEASE/dist/server.js" ] || [ ! -f "$MOP_PLIST" ]; then
-  log "  launchd absent but pointer-selected release ($MOP_CURRENT -> ${RELEASE:-unresolved}) or plist ($MOP_PLIST) is unusable; no fallback"
-  exit 0
+  unknown "pointer-selected release ($MOP_CURRENT -> ${RELEASE:-unresolved}) or plist ($MOP_PLIST) is unusable"
 fi
 # Owner-absent fallback = re-establish launchd ownership from the plist, which pins
 # the runtime, env (MOP_DB_PATH) and WorkingDirectory=$MOP_CURRENT. Never a bare
 # nohup server and never the plugin-cache dist.
-log "  launchd absent (proven); bootstrapping ${LAUNCHD_LABEL} for pointer-selected release ${RELEASE}"
+log "  launchd absent (recognized not-found), :3100 clean (lsof completed, no listener); bootstrapping ${LAUNCHD_LABEL} for pointer-selected release ${RELEASE}"
 if launchctl bootstrap "gui/${UID_NUM}" "$MOP_PLIST" >>"$LOG_FILE" 2>&1; then
   echo 0 > "$COUNTER_FILE"
 else
