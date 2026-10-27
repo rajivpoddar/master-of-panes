@@ -352,6 +352,15 @@
       "source_path": "claude/scripts/cto-relay-snapshot.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/growth/lifecycle-drip.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-lifecycle-email",
+      "sha256": "a6115911c477ca391ad0c54af491501f21c1ffe7667b3e665e07745745e1364b",
+      "source_path": "claude/scripts/growth/lifecycle-drip.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/heartbeat-session-age-clear.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -913,6 +922,60 @@
       "ownership_class": "shared-claude-hourly-heartbeat",
       "sha256": "72833fecba9f92e6e92890d26ed258b99b5a4a90d09502925ca2ddcb77bb061a",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-lifecycle-email",
+      "sha256": "7407529995acb869caaa148318d77f412d6a6397ea85387f196784c598be2834",
+      "source_path": "claude/skills/lifecycle-email-processing/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D0.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-lifecycle-email",
+      "sha256": "90c53d111ed7b937368f4d64950904d22b54beb9a97b68c8eb5db91a3912bc4d",
+      "source_path": "claude/skills/lifecycle-email-processing/templates/D0.txt"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D1.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-lifecycle-email",
+      "sha256": "123de320b0b31118e8c9bc64ee1716acb2e33c2a45f28051ff9fea274bf2a16b",
+      "source_path": "claude/skills/lifecycle-email-processing/templates/D1.txt"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D3.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-lifecycle-email",
+      "sha256": "03304ef632b9656e97a75262a2b7ec034b6103dd0f5bb927c2435e65bf61acab",
+      "source_path": "claude/skills/lifecycle-email-processing/templates/D3.txt"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D7.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-lifecycle-email",
+      "sha256": "3c6cbe331612f8ceca917e33ee98ed632ddf894b8e39a15f78e6f2aa11605856",
+      "source_path": "claude/skills/lifecycle-email-processing/templates/D7.txt"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/FIRST_FILE_READY.txt",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-lifecycle-email",
+      "sha256": "e2e0a3493ac77f71350b9d7f922475f354c811e3f26796163645a2d798654a4d",
+      "source_path": "claude/skills/lifecycle-email-processing/templates/FIRST_FILE_READY.txt"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/macos-word-window-screenshot/SKILL.md",
@@ -1521,7 +1584,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 165,
+    "selected_count": 172,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

@@ -1,0 +1,17 @@
+STATUS: APPROVED (Rajiv C0ALZJHGE49 ts 1793088244.818019, 2026-10-27)
+TOUCH: D3 (3-4 days after sign-up, no own upload)
+SUBJECT: Anything stopping you from uploading a file?
+---
+Hi {first_name},
+
+{PERSONALIZE: one sentence from ACTIVITY FACTS on where they stopped. E.g. "You signed up on Monday but haven't uploaded a file yet." or "You tried the sample but haven't uploaded your own file yet."}
+
+Most reporters who stay with HeyDonna say the same thing: their own transcript comes back already proofread and formatted, and they barely edit it before delivery.
+
+If something stopped you (the template, the audio format, not sure what to upload), just reply with one line and I'll sort it out. Or pick a time and we'll run your first file together: https://calendar.app.google/dDdvx2G3UzKrC7zY9
+
+Your {credits_left} free credits are still there.
+
+Rajiv
+
+Reply 'stop' and I won't email again.

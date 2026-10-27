@@ -1,0 +1,17 @@
+STATUS: APPROVED (Rajiv C0ALZJHGE49 ts 1793088244.818019, 2026-10-27)
+TOUCH: FIRST_FILE_READY (first own-file transcript finished processing since last run)
+SUBJECT: Your {audio_hours}-hour deposition is ready
+---
+Hi {first_name},
+
+{PERSONALIZE: state the result from ACTIVITY FACTS only. E.g. "Your 1.6-hour deposition finished in 17 minutes: transcribed, proofread and formatted in the NY Standard Deposition template."}
+
+A quick way to check it: open it, skim the Q/A and speaker labels on the first few pages, then export to DOCX. {PERSONALIZE (optional): if template_used does not match their state per facts, do NOT guess; omit. Only mention the template name as given.}
+
+If anything looks off (a speaker name, the layout, your court's format), reply and tell me what you'd have changed. That feedback goes straight into how HeyDonna formats your next file.
+
+Or grab 15 minutes and we'll go through it together: https://calendar.app.google/dDdvx2G3UzKrC7zY9
+
+Rajiv
+
+Reply 'stop' and I won't email again.

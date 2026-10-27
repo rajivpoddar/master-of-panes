@@ -1,0 +1,17 @@
+STATUS: APPROVED (Rajiv C0ALZJHGE49 ts 1793088244.818019, 2026-10-27)
+TOUCH: D7 (7-8 days after sign-up, no activity in 5 days)
+SUBJECT: Quick question about HeyDonna
+---
+Hi {first_name},
+
+{PERSONALIZE: one sentence summarizing what they did, from ACTIVITY FACTS. E.g. "Last week you uploaded a 1.6-hour deposition and exported it as DOCX." or "Last week you looked at the sample deposition."} I haven't seen you back since, so I wanted to ask directly.
+
+What would have to be true for HeyDonna to save you time on your next job? One line is plenty. I read every reply.
+
+{PERSONALIZE (optional, only if facts support it): one concrete next step. E.g. if they imported a DOCX and never ran Proofread/Format: "Your file still has Proofread and Format under AI in the editor menu; that's where most of the time savings are."}
+
+If a call is easier: https://calendar.app.google/dDdvx2G3UzKrC7zY9
+
+Rajiv
+
+Reply 'stop' and I won't email again.

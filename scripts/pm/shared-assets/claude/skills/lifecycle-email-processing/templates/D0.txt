@@ -1,0 +1,17 @@
+STATUS: APPROVED (Rajiv C0ALZJHGE49 ts 1793088244.818019, 2026-10-27)
+TOUCH: D0 (signed up in the last 24h)
+SUBJECT: Try HeyDonna on one of your own depositions
+---
+Hi {first_name},
+
+I'm Rajiv, founder of HeyDonna. Thanks for signing up.
+
+{PERSONALIZE: one sentence on what they did so far, from ACTIVITY FACTS only. E.g. "I saw you opened the sample deposition." If nothing, omit.}
+
+The fastest way to see what HeyDonna does is your own audio. Upload one deposition or hearing you're working on, with the jobsheet, and leave auto-process on. It comes back transcribed, proofread and formatted in your template, ready to review. A 1.5-hour deposition usually takes about 20 minutes. You have {credits_left} free credits, enough for several hours of audio.
+
+If anything gets in the way, just reply and tell me, or grab 15 minutes here: https://calendar.app.google/dDdvx2G3UzKrC7zY9
+
+Rajiv
+
+Reply 'stop' and I won't email again.

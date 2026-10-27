@@ -13,12 +13,15 @@
  * config keys so restarts do not double-fire within the same cadence bucket.
  */
 
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, readFileSync } from "node:fs";
+
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 
-export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat" | "growth-daily";
+export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat" | "growth-daily" | "lifecycle-email";
 export type PMCadenceTriggerReason = "scheduled" | "manual" | "boot";
 
 type PMCadenceTask = {
@@ -71,11 +74,43 @@ const GROWTH_DAILY_TASK: PMCadenceTask = {
     "MoP: growth report due. Invoke Skill(growth-daily) now: launch the growth background agent with run_in_background=true (Mondays: Skill(growth-weekly)). Do not run it inline.",
 };
 
+// Rajiv approved templates: C0ALZJHGE49 ts 1793088244.818019.
+const LIFECYCLE_EMAIL_TASK: PMCadenceTask = {
+  name: "lifecycle-email",
+  label: "lifecycle email (weekdays 10:00 ET)",
+  configPrefix: "pm_cadence_lifecycle_email",
+  commandDescription: "MoP: lifecycle email due. Invoke Skill(lifecycle-email-processing) now. Launch the lifecycle-email-agent background agent with run_in_background=true; preserve the selector send_allowed gate. Do not run it inline.",
+};
+
+export function lifecycleEmailApproved(root = join(homedir(), ".claude/skills/lifecycle-email-processing/templates")): boolean {
+  return ["D0", "D1", "D3", "D7", "FIRST_FILE_READY"].every((touch) => {
+    try {
+      return /^STATUS:\s*APPROVED(?:\s|$)/m.test(readFileSync(join(root, `${touch}.txt`), "utf8"));
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function lifecycleEmailParts(now: Date): { day: string; hour: number; weekday: string } {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", hourCycle: "h23", weekday: "short",
+  }).formatToParts(now).map((p) => [p.type, p.value]));
+  return { day: `${parts.year}-${parts.month}-${parts.day}-ET`, hour: Number(parts.hour), weekday: parts.weekday };
+}
+
+export function isLifecycleEmailWindow(now: Date): boolean {
+  const et = lifecycleEmailParts(now);
+  return et.weekday !== "Sat" && et.weekday !== "Sun" && et.hour >= 10;
+}
+
 const TASKS: Record<PMCadenceTaskName, PMCadenceTask> = {
   heartbeat: HEARTBEAT_TASK,
   "morning-brief": MORNING_BRIEF_TASK,
   "hourly-heartbeat": HOURLY_HEARTBEAT_TASK,
   "growth-daily": GROWTH_DAILY_TASK,
+  "lifecycle-email": LIFECYCLE_EMAIL_TASK,
 };
 
 const CFG_GLOBAL_PAUSED = "pm_cadence_paused";
@@ -192,6 +227,8 @@ export class PMCadenceScheduler {
       if (hourly) results.push(hourly);
       const growth = await this.runIfDue("growth-daily", reason);
       if (growth) results.push(growth);
+      const lifecycle = await this.runIfDue("lifecycle-email", reason);
+      if (lifecycle) results.push(lifecycle);
       return results;
     } finally {
       this.running = false;
@@ -321,6 +358,10 @@ export class PMCadenceScheduler {
     manual: boolean,
   ): Promise<PMCadenceRunResult> {
     const task = TASKS[taskName];
+    if (taskName === "lifecycle-email" && !lifecycleEmailApproved()) {
+      return { task: taskName, triggered: false, reason, due_key: dueKey,
+        injected: false, queued: false, message: "Templates not all APPROVED; selector send_allowed=false" };
+    }
     let message = task.commandDescription;
 
     const eventType = cadenceEventType(taskName, dueKey);
@@ -376,6 +417,7 @@ export class PMCadenceScheduler {
   }
 
   private currentDueKey(taskName: PMCadenceTaskName, now = new Date()): string {
+    if (taskName === "lifecycle-email") return lifecycleEmailParts(now).day;
     if (taskName === "heartbeat") return heartbeatDueKey(now);
     if (taskName === "hourly-heartbeat") return hourlyHeartbeatDueKey(now);
     if (taskName === "growth-daily") return growthDailyDueKey(now);
@@ -383,6 +425,9 @@ export class PMCadenceScheduler {
   }
 
   private isTaskDue(taskName: PMCadenceTaskName, now: Date, lastDueKey: string | null): boolean {
+    if (taskName === "lifecycle-email") {
+      return isLifecycleEmailWindow(now) && lifecycleEmailParts(now).day !== lastDueKey;
+    }
     if (taskName === "heartbeat") {
       return heartbeatDueKey(now) !== lastDueKey;
     }

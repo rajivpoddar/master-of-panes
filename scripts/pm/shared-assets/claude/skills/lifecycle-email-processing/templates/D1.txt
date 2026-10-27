@@ -1,0 +1,17 @@
+STATUS: APPROVED (Rajiv C0ALZJHGE49 ts 1793088244.818019, 2026-10-27)
+TOUCH: D1 (touched the sample, no own file, 1-2 days after sign-up)
+SUBJECT: The sample is ours. Try one of yours.
+---
+Hi {first_name},
+
+{PERSONALIZE: name the exact sample actions from ACTIVITY FACTS. E.g. "You ran Proofread on the sample deposition yesterday." or "You opened the sample deposition yesterday."}
+
+The sample is already processed, so it can't show you the main thing: your own deposition coming back formatted in your court's layout. That's what saves reporters the most time.
+
+Upload one file you're working on (audio plus jobsheet) and leave auto-process on. It comes back transcribed, proofread and formatted in about 20 minutes for a 1.5-hour deposition. You still have {credits_left} free credits.
+
+If you'd rather I look at the first one with you, grab 15 minutes here: https://calendar.app.google/dDdvx2G3UzKrC7zY9
+
+Rajiv
+
+Reply 'stop' and I won't email again.
