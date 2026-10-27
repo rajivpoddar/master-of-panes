@@ -33,6 +33,7 @@ import {
   registerRespawnWhenIdleRoutes,
   RESPAWN_WHEN_IDLE_TICK_MS,
   deliverRespawnExit,
+  respawnSessionAt,
   type RespawnWhenIdleRequest,
 } from "./respawnWhenIdle.js";
 import { createGhIssueOwnershipProjection } from "./issueProjection.js";
@@ -1787,6 +1788,18 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   // forever (its owning session never emits Stop/SessionEnd), so the respawn
   // result below is conditional on that exact turn actually settling.
   const preRespawnTurnId = slotState?.active_turn_id ?? null;
+  const originalSession = respawnSessionAt(db, slotNum, identity.snapshot.currentPath);
+  const assignmentFence = () => {
+    const row = db.getSlot(slotNum);
+    if (!row || !slotState || (["assignment_epoch", "issue", "repository_id", "branch_ref", "occupied"] as const)
+        .some(key => row[key] !== slotState[key])) return "respawn_assignment_drift";
+    if (row.active_turn_state !== "inactive" || row.active_turn_id !== preRespawnTurnId
+        || (row.occupied && !row.idle)) return "slot_busy_respawn_refused";
+    return null;
+  };
+  const sessionFence = (session: string | null) => assignmentFence()
+    ?? (respawnSessionAt(db, slotNum, identity.snapshot.currentPath) !== session ? "respawn_session_drift" : null);
+
   const readPinnedCommand = async () => {
     const command = await healthChecker.getPaneCommandPublic(slotNum);
     const current = await verifyPaneIdentity(slotNum);
@@ -1874,15 +1887,25 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     if (model) parts.push(model);
     if (continueSession) parts.push("--continue");
     const launchCmd = parts.join(" ");
+    const launchEventId = db.getEvents(slotNum, 1)[0]?.id ?? 0;
     try {
-      const current = db.getSlot(slotNum);
-      if (!current || current.assignment_epoch !== slotState?.assignment_epoch) {
-        return c.json({ error: "Assignment changed after /exit", reason: "respawn_assignment_drift", steps }, 409);
-      }
-      await execShell(
-        `tmux send-keys -t ${paneTarget} '${launchCmd}' Enter`,
-        { timeout: 10_000 },
-      );
+      const launchRefusal = await withSlotSendLock(slotNum, async () => {
+        for (const key of ["text", "Enter"]) {
+          const current = await verifyPaneIdentity(slotNum);
+          if (!current.ok || current.snapshot.paneId !== paneTarget
+              || current.snapshot.currentPath !== identity.snapshot.currentPath) return "pane_identity_mismatch";
+          const cmd = await readPinnedCommand();
+          if (!cmd || !SHELL_COMMANDS.has(cmd)) return "respawn_shell_changed";
+          const refusal = sessionFence(originalSession);
+          if (refusal) return refusal;
+          // No await between the caller fence and either effect; same send lock.
+          await execShell(key === "text"
+            ? `tmux send-keys -l -t ${paneTarget} '${launchCmd}'`
+            : `tmux send-keys -t ${paneTarget} Enter`, { timeout: 10_000 });
+        }
+        return null;
+      });
+      if (launchRefusal) return c.json({ error: "Launch suppressed after /exit", reason: launchRefusal, steps }, 409);
       recordStep("sent_launch_cmd", launchCmd);
     } catch (err) {
       healthChecker.clearPmInitiatedRespawn(slotNum);
@@ -1918,20 +1941,37 @@ app.post("/slots/:slotNum/respawn", async (c) => {
       }, 504);
     }
 
-    // Step 5: Let the UI settle, then inject "continue" to resume the previous
-    // prompt. Claude Code needs the literal prompt; omp resumes from the
-    // --continue launch flag instead, so skip text injection for omp.
+    // Bind to this boot's hook before settling: a successor cannot inherit continue.
+    const bootEvent = db.getEvents(slotNum, 100, "SessionStart").reverse().find(event => event.id > launchEventId);
+    let bootSession: string | null = null;
+    if (bootEvent) {
+      try {
+        const p = JSON.parse(bootEvent.payload);
+        if ((p.source === "startup" || p.source === "resume") && p.cwd === identity.snapshot.currentPath
+            && typeof p.session_id === "string" && p.session_id.trim()) bootSession = p.session_id;
+      } catch { /* No trustworthy boot binding: suppress continuation. */ }
+    }
     await sleep(2_000);
     if (continueSession && bootCommand === "claude") {
-      try {
-        await execShell(
-          `tmux send-keys -t ${paneTarget} 'continue' && tmux send-keys -t ${paneTarget} Enter`,
-          { timeout: 5_000 },
-        );
-        recordStep("sent_continue");
-      } catch (err) {
-        // Not fatal — Claude is up, user just has to manually send "continue".
-        recordStep("continue_inject_failed", String(err));
+      if (!bootSession) recordStep("continue_suppressed", "respawn_boot_session_unbound");
+      else {
+        const continueFence = () => sessionFence(bootSession)
+          ?? (db.getEvents(slotNum, 1, "SessionStart")[0]?.id !== bootEvent?.id ? "respawn_session_drift" : null);
+        const result = await relay.deliverGuardedToSlot(slotNum, "continue", {
+          expectedPaneId: paneTarget,
+          recheck: async () => {
+            const early = continueFence();
+            if (early) return early;
+            const current = await verifyPaneIdentity(slotNum);
+            if (!current.ok || current.snapshot.paneId !== paneTarget
+                || current.snapshot.currentPath !== identity.snapshot.currentPath) return "pane_identity_mismatch";
+            if (await relay.getSlotActivityState(slotNum, paneTarget) !== "idle") return "pane_not_idle";
+            return continueFence();
+          },
+          finalCheck: continueFence,
+        });
+        recordStep(result.outcome === "delivered" ? "sent_continue" : "continue_suppressed",
+          result.outcome === "delivered" ? undefined : result.reason);
       }
     }
     respawnCompleted = true;

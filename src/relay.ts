@@ -1184,6 +1184,22 @@ export class TmuxRelay {
     // Never re-resolve the numeric address after verification: tmux can reindex
     // it if a pane is inserted or destroyed.
     const paneTarget = identity.snapshot.paneId;
+    if (!raw && isSlashCommand(command)) {
+      const owner = () => {
+        const row = this.db?.getSlot(slotNum);
+        const event = this.db?.getEvents(slotNum, 100).find(e => e.hook_type);
+        return JSON.stringify([row && [row.assignment_epoch, row.issue, row.repository_id,
+          row.branch_ref, row.occupied, row.active_turn_id, row.active_turn_state], event?.payload]);
+      };
+      const original = owner();
+      const fence = () => owner() !== original ? "slot_owner_changed"
+        : this.db?.getSlot(slotNum)?.active_turn_state === "active" ? "slot_busy" : null;
+      return (await this.deliverGuardedToSlot(slotNum, command, {
+        expectedPaneId: paneTarget,
+        recheck: async () => fence() ?? (await this.getSlotActivityState(slotNum, paneTarget) !== "idle" ? "pane_not_idle" : fence()),
+        finalCheck: fence,
+      })).outcome === "delivered";
+    }
     const cooldownKey = `${slotNum}:${command.slice(0, 80)}`;
 
     // Per-(slot, command) cooldown — defensive layer against tight retry
@@ -1236,9 +1252,6 @@ export class TmuxRelay {
             };
             prePasteComposer = await readComposer();
             const slash = isSlashCommand(command);
-            if (slash && slashComposerClearable(prePasteComposer, command)) {
-              prePasteComposer = await this.clearComposerForSlash(paneTarget, readComposer, command);
-            }
             await this.runShell(
               `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
               { timeout: 3_000 }
@@ -1339,25 +1352,31 @@ export class TmuxRelay {
     return { dwellMs: ms, payloadStableMs: ms };
   }
 
-  /** Escape (dismiss any autocomplete menu) then C-u (clear the line); return the re-read composer. */
-  private async clearComposerForSlash(paneTarget: string, read: () => Promise<string | null>, command: string): Promise<string | null> {
-    try {
-      await this.runShell(`tmux send-keys -t ${paneTarget} Escape`, { timeout: 3_000 });
-      // Escape closes autocomplete asynchronously; an immediate C-u is swallowed.
-      await sleep(Math.max(250, resolveSlashCommandEnterDelayMs()));
-      const settled = await read();
-      if (!slashComposerClearable(settled, command)) return settled;
-      await this.runShell(`tmux send-keys -t ${paneTarget} C-u`, { timeout: 3_000 });
-    } catch {
-      return null;
+  /** Clear only our slash composer; every key is a separately fenced effect. */
+  private async clearComposerForSlash(
+    paneTarget: string, read: () => Promise<string | null>, command: string,
+    recheck: () => Promise<string | null>, finalCheck: () => string | null,
+    attempted: () => void,
+  ): Promise<{ composer: string | null; reason?: string }> {
+    for (const key of ["Escape", "C-u"]) {
+      if (key === "C-u") await sleep(Math.max(250, resolveSlashCommandEnterDelayMs()));
+      const refusal = await recheck();
+      if (refusal) return { composer: null, reason: refusal };
+      const composer = await read();
+      if (!slashComposerClearable(composer, command)) return { composer, reason: "composer_not_owned_by_send" };
+      const final = finalCheck();
+      if (final) return { composer: null, reason: final };
+      attempted();
+      try { await this.runShell(`tmux send-keys -t ${paneTarget} ${key}`, { timeout: 3_000 }); }
+      catch { return { composer: null, reason: "clear_key_uncertain" }; }
     }
     let composer: string | null = null;
     for (let waited = 0; waited <= 1_000; waited += 250) {
       await sleep(250);
       composer = await read();
-      if (composer === "") return composer;
+      if (composer === "") return { composer };
     }
-    return composer;
+    return { composer };
   }
 
   /**
@@ -1432,10 +1451,10 @@ export class TmuxRelay {
    * - refuses unless the verified pane id equals the observed pane id;
    * - runs the caller's recheck (owner/turn/stall) inside the per-slot send
    *   lock before paste AND again immediately before the one Enter;
-   * - never retries or repastes once the paste was attempted, and presses
-   *   Enter at most once;
-   * - reports refused_pre_effect only when no keystroke reached the pane, and
-   *   uncertain for any outcome after the paste was attempted.
+   * - never replays clearing keys or repastes after an attempted effect;
+   *   slash submissions permit one owned-payload Enter retry;
+   * - reports refused_pre_effect only before any clearing key or paste attempt,
+   *   and uncertain for unconfirmed outcomes after either effect.
    */
   async deliverGuardedToSlot(
     slotNum: number,
@@ -1472,31 +1491,40 @@ export class TmuxRelay {
     const result = await withSlotSendLock(slotNum, async (): Promise<GuardedSlotDelivery> => {
       const prePaste = await recheck("pre_paste");
       if (prePaste) return { outcome: "refused_pre_effect", reason: prePaste, paneId };
+      let effectAttempted = false;
+      const refuse = (reason: string): GuardedSlotDelivery => ({
+        outcome: effectAttempted ? "uncertain" : "refused_pre_effect", reason, paneId,
+      });
       const before = await capture();
       let prePasteComposer = composerText(before);
       const slash = isSlashCommand(command);
       if (slash && slashComposerClearable(prePasteComposer, command)) {
-        prePasteComposer = await this.clearComposerForSlash(paneId, async () => composerText(await capture()), command);
+        const cleared = await this.clearComposerForSlash(paneId, async () => composerText(await capture()), command,
+          async () => (await recheck("pre_paste"))
+            ?? (await this.getSlotActivityState(slotNum, paneId) !== "idle" ? "pane_not_idle" : null),
+          () => opts.finalCheck?.("pre_paste") ?? null,
+          () => { effectAttempted = true; }).catch(() => ({ composer: null, reason: "clear_check_failed" }));
+        if (cleared.reason) return refuse(cleared.reason);
+        prePasteComposer = cleared.composer;
       }
-      if (prePasteComposer === null) return { outcome: "refused_pre_effect", reason: "composer_unreadable", paneId };
-      if (prePasteComposer !== "") return { outcome: "refused_pre_effect", reason: "composer_not_empty", paneId };
+      if (prePasteComposer === null) return refuse("composer_unreadable");
+      if (prePasteComposer !== "") return refuse("composer_not_empty");
       const tmpFile = `/tmp/mop-guarded-${slotNum}-${Date.now()}.txt`;
       const bufName = `mop-guarded-${slotNum}`;
-      let effectAttempted = false;
       let enterSent = 0;
       let preEnterRefusal: string | null = null;
       try {
         await fs.writeFile(tmpFile, command);
         await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 3_000 });
         const loadedRefusal = await recheck("pre_paste");
-        if (loadedRefusal) return { outcome: "refused_pre_effect", reason: loadedRefusal, paneId };
+        if (loadedRefusal) return refuse(loadedRefusal);
         // File/buffer loading and the caller's fence can yield to a new draft.
         // Read the composer again after those awaits, before the paste effect.
         const loadedComposer = composerText(await capture());
-        if (loadedComposer === null) return { outcome: "refused_pre_effect", reason: "composer_unreadable", paneId };
-        if (loadedComposer !== "") return { outcome: "refused_pre_effect", reason: "composer_not_empty", paneId };
+        if (loadedComposer === null) return refuse("composer_unreadable");
+        if (loadedComposer !== "") return refuse("composer_not_empty");
         const prePasteFence = opts.finalCheck?.("pre_paste") ?? null;
-        if (prePasteFence) return { outcome: "refused_pre_effect", reason: prePasteFence, paneId };
+        if (prePasteFence) return refuse(prePasteFence);
         effectAttempted = true;
         await this.runShell(`tmux paste-buffer${opts.bracketedPaste ? " -p" : ""} -b ${bufName} -t ${paneId} -d`, { timeout: 3_000 });
         const submit = await submitWithComposerCheck(command, {

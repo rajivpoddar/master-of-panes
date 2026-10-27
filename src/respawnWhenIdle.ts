@@ -93,7 +93,7 @@ const RETRYABLE_REASONS = new Set(["slot_busy_respawn_refused", "pane_identity_m
 
 const TUPLE_KEYS = ["assignment_epoch", "issue", "repository_id", "branch_ref", "occupied"] as const;
 
-function sessionAt(db: MoPDatabase, slot: number, checkout: string): string | null {
+export function respawnSessionAt(db: MoPDatabase, slot: number, checkout: string): string | null {
   for (const event of db.getEvents(slot, 100)) {
     if (!event.hook_type) continue;
     try {
@@ -107,7 +107,7 @@ function sessionAt(db: MoPDatabase, slot: number, checkout: string): string | nu
 }
 
 function captureRequest(db: MoPDatabase, row: SlotState, pane: PaneIdentitySnapshot, at: string, allowUnboundFree = false): RespawnWhenIdleRequest | null {
-  const session = sessionAt(db, row.slot, pane.currentPath);
+  const session = respawnSessionAt(db, row.slot, pane.currentPath);
   // Direct operator respawns of free, naturally idle panes need no historical
   // hook session. Deferred requests and occupied panes still require one.
   if (!session && !(allowUnboundFree && !row.occupied && slotAtNaturalIdle(db, row.slot))) return null;
@@ -131,7 +131,7 @@ function requestFence(db: MoPDatabase, request: RespawnWhenIdleRequest, persiste
   if (persistent && !sameRequest(pending, request)) return "respawn_request_changed";
   const row = db.getSlot(request.slot);
   if (!row || TUPLE_KEYS.some(key => row[key] !== request[key])) return "respawn_assignment_drift";
-  if ((sessionAt(db, request.slot, request.checkout_path) ?? "") !== request.session_id) return "respawn_session_drift";
+  if ((respawnSessionAt(db, request.slot, request.checkout_path) ?? "") !== request.session_id) return "respawn_session_drift";
   if (persistent) {
     const completed = db.getEvents(request.slot, 100, "SessionStart").find(event => {
       if (event.id <= request.scheduled_event_id!) return false;
@@ -188,7 +188,7 @@ export async function deliverRespawnExit(args: {
     finalCheck: stage => {
       const refusal = fence();
       if (refusal) return refusal;
-      if (stage === "pre_paste") {
+      if (stage === "pre_paste" && !ownAttempt) {
         const before = args.beforeEffect();
         if (before) return before;
         if (args.request) args.db.setConfig(`${KEY_PREFIX}${args.slot}`, JSON.stringify({

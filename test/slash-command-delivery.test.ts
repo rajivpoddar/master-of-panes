@@ -170,8 +170,8 @@ test("slash clear waits for Escape rendering before C-u and preserves a changed 
     return run(command);
   } });
   const result = await guarded(relay, "/exit");
-  assert.equal(result.outcome, "refused_pre_effect");
-  assert.equal(result.reason, "composer_not_empty");
+  assert.equal(result.outcome, "uncertain");
+  assert.equal(result.reason, "composer_not_owned_by_send");
   assert.deepEqual(p.keys, ["Escape"]);
   assert.equal(p.composer, "operator draft");
 });

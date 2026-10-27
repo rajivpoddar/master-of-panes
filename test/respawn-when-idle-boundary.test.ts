@@ -12,6 +12,7 @@ const turn = await load("respawnTurnGuard");
 const { MoPDatabase } = await load("db");
 const { TmuxRelay } = await load("relay");
 const { DEFAULT_CONFIG } = await load("types");
+const { withSlotSendLock } = await load("slotSendLock");
 
 const PATH = "/Users/rajiv/Downloads/projects/heydonna-app-3001";
 const RULE = "─".repeat(40);
@@ -23,7 +24,7 @@ async function fixture() {
   db.logEvent(1, "Stop", "Stop", null, { session_id: "s1", cwd: PATH });
   const state = { activity: "idle", pane: "%11", composer: "", buffer: "", exits: 0, pastes: 0,
     probes: 0, identities: 0, routeCalls: 0, loseAck: false, shellAck: true, launches: 0,
-    enters: 0, swallowEnters: 0, staleExitComposer: false, drift: {} as Record<string, unknown>, onProbe: (_n: number) => {}, onIdentity: (_n: number) => {}, onPaste: () => {} };
+    clears: [] as string[], bootCommand: "omp", continues: 0, onEscape: () => {}, onSettle: () => {}, enters: 0, swallowEnters: 0, staleExitComposer: false, drift: {} as Record<string, unknown>, onProbe: (_n: number) => {}, onIdentity: (_n: number) => {}, onPaste: () => {} };
   const readSlot = db.getSlot.bind(db);
   db.getSlot = slot => { const row = readSlot(slot); return row && { ...row, ...state.drift }; };
   const render = () => `${RULE}\n❯ ${state.composer}\n${RULE}\n${state.composer === "/exit" ? "  \x1b[38;2;153;153;153m❯ /exit Exit the CLI\x1b[0m" : " ? for shortcuts"}\n`;
@@ -47,12 +48,16 @@ async function fixture() {
     if (command.startsWith("tmux load-buffer")) { state.buffer = await readFile(command.match(/'([^']+)'\s*$/)![1], "utf8"); return { stdout: "", stderr: "" }; }
     if (command.startsWith("tmux paste-buffer")) { state.pastes++; state.composer = state.buffer; state.onPaste(); return { stdout: "", stderr: "" }; }
     if (command.startsWith("tmux send-keys")) {
+      if (command.includes("\'continue\'")) state.continues++;
+      if (command.endsWith(" Escape")) { state.clears.push("Escape"); state.onEscape(); }
+      if (command.endsWith(" C-u")) { state.clears.push("C-u"); state.composer = ""; }
+      if (command.endsWith(" Enter") && state.composer === "continue") { state.continues++; state.composer = ""; }
       assert.ok(!command.includes('"/exit"'), "exit text and Enter must be separate effects");
       if (command.endsWith(" Enter") && !command.includes("/fake/launch.sh") && state.composer === "/exit") {
         state.enters++;
         if (state.enters > state.swallowEnters) { state.exits++; if (!state.staleExitComposer) state.composer = ""; }
       }
-      if (command.includes("/fake/launch.sh")) state.launches++;
+      if (command.includes("/fake/launch.sh")) { state.launches++; state.composer = ""; }
       return { stdout: "", stderr: "" };
     }
     throw Error(`unexpected fake shell: ${command}`);
@@ -73,11 +78,11 @@ async function fixture() {
   assert.ok(route.includes('app.post("/slots/:slotNum/respawn"'));
   let paneCommands = 0;
   let clock = 0;
-  const globals = { app, db, relay, verifyPaneIdentity: identity, slotParamSchema: { safeParse: (s: string) => ({ success: true, data: +s }) },
+  const globals = { app, db, relay, withSlotSendLock, verifyPaneIdentity: identity, slotParamSchema: { safeParse: (s: string) => ({ success: true, data: +s }) },
     RESTART_COMMANDS: { 1: "bash /fake/launch.sh --continue" }, WEDGED_BUSY_REMEDIATION: "fixture",
-    healthChecker: { isPmInitiatedRespawn: () => false, markPmInitiatedRespawn: () => {}, clearPmInitiatedRespawn: () => {}, completePmInitiatedRespawn: () => {}, getPaneCommandPublic: async () => !state.shellAck || state.exits === 0 ? "claude" : ++paneCommands === 1 ? "zsh" : "omp" },
-    execShell: runShell, sleep: async (ms: number) => { clock += ms; }, Date: { now: () => clock },
-    SHELL_COMMANDS: new Set(["zsh"]), AGENT_COMMANDS: new Set(["omp"]), ...turn, ...idle };
+    healthChecker: { isPmInitiatedRespawn: () => false, markPmInitiatedRespawn: () => {}, clearPmInitiatedRespawn: () => {}, completePmInitiatedRespawn: () => {}, getPaneCommandPublic: async () => !state.shellAck || state.exits === 0 ? "claude" : ++paneCommands <= 3 ? "zsh" : (db.logEvent(1, "SessionStart", "SessionStart", null, { source: "startup", session_id: "new-boot", cwd: PATH }), state.bootCommand) },
+    execShell: runShell, sleep: async (ms: number) => { clock += ms; if (ms === 2_000) state.onSettle(); }, Date: { now: () => clock },
+    SHELL_COMMANDS: new Set(["zsh"]), AGENT_COMMANDS: new Set(["omp", "claude"]), ...turn, ...idle };
   new Function(...Object.keys(globals), route)(...Object.values(globals));
   const deps = { db, devSlots: [1], verifyPaneIdentity: identity,
     getSlotActivityState: (slot: number, pane: string) => relay.getSlotActivityState(slot, pane),
@@ -208,5 +213,34 @@ test("exited CLI may leave stale /exit composer: shell acknowledgement permits l
     assert.equal(response.status, 200);
     assert.equal(f.state.launches, 1);
     assert.equal(f.state.enters, 2);
+  } finally { await f.cleanup(); }
+});
+
+for (const drift of ["assignment", "turn"]) test(`autocomplete dwell ${drift}: attempted Escape, no later keys or replay`, async () => {
+  const f = await fixture(); try {
+    await f.schedule();
+    f.state.onEscape = () => { setTimeout(() => {
+      if (drift === "turn") f.db.startAgentTurn(1, "dwell-turn");
+      else f.state.drift = { issue: 20, assignment_epoch: 2 };
+    }, 10); };
+    assert.equal(await f.ticker.tickSlot(1), "failed");
+    assert.deepEqual(f.state.clears, ["Escape"]);
+    assert.equal(f.state.pastes, 0); assert.equal(f.state.enters, 0);
+    assert.ok(idle.getRespawnWhenIdle(f.db, 1)?.attempted_at);
+    await f.ticker.tickSlot(1);
+    assert.deepEqual(f.state.clears, ["Escape"]); assert.equal(f.state.pastes, 0);
+  } finally { await f.cleanup(); }
+});
+for (const drift of ["none", "assignment", "turn"]) test(`claude boot continuation settle ${drift}`, async () => {
+  const f = await fixture(); try {
+    f.state.bootCommand = "claude";
+    f.state.onSettle = () => {
+      if (drift === "turn") f.db.startAgentTurn(1, "settle-turn");
+      if (drift === "assignment") f.state.drift = { issue: 20, assignment_epoch: 2 };
+    };
+    const response = await f.app.request("/slots/1/respawn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ continue_session: true }) });
+    assert.equal(response.status, 200); assert.equal(f.state.launches, 1);
+    assert.equal(f.state.continues, drift === "none" ? 1 : 0);
+    if (drift !== "none") assert.equal(f.state.pastes, 1);
   } finally { await f.cleanup(); }
 });
