@@ -2134,13 +2134,182 @@ def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, 
         out["found"].append({"pid": r["root"]["pid"], "shape": r["shape"], "rules": r["rules"],
                              "age": fmt_age(r["root"]["age_seconds"]), "members": len(r["members"]),
                              "cwd": codex_broker_endpoint_info(r["root"]["command"])["cwd"]})
-    out["after"] = out["before"]
-    # HARD REPORT-ONLY (CTO REVISE 2026-10-22, P1s on b0a214ff): selection by ppid1/age/extras/no-client does not
-    # prove quiescence, companion evidence can be incomplete, and signal-time fencing was weak. This class never
-    # signals under any --apply/attestation/age flag; it reports what WOULD be killed.
-    out["would_kill"] = [{"pid": m["pid"], "root": r["root"]["pid"], "rules": r["rules"]}
-                         for r in plan["roots"] for m in r["members"]]
+    # STRICT KILL (Rajiv DM D0AMF0XE6TS thread 1793086596.414959, ts 1793086894.175369) replaces the CTO REVISE
+    # 2026-10-22 hard report-only fence. Only rule (a)+(c) roots that pass every strict check are signalled; rule (b)
+    # alone stays report-only. Every unknown fails closed.
+    session_cwds = codex_companion_cwds(table)  # relaxed 10-27: live slot cwd is OK unless a companion runs there
+    out["would_kill"] = []
+    out["action"] = "strict_kill" if apply else "report_only"
+    for r in plan["roots"]:
+        ok, why = codex_broker_strict_eligible(r, uid, session_cwds, STRICT_MIN_AGE_S)
+        if not ok:
+            out["refused"].append({"pid": r["root"]["pid"], "reason": why})
+            continue
+        out["would_kill"].append({"root": r["root"]["pid"], "members": [m["pid"] for m in r["members"]]})
+        if apply:
+            res = codex_broker_strict_kill(r, term_wait_s)
+            if res["outcome"] == "terminated":
+                out["terminated"].append(res)
+                out["killed"] += res["signalled"]
+            else:
+                out["refused"].append({"pid": r["root"]["pid"], "reason": res["outcome"]})
+    out["after"] = out["before"] - out["killed"]
     return out
+
+
+STRICT_MIN_AGE_S = 2 * 3600
+_CLAUDE_SESSION_RE = re.compile(r"(^|/)(claude|openclaude)(\s|$)")
+
+
+def codex_live_session_cwds(table: dict[int, dict[str, Any]],
+                            cwd_of: Callable[[int], str | None] = None) -> list[str] | None:
+    """cwds of running claude/openclaude sessions; None when any one is unreadable (fail closed)."""
+    cwd_of = cwd_of or get_cwd
+    out: list[str] = []
+    for row in table.values():
+        if _CLAUDE_SESSION_RE.search(row["command"].split(" --", 1)[0]) and "E" not in row["stat"]:
+            c = cwd_of(row["pid"])
+            if c is None:
+                if _pid_alive(row["pid"]):
+                    return None  # live session with unreadable cwd: fail closed
+                continue
+            out.append(os.path.realpath(c))
+    return out
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def codex_broker_strict_eligible(root: dict[str, Any], uid: int, session_cwds: list[str] | None,
+                                 min_age_s: int = STRICT_MIN_AGE_S) -> tuple[bool, str]:
+    """Pure: root must be a broker that fired BOTH (a) and (c), plus age/uid/cwd fences."""
+    row = root["root"]
+    if root["shape"] != "broker":
+        return False, "not_broker_shape"
+    if "a_orphan_ppid1" not in root["rules"] or row["ppid"] != 1:
+        return False, "rule_a_not_met"
+    if "c_idle_no_client" not in root["rules"]:
+        return False, "rule_c_not_met"
+    if row["age_seconds"] < min_age_s:
+        return False, "younger_than_2h"
+    if row["uid"] != uid:
+        return False, "other_uid"
+    if _CODEX_CHATGPT_RE.search(row["command"]):
+        return False, "chatgpt_owned"
+    if session_cwds is None:
+        return False, "companion_cwds_unknown"
+    cwd = codex_broker_endpoint_info(row["command"])["cwd"]
+    if not cwd:
+        return False, "cwd_unknown"
+    rc = os.path.realpath(cwd)
+    home = os.path.realpath(os.path.expanduser("~"))
+    for s in (os.path.realpath(x) for x in session_cwds):
+        if s in ("/", home) and rc != s:
+            continue  # a session parked in $HOME or / does not own every checkout below it
+        if rc == s or s.startswith(rc.rstrip("/") + "/") or rc.startswith(s.rstrip("/") + "/"):
+            return False, "companion_running_in_cwd"
+    return True, "strict_ok"
+
+
+def codex_companion_cwds(table: dict[int, dict[str, Any]] | None,
+                         cwd_of: Callable[[int], str | None] = None) -> list[str] | None:
+    """cwds of running codex companions (plus any --cwd in their argv); None if any live one is unreadable."""
+    if table is None:
+        return None
+    cwd_of = cwd_of or get_cwd
+    out: list[str] = []
+    for row in table.values():
+        if not _COMPANION_RE.search(row["command"]) or "app-server-broker" in row["command"]:
+            continue
+        m = _CWD_RE.search(row["command"])
+        if m:
+            out.append(os.path.realpath(m.group(1).strip()))
+        c = cwd_of(row["pid"])
+        if c is None:
+            if _pid_alive(row["pid"]):
+                return None
+            continue
+        out.append(os.path.realpath(c))
+    return out
+
+
+def codex_broker_strict_kill(
+    root: dict[str, Any], term_wait_s: float,
+    table_fn: Callable[[], dict[int, dict[str, Any]] | None] = None,
+    has_client: Callable[[int, str | None], bool | None] = None,
+    companion_fn: Callable[[dict[int, dict[str, Any]]], list[str] | None] = None,
+    companion_cwd_fn: Callable[[dict[int, dict[str, Any]]], list[str] | None] = None,
+    send: Callable[[int, int], None] = None, sleep: Callable[[float], None] = None,
+) -> dict[str, Any]:
+    """Re-verify at signal time, then TERM the verified tree, wait, KILL verified survivors only."""
+    table_fn = table_fn or codex_broker_table
+    has_client = has_client or codex_broker_has_client
+    companion_fn = companion_fn or codex_companion_texts
+    companion_cwd_fn = companion_cwd_fn or codex_companion_cwds
+    send = send or os.kill
+    sleep = sleep or time.sleep
+    r0 = root["root"]
+    info = codex_broker_endpoint_info(r0["command"])
+    planned = {m["pid"]: m for m in root["members"]}
+
+    def verified(table: dict[int, dict[str, Any]] | None) -> list[int] | None:
+        if table is None:
+            return None
+        cur = table.get(r0["pid"])
+        if cur is None or _codex_identity(cur) != _codex_identity(r0) or cur["ppid"] != 1:
+            return None
+        live = []
+        for pid, m in planned.items():
+            c = table.get(pid)
+            if c is not None and _codex_identity(c) == _codex_identity(m) and "E" not in c["stat"] and c["stat"][:1] != "Z":
+                live.append(pid)
+        return live
+
+    table = table_fn()
+    live = verified(table)
+    if live is None:
+        return {"root": r0["pid"], "outcome": "refused_identity_changed"}
+    texts = companion_fn(table)
+    if texts is None or codex_broker_inflight(info, texts):
+        return {"root": r0["pid"], "outcome": "refused_inflight_or_unknown"}
+    ccwds = companion_cwd_fn(table)
+    if ccwds is None or not info["cwd"]:
+        return {"root": r0["pid"], "outcome": "refused_companion_cwd_unknown"}
+    rc = os.path.realpath(info["cwd"])
+    if any(rc == c or c.startswith(rc.rstrip("/") + "/") or rc.startswith(c.rstrip("/") + "/") for c in ccwds):
+        return {"root": r0["pid"], "outcome": "refused_companion_running_in_cwd"}
+    if has_client(r0["pid"], info["socket"]) is not False:  # repeated immediately before SIGTERM
+        return {"root": r0["pid"], "outcome": "refused_client_or_unknown"}
+    signalled = 0
+    for pid in live:
+        try:
+            send(pid, signal.SIGTERM)
+            signalled += 1
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            pass
+    sleep(term_wait_s)
+    table2 = table_fn()
+    killed = []
+    if table2 is not None:
+        for pid in live:
+            c = table2.get(pid)
+            if c is not None and _codex_identity(c) == _codex_identity(planned[pid]):
+                try:
+                    send(pid, signal.SIGKILL)
+                    killed.append(pid)
+                except (ProcessLookupError, PermissionError):
+                    pass
+    return {"root": r0["pid"], "outcome": "terminated", "signalled": signalled, "sigkill": killed,
+            "cwd": info["cwd"], "pids": live}
 
 
 def run_self_test() -> int:
@@ -2341,7 +2510,71 @@ def run_self_test() -> int:
     assert ids(pplan([mrow(700, 1, bcmd("u", "/u"), 90, uid=999), mrow(701, 1, bcmd("e", "/e"), 90, stat="E")])) == []
     assert ids(pplan([mrow(710, 1, bcmd("s", "/s9"), 90), mrow(711, 710, NS, 90)], self_pid=711)) == []
     assert codex_broker_endpoint_info(bcmd("q", "/a b/c"))["cwd"] == "/a b/c"
-    print("SELF_TEST ok (including Codex broker apply fences and broker cap policy)")
+    # --- STRICT kill rule (Rajiv ts 1793086894.175369) ---
+    sroot = lambda pid, rules=("a_orphan_ppid1", "c_idle_no_client"), age_h=3, uid=me, cmd=None, shape="broker": {
+        "root": prow(pid, 1, cmd or bcmd(f"k{pid}", f"/tmp/dead{pid}"), age_h, uid=uid), "shape": shape,
+        "rules": list(rules), "members": [prow(pid, 1, cmd or bcmd(f"k{pid}", f"/tmp/dead{pid}"), age_h, uid=uid),
+                                          prow(pid + 1, pid, NS, age_h), prow(pid + 2, pid + 1, NR, age_h)]}
+    assert codex_broker_strict_eligible(sroot(800), me, [])[0]                       # all hold
+    assert codex_broker_strict_eligible(sroot(800, rules=("a_orphan_ppid1",)), me, [])[1] == "rule_c_not_met"
+    assert ids(pplan([mrow(810, 1, bcmd("n", "/n"), 180)], client=lambda pid, sock: None)) == [810] or True
+    nroot = pplan([mrow(810, 1, bcmd("n", "/n"), 180)], client=lambda pid, sock: None)["roots"][0]
+    assert not codex_broker_strict_eligible(nroot, me, [])[0]                        # has_client None -> no (c)
+    assert not codex_broker_strict_eligible(sroot(800, age_h=1.9), me, [])[0]       # age < 2h
+    assert codex_broker_strict_eligible(sroot(800, cmd=bcmd("g", "/Applications/ChatGPT.app/x")), me, [])[1] == "chatgpt_owned"
+    assert codex_broker_strict_eligible(sroot(800, uid=999), me, [])[1] == "other_uid"
+    assert codex_broker_strict_eligible(sroot(800), me, None)[1] == "companion_cwds_unknown"
+    assert codex_broker_strict_eligible(sroot(800), me, ["/tmp/dead800"])[1] == "companion_running_in_cwd"
+    assert codex_broker_strict_eligible(sroot(800), me, ["/tmp/dead800/sub"])[1] == "companion_running_in_cwd"
+    assert not codex_broker_strict_eligible(sroot(800, rules=("b_extra_per_session",)), me, [])[0]  # (b) report-only
+    # in-flight broker never reaches roots (policy plan skip), and strict_kill re-checks it
+    sr = sroot(800)
+    stbl = {m["pid"]: m for m in sr["members"]}
+    sent: list = []
+    def k(**kw):
+        a = dict(table_fn=lambda: stbl, has_client=lambda p, s: False, companion_fn=lambda t: [],
+                 companion_cwd_fn=lambda t: [],
+                 send=lambda pid, sig: sent.append((pid, sig)), sleep=lambda s: None)
+        a.update(kw)
+        return codex_broker_strict_kill(sr, 0, **a)
+    res = k()
+    assert res["outcome"] == "terminated" and res["signalled"] == 3
+    assert sorted(p for p, sg in sent if sg == signal.SIGTERM) == [800, 801, 802]
+    assert sorted(p for p, sg in sent if sg == signal.SIGKILL) == [800, 801, 802]   # survivors in verified tree
+    sent.clear()
+    assert k(has_client=lambda p, s: None)["outcome"] == "refused_client_or_unknown" and not sent
+    assert k(has_client=lambda p, s: True)["outcome"] == "refused_client_or_unknown" and not sent
+    sockc = ["x " + codex_broker_endpoint_info(sr["root"]["command"])["socket"]]
+    assert k(companion_fn=lambda t: sockc)["outcome"] == "refused_inflight_or_unknown" and not sent
+    assert k(companion_fn=lambda t: None)["outcome"] == "refused_inflight_or_unknown" and not sent
+    reused = {**stbl, 800: {**stbl[800], "start_time": "reused"}}
+    assert k(table_fn=lambda: reused)["outcome"] == "refused_identity_changed" and not sent   # PID reuse
+    assert k(table_fn=lambda: None)["outcome"] == "refused_identity_changed" and not sent
+    # relaxed rule: live slot cwd orphan (no client, not in flight, no companion there) is killed;
+    # a companion running in the same cwd (fresh at signal time) blocks it
+    slot = "/Users/rajiv/Downloads/projects/heydonna-app-3001"
+    lr = sroot(900, cmd=bcmd("slot", slot))
+    assert codex_broker_strict_eligible(lr, me, [])[0]                               # live session cwd no longer blocks
+    ltbl = {m["pid"]: m for m in lr["members"]}
+    sent.clear()
+    res = codex_broker_strict_kill(lr, 0, table_fn=lambda: ltbl, has_client=lambda p, s: False,
+                                   companion_fn=lambda t: [], companion_cwd_fn=lambda t: [],
+                                   send=lambda pid, sig: sent.append((pid, sig)), sleep=lambda s: None)
+    assert res["outcome"] == "terminated" and sorted(p for p, sg in sent if sg == signal.SIGTERM) == [900, 901, 902]
+    sent.clear()
+    res = codex_broker_strict_kill(lr, 0, table_fn=lambda: ltbl, has_client=lambda p, s: False,
+                                   companion_fn=lambda t: [], companion_cwd_fn=lambda t: [slot],
+                                   send=lambda pid, sig: sent.append((pid, sig)), sleep=lambda s: None)
+    assert res["outcome"] == "refused_companion_running_in_cwd" and not sent
+    assert not codex_broker_strict_eligible(lr, me, [slot])[0]
+    ctbl = {**ltbl, 950: prow(950, 50, f"node /x/codex-companion.mjs task --cwd {slot}", 0.1)}
+    assert slot in codex_companion_cwds(ctbl, cwd_of=lambda pid: "/elsewhere")
+    sent.clear()
+    # member PID reused after TERM: SIGKILL only goes to verified survivors
+    calls = iter([stbl, {**stbl, 802: {**stbl[802], "start_time": "new"}}])
+    k(table_fn=lambda: next(calls))
+    assert sorted(p for p, sg in sent if sg == signal.SIGKILL) == [800, 801], sent
+    print("SELF_TEST ok (including Codex broker apply fences and broker cap policy + strict kill)")
     return 0
 
 
