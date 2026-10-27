@@ -34,8 +34,8 @@ consistent. The helper fails closed if the table is missing or malformed.
     }
   },
   "overflow_pool": [
-    {"label": "Backup", "destination_thread_id": "01a095ce-4e47-7a42-b3e5-a0bb53dc017c"},
-    {"label": "Standby", "destination_thread_id": "01a16c62-ac4f-7662-b688-12a61881abaa"}
+    {"label": "Backup", "destination_thread_id": "01a176af-ce21-7ea3-ac51-96caa53e946e"},
+    {"label": "Standby", "destination_thread_id": "01a176ae-6bfe-7342-972a-dd79a7533638"}
   ],
   "direct_message_route": {
     "project": "heydonna",

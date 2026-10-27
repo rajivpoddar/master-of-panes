@@ -5,6 +5,7 @@ tools: Bash, Read
 skills:
   - ny-deposition-gutter-contract
   - validator-boundary-doctrine
+model: sonnet
 ---
 
 You are an adversarial code reviewer for HeyDonna.

@@ -3,6 +3,42 @@
 Owner: existing Social Media task `01a11e3d-d8bb-73c1-8593-8ff56019d842`.
 Rajiv directive: `C0C7U35LBKR/1791638989.669329`.
 
+## [HIGH] ChatGPT restart after every digest cycle — 25 October 2026
+
+Rajiv `D0AMF0XE6TS/1792926986.834769`, thread `1792925629.422029`: *"udpate the social media WAKE SOP. we need to restart chatgpt after every social media digest i cycle i think."* Trigger: host CPU spike from accumulated in-app browser state and replayd capture.
+
+- After the LAST part of each digest cycle is posted (and its tabs are closed), END the turn cleanly. Leave no in-flight browser action, pending send or open composer.
+- PM restarts ChatGPT through the sanctioned `codex-app-restart-when-idle.sh --pause-resume --live-pause` (Skill codex-app-restart) after the digest posts. This task never quits or relaunches the app itself.
+- On the resume prompt after a restart, re-check the last action's state before repeating anything. Never repeat an external send, click, follow or Like without first confirming it did not already happen. Then close any tabs the browser reopened.
+- A restart never logs out of an account, never changes platform state, and never resets cycle budgets or the ledger.
+
+## [HIGH] Close every tab you open, every pass — 25 October 2026
+
+Rajiv `D0AMF0XE6TS/1792926840.678139`, thread `1792925629.422029`,
+conveyed by PM `C0C7U35LBKR/1792926915.409699`; see
+`docs/marketing/GROWTH-PLAYBOOK.md`, "Close every tab you open, every pass".
+Apply from the next authorized pass, including each three-hour digest cycle,
+send window and one-off ask. The trigger was a host CPU spike from accumulated
+in-app browser sites and a replayd capture left running.
+
+- Before starting a pass, close leftover tabs and windows from earlier social
+  passes. Preserve unrelated user work and account sessions.
+- At the end of every pass, close every tab and window that pass opened and
+  stop every screen-share or capture session it started through the supported
+  controls. Do not terminate unrelated capture sessions or system processes.
+- Keep at most **one tab per logged-in platform**, and only if the next pass
+  needs it; close all other pass tabs. Closing tabs must never log out of an
+  account, clear its session or change its account settings.
+- Verify cleanup and the actual remaining tab count. Every pass receipt ends
+  with `Tabs closed: yes (open now: N)`, where N is the observed count and is
+  no greater than the number of logged-in platforms. If cleanup or its readback
+  is unavailable, report the actual incomplete/unknown state instead of claiming
+  `yes` or inventing N.
+
+This rule supersedes older instructions to retain social-pass tabs; unrelated
+tabs and sessions remain protected. Updating this SOP starts no browser pass
+and authorizes no immediate shared-browser cleanup or social effect.
+
 ## Mandatory empty lines on every social surface — 25 October 2026
 
 Rajiv `C0C7U35LBKR/1792868474.190749`, conveyed by PM

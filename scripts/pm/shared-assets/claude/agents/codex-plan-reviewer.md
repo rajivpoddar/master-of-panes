@@ -7,6 +7,7 @@ maxTurns: 8
 skills:
   - ny-deposition-gutter-contract
   - validator-boundary-doctrine
+model: sonnet
 ---
 
 You are an adversarial plan reviewer for HeyDonna. You invoke the custom Codex review companion script.

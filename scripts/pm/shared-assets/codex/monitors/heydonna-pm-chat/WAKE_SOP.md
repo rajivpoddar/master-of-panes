@@ -150,8 +150,8 @@ HeyDonna tasks in this pool, respecting each request's availability and affinity
 | --- | --- |
 | PR Merges | `01a0324b-68e0-7491-988f-e7e1549f16f7` |
 | Rescues | `01a16c6b-69bc-76f2-86d2-6110fb97ba18` |
-| Standby | `01a16c62-ac4f-7662-b688-12a61881abaa` |
-| Backup | `01a095ce-4e47-7a42-b3e5-a0bb53dc017c` |
+| Standby | `01a176ae-6bfe-7342-972a-dd79a7533638` |
+| Backup | `01a176af-ce21-7ea3-ac51-96caa53e946e` |
 | Hotfixes | `01a095ce-4e47-7a42-b3e5-a09fbd1ed60a` |
 | CP Repairs | `01a08f69-45db-71c2-b433-678419139ed7` |
 | PR Reviews | `01a0b53e-3316-77d3-9610-1c0c58d4ba5b` |
@@ -384,7 +384,7 @@ current approved brief.
 
 ## Execution owners (lookup; verify liveness before new work)
 
-Rescues (`01a16c6b-69bc-76f2-86d2-6110fb97ba18`) / backup (`01a095ce-4e47-7a42-b3e5-a0bb53dc017c`) / standby (`01a16c62-ac4f-7662-b688-12a61881abaa`): bounded rescue work outside PR-red CI/E2E terminal processing
+Rescues (`01a16c6b-69bc-76f2-86d2-6110fb97ba18`) / backup (`01a176af-ce21-7ea3-ac51-96caa53e946e`) / standby (`01a176ae-6bfe-7342-972a-dd79a7533638`): bounded rescue work outside PR-red CI/E2E terminal processing
 (off-slot, full-suite, non-force publication); idle-first selection by live
 status (Rajiv `Ev0C3BPT9PJ4` supersedes older fences). `hotfixes`
 (`01a095ce-4e47-7a42-b3e5-a09fbd1ed60a`): all new hotfixes incl. shared E2E auth/runner and

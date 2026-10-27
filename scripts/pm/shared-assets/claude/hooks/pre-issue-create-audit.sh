@@ -166,7 +166,10 @@ if [ -z "$THREAD_TS" ]; then
   fi
 fi
 
-CHANNEL=$(printf '%s' "$BODY_OR_CMD" | grep -oE 'C[A-Z0-9]{10}' | head -1 || true)
+# Slack channel ids are C… (public/private) or D… (DM, e.g. Rajiv's D0AMF0XE6TS);
+# both are 11 chars. Without D, DM-sourced intakes fell back to C0AGWPQFKHA and
+# missed their correctly minted permit (2026-10-26, account dropdown + upload overlay).
+CHANNEL=$(printf '%s' "$BODY_OR_CMD" | grep -oE '\b[CD][A-Z0-9]{10}\b' | head -1 || true)
 if [ -z "$CHANNEL" ]; then
   if printf '%s' "$BODY_OR_CMD" | grep -qE 'heydonna-dev'; then
     CHANNEL="C0ALZJHGE49"
