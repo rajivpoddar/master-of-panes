@@ -2112,6 +2112,8 @@ def codex_broker_policy_plan(
 
 
 def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, extra_min: int, idle_min: int) -> dict[str, Any]:
+    # CTO containment: this class stays report-only until per-member fences are proven.
+    apply = False
     out: dict[str, Any] = {
         "class": "codex_broker_cap", "action": "report_only",
         "orphan_min": orphan_min, "extra_min": extra_min, "idle_min": idle_min,

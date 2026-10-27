@@ -73,7 +73,7 @@ class BrokerCapReportOnlyTests(unittest.TestCase):
                      patch.object(MODULE, "codex_broker_has_client", return_value=guard == "client"), \
                      patch.object(MODULE, "codex_broker_strict_kill", side_effect=forbid("signal")):
                     out = MODULE.codex_broker_policy_check(True, 0, 0, 0, 0)
-                self.assertEqual(out["action"], "strict_kill")
+                self.assertEqual(out["action"], "report_only")
                 self.assertEqual(out["would_kill"], [])
                 self.assertEqual(out["killed"], 0)
 
@@ -131,9 +131,17 @@ class BrokerCapReportOnlyTests(unittest.TestCase):
                     patch.object(MODULE, "run", side_effect=forbid("run")), \
                     patch.object(sys, "argv", argv), patch.object(sys, "stdout", new_callable=io.StringIO) as out:
                 MODULE.main()
-            self.assertIn("CODEX_BROKER_CAP action=strict_kill", out.getvalue())
+            self.assertIn("CODEX_BROKER_CAP action=report_only", out.getvalue())
             self.assertEqual(json.loads(output.read_text())["codex_broker_cap"]["killed"], 0)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_containment_refuses_even_an_otherwise_eligible_broker():
+    table = {100: proc(100, 1, broker("orphan", "/a"))}
+    with patch.object(MODULE, "codex_broker_table", return_value=table), patch.object(MODULE, "codex_companion_texts", return_value=[]), patch.object(MODULE, "codex_companion_cwds", return_value=[]), patch.object(MODULE, "codex_broker_has_client", return_value=False), patch.object(MODULE, "codex_broker_strict_kill", side_effect=forbid("strict kill")):
+        result = MODULE.codex_broker_policy_check(True, 0, 0, 0, 0)
+    assert result["action"] == "report_only" and result["killed"] == 0
+    assert result["would_kill"]
