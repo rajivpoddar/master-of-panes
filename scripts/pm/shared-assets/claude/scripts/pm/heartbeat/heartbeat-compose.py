@@ -284,7 +284,11 @@ def pr_block(prs: list[dict] | None, max_prs: int = MAX_PRS) -> tuple[list[str],
         return ["*Open PRs:* unavailable"], "PRs unavailable", []
     if not prs:
         return ["*Open PRs (0):* quiet"], "no open PRs", []
-    lines = [f"*Open PRs ({len(prs)}):*"]
+    non_drafts = sum(not r.get("draft", False) for r in prs)
+    drafts = len(prs) - non_drafts
+    summary = f"{non_drafts} open non-draft PRs (+{drafts} drafts)"
+    cap = " — cap exceeded" if non_drafts > 25 else ""
+    lines = [f"*{summary} — cap {non_drafts}/25{cap}:*"]
     order = {"red": 0, "CI+E2E green": 1}
     ranked = sorted(prs, key=lambda r: (order.get(r["state"].split(":")[0], 2), -int(r["number"])))
     for r in ranked[:max_prs]:
@@ -294,7 +298,7 @@ def pr_block(prs: list[dict] | None, max_prs: int = MAX_PRS) -> tuple[list[str],
     red = [r for r in prs if r["state"].startswith("red")]
     unowned_red = [r for r in red if "unowned" in r["state"]]
     merge = [f"#{r['number']}@{r['head']}" for r in prs if r["next"] == "CTO merge ask"]
-    tldr = f"{len(prs)} open PRs"
+    tldr = summary
     if red:
         tldr += f", {len(red)} red" + (f" ({len(unowned_red)} unowned)" if unowned_red else "")
     if merge:

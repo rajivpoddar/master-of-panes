@@ -113,7 +113,7 @@ def test_live_producer_reads_existing_reconciliation_sentinel(tmp_path, monkeypa
     assert rows[1]["next"] == "PM readiness unverified"
     assert len(rows) == 2 and all(r["state"] == "CI+E2E green" for r in rows)
     post = composer.compose("1h", datetime.now(timezone.utc), {"events": 0}, {}, rows)
-    assert "2 open PRs" in post and "merge-ready" not in post and "*Asks:*" not in post
+    assert "2 open non-draft PRs (+0 drafts)" in post and "merge-ready" not in post and "*Asks:*" not in post
 
 
 @pytest.mark.parametrize("contents", ["{bad", "[]", "null"])
