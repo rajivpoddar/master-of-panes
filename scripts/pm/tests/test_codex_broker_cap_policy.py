@@ -1,4 +1,4 @@
-"""Codex broker cap policy is HARD REPORT-ONLY (CTO REVISE 2026-10-22): it never signals under any flag."""
+"""Strict broker cleanup preserves live clients, requests and companions."""
 
 from __future__ import annotations
 
@@ -63,18 +63,32 @@ class BrokerCapReportOnlyTests(unittest.TestCase):
                 patch.object(MODULE, "run", side_effect=forbid("run")):
             return MODULE.codex_broker_policy_check(apply, 0, 0, 0, 0)
 
-    def test_apply_never_signals_for_connected_noncompanion_and_tool_trees(self):
-        for client in (True, False, None):
-            for comps in ([], ["node codex-review-companion.mjs --endpoint unix:/var/folders/x/cxc-busy/broker.sock"]):
-                out = self.check(True, comps, client)
-                self.assertEqual(out["action"], "report_only")
+    def test_strict_guards_independently_refuse(self):
+        for guard in ("cwd", "inflight", "client", "young"):
+            with self.subTest(guard=guard):
+                table = {100: proc(100, 1, broker("orphan", "/a"), 119 if guard == "young" else 120)}
+                with patch.object(MODULE, "codex_broker_table", return_value=table), \
+                     patch.object(MODULE, "codex_companion_texts", return_value=[broker("orphan", "/a")] if guard == "inflight" else []), \
+                     patch.object(MODULE, "codex_companion_cwds", return_value=["/a"] if guard == "cwd" else []), \
+                     patch.object(MODULE, "codex_broker_has_client", return_value=guard == "client"), \
+                     patch.object(MODULE, "codex_broker_strict_kill", side_effect=forbid("signal")):
+                    out = MODULE.codex_broker_policy_check(True, 0, 0, 0, 0)
+                self.assertEqual(out["action"], "strict_kill")
+                self.assertEqual(out["would_kill"], [])
                 self.assertEqual(out["killed"], 0)
-                self.assertEqual(out["terminated"], [])
-        out = self.check(True, [], True)  # connected broker (has_client=True) is only reported
-        self.assertIn(102, [w["pid"] for w in out["would_kill"]])
-        self.assertNotIn(120, [w["pid"] for w in out["would_kill"]])  # ChatGPT exempt
-        out = self.check(True, ["node codex-review-companion.mjs --endpoint unix:/var/folders/x/cxc-busy/broker.sock"])
-        self.assertNotIn(110, [w["pid"] for w in out["would_kill"]])  # in-flight guard intact
+
+    def test_strict_rechecks_before_signalling(self):
+        table = {100: proc(100, 1, broker("orphan", "/a"))}
+        root = MODULE.codex_broker_policy_plan(table, UID, -1, [], lambda *a: False, 0, 0, 0)["roots"][0]
+        for guard in ("identity", "inflight", "cwd", "client"):
+            with self.subTest(guard=guard):
+                result = MODULE.codex_broker_strict_kill(
+                    root, 0, table_fn=lambda: {} if guard == "identity" else table,
+                    has_client=lambda *a: guard == "client",
+                    companion_fn=lambda t: [broker("orphan", "/a")] if guard == "inflight" else [],
+                    companion_cwd_fn=lambda t: ["/a"] if guard == "cwd" else [],
+                    send=forbid("signal"), sleep=forbid("sleep"))
+                self.assertTrue(result["outcome"].startswith("refused_"))
 
     def test_failed_evidence_cases_never_signal(self):
         for table_ret, comp_ret in ((None, []), (make_table(), None)):
@@ -117,7 +131,7 @@ class BrokerCapReportOnlyTests(unittest.TestCase):
                     patch.object(MODULE, "run", side_effect=forbid("run")), \
                     patch.object(sys, "argv", argv), patch.object(sys, "stdout", new_callable=io.StringIO) as out:
                 MODULE.main()
-            self.assertIn("CODEX_BROKER_CAP action=report_only", out.getvalue())
+            self.assertIn("CODEX_BROKER_CAP action=strict_kill", out.getvalue())
             self.assertEqual(json.loads(output.read_text())["codex_broker_cap"]["killed"], 0)
 
 
