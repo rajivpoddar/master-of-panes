@@ -114,6 +114,12 @@ Full list: see rule 43 (full list), 17 rules. Includes: no disabled buttons, sho
 
 REQUEST_CHANGES/BLOCK a UI diff that breaks the 17 UX rules (more than 1 status line + 1 primary button, stacked/contradicting banners, internal jargon, destructive adjacent to safe at equal weight, targets under 44px) or a new/changed surface with no Rajiv-approved mock. Required: ux-reviewer heuristic pass (rule, then Nielsen + WCAG 2.2 AA).
 
+## No-transmitted-partner-keys gate
+Source: Rajiv D0AMF0XE6TS ts 1793075323.957449: "all keys are generated from workspace admin account". Rule: ~/.claude/rules/47-heydonna-keys-self-serve-admin.md.
+- Partner/integration credentials (API keys, webhook HMAC, API-signing keys, bearer tokens) are generated self-serve by the partner's workspace admin in their HeyDonna admin account. HeyDonna staff never generate a partner secret for delivery or transmit one (Slack/email/PR/1Password share/call).
+- Only key-ids, endpoint URLs and hostnames are exchanged. One credential per direction/purpose.
+- BLOCK any plan/runbook/diff with a staff- or script-generated partner secret meant for delivery, or a secret-transmission step. Require the admin-account flow (admin-only, shown-once, stored hashed/encrypted, rotate/revoke) with tests.
+
 ## Review Source Invariant
 
 Before reading the plan file, adjudicating the plan, or writing a `/tmp` plan

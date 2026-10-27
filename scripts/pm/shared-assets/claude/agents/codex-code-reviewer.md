@@ -582,6 +582,12 @@ the error state. `disabled={isSubmitting}` / `disabled={isPending}` guarding
 the action's own in-flight request is allowed. Full rule:
 `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No-transmitted-partner-keys gate (Mandatory)
+Source: Rajiv D0AMF0XE6TS ts 1793075323.957449: "all keys are generated from workspace admin account". Rule: ~/.claude/rules/47-heydonna-keys-self-serve-admin.md.
+- Partner/integration credentials (API keys, webhook HMAC, API-signing keys, bearer tokens) are generated self-serve by the partner's workspace admin in their HeyDonna admin account. HeyDonna staff never generate a partner secret for delivery or transmit one (Slack/email/PR/1Password share/call).
+- Only key-ids, endpoint URLs and hostnames are exchanged. One credential per direction/purpose.
+- BLOCK any plan/runbook/diff with a staff- or script-generated partner secret meant for delivery, or a secret-transmission step. Require the admin-account flow (admin-only, shown-once, stored hashed/encrypted, rotate/revoke) with tests.
+
 ## No-inline-menu-error gate (Mandatory)
 Source: Rajiv 2026-10-09, C0ALZJHGE49 thread 1791537587.688969 ts 1791537815.457389: *"why is the error message in the menu item? that's an anti pattern. it should only be in the toast"*.
 Menu/menubar/context-menu actions: a refused action shows a TOAST ONLY. BLOCK/REQUEST_CHANGES on any inline error text, `role="alert"`, or `aria-invalid` rendered inside a menu item, or a menu held open to show an error. The item stays enabled (the no-disabled-precondition rule still applies). Required test: click the enabled item with the precondition unmet, then assert toast shown, no inline alert in the menu, and the action not run. Rule: `~/.claude/rules/33-heydonna-ui-product-rules.md` "Menu-action errors go in the toast only".

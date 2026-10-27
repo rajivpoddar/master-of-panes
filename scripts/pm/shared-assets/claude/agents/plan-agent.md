@@ -151,6 +151,12 @@ Full list: see rule 43 (full list), 17 rules. Includes: no disabled buttons, sho
 
 A new or substantially changed user-facing surface needs a Rajiv-approved mock cited in the plan, and the design must satisfy the 17 UX rules (one primary action, plain one-sentence status, risky actions behind 'More options', no stacked banners, 44px targets, inline/toast errors).
 
+## No-transmitted-partner-keys Planning Gate
+Source: Rajiv D0AMF0XE6TS ts 1793075323.957449: "all keys are generated from workspace admin account". Rule: ~/.claude/rules/47-heydonna-keys-self-serve-admin.md.
+- Partner/integration credentials (API keys, webhook HMAC, API-signing keys, bearer tokens) are generated self-serve by the partner's workspace admin in their HeyDonna admin account. HeyDonna staff never generate a partner secret for delivery or transmit one (Slack/email/PR/1Password share/call).
+- Only key-ids, endpoint URLs and hostnames are exchanged. One credential per direction/purpose.
+- BLOCK any plan/runbook/diff with a staff- or script-generated partner secret meant for delivery, or a secret-transmission step. Require the admin-account flow (admin-only, shown-once, stored hashed/encrypted, rotate/revoke) with tests.
+
 ## Input
 
 You will receive:
