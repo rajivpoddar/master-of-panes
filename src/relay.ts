@@ -1382,12 +1382,24 @@ export class TmuxRelay {
       const { stdout } = await this.runShell(`tmux capture-pane -e -t ${paneId} -p`, { timeout: 5_000 });
       const plain = stdout.replace(/\x1b\[[0-9;]*m/g, "");
       if (composerText(plain) === null) return "unknown";
-      const line = stdout.split("\n").reverse().find(l => /^\s*❯(?:\s|$)/.test(l.replace(/\x1b\[[0-9;]*m/g, "")));
-      if (!line) return "unknown";
+      const lines = stdout.split("\n");
+      let promptLine = -1;
+      // Slash autocomplete also renders a chevron below the composer. Only
+      // the prompt immediately below a composer rule owns activity evidence.
+      for (let i = lines.length - 1; i > 0; i--) {
+        if (/^\s*─{20,}\s*$/.test(lines[i - 1].replace(/\x1b\[[0-9;]*m/g, ""))
+            && /^\s*❯(?:\s|$)/.test(lines[i].replace(/\x1b\[[0-9;]*m/g, ""))
+            && lines.slice(i + 1).some(l => /^\s*─{20,}\s*$/.test(l.replace(/\x1b\[[0-9;]*m/g, "")))) {
+          promptLine = i;
+          break;
+        }
+      }
+      if (promptLine < 0) return "unknown";
+      const line = lines[promptLine];
       let color = "default";
       // Foreground can be inherited from a preceding line; process the full
       // capture prefix, not just the prompt line's explicit SGR codes.
-      const prefix = stdout.slice(0, stdout.lastIndexOf(line) + line.indexOf("❯"));
+      const prefix = lines.slice(0, promptLine).join("\n") + "\n" + line.slice(0, line.indexOf("❯"));
       for (const match of prefix.matchAll(/\x1b\[([0-9;]*)m/g)) {
         const codes = (match[1] || "0").split(";").map(Number);
         for (let i = 0; i < codes.length; i++) {

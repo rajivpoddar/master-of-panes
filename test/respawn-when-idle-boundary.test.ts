@@ -26,7 +26,7 @@ async function fixture() {
     enters: 0, swallowEnters: 0, drift: {} as Record<string, unknown>, onProbe: (_n: number) => {}, onIdentity: (_n: number) => {}, onPaste: () => {} };
   const readSlot = db.getSlot.bind(db);
   db.getSlot = slot => { const row = readSlot(slot); return row && { ...row, ...state.drift }; };
-  const render = () => `${RULE}\n❯ ${state.composer}\n${RULE}\n ? for shortcuts\n`;
+  const render = () => `${RULE}\n❯ ${state.composer}\n${RULE}\n${state.composer === "/exit" ? "  \x1b[38;2;153;153;153m❯ /exit Exit the CLI\x1b[0m" : " ? for shortcuts"}\n`;
   const identity = async () => {
     state.onIdentity(++state.identities);
     return { ok: true as const, snapshot: { slot: 1, address: "0:0.1", paneId: state.pane, currentPath: PATH, expectedPath: PATH } };

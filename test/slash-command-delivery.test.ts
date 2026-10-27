@@ -138,3 +138,26 @@ test("guarded /exit whose retry is refused after the first Enter (TUI exiting) r
   assert.equal(result.reason, "submit_unconfirmed");
   assert.equal(p.keys.filter(k => k === "Enter").length, 1, "never a second Enter into a non-idle pane");
 });
+
+test("activity probe ignores gray slash-menu chevron below idle composer", async () => {
+  const p: Pane = { composer: "/exit", buffer: "", keys: [], swallowEnters: 0 };
+  const run = shell(p);
+  const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: async command => {
+    const result = await run(command);
+    if (command.startsWith("tmux capture-pane")) result.stdout = result.stdout.replace("  ⏵⏵ bypass permissions on", "  \x1b[38;2;153;153;153m❯ /exit Exit the CLI\x1b[0m");
+    return result;
+  } });
+  assert.equal(await relay.getPaneActivityState("%16"), "idle");
+});
+test("activity probe retains busy composer state despite a white menu chevron", async () => {
+  const p: Pane = { composer: "/exit", buffer: "", keys: [], swallowEnters: 0 };
+  const run = shell(p);
+  const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: async command => {
+    const result = await run(command);
+    if (command.startsWith("tmux capture-pane")) {
+      result.stdout = result.stdout.replace("❯ /exit", "\x1b[38;2;153;153;153m❯\x1b[0m /exit").replace("  ⏵⏵ bypass permissions on", "  ❯ /exit Exit the CLI");
+    }
+    return result;
+  } });
+  assert.equal(await relay.getPaneActivityState("%16"), "active");
+});
