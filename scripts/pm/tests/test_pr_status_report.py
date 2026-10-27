@@ -93,3 +93,44 @@ def test_real_sender_callback_only_hourly_alert_parent():
             assert run.called == expected
             if expected:
                 assert run.call_args.args[0][-2:] == ['--thread', '123.456']
+
+
+def test_pending_ci_lane_owns_admitted_pr_until_four_hours():
+    prs, checks = fixture()
+    for prior, expected in [({}, 'MOVING'), ({'3': {'gate': 'CI running', 'since': '2026-10-27T05:00:00Z'}}, 'STUCK')]:
+        lines, _ = report.render([prs[2]], checks, [], [], prior, NOW)
+        assert 'CI (admitted head)' in lines[0]
+        assert expected in lines[0]
+
+
+def test_draft_branch_matches_live_slot_checkout():
+    prs, checks = fixture()
+    prs[0]['headRefName'] = 'feature/live-work'
+    lines, _ = report.render([prs[0]], checks, [dict(slot=2, pr=None, checkout_branch='feature/live-work')], [], {}, NOW)
+    assert 'S2' in lines[0] and 'MOVING' in lines[0]
+    # A PR-field assignment also works when issue metadata is absent.
+    lines, _ = report.render([prs[0]], checks, [dict(slot=1, pr=1)], [], {}, NOW)
+    assert 'S1' in lines[0]
+
+
+def test_current_head_merge_ask_transfers_owner_to_cto():
+    prs, checks = fixture()
+    for evidence, expected in [('head', 'CTO (merge ask sent)'), ('old', 'unowned')]:
+        rows = [dict(pr=6, kind='pr_merge_ask', evidence_json=json.dumps({'head': evidence}))]
+        lines, _ = report.render([prs[5]], checks, [], rows, {}, NOW)
+        assert expected in lines[0]
+        assert ('MOVING' if evidence == 'head' else 'STUCK') in lines[0]
+    prs[5]['merge_ask_sent'] = True
+    lines, _ = report.render([prs[5]], checks, [], [], {}, NOW)
+    assert 'CTO (merge ask sent)' in lines[0]
+
+
+def test_post_has_one_pr_per_block_and_explicit_multiline_fallback():
+    text = report.chunks(['#1 ready · MOVING', '#2 draft · MOVING'])[0]
+    with patch('subprocess.run') as run:
+        run.return_value.stdout = 'OK ts=123.4 channel=C0ALZJHGE49'
+        assert report.post('C0ALZJHGE49', '123.0', text) == '123.4'
+        argv = run.call_args.args[0]
+        blocks = json.loads(argv[argv.index('-b') + 1])
+        assert [b['text']['text'] for b in blocks][1:] == ['#1 ready · MOVING', '#2 draft · MOVING']
+        assert '\n\n#1' in run.call_args.kwargs['input']

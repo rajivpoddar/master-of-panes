@@ -47,7 +47,7 @@ def collect():
     for page in pages:
         for item in page:
             pr = gh('pr', 'view', str(item['number']), '--repo', REPO, '--json',
-                    'number,isDraft,headRefOid,labels,mergeable')
+                    'number,isDraft,headRefOid,headRefName,labels,mergeable')
             prs.append(pr)
             # Check-runs endpoint is pinned to the SHA, not branch/latest workflow.
             runs = gh('api', '--paginate', '--slurp',
@@ -55,11 +55,27 @@ def collect():
             checks[pr['number']] = [r for p in runs for r in p['check_runs']]
     with urllib.request.urlopen('http://127.0.0.1:3100/slots', timeout=10) as response:
         slots = json.load(response)['slots']
+    for slot in slots:
+        checkout = HOME / f'Downloads/projects/heydonna-app-{3000 + int(slot["slot"])}'
+        branch = subprocess.run(['git', '-C', str(checkout), 'branch', '--show-current'],
+                                capture_output=True, text=True, timeout=10)
+        slot['checkout_branch'] = branch.stdout.strip() if branch.returncode == 0 else None
     with sqlite3.connect(f'file:{DB}?mode=ro', uri=True, timeout=5) as con:
         con.row_factory = sqlite3.Row
         obligations = [dict(row) for row in con.execute(
-            "SELECT id, pr, owner, suppress_until, kind FROM obligations "
-            "WHERE status='open' AND kind IN ('pr_red_unowned','pr_admission') ORDER BY id DESC")]
+            "SELECT id, pr, owner, suppress_until, kind, evidence_json FROM obligations "
+            "WHERE status='open' AND kind IN ('pr_red_unowned','pr_admission','pr_merge_ask') ORDER BY id DESC")]
+    bridge = HOME / 'Downloads/projects/tmux-slack-bridge/bridge.db'
+    if bridge.exists():
+        with sqlite3.connect(f'file:{bridge}?mode=ro', uri=True, timeout=5) as con:
+            messages = [row[0] for row in con.execute(
+                "SELECT body FROM messages WHERE direction='outbound' AND "
+                "channel_id='C0ALZJHGE49' AND lower(body) LIKE '%merge ask%' "
+                "ORDER BY ts DESC LIMIT 2000")]
+        for pr in prs:
+            pr['merge_ask_sent'] = any(
+                re.search(r'#' + str(pr['number']) + r'\b', body)
+                and pr['headRefOid'][:12] in body for body in messages)
     return prs, checks, slots, obligations
 
 
@@ -98,7 +114,9 @@ def classify(pr, runs, slots, obligations, prior, now):
         action = 'resolve conflicts; ' + action
     owner = None
     for slot in slots:
-        if slot.get('pr') == number and slot.get('issue') is not None:
+        if (slot.get('pr') == number or (pr.get('headRefName') and
+                pr['headRefName'] in (slot.get('checkout_branch'), slot.get('branch'),
+                                      str(slot.get('branch_ref') or '').removeprefix('refs/heads/')))):
             owner = f'S{slot["slot"]}'
             break
     if owner is None:
@@ -107,6 +125,15 @@ def classify(pr, runs, slots, obligations, prior, now):
             if row.get('pr') == number and row.get('owner') and until and until > now:
                 owner = f'{row["owner"]} (until {row["suppress_until"]})'
                 break
+    if gate == 'CI running' and admitted and 'PENDING' in (ci, e2e):
+        owner = f'CI (admitted {head[:12]})'
+    merge_ask = pr.get('merge_ask_sent', False)
+    for row in obligations:
+        if row.get('pr') == number and row.get('kind') == 'pr_merge_ask':
+            evidence = json.loads(row.get('evidence_json') or '{}')
+            merge_ask = merge_ask or evidence.get('head') == head
+    if gate == 'dual-green/merge ask' and merge_ask:
+        owner, action = 'CTO (merge ask sent)', 'await merge decision'
     previous = prior.get(str(number), {})
     since = stamp(previous.get('since')) if previous.get('gate') == gate else None
     since = since or now
@@ -132,20 +159,25 @@ def render(prs, checks, slots, obligations, prior, now):
 
 def chunks(lines, limit=35000):
     # Slack hard limit is 40k; split on complete PR lines, never omit a row.
-    out, text = [], '*Hourly per-PR status*\n'
+    out, text, count = [], '*Hourly per-PR status*\n\n', 0
     for line in lines:
         if len(line) + 30 > limit:
             raise ValueError('single PR line exceeds Slack limit')
-        if len(text) + len(line) + 1 > limit:
+        if len(text) + len(line) + 2 > limit or count >= 40:
             out.append(text)
-            text = '*Hourly per-PR status (continued)*\n'
-        text += line + '\n'
+            text, count = '*Hourly per-PR status (continued)*\n\n', 0
+        text += line + '\n\n'
+        count += 1
     return out + [text]
 
 
 def post(channel, thread, text):
+    # Separate Block Kit sections guarantee one PR per visible row; provide the
+    # same explicit fallback body for bridge consumers and notifications.
+    blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': line}}
+              for line in text.splitlines() if line]
     result = subprocess.run(['bash', str(HOME / '.claude/scripts/slack-send.sh'),
-                             '-c', channel, '-t', thread, '-f'], input=text,
+                             '-c', channel, '-t', thread, '-b', json.dumps(blocks), '-f'], input=text,
                             text=True, capture_output=True, timeout=120,
                             env={**os.environ, 'SLACK_SEND_AS': 'alerts'}, check=True)
     match = re.search(r'OK ts=([0-9.]+)', result.stdout)
