@@ -284,7 +284,7 @@ def pr_block(prs: list[dict] | None, max_prs: int = MAX_PRS) -> tuple[list[str],
         return ["*Open PRs:* unavailable"], "PRs unavailable", []
     if not prs:
         return ["*Open PRs (0):* quiet"], "no open PRs", []
-    non_drafts = sum(not r.get("draft", False) for r in prs)
+    non_drafts = sum(not r.get("isDraft", r.get("draft", False)) for r in prs)
     drafts = len(prs) - non_drafts
     summary = f"{non_drafts} open non-draft PRs (+{drafts} drafts)"
     cap = " — cap exceeded" if non_drafts > 25 else ""

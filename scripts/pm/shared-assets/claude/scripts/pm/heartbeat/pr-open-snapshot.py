@@ -723,6 +723,7 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
         "head": head[:7],
         "head_full": head,
         "title": (pr.get("title") or "")[:60],
+        "isDraft": bool(pr.get("isDraft")),
         "draft": bool(pr.get("isDraft")),
         "admitted": admitted,
         "state": state,
