@@ -106,11 +106,13 @@ function sessionAt(db: MoPDatabase, slot: number, checkout: string): string | nu
   return null;
 }
 
-function captureRequest(db: MoPDatabase, row: SlotState, pane: PaneIdentitySnapshot, at: string): RespawnWhenIdleRequest | null {
+function captureRequest(db: MoPDatabase, row: SlotState, pane: PaneIdentitySnapshot, at: string, allowUnboundFree = false): RespawnWhenIdleRequest | null {
   const session = sessionAt(db, row.slot, pane.currentPath);
-  if (!session) return null;
+  // Direct operator respawns of free, naturally idle panes need no historical
+  // hook session. Deferred requests and occupied panes still require one.
+  if (!session && !(allowUnboundFree && !row.occupied && slotAtNaturalIdle(db, row.slot))) return null;
   return { slot: row.slot, requested_at: at, scheduled_event_id: db.getEvents(undefined, 1)[0]?.id ?? 0,
-    pane_id: pane.paneId, checkout_path: pane.currentPath, session_id: session,
+    pane_id: pane.paneId, checkout_path: pane.currentPath, session_id: session ?? "",
     assignment_epoch: row.assignment_epoch, issue: row.issue, repository_id: row.repository_id,
     branch_ref: row.branch_ref, occupied: row.occupied };
 }
@@ -122,14 +124,14 @@ function sameRequest(a: RespawnWhenIdleRequest | null, b: RespawnWhenIdleRequest
 }
 
 /** Synchronous ownership/completion fence used again at both command boundaries. */
-function requestFence(db: MoPDatabase, request: RespawnWhenIdleRequest, persistent: boolean, ownAttempt = false): string | null {
-  if (!request.pane_id || !request.session_id || !request.checkout_path || request.scheduled_event_id == null
+function requestFence(db: MoPDatabase, request: RespawnWhenIdleRequest, persistent: boolean, ownAttempt = false, allowUnboundFree = false): string | null {
+  if (!request.pane_id || (!request.session_id && !(allowUnboundFree && !persistent && request.occupied === false)) || !request.checkout_path || request.scheduled_event_id == null
       || TUPLE_KEYS.some(key => request[key] === undefined)) return "respawn_identity_unbound";
   const pending = persistent ? getRespawnWhenIdle(db, request.slot) : null;
   if (persistent && !sameRequest(pending, request)) return "respawn_request_changed";
   const row = db.getSlot(request.slot);
   if (!row || TUPLE_KEYS.some(key => row[key] !== request[key])) return "respawn_assignment_drift";
-  if (sessionAt(db, request.slot, request.checkout_path) !== request.session_id) return "respawn_session_drift";
+  if ((sessionAt(db, request.slot, request.checkout_path) ?? "") !== request.session_id) return "respawn_session_drift";
   if (persistent) {
     const completed = db.getEvents(request.slot, 100, "SessionStart").find(event => {
       if (event.id <= request.scheduled_event_id!) return false;
@@ -151,7 +153,7 @@ function requestFence(db: MoPDatabase, request: RespawnWhenIdleRequest, persiste
   return slotAtNaturalIdle(db, request.slot) ? null : "slot_busy_respawn_refused";
 }
 
-/** Use the existing pane send lock, verified composer and one-Enter guard for /exit. */
+/** Use the existing pane send lock, verified composer and bounded Enter retry for /exit. */
 export async function deliverRespawnExit(args: {
   db: MoPDatabase;
   relay: Pick<TmuxRelay, "deliverGuardedToSlot" | "getSlotActivityState">;
@@ -162,13 +164,13 @@ export async function deliverRespawnExit(args: {
   beforeEffect: () => string | null;
 }) {
   const row = args.db.getSlot(args.slot);
-  const request = args.request ?? (row ? captureRequest(args.db, row, args.pane, "direct") : null);
+  const request = args.request ?? (row ? captureRequest(args.db, row, args.pane, "direct", true) : null);
   if (!request || request.slot !== args.slot || request.pane_id !== args.pane.paneId) {
     return { outcome: "refused_pre_effect" as const, reason: "respawn_identity_unbound", paneId: args.pane.paneId };
   }
   const turnId = args.db.getSlot(args.slot)?.active_turn_id;
   let ownAttempt = false;
-  const fence = () => requestFence(args.db, request, !!args.request, ownAttempt)
+  const fence = () => requestFence(args.db, request, !!args.request, ownAttempt, !args.request)
     ?? (args.db.getSlot(args.slot)?.active_turn_id !== turnId ? "slot_busy_respawn_refused" : null);
   return args.relay.deliverGuardedToSlot(args.slot, "/exit", {
     expectedPaneId: request.pane_id!,

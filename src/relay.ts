@@ -1526,7 +1526,8 @@ export class TmuxRelay {
         if (confirmed) return { outcome: "delivered", paneId };
         return {
           outcome: "uncertain",
-          reason: submit.enterPresses === 0 ? "pasted_not_submitted" : "submit_unconfirmed",
+          reason: submit.enterPresses === 0 ? "pasted_not_submitted"
+            : slash && submit.cleared === false ? "composer_not_cleared" : "submit_unconfirmed",
           paneId,
         };
       } catch (err) {

@@ -23,7 +23,7 @@ async function fixture() {
   db.logEvent(1, "Stop", "Stop", null, { session_id: "s1", cwd: PATH });
   const state = { activity: "idle", pane: "%11", composer: "", buffer: "", exits: 0, pastes: 0,
     probes: 0, identities: 0, routeCalls: 0, loseAck: false, shellAck: true, launches: 0,
-    drift: {} as Record<string, unknown>, onProbe: (_n: number) => {}, onIdentity: (_n: number) => {}, onPaste: () => {} };
+    enters: 0, swallowEnters: 0, drift: {} as Record<string, unknown>, onProbe: (_n: number) => {}, onIdentity: (_n: number) => {}, onPaste: () => {} };
   const readSlot = db.getSlot.bind(db);
   db.getSlot = slot => { const row = readSlot(slot); return row && { ...row, ...state.drift }; };
   const render = () => `${RULE}\n❯ ${state.composer}\n${RULE}\n ? for shortcuts\n`;
@@ -47,7 +47,11 @@ async function fixture() {
     if (command.startsWith("tmux load-buffer")) { state.buffer = await readFile(command.match(/'([^']+)'\s*$/)![1], "utf8"); return { stdout: "", stderr: "" }; }
     if (command.startsWith("tmux paste-buffer")) { state.pastes++; state.composer = state.buffer; state.onPaste(); return { stdout: "", stderr: "" }; }
     if (command.startsWith("tmux send-keys")) {
-      if (command.includes('"/exit"') || state.composer === "/exit") { state.exits++; state.composer = ""; }
+      assert.ok(!command.includes('"/exit"'), "exit text and Enter must be separate effects");
+      if (command.endsWith(" Enter") && state.composer === "/exit") {
+        state.enters++;
+        if (state.enters > state.swallowEnters) { state.exits++; state.composer = ""; }
+      }
       if (command.includes("/fake/launch.sh")) state.launches++;
       return { stdout: "", stderr: "" };
     }
@@ -71,7 +75,7 @@ async function fixture() {
   let clock = 0;
   const globals = { app, db, relay, verifyPaneIdentity: identity, slotParamSchema: { safeParse: (s: string) => ({ success: true, data: +s }) },
     RESTART_COMMANDS: { 1: "bash /fake/launch.sh --continue" }, WEDGED_BUSY_REMEDIATION: "fixture",
-    healthChecker: { isPmInitiatedRespawn: () => false, markPmInitiatedRespawn: () => {}, clearPmInitiatedRespawn: () => {}, completePmInitiatedRespawn: () => {}, getPaneCommandPublic: async () => !state.shellAck ? "claude" : ++paneCommands === 1 ? "zsh" : "omp" },
+    healthChecker: { isPmInitiatedRespawn: () => false, markPmInitiatedRespawn: () => {}, clearPmInitiatedRespawn: () => {}, completePmInitiatedRespawn: () => {}, getPaneCommandPublic: async () => !state.shellAck || state.exits === 0 ? "claude" : ++paneCommands === 1 ? "zsh" : "omp" },
     execShell: runShell, sleep: async (ms: number) => { clock += ms; }, Date: { now: () => clock },
     SHELL_COMMANDS: new Set(["zsh"]), AGENT_COMMANDS: new Set(["omp"]), ...turn, ...idle };
   new Function(...Object.keys(globals), route)(...Object.values(globals));
@@ -146,4 +150,53 @@ test("TUI disappears after one Enter: proven shell handoff allows exactly one la
 });
 test("legacy unpinned pending record is retained without guessing an identity", async () => {
   const f = await fixture(); try { f.db.setConfig("respawn_when_idle_1", JSON.stringify({ slot: 1, requested_at: "legacy", assignment_epoch: 1, scheduled_event_id: 0 })); await f.ticker.tickSlot(1); assert.equal(f.state.pastes, 0); assert.equal(idle.getRespawnWhenIdle(f.db, 1)?.requested_at, "legacy"); } finally { await f.cleanup(); }
+});
+
+for (const occupied of [false, true]) test(`direct respawn without hook session: occupied=${occupied}`, async () => {
+  const f = await fixture(); try {
+    f.state.drift = { occupied };
+    const events = f.db.getEvents.bind(f.db);
+    f.db.getEvents = (...args) => events(...args).filter(event => !event.hook_type);
+    const response = await f.app.request("/slots/1/respawn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ continue_session: false }) });
+    assert.equal(response.status, occupied ? 409 : 200);
+    assert.equal(f.state.exits, occupied ? 0 : 1);
+    assert.equal(f.state.launches, occupied ? 0 : 1);
+  } finally { await f.cleanup(); }
+});
+for (const swallowed of [1, 2]) test(`actual respawn retries swallowed Enter once: swallowed=${swallowed}`, async () => {
+  const f = await fixture(); try {
+    f.state.swallowEnters = swallowed;
+    const response = await f.app.request("/slots/1/respawn", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    assert.equal(f.state.enters, 2);
+    assert.equal(response.status, swallowed === 1 ? 200 : 500);
+    assert.equal(f.state.launches, swallowed === 1 ? 1 : 0);
+    if (swallowed === 2) assert.equal((await response.json()).reason, "respawn_exit_uncertain");
+  } finally { await f.cleanup(); }
+});
+
+for (const drift of ["turn", "assignment", "session"]) test(`unbound free direct respawn refuses ${drift} after paste`, async () => {
+  const f = await fixture(); try {
+    f.state.drift = { occupied: false };
+    const events = f.db.getEvents.bind(f.db);
+    let hideHooks = true;
+    f.db.getEvents = (...args) => hideHooks ? events(...args).filter(event => !event.hook_type) : events(...args);
+    f.state.onPaste = () => {
+      if (drift === "turn") f.db.startAgentTurn(1, "new-turn");
+      else if (drift === "assignment") f.state.drift = { occupied: true, assignment_epoch: 99 };
+      else hideHooks = false;
+    };
+    const response = await f.app.request("/slots/1/respawn", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    assert.equal(response.status, 500);
+    assert.equal(f.state.enters, 0);
+    assert.equal(f.state.launches, 0);
+  } finally { await f.cleanup(); }
+});
+test("free pane without hooks cannot schedule an unbound deferred request", async () => {
+  const f = await fixture(); try {
+    f.state.drift = { occupied: false };
+    const events = f.db.getEvents.bind(f.db);
+    f.db.getEvents = (...args) => events(...args).filter(event => !event.hook_type);
+    assert.equal((await f.schedule()).status, 409);
+    assert.equal(f.state.pastes, 0);
+  } finally { await f.cleanup(); }
 });
