@@ -24,7 +24,7 @@ async function fixture() {
   db.logEvent(1, "Stop", "Stop", null, { session_id: "s1", cwd: PATH });
   const state = { activity: "idle", pane: "%11", composer: "", buffer: "", exits: 0, pastes: 0,
     probes: 0, identities: 0, routeCalls: 0, loseAck: false, shellAck: true, launches: 0,
-    clears: [] as string[], bootCommand: "omp", continues: 0, onEscape: () => {}, onSettle: () => {}, enters: 0, swallowEnters: 0, staleExitComposer: false, drift: {} as Record<string, unknown>, onProbe: (_n: number) => {}, onIdentity: (_n: number) => {}, onPaste: () => {} };
+    clears: [] as string[], bootCommand: "omp", continues: 0, settled: false, settleEnters: 0, onEscape: () => {}, onSettle: () => {}, enters: 0, swallowEnters: 0, staleExitComposer: false, drift: {} as Record<string, unknown>, onProbe: (_n: number) => {}, onIdentity: (_n: number) => {}, onPaste: () => {} };
   const readSlot = db.getSlot.bind(db);
   db.getSlot = slot => { const row = readSlot(slot); return row && { ...row, ...state.drift }; };
   const render = () => `${RULE}\n❯ ${state.composer}\n${RULE}\n${state.composer === "/exit" ? "  \x1b[38;2;153;153;153m❯ /exit Exit the CLI\x1b[0m" : " ? for shortcuts"}\n`;
@@ -48,6 +48,7 @@ async function fixture() {
     if (command.startsWith("tmux load-buffer")) { state.buffer = await readFile(command.match(/'([^']+)'\s*$/)![1], "utf8"); return { stdout: "", stderr: "" }; }
     if (command.startsWith("tmux paste-buffer")) { state.pastes++; state.composer = state.buffer; state.onPaste(); return { stdout: "", stderr: "" }; }
     if (command.startsWith("tmux send-keys")) {
+      if (state.settled && command.endsWith(" Enter")) state.settleEnters++;
       if (command.includes("\'continue\'")) state.continues++;
       if (command.endsWith(" Escape")) { state.clears.push("Escape"); state.onEscape(); }
       if (command.endsWith(" C-u")) { state.clears.push("C-u"); state.composer = ""; }
@@ -231,16 +232,30 @@ for (const drift of ["assignment", "turn"]) test(`autocomplete dwell ${drift}: a
     assert.deepEqual(f.state.clears, ["Escape"]); assert.equal(f.state.pastes, 0);
   } finally { await f.cleanup(); }
 });
-for (const drift of ["none", "assignment", "turn"]) test(`claude boot continuation settle ${drift}`, async () => {
+for (const drift of ["none", "assignment", "turn", "completed-turn", "completed-turn-same-time"]) test(`claude boot continuation settle ${drift}`, async () => {
   const f = await fixture(); try {
     f.state.bootCommand = "claude";
     f.state.onSettle = () => {
+      f.state.settled = true;
+      if (drift.startsWith("completed-turn")) {
+        const previousWork = f.db.getSlot(1)!.last_meaningful_work_at;
+        f.db.startAgentTurn(1, "successor");
+        if (drift === "completed-turn-same-time") {
+          f.db.logEvent(1, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "new-boot", cwd: PATH });
+          // Same-millisecond work timestamps cannot restore a monotonic event ID.
+          f.state.drift = { last_meaningful_work_at: previousWork };
+        }
+        f.db.finishAgentTurn(1, "successor");
+        assert.equal(f.db.getSlot(1)!.active_turn_id, null);
+        assert.equal(f.db.getSlot(1)!.active_turn_state, "inactive");
+      }
       if (drift === "turn") f.db.startAgentTurn(1, "settle-turn");
       if (drift === "assignment") f.state.drift = { issue: 20, assignment_epoch: 2 };
     };
     const response = await f.app.request("/slots/1/respawn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ continue_session: true }) });
     assert.equal(response.status, 200); assert.equal(f.state.launches, 1);
     assert.equal(f.state.continues, drift === "none" ? 1 : 0);
+    assert.equal(f.state.settleEnters, drift === "none" ? 1 : 0);
     if (drift !== "none") assert.equal(f.state.pastes, 1);
   } finally { await f.cleanup(); }
 });

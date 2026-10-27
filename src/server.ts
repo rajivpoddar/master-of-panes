@@ -1789,11 +1789,16 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   // result below is conditional on that exact turn actually settling.
   const preRespawnTurnId = slotState?.active_turn_id ?? null;
   const originalSession = respawnSessionAt(db, slotNum, identity.snapshot.currentPath);
+  // Stop clears active_turn_id/state; prompt history must never restore eligibility.
+  const promptStartId = () => db.getEvents(slotNum, 1, "UserPromptSubmit")[0]?.id ?? 0;
+  const originalPromptStartId = promptStartId();
   const assignmentFence = () => {
     const row = db.getSlot(slotNum);
     if (!row || !slotState || (["assignment_epoch", "issue", "repository_id", "branch_ref", "occupied"] as const)
         .some(key => row[key] !== slotState[key])) return "respawn_assignment_drift";
     if (row.active_turn_state !== "inactive" || row.active_turn_id !== preRespawnTurnId
+        || row.last_meaningful_work_at !== slotState.last_meaningful_work_at
+        || promptStartId() !== originalPromptStartId
         || (row.occupied && !row.idle)) return "slot_busy_respawn_refused";
     return null;
   };
