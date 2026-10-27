@@ -91,6 +91,14 @@ def latest_checks(runs, head):
                    else 'PENDING') for name, run in latest.items()}
 
 
+def claim_evidence(row):
+    try:
+        value = json.loads(row.get('evidence_json') or '{}')
+        return value if isinstance(value, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
 def classify(pr, runs, slots, obligations, prior, now):
     number, head = pr['number'], pr['headRefOid']
     labels = [item['name'] for item in pr['labels']]
@@ -114,30 +122,48 @@ def classify(pr, runs, slots, obligations, prior, now):
         action = 'resolve conflicts; ' + action
     owner = None
     for slot in slots:
-        if (slot.get('pr') == number or (pr.get('headRefName') and
-                pr['headRefName'] in (slot.get('checkout_branch'), slot.get('branch'),
-                                      str(slot.get('branch_ref') or '').removeprefix('refs/heads/')))):
+        # Checkout branches survive release/reassignment; only MoP's current,
+        # occupied PR+head assignment is authority, never leftover git state.
+        if slot.get('occupied') is True and slot.get('pr') == number and slot.get('head_sha') == head:
             owner = f'S{slot["slot"]}'
             break
     if owner is None:
         for row in obligations:
             until = stamp(row.get('suppress_until'))
-            if row.get('pr') == number and row.get('owner') and until and until > now:
+            evidence = claim_evidence(row)
+            if (row.get('pr') == number and row.get('owner') and until and until > now
+                    and evidence.get('head') == head):
                 owner = f'{row["owner"]} (until {row["suppress_until"]})'
                 break
-    if gate == 'CI running' and admitted and 'PENDING' in (ci, e2e):
+    ci_wait = gate == 'CI running' and admitted and 'PENDING' in (ci, e2e)
+    if ci_wait:
         owner = f'CI (admitted {head[:12]})'
     merge_ask = pr.get('merge_ask_sent', False)
     for row in obligations:
         if row.get('pr') == number and row.get('kind') == 'pr_merge_ask':
-            evidence = json.loads(row.get('evidence_json') or '{}')
+            evidence = claim_evidence(row)
             merge_ask = merge_ask or evidence.get('head') == head
     if gate == 'dual-green/merge ask' and merge_ask:
         owner, action = 'CTO (merge ask sent)', 'await merge decision'
     previous = prior.get(str(number), {})
     since = stamp(previous.get('since')) if previous.get('gate') == gate else None
     since = since or now
-    movement = 'STUCK' if owner is None or (now - since).total_seconds() > 4 * 3600 else 'MOVING'
+    movement = 'STUCK' if owner is None or (now - since).total_seconds() > 4 * 3600 else 'OWNED'
+    if movement != 'STUCK':
+        if ci_wait:
+            latest = {}
+            for run in runs:
+                if run.get('head_sha') == head and run.get('name') in ('test', 'e2e'):
+                    name = run['name']
+                    if run.get('id', 0) > latest.get(name, {}).get('id', -1):
+                        latest[name] = run
+            movement = ('QUEUED' if any(r.get('status') in ('queued', 'waiting', 'requested', 'pending')
+                                        for r in latest.values()) else 'WAITING')
+        elif gate == 'dual-green/merge ask' and merge_ask:
+            movement = 'WAITING'
+        elif previous.get('head') and previous['head'] != head:
+            movement = 'MOVING'  # observed new pushed head, not merely a claim
+
     if blocked:
         movement = 'PARKED'
         action = 'resolve ' + ','.join(blocked)
@@ -145,7 +171,7 @@ def classify(pr, runs, slots, obligations, prior, now):
     line = (f'#{number} {"draft" if pr["isDraft"] else "ready"} · {gate} '
             f'[ci-head {admission}; CI {ci}; E2E {e2e}; mergeable {pr.get("mergeable", "UNKNOWN")}] '
             f'· {safe_owner} · {action} · {movement}')
-    return line, {'gate': gate, 'since': since.isoformat()}
+    return line, {'gate': gate, 'since': since.isoformat(), 'head': head}
 
 
 def render(prs, checks, slots, obligations, prior, now):
@@ -208,16 +234,32 @@ def main():
         # Save ages even if delivery fails; retries cannot reset the STUCK clock.
         def save():
             temporary = STATE.with_suffix('.new')
-            temporary.write_text(json.dumps(saved, indent=2) + '\n')
+            with temporary.open('w') as handle:
+                handle.write(json.dumps(saved, indent=2) + '\n')
+                handle.flush()
+                os.fsync(handle.fileno())
             temporary.replace(STATE)
+            directory = os.open(STATE.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         save()
         if not args.thread:
             print('\n'.join(lines))
             return
         receipt = delivered.setdefault(key, {'parts': [], 'messages': chunks(lines)})
         save()
-        for text in receipt['messages'][len(receipt['parts']):]:
-            receipt['parts'].append(post(args.channel, args.thread, text))
+        if receipt.get('attempt') is not None:
+            raise RuntimeError('UNCERTAIN Slack part; reconcile the existing thread before retrying: '
+                               + json.dumps(receipt['attempt']))
+        for index in range(len(receipt['parts']), len(receipt['messages'])):
+            # Save intent durably BEFORE sending. A lost response or crash must
+            # never turn an accepted send into a duplicate on the next run.
+            receipt['attempt'] = {'index': index, 'started_at': now.isoformat()}
+            save()
+            receipt['parts'].append(post(args.channel, args.thread, receipt['messages'][index]))
+            receipt.pop('attempt')
             save()
         receipt['done'] = True
         save()

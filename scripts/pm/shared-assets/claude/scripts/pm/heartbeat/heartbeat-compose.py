@@ -512,11 +512,10 @@ def _session_started(path: Path) -> float | None:
 
 
 def read_agents(root: Path = PM_PROJECT, now: datetime | None = None, process_start: float | None = None) -> dict | None:
-    """Count what the CURRENT PM pane process lists (Rajiv 2026-10-23, ts 1792770807.935489).
-    Sessions = top-level JSONLs begun since the PM claude process started (chain across /clear);
-    only DIRECT subagents; completed only if finished within the process lifetime.
-    running = written <60m, not ended; completed = final end_turn; inactive = not ended, >=60m idle.
-    Unknown process start => None (unavailable), never a guess."""
+    """Count agents only from the newest top-level PM session transcript.
+    A /clear ends the previous session's agents even without finish records.
+    Keep the current session's existing running/completed/inactive classification.
+    """
     now = now or datetime.now(timezone.utc)
     if not root.is_dir():
         return None
@@ -524,21 +523,22 @@ def read_agents(root: Path = PM_PROJECT, now: datetime | None = None, process_st
         process_start = pm_process_start()
     if process_start is None:
         return None
-    # Compaction/clear changes the PM session id and old session dirs may lose their top-level JSONL,
-    # so scan EVERY session's subagents dir and filter by the agent's own start time.
-    agent_paths = []
+    current_session = None
     newest = 0.0
     for session in root.glob("*.jsonl"):
         try:
-            newest = max(newest, session.stat().st_mtime)
+            modified = session.stat().st_mtime
+            if modified > newest:
+                newest = modified
+                current_session = session
         except OSError:
             continue
-    if not newest:
+    if current_session is None:
         return None
     if now.timestamp() - newest > PM_SESSION_FRESH_S:
         return None  # fresh children cannot revive a dead PM pane
     running, completed, inactive, stale, unreadable = 0, [], [], [], 0
-    for path in root.glob("*/subagents/agent-*.jsonl"):
+    for path in (root / current_session.stem / "subagents").glob("agent-*.jsonl"):
         try:
             modified_at = path.stat().st_mtime
             age_s = now.timestamp() - modified_at

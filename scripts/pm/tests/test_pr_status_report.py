@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import pytest
 from unittest.mock import patch
 
 ASSETS = Path(__file__).resolve().parents[1] / 'shared-assets/claude'
@@ -36,8 +37,8 @@ def fixture():
 
 def test_mixed_fixture():
     prs, checks = fixture()
-    obligations = [dict(pr=n, owner='repair-agent', suppress_until='2026-10-27T12:00:00Z') for n in range(1, 9)]
-    lines, ages = report.render(prs, checks, [dict(slot=2, pr=1, issue=123)], obligations,
+    obligations = [dict(pr=n, owner='repair-agent', suppress_until='2026-10-27T12:00:00Z', evidence_json=json.dumps({'head': 'head'})) for n in range(1, 9)]
+    lines, ages = report.render(prs, checks, [dict(slot=2, pr=1, issue=123, occupied=True, head_sha='head')], obligations,
                                {'6': {'gate': 'dual-green/merge ask', 'since': '2026-10-27T05:00:00Z'}}, NOW)
     assert len(lines) == 8
     for line, expected in zip(lines, ['draft-rework', '12b', 'CI running', 'CI red', 'E2E red',
@@ -47,7 +48,8 @@ def test_mixed_fixture():
     assert 'STUCK' in lines[5]
     assert 'resolve conflicts' in lines[7]
     assert ages['6']['since'] == '2026-10-27T05:00:00+00:00'
-    assert all('MOVING' in line for line in lines[:5])
+    assert all('OWNED' in lines[i] for i in (0, 1, 3, 4))
+    assert 'WAITING' in lines[2]
 
 
 def test_unowned_expired_and_wrong_head():
@@ -95,22 +97,56 @@ def test_real_sender_callback_only_hourly_alert_parent():
                 assert run.call_args.args[0][-2:] == ['--thread', '123.456']
 
 
-def test_pending_ci_lane_owns_admitted_pr_until_four_hours():
+def test_pending_ci_lane_waits_without_claiming_movement():
     prs, checks = fixture()
-    for prior, expected in [({}, 'MOVING'), ({'3': {'gate': 'CI running', 'since': '2026-10-27T05:00:00Z'}}, 'STUCK')]:
+    for prior, expected in [({}, 'WAITING'), ({'3': {'gate': 'CI running', 'since': '2026-10-27T05:00:00Z'}}, 'STUCK')]:
         lines, _ = report.render([prs[2]], checks, [], [], prior, NOW)
         assert 'CI (admitted head)' in lines[0]
         assert expected in lines[0]
 
 
-def test_draft_branch_matches_live_slot_checkout():
+@pytest.mark.parametrize('slot', [
+    dict(slot=2, pr=None, occupied=False, head_sha='head', checkout_branch='feature/live-work'),
+    dict(slot=2, pr=99, occupied=True, head_sha='head', checkout_branch='feature/live-work'),
+    dict(slot=2, pr=1, occupied=True, head_sha='old', checkout_branch='feature/live-work'),
+])
+def test_stale_checkout_cannot_own_pr(tmp_path, monkeypatch, capsys, slot):
     prs, checks = fixture()
     prs[0]['headRefName'] = 'feature/live-work'
-    lines, _ = report.render([prs[0]], checks, [dict(slot=2, pr=None, checkout_branch='feature/live-work')], [], {}, NOW)
-    assert 'S2' in lines[0] and 'MOVING' in lines[0]
-    # A PR-field assignment also works when issue metadata is absent.
-    lines, _ = report.render([prs[0]], checks, [dict(slot=1, pr=1)], [], {}, NOW)
-    assert 'S1' in lines[0]
+    monkeypatch.setattr(report, 'STATE', tmp_path / 'state.json')
+    monkeypatch.setattr(report, 'collect', lambda: ([prs[0]], checks, [slot], []))
+    monkeypatch.setattr(sys, 'argv', ['report'])
+    report.main()
+    line = capsys.readouterr().out
+    assert 'unowned' in line and 'STUCK' in line and 'S2' not in line
+    assert 'draft-rework' in line  # draft takes precedence over CI
+
+
+def test_exact_head_current_slot_is_owned_not_assumed_moving():
+    prs, checks = fixture()
+    lines, _ = report.render([prs[0]], checks,
+                            [dict(slot=1, pr=1, occupied=True, head_sha='head')], [], {}, NOW)
+    assert 'S1' in lines[0] and 'OWNED' in lines[0] and 'MOVING' not in lines[0]
+
+
+@pytest.mark.parametrize('head,expected', [('old', 'unowned'), ('head', 'repair-agent')])
+def test_obligation_must_match_current_head(head, expected):
+    prs, checks = fixture()
+    rows = [dict(pr=1, owner='repair-agent', suppress_until='2026-10-27T12:00:00Z',
+                 evidence_json=json.dumps({'head': head}))]
+    lines, _ = report.render([prs[0]], checks, [], rows, {}, NOW)
+    assert expected in lines[0] and 'MOVING' not in lines[0]
+
+
+def test_queued_ci_is_not_observed_progress(tmp_path, monkeypatch, capsys):
+    prs, checks = fixture()
+    checks[3][0]['status'] = 'queued'
+    monkeypatch.setattr(report, 'STATE', tmp_path / 'state.json')
+    monkeypatch.setattr(report, 'collect', lambda: ([prs[2]], checks, [], []))
+    monkeypatch.setattr(sys, 'argv', ['report'])
+    report.main()
+    line = capsys.readouterr().out
+    assert 'QUEUED' in line and 'MOVING' not in line
 
 
 def test_current_head_merge_ask_transfers_owner_to_cto():
@@ -119,7 +155,7 @@ def test_current_head_merge_ask_transfers_owner_to_cto():
         rows = [dict(pr=6, kind='pr_merge_ask', evidence_json=json.dumps({'head': evidence}))]
         lines, _ = report.render([prs[5]], checks, [], rows, {}, NOW)
         assert expected in lines[0]
-        assert ('MOVING' if evidence == 'head' else 'STUCK') in lines[0]
+        assert ('WAITING' if evidence == 'head' else 'STUCK') in lines[0]
     prs[5]['merge_ask_sent'] = True
     lines, _ = report.render([prs[5]], checks, [], [], {}, NOW)
     assert 'CTO (merge ask sent)' in lines[0]
@@ -134,3 +170,65 @@ def test_post_has_one_pr_per_block_and_explicit_multiline_fallback():
         blocks = json.loads(argv[argv.index('-b') + 1])
         assert [b['text']['text'] for b in blocks][1:] == ['#1 ready · MOVING', '#2 draft · MOVING']
         assert '\n\n#1' in run.call_args.kwargs['input']
+
+
+def test_lost_slack_response_stops_restart_without_duplicate(tmp_path, monkeypatch):
+    prs, checks = fixture()
+    state = tmp_path / 'state.json'
+    monkeypatch.setattr(report, 'STATE', state)
+    monkeypatch.setattr(report, 'collect', lambda: (prs, checks, [], []))
+    monkeypatch.setattr(sys, 'argv', ['report', '--thread', '123.0'])
+    accepted = []
+
+    def lost_response(*args, **kwargs):
+        saved = json.loads(state.read_text())
+        assert saved['delivered']['C0ALZJHGE49:123.0']['attempt']['index'] == 0
+        accepted.append(kwargs['input'])  # Slack accepted it, response was lost
+        raise __import__('subprocess').TimeoutExpired('slack-send', 120)
+
+    with patch('subprocess.run', side_effect=lost_response):
+        with pytest.raises(__import__('subprocess').TimeoutExpired):
+            report.main()
+    # Reload the production entry point, as a real new process would.
+    restarted = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(restarted)
+    monkeypatch.setattr(restarted, 'STATE', state)
+    monkeypatch.setattr(restarted, 'collect', lambda: (prs, checks, [], []))
+    with patch('subprocess.run') as send:
+        with pytest.raises(RuntimeError, match='UNCERTAIN'):
+            restarted.main()
+        send.assert_not_called()
+    assert len(accepted) == 1
+
+
+def test_confirmed_parts_reused_after_restart(tmp_path, monkeypatch):
+    state = tmp_path / 'state.json'
+    state.write_text(json.dumps({'delivered': {'C0ALZJHGE49:123.0': {
+        'parts': ['123.1'], 'messages': ['already posted', 'remaining']}}}))
+    monkeypatch.setattr(report, 'STATE', state)
+    monkeypatch.setattr(report, 'collect', lambda: ([], {}, [], []))
+    monkeypatch.setattr(sys, 'argv', ['report', '--thread', '123.0'])
+    with patch('subprocess.run') as send:
+        send.return_value.stdout = 'OK ts=123.2'
+        report.main()
+        assert send.call_count == 1 and send.call_args.kwargs['input'] == 'remaining'
+        report.main()
+        assert send.call_count == 1
+    receipt = json.loads(state.read_text())['delivered']['C0ALZJHGE49:123.0']
+    assert receipt['parts'] == ['123.1', '123.2'] and receipt['done']
+    assert 'attempt' not in receipt
+
+
+def test_twenty_two_rows_preserve_block_layout():
+    prs, checks = fixture()
+    prs = [dict(prs[i % 8], number=i + 1) for i in range(22)]
+    lines, _ = report.render(prs, checks, [], [], {}, NOW)
+    assert len(lines) == 22
+    text = report.chunks(lines)[0]
+    with patch('subprocess.run') as send:
+        send.return_value.stdout = 'OK ts=123.4'
+        report.post('C0ALZJHGE49', '123.0', text)
+    argv = send.call_args.args[0]
+    blocks = json.loads(argv[argv.index('-b') + 1])
+    assert len(blocks) == 23
+    assert [b['text']['text'] for b in blocks][1:] == lines
