@@ -109,3 +109,20 @@ def test_failed_sync_does_not_advance_merge_cursor(tmp_path):
         with pytest.raises(RuntimeError):
             m.run()
     assert json.loads(state.read_text())['since'] == '2026-10-26T00:00:00Z'
+
+
+def test_blocker_states_batches_reads_and_keeps_invalid_or_missing_unknown():
+    m = load()
+    response = {'data': {'repository': {
+        'b10': {'__typename': 'Issue', 'state': 'CLOSED'},
+        'b11': {'__typename': 'PullRequest', 'merged': False}, 'b12': None}},
+        'errors': [{'type': 'NOT_FOUND', 'path': ['repository', 'b12']}]}
+    with patch.object(m, 'gh', return_value=response) as query:
+        assert m.blocker_states({10, 11, 12, 39189729524}) == {10: True, 11: False, 12: None, 39189729524: None}
+        assert query.call_count == 1
+        assert '39189729524' not in query.call_args.args[-1]
+    with patch.object(m, 'gh', side_effect=m.subprocess.CalledProcessError(1, ['gh'], output=json.dumps(response))):
+        assert m.blocker_states({10, 11, 12})[10] is True
+    with patch.object(m, 'gh', return_value={'errors': [{'type': 'RATE_LIMITED'}]}):
+        with pytest.raises(RuntimeError):
+            m.blocker_states({10})

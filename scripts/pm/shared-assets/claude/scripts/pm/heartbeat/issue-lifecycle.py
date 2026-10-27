@@ -133,6 +133,41 @@ def timeline(number, page):
         page = graphql(query, dict(number=number, cursor=page['pageInfo']['endCursor']))['repository']['issue']['timelineItems']
 
 
+def blocker_states(numbers):
+    """Resolve bounded batches; absent references are unknown, not satisfied."""
+    known = dict.fromkeys(numbers)
+    valid = sorted(n for n in numbers if 0 < n <= 2147483647)
+    for start in range(0, len(valid), 30):
+        batch = valid[start:start + 30]
+        aliases = {f'b{n}': n for n in batch}
+        fields = ' '.join(f'{a}:issueOrPullRequest(number:{n}) {{ __typename ... on Issue {{ state }} ... on PullRequest {{ merged }} }}'
+                          for a, n in aliases.items())
+        query = 'query { repository(owner:"heydonna-app",name:"heydonna-app") { ' + fields + ' } }'
+        try:
+            doc = gh('api', 'graphql', '-f', 'query=' + query)
+        except subprocess.CalledProcessError as error:
+            # gh exits 1 even for a valid partial response with a missing alias.
+            doc = json.loads(error.stdout or '{}')
+            if not doc.get('errors'):
+                raise
+        for error in doc.get('errors', []):
+            path = error.get('path', [])
+            if (error.get('type') != 'NOT_FOUND' or len(path) != 2
+                    or path[0] != 'repository' or path[1] not in aliases):
+                raise RuntimeError('GitHub blocker query failed')
+        repository = doc['data']['repository']
+        for alias, n in aliases.items():
+            node = repository[alias]
+            if node is not None:
+                if node['__typename'] == 'Issue':
+                    known[n] = node['state'] == 'CLOSED'
+                elif node['__typename'] == 'PullRequest':
+                    known[n] = node['merged'] is True
+                else:
+                    raise ValueError('unexpected blocker type')
+    return known
+
+
 def collect(since):
     issues, cursor = [], None
     while True:
@@ -165,16 +200,13 @@ def collect(since):
         cursor = page['pageInfo']['endCursor']
     known = {i['number']: False for i in issues}
 
-    def resolve(n):
-        if n not in known:
-            doc = gh('api', f'repos/{REPO}/issues/{n}')
-            if doc.get('pull_request'):
-                pr = gh('api', f'repos/{REPO}/pulls/{n}')
-                known[n] = bool(pr.get('merged_at'))
-            else:
-                known[n] = doc.get('state') == 'closed'
-        return known[n]
-    return issues, open_prs, slots, merged, resolve
+    needed = set()
+    for item in issues:
+        labs = labels(item)
+        if labs & {'status:blocked', 'status:backlog'} or any(l.startswith('pm-blocked:') for l in labs):
+            needed.update(refs(BLOCKERS, item.get('body')) - {item['number']})
+    known.update(blocker_states(needed - known.keys()))
+    return issues, open_prs, slots, merged, known.get
 
 
 def sync(findings):
