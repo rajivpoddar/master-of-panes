@@ -5,10 +5,12 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import pytest
 from unittest.mock import patch
 
-ASSETS = Path(__file__).resolve().parents[1] / 'shared-assets/claude'
+ASSETS = Path(os.environ.get('MOP_REPORT_PROOF_ASSETS',
+    Path(__file__).resolve().parents[1] / 'shared-assets/claude'))
 SCRIPT = ASSETS / 'scripts/pm/heartbeat/pr-status-report.py'
 spec = importlib.util.spec_from_file_location('pr_status_report', SCRIPT)
 report = importlib.util.module_from_spec(spec)
@@ -204,7 +206,7 @@ def test_lost_slack_response_stops_restart_without_duplicate(tmp_path, monkeypat
 def test_confirmed_parts_reused_after_restart(tmp_path, monkeypatch):
     state = tmp_path / 'state.json'
     state.write_text(json.dumps({'delivered': {'C0ALZJHGE49:123.0': {
-        'parts': ['123.1'], 'messages': ['already posted', 'remaining']}}}))
+        'parts': ['123.1'], 'messages': ['already posted', 'remaining'], 'delivery_version': 1}}}))
     monkeypatch.setattr(report, 'STATE', state)
     monkeypatch.setattr(report, 'collect', lambda: ([], {}, [], []))
     monkeypatch.setattr(sys, 'argv', ['report', '--thread', '123.0'])
@@ -232,3 +234,140 @@ def test_twenty_two_rows_preserve_block_layout():
     blocks = json.loads(argv[argv.index('-b') + 1])
     assert len(blocks) == 23
     assert [b['text']['text'] for b in blocks][1:] == lines
+
+
+def entry_fixture(tmp_path):
+    """Actual reporter main and Bash sender; only external boundaries are synthetic."""
+    home = tmp_path / 'home'
+    scripts = home / '.claude/scripts'
+    scripts.mkdir(parents=True)
+    environment = tmp_path / 'fixture.env'
+    environment.write_text('SLACK_BOT_TOKEN=fixture-only\nSLACK_ALERTS_BOT_TOKEN=fixture-only\n')
+    sender = (ASSETS / 'skills/slack-message/scripts/slack-send.sh').read_text()
+    # Redirect its one hardcoded credential dependency, never read production env.
+    old = 'PM_ENV="/Users/rajiv/Downloads/projects/heydonna-app/.env.local"'
+    assert sender.count(old) == 1
+    actual = tmp_path / 'actual-slack-send.sh'
+    actual.write_text(sender.replace(old, f'PM_ENV="{environment}"'))
+    (scripts / 'slack-send.sh').write_text(f'''#!/bin/bash
+if [ "${{CASE_FAULT:-}}" = stdout-loss ] && [ -f "$CASE_LOG" ]; then
+  exec bash '{actual}' "$@" >/dev/null
+fi
+exec bash '{actual}' "$@"
+''')
+    binaries = tmp_path / 'bin'
+    binaries.mkdir()
+    curl = binaries / 'curl'
+    curl.write_text(f'''#!{sys.executable}
+import json,os,sys
+from pathlib import Path
+assert sys.argv[-3] == '-d' or '-d' in sys.argv
+assert 'https://slack.com/api/chat.postMessage' in sys.argv
+p=json.loads(sys.argv[sys.argv.index('-d')+1])
+log=Path(os.environ['CASE_LOG'])
+rows=log.read_text().splitlines() if log.exists() else []
+state=json.loads((Path.home()/'.claude/state/pr-status-report.json').read_text())
+receipt=state['delivered']['C_TEST:123.0']
+index=len(rows)
+attempt=receipt.get('attempt',{{}})
+with log.open('a') as f:
+ f.write(json.dumps({{'payload':p,'attempt_before_send':'attempted' if attempt.get('index')==index else None}})+'\\n');f.flush();os.fsync(f.fileno())
+print(json.dumps({{'ok':True,'ts':f'321.{{len(rows)+1:06d}}','channel':p['channel']}}))
+''')
+    curl.chmod(0o755)
+    data = tmp_path / 'input.json'
+    prs = [dict(number=n, headRefOid='head', headRefName=f'pr-{n}', isDraft=False,
+                labels=[], mergeable='MERGEABLE') for n in range(1, 42)]
+    data.write_text(json.dumps(prs))
+    driver = tmp_path / 'reporter-entry.py'
+    driver.write_text('''import importlib.util,json,os,sys
+from pathlib import Path
+s=importlib.util.spec_from_file_location('entry_report',os.environ['CASE_REPORT'])
+m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+m.collect=lambda:(json.loads(Path(os.environ['CASE_INPUT']).read_text()),{},[],[])
+real=m.post
+calls=0
+def post(*args):
+ global calls
+ result=real(*args);calls+=1
+ if os.environ.get('CASE_FAULT')=='crash' and calls==2: os._exit(87)
+ return result
+m.post=post
+m.main()
+''')
+    log = tmp_path / 'accepted.jsonl'
+    env = {**os.environ, 'HOME': str(home), 'PATH': str(binaries) + os.pathsep + os.environ['PATH'],
+           'CASE_INPUT': str(data), 'CASE_REPORT': str(SCRIPT), 'CASE_LOG': str(log),
+           'BRIDGE_DB': str(tmp_path / 'never-production.db')}
+    def invoke(fault=''):
+        return subprocess.run([sys.executable, str(driver), '--channel', 'C_TEST', '--thread', '123.0'],
+                              cwd=tmp_path, env={**env, 'CASE_FAULT': fault},
+                              text=True, capture_output=True, timeout=20)
+    return invoke, log, home / '.claude/state/pr-status-report.json'
+
+
+@pytest.mark.parametrize('fault,code', [('stdout-loss', 1), ('crash', 87)])
+def test_actual_entries_accepted_second_part_response_loss_and_restart(tmp_path, fault, code):
+    invoke, log, ledger = entry_fixture(tmp_path)
+    first = invoke(fault)
+    before = json.loads(ledger.read_text())['delivered']['C_TEST:123.0']
+    again = invoke()
+    rows = [json.loads(x) for x in log.read_text().splitlines()]
+    assert len(rows) == 2
+    assert first.returncode == code, first.stderr
+    # Real sender accepted both parts; only the first has a durable confirmation.
+    assert before['parts'] == ['321.000001']
+    assert before['attempt']['index'] == 1
+    assert again.returncode == 1 and 'UNCERTAIN' in again.stderr
+    assert all(r['attempt_before_send'] == 'attempted' for r in rows)
+    assert json.loads(ledger.read_text())['delivered']['C_TEST:123.0']['parts'] == before['parts']
+
+
+def test_actual_entries_confirm_all_rows_and_never_repeat_completed_thread(tmp_path):
+    invoke, log, ledger = entry_fixture(tmp_path)
+    first = invoke()
+    assert first.returncode == 0, first.stderr
+    assert invoke().returncode == 0
+    rows = [json.loads(x) for x in log.read_text().splitlines()]
+    assert len(rows) == 2
+    visible = [line for row in rows for line in row['payload']['text'].splitlines() if line.startswith('#')]
+    assert [int(line.split()[0][1:]) for line in visible] == list(range(1, 42))
+    for row in rows:
+        assert row['payload']['thread_ts'] == '123.0'
+        assert len([b for b in row['payload']['blocks'] if b['text']['text'].startswith('#')]) in (40, 1)
+    saved = json.loads(ledger.read_text())['delivered']['C_TEST:123.0']
+    assert saved['done'] and len(saved['parts']) == 2
+
+
+def test_legacy_incomplete_receipt_retains_confirmed_parts_without_send(tmp_path):
+    invoke, log, ledger = entry_fixture(tmp_path)
+    ledger.parent.mkdir(parents=True)
+    receipt = {'parts': ['321.000001'], 'messages': ['confirmed', 'possibly sent']}
+    ledger.write_text(json.dumps({'delivered': {'C_TEST:123.0': receipt}}))
+    result = invoke()
+    assert result.returncode == 1 and 'UNCERTAIN' in result.stderr
+    assert not log.exists()
+    assert json.loads(ledger.read_text())['delivered']['C_TEST:123.0']['parts'] == receipt['parts']
+
+
+def test_legacy_accepted_response_loss_is_not_replayed(tmp_path):
+    invoke, log, ledger = entry_fixture(tmp_path)
+    assert invoke('stdout-loss').returncode == 1
+    # Encode the exact pre-fix receipt shape after a known accepted second part.
+    # These are synthetic files; no real receipt or production state is changed.
+    saved = json.loads(ledger.read_text())
+    receipt = saved['delivered']['C_TEST:123.0']
+    receipt.pop('attempt', None)
+    receipt.pop('delivery_version', None)
+    ledger.write_text(json.dumps(saved))
+    restarted = invoke()
+    assert len(log.read_text().splitlines()) == 2
+    assert restarted.returncode == 1 and 'UNCERTAIN' in restarted.stderr
+    assert json.loads(ledger.read_text())['delivered']['C_TEST:123.0']['parts'] == ['321.000001']
+
+
+def test_native_draft_false_precedes_legacy_true():
+    prs, checks = fixture()
+    prs[0].update(isDraft=False, draft=True)
+    lines, _ = report.render(prs, checks, [], [], {}, NOW)
+    assert '#1 ready' in lines[0] and 'draft-rework' not in lines[0]

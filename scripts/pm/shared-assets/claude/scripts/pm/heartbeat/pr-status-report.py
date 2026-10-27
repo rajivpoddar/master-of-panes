@@ -227,6 +227,14 @@ def main():
         if args.thread and delivered.get(key, {}).get('done'):
             print('ALREADY_POSTED ' + key)
             return
+        receipt = delivered.get(key) if args.thread else None
+        if receipt and (receipt.get('attempt') is not None or
+                (len(receipt['parts']) < len(receipt['messages'])
+                 and receipt.get('delivery_version') != 1)):
+            # Older receipts cannot prove the next part was never accepted.
+            # Keep confirmed parts and stop before even recollecting providers.
+            raise RuntimeError('UNCERTAIN Slack part; reconcile the existing thread before retrying: '
+                               + key + f'; confirmed_parts={len(receipt["parts"])}')
         prs, checks, slots, obligations = collect()
         now = dt.datetime.now(dt.timezone.utc)
         lines, ages = render(prs, checks, slots, obligations, saved.get('gates', {}), now)
@@ -248,7 +256,7 @@ def main():
         if not args.thread:
             print('\n'.join(lines))
             return
-        receipt = delivered.setdefault(key, {'parts': [], 'messages': chunks(lines)})
+        receipt = delivered.setdefault(key, {'parts': [], 'messages': chunks(lines), 'delivery_version': 1})
         save()
         if receipt.get('attempt') is not None:
             raise RuntimeError('UNCERTAIN Slack part; reconcile the existing thread before retrying: '
