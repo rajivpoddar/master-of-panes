@@ -1237,7 +1237,7 @@ export class TmuxRelay {
             prePasteComposer = await readComposer();
             const slash = isSlashCommand(command);
             if (slash && slashComposerClearable(prePasteComposer, command)) {
-              prePasteComposer = await this.clearComposerForSlash(paneTarget, readComposer);
+              prePasteComposer = await this.clearComposerForSlash(paneTarget, readComposer, command);
             }
             await this.runShell(
               `tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`,
@@ -1340,9 +1340,13 @@ export class TmuxRelay {
   }
 
   /** Escape (dismiss any autocomplete menu) then C-u (clear the line); return the re-read composer. */
-  private async clearComposerForSlash(paneTarget: string, read: () => Promise<string | null>): Promise<string | null> {
+  private async clearComposerForSlash(paneTarget: string, read: () => Promise<string | null>, command: string): Promise<string | null> {
     try {
       await this.runShell(`tmux send-keys -t ${paneTarget} Escape`, { timeout: 3_000 });
+      // Escape closes autocomplete asynchronously; an immediate C-u is swallowed.
+      await sleep(Math.max(250, resolveSlashCommandEnterDelayMs()));
+      const settled = await read();
+      if (!slashComposerClearable(settled, command)) return settled;
       await this.runShell(`tmux send-keys -t ${paneTarget} C-u`, { timeout: 3_000 });
     } catch {
       return null;
@@ -1472,7 +1476,7 @@ export class TmuxRelay {
       let prePasteComposer = composerText(before);
       const slash = isSlashCommand(command);
       if (slash && slashComposerClearable(prePasteComposer, command)) {
-        prePasteComposer = await this.clearComposerForSlash(paneId, async () => composerText(await capture()));
+        prePasteComposer = await this.clearComposerForSlash(paneId, async () => composerText(await capture()), command);
       }
       if (prePasteComposer === null) return { outcome: "refused_pre_effect", reason: "composer_unreadable", paneId };
       if (prePasteComposer !== "") return { outcome: "refused_pre_effect", reason: "composer_not_empty", paneId };

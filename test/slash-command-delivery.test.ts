@@ -161,3 +161,17 @@ test("activity probe retains busy composer state despite a white menu chevron", 
   } });
   assert.equal(await relay.getPaneActivityState("%16"), "active");
 });
+
+test("slash clear waits for Escape rendering before C-u and preserves a changed draft", async () => {
+  const p: Pane = { composer: "/exit", buffer: "", keys: [], swallowEnters: 0 };
+  const run = shell(p);
+  const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: async command => {
+    if (command.startsWith("tmux capture-pane") && p.keys.includes("Escape")) p.composer = "operator draft";
+    return run(command);
+  } });
+  const result = await guarded(relay, "/exit");
+  assert.equal(result.outcome, "refused_pre_effect");
+  assert.equal(result.reason, "composer_not_empty");
+  assert.deepEqual(p.keys, ["Escape"]);
+  assert.equal(p.composer, "operator draft");
+});
