@@ -609,7 +609,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "2c1fe6bdbe4f557c63423b1e2d385ea0499067e5bab198e67deb31617bcf959e",
+      "sha256": "6386a0e417db9bca90960ce5bcd339183133105025039a02866bc41c465a4d71",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -629,6 +629,15 @@
       "ownership_class": "shared-claude-hourly-heartbeat",
       "sha256": "0533d09e06fbc63a95e4db07e27eda5a5276a73f3874bf1a87b1e747ad1e975e",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-known-codes.json"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/issue-lifecycle.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "f557e1b8423498c1e71bece01901a327697ee7514a53a370d1367268bfd4b262",
+      "source_path": "claude/scripts/pm/heartbeat/issue-lifecycle.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/pr-open-snapshot.py",
@@ -890,8 +899,20 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "f0fdf923b787cf8c33aac33acaa5f7bce3280a3815bbd090df7710824d0eb124",
+      "sha256": "1d0b7df2abe06522ee176b4fa485a015deb553bf87e59d1a3d088290f01245a7",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
+    },
+    {
+      "additional_targets": [
+        "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/hourly-report-processing/SKILL.md"
+      ],
+      "canonical_target": "/Users/rajiv/.claude/skills/hourly-report-processing/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "72833fecba9f92e6e92890d26ed258b99b5a4a90d09502925ca2ddcb77bb061a",
+      "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/macos-word-window-screenshot/SKILL.md",
@@ -1500,7 +1521,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 163,
+    "selected_count": 165,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

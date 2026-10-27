@@ -1134,7 +1134,15 @@ def main() -> int:
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")
     training = training_line() if args.mode == "1h" else None
-    unblockable = unblockable_block(failures) if args.mode == "1h" else None
+    # Extend the existing Unblockable now section, never add a second queue.
+    unblockable = None
+    if args.mode == "1h":
+        lifecycle = _run_json([py, str(SCRIPTS / "issue-lifecycle.py")],
+                              failures, "issue-lifecycle", timeout=600)
+        unblockable = (lifecycle["lines"] if lifecycle else
+                       ["*Unblockable now / issue lifecycle:*", "• unavailable; cursor retained, PM must retry"])
+        if lifecycle and lifecycle["findings"]:
+            pm_actions.append("orphaned_issue: disposition every open lifecycle obligation via hourly-report-processing")
     langsmith = None  # LangSmith ingest dropped from the hourly (Rajiv ts 1792806414.519859)
     print(compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
