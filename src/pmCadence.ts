@@ -21,7 +21,7 @@ import { join } from "node:path";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 
-export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat" | "growth-daily" | "lifecycle-email";
+export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat" | "growth-daily" | "lifecycle-email" | "daily-pm-restart";
 export type PMCadenceTriggerReason = "scheduled" | "manual" | "boot";
 
 type PMCadenceTask = {
@@ -105,12 +105,33 @@ export function isLifecycleEmailWindow(now: Date): boolean {
   return et.weekday !== "Sat" && et.weekday !== "Sun" && et.hour >= 10;
 }
 
+const DAILY_PM_RESTART_TASK: PMCadenceTask = {
+  name: "daily-pm-restart",
+  label: "daily PM restart (04:00 IST)",
+  configPrefix: "pm_cadence_daily_pm_restart",
+  commandDescription: "MoP: run Skill(daily-pm-restart)",
+};
+
+export function dailyPMRestartParts(now: Date): { day: string; hour: number } {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", hourCycle: "h23",
+  }).formatToParts(now).map((p) => [p.type, p.value]));
+  return { day: `${parts.year}-${parts.month}-${parts.day}-IST`, hour: Number(parts.hour) };
+}
+
+export function isDailyPMRestartWindow(now: Date): boolean {
+  // No midday boot catch-up: only the 04:00 hour can enqueue a new occurrence.
+  return dailyPMRestartParts(now).hour === 4;
+}
+
 const TASKS: Record<PMCadenceTaskName, PMCadenceTask> = {
   heartbeat: HEARTBEAT_TASK,
   "morning-brief": MORNING_BRIEF_TASK,
   "hourly-heartbeat": HOURLY_HEARTBEAT_TASK,
   "growth-daily": GROWTH_DAILY_TASK,
   "lifecycle-email": LIFECYCLE_EMAIL_TASK,
+  "daily-pm-restart": DAILY_PM_RESTART_TASK,
 };
 
 const CFG_GLOBAL_PAUSED = "pm_cadence_paused";
@@ -229,6 +250,8 @@ export class PMCadenceScheduler {
       if (growth) results.push(growth);
       const lifecycle = await this.runIfDue("lifecycle-email", reason);
       if (lifecycle) results.push(lifecycle);
+      const restart = await this.runIfDue("daily-pm-restart", reason);
+      if (restart) results.push(restart);
       return results;
     } finally {
       this.running = false;
@@ -417,6 +440,7 @@ export class PMCadenceScheduler {
   }
 
   private currentDueKey(taskName: PMCadenceTaskName, now = new Date()): string {
+    if (taskName === "daily-pm-restart") return dailyPMRestartParts(now).day;
     if (taskName === "lifecycle-email") return lifecycleEmailParts(now).day;
     if (taskName === "heartbeat") return heartbeatDueKey(now);
     if (taskName === "hourly-heartbeat") return hourlyHeartbeatDueKey(now);
@@ -425,6 +449,9 @@ export class PMCadenceScheduler {
   }
 
   private isTaskDue(taskName: PMCadenceTaskName, now: Date, lastDueKey: string | null): boolean {
+    if (taskName === "daily-pm-restart") {
+      return isDailyPMRestartWindow(now) && dailyPMRestartParts(now).day !== lastDueKey;
+    }
     if (taskName === "lifecycle-email") {
       return isLifecycleEmailWindow(now) && lifecycleEmailParts(now).day !== lastDueKey;
     }
