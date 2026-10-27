@@ -13,14 +13,15 @@ Launch `lifecycle-email-agent` in the background (`run_in_background=true`) with
 
 ## Pieces
 - Selector (deterministic, no LLM): `~/.claude/scripts/growth/lifecycle-drip.py`
-  - `select [--dry-run]`: JSON `{meta, records, skipped}`. A non-dry run appends a `run` marker, which bounds the FIRST_FILE_READY window.
-  - `record-sent --user-id U --email E --touch T --gmail-id G`: idempotent send-once record.
+  - `select [--dry-run]`: JSON `{meta, records, skipped}`. Run markers are reporting only; unsent FIRST_FILE_READY stays recoverable within the cohort even after a failed/skipped batch.
+  - `send --user-id U --email E --touch T --subject S --body-file F`: the sole lifecycle Gmail writer; per-touch lock and fsynced attempt precede Gmail, then the confirmed Gmail ID is fsynced under the same lock.
+  - `record-sent --user-id U --email E --touch T --gmail-id G --attempt-id A`: reconcile an existing exact owned uncertain attempt from an observed Gmail ID; never a resend.
   - `opt-out --email E [--reason ...]`: adds the address to the opt-out list.
 - State: `~/.claude/state/lifecycle-drip.jsonl` (send-once per (userId, touch)). Opt-outs: `~/.claude/state/lifecycle-drip-optout.jsonl`.
 - Templates: `templates/{D0,D1,D3,D7,FIRST_FILE_READY}.txt`. The header holds `STATUS:`, `TOUCH:` and `SUBJECT:`, then `---`, then the body.
 
 ## Rules (selector)
-- D0: signed up < 24h ago. D1: 1–2 days, touched the sample, no own file. D3: 3–4 days, no own upload. D7: 7–8 days, no activity in 5 days. FIRST_FILE_READY: first own-file transcript finished auto-process since the last real run. At most one touch per user per run (priority FIRST_FILE_READY > D0 > D1 > D3 > D7).
+- D0: signed up < 24h ago. D1: 1–2 days, touched the sample, no own file. D3: 3–4 days, no own upload. D7: 7–8 days, no activity in 5 days. FIRST_FILE_READY: first own-file transcript finished auto-process and this touch is unsent; batch selection never consumes it. At most one touch per user per run (priority FIRST_FILE_READY > D0 > D1 > D3 > D7).
 - Excluded: Scribie cohort (active member of an `externalOrgId=scribie` workspace, `cohort=scribie`, or a scribie.com/.ai source/referrer/landing), abuse-flagged (`adjustment` ledger row with an `abuse:` reason), @heydonna.law / @scribie.com, opted out, already sent, and anyone rajiv@ emailed manually in the last 3 days (so we don't double-email).
 
 ## Hard gates (agent refuses otherwise)
@@ -32,8 +33,8 @@ Launch `lifecycle-email-agent` in the background (`run_in_background=true`) with
 ## Send loop (only when send_allowed)
 For each record:
 1. Fill the touch template: `{first_name}` (fall back to "Hi there,"), `{credits_left}` / `{audio_hours}` from facts, and replace each `{PERSONALIZE: ...}` with one or two sentences grounded in facts.
-2. `gws gmail +send --to <email> --subject "<subject>" --body "<body>"` (rajiv@heydonna.law is the authenticated account). Take the `id` from the JSON output.
-3. `python3 ~/.claude/scripts/growth/lifecycle-drip.py record-sent ...` immediately after each successful send. On a send failure, do not record; list it as skipped with the error.
+2. Save the personalized body to a unique mode0600 scratch file (`umask 077`). Call `python3 ~/.claude/scripts/growth/lifecycle-drip.py send --user-id U --email E --touch T --subject S --body-file F`. Do not call `gws gmail +send` directly. Rajiv's authenticated founder identity and all selector/human gates above still apply.
+3. The helper returns a confirmed Gmail ID or UNCERTAIN. UNCERTAIN means Gmail may have accepted: stop this user/touch, preserve its attempt and confirmed prefix, and reconcile existing Sent mail before `record-sent --attempt-id A --gmail-id G`. A crash, timeout, nonzero exit or missing output is never permission to retry Gmail. Do not delete or rewrite attempts or sent records. A confirmed duplicate is already sent; do not include it as a new delivery.
 
 ## Slack (after the loop)
 - ONE top-level post to #heydonna-growth `C0C7U35LBKR` (private, so emails are fine), as PM: `slack-send.sh -c C0C7U35LBKR -f < <unique scratch file>`. Content: date, count, then for each user the email, touch, subject and FULL body.

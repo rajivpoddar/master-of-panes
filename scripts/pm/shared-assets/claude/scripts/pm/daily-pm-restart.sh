@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import sqlite3
 import subprocess
@@ -33,8 +34,64 @@ def emit(message):
 
 def atomic(path, text):
     temporary = path.with_name(path.name + f'.{os.getpid()}.new')
-    temporary.write_text(text)
-    temporary.replace(path)
+    with temporary.open('w') as output:
+        output.write(text)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def pm_identity(target='0:0.0'):
+    """Read-only PM pin: immutable pane/session, process birth and monotonic hook work."""
+    with urllib.request.urlopen('http://127.0.0.1:3100/pm-status', timeout=15) as response:
+        status = json.load(response)
+    if status.get('pm_busy') is not False or status.get('queue_count') != 0:
+        raise RuntimeError('PM busy, queued, or activity unknown; restart deferred')
+    fields = subprocess.run(['tmux', 'display-message', '-t', target, '-p',
+        '#{pane_id}|#{session_id}|#{pane_pid}|#{pane_current_path}|#{pane_current_command}'],
+        capture_output=True, text=True, check=True, timeout=5).stdout.strip().split('|')
+    if (len(fields) != 5 or not re.fullmatch(r'%\d+', fields[0])
+            or not re.fullmatch(r'\$\d+', fields[1]) or not fields[2].isdigit()
+            or fields[3] != str(home / 'Downloads/projects/heydonna-app')
+            or fields[4] not in ('claude', 'openclaude')):
+        raise RuntimeError('PM pane/session/checkout identity unknown')
+    listing = subprocess.run(['ps', '-axo', 'pid=,ppid=,uid=,lstart=,command='],
+        capture_output=True, text=True, check=True, timeout=5).stdout
+    processes = {}
+    for line in listing.splitlines():
+        row = line.split(None,8)
+        if len(row) != 9 or not all(v.isdigit() for v in row[:3]):
+            raise RuntimeError('PM process table unreadable')
+        processes[int(row[0])] = row
+    members, pending = set(), [int(fields[2])]
+    while pending:
+        pid = pending.pop()
+        if pid in members: raise RuntimeError('PM process ancestry cycle')
+        members.add(pid)
+        pending.extend(p for p,r in processes.items() if int(r[1]) == pid)
+    if not members <= processes.keys() or any(int(processes[p][2]) != os.getuid() for p in members):
+        raise RuntimeError('PM process ownership unknown')
+    agents = [p for p in members if re.search(r'(^|/)(claude|openclaude)(\s|$)',processes[p][8])]
+    if len(agents) != 1 or members - {int(fields[2]), *agents}:
+        raise RuntimeError('PM active descendant work or foreground identity unknown')
+    birth = [processes[p] for p in sorted(members)]
+    capture = subprocess.run(['tmux', 'capture-pane', '-p', '-t', fields[0], '-S', '-15'],
+        capture_output=True, text=True, check=True, timeout=5).stdout
+    prompts = [line.strip() for line in capture.splitlines() if line.strip().startswith('❯')]
+    if not prompts or prompts[-1] != '❯':
+        raise RuntimeError('PM composer not proven empty')
+    db = Path(os.environ.get('MOP_DB_PATH', str(home / '.local/share/master-of-panes/data/mop.db')))
+    with sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True) as connection:
+        boot = connection.execute("SELECT id,payload FROM events WHERE slot=0 AND event_type='SessionStart' ORDER BY id DESC LIMIT 1").fetchone()
+        work = connection.execute("SELECT max(id) FROM events WHERE slot=0 AND event_type IN ('UserPromptSubmit','PreToolUse','PostToolUse','Stop')").fetchone()[0]
+    if not boot or not isinstance(work, int):
+        raise RuntimeError('PM boot/work history unavailable')
+    return {'pane': fields[0], 'session': fields[1], 'pid': fields[2], 'birth': birth,
+            'checkout': fields[3], 'command': fields[4], 'boot': list(boot), 'work': work}
 
 def snapshot():
     db = memory.parent / 'state/pm-ops.db'
@@ -59,6 +116,7 @@ def perform():
     if saved.get('launch_intent'):
         emit('ALREADY_REQUESTED: PM restart was checkpointed for ' + day + '; inspect pane before any manual retry')
         return
+    pin = pm_identity()
     obligations, slots, prs = snapshot()
     owners = sorted({r['owner'] for r in obligations if r.get('owner')})
     prompt = ('Read ' + str(resume) + '. Resume PM from the canonical ledger. Relaunch the listed background agents only after checking their live state; '
@@ -94,21 +152,33 @@ def perform():
         subprocess.run(['python3', str(scripts / 'stale-process-cleanup.py'), '--apply', '--attest-slotless-reap'], check=True, timeout=300)
         saved['cleanup'] = True
         atomic(state, json.dumps(saved))
+    if pm_identity(pin['pane']) != pin:
+        raise RuntimeError('PM identity/work changed during cleanup; restart deferred')
     # Arm safe-point exits before replacing the invoking PM process.
     request = urllib.request.Request('http://127.0.0.1:3100/exit-pending', data=b'{"enabled":true}',
         headers={'Content-Type': 'application/json'}, method='POST')
     with urllib.request.urlopen(request, timeout=15) as response:
         if json.load(response).get('ok') is not True:
             raise RuntimeError('MoP refused safe-point exits')
+    if pm_identity(pin['pane']) != pin:
+        raise RuntimeError('PM identity/work changed during checkpoint/cleanup; restart deferred')
     saved['launch_intent'] = True
+    saved['pm_identity'] = pin
+    saved['replacement_status'] = 'attempted_uncertain'
     atomic(state, json.dumps(saved))
     emit('CHECKPOINTED: resume written, pointer updated, cleanup complete, safe-point exits armed; replacing PM')
-    try:
-        subprocess.run(['tmux', 'respawn-pane', '-k', '-t', '0:0.0', shlex.join(launch)], check=True)
-    except Exception:
-        saved['launch_intent'] = False
-        atomic(state, json.dumps(saved))
-        raise
+    # Recheck AFTER the fsynced attempt. Never clear intent, even on timeout/response loss.
+    if pm_identity(pin['pane']) != pin:
+        raise RuntimeError('PM successor/work after attempted checkpoint; replacement suppressed')
+    condition = '#{&&:#{==:#{pane_id},' + pin['pane'] + '},#{&&:#{==:#{pane_pid},' + pin['pid'] + '},#{==:#{session_id},' + pin['session'] + '}}}'
+    effect = shlex.join(['respawn-pane', '-k', '-t', pin['pane'], shlex.join(launch)])
+    result = subprocess.run(['tmux', 'if-shell', '-F', '-t', pin['pane'], condition,
+        effect + ' ; display-message -p PM_RESTART_REQUESTED', 'display-message -p PM_RESTART_REFUSED_IDENTITY'],
+        check=True, capture_output=True, text=True, timeout=15)
+    if result.stdout.strip() != 'PM_RESTART_REQUESTED':
+        raise RuntimeError('PM replacement not acknowledged; retain attempted state')
+    saved['replacement_status'] = 'requested'
+    atomic(state, json.dumps(saved))
 
 if args.dry_run:
     perform()

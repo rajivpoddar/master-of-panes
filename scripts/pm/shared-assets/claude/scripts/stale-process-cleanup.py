@@ -2112,8 +2112,6 @@ def codex_broker_policy_plan(
 
 
 def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, extra_min: int, idle_min: int) -> dict[str, Any]:
-    # CTO containment: this class stays report-only until per-member fences are proven.
-    apply = False
     out: dict[str, Any] = {
         "class": "codex_broker_cap", "action": "report_only",
         "orphan_min": orphan_min, "extra_min": extra_min, "idle_min": idle_min,
@@ -2154,8 +2152,9 @@ def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, 
                 out["terminated"].append(res)
                 out["killed"] += res["signalled"]
             else:
-                out["refused"].append({"pid": r["root"]["pid"], "reason": res["outcome"]})
-    out["after"] = out["before"] - out["killed"]
+                out["refused"].append({"pid": r["root"]["pid"], **res})
+    # Signals are attempts, not proof of death. A failed post-read stays unknown.
+    out["after"] = "unknown" if apply and out["would_kill"] else out["before"]
     return out
 
 
@@ -2250,7 +2249,7 @@ def codex_broker_strict_kill(
     companion_cwd_fn: Callable[[dict[int, dict[str, Any]]], list[str] | None] = None,
     send: Callable[[int, int], None] = None, sleep: Callable[[float], None] = None,
 ) -> dict[str, Any]:
-    """Re-verify at signal time, then TERM the verified tree, wait, KILL verified survivors only."""
+    """Fence the entire original group and activity immediately before EACH signal."""
     table_fn = table_fn or codex_broker_table
     has_client = has_client or codex_broker_has_client
     companion_fn = companion_fn or codex_companion_texts
@@ -2261,57 +2260,79 @@ def codex_broker_strict_kill(
     info = codex_broker_endpoint_info(r0["command"])
     planned = {m["pid"]: m for m in root["members"]}
 
-    def verified(table: dict[int, dict[str, Any]] | None) -> list[int] | None:
-        if table is None:
-            return None
-        cur = table.get(r0["pid"])
-        if cur is None or _codex_identity(cur) != _codex_identity(r0) or cur["ppid"] != 1:
-            return None
-        live = []
-        for pid, m in planned.items():
-            c = table.get(pid)
-            if c is not None and _codex_identity(c) == _codex_identity(m) and "E" not in c["stat"] and c["stat"][:1] != "Z":
-                live.append(pid)
-        return live
+    signalled, killed = [], []
 
-    table = table_fn()
-    live = verified(table)
-    if live is None:
-        return {"root": r0["pid"], "outcome": "refused_identity_changed"}
-    texts = companion_fn(table)
-    if texts is None or codex_broker_inflight(info, texts):
-        return {"root": r0["pid"], "outcome": "refused_inflight_or_unknown"}
-    ccwds = companion_cwd_fn(table)
-    if ccwds is None or not info["cwd"]:
-        return {"root": r0["pid"], "outcome": "refused_companion_cwd_unknown"}
-    rc = os.path.realpath(info["cwd"])
-    if any(rc == c or c.startswith(rc.rstrip("/") + "/") or rc.startswith(c.rstrip("/") + "/") for c in ccwds):
-        return {"root": r0["pid"], "outcome": "refused_companion_running_in_cwd"}
-    if has_client(r0["pid"], info["socket"]) is not False:  # repeated immediately before SIGTERM
-        return {"root": r0["pid"], "outcome": "refused_client_or_unknown"}
-    signalled = 0
-    for pid in live:
-        try:
-            send(pid, signal.SIGTERM)
-            signalled += 1
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            pass
-    sleep(term_wait_s)
-    table2 = table_fn()
-    killed = []
-    if table2 is not None:
-        for pid in live:
-            c = table2.get(pid)
-            if c is not None and _codex_identity(c) == _codex_identity(planned[pid]):
+    def refuse(reason):
+        return {"root": r0["pid"], "outcome": reason, "signalled": len(signalled),
+                "term_pids": signalled, "sigkill": killed, "after": "unknown" if signalled else len(planned)}
+
+    def verified(table: dict[int, dict[str, Any]] | None) -> str | None:
+        if table is None:
+            return "refused_ps_failed"
+        remaining = [m for pid, m in planned.items() if pid in table]
+        if any(table[m['pid']]['ppid'] != m['ppid'] for m in remaining):
+            return "refused_member_parent_changed"
+        descendants, pending = set(), [r0['pid']]
+        while pending:
+            parent = pending.pop()
+            for candidate in table.values():
+                if candidate['ppid'] == parent and candidate['pid'] not in descendants:
+                    descendants.add(candidate['pid'])
+                    pending.append(candidate['pid'])
+        if descendants - set(planned):
+            return "refused_group_changed"
+        entry = {**root, "members": remaining}
+        ok, _ = codex_broker_verify(entry, table, STRICT_MIN_AGE_S, os.getuid(), os.getpid())
+        if not ok:
+            return "refused_identity_or_parent_changed"
+        fresh = codex_broker_plan(table, STRICT_MIN_AGE_S, r0["uid"], os.getpid())
+        group = next((g for g in fresh["roots"] if g["root"]["pid"] == r0["pid"]), None)
+        if group is None or {m["pid"] for m in group["members"]} != {m["pid"] for m in remaining}:
+            return "refused_group_changed"
+        texts = companion_fn(table)
+        if texts is None or codex_broker_inflight(info, texts):
+            return "refused_inflight_or_unknown"
+        cwds = companion_cwd_fn(table)
+        if cwds is None or not info["cwd"]:
+            return "refused_companion_cwd_unknown"
+        rc = os.path.realpath(info["cwd"])
+        if any(rc == c or c.startswith(rc.rstrip("/") + "/") or rc.startswith(c.rstrip("/") + "/") for c in cwds):
+            return "refused_companion_running_in_cwd"
+        if has_client(r0["pid"], info["socket"]) is not False:
+            return "refused_client_or_unknown"
+        for m in remaining:
+            command = table[m["pid"]]["command"]
+            # An arbitrary descendant tool is work, even with no connected UI.
+            if m["pid"] != r0["pid"] and _codex_root_shape(command) != "orphan_app_server":
+                if (_CODEX_CHATGPT_RE.search(command) or _CODEX_PROTECTED_ANCESTOR_RE.search(command)
+                        or _LIVE_OWNER_RE.search(command) or _SESSION_RE.search(command)):
+                    return "refused_protected_member"
+                return "refused_descendant_work"
+        return None
+
+    # Children first: do not orphan an unexamined descendant by signalling root first.
+    order = list(reversed(list(planned)))
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if sig == signal.SIGKILL:
+            sleep(term_wait_s)
+        for pid in order:
+            table = table_fn()
+            reason = verified(table)
+            if reason:
+                return refuse(reason)
+            if pid in table:
                 try:
-                    send(pid, signal.SIGKILL)
-                    killed.append(pid)
+                    send(pid, sig)
+                    (signalled if sig == signal.SIGTERM else killed).append(pid)
                 except (ProcessLookupError, PermissionError):
-                    pass
-    return {"root": r0["pid"], "outcome": "terminated", "signalled": signalled, "sigkill": killed,
-            "cwd": info["cwd"], "pids": live}
+                    return refuse("refused_signal_unconfirmed")
+    final = table_fn()
+    if final is None:
+        return refuse("refused_post_read_unknown")
+    if any(pid in final and _codex_identity(final[pid]) == _codex_identity(m) for pid, m in planned.items()):
+        return refuse("refused_survivors")
+    return {"root": r0["pid"], "outcome": "terminated", "signalled": len(signalled),
+            "sigkill": killed, "cwd": info["cwd"], "pids": list(planned), "after": 0}
 
 
 def run_self_test() -> int:
@@ -2400,7 +2421,7 @@ def run_self_test() -> int:
     assert not convex_cli_classify(D, 99999, 9 * 1024 * 1024, ["node next dev -p 3002"])
     assert not convex_cli_classify(D, 99999, 9 * 1024 * 1024, ["node ./node_modules/.bin/convex dev"])
     # codex orphan broker policy (pure; synthetic process table)
-    me = 501
+    me = os.getuid()
     def prow(pid, ppid, cmd, age_h, stat="S", uid=me):
         return {"pid": pid, "ppid": ppid, "uid": uid, "etime": "x", "age_seconds": int(age_h * 3600),
                 "stat": stat, "start_time": f"t{pid}", "command": cmd}
@@ -2540,9 +2561,8 @@ def run_self_test() -> int:
         a.update(kw)
         return codex_broker_strict_kill(sr, 0, **a)
     res = k()
-    assert res["outcome"] == "terminated" and res["signalled"] == 3
-    assert sorted(p for p, sg in sent if sg == signal.SIGTERM) == [800, 801, 802]
-    assert sorted(p for p, sg in sent if sg == signal.SIGKILL) == [800, 801, 802]   # survivors in verified tree
+    assert res["outcome"] == "refused_protected_member" and res["signalled"] == 0
+    assert not sent  # a detached descendant tool remains work without a connected client
     sent.clear()
     assert k(has_client=lambda p, s: None)["outcome"] == "refused_client_or_unknown" and not sent
     assert k(has_client=lambda p, s: True)["outcome"] == "refused_client_or_unknown" and not sent
@@ -2550,8 +2570,8 @@ def run_self_test() -> int:
     assert k(companion_fn=lambda t: sockc)["outcome"] == "refused_inflight_or_unknown" and not sent
     assert k(companion_fn=lambda t: None)["outcome"] == "refused_inflight_or_unknown" and not sent
     reused = {**stbl, 800: {**stbl[800], "start_time": "reused"}}
-    assert k(table_fn=lambda: reused)["outcome"] == "refused_identity_changed" and not sent   # PID reuse
-    assert k(table_fn=lambda: None)["outcome"] == "refused_identity_changed" and not sent
+    assert k(table_fn=lambda: reused)["outcome"] == "refused_identity_or_parent_changed" and not sent   # PID reuse
+    assert k(table_fn=lambda: None)["outcome"] == "refused_ps_failed" and not sent
     # relaxed rule: live slot cwd orphan (no client, not in flight, no companion there) is killed;
     # a companion running in the same cwd (fresh at signal time) blocks it
     slot = "/Users/rajiv/Downloads/projects/heydonna-app-3001"
@@ -2562,7 +2582,7 @@ def run_self_test() -> int:
     res = codex_broker_strict_kill(lr, 0, table_fn=lambda: ltbl, has_client=lambda p, s: False,
                                    companion_fn=lambda t: [], companion_cwd_fn=lambda t: [],
                                    send=lambda pid, sig: sent.append((pid, sig)), sleep=lambda s: None)
-    assert res["outcome"] == "terminated" and sorted(p for p, sg in sent if sg == signal.SIGTERM) == [900, 901, 902]
+    assert res["outcome"] == "refused_protected_member" and not sent
     sent.clear()
     res = codex_broker_strict_kill(lr, 0, table_fn=lambda: ltbl, has_client=lambda p, s: False,
                                    companion_fn=lambda t: [], companion_cwd_fn=lambda t: [slot],
@@ -2572,10 +2592,10 @@ def run_self_test() -> int:
     ctbl = {**ltbl, 950: prow(950, 50, f"node /x/codex-companion.mjs task --cwd {slot}", 0.1)}
     assert slot in codex_companion_cwds(ctbl, cwd_of=lambda pid: "/elsewhere")
     sent.clear()
-    # member PID reused after TERM: SIGKILL only goes to verified survivors
+    # Active descendant work cannot reach escalation, including when later evidence would change.
     calls = iter([stbl, {**stbl, 802: {**stbl[802], "start_time": "new"}}])
     k(table_fn=lambda: next(calls))
-    assert sorted(p for p, sg in sent if sg == signal.SIGKILL) == [800, 801], sent
+    assert not sent
     print("SELF_TEST ok (including Codex broker apply fences and broker cap policy + strict kill)")
     return 0
 

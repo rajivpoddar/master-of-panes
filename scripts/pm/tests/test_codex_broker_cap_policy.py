@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import io
 import json
 import os
@@ -53,6 +54,54 @@ def make_table() -> dict:
 
 
 class BrokerCapReportOnlyTests(unittest.TestCase):
+    def test_pure_policy_selftest_has_no_real_signal(self):
+        with patch.object(MODULE.os, 'kill', side_effect=forbid('real signal')):
+            self.assertEqual(MODULE.run_self_test(),0)
+    def test_each_term_and_kill_rechecks_full_group_and_activity(self):
+        table = {100: proc(100, 1, broker('safe','/a')),
+                 101: proc(101, 100, 'node /opt/homebrew/bin/codex app-server')}
+        root = MODULE.codex_broker_policy_plan(table, UID, -1, [], lambda *a: False, 0, 0, 0)['roots'][0]
+        for at in ('before_term', 'between_terms', 'before_kill'):
+            for drift in ('reparent', 'protected', 'new_foreign', 'tool', 'client', 'inflight', 'cwd', 'unknown'):
+                with self.subTest(at=at, drift=drift):
+                    state = copy.deepcopy(table)
+                    sent, stepped = [], [False]
+                    def change():
+                        stepped[0] = True
+                        if drift == 'reparent': state[101]['ppid'] = 1
+                        if drift == 'protected': state[101]['command'] = 'claude active-work'
+                        if drift in ('new_foreign','tool'):
+                            state[102] = proc(102,100,'long-running-tool')
+                            if drift == 'new_foreign': state[102]['uid'] = UID + 1
+                    if at == 'before_term': change()
+                    def send(pid, sig):
+                        sent.append((pid,sig))
+                        if at == 'between_terms' and len(sent) == 1: change()
+                    result = MODULE.codex_broker_strict_kill(root, 0,
+                        table_fn=lambda: None if stepped[0] and drift == 'unknown' else state,
+                        has_client=lambda *a: stepped[0] and drift == 'client',
+                        companion_fn=lambda t: [broker('safe','/a')] if stepped[0] and drift == 'inflight' else [],
+                        companion_cwd_fn=lambda t: ['/a'] if stepped[0] and drift == 'cwd' else [],
+                        send=send, sleep=lambda _: change() if at == 'before_kill' else None)
+                    self.assertTrue(result['outcome'].startswith('refused_'), result)
+                    self.assertEqual(len(sent), {'before_term':0,'between_terms':1,'before_kill':2}[at])
+                    self.assertEqual(result['sigkill'], [])
+                    self.assertEqual(result['signalled'], len(sent))
+
+    def test_safe_known_group_control_and_unknown_post_read(self):
+        for unknown in (False, True):
+            table = {100: proc(100,1,broker('safe','/a'))}
+            root = MODULE.codex_broker_policy_plan(table,UID,-1,[],lambda *a:False,0,0,0)['roots'][0]
+            calls = [0]
+            sent = []
+            def scan():
+                calls[0] += 1
+                return (None if unknown else {}) if calls[0] == 3 else table
+            out = MODULE.codex_broker_strict_kill(root,0,table_fn=scan,has_client=lambda *a:False,
+                companion_fn=lambda t:[],companion_cwd_fn=lambda t:[],send=lambda *a:sent.append(a),sleep=lambda _:None)
+            self.assertEqual(out['outcome'], 'refused_post_read_unknown' if unknown else 'terminated')
+            self.assertEqual(len(sent),2)
+
     def check(self, apply, companions, has_client=True):
         with patch.object(MODULE, "codex_broker_table", side_effect=make_table), \
                 patch.object(MODULE, "codex_companion_texts", return_value=companions), \
@@ -73,7 +122,7 @@ class BrokerCapReportOnlyTests(unittest.TestCase):
                      patch.object(MODULE, "codex_broker_has_client", return_value=guard == "client"), \
                      patch.object(MODULE, "codex_broker_strict_kill", side_effect=forbid("signal")):
                     out = MODULE.codex_broker_policy_check(True, 0, 0, 0, 0)
-                self.assertEqual(out["action"], "report_only")
+                self.assertEqual(out["action"], "strict_kill")
                 self.assertEqual(out["would_kill"], [])
                 self.assertEqual(out["killed"], 0)
 
@@ -122,16 +171,16 @@ class BrokerCapReportOnlyTests(unittest.TestCase):
                     patch.object(MODULE, "replayd_check", return_value={"pid": None, "cpu": None, "streak": 0, "action": "none"}), \
                     patch.object(MODULE, "codex_renderer_check", return_value={"class": "codex_renderer", "observed": 0, "over_threshold": 0, "pending": 0, "found": [], "terminated": [], "refused": [], "errors": []}), \
                     patch.object(MODULE, "codex_broker_orphan_check", return_value={"class": "codex_broker_orphan", "min_hours": 0, "action": "report_only", "roots": 0, "before": 0, "killed": 0, "exiting": 0, "after": 0, "skipped_protected": 0, "skipped_young": 0, "found": [], "skipped": [], "terminated": [], "exiting_pids": [], "refused": [], "errors": []}), \
-                    patch.object(MODULE, "codex_broker_table", side_effect=make_table), \
+                    patch.object(MODULE, "codex_broker_table", side_effect=lambda: {p:r for p,r in make_table().items() if p in (100,101,102)}), \
                     patch.object(MODULE, "codex_companion_texts", return_value=[]), \
-                    patch.object(MODULE, "codex_broker_has_client", return_value=True), \
+                    patch.object(MODULE, "codex_broker_has_client", return_value=False), \
                     patch.object(MODULE, "_kill_members", side_effect=forbid("_kill_members")), \
                     patch.object(MODULE.os, "kill", side_effect=forbid("os.kill")), \
                     patch.object(MODULE.time, "sleep", side_effect=forbid("sleep")), \
                     patch.object(MODULE, "run", side_effect=forbid("run")), \
                     patch.object(sys, "argv", argv), patch.object(sys, "stdout", new_callable=io.StringIO) as out:
                 MODULE.main()
-            self.assertIn("CODEX_BROKER_CAP action=report_only", out.getvalue())
+            self.assertIn("CODEX_BROKER_CAP action=strict_kill", out.getvalue())
             self.assertEqual(json.loads(output.read_text())["codex_broker_cap"]["killed"], 0)
 
 
@@ -139,9 +188,15 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def test_containment_refuses_even_an_otherwise_eligible_broker():
+def test_eligible_broker_still_requires_fresh_signal_time_evidence():
+    """Retains e148's eligible-root control; unknown fresh evidence cannot lift containment."""
     table = {100: proc(100, 1, broker("orphan", "/a"))}
-    with patch.object(MODULE, "codex_broker_table", return_value=table), patch.object(MODULE, "codex_companion_texts", return_value=[]), patch.object(MODULE, "codex_companion_cwds", return_value=[]), patch.object(MODULE, "codex_broker_has_client", return_value=False), patch.object(MODULE, "codex_broker_strict_kill", side_effect=forbid("strict kill")):
+    with patch.object(MODULE, "codex_broker_table", side_effect=[table, None]), \
+            patch.object(MODULE, "codex_companion_texts", return_value=[]), \
+            patch.object(MODULE, "codex_companion_cwds", return_value=[]), \
+            patch.object(MODULE, "codex_broker_has_client", return_value=False), \
+            patch.object(MODULE.os, "kill", side_effect=forbid("signal without fresh evidence")):
         result = MODULE.codex_broker_policy_check(True, 0, 0, 0, 0)
-    assert result["action"] == "report_only" and result["killed"] == 0
-    assert result["would_kill"]
+    assert result['action'] == 'strict_kill' and result['killed'] == 0
+    assert result['would_kill']
+    assert result['refused'][0]['outcome'] == 'refused_ps_failed'

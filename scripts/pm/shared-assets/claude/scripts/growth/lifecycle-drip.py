@@ -5,11 +5,13 @@ Source: Rajiv, C0ALZJHGE49 thread 1793076476.707989 (design ts 1793086314.202589
 OK ts 1793086430.314129). Consumer: Skill(lifecycle-email-processing) /
 agent lifecycle-email-agent, which personalizes and sends.
 
-Decides WHO gets WHICH touch and emits ACTIVITY FACTS. It never sends mail.
+Decides WHO gets WHICH touch and emits ACTIVITY FACTS. The send subcommand
+owns the existing Gmail boundary under a locked, durable per-touch attempt.
 
 Subcommands:
   select [--dry-run] [--now ISO]      emit JSON {records, skipped, meta}
-  record-sent --user-id U --email E --touch T --gmail-id G
+  send --user-id U --email E --touch T --subject S --body-file F
+  record-sent --user-id U --email E --touch T --gmail-id G --attempt-id A
   opt-out --email E [--reason TEXT]   add to opt-out list (e.g. a "stop" reply)
 
 Reads prod Convex beloved-cardinal-941 READ-ONLY via `npx convex data`, Axiom
@@ -20,12 +22,15 @@ contact. State: ~/.claude/state/lifecycle-drip.jsonl (append-only; send-once per
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import urllib.request
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -142,13 +147,76 @@ def gmail_recent_manual_recipients(now: datetime) -> set[str]:
 def read_jsonl(p: Path) -> list[dict]:
     if not p.exists():
         return []
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    with p.open() as f:
+        fcntl.flock(f, fcntl.LOCK_SH)
+        return [json.loads(l) for l in f if l.strip()]
 
 
 def append_jsonl(p: Path, row: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(row) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    fd = os.open(p.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def touch_lock(user_id: str, touch: str):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(json.dumps([user_id, touch]).encode()).hexdigest()
+    return (STATE.parent / f'lifecycle-touch-{key}.lock').open('a')
+
+
+def deliver(args) -> dict:
+    """Only send owner: lock, fsynced intent, one Gmail attempt, confirmed ID.
+
+    Any loss after intent is uncertain and never auto-replayed. record-sent is
+    reconciliation of that exact intent, not permission to invoke Gmail again.
+    """
+    if args.touch not in TOUCHES:
+        raise ValueError('unknown touch')
+    with touch_lock(args.user_id, args.touch) as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rows = [r for r in read_jsonl(STATE) if (r.get('userId'), r.get('touch')) == (args.user_id, args.touch)]
+        sent = next((r for r in rows if r.get('event') == 'sent'), None)
+        if sent:
+            return {'ok': True, 'duplicate': True, 'gmail_id': sent.get('gmail_id')}
+        attempts = [r for r in rows if r.get('event') == 'attempt']
+        if args.cmd == 'record-sent':
+            if (len(attempts) != 1 or not args.attempt_id or attempts[0]['attempt_id'] != args.attempt_id
+                    or attempts[0]['email'] != args.email.lower() or not args.gmail_id.strip()):
+                raise ValueError('reconciliation requires exact owned attempt and observed Gmail ID')
+            attempt_id = args.attempt_id
+        else:
+            if attempts:
+                return {'ok': False, 'status': 'UNCERTAIN', 'attempt_id': attempts[-1]['attempt_id']}
+            email = args.email.lower()
+            if (not email or email.endswith(INTERNAL_DOMAINS) or email in {r['email'].lower() for r in read_jsonl(OPTOUT)}
+                    or datetime.now(timezone.utc).astimezone(ET).weekday() >= 5
+                    or any(v != 'APPROVED' for v in template_status().values())):
+                raise ValueError('send policy refused')
+            body = Path(args.body_file).read_text()
+            attempt_id = uuid.uuid4().hex
+            append_jsonl(STATE, {'event': 'attempt', 'ts': datetime.now(timezone.utc).isoformat(),
+                'userId': args.user_id, 'email': email, 'touch': args.touch, 'attempt_id': attempt_id})
+            try:
+                result = subprocess.run(['gws', 'gmail', '+send', '--to', email,
+                    '--subject', args.subject, '--body', body], capture_output=True, text=True, timeout=120, check=True)
+                gmail_id = json.loads(result.stdout)['id']
+                if not isinstance(gmail_id, str) or not gmail_id.strip():
+                    raise ValueError('missing Gmail ID')
+            except Exception:
+                return {'ok': False, 'status': 'UNCERTAIN', 'attempt_id': attempt_id}
+            args.gmail_id = gmail_id
+        append_jsonl(STATE, {'event': 'sent', 'ts': datetime.now(timezone.utc).isoformat(),
+            'userId': args.user_id, 'email': args.email.lower(), 'touch': args.touch,
+            'attempt_id': attempt_id, 'gmail_id': args.gmail_id})
+        return {'ok': True, 'gmail_id': args.gmail_id, 'attempt_id': attempt_id}
 
 
 def template_status() -> dict[str, str]:
@@ -211,6 +279,7 @@ def select(now: datetime, dry_run: bool) -> dict:
     now_ms = now.timestamp() * 1000
     state = read_jsonl(STATE)
     sent = {(r["userId"], r["touch"]) for r in state if r.get("event") == "sent"}
+    uncertain = {(r['userId'], r['touch']) for r in state if r.get('event') == 'attempt'} - sent
     runs = [r for r in state if r.get("event") == "run" and not r.get("dry_run")]
     last_run_ms = max((ms(r["ts"]) for r in runs), default=now_ms - 2 * DAY_MS)
     optouts = {r["email"].lower() for r in read_jsonl(OPTOUT)}
@@ -264,7 +333,8 @@ def select(now: datetime, dry_run: bool) -> dict:
         # Eligible touches (rules from the approved design)
         elig = []
         first_ready = own_ready[0] if own_ready else None
-        if first_ready and first_ready["lastAutoProcessCompletedAt"] > last_run_ms:
+        # Per-user sent/attempt state owns delivery, not a global selection watermark.
+        if first_ready:
             elig.append("FIRST_FILE_READY")
         if days < 1:
             elig.append("D0")
@@ -279,6 +349,8 @@ def select(now: datetime, dry_run: bool) -> dict:
         touch = next((t for t in elig if (uid, t) not in sent), None)
         if reason is None and touch is None:
             reason = "already_sent:" + ",".join(elig)
+        if reason is None and (uid, touch) in uncertain:
+            reason = 'uncertain_attempt_requires_reconciliation'
         if reason is None and email in manual:
             reason = f"manual_email_last_{MANUAL_CONTACT_DAYS}d"
         if reason is None and not email:
@@ -358,22 +430,18 @@ def main() -> None:
     r = sub.add_parser("record-sent")
     for k in ("--user-id", "--email", "--touch", "--gmail-id"):
         r.add_argument(k, required=True)
+    r.add_argument('--attempt-id', required=True)
+    s = sub.add_parser('send')
+    for k in ('--user-id', '--email', '--touch', '--subject', '--body-file'):
+        s.add_argument(k, required=True)
     o = sub.add_parser("opt-out")
     o.add_argument("--email", required=True)
     o.add_argument("--reason", default="replied stop")
     ap.add_argument("--dry-run", action="store_true", help="shorthand for `select --dry-run`")
     args = ap.parse_args()
 
-    if args.cmd == "record-sent":
-        if args.touch not in TOUCHES:
-            raise SystemExit(f"unknown touch {args.touch}")
-        key = (args.user_id, args.touch)
-        if any((x["userId"], x["touch"]) == key for x in read_jsonl(STATE) if x.get("event") == "sent"):
-            print(json.dumps({"ok": True, "duplicate": True}))
-            return
-        append_jsonl(STATE, {"event": "sent", "ts": datetime.now(timezone.utc).isoformat(), "userId": args.user_id,
-                             "email": args.email.lower(), "touch": args.touch, "gmail_id": args.gmail_id})
-        print(json.dumps({"ok": True}))
+    if args.cmd in ('send', 'record-sent'):
+        print(json.dumps(deliver(args)))
         return
     if args.cmd == "opt-out":
         email = args.email.lower()

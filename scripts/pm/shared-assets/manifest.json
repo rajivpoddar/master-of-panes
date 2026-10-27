@@ -357,7 +357,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-lifecycle-email",
-      "sha256": "a6115911c477ca391ad0c54af491501f21c1ffe7667b3e665e07745745e1364b",
+      "sha256": "0b3eb8df9a5465abafafa3ea72ce62064642d7b6ed9b72fad88bb8673f1fa202",
       "source_path": "claude/scripts/growth/lifecycle-drip.py"
     },
     {
@@ -600,7 +600,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-daily-pm-restart",
-      "sha256": "951fba47b464da730ac348f0a10f3b1216e8665a4a5bf56204e904f7e3b3c53c",
+      "sha256": "0f4c54b7a64f54f26d74aa0ec8528c85373eb1f44bb998c9fb9b0df45d9cd5d2",
       "source_path": "claude/scripts/pm/daily-pm-restart.sh"
     },
     {
@@ -728,7 +728,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "ff6229936df3534a6417cd5dc11090e2894f73fab379261ef69ca9e7d80e6efa",
+      "sha256": "b69d79aed6a82037a3ba59a8c3e9410661165078ec30ec3ea3f739be900deaaa",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
@@ -881,7 +881,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-daily-pm-restart",
-      "sha256": "bbed4d170f8e26634b6545fa1f3e4509d70fbf1448bd69ef715926235f320c8a",
+      "sha256": "cbb42d756455a34103c849c7d8dd6236a02b0258ceb31ac63926d09161f487a9",
       "source_path": "claude/skills/daily-pm-restart/SKILL.md"
     },
     {
@@ -947,7 +947,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-lifecycle-email",
-      "sha256": "7407529995acb869caaa148318d77f412d6a6397ea85387f196784c598be2834",
+      "sha256": "4088cedb53fc0dda37a8bdb3968e81b6ab880428043e2a1710cdb2c77793063f",
       "source_path": "claude/skills/lifecycle-email-processing/SKILL.md"
     },
     {
