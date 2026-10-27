@@ -1860,6 +1860,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
       healthChecker.clearPmInitiatedRespawn(slotNum);
       return c.json({
         error: `Claude did not exit after /exit (waited ${exitTimeout}ms)`,
+        reason: "respawn_exit_uncertain",
         steps,
       }, 504);
     }

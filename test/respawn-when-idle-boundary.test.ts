@@ -23,7 +23,7 @@ async function fixture() {
   db.logEvent(1, "Stop", "Stop", null, { session_id: "s1", cwd: PATH });
   const state = { activity: "idle", pane: "%11", composer: "", buffer: "", exits: 0, pastes: 0,
     probes: 0, identities: 0, routeCalls: 0, loseAck: false, shellAck: true, launches: 0,
-    enters: 0, swallowEnters: 0, drift: {} as Record<string, unknown>, onProbe: (_n: number) => {}, onIdentity: (_n: number) => {}, onPaste: () => {} };
+    enters: 0, swallowEnters: 0, staleExitComposer: false, drift: {} as Record<string, unknown>, onProbe: (_n: number) => {}, onIdentity: (_n: number) => {}, onPaste: () => {} };
   const readSlot = db.getSlot.bind(db);
   db.getSlot = slot => { const row = readSlot(slot); return row && { ...row, ...state.drift }; };
   const render = () => `${RULE}\n❯ ${state.composer}\n${RULE}\n${state.composer === "/exit" ? "  \x1b[38;2;153;153;153m❯ /exit Exit the CLI\x1b[0m" : " ? for shortcuts"}\n`;
@@ -48,9 +48,9 @@ async function fixture() {
     if (command.startsWith("tmux paste-buffer")) { state.pastes++; state.composer = state.buffer; state.onPaste(); return { stdout: "", stderr: "" }; }
     if (command.startsWith("tmux send-keys")) {
       assert.ok(!command.includes('"/exit"'), "exit text and Enter must be separate effects");
-      if (command.endsWith(" Enter") && state.composer === "/exit") {
+      if (command.endsWith(" Enter") && !command.includes("/fake/launch.sh") && state.composer === "/exit") {
         state.enters++;
-        if (state.enters > state.swallowEnters) { state.exits++; state.composer = ""; }
+        if (state.enters > state.swallowEnters) { state.exits++; if (!state.staleExitComposer) state.composer = ""; }
       }
       if (command.includes("/fake/launch.sh")) state.launches++;
       return { stdout: "", stderr: "" };
@@ -168,7 +168,7 @@ for (const swallowed of [1, 2]) test(`actual respawn retries swallowed Enter onc
     f.state.swallowEnters = swallowed;
     const response = await f.app.request("/slots/1/respawn", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     assert.equal(f.state.enters, 2);
-    assert.equal(response.status, swallowed === 1 ? 200 : 500);
+    assert.equal(response.status, swallowed === 1 ? 200 : 504);
     assert.equal(f.state.launches, swallowed === 1 ? 1 : 0);
     if (swallowed === 2) assert.equal((await response.json()).reason, "respawn_exit_uncertain");
   } finally { await f.cleanup(); }
@@ -198,5 +198,15 @@ test("free pane without hooks cannot schedule an unbound deferred request", asyn
     f.db.getEvents = (...args) => events(...args).filter(event => !event.hook_type);
     assert.equal((await f.schedule()).status, 409);
     assert.equal(f.state.pastes, 0);
+  } finally { await f.cleanup(); }
+});
+
+test("exited CLI may leave stale /exit composer: shell acknowledgement permits launch", async () => {
+  const f = await fixture(); try {
+    f.state.staleExitComposer = true;
+    const response = await f.app.request("/slots/1/respawn", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    assert.equal(response.status, 200);
+    assert.equal(f.state.launches, 1);
+    assert.equal(f.state.enters, 2);
   } finally { await f.cleanup(); }
 });
