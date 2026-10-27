@@ -106,6 +106,16 @@ export function respawnSessionAt(db: MoPDatabase, slot: number, checkout: string
   return null;
 }
 
+/** Stop clears current-turn state, but cannot erase an intervening prompt's
+ * monotonic event ID. Work time also fences the synchronous startAgentTurn
+ * boundary before the hook processor records UserPromptSubmit. */
+export function respawnWorkToken(db: MoPDatabase, slot: number): string {
+  return JSON.stringify([
+    db.getEvents(slot, 1, "UserPromptSubmit")[0]?.id ?? 0,
+    db.getSlot(slot)?.last_meaningful_work_at ?? null,
+  ]);
+}
+
 function captureRequest(db: MoPDatabase, row: SlotState, pane: PaneIdentitySnapshot, at: string, allowUnboundFree = false): RespawnWhenIdleRequest | null {
   const session = respawnSessionAt(db, row.slot, pane.currentPath);
   // Direct operator respawns of free, naturally idle panes need no historical
@@ -169,11 +179,11 @@ export async function deliverRespawnExit(args: {
     return { outcome: "refused_pre_effect" as const, reason: "respawn_identity_unbound", paneId: args.pane.paneId };
   }
   const turnId = args.db.getSlot(args.slot)?.active_turn_id;
-  const workAt = row?.last_meaningful_work_at;
+  const workToken = respawnWorkToken(args.db, args.slot);
   let ownAttempt = false;
   const fence = () => requestFence(args.db, request, !!args.request, ownAttempt, !args.request)
     ?? (args.db.getSlot(args.slot)?.active_turn_id !== turnId
-      || args.db.getSlot(args.slot)?.last_meaningful_work_at !== workAt ? "slot_busy_respawn_refused" : null);
+      || respawnWorkToken(args.db, args.slot) !== workToken ? "slot_busy_respawn_refused" : null);
   return args.relay.deliverGuardedToSlot(args.slot, "/exit", {
     expectedPaneId: request.pane_id!,
     recheck: async () => {
