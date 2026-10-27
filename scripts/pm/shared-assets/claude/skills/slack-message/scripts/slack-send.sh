@@ -975,7 +975,19 @@ if r.get('ok'):
         print(f'bridge-db record skipped: {e}', file=sys.stderr)
     ts = r.get('ts', '')
     channel = r.get('channel', '')
-    print(f'OK ts={ts} channel={channel}')
+    print(f'OK ts={ts} channel={channel}', flush=True)
+    # Deterministic Step 2d: only a successful Alerts Hourly parent triggers it.
+    # Thread replies (including the generated report) cannot recurse.
+    import re, subprocess
+    pl = json.loads(os.environ.get('SLACK_SEND_PAYLOAD') or '{}')
+    if (os.environ.get('SLACK_SEND_AS') == 'alerts'
+            and channel == 'C0ALZJHGE49' and not pl.get('thread_ts')
+            and re.match(r'^(?:<@U0BNFGX2UAX> )?[*]?Hourly — ', pl.get('text', ''))):
+        report = os.path.expanduser('~/.claude/scripts/pm/heartbeat/pr-status-report.py')
+        result = subprocess.run([sys.executable, report, '--channel', channel, '--thread', ts])
+        if result.returncode:
+            print(f'HOURLY_PR_REPORT_FAILED parent_ts={ts}; retry pr-status-report.py --thread {ts}', file=sys.stderr)
+            sys.exit(result.returncode)
 else:
     print(f'ERROR: {r.get(\"error\", \"unknown\")}')
     sys.exit(1)

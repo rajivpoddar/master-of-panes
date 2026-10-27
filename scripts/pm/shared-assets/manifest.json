@@ -640,6 +640,15 @@
       "source_path": "claude/scripts/pm/heartbeat/pr-open-snapshot.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/pr-status-report.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "0fde9d3d79112f7d29bfb176fad095ce1521ca13984916f01c56c5dc773553d6",
+      "source_path": "claude/scripts/pm/heartbeat/pr-status-report.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/support-inbox-snapshot.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -996,7 +1005,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
-      "sha256": "afab9d4917c46a1c747e6d57561b50913fc1e30eeee510eadf67f733b1a31bde",
+      "sha256": "9c25a046b821b317b023d22664b47d755219c211240a271d77e11feedfd57d52",
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {
@@ -1491,7 +1500,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 162,
+    "selected_count": 163,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
