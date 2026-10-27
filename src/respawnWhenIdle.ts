@@ -169,9 +169,11 @@ export async function deliverRespawnExit(args: {
     return { outcome: "refused_pre_effect" as const, reason: "respawn_identity_unbound", paneId: args.pane.paneId };
   }
   const turnId = args.db.getSlot(args.slot)?.active_turn_id;
+  const workAt = row?.last_meaningful_work_at;
   let ownAttempt = false;
   const fence = () => requestFence(args.db, request, !!args.request, ownAttempt, !args.request)
-    ?? (args.db.getSlot(args.slot)?.active_turn_id !== turnId ? "slot_busy_respawn_refused" : null);
+    ?? (args.db.getSlot(args.slot)?.active_turn_id !== turnId
+      || args.db.getSlot(args.slot)?.last_meaningful_work_at !== workAt ? "slot_busy_respawn_refused" : null);
   return args.relay.deliverGuardedToSlot(args.slot, "/exit", {
     expectedPaneId: request.pane_id!,
     recheck: async () => {

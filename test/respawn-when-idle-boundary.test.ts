@@ -217,11 +217,14 @@ test("exited CLI may leave stale /exit composer: shell acknowledgement permits l
   } finally { await f.cleanup(); }
 });
 
-for (const drift of ["assignment", "turn"]) test(`autocomplete dwell ${drift}: attempted Escape, no later keys or replay`, async () => {
+for (const drift of ["assignment", "turn", "completed-turn"]) test(`autocomplete dwell ${drift}: attempted Escape, no later keys or replay`, async () => {
   const f = await fixture(); try {
     await f.schedule();
     f.state.onEscape = () => { setTimeout(() => {
-      if (drift === "turn") f.db.startAgentTurn(1, "dwell-turn");
+      if (drift === "turn" || drift === "completed-turn") {
+        f.db.startAgentTurn(1, "dwell-turn");
+        if (drift === "completed-turn") f.db.finishAgentTurn(1, "dwell-turn");
+      }
       else f.state.drift = { issue: 20, assignment_epoch: 2 };
     }, 10); };
     assert.equal(await f.ticker.tickSlot(1), "failed");

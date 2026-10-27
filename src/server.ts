@@ -1808,7 +1808,8 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   const readPinnedCommand = async () => {
     const command = await healthChecker.getPaneCommandPublic(slotNum);
     const current = await verifyPaneIdentity(slotNum);
-    return current.ok && current.snapshot.paneId === paneTarget ? command : null;
+    return current.ok && current.snapshot.paneId === paneTarget
+      && current.snapshot.currentPath === identity.snapshot.currentPath ? command : null;
   };
   if (slotState && slotState.occupied && !slotState.idle) {
     return c.json({

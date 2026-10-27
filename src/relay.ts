@@ -1189,7 +1189,8 @@ export class TmuxRelay {
         const row = this.db?.getSlot(slotNum);
         const event = this.db?.getEvents(slotNum, 100).find(e => e.hook_type);
         return JSON.stringify([row && [row.assignment_epoch, row.issue, row.repository_id,
-          row.branch_ref, row.occupied, row.active_turn_id, row.active_turn_state], event?.payload]);
+          row.branch_ref, row.occupied, row.active_turn_id, row.active_turn_state,
+          row.last_meaningful_work_at], event?.payload]);
       };
       const original = owner();
       const fence = () => owner() !== original ? "slot_owner_changed"
