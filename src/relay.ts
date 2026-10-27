@@ -281,15 +281,17 @@ export class TmuxRelay {
   private directInjectSeq = 0;
   private runShell: typeof execShell;
   private readonly pmPaneReadyOverride?: () => Promise<boolean>;
+  private readonly pmIdleHandoff?: () => Promise<void>;
 
   constructor(
     config: MoPConfig,
-    deps: { runShell?: typeof execShell; pmRuntime?: PMRuntime; pmPaneReady?: () => Promise<boolean> } = {},
+    deps: { runShell?: typeof execShell; pmRuntime?: PMRuntime; pmPaneReady?: () => Promise<boolean>; pmIdleHandoff?: () => Promise<void> } = {},
   ) {
     this.pmPaneAddress = config.pmPaneAddress;
     this.pmRuntime = deps.pmRuntime ?? resolvePMRuntime(process.env.MOP_PM_RUNTIME);
     this.runShell = deps.runShell ?? execShell;
     this.pmPaneReadyOverride = deps.pmPaneReady;
+    this.pmIdleHandoff = deps.pmIdleHandoff;
   }
 
   /** Attach the MoP DB so injectToPM can enqueue when PM is busy. */
@@ -363,6 +365,15 @@ export class TmuxRelay {
           debounce_ms: delayMs,
           drained: n,
           reason: "omp_idle_confirmed",
+        });
+      }
+      // Continue a checkpoint only after this existing Stop generation is
+      // proven idle and the queue drained without starting another turn.
+      if (this.pmIdleHandoff && n === 0) {
+        await withSlotSendLock(0, async () => {
+          if (generation !== this.drainGeneration || this.pmBusy !== false
+              || (this.db?.getPendingPMEventCount() ?? 0) !== 0) return;
+          await this.pmIdleHandoff!();
         });
       }
     } catch (error) {

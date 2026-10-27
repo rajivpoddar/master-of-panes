@@ -17,6 +17,7 @@ import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Hono } from "hono";
@@ -116,7 +117,23 @@ const config: MoPConfig = {
 // ─── Initialize ──────────────────────────────────────────
 
 const db = new MoPDatabase(config);
-const relay = new TmuxRelay(config);
+const relay = new TmuxRelay(config, { pmIdleHandoff: async () => {
+  const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const checkpoint = join(homedir(), ".claude/state", `daily-pm-restart-${day}.json`);
+  try {
+    const saved = JSON.parse(await readFile(checkpoint, "utf8"));
+    if (saved.handoff_status !== "pending" || saved.launch_intent) return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  // MoP's child, outside the target Claude tree. No detached PM descendant,
+  // timer, new service or polling worker owns this continuation.
+  await new Promise<void>((done, reject) => execFile("/bin/bash",
+    [join(homedir(), ".claude/scripts/pm/daily-pm-restart.sh"), "--complete-on-idle"],
+    { timeout: 330_000, env: { ...process.env, MOP_DB_PATH: resolve(config.dbPath) } },
+    (error) => error ? reject(error) : done()));
+} });
 // Wire DB into relay so injectToPM can queue when PM is busy.
 // Rajiv directive 2026-05-06 11:18 IST.
 relay.setDatabase(db);

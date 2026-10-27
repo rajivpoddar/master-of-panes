@@ -16,7 +16,9 @@ import urllib.request
 from zoneinfo import ZoneInfo
 
 ap = argparse.ArgumentParser()
-ap.add_argument('--dry-run', action='store_true')
+mode = ap.add_mutually_exclusive_group()
+mode.add_argument('--dry-run', action='store_true')
+mode.add_argument('--complete-on-idle', action='store_true')
 args = ap.parse_args()
 home = Path.home()
 day = dt.datetime.now(ZoneInfo('Asia/Kolkata')).strftime('%Y-%m-%d')
@@ -45,11 +47,11 @@ def atomic(path, text):
     finally:
         os.close(fd)
 
-def pm_identity(target='0:0.0'):
+def pm_identity(target='0:0.0', require_idle=True):
     """Read-only PM pin: immutable pane/session, process birth and monotonic hook work."""
     with urllib.request.urlopen('http://127.0.0.1:3100/pm-status', timeout=15) as response:
         status = json.load(response)
-    if status.get('pm_busy') is not False or status.get('queue_count') != 0:
+    if require_idle and (status.get('pm_busy') is not False or status.get('queue_count') != 0):
         raise RuntimeError('PM busy, queued, or activity unknown; restart deferred')
     fields = subprocess.run(['tmux', 'display-message', '-t', target, '-p',
         '#{pane_id}|#{session_id}|#{pane_pid}|#{pane_current_path}|#{pane_current_command}'],
@@ -76,22 +78,80 @@ def pm_identity(target='0:0.0'):
     if not members <= processes.keys() or any(int(processes[p][2]) != os.getuid() for p in members):
         raise RuntimeError('PM process ownership unknown')
     agents = [p for p in members if re.search(r'(^|/)(claude|openclaude)(\s|$)',processes[p][8])]
-    if len(agents) != 1 or members - {int(fields[2]), *agents}:
+    if len(agents) != 1 or (require_idle and members - {int(fields[2]), *agents}):
         raise RuntimeError('PM active descendant work or foreground identity unknown')
-    birth = [processes[p] for p in sorted(members)]
+    # Checkpointing is effect-free and may run in this Claude's Bash/Python
+    # subtree. Pin only its owner; the idle effect phase still rejects ALL tools.
+    birth = [processes[p] for p in sorted({int(fields[2]), *agents})]
     capture = subprocess.run(['tmux', 'capture-pane', '-p', '-t', fields[0], '-S', '-15'],
         capture_output=True, text=True, check=True, timeout=5).stdout
     prompts = [line.strip() for line in capture.splitlines() if line.strip().startswith('❯')]
-    if not prompts or prompts[-1] != '❯':
+    if require_idle and (not prompts or prompts[-1] != '❯'):
         raise RuntimeError('PM composer not proven empty')
     db = Path(os.environ.get('MOP_DB_PATH', str(home / '.local/share/master-of-panes/data/mop.db')))
     with sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True) as connection:
         boot = connection.execute("SELECT id,payload FROM events WHERE slot=0 AND event_type='SessionStart' ORDER BY id DESC LIMIT 1").fetchone()
-        work = connection.execute("SELECT max(id) FROM events WHERE slot=0 AND event_type IN ('UserPromptSubmit','PreToolUse','PostToolUse','Stop')").fetchone()[0]
-    if not boot or not isinstance(work, int):
+        work = connection.execute("SELECT max(id) FROM events WHERE slot=0 AND event_type IN ('UserPromptSubmit','pm_status_busy','PreToolUse','PostToolUse','Stop')").fetchone()[0]
+        submit = connection.execute("SELECT max(id) FROM events WHERE slot=0 AND event_type IN ('UserPromptSubmit','pm_status_busy')").fetchone()[0]
+    if not boot or not isinstance(work, int) or not isinstance(submit, int):
         raise RuntimeError('PM boot/work history unavailable')
     return {'pane': fields[0], 'session': fields[1], 'pid': fields[2], 'birth': birth,
-            'checkout': fields[3], 'command': fields[4], 'boot': list(boot), 'work': work}
+            'checkout': fields[3], 'command': fields[4], 'boot': list(boot), 'work': work, 'submit': submit}
+
+def owner(pin):
+    return {k:v for k,v in pin.items() if k != 'work'}
+
+def resume_on_idle(saved):
+    if saved.get('handoff_status') != 'pending':
+        emit('NO_PENDING_HANDOFF: nothing to replace')
+        return
+    requested = saved['request_identity']
+    pin = pm_identity(requested['pane'])
+    db = Path(os.environ.get('MOP_DB_PATH', str(home / '.local/share/master-of-panes/data/mop.db')))
+    with sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True) as connection:
+        later_work = connection.execute("SELECT count(*) FROM events WHERE slot=0 AND id>? AND event_type IN ('UserPromptSubmit','pm_status_busy','PreToolUse')", (requested['work'],)).fetchone()[0]
+        completions = connection.execute("SELECT id,payload FROM events WHERE slot=0 AND id>? AND event_type='PostToolUse' ORDER BY id", (requested['work'],)).fetchall()
+        stopped = connection.execute("SELECT max(id) FROM events WHERE slot=0 AND event_type='Stop'").fetchone()[0]
+    completion = json.loads(completions[0][1]) if len(completions) == 1 else {}
+    own_return = (len(completions) == 1 and completion.get('tool_name') == 'Bash'
+        and 'daily-pm-restart.sh' in str((completion.get('tool_input') or {}).get('command', ''))
+        and isinstance(stopped, int) and stopped > completions[0][0])
+    if owner(pin) != owner(requested) or later_work or not own_return:
+        saved['handoff_status'] = 'refused_successor_or_work'
+        atomic(state, json.dumps(saved))
+        emit('REFUSED: checkpoint owner or productive work changed before idle handoff')
+        return
+    if not saved.get('cleanup'):
+        subprocess.run(['python3', str(scripts / 'stale-process-cleanup.py'), '--apply', '--attest-slotless-reap'], check=True, timeout=300)
+        saved['cleanup'] = True
+        atomic(state, json.dumps(saved))
+    if pm_identity(pin['pane']) != pin:
+        raise RuntimeError('PM identity/work changed during cleanup; restart deferred')
+    request = urllib.request.Request('http://127.0.0.1:3100/exit-pending', data=b'{"enabled":true}',
+        headers={'Content-Type': 'application/json'}, method='POST')
+    with urllib.request.urlopen(request, timeout=15) as response:
+        if json.load(response).get('ok') is not True:
+            raise RuntimeError('MoP refused safe-point exits')
+    if pm_identity(pin['pane']) != pin:
+        raise RuntimeError('PM identity/work changed during checkpoint/cleanup; restart deferred')
+    saved['launch_intent'] = True
+    saved['pm_identity'] = pin
+    saved['replacement_status'] = 'attempted_uncertain'
+    atomic(state, json.dumps(saved))
+    emit('CHECKPOINTED: Stop/idle handoff replacing the pinned PM')
+    if pm_identity(pin['pane']) != pin:
+        raise RuntimeError('PM successor/work after attempted checkpoint; replacement suppressed')
+    launch = [str(scripts / 'launch-pm-cliproxy.sh'), saved['continuation_prompt']]
+    condition = '#{&&:#{==:#{pane_id},' + pin['pane'] + '},#{&&:#{==:#{pane_pid},' + pin['pid'] + '},#{==:#{session_id},' + pin['session'] + '}}}'
+    effect = shlex.join(['respawn-pane', '-k', '-t', pin['pane'], shlex.join(launch)])
+    result = subprocess.run(['tmux', 'if-shell', '-F', '-t', pin['pane'], condition,
+        effect + ' ; display-message -p PM_RESTART_REQUESTED', 'display-message -p PM_RESTART_REFUSED_IDENTITY'],
+        check=True, capture_output=True, text=True, timeout=15)
+    if result.stdout.strip() != 'PM_RESTART_REQUESTED':
+        raise RuntimeError('PM replacement not acknowledged; retain attempted state')
+    saved['replacement_status'] = 'requested'
+    saved['handoff_status'] = 'requested'
+    atomic(state, json.dumps(saved))
 
 def snapshot():
     db = memory.parent / 'state/pm-ops.db'
@@ -116,7 +176,16 @@ def perform():
     if saved.get('launch_intent'):
         emit('ALREADY_REQUESTED: PM restart was checkpointed for ' + day + '; inspect pane before any manual retry')
         return
-    pin = pm_identity()
+    if args.complete_on_idle:
+        resume_on_idle(saved)
+        return
+    if saved and not saved.get('handoff_status'):
+        emit('LEGACY_UNCERTAIN: retained pre-handoff state is not permission for another replacement')
+        return
+    if saved.get('handoff_status'):
+        emit('ALREADY_CHECKPOINTED: inspect retained handoff; no new owner or replacement attempt')
+        return
+    pin = pm_identity(require_idle=False)
     obligations, slots, prs = snapshot()
     owners = sorted({r['owner'] for r in obligations if r.get('owner')})
     prompt = ('Read ' + str(resume) + '. Resume PM from the canonical ledger. Relaunch the listed background agents only after checking their live state; '
@@ -128,6 +197,8 @@ def perform():
     emit('PM_RELAUNCH: tmux respawn-pane -k -t 0:0.0 ' + shlex.join(launch))
     if args.dry_run:
         return
+    if owner(pm_identity(pin['pane'], require_idle=False)) != owner(pin):
+        raise RuntimeError('PM owner changed before writing the checkpoint')
     text = ('---\nname: pm-resume-prompt-' + day + '-0400\ndescription: Daily 04:00 IST PM continuation; live snapshots and agent owners.\n---\n\n'
         '# PM RESUME PROMPT: ' + day + ' 04:00 IST\n\n'
         'Read MEMORY-session-handoff-current.md too. pm-ops.db is authoritative; snapshots are not permission to mutate ownership. '
@@ -148,37 +219,13 @@ def perform():
         raise RuntimeError('Expected exactly one MEMORY.md resume pointer; restart refused')
     lines[matches[0]] = pointer
     atomic(index, '\n'.join(lines) + '\n')
-    if not saved.get('cleanup'):
-        subprocess.run(['python3', str(scripts / 'stale-process-cleanup.py'), '--apply', '--attest-slotless-reap'], check=True, timeout=300)
-        saved['cleanup'] = True
-        atomic(state, json.dumps(saved))
-    if pm_identity(pin['pane']) != pin:
-        raise RuntimeError('PM identity/work changed during cleanup; restart deferred')
-    # Arm safe-point exits before replacing the invoking PM process.
-    request = urllib.request.Request('http://127.0.0.1:3100/exit-pending', data=b'{"enabled":true}',
-        headers={'Content-Type': 'application/json'}, method='POST')
-    with urllib.request.urlopen(request, timeout=15) as response:
-        if json.load(response).get('ok') is not True:
-            raise RuntimeError('MoP refused safe-point exits')
-    if pm_identity(pin['pane']) != pin:
-        raise RuntimeError('PM identity/work changed during checkpoint/cleanup; restart deferred')
-    saved['launch_intent'] = True
-    saved['pm_identity'] = pin
-    saved['replacement_status'] = 'attempted_uncertain'
+    if owner(pm_identity(pin['pane'], require_idle=False)) != owner(pin):
+        raise RuntimeError('PM owner changed while checkpointing')
+    saved['request_identity'] = pin
+    saved['continuation_prompt'] = prompt
+    saved['handoff_status'] = 'pending'
     atomic(state, json.dumps(saved))
-    emit('CHECKPOINTED: resume written, pointer updated, cleanup complete, safe-point exits armed; replacing PM')
-    # Recheck AFTER the fsynced attempt. Never clear intent, even on timeout/response loss.
-    if pm_identity(pin['pane']) != pin:
-        raise RuntimeError('PM successor/work after attempted checkpoint; replacement suppressed')
-    condition = '#{&&:#{==:#{pane_id},' + pin['pane'] + '},#{&&:#{==:#{pane_pid},' + pin['pid'] + '},#{==:#{session_id},' + pin['session'] + '}}}'
-    effect = shlex.join(['respawn-pane', '-k', '-t', pin['pane'], shlex.join(launch)])
-    result = subprocess.run(['tmux', 'if-shell', '-F', '-t', pin['pane'], condition,
-        effect + ' ; display-message -p PM_RESTART_REQUESTED', 'display-message -p PM_RESTART_REFUSED_IDENTITY'],
-        check=True, capture_output=True, text=True, timeout=15)
-    if result.stdout.strip() != 'PM_RESTART_REQUESTED':
-        raise RuntimeError('PM replacement not acknowledged; retain attempted state')
-    saved['replacement_status'] = 'requested'
-    atomic(state, json.dumps(saved))
+    emit('CHECKPOINTED: return from the skill; MoP continues once at the existing debounced Stop/idle boundary')
 
 if args.dry_run:
     perform()
