@@ -12,7 +12,7 @@
  * restoring conversation context including any in-progress work.
  *
  * PM auto-revival: When the PM process (pane 0:0.0) dies, MoP detects it
- * and restarts with `claude-pm --continue`. This is the most critical case —
+ * and restarts with `launch-pm-cliproxy.sh --continue`. This is the most critical case —
  * PM coordinates all slots, so downtime must be minimized.
  */
 
@@ -34,9 +34,9 @@ import { latestSessionStartEventId } from "./sessionStartClearWait.js";
 // Use standalone scripts instead of shell aliases — eliminates .zshrc/OMZ dependency.
 // Scripts are bash, not zsh, so no alias resolution issues.
 // (Rajiv directive 2026-04-03: "use scripts to launch claude on the slots instead of aliases")
-// PM remains on the tracked main-repo launcher. Numbered slots use the small,
-// user-local Claude Code wrappers because PM/operator cutovers may replace the
-// tracked OMP launchers independently of the active slot runtime.
+// PM and numbered slots use user-local Claude Code launchers. PM keeps CLIProxy
+// routing during both crash recovery and explicit respawn; numbered wrappers
+// remain independent of tracked OMP launcher cutovers.
 export const SCRIPTS_DIR = "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts";
 export const CLAUDE_SLOT_SCRIPTS_DIR = "/Users/rajiv/.claude/scripts";
 export const CLAUDE_SLOT_RUNTIME_ENV = [
@@ -49,7 +49,7 @@ export const CLAUDE_SLOT_RUNTIME_ENV = [
 // Health checker: always --continue (crash recovery preserves session/work).
 // Respawn skill: --continue is optional arg (fresh start for atma updates).
 export const RESTART_COMMANDS: Record<number, string> = {
-  0: `bash ${SCRIPTS_DIR}/launch-pm.sh --continue`,
+  0: `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-pm-cliproxy.sh --continue`,
   ...Object.fromEntries(DEV_SLOT_NUMBERS.map((slot) => [
     slot,
     `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${SLOT_RUNTIME_IDENTITIES[slot].launchScript} --continue`,

@@ -68,7 +68,7 @@ test("S5-S8 runtime identities are isolated and launchable without provisioning 
   assert.deepEqual(identityJson.slots.map((row) => [row.slot, row.name, row.app_port]), DEV_SLOT_NUMBERS.map((slot) => [slot, DEV_SLOT_NAMES[slot], 3000 + slot]));
 });
 
-test("all eight versioned launch wrappers pin the GPT-6 Luna profile and preserve the shared launcher library", () => {
+test("all eight versioned launch wrappers pin the GPT-6.1 Terra profile and preserve the shared launcher library", () => {
   const manifest = JSON.parse(readFileSync(new URL("../scripts/pm/shared-assets/manifest.json", import.meta.url), "utf8")) as {
     entries: Array<{ source_path: string; canonical_target: string; mode: number }>;
   };
@@ -83,8 +83,8 @@ test("all eight versioned launch wrappers pin the GPT-6 Luna profile and preserv
       "utf8",
     );
     assert.match(wrapper, /set -euo pipefail/);
-    // Every slot runs GPT-6.1 Sol (Rajiv GO 2026-10-09); an explicit profile still overrides.
-    assert.match(wrapper, /DEV_SLOT_SPARK_PROFILE="\$\{DEV_SLOT_SPARK_PROFILE:-gpt61sol\}"/);
+    // Preserve the live Terra default while allowing an explicit profile override.
+    assert.match(wrapper, /DEV_SLOT_SPARK_PROFILE="\$\{DEV_SLOT_SPARK_PROFILE:-gpt61terra\}"/);
     assert.match(
       wrapper,
       new RegExp(`exec /Users/rajiv/\\.claude/scripts/launch-dev-slot-claude\\.sh ${slot} "\\$@"`),

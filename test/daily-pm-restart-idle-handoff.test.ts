@@ -10,7 +10,7 @@ import { DEFAULT_CONFIG } from "../src/types.js";
 import type { MoPDatabase } from "../src/db.js";
 
 const fixture = fileURLToPath(new URL("../scripts/pm/tests/test_daily_pm_restart.py", import.meta.url));
-const python = process.env.MOP_FIXTURE_PYTHON ?? "/private/tmp/mop-respawn-test-env/bin/python";
+const python = process.env.MOP_FIXTURE_PYTHON ?? "python3";
 
 type IdleBoundary = {
   drainTimer: ReturnType<typeof setTimeout> | null;

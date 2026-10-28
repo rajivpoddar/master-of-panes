@@ -26,9 +26,9 @@ test("numbered slot auto-restarts preserve the Ornith context/output contract", 
   assert.doesNotMatch(CLAUDE_SLOT_RUNTIME_ENV, /MAX_OUTPUT_TOKENS=2048(?:\s|$)/);
 });
 
-test("PM restart remains on its tracked Claude Code launcher", () => {
+test("PM restart preserves CLIProxy routing and session continuation", () => {
   assert.equal(
     RESTART_COMMANDS[0],
-    "bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/launch-pm.sh --continue",
+    "bash /Users/rajiv/.claude/scripts/launch-pm-cliproxy.sh --continue",
   );
 });

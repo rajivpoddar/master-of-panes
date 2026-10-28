@@ -144,14 +144,11 @@ def test_canonical_asset_manifest_has_exact_source_digests_and_modes() -> None:
     assert entries["claude/scripts/pm/control-plane/sakshi-heartbeat.py"]["canonical_target"] == "/Users/rajiv/.claude/scripts/sakshi-heartbeat.py"
 
 
-def test_unrelated_asset_is_unchanged_from_candidate_base() -> None:
-    relative = "scripts/pm/shared-assets/claude/scripts/launch-dev-slot-claude.sh"
-    current = (ROOT / relative).read_bytes()
-    import subprocess
-
-    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    original = subprocess.check_output(["git", "show", f"{base}:{relative}"], cwd=ROOT)
-    assert current == original
+def test_shared_launcher_matches_manifest_digest() -> None:
+    relative = "claude/scripts/launch-dev-slot-claude.sh"
+    entry = next(item for item in json.loads(MANIFEST.read_text())["entries"]
+                 if item["source_path"] == relative)
+    assert hashlib.sha256((SHARED / relative).read_bytes()).hexdigest() == entry["sha256"]
 
 
 def test_cto_return_transport_is_explicit() -> None:

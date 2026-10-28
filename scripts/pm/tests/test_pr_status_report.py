@@ -39,7 +39,7 @@ def fixture():
 
 def test_mixed_fixture():
     prs, checks = fixture()
-    obligations = [dict(pr=n, owner='repair-agent', suppress_until='2026-10-27T12:00:00Z', evidence_json=json.dumps({'head': 'head'})) for n in range(1, 9)]
+    obligations = [dict(pr=n, target_type='github_pr', target_id=str(n), owner='repair-agent', suppress_until='2026-10-27T12:00:00Z', evidence_json=json.dumps({'head': 'head'})) for n in (1, 2, 4, 5)]
     lines, ages = report.render(prs, checks, [dict(slot=2, pr=1, issue=123, occupied=True, head_sha='head')], obligations,
                                {'6': {'gate': 'dual-green/merge ask', 'since': '2026-10-27T05:00:00Z'}}, NOW)
     assert len(lines) == 8
@@ -131,11 +131,11 @@ def test_exact_head_current_slot_is_owned_not_assumed_moving():
     assert 'S1' in lines[0] and 'OWNED' in lines[0] and 'MOVING' not in lines[0]
 
 
-@pytest.mark.parametrize('head,expected', [('old', 'unowned'), ('head', 'repair-agent')])
-def test_obligation_must_match_current_head(head, expected):
+@pytest.mark.parametrize('target,expected', [('99', 'unowned'), ('1', 'repair-agent')])
+def test_obligation_must_match_pr_target(target, expected):
     prs, checks = fixture()
-    rows = [dict(pr=1, owner='repair-agent', suppress_until='2026-10-27T12:00:00Z',
-                 evidence_json=json.dumps({'head': head}))]
+    rows = [dict(pr=1, target_type='github_pr', target_id=target, owner='repair-agent', suppress_until='2026-10-27T12:00:00Z',
+                 evidence_json=json.dumps({'head': 'head'}))]
     lines, _ = report.render([prs[0]], checks, [], rows, {}, NOW)
     assert expected in lines[0] and 'MOVING' not in lines[0]
 

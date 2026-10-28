@@ -56,13 +56,13 @@ def test_ownership_uses_live_mop_not_slot_label_and_all_pr_reference_paths():
 
 def test_blocker_boundaries_and_unknowns():
     m = load()
-    rows = [issue(1, 'status:blocked', body='Blockers: #10, #11\nAC: #99'),
-            issue(2, 'status:blocked', body='Depends on #10 and #12'),
+    rows = [issue(1, 'pm-blocked:dependency', body='Blockers: #10, #11\nAC: #99'),
+            issue(2, 'pm-blocked:dependency', body='Depends on #10 and #12'),
             issue(3, 'pm-blocked:product', body='Need approval; see #10'),
-            issue(4, 'status:blocked', body='Blockers: #4'),
-            issue(5, 'status:blocked', body='After #10\nWake: Rajiv approval'),
+            issue(4, 'pm-blocked:dependency', body='Blockers: #4'),
+            issue(5, 'pm-blocked:dependency', body='After #10\nWake: Rajiv approval'),
             issue(6, 'status:todo', body='Blockers: #10'),
-            issue(7, 'status:backlog', body='**Blockers**: #10')]
+            issue(7, 'status:backlog', 'pm-blocked:dependency', body='**Blockers**: #10')]
     # External wakes remain for PM's park/unblock disposition, not auto-mutation.
     assert [r['issue'] for r in m.detect(rows, [], [], [], lambda n: n in (10, 11))] == [1, 5, 7]
 
