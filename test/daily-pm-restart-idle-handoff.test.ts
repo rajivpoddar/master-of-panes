@@ -44,12 +44,18 @@ test("documented busy skill checkpoints with caller tools; MoP Stop/idle replace
     call("checkpoint"); // fixture contains Claude -> Bash -> Python -> ps
     assert.equal(relay.isPMBusy(), true);
     let effects = JSON.parse(readFileSync(join(home, "fixture-effects.json"), "utf8")) as string[][];
-    assert.equal(effects.some(a => a[1] === "if-shell" || a[0] === "exit-pending"), false);
+    assert.equal(effects.some(a => a[1] === "respawn-pane" || a[0] === "mop-respawn"), false);
+    assert.deepEqual(JSON.parse(effects.find(a => a[0] === "exit-pending")![1]), { enabled: true, dev_only: true });
     assert.equal(launches, 0);
     call("stop"); // own Bash completion + terminal Stop, no new prompt/tool
     await stopAndDrain(relay);
     effects = JSON.parse(readFileSync(join(home, "fixture-effects.json"), "utf8"));
-    assert.equal(effects.filter(a => a[0] === "tmux" && a[1] === "if-shell").length, 1);
+    assert.equal(effects.filter(a => a[0] === "mop-respawn").length, 1);
+    assert.deepEqual(JSON.parse(effects.find(a => a[0] === "mop-respawn")![1]), { continue_session: true });
+    const send = effects.find(a => a[0] === "mop-send")!;
+    assert.ok(effects.indexOf(send) > effects.findIndex(a => a[0] === "mop-respawn"));
+    assert.match(JSON.parse(send[1]).command, /Read .*0400/);
+    assert.equal(effects.some(a => a[0] === "tmux" && a[1] === "respawn-pane"), false);
     assert.equal(JSON.parse(readFileSync(join(home, "fixture-parent.json"), "utf8")).parent_pid, process.pid);
     await stopAndDrain(relay);
     assert.equal(launches, 1, "retained requested state cannot replay on another Stop");

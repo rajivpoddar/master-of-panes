@@ -634,8 +634,9 @@ export class ProcessHealthChecker {
 
     const status = this.db.getExitStatus();
 
-    // Check all slots including PM (slot 0) — MoP triggers exit for all panes
+    // Dev-only episodes leave PM replacement exclusively to /slots/0/respawn.
     for (const slot of RUNTIME_SLOT_NUMBERS) {
+      if (slot === 0 && status.dev_only) continue;
       // Already cycled — skip
       if (status.cycled[slot]) continue;
 
@@ -663,7 +664,8 @@ export class ProcessHealthChecker {
       if (slot > 0 && (!row || row.active_turn_state !== "inactive")) continue;
       const pin = row ? pinFrom({ paneId: observed.paneId, checkout: SLOT_RUNTIME_IDENTITIES[slot].checkoutPath }, { ...row, session_id: sessionId }) : null;
       const fence = (): string | null => {
-        if (!this.db.getExitPending() || this.db.getExitStatus().cycled[slot]) return "exit_pending_consumed";
+        const freshStatus = this.db.getExitStatus();
+        if (!this.db.getExitPending() || freshStatus.cycled[slot] || (slot === 0 && freshStatus.dev_only)) return "exit_pending_consumed";
         if (session() !== sessionId) return "session_changed";
         if (slot === 0) return null;
         const fresh = this.db.getSlot(slot);
@@ -704,7 +706,7 @@ export class ProcessHealthChecker {
 
     // Check if all slots have now cycled
     const updatedStatus = this.db.getExitStatus();
-    const allCycled = Object.entries(updatedStatus.cycled).every(([, v]) => v);
+    const allCycled = Object.entries(updatedStatus.cycled).every(([slot, v]) => (updatedStatus.dev_only && Number(slot) === 0) || v);
     if (allCycled) {
       this.db.setExitPending(false);
       this.relay.injectToPM("# All exit_pending attempts consumed — flag auto-cleared; this is not restart verification");

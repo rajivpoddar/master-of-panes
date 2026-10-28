@@ -1229,7 +1229,7 @@ app.post("/slots/:slotNum/dnd", async (c) => {
 
 /** Set or clear the exit_pending flag (REST parity for mop_set_exit_pending). */
 app.post("/exit-pending", async (c) => {
-  let body: { enabled?: boolean } = {};
+  let body: { enabled?: boolean; dev_only?: boolean } = {};
   try {
     body = await c.req.json();
   } catch {
@@ -1238,7 +1238,10 @@ app.post("/exit-pending", async (c) => {
   if (typeof body.enabled !== "boolean") {
     return c.json({ error: "Missing 'enabled' boolean field" }, 400);
   }
-  db.setExitPending(body.enabled);
+  if (body.dev_only !== undefined && typeof body.dev_only !== "boolean") {
+    return c.json({ error: "Invalid 'dev_only' boolean field" }, 400);
+  }
+  db.setExitPending(body.enabled, body.dev_only === true);
   db.logEvent(0, body.enabled ? "exit_pending_enabled" : "exit_pending_disabled", null, null, {
     reason: body.enabled ? "PM set exit_pending — slots will /exit at next idle" : "PM cleared exit_pending flag",
   });

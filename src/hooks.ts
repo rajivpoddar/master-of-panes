@@ -1595,7 +1595,7 @@ export class HookProcessor {
     // instead of normal idle notification. Watchdog will restart it.
     // Guard: skip if this slot already cycled (prevents restart loops after
     // watchdog restarts the slot with --continue and it goes idle again).
-    if (this.db.getExitPending() && !this.db.getExitStatus().cycled[slotNum]) {
+    if (this.db.getExitPending() && !(slotNum === 0 && this.db.getExitStatus().dev_only) && !this.db.getExitStatus().cycled[slotNum]) {
       this.relay.sendToSlot(slotNum, "/exit", true);
       this.db.markSlotExitCycled(slotNum);
       this.db.logEvent(slotNum, "exit_pending_triggered", "Stop", null, {
@@ -1610,7 +1610,7 @@ export class HookProcessor {
       // Check if all slots have cycled — if so, auto-clear the flag
       const status = this.db.getExitStatus();
       const allCycled = Object.entries(status.cycled)
-        .every(([, v]) => v);
+        .every(([slot, v]) => (status.dev_only && Number(slot) === 0) || v);
       if (allCycled) {
         this.db.setExitPending(false);
         this.relay.injectToPM(

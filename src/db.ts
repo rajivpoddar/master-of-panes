@@ -2491,7 +2491,8 @@ export class MoPDatabase {
     return this.getConfig("exit_pending") === "true";
   }
 
-  setExitPending(enabled: boolean): void {
+  setExitPending(enabled: boolean, devOnly = false): void {
+    this.setConfig("exit_pending_dev_only", enabled && devOnly ? "true" : "false");
     this.setConfig("exit_pending", enabled ? "true" : "false");
     if (enabled) {
       // Reset all slot exit-cycled tracking when enabling
@@ -2505,13 +2506,13 @@ export class MoPDatabase {
     this.setConfig(`exit_cycled_${slot}`, "true");
   }
 
-  getExitStatus(): { pending: boolean; cycled: Record<number, boolean> } {
+  getExitStatus(): { pending: boolean; dev_only: boolean; cycled: Record<number, boolean> } {
     const pending = this.getExitPending();
     const cycled: Record<number, boolean> = {};
     for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
       cycled[i] = this.getConfig(`exit_cycled_${i}`) === "true";
     }
-    return { pending, cycled };
+    return { pending, dev_only: this.getConfig("exit_pending_dev_only") === "true", cycled };
   }
 
   // ─── Clear Pending ─────────────────────────────────────

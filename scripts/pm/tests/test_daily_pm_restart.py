@@ -1,5 +1,6 @@
 """Daily restart runs real snapshot code against isolated state and mocked effects."""
 import io
+import urllib.error
 import json
 import os
 from pathlib import Path
@@ -71,8 +72,21 @@ def execute(home, dry, effects, race=None, phase='checkpoint'):
         if isinstance(request, str):
             if request.endswith('/pm-status'):
                 return io.BytesIO(json.dumps({'pm_busy': phase == 'checkpoint' or race == 'busy', 'queue_count': 1 if race == 'queued' else 0}).encode())
+            if request.endswith('/exit-status'):
+                return io.BytesIO(json.dumps({} if race == 'no_dev_scope' else {'dev_only': False}).encode())
             return io.BytesIO(json.dumps({'slots': [{'slot': 2, 'issue': 12, 'assignment_epoch': 8}]}).encode())
-        effects.append(['exit-pending', request.data.decode()])
+        if request.full_url.endswith('/exit-pending'):
+            effects.append(['exit-pending', request.data.decode()])
+            return io.BytesIO(b'{"ok":true,"status":{"dev_only":true}}')
+        if request.full_url.endswith('/slots/0/respawn'):
+            effects.append(['mop-respawn', request.data.decode()])
+            saved, = (home / '.claude/state').glob('daily-pm-restart-*.json')
+            assert json.loads(saved.read_text())['launch_intent'] is True
+            if race == 'uncertain': raise TimeoutError('accepted response lost')
+            if race == 'respawn_busy': raise urllib.error.HTTPError(request.full_url,409,'busy',{},io.BytesIO(b'busy'))
+            return io.BytesIO(b'{"success":true}')
+        assert request.full_url.endswith('/slots/0/send')
+        effects.append(['mop-send', request.data.decode()])
         return io.BytesIO(b'{"ok":true}')
     with patch.dict(os.environ, {'MOP_DB_PATH': str(home / '.local/share/master-of-panes/data/mop.db')}), \
          patch.object(Path, 'home', return_value=home), patch.object(sys, 'argv', ['restart'] + (['--dry-run'] if dry else ['--complete-on-idle'] if phase == 'idle' else [])), \
@@ -86,7 +100,7 @@ def stop(home):
 
 
 def replacements(effects):
-    return [e for e in effects if e[:2] in (['tmux','if-shell'],['tmux','respawn-pane'])]
+    return [e for e in effects if e[0] == 'mop-respawn' or e[:2] in (['tmux','if-shell'],['tmux','respawn-pane'])]
 
 
 def test_legacy_unfinished_state_is_preserved_without_new_attempt(tmp_path):
@@ -110,7 +124,7 @@ def test_dry_run_snapshots_but_does_not_restart_or_write_resume(tmp_path, capsys
     assert not any(e[:2] == ['tmux','if-shell'] or e[0] == 'exit-pending' for e in effects)
     output = capsys.readouterr().out
     assert 'open_obligations=1; slots=1; open_prs=1' in output
-    assert 'SAFE_POINT' in output and 'PM_RELAUNCH' in output
+    assert 'DEV_EXIT_PENDING' in output and 'PM_RELAUNCH' in output
     assert '(old.md)' in (base / 'memory/MEMORY.md').read_text()
 
 
@@ -123,17 +137,22 @@ def test_apply_preserves_state_orders_safe_exits_and_is_idempotent(tmp_path):
     assert 'agent-one' in text and 'assignment_epoch' in text and 'abc' in text
     assert resume.name in (base / 'memory/MEMORY.md').read_text()
     assert 'Keep this entry' in (base / 'memory/MEMORY.md').read_text()
-    assert not replacements(effects) and not any(e[0] == 'exit-pending' for e in effects)
+    assert not replacements(effects)
+    assert sum(e[0] == 'exit-pending' for e in effects) == 1
+    assert json.loads(next(e[1] for e in effects if e[0] == 'exit-pending')) == {'enabled': True, 'dev_only': True}
     saved, = (tmp_path / '.claude/state').glob('daily-pm-restart-*.json')
     assert json.loads(saved.read_text())['handoff_status'] == 'pending'
     assert not json.loads(saved.read_text()).get('launch_intent')
     stop(tmp_path)
     execute(tmp_path, False, effects, phase='idle')
-    replacement, = [e for e in effects if e[:2] == ['tmux','if-shell']]
+    replacement, = replacements(effects)
     assert next(i for i,e in enumerate(effects) if e[0] == 'exit-pending') < effects.index(replacement)
-    assert replacement[4] == '%40'
-    assert 'respawn-pane -k -t %40' in replacement[-2]
-    assert 'launch-pm-cliproxy.sh' in replacement[-2]
+    assert json.loads(replacement[1]) == {'continue_session': True}
+    sent, = [e for e in effects if e[0] == 'mop-send']
+    assert effects.index(sent) > effects.index(replacement)
+    assert resume.name in json.loads(sent[1])['command']
+    assert not any(e[:2] == ['tmux','respawn-pane'] for e in effects)
+    assert json.loads(saved.read_text())['dev_exit_pending_armed'] is True
     before = list(effects)
     execute(tmp_path, False, effects, phase='idle')
     assert effects == before
@@ -219,3 +238,27 @@ def test_other_root_descendant_still_refuses_ownership(tmp_path):
     environment(tmp_path)
     with pytest.raises(RuntimeError, match='ownership unknown'):
         execute(tmp_path, True, [], race='root_child')
+
+
+def test_missing_dev_scope_does_not_arm_global_flag(tmp_path):
+    environment(tmp_path)
+    effects = []
+    execute(tmp_path, False, effects, 'no_dev_scope')
+    saved, = (tmp_path / '.claude/state').glob('daily-pm-restart-*.json')
+    assert json.loads(saved.read_text())['dev_exit_pending_armed'] == 'blocked_mop_dev_only_scope_missing'
+    assert not any(e[0] == 'exit-pending' for e in effects)
+    execute(tmp_path, False, effects)
+    assert json.loads(saved.read_text())['dev_exit_pending_armed'] is True
+    assert sum(e[0] == 'exit-pending' for e in effects) == 1
+
+
+def test_respawn_409_is_deferred_without_prompt_or_tmux_replacement(tmp_path):
+    environment(tmp_path)
+    effects = []
+    execute(tmp_path, False, effects)
+    stop(tmp_path)
+    execute(tmp_path, False, effects, 'respawn_busy', phase='idle')
+    saved, = (tmp_path / '.claude/state').glob('daily-pm-restart-*.json')
+    assert json.loads(saved.read_text())['replacement_status'] == 'deferred_mop_409'
+    assert len(replacements(effects)) == 1
+    assert not any(e[0] == 'mop-send' or e[:2] == ['tmux','respawn-pane'] for e in effects)
