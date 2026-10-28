@@ -682,15 +682,29 @@ def spark_probe(timeout: int = 8) -> tuple[dict | None, str]:
     return doc, ""
 
 
-def monitor_up() -> bool:
+def monitor_up(container: str | None = None) -> bool:
+    """Liveness from live processes. The monitor may run as `bash spark-run-monitor.sh ...`
+    or as a python process fed the script on stdin (argv lacks the script name), so match
+    on its argv shape (--run-name + --container) and, when known, the active container."""
     try:
-        r = subprocess.run(["pgrep", "-f", "spark-run-monitor\\.sh"], capture_output=True, text=True, errors="replace", timeout=3)
+        r = subprocess.run(["ps", "-ww", "-ax", "-o", "pid=,command="], capture_output=True, text=True, errors="replace", timeout=5)
         own = os.getpid()
-        pids = [int(x) for x in r.stdout.split() if x.isdigit() and int(x) != own]
-        for pid in pids:
-            c = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, errors="replace", timeout=3).stdout
-            if "spark-run-monitor.sh --run-name" in c or c.strip().startswith(("bash", "/bin/bash", "sh ")) and "spark-run-monitor" in c:
-                return True
+        for line in r.stdout.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) < 2 or not parts[0].isdigit() or int(parts[0]) == own:
+                continue
+            c = parts[1]
+            if "grep" in c.split(None, 1)[0] or "pgrep" in c:
+                continue
+            argv = c.split()
+            is_monitor = "spark-run-monitor" in c or ("--run-name" in argv and "--container" in argv and "--memory-config" in argv)
+            if not is_monitor:
+                continue
+            if container and "--container" in argv:
+                i = argv.index("--container")
+                if i + 1 < len(argv) and argv[i + 1] != container:
+                    continue
+            return True
         return False
     except Exception:
         return False
@@ -703,7 +717,7 @@ def training_line(probe=None, mon_up=None) -> tuple[str, list[str]]:
         return f"*Training:* UNAVAILABLE ({reason or 'probe failed'})", []
     if not doc:
         return "*Training:* no run active", []
-    up = monitor_up() if mon_up is None else mon_up
+    up = monitor_up(doc.get("run")) if mon_up is None else mon_up
     bits = [doc["run"]]
     if doc.get("step") is not None:
         pct = 100.0 * doc["step"] / doc["total"] if doc["total"] else 0
@@ -744,6 +758,7 @@ def compose(
     training: tuple | None = None,
     langsmith: str | None = None,
     unblockable: list[str] | None = None,
+    tracked: list[str] | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -791,6 +806,9 @@ def compose(
         sl_lines, sl_tldr, slot_actions = slot_block(slots, now, release_seen)
         parts.append(sl_tldr)
         body += ["", *sl_lines]
+    if tracked:
+        # Rajiv 2026-10-27 DM D0AMF0XE6TS thread 1793097714.304129: tracked features right after Slots.
+        body += ["", *tracked]
     if mode == "1h":
         # Empty line before Agents and before Training; LangSmith ingest line dropped
         # (Rajiv 2026-10-24, C0ALZJHGE49 thread 1792806307.991749, ts 1792806414.519859).
@@ -1121,7 +1139,8 @@ def main() -> int:
     if args.mode == "3h":
         try:
             up = subprocess.run([py, str(Path.home() / ".claude/scripts/usage-snapshot.py")], capture_output=True, text=True, errors="replace", timeout=120)
-            usage_lines = [l for l in up.stdout.splitlines() if l.strip()]
+            # Rajiv 2026-10-27 (C0ALZJHGE49 ts 1793096042.185159): drop Fable from the Claude accounts.
+            usage_lines = [l for l in up.stdout.splitlines() if l.strip() and "fable" not in l.lower()]
             if up.returncode != 0 and not usage_lines:
                 failures.append(f"usage: rc={up.returncode}")
         except Exception as exc:
@@ -1134,15 +1153,12 @@ def main() -> int:
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")
     training = training_line() if args.mode == "1h" else None
-    # Extend the existing Unblockable now section, never add a second queue.
+    # Tracked features and issue lifecycle moved to their own thread replies
+    # (tracked-features-report.py / issue-lifecycle-report.py, invoked by slack-send.sh
+    # after the Hourly parent, like pr-status-report.py). Rajiv C0ALZJHGE49
+    # thread 1793116023.781399, ts 1793118979.539329.
     unblockable = None
-    if args.mode == "1h":
-        lifecycle = _run_json([py, str(SCRIPTS / "issue-lifecycle.py")],
-                              failures, "issue-lifecycle", timeout=600)
-        unblockable = (lifecycle["lines"] if lifecycle else
-                       ["*Unblockable now / issue lifecycle:*", "• unavailable; cursor retained, PM must retry"])
-        if lifecycle and lifecycle["findings"]:
-            pm_actions.append("orphaned_issue: disposition every open lifecycle obligation via hourly-report-processing")
+    tracked = None
     langsmith = None  # LangSmith ingest dropped from the hourly (Rajiv ts 1792806414.519859)
     print(compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
@@ -1150,7 +1166,7 @@ def main() -> int:
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
-        email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable,
+        email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
     ))
     pm_actions += (training[1] if training else [])
     if pm_actions:

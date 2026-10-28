@@ -983,11 +983,18 @@ if r.get('ok'):
     if (os.environ.get('SLACK_SEND_AS') == 'alerts'
             and channel == 'C0ALZJHGE49' and not pl.get('thread_ts')
             and re.match(r'^(?:<@U0BNFGX2UAX> )?[*]?Hourly — ', pl.get('text', ''))):
-        report = os.path.expanduser('~/.claude/scripts/pm/heartbeat/pr-status-report.py')
-        result = subprocess.run([sys.executable, report, '--channel', channel, '--thread', ts])
-        if result.returncode:
-            print(f'HOURLY_PR_REPORT_FAILED parent_ts={ts}; retry pr-status-report.py --thread {ts}', file=sys.stderr)
-            sys.exit(result.returncode)
+        # Three replies: PR status, tracked features, issue lifecycle (Rajiv
+        # C0ALZJHGE49 thread 1793116023.781399, ts 1793118979.539329). Each is
+        # idempotent per thread; one failure does not skip the others.
+        rc = 0
+        for name in ('pr-status-report.py', 'tracked-features-report.py', 'issue-lifecycle-report.py'):
+            report = os.path.expanduser('~/.claude/scripts/pm/heartbeat/' + name)
+            result = subprocess.run([sys.executable, report, '--channel', channel, '--thread', ts])
+            if result.returncode:
+                print(f'HOURLY_REPLY_FAILED parent_ts={ts}; retry {name} --thread {ts}', file=sys.stderr)
+                rc = rc or result.returncode
+        if rc:
+            sys.exit(rc)
 else:
     print(f'ERROR: {r.get(\"error\", \"unknown\")}')
     sys.exit(1)

@@ -11,7 +11,7 @@ while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --spark-profile)
       if [[ "$#" -lt 2 ]]; then
-        echo "ERROR: --spark-profile requires ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, gpt6luna, gpt61sol, or opus55" >&2
+        echo "ERROR: --spark-profile requires ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, gpt6luna, gpt61sol, gpt61terra, or opus55" >&2
         exit 2
       fi
       SPARK_PROFILE="$2"
@@ -62,6 +62,18 @@ case "$SPARK_PROFILE" in
     SPARK_MODEL="${GPT61SOL_SPARK_MODEL:-gpt-6.1-sol}"
     SPARK_BASE_URL="${GPT61SOL_SPARK_BASE_URL:-http://127.0.0.1:8317}"
     SPARK_KEY_ENV_FILE="${GPT61SOL_SPARK_KEY_ENV_FILE:-/Users/rajiv/.config/cliproxyapi/client.env}"
+    SPARK_EXPECTED_MODEL="$SPARK_MODEL"
+    SPARK_READINESS_TIMEOUT_SECONDS="10"
+    SPARK_API_TIMEOUT_MS="1200000"
+    SPARK_MAX_CONTEXT_TOKENS="200000"
+    SPARK_MAX_OUTPUT_TOKENS="32000"
+    SPARK_MAX_THINKING_TOKENS="2048"
+    ;;
+  gpt61terra)
+    # GPT-6.1 Terra high through the local CLIProxyAPI (Rajiv D0AMF0XE6TS thread 1793097880.100719, ts 1793098122.648999).
+    SPARK_MODEL="${GPT61TERRA_SPARK_MODEL:-gpt-6.1-terra}"
+    SPARK_BASE_URL="${GPT61TERRA_SPARK_BASE_URL:-http://127.0.0.1:8317}"
+    SPARK_KEY_ENV_FILE="${GPT61TERRA_SPARK_KEY_ENV_FILE:-/Users/rajiv/.config/cliproxyapi/client.env}"
     SPARK_EXPECTED_MODEL="$SPARK_MODEL"
     SPARK_READINESS_TIMEOUT_SECONDS="10"
     SPARK_API_TIMEOUT_MS="1200000"
@@ -258,7 +270,7 @@ case "$SPARK_PROFILE" in
     SPARK_MAX_THINKING_TOKENS="0"
     ;;
   *)
-    echo "ERROR: unsupported profile '$SPARK_PROFILE'; expected ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, gpt6luna, gpt61sol, or opus55" >&2
+    echo "ERROR: unsupported profile '$SPARK_PROFILE'; expected ornith, ornstein, ling-mia, deepseek-v4, deepseek-flash-4.1, qwen38-next, qwen38-mia, swift-qwen38, qwopus, tiel, nemotron, spark25, neohorse, glimmer, oxcoder, muse13-contributor, gpt6luna, gpt61sol, gpt61terra, or opus55" >&2
     exit 2
     ;;
 esac
@@ -452,6 +464,9 @@ fi
 # GPT-6 Luna lanes run at high. GPT-6.1 Sol runs at LOW (Rajiv 2026-10-09 C0ALZJHGE49 ts 1791551071.854279: "set the effort to low on all slots").
 if [[ "$SPARK_PROFILE" == "gpt61sol" ]]; then
   SLOT_EFFORT="${DEV_SLOT_EFFORT:-low}"
+elif [[ "$SPARK_PROFILE" == "gpt61terra" ]]; then
+  # Terra runs at high (Rajiv 2026-10-27 D0AMF0XE6TS ts 1793098122.648999).
+  SLOT_EFFORT="${DEV_SLOT_EFFORT:-high}"
 elif [[ "$SPARK_PROFILE" == "gpt6luna" ]]; then
   SLOT_EFFORT="${DEV_SLOT_EFFORT:-high}"
 fi

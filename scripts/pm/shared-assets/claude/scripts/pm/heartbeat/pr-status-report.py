@@ -15,11 +15,14 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import sys
+import time
 import urllib.request
 
 HOME = Path.home()
 STATE = HOME / '.claude/state/pr-status-report.json'
-DB = HOME / '.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db'
+DB = Path(os.environ.get('PM_OPS_DB', str(
+    HOME / '.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db')))
 REPO = 'heydonna-app/heydonna-app'
 RED = {'FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'}
 
@@ -39,6 +42,20 @@ def gh(*args):
     return json.loads(result.stdout)
 
 
+def fetch_checks(head, retry_delay=3):
+    """Per-PR check-runs; retry once, then None (unavailable) instead of aborting."""
+    for attempt in range(2):
+        try:
+            runs = gh('api', '--paginate', '--slurp',
+                      f'repos/{REPO}/commits/{head}/check-runs?per_page=100&filter=latest')
+            return [r for p in runs for r in p['check_runs']]
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
+            print(f'WARN check-runs fetch failed for {head[:12]} (attempt {attempt + 1}): {exc}', file=sys.stderr)
+            if attempt == 0:
+                time.sleep(retry_delay)
+    return None
+
+
 def collect():
     # REST pagination includes drafts and has no fixed PR-count cutoff.
     pages = gh('api', '--paginate', '--slurp', f'repos/{REPO}/pulls?state=open&per_page=100')
@@ -46,13 +63,25 @@ def collect():
     checks = {}
     for page in pages:
         for item in page:
-            pr = gh('pr', 'view', str(item['number']), '--repo', REPO, '--json',
-                    'number,isDraft,headRefOid,headRefName,labels,mergeable')
+            pr = None
+            for attempt in range(2):
+                try:
+                    pr = gh('pr', 'view', str(item['number']), '--repo', REPO, '--json',
+                            'number,isDraft,headRefOid,headRefName,labels,mergeable')
+                    break
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as exc:
+                    print(f'WARN pr view #{item["number"]} failed (attempt {attempt + 1}): {exc}', file=sys.stderr)
+                    if attempt == 0:
+                        time.sleep(3)
+            if pr is None:
+                # Fall back to the REST list row; mergeable is unknown.
+                pr = {'number': item['number'], 'isDraft': bool(item.get('draft')),
+                      'headRefOid': item['head']['sha'], 'headRefName': item['head']['ref'],
+                      'labels': [{'name': x['name']} for x in item.get('labels', [])],
+                      'mergeable': 'UNKNOWN'}
             prs.append(pr)
             # Check-runs endpoint is pinned to the SHA, not branch/latest workflow.
-            runs = gh('api', '--paginate', '--slurp',
-                      f'repos/{REPO}/commits/{pr["headRefOid"]}/check-runs?per_page=100&filter=latest')
-            checks[pr['number']] = [r for p in runs for r in p['check_runs']]
+            checks[pr['number']] = fetch_checks(pr['headRefOid'])
     with urllib.request.urlopen('http://127.0.0.1:3100/slots', timeout=10) as response:
         slots = json.load(response)['slots']
     for slot in slots:
@@ -63,8 +92,9 @@ def collect():
     with sqlite3.connect(f'file:{DB}?mode=ro', uri=True, timeout=5) as con:
         con.row_factory = sqlite3.Row
         obligations = [dict(row) for row in con.execute(
-            "SELECT id, pr, owner, suppress_until, kind, evidence_json FROM obligations "
-            "WHERE status='open' AND kind IN ('pr_red_unowned','pr_admission','pr_merge_ask') ORDER BY id DESC")]
+            "SELECT id, pr, target_type, target_id, owner, suppress_until, kind, evidence_json FROM obligations "
+            "WHERE status='open' AND (target_type='github_pr' OR "
+            "kind IN ('pr_red_unowned','pr_admission','pr_merge_ask')) ORDER BY id DESC")]
     bridge = HOME / 'Downloads/projects/tmux-slack-bridge/bridge.db'
     if bridge.exists():
         with sqlite3.connect(f'file:{bridge}?mode=ro', uri=True, timeout=5) as con:
@@ -99,27 +129,99 @@ def claim_evidence(row):
         return {}
 
 
-def classify(pr, runs, slots, obligations, prior, now):
+MERGEABLE_OK = {'MERGEABLE', 'CLEAN'}
+
+
+def hold_reason(pr, obligations):
+    """Shared hold check: pm-blocked:*, pm-state:blocked-*, or an open pr_admission 'HELD' obligation."""
+    labels = [item['name'] for item in pr['labels']]
+    held = sorted(x for x in labels if x.startswith('pm-blocked:') or x.startswith('pm-state:blocked-'))
+    if held:
+        return ','.join(held)
+    for row in obligations or []:
+        if row.get('pr') != pr['number'] or row.get('kind') != 'pr_admission':
+            continue
+        raw = row.get('evidence_json') or ''
+        texts = [raw] + list(claim_evidence(row).keys())
+        for text in texts:
+            text = text.lstrip('{"\' ')
+            if text.startswith('HELD'):
+                return re.sub(r'\s+', ' ', text[4:].lstrip(':- ').split('(')[0].split(';')[0]).strip()[:80]
+    return None
+
+
+def classifier_e2e_required(number, head):
+    """change_scope.py classifier (main copy); fail closed to True."""
+    script = HOME / 'Downloads/projects/heydonna-app/scripts/ci/change_scope.py'
+    try:
+        out = subprocess.run([sys.executable, str(script), '--repo', REPO, '--pr', str(number),
+                              '--expected-head', head], capture_output=True, text=True, timeout=90,
+                             cwd=script.parent.parent.parent, check=True).stdout
+        return bool(json.loads(out).get('e2e_required', True))
+    except Exception:
+        return True
+
+
+def merge_gate(pr, runs, obligations, e2e_required=None):
+    """Single merge-ask gate (shared by tracked-features). Returns (gate, action, checks).
+
+    Merge ask only when: non-draft, no hold, live head == ci-head label, CI SUCCESS,
+    E2E SUCCESS (or not required by the classifier), mergeable MERGEABLE/CLEAN.
+    """
     number, head = pr['number'], pr['headRefOid']
     labels = [item['name'] for item in pr['labels']]
-    blocked = sorted(label for label in labels if label.startswith('pm-blocked:'))
     admitted = f'ci-head:{head}' in labels
-    admission = 'matches' if admitted else ('stale' if any(x.startswith('ci-head:') for x in labels) else 'missing')
-    checks = latest_checks(runs, head)
+    checks = latest_checks(runs or [], head)
     ci, e2e = checks.get('test', 'MISSING'), checks.get('e2e', 'MISSING')
+    if ci == 'SUCCESS' and e2e in ('MISSING', 'SKIPPED', 'NEUTRAL'):
+        if e2e_required is None:
+            e2e_required = classifier_e2e_required(number, head)
+        if not e2e_required:
+            e2e = 'NOT_REQUIRED'
+    hold = hold_reason(pr, obligations)
+    mergeable = pr.get('mergeable') or 'UNKNOWN'
     if pr['isDraft']:
         gate, action = 'draft-rework', 'finish rework'
+    elif hold:
+        gate, action = 'held', f'held: {hold}'
     elif not admitted:
         gate, action = '12b', 'review/admit exact head'
     elif ci in RED or e2e in RED:
         gate = 'CI red' if ci in RED else 'E2E red'
         action = 'repair failing run'
-    elif ci == e2e == 'SUCCESS':
-        gate, action = 'dual-green/merge ask', 'request exact-head merge'
+    elif ci == 'SUCCESS' and e2e in ('SUCCESS', 'NOT_REQUIRED'):
+        if mergeable in MERGEABLE_OK:
+            gate, action = 'dual-green/merge ask', 'request exact-head merge'
+        else:
+            gate = 'green/not mergeable'
+            action = 'resolve conflicts' if mergeable == 'CONFLICTING' else f'reconcile mergeable {mergeable}'
     else:
         gate, action = 'CI running', 'await terminal' if 'PENDING' in (ci, e2e) else 'reconcile missing gates'
-    if pr.get('mergeable') == 'CONFLICTING':
+    if mergeable == 'CONFLICTING' and not action.startswith('resolve conflicts'):
         action = 'resolve conflicts; ' + action
+    return gate, action, {'ci': ci, 'e2e': e2e, 'admitted': admitted}
+
+
+def pending_ci(head):
+    """Workflow status covers queued runs before their test check is created."""
+    try:
+        runs = gh('run', 'list', '--repo', REPO, '--workflow', 'ci.yml',
+                  '--commit', head, '--json', 'headSha,status')
+        return any(run.get('headSha') == head and run.get('status') in ('queued', 'in_progress')
+                   for run in runs)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, TypeError) as exc:
+        print(f'WARN CI runs fetch failed for {head[:12]}: {exc}', file=sys.stderr)
+        return False
+
+
+def classify(pr, runs, slots, obligations, prior, now):
+    number, head = pr['number'], pr['headRefOid']
+    labels = [item['name'] for item in pr['labels']]
+    admitted = f'ci-head:{head}' in labels
+    admission = 'matches' if admitted else ('stale' if any(x.startswith('ci-head:') for x in labels) else 'missing')
+    gate, action, g = merge_gate(pr, runs, obligations)
+    ci, e2e = g['ci'], g['e2e']
+    blocked = hold_reason(pr, obligations)
     owner = None
     for slot in slots:
         # Checkout branches survive release/reassignment; only MoP's current,
@@ -127,17 +229,22 @@ def classify(pr, runs, slots, obligations, prior, now):
         if slot.get('occupied') is True and slot.get('pr') == number and slot.get('head_sha') == head:
             owner = f'S{slot["slot"]}'
             break
+    active_owner = False
     if owner is None:
         for row in obligations:
             until = stamp(row.get('suppress_until'))
-            evidence = claim_evidence(row)
-            if (row.get('pr') == number and row.get('owner') and until and until > now
-                    and evidence.get('head') == head):
-                owner = f'{row["owner"]} (until {row["suppress_until"]})'
+            if (row.get('target_type') == 'github_pr' and str(row.get('target_id')) == str(number)
+                    and row.get('owner') and until and until > now):
+                owner = f'owner: {row["owner"]} (until {until.astimezone().strftime("%H:%M")})'
+                active_owner = True
                 break
-    ci_wait = gate == 'CI running' and admitted and 'PENDING' in (ci, e2e)
+    workflow_wait = (gate == 'CI running' and admitted and action == 'reconcile missing gates'
+                     and pending_ci(head))
+    ci_wait = gate == 'CI running' and admitted and ('PENDING' in (ci, e2e) or workflow_wait)
     if ci_wait:
-        owner = f'CI (admitted {head[:12]})'
+        action = 'await terminal'
+        if owner is None:
+            owner = f'CI (admitted {head[:12]})'
     merge_ask = pr.get('merge_ask_sent', False)
     for row in obligations:
         if row.get('pr') == number and row.get('kind') == 'pr_merge_ask':
@@ -164,9 +271,12 @@ def classify(pr, runs, slots, obligations, prior, now):
         elif previous.get('head') and previous['head'] != head:
             movement = 'MOVING'  # observed new pushed head, not merely a claim
 
+    if active_owner:
+        movement = 'OWNED'
+    if workflow_wait:
+        movement = 'WAITING'
     if blocked:
         movement = 'PARKED'
-        action = 'resolve ' + ','.join(blocked)
     safe_owner = re.sub(r'[\r\n]+', ' ', owner or 'unowned')
     line = (f'#{number} {"draft" if pr["isDraft"] else "ready"} · {gate} '
             f'[ci-head {admission}; CI {ci}; E2E {e2e}; mergeable {pr.get("mergeable", "UNKNOWN")}] '
@@ -175,11 +285,25 @@ def classify(pr, runs, slots, obligations, prior, now):
 
 
 def render(prs, checks, slots, obligations, prior, now):
-    lines, state = [], {}
+    lines, state, failed = [], {}, 0
     for pr in sorted(prs, key=lambda item: item['number']):
-        line, entry = classify(pr, checks.get(pr['number'], []), slots, obligations, prior, now)
+        runs = checks.get(pr['number'], [])
+        if runs is None:
+            failed += 1
+            labels = [item['name'] for item in pr['labels']]
+            lines.append(f'#{pr["number"]} {"draft" if pr["isDraft"] else "ready"} · '
+                         f'checks: unavailable (GitHub API error) · head {pr["headRefOid"][:12]} '
+                         f'· mergeable {pr.get("mergeable", "UNKNOWN")}'
+                         + (' · ' + ','.join(sorted(x for x in labels if x.startswith('pm-blocked:')))
+                            if any(x.startswith('pm-blocked:') for x in labels) else ''))
+            if str(pr['number']) in prior:
+                state[str(pr['number'])] = prior[str(pr['number'])]  # keep gate age
+            continue
+        line, entry = classify(pr, runs, slots, obligations, prior, now)
         lines.append(line)
         state[str(pr['number'])] = entry
+    if prs and failed * 2 > len(prs):
+        lines.insert(0, f'GitHub API degraded: check-runs unavailable for {failed}/{len(prs)} PRs')
     return lines or ['No open PRs.'], state
 
 

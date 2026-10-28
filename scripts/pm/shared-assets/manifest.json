@@ -6,7 +6,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "0d94d8375b9636150912cee0aea4cec8278bb9b13e716e45e55dc57ae734ed76",
+      "sha256": "ada396213c7f5dcc7d621eaa57d84588326d3c3188900b22e7493b2bbb00844d",
       "source_path": "bridge/cto-bridge.ts"
     },
     {
@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "73d4b3cd1fb376c4a40a53082afbb195736b2be8d9b1b6fd8024c886f91e9834",
+      "sha256": "899071dc198dfe330c16cd26288949190f1027e5fb4b5438e3cb2dbcea1da1ad",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "95ce4d14df4abe5c21aa082d6da15f1fe7d55f7ae17b25eac5f4fa5211b9e8ea",
+      "sha256": "85d6bd5597d79cee63a4af5f2914cdf697660ef730092d42c2e0c32763fb7fcc",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -33,7 +33,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "94bb6508c67ad92f58226b99c6cea0cfd7e62e1e9b5a74b08bf7744715327ed2",
+      "sha256": "7c99e0efa9e72f38cb241a0de880247eac39d3d3d84919c22fa0b955fed477a3",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -258,7 +258,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "44ec64507609dc78a3bfd23031d3b3c9530d176e10bcae22e20b1db015f6fceb",
+      "sha256": "3295ef48ec842c628688f53076be7a76ba17b08378737abfd50852d01b996bfe",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -267,7 +267,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "71c56dba995a35c0d88f544474ac6b9bdbcea71e4c43ceb0c5afb8b79d6e50a2",
+      "sha256": "514acaab13ef611b52ce9eb0803ebe3b0251070c9cc2dfe0bfac001eb15fdbfa",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
@@ -312,7 +312,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "63e3f26a76131d564ac72d61de347b1479e36d16845e3e2f5890187878762f16",
+      "sha256": "837559048173f422b70051b5d978ed9435448b3524ec26f2f68e92e015a35226",
       "source_path": "claude/scripts/ci/pm-admit-ci.sh"
     },
     {
@@ -348,7 +348,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "4cbbbd20e64346cd7ea2160fe8bc201d4d0b1ae076af6b5c28a266ef8ef99787",
+      "sha256": "0c95d84bfa492865772b9f643286d0fb6c8a5c1fa23fd733ae891456c8e2f196",
       "source_path": "claude/scripts/cto-relay-snapshot.py"
     },
     {
@@ -393,7 +393,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "50d543e183e564373df67ba82fbecff9c9e56d26b1039539c2f93522e95354fd",
+      "sha256": "1b11a1f90ab1f020cc7cab0b1bb12dc8d0889554385f0ec28aefde98eb1c03e4",
       "source_path": "claude/scripts/launch-dev-slot-claude.sh"
     },
     {
@@ -402,7 +402,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "43eee9cd8e759cb3666467cbd9064ebb8718d742f43e2f485200fa3e9e8efee8",
+      "sha256": "095c6404d2ba596814f48d17107164579803106ed1acaac003de3bf4bc1b1fd4",
       "source_path": "claude/scripts/launch-slot-1.sh"
     },
     {
@@ -411,7 +411,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "ce8a7f4d15f165cb70fdf332a606bfd687a76715f91d0b185f31b42556d9c992",
+      "sha256": "634e2a921e31a659ca5cb8d19803e2f567ffda059ced934c610cb433f14b3a75",
       "source_path": "claude/scripts/launch-slot-2.sh"
     },
     {
@@ -420,7 +420,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "18b74b76046d5dac620aa98214eaac2c6766f6bfa7ab4c8c2b86a31bfbbe4583",
+      "sha256": "0e1a0171f1cd8f6a6c541b61e8c7b9cd8ce9b9d2d06d63911b09425ab89caef8",
       "source_path": "claude/scripts/launch-slot-3.sh"
     },
     {
@@ -429,7 +429,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "d7b4a2c57afb04395a35f18613dccb8f0c077b35f10d22fab2c53cc32595c482",
+      "sha256": "a57d2df010b2f6aa71fc59c32a462e50e5684a980295cfb012b5939c7a8f1acc",
       "source_path": "claude/scripts/launch-slot-4.sh"
     },
     {
@@ -438,7 +438,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "dd3c89a615db9d08d1914aad34fe202633a3ce19afbc0ffa830986b1fad49861",
+      "sha256": "e9aa381bb14b6d219dc63c6f20f1864a8bdb4736f5e3de2e3eec22a1ffbb32ff",
       "source_path": "claude/scripts/launch-slot-5.sh"
     },
     {
@@ -447,7 +447,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "1d182a1d3981be8204571d88b940c148552d73200d65d84a8a95a6aae2c427f4",
+      "sha256": "668afa12876d552429c73dbeea4dd109fb352cd49b240d3347b4efbc1482a9ea",
       "source_path": "claude/scripts/launch-slot-6.sh"
     },
     {
@@ -456,7 +456,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "e33f5be0dac949442b1bb2a821421e9fc7127e579524911a5a6be28e7421c709",
+      "sha256": "a49f0cc8cc5aac424712da001b575a3f235420e8a7a9c360d7de93540e1d4677",
       "source_path": "claude/scripts/launch-slot-7.sh"
     },
     {
@@ -465,7 +465,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "bca1b528936f1bc5fed722c5d34783c0e1b36a4c28a6bcd99eccacca4ea3046d",
+      "sha256": "eef082332a6fe82a935c03048a77bff394a15eb5ccb91183110faa87a23943d5",
       "source_path": "claude/scripts/launch-slot-8.sh"
     },
     {
@@ -627,7 +627,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "6386a0e417db9bca90960ce5bcd339183133105025039a02866bc41c465a4d71",
+      "sha256": "00c9db54f627e203d5652e638f2abb5507c802ac95ca4edae9d08ac0562bbf14",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -654,7 +654,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "368260f039dbc87abab2f7a552d661cce01200a5dfe4f77f63920313df0c1666",
+      "sha256": "6c29eaacf257989b4db827b75a7891fd05aff75fef4a880309b5840fb5f143dd",
       "source_path": "claude/scripts/pm/heartbeat/issue-lifecycle.py"
     },
     {
@@ -672,7 +672,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "b5db1fe98e308d3c55809bead0f29010ad307f7850a0f7e5691d166344297ac7",
+      "sha256": "12773a5d69d7dbc9c5e01f335ae496999b5df02cb75eb1acfc35c731900683f9",
       "source_path": "claude/scripts/pm/heartbeat/pr-status-report.py"
     },
     {
@@ -926,7 +926,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "1d0b7df2abe06522ee176b4fa485a015deb553bf87e59d1a3d088290f01245a7",
+      "sha256": "53a625f25b03fc345869df28e7542ed9ed5537ec68e665b35c5281045aa3ca2b",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
@@ -1107,7 +1107,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
-      "sha256": "9c25a046b821b317b023d22664b47d755219c211240a271d77e11feedfd57d52",
+      "sha256": "d97faa9bc2d33e35ee4683663c379ef1b5e4aa5a51e9f0c20ebad94d7771d8c0",
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {
@@ -1503,7 +1503,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "66b82bb66d23050f7f5b27944bec275cc9592f635f2cbc68952e659a111aa390",
+      "sha256": "bdf029a0a7214a4ec445872173874b0fac151246a8d6fa899d47bd0389ee25cc",
       "source_path": "codex/skills/heydonna-cto-pr-merge/SKILL.md"
     },
     {

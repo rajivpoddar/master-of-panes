@@ -222,6 +222,16 @@ screenshots for backend, workflow or test-only work. DOCX/Word/PDF artifact
 proof, where release-critical, remains product/export evidence and must not
 be described as real rendered proof if only OOXML tests were executed.
 
+### 5. No new HIGH/CRITICAL vulnerable dependency
+
+Rajiv, DM D0AMF0XE6TS thread 1793097714.304129, ts 1793104352.768809. Run
+`~/.claude/scripts/ci/pr-dependency-review.sh "$PR"` (same Mac host; it reads
+the live PR head, which must equal AUTHORIZED_HEAD). Exit 1 FAIL: do not merge;
+BLOCKED lists each package@version, GHSA and severity. Exit 3 UNKNOWN: note it in
+the receipt, not a block. Exit 0 PASS: quote the PASS line in COMPLETE.
+Gate: prevents merging a new HIGH/CRITICAL vulnerable dep (the SOC 2 blocker of
+10-12); Dependabot alerts only after merge; cost ~2-25s; review 2027-01-25.
+
 ## Merge immediately when all gates pass
 
 Confirm no same-tuple cancellation/supersession or accepted equivalent effect

@@ -12,6 +12,7 @@ import fcntl
 import json
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 import urllib.request
@@ -22,6 +23,12 @@ PM_OPS = Path.home() / '.claude/scripts/pm-ops.py'
 HEADER = '*Unblockable now / issue lifecycle:*'
 PARTIAL = re.compile(r'\b(?:part\s+of|refs?)\s+((?:#\d+[ \t,;]*(?:and\s+)?)+)', re.I)
 CLOSES = re.compile(r'\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+((?:#\d+[ \t,;]*(?:and\s+)?)+)', re.I)
+# Only dependency-gated issues can be auto-detected as unblocked; gate/infra/
+# product/external/cto blocks have wake conditions the collector cannot see.
+DEPENDENCY = 'pm-blocked:dependency'
+NON_DEPENDENCY = {'pm-blocked:pm-gate', 'pm-blocked:infra', 'pm-blocked:product',
+                  'pm-blocked:external', 'pm-blocked:cto'}
+NARROWED = 'collector_narrowed_not_dependency_gated'
 BLOCKERS = re.compile(r'(?im)^[^\n]*?\b(?:blockers?\**\s*:|blocked\s+(?:by|on)|depends\s+on|after|waits?\s+on|until|unblock[_ ]condition\s*[:=])\**\s+([^\n]+)')
 SOURCE = '''nodes { ... on CrossReferencedEvent { source { ... on PullRequest {
  number state body title headRefName mergedAt
@@ -50,6 +57,10 @@ def labels(item):
     if isinstance(value, dict):
         value = value['nodes']
     return {v['name'] if isinstance(v, dict) else v for v in value}
+
+
+def dependency_gated(labs):
+    return DEPENDENCY in labs and not labs & NON_DEPENDENCY
 
 
 def refs(pattern, text):
@@ -94,7 +105,7 @@ def detect(issues, open_prs, slots, merged, resolve):
             if pr.get('state', '').upper() == 'MERGED' and n in closing(pr):
                 reasons.add('merged_closes_open')
                 prs.add(pr['number'])
-        if labs & {'status:blocked', 'status:backlog'} or any(l.startswith('pm-blocked:') for l in labs):
+        if dependency_gated(labs):
             body = item.get('body') or ''
             blockers = refs(BLOCKERS, body) - {n}
             # This is a disposition candidate, not permission to unblock:
@@ -110,15 +121,18 @@ def detect(issues, open_prs, slots, merged, resolve):
     return sorted(findings, key=lambda r: r['issue'])
 
 
-def render(findings):
+def render(findings, carried=frozenset()):
     kinds = ('unowned_lifecycle', 'done_open', 'merged_closes_open', 'blockers_resolved', 'partial_merge')
     lines = [HEADER, f'• {len(findings)} issues · ' + ' · '.join(
-        f'{kind}={sum(kind in r["reasons"] for r in findings)}' for kind in kinds)]
-    for row in findings[:10]:
+        f'{kind}={sum(kind in r["reasons"] for r in findings)}' for kind in kinds)
+        + f' (blockers_resolved new={sum("blockers_resolved" in r["reasons"] and r["issue"] not in carried for r in findings)}, carried={len(carried)})']
+    # Carried blockers_resolved rows were already reported; list only new ones.
+    shown = [r for r in findings if not (r['issue'] in carried and r['reasons'] == ['blockers_resolved'])]
+    for row in shown[:10]:
         evidence = ('; PR ' + ', '.join('#' + str(n) for n in row['prs'])) if row['prs'] else ''
         lines.append(f'• #{row["issue"]}: ' + ', '.join(row['reasons']) + evidence)
-    if len(findings) > 10:
-        lines.append(f'• +{len(findings) - 10} more; all in orphaned_issue obligations.')
+    if len(shown) > 10:
+        lines.append(f'• +{len(shown) - 10} more; all in orphaned_issue obligations.')
     return lines
 
 
@@ -203,7 +217,7 @@ def collect(since):
     needed = set()
     for item in issues:
         labs = labels(item)
-        if labs & {'status:blocked', 'status:backlog'} or any(l.startswith('pm-blocked:') for l in labs):
+        if dependency_gated(labs):
             needed.update(refs(BLOCKERS, item.get('body')) - {item['number']})
     known.update(blocker_states(needed - known.keys()))
     return issues, open_prs, slots, merged, known.get
@@ -219,7 +233,41 @@ def sync(findings):
             '--evidence-json', json.dumps(row)], capture_output=True, text=True, timeout=30, check=True)
 
 
-def run():
+def resolve_narrowed(previous, findings):
+    """Resolve orphaned_issue rows for issues that only qualified under the old broad rule."""
+    current = {r['issue'] for r in findings}
+    dropped = sorted({r['issue'] for r in previous if 'blockers_resolved' in r.get('reasons', [])} - current)
+    for n in dropped:
+        proc = subprocess.run([sys.executable, str(PM_OPS), 'obligation-resolve', '--kind', 'orphaned_issue',
+            '--target-type', 'github_issue', '--target-id', str(n), '--issue', str(n), '--reason', NARROWED],
+            capture_output=True, text=True, timeout=30)
+        # rc=1 'matched no open row' = already resolved/never upserted; that is fine.
+        if proc.returncode and 'matched no open row' not in (proc.stderr + proc.stdout):
+            raise RuntimeError(f'obligation-resolve failed for #{n}: {proc.stderr.strip()}')
+    return dropped
+
+
+def active_suppressions(now):
+    """Read PM's authoritative dispositions; never renew or overwrite them."""
+    proc = subprocess.run([sys.executable, str(PM_OPS), 'status', '--format', 'json', '--read-only'],
+                          capture_output=True, text=True, timeout=30, check=True)
+    database = Path(json.loads(proc.stdout)['db']).resolve()
+    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as connection:
+        rows = connection.execute("SELECT issue, suppress_until FROM obligations "
+                                  "WHERE kind='orphaned_issue' AND status='open' "
+                                  "AND owner IS NOT NULL AND owner != '' AND suppress_until IS NOT NULL")
+        suppressed = set()
+        for issue, until in rows:
+            try:
+                expires = dt.datetime.fromisoformat(until.replace('Z', '+00:00'))
+                if expires > now:
+                    suppressed.add(int(issue))
+            except (ValueError, TypeError):
+                continue  # Invalid/naive timestamps must not hide work.
+    return suppressed
+
+
+def run(dry_run=False):
     STATE.parent.mkdir(parents=True, exist_ok=True)
     with STATE.with_suffix('.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -227,8 +275,22 @@ def run():
         saved = json.loads(STATE.read_text()) if STATE.exists() else {}
         since = saved.get('since') or (now - dt.timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%SZ')
         findings = detect(*collect(since))
-        sync(findings)
-        doc = dict(since=now.strftime('%Y-%m-%dT%H:%M:%SZ'), findings=findings, lines=render(findings), scanned_since=since)
+        resolved = {r['issue'] for r in findings if 'blockers_resolved' in r['reasons']}
+        reported = set(saved.get('reported_blockers_resolved', []))
+        suppressed = active_suppressions(now)
+        actionable = [r for r in findings if r['issue'] not in suppressed]
+        carried = resolved & reported & {r['issue'] for r in actionable}
+        lines = render(actionable, carried)
+        if len(actionable) != len(findings):
+            lines.append(f'• {len(findings) - len(actionable)} dispositioned issues suppressed until their recorded review/wake; not actions.')
+        if dry_run:
+            dropped = sorted({r['issue'] for r in saved.get('findings', []) if 'blockers_resolved' in r.get('reasons', [])}
+                             - {r['issue'] for r in findings})
+            return dict(dry_run=True, findings=actionable, lines=lines, would_resolve=dropped)
+        sync(actionable)
+        dropped = resolve_narrowed(saved.get('findings', []), findings)
+        doc = dict(since=now.strftime('%Y-%m-%dT%H:%M:%SZ'), findings=actionable, lines=lines,
+                   scanned_since=since, reported_blockers_resolved=sorted(resolved), resolved_narrowed=dropped)
         temporary = STATE.with_suffix('.new')
         temporary.write_text(json.dumps(doc, indent=2) + '\n')
         temporary.replace(STATE)
@@ -236,4 +298,4 @@ def run():
 
 
 if __name__ == '__main__':
-    print(json.dumps(run()))
+    print(json.dumps(run(dry_run='--dry-run' in sys.argv)))

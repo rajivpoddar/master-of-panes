@@ -157,6 +157,15 @@ Source: Rajiv D0AMF0XE6TS ts 1793075323.957449: "all keys are generated from wor
 - Only key-ids, endpoint URLs and hostnames are exchanged. One credential per direction/purpose.
 - BLOCK any plan/runbook/diff with a staff- or script-generated partner secret meant for delivery, or a secret-transmission step. Require the admin-account flow (admin-only, shown-once, stored hashed/encrypted, rotate/revoke) with tests.
 
+## No-concurrent-writer (single-writer lease) Planning Gate
+
+Source: Rajiv DM D0AMF0XE6TS ts 1793112086.989209 (approved ts 1793113448.532669): *"only the first file open should be writeable. all others are readonly. server should never update while editing is in progress."* Rule: `~/.claude/rules/48-heydonna-single-writer.md`.
+- First opener holds the writer lease; others read-only; no force-takeover of a live holder.
+- Every server save path (save, bundle admit, version restore, admin repoint/revert) verifies the live writer lease server-side (same session + parent == head; identical retry idempotent). Client-only guards do not count.
+- No server path (pipeline delivery, proofread/SC/format apply, admin, backfill) writes transcript content/head during a live lease; results land as a pending artifact the writer applies.
+- Plan MUST name the lease check for every new or changed transcript write path; missing = self-review failure.
+- Tests required: server test refusing a non-holder save; test that a pipeline write during a live lease is deferred, not applied.
+
 ## Input
 
 You will receive:

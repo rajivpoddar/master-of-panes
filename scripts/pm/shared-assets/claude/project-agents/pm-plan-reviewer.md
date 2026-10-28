@@ -84,6 +84,15 @@ when a plan or AC adds a precondition-gated disabled button; require the
 click-time error-state pattern plus a test that clicks the enabled button with
 the precondition unmet. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No-concurrent-writer gate (Rajiv product rule 2026-10-27)
+
+Source: Rajiv DM D0AMF0XE6TS ts 1793112086.989209 (approved ts 1793113448.532669): *"only the first file open should be writeable. all others are readonly. server should never update while editing is in progress."* Rule: `~/.claude/rules/48-heydonna-single-writer.md`.
+- First opener holds the writer lease; others read-only; no force-takeover of a live holder.
+- Every server save path (save, bundle admit, version restore, admin repoint/revert) verifies the live writer lease server-side (same session + parent == head; identical retry idempotent). Client-only guards do not count.
+- No server path (pipeline delivery, proofread/SC/format apply, admin, backfill) writes transcript content/head during a live lease; results land as a pending artifact the writer applies.
+- BLOCK/REQUEST_CHANGES any plan or diff that adds a transcript-head/content write without the server lease check, or relies on a client-only writer guard.
+- Tests required: server test refusing a non-holder save; test that a pipeline write during a live lease is deferred, not applied.
+
 ## No-inline-menu-error gate
 Source: Rajiv 2026-10-09, C0ALZJHGE49 thread 1791537587.688969 ts 1791537815.457389: *"why is the error message in the menu item? that's an anti pattern. it should only be in the toast"*.
 Menu/menubar/context-menu actions: a refused action shows a TOAST ONLY. BLOCK/REQUEST_CHANGES on any inline error text, `role="alert"`, or `aria-invalid` rendered inside a menu item, or a menu held open to show an error. The item stays enabled (the no-disabled-precondition rule still applies). Required test: click the enabled item with the precondition unmet, then assert toast shown, no inline alert in the menu, and the action not run. Rule: `~/.claude/rules/33-heydonna-ui-product-rules.md` "Menu-action errors go in the toast only".

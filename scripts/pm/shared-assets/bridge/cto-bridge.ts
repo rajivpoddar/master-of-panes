@@ -27,6 +27,13 @@ import {
 } from "./cto-thread-context.ts";
 import { getDb } from "./db.ts";
 import { ipcOwnerDiscoveryArgs } from "./cto-ipc-policy.ts";
+import { initializeStateFiles, migrateLegacyState, resolveStateDir, statePath } from "./cto-state-paths.ts";
+import {
+  evaluateWatchdog,
+  readWatchdogState,
+  sendWatchdogAlert,
+  writeWatchdogState,
+} from "./cto-relay-watchdog.ts";
 import { materializeSlackImages, type MaterializedAttachment, type SlackFile } from "./cto-file-materialization.ts";
 import { buildCtoDurableEnvelope, hasDurableEnvelopeKey } from "./cto-envelope-queue.ts";
 import {
@@ -35,19 +42,22 @@ import {
 } from "./codex-app-server-client.ts";
 
 const ENV_FILE = "/Users/rajiv/Downloads/projects/heydonna-app/.env.local";
-const QUEUE_FILE = "/tmp/cto-slack-queue.jsonl";
-const EVENTS_FILE = "/tmp/cto-slack-events.json";
-const ACK_FILE = "/tmp/cto-slack-ack.json";
+const STATE_DIR = resolveStateDir();
+const MIGRATED_STATE_FILES = migrateLegacyState(STATE_DIR);
+const WATCHDOG_STATE_FILE = statePath("cto-relay-watchdog.json");
+const QUEUE_FILE = statePath("cto-slack-queue.jsonl");
+const EVENTS_FILE = statePath("cto-slack-events.json");
+const ACK_FILE = statePath("cto-slack-ack.json");
 const LOG_FILE = "/tmp/cto-bridge.log";
-const DIRECT_DELIVERY_RECEIPTS_FILE = "/tmp/cto-ipc-delivery-receipts.jsonl";
-const MONITOR_TRIGGER_RECEIPTS_FILE = "/tmp/cto-ipc-monitor-trigger-receipts.jsonl";
-const APP_SERVER_DELIVERY_RECEIPTS_FILE = "/tmp/cto-app-server-delivery-receipts.jsonl";
+const DIRECT_DELIVERY_RECEIPTS_FILE = statePath("cto-ipc-delivery-receipts.jsonl");
+const MONITOR_TRIGGER_RECEIPTS_FILE = statePath("cto-ipc-monitor-trigger-receipts.jsonl");
+const APP_SERVER_DELIVERY_RECEIPTS_FILE = statePath("cto-app-server-delivery-receipts.jsonl");
 const IPC_SENDER = "/Users/rajiv/.codex/skills/codex-ipc-send-message/scripts/send_message.py";
 const RELAY_SNAPSHOT_HELPER = "/Users/rajiv/.claude/scripts/cto-relay-snapshot.py";
 const RELAY_SNAPSHOT_FILE_PREFIX = "/tmp/cto-slack-relay-snapshot.bridge";
-const RELAY_CLAIMS_FILE = "/tmp/cto-slack-relay-claims.json";
-const RELAY_LOCK_FILE = "/tmp/cto-slack-relay.lock";
-const RELAY_HEARTBEAT_FILE = "/tmp/cto-slack-relay-heartbeat";
+const RELAY_CLAIMS_FILE = statePath("cto-slack-relay-claims.json");
+const RELAY_LOCK_FILE = statePath("cto-slack-relay.lock");
+const RELAY_HEARTBEAT_FILE = statePath("cto-slack-relay-heartbeat");
 const CLAIM_TTL_SECONDS = 120;
 const CLAIM_RENEW_INTERVAL_MS = 30_000;
 const SLACK_MONITOR_THREAD_ID = "019fd9df-23ad-7500-8b3e-53ce9341a140";
@@ -319,6 +329,43 @@ function asRoutedEnvelope(value: unknown, claimOwner: string): RoutedEnvelope | 
   } as RoutedEnvelope;
 }
 
+let consecutiveSnapshotFailures = 0;
+let lastSnapshotError: string | null = null;
+
+async function runRelayWatchdog(): Promise<void> {
+  try {
+    // Routable pending relays come from the snapshot helper's read-only report so the
+    // watchdog and the relay agree on eligibility (non-routed channel chatter is ignored).
+    const report = await runPython([RELAY_SNAPSHOT_HELPER, "--pending-report", "--route-sop", SLACK_MONITOR_SOP]);
+    let pendingQueuedAt: Array<string | undefined> = [];
+    if (report.code !== 0) {
+      const error = report.stderr.trim() || `exit-${report.code}`;
+      consecutiveSnapshotFailures += 1;
+      lastSnapshotError = error;
+      log(`relay-snapshot-failure source=watchdog error=${error}`);
+    } else {
+      const parsed = JSON.parse(report.stdout) as { queued_at?: unknown };
+      pendingQueuedAt = Array.isArray(parsed.queued_at)
+        ? parsed.queued_at.map((value) => (typeof value === "string" ? value : undefined))
+        : [];
+    }
+    const { state, alert } = evaluateWatchdog(
+      { nowMs: Date.now(), pendingQueuedAt, consecutiveSnapshotFailures, lastSnapshotError },
+      readWatchdogState(WATCHDOG_STATE_FILE),
+    );
+    if (!alert) {
+      writeWatchdogState(WATCHDOG_STATE_FILE, state);
+      return;
+    }
+    const sent = sendWatchdogAlert(alert, `/tmp/cto-relay-watchdog-alert-${process.pid}.txt`);
+    // Only a delivered alert closes the episode's alert slot; a failed send retries next tick.
+    if (sent.ok) writeWatchdogState(WATCHDOG_STATE_FILE, state);
+    log(`relay-watchdog-alert ok=${sent.ok} pending=${pendingQueuedAt.length} failures=${consecutiveSnapshotFailures} ${sent.detail}`);
+  } catch (error) {
+    log(`relay-watchdog-failure error=${formatError(error)}`);
+  }
+}
+
 async function runRelaySnapshot(): Promise<RoutedEnvelope | null> {
   const claimOwner = `bridge-${process.pid}-${randomUUID()}`;
   const snapshotFile = `${RELAY_SNAPSHOT_FILE_PREFIX}-${process.pid}-${randomUUID()}.json`;
@@ -337,9 +384,14 @@ async function runRelaySnapshot(): Promise<RoutedEnvelope | null> {
       claimOwner,
     ]);
     if (result.code !== 0) {
-      log(`relay-snapshot-failure error=${result.stderr.trim() || `exit-${result.code}`}`);
+      const error = result.stderr.trim() || `exit-${result.code}`;
+      consecutiveSnapshotFailures += 1;
+      lastSnapshotError = error;
+      log(`relay-snapshot-failure error=${error}`);
       return null;
     }
+    consecutiveSnapshotFailures = 0;
+    lastSnapshotError = null;
     const snapshot = readJsonFile(snapshotFile, []) as unknown;
     if (!Array.isArray(snapshot) || snapshot.length === 0) return null;
     const envelope = asRoutedEnvelope(snapshot[0], claimOwner);
@@ -391,6 +443,15 @@ function appendReceipt(path: string, receipt: Record<string, unknown>): void {
 }
 
 function acknowledgeEnvelope(envelope: RoutedEnvelope): void {
+  if (existsSync(ACK_FILE)) {
+    try {
+      JSON.parse(readFileSync(ACK_FILE, "utf8"));
+    } catch (error) {
+      // Fail closed: never overwrite a corrupt ack file (that would drop handled keys).
+      log(`ack-write-refused corrupt ack file path=${ACK_FILE} error=${formatError(error)}`);
+      return;
+    }
+  }
   const ack = readJsonFile(ACK_FILE, { handled: [] }) as { handled?: unknown };
   const handled = new Set(
     Array.isArray(ack.handled) ? ack.handled.filter((value): value is string => typeof value === "string") : [],
@@ -1000,11 +1061,16 @@ process.on("unhandledRejection", (error) => {
 
 setInterval(() => {
   log(`heartbeat connected=${connected} seen=${seen.size}`);
+  void runRelayWatchdog();
 }, 60_000).unref();
 
 log(
   `startup fallback_relay_thread=${SLACK_MONITOR_THREAD_ID} queue=${QUEUE_FILE} delivery=codex_thread_queue_then_codex_desktop_ipc_fallback`,
 );
+log(`state-dir path=${STATE_DIR} migrated=${MIGRATED_STATE_FILES.join(",") || "none"}`);
+for (const path of initializeStateFiles(ACK_FILE, EVENTS_FILE)) {
+  log(`state-file-initialized path=${path}`);
+}
 rehydratePendingEvents();
 try {
   const auth = await app.client.auth.test();

@@ -9,6 +9,52 @@
 set -euo pipefail
 PR="$1"; shift; REPO=Scribie/heydonna-app
 MAIN_REPO=/Users/rajiv/Downloads/projects/heydonna-app
+# Crash = non-zero (never 0): any unexpected error/unbound var exits 70 with a REFUSE line.
+trap 'rc=$?; echo "REFUSE: script_error line $LINENO rc=$rc"; exit 70' ERR
+H="" H0="" HM="" HEAD="" MERGEABLE="" LJ="" L=""
+# Fail-closed GitHub reads (2026-10-27: a GraphQL HTTP 499 on #11173 yielded an EMPTY head,
+# "ADMITTED #11173 at" and an empty `ci-head:` label). Every value admission needs is validated;
+# one retry after a short backoff, then REFUSE: github_api_error <step>.
+GH_RETRY_SLEEP="${PM_ADMIT_RETRY_SLEEP:-3}"
+SHA_RE='^[0-9a-f]{40}$'
+api_fail() { echo "REFUSE: github_api_error $1"; exit 7; }
+gh_valid() {
+  case "$1" in
+    sha) printf '%s' "$2" | grep -Eq "$SHA_RE" ;;
+    head_mergeable) printf '%s' "$2" | grep -Eq '^[0-9a-f]{40} (MERGEABLE|CONFLICTING|UNKNOWN)$' ;;
+    labels_json) printf '%s' "$2" | jq -e '.labels | type == "array"' >/dev/null 2>&1 ;;
+    ok) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# gh_get <step> <kind> <cmd...>: prints the validated output; returns 1 after two failed attempts.
+gh_get() {
+  local step="$1" kind="$2" out attempt; shift 2
+  for attempt in 1 2; do
+    if out=$("$@" 2>/dev/null) && gh_valid "$kind" "$out"; then printf '%s' "$out"; return 0; fi
+    echo "WARN github_api $step: attempt $attempt failed or invalid output" >&2
+    [ "$attempt" = 1 ] && sleep "$GH_RETRY_SLEEP"
+  done
+  return 1
+}
+# gh_do <step> <cmd...>: run a write; one retry; REFUSE on second failure.
+gh_do() {
+  local step="$1"; shift
+  "$@" >/dev/null 2>&1 && return 0
+  echo "WARN github_api $step: attempt 1 failed" >&2; sleep "$GH_RETRY_SLEEP"
+  "$@" >/dev/null 2>&1 || api_fail "$step"
+}
+# Remove any malformed ci-head label (e.g. the empty `ci-head:` left by the 10-27 bug).
+clean_bad_ci_head_labels() {
+  local lj bad
+  lj=$(gh_get pr_labels labels_json gh pr view "$PR" --repo "$REPO" --json labels) || api_fail pr_labels
+  for bad in $(printf '%s' "$lj" | jq -r '.labels[].name | select(startswith("ci-head:")) | select(test("^ci-head:[0-9a-f]{40}$") | not)'); do
+    echo "removing malformed label '$bad'"
+    gh_do remove_bad_ci_head gh pr edit "$PR" --repo "$REPO" --remove-label "$bad"
+  done
+  return 0
+}
+
 # Related-tests gate is OFF by default (Rajiv 2026-10-11, DM ts 1791738750.254179: "why does pm admission have to run tsc or vitest? that's already done by the slots."). Slots run tests; CI is the gate. Opt in with --related-tests.
 NO_UPDATE=0; DRY=0; SKIP_REASON="default-off: slots ran tests, CI is the gate (Rajiv ts 1791738750.254179)"; FORCE_CI=""; ALLOW_MAIN_RED=""
 while [ $# -gt 0 ]; do
@@ -162,7 +208,7 @@ except Exception: print("err err err x")' 2>/dev/null)"
 }
 
 if [ "$DRY" = 1 ]; then
-  H=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)
+  H=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
   echo "DRY RUN PR #$PR head=$H"
   rc=0; scope_gate "$H" || rc=$?
   [ $rc -ne 0 ] && { echo "DRY RUN done (scope gate rc=$rc); nothing admitted"; exit $rc; }
@@ -172,7 +218,8 @@ if [ "$DRY" = 1 ]; then
   echo "DRY RUN done (gate rc=$rc); nothing admitted"; exit $rc
 fi
 
-H0=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)
+H0=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
+clean_bad_ci_head_labels
 scope_gate "$H0" || exit 5
 main_red_gate || exit 6
 related_tests_gate "$H0" || exit 4
@@ -181,7 +228,8 @@ if [ "$NO_UPDATE" = 0 ]; then
   gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" >/dev/null 2>&1 || echo "update-branch: already up to date or refused"
   sleep 8
 fi
-read -r HEAD MERGEABLE <<<"$(gh pr view "$PR" --repo "$REPO" --json headRefOid,mergeable --jq '.headRefOid+" "+.mergeable')"
+HM=$(gh_get pr_head_mergeable head_mergeable gh pr view "$PR" --repo "$REPO" --json headRefOid,mergeable --jq '.headRefOid+" "+.mergeable') || api_fail pr_head_mergeable
+read -r HEAD MERGEABLE <<<"$HM"
 echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 [ "$MERGEABLE" = "CONFLICTING" ] && { echo "REFUSE: conflict with main; route to slot"; exit 2; }
 # Priority mirroring is best-effort and must never block admission.
@@ -209,10 +257,12 @@ $labels"
   return 0
 }
 mirror_priority || echo "WARN priority: lookup or normalization failed for PR #$PR; continuing admission"
+printf '%s' "$HEAD" | grep -Eq "$SHA_RE" || api_fail pr_head_invalid
 L="ci-head:$HEAD"
 gh label create "$L" --repo "$REPO" --color 0E8A16 >/dev/null 2>&1 || true
-for old in $(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name|select(startswith("ci-head:"))'); do
-  [ "$old" != "$L" ] && gh pr edit "$PR" --repo "$REPO" --remove-label "$old" >/dev/null
+LJ=$(gh_get pr_labels labels_json gh pr view "$PR" --repo "$REPO" --json labels) || api_fail pr_labels
+for old in $(printf '%s' "$LJ" | jq -r '.labels[].name|select(startswith("ci-head:"))'); do
+  [ "$old" != "$L" ] && gh_do remove_old_ci_head gh pr edit "$PR" --repo "$REPO" --remove-label "$old"
 done
-gh pr edit "$PR" --repo "$REPO" --add-label "$L" --add-label pm-state:qa-passed-awaiting-ci >/dev/null
+gh_do add_ci_head_label gh pr edit "$PR" --repo "$REPO" --add-label "$L" --add-label pm-state:qa-passed-awaiting-ci
 echo "ADMITTED #$PR at $HEAD"

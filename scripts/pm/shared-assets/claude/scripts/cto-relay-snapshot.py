@@ -19,17 +19,58 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_EVENTS_FILE = Path("/tmp/cto-slack-events.json")
-DEFAULT_ACK_FILE = Path("/tmp/cto-slack-ack.json")
+# Durable state dir (persists across reboots; /tmp wipe incident 2026-10-27).
+# Must match tmux-slack-bridge/cto-state-paths.ts: env CTO_BRIDGE_STATE_DIR,
+# default ~/.claude/state/cto-bridge. The snapshot OUTPUT stays in /tmp.
+STATE_DIR_ENV = "CTO_BRIDGE_STATE_DIR"
+LEGACY_STATE_DIR = Path("/tmp")
+DURABLE_STATE_FILES = (
+    "cto-slack-queue.jsonl",
+    "cto-slack-events.json",
+    "cto-slack-ack.json",
+    "cto-ipc-delivery-receipts.jsonl",
+    "cto-ipc-monitor-trigger-receipts.jsonl",
+    "cto-app-server-delivery-receipts.jsonl",
+    "cto-slack-relay-claims.json",
+    "cto-slack-relay-heartbeat",
+)
+
+
+def resolve_state_dir(env: Any = None) -> Path:
+    env = os.environ if env is None else env
+    configured = (env.get(STATE_DIR_ENV) or "").strip()
+    return Path(configured) if configured else Path.home() / ".claude" / "state" / "cto-bridge"
+
+
+def migrate_legacy_state(state_dir: Path, legacy_dir: Path = LEGACY_STATE_DIR) -> list[str]:
+    """Copy legacy /tmp state files that have no durable copy yet; never overwrite."""
+    import shutil
+
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    copied: list[str] = []
+    if state_dir.resolve() == legacy_dir.resolve():
+        return copied
+    for name in DURABLE_STATE_FILES:
+        source, target = legacy_dir / name, state_dir / name
+        if target.exists() or not source.exists():
+            continue
+        shutil.copy2(source, target)
+        copied.append(name)
+    return copied
+
+
+STATE_DIR = resolve_state_dir()
+DEFAULT_EVENTS_FILE = STATE_DIR / "cto-slack-events.json"
+DEFAULT_ACK_FILE = STATE_DIR / "cto-slack-ack.json"
 DEFAULT_OUTPUT_FILE = Path("/tmp/cto-slack-relay-snapshot.json")
-DEFAULT_HEARTBEAT_FILE = Path("/tmp/cto-slack-relay-heartbeat")
-DEFAULT_CLAIMS_FILE = Path("/tmp/cto-slack-relay-claims.json")
-DEFAULT_LOCK_FILE = Path("/tmp/cto-slack-relay.lock")
+DEFAULT_HEARTBEAT_FILE = STATE_DIR / "cto-slack-relay-heartbeat"
+DEFAULT_CLAIMS_FILE = STATE_DIR / "cto-slack-relay-claims.json"
+DEFAULT_LOCK_FILE = STATE_DIR / "cto-slack-relay.lock"
 DEFAULT_CLAIM_TTL_SECONDS = 120.0
 DEFAULT_DELIVERY_RECEIPTS_FILES = (
-    Path("/tmp/cto-ipc-delivery-receipts.jsonl"),
-    Path("/tmp/cto-app-server-delivery-receipts.jsonl"),
-    Path("/tmp/cto-ipc-monitor-trigger-receipts.jsonl"),
+    STATE_DIR / "cto-ipc-delivery-receipts.jsonl",
+    STATE_DIR / "cto-app-server-delivery-receipts.jsonl",
+    STATE_DIR / "cto-ipc-monitor-trigger-receipts.jsonl",
 )
 ROUTE_TABLE_BEGIN = "<!-- CTO_SLACK_ROUTE_TABLE_V2"
 ROUTE_TABLE_END = "CTO_SLACK_ROUTE_TABLE_END -->"
@@ -470,10 +511,14 @@ def route_event(
     return routed
 
 
-def read_json(path: Path) -> Any:
+def read_json(path: Path, missing_default: Any = None) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
+        # Ack/events files only exist after first use (fresh state dir, or /tmp wiped on reboot);
+        # absence is the empty default. Corrupt content still fails closed below.
+        if missing_default is not None:
+            return missing_default
         raise SnapshotError(f"missing state file: {path}") from error
     except (OSError, json.JSONDecodeError) as error:
         raise SnapshotError(f"unreadable state file: {path}: {error}") from error
@@ -615,6 +660,7 @@ def write_heartbeat(path: Path) -> None:
 
 
 def main() -> int:
+    migrate_legacy_state(STATE_DIR, LEGACY_STATE_DIR)
     parser = argparse.ArgumentParser()
     parser.add_argument("--events-file", type=Path, default=DEFAULT_EVENTS_FILE)
     parser.add_argument("--ack-file", type=Path, default=DEFAULT_ACK_FILE)
@@ -630,6 +676,7 @@ def main() -> int:
         help="Authoritative SOP containing the machine-readable project route table",
     )
     parser.add_argument("--key", default=None, help="Claim only this exact dedup key")
+    parser.add_argument("--pending-report", action="store_true", help="Read-only: print routable pending count/ages as JSON (watchdog)")
     claim_action = parser.add_mutually_exclusive_group()
     claim_action.add_argument("--renew-key", default=None, help="Renew this active claim lease")
     claim_action.add_argument("--release-key", default=None, help="Release this active claim lease")
@@ -667,7 +714,7 @@ def main() -> int:
             try:
                 with os.fdopen(lock_fd, "r+") as lock_handle:
                     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-                    handled = extract_handled(read_json(args.ack_file))
+                    handled = extract_handled(read_json(args.ack_file, {"handled": []}))
                     try:
                         claims = extract_claims(read_json(args.claims_file))
                     except SnapshotError as error:
@@ -707,6 +754,28 @@ def main() -> int:
             return 2
         return 0
 
+    if args.pending_report:
+        # Read-only watchdog view: routable, unhandled events regardless of live
+        # claims (a claim that never completes is still a stalled relay).
+        try:
+            events = extract_events(read_json(args.events_file, {"events": []}))
+            handled = extract_handled(read_json(args.ack_file, {"handled": []}))
+            route_table = extract_route_table(args.route_sop)
+            receipt_keys = receipt_handled_keys(args.delivery_receipts_file or list(DEFAULT_DELIVERY_RECEIPTS_FILES))
+            pending = [
+                event for event in pending_events(events, handled | receipt_keys, {}, time.time(), args.key)
+                if event_eligible_for_route(event, route_table)
+            ]
+        except SnapshotError as error:
+            print(f"ACTION_REQUIRED {error}", file=os.sys.stderr)
+            return 2
+        print(json.dumps({
+            "pending": len(pending),
+            "queued_at": [event.get("queued_at") for event in pending],
+            "keys": [event.get("dedup_key") for event in pending],
+        }))
+        return 0
+
     # Invalidate any snapshot from a prior tick before interpreting mutable
     # queue/SOP state. A failed invocation must never leave deliverable stale
     # routing output behind for the direct IPC consumer.
@@ -723,8 +792,8 @@ def main() -> int:
         try:
             with os.fdopen(lock_fd, "r+") as lock_handle:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-                events = extract_events(read_json(args.events_file))
-                handled = extract_handled(read_json(args.ack_file))
+                events = extract_events(read_json(args.events_file, {"events": []}))
+                handled = extract_handled(read_json(args.ack_file, {"handled": []}))
                 # Scope the added receipt fence to temporal channel overrides;
                 # all other channels keep the prior snapshot behavior.
                 route_table = extract_route_table(args.route_sop)
