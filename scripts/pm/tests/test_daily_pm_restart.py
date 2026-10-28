@@ -50,6 +50,9 @@ def execute(home, dry, effects, race=None, phase='checkpoint'):
             else:
                 text += f'\n500 1 {os.getuid()} Tue Oct 27 00:00:00 2026 node mop-server'
                 text += f'\n501 500 {os.getuid()} Tue Oct 27 00:01:00 2026 python3 -'
+            if race in ('setuid_ps', 'root_child'):
+                cmd = 'ps -axo pid=,ppid=,uid=,lstart=,command=' if race == 'setuid_ps' else 'sudo hidden-tool'
+                text += f'\n104 102 0 Tue Oct 27 00:01:00 2026 {cmd}'
             if changed and race == 'tool': text += f'\n101 100 {os.getuid()} Tue Oct 27 00:00:00 2026 running-tool'
             if changed and race == 'birth': text = text.replace('00:00:00','01:00:00')
         elif argv[:2] == ['tmux','capture-pane']: text = 'Ready\n❯\n'
@@ -73,7 +76,7 @@ def execute(home, dry, effects, race=None, phase='checkpoint'):
         return io.BytesIO(b'{"ok":true}')
     with patch.dict(os.environ, {'MOP_DB_PATH': str(home / '.local/share/master-of-panes/data/mop.db')}), \
          patch.object(Path, 'home', return_value=home), patch.object(sys, 'argv', ['restart'] + (['--dry-run'] if dry else ['--complete-on-idle'] if phase == 'idle' else [])), \
-         patch('subprocess.run', side_effect=run), patch('urllib.request.urlopen', side_effect=url):
+         patch('subprocess.run', side_effect=run), patch('os.getpid', return_value=102 if race in ('setuid_ps', 'root_child') else os.getpid()), patch('urllib.request.urlopen', side_effect=url):
         exec(compile(code, str(SCRIPT), 'exec'), {'__name__': '__main__'})
 
 
@@ -203,3 +206,16 @@ if __name__ == '__main__':
         execute(home,False,effects,phase=phase)
         history.write_text(json.dumps(effects))
         (home/'fixture-parent.json').write_text(json.dumps({'parent_pid':os.getppid()}))
+
+
+def test_setuid_root_ps_probe_is_not_a_foreign_owner(tmp_path, capsys):
+    """macOS ps is setuid root; its own probe must not break PM ownership pinning."""
+    environment(tmp_path)
+    execute(tmp_path, True, [], race='setuid_ps')
+    assert 'DRY_RUN' in capsys.readouterr().out
+
+
+def test_other_root_descendant_still_refuses_ownership(tmp_path):
+    environment(tmp_path)
+    with pytest.raises(RuntimeError, match='ownership unknown'):
+        execute(tmp_path, True, [], race='root_child')

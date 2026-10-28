@@ -600,7 +600,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-daily-pm-restart",
-      "sha256": "5d61593fd1a811af4543af5eb5340747725f7347a35931b26961ad495cd17fca",
+      "sha256": "e6e07d5cd077a9de927d7607c060ffb1e6d53c0cc9484b88238e179ca696e816",
       "source_path": "claude/scripts/pm/daily-pm-restart.sh"
     },
     {

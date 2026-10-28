@@ -68,6 +68,12 @@ def pm_identity(target='0:0.0', require_idle=True):
         row = line.split(None,8)
         if len(row) != 9 or not all(v.isdigit() for v in row[:3]):
             raise RuntimeError('PM process table unreadable')
+        # macOS /bin/ps is setuid root: this script's own direct ps probe shows
+        # as a uid-0 descendant of the PM when run from its Bash tool. Skip only
+        # that probe (our direct child running exactly this ps); any other
+        # non-owner process still refuses.
+        if int(row[1]) == os.getpid() and row[8].startswith('ps -axo pid=,ppid=,uid=,lstart=,command='):
+            continue
         processes[int(row[0])] = row
     members, pending = set(), [int(fields[2])]
     while pending:
