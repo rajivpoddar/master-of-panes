@@ -41,7 +41,7 @@ def execute(home, dry, effects, race=None, phase='checkpoint'):
         effects.append(argv)
         text = '[{"number":13,"headRefOid":"abc"}]'
         if argv[:2] == ['tmux','display-message']:
-            text = f"{'%41' if (changed and race == 'identity') or race == 'successor' else '%40'}|$1|100|{home}/Downloads/projects/heydonna-app|claude"
+            text = '100' if argv[-1] == '#{pane_pid}' else f"{'%41' if (changed and race == 'identity') or race == 'successor' else '%40'}|$1|100|{home}/Downloads/projects/heydonna-app|claude"
         elif argv[0] == 'ps':
             text = f'100 1 {os.getuid()} Tue Oct 27 00:00:00 2026 claude'
             if phase == 'checkpoint' or race == 'caller_still_running':

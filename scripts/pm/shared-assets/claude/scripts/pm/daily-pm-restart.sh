@@ -48,6 +48,53 @@ def atomic(path, text):
     finally:
         os.close(fd)
 
+# Long-lived PM infrastructure children (MCP servers, caffeinate, zombie/defunct
+# helpers) never mean a turn is working. Anything else (Bash shells, python, node
+# tool runs, git, gh, npx, test runners) is tool work and blocks the effect phase.
+INFRA_PATTERNS = [
+    re.compile(r'^(npm exec|npx)\s+\S*mcp\S*(\s|$)'),          # npm exec mcp-server-axiom / @upstash/context7-mcp
+    re.compile(r'(^|\s|/)(node\s+)?\S*/node_modules/\.bin/\S*mcp\S*(\s|$)'),
+    re.compile(r'^(\S*/)?\S*mcp-server\S*(\s|$)'),
+    re.compile(r'^(\S*/)?caffeinate(\s|$)'),
+    re.compile(r'^\([^)]*\)$'),                                   # defunct/zombie helper, e.g. "(git)"
+]
+
+def classify_children(processes, pids):
+    """Return (allowed, blocking). Descendants of an allowlisted MCP root are allowed;
+    any non-infra process (or descendant of one) blocks."""
+    def infra(p):
+        return any(rx.search(processes[p][8].strip()) for rx in INFRA_PATTERNS)
+    allowed, blocking = set(), set()
+    for p in pids:
+        chain, q = [], p
+        while q in pids:
+            chain.append(q)
+            q = int(processes[q][1])
+        (allowed if any(infra(c) for c in chain) and infra(chain[-1]) else blocking).add(p)
+    return allowed, blocking
+
+def pm_children_report(target='0:0.0'):
+    fields = subprocess.run(['tmux', 'display-message', '-t', target, '-p', '#{pane_pid}'],
+        capture_output=True, text=True, check=True, timeout=5).stdout.strip()
+    listing = subprocess.run(['ps', '-axo', 'pid=,ppid=,uid=,lstart=,command='],
+        capture_output=True, text=True, check=True, timeout=5).stdout
+    processes = {}
+    for line in listing.splitlines():
+        row = line.split(None, 8)
+        if len(row) == 9 and row[0].isdigit() and row[1].isdigit():
+            processes[int(row[0])] = row
+    root = int(fields); members, pending = set(), [root]
+    while pending:
+        pid = pending.pop()
+        if pid in members: continue
+        members.add(pid)
+        pending.extend(p for p, r in processes.items() if int(r[1]) == pid)
+    agents = {p for p in members if re.search(r'(^|/)(claude|openclaude)(\s|$)', processes[p][8])}
+    allowed, blocking = classify_children(processes, members - {root} - agents)
+    fmt = lambda xs: ', '.join(f'{p}:{processes[p][8].strip()[:60]}' for p in sorted(xs)) or '-'
+    emit(f'PM_CHILDREN: allowlisted={len(allowed)} [{fmt(allowed)}]')
+    emit(f'PM_CHILDREN: would_block={len(blocking)} [{fmt(blocking)}]')
+
 def pm_identity(target='0:0.0', require_idle=True):
     """Read-only PM pin: immutable pane/session, process birth and monotonic hook work."""
     with urllib.request.urlopen('http://127.0.0.1:3100/pm-status', timeout=15) as response:
@@ -85,8 +132,10 @@ def pm_identity(target='0:0.0', require_idle=True):
     if not members <= processes.keys() or any(int(processes[p][2]) != os.getuid() for p in members):
         raise RuntimeError('PM process ownership unknown')
     agents = [p for p in members if re.search(r'(^|/)(claude|openclaude)(\s|$)',processes[p][8])]
-    if len(agents) != 1 or (require_idle and members - {int(fields[2]), *agents}):
-        raise RuntimeError('PM active descendant work or foreground identity unknown')
+    allowed, blocking = classify_children(processes, members - {int(fields[2]), *agents})
+    if len(agents) != 1 or (require_idle and blocking):
+        raise RuntimeError('PM active descendant work or foreground identity unknown: '
+            + '; '.join(f'{p} {processes[p][8][:80]}' for p in sorted(blocking))[:400])
     # Checkpointing is effect-free and may run in this Claude's Bash/Python
     # subtree. Pin only its owner; the idle effect phase still rejects ALL tools.
     birth = [processes[p] for p in sorted({int(fields[2]), *agents})]
@@ -248,6 +297,7 @@ def perform():
     emit('CLEANUP: ' + str(scripts / 'stale-process-cleanup.py') + ' --apply --attest-slotless-reap')
     emit('PM_RELAUNCH: MoP POST http://127.0.0.1:3100/slots/0/respawn {"continue_session":true} (RESTART_COMMANDS[0]=launch-pm-cliproxy.sh --continue); then POST /slots/0/send resume prompt; 409=deferred')
     if args.dry_run:
+        pm_children_report()
         return
     if owner(pm_identity(pin['pane'], require_idle=False)) != owner(pin):
         raise RuntimeError('PM owner changed before writing the checkpoint')
