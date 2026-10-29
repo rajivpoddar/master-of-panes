@@ -410,7 +410,7 @@ test("compiled /send route routes every PM self-clear through the fenced writer 
   assert.ok(fenced < firstGate && fenced < normalKey, "PM clear returns before any other gate or key");
   assert.match(route, /pm_clear_authority_missing/);
   assert.doesNotMatch(route, /allowPmClear && relay\.isPMBusy\(\)/);
-  for (const via of ["pm_status_stop_retry", "pm_status_stop", "options.source"]) {
+  for (const via of ["pm_native_stop", "options.source"]) {
     assert.ok(source.includes(`sendClearViaMopSendPath(0, ${via.includes(".") ? via : `"${via}"`}, {`), via);
   }
 });

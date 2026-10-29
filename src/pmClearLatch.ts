@@ -166,6 +166,8 @@ export function claimPmClearRequest(options: {
 export async function requestPmClearOnce(options: Parameters<typeof claimPmClearRequest>[0] & {
   isPMBusy: () => boolean;
   send: (request: { requestedAt: string }) => Promise<PMClearSendResult>;
+  /** Operator requests wait for the next native Stop even if PM was already idle. */
+  deferUntilStop?: boolean;
 }): Promise<PMClearDelivery> {
   const { db } = options;
   const claim = claimPmClearRequest(options);
@@ -174,11 +176,12 @@ export async function requestPmClearOnce(options: Parameters<typeof claimPmClear
   // Synchronous with the claim: from here this request is consumed. Any
   // concurrent Stop/drain caller sees "sending" and stays suppressed.
   db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "sending");
-  if (options.isPMBusy()) {
+  if (options.deferUntilStop || options.isPMBusy()) {
     db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "deferred_busy");
     db.logEvent(0, "clear_pending_deferred_busy", null, null, {
       requested_at: claim.requestedAt,
-      reason: "PM is busy at clear-send boundary; latch retained for retry when idle",
+      reason: options.deferUntilStop ? "PM clear requested; waiting for the next native Stop hook"
+        : "PM is busy at clear-send boundary; latch retained for retry when idle",
     });
     return { kind: "deferred_busy", requestedAt: claim.requestedAt };
   }

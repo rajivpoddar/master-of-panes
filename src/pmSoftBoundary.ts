@@ -147,7 +147,7 @@ export class PMSoftBoundary {
       const pending = this.pending();
       if (!this.state.effect && this.activeWriters === 0 && this.state.stopped && pending && pending.boot === boot.id
           && pending.key !== this.state.failures?.[pending.kind]?.request
-          && (this.db.getPendingPMEventCount() === 0
+          && (pending.kind === "clear" || this.db.getPendingPMEventCount() === 0
               || this.now() - pending.requestedAt >= PM_SOFT_MAX_DEFERRAL_MS)) {
         this.state.request = pending.key;
         this.state.fenced = true;
@@ -229,7 +229,8 @@ export function pendingPMMaintenance(db: MoPDatabase, now = new Date()): Pending
   } catch { return null; }
 }
 
-export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRelay): PMSoftBoundary {
+export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRelay,
+  onClearStop?: () => Promise<unknown>): PMSoftBoundary {
   const boundary = new PMSoftBoundary(db, () => pendingPMMaintenance(db), Date.now, () => relay.setPMBusy(true));
   relay.setPMMaintenanceGate(boundary);
   app.use("/hooks/slot/0", async (c, next) => {
@@ -240,6 +241,15 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
       return c.json({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: refusal } });
     }
     if (raw.hook_event_name === "PreToolUse") relay.setPMBusy(true);
+    const clearStop = !!onClearStop && raw.hook_event_name === "Stop" && raw.mop_tool_tracking === 1
+      && raw.session_id === boundary.status().session_id && boundary.isSafe()
+      && boundary.status().request?.startsWith("clear:") === true;
+    if (clearStop) {
+      // Start the guarded write from this Stop, not the notification debounce.
+      // Do not hold the native hook response while the tmux writer settles.
+      relay.setPMBusy(true);
+      void onClearStop!().catch(error => console.error(`[pm-clear] Stop delivery failed: ${String(error)}`));
+    }
     await next();
     if (raw.hook_event_name === "PreToolUse") {
       const response = await c.res.clone().json();
@@ -256,7 +266,7 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
       boundary.sessionStarted(raw.source);
       if (wasHeld && !boundary.isHeld()) relay.setPMBusy(raw.source !== "clear");
     }
-    if (raw.hook_event_name === "Stop" && boundary.isHeld() && boundary.isSafe()) {
+    if (!clearStop && raw.hook_event_name === "Stop" && boundary.isHeld() && boundary.isSafe()) {
       if (await relay.isPMComposerQueueEmpty() && boundary.isSafe()) relay.setPMBusy(false);
       else { boundary.deferCLIInput(); relay.setPMBusy(true); }
     }

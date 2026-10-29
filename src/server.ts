@@ -87,7 +87,7 @@ import {
   waitForSessionStartClearOnDb,
 } from "./sessionStartClearWait.js";
 import { paneInputModeRefusalReason, type PaneInputModeRefusalReason } from "./paneInputMode.js";
-import { isPmClearUndelivered, makePmClearWriteFence, requestPmClearOnce, retryDeferredPmClearOnStop, touchPmClearRequestedMarker, waitForPmIdleDrain, type PMClearSendResult } from "./pmClearLatch.js";
+import { isPmClearUndelivered, makePmClearWriteFence, requestPmClearOnce, retryDeferredPmClearOnStop, touchPmClearRequestedMarker, type PMClearSendResult } from "./pmClearLatch.js";
 import {
   interruptLiveTurnBeforeClear,
   pinDrift,
@@ -307,7 +307,7 @@ const eventLoopLagTimer = setInterval(() => {
 }, 60 * 1000);
 
 const app = new Hono();
-const pmSoftBoundary = registerPMSoftBoundary(app, db, relay);
+const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop);
 
 // ─── MoP Clear Helpers ─────────────────────────────────
 // HTTP path for deterministic schedulers that cannot call MCP tools.
@@ -325,8 +325,6 @@ const PM_CLEAR_STALE_ACK_REPAIR_MS = parseInt(
 );
 const PM_CLEAR_REQUESTED_AT_KEY = "pm_clear_requested_at";
 let pmClearDrainGeneration = 0;
-const PM_CLEAR_STOP_RETRY_SETTLE_MS = parseInt(process.env.MOP_PM_CLEAR_STOP_RETRY_SETTLE_MS ?? "2000", 10);
-const PM_CLEAR_STOP_RETRY_BACKOFF_MS = parseInt(process.env.MOP_PM_CLEAR_STOP_RETRY_BACKOFF_MS ?? "60000", 10);
 
 // ─── resume_prompt fallback (bounded poll) ──────────────
 // The hook-driven injection in hooks.ts (SessionStart source=clear) is the
@@ -432,66 +430,33 @@ function findLaterPmLifecycleEvent(requestedAt: string | null) {
   }) ?? null;
 }
 
-/** Deferred-busy latch: retry the guarded /clear once on this Stop (stop-generation fenced, backoff bounded). */
-function retryUndeliveredPmClearOnStop(generation: number): void {
+/** A pending PM clear is sent only from the next native, tool-free Stop. */
+async function sendPendingPmClearAtStop(): Promise<void> {
+  if (!isPmClearUndelivered(db) || !pmSoftBoundary.isSafe()) return;
+  const generation = ++pmClearDrainGeneration;
   const sessionToken = slotSessionToken(0);
-  // Deferred-busy latch: retry the guarded send once on this Stop, fenced by
-  // the stop generation and bounded by backoff. Awaiting-ack latches never resend.
   const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
-  void retryDeferredPmClearOnStop({
+  await retryDeferredPmClearOnStop({
     db,
-    source: "pm_status_stop_retry",
+    source: "pm_native_stop",
     nowMs: Date.now(),
     staleAfterMs: PM_CLEAR_STALE_ACK_REPAIR_MS,
     recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
     hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
     laterLifecycleEvent: findLaterPmLifecycleEvent(requestedAt),
-    backoffMs: PM_CLEAR_STOP_RETRY_BACKOFF_MS,
-    settleMs: PM_CLEAR_STOP_RETRY_SETTLE_MS,
+    backoffMs: 0,
+    settleMs: 0,
     wait: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
     isCurrent: () => generation === pmClearDrainGeneration,
-    isIdleProven: () => relay.isPMIdleProven(),
+    isIdleProven: () => pmSoftBoundary.isSafe(),
     send: ({ requestedAt: fencedRequestedAt }) =>
-      sendClearViaMopSendPath(0, "pm_status_stop_retry", {
+      sendClearViaMopSendPath(0, "pm_native_stop", {
         requestedAt: fencedRequestedAt,
         generation,
         sessionToken,
         stopFenced: true,
       }),
-  }).finally(() => pmSoftBoundary.reconcileFailedMaintenance())
-    .catch((err) => console.error(`[pm-clear] stop retry failed: ${String(err)}`));
-}
-
-function retryPendingPmClearAfterDrain(stopEventId: number, generation: number): void {
-  const sessionToken = slotSessionToken(0);
-  void waitForPmIdleDrain({
-    afterEventId: stopEventId,
-    getDrainEvent: () => db.getEvents(0, 1, "pm_debounce_drain_fired")[0] ?? null,
-    isPMBusy: () => relay.isPMBusy(),
-    isCurrent: () => generation === pmClearDrainGeneration,
-    wait: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
-    onDrain: async () => {
-      if (!db.hasPendingClear(0)) return;
-      const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
-      await requestPmClearOnce({
-        db,
-        source: "pm_status_stop",
-        nowMs: Date.now(),
-        staleAfterMs: PM_CLEAR_STALE_ACK_REPAIR_MS,
-        recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
-        hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
-        laterLifecycleEvent: findLaterPmLifecycleEvent(requestedAt),
-        isPMBusy: () => relay.isPMBusy(),
-        send: ({ requestedAt: fencedRequestedAt }) =>
-          sendClearViaMopSendPath(0, "pm_status_stop", {
-            requestedAt: fencedRequestedAt,
-            generation,
-            sessionToken,
-            stopFenced: false,
-          }),
-      }).finally(() => pmSoftBoundary.reconcileFailedMaintenance());
-    },
-  });
+  }).finally(() => pmSoftBoundary.reconcileFailedMaintenance());
 }
 
 /** Dev-slot session clear through the existing /send path (never PM: PM uses the fenced writer). */
@@ -787,7 +752,7 @@ async function clearSlotsThroughMopHttp(
 
   if (includePmSlot) {
     const nowMs = Date.now();
-    // Pin the PM turn/session observed at request time into the writer.
+    // Record intent only. Even an already-idle PM waits for its next native Stop.
     const operatorGeneration = pmClearDrainGeneration;
     const operatorSessionToken = slotSessionToken(0);
     const delivery = await requestPmClearOnce({
@@ -799,6 +764,7 @@ async function clearSlotsThroughMopHttp(
       hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
       laterLifecycleEvent: findLaterPmLifecycleEvent(db.getConfig(PM_CLEAR_REQUESTED_AT_KEY)),
       operatorReRequest: options.clearExistingPendingForTargets,
+      deferUntilStop: true,
       isPMBusy: () => relay.isPMBusy(),
       send: ({ requestedAt: fencedRequestedAt }) =>
         sendClearViaMopSendPath(0, options.source, {
@@ -822,7 +788,7 @@ async function clearSlotsThroughMopHttp(
     }
 
     if (delivery.kind === "deferred_busy") {
-      results.push({ slot: 0, name: "PM", status: "deferred (PM busy; clear remains pending)" });
+      results.push({ slot: 0, name: "PM", status: "deferred (waiting for next PM Stop hook)" });
       return results;
     }
 
@@ -1013,20 +979,15 @@ app.post("/pm-status", async (c) => {
     return c.json({ success: true, pm_busy: true, drained: result.drained });
   } else {
     // event === "stop" → drain
-    const generation = ++pmClearDrainGeneration;
     const before = db.getPendingPMEventCount();
     const result = relay.setPMBusy(false);
-    const idleDrainedEventId = db.logEvent(0, "pm_status_idle_drained", null, null, {
+    db.logEvent(0, "pm_status_idle_drained", null, null, {
       event,
       queued_before: before,
       drained: result.drained,
     });
-    if (isPmClearUndelivered(db)) {
-      retryUndeliveredPmClearOnStop(generation);
-    }
-    if (db.hasPendingClear(0)) {
-      retryPendingPmClearAfterDrain(idleDrainedEventId, generation);
-    }
+    // This compatibility status signal only drives notification draining.
+    // The tracked native Stop hook owns pending /clear delivery.
     return c.json({ success: true, pm_busy: false, queued_before: before, drained: result.drained });
   }
 });
@@ -1159,6 +1120,12 @@ app.post("/hooks/slot/:slotNum", async (c) => {
   }
 
   const payload = normalizePayload(payloadParse.data);
+
+  // Native work/boot hooks invalidate an older Stop writer even if the
+  // separate compatibility /pm-status start notification is delayed or lost.
+  if (slotNum === 0 && (payload.type === "UserPromptSubmit" || payload.type === "PreToolUse" || payload.type === "SessionStart")) {
+    pmClearDrainGeneration += 1;
+  }
 
   // Process the hook event
   if (payload.type === "UserPromptSubmit" && payload.session_id?.trim()) {
@@ -2776,7 +2743,7 @@ app.post("/slots/:slotNum/send", async (c) => {
         sessionToken,
         currentGeneration: () => pmClearDrainGeneration,
         currentSessionToken: () => slotSessionToken(0),
-        idleProven: () => relay.isPMIdleProven() && pmSoftBoundary.isSafe(),
+        idleProven: () => pmSoftBoundary.isSafe(),
       }),
     }));
     if (written.ok) {

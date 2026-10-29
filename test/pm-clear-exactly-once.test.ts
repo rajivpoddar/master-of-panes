@@ -266,7 +266,7 @@ test("an unacknowledged delivered clear reports a missing acknowledgement instea
   }
 });
 
-test("PM status Stop schedules retry after drain and keeps explicit retry distinct", () => {
+test("only native Stop dispatches PM clear; status/drain and operator requests cannot send it", () => {
   const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   const start = source.indexOf('app.post("/pm-status"');
   const end = source.indexOf('app.get("/pm-status"', start);
@@ -276,13 +276,11 @@ test("PM status Stop schedules retry after drain and keeps explicit retry distin
   const route = source.slice(start, end);
   assert.doesNotMatch(route, /requestPmClearOnce\(/);
   assert.doesNotMatch(route, /sendClearViaMopSendPath\(/);
-  assert.match(route, /retryPendingPmClearAfterDrain\(idleDrainedEventId, generation\)/);
-  assert.match(route, /retryUndeliveredPmClearOnStop\(generation\)/);
-  assert.match(source, /sendClearViaMopSendPath\(0, "pm_status_stop_retry", \{/);
-  assert.match(source, /getEvents\(0, 1, "pm_debounce_drain_fired"\)/);
-  assert.match(source, /sendClearViaMopSendPath\(0, "pm_status_stop", \{/);
-  assert.match(source, /isPMBusy: \(\) => relay\.isPMBusy\(\)/);
-  assert.match(source, /sendClearViaMopSendPath\(0, options\.source, \{/);
+  assert.doesNotMatch(route, /sendPendingPmClearAtStop|retryPendingPmClearAfterDrain|retryUndeliveredPmClearOnStop/);
+  assert.match(source, /registerPMSoftBoundary\(app, db, relay, sendPendingPmClearAtStop\)/);
+  assert.match(source, /sendClearViaMopSendPath\(0, "pm_native_stop", \{/);
+  assert.doesNotMatch(source, /waitForPmIdleDrain|PM_CLEAR_STOP_RETRY_SETTLE_MS|PM_CLEAR_STOP_RETRY_BACKOFF_MS/);
+  assert.match(source, /deferUntilStop: true/);
   assert.match(source, /db\.getEvents\(0, 100, "pm_status_idle_drained"\)/);
   assert.match(source, /operatorReRequest: options\.clearExistingPendingForTargets/);
 

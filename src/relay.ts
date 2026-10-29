@@ -810,7 +810,7 @@ export class TmuxRelay {
         { timeout: 5_000 },
       );
       const [id, command] = pane.stdout.trim().split("|", 2);
-      if (!/^%\d+$/.test(id) || command !== (this.pmRuntime === "omp" ? "omp" : "claude")) return false;
+      if (!/^%\d+$/.test(id) || !(await this.isPMCommandReady(command, id))) return false;
       return (await this.pmClearPaneRefusal(id, "")) === null;
     } catch { return false; }
   }
@@ -823,7 +823,7 @@ export class TmuxRelay {
       );
       const [currentPaneId, command] = resolved.stdout.trim().split("|", 2);
       if (currentPaneId !== paneId) return { reason: "pm_pane_identity_drift", busy: false };
-      if (command !== (this.pmRuntime === "omp" ? "omp" : "claude")) return { reason: "pm_pane_not_ready", busy: false };
+      if (!(await this.isPMCommandReady(command, paneId))) return { reason: "pm_pane_not_ready", busy: false };
       const snapshot = await this.runShell(`tmux capture-pane -p -t ${paneId}`, { timeout: 5_000 });
       if (QUEUED_HINT.test(snapshot.stdout)) return { reason: "pm_cli_queue_not_empty", busy: true };
       const composer = composerText(snapshot.stdout);
@@ -1034,13 +1034,21 @@ export class TmuxRelay {
         `tmux display-message -t ${this.pmPaneAddress} -p '#{pane_current_command}'`,
         { timeout: 5_000 },
       );
-      const command = result.stdout.trim();
+      return await this.isPMCommandReady(result.stdout.trim(), this.pmPaneAddress);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Share executable proof with the pinned clear writer, not just inbound delivery. */
+  private async isPMCommandReady(command: string, paneTarget: string): Promise<boolean> {
+    try {
       if (command === (this.pmRuntime === "omp" ? "omp" : "claude")) return true;
       // Native Claude can expose its version as the tmux foreground title.
       // A version alone is not identity: verify the pane process executable.
       if (this.pmRuntime !== "claude" || !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(command)) return false;
       const pane = await this.runShell(
-        `tmux display-message -t ${this.pmPaneAddress} -p '#{pane_pid}'`,
+        `tmux display-message -t ${paneTarget} -p '#{pane_pid}'`,
         { timeout: 5_000 },
       );
       const pid = pane.stdout.trim();

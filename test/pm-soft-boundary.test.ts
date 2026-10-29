@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,7 +8,7 @@ import { MoPDatabase } from "../src/db.js";
 import { PMSoftBoundary, PM_SOFT_MAX_DEFERRAL_MS, registerPMSoftBoundary } from "../src/pmSoftBoundary.js";
 import { TmuxRelay } from "../src/relay.js";
 import { deliverRespawnExit } from "../src/respawnWhenIdle.js";
-import { requestPmClearOnce } from "../src/pmClearLatch.js";
+import { isPmClearUndelivered, makePmClearWriteFence, requestPmClearOnce, retryDeferredPmClearOnStop } from "../src/pmClearLatch.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
 function fixture() {
@@ -23,6 +23,111 @@ function fixture() {
   });
   return { db, boot, pending, boundary, observe, advance: (ms: number) => { now += ms; },
     close: () => { db.close(); rmSync(directory, { recursive: true, force: true }); } };
+}
+
+test("a PM clear request waits for the next Stop even when PM is already idle", async () => {
+  const f = fixture();
+  try {
+    f.observe("Stop"); // an old idle observation is not the requested future Stop
+    let writes = 0;
+    const result = await requestPmClearOnce({ db: f.db, source: "operator", nowMs: Date.now(),
+      staleAfterMs: 0, recentSuppressMs: 0, hasRecentClearEvent: false, laterLifecycleEvent: null,
+      deferUntilStop: true, isPMBusy: () => false,
+      send: async () => { writes++; return { success: true }; } });
+    assert.equal(result.kind, "deferred_busy");
+    assert.equal(writes, 0);
+    assert.equal(isPmClearUndelivered(f.db), true);
+  } finally { f.close(); }
+});
+
+for (const scenario of ["healthy", "version-title", "version-zsh", "input-after-paste", "completed-input-after-paste", "active-tool", "wrong-session"] as const) {
+  test(`native Stop immediately dispatches pending clear with real guarded writer: ${scenario}`, async () => {
+    const f = fixture();
+    let relay: TmuxRelay | undefined;
+    try {
+      const requestedAt = new Date().toISOString();
+      f.db.setPendingClear(0);
+      f.db.setConfig("pm_clear_requested_at", requestedAt);
+      f.db.setConfig("pm_clear_delivery_state", "deferred_busy");
+      f.db.enqueuePendingPMEvent(0, "retained-inbound", "retained message");
+      const retained = f.db.peekPendingPMEvents();
+      const commands: string[] = [];
+      let composer = "", buffer = "", sends = 0, generation = 0;
+      let delivery: Promise<unknown> | undefined;
+      let boundary!: PMSoftBoundary;
+      let hook!: (event: string, extra?: Record<string, unknown>) => Promise<Response>;
+      relay = new TmuxRelay(DEFAULT_CONFIG, { pmRuntime: "claude", runShell: async command => {
+        commands.push(command);
+        if (command.includes("#{pane_id}|#{pane_current_command}")) return {
+          stdout: `%1|${scenario.startsWith("version-") ? "2.1.312" : "claude"}\n`, stderr: "" };
+        if (command.includes("#{pane_pid}")) {
+          assert.match(command, /-t %1 /, "executable proof targets the pinned clear pane");
+          return { stdout: "321\n", stderr: "" };
+        }
+        if (command.startsWith("ps -p 321")) return { stdout: scenario === "version-zsh" ? "/bin/zsh" : "/opt/claude", stderr: "" };
+        if (command.startsWith("tmux capture-pane")) return { stdout: `${"─".repeat(40)}\n❯ ${composer}\n${"─".repeat(40)}`, stderr: "" };
+        const load = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
+        if (load) buffer = readFileSync(load[1]!, "utf8");
+        if (command.startsWith("tmux paste-buffer")) {
+          composer = buffer;
+          if (scenario === "input-after-paste") boundary.observe({ hook_event_name: "UserPromptSubmit", session_id: "pm" });
+          if (scenario === "completed-input-after-paste") {
+            await hook("UserPromptSubmit");
+            await hook("Stop");
+            assert.equal(boundary.isSafe(), true, "completed input restored idle but must not restore old writer authority");
+          }
+        }
+        if (command.endsWith(" C-u") || command.endsWith(" Enter")) composer = "";
+        return { stdout: "", stderr: "" };
+      } });
+      relay.setDatabase(f.db);
+      const app = new Hono();
+      boundary = registerPMSoftBoundary(app, f.db, relay, () => {
+        if (!isPmClearUndelivered(f.db) || !boundary.isSafe()) return Promise.resolve();
+        const stopGeneration = ++generation;
+        delivery = retryDeferredPmClearOnStop({ db: f.db, source: "pm_native_stop", nowMs: Date.now(),
+          staleAfterMs: 0, recentSuppressMs: 0, hasRecentClearEvent: false, laterLifecycleEvent: null,
+          backoffMs: 0, settleMs: 0, wait: async () => { throw new Error("Stop must not wait for a timer"); },
+          isCurrent: () => generation === stopGeneration, isIdleProven: () => boundary.isSafe(), send: async () => {
+            sends++;
+            const written = await boundary.withMaintenanceWriter(() => relay!.writePMClearFenced({ paneId: "%1",
+              check: makePmClearWriteFence({ db: f.db, requestedAt, generation: stopGeneration, sessionToken: String(f.boot),
+                currentGeneration: () => generation, currentSessionToken: () => String(f.boot), idleProven: () => boundary.isSafe() }) }));
+            return { success: written.ok, busy: written.busy, zeroEffect: written.zeroEffect };
+          } }).finally(() => boundary.reconcileFailedMaintenance());
+        return delivery;
+      });
+      app.post("/hooks/slot/0", async c => {
+        const raw = await c.req.json();
+        if (["UserPromptSubmit", "PreToolUse", "SessionStart"].includes(raw.hook_event_name)) generation++;
+        return c.json({});
+      });
+      app.post("/pm-status", c => c.json({}));
+      hook = async (event: string, extra = {}) => app.request("/hooks/slot/0", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hook_event_name: event,
+          session_id: "pm", mop_tool_tracking: 1, ...extra }) });
+      await app.request("/pm-status", { method: "POST", headers: { "Content-Type": "application/json" }, body: '{"event":"stop"}' });
+      await hook("SessionStart", { source: "resume" });
+      assert.equal(sends, 0, "status/startup cannot substitute for the native Stop");
+      if (scenario === "active-tool") await hook("PreToolUse", { tool_use_id: "still-running" });
+      await hook("Stop", scenario === "wrong-session" ? { session_id: "old" } : {});
+      if (scenario === "active-tool" || scenario === "wrong-session") {
+        assert.equal(sends, 0);
+        assert.equal(commands.some(c => /paste-buffer|send-keys/.test(c)), false);
+      } else {
+        assert.equal(sends, 1, "Stop dispatched immediately without debounce, settle or backoff");
+        assert.equal(relay.isPMIdleProven(), false, "no fake global idle transition was needed");
+        await delivery;
+        assert.equal(commands.filter(c => c.startsWith("tmux paste-buffer")).length, scenario === "version-zsh" ? 0 : 1);
+        const successful = scenario === "healthy" || scenario === "version-title";
+        assert.equal(commands.filter(c => c.endsWith(" Enter")).length, successful ? 1 : 0);
+        assert.equal(f.db.getConfig("pm_clear_delivery_state"), successful ? "awaiting_ack" : scenario === "version-zsh" ? "failed" : "uncertain");
+        await hook("Stop");
+        assert.equal(sends, 1, "duplicate Stop never repeats a possible-effect clear");
+      }
+      assert.deepEqual(f.db.peekPendingPMEvents(), retained);
+    } finally { relay?.setPMBusy(true); f.close(); }
+  });
 }
 
 test("parallel tools and failures: a Stop never bypasses an admitted in-flight tool", () => {
