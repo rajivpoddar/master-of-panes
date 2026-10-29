@@ -237,7 +237,8 @@ export type PMClearFenceRefusal = { reason: string; busy: boolean };
 /**
  * Build the authority the serialized PM writer rechecks at paste and at the
  * single Enter: the original request id (still latched and in "sending"), the
- * PM turn generation pinned by the caller, the PM hook session, and idle.
+ * PM input generation pinned by the caller and the PM hook session. Native
+ * Stop is the delivery boundary; notification/debounced idle is not authority.
  */
 export function makePmClearWriteFence(deps: {
   db: Pick<MoPDatabase, "hasPendingClear" | "getConfig">;
@@ -259,7 +260,6 @@ export function makePmClearWriteFence(deps: {
     }
     if (deps.currentGeneration() !== deps.generation) return { reason: "pm_turn_started", busy: true };
     if (deps.currentSessionToken() !== deps.sessionToken) return { reason: "pm_session_drift", busy: false };
-    if (!deps.idleProven()) return { reason: "pm_busy", busy: true };
     return null;
   };
 }
@@ -273,9 +273,9 @@ export function isPmClearUndelivered(db: Pick<MoPDatabase, "hasPendingClear" | "
 
 /**
  * On a PM Stop, retry an undelivered (deferred_busy) clear latch once.
- * Delivered-awaiting-ack latches are never resent. The retry waits a short
- * settle window, then requires the stop generation to still be current (no PM
- * turn started since this Stop), and is bounded by a per-attempt backoff.
+ * Delivered-awaiting-ack latches are never resent. The pinned
+ * Stop generation must still be current (no new input since this Stop).
+ * No idle proof, settle delay or retry backoff is required.
  */
 export async function retryDeferredPmClearOnStop(options: Omit<Parameters<typeof requestPmClearOnce>[0], "isPMBusy"> & {
   backoffMs: number;
@@ -287,12 +287,7 @@ export async function retryDeferredPmClearOnStop(options: Omit<Parameters<typeof
 }): Promise<PMClearDelivery | { kind: "skipped"; reason: string }> {
   const { db } = options;
   if (!isPmClearUndelivered(db)) return { kind: "skipped", reason: "not_undelivered" };
-  const lastMs = parseMoPIsoMs(db.getConfig(PM_CLEAR_STOP_RETRY_AT_KEY));
-  if (lastMs !== null && options.nowMs >= lastMs && options.nowMs - lastMs < options.backoffMs) {
-    return { kind: "skipped", reason: "backoff" };
-  }
   const fencedRequestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY) ?? "";
-  if (options.settleMs > 0) await options.wait(options.settleMs);
   if (!options.isCurrent() || !isPmClearUndelivered(db) || db.getConfig(PM_CLEAR_REQUESTED_AT_KEY) !== fencedRequestedAt) {
     return { kind: "skipped", reason: "stop_generation_superseded" };
   }
@@ -306,7 +301,7 @@ export async function retryDeferredPmClearOnStop(options: Omit<Parameters<typeof
   return requestPmClearOnce({
     ...options,
     expectedRequestedAt: fencedRequestedAt,
-    isPMBusy: () => !options.isCurrent() || !options.isIdleProven(),
+    isPMBusy: () => !options.isCurrent(),
   });
 }
 

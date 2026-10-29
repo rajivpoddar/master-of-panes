@@ -70,11 +70,11 @@ for (const scenario of ["healthy", "version-title", "version-zsh", "input-after-
         if (load) buffer = readFileSync(load[1]!, "utf8");
         if (command.startsWith("tmux paste-buffer")) {
           composer = buffer;
-          if (scenario === "input-after-paste") boundary.observe({ hook_event_name: "UserPromptSubmit", session_id: "pm" });
+          if (scenario === "input-after-paste") { generation++; boundary.observe({ hook_event_name: "UserPromptSubmit", session_id: "pm" }); }
           if (scenario === "completed-input-after-paste") {
             await hook("UserPromptSubmit");
             await hook("Stop");
-            assert.equal(boundary.isSafe(), true, "completed input restored idle but must not restore old writer authority");
+            assert.equal(boundary.isAdmissionFenced(), false, "clear never fences input or tools");
           }
         }
         if (command.endsWith(" C-u") || command.endsWith(" Enter")) composer = "";
@@ -83,7 +83,7 @@ for (const scenario of ["healthy", "version-title", "version-zsh", "input-after-
       relay.setDatabase(f.db);
       const app = new Hono();
       boundary = registerPMSoftBoundary(app, f.db, relay, () => {
-        if (!isPmClearUndelivered(f.db) || !boundary.isSafe()) return Promise.resolve();
+        if (!isPmClearUndelivered(f.db)) return Promise.resolve();
         const stopGeneration = ++generation;
         delivery = retryDeferredPmClearOnStop({ db: f.db, source: "pm_native_stop", nowMs: Date.now(),
           staleAfterMs: 0, recentSuppressMs: 0, hasRecentClearEvent: false, laterLifecycleEvent: null,
@@ -111,7 +111,7 @@ for (const scenario of ["healthy", "version-title", "version-zsh", "input-after-
       assert.equal(sends, 0, "status/startup cannot substitute for the native Stop");
       if (scenario === "active-tool") await hook("PreToolUse", { tool_use_id: "still-running" });
       await hook("Stop", scenario === "wrong-session" ? { session_id: "old" } : {});
-      if (scenario === "active-tool" || scenario === "wrong-session") {
+      if (scenario === "wrong-session") {
         assert.equal(sends, 0);
         assert.equal(commands.some(c => /paste-buffer|send-keys/.test(c)), false);
       } else {
@@ -119,7 +119,7 @@ for (const scenario of ["healthy", "version-title", "version-zsh", "input-after-
         assert.equal(relay.isPMIdleProven(), false, "no fake global idle transition was needed");
         await delivery;
         assert.equal(commands.filter(c => c.startsWith("tmux paste-buffer")).length, scenario === "version-zsh" ? 0 : 1);
-        const successful = scenario === "healthy" || scenario === "version-title";
+        const successful = scenario === "healthy" || scenario === "version-title" || scenario === "active-tool";
         assert.equal(commands.filter(c => c.endsWith(" Enter")).length, successful ? 1 : 0);
         assert.equal(f.db.getConfig("pm_clear_delivery_state"), successful ? "awaiting_ack" : scenario === "version-zsh" ? "failed" : "uncertain");
         await hook("Stop");
@@ -311,11 +311,11 @@ test("HTTP admission defers maintenance for inbound prompts instead of blocking 
     boundary.observe({ hook_event_name: "Stop", session_id: "pm", mop_tool_tracking: 1 });
     const before = processed;
     const denied = await post("PreToolUse", { tool_use_id: "b" });
-    assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
-    assert.equal(processed, before);
+    assert.equal(denied.mop_tool_admitted, true);
+    assert.equal(processed, before + 1);
     const admitted = await post("UserPromptSubmit", { prompt: "inbound during maintenance" });
     assert.deepEqual(admitted, {});
-    assert.equal(processed, before + 1, "human prompt reaches the actual processor");
+    assert.equal(processed, before + 2, "human prompt reaches the actual processor");
     assert.equal(boundary.isAdmissionFenced(), false);
     assert.equal(boundary.isSafe(), false);
     assert.equal(f.db.getPendingPMEventCount(), 0, "no maintenance replay copy is created");

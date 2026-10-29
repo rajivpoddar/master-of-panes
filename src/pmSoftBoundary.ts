@@ -147,7 +147,8 @@ export class PMSoftBoundary {
       const pending = this.pending();
       if (!this.state.effect && this.activeWriters === 0 && this.state.stopped && pending && pending.boot === boot.id
           && pending.key !== this.state.failures?.[pending.kind]?.request
-          && (pending.kind === "clear" || this.db.getPendingPMEventCount() === 0
+          && pending.kind !== "clear"
+          && (this.db.getPendingPMEventCount() === 0
               || this.now() - pending.requestedAt >= PM_SOFT_MAX_DEFERRAL_MS)) {
         this.state.request = pending.key;
         this.state.fenced = true;
@@ -241,9 +242,11 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
       return c.json({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: refusal } });
     }
     if (raw.hook_event_name === "PreToolUse") relay.setPMBusy(true);
-    const clearStop = !!onClearStop && raw.hook_event_name === "Stop" && raw.mop_tool_tracking === 1
-      && raw.session_id === boundary.status().session_id && boundary.isSafe()
-      && boundary.status().request?.startsWith("clear:") === true;
+    const boot = db.getEvents(0, 1, "SessionStart")[0];
+    const clearStop = !!onClearStop && raw.hook_event_name === "Stop"
+      && typeof raw.session_id === "string" && raw.session_id.length > 0
+      && raw.session_id === JSON.parse(boot?.payload || "{}").session_id
+      && db.hasPendingClear(0) && db.getConfig("pm_clear_delivery_state") === "deferred_busy";
     if (clearStop) {
       // Start the guarded write from this Stop, not the notification debounce.
       // Do not hold the native hook response while the tmux writer settles.

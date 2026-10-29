@@ -65,7 +65,7 @@ test("deferred-busy latch: a later Stop retries the guarded send exactly once", 
   }
 });
 
-test("deferred-busy retry is fenced by the stop generation and bounded by backoff", async () => {
+test("deferred-busy retry is fenced by new input, never delayed by backoff", async () => {
   const { db, directory } = freshDb("mop-pm-clear-fence-");
   try {
     const now = Date.parse("2026-10-07T12:40:00.000Z");
@@ -79,17 +79,17 @@ test("deferred-busy retry is fenced by the stop generation and bounded by backof
     assert.equal(fenced.kind, "skipped");
     assert.equal(counter.sends, 0);
 
-    // A send that hits a busy PM re-defers; a Stop inside the backoff does not resend.
+    // A zero-effect refusal defers; the next Stop retries even inside the old backoff.
     const busySend = { ...baseOptions(db, now + 1000, counter), send: async () => { counter.sends += 1; return { success: false, busy: true, zeroEffect: true }; } };
     const deferred = await retryDeferredPmClearOnStop(busySend);
     assert.equal(deferred.kind, "deferred_busy");
     assert.equal(counter.sends, 1);
     const backoff = await retryDeferredPmClearOnStop(baseOptions(db, now + 30_000, counter));
-    assert.equal(backoff.kind, "skipped");
-    assert.equal(counter.sends, 1);
+    assert.equal(backoff.kind, "sent");
+    assert.equal(counter.sends, 2);
 
     const after = await retryDeferredPmClearOnStop(baseOptions(db, now + 62_000, counter));
-    assert.equal(after.kind, "sent");
+    assert.equal(after.kind, "skipped");
     assert.equal(counter.sends, 2);
   } finally {
     rmSync(directory, { recursive: true, force: true });

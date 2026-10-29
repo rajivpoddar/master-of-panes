@@ -139,24 +139,19 @@ def main() -> int:
             "obligation_id": int(row["id"]),
         }, sort_keys=True))
         return 0
-    # Deadlock guard (2026-10-07): once PM has requested the MoP clear
-    # (POST /slots/pm/clear touches this marker), MoP defers the clear until
-    # PM goes idle. Blocking Stop here would keep PM busy forever, so let the
-    # Stop through while a fresh request is pending.
-    marker = Path("/tmp/pm-self-clear-requested")
+    # MoP owns delivery after acceptance. A pending latch lets Stop through
+    # regardless of the legacy marker's age; never deadlock its Stop writer.
+    mop_db = Path(os.environ.get("MOP_DB_PATH", str(Path.home() / ".local/share/master-of-panes/data/mop.db")))
     try:
-        if marker.exists() and (
-            datetime.now(timezone.utc).timestamp() - marker.stat().st_mtime
-        ) < 30 * 60:
-            print(json.dumps({
-                "kind": "pm-self-clear",
-                "status": "deferred",
-                "reason": "mop_clear_requested_awaiting_idle",
-                "obligation_id": int(row["id"]),
-            }, sort_keys=True))
+        with sqlite3.connect(f"file:{mop_db}?mode=ro", uri=True, timeout=1) as mop:
+            pending = mop.execute("SELECT value FROM config WHERE key='clear_pending_0'").fetchone()
+        if pending and pending[0] == "true":
+            print(json.dumps({"kind": "pm-self-clear", "status": "deferred",
+                "reason": "mop_clear_pending_awaiting_stop", "obligation_id": int(row["id"])}))
             return 0
-    except OSError:
-        pass
+    except (OSError, sqlite3.Error):
+        # MoP is unreachable: PM hooks must fail open (rule 50).
+        return 0
     action = row["required_action"] or (
         "At next safe Stop boundary, self-clear context and prove a fresh boundary before resuming work"
     )

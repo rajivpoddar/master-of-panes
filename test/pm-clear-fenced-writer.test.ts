@@ -375,8 +375,8 @@ test("Stop settle never adopts a replacement request, and settle never touches a
       ...latchOptions(db, Date.parse(REQUESTED_AT) + 60_000, sends),
       backoffMs: 60_000,
       settleMs: 2000,
-      wait: async () => latch(db, "deferred_busy", replacedAt),
-      isCurrent: () => true,
+      wait: async () => {},
+      isCurrent: () => { latch(db, "deferred_busy", replacedAt); return false; },
       isIdleProven: () => true,
     });
     assert.equal(result.kind, "skipped");
@@ -440,16 +440,15 @@ test("fix 1: authority is revalidated after the buffer load, immediately before 
   }
 });
 
-test("fix 2: a same-generation Stop without proven idle never writes", async () => {
+test("native Stop writes immediately without debounced idle proof", async () => {
   const { db, directory } = freshDb("mop-pmclear-stopidle-");
   try {
     latch(db);
     const pm = pmState();
     const pane = fakePane();
     const result = await relayFor(pane, db).writePMClearFenced({ paneId: "%1", check: fenceFor(db, pm, () => false) });
-    assert.equal(result.ok, false);
-    assert.equal(result.busy, true);
-    assert.deepEqual(effects(pane), { pastes: [], enters: [] });
+    assert.equal(result.ok, true);
+    assert.equal(effects(pane).enters.length, 1);
 
     latch(db, "deferred_busy");
     const sends = { n: 0 };
@@ -461,8 +460,8 @@ test("fix 2: a same-generation Stop without proven idle never writes", async () 
       isCurrent: () => true,
       isIdleProven: () => false,
     });
-    assert.equal(retry.kind, "deferred_busy");
-    assert.equal(sends.n, 0);
+    assert.equal(retry.kind, "sent");
+    assert.equal(sends.n, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

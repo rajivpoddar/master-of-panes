@@ -12,6 +12,7 @@
  * 5. Returns a HookResponse that Claude Code acts on
  */
 
+import { resolveAcceptedPmSelfClear } from "./pmSelfClearObligation.js";
 import { resolveBindHost } from "./bindHost.js";
 import { registerPMSoftBoundary } from "./pmSoftBoundary.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
@@ -430,9 +431,9 @@ function findLaterPmLifecycleEvent(requestedAt: string | null) {
   }) ?? null;
 }
 
-/** A pending PM clear is sent only from the next native, tool-free Stop. */
+/** A pending PM clear is sent from the next native Stop, never an idle timer. */
 async function sendPendingPmClearAtStop(): Promise<void> {
-  if (!isPmClearUndelivered(db) || !pmSoftBoundary.isSafe()) return;
+  if (!isPmClearUndelivered(db)) return;
   const generation = ++pmClearDrainGeneration;
   const sessionToken = slotSessionToken(0);
   const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
@@ -776,6 +777,9 @@ async function clearSlotsThroughMopHttp(
     });
     pmSoftBoundary.reconcileFailedMaintenance();
     touchPmClearRequestedMarker(delivery.kind);
+    if (["sent", "deferred_busy", "pending"].includes(delivery.kind)) {
+      await resolveAcceptedPmSelfClear(delivery.kind, db.getConfig(PM_CLEAR_REQUESTED_AT_KEY));
+    }
 
     if (delivery.kind === "pending") {
       results.push({ slot: 0, name: "PM", status: "skipped (PM clear already requested)" });
