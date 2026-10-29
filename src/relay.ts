@@ -1034,7 +1034,19 @@ export class TmuxRelay {
         `tmux display-message -t ${this.pmPaneAddress} -p '#{pane_current_command}'`,
         { timeout: 5_000 },
       );
-      return result.stdout.trim() === (this.pmRuntime === "omp" ? "omp" : "claude");
+      const command = result.stdout.trim();
+      if (command === (this.pmRuntime === "omp" ? "omp" : "claude")) return true;
+      // Native Claude can expose its version as the tmux foreground title.
+      // A version alone is not identity: verify the pane process executable.
+      if (this.pmRuntime !== "claude" || !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(command)) return false;
+      const pane = await this.runShell(
+        `tmux display-message -t ${this.pmPaneAddress} -p '#{pane_pid}'`,
+        { timeout: 5_000 },
+      );
+      const pid = pane.stdout.trim();
+      if (!/^\d+$/.test(pid)) return false;
+      const process = await this.runShell(`ps -p ${pid} -o comm=`, { timeout: 5_000 });
+      return process.stdout.trim().split("/").pop() === "claude";
     } catch {
       return false;
     }

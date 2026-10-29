@@ -155,6 +155,34 @@ test("real relay delivers inbound messages during maintenance and defers only ma
   } finally { f.close(); }
 });
 
+test("native version-titled Claude delivers only with executable identity proof", async () => {
+  for (const executable of ["claude", "/Users/rajiv/.local/opt/claude-code/claude", "/bin/zsh"]) {
+    const f = fixture();
+    try {
+      const commands: string[] = [];
+      const relay = new TmuxRelay(DEFAULT_CONFIG, { pmRuntime: "claude",
+        runShell: async command => {
+          commands.push(command);
+          return { stdout: command.includes("pane_current_command") ? "2.1.312"
+            : command.includes("pane_pid") ? "321"
+            : command.startsWith("ps -p 321") ? executable : "", stderr: "", code: 0 };
+        },
+      });
+      relay.setDatabase(f.db);
+      const result = await relay.submitToPM("version-title delivery canary");
+      await (relay as unknown as { pmDrainChain: Promise<unknown> }).pmDrainChain;
+      if (executable.endsWith("claude")) {
+        assert.equal(result.ok, true);
+        assert.notEqual(result.queued, true);
+        assert.equal(commands.filter(command => command.includes("paste-buffer")).length, 1);
+      } else {
+        assert.equal(result.queued, true, "a version title is not proof of Claude");
+        assert.equal(commands.some(command => command.includes("paste-buffer")), false);
+      }
+    } finally { f.close(); }
+  }
+});
+
 test("HTTP admission defers maintenance for inbound prompts instead of blocking or retaining them", async () => {
   const f = fixture();
   try {
