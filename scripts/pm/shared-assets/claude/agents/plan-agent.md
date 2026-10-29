@@ -100,6 +100,15 @@ including a false-positive regression. Synthetic fixtures may anonymize values
 but may not change semantic shape, scale relationship, or transformation. If the
 evidence contradicts the issue premise, stop and require an issue rewrite.
 
+Rule-34 de-escalation exemption (PM 2026-10-28, per Rajiv rule 34 "no hard rejects except
+content corruption ... all model responses", C0ALZJHGE49 ts 1793194525.103039): the
+production-pair requirement above gates ADDING or KEEPING a hard reject. A plan that only
+CONVERTS a non-corruption hard reject or retry into soft_warn/quality_warning (the Rule 34
+issue family #11761-#11775) does NOT need production pairs. Use deterministic synthetic
+fixtures that cover (a) the converted condition publishing with the warning and (b) every
+retained genuine-corruption guard (empty, truncation, material word loss, hallucinated
+insertion, extreme size change) still rejecting. Write the plan file as normal.
+
 ## NY Standard Deposition Gutter Planning Gate
 
 For gutter, line-number, header drawing/textbox, `sectPr`, `lnNumType`, or DOCX
@@ -165,6 +174,27 @@ Source: Rajiv DM D0AMF0XE6TS ts 1793112086.989209 (approved ts 1793113448.532669
 - No server path (pipeline delivery, proofread/SC/format apply, admin, backfill) writes transcript content/head during a live lease; results land as a pending artifact the writer applies.
 - Plan MUST name the lease check for every new or changed transcript write path; missing = self-review failure.
 - Tests required: server test refusing a non-holder save; test that a pipeline write during a live lease is deferred, not applied.
+
+## No-route-file-exports Planning Gate (rule 49)
+Source: Rajiv DM D0AMF0XE6TS thread 1793171436.006819, ts 1793171617.500279: "add a product rule for no exported constants in route files"; trigger #11559 TS2344 broke every CF Workers build. Rule: `~/.claude/rules/49-heydonna-route-file-exports.md`.
+- BLOCK/REQUEST_CHANGES when a diff or plan adds any export to `app/**/{route,page,layout}.{ts,tsx}` outside the allowlist: GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS, runtime, dynamic, revalidate, fetchCache, preferredRegion, maxDuration, dynamicParams, generateStaticParams, generateMetadata, metadata, viewport, default (page/layout).
+- Required pattern: shared constants/types/helpers live in `lib/` and are imported (e.g. `SIGNUP_CHALLENGE_COOKIE` in `lib/auth/signup-challenge.ts`).
+- Required test: source-inspection test over route/page/layout files asserting no non-allowlisted exports; `bun run build:cf` / `next build` is authoritative.
+
+## Parity Inventory Planning Gate (Mandatory)
+Source: Rajiv D0AMF0XE6TS thread 1793213078.536199 (ts 1793213226.657249, ts 1793213424.843129). Trigger: the Fix speakers #11756 plan restated "lock + apply diff" and missed the progress overlay and the reachability of Accept/Reject All from the toolbar and shortcuts, which proofread and format already had.
+- When the issue or directive says "same as / like / work the way X does / parity with" an existing flow, the plan MUST include `## Parity inventory`. Trace X in code (cite file:line) and list every user-visible state and surface: lock/overlay and progress, cancel/Esc, toasts and errors, toolbar/menu/shortcut entry points, accept/reject/undo, and refusal paths.
+- Each row: `| X behaviour (file:line) | new flow: same code path / new code (file) | proof: test + browser check on the REAL flow |`. A row that says "not needed" quotes the directive line that excludes it.
+- Browser QA in the plan walks every row on the real feature (not a hand-typed stand-in), with an exact-head screenshot per state.
+- Self-review fails if a "like X" issue has no inventory, or if any row lacks proof.
+## Best-output-on-exhaustion gate (Mandatory - Rajiv product rule 2026-10-29)
+
+Source: Rajiv, C0ALZJHGE49 thread 1793215184.709299. ts 1793215326.517839: "it shoudl be scoring fail so that it goes to the rung". ts 1793215519.589579: "we should deliver whatever the best output was and let humans correct it". ts 1793215612.981359: "add this as product rule as well". Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md` § "Scoring fails advance the ladder".
+- A non-corruption quality condition (e.g. total speaker-label wipeout with words intact) MAY be a scoring/BoN fail that advances to the next rung.
+- On ladder exhaustion for a non-corruption failure, the BEST candidate MUST be delivered with soft_warn. Manual editor mode applies the result as tracked changes with the warning.
+- BLOCK / REQUEST_CHANGES when a plan or diff: withholds the result on exhaustion; falls back to the source or original text for a non-corruption failure; or refuses a manual-mode result for non-corruption. The 6 corruption classes are unchanged.
+- Required test: every rung fails non-corruption, the best candidate (not the source) is published or applied with the warning, and RED-on-revert proves it.
+
 
 ## Input
 
@@ -785,4 +815,10 @@ architecture.
 ## No hard rejects except content corruption (Rajiv 2026-09-28 + 2026-09-29, mandatory blocking CHECK)
 
 Enumerate EVERY new or changed `raise`, validator failure, strict-parse reject, retry/BoN/fallback trigger, withhold / "refusing to publish" path, and failed-status write in the plan (as a mandatory `## Hard-reject ledger` section). Classify each as exactly one of the 6 content-corruption classes: (1) empty output from non-empty input, (2) provider truncation, (3) material word/content loss, (4) hallucinated insertion or runaway repetition, (5) extreme shrink/expansion, (6) structure so malformed that transcript semantics are destroyed. Anything else (placeholder/unfilled `{{TOKEN}}`, speaker/Q-A/formatting quality, residual raw labels, ordering/ranking, confidence proxies, preference) is a BLOCKING finding (plan fails self-review): require the soft_warn / quality_warning pattern plus a test proving the transcript publishes with the warning. A hard reject always triggers a retry, so a non-corruption reject wastes tokens as well as withholding the transcript. An unclassified item counts as a failure of this check. Sources: Rajiv 2026-09-28 thread 1790565390.460619; 2026-09-29 thread 1790647403.075549 ("The hard rejects are only for content corruption. It's always followed by retry as well. We do not want to waste tokens unnecessarily."). Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md` (precedent #8407).
+
+### Client apply/admission guards are hard rejects too (Rajiv C0ALZJHGE49 thread 1793190232.455079, ts 1793194172.168679)
+- Scope (Rajiv C0ALZJHGE49 thread 1793190232.455079, ts 1793194525.103039): "fix the product rule. no hard rejects except for content corruption should apply to all model responses, both server and client side." Scope = ALL model responses: validators, BoN/fallback triggers, status writes, client apply/admission guards, execute-* actions.
+- `{success:false}`/`error:` returns, "not applied" toasts or refusals of an AI result in `lib/editor/**/apply-diff/**`, mark-operations, corruption-admission, `lib/utils/*apply*`, `execute-*` actions ARE hard rejects; enumerate them in the same ledger.
+- Allowed only for the 6 corruption classes. Speaker identity/metadata mismatch, mid-line labels, Q/A labelling, pending-change overlap etc. must APPLY with a soft_warn toast plus a test proving it applies with the warning.
+- Otherwise the plan fails self-review. Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md`.
 

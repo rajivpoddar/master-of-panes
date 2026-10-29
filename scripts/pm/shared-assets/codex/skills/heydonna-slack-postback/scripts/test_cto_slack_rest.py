@@ -480,5 +480,95 @@ class ImageAttachmentTest(unittest.TestCase):
         self.assertEqual([m for m, _ in record["slack"]], ["auth.test", "chat.postMessage"])
 
 
+DIGEST = (
+    "LinkedIn prospecting pass 23:15 IST\n"
+    "\n"
+    "| Measure | Actual result |\n"
+    "|---|---|\n"
+    "| Candidates opened | 5 full native profiles |\n"
+    "| **Blockers** | One profile unverified |\n"
+    "\n"
+    "Empty lines verified live: yes"
+)
+
+
+class TableBlocksTest(unittest.TestCase):
+    def test_pipe_table_becomes_native_table_block_with_prose_sections(self) -> None:
+        blocks = cto_slack_rest.text_to_table_blocks(DIGEST)
+        assert blocks is not None
+        self.assertEqual([b["type"] for b in blocks], ["section", "table", "section"])
+        self.assertEqual(blocks[0]["text"]["text"], "LinkedIn prospecting pass 23:15 IST")
+        rows = blocks[1]["rows"]
+        self.assertEqual(len(rows), 3)  # separator row dropped
+        cell_text = lambda c: c["elements"][0]["elements"][0]  # noqa: E731
+        self.assertEqual(cell_text(rows[0][0]), {"type": "text", "text": "Measure", "style": {"bold": True}})
+        self.assertEqual(cell_text(rows[1][1]), {"type": "text", "text": "5 full native profiles"})
+        self.assertEqual(cell_text(rows[2][0])["text"], "Blockers")  # markdown bold stripped
+        self.assertEqual(blocks[2]["text"]["text"], "Empty lines verified live: yes")
+
+    def test_no_table_stays_plain_text(self) -> None:
+        self.assertIsNone(cto_slack_rest.text_to_table_blocks("just prose | with a pipe"))
+
+    def test_second_table_renders_as_mrkdwn_rows_not_plain_text(self) -> None:
+        two = DIGEST + "\n\n| Measure | Actual |\n|---|---|\n| Connects today | 7/20 |\n\ntail"
+        blocks = cto_slack_rest.text_to_table_blocks(two)
+        assert blocks is not None
+        types = [b["type"] for b in blocks]
+        self.assertEqual(types.count("table"), 1)  # Slack: only_one_table_allowed
+        prose = "\n".join(b["text"]["text"] for b in blocks if b["type"] == "section")
+        self.assertIn("• *Connects today*: 7/20", prose)
+        self.assertNotIn("|---|", prose)
+        self.assertIn("tail", prose)
+
+    def test_ragged_rows_are_padded_and_empty_cells_render(self) -> None:
+        blocks = cto_slack_rest.text_to_table_blocks("| A | B | C |\n|---|---|---|\n| 1 |  |\n")
+        assert blocks is not None
+        rows = blocks[0]["rows"]
+        self.assertEqual([len(r) for r in rows], [3, 3])
+        self.assertEqual(rows[1][1]["elements"][0]["elements"][0]["text"], " ")
+
+    def test_sender_posts_blocks_with_full_text_fallback_and_checks_stored_table(self) -> None:
+        posted: list[dict] = []
+
+        def fake_slack_call(method: str, token: str, payload: dict | None = None) -> dict:
+            if method == "auth.test":
+                return {"ok": True, "user_id": cto_slack_rest.EXPECTED_USER_ID}
+            posted.append(payload or {})
+            return {"ok": True, "ts": "123.456"}
+
+        def reply_response(stored_blocks: list[dict]) -> mock.MagicMock:
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.side_effect = lambda: json.dumps({"ok": True, "messages": [{
+                "ts": "123.456", "user": cto_slack_rest.EXPECTED_USER_ID,
+                "text": posted[-1]["text"], "blocks": stored_blocks,
+            }]}).encode()
+            return response
+
+        def invoke(extra: list[str], stored_blocks: list[dict]) -> dict:
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"SLACK_CTO_BOT_TOKEN": "token"}, clear=False),
+                mock.patch.object(sys, "argv", ["cto_slack_rest.py", "--channel", "C123", "--text", DIGEST, *extra]),
+                mock.patch.object(cto_slack_rest, "slack_call", side_effect=fake_slack_call),
+                mock.patch.object(cto_slack_rest.urllib.request, "urlopen", return_value=reply_response(stored_blocks)),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(cto_slack_rest.main(), 0)
+            return json.loads(stdout.getvalue())
+
+        result = invoke([], [{"type": "table"}])
+        self.assertEqual(posted[-1]["text"], DIGEST)
+        self.assertIn("table", [b["type"] for b in posted[-1]["blocks"]])
+        self.assertIs(result["table_block_stored"], True)
+
+        result = invoke(["--plain-text"], [])
+        self.assertNotIn("blocks", posted[-1])
+        self.assertIsNone(result["table_block_stored"])
+
+        # A missing stored table is reported, not fatal (no duplicate re-send).
+        self.assertIs(invoke([], [])["table_block_stored"], False)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,8 @@ description: |
   handoff bodies.
 ---
 
+> **[HIGH] Default transport (Rajiv 2026-10-28, DM D0AMF0XE6TS ts 1793201544.971459: "this method looks better. it should be the default method"):** send PM-to-slot messages with Claude Code native **SendMessage** to the slot peer (`heydonna-app-300N`; use ListAgents for exact names). It delivers with a receipt and queues to the slot's next tool round without interrupting. Use the message-slot script only as a fallback when the peer is not listed (session restarted); run it in the background and verify MESSAGE_SLOT_OK. Assignments and releases still go through mop-assign-slot / direct-release.
+
 # message-slot
 
 Short PM-to-slot or slot-to-slot communication. This is the slot-directed

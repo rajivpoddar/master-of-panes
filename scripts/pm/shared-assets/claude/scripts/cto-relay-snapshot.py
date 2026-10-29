@@ -76,6 +76,9 @@ ROUTE_TABLE_BEGIN = "<!-- CTO_SLACK_ROUTE_TABLE_V2"
 ROUTE_TABLE_END = "CTO_SLACK_ROUTE_TABLE_END -->"
 CTO_MENTION = re.compile(r"<@(?P<user_id>[^|>\r\n]+)(?:\|[^>\r\n]*)?>")
 GROWTH_CHANNEL = "C0C7U35LBKR"
+CTO_USER_ID = "U0BNFGX2UAX"
+# Rescues Backup / Rescues Standby: no browser tools; never overflow targets.
+FORBIDDEN_OVERFLOW_THREADS = {"01a176af-ce21-7ea3-ac51-96caa53e946e", "01a176ae-6bfe-7342-972a-dd79a7533638"}
 QUEUE_RPC_HELPER = Path("/Users/rajiv/.codex/skills/codex-stdio-send-message/scripts/queue_preview.py")
 CODEX_BIN = "/opt/homebrew/bin/codex"
 # Persisted task state. A fresh `codex app-server --stdio` child never has the
@@ -160,17 +163,25 @@ def extract_route_table(path: Path) -> dict[str, Any]:
         if not isinstance(user_id, str) or not user_id:
             raise SnapshotError(f"route SOP mention_only_channels.{channel} must be a non-empty user ID")
         normalized_mentions[channel] = user_id
-    overflow_pool: list[dict[str, str]] = []
-    raw_pool = table.get("overflow_pool", [])
-    if not isinstance(raw_pool, list):
-        raise SnapshotError("route SOP overflow_pool must be a list")
-    for index, member in enumerate(raw_pool):
-        task = require_route({**(member if isinstance(member, dict) else {}), "project": "heydonna",
-                              "consumer_sop_path": "-"}, f"route SOP overflow_pool[{index}]")
-        overflow_pool.append({"label": str(member.get("label", "")), "destination_thread_id": task["destination_thread_id"]})
+    pools: dict[str, list[dict[str, str]]] = {}
+    for pool_name in ("overflow_pool",):
+        raw_pool = table.get(pool_name, [])
+        if not isinstance(raw_pool, list):
+            raise SnapshotError(f"route SOP {pool_name} must be a list")
+        pools[pool_name] = []
+        for index, member in enumerate(raw_pool):
+            task = require_route({**(member if isinstance(member, dict) else {}), "project": "heydonna",
+                                  "consumer_sop_path": "-"}, f"route SOP {pool_name}[{index}]")
+            pools[pool_name].append({"label": str(member.get("label", "")), "destination_thread_id": task["destination_thread_id"]})
+    # Rajiv C0C7U35LBKR ts 1793173715.413409: the ONLY overflow pool is the three
+    # browser-capable social media tasks; Rescues Backup/Standby are never pool members.
+    for member in pools["overflow_pool"]:
+        if member["label"].strip().lower() in {"backup", "standby"} or member["destination_thread_id"] in FORBIDDEN_OVERFLOW_THREADS:
+            raise SnapshotError(f"route SOP overflow_pool must not contain {member['label']}")
     return {
         "version": 2,
-        "overflow_pool": overflow_pool,
+        "overflow_pool": pools["overflow_pool"],
+
         "exact_channel_routes": normalized_exact,
         "mention_only_channels": normalized_mentions,
         "direct_message_route": require_route(
@@ -315,6 +326,7 @@ def persisted_activity(thread_id: str) -> dict[str, str]:
             return {"state": "unknown", "reason": "persisted-thread-missing-or-archived"}
         with open(row[0], "rb") as handle:
             size = handle.seek(0, os.SEEK_END)
+            whole_file = size <= ROLLOUT_TAIL_BYTES
             handle.seek(max(0, size - ROLLOUT_TAIL_BYTES))
             lines = handle.read().decode("utf-8", "ignore").split("\n")
     except Exception as error:
@@ -330,6 +342,12 @@ def persisted_activity(thread_id: str) -> dict[str, str]:
             return {"state": "idle", "reason": "persisted-last-turn-" + kind}
         if kind in ROLLOUT_START:
             return {"state": "busy", "reason": "persisted-turn-in-progress"}
+    # Rajiv C0C7U35LBKR thread 1793196755.218449: a task that has never started a
+    # turn (whole rollout read, no user message) is idle, not busy. The caller still
+    # confirms the native queue is empty before treating it as idle.
+    no_user_message = not any('"user_message"' in line for line in lines)
+    if whole_file and no_user_message:
+        return {"state": "idle", "reason": "persisted-never-started"}
     return {"state": "busy", "reason": "persisted-no-lifecycle-in-tail"}
 
 
@@ -471,7 +489,16 @@ def route_event(
         gate = selected.get("availability_gate")
         all_messages = selected.get("all_messages_gate")
         if all_messages and channel_override_applies(event, all_messages):
-            route_match = "growth_all_messages"
+            # Rajiv C0C7U35LBKR thread 1793196755.218449, ts 1793200758.332809:
+            # growth goes DIRECTLY to the social pool (idle-first: social media ->
+            # (2) -> (3), else queue to social media); any CTO @-mention goes to
+            # CTO Decisions (default route) instead.
+            if event_has_current_user_mention(event, CTO_USER_ID):
+                selected = table["default_route"]
+                route_match = "growth_cto_mention"
+            else:
+                selected, availability = select_with_overflow(selected, table)
+                route_match = "growth_all_messages"
         elif gate and channel_override_applies(event, gate):
             # Rajiv 2026-10-22 (C0C7U35LBKR/1792670433.869629, ts 1792689875.791679):
             # Social by default; overflow to an idle pool task, never the DMs task;
@@ -481,9 +508,7 @@ def route_event(
     elif slack_event_type == "message.im":
         selected = table["direct_message_route"]
         route_match = "direct_message"
-        if allow_overflow and table.get("overflow_pool"):
-            selected, availability = select_with_overflow(selected, table)
-            route_match = "direct_message_availability"
+        # Rajiv C0C7U35LBKR ts 1793173970.438699: DMs go ONLY to the DMs task (queue when busy).
     else:
         selected = table["default_route"]
         route_match = "default"
@@ -693,7 +718,12 @@ def main() -> int:
         default=None,
         help="Freeze at most this many oldest pending events for one relay tick",
     )
+    parser.add_argument("--probe-thread", default=None, help="Read-only: print one task's availability JSON and exit")
     args = parser.parse_args()
+
+    if args.probe_thread:
+        print(json.dumps(snapshot_social_availability(args.probe_thread)))
+        return 0
 
     if (args.renew_key or args.release_key) and args.key:
         parser.error("claim renewal/release cannot be combined with --key")
@@ -854,7 +884,7 @@ def main() -> int:
                         "expires_at_epoch": expires_at,
                         "owner": claim_owner,
                         **({"relay_route": event["relay_route"], "route_fingerprint": event["fingerprint"]}
-                           if event["relay_route"].get("match") in {"growth_availability", "growth_all_messages", "direct_message_availability"} else {}),
+                           if event["relay_route"].get("match") in {"growth_availability", "growth_all_messages", "growth_cto_mention", "direct_message_availability"} else {}),
                     }
                 write_json_atomic(args.claims_file, claims)
                 write_json_atomic(args.output, pending)

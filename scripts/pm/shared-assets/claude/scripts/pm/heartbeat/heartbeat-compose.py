@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import importlib.util
 import os
 import re
 import sqlite3
@@ -759,6 +760,7 @@ def compose(
     langsmith: str | None = None,
     unblockable: list[str] | None = None,
     tracked: list[str] | None = None,
+    priority_flags: list[str] | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -804,6 +806,11 @@ def compose(
     slot_actions: list[str] = []
     if include_slots:
         sl_lines, sl_tldr, slot_actions = slot_block(slots, now, release_seen)
+        if priority_flags:
+            # Rajiv C0ALZJHGE49 thread 1793195119.674919, ts 1793202340.562609: P2 lane while a P0 is ready.
+            sl_tldr += f", {len(priority_flags)} PRIORITY_INVERSION"
+            sl_lines = [*sl_lines, *("• ⚠ " + f for f in priority_flags)]
+            slot_actions = slot_actions + list(priority_flags)
         parts.append(sl_tldr)
         body += ["", *sl_lines]
     if tracked:
@@ -1017,6 +1024,24 @@ def _fetch_slots(url: str = MOP_SLOTS_URL, timeout: int = 5):
 CLEANUP_STATUS = Path("/tmp/stale-process-cleanup-status.json")
 
 
+def priority_inversion_flags(slots_doc, failures: list[str]) -> list[str]:
+    """PRIORITY_INVERSION: an occupied slot on a P2/P3 lane while a P0 is ready and unassigned.
+    Rajiv C0ALZJHGE49 thread 1793195119.674919, ts 1793202340.562609. Never fails the compose."""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "ready_pool_select", Path.home() / ".claude/scripts/ready_pool_select.py")
+        rps = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rps)
+        slots = slots_doc.get("slots", []) if isinstance(slots_doc, dict) else (slots_doc or [])
+        issues = rps.load_open_issues(timeout=90)
+        prio = {int(i["number"]): rps.priority_rank({l["name"] for l in i.get("labels") or []}, i.get("body") or "")
+                for i in issues}
+        return rps.priority_inversions(slots, prio, rps.rank_candidates(issues))
+    except Exception as exc:  # noqa: BLE001 - heartbeat must still post
+        failures.append(f"priority-inversion: {type(exc).__name__}")
+        return []
+
+
 def cleanup_status_alert(path: Path = CLEANUP_STATUS) -> str | None:
     """'stale-process-cleanup REFUSED: <reason>' when the last run refused or errored."""
     try:
@@ -1125,8 +1150,11 @@ def main() -> int:
     # The runtime contract requires them in the structured ACTIONS: channel the agent
     # copies into its return value, so compute + persist them here too (Codex #7 P2).
     slot_actions: list[str] = []
+    priority_flags: list[str] = []
     if slots is not None and not args.no_slots:
         _, _, slot_actions = slot_block(slots, datetime.now(timezone.utc), release_seen)
+        priority_flags = priority_inversion_flags(slots, failures)
+        slot_actions += priority_flags
     pm_actions = [a for r in (prs or []) for a in r.get("actions") or []] + slot_actions
 
     if args.save_inputs:
@@ -1167,6 +1195,7 @@ def main() -> int:
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
         email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
+        priority_flags=priority_flags,
     ))
     pm_actions += (training[1] if training else [])
     if pm_actions:

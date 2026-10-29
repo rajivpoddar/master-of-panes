@@ -287,6 +287,129 @@ def normalize_prose_number_spacing(text: str) -> str:
     return "".join(output)
 
 
+_TABLE_ROW = re.compile(r"^\s*\|[^\n]*\|[^\n]*\|\s*$")
+_TABLE_SEPARATOR = re.compile(r"^\s*\|[-:\s|]+\|\s*$")
+_SECTION_TEXT_LIMIT = 2900
+_TABLE_MAX_ROWS = 100
+_TABLE_MAX_COLUMNS = 20
+_MAX_BLOCKS = 50
+
+
+def _split_table_row(line: str) -> list[str]:
+    cells = line.strip().split("|")
+    if cells and cells[0].strip() == "":
+        cells = cells[1:]
+    if cells and cells[-1].strip() == "":
+        cells = cells[:-1]
+    return [cell.strip().replace("**", "") for cell in cells]
+
+
+def _table_cell(value: str, bold: bool) -> dict[str, Any]:
+    element: dict[str, Any] = {"type": "text", "text": value or " "}
+    if bold:
+        element["style"] = {"bold": True}
+    return {
+        "type": "rich_text",
+        "elements": [{"type": "rich_text_section", "elements": [element]}],
+    }
+
+
+def _prose_sections(lines: list[str]) -> list[dict[str, Any]]:
+    chunk = "\n".join(lines).strip("\n")
+    if not chunk.strip():
+        return []
+    sections: list[str] = []
+    current = ""
+    for line in chunk.split("\n"):
+        if current and len(current) + len(line) + 1 > _SECTION_TEXT_LIMIT:
+            sections.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        sections.append(current)
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": s}} for s in sections]
+
+
+def _later_tables_as_mrkdwn(lines: list[str]) -> list[str]:
+    """Rewrite pipe tables after the first one as ``*key*: value`` rows."""
+    out: list[str] = []
+    header: list[str] | None = None
+    for line in lines:
+        if _TABLE_ROW.match(line):
+            if _TABLE_SEPARATOR.match(line):
+                continue
+            cells = _split_table_row(line)
+            if header is None:
+                header = cells
+                continue
+            first = cells[0] if cells else ""
+            rest = [
+                f"{header[i] if i < len(header) else ''}: {cell}".strip(": ")
+                if len(header) > 2 else cell
+                for i, cell in enumerate(cells[1:], start=1)
+                if cell
+            ]
+            out.append(f"• *{first}*: " + " · ".join(rest) if rest else f"• *{first}*")
+        else:
+            header = None
+            out.append(line)
+    return out
+
+
+def text_to_table_blocks(text: str) -> list[dict[str, Any]] | None:
+    """Render a message containing markdown pipe tables as Block Kit.
+
+    Prose before and after the table becomes mrkdwn sections; the FIRST table
+    becomes a native top-level ``table`` block whose first row is bold. Slack
+    allows only one table block per message (``only_one_table_allowed``), so
+    any later table is rendered inside the prose as bold-header mrkdwn rows
+    instead of dropping the whole message to plain text (Rajiv C0C7U35LBKR
+    thread 1793252591.190789). Returns None, leaving the message as plain text,
+    when there is no table or the first table exceeds Slack's row/column limits.
+    """
+    lines = text.split("\n")
+    before: list[str] = []
+    after: list[str] = []
+    rows: list[list[str]] = []
+    state = "before"
+    for line in lines:
+        is_row = bool(_TABLE_ROW.match(line))
+        if state == "before":
+            if is_row and not _TABLE_SEPARATOR.match(line):
+                state = "table"
+                rows.append(_split_table_row(line))
+            else:
+                before.append(line)
+        elif state == "table":
+            if _TABLE_SEPARATOR.match(line):
+                continue
+            if is_row:
+                rows.append(_split_table_row(line))
+            else:
+                state = "after"
+                after.append(line)
+        else:
+            after.append(line)
+    after = _later_tables_as_mrkdwn(after)
+    if len(rows) < 2:
+        return None
+    columns = max(len(row) for row in rows)
+    if len(rows) > _TABLE_MAX_ROWS or columns > _TABLE_MAX_COLUMNS:
+        return None
+    table = {
+        "type": "table",
+        "rows": [
+            [_table_cell(cell, bold=index == 0) for cell in row + [""] * (columns - len(row))]
+            for index, row in enumerate(rows)
+        ],
+    }
+    blocks = _prose_sections(before) + [table] + _prose_sections(after)
+    if len(blocks) > _MAX_BLOCKS:
+        return None
+    return blocks
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--channel", required=True)
@@ -298,6 +421,11 @@ def main() -> int:
         "--preserve-literal-escapes",
         action="store_true",
         help="Do not convert visible \\n, \\r, or \\t sequences to real whitespace",
+    )
+    parser.add_argument(
+        "--plain-text",
+        action="store_true",
+        help="Send markdown pipe tables as plain text instead of a Block Kit table",
     )
     parser.add_argument(
         "--image-file",
@@ -328,7 +456,13 @@ def main() -> int:
     if args.image_file:
         image_bytes = read_image_bytes(args.image_file)
 
-    payload = {"channel": args.channel, "text": text}
+    payload: dict[str, Any] = {"channel": args.channel, "text": text}
+    # Markdown pipe tables render as a native Block Kit table (Rajiv
+    # C0C7U35LBKR ts 1793211925.766299). The full text stays as the
+    # notification/bot-reader fallback, so the readback below is unchanged.
+    blocks = None if args.plain_text else text_to_table_blocks(text)
+    if blocks is not None:
+        payload["blocks"] = blocks
     if args.thread_ts:
         payload["thread_ts"] = args.thread_ts
     posted = slack_call("chat.postMessage", token, payload)
@@ -362,6 +496,13 @@ def main() -> int:
         )
     if slack_normalize_stored_text(stored.get("text") or "") != text:
         raise SystemExit("stored_text_mismatch")
+    # Reported, never fatal: the message is already posted, and failing here
+    # would invite a duplicate re-send of the same digest.
+    table_block_stored = None
+    if blocks is not None:
+        table_block_stored = any(
+            block.get("type") == "table" for block in stored.get("blocks") or []
+        )
     if args.thread_ts and str(stored.get("thread_ts")) != args.thread_ts:
         raise SystemExit(
             f"stored_thread_mismatch: expected={args.thread_ts} actual={stored.get('thread_ts')}"
@@ -395,6 +536,7 @@ def main() -> int:
                 "stored_user": stored_user,
                 "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "image": image_result,
+                "table_block_stored": table_block_stored,
             },
             sort_keys=True,
         )

@@ -3,6 +3,19 @@ name: direct-assign
 description: Assign one eligible task to one free numbered slot under the approved priority rules.
 ---
 
+> **[HIGH] Default transport (Rajiv 2026-10-28, DM D0AMF0XE6TS ts 1793201544.971459: "this method looks better. it should be the default method"):** send PM-to-slot messages with Claude Code native **SendMessage** to the slot peer (`heydonna-app-300N`; use ListAgents for exact names). It delivers with a receipt and queues to the slot's next tool round without interrupting. Use the message-slot script only as a fallback when the peer is not listed (session restarted); run it in the background and verify MESSAGE_SLOT_OK. Assignments and releases still go through mop-assign-slot / direct-release.
+
+## [HIGH] Priority-first selection (Rajiv C0ALZJHGE49 thread 1793195119.674919, ts 1793202340.562609: "academy, multi doc upload, speaker mapping sidebar are p2. how do we ensure this priority is followed on slot assignments")
+
+Pick the next slot work by priority label first: P0 before P1 before P2 before P3. Break ties with rework before repro before new_issue, then oldest. A slot may take a lower-priority `new_issue` only when NO ready P0/P1 candidate exists. Use the deterministic selector, never judgement:
+
+```text
+python3 ~/.claude/scripts/ready_pool_select.py [--rework-only] [--extra-json rows.json]   # ranked; take .pick
+python3 ~/.claude/scripts/ready_pool_select.py --check <issue>   # REQUIRED before mop-assign-slot; exit 3 = PRIORITY_INVERSION, do not assign
+```
+
+`--rework-only` applies while the WIP cap is hit. `--extra-json` adds PR rework/repro lanes that carry no rework label (`[{"issue":N,"class":"rework","priority":"P1","pr":M}]`). When the pick is P2 or lower, copy the selector's `priority_reason` line into the task file and the `#heydonna-dev` assignment post. That line is the assignment receipt. Feature priority overrides live in `~/.claude/scripts/pm/heartbeat/tracked-features-groups.json` (`priority` per group) and are mirrored as the issues' P-labels.
+
 ## Execution contract
 
 Follow the shared release-conveyor decision boundary. PM may execute this

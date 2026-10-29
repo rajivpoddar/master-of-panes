@@ -60,10 +60,13 @@ targets, caps, templates and approvals (newest explicit Rajiv directive wins) an
 `docs/marketing/do-not-contact.md` is checked FIRST before any outreach. Where an
 older section of this SOP conflicts, apply the following:
 
-- Relay overflow (Rajiv C0C7U35LBKR/1792670433.869629, ts 1792689875.791679):
-  the "busy or not" sentence below is superseded. When this task is busy the relay
-  queues the event to an idle overflow executor (Standby/Backup) and only queues
-  here when none is idle. The all-messages gate stays inert pending PM.
+- Relay routing (Rajiv C0C7U35LBKR thread 1793196755.218449, ts 1793200758.332809;
+  supersedes the Standby/Backup overflow and "busy or not" text below): every
+  growth-channel message WITHOUT a CTO @-mention comes DIRECTLY to the social pool,
+  idle-first: `social media` (01a11e3d), else `social media (2)` (01a18172), else
+  `social media (3)` (01a18174); when none is idle it queues to `social media`.
+  Standby/Backup are never used. Growth messages that @-mention the CTO go to CTO
+  Decisions instead. All three social tasks run this same SOP.
   Overflow executors share the same in-app browser and Rajiv's logins (ts 1792695362.355229),
   so they run this SOP fully, including publishing, within the same caps and ledger.
 - LinkedIn connection requests: 20/day, at most 100/week, about 12 reporters / 8 CET

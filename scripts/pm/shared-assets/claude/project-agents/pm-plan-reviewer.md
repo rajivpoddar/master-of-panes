@@ -84,6 +84,26 @@ when a plan or AC adds a precondition-gated disabled button; require the
 click-time error-state pattern plus a test that clicks the enabled button with
 the precondition unmet. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## Best-output-on-exhaustion gate (Mandatory - Rajiv product rule 2026-10-29)
+
+Source: Rajiv, C0ALZJHGE49 thread 1793215184.709299. ts 1793215326.517839: "it shoudl be scoring fail so that it goes to the rung". ts 1793215519.589579: "we should deliver whatever the best output was and let humans correct it". ts 1793215612.981359: "add this as product rule as well". Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md` § "Scoring fails advance the ladder".
+- A non-corruption quality condition (e.g. total speaker-label wipeout with words intact) MAY be a scoring/BoN fail that advances to the next rung.
+- On ladder exhaustion for a non-corruption failure, the BEST candidate MUST be delivered with soft_warn. Manual editor mode applies the result as tracked changes with the warning.
+- BLOCK / REQUEST_CHANGES when a plan or diff: withholds the result on exhaustion; falls back to the source or original text for a non-corruption failure; or refuses a manual-mode result for non-corruption. The 6 corruption classes are unchanged.
+- Required test: every rung fails non-corruption, the best candidate (not the source) is published or applied with the warning, and RED-on-revert proves it.
+
+## No-hard-reject gate incl. client apply guards (rule 34; Rajiv C0ALZJHGE49 thread 1793190232.455079, ts 1793194172.168679)
+- Scope (Rajiv C0ALZJHGE49 thread 1793190232.455079, ts 1793194525.103039): "fix the product rule. no hard rejects except for content corruption should apply to all model responses, both server and client side." Scope = ALL model responses: validators, BoN/fallback triggers, status writes, client apply/admission guards, execute-* actions.
+- `{success:false}`/`error:` returns, "not applied" toasts or refusals of an AI result in `lib/editor/**/apply-diff/**`, mark-operations, corruption-admission, `lib/utils/*apply*`, `execute-*` actions ARE hard rejects; enumerate them in the same ledger.
+- Allowed only for the 6 corruption classes. Speaker identity/metadata mismatch, mid-line labels, Q/A labelling, pending-change overlap etc. must APPLY with a soft_warn toast plus a test proving it applies with the warning.
+- Otherwise REVISE. Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md`.
+
+## No-route-file-exports gate (Rajiv product rule 2026-10-28)
+Source: Rajiv DM D0AMF0XE6TS thread 1793171436.006819, ts 1793171617.500279: "add a product rule for no exported constants in route files"; trigger #11559 TS2344 broke every CF Workers build. Rule: `~/.claude/rules/49-heydonna-route-file-exports.md`.
+- BLOCK/REQUEST_CHANGES when a diff or plan adds any export to `app/**/{route,page,layout}.{ts,tsx}` outside the allowlist: GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS, runtime, dynamic, revalidate, fetchCache, preferredRegion, maxDuration, dynamicParams, generateStaticParams, generateMetadata, metadata, viewport, default (page/layout).
+- Required pattern: shared constants/types/helpers live in `lib/` and are imported (e.g. `SIGNUP_CHALLENGE_COOKIE` in `lib/auth/signup-challenge.ts`).
+- Required test: source-inspection test over route/page/layout files asserting no non-allowlisted exports; `bun run build:cf` / `next build` is authoritative.
+
 ## No-concurrent-writer gate (Rajiv product rule 2026-10-27)
 
 Source: Rajiv DM D0AMF0XE6TS ts 1793112086.989209 (approved ts 1793113448.532669): *"only the first file open should be writeable. all others are readonly. server should never update while editing is in progress."* Rule: `~/.claude/rules/48-heydonna-single-writer.md`.

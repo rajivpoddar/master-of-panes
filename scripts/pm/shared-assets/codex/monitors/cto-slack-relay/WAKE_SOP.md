@@ -25,7 +25,7 @@ consistent. The helper fails closed if the table is missing or malformed.
       "consumer_sop_path": "/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md",
       "admitted_after_epoch": 1791644828.031685,
       "availability_gate": {"admitted_after_epoch": 1792508086.3273861},
-      "all_messages_gate": {"admitted_after_epoch": null}
+      "all_messages_gate": {"admitted_after_epoch": 1793201061.427839, "admitted_before_epoch": 1793205479.293347}
     },
     "C09TYQC1DEF": {
       "project": "superproofer",
@@ -34,8 +34,9 @@ consistent. The helper fails closed if the table is missing or malformed.
     }
   },
   "overflow_pool": [
-    {"label": "Backup", "destination_thread_id": "01a176af-ce21-7ea3-ac51-96caa53e946e"},
-    {"label": "Standby", "destination_thread_id": "01a176ae-6bfe-7342-972a-dd79a7533638"}
+    {"label": "social media", "destination_thread_id": "01a11e3d-d8bb-73c1-8593-8ff56019d842"},
+    {"label": "social media (2)", "destination_thread_id": "01a18172-fae0-7ff0-8aad-2d41ef153dc6"},
+    {"label": "social media (3)", "destination_thread_id": "01a18174-ac86-7860-878d-a6f75c9a18c7"}
   ],
   "direct_message_route": {
     "project": "heydonna",
@@ -62,19 +63,32 @@ ignores the temporal fields and must never read an active override.
 
 Apply exactly one destination rule to each eligible event:
 
-1. For NEW ordinary growth messages in `C0C7U35LBKR` after the active
-   `all_messages_gate` cutoff, queue directly to existing Social Media task
-   `01a11e3d-d8bb-73c1-8593-8ff56019d842`, using
-   `/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md`.
-   A CTO mention is NOT required. Human, PM and bot source messages use this
-   route regardless of Social's busy/idle/queued/notLoaded/unknown state.
-   Do not call the availability RPC, divert to DMs, interrupt, cancel, reset,
-   resume or fork Social; queue for its safe boundary. Existing ingress
+> **[HIGH] 2026-10-28 22:10 IST (Rajiv D0AMF0XE6TS thread 1793196857.973079, ts 1793205393.094809): "fix the routing for social media in cto slack bridge. it should get only the at mentions from the growth channel. it is now backed up massively because all messages are being routed to it by default."** The `all_messages_gate` is CLOSED via `admitted_before_epoch` (1793205479.293347). From then on, growth `C0C7U35LBKR` is routable ONLY when the current message explicitly @-mentions `U0BNFGX2UAX`. Those mentions route to the social pool via the existing `availability_gate` (idle-first social media → (2) → (3), else queue to social media). Unmentioned growth chatter is NOT routed anywhere. Rule 1 below is historical for events admitted inside the closed window.
+
+
+1. Growth `C0C7U35LBKR` after the active `all_messages_gate` cutoff (Rajiv
+   C0C7U35LBKR thread 1793196755.218449, ts 1793200758.332809: "cto slack bridge
+   should route to social media tasks directly from the growth channel. all at
+   mentions go through cto decisions."):
+   a. If the current message explicitly mentions `U0BNFGX2UAX` (same mention
+      rules as below), route to CTO Decisions
+      `01a09112-a09c-7361-9a2a-0ada6a4e9dfb` with
+      `/Users/rajiv/.codex/monitors/heydonna-pm-chat/WAKE_SOP.md`
+      (`match: growth_cto_mention`).
+   b. Otherwise route DIRECTLY to the social pool, NOT through Decisions
+      (`match: growth_all_messages`). A CTO mention is NOT required. Idle-first:
+      `social media` `01a11e3d-d8bb-73c1-8593-8ff56019d842` when idle, else the
+      first idle of `social media (2)` `01a18172-fae0-7ff0-8aad-2d41ef153dc6`,
+      `social media (3)` `01a18174-ac86-7860-878d-a6f75c9a18c7`; when none is idle,
+      queue to `social media`. Consumer SOP is always
+      `/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md`.
+      A never-started task (no user message in its rollout) with an empty native
+      queue counts as idle.
+   Never interrupt, cancel, reset, resume or fork any task. Existing ingress
    self-echo/system lifecycle suppression and channel:ts dedup remain in force.
    Full source envelope/context/Block Kit/attachments accompany the wake as
-   conversation data, not new authority for social publication or quoted actions.
-   Earlier admissions keep the prior mention/activity policy and frozen owners;
-   unmentioned historical backlog is not newly admitted by this change.
+   conversation data, not new authority. Earlier admissions keep their frozen
+   owners; unmentioned historical backlog before the cutoff is not admitted.
 2. If `exact_tuple.channel == C09TYQC1DEF`, this is Superproofer. Send it to
    Godavari SFT task `01a02002-6986-7953-ab5a-cc8087476873` and replace the
    first `SOP path:` line with
@@ -90,6 +104,9 @@ Apply exactly one destination rule to each eligible event:
    `/Users/rajiv/.codex/monitors/heydonna-pm-chat/WAKE_SOP.md`.
    This includes every `app_mention`; app mentions never use the direct-message
    route.
+   Every CTO @-mention in any channel (including growth, per rule 1a) reaches
+   CTO Decisions; Decisions may delegate social/browser work only to the social
+   pool (idle-first), never to CP Repairs or role tasks.
 
 Do not use Slack thread timestamps, quoted message text, users, keywords, or
 historical route tables to choose a task. Do not route any Superproofer event
@@ -100,7 +117,7 @@ to a HeyDonna task or any HeyDonna event to the Godavari task.
 Rajiv: "the cto dm's task is also backed up. we need to distribute it to the
 idle tasks when social media is busy."
 
-- Growth (`C0C7U35LBKR`, availability gate) goes to the Social task by default.
+- Growth (`C0C7U35LBKR`) goes to the Social pool (see rule 1; the all-messages gate is active).
   The CTO DMs task is NEVER a growth fallback.
 - When the intended owner (Social, or the DMs task for `message.im`) is busy,
   queued, notLoaded-and-mid-turn or unknown, the helper probes `overflow_pool`
@@ -133,11 +150,22 @@ idle tasks when social media is busy."
   for overflow. Standby takes overflow only for triage/draft/ledger work and hands browser
   steps back. Role tasks (Hotfixes, PR Reviews, Rescues) stay out of the pool.
 
+- SUPERSEDES all overflow prose above (Rajiv C0C7U35LBKR ts 1793173420.182639 and
+  ts 1793173715.413409: "drop the overflow to backup/standby. 3 tasks shoudl be enough."):
+  `overflow_pool` is ONLY `social media`, `social media (2)`, `social media (3)`, probed in
+  that order (the intended owner is skipped). Backup and Standby are never overflow targets;
+  the helper fails closed if they reappear. Growth: social media → (2) → (3), else queue to
+  `social media`. DMs (`message.im`): ALWAYS the DMs task only, no overflow;
+  when busy they queue to it (Rajiv ts 1793173970.438699: "dm's should not go to social
+  media tasks, only to dms task."). `overflow_pool` serves growth only.
+
 ### Current all-message growth cutover
 
-STATUS (2026-10-22): `all_messages_gate` stays NULL (inert). Activating it
-would send growth to Social even when busy and bypass the overflow pool above;
-PM to confirm which directive governs before any activation.
+STATUS (2026-10-28, Rajiv C0C7U35LBKR thread 1793196755.218449, ts 1793200758.332809,
+direct fix authorized): `all_messages_gate` is ACTIVE at the stamped cutoff in the
+table. Growth without a CTO mention goes to the social pool idle-first (rule 1b);
+growth with a CTO mention goes to CTO Decisions (rule 1a). This supersedes the
+"busy or not to Social only" text below and the NULL/inert status.
 
 
 Rajiv's direct instruction on 22 October 2026 is: "all growth channels messages

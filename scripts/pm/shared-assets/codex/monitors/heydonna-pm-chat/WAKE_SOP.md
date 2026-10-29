@@ -310,13 +310,23 @@ the result; it never runs these skills.
 
 Rajiv directed: "setup a task for all social media related work and update
 the decisions SOP. add the account details to SOP as well."
-Dedicated execution owner: **HeyDonna Social Media**
-`01a11e3d-d8bb-73c1-8593-8ff56019d842` (local; output directory
+Execution owner is the **social pool** (Rajiv C0C7U35LBKR thread 1793196755.218449,
+ts 1793200758.332809, supersedes the single-owner wording): `social media`
+`01a11e3d-d8bb-73c1-8593-8ff56019d842`, `social media (2)`
+`01a18172-fae0-7ff0-8aad-2d41ef153dc6`, `social media (3)`
+`01a18174-ac86-7860-878d-a6f75c9a18c7` (local; output directory
 `/Users/rajiv/Documents/Codex/2026-10-09/heydonna-social-media/outputs`).
-Route ALL NEW HeyDonna/Donna social-account/page, profile, social-content and
-media-asset, publication, authorized engagement/follow, and reporting briefs
-to this owner through the existing independent-delegation transport. Do not
-route new social execution to CTO DM or create another social/browser owner.
+The relay sends growth-channel (`C0C7U35LBKR`) events WITHOUT a CTO mention
+directly to this pool; Decisions sees growth only when the CTO is @-mentioned.
+When Decisions delegates NEW HeyDonna/Donna social-account/page, profile,
+social-content and media-asset, publication, authorized engagement/follow,
+reporting or other browser briefs, pick the pool IDLE-FIRST (probe with
+`python3 /Users/rajiv/.claude/scripts/cto-relay-snapshot.py --probe-thread <id> --route-sop /Users/rajiv/.codex/monitors/cto-slack-relay/WAKE_SOP.md`
+in the order above; first `idle` wins; none idle → queue to `social media`)
+through the existing independent-delegation transport. NEVER delegate
+social/browser work to CP Repairs or any role task (PR Merges, Hotfixes,
+PR Reviews, Rescues, Rescues Backup/Standby, Returns, DMs), and never create
+another social/browser owner.
 Decisions retains scope and reserved decisions; new briefs name CTO Returns
 as their terminal consumer. Rajiv DM decisions remain with CTO DM
 `01a0911a-a718-7743-b37e-e785f24f3708`; unrelated access/credential/media

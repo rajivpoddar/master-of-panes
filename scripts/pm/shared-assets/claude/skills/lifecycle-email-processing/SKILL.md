@@ -22,7 +22,7 @@ Launch `lifecycle-email-agent` in the background (`run_in_background=true`) with
 
 ## Rules (selector)
 - D0: signed up < 24h ago. D1: 1–2 days, touched the sample, no own file. D3: 3–4 days, no own upload. D7: 7–8 days, no activity in 5 days. FIRST_FILE_READY: first own-file transcript finished auto-process and this touch is unsent; batch selection never consumes it. At most one touch per user per run (priority FIRST_FILE_READY > D0 > D1 > D3 > D7).
-- Excluded: Scribie cohort (active member of an `externalOrgId=scribie` workspace, `cohort=scribie`, or a scribie.com/.ai source/referrer/landing), abuse-flagged (`adjustment` ledger row with an `abuse:` reason), @heydonna.law / @scribie.com, opted out, already sent, and anyone rajiv@ emailed manually in the last 3 days (so we don't double-email).
+- Excluded: Scribie cohort (active member of an `externalOrgId=scribie` workspace, `cohort=scribie`, or a scribie.com/.ai source/referrer/landing), abuse-flagged (`adjustment` ledger row with an `abuse:` reason), @heydonna.law / @scribie.com, Rajiv's personal rpoddar@gmail.com (Rajiv C0C7U35LBKR ts 1793196453.744059: "skip rpoddar@gmail. that's me."), opted out, already sent, and anyone rajiv@ emailed manually in the last 3 days (so we don't double-email).
 
 ## Hard gates (agent refuses otherwise)
 1. **Templates approved**: every template used must be `STATUS: APPROVED`. While any is `DRAFT_PENDING_RAJIV`, `meta.send_allowed=false`: run `select --dry-run` only, send nothing, record nothing, and return the would-send list to PM. Only Rajiv flips the status; PM edits the line after his written approval and cites the ts.

@@ -91,7 +91,8 @@ Each hourly, check EVERY open PR (drafts included, via `gh pr list --state open 
 Never summarize the PR list as "+N more" in the reply. If the list is long, post it as a second reply in the same thread instead of truncating it. Rajiv checks this thread to see whether PRs are moving.
 
 ## Step 3: Slots
-- **Idle free slot:** `mop-assign-slot` the next work in the same turn: existing-PR rework first, then the highest Ready Pool todo (SOP §23). While the Step 2b WIP cap is hit, only existing-PR work is allowed (no `new_issue`).
+- **Idle free slot:** `mop-assign-slot` the next work in the same turn, chosen by `python3 ~/.claude/scripts/ready_pool_select.py` (add `--rework-only` while the Step 2b WIP cap is hit; no `new_issue` then). The order is priority label first (P0 > P1 > P2 > P3), then rework before repro before new_issue, then oldest. Run `--check <issue>` before assigning; exit 3 means PRIORITY_INVERSION, so don't assign. A P2-or-lower `new_issue` is allowed only when no ready P0/P1 exists, and its `priority_reason` goes into the assignment receipt (Rajiv C0ALZJHGE49 thread 1793195119.674919, ts 1793202340.562609).
+- **PRIORITY_INVERSION** (the heartbeat Slots block and ACTIONS line print `PRIORITY_INVERSION S<n> on #X (P2) while P0 #Y is ready and unassigned`): in the same turn, assign the P0 to the next free slot. If none is free, preempt the P2 lane with Skill(preempt-slot) (push WIP, then reassign the P0) unless that lane is at dual green or admitted. Name the action in the hourly reply.
 - **IDLE-WITH-LANE (idle more than 10 min, lane still owned):** re-send its last packet via `message-slot`, or reassign.
 - **Slot waiting on PM** (review, CI, admission or a decision): answer it or release it. A PR wait never holds a slot.
 - **No eligible work:** post Rajiv an explicit hold with the reason and an end time.
@@ -214,3 +215,7 @@ Classify every `*Unblockable now:*` item (and every other stuck dependency seen 
 
 ### No repeat-without-action rule
 An Unblockable item may NOT appear in two consecutive hourlies without an action taken on it. Before posting the thread reply, compare against the previous hourly's `*Unblockable now:*`; any carry-over must show the case number and the action taken (or the typed blocker + owner + wake) in the reply. A carry-over with no action is a miss, handled the same turn.
+
+## [HIGH] P0/P1 never wait for a slot (S103, Rajiv 2026-10-29)
+Rajiv, D0AMF0XE6TS thread 1793254511.567489, ts 1793256031.251919: "P0 and p1's should be done with pm hotfix agent when slots are not available."
+Each hourly pass lists every ready P0/P1 issue that has neither a slot nor a running pm-hotfix agent. If all slots are busy on equal or higher priority work, PM starts a pm-hotfix agent (MODE: PLAN, then IMPLEMENT) for each one in the SAME turn. Exception: work that needs a slot's Convex dev, Modal runtime or settings screenshots (S14) goes to the next free slot, or PM preempts a P2+ lane. An idle ready P0/P1 with no owner is reported as UNOWNED_P0P1.
