@@ -359,11 +359,15 @@ export class TmuxRelay {
       if (generation !== this.drainGeneration) return;
 
       if (this.pmMaintenanceGate?.isHeld()) {
-        // Admission was closed synchronously at a hook-proven tool-free Stop.
-        // Settle any older delivery before maintenance; never coalesce or delete
-        // queued messages while this durable barrier owns the pane.
-        await this.pmDrainChain;
+        // Deliver inbound work first. Only clear/restart waits for the safe
+        // boundary; maintenance must never hold the message-delivery queue.
+        await this.drainPMQueue();
         await this.directInjectChain;
+        if ((this.db?.getPendingPMEventCount() ?? 0) > 0) {
+          this.pmMaintenanceGate.deferCLIInput();
+          this.pmBusy = true;
+          return;
+        }
         if (generation !== this.drainGeneration || !this.pmMaintenanceGate.isSafe()) return;
         if (!(await this.isPMComposerQueueEmpty()) || !this.pmMaintenanceGate.isSafe()) {
           this.pmMaintenanceGate.deferCLIInput();
@@ -373,7 +377,7 @@ export class TmuxRelay {
         this.pmBusy = false;
         this.drainTimer = null;
         this.db?.logEvent(0, "pm_debounce_drain_fired", null, null, {
-          debounce_ms: delayMs, drained: 0, reason: "pm_soft_boundary_queue_held",
+          debounce_ms: delayMs, drained: 0, reason: "pm_soft_boundary_ready",
         });
         if (this.pmMaintenanceHandoffInFlight) return;
         this.pmMaintenanceHandoffInFlight = true;
@@ -440,14 +444,13 @@ export class TmuxRelay {
   }
 
   private async drainPMQueueOnce(): Promise<number> {
-    if (!this.db || this.pmMaintenanceGate?.isHeld()) return 0;
+    if (!this.db) return 0;
     // Do not destructively coalesce/drain rows until the configured agent is
     // actually running in the PM pane. In particular, never type into zsh.
-    if (!(await this.isPMPaneReady()) || this.pmMaintenanceGate?.isHeld()) return 0;
+    if (!(await this.isPMPaneReady())) return 0;
     const rows = this.db.drainPendingPMEvents();
     let injected = 0;
     for (const row of rows) {
-      if (this.pmMaintenanceGate?.isHeld()) break;
       if (row.event_type === "check-slot" && !row.payload) {
         this.db.logEvent(row.slot, "pm_queue_dropped", null, null, {
           event_type: row.event_type,
@@ -631,6 +634,7 @@ export class TmuxRelay {
   }
 
   private async injectNativeClaudeOrQueue(message: string, eventTypeOverride?: string): Promise<void> {
+    this.pmMaintenanceGate?.deferCLIInput();
     if (!(await this.isPMPaneReady())) {
       if (!this.db) {
         console.error("[relay] PM pane is not booted and no database is available for durable queueing");
@@ -731,6 +735,7 @@ export class TmuxRelay {
    * active turn when PM is busy.
    */
   async submitToPM(message: string, eventTypeOverride?: string): Promise<PMSubmitResult> {
+    this.pmMaintenanceGate?.deferCLIInput();
     if (this.pmRuntime === "claude") {
       if (!(await this.isPMPaneReady())) {
         if (!this.db) return { ok: false, submitKey: "Enter", ambiguous: false };
@@ -744,6 +749,9 @@ export class TmuxRelay {
         this.enqueuePMMessage(message, eventTypeOverride, "submitToPM-pane-became-not-ready");
         return { ok: true, submitKey: "Enter", ambiguous: false, queued: true };
       }
+      // Wake previously retained inbound work without delaying this receipt or
+      // requiring another idle Stop. Durable delivery still owns replay safety.
+      if (result.ok) void this.drainPMQueue();
       return { ...result, submitKey: "Enter" };
     }
     if (!this.db) {
@@ -922,9 +930,7 @@ export class TmuxRelay {
   }
 
   private async deliverPMRowNow(row: PMQueueRow): Promise<PMSubmitResult> {
-    if (this.pmMaintenanceGate?.isHeld()) {
-      return { ok: true, submitKey: "Enter", ambiguous: false, queued: true };
-    }
+    this.pmMaintenanceGate?.deferCLIInput();
     if (!this.db) {
       const submitKey = decidePMSubmitKey(this.pmBusy, this.pmRuntime);
       const result = await this.injectDirectWithSubmitKey(row.payload ?? "", submitKey);
@@ -1001,17 +1007,12 @@ export class TmuxRelay {
         await fs.writeFile(tmpFile, message);
         try {
           await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
-          if (this.pmMaintenanceGate?.isHeld()) {
-            await this.runShell(`tmux delete-buffer -b ${bufName}`, { timeout: 5_000 });
-            return { ok: false, ambiguous: false, notReady: true };
-          }
           // `-p` wraps this as a bracketed paste. Claude Code 2.1.282 keeps a
           // plain multiline paste in its composer after Enter; bracketed paste
           // lets the same single Enter submit the complete message.
           await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
           pasted = true;
           await sleep(PM_INJECT_ENTER_DELAY_MS);
-          if (this.pmMaintenanceGate?.isHeld()) return { ok: false, ambiguous: true };
           await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
           await sleep(500);
         } finally {
@@ -1027,7 +1028,6 @@ export class TmuxRelay {
   }
 
   private async isPMPaneReady(): Promise<boolean> {
-    if (this.pmMaintenanceGate?.isHeld()) return false;
     if (this.pmPaneReadyOverride) return this.pmPaneReadyOverride();
     try {
       const result = await this.runShell(

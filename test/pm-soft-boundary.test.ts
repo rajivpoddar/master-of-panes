@@ -120,7 +120,7 @@ test("respawn acknowledgement requires a new boot; uncertain attempts are never 
   } finally { f.close(); }
 });
 
-test("real relay prioritizes fenced maintenance over a nonempty queue, then replays once", async () => {
+test("real relay delivers inbound messages during maintenance and defers only maintenance", async () => {
   const f = fixture();
   try {
     let handoffs = 0;
@@ -136,23 +136,26 @@ test("real relay prioritizes fenced maintenance over a nonempty queue, then repl
     f.observe("Stop");
     relay.injectToPMDirect("retain direct");
     const submitted = await relay.submitToPM("retain HTTP send");
-    assert.equal(submitted.queued, true);
+    assert.equal(submitted.ok, true);
+    assert.notEqual(submitted.queued, true, "maintenance is not pane unavailability");
+    assert.equal(f.boundary.isSafe(), false, "inbound delivery invalidates maintenance authority");
+    await (relay as unknown as { pmDrainChain: Promise<unknown> }).pmDrainChain;
+    assert.equal(f.db.getPendingPMEventCount(), 0, "held backlog drains after inbound delivery without a Stop");
     // Invoke the real debounce control point without waiting 30 seconds.
     await (relay as unknown as { runDrainCheck(ms: number, generation: number): Promise<void> }).runDrainCheck(0, 0);
-    assert.equal(handoffs, 1);
-    assert.equal(commands.filter(command => /paste-buffer|send-keys/.test(command)).length, 0);
-    assert.equal(f.db.getPendingPMEventCount(), 3);
-    assert.equal(await relay.drainPMQueue(), 0);
-    f.db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "fresh" });
-    f.boundary.sessionStarted("clear");
-    assert.equal(await relay.drainPMQueue(), 3);
+    assert.equal(handoffs, 0);
     assert.equal(f.db.getPendingPMEventCount(), 0);
     assert.equal(await relay.drainPMQueue(), 0);
     assert.equal(commands.filter(command => command.includes("paste-buffer")).length, 3);
+    assert.equal(f.observe("PreToolUse", "answer-human"), null);
+    f.observe("PostToolUse", "answer-human");
+    f.observe("Stop");
+    await (relay as unknown as { runDrainCheck(ms: number, generation: number): Promise<void> }).runDrainCheck(0, 0);
+    assert.equal(handoffs, 1, "maintenance can run at a later empty boundary");
   } finally { f.close(); }
 });
 
-test("HTTP admission fences tools before the processor and retains new inbound prompts", async () => {
+test("HTTP admission defers maintenance for inbound prompts instead of blocking or retaining them", async () => {
   const f = fixture();
   try {
     const relay = new TmuxRelay(DEFAULT_CONFIG, { pmPaneReady: async () => true });
@@ -177,11 +180,13 @@ test("HTTP admission fences tools before the processor and retains new inbound p
     const denied = await post("PreToolUse", { tool_use_id: "b" });
     assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
     assert.equal(processed, before);
-    const blocked = await post("UserPromptSubmit", { prompt: "inbound during maintenance" });
-    assert.equal(blocked.decision, "block");
-    assert.equal(f.db.peekPendingPMEvents()[0].payload, "inbound during maintenance");
-    await post("UserPromptSubmit", { prompt: "inbound during maintenance" });
-    assert.equal(f.db.getPendingPMEventCount(), 1, "duplicate hook does not duplicate replay");
+    const admitted = await post("UserPromptSubmit", { prompt: "inbound during maintenance" });
+    assert.deepEqual(admitted, {});
+    assert.equal(processed, before + 1, "human prompt reaches the actual processor");
+    assert.equal(boundary.isAdmissionFenced(), false);
+    assert.equal(boundary.isSafe(), false);
+    assert.equal(f.db.getPendingPMEventCount(), 0, "no maintenance replay copy is created");
+    assert.equal((await post("PreToolUse", { tool_use_id: "answer" })).mop_tool_admitted, true);
   } finally { f.close(); }
 });
 
@@ -208,7 +213,7 @@ test("CLI queued input, including the empty-looking placeholder, prevents mainte
     let handoffs = 0;
     let queued = true;
     const commands: string[] = [];
-    const relay = new TmuxRelay(DEFAULT_CONFIG, { pmRuntime: "claude",
+    const relay = new TmuxRelay(DEFAULT_CONFIG, { pmRuntime: "claude", pmPaneReady: async () => true,
       pmIdleHandoff: async () => { handoffs++; },
       runShell: async command => {
         commands.push(command);
@@ -224,9 +229,9 @@ test("CLI queued input, including the empty-looking placeholder, prevents mainte
     const drain = () => (relay as unknown as { runDrainCheck(ms: number, generation: number): Promise<void> }).runDrainCheck(0, 0);
     await drain();
     assert.equal(handoffs, 0, "45 minutes never authorizes clearing CLI-queued input");
-    assert.equal(f.boundary.isHeld(), true, "MoP queue stays held");
+    assert.equal(f.boundary.isHeld(), true, "maintenance intent remains pending");
     assert.equal(f.boundary.isAdmissionFenced(), false, "CLI-queued work can finish");
-    assert.equal(f.db.getPendingPMEventCount(), 1);
+    assert.equal(f.db.getPendingPMEventCount(), 0, "inbound queue is delivered, not held");
     assert.equal(f.observe("PreToolUse", "queued-work"), null);
     f.observe("PostToolUse", "queued-work");
     queued = false;
@@ -234,8 +239,8 @@ test("CLI queued input, including the empty-looking placeholder, prevents mainte
     await drain();
     assert.equal(handoffs, 1, "later tool-free and CLI-empty Stop executes maintenance");
     assert.equal(f.boundary.isAdmissionFenced(), true);
-    assert.equal(f.db.getPendingPMEventCount(), 1);
-    assert.equal(commands.some(command => /paste-buffer|send-keys/.test(command)), false);
+    assert.equal(f.db.getPendingPMEventCount(), 0);
+    assert.equal(commands.filter(command => command.includes("paste-buffer")).length, 1);
   } finally { f.close(); }
 });
 
@@ -389,7 +394,7 @@ for (const state of ["uncertain", "failed", "awaiting_ack"] as const) {
   });
 }
 
-test("response loss cannot unlock an in-flight writer; settlement releases input without repeating clear", async () => {
+test("response loss keeps the writer reservation while inbound input defers maintenance; settlement prevents retry", async () => {
   const f = fixture();
   try {
     const requestedAt = new Date().toISOString();
@@ -403,7 +408,10 @@ test("response loss cannot unlock an in-flight writer; settlement releases input
     const writer = boundary.withMaintenanceWriter(() => new Promise<void>(resolve => { finish = resolve; }));
     f.db.setConfig("pm_clear_delivery_state", "uncertain"); // HTTP caller timed out before writer finished
     assert.equal(boundary.reconcileFailedMaintenance(), false);
-    assert.match(boundary.observe({ hook_event_name: "UserPromptSubmit", session_id: "pm" })!, /maintenance/);
+    assert.equal(boundary.observe({ hook_event_name: "UserPromptSubmit", session_id: "pm" }), null,
+      "inbound input keeps priority over maintenance");
+    assert.equal(boundary.isHeld(), true, "input does not claim the active writer has finished");
+    assert.equal(boundary.isSafe(), false, "new input invalidates later maintenance effects");
     finish();
     await writer;
     assert.equal(boundary.isHeld(), false);
