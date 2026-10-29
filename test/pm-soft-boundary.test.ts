@@ -8,6 +8,7 @@ import { MoPDatabase } from "../src/db.js";
 import { PMSoftBoundary, PM_SOFT_MAX_DEFERRAL_MS, registerPMSoftBoundary } from "../src/pmSoftBoundary.js";
 import { TmuxRelay } from "../src/relay.js";
 import { deliverRespawnExit } from "../src/respawnWhenIdle.js";
+import { requestPmClearOnce } from "../src/pmClearLatch.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
 function fixture() {
@@ -347,4 +348,136 @@ test("clear recovery refuses active, unknown, changed-request, compact and respa
       assert.equal(boundary.isHeld(), true, scenario);
     } finally { f.close(); }
   }
+});
+
+for (const state of ["uncertain", "failed", "awaiting_ack"] as const) {
+  test(`same-session ${state} maintenance admits human input and tools without restart or replay`, async () => {
+    const f = fixture();
+    try {
+      const requestedAt = new Date().toISOString();
+      f.db.setPendingClear(0);
+      f.db.setConfig("pm_clear_requested_at", requestedAt);
+      f.db.setConfig("pm_clear_delivery_state", state);
+      f.db.setConfig("pm_soft_boundary_v1", JSON.stringify({ boot: f.boot, session: "pm", tools: [],
+        stopped: true, request: `clear:${Date.parse(requestedAt)}`, effect: false, fenced: true }));
+      f.db.enqueuePendingPMEvent(0, "maintenance-input-existing", "existing retained input");
+      const retained = f.db.peekPendingPMEvents();
+      const commands: string[] = [];
+      const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: async command => {
+        commands.push(command); throw new Error("no composer keys, cleanup or queue replay permitted");
+      } });
+      relay.setDatabase(f.db);
+      const app = new Hono();
+      const boundary = registerPMSoftBoundary(app, f.db, relay);
+      let processed = 0;
+      app.post("/hooks/slot/0", c => { processed++; return c.json({}); });
+      const post = async (hook_event_name: string, extra = {}) => (await app.request("/hooks/slot/0", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hook_event_name, session_id: "pm", mop_tool_tracking: 1, ...extra }),
+      })).json();
+      assert.deepEqual(await post("UserPromptSubmit", { prompt: "let me work" }), {});
+      assert.equal((await post("PreToolUse", { tool_use_id: "human-work" })).mop_tool_admitted, true);
+      assert.equal(processed, 2);
+      assert.equal(boundary.isHeld(), false);
+      assert.equal(relay.isPMBusy(), true, "unlock is not an idle declaration");
+      assert.equal(f.db.getEvents(0, 10, "SessionStart").length, 1);
+      assert.deepEqual(f.db.peekPendingPMEvents(), retained);
+      assert.equal(f.db.getConfig("pm_clear_delivery_state"), state);
+      assert.equal(f.db.hasPendingClear(0), true);
+      assert.deepEqual(commands, []);
+    } finally { f.close(); }
+  });
+}
+
+test("response loss cannot unlock an in-flight writer; settlement releases input without repeating clear", async () => {
+  const f = fixture();
+  try {
+    const requestedAt = new Date().toISOString();
+    f.db.setPendingClear(0);
+    f.db.setConfig("pm_clear_requested_at", requestedAt);
+    f.db.setConfig("pm_clear_delivery_state", "deferred_busy");
+    f.db.setConfig("pm_soft_boundary_v1", JSON.stringify({ boot: f.boot, session: "pm", tools: [],
+      stopped: true, request: `clear:${Date.parse(requestedAt)}`, effect: false, fenced: true }));
+    const boundary = new PMSoftBoundary(f.db, () => null);
+    let finish!: () => void;
+    const writer = boundary.withMaintenanceWriter(() => new Promise<void>(resolve => { finish = resolve; }));
+    f.db.setConfig("pm_clear_delivery_state", "uncertain"); // HTTP caller timed out before writer finished
+    assert.equal(boundary.reconcileFailedMaintenance(), false);
+    assert.match(boundary.observe({ hook_event_name: "UserPromptSubmit", session_id: "pm" })!, /maintenance/);
+    finish();
+    await writer;
+    assert.equal(boundary.isHeld(), false);
+    assert.equal(boundary.observe({ hook_event_name: "UserPromptSubmit", session_id: "pm" }), null);
+    let sends = 0;
+    const again = await requestPmClearOnce({ db: f.db, source: "fixture", nowMs: Date.now(), staleAfterMs: 0,
+      recentSuppressMs: 0, hasRecentClearEvent: false, laterLifecycleEvent: null, isPMBusy: () => false,
+      send: async () => { sends++; return { success: true }; } });
+    assert.equal(again.kind, "pending");
+    assert.equal(sends, 0);
+    assert.equal(f.db.getConfig("pm_clear_delivery_state"), "uncertain");
+  } finally { f.close(); }
+});
+
+test("failed daily handoff releases input after all writers settle and never reclaims its attempted request", async () => {
+  const f = fixture();
+  try {
+    f.observe("Stop");
+    assert.equal(f.boundary.beginRespawn(f.pending.key), true);
+    let finish!: () => void;
+    const writer = f.boundary.withMaintenanceWriter(() => new Promise<void>(resolve => { finish = resolve; }));
+    f.boundary.failMaintenance(f.pending.key);
+    assert.equal(f.boundary.isHeld(), true, "active writer still owns the fence");
+    finish();
+    await writer;
+    assert.equal(f.boundary.isHeld(), false);
+    assert.equal(f.observe("UserPromptSubmit"), null);
+    f.observe("Stop");
+    assert.equal(f.boundary.isHeld(), false, "unchanged failed checkpoint cannot be reclaimed");
+    const restored = new PMSoftBoundary(f.db, () => f.pending);
+    restored.observe({ hook_event_name: "Stop", session_id: "pm", mop_tool_tracking: 1 });
+    assert.equal(restored.isHeld(), false, "failed request remains consumed across MoP reload");
+    assert.equal(restored.beginRespawn(f.pending.key), false);
+    const saved = JSON.parse(f.db.getConfig("pm_soft_boundary_v1")!);
+    assert.deepEqual(saved.failures.daily, { request: f.pending.key, effect: true });
+    assert.equal(f.db.getEvents(0, 10, "slot_cleared").length, 0);
+  } finally { f.close(); }
+});
+
+test("late failure for another maintenance request cannot unlock the current owner", () => {
+  const f = fixture();
+  try {
+    f.observe("Stop");
+    f.boundary.failMaintenance("daily:older");
+    assert.equal(f.boundary.isHeld(), true);
+    assert.equal(f.boundary.isAdmissionFenced(), true);
+  } finally { f.close(); }
+});
+
+test("actual failed respawn route releases same-session input only after its enclosing daily helper returns", async () => {
+  const f = fixture();
+  try {
+    f.observe("Stop");
+    const relay = new TmuxRelay(DEFAULT_CONFIG);
+    relay.setDatabase(f.db);
+    relay.isPMComposerQueueEmpty = async () => true;
+    const app = new Hono();
+    const boundary = registerPMSoftBoundary(app, f.db, relay);
+    let attempts = 0;
+    app.post("/slots/0/respawn", c => {
+      if (!boundary.isHeld() || !boundary.isSafe()) return c.json({ success: false }, 409);
+      attempts++;
+      return c.json({ success: false, reason: "fixture lost acknowledgement" }, 502);
+    });
+    const request = () => app.request("/slots/0/respawn", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pm_soft_boundary_request: f.pending.key }) });
+    await boundary.withMaintenanceWriter(async () => {
+      assert.equal((await request()).status, 502);
+      assert.equal(boundary.isAdmissionFenced(), true, "enclosing helper has not returned yet");
+    });
+    assert.equal(boundary.isHeld(), false);
+    assert.equal(relay.isPMBusy(), true);
+    assert.equal(boundary.observe({ hook_event_name: "UserPromptSubmit", session_id: "pm" }), null);
+    assert.equal((await request()).status, 409);
+    assert.equal(attempts, 1);
+  } finally { f.close(); }
 });

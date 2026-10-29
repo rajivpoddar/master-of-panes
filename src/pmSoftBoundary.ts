@@ -11,6 +11,7 @@ export const PM_SOFT_MAX_DEFERRAL_MS = 45 * 60_000;
 type State = {
   boot: number; session: string; tools: string[]; stopped: boolean;
   request: string | null; effect: boolean; fenced: boolean;
+  failures?: Partial<Record<"clear" | "daily", { request: string; effect: boolean }>>;
 };
 type Pending = { key: string; requestedAt: number; boot: number; kind: "daily" | "clear" };
 
@@ -20,8 +21,9 @@ type Pending = { key: string; requestedAt: number; boot: number; kind: "daily" |
  */
 export class PMSoftBoundary {
   private state: State;
+  private activeWriters = 0;
   constructor(private db: MoPDatabase, private pending: () => Pending | null,
-    private now = Date.now) {
+    private now = Date.now, private onFailureReleased: () => void = () => {}) {
     try {
       const value = JSON.parse(db.getConfig(KEY) || "null");
       if (!value || !Number.isInteger(value.boot) || typeof value.session !== "string"
@@ -43,6 +45,50 @@ export class PMSoftBoundary {
   isAdmissionFenced(): boolean { return this.isHeld() && this.state.fenced; }
   isDailyRestartReady(): boolean {
     return this.state.request?.startsWith("daily:") === true && this.isSafe();
+  }
+  /** Count the real writer/helper lifetime, including an HTTP handler that
+   * outlives its caller's timeout. No failure releases input while keys may
+   * still be issued by this process. Nested daily/respawn writers share it. */
+  async withMaintenanceWriter<T>(run: () => Promise<T>): Promise<T> {
+    this.activeWriters++;
+    try { return await run(); }
+    finally {
+      this.activeWriters--;
+      this.reconcileFailedMaintenance();
+    }
+  }
+  failMaintenance(request: string): void {
+    if (this.state.request !== request) return; // never release a successor
+    const kind = request.startsWith("clear:") ? "clear" : "daily";
+    this.state.failures = { ...this.state.failures, [kind]: { request, effect: this.state.effect } };
+    this.save();
+    this.reconcileFailedMaintenance();
+  }
+  /** Retry receipts and input admission are independent. Terminal failure
+   * consumes the request but relinquishes its lock without touching the
+   * composer, declaring idle, or sending/deleting any retained input. */
+  reconcileFailedMaintenance(inputAfterWriter = false): boolean {
+    const request = this.state.request;
+    if (!request || this.activeWriters !== 0) return false;
+    const kind = request.startsWith("clear:") ? "clear" : "daily";
+    const clearState = this.db.getConfig("pm_clear_delivery_state");
+    const failedClear = kind === "clear" && !this.state.effect
+      && request === `clear:${Date.parse(this.db.getConfig("pm_clear_requested_at") || "")}`
+      && (clearState === "failed" || clearState === "uncertain"
+        || (inputAfterWriter && clearState === "awaiting_ack"));
+    if (!failedClear && this.state.failures?.[kind]?.request !== request) return false;
+    const failure = this.state.failures?.[kind]?.request === request
+      ? this.state.failures[kind]! : { request, effect: this.state.effect };
+    this.state = { ...this.state, request: null, effect: false, fenced: false, stopped: false,
+      failures: { ...this.state.failures, [kind]: failure } };
+    this.save();
+    this.db.logEvent(0, "pm_maintenance_input_released", null, null, {
+      request, attempted_effect: failure.effect,
+      reason: clearState === "awaiting_ack" ? "input_after_completed_clear_write" : "failed_writer_settled",
+      retry_receipt: "preserved",
+    });
+    this.onFailureReleased();
+    return true;
   }
   deferCLIInput(): void {
     if (this.state.effect) return;
@@ -69,6 +115,7 @@ export class PMSoftBoundary {
     if (!session || session !== boot.session || !boot.id) {
       return type === "PreToolUse" ? "PM tool session is not the current observed session." : null;
     }
+    this.reconcileFailedMaintenance(type === "UserPromptSubmit" || type === "PreToolUse");
     if (this.state.boot !== boot.id) {
       if (this.state.session === session && !this.state.effect) {
         // Compaction keeps the session and its outstanding tool identities.
@@ -79,7 +126,7 @@ export class PMSoftBoundary {
           return type === "PreToolUse" || type === "UserPromptSubmit"
             ? "PM maintenance is awaiting acknowledgement; inbound input is retained." : null;
         }
-        this.state = { boot: boot.id, session, tools: [], stopped: false, request: null, effect: false, fenced: false };
+        this.state = { boot: boot.id, session, tools: [], stopped: false, request: null, effect: false, fenced: false, failures: this.state.failures };
       }
     }
     const id = typeof raw.tool_use_id === "string" ? raw.tool_use_id.trim() : "";
@@ -96,7 +143,8 @@ export class PMSoftBoundary {
     } else if (type === "Stop" && raw.mop_tool_tracking === 1) {
       this.state.stopped = this.state.tools.length === 0;
       const pending = this.pending();
-      if (!this.state.effect && this.state.stopped && pending && pending.boot === boot.id
+      if (!this.state.effect && this.activeWriters === 0 && this.state.stopped && pending && pending.boot === boot.id
+          && pending.key !== this.state.failures?.[pending.kind]?.request
           && (this.db.getPendingPMEventCount() === 0
               || this.now() - pending.requestedAt >= PM_SOFT_MAX_DEFERRAL_MS)) {
         this.state.request = pending.key;
@@ -126,7 +174,7 @@ export class PMSoftBoundary {
     if ((source === "startup" || source === "resume") && !this.state.effect
         && this.state.tools.length === 0 && this.state.request === clearRequest
         && this.db.getConfig("pm_clear_delivery_state") === "uncertain") {
-      this.state = { boot: boot.id, session: boot.session, tools: [], stopped: false, request: null, effect: false, fenced: false };
+      this.state = { boot: boot.id, session: boot.session, tools: [], stopped: false, request: null, effect: false, fenced: false, failures: this.state.failures };
       this.save();
       this.db.logEvent(0, "pm_maintenance_admission_recovered", "SessionStart", null, {
         request: clearRequest, source, reason: "fresh_boot_after_uncertain_clear", clear_receipt: "preserved",
@@ -136,7 +184,7 @@ export class PMSoftBoundary {
     // A respawn keeps the fence through its full guarded response. A /clear
     // instead has a definitive SessionStart:clear acknowledgement.
     if (this.isHeld() && source !== "clear") return;
-    this.state = { boot: boot.id, session: boot.session, tools: [], stopped: false, request: null, effect: false, fenced: false };
+    this.state = { boot: boot.id, session: boot.session, tools: [], stopped: false, request: null, effect: false, fenced: false, failures: this.state.failures };
     this.save();
   }
   beginRespawn(request: unknown): boolean {
@@ -150,7 +198,7 @@ export class PMSoftBoundary {
     const request = this.state.request;
     const boot = this.boot();
     if (!boot.id || boot.id === this.state.boot) return; // response alone is not a boot receipt
-    this.state = { boot: boot.id, session: boot.session, tools: [], stopped: false, request: null, effect: false, fenced: false };
+    this.state = { boot: boot.id, session: boot.session, tools: [], stopped: false, request: null, effect: false, fenced: false, failures: this.state.failures };
     this.save();
     this.db.logEvent(0, "clear_pending_executed", "SessionStart", null, { via: "pm_soft_boundary_respawn", request });
     this.db.logEvent(0, "slot_cleared", "SessionStart", null, { via: "pm_soft_boundary_respawn", request });
@@ -180,7 +228,7 @@ export function pendingPMMaintenance(db: MoPDatabase, now = new Date()): Pending
 }
 
 export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRelay): PMSoftBoundary {
-  const boundary = new PMSoftBoundary(db, () => pendingPMMaintenance(db));
+  const boundary = new PMSoftBoundary(db, () => pendingPMMaintenance(db), Date.now, () => relay.setPMBusy(true));
   relay.setPMMaintenanceGate(boundary);
   app.use("/hooks/slot/0", async (c, next) => {
     let raw: Record<string, unknown>;
@@ -239,12 +287,20 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     if (!(await relay.isPMComposerQueueEmpty()) || !boundary.beginRespawn(body.pm_soft_boundary_request)) {
       return c.json({ success: false, reason: "pm_soft_boundary_refused", zero_effect: true }, 409);
     }
-    await next();
-    if (c.res.ok && (await c.res.clone().json()).success === true) {
-      boundary.respawnAcknowledged();
-      if (!boundary.isHeld()) relay.setPMBusy(false);
-    }
-    // Any unacknowledged attempt retains the durable fence; never blindly replay.
+    const request = boundary.status().request!;
+    await boundary.withMaintenanceWriter(async () => {
+      try {
+        await next();
+        if (c.res.ok && (await c.res.clone().json()).success === true) {
+          boundary.respawnAcknowledged();
+          if (!boundary.isHeld()) relay.setPMBusy(false);
+        }
+      } finally {
+        // A failed/uncertain response is terminal for this attempt. Keep its
+        // consumed identity, not a permanent lock on the human's input.
+        boundary.failMaintenance(request);
+      }
+    });
   });
   return boundary;
 }

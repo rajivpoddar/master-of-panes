@@ -119,23 +119,33 @@ const config: MoPConfig = {
 
 const db = new MoPDatabase(config);
 const relay = new TmuxRelay(config, { pmIdleHandoff: async () => {
-  const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-  const checkpoint = join(homedir(), ".claude/state", `daily-pm-restart-${day}.json`);
-  try {
-    const saved = JSON.parse(await readFile(checkpoint, "utf8"));
-    if (saved.handoff_status !== "pending" || saved.launch_intent) return;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-  if (!pmSoftBoundary.isDailyRestartReady()) return;
-  // MoP's child, outside the target Claude tree. No detached PM descendant,
-  // timer, new service or polling worker owns this continuation.
-  await new Promise<void>((done, reject) => execFile("/bin/bash",
-    [join(homedir(), ".claude/scripts/pm/daily-pm-restart.sh"), "--complete-on-idle"],
-    { timeout: 330_000, env: { ...process.env, MOP_DB_PATH: resolve(config.dbPath),
-      MOP_PM_SOFT_BOUNDARY_REQUEST: pmSoftBoundary.status().request ?? "" } },
-    (error) => error ? reject(error) : done()));
+  const request = pmSoftBoundary.status().request;
+  if (!request || !pmSoftBoundary.isDailyRestartReady()) return;
+  await pmSoftBoundary.withMaintenanceWriter(async () => {
+    try {
+      const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+      const checkpoint = join(homedir(), ".claude/state", `daily-pm-restart-${day}.json`);
+      try {
+        const saved = JSON.parse(await readFile(checkpoint, "utf8"));
+        if (saved.handoff_status !== "pending" || saved.launch_intent) return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      if (!pmSoftBoundary.isDailyRestartReady()) return;
+      // MoP's child, outside the target Claude tree. No detached PM descendant,
+      // timer, new service or polling worker owns this continuation.
+      await new Promise<void>((done, reject) => execFile("/bin/bash",
+        [join(homedir(), ".claude/scripts/pm/daily-pm-restart.sh"), "--complete-on-idle"],
+        { timeout: 330_000, env: { ...process.env, MOP_DB_PATH: resolve(config.dbPath),
+          MOP_PM_SOFT_BOUNDARY_REQUEST: pmSoftBoundary.status().request ?? "" } },
+        (error) => error ? reject(error) : done()));
+    } finally {
+      // A refusal, helper timeout, or lost respawn acknowledgement must not
+      // retain input admission after all nested writers have returned.
+      pmSoftBoundary.failMaintenance(request);
+    }
+  });
 } });
 // Wire DB into relay so injectToPM can queue when PM is busy.
 // Rajiv directive 2026-05-06 11:18 IST.
@@ -448,7 +458,8 @@ function retryUndeliveredPmClearOnStop(generation: number): void {
         sessionToken,
         stopFenced: true,
       }),
-  }).catch((err) => console.error(`[pm-clear] stop retry failed: ${String(err)}`));
+  }).finally(() => pmSoftBoundary.reconcileFailedMaintenance())
+    .catch((err) => console.error(`[pm-clear] stop retry failed: ${String(err)}`));
 }
 
 function retryPendingPmClearAfterDrain(stopEventId: number, generation: number): void {
@@ -478,7 +489,7 @@ function retryPendingPmClearAfterDrain(stopEventId: number, generation: number):
             sessionToken,
             stopFenced: false,
           }),
-      });
+      }).finally(() => pmSoftBoundary.reconcileFailedMaintenance());
     },
   });
 }
@@ -797,6 +808,7 @@ async function clearSlotsThroughMopHttp(
           stopFenced: false,
         }),
     });
+    pmSoftBoundary.reconcileFailedMaintenance();
     touchPmClearRequestedMarker(delivery.kind);
 
     if (delivery.kind === "pending") {
@@ -2755,7 +2767,7 @@ app.post("/slots/:slotNum/send", async (c) => {
         reason: "pm_clear_authority_missing",
       }, 409);
     }
-    const written = await relay.writePMClearFenced({
+    const written = await pmSoftBoundary.withMaintenanceWriter(() => relay.writePMClearFenced({
       paneId: paneTarget,
       check: makePmClearWriteFence({
         db,
@@ -2766,7 +2778,7 @@ app.post("/slots/:slotNum/send", async (c) => {
         currentSessionToken: () => slotSessionToken(0),
         idleProven: () => relay.isPMIdleProven() && pmSoftBoundary.isSafe(),
       }),
-    });
+    }));
     if (written.ok) {
       db.logEvent(0, "send_command", null, null, {
         command,
