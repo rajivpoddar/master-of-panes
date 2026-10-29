@@ -1449,7 +1449,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-stdio-send-message",
-      "sha256": "9d3bf0c5aa0e163e9321061881bd4cc811f0a6c2c8706c7bee3d7cc1f66cd3cc",
+      "sha256": "32099c19a89686cb5a3af8f2f3d4ac38f6919382c9be229d729035b0c32ee762",
       "source_path": "codex/skills/codex-stdio-send-message/scripts/test_queue_preview.py"
     },
     {

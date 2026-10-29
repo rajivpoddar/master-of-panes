@@ -352,17 +352,30 @@ def new_growth_event(sop, text="ordinary growth message", kind="message.group"):
 
 @pytest.mark.parametrize("activity", ["busy", "idle", "queued", "notLoaded", "unknown", "unavailable"])
 @pytest.mark.parametrize("text", ["ordinary growth message", "<@U0BNFGX2UAX> growth message"])
-def test_all_messages_future_growth_never_probes_activity(tmp_path, monkeypatch, activity, text):
+def test_historical_all_messages_routes_mentions_to_decisions_and_others_to_social_pool(tmp_path, monkeypatch, activity, text):
+    # Rajiv 1793200758.332809 superseded the old no-probe/Social-only rule.
     sop = all_messages_sop(tmp_path)
-    def forbidden(_):
-        pytest.fail("new all-messages admission must not probe " + activity)
-    monkeypatch.setattr(MOD, "snapshot_social_availability", forbidden)
+    probes = []
+    def observe(thread_id):
+        probes.append(thread_id)
+        return {"state": activity, "reason": "synthetic-" + activity}
+    monkeypatch.setattr(MOD, "snapshot_social_availability", observe)
     source = new_growth_event(sop, text)
     source["exact_tuple"]["blocks"] = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
     first = snapshot(tmp_path, sop, [source], in_process=True)[0]
-    assert first["relay_route"]["destination_thread_id"] == SOCIAL
-    assert first["relay_route"]["match"] == "growth_all_messages"
-    assert "availability" not in first["relay_route"]
+    if "<@U0BNFGX2UAX>" in text:
+        assert first["relay_route"]["destination_thread_id"] == DECISIONS
+        assert first["relay_route"]["match"] == "growth_cto_mention"
+        assert "availability" not in first["relay_route"]
+        assert probes == []
+    else:
+        assert first["relay_route"]["destination_thread_id"] == SOCIAL
+        assert first["relay_route"]["match"] == "growth_all_messages"
+        assert first["relay_route"]["availability"]["state"] == activity
+        pool = MOD.extract_route_table(sop)["overflow_pool"]
+        assert probes == ([SOCIAL] if activity == "idle" else
+                          [SOCIAL] + [member["destination_thread_id"] for member in pool
+                                      if member["destination_thread_id"] != SOCIAL])
     assert first["exact_tuple"] == source["exact_tuple"]
     assert first["attachments"] == source["attachments"]
     assert json.dumps(source, ensure_ascii=False) in first["routed_wake_text"]
@@ -467,10 +480,50 @@ def test_all_messages_release_renew_and_output_failure_preserve_choice(tmp_path,
         assert kept["route_fingerprint"] == source["fingerprint"]
 
 
+@pytest.mark.parametrize("text,admitted", [
+    ("ordinary growth message", False),
+    ("> <@U0BNFGX2UAX> quoted", False),
+    ("`<@U0BNFGX2UAX>`", False),
+    ("<@U0BNFGX2UAX> current mention", True),
+])
+def test_closed_all_message_window_admits_only_current_mentions(tmp_path, monkeypatch, text, admitted):
+    # Exercise the managed table, not an indefinitely open synthetic cutover.
+    probes = []
+    def observe(thread_id):
+        probes.append(thread_id)
+        return {"state": "busy" if thread_id == SOCIAL else "idle", "reason": "synthetic"}
+    monkeypatch.setattr(MOD, "snapshot_social_availability", observe)
+    source = event(SOP, ts="1793205480.000001", queued_at="2026-10-28T16:38:00Z", text=text)
+    routed = snapshot(tmp_path, SOP, [source], in_process=True)
+    if admitted:
+        assert routed[0]["relay_route"]["match"] == "growth_availability"
+        assert routed[0]["relay_route"]["destination_thread_id"] == "01a18172-fae0-7ff0-8aad-2d41ef153dc6"
+        assert probes == [SOCIAL, "01a18172-fae0-7ff0-8aad-2d41ef153dc6"]
+    else:
+        assert routed == []
+        assert probes == []
+
+
+def test_direct_messages_never_probe_or_overflow_to_social(tmp_path, monkeypatch):
+    monkeypatch.setattr(MOD, "snapshot_social_availability", lambda _: pytest.fail("DM overflow forbidden"))
+    source = event(SOP, channel="Dsynthetic", kind="message.im")
+    routed = snapshot(tmp_path, SOP, [source], in_process=True)[0]
+    assert routed["relay_route"]["destination_thread_id"] == DM
+    assert routed["relay_route"]["match"] == "direct_message"
+
+
 def test_all_messages_managed_branch_and_cutover_contract():
     table = MOD.extract_route_table(SOP)
     growth = table["exact_channel_routes"][GROWTH]
-    assert growth["all_messages_gate"] == {"admitted_after_epoch": None}
+    # Rajiv 1793205393.094809 closed the historical all-message interval.
+    assert growth["all_messages_gate"] == {
+        "admitted_after_epoch": 1793201061.427839,
+        "admitted_before_epoch": 1793205479.293347,
+    }
+    assert [member["destination_thread_id"] for member in table["overflow_pool"]] == [
+        SOCIAL, "01a18172-fae0-7ff0-8aad-2d41ef153dc6",
+        "01a18174-ac86-7860-878d-a6f75c9a18c7",
+    ]
     assert growth["admitted_after_epoch"] == 1791644828.031685
     assert growth["availability_gate"]["admitted_after_epoch"] == 1792508086.3273861
     instructions = SOP.read_text().split("### Historical availability cutover", 1)[0]
