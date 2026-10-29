@@ -13,6 +13,7 @@
  */
 
 import { resolveBindHost } from "./bindHost.js";
+import { registerPMSoftBoundary } from "./pmSoftBoundary.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -127,11 +128,13 @@ const relay = new TmuxRelay(config, { pmIdleHandoff: async () => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
+  if (!pmSoftBoundary.isHeld() || !pmSoftBoundary.isSafe()) return;
   // MoP's child, outside the target Claude tree. No detached PM descendant,
   // timer, new service or polling worker owns this continuation.
   await new Promise<void>((done, reject) => execFile("/bin/bash",
     [join(homedir(), ".claude/scripts/pm/daily-pm-restart.sh"), "--complete-on-idle"],
-    { timeout: 330_000, env: { ...process.env, MOP_DB_PATH: resolve(config.dbPath) } },
+    { timeout: 330_000, env: { ...process.env, MOP_DB_PATH: resolve(config.dbPath),
+      MOP_PM_SOFT_BOUNDARY_REQUEST: pmSoftBoundary.status().request ?? "" } },
     (error) => error ? reject(error) : done()));
 } });
 // Wire DB into relay so injectToPM can queue when PM is busy.
@@ -294,6 +297,7 @@ const eventLoopLagTimer = setInterval(() => {
 }, 60 * 1000);
 
 const app = new Hono();
+const pmSoftBoundary = registerPMSoftBoundary(app, db, relay);
 
 // ─── MoP Clear Helpers ─────────────────────────────────
 // HTTP path for deterministic schedulers that cannot call MCP tools.
@@ -845,6 +849,7 @@ const hookPayloadSchema = z.object({
   hook_event_name: z.enum([
     "PreToolUse",
     "PostToolUse",
+    "PostToolUseFailure",
     "Notification",
     "Stop",
     "UserPromptSubmit",
@@ -860,6 +865,7 @@ const hookPayloadSchema = z.object({
   permission_mode: z.string().optional(),
 
   // PreToolUse / PostToolUse fields
+  tool_use_id: z.string().optional(),
   tool_name: z.string().optional(),
   tool_input: z.record(z.unknown()).optional(),
   tool_output: z.string().optional(),
@@ -889,6 +895,7 @@ const slotParamSchema = z.coerce.number().int().min(0).max(DEFAULT_DEV_SLOT_COUN
 function normalizePayload(raw: z.infer<typeof hookPayloadSchema>): HookPayload {
   return {
     type: raw.hook_event_name,
+    tool_use_id: raw.tool_use_id,
     tool_name: raw.tool_name,
     tool_input: raw.tool_input,
     tool_output: raw.tool_output,
@@ -1813,6 +1820,10 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   // Stop clears active_turn_id/state; prompt history must never restore eligibility.
   const preRespawnWorkToken = respawnWorkToken(db, slotNum);
   const assignmentFence = () => {
+    if (slotNum === 0) {
+      return pmSoftBoundary.isHeld() && pmSoftBoundary.isSafe()
+        && respawnWorkToken(db, 0) === preRespawnWorkToken ? null : "slot_busy_respawn_refused";
+    }
     const row = db.getSlot(slotNum);
     if (!row || !slotState || (["assignment_epoch", "issue", "repository_id", "branch_ref", "occupied"] as const)
         .some(key => row[key] !== slotState[key])) return "respawn_assignment_drift";
@@ -1854,6 +1865,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
       const exit = await deliverRespawnExit({
         db, relay, slot: slotNum, pane: identity.snapshot, verifyPaneIdentity,
         request: body.idle_request as RespawnWhenIdleRequest | undefined,
+        pmMaintenanceFence: slotNum === 0 ? () => sessionFence(originalSession) : undefined,
         beforeEffect: () => {
           if (healthChecker.isPmInitiatedRespawn(slotNum)) return "slot_busy_respawn_refused";
           healthChecker.markPmInitiatedRespawn(slotNum);
@@ -1977,7 +1989,9 @@ app.post("/slots/:slotNum/respawn", async (c) => {
       } catch { /* No trustworthy boot binding: suppress continuation. */ }
     }
     await sleep(2_000);
-    if (continueSession && bootCommand === "claude") {
+    // PM's checkpoint sends its persisted resume prompt through the held MoP
+    // queue after boot acknowledgement; never inject an unfenced extra turn.
+    if (slotNum !== 0 && continueSession && bootCommand === "claude") {
       if (!bootSession) recordStep("continue_suppressed", "respawn_boot_session_unbound");
       else {
         const continueFence = () => sessionFence(bootSession)
@@ -2750,7 +2764,7 @@ app.post("/slots/:slotNum/send", async (c) => {
         sessionToken,
         currentGeneration: () => pmClearDrainGeneration,
         currentSessionToken: () => slotSessionToken(0),
-        idleProven: () => relay.isPMIdleProven(),
+        idleProven: () => relay.isPMIdleProven() && pmSoftBoundary.isSafe(),
       }),
     });
     if (written.ok) {

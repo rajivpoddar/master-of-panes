@@ -1,56 +1,47 @@
 #!/usr/bin/env bash
-# hook-relay.sh — Forward Claude Code hook events to MoP server
-#
-# Called as a Claude Code command hook for UserPromptSubmit, Stop, PostToolUse,
-# and Notification events.
-# Reads JSON from stdin (Claude Code hook protocol), determines slot number
-# from the cwd field, and POSTs to the MoP HTTP server.
-#
-# Slot detection: Each slot runs in /Users/rajiv/Downloads/projects/heydonna-app-300N
-# where N is the slot number (1-6). The PM pane (heydonna-app, no suffix) is slot 0.
-#
-# Usage: hook-relay.sh <hook_type>
-#   hook_type: UserPromptSubmit | Stop | PostToolUse | PreToolUse | Notification
-
+# Direct Claude hooks for MoP. PM PreToolUse is an admission handshake, not
+# fire-and-forget: no acknowledged tracking means no admitted PM tool.
 set -euo pipefail
-
 HOOK_TYPE="${1:-}"
 [ -z "$HOOK_TYPE" ] && exit 0
-
-# All processing in Python: read stdin JSON, detect slot from cwd, POST to MoP
-python3 -c "
+python3 -c '
 import json, sys, re, urllib.request
-
 hook_type = sys.argv[1]
-
 try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-
-# Determine slot number from cwd: heydonna-app-300N → N, or heydonna-app (no suffix) → 0
-cwd = data.get('cwd', '')
-m = re.search(r'heydonna-app-300([1-8])', cwd)
+cwd = data.get("cwd", "")
+m = re.search(r"heydonna-app-300([1-8])", cwd)
 if m:
     slot = m.group(1)
-elif re.search(r'heydonna-app(?!-300)', cwd):
-    slot = '0'  # PM pane (heydonna-app, no -300N suffix)
+elif re.search(r"heydonna-app(?!-300)", cwd):
+    slot = "0"
 else:
-    sys.exit(0)  # Unknown project — skip
-
-# Add hook_event_name (command hooks don't include it, only HTTP hooks do)
-data['hook_event_name'] = hook_type
-
+    sys.exit(0)
+data["hook_event_name"] = hook_type
+if slot == "0":
+    data["mop_tool_tracking"] = 1
 try:
     req = urllib.request.Request(
-        f'http://localhost:3100/hooks/slot/{slot}',
+        f"http://localhost:3100/hooks/slot/{slot}",
         data=json.dumps(data).encode(),
-        headers={'Content-Type': 'application/json'},
-        method='POST'
-    )
-    urllib.request.urlopen(req, timeout=3)
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=3) as response:
+        result = json.load(response)
+    if slot == "0" and hook_type == "PreToolUse":
+        if result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
+            print(json.dumps(result))
+        elif result.pop("mop_tool_admitted", False) is True:
+            print(json.dumps(result))
+        else:
+            raise RuntimeError("MoP did not acknowledge admission")
+    elif slot == "0" and hook_type == "UserPromptSubmit":
+        print(json.dumps(result))
 except Exception:
-    pass  # Never block Claude Code — fire and forget
-" "$HOOK_TYPE" 2>/dev/null
-
-exit 0
+    if slot == "0" and hook_type == "PreToolUse":
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny",
+            "permissionDecisionReason": "MoP could not acknowledge PM tool admission; retry after service recovery."
+        }}))
+' "$HOOK_TYPE" 2>/dev/null

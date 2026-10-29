@@ -31,7 +31,7 @@ def environment(tmp_path):
     return base
 
 
-def execute(home, dry, effects, race=None, phase='checkpoint'):
+def execute(home, dry, effects, race=None, phase='checkpoint', soft=False):
     code = SCRIPT.read_text().split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
     code = code.replace("log = Path(f'/tmp/daily-pm-restart-{day}.log')", "log = state_dir / f'daily-pm-restart-{day}.log'")
     (home / '.claude/state').mkdir(parents=True, exist_ok=True)
@@ -56,7 +56,8 @@ def execute(home, dry, effects, race=None, phase='checkpoint'):
                 text += f'\n104 102 0 Tue Oct 27 00:01:00 2026 {cmd}'
             if changed and race == 'tool': text += f'\n101 100 {os.getuid()} Tue Oct 27 00:00:00 2026 running-tool'
             if changed and race == 'birth': text = text.replace('00:00:00','01:00:00')
-        elif argv[:2] == ['tmux','capture-pane']: text = 'Ready\n❯\n'
+        elif argv[:2] == ['tmux','capture-pane']:
+            text = 'Ready\n❯\n' + ('press up to edit queued messages\n' if race == 'cli_queued' else '')
         elif argv[0] == 'python3' and 'stale-process-cleanup' in argv[1]:
             changed = True
             if race == 'completed_work':
@@ -71,7 +72,15 @@ def execute(home, dry, effects, race=None, phase='checkpoint'):
     def url(request, **kwargs):
         if isinstance(request, str):
             if request.endswith('/pm-status'):
-                return io.BytesIO(json.dumps({'pm_busy': phase == 'checkpoint' or race == 'busy', 'queue_count': 1 if race == 'queued' else 0}).encode())
+                status = {'pm_busy': phase == 'checkpoint' or race == 'busy', 'queue_count': 1 if race == 'queued' else 0}
+                if soft:
+                    with sqlite3.connect(home / '.local/share/master-of-panes/data/mop.db') as c:
+                        boot_id = c.execute("SELECT max(id) FROM events WHERE event_type='SessionStart'").fetchone()[0]
+                    status['soft_boundary'] = {'held': race != 'proof_missing', 'stopped': True,
+                        'admission_fenced': race != 'unfenced', 'cli_queue_empty': race != 'cli_proof_missing',
+                        'request': 'fixture-boundary', 'tools_in_flight': 1 if race == 'inflight' else 0,
+                        'boot_id': boot_id, 'session_id': 'other' if race == 'proof_session' else 's'}
+                return io.BytesIO(json.dumps(status).encode())
             if request.endswith('/exit-status'):
                 return io.BytesIO(json.dumps({} if race == 'no_dev_scope' else {'dev_only': False}).encode())
             return io.BytesIO(json.dumps({'slots': [{'slot': 2, 'issue': 12, 'assignment_epoch': 8}]}).encode())
@@ -88,7 +97,8 @@ def execute(home, dry, effects, race=None, phase='checkpoint'):
         assert request.full_url.endswith('/slots/0/send')
         effects.append(['mop-send', request.data.decode()])
         return io.BytesIO(b'{"ok":true}')
-    with patch.dict(os.environ, {'MOP_DB_PATH': str(home / '.local/share/master-of-panes/data/mop.db')}), \
+    with patch.dict(os.environ, {'MOP_DB_PATH': str(home / '.local/share/master-of-panes/data/mop.db'),
+                                'MOP_PM_SOFT_BOUNDARY_REQUEST': 'fixture-boundary' if soft else ''}), \
          patch.object(Path, 'home', return_value=home), patch.object(sys, 'argv', ['restart'] + (['--dry-run'] if dry else ['--complete-on-idle'] if phase == 'idle' else [])), \
          patch('subprocess.run', side_effect=run), patch('os.getpid', return_value=102 if race in ('setuid_ps', 'root_child') else os.getpid()), patch('urllib.request.urlopen', side_effect=url):
         exec(compile(code, str(SCRIPT), 'exec'), {'__name__': '__main__'})
@@ -262,3 +272,33 @@ def test_respawn_409_is_deferred_without_prompt_or_tmux_replacement(tmp_path):
     assert json.loads(saved.read_text())['replacement_status'] == 'deferred_mop_409'
     assert len(replacements(effects)) == 1
     assert not any(e[0] == 'mop-send' or e[:2] == ['tmux','respawn-pane'] for e in effects)
+
+
+def test_soft_boundary_accepts_completed_turns_and_held_queue_without_weakening_effect_pin(tmp_path):
+    environment(tmp_path)
+    effects = []
+    execute(tmp_path, False, effects)
+    stop(tmp_path)
+    with sqlite3.connect(tmp_path / '.local/share/master-of-panes/data/mop.db') as c:
+        c.executemany('INSERT INTO events(slot,event_type,payload) VALUES(0,?,?)',
+            [('UserPromptSubmit','{}'),('PreToolUse','{}'),('PostToolUse','{}'),
+             ('SessionStart','{"session_id":"s","source":"compact"}'),('Stop','{}')])
+    execute(tmp_path, False, effects, 'queued', phase='idle', soft=True)
+    replacement, = replacements(effects)
+    assert json.loads(replacement[1]) == {'continue_session': True, 'pm_soft_boundary_request': 'fixture-boundary'}
+    assert len([e for e in effects if e[0] == 'mop-send']) == 1
+
+
+@pytest.mark.parametrize('race', ['busy', 'tool', 'caller_still_running', 'completed_work', 'successor',
+                                 'proof_missing', 'proof_session', 'inflight', 'cli_queued', 'cli_proof_missing', 'unfenced'])
+def test_soft_boundary_never_overrides_busy_tool_session_or_effect_drift(tmp_path, race):
+    environment(tmp_path)
+    effects = []
+    execute(tmp_path, False, effects)
+    stop(tmp_path)
+    if race == 'successor':
+        execute(tmp_path, False, effects, race, phase='idle', soft=True)
+    else:
+        with pytest.raises(RuntimeError):
+            execute(tmp_path, False, effects, race, phase='idle', soft=True)
+    assert not replacements(effects)

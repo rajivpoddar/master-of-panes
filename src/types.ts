@@ -13,6 +13,7 @@
 export type HookType =
   | "PreToolUse"
   | "PostToolUse"
+  | "PostToolUseFailure"
   | "Notification"
   | "Stop"
   | "UserPromptSubmit"
@@ -28,6 +29,7 @@ export interface HookPayload {
   type: HookType;
   /** The tool that was used (for PreToolUse/PostToolUse) */
   tool_name?: string;
+  tool_use_id?: string;
   /** Tool input parameters */
   tool_input?: Record<string, unknown>;
   /** Tool output (for PostToolUse) */

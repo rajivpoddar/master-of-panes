@@ -46,7 +46,7 @@ class InstallRelayHooksTest(unittest.TestCase):
     def test_mixed_group_keeps_non_mop_commands_and_metadata(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "settings.local.json")
-            mop_old = 'bash "/x/master-of-panes/current/scripts/hook-relay.sh" Stop'
+            mop_old = '/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/scripts/hook-relay.sh Stop'
             orig = {"hooks": {
                 "Stop": [{"matcher": "keep-matcher", "hooks": [
                     {"type": "command", "command": "pm-stop-validator.sh", "timeout": 8},
@@ -63,7 +63,9 @@ class InstallRelayHooksTest(unittest.TestCase):
             stop0 = s1["hooks"]["Stop"][0]
             self.assertEqual(stop0["matcher"], "keep-matcher")
             self.assertEqual(stop0["hooks"], [{"type": "command", "command": "pm-stop-validator.sh", "timeout": 8}])
-            self.assertEqual(s1["hooks"]["PreToolUse"], orig["hooks"]["PreToolUse"])
+            self.assertEqual(s1["hooks"]["PreToolUse"][0], orig["hooks"]["PreToolUse"][0])
+            for ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+                self.assertEqual(sum("hook-relay.sh" in h["command"] for g in s1["hooks"][ev] for h in g["hooks"]), 1)
             ups = [h["command"] for g in s1["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
             self.assertIn("audit.sh", ups)
             self.assertFalse(any("/old/" in c for c in ups))

@@ -397,7 +397,9 @@ test("automated PM injects are durable before async submit and retain both idle/
     assert.equal(relay.injectToPM("idle automated alert", "freeform-idle-failure"), true);
     assert.equal(relay.injectToPMDirect("direct automated alert"), true);
     assert.equal(db.getPendingPMEventCount(), 2);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Join the actual serialized drain, not a 20ms scheduling guess under the
+    // full suite's concurrent filesystem load. Failed rows must stay durable.
+    await relay.drainPMQueue();
     assert.equal(db.getPendingPMEventCount(), 2);
     assert.equal(db.getEvents(0, 20, "pm_queue_delivery_deferred").length >= 1, true);
   } finally {

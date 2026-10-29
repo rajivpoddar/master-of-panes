@@ -99,7 +99,16 @@ def pm_identity(target='0:0.0', require_idle=True):
     """Read-only PM pin: immutable pane/session, process birth and monotonic hook work."""
     with urllib.request.urlopen('http://127.0.0.1:3100/pm-status', timeout=15) as response:
         status = json.load(response)
-    if require_idle and (status.get('pm_busy') is not False or status.get('queue_count') != 0):
+    boundary_request = os.environ.get('MOP_PM_SOFT_BOUNDARY_REQUEST')
+    proof = status.get('soft_boundary') or {}
+    soft_boundary = (bool(boundary_request) and proof.get('request') == boundary_request
+        and proof.get('held') is True and proof.get('stopped') is True
+        and proof.get('admission_fenced') is True and proof.get('cli_queue_empty') is True
+        and proof.get('tools_in_flight') == 0)
+    if boundary_request and not soft_boundary:
+        raise RuntimeError('PM soft-boundary admission fence is no longer authoritative')
+    if require_idle and (status.get('pm_busy') is not False
+            or (status.get('queue_count') != 0 and not soft_boundary)):
         raise RuntimeError('PM busy, queued, or activity unknown; restart deferred')
     fields = subprocess.run(['tmux', 'display-message', '-t', target, '-p',
         '#{pane_id}|#{session_id}|#{pane_pid}|#{pane_current_path}|#{pane_current_command}'],
@@ -142,7 +151,8 @@ def pm_identity(target='0:0.0', require_idle=True):
     capture = subprocess.run(['tmux', 'capture-pane', '-p', '-t', fields[0], '-S', '-15'],
         capture_output=True, text=True, check=True, timeout=5).stdout
     prompts = [line.strip() for line in capture.splitlines() if line.strip().startswith('❯')]
-    if require_idle and (not prompts or prompts[-1] != '❯'):
+    if require_idle and (not prompts or prompts[-1] != '❯'
+            or re.search(r'press\s+up\s+to\s+edit\s+queued\s+messages|ctrl\+x\s+ctrl\+s\s+to\s+send\s+now', capture, re.I)):
         raise RuntimeError('PM composer not proven empty')
     db = Path(os.environ.get('MOP_DB_PATH', str(home / '.local/share/master-of-panes/data/mop.db')))
     with sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True) as connection:
@@ -151,6 +161,9 @@ def pm_identity(target='0:0.0', require_idle=True):
         submit = connection.execute("SELECT max(id) FROM events WHERE slot=0 AND event_type IN ('UserPromptSubmit','pm_status_busy')").fetchone()[0]
     if not boot or not isinstance(work, int) or not isinstance(submit, int):
         raise RuntimeError('PM boot/work history unavailable')
+    if soft_boundary and (proof.get('boot_id') != boot[0]
+            or proof.get('session_id') != json.loads(boot[1]).get('session_id')):
+        raise RuntimeError('PM soft-boundary session changed')
     return {'pane': fields[0], 'session': fields[1], 'pid': fields[2], 'birth': birth,
             'checkout': fields[3], 'command': fields[4], 'boot': list(boot), 'work': work, 'submit': submit}
 
@@ -198,7 +211,18 @@ def resume_on_idle(saved):
     own_return = (len(completions) == 1 and completion.get('tool_name') == 'Bash'
         and 'daily-pm-restart.sh' in str((completion.get('tool_input') or {}).get('command', ''))
         and isinstance(stopped, int) and stopped > completions[0][0])
-    if owner(pin) != owner(requested) or later_work or not own_return:
+    soft_boundary = bool(os.environ.get('MOP_PM_SOFT_BOUNDARY_REQUEST'))
+    # Completed intervening turns are allowed ONLY under MoP's current,
+    # session-bound tool/admission fence. The effect pin below still includes
+    # submit/work and is rechecked at every existing irreversible boundary.
+    def checkpoint_owner(value):
+        result = {k: v for k, v in owner(value).items() if not (soft_boundary and k == 'submit')}
+        if soft_boundary:
+            # Auto-compaction emits SessionStart with the SAME session id.
+            # It is not a successor process; birth/pane/pid remain pinned.
+            result['boot'] = json.loads(value['boot'][1]).get('session_id')
+        return result
+    if checkpoint_owner(pin) != checkpoint_owner(requested) or (not soft_boundary and (later_work or not own_return)):
         saved['handoff_status'] = 'refused_successor_or_work'
         atomic(state, json.dumps(saved))
         emit('REFUSED: checkpoint owner or productive work changed before idle handoff')
@@ -223,7 +247,10 @@ def resume_on_idle(saved):
     # Rajiv 2026-10-28 D0AMF0XE6TS ts 1793164925.956469: "pm pane is supposed to restart through MoP".
     # MoP owns the replacement: idle-gated /exit, RESTART_COMMANDS[0] (launch-pm-cliproxy.sh --continue),
     # boot wait, generic "continue". Never tmux respawn-pane the PM directly.
-    respawn = urllib.request.Request('http://127.0.0.1:3100/slots/0/respawn', data=b'{"continue_session":true}',
+    respawn_body = {'continue_session': True}
+    if soft_boundary:
+        respawn_body['pm_soft_boundary_request'] = os.environ['MOP_PM_SOFT_BOUNDARY_REQUEST']
+    respawn = urllib.request.Request('http://127.0.0.1:3100/slots/0/respawn', data=json.dumps(respawn_body).encode(),
         headers={'Content-Type': 'application/json'}, method='POST')
     try:
         with urllib.request.urlopen(respawn, timeout=280) as response:
@@ -324,6 +351,7 @@ def perform():
     if owner(pm_identity(pin['pane'], require_idle=False)) != owner(pin):
         raise RuntimeError('PM owner changed while checkpointing')
     saved['request_identity'] = pin
+    saved['requested_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
     saved['continuation_prompt'] = prompt
     saved['handoff_status'] = 'pending'
     atomic(state, json.dumps(saved))

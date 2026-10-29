@@ -19,6 +19,7 @@
  * pending for the next tick. Uncertain attempted effects remain recorded and
  * cannot fire again; legacy requests without pinned identity stay pending.
  */
+import { maintenanceComposerMatches } from "./composer.js";
 import type { Hono } from "hono";
 
 import type { MoPDatabase } from "./db.js";
@@ -172,7 +173,37 @@ export async function deliverRespawnExit(args: {
   pane: PaneIdentitySnapshot;
   request?: RespawnWhenIdleRequest;
   beforeEffect: () => string | null;
+  /** PM has no dev-slot row: its caller must supply the hook-bound authority. */
+  pmMaintenanceFence?: () => string | null;
 }) {
+  if (args.slot === 0) {
+    const fence = args.pmMaintenanceFence;
+    if (!fence) return { outcome: "refused_pre_effect" as const, reason: "pm_maintenance_unbound", paneId: args.pane.paneId };
+    let marked = false;
+    return args.relay.deliverGuardedToSlot(0, "/exit", {
+      expectedPaneId: args.pane.paneId,
+      recheck: async (stage, capture) => {
+        const early = fence();
+        if (early) return early;
+        const identity = await args.verifyPaneIdentity(0);
+        if (!identity.ok || identity.snapshot.paneId !== args.pane.paneId
+            || identity.snapshot.currentPath !== args.pane.currentPath) return "pane_identity_mismatch";
+        if (await args.relay.getSlotActivityState(0, args.pane.paneId) !== "idle") return "pane_not_idle";
+        if (!maintenanceComposerMatches(await capture(), stage === "pre_enter" ? "/exit" : "")) return "pm_cli_queue_not_empty";
+        return fence();
+      },
+      finalCheck: stage => {
+        const refusal = fence();
+        if (refusal) return refusal;
+        if (stage === "pre_paste" && !marked) {
+          const refusal = args.beforeEffect();
+          if (refusal) return refusal;
+          marked = true;
+        }
+        return null;
+      },
+    });
+  }
   const row = args.db.getSlot(args.slot);
   const request = args.request ?? (row ? captureRequest(args.db, row, args.pane, "direct", true) : null);
   if (!request || request.slot !== args.slot || request.pane_id !== args.pane.paneId) {

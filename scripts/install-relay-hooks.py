@@ -18,7 +18,7 @@ import stat
 
 PLUGIN = "master-of-panes@rajiv-plugins"
 DEFAULT_SCRIPTS = os.path.expanduser("~/.local/share/master-of-panes/current/scripts")
-RELAY_EVENTS = ["UserPromptSubmit", "Stop", "PostToolUse", "Notification", "SessionStart"]
+RELAY_EVENTS = ["UserPromptSubmit", "Stop", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Notification", "SessionStart"]
 MARK = "master-of-panes/current/scripts/"
 
 
@@ -37,7 +37,10 @@ def desired_hooks(scripts_dir):
 
 
 def is_mop_command(cmd, scripts_dir):
-    return scripts_dir in cmd or MARK in cmd
+    legacy = "/.claude/plugins/cache/rajiv-plugins/master-of-panes/" in cmd and any(
+        name in cmd for name in ("/scripts/hook-relay.sh", "/scripts/update-pane-state.sh")
+    )
+    return scripts_dir in cmd or MARK in cmd or legacy
 
 
 def apply(settings, scripts_dir):

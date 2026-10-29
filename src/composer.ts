@@ -84,6 +84,14 @@ export function composerText(snapshot: string | null | undefined): string | null
   return null;
 }
 
+/** Maintenance must not treat Claude's empty-looking queued-input placeholder
+ * as an empty queue. Unknown layouts fail closed; own pasted slash text is
+ * permitted only at the writer's pre-Enter recheck.
+ */
+export function maintenanceComposerMatches(snapshot: string | null | undefined, expected = ""): boolean {
+  return !!snapshot && !QUEUED_HINT.test(snapshot) && composerText(snapshot) === expected;
+}
+
 function squash(text: string): string {
   return text.replace(/\s+/g, "");
 }
