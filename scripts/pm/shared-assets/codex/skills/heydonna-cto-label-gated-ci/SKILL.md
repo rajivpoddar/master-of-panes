@@ -23,8 +23,13 @@ use it or add `ci-head:<full-head>` for confirmed site-only scope; use the
 existing exact-head site-proof path instead. Making executable admission
 scope-aware is a separate follow-up, not a reason to delay this policy.
 
-1. For a UI change, inspect its exact live head and require a PASS from the
-   versioned visual-proof gate before requesting admission. Run:
+1. For a NEW or MOVED UI change (placement/layout/shell) or a visual-only change no
+   test can assert, inspect its exact live head and require a PASS from the
+   versioned visual-proof gate before requesting admission. Any other behavior
+   change with `Visual proof: WAIVED — covered by <test file::cases>` and exact-head
+   integration/unit tests through the real control point needs NO visual gate
+   (Rajiv 2026-10-29, C0ALZJHGE49 thread 1793275486.848389, ts 1793295441.005939 /
+   1793295548.599969 / 1793295657.837009; buddhi S106). Run (UI-gated cases only):
 
    ```bash
    python3 /Users/rajiv/.claude/scripts/qa-visual-proof-gate.py --pr PR --repo heydonna-app/heydonna-app --expect-head FULL_HEAD --json

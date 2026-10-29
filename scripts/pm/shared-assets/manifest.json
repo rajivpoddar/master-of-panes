@@ -890,7 +890,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-direct-assign",
-      "sha256": "89e8509bda61db917063c5610b79837b40b29658253bd2fc9997188fb33483ef",
+      "sha256": "532219c986305ceafc28bad65eb7d70718bca72f9620528eaf8948735f4cc6b5",
       "source_path": "claude/skills/direct-assign/SKILL.md"
     },
     {
@@ -1476,7 +1476,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "c0d2e88e2bc7e0f7d1fc2f7ac8406163380fb9074faccabaab6f1e66ff2de68e",
+      "sha256": "8b6f74e703b8c8d5a478e2981b55950575f6e0a55f4c80c79f2d0e5468d454fa",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
     },
     {
@@ -1503,7 +1503,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "bdf029a0a7214a4ec445872173874b0fac151246a8d6fa899d47bd0389ee25cc",
+      "sha256": "b993067bcf5946662ff6dd308bb14174e59529a2479a3d327ed2f75e8386a54c",
       "source_path": "codex/skills/heydonna-cto-pr-merge/SKILL.md"
     },
     {

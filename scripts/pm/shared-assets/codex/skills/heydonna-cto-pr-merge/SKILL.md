@@ -216,6 +216,19 @@ using one reusable sibling/layout comparison, no paid tests or browser session.
 Remove this standalone wording if an equivalent canonical visual checklist
 fully subsumes it; never run duplicate checks.
 
+**Waiver scope (Rajiv 2026-10-29, C0ALZJHGE49 thread 1793275486.848389,
+ts 1793295441.005939 "visual proof can be waived off if integration tests
+cover the scenario"; scope confirmed ts 1793295548.599969; extended to this
+skill at ts 1793295657.837009; buddhi S106).** The Slack screenshot gate above
+applies ONLY to NEW or MOVED UI (placement/layout, shell) or a visual-only
+change that no test can assert. For any other behavior change, the PR records
+`Visual proof: WAIVED — covered by <test file::cases>`. When exact-head
+integration/unit tests exercise that scenario through its real control point,
+record `VISUAL_WAIVED_TESTS` with the named tests and do NOT block merge for
+missing screenshots or a ProofShot video. Ernest tests it after merge. A
+WAIVED line on a change that does add or move UI is not a valid waiver; the
+gate above still applies.
+
 When no user-visible UI/layout change exists, record `VISUAL_NOT_APPLICABLE`
 with the actual changed-path/behavior reason. Do not require decorative
 screenshots for backend, workflow or test-only work. DOCX/Word/PDF artifact

@@ -217,7 +217,8 @@ delivery. Keep it in sync with the MoP-side dispatch/handoff template.
 
 
 ### Screenshots use Skill(remote-editor-screenshots) (Rajiv 2026-10-22, DM D0AMF0XE6TS thread 1792665412.130339, ts 1792665956.402069)
-Every new_issue/rework task with a visual/UI AC MUST carry this line verbatim:
+Scope (Rajiv 2026-10-29, C0ALZJHGE49 thread 1793275486.848389, ts 1793295548.599969, S106): this applies only to ACs that add or MOVE UI, or a visual-only change no test can assert. For any other behavior change, exact-head integration/unit tests through the real control point replace screenshots: the PR records `Visual proof: WAIVED — covered by <test file::cases>`, and the slot never waits on a remote browser box.
+Every new_issue/rework task with such a new/moved-UI AC MUST carry this line verbatim:
 
 ```text
 Screenshots: use Skill(remote-editor-screenshots): remote-browser-box.sh capture --requires-modal (+ --capture --synthetic-data-only when processing), seeded "[Test] E2E Seed - Medium Deposition (Frazier)" or a new UI project with job sheet + MP3, wait-ready on the box, exact-head 1440x900. "Visual proof NOT VIABLE" only after one correct logged attempt hits a concrete blocker.
