@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Direct Claude hooks for MoP. PM PreToolUse is an admission handshake, not
-# fire-and-forget: no acknowledged tracking means no admitted PM tool.
+# Direct Claude hooks for MoP. Honor explicit PM admission denials, but fail
+# open on transport/protocol failures so recovery tools remain available.
 set -euo pipefail
 HOOK_TYPE="${1:-}"
 [ -z "$HOOK_TYPE" ] && exit 0
@@ -39,9 +39,7 @@ try:
     elif slot == "0" and hook_type == "UserPromptSubmit":
         print(json.dumps(result))
 except Exception:
-    if slot == "0" and hook_type == "PreToolUse":
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse", "permissionDecision": "deny",
-            "permissionDecisionReason": "MoP could not acknowledge PM tool admission; retry after service recovery."
-        }}))
+    # Admission tracking is best effort when MoP cannot acknowledge. Never
+    # turn a service outage into a session-wide lockout of recovery tools.
+    pass
 ' "$HOOK_TYPE" 2>/dev/null

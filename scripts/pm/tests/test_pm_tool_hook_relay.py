@@ -35,10 +35,17 @@ def test_pm_admission_requires_positive_server_acknowledgement():
     assert sent[0]['tool_use_id'] == 'tool-1' and sent[0]['mop_tool_tracking'] == 1
 
 
+@pytest.mark.parametrize('tool_name', ['Read', 'Bash', 'Edit', 'Agent'])
 @pytest.mark.parametrize('fail', [False, True])
-def test_missing_ack_or_network_error_denies_pm_tool(fail):
-    response, _ = relay('PreToolUse', {}, fail=fail)
-    assert response['hookSpecificOutput']['permissionDecision'] == 'deny'
+def test_missing_ack_or_network_error_keeps_pm_recovery_tools_available(fail, tool_name):
+    response, sent = relay('PreToolUse', {}, fail=fail, tool_name=tool_name)
+    assert response is None
+    assert sent[0]['mop_tool_tracking'] == 1
+
+
+@pytest.mark.parametrize('reply', [[], 'invalid', {'hookSpecificOutput': None}])
+def test_malformed_admission_response_fails_open(reply):
+    assert relay('PreToolUse', reply)[0] is None
 
 
 def test_maintenance_denial_and_retained_prompt_are_returned_to_claude():
