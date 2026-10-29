@@ -272,3 +272,79 @@ test("PM respawn uses hook authority without a dev row and rejects CLI queue at 
     }
   } finally { f.close(); }
 });
+
+test("fresh PM resume recovers a finished uncertain clear without resending or deleting retained input", async () => {
+  const f = fixture();
+  try {
+    const requestedAt = new Date().toISOString();
+    const request = `clear:${Date.parse(requestedAt)}`;
+    f.db.setPendingClear(0);
+    f.db.setConfig("pm_clear_requested_at", requestedAt);
+    f.db.setConfig("pm_clear_delivery_state", "uncertain");
+    f.db.setConfig("pm_soft_boundary_v1", JSON.stringify({ boot: f.boot, session: "pm",
+      tools: [], stopped: true, request, effect: false, fenced: true }));
+    f.db.enqueuePendingPMEvent(0, "maintenance-input-human", "retained human question");
+    f.db.enqueuePendingPMEvent(0, "maintenance-input-agent", "retained agent message");
+    const retained = f.db.peekPendingPMEvents();
+    const commands: string[] = [];
+    const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: async command => {
+      commands.push(command); throw new Error("recovery must not touch tmux");
+    } });
+    relay.setDatabase(f.db);
+    const app = new Hono();
+    const boundary = registerPMSoftBoundary(app, f.db, relay);
+    app.post("/hooks/slot/0", async c => {
+      const raw = await c.req.json();
+      if (raw.hook_event_name === "SessionStart") f.db.logEvent(0, "SessionStart", "SessionStart", null, raw);
+      return c.json({});
+    });
+    const post = async (event: string, extra = {}) => (await app.request("/hooks/slot/0", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hook_event_name: event, session_id: "pm", mop_tool_tracking: 1, ...extra }),
+    })).json();
+    assert.equal(boundary.isHeld(), true);
+    assert.equal(boundary.isDailyRestartReady(), false, "a clear claim must not launch the daily restart helper");
+    await post("SessionStart", { source: "resume" });
+    assert.equal(boundary.isHeld(), false);
+    assert.equal(boundary.isSafe(), false, "a new session is not proof of idle");
+    assert.equal(relay.isPMBusy(), true, "recovery must not schedule a queue replay");
+    assert.deepEqual(await post("UserPromptSubmit", { prompt: "new human question" }), {});
+    assert.equal((await post("PreToolUse", { tool_use_id: "new-work" })).mop_tool_admitted, true);
+    assert.deepEqual(f.db.peekPendingPMEvents(), retained);
+    assert.equal(f.db.hasPendingClear(0), true);
+    assert.equal(f.db.getConfig("pm_clear_requested_at"), requestedAt);
+    assert.equal(f.db.getConfig("pm_clear_delivery_state"), "uncertain");
+    assert.deepEqual(commands, []);
+    assert.equal(f.db.getEvents(0, 10, "slot_cleared").length, 0);
+  } finally { f.close(); }
+});
+
+test("daily restart handoff remains eligible only for its own safe claim", () => {
+  const f = fixture();
+  try {
+    assert.equal(f.boundary.isDailyRestartReady(), false);
+    f.observe("Stop");
+    assert.equal(f.boundary.isDailyRestartReady(), true);
+    f.boundary.deferCLIInput();
+    assert.equal(f.boundary.isDailyRestartReady(), false);
+  } finally { f.close(); }
+});
+
+test("clear recovery refuses active, unknown, changed-request, compact and respawn-effect claims", () => {
+  for (const scenario of ["sending", "awaiting_ack", "deferred_busy", "unknown", "changed-request", "compact", "respawn-effect", "same-boot"]) {
+    const f = fixture();
+    try {
+      const requestedAt = new Date().toISOString();
+      f.db.setPendingClear(0);
+      f.db.setConfig("pm_clear_requested_at", requestedAt);
+      f.db.setConfig("pm_clear_delivery_state", ["changed-request", "compact", "respawn-effect", "same-boot"].includes(scenario) ? "uncertain" : scenario);
+      f.db.setConfig("pm_soft_boundary_v1", JSON.stringify({ boot: f.boot, session: "pm",
+        tools: [], stopped: true, request: `clear:${Date.parse(requestedAt) + (scenario === "changed-request" ? 1 : 0)}`,
+        effect: scenario === "respawn-effect", fenced: true }));
+      const boundary = new PMSoftBoundary(f.db, () => null);
+      if (scenario !== "same-boot") f.db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "pm" });
+      boundary.sessionStarted(scenario === "compact" ? "compact" : "resume");
+      assert.equal(boundary.isHeld(), true, scenario);
+    } finally { f.close(); }
+  }
+});

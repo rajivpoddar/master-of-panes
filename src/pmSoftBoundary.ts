@@ -41,6 +41,9 @@ export class PMSoftBoundary {
   }
   isHeld(): boolean { return this.state.request !== null; }
   isAdmissionFenced(): boolean { return this.isHeld() && this.state.fenced; }
+  isDailyRestartReady(): boolean {
+    return this.state.request?.startsWith("daily:") === true && this.isSafe();
+  }
   deferCLIInput(): void {
     if (this.state.effect) return;
     this.state.fenced = false;
@@ -114,6 +117,20 @@ export class PMSoftBoundary {
       this.state.boot = boot.id;
       this.state.stopped = false;
       this.save();
+      return;
+    }
+    // A fresh CLI boot has no composer from the abandoned writer. Release only
+    // its admission reservation, never its consumed/uncertain clear receipt.
+    // Active writes, compaction and attempted respawns still require their ack.
+    const clearRequest = `clear:${Date.parse(this.db.getConfig("pm_clear_requested_at") || "")}`;
+    if ((source === "startup" || source === "resume") && !this.state.effect
+        && this.state.tools.length === 0 && this.state.request === clearRequest
+        && this.db.getConfig("pm_clear_delivery_state") === "uncertain") {
+      this.state = { boot: boot.id, session: boot.session, tools: [], stopped: false, request: null, effect: false, fenced: false };
+      this.save();
+      this.db.logEvent(0, "pm_maintenance_admission_recovered", "SessionStart", null, {
+        request: clearRequest, source, reason: "fresh_boot_after_uncertain_clear", clear_receipt: "preserved",
+      });
       return;
     }
     // A respawn keeps the fence through its full guarded response. A /clear
@@ -192,7 +209,7 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     if (raw.hook_event_name === "SessionStart") {
       const wasHeld = boundary.isHeld();
       boundary.sessionStarted(raw.source);
-      if (wasHeld && !boundary.isHeld()) relay.setPMBusy(false);
+      if (wasHeld && !boundary.isHeld()) relay.setPMBusy(raw.source !== "clear");
     }
     if (raw.hook_event_name === "Stop" && boundary.isHeld() && boundary.isSafe()) {
       if (await relay.isPMComposerQueueEmpty() && boundary.isSafe()) relay.setPMBusy(false);

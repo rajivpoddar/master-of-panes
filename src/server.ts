@@ -128,7 +128,7 @@ const relay = new TmuxRelay(config, { pmIdleHandoff: async () => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  if (!pmSoftBoundary.isHeld() || !pmSoftBoundary.isSafe()) return;
+  if (!pmSoftBoundary.isDailyRestartReady()) return;
   // MoP's child, outside the target Claude tree. No detached PM descendant,
   // timer, new service or polling worker owns this continuation.
   await new Promise<void>((done, reject) => execFile("/bin/bash",
