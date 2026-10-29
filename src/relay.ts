@@ -294,10 +294,10 @@ export class TmuxRelay {
     this.pmIdleHandoff = deps.pmIdleHandoff;
   }
 
-  private pmMaintenanceGate?: { isHeld(): boolean; isSafe(): boolean; deferCLIInput(): void };
+  private pmMaintenanceGate?: { isHeld(): boolean; isSafe(): boolean; deferCLIInput(): void; isRespawnInProgress?(): boolean };
   private pmMaintenanceHandoffInFlight = false;
 
-  setPMMaintenanceGate(gate: { isHeld(): boolean; isSafe(): boolean; deferCLIInput(): void }): void {
+  setPMMaintenanceGate(gate: { isHeld(): boolean; isSafe(): boolean; deferCLIInput(): void; isRespawnInProgress?(): boolean }): void {
     this.pmMaintenanceGate = gate;
   }
 
@@ -796,7 +796,14 @@ export class TmuxRelay {
     paneId: string;
     check: () => PMClearFenceRefusal | null;
   }): Promise<PMClearWriteResult> {
-    const run = (): Promise<PMClearWriteResult> => this.writePMClearFencedNow(fence);
+    const run = (): Promise<PMClearWriteResult> => withSlotSendLock(0, () => this.writePMClearFencedNow({
+      ...fence,
+      // Respawn retains its existing ownership between /exit and launch, when
+      // the pane and hook session may still look unchanged. Never splice a
+      // clear into that replacement window, including after waiting for the lock.
+      check: () => fence.check() ?? (this.pmMaintenanceGate?.isRespawnInProgress?.()
+        ? { reason: "pm_respawn_in_progress", busy: true } : null),
+    }));
     const result = this.directInjectChain.then(run, run);
     this.directInjectChain = result.then(() => undefined, () => undefined);
     return result;

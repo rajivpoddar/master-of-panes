@@ -41,6 +41,8 @@ export class PMSoftBoundary {
     catch { return { id: 0, session: "" }; }
   }
   isHeld(): boolean { return this.state.request !== null; }
+  /** Existing respawn ownership spans /exit, the shell wait and launch. */
+  isRespawnInProgress(): boolean { return this.state.effect; }
   isAdmissionFenced(): boolean { return this.isHeld() && this.state.fenced; }
   isDailyRestartReady(): boolean {
     return this.state.request?.startsWith("daily:") === true && this.isSafe();
