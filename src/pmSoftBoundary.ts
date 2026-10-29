@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +15,7 @@ type Pending = { key: string; requestedAt: number; boot: number; kind: "daily" |
 
 /** Session-bound hook accounting. Admission and Stop claiming are synchronous:
  * no await may separate the empty-tool check from closing tool admission.
- * Persisting the claim also keeps the inbound queue held across a MoP restart.
+ * The claim fences maintenance effects, never inbound message delivery.
  */
 export class PMSoftBoundary {
   private state: State;
@@ -69,6 +68,12 @@ export class PMSoftBoundary {
     if (!session || session !== boot.session || !boot.id) {
       return type === "PreToolUse" ? "PM tool session is not the current observed session." : null;
     }
+    if (type === "UserPromptSubmit") {
+      // Human input takes priority over an unexecuted maintenance claim. The
+      // native CLI owns busy-turn delivery; MoP must not retain/block it.
+      this.deferCLIInput();
+      return null;
+    }
     if (this.state.boot !== boot.id) {
       if (this.state.session === session && !this.state.effect) {
         // Compaction keeps the session and its outstanding tool identities.
@@ -76,8 +81,8 @@ export class PMSoftBoundary {
         this.state.stopped = false;
       } else {
         if (this.isHeld()) {
-          return type === "PreToolUse" || type === "UserPromptSubmit"
-            ? "PM maintenance is awaiting acknowledgement; inbound input is retained." : null;
+          return type === "PreToolUse"
+            ? "PM maintenance is awaiting acknowledgement." : null;
         }
         this.state = { boot: boot.id, session, tools: [], stopped: false, request: null, effect: false, fenced: false };
       }
@@ -90,9 +95,6 @@ export class PMSoftBoundary {
       if (!this.state.tools.includes(id)) this.state.tools.push(id);
     } else if (type === "PostToolUse" || type === "PostToolUseFailure") {
       if (id) this.state.tools = this.state.tools.filter(tool => tool !== id);
-    } else if (type === "UserPromptSubmit") {
-      if (this.isAdmissionFenced()) return "PM maintenance is pending; this message is retained for replay.";
-      this.state.stopped = false;
     } else if (type === "Stop" && raw.mop_tool_tracking === 1) {
       this.state.stopped = this.state.tools.length === 0;
       const pending = this.pending();
@@ -187,11 +189,6 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     try { raw = await c.req.raw.clone().json(); } catch { return next(); }
     const refusal = boundary.observe(raw);
     if (refusal) {
-      if (raw.hook_event_name === "UserPromptSubmit" && typeof raw.prompt === "string" && raw.prompt) {
-        const key = createHash("sha256").update(JSON.stringify([raw.session_id, raw.prompt])).digest("hex");
-        db.enqueuePendingPMEvent(0, `maintenance-input-${key}`, raw.prompt);
-        return c.json({ decision: "block", reason: refusal });
-      }
       return c.json({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: refusal } });
     }
     if (raw.hook_event_name === "PreToolUse") relay.setPMBusy(true);
