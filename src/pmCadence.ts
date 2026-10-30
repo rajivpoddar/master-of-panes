@@ -21,7 +21,7 @@ import { join } from "node:path";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 
-export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat" | "growth-daily" | "lifecycle-email" | "daily-pm-restart";
+export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat" | "growth-daily" | "lifecycle-email" | "daily-pm-restart" | "rtb-split-update";
 export type PMCadenceTriggerReason = "scheduled" | "manual" | "boot";
 
 type PMCadenceTask = {
@@ -55,6 +55,15 @@ const MORNING_BRIEF_TASK: PMCadenceTask = {
   commandDescription:
     "MoP: morning brief due\n\n" +
     "Invoke Skill(morning-brief) now. Launch the morning-brief background agent with run_in_background=true; the agent owns evidence gathering and Slack posting. Do not run /morning-brief inline.",
+};
+
+// Rajiv C0ALZJHGE49 thread 1793299570.404429: every 30 minutes until stopped.
+// Normal PM prompt via the hourly-heartbeat delivery path, never a slash command.
+const RTB_SPLIT_UPDATE_TASK: PMCadenceTask = {
+  name: "rtb-split-update",
+  label: "remote-box split update (:13/:43 local)",
+  configPrefix: "pm_cadence_rtb_split_update",
+  commandDescription: "MoP: post the 30-min remote-box split update to C0ALZJHGE49 thread 1793299570.404429 via a bg agent: RTB candidate state, pool usage, cx33 status, next step.",
 };
 
 const HOURLY_HEARTBEAT_TASK: PMCadenceTask = {
@@ -129,6 +138,7 @@ const TASKS: Record<PMCadenceTaskName, PMCadenceTask> = {
   heartbeat: HEARTBEAT_TASK,
   "morning-brief": MORNING_BRIEF_TASK,
   "hourly-heartbeat": HOURLY_HEARTBEAT_TASK,
+  "rtb-split-update": RTB_SPLIT_UPDATE_TASK,
   "growth-daily": GROWTH_DAILY_TASK,
   "lifecycle-email": LIFECYCLE_EMAIL_TASK,
   "daily-pm-restart": DAILY_PM_RESTART_TASK,
@@ -160,6 +170,14 @@ export function hourlyHeartbeatDueKey(now: Date): string {
 
 export function isHourlyHeartbeatWindow(now: Date): boolean {
   return now.getMinutes() >= HOURLY_HEARTBEAT_MINUTE;
+}
+
+function rtbSplitUpdateDueKey(now: Date): string {
+  // Shift the half-hour buckets by 13 minutes; before :13 belongs to the
+  // previous hour's :43 occurrence (including across local midnight).
+  const shifted = new Date(now.getTime() - 13 * 60 * 1000);
+  const minute = Math.floor(shifted.getMinutes() / 30) * 30 + 13;
+  return `${localDayKey(shifted)}:${pad2(shifted.getHours())}:${pad2(minute)}`;
 }
 
 function morningBriefDueKey(now: Date): string {
@@ -246,6 +264,8 @@ export class PMCadenceScheduler {
       if (morningBrief) results.push(morningBrief);
       const hourly = await this.runIfDue("hourly-heartbeat", reason);
       if (hourly) results.push(hourly);
+      const rtb = await this.runIfDue("rtb-split-update", reason);
+      if (rtb) results.push(rtb);
       const growth = await this.runIfDue("growth-daily", reason);
       if (growth) results.push(growth);
       const lifecycle = await this.runIfDue("lifecycle-email", reason);
@@ -326,7 +346,7 @@ export class PMCadenceScheduler {
     const now = new Date();
     const dueKey = this.currentDueKey(taskName, now);
     const lastDueKey = this.db.getConfig(configKey(task, "last_due_key"));
-    if (lastDueKey === null && reason !== "manual" && (taskName === "heartbeat" || taskName === "hourly-heartbeat")) {
+    if (lastDueKey === null && reason !== "manual" && (taskName === "heartbeat" || taskName === "hourly-heartbeat" || taskName === "rtb-split-update")) {
       // Hourly: a startup before :13 must not suppress this hour's :13 run. Seed a
       // pre-window marker that differs from the hour's due key so :13 still fires.
       const seedKey = taskName === "hourly-heartbeat" && !isHourlyHeartbeatWindow(now) ? `${dueKey}:pre` : dueKey;
@@ -440,6 +460,7 @@ export class PMCadenceScheduler {
   }
 
   private currentDueKey(taskName: PMCadenceTaskName, now = new Date()): string {
+    if (taskName === "rtb-split-update") return rtbSplitUpdateDueKey(now);
     if (taskName === "daily-pm-restart") return dailyPMRestartParts(now).day;
     if (taskName === "lifecycle-email") return lifecycleEmailParts(now).day;
     if (taskName === "heartbeat") return heartbeatDueKey(now);
@@ -449,6 +470,7 @@ export class PMCadenceScheduler {
   }
 
   private isTaskDue(taskName: PMCadenceTaskName, now: Date, lastDueKey: string | null): boolean {
+    if (taskName === "rtb-split-update") return rtbSplitUpdateDueKey(now) !== lastDueKey;
     if (taskName === "daily-pm-restart") {
       return isDailyPMRestartWindow(now) && dailyPMRestartParts(now).day !== lastDueKey;
     }

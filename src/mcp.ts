@@ -830,7 +830,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "mop_pm_cadence_run",
     "Manually inject one MoP-owned PM cadence task now. Use for operator recovery; scheduled ticks are owned by MoP and persisted by due bucket/day.",
     {
-      task: z.enum(["heartbeat", "morning-brief", "hourly-heartbeat", "growth-daily", "lifecycle-email", "daily-pm-restart"]).describe("Which PM cadence task to inject now"),
+      task: z.enum(["heartbeat", "morning-brief", "hourly-heartbeat", "growth-daily", "lifecycle-email", "daily-pm-restart", "rtb-split-update"]).describe("Which PM cadence task to inject now"),
     },
     async ({ task }) => {
       try {
@@ -863,7 +863,7 @@ export async function startMcpServer(config: MoPConfig): Promise<void> {
     "Pause or resume MoP-owned PM cadence injection. Pause globally or for just heartbeat/morning-brief; persisted in MoP SQLite config.",
     {
       paused: z.boolean().describe("true = pause, false = resume"),
-      task: z.enum(["heartbeat", "morning-brief", "hourly-heartbeat", "growth-daily", "lifecycle-email", "daily-pm-restart"]).optional().describe("Optional specific task. Omit to pause/resume all PM cadence tasks."),
+      task: z.enum(["heartbeat", "morning-brief", "hourly-heartbeat", "growth-daily", "lifecycle-email", "daily-pm-restart", "rtb-split-update"]).optional().describe("Optional specific task. Omit to pause/resume all PM cadence tasks."),
     },
     async ({ paused, task }) => {
       try {

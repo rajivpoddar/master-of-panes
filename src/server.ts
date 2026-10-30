@@ -1063,8 +1063,8 @@ app.post("/pm-cadence/run", async (c) => {
   } catch {
     return c.json({ success: false, error: "Body must be JSON: { task: 'heartbeat'|'morning-brief' }" }, 400);
   }
-  if (body.task !== "heartbeat" && body.task !== "morning-brief" && body.task !== "hourly-heartbeat" && body.task !== "growth-daily" && body.task !== "lifecycle-email" && body.task !== "daily-pm-restart") {
-    return c.json({ success: false, error: "task must be 'heartbeat', 'morning-brief', 'hourly-heartbeat', 'growth-daily', 'lifecycle-email' or 'daily-pm-restart'" }, 400);
+  if (body.task !== "heartbeat" && body.task !== "morning-brief" && body.task !== "hourly-heartbeat" && body.task !== "growth-daily" && body.task !== "lifecycle-email" && body.task !== "daily-pm-restart" && body.task !== "rtb-split-update") {
+    return c.json({ success: false, error: "task must be 'heartbeat', 'morning-brief', 'hourly-heartbeat', 'growth-daily', 'lifecycle-email', 'daily-pm-restart' or 'rtb-split-update'" }, 400);
   }
   const result = await pmCadenceScheduler.runManual(body.task);
   return c.json({ success: true, result, status: pmCadenceScheduler.getStatus() });
@@ -1080,8 +1080,8 @@ app.post("/pm-cadence/pause", async (c) => {
   if (typeof body.paused !== "boolean") {
     return c.json({ success: false, error: "paused must be boolean" }, 400);
   }
-  if (body.task !== undefined && body.task !== "heartbeat" && body.task !== "morning-brief" && body.task !== "hourly-heartbeat" && body.task !== "growth-daily" && body.task !== "lifecycle-email" && body.task !== "daily-pm-restart") {
-    return c.json({ success: false, error: "task must be 'heartbeat', 'morning-brief', 'hourly-heartbeat', 'growth-daily', 'lifecycle-email' or 'daily-pm-restart' when provided" }, 400);
+  if (body.task !== undefined && body.task !== "heartbeat" && body.task !== "morning-brief" && body.task !== "hourly-heartbeat" && body.task !== "growth-daily" && body.task !== "lifecycle-email" && body.task !== "daily-pm-restart" && body.task !== "rtb-split-update") {
+    return c.json({ success: false, error: "task must be 'heartbeat', 'morning-brief', 'hourly-heartbeat', 'growth-daily', 'lifecycle-email', 'daily-pm-restart' or 'rtb-split-update' when provided" }, 400);
   }
   pmCadenceScheduler.setPaused(body.paused, body.task);
   return c.json({ success: true, status: pmCadenceScheduler.getStatus() });
