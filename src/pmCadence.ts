@@ -422,7 +422,11 @@ export class PMCadenceScheduler {
     const ts = new Date().toISOString();
     if (injected) {
       this.db.setConfig(configKey(task, "last_due_key"), dueKey);
-      armDeliveryVerification(this.db, taskName, dueKey, ts);
+      // The durable relay journal already owns this occurrence's replay
+      // decision. Do not arm a second, raw transcript-based submit path.
+      if (!this.db.hasPMQueueDelivery(0, eventType, message)) {
+        armDeliveryVerification(this.db, taskName, dueKey, ts);
+      }
     }
     this.db.setConfig(configKey(task, "last_run_ts"), ts);
     this.db.setConfig(configKey(task, "last_run_reason"), reason);

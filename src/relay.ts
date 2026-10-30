@@ -736,7 +736,10 @@ export class TmuxRelay {
    */
   async submitToPM(message: string, eventTypeOverride?: string): Promise<PMSubmitResult> {
     this.pmMaintenanceGate?.deferCLIInput();
-    if (this.pmRuntime === "claude") {
+    // Cadence has an exact durable event identity. Native Claude must use the
+    // same attempt journal as queue drains, not the ordinary inbound fast path.
+    const durableCadence = eventTypeOverride?.startsWith("cadence-") === true;
+    if (this.pmRuntime === "claude" && !durableCadence) {
       if (!(await this.isPMPaneReady())) {
         if (!this.db) return { ok: false, submitKey: "Enter", ambiguous: false };
         this.enqueuePMMessage(message, eventTypeOverride, "submitToPM-pane-not-ready");
@@ -756,6 +759,7 @@ export class TmuxRelay {
     }
     if (!this.db) {
       const submitKey = decidePMSubmitKey(this.pmBusy, this.pmRuntime);
+      if (durableCadence) return { ok: false, submitKey, ambiguous: false };
       const result = await this.injectDirectWithSubmitKey(message, submitKey);
       return { ...result, submitKey };
     }
@@ -779,6 +783,8 @@ export class TmuxRelay {
         this.db.deletePendingPMEvent(existing.slot, existing.event_type, existing.enqueued_at);
         return { ok: true, submitKey, ambiguous: false };
       }
+      // Re-enqueueing would replace enqueued_at and sever attempt authority.
+      return this.deliverPMRow(existing);
     }
     const row = this.enqueuePMMessage(message, eventTypeOverride, "submitToPM");
     return this.deliverPMRow(row);

@@ -15,7 +15,8 @@ test("daily restart uses persisted normal PM cadence and honors per-task pause",
   const config = new Map<string, string>();
   const messages: string[] = [];
   const db = { getConfig: (k: string) => config.get(k) ?? null,
-    setConfig: (k: string, v: string) => config.set(k, v), logEvent: () => {} };
+    setConfig: (k: string, v: string) => config.set(k, v), logEvent: () => {},
+    hasPMQueueDelivery: () => false };
   const relay = { submitToPM: async (message: string) => { messages.push(message); return { ok: true }; } };
   const scheduler = new PMCadenceScheduler(db as never, relay as never);
   assert.equal(scheduler.getStatus().tasks.find(t => t.task === "daily-pm-restart")!.command, "MoP: run Skill(daily-pm-restart)");
