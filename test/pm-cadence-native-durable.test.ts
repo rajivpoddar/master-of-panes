@@ -22,6 +22,7 @@ test("native cadence preserves one durable occurrence through unavailable, ACK l
   let db = new MoPDatabase(config);
   let ready = false;
   let loseAck = false;
+  let losePasteAck = false;
   let buffer = "";
   const pastes: string[] = [];
   const enters: string[] = [];
@@ -34,7 +35,10 @@ test("native cadence preserves one durable occurrence through unavailable, ACK l
         if (command.includes("pane_current_command")) return { stdout: ready ? "claude\n" : "zsh\n", stderr: "" };
         const load = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
         if (load) buffer = readFileSync(load[1], "utf8");
-        if (command.startsWith("tmux paste-buffer")) pastes.push(buffer);
+        if (command.startsWith("tmux paste-buffer")) {
+          pastes.push(buffer);
+          if (losePasteAck) { losePasteAck = false; throw new Error("accepted paste; tmux ACK lost"); }
+        }
         if (command.endsWith(" Enter")) {
           enters.push(buffer); // The native composer accepted Enter, but its ACK can be lost.
           if (loseAck) { loseAck = false; throw new Error("accepted Enter; tmux ACK lost"); }
@@ -139,6 +143,24 @@ test("native cadence preserves one durable occurrence through unavailable, ACK l
     assert.equal(count(enters), 6);
     assert.equal(count(pastes), 6);
     assert.deepEqual(db.peekPendingPMEvents(), [ambiguous], "ambiguous original attempt remains durable for operator reconciliation");
+
+    at(16, 13);
+    losePasteAck = true;
+    await scheduler.tick("scheduled");
+    const pasteAmbiguous = db.peekPendingPMEvents().find(row => row.event_type.endsWith("16:13"));
+    assert.ok(pasteAmbiguous);
+    assert.equal(count(pastes), 7);
+    assert.equal(count(enters), 6, "paste ACK loss must not proceed to Enter");
+    assert.equal(db.getPMQueueDeliveryState(0, pasteAmbiguous.event_type, prompt, pasteAmbiguous.enqueued_at), "ambiguous");
+    restart();
+    at(16, 14);
+    await scheduler.tick("boot");
+    await scheduler.tick("scheduled");
+    await relay.drainPMQueue();
+    assert.equal(count(pastes), 7, "accepted paste with lost ACK must never replay");
+    assert.equal(count(enters), 6);
+    assert.deepEqual(db.peekPendingPMEvents().find(row => row.event_type === pasteAmbiguous.event_type), pasteAmbiguous);
+    assert.equal(db.getPMQueueDeliveryState(0, pasteAmbiguous.event_type, prompt, pasteAmbiguous.enqueued_at), "ambiguous");
   } finally {
     globalThis.Date = RealDate;
     db.close();

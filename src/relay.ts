@@ -1023,8 +1023,10 @@ export class TmuxRelay {
           // `-p` wraps this as a bracketed paste. Claude Code 2.1.282 keeps a
           // plain multiline paste in its composer after Enter; bracketed paste
           // lets the same single Enter submit the complete message.
-          await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
+          // Once invoked, tmux may have accepted the paste even if its ACK is lost.
+          // Conservatively retain an ambiguous attempt instead of replaying it.
           pasted = true;
+          await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
           await sleep(PM_INJECT_ENTER_DELAY_MS);
           await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
           await sleep(500);
