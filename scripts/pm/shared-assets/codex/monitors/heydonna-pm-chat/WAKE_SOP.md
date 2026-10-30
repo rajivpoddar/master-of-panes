@@ -327,6 +327,25 @@ through the existing independent-delegation transport. NEVER delegate
 social/browser work to CP Repairs or any role task (PR Merges, Hotfixes,
 PR Reviews, Rescues, Rescues Backup/Standby, Returns, DMs), and never create
 another social/browser owner.
+**[HIGH] Hand off non-reserved work to an idle social task (Rajiv C0ALZJHGE49 thread
+1793335380.874289, ts 1793341286.829809: "cto decisions should also route to the idle
+social media tasks"; ts 1793341667.502269: "this shoudl be in the wake SOP of decisions
+task").** At the start of EVERY wake, classify the event:
+- RESERVED → Decisions handles it itself: merge/admin-merge asks, admission/ci-head,
+  rollback/revert, deploy/prod data/DB, billing/pricing/refund, security/credentials/
+  secrets, review verdicts (REVISE/AUTHORIZED/APPROVE/BLOCK, re-review, post-deploy
+  review), escalation-ladder rows (`ladder:pel-`), and product/policy decisions.
+- NON-RESERVED → anything else, notably browser-owner work (LinkedIn/profile lookups,
+  approved outreach sends, social posts, research, illustration or other media
+  requests), status checks and lookups that need no CTO authority.
+For NON-RESERVED events, delegate the whole request on THIS wake to the social pool
+IDLE-FIRST using the probe above (`social media` → `(2)` → `(3)`; first `idle` wins).
+Pass the full source envelope and the Slack channel:ts, and name the social task as the
+executor that posts the result in the source thread. Do not do the work in Decisions,
+and do not hold it in Decisions' own queue. If NO pool task is idle, queue it to
+`social media` (never keep it in Decisions). When unsure whether something is reserved,
+treat it as RESERVED. One owner per event; never double-deliver.
+
 Decisions retains scope and reserved decisions; new briefs name CTO Returns
 as their terminal consumer. Rajiv DM decisions remain with CTO DM
 `01a0911a-a718-7743-b37e-e785f24f3708`; unrelated access/credential/media

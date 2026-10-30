@@ -116,7 +116,7 @@ def pm_identity(target='0:0.0', require_idle=True):
     if (len(fields) != 5 or not re.fullmatch(r'%\d+', fields[0])
             or not re.fullmatch(r'\$\d+', fields[1]) or not fields[2].isdigit()
             or fields[3] != str(home / 'Downloads/projects/heydonna-app')
-            or fields[4] not in ('claude', 'openclaude')):
+            or (fields[4] not in ('claude', 'openclaude') and not re.fullmatch(r'\d+\.\d+\.\d+', fields[4]))):
         raise RuntimeError('PM pane/session/checkout identity unknown')
     listing = subprocess.run(['ps', '-axo', 'pid=,ppid=,uid=,lstart=,command='],
         capture_output=True, text=True, check=True, timeout=5).stdout

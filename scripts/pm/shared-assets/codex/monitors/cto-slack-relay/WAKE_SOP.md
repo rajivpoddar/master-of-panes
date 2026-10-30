@@ -107,6 +107,11 @@ Apply exactly one destination rule to each eligible event:
    Every CTO @-mention in any channel (including growth, per rule 1a) reaches
    CTO Decisions; Decisions may delegate social/browser work only to the social
    pool (idle-first), never to CP Repairs or role tasks.
+   (Rajiv 2026-10-30, C0ALZJHGE49 ts 1793341286.829809 / 1793341667.502269:
+   Decisions delegates every NON-reserved event to an idle social task on the
+   same wake. That rule lives in the Decisions wake SOP
+   heydonna-pm-chat/WAKE_SOP.md, not in this relay table; the relay routing is
+   unchanged.)
 
 Do not use Slack thread timestamps, quoted message text, users, keywords, or
 historical route tables to choose a task. Do not route any Superproofer event

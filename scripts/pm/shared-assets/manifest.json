@@ -600,7 +600,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-daily-pm-restart",
-      "sha256": "170a2e9115cf9743bc6c77af534d28ca9babb0394d10a9965e2f65a6a27db32f",
+      "sha256": "16e095af2b2f2f9c61a98adf4712f4c104e0c2a4eddceb6c81eec3fbd45e2561",
       "source_path": "claude/scripts/pm/daily-pm-restart.sh"
     },
     {
@@ -890,7 +890,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-direct-assign",
-      "sha256": "532219c986305ceafc28bad65eb7d70718bca72f9620528eaf8948735f4cc6b5",
+      "sha256": "a9f8cc64d752376abafdc4a0a9b6a9303b15d8fb99b0bf3e14d5c902ebbc50ee",
       "source_path": "claude/skills/direct-assign/SKILL.md"
     },
     {
@@ -1350,7 +1350,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-cto-slack-routing",
-      "sha256": "54b22d6dd2bfdce0eda8fc4aa93ac98e563eee4d25ddea02fb164b4398e949dd",
+      "sha256": "cf10593a92c43565a739634298e41a7a437c0df0a426df805868aa49f2cb53a4",
       "source_path": "codex/monitors/cto-slack-relay/WAKE_SOP.md"
     },
     {
@@ -1377,7 +1377,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "61fd6251e9597bd6639b54729936d5dd5321ae807db06efedb90bfda4b5dbc4a",
+      "sha256": "cfe8d5e1987e479415bc3745bf13fe5c468750ae1fd41690cfde8ffa5d9b1e9d",
       "source_path": "codex/monitors/heydonna-pm-chat/WAKE_SOP.md"
     },
     {

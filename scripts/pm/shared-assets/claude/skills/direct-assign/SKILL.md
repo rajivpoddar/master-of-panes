@@ -175,6 +175,20 @@ confirming it holds no unpushed unique commits.
 This step is part of the literal `task` message the skill POSTs, not a separate
 delivery. Keep it in sync with the MoP-side dispatch/handoff template.
 
+[HIGH] Tool denial line (Rajiv DM D0AMF0XE6TS thread 1793332951.617349, ts
+1793337164.756299: *"managing all dev slots is your job. did it get stuck at the
+permission prompt?"*). Trigger: slot 4 ran `git restore --source=origin/main --
+<files>`, hit the `Bash(git restore *)` deny and waited for a human. Every
+dispatched `task` (repro/rework/new_issue) MUST carry this line verbatim:
+
+```text
+On ANY tool denial or hook block (permission denied, PreToolUse BLOCKED), immediately SendMessage the PM with the exact command and stop. Never ask Rajiv or any user to approve it, and never wait for a human. Use a non-destructive alternative only when PM directs it (e.g. `git show origin/main:<path>`, a scratch branch, a stash; never git restore/reset --hard/checkout -- to discard work).
+```
+
+PM answers such a message the same turn with the alternative or a park; it
+never relays the approval request to Rajiv. Keep in sync with the MoP-side
+dispatch/handoff template.
+
 ## Canonical workflow chain (Rajiv directive 2026-09-11, thread 1789111520)
 
 The dev workflow STARTS AT THE PLAN-AGENT STEP. `/handoff` is NOT a workflow
