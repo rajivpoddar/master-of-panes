@@ -736,7 +736,11 @@ export class ProcessHealthChecker {
     const restartEpisode = slotNum === 0 ? this.db.getExitStatus().episode : null;
     const timer = setTimeout(async () => {
       const cmd = await this.getPaneCommand(slotNum);
-      if (cmd !== "claude") {
+      // Native Claude's executable name is its installed version (for example
+      // 2.1.312). The daily PM identity probe already accepts that live shape.
+      const pmRestartReady = slotNum === 0 && this.db.getExitStatus().pm_only
+        && /^\d+\.\d+\.\d+$/.test(cmd ?? "");
+      if (cmd !== "claude" && !pmRestartReady) {
         console.log(
           `[health] Slot ${slotNum} not yet at claude prompt (cmd: ${cmd}) — skipping continue injection`,
         );

@@ -135,7 +135,8 @@ test("new work after Stop refuses the exit attempt without holding that input", 
   } finally { db.close(); }
 });
 
-test("existing post-respawn timer dispatches PM continuation rather than generic continue", async () => {
+for (const command of ["claude", "2.1.312"]) {
+test(`existing post-respawn timer dispatches PM continuation for ${command} rather than generic continue`, async () => {
   const { readFileSync } = await import("node:fs");
   const { default: ts } = await import("typescript");
   const source = readFileSync(new URL("../src/health.ts", import.meta.url), "utf8");
@@ -162,7 +163,7 @@ test("existing post-respawn timer dispatches PM continuation rather than generic
         sent.push(text); return { outcome: "delivered" };
       },
     } as any) as any;
-    health.getPaneCommand = async () => "claude";
+    health.getPaneCommand = async () => command;
     const schedule = new Function("verifyPaneIdentity", "execShell", "setTimeout",
       `${js}; return Probe.prototype.scheduleContinueInjection;`)(
       async () => ({ ok: true, snapshot: { paneId: "%40" } }),
@@ -176,3 +177,4 @@ test("existing post-respawn timer dispatches PM continuation rather than generic
     assert.equal(db.getExitStatus().dev_only, true);
   } finally { db.close(); }
 });
+}
