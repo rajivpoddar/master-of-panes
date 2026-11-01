@@ -216,6 +216,35 @@ Classify every `*Unblockable now:*` item (and every other stuck dependency seen 
 ### No repeat-without-action rule
 An Unblockable item may NOT appear in two consecutive hourlies without an action taken on it. Before posting the thread reply, compare against the previous hourly's `*Unblockable now:*`; any carry-over must show the case number and the action taken (or the typed blocker + owner + wake) in the reply. A carry-over with no action is a miss, handled the same turn.
 
+## [HIGH] Step 2e: Ready Pool refill, P0/P1 first, every hourly (Rajiv 2026-10-31)
+Rajiv, DM D0AMF0XE6TS thread 1793324569.896659, ts 1793417547.753829: *"Why am I having to nudge for ready pool promotion and draft pr's? The hourly report processing skill should be doing all this. Update it."* Trigger: on 2026-10-31 the pool sat at 0–5 for 3h+. 26 P0s were open, 7 of them backlog leaves nobody promoted or split. Rajiv had to ask 5 times.
+
+Every hourly, IN THE SAME TURN and without waiting to be asked:
+1. **Measure the real pool.** Run `python3 ~/.claude/scripts/ready_pool_select.py`. Count only picks that are actually dispatchable: not already on a slot or PR, not a tracker, no open blocker. Post `ready_pool: <real>/<listed> (P0 a · P1 b · P2 c)` in the reply.
+2. **If the real pool is under 10, OR any open P0/P1 is in backlog with no `pm-blocked:*` label:** launch ONE `pm-arch-reviewer` MODE: PROMOTE batch over every open P0, then every open P1, then backlog leaves. Act on its verdicts in the same turn:
+   - READY: promote (status:todo).
+   - NEEDS_SPLIT or TRACKER: launch ONE agent that files a bounded ≤3-AC child from the parent's own AC text (ICL ledger, internal-followup marker, validator) and promotes it.
+   - NOT_READY with a stale contract: rewrite the contract via issue-contract-auditor.
+   - Waiting on a decision: case 6 below. Product and policy calls the PM can answer from standing rules (S94, rule 34/48, prior Rajiv/CTO ts found by recall) are answered by PM, never escalated.
+3. **P0/P1 preemption:** once a P0/P1 is promoted, it takes the next free slot. If none is free, preempt the lowest-priority P2/P3 lane (Skill(preempt-slot)) in the same turn.
+4. **Plan-only gated P0/P1** (e.g. a CTO "plan completion only" ruling): assign as plan work (pm-hotfix MODE: PLAN when no slot is free), then send ONE head-pinned CTO sign-off ask.
+5. Name every action in the hourly reply. A P0/P1 sitting in backlog with no blocker label and no action this hour is a MISS.
+6. **Pool size never gates promotion (gap fix 2026-10-31, Rajiv D0AMF0XE6TS thread 1793425202.193379: "Why don't these issues get promoted correctly? Where is the gap?").** With the pool at 17-21 (above 10), RL customer issues sat in backlog: no READY_POOL_LOW fired, and nothing else looked at them. Every hourly, regardless of pool size, run `python3 ~/.claude/scripts/backlog-triage.py promote --dry-run` and act on its output in the same turn:
+   - SELECTED → `promote --apply --issues <N...>`.
+   - NEEDS_READY_POOL_METADATA (stub `ready-pool: priority: Px` only; RL call issues #11782/#11786 were filed this way) → fill the full block from the issue's own ACs (validator-checked body file), then promote.
+   - `not_runnable:latest_pm_comment_parked` → read the park comment. If its named decision or dependency has resolved, post a `PM UNPARKED` comment and promote. Otherwise leave it parked and name it with its wake condition.
+   - `blocked_label` → check that the `pm-blocked:*` label is still true for the WHOLE issue. Remove it when only a sub-case is blocked and the ACs already exclude that sub-case (#11782).
+7. **No-status P0/P1/P2 sweep.** Open issues with a P-label but no `status:*` label are invisible to both the promoter (backlog-only) and the selector (todo-only). On 2026-10-31 there were P0 1, P1 25 and P2 46. Each hourly, give each P0/P1 one status (`status:backlog` + contract, or close it), at most 10 per hour, oldest first. Report the remaining count.
+
+## [HIGH] Step 2f: Draft PR disposition, every hourly (Rajiv 2026-10-31, same ts)
+Every hourly, IN THE SAME TURN, each open draft PR with no live owner (no slot lane, no PM bg agent, no live obligation) gets exactly ONE verdict and its action:
+- **CLOSE:** the linked issue is closed, the work is superseded by a merged PR, or it's a parked draft older than 7d with no live blocker. Close it, keep the branch, and comment the reason plus the superseding PR.
+- **REWORK-SLOT:** it needs Convex dev, Modal runtime or a browser (S14). Queue it as a rework lane, priority-ordered. Rework goes before new_issue, so it takes the next free slot via mop-assign-slot `--class rework`.
+- **REWORK-PMBG:** no Convex/Modal needed (main-merge conflicts, inventory re-keys, test/doc fixes). Launch a PM background agent now (S13/S14). Use pm-hotfix MODE: REWORK only for PRs no slot owns.
+- **PARK:** blocked on a named open dependency or decision. Label it `pm-blocked:<kind>`, and record the wake condition and owner in a PR comment.
+- **READY-FOR-12B:** complete. Merge main, run 12b, admit.
+Run the classification in ONE background agent when there are more than 5 drafts. Then PM executes its verdicts in the same turn. The reply lists every draft with its verdict (Step 2d format). An unowned draft carried over two hourlies with no verdict action is a MISS.
+
 ## [HIGH] P0/P1 never wait for a slot (S103, Rajiv 2026-10-29)
 Rajiv, D0AMF0XE6TS thread 1793254511.567489, ts 1793256031.251919: "P0 and p1's should be done with pm hotfix agent when slots are not available."
 Each hourly pass lists every ready P0/P1 issue that has neither a slot nor a running pm-hotfix agent. If all slots are busy on equal or higher priority work, PM starts a pm-hotfix agent (MODE: PLAN, then IMPLEMENT) for each one in the SAME turn. Exception: work that needs a slot's Convex dev, Modal runtime or settings screenshots (S14) goes to the next free slot, or PM preempts a P2+ lane. An idle ready P0/P1 with no owner is reported as UNOWNED_P0P1.

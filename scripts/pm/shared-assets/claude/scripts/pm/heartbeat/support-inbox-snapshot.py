@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -45,10 +46,25 @@ LINK_RE = re.compile(r"(?<![\w/])#(\d{3,5})\b|github\.com/[\w.-]+/[\w.-]+/(?:iss
 # A bare acknowledgement must match the COMPLETE (trimmed, mention-stripped) message -- a
 # continuation like "Thanks, but it still does not work" is not an acknowledgement and must
 # not be dropped (Codex #7 P1).
-ACK_RE = re.compile(
-    r"^\W*(ok(ay)?|thanks?|thank you|thx|great|perfect|got it|yes|cool|sounds good|"
-    r"(that|it) worked|will do|awesome|noted)[!.\s]*$",
-    re.IGNORECASE,
+_ACK_TERM = (
+    r"(?:ok(?:ay)?|thanks?|thank you|thx|great|perfect|got it|yes|cool|sounds good|"
+    r"(?:that|it) worked|will do|awesome|noted)"
+)
+# One or more ack terms ("ok thanks!"); is_closing_ack caps combinations at ACK_MAX_WORDS.
+ACK_RE = re.compile(rf"^\W*{_ACK_TERM}(?:[\s,!.]+{_ACK_TERM})*[!.\s]*$", re.IGNORECASE)
+ACK_MAX_WORDS = 4
+# Emoji-only acknowledgements (":+1:", ":pray:", Unicode emoji). Negative/question emoji keep
+# the thread open (2026-10-31: C0A56RX6FNW/1793267174.396729 flagged OVERDUE on a bare ":+1:").
+SHORTCODE_RE = re.compile(r":([a-z0-9_+\-']+):", re.IGNORECASE)
+NEGATIVE_SHORTCODES = {
+    "-1", "thumbsdown", "x", "negative_squared_cross_mark", "disappointed", "cry", "sob",
+    "confused", "worried", "rage", "angry", "warning", "question", "grey_question",
+    "exclamation", "grey_exclamation", "thinking_face", "no_entry", "no_entry_sign",
+    "face_with_raised_eyebrow", "slightly_frowning_face", "white_frowning_face",
+}
+NEGATIVE_EMOJI_NAME_RE = re.compile(
+    r"THUMBS DOWN|CROSS MARK|QUESTION|EXCLAMATION|CRYING|DISAPPOINTED|CONFUSED|WORRIED|ANGRY|"
+    r"POUTING|WARNING|THINKING|FROWNING|NO ENTRY",
 )
 # Real closings are rarely bare: "I turned it on and it worked. thank you!" (thanks at the end) or
 # "<@PM> Was able to create both projects." (answers the PM's follow-up question). A short
@@ -103,12 +119,34 @@ def is_team(msg: dict) -> bool:
     return team_name(msg) is not None
 
 
+def is_emoji_only(text: str) -> bool:
+    """Pure: True when text is only positive/neutral emoji (shortcodes or Unicode) and whitespace."""
+    for code in SHORTCODE_RE.findall(text):
+        if code.lower() in NEGATIVE_SHORTCODES:
+            return False
+    rest = SHORTCODE_RE.sub("", text).strip()
+    if not rest and SHORTCODE_RE.search(text):
+        return True
+    if not rest:
+        return False
+    for ch in rest:
+        if ch.isspace() or ord(ch) in (0x200D, 0xFE0F) or 0x1F3FB <= ord(ch) <= 0x1F3FF:
+            continue
+        if unicodedata.category(ch) != "So":
+            return False
+        if NEGATIVE_EMOJI_NAME_RE.search(unicodedata.name(ch, "")):
+            return False
+    return True
+
+
 def is_closing_ack(text: str) -> bool:
     """Pure: True when a requester message only closes the thread (thanks / it worked / done)."""
     body = " ".join(MENTION_RE.sub(" ", text or "").split())
     if not body or len(body) > CLOSING_MAX_CHARS:
         return False
-    if ACK_RE.match(body):
+    if is_emoji_only(body):
+        return True
+    if ACK_RE.match(body) and len(body.split()) <= ACK_MAX_WORDS:
         return True
     return not REOPEN_CUE_RE.search(body) and bool(CLOSING_CUE_RE.search(body))
 

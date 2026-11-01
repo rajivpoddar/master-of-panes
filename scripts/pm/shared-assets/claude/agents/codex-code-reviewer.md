@@ -582,6 +582,13 @@ the error state. `disabled={isSubmitting}` / `disabled={isPending}` guarding
 the action's own in-flight request is allowed. Full rule:
 `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No-unindexed-query gate (Mandatory)
+Source: Rajiv DM D0AMF0XE6TS thread 1793355859.689089, ts 1793356037.363689: "add a product rule for indexed queries. audit the code for where else we do a unindexed full-table scan"; trigger P0 #12099 (`docxTemplates` `.filter().collect()` crossed Convex's 16 MiB read limit; 15/19 partner creates returned 500). Rule: `~/.claude/rules/51-heydonna-indexed-convex-queries.md`.
+- REQUEST_CHANGES when the diff adds or changes a `ctx.db.query(...)` on a request or cron path that reaches `.collect()`/`.first()`/`.unique()`/`.take()`/`.paginate()`/iteration without `.withIndex`/`.withSearchIndex`, or reads with `.filter()` alone (still a full-table scan), and names no exception. Allowed exceptions: an explicit small page size, a fixed-size table (<100 rows) or a one-off migration/admin script that requests can't reach, each with a one-line comment naming the bound.
+- Required pattern: `.withIndex(...)`/`.withSearchIndex(...)`. If the index doesn't exist, add it in `convex/schema.ts` in the same PR.
+- Required tests: a source-inspection test over `convex/**` with an exception allowlist that names each reason, plus a production-shaped read-budget test for the changed request path (fixture sized from prod metadata; bytes read well under 16 MiB).
+- Existing violations (`docs/investigations/2026-10-30-unindexed-convex-scans-audit.md`) are tracked migrations and do not block unrelated PRs.
+
 ## Best-output-on-exhaustion gate (Mandatory - Rajiv product rule 2026-10-29)
 
 Source: Rajiv, C0ALZJHGE49 thread 1793215184.709299. ts 1793215326.517839: "it shoudl be scoring fail so that it goes to the rung". ts 1793215519.589579: "we should deliver whatever the best output was and let humans correct it". ts 1793215612.981359: "add this as product rule as well". Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md` § "Scoring fails advance the ladder".

@@ -195,6 +195,13 @@ Source: Rajiv, C0ALZJHGE49 thread 1793215184.709299. ts 1793215326.517839: "it s
 - BLOCK / REQUEST_CHANGES when a plan or diff: withholds the result on exhaustion; falls back to the source or original text for a non-corruption failure; or refuses a manual-mode result for non-corruption. The 6 corruption classes are unchanged.
 - Required test: every rung fails non-corruption, the best candidate (not the source) is published or applied with the warning, and RED-on-revert proves it.
 
+## No-unindexed-query Planning Gate (rule 51)
+Source: Rajiv DM D0AMF0XE6TS thread 1793355859.689089, ts 1793356037.363689: "add a product rule for indexed queries. audit the code for where else we do a unindexed full-table scan"; trigger P0 #12099 (`docxTemplates` `.filter().collect()` crossed Convex's 16 MiB read limit; 15/19 partner creates returned 500). Rule: `~/.claude/rules/51-heydonna-indexed-convex-queries.md`.
+- The plan lists every new or changed `ctx.db.query` with its index. BLOCK/REQUEST_CHANGES when a plan adds or changes a `ctx.db.query(...)` on a request or cron path that reaches `.collect()`/`.first()`/`.unique()`/`.take()`/`.paginate()`/iteration without `.withIndex`/`.withSearchIndex`, or reads with `.filter()` alone (still a full-table scan), and names no exception. Allowed exceptions: an explicit small page size, a fixed-size table (<100 rows) or a one-off migration/admin script that requests can't reach, each with a one-line comment naming the bound.
+- Required pattern: `.withIndex(...)`/`.withSearchIndex(...)`. If the index doesn't exist, add it in `convex/schema.ts` in the same PR.
+- Required tests: a source-inspection test over `convex/**` with an exception allowlist that names each reason, plus a production-shaped read-budget test for the changed request path (fixture sized from prod metadata; bytes read well under 16 MiB).
+- Existing violations (`docs/investigations/2026-10-30-unindexed-convex-scans-audit.md`) are tracked migrations and do not block unrelated PRs.
+
 
 ## Input
 

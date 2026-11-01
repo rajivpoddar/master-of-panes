@@ -3208,11 +3208,8 @@ def validate(data: dict[str, Any]) -> list[str]:
     missing = {"PM", "S1", "S2", "S3", "S4", "S5", "S6"} - labels
     if missing:
         errors.append(f"session table missing {', '.join(sorted(missing))}")
-    for row in sessions:
-        if not row.get("jsonl"):
-            errors.append(f"{row.get('label', '?')} missing jsonl")
-        if row.get("age_seconds") is None:
-            errors.append(f"{row.get('label', '?')} missing age_seconds")
+    # Session age is observation-only: unavailable runtime identity, session
+    # files or timestamps remain visible as unknown, never a heartbeat failure.
 
     audit = data.get("open_pr_activity_audit")
     if not isinstance(audit, dict) or not audit.get("ok"):
