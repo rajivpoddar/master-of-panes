@@ -38,6 +38,7 @@ test("real PM Stop without slot row consumes /exit once, while dev Stops and inp
     };
     const processor = new HookProcessor(db, relay as any) as any;
     assert.equal(db.getSlot(0), undefined);
+    db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "pm" });
     // An input before this Stop is just work; no input gate or tool counter.
     db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, {});
     await processor.process(0, { type: "Stop", session_id: "pm" });
@@ -117,6 +118,7 @@ test("new work after Stop refuses the exit attempt without holding that input", 
   const db = database();
   try {
     db.setExitPending(true, false, true);
+    db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "pm" });
     let delivered = false;
     const processor = new HookProcessor(db, {
       observeSlotPane: async () => {
@@ -157,6 +159,12 @@ test(`existing post-respawn timer dispatches PM continuation for ${command} rath
   try {
     db.setExitPending(true, false, true, "saved continuation");
     db.markSlotExitCycled(0);
+    db.logEvent(0, "exit_pending_triggered", "Stop", null, {
+      episode: db.getExitStatus().episode, delivery: "delivered",
+    });
+    db.logEvent(0, "SessionStart", "SessionStart", null, {
+      session_id: "recovered", source: "resume", cwd: "/fixture",
+    });
     const sent: string[] = [];
     const health = new ProcessHealthChecker(db, {
       deliverGuardedToSlot: async (_slot: number, text: string) => {
@@ -164,6 +172,7 @@ test(`existing post-respawn timer dispatches PM continuation for ${command} rath
       },
     } as any) as any;
     health.getPaneCommand = async () => command;
+    health.reconcilePMRestartContinuation = async () => health.deliverPMRestartContinuation("%40");
     const schedule = new Function("verifyPaneIdentity", "execShell", "setTimeout",
       `${js}; return Probe.prototype.scheduleContinueInjection;`)(
       async () => ({ ok: true, snapshot: { paneId: "%40" } }),

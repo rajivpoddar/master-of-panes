@@ -1458,6 +1458,11 @@ export class HookProcessor {
     const exitStatus = this.db.getExitStatus();
     if (slotNum === 0 && exitStatus.pending && exitStatus.pm_only) {
       if (exitStatus.cycled[0]) return {};
+      const boot = this.db.getEvents(0, 1, "SessionStart")[0];
+      let currentSession: unknown;
+      try { currentSession = boot && JSON.parse(boot.payload).session_id; } catch { /* Unknown identity refuses the exit. */ }
+      if (typeof currentSession !== "string" || !currentSession.trim()
+          || payload.session_id !== currentSession) return {};
       this.db.markSlotExitCycled(0);
       const workVersion = () => Math.max(...["SessionStart", "UserPromptSubmit", "PreToolUse"].map(
         type => this.db.getEvents(0, 1, type)[0]?.id ?? 0));
@@ -1475,6 +1480,7 @@ export class HookProcessor {
       }) : { outcome: "refused_pre_effect", reason: "pm_pane_unknown" };
       this.db.logEvent(0, "exit_pending_triggered", "Stop", null, {
         source: "pm_only_stop", delivery: delivery.outcome,
+        episode: exitStatus.episode, session_id: currentSession,
         reason: "PM Stop consumed one /exit attempt; watchdog owns respawn",
       });
       return {};

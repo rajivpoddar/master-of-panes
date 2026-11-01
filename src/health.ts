@@ -306,11 +306,16 @@ export class ProcessHealthChecker {
     }
   }
 
+  private isAgentCommand(slotNum: number, command: string | null): boolean {
+    return command !== null && (AGENT_COMMANDS.has(command)
+      || (slotNum === 0 && /^\d+\.\d+\.\d+$/.test(command)));
+  }
+
   private async waitForAgentBoot(slotNum: number, timeoutMs = this.AGENT_BOOT_TIMEOUT_MS): Promise<string | null> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() <= deadline) {
       const command = await this.getPaneCommand(slotNum);
-      if (command && AGENT_COMMANDS.has(command)) {
+      if (this.isAgentCommand(slotNum, command)) {
         this.db.logEvent(slotNum, "agent_booted", null, null, {
           command,
           launch_command: RESTART_COMMANDS[slotNum],
@@ -517,7 +522,8 @@ export class ProcessHealthChecker {
 
       const paneCommand = await this.getPaneCommand(slot);
 
-      if (paneCommand === "claude") {
+      if (this.isAgentCommand(slot, paneCommand)) {
+        if (slot === 0 && this.db.getExitPending()) await this.reconcilePMRestartContinuation();
         await this.checkClaudeResponsiveness(slot);
         continue;
       }
@@ -738,9 +744,7 @@ export class ProcessHealthChecker {
       const cmd = await this.getPaneCommand(slotNum);
       // Native Claude's executable name is its installed version (for example
       // 2.1.312). The daily PM identity probe already accepts that live shape.
-      const pmRestartReady = slotNum === 0 && this.db.getExitStatus().pm_only
-        && /^\d+\.\d+\.\d+$/.test(cmd ?? "");
-      if (cmd !== "claude" && !pmRestartReady) {
+      if (cmd !== "claude" && !(slotNum === 0 && this.isAgentCommand(slotNum, cmd))) {
         console.log(
           `[health] Slot ${slotNum} not yet at claude prompt (cmd: ${cmd}) — skipping continue injection`,
         );
@@ -755,7 +759,7 @@ export class ProcessHealthChecker {
         }
         if (slotNum === 0 && this.db.getExitStatus().pm_only) {
           if (this.db.getExitStatus().episode !== restartEpisode) return;
-          await this.deliverPMRestartContinuation(identity.snapshot.paneId);
+          await this.reconcilePMRestartContinuation();
           return;
         }
         await execShell(
@@ -776,12 +780,35 @@ export class ProcessHealthChecker {
     if (timer.unref) timer.unref();
   }
 
-  private async deliverPMRestartContinuation(paneId: string): Promise<void> {
+  /** Recover only an unattempted episode whose exit is followed by a PM boot. */
+  private async reconcilePMRestartContinuation(): Promise<void> {
+    const status = this.db.getExitStatus();
+    if (!status.pending || !status.pm_only || !status.cycled[0]
+        || status.continuation_delivery !== "waiting") return;
+    const exit = this.db.getEvents(0, 1, "exit_pending_triggered")[0];
+    const boot = this.db.getEvents(0, 1, "SessionStart")[0];
+    if (!exit || !boot || boot.id <= exit.id) return;
+    let payload: Record<string, unknown>;
+    let receipt: Record<string, unknown>;
+    try { payload = JSON.parse(boot.payload); receipt = JSON.parse(exit.payload); }
+    catch { return; }
+    if (receipt.episode !== status.episode || receipt.delivery !== "delivered"
+        || !["startup", "resume"].includes(String(payload.source))
+        || typeof payload.session_id !== "string" || !payload.session_id.trim()) return;
+    const identity = await verifyPaneIdentity(0);
+    if (!identity.ok || payload.cwd !== identity.snapshot.currentPath) return;
+    if (latestSessionStartEventId(this.db, 0) !== boot.id
+        || this.db.getExitStatus().episode !== status.episode) return;
+    await this.deliverPMRestartContinuation(identity.snapshot.paneId, boot.id);
+  }
+
+  private async deliverPMRestartContinuation(paneId: string, expectedBoot?: number): Promise<void> {
     const status = this.db.getExitStatus();
     if (!status.pending || !status.pm_only || !status.cycled[0]
         || status.continuation_delivery !== "waiting") return;
     const prompt = status.continuation_prompt ?? "continue";
     const boot = latestSessionStartEventId(this.db, 0);
+    if (expectedBoot !== undefined && boot !== expectedBoot) return;
     this.db.setConfig("exit_pending_continuation_delivery", "attempted");
     const fence = () => {
       const current = this.db.getExitStatus();
@@ -792,7 +819,9 @@ export class ProcessHealthChecker {
       expectedPaneId: paneId,
       recheck: async () => fence(), finalCheck: fence, bracketedPaste: true,
     });
-    this.db.logEvent(0, "pm_restart_continuation", null, null, { delivery: result.outcome });
+    this.db.logEvent(0, "pm_restart_continuation", null, null, {
+      episode: status.episode, boot_event_id: boot, delivery: result.outcome,
+    });
     if (result.outcome !== "delivered" || fence()) return;
     // Rajiv 1793502605.714159: only AFTER PM has booted and received its
     // continuation do we reset dev flags. DND and normal Stop handling remain.
