@@ -633,6 +633,9 @@ export class ProcessHealthChecker {
     if (!this.db.getExitPending()) return;
 
     const status = this.db.getExitStatus();
+    // PM-first episodes and their dev successors fire at Stop only, never on
+    // the already-idle health scan (and never from tracked-tool accounting).
+    if (status.pm_only || status.stop_only) return;
 
     // Dev-only episodes leave PM replacement exclusively to /slots/0/respawn.
     for (const slot of RUNTIME_SLOT_NUMBERS) {
@@ -665,7 +668,7 @@ export class ProcessHealthChecker {
       const pin = row ? pinFrom({ paneId: observed.paneId, checkout: SLOT_RUNTIME_IDENTITIES[slot].checkoutPath }, { ...row, session_id: sessionId }) : null;
       const fence = (): string | null => {
         const freshStatus = this.db.getExitStatus();
-        if (!this.db.getExitPending() || freshStatus.cycled[slot] || (slot === 0 && freshStatus.dev_only)) return "exit_pending_consumed";
+        if (!this.db.getExitPending() || freshStatus.pm_only || freshStatus.stop_only || freshStatus.cycled[slot] || (slot === 0 && freshStatus.dev_only)) return "exit_pending_consumed";
         if (session() !== sessionId) return "session_changed";
         if (slot === 0) return null;
         const fresh = this.db.getSlot(slot);
@@ -730,6 +733,7 @@ export class ProcessHealthChecker {
    * and next checkAll() cycle will handle it.
    */
   private scheduleContinueInjection(slotNum: number): void {
+    const restartEpisode = slotNum === 0 ? this.db.getExitStatus().episode : null;
     const timer = setTimeout(async () => {
       const cmd = await this.getPaneCommand(slotNum);
       if (cmd !== "claude") {
@@ -743,6 +747,11 @@ export class ProcessHealthChecker {
         const identity = await verifyPaneIdentity(slotNum);
         if (!identity.ok) {
           console.warn(`[health] refusing continue injection for slot ${slotNum}: ${identity.detail}`);
+          return;
+        }
+        if (slotNum === 0 && this.db.getExitStatus().pm_only) {
+          if (this.db.getExitStatus().episode !== restartEpisode) return;
+          await this.deliverPMRestartContinuation(identity.snapshot.paneId);
           return;
         }
         await execShell(
@@ -761,6 +770,35 @@ export class ProcessHealthChecker {
 
     // Don't prevent process exit
     if (timer.unref) timer.unref();
+  }
+
+  private async deliverPMRestartContinuation(paneId: string): Promise<void> {
+    const status = this.db.getExitStatus();
+    if (!status.pending || !status.pm_only || !status.cycled[0]
+        || status.continuation_delivery !== "waiting") return;
+    const prompt = status.continuation_prompt ?? "continue";
+    const boot = latestSessionStartEventId(this.db, 0);
+    this.db.setConfig("exit_pending_continuation_delivery", "attempted");
+    const fence = () => {
+      const current = this.db.getExitStatus();
+      return !current.pending || !current.pm_only || current.episode !== status.episode || current.continuation_prompt !== status.continuation_prompt
+        ? "exit_pending_changed" : latestSessionStartEventId(this.db, 0) !== boot ? "pm_session_changed" : null;
+    };
+    const result = await this.relay.deliverGuardedToSlot(0, prompt, {
+      expectedPaneId: paneId,
+      recheck: async () => fence(), finalCheck: fence, bracketedPaste: true,
+    });
+    this.db.logEvent(0, "pm_restart_continuation", null, null, { delivery: result.outcome });
+    if (result.outcome !== "delivered" || fence()) return;
+    // Rajiv 1793502605.714159: only AFTER PM has booted and received its
+    // continuation do we reset dev flags. DND and normal Stop handling remain.
+    this.db.setExitPending(true, true);
+    this.db.setConfig("exit_pending_stop_only", "true");
+    this.db.setConfig("exit_pending_continuation_delivery", "delivered");
+    this.db.logEvent(0, "dev_exit_pending_after_pm_restart", null, null, {
+      reason: "PM continuation delivered; dev slots exit at their next Stop, DND skipped",
+    });
+    this.unresponsiveStates.delete(0);
   }
 
   // ─── Lifecycle ─────────────────────────────────────────

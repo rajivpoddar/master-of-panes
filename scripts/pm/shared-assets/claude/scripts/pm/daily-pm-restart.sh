@@ -170,112 +170,37 @@ def pm_identity(target='0:0.0', require_idle=True):
 def owner(pin):
     return {k:v for k,v in pin.items() if k != 'work'}
 
-def arm_dev_exit_pending(saved):
-    """Rajiv D0AMF0XE6TS ts 1793166992.093769: "the daily restart has to set exit pending on all the dev slots as well".
-    Armed on every daily run right after the checkpoint, independent of the PM handoff. Dev slots exit only at
-    their own idle safe point (MoP Stop hook / health idle scan; DND skipped). The PM (slot 0) must NOT be
-    cycled by this flag: it is replaced only by the effect phase via /slots/0/respawn. MoP's flag is global and
-    includes slot 0, so arm ONLY when MoP advertises the dev-only scope; otherwise record the block, never arm."""
-    if saved.get('dev_exit_pending_armed') is True:
-        emit('DEV_EXIT_PENDING: already armed for ' + day)
+def arm_pm_exit_pending(saved):
+    """Rajiv 1793501776.726249, 1793502261.099499, 1793502605.714159:
+    PM exits at its next Stop, resumes its saved prompt, THEN MoP arms dev exits.
+    No maintenance, input gate, idle polling or tracked-tool accounting."""
+    if saved.get('pm_exit_pending_armed') is True:
+        emit('PM_EXIT_PENDING: already armed for ' + day)
         return
     with urllib.request.urlopen('http://127.0.0.1:3100/exit-status', timeout=15) as response:
         status = json.load(response)
-    if 'dev_only' not in status:
-        saved['dev_exit_pending_armed'] = 'blocked_mop_dev_only_scope_missing'
+    if 'pm_only' not in status or 'dev_only' not in status:
+        saved['pm_exit_pending_armed'] = 'blocked_mop_pm_only_scope_missing'
         atomic(state, json.dumps(saved))
-        emit('DEV_EXIT_PENDING_BLOCKED: MoP /exit-pending has no dev_only scope; global flag would also /exit the PM. Needs mop-main-repair change.')
+        emit('PM_EXIT_PENDING_BLOCKED: MoP lacks PM-first exit-pending support; no global or dev-only fallback')
         return
-    request = urllib.request.Request('http://127.0.0.1:3100/exit-pending', data=b'{"enabled":true,"dev_only":true}',
+    # Persist intent before HTTP: an accepted request with lost ACK must not
+    # reset the PM cycle flag and cause another restart on a repeated skill.
+    saved['launch_intent'] = True
+    saved['replacement_status'] = 'attempted_uncertain'
+    saved['handoff_status'] = 'armed'
+    atomic(state, json.dumps(saved))
+    request = urllib.request.Request('http://127.0.0.1:3100/exit-pending',
+        data=json.dumps({'enabled': True, 'pm_only': True, 'continuation_prompt': saved['continuation_prompt']}).encode(),
         headers={'Content-Type': 'application/json'}, method='POST')
     with urllib.request.urlopen(request, timeout=15) as response:
         body = json.load(response)
-    if body.get('ok') is not True or (body.get('status') or {}).get('dev_only') is not True:
-        raise RuntimeError('MoP refused dev-only safe-point exits')
-    saved['dev_exit_pending_armed'] = True
+    if body.get('ok') is not True or (body.get('status') or {}).get('pm_only') is not True:
+        raise RuntimeError('MoP refused PM-only safe-point exit; retain intent, no automatic retry')
+    saved['pm_exit_pending_armed'] = True
+    saved['replacement_status'] = 'exit_pending_armed'
     atomic(state, json.dumps(saved))
-    emit('DEV_EXIT_PENDING: armed for all dev slots (idle safe point, DND skipped, PM excluded)')
-
-def resume_on_idle(saved):
-    if saved.get('handoff_status') != 'pending':
-        emit('NO_PENDING_HANDOFF: nothing to replace')
-        return
-    requested = saved['request_identity']
-    pin = pm_identity(requested['pane'])
-    db = Path(os.environ.get('MOP_DB_PATH', str(home / '.local/share/master-of-panes/data/mop.db')))
-    with sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True) as connection:
-        later_work = connection.execute("SELECT count(*) FROM events WHERE slot=0 AND id>? AND event_type IN ('UserPromptSubmit','pm_status_busy','PreToolUse')", (requested['work'],)).fetchone()[0]
-        completions = connection.execute("SELECT id,payload FROM events WHERE slot=0 AND id>? AND event_type='PostToolUse' ORDER BY id", (requested['work'],)).fetchall()
-        stopped = connection.execute("SELECT max(id) FROM events WHERE slot=0 AND event_type='Stop'").fetchone()[0]
-    completion = json.loads(completions[0][1]) if len(completions) == 1 else {}
-    own_return = (len(completions) == 1 and completion.get('tool_name') == 'Bash'
-        and 'daily-pm-restart.sh' in str((completion.get('tool_input') or {}).get('command', ''))
-        and isinstance(stopped, int) and stopped > completions[0][0])
-    soft_boundary = bool(os.environ.get('MOP_PM_SOFT_BOUNDARY_REQUEST'))
-    # Completed intervening turns are allowed ONLY under MoP's current,
-    # session-bound tool/admission fence. The effect pin below still includes
-    # submit/work and is rechecked at every existing irreversible boundary.
-    def checkpoint_owner(value):
-        result = {k: v for k, v in owner(value).items() if not (soft_boundary and k == 'submit')}
-        if soft_boundary:
-            # Auto-compaction emits SessionStart with the SAME session id.
-            # It is not a successor process; birth/pane/pid remain pinned.
-            result['boot'] = json.loads(value['boot'][1]).get('session_id')
-        return result
-    if checkpoint_owner(pin) != checkpoint_owner(requested) or (not soft_boundary and (later_work or not own_return)):
-        saved['handoff_status'] = 'refused_successor_or_work'
-        atomic(state, json.dumps(saved))
-        emit('REFUSED: checkpoint owner or productive work changed before idle handoff')
-        return
-    if not saved.get('cleanup'):
-        subprocess.run(['python3', str(scripts / 'stale-process-cleanup.py'), '--apply', '--attest-slotless-reap'], check=True, timeout=300)
-        saved['cleanup'] = True
-        atomic(state, json.dumps(saved))
-    if pm_identity(pin['pane']) != pin:
-        raise RuntimeError('PM identity/work changed during cleanup; restart deferred')
-    # Dev exit-pending is armed at checkpoint time (arm_dev_exit_pending); never re-arm the global
-    # flag here, which would also /exit the respawned PM (double restart).
-    if pm_identity(pin['pane']) != pin:
-        raise RuntimeError('PM identity/work changed during checkpoint/cleanup; restart deferred')
-    saved['launch_intent'] = True
-    saved['pm_identity'] = pin
-    saved['replacement_status'] = 'attempted_uncertain'
-    atomic(state, json.dumps(saved))
-    emit('CHECKPOINTED: Stop/idle handoff replacing the pinned PM')
-    if pm_identity(pin['pane']) != pin:
-        raise RuntimeError('PM successor/work after attempted checkpoint; replacement suppressed')
-    # Rajiv 2026-10-28 D0AMF0XE6TS ts 1793164925.956469: "pm pane is supposed to restart through MoP".
-    # MoP owns the replacement: idle-gated /exit, RESTART_COMMANDS[0] (launch-pm-cliproxy.sh --continue),
-    # boot wait, generic "continue". Never tmux respawn-pane the PM directly.
-    respawn_body = {'continue_session': True}
-    if soft_boundary:
-        respawn_body['pm_soft_boundary_request'] = os.environ['MOP_PM_SOFT_BOUNDARY_REQUEST']
-    respawn = urllib.request.Request('http://127.0.0.1:3100/slots/0/respawn', data=json.dumps(respawn_body).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST')
-    try:
-        with urllib.request.urlopen(respawn, timeout=280) as response:
-            body = json.load(response)
-    except urllib.error.HTTPError as error:
-        if error.code == 409:
-            saved['replacement_status'] = 'deferred_mop_409'
-            atomic(state, json.dumps(saved))
-            emit('DEFERRED: MoP respawn 409 (busy or already in progress): ' + error.read().decode(errors='replace')[:300])
-            return
-        raise RuntimeError(f'MoP respawn HTTP {error.code}; retain attempted state, no retry')
-    if body.get('success') is not True:
-        raise RuntimeError('MoP respawn not acknowledged; retain attempted state, no retry')
-    # MoP's respawn injects only "continue"; deliver the dated resume prompt through MoP's PM send path.
-    send = urllib.request.Request('http://127.0.0.1:3100/slots/0/send',
-        data=json.dumps({'command': saved['continuation_prompt']}).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST')
-    try:
-        with urllib.request.urlopen(send, timeout=60) as response:
-            emit('RESUME_PROMPT_SENT: ' + json.dumps(json.load(response))[:200])
-    except Exception as error:
-        emit('RESUME_PROMPT_SEND_FAILED (new PM still has MEMORY.md resume pointer): ' + str(error)[:200])
-    saved['replacement_status'] = 'requested'
-    saved['handoff_status'] = 'requested'
-    atomic(state, json.dumps(saved))
+    emit('PM_EXIT_PENDING: PM exits at next Stop; watchdog resumes saved prompt, THEN arms dev-only exits (next Stop, DND skipped)')
 
 def snapshot():
     db = memory.parent / 'state/pm-ops.db'
@@ -304,7 +229,7 @@ def perform():
         emit('ALREADY_REQUESTED: PM restart was checkpointed for ' + day + '; inspect pane before any manual retry')
         return
     if args.complete_on_idle:
-        resume_on_idle(saved)
+        emit('NO_IDLE_REPLACEMENT: PM-first exit-pending is owned by the Stop hook and watchdog')
         return
     if saved and not saved.get('handoff_status'):
         emit('LEGACY_UNCERTAIN: retained pre-handoff state is not permission for another replacement')
@@ -312,7 +237,7 @@ def perform():
     if saved.get('handoff_status'):
         emit('ALREADY_CHECKPOINTED: inspect retained handoff; no new owner or replacement attempt')
         if not args.dry_run:
-            arm_dev_exit_pending(saved)
+            arm_pm_exit_pending(saved)
         return
     pin = pm_identity(require_idle=False)
     obligations, slots, prs = snapshot()
@@ -320,9 +245,8 @@ def perform():
     prompt = ('Read ' + str(resume) + '. Resume PM from the canonical ledger. Relaunch the listed background agents only after checking their live state; '
               'do not duplicate completed work. Run Skill(daily-pm-restart) post-restart completion: post one line to Rajiv DM D0AMF0XE6TS.')
     emit(f'{"DRY_RUN" if args.dry_run else "RESTART"}: resume={resume}; open_obligations={len(obligations)}; slots={len(slots)}; open_prs={len(prs)}')
-    emit('DEV_EXIT_PENDING (first, after checkpoint, independent of PM handoff): GET /exit-status requires dev_only scope; POST /exit-pending {"enabled":true,"dev_only":true}; idempotent per IST day via state dev_exit_pending_armed; dev slots exit only at idle, DND skipped, PM excluded')
-    emit('CLEANUP: ' + str(scripts / 'stale-process-cleanup.py') + ' --apply --attest-slotless-reap')
-    emit('PM_RELAUNCH: MoP POST http://127.0.0.1:3100/slots/0/respawn {"continue_session":true} (RESTART_COMMANDS[0]=launch-pm-cliproxy.sh --continue); then POST /slots/0/send resume prompt; 409=deferred')
+    emit('PM_RELAUNCH: POST /exit-pending pm_only with saved continuation; /exit at next Stop; watchdog uses RESTART_COMMANDS[0]')
+    emit('DEV_EXIT_PENDING: only AFTER PM boot and continuation delivery; dev_only, next Stop, DND skipped')
     if args.dry_run:
         pm_children_report()
         return
@@ -355,8 +279,8 @@ def perform():
     saved['continuation_prompt'] = prompt
     saved['handoff_status'] = 'pending'
     atomic(state, json.dumps(saved))
-    arm_dev_exit_pending(saved)
-    emit('CHECKPOINTED: return from the skill; MoP continues once at the existing debounced Stop/idle boundary')
+    arm_pm_exit_pending(saved)
+    emit('CHECKPOINTED: PM remains active; MoP sends /exit once at the next Stop')
 
 if args.dry_run:
     perform()

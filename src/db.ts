@@ -2491,12 +2491,17 @@ export class MoPDatabase {
     return this.getConfig("exit_pending") === "true";
   }
 
-  setExitPending(enabled: boolean, devOnly = false): void {
+  setExitPending(enabled: boolean, devOnly = false, pmOnly = false, continuationPrompt?: string): void {
+    this.setConfig("exit_pending_episode", randomUUID());
+    this.setConfig("exit_pending_pm_only", enabled && pmOnly ? "true" : "false");
+    this.setConfig("exit_pending_continuation_prompt", enabled ? continuationPrompt ?? "" : "");
+    this.setConfig("exit_pending_continuation_delivery", enabled && pmOnly ? "waiting" : "");
+    this.setConfig("exit_pending_stop_only", "false");
     this.setConfig("exit_pending_dev_only", enabled && devOnly ? "true" : "false");
     this.setConfig("exit_pending", enabled ? "true" : "false");
     if (enabled) {
-      // Reset all slot exit-cycled tracking when enabling
-      for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
+      // PM-first restart must not reset any dev episode before PM has resumed.
+      for (const i of pmOnly ? [PM_SLOT] : devOnly ? devSlots(this.config.slotCount) : [PM_SLOT, ...devSlots(this.config.slotCount)]) {
         this.setConfig(`exit_cycled_${i}`, "false");
       }
     }
@@ -2506,13 +2511,17 @@ export class MoPDatabase {
     this.setConfig(`exit_cycled_${slot}`, "true");
   }
 
-  getExitStatus(): { pending: boolean; dev_only: boolean; cycled: Record<number, boolean> } {
+  getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean> } {
     const pending = this.getExitPending();
     const cycled: Record<number, boolean> = {};
     for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
       cycled[i] = this.getConfig(`exit_cycled_${i}`) === "true";
     }
-    return { pending, dev_only: this.getConfig("exit_pending_dev_only") === "true", cycled };
+    return { pending, episode: this.getConfig("exit_pending_episode"), dev_only: this.getConfig("exit_pending_dev_only") === "true",
+      pm_only: this.getConfig("exit_pending_pm_only") === "true",
+      continuation_prompt: this.getConfig("exit_pending_continuation_prompt") || null,
+      continuation_delivery: this.getConfig("exit_pending_continuation_delivery") || null,
+      stop_only: this.getConfig("exit_pending_stop_only") === "true", cycled };
   }
 
   // ─── Clear Pending ─────────────────────────────────────

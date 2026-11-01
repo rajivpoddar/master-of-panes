@@ -27,7 +27,7 @@ async function stopAndDrain(relay: TmuxRelay): Promise<void> {
   await boundary.runDrainCheck(30_000, boundary.drainGeneration);
 }
 
-test("documented busy skill checkpoints with caller tools; MoP Stop/idle replaces once outside Claude", async () => {
+test("daily checkpoint arms PM-only Stop restart; legacy idle callback cannot replace or arm dev slots", async () => {
   const home = mkdtempSync(join(tmpdir(), "mop-pm-checkpoint-"));
   const call = (phase: string) => execFileSync(python, [fixture, home, phase], { encoding: "utf8" });
   let launches = 0;
@@ -45,20 +45,20 @@ test("documented busy skill checkpoints with caller tools; MoP Stop/idle replace
     assert.equal(relay.isPMBusy(), true);
     let effects = JSON.parse(readFileSync(join(home, "fixture-effects.json"), "utf8")) as string[][];
     assert.equal(effects.some(a => a[1] === "respawn-pane" || a[0] === "mop-respawn"), false);
-    assert.deepEqual(JSON.parse(effects.find(a => a[0] === "exit-pending")![1]), { enabled: true, dev_only: true });
+    const arm = JSON.parse(effects.find(a => a[0] === "exit-pending")![1]);
+    assert.equal(arm.enabled, true);
+    assert.equal(arm.pm_only, true);
+    assert.equal(arm.dev_only, undefined);
+    assert.match(arm.continuation_prompt, /Read .*0400/);
     assert.equal(launches, 0);
     call("stop"); // own Bash completion + terminal Stop, no new prompt/tool
     await stopAndDrain(relay);
     effects = JSON.parse(readFileSync(join(home, "fixture-effects.json"), "utf8"));
-    assert.equal(effects.filter(a => a[0] === "mop-respawn").length, 1);
-    assert.deepEqual(JSON.parse(effects.find(a => a[0] === "mop-respawn")![1]), { continue_session: true });
-    const send = effects.find(a => a[0] === "mop-send")!;
-    assert.ok(effects.indexOf(send) > effects.findIndex(a => a[0] === "mop-respawn"));
-    assert.match(JSON.parse(send[1]).command, /Read .*0400/);
-    assert.equal(effects.some(a => a[0] === "tmux" && a[1] === "respawn-pane"), false);
-    assert.equal(JSON.parse(readFileSync(join(home, "fixture-parent.json"), "utf8")).parent_pid, process.pid);
+    assert.equal(effects.filter(a => a[0] === "mop-respawn").length, 0);
+    assert.equal(effects.filter(a => a[0] === "mop-send").length, 0);
+    assert.equal(effects.filter(a => a[0] === "exit-pending").length, 1);
     await stopAndDrain(relay);
-    assert.equal(launches, 1, "retained requested state cannot replay on another Stop");
+    assert.equal(launches, 0, "armed Stop episode bypasses the legacy idle handoff");
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 

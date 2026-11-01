@@ -126,3 +126,42 @@ for (const devOnly of [false, true]) {
     } finally { db.close(); }
   });
 }
+
+test("REST PM-only scope preserves dev flags and rejects invalid scope/prompt without mutation", async () => {
+  const db = database();
+  try {
+    db.markSlotExitCycled(2);
+    const post = route("/exit-pending", "post", db);
+    const ctx = (body: unknown) => ({ req: { json: async () => body }, json: (body: unknown, status = 200) => ({ body, status }) });
+    const prompt = "Read PM's saved file.\nResume the canonical ledger.";
+    assert.equal((await post(ctx({ enabled: true, pm_only: true, continuation_prompt: prompt }))).status, 200);
+    const armed = db.getExitStatus();
+    assert.equal(armed.pm_only, true);
+    assert.equal(armed.dev_only, false);
+    assert.equal(armed.continuation_prompt, prompt);
+    assert.equal(armed.cycled[2], true);
+    for (const body of [
+      { enabled: true, pm_only: "true" },
+      { enabled: true, pm_only: true, dev_only: true },
+      { enabled: true, pm_only: true, continuation_prompt: 1 },
+      { enabled: true, continuation_prompt: "not PM-only" },
+    ]) {
+      assert.equal((await post(ctx(body))).status, 400);
+      assert.deepEqual(db.getExitStatus(), armed);
+    }
+  } finally { db.close(); }
+});
+
+test("PM-only episode ignores every dev Stop without resetting prior cycle flags", () => {
+  const db = database();
+  try {
+    db.markSlotExitCycled(2);
+    db.setExitPending(true, false, true, "resume");
+    const before = db.getExitStatus();
+    const sent: number[] = [];
+    const stop = stopExit(db, sent);
+    for (let slot = 1; slot <= 8; slot++) stop(slot);
+    assert.deepEqual(sent, []);
+    assert.deepEqual(db.getExitStatus(), before);
+  } finally { db.close(); }
+});

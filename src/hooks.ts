@@ -1452,6 +1452,33 @@ export class HookProcessor {
   // ─── Stop Hook ─────────────────────────────────────────
 
   private async handleStop(slotNum: number, payload: HookPayload): Promise<HookResponse> {
+    // Rajiv 1793501776.726249 / 1793502261.099499: PM exits ONLY on Stop.
+    // Slot 0 has no slot-table row. Consume before any await so duplicate Stops
+    // cannot send a second /exit; never consult stale tracked-tool accounting.
+    const exitStatus = this.db.getExitStatus();
+    if (slotNum === 0 && exitStatus.pending && exitStatus.pm_only) {
+      if (exitStatus.cycled[0]) return {};
+      this.db.markSlotExitCycled(0);
+      const workVersion = () => Math.max(...["SessionStart", "UserPromptSubmit", "PreToolUse"].map(
+        type => this.db.getEvents(0, 1, type)[0]?.id ?? 0));
+      const stoppedWork = workVersion();
+      const fence = () => {
+        const current = this.db.getExitStatus();
+        return !current.pending || !current.pm_only || current.episode !== exitStatus.episode ? "exit_pending_cancelled"
+          : workVersion() !== stoppedWork ? "pm_work_changed_after_stop" : null;
+      };
+      const observed = await this.relay.observeSlotPane(0);
+      const delivery = observed ? await this.relay.deliverGuardedToSlot(0, "/exit", {
+        expectedPaneId: observed.paneId,
+        recheck: async () => fence(),
+        finalCheck: fence,
+      }) : { outcome: "refused_pre_effect", reason: "pm_pane_unknown" };
+      this.db.logEvent(0, "exit_pending_triggered", "Stop", null, {
+        source: "pm_only_stop", delivery: delivery.outcome,
+        reason: "PM Stop consumed one /exit attempt; watchdog owns respawn",
+      });
+      return {};
+    }
     if (slotNum === 0) {
       // Cadence inject delivery check: re-submit a reported-ok cadence prompt
       // once when it never reached the PM transcript (pmCadence.ts).
@@ -1595,7 +1622,7 @@ export class HookProcessor {
     // instead of normal idle notification. Watchdog will restart it.
     // Guard: skip if this slot already cycled (prevents restart loops after
     // watchdog restarts the slot with --continue and it goes idle again).
-    if (this.db.getExitPending() && !(slotNum === 0 && this.db.getExitStatus().dev_only) && !this.db.getExitStatus().cycled[slotNum]) {
+    if (this.db.getExitPending() && !this.db.getExitStatus().pm_only && !(slotNum === 0 && this.db.getExitStatus().dev_only) && !this.db.getExitStatus().cycled[slotNum]) {
       this.relay.sendToSlot(slotNum, "/exit", true);
       this.db.markSlotExitCycled(slotNum);
       this.db.logEvent(slotNum, "exit_pending_triggered", "Stop", null, {

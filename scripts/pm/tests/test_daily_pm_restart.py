@@ -82,11 +82,12 @@ def execute(home, dry, effects, race=None, phase='checkpoint', soft=False):
                         'boot_id': boot_id, 'session_id': 'other' if race == 'proof_session' else 's'}
                 return io.BytesIO(json.dumps(status).encode())
             if request.endswith('/exit-status'):
-                return io.BytesIO(json.dumps({} if race == 'no_dev_scope' else {'dev_only': False}).encode())
+                return io.BytesIO(json.dumps({} if race == 'no_dev_scope' else {'dev_only': False, 'pm_only': False}).encode())
             return io.BytesIO(json.dumps({'slots': [{'slot': 2, 'issue': 12, 'assignment_epoch': 8}]}).encode())
         if request.full_url.endswith('/exit-pending'):
             effects.append(['exit-pending', request.data.decode()])
-            return io.BytesIO(b'{"ok":true,"status":{"dev_only":true}}')
+            if race == 'uncertain': raise TimeoutError('accepted response lost')
+            return io.BytesIO(b'{"ok":true,"status":{"pm_only":true}}')
         if request.full_url.endswith('/slots/0/respawn'):
             effects.append(['mop-respawn', request.data.decode()])
             saved, = (home / '.claude/state').glob('daily-pm-restart-*.json')
@@ -138,7 +139,7 @@ def test_dry_run_snapshots_but_does_not_restart_or_write_resume(tmp_path, capsys
     assert '(old.md)' in (base / 'memory/MEMORY.md').read_text()
 
 
-def test_apply_preserves_state_orders_safe_exits_and_is_idempotent(tmp_path):
+def test_apply_checkpoints_then_arms_pm_first_without_dev_exit_or_replacement(tmp_path):
     base = environment(tmp_path)
     effects = []
     execute(tmp_path, False, effects)
@@ -148,24 +149,20 @@ def test_apply_preserves_state_orders_safe_exits_and_is_idempotent(tmp_path):
     assert resume.name in (base / 'memory/MEMORY.md').read_text()
     assert 'Keep this entry' in (base / 'memory/MEMORY.md').read_text()
     assert not replacements(effects)
-    assert sum(e[0] == 'exit-pending' for e in effects) == 1
-    assert json.loads(next(e[1] for e in effects if e[0] == 'exit-pending')) == {'enabled': True, 'dev_only': True}
+    requests = [json.loads(e[1]) for e in effects if e[0] == 'exit-pending']
+    assert len(requests) == 1
+    assert requests[0]['enabled'] is True and requests[0]['pm_only'] is True
+    assert 'dev_only' not in requests[0]
+    assert resume.name in requests[0]['continuation_prompt']
     saved, = (tmp_path / '.claude/state').glob('daily-pm-restart-*.json')
-    assert json.loads(saved.read_text())['handoff_status'] == 'pending'
-    assert not json.loads(saved.read_text()).get('launch_intent')
+    assert json.loads(saved.read_text())['handoff_status'] == 'armed'
+    assert json.loads(saved.read_text())['pm_exit_pending_armed'] is True
+    before = list(effects)
+    execute(tmp_path, False, effects)
     stop(tmp_path)
     execute(tmp_path, False, effects, phase='idle')
-    replacement, = replacements(effects)
-    assert next(i for i,e in enumerate(effects) if e[0] == 'exit-pending') < effects.index(replacement)
-    assert json.loads(replacement[1]) == {'continue_session': True}
-    sent, = [e for e in effects if e[0] == 'mop-send']
-    assert effects.index(sent) > effects.index(replacement)
-    assert resume.name in json.loads(sent[1])['command']
-    assert not any(e[:2] == ['tmux','respawn-pane'] for e in effects)
-    assert json.loads(saved.read_text())['dev_exit_pending_armed'] is True
-    before = list(effects)
-    execute(tmp_path, False, effects, phase='idle')
     assert effects == before
+    assert not any(e[0] in ('mop-send', 'mop-respawn') for e in effects)
 
 
 def test_unknown_database_refuses_before_any_restart_effect(tmp_path):
@@ -180,48 +177,25 @@ def test_unknown_database_refuses_before_any_restart_effect(tmp_path):
     assert '(old.md)' in (base / 'memory/MEMORY.md').read_text()
 
 
-@pytest.mark.parametrize('race', ['identity', 'completed_work', 'busy', 'birth', 'tool', 'caller_still_running', 'queued'])
-def test_fresh_pm_identity_and_activity_refuse_replacement(tmp_path, race):
+def test_accepted_arm_response_loss_cannot_retry_or_reset_cycle(tmp_path):
     environment(tmp_path)
     effects = []
-    execute(tmp_path, False, effects)
-    stop(tmp_path)
-    with pytest.raises(RuntimeError): execute(tmp_path, False, effects, race, phase='idle')
-    assert not any(e[:2] == ['tmux','if-shell'] or e[:2] == ['tmux','respawn-pane'] for e in effects)
-
-
-def test_accepted_replacement_response_loss_cannot_retry(tmp_path):
-    environment(tmp_path)
-    effects = []
-    execute(tmp_path,False,effects)
-    stop(tmp_path)
-    with pytest.raises(TimeoutError): execute(tmp_path, False, effects, 'uncertain', phase='idle')
+    with pytest.raises(TimeoutError): execute(tmp_path, False, effects, 'uncertain')
     before = list(effects)
-    execute(tmp_path, False, effects, phase='idle')
+    execute(tmp_path, False, effects)
     assert effects == before
     saved, = (tmp_path / '.claude/state').glob('daily-pm-restart-*.json')
     assert json.loads(saved.read_text())['replacement_status'] == 'attempted_uncertain'
 
 
-@pytest.mark.parametrize('race', ['successor','completed_before_idle','tool_after_checkpoint','posttool_without_pre','status_start_stop'])
-def test_idle_handoff_refuses_successor_or_intervening_work(tmp_path,race):
+@pytest.mark.parametrize('race', ['busy', 'queued', 'caller_still_running'])
+def test_pm_first_arm_never_requires_idle_or_holds_new_input(tmp_path, race):
     environment(tmp_path)
     effects = []
-    execute(tmp_path,False,effects)
-    stop(tmp_path)
-    with sqlite3.connect(tmp_path / '.local/share/master-of-panes/data/mop.db') as c:
-        if race == 'completed_before_idle':
-            c.executemany('INSERT INTO events(slot,event_type,payload) VALUES(0,?,?)',[('UserPromptSubmit','{}'),('Stop','{}')])
-        if race == 'tool_after_checkpoint':
-            c.executemany('INSERT INTO events(slot,event_type,payload) VALUES(0,?,?)',[('PreToolUse','{}'),('PostToolUse','{}'),('Stop','{}')])
-        if race == 'posttool_without_pre':
-            c.executemany('INSERT INTO events(slot,event_type,payload) VALUES(0,?,?)',[('PostToolUse','{}'),('Stop','{}')])
-        if race == 'status_start_stop':
-            c.executemany('INSERT INTO events(slot,event_type,payload) VALUES(0,?,?)',[('pm_status_busy','{}'),('pm_status_idle_drained','{}'),('Stop','{}')])
-    execute(tmp_path,False,effects,race,phase='idle')
+    execute(tmp_path, False, effects, race)
+    request, = [json.loads(e[1]) for e in effects if e[0] == 'exit-pending']
+    assert request['pm_only'] is True
     assert not replacements(effects)
-    saved, = (tmp_path / '.claude/state').glob('daily-pm-restart-*.json')
-    assert json.loads(saved.read_text())['handoff_status'] == 'refused_successor_or_work'
 
 
 if __name__ == '__main__':
@@ -250,55 +224,13 @@ def test_other_root_descendant_still_refuses_ownership(tmp_path):
         execute(tmp_path, True, [], race='root_child')
 
 
-def test_missing_dev_scope_does_not_arm_global_flag(tmp_path):
+def test_missing_pm_scope_does_not_arm_global_or_dev_flag(tmp_path):
     environment(tmp_path)
     effects = []
     execute(tmp_path, False, effects, 'no_dev_scope')
     saved, = (tmp_path / '.claude/state').glob('daily-pm-restart-*.json')
-    assert json.loads(saved.read_text())['dev_exit_pending_armed'] == 'blocked_mop_dev_only_scope_missing'
+    assert json.loads(saved.read_text())['pm_exit_pending_armed'] == 'blocked_mop_pm_only_scope_missing'
     assert not any(e[0] == 'exit-pending' for e in effects)
     execute(tmp_path, False, effects)
-    assert json.loads(saved.read_text())['dev_exit_pending_armed'] is True
+    assert json.loads(saved.read_text())['pm_exit_pending_armed'] is True
     assert sum(e[0] == 'exit-pending' for e in effects) == 1
-
-
-def test_respawn_409_is_deferred_without_prompt_or_tmux_replacement(tmp_path):
-    environment(tmp_path)
-    effects = []
-    execute(tmp_path, False, effects)
-    stop(tmp_path)
-    execute(tmp_path, False, effects, 'respawn_busy', phase='idle')
-    saved, = (tmp_path / '.claude/state').glob('daily-pm-restart-*.json')
-    assert json.loads(saved.read_text())['replacement_status'] == 'deferred_mop_409'
-    assert len(replacements(effects)) == 1
-    assert not any(e[0] == 'mop-send' or e[:2] == ['tmux','respawn-pane'] for e in effects)
-
-
-def test_soft_boundary_accepts_completed_turns_and_held_queue_without_weakening_effect_pin(tmp_path):
-    environment(tmp_path)
-    effects = []
-    execute(tmp_path, False, effects)
-    stop(tmp_path)
-    with sqlite3.connect(tmp_path / '.local/share/master-of-panes/data/mop.db') as c:
-        c.executemany('INSERT INTO events(slot,event_type,payload) VALUES(0,?,?)',
-            [('UserPromptSubmit','{}'),('PreToolUse','{}'),('PostToolUse','{}'),
-             ('SessionStart','{"session_id":"s","source":"compact"}'),('Stop','{}')])
-    execute(tmp_path, False, effects, 'queued', phase='idle', soft=True)
-    replacement, = replacements(effects)
-    assert json.loads(replacement[1]) == {'continue_session': True, 'pm_soft_boundary_request': 'fixture-boundary'}
-    assert len([e for e in effects if e[0] == 'mop-send']) == 1
-
-
-@pytest.mark.parametrize('race', ['busy', 'tool', 'caller_still_running', 'completed_work', 'successor',
-                                 'proof_missing', 'proof_session', 'inflight', 'cli_queued', 'cli_proof_missing', 'unfenced'])
-def test_soft_boundary_never_overrides_busy_tool_session_or_effect_drift(tmp_path, race):
-    environment(tmp_path)
-    effects = []
-    execute(tmp_path, False, effects)
-    stop(tmp_path)
-    if race == 'successor':
-        execute(tmp_path, False, effects, race, phase='idle', soft=True)
-    else:
-        with pytest.raises(RuntimeError):
-            execute(tmp_path, False, effects, race, phase='idle', soft=True)
-    assert not replacements(effects)
