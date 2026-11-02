@@ -104,6 +104,23 @@ Never summarize the PR list as "+N more" in the reply. If the list is long, post
   **Repro lanes count too: 3h on the ISSUE, PR or not** (Rajiv C0ALZJHGE49 thread `1791423886.620339`, ts `1791425729.455819`: "was it doing a repro or an implementation? if it's repro, it can be closed an reimplemented."; ts `1791425780.521879`: "update the hourly report processing skill"; trigger S2 on #9062, ~14h, ~10h of it repro/characterization with nothing pushed and no PR). The 3h clock is time on lane (the issue), not time since a PR was opened. For every slot past 3h on lane, the agent classifies the work as **repro/characterization** (investigating, tracing, profiling, building harnesses; no product-code diff that fixes an AC) or **implementation** (a product-code diff with AC tests). Repro past 3h is `NEEDS_PM: CLOSE_REIMPLEMENT` even with no PR. The slot pushes its WIP plus findings to the issue, PM parks or closes the lane, splits the remaining repro into its own thin issue if needed, and gives the implementation to a fresh `new_issue` from origin/main with a 3h box. An implementation lane past 3h gets the split check and a 30-min hard stop (pushed head plus ready PR, or a typed blocker); if it misses that, close and reimplement. PM decides in the same turn, and never exempts a lane only because a split already happened.
   It never assigns or releases slots, never touches another slot's work, never runs builds/tests. It posts a table (slot | lane | time on lane | last push | turn | verdict ON_TRACK/CORRECTED/NEEDS_PM | action) via `~/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -t <hourly_ts> -f < file` and returns it. PM handles NEEDS_PM items (reassign/release/decision) the same turn.
 
+## Step 3a: Remote test/browser boxes (Rajiv 2026-11-02, DM D0AMF0XE6TS thread 1793614728.759459, ts 1793615262.985719)
+*"add the remote test/browser boxes status to the hourly report. add the recovery steps to the hourly report processing skill"*. Trigger: test pool showed 0 free / 8 with 7 queued, from 2 broken, 1 expired and 1 mid-preempt box. Slots and PM agents sat waiting on leases (#12040, #12498, #11813, #12542) while the browser pool had 9/12 free.
+
+Each hourly, read the report's `*Remote boxes:*` line. If it is missing, run `~/.claude/scripts/remote-test-box.sh list` yourself. For EACH pool (test cx33, browser cx43), record free / leased / preempting / expired / broken / queued counts, plus the oldest queued request's age.
+
+Recovery, in the same turn, in this order. Delegate the mutating steps to ONE PM bg agent; never run them in the foreground:
+1. **Expired leases**: run `remote-test-box.sh reap`. It resets expired leases whose launcher is gone and rebuilds long-broken boxes.
+2. **`ORPHAN_REFUSED` / custody-marked (`retry_unresolved`, `transport_unknown`) leases** that reap would not touch:
+   - verify no live owner: no local `pgrep -f <lease-alias>`; box-side `ps` shows no test process; the owner agent or slot no longer holds that lease (check ListAgents and MoP `/slots`; a newer lease for the same PR is a different lease);
+   - then `remote-test-box.sh custody-resolve <lease> --by pm --reason "<evidence>"`, followed by the fenced rebuild/reset path.
+   - Never release a lease whose launcher pid is alive.
+3. **Broken boxes**: after custody is resolved, use the fenced single-box rebuild, one box at a time, and verify each returns `free`.
+4. **Queue ≥ 4, or the oldest queued request ≥ 30 min, with the other pool mostly free**: name the imbalance in the reply. Pool sizes are `RTB_TPOOL_SIZE` / `RTB_POOL_SIZE` in remote-test-box.sh, and Rajiv approves size changes.
+5. **Stopped agents hold leases**: when Step 3c stops an agent, check `list` for leases it owned in the same turn, and release them through step 2.
+6. **Waiting work**: tell each slot or agent whose queue attempt timed out (rc75) to re-queue ONE request with `--wait 3600` at its correct priority. Don't escalate a retry loop. p3 is the default for non-P0/P1 proof. A request only preempts strictly lower priority.
+Reply line: `boxes: test <free>/<target> (<queued> queued, <broken> broken, <expired> expired) · browser <free>/<target> · action: <what was done/owner>`.
+
 ## Step 3b: Training progress (Rajiv 2026-10-21, C0ALZJHGE49 thread 1792550718.626739, ts 1792551127.300669)
 *"update the processing skill to check verify the sindhu run steps as well. if step count remains the same then check the status with superproofer agent an dm me."*
 
