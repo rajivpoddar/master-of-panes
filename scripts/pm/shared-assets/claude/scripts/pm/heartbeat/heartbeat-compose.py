@@ -668,12 +668,19 @@ def spark_probe(timeout: int = 8) -> tuple[dict | None, str]:
     if not name:
         return {}, ""
     doc: dict = {"run": name}
+    # Trainer bar only: skip HF "Loading weights" bars (677 tensors on gemma-4-12B), which matched as "12/677" after a
+    # resume (2026-11-02). The trainer bar is already GLOBAL (resume offset included: "2753/5625"). Right after a native
+    # resume tqdm prints a bogus it/s rate (it divides by the global step), so accept it/s for the step but use only s/it
+    # for the ETA.
     prog = None
-    for mm in _re.finditer(r"(\d+)/(\d+)\s*\[[^\]]*?([\d.]+)s/it", out):
-        if prog is None or int(mm[2]) >= int(prog[2]):
-            prog = mm
+    for line in out.splitlines():
+        if "Loading" in line:
+            continue
+        for mm in _re.finditer(r"(\d+)/(\d+)\s*\[[^\]]*?([\d.]+)(s/it|it/s)", line):
+            if prog is None or int(mm[2]) > int(prog[2]) or (int(mm[2]) == int(prog[2]) and int(mm[1]) >= int(prog[1])):
+                prog = mm
     if prog:
-        doc.update(step=int(prog[1]), total=int(prog[2]), spi=float(prog[3]))
+        doc.update(step=int(prog[1]), total=int(prog[2]), spi=float(prog[3]) if prog[4] == "s/it" else None)
     losses = _re.findall(r"'loss': '?([\d.]+)'?", out)
     if losses:
         doc["loss"] = losses[-1]
@@ -722,7 +729,7 @@ def training_line(probe=None, mon_up=None) -> tuple[str, list[str]]:
     bits = [doc["run"]]
     if doc.get("step") is not None:
         pct = 100.0 * doc["step"] / doc["total"] if doc["total"] else 0
-        bits.append(f"{doc['step']}/{doc['total']} ({pct:.0f}%)")
+        bits.append(f"step {doc['step']}/{doc['total']} ({pct:.0f}%)")
     else:
         bits.append("step n/a")
     bits.append(f"loss {doc.get('loss', 'n/a')}")
