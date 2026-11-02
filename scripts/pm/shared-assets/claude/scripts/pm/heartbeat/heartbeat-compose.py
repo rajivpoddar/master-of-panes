@@ -744,6 +744,64 @@ def training_line(probe=None, mon_up=None) -> tuple[str, list[str]]:
     return "*Training:* " + " · ".join(bits), acts
 
 
+REMOTE_BOX_SCRIPT = Path.home() / ".claude/scripts/remote-test-box.sh"
+
+
+def remote_boxes_line(timeout: int = 20) -> str:
+    """Collect both pools; malformed or incomplete output is never reported as healthy."""
+    try:
+        result = subprocess.run(["bash", str(REMOTE_BOX_SCRIPT), "list"], capture_output=True,
+                                text=True, errors="replace", timeout=timeout)
+        if result.returncode:
+            raise ValueError(f"collector rc={result.returncode}")
+        pools = {}
+        current = None
+        for line in result.stdout.splitlines():
+            header = re.match(r"^== (browser|test) pool \([^)]*target (\d+)\) ==$", line.strip())
+            if header:
+                current = header.group(1)
+                if current in pools or int(header.group(2)) != {"test": 12, "browser": 8}[current]:
+                    raise ValueError("unexpected pool header")
+                pools[current] = {"rows": [], "summary": None}
+                continue
+            if current is None:
+                continue
+            row = re.match(r"^(rtb-(?:tpool|pool)-\S+)\s+(\S+)(?:\s|$)", line.strip())
+            if row:
+                name, state = row.groups()
+                if not name.startswith("rtb-tpool-" if current == "test" else "rtb-pool-"):
+                    raise ValueError("box in wrong pool")
+                if state not in {"free", "leased", "releasing", "expired", "broken", "preempting"}:
+                    raise ValueError("unknown box state")
+                pools[current]["rows"].append((name, state))
+            summary = re.match(r"^pool:\s*(\d+) free / (\d+),", line.strip())
+            if summary:
+                pools[current]["summary"] = tuple(map(int, summary.groups()))
+        if set(pools) != {"test", "browser"}:
+            raise ValueError("missing pool")
+        pieces = []
+        for name, target in (("test", 12), ("browser", 8)):
+            pool = pools[name]
+            rows = pool["rows"]
+            names = [box for box, _ in rows]
+            count = lambda state: sum(s == state for _, s in rows)
+            if len(names) != len(set(names)) or pool["summary"] != (count("free"), target):
+                raise ValueError(f"invalid {name} pool summary")
+            details = [f"{count('leased')} leased", f"{count('releasing')} releasing"]
+            if count("preempting"):
+                details.append(f"{count('preempting')} preempting")
+            for state in ("expired", "broken"):
+                affected = [box for box, s in rows if s == state]
+                details.append(f"{len(affected)} {state}" + (f": {', '.join(affected)}" if affected else ""))
+            pieces.append(f"{name} pool {count('free')} free / {target} (" + "; ".join(details) + ")")
+        return "*Remote boxes:* " + " · ".join(pieces)
+    except subprocess.TimeoutExpired:
+        reason = "collector timeout"
+    except (OSError, ValueError) as exc:
+        reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+    return f"*Remote boxes:* unavailable ({reason})"
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -768,6 +826,7 @@ def compose(
     unblockable: list[str] | None = None,
     tracked: list[str] | None = None,
     priority_flags: list[str] | None = None,
+    remote_boxes: str | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -820,6 +879,8 @@ def compose(
             slot_actions = slot_actions + list(priority_flags)
         parts.append(sl_tldr)
         body += ["", *sl_lines]
+    if mode == "1h":
+        body += ["", remote_boxes or "*Remote boxes:* unavailable (collector not run)"]
     if tracked:
         # Rajiv 2026-10-27 DM D0AMF0XE6TS thread 1793097714.304129: tracked features right after Slots.
         body += ["", *tracked]
@@ -1202,7 +1263,7 @@ def main() -> int:
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
         email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
-        priority_flags=priority_flags,
+        priority_flags=priority_flags, remote_boxes=remote_boxes_line() if args.mode == "1h" else None,
     ))
     pm_actions += (training[1] if training else [])
     if pm_actions:
