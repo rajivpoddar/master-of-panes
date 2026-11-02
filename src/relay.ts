@@ -828,7 +828,7 @@ export class TmuxRelay {
     } catch { return false; }
   }
 
-  private async pmClearPaneRefusal(paneId: string, expectComposer: string): Promise<PMClearFenceRefusal | null> {
+  private async pmClearPaneRefusal(paneId: string, expectComposer: string, allowQueuedClear = false): Promise<PMClearFenceRefusal | null> {
     try {
       const resolved = await this.runShell(
         `tmux display-message -t ${this.pmPaneAddress} -p '#{pane_id}|#{pane_current_command}'`,
@@ -838,7 +838,9 @@ export class TmuxRelay {
       if (currentPaneId !== paneId) return { reason: "pm_pane_identity_drift", busy: false };
       if (!(await this.isPMCommandReady(command, paneId))) return { reason: "pm_pane_not_ready", busy: false };
       const snapshot = await this.runShell(`tmux capture-pane -p -t ${paneId}`, { timeout: 5_000 });
-      if (QUEUED_HINT.test(snapshot.stdout)) return { reason: "pm_cli_queue_not_empty", busy: true };
+      // Rajiv 1793587783.511949: submit a pending clear at Stop even with CLI backlog.
+      // Queue survival is a CLI assumption, not proven here; prompt writes retain the guard.
+      if (!allowQueuedClear && QUEUED_HINT.test(snapshot.stdout)) return { reason: "pm_cli_queue_not_empty", busy: true };
       const composer = composerText(snapshot.stdout);
       if (composer === null) return { reason: "pm_composer_unreadable", busy: true };
       if (composer !== expectComposer) {
@@ -887,7 +889,7 @@ export class TmuxRelay {
       });
       return { ok: false, zeroEffect, busy: zeroEffect && refusal.busy, reason: refusal.reason };
     };
-    const prePaste = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, "")) ?? fence.check();
+    const prePaste = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, "", label === "pm_clear" && text === PM_CLEAR_COMMAND)) ?? fence.check();
     if (prePaste) return refuse(prePaste, true, "pre_paste");
 
     const seq = ++this.directInjectSeq;
@@ -898,7 +900,7 @@ export class TmuxRelay {
       await fs.writeFile(tmpFile, text);
       await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
       // Revalidate authority after the file/buffer awaits, immediately before the paste.
-      const atPaste = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, "")) ?? fence.check();
+      const atPaste = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, "", label === "pm_clear" && text === PM_CLEAR_COMMAND)) ?? fence.check();
       if (atPaste) {
         await this.runShell(`tmux delete-buffer -b ${bufName}`, { timeout: 5_000 }).catch(() => undefined);
         return refuse(atPaste, true, "at_paste");
@@ -907,11 +909,11 @@ export class TmuxRelay {
       await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${fence.paneId} -d`, { timeout: 10_000 });
       await sleep(PM_INJECT_ENTER_DELAY_MS);
 
-      const preEnter = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, text)) ?? fence.check();
+      const preEnter = fence.check() ?? (await this.pmClearPaneRefusal(fence.paneId, text, label === "pm_clear" && text === PM_CLEAR_COMMAND)) ?? fence.check();
       if (preEnter) {
         // Remove only our own paste, and only while the composer holds exactly it.
         // A paste happened: the outcome is never zero-effect (never rearmed).
-        const owned = (await this.pmClearPaneRefusal(fence.paneId, text)) === null;
+        const owned = (await this.pmClearPaneRefusal(fence.paneId, text, label === "pm_clear" && text === PM_CLEAR_COMMAND)) === null;
         if (owned) {
           await this.runShell(`tmux send-keys -t ${fence.paneId} C-u`, { timeout: 10_000 });
         }

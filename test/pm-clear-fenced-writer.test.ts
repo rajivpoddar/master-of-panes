@@ -35,6 +35,7 @@ type FakePane = {
   command: string;
   composer: string | null;
   buffer: string;
+  queued?: boolean;
   commands: string[];
   onPaste?: () => void;
   onFirstProbe?: () => void;
@@ -55,9 +56,10 @@ function relayFor(pane: FakePane, db: MoPDatabase): TmuxRelay {
         first?.();
         return { stdout: `${pane.addressPaneId}|${pane.command}\n`, stderr: "" };
       }
+      if (command.endsWith("-p '#{pane_id}'")) return { stdout: `${pane.addressPaneId}\n`, stderr: "" };
       if (command.startsWith("tmux capture-pane")) {
         const body = pane.composer === null ? "loading..." : `${RULE}\n❯ ${pane.composer}\n${RULE}`;
-        return { stdout: `output\n${body}\n`, stderr: "" };
+        return { stdout: `output\n${body}\n${pane.queued ? "Press up to edit queued messages" : ""}\n`, stderr: "" };
       }
       const load = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
       if (load) {
@@ -124,6 +126,51 @@ test("legitimate current-generation delivery: one paste and one Enter, pinned to
     assert.equal(enters[0], "tmux send-keys -t %1 Enter");
     assert.equal(pane.buffer, PM_CLEAR_COMMAND);
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("pending clear at Stop submits over CLI backlog; a new running turn and unreadable composer still defer", async () => {
+  for (const scenario of ["queued", "running", "unreadable"] as const) {
+    const { db, directory } = freshDb("mop-pmclear-queue-stop-");
+    try {
+      latch(db, "deferred_busy");
+      const pane = fakePane({ queued: true, composer: scenario === "unreadable" ? null : "" });
+      const pm = pmState();
+      if (scenario === "running") pm.generation += 1;
+      const relay = relayFor(pane, db);
+      const result = await retryDeferredPmClearOnStop({
+        ...latchOptions(db, Date.parse(REQUESTED_AT), { n: 0 }),
+        backoffMs: 0, settleMs: 0, wait: async () => {},
+        isCurrent: () => true, isIdleProven: () => true,
+        send: async () => {
+          const write = await relay.writePMClearFenced({ paneId: "%1", check: fenceFor(db, pm) });
+          return { success: write.ok, busy: write.busy, zeroEffect: write.zeroEffect, error: write.reason };
+        },
+      });
+      assert.equal(result.kind, scenario === "queued" ? "sent" : "deferred_busy", scenario);
+      assert.equal(effects(pane).enters.length, scenario === "queued" ? 1 : 0, scenario);
+      assert.equal(effects(pane).pastes.length, scenario === "queued" ? 1 : 0, scenario);
+      assert.equal(db.getConfig("pm_clear_delivery_state"), scenario === "queued" ? "awaiting_ack" : "deferred_busy");
+      assert.equal(pane.queued, true, "fake CLI backlog is not mutated; real CLI survival remains unverified");
+    } finally {
+      db.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ordinary fenced PM prompts still refuse a non-empty CLI queue", async () => {
+  const { db, directory } = freshDb("mop-pmprompt-queue-");
+  try {
+    const pane = fakePane({ queued: true });
+    const relay = relayFor(pane, db);
+    const result = await relay.writePMPromptFenced("ordinary prompt", () => null);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "pm_cli_queue_not_empty");
+    assert.deepEqual(effects(pane), { pastes: [], enters: [] });
+  } finally {
+    db.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });
