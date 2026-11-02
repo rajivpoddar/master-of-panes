@@ -93,6 +93,8 @@ STEP 2 — check: first line is "*Hourly — HH:MM IST*", or starts with
   Sources: Rajiv C0ALZJHGE49 thread 1792637124.844719, ts 1792637256.052779;
   DM D0AMF0XE6TS thread 1792637361.212159, ts 1792638231.158209.
 
+  - "*Remote boxes:*" line (Rajiv 2026-11-02, C0ALZJHGE49 thread 1793619957.716719, ts 1793620021.219069: "Add a blank line before remote boxes"): it goes after Slots, preceded by ONE blank line. If the composer doesn't emit it, add it from `timeout 60 ~/.claude/scripts/remote-test-box.sh list`, using the same blank line.
+
 STEP 3 — post ONE NEW TOP-LEVEL message (no -t):
   SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-1h-post.txt
   From the readback `OK ts=<ts>` record the thread:

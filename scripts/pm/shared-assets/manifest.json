@@ -926,7 +926,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "53a625f25b03fc345869df28e7542ed9ed5537ec68e665b35c5281045aa3ca2b",
+      "sha256": "a3204aa5a173b4c981589b562e7de46b1a66081f5bb6ed87b802f565a43ce50e",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
