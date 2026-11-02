@@ -33,8 +33,12 @@ class World:
         self.parents = FIXTURE["parents"][:]
         self.blobs = copy.deepcopy(FIXTURE["blob_shas"])
         self.rules = FIXTURE["rules"]
-        self.e2e = None
-        self.e2e_jobs = []
+        self.e2e = dict(self.run, id=40075590960, path=".github/workflows/e2e.yml")
+        scope = copy.deepcopy(self.jobs[0])
+        scope.update(run_id=self.e2e["id"], steps=[{
+            "name": "Classify paid E2E scope", "status": "completed", "conclusion": "success"}])
+        self.e2e_jobs = [scope, dict(scope, id=scope["id"]+1, name="e2e",
+                                     conclusion="skipped", steps=[])]
         self.commands = []
         self.reads = []
         self.runs = None
@@ -230,8 +234,6 @@ def test_no_e2e_red_or_required_skip_waiver(required, state):
 
 def test_exact_head_successful_e2e_wrapper_with_skipped_tests():
     w = World()
-    w.e2e = dict(w.run, id=40075590960, path=".github/workflows/e2e.yml")
-    w.e2e_jobs = [dict(w.jobs[0], run_id=w.e2e["id"], name="e2e", conclusion="skipped", steps=[])]
     result, _ = w.evaluate()
     assert result["workflows"]["e2e.yml"]["run"] == w.e2e["id"]
     assert result["workflows"]["e2e.yml"]["skipped"] is True

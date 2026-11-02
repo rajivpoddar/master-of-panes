@@ -512,7 +512,7 @@ def verify_ci_required_jobs(run, jobs, required_set):
 
 
 def app_test_only_e2e_proof(pr, classifier_proof):
-    """Allow E2E absence or an exact-head successful run with its E2E job skipped."""
+    """Select the newest substantive E2E run; only wholly skipped wrappers may yield."""
     head = pr["head"]["sha"]
     runs = pages(f"actions/workflows/e2e.yml/runs?event=pull_request&head_sha={head}&per_page=100",
                  "workflow_runs")
@@ -520,25 +520,39 @@ def app_test_only_e2e_proof(pr, classifier_proof):
     matching = [run for run in runs if (
         run.get("head_sha") == head and run.get("event") == "pull_request"
         and run.get("head_branch") == pr["head"]["ref"]
-        and run.get("path", "").split("@")[0] == ".github/workflows/e2e.yml")]
-    if not matching:
-        return {**classifier_proof, "workflow": "e2e.yml", "run": None, "skipped": True}
-    run = matching[0]
-    if not successful(run):
-        return None
-    jobs = pages(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100", "jobs")
-    if "ts_changed" in classifier_proof and any(
-            job.get("run_id") != run["id"]
-            or job.get("run_attempt") != run.get("run_attempt", 1)
-            or job.get("head_sha") != head
-            or job.get("status") != "completed"
-            or job.get("conclusion") not in ("success", "skipped") for job in jobs):
-        return None
-    e2e_jobs = [job for job in jobs if job.get("name") == "e2e"]
-    if len(e2e_jobs) != 1 or e2e_jobs[0].get("conclusion") != "skipped":
-        return None
-    return {**classifier_proof, "workflow": "e2e.yml", "run": run["id"],
-            "attempt": run.get("run_attempt", 1), "skipped": True}
+        and run.get("path", "").split("@")[0] == ".github/workflows/e2e.yml"
+        and native_pr_binding_ok(run, pr))]
+    for run in matching:
+        jobs = pages(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100", "jobs")
+        if (len({job.get("name") for job in jobs}) != len(jobs)
+                or len({job.get("id") for job in jobs}) != len(jobs)
+                or any(job.get("run_id") != run["id"]
+                       or job.get("run_attempt") != run.get("run_attempt", 1)
+                       or job.get("head_sha") != head for job in jobs)):
+            return None
+        scope_jobs = [job for job in jobs if job.get("name") == CLASSIFIER_JOB_NAME]
+        if len(scope_jobs) != 1:
+            return None
+        scope = scope_jobs[0]
+        # Label-event wrappers have no executed classifier. Do not use this
+        # exception to ignore pending/failed/ambiguous classifiers or infra red.
+        if (run.get("status") == "completed" and run.get("conclusion") == "skipped"
+                and all(job.get("status") == "completed"
+                        and job.get("conclusion") == "skipped"
+                        and not job.get("steps") for job in jobs)):
+            continue
+        if (not successful(run) or not successful(scope)
+                or not any(step.get("name") == "Classify paid E2E scope" and successful(step)
+                           for step in scope.get("steps", []))
+                or any(job.get("status") != "completed"
+                       or job.get("conclusion") not in ("success", "skipped") for job in jobs)):
+            return None
+        e2e_jobs = [job for job in jobs if job.get("name") == "e2e"]
+        if len(e2e_jobs) != 1 or e2e_jobs[0].get("conclusion") != "skipped":
+            return None
+        return {**classifier_proof, "workflow": "e2e.yml", "run": run["id"],
+                "attempt": run.get("run_attempt", 1), "skipped": True}
+    return None
 
 
 def site_paths_confined(pr, rules_bytes):
@@ -649,6 +663,8 @@ def merge(number, head, apply=False, unrelated_main=None):
         required_set = ci_proof.get("classifier_required_set")
         test_only = ci_proof.get("app_test_only")
         e2e_proof = app_test_only_e2e_proof(pr, test_only) if test_only else None
+        if test_only and e2e_proof is None:
+            raise Refusal("UNREQUIRED_E2E_NOT_SUCCESSFULLY_SKIPPED")
         if required_set is not None:
             if required_set["e2e_required"]:
                 e2e_proof = workflow_proof(pr, "e2e.yml", WORKFLOWS["e2e.yml"])

@@ -668,19 +668,20 @@ class AppTestOnlyCompatibilityTests(unittest.TestCase):
                 parent.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
             self.assertIn("WORKFLOW_MISSING workflow=e2e.yml", str(ctx.exception))
 
-    def test_exact_app_test_only_receipt_allows_absent_e2e_with_green_ci(self):
+    def test_exact_app_test_only_receipt_without_executed_e2e_classifier_refuses(self):
         install(self.world())
-        result = merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
-        self.assertEqual(result["status"], "READY_TO_MERGE")
-        self.assertTrue(result["workflows"]["ci.yml"]["app_test_only"])
-        self.assertEqual(result["workflows"]["e2e.yml"]["exempt"], "app_test_only")
-        self.assertIsNone(result["workflows"]["e2e.yml"]["run"])
+        with self.assertRaisesRegex(merge.Refusal, "UNREQUIRED_E2E_NOT_SUCCESSFULLY_SKIPPED"):
+            merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
 
     def test_exact_app_test_only_receipt_allows_successful_explicit_e2e_skip(self):
         skipped = test_only_run(path="e2e.yml")
+        skipped["pull_requests"] = [{"number": TEST_ONLY_NUMBER}]
+        common = {"run_id": skipped["id"], "run_attempt": skipped["run_attempt"],
+                  "head_sha": TEST_ONLY_HEAD, "status": "completed"}
         install(self.world(e2e_runs=[skipped], e2e_jobs=[
-            {"id": 8219003, "name": "e2e", "status": "completed",
-             "conclusion": "skipped", "steps": []}]))
+            dict(common, id=8219002, name="classify-change-scope", conclusion="success", steps=[
+                {"name": "Classify paid E2E scope", "status": "completed", "conclusion": "success"}]),
+            dict(common, id=8219003, name="e2e", conclusion="skipped", steps=[])]))
         result = merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
         self.assertEqual(result["status"], "READY_TO_MERGE")
         self.assertTrue(result["workflows"]["e2e.yml"]["skipped"])
