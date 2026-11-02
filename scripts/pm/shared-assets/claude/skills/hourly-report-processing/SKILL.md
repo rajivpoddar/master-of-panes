@@ -110,7 +110,12 @@ Never summarize the PR list as "+N more" in the reply. If the list is long, post
 Each hourly, read the report's `*Training:*` line (e.g. `sindhu-r7-n5625 step 1150/5625 ... (as of HH:MM IST)`) and compare its run id and step against the PREVIOUS hourly report's training line in C0ALZJHGE49.
 - Step advanced → note `training: <run> step A→B ON_TRACK` in the Step 4 reply.
 - Step UNCHANGED for the same run (or the `as of` time is stale by >1h) → launch the `superproofer` agent (MODE: TRAIN status check, read-only: process alive, last log step/loss, CUDA/MemAvailable, errors; no relaunch, no fix). In the SAME turn, DM Rajiv in D0AMF0XE6TS: run id, the stuck step, last-advanced time, the superproofer finding and the PM default (e.g. BUILD fix → TRAIN per S29). Also include it in the Step 4 reply.
-- No training line → skip.
+- No training line, or "no run active", → CHECK, don't skip. Read the last known run, in this order: the previous hourly training line, pm-ops training obligations, then the superproofer STATE/run parent. If that run never reached its final step (e.g. last seen 2754/5625), treat it as CRASHED. Do these in the SAME turn:
+  1. Launch Skill(spark-resume-run): ONE resume attempt from the latest complete checkpoint, under the S29 rule that PM owns Spark failures. Local Spark needs no spend GO.
+  2. DM Rajiv: run, last step, crash time, and that the resume was launched.
+  3. Note it in the Step 4 reply.
+  If the run did finish, record it as `training: <run> COMPLETE` and skip.
+  Source: Rajiv, C0ALZJHGE49 thread 1793583921.659259, ts 1793585706.576799: *"why wasn't it auto restarted? does the hourly report processing have that?"* Trigger: the box reboot on 11-01 at 14:27 IST killed r7 at step 2754. The hourly read "no run active" and skipped it for about 17h.
 
 ## Step 3c: Inactive background agents (Rajiv 2026-10-22, DM D0AMF0XE6TS thread 1792637361.212159, ts 1792638231.158209)
 Stale agents (2026-10-25, Rajiv C0ALZJHGE49 thread 1792914695.006599): Step 3c also stops every agent the composer lists as `stale` (quiet >3h or completed but uncollected, up to 24h), not only completed/inactive.
