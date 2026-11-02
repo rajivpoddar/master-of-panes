@@ -1,4 +1,4 @@
-import { closeSync, openSync, utimesSync } from "node:fs";
+import { closeSync, openSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 
 import type { MoPDatabase } from "./db.js";
 
@@ -168,6 +168,7 @@ export async function requestPmClearOnce(options: Parameters<typeof claimPmClear
   send: (request: { requestedAt: string }) => Promise<PMClearSendResult>;
   /** Operator requests wait for the next native Stop even if PM was already idle. */
   deferUntilStop?: boolean;
+  onTerminalFailure?: (failure: { requestedAt: string; error: string }) => void;
 }): Promise<PMClearDelivery> {
   const { db } = options;
   const claim = claimPmClearRequest(options);
@@ -211,11 +212,15 @@ export async function requestPmClearOnce(options: Parameters<typeof claimPmClear
     return { kind: "deferred_busy", requestedAt: claim.requestedAt };
   }
   if (result.zeroEffect) {
-    // Proven zero effect, not a busy refusal (identity/session drift,
-    // unreadable composer): release the latch without retrying.
+    // Proven zero effect, not a busy refusal: release this request only.
     if (ownsLatch) {
       db.clearPendingClear(0);
       db.setConfig(PM_CLEAR_DELIVERY_STATE_KEY, "failed");
+      const error = result.error ?? "PM clear refused before any effect";
+      db.logEvent(0, "pm_clear_delivery_failed", null, null, {
+        requested_at: claim.requestedAt, error, via: options.source, zero_effect: true,
+      });
+      options.onTerminalFailure?.({ requestedAt: claim.requestedAt, error });
     }
     return { kind: "failed", error: result.error ?? "PM clear refused before any effect" };
   }
@@ -311,6 +316,31 @@ export async function retryDeferredPmClearOnStop(options: Omit<Parameters<typeof
  * instead of blocking (which would keep PM busy and deadlock the clear).
  */
 export const PM_SELF_CLEAR_MARKER_PATH = "/tmp/pm-self-clear-requested";
+
+/** Replace stale deferred receipts after a proven terminal failure. Never sends input. */
+export function recordPmClearFailureProof(
+  failure: { requestedAt: string; error: string },
+  paths = ["/tmp/mop-clear-slot-latest.json", PM_SELF_CLEAR_MARKER_PATH],
+): void {
+  for (const path of paths) {
+    let previous: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) previous = parsed;
+    } catch { /* Legacy markers can be empty or plain text. */ }
+    const receipt = {
+      ...previous, ok: false, status: "failed", delivery_state: "failed",
+      requested_at: failure.requestedAt, error: failure.error,
+      message: "MoP delivery failed, re-request",
+      results: Array.isArray(previous.results)
+        ? previous.results.map((row: Record<string, unknown>) => row.slot === 0
+          ? { ...row, status: `failed: ${failure.error}` } : row)
+        : [{ slot: 0, name: "PM", status: `failed: ${failure.error}` }],
+    };
+    try { writeFileSync(path, JSON.stringify(receipt, null, 2) + "\n"); }
+    catch { /* DB state and typed event remain authoritative if a receipt is unwritable. */ }
+  }
+}
 
 export function touchPmClearRequestedMarker(
   kind: PMClearDelivery["kind"],

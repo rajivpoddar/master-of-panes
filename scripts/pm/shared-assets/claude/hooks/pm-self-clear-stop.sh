@@ -145,12 +145,19 @@ def main() -> int:
     try:
         with sqlite3.connect(f"file:{mop_db}?mode=ro", uri=True, timeout=1) as mop:
             pending = mop.execute("SELECT value FROM config WHERE key='clear_pending_0'").fetchone()
+            delivery = mop.execute("SELECT value FROM config WHERE key='pm_clear_delivery_state'").fetchone()
         if pending and pending[0] == "true":
             print(json.dumps({"kind": "pm-self-clear", "status": "deferred",
                 "reason": "mop_clear_pending_awaiting_stop", "obligation_id": int(row["id"])}))
             return 0
     except (OSError, sqlite3.Error):
         # MoP is unreachable: PM hooks must fail open (rule 50).
+        return 0
+    if delivery and delivery[0] == "failed":
+        print(json.dumps({"kind": "pm-self-clear", "status": "failed",
+            "reason": "mop_clear_delivery_failed",
+            "message": "MoP delivery failed, re-request",
+            "obligation_id": int(row["id"])}))
         return 0
     action = row["required_action"] or (
         "At next safe Stop boundary, self-clear context and prove a fresh boundary before resuming work"

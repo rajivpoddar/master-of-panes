@@ -840,13 +840,13 @@ export class TmuxRelay {
       const snapshot = await this.runShell(`tmux capture-pane -p -t ${paneId}`, { timeout: 5_000 });
       if (QUEUED_HINT.test(snapshot.stdout)) return { reason: "pm_cli_queue_not_empty", busy: true };
       const composer = composerText(snapshot.stdout);
-      if (composer === null) return { reason: "pm_composer_unreadable", busy: false };
+      if (composer === null) return { reason: "pm_composer_unreadable", busy: true };
       if (composer !== expectComposer) {
         return { reason: expectComposer === "" ? "pm_composer_not_empty" : "pm_composer_drift", busy: false };
       }
       return null;
     } catch {
-      return { reason: "pm_pane_unobservable", busy: false };
+      return { reason: "pm_pane_unobservable", busy: true };
     }
   }
 

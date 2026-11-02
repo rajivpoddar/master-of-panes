@@ -88,7 +88,7 @@ import {
   waitForSessionStartClearOnDb,
 } from "./sessionStartClearWait.js";
 import { paneInputModeRefusalReason, type PaneInputModeRefusalReason } from "./paneInputMode.js";
-import { isPmClearUndelivered, makePmClearWriteFence, requestPmClearOnce, retryDeferredPmClearOnStop, touchPmClearRequestedMarker, type PMClearSendResult } from "./pmClearLatch.js";
+import { recordPmClearFailureProof, isPmClearUndelivered, makePmClearWriteFence, requestPmClearOnce, retryDeferredPmClearOnStop, touchPmClearRequestedMarker, type PMClearSendResult } from "./pmClearLatch.js";
 import {
   interruptLiveTurnBeforeClear,
   pinDrift,
@@ -440,6 +440,7 @@ async function sendPendingPmClearAtStop(): Promise<void> {
   await retryDeferredPmClearOnStop({
     db,
     source: "pm_native_stop",
+    onTerminalFailure: recordPmClearFailureProof,
     nowMs: Date.now(),
     staleAfterMs: PM_CLEAR_STALE_ACK_REPAIR_MS,
     recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
@@ -757,6 +758,7 @@ async function clearSlotsThroughMopHttp(
     const operatorGeneration = pmClearDrainGeneration;
     const operatorSessionToken = slotSessionToken(0);
     const delivery = await requestPmClearOnce({
+      onTerminalFailure: recordPmClearFailureProof,
       db,
       source: options.source,
       nowMs,

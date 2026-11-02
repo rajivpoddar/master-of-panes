@@ -150,7 +150,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-self-clear-stop",
-      "sha256": "65020f0f11a547e50fd0a9ea4a1aa5a97e818180d3614b5127a070e9dd8d88ef",
+      "sha256": "0b5d802c1ff827f18cb45bbc9c096b656fc674ab0240678dfff7e36237f00997",
       "source_path": "claude/hooks/pm-self-clear-stop.sh"
     },
     {

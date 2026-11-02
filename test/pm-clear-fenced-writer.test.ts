@@ -192,7 +192,7 @@ test("unknown, drifted or rebound identity refuses before any paste", async () =
       const result = await relayFor(pane, db).writePMClearFenced({ paneId: "%1", check: fenceFor(db, pm) });
       assert.equal(result.ok, false, name);
       assert.equal(result.zeroEffect, true, name);
-      assert.equal(result.busy, false, name);
+      assert.equal(result.busy, name === "unreadable composer", name);
       assert.deepEqual(effects(pane), { pastes: [], enters: [] }, name);
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -495,6 +495,37 @@ test("fix 3: a post-paste refusal settles the latch as uncertain and is never re
     assert.equal(sends.n, 1);
     assert.equal(effects(pane).enters.length, 0);
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("unreadable Stop composer stays pending and the next readable Stop submits once", async () => {
+  const { db, directory } = freshDb("mop-pmclear-unreadable-");
+  try {
+    latch(db, "deferred_busy");
+    const pane = fakePane({ composer: null });
+    const relay = relayFor(pane, db);
+    const pm = pmState();
+    const stop = () => retryDeferredPmClearOnStop({
+      ...latchOptions(db, Date.parse(REQUESTED_AT), { n: 0 }),
+      backoffMs: 0, settleMs: 0, wait: async () => {},
+      isCurrent: () => true, isIdleProven: () => true,
+      send: async () => {
+        const result = await relay.writePMClearFenced({ paneId: "%1", check: fenceFor(db, pm) });
+        return { success: result.ok, busy: result.busy, zeroEffect: result.zeroEffect, error: result.reason };
+      },
+    });
+    assert.equal((await stop()).kind, "deferred_busy");
+    assert.equal(db.hasPendingClear(0), true);
+    assert.equal(db.getConfig("pm_clear_delivery_state"), "deferred_busy");
+    assert.deepEqual(effects(pane), { pastes: [], enters: [] });
+    pane.composer = "";
+    assert.equal((await stop()).kind, "sent");
+    assert.equal(db.getConfig("pm_clear_delivery_state"), "awaiting_ack");
+    assert.equal(effects(pane).enters.length, 1);
+    assert.equal((await stop()).kind, "skipped");
+  } finally {
+    db.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });

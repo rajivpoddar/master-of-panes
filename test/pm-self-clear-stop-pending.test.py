@@ -13,7 +13,7 @@ HOOK = Path(__file__).resolve().parents[1] / "scripts/pm/shared-assets/claude/ho
 
 
 class PendingClearStopTest(unittest.TestCase):
-    def test_pending_latch_does_not_require_a_fresh_marker(self):
+    def run_hook(self, failed=False):
         with tempfile.TemporaryDirectory(prefix="mop-clear-hook-") as directory:
             root = Path(directory)
             ops = root / "pm-ops.db"
@@ -27,13 +27,24 @@ class PendingClearStopTest(unittest.TestCase):
                            (json.dumps({"session_id": "pm", "session_started_at": old}),))
             with sqlite3.connect(mop) as db:
                 db.execute("CREATE TABLE config (key TEXT, value TEXT)")
-                db.execute("INSERT INTO config VALUES ('clear_pending_0', 'true')")
+                db.execute("INSERT INTO config VALUES ('clear_pending_0', ?)", ("false" if failed else "true",))
+                db.execute("INSERT INTO config VALUES ('pm_clear_delivery_state', ?)", ("failed" if failed else "deferred_busy",))
             result = subprocess.run([sys.executable, str(HOOK)], input=json.dumps({
                 "session_id": "pm", "transcript_path": str(transcript)}), text=True,
                 capture_output=True, env={**os.environ, "PM_OPS_DB": str(ops), "MOP_DB_PATH": str(mop)}, check=True)
             output = json.loads(result.stdout)
-            self.assertNotEqual(output.get("decision"), "block")
-            self.assertEqual(output["reason"], "mop_clear_pending_awaiting_stop")
+            return output
+
+    def test_pending_latch_does_not_require_a_fresh_marker(self):
+        output = self.run_hook()
+        self.assertNotEqual(output.get("decision"), "block")
+        self.assertEqual(output["reason"], "mop_clear_pending_awaiting_stop")
+
+    def test_terminal_failure_reports_rerequest_without_blocking(self):
+        output = self.run_hook(failed=True)
+        self.assertNotEqual(output.get("decision"), "block")
+        self.assertEqual(output["reason"], "mop_clear_delivery_failed")
+        self.assertEqual(output["message"], "MoP delivery failed, re-request")
 
 
 if __name__ == "__main__":
