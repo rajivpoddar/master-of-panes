@@ -114,7 +114,9 @@ export class PMSoftBoundary {
     if (!["PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "UserPromptSubmit"].includes(String(type))) return null;
     const boot = this.boot();
     if (!session || session !== boot.session || !boot.id) {
-      return type === "PreToolUse" ? "PM tool session is not the current observed session." : null;
+      // The observed boot is maintenance evidence, not native tool authority.
+      // Foreign/unknown hooks cannot settle tools or claim a maintenance Stop.
+      return null;
     }
     this.reconcileFailedMaintenance(type === "UserPromptSubmit" || type === "PreToolUse");
     if (type === "UserPromptSubmit") {
@@ -245,9 +247,10 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     }
     if (raw.hook_event_name === "PreToolUse") relay.setPMBusy(true);
     const boot = db.getEvents(0, 1, "SessionStart")[0];
-    const clearStop = !!onClearStop && raw.hook_event_name === "Stop"
+    const currentStop = raw.hook_event_name === "Stop"
       && typeof raw.session_id === "string" && raw.session_id.length > 0
-      && raw.session_id === JSON.parse(boot?.payload || "{}").session_id
+      && raw.session_id === JSON.parse(boot?.payload || "{}").session_id;
+    const clearStop = !!onClearStop && currentStop
       && db.hasPendingClear(0) && db.getConfig("pm_clear_delivery_state") === "deferred_busy";
     if (clearStop) {
       // Start the guarded write from this Stop, not the notification debounce.
@@ -271,7 +274,7 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
       boundary.sessionStarted(raw.source);
       if (wasHeld && !boundary.isHeld()) relay.setPMBusy(raw.source !== "clear");
     }
-    if (!clearStop && raw.hook_event_name === "Stop" && boundary.isHeld() && boundary.isSafe()) {
+    if (!clearStop && currentStop && boundary.isHeld() && boundary.isSafe()) {
       if (await relay.isPMComposerQueueEmpty() && boundary.isSafe()) relay.setPMBusy(false);
       else { boundary.deferCLIInput(); relay.setPMBusy(true); }
     }

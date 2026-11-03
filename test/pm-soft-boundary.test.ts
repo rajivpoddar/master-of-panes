@@ -175,7 +175,7 @@ test("session, tool-id and duplicate fences survive MoP restart", () => {
   const f = fixture();
   try {
     assert.match(f.observe("PreToolUse")!, /identified/);
-    assert.match(f.observe("PreToolUse", "a", { session_id: "old" })!, /session/);
+    assert.equal(f.observe("PreToolUse", "a", { session_id: "old" }), null);
     f.observe("PreToolUse", "a");
     f.observe("PreToolUse", "a");
     f.observe("PostToolUse", "a", { session_id: "old" });
@@ -286,6 +286,80 @@ test("native version-titled Claude delivers only with executable identity proof"
       }
     } finally { f.close(); }
   }
+});
+
+for (const identity of ["other-session", "missing-session", "missing-boot"] as const) {
+  test(`HTTP native tools proceed without observed-session authority: ${identity}`, async () => {
+    const f = fixture();
+    const commands: string[] = [];
+    const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: async command => {
+      commands.push(command); return { stdout: "", stderr: "" };
+    } });
+    try {
+      relay.setDatabase(f.db);
+      const boot = f.db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "observed-B" });
+      f.boundary.sessionStarted("startup");
+      f.boundary.observe({ hook_event_name: "PreToolUse", session_id: "observed-B",
+        mop_tool_tracking: 1, tool_use_id: "tracked-B" });
+      if (identity === "missing-boot") {
+        const getEvents = f.db.getEvents.bind(f.db);
+        f.db.getEvents = ((slot: number, limit?: number, type?: string) =>
+          slot === 0 && type === "SessionStart" ? [] : getEvents(slot, limit, type)) as typeof f.db.getEvents;
+      }
+      f.db.setPendingClear(0);
+      f.db.setConfig("pm_clear_requested_at", new Date().toISOString());
+      f.db.setConfig("pm_clear_delivery_state", "deferred_busy");
+      f.db.enqueuePendingPMEvent(0, "retained", "original queued input");
+      const queue = f.db.peekPendingPMEvents();
+      let clears = 0, processed = 0;
+      const app = new Hono();
+      const boundary = registerPMSoftBoundary(app, f.db, relay, async () => { clears++; });
+      app.post("/hooks/slot/0", c => { processed++; return c.json({}); });
+      const before = f.db.getConfig("pm_soft_boundary_v1");
+      const session_id = identity === "missing-session" ? undefined : "real-PM-A";
+      const hook = (hook_event_name: string) => app.request("/hooks/slot/0", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hook_event_name,
+          session_id, mop_tool_tracking: 1, tool_use_id: "tracked-B" }) });
+      assert.deepEqual(await (await hook("PreToolUse")).json(), { mop_tool_admitted: true });
+      await hook("PostToolUse");
+      await hook("PostToolUseFailure");
+      await hook("Stop");
+      assert.equal(processed, 4, "native hooks reach the processor without a session-mismatch denial");
+      assert.equal(f.db.getConfig("pm_soft_boundary_v1"), before, "foreign hooks retain genuine tool accounting");
+      assert.equal(boundary.status().tools_in_flight, 1);
+      assert.equal(boundary.isSafe(), false);
+      assert.equal(boundary.isHeld(), false);
+      assert.equal(boundary.beginRespawn("daily:foreign"), false);
+      assert.equal(clears, 0);
+      assert.deepEqual(commands, []);
+      assert.deepEqual(f.db.peekPendingPMEvents(), queue);
+      assert.equal(f.db.getEvents(0, 10, "pm_soft_boundary_claimed").length, 0);
+      assert.equal(boundary.status().boot_id, boot);
+    } finally { relay.setPMBusy(true); f.close(); }
+  });
+}
+
+test("a foreign Stop cannot reuse an existing safe maintenance reservation to mark PM idle", async () => {
+  const f = fixture();
+  try {
+    f.observe("Stop");
+    assert.equal(f.boundary.isHeld(), true);
+    const app = new Hono();
+    let composerChecks = 0;
+    const relay = new TmuxRelay(DEFAULT_CONFIG);
+    relay.setDatabase(f.db);
+    relay.setPMBusy(true);
+    relay.isPMComposerQueueEmpty = async () => { composerChecks++; return true; };
+    const boundary = registerPMSoftBoundary(app, f.db, relay);
+    app.post("/hooks/slot/0", c => c.json({}));
+    const before = f.db.getConfig("pm_soft_boundary_v1");
+    await app.request("/hooks/slot/0", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hook_event_name: "Stop", session_id: "foreign", mop_tool_tracking: 1 }) });
+    assert.equal(composerChecks, 0);
+    assert.equal(relay.isPMBusy(), true);
+    assert.equal(boundary.isHeld(), true);
+    assert.equal(f.db.getConfig("pm_soft_boundary_v1"), before);
+  } finally { f.close(); }
 });
 
 test("HTTP admission defers maintenance for inbound prompts instead of blocking or retaining them", async () => {
