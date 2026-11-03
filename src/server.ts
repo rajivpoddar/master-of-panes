@@ -14,7 +14,7 @@
 
 import { resolveAcceptedPmSelfClear } from "./pmSelfClearObligation.js";
 import { resolveBindHost } from "./bindHost.js";
-import { registerPMSoftBoundary } from "./pmSoftBoundary.js";
+import { registerPMSoftBoundary, type PMStopAuthority, type PMStopAuthorityPins } from "./pmSoftBoundary.js";
 import {
   PM_HANDOFF_REQUESTED_AT_KEY,
   PM_HANDOFF_SESSION_KEY,
@@ -315,7 +315,18 @@ const eventLoopLagTimer = setInterval(() => {
 }, 60 * 1000);
 
 const app = new Hono();
-const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop);
+/** Stop pins: snapshot at hook entry, claim after parse, recheck before every effect. */
+const pmStopPins: PMStopAuthorityPins = {
+  snapshot: () => ({ generation: pmClearDrainGeneration, sessionToken: slotSessionToken(0) }),
+  claim: (entry, sessionId) =>
+    entry.generation === pmClearDrainGeneration && entry.sessionToken === slotSessionToken(0)
+      ? { generation: entry.generation, sessionToken: entry.sessionToken, sessionId }
+      : null,
+  isCurrent: (authority) =>
+    authority.generation === pmClearDrainGeneration && authority.sessionToken === slotSessionToken(0),
+};
+
+const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop, pmStopPins);
 
 // ─── MoP Clear Helpers ─────────────────────────────────
 // HTTP path for deterministic schedulers that cannot call MCP tools.
@@ -439,10 +450,13 @@ function findLaterPmLifecycleEvent(requestedAt: string | null) {
 }
 
 /** A pending PM clear is sent from the next native Stop, never an idle timer. */
-async function sendPendingPmClearAtStop(): Promise<void> {
+async function sendPendingPmClearAtStop(authority?: PMStopAuthority): Promise<void> {
   if (!isPmClearUndelivered(db)) return;
-  const generation = ++pmClearDrainGeneration;
-  const sessionToken = slotSessionToken(0);
+  if (authority && !pmStopPins.isCurrent(authority)) return;
+  // The Stop's pinned generation/boot (taken before its first await) is carried
+  // unchanged into the latch claim and the paste/Enter fence (CTO fix 2).
+  const generation = authority ? authority.generation : ++pmClearDrainGeneration;
+  const sessionToken = authority ? authority.sessionToken : slotSessionToken(0);
   const requestedAt = db.getConfig(PM_CLEAR_REQUESTED_AT_KEY);
   await retryDeferredPmClearOnStop({
     db,
@@ -481,10 +495,11 @@ const pmHandoffOps = pmOpsHandoffObligationOps();
  * Stop (deferred_busy), so the soft-boundary Stop path injects immediately and
  * new input / a session change cancels the write. Never blocks the hook.
  */
-async function armPmClearAfterHandoffAtStop(sessionId: string): Promise<void> {
+async function armPmClearAfterHandoffAtStop(sessionId: string, authority?: PMStopAuthority): Promise<void> {
   const { delivery } = await armPmClearAfterSavedHandoff(db, {
     sessionId,
     ops: pmHandoffOps,
+    isCurrent: () => !authority || pmStopPins.isCurrent(authority),
     requestClear: () => requestPmClearOnce({
       onTerminalFailure: recordPmClearFailureProof,
       db,

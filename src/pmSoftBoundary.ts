@@ -234,13 +234,25 @@ export function pendingPMMaintenance(db: MoPDatabase, now = new Date()): Pending
   } catch { return null; }
 }
 
+/** Stop authority pinned BEFORE the Stop's first await (CTO REVISE fix 2). */
+export type PMStopAuthority = { generation: number; sessionToken: string; sessionId: string };
+export type PMStopAuthorityPins = {
+  /** Synchronous snapshot taken at hook entry, before any await. */
+  snapshot: () => { generation: number; sessionToken: string };
+  /** Claim THIS Stop's generation if nothing (input, work, boot) changed since the snapshot. */
+  claim: (entry: { generation: number; sessionToken: string }, sessionId: string) => PMStopAuthority | null;
+  isCurrent: (authority: PMStopAuthority) => boolean;
+};
+
 export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRelay,
-  onClearStop?: () => Promise<unknown>,
+  onClearStop?: (authority?: PMStopAuthority) => Promise<unknown>,
   /** Saved-handoff check: may arm the clear latch for THIS Stop. Never blocks input. */
-  beforeClearStop?: (sessionId: string) => Promise<void>): PMSoftBoundary {
+  beforeClearStop?: (sessionId: string, authority?: PMStopAuthority) => Promise<void>,
+  stopPins?: PMStopAuthorityPins): PMSoftBoundary {
   const boundary = new PMSoftBoundary(db, () => pendingPMMaintenance(db), Date.now, () => relay.setPMBusy(true));
   relay.setPMMaintenanceGate(boundary);
   app.use("/hooks/slot/0", async (c, next) => {
+    const entry = stopPins?.snapshot();
     let raw: Record<string, unknown>;
     try { raw = await c.req.raw.clone().json(); } catch { return next(); }
     const refusal = boundary.observe(raw);
@@ -252,17 +264,22 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     const currentStop = raw.hook_event_name === "Stop"
       && typeof raw.session_id === "string" && raw.session_id.length > 0
       && raw.session_id === JSON.parse(boot?.payload || "{}").session_id;
-    if (currentStop && beforeClearStop) {
-      try { await beforeClearStop(raw.session_id as string); }
+    // Pin generation/session/boot now; every later step carries this value.
+    const authority = currentStop && stopPins && entry ? stopPins.claim(entry, raw.session_id as string) : undefined;
+    // A Stop whose pin was superseded (new input, completed work, new boot) arms nothing.
+    const pinnedStop = currentStop && (!stopPins || authority != null);
+    if (pinnedStop && beforeClearStop) {
+      try { await beforeClearStop(raw.session_id as string, authority ?? undefined); }
       catch (error) { console.error(`[pm-clear] handoff Stop check failed open: ${String(error)}`); }
     }
-    const clearStop = !!onClearStop && currentStop
+    const clearStop = !!onClearStop && pinnedStop
+      && (!stopPins || (authority != null && stopPins.isCurrent(authority)))
       && db.hasPendingClear(0) && db.getConfig("pm_clear_delivery_state") === "deferred_busy";
     if (clearStop) {
       // Start the guarded write from this Stop, not the notification debounce.
       // Do not hold the native hook response while the tmux writer settles.
       relay.setPMBusy(true);
-      void onClearStop!().catch(error => console.error(`[pm-clear] Stop delivery failed: ${String(error)}`));
+      void onClearStop!(authority ?? undefined).catch(error => console.error(`[pm-clear] Stop delivery failed: ${String(error)}`));
     }
     await next();
     if (raw.hook_event_name === "PreToolUse") {

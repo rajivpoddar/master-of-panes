@@ -1,27 +1,50 @@
 // Rajiv, DM D0AMF0XE6TS thread 1793731816.594829, ts 1793732417.459339:
 // "add the obligation to save memory and then automatically inject clear at next stop".
+// CTO REVISE (C0ALZJHGE49 thread 1793736095.019189, ts 1793736515.197999): bind completion
+// and ID publication to the original request, pin Stop authority before the first await,
+// and make failed/lost-ACK obligation creation recoverable. Proof packet (a)(b)(c) below.
 import assert from "node:assert/strict";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
+import Database from "better-sqlite3";
 import { Hono } from "hono";
 
 import { MoPDatabase } from "../src/db.js";
 import { HookProcessor } from "../src/hooks.js";
-import { isPmClearUndelivered, requestPmClearOnce, retryDeferredPmClearOnStop } from "../src/pmClearLatch.js";
+import { isPmClearUndelivered, makePmClearWriteFence, requestPmClearOnce, retryDeferredPmClearOnStop } from "../src/pmClearLatch.js";
 import {
   armPmClearAfterSavedHandoff,
   failOpenUnobservedPmClear,
   handoffFilesSaved,
+  handoffRequestKey,
   isPmHandoffPending,
+  pmOpsHandoffObligationOps,
+  reconcilePmHandoffObligation,
   requestPmHandoffClear,
+  PM_HANDOFF_MAX_RECONCILE_ATTEMPTS,
+  PM_HANDOFF_OBLIGATION_KEY,
+  PM_HANDOFF_REQUESTED_AT_KEY,
+  PM_HANDOFF_SESSION_KEY,
   type HandoffObligationOps,
 } from "../src/pmHandoffClear.js";
-import { registerPMSoftBoundary } from "../src/pmSoftBoundary.js";
-import type { TmuxRelay } from "../src/relay.js";
+import { registerPMSoftBoundary, type PMStopAuthority, type PMStopAuthorityPins } from "../src/pmSoftBoundary.js";
+import { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
+const PM_OPS_LEGACY = new URL("../scripts/pm/shared-assets/claude/scripts/pm-ops-legacy.py", import.meta.url).pathname;
+const run = promisify(execFile);
+
+function gate() {
+  let open!: () => void;
+  const promise = new Promise<void>((resolve) => { open = resolve; });
+  return { promise, open };
+}
+
+/** MoP DB + handoff files + an ISOLATED real pm-ops ledger (pm-ops-legacy.py, tmp PM_OPS_DB). */
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "mop-pm-handoff-"));
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
@@ -29,151 +52,158 @@ function fixture() {
   const files = [join(directory, "MEMORY-session-handoff-current.md"), join(directory, "pm-continuation-note.md")];
   const past = new Date(Date.now() - 3_600_000);
   for (const file of files) { writeFileSync(file, "old\n"); utimesSync(file, past, past); }
-  const calls = { upserts: [] as Record<string, unknown>[], resolves: [] as string[], explicit: false };
-  const ops: HandoffObligationOps = {
-    upsert: async (evidence) => { calls.upserts.push(evidence); return "4242"; },
-    resolve: async (reason) => { calls.resolves.push(reason); return true; },
-    isExplicitlyResolved: () => calls.explicit,
+  const ledger = join(directory, "pm-ops.db");
+  // Real schema via the canonical writer, ids seeded to production-like values
+  // (pm-ops-legacy exits with the row id, so id 2 would read as its refusal code 2).
+  execFileSync("python3", [PM_OPS_LEGACY, "init"], { env: { ...process.env, PM_OPS_DB: ledger, HOME: directory } });
+  { const con = new Database(ledger); con.prepare("INSERT OR REPLACE INTO sqlite_sequence(name, seq) VALUES ('obligations', 29000)").run(); con.close(); }
+  const execute = (file: string, args: string[], options: { timeout: number }) =>
+    run(file, args, { ...options, env: { ...process.env, PM_OPS_DB: ledger, HOME: directory } });
+  const ops = pmOpsHandoffObligationOps(execute, ledger, PM_OPS_LEGACY);
+  const rows = () => {
+    try {
+      const con = new Database(ledger, { readonly: true });
+      try {
+        return con.prepare("SELECT id, status, target_id FROM obligations WHERE kind='pm_save_handoff' ORDER BY id").all() as
+          { id: number; status: string; target_id: string }[];
+      } finally { con.close(); }
+    } catch { return []; }
   };
   const save = (file: string) => { const future = new Date(Date.now() + 5_000); writeFileSync(file, "new\n"); utimesSync(file, future, future); };
-  return { db, files, ops, calls, save, close: () => { db.close(); rmSync(directory, { recursive: true, force: true }); } };
+  const saveAll = () => files.forEach(save);
+  return { db, files, ops, ledger, rows, save, saveAll, directory,
+    close: () => { db.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
+type Fixture = ReturnType<typeof fixture>;
 
-function fakeRelay(): TmuxRelay {
-  return {
-    setPMMaintenanceGate() {}, setPMBusy() { return { drained: 0 }; },
-    isPMBusy: () => false, isPMComposerQueueEmpty: async () => true,
-  } as unknown as TmuxRelay;
-}
+const request = (f: Fixture, ops: HandoffObligationOps = f.ops, source = "op", nowMs = Date.now()) =>
+  requestPmHandoffClear(f.db, { source, sessionId: "pm", nowMs, automatic: source.startsWith("session_age"), ops });
 
-/** Wire the real soft-boundary Stop middleware with the saved-handoff arm and a counting Stop sender. */
-function stopHarness(f: ReturnType<typeof fixture>) {
+const armLatch = (f: Fixture) => () => requestPmClearOnce({
+  db: f.db, source: "pm_handoff_saved_stop", nowMs: Date.now(), staleAfterMs: 0, recentSuppressMs: 0,
+  hasRecentClearEvent: false, laterLifecycleEvent: null, deferUntilStop: true, isPMBusy: () => false,
+  send: async () => { throw new Error("arm must never send"); } });
+
+/**
+ * Real Hono + soft-boundary middleware + real TmuxRelay guarded PM clear writer
+ * (writePMClearFenced + makePmClearWriteFence), pinned Stop authority, and an
+ * optional barrier inside beforeClearStop.
+ */
+function stopHarness(f: Fixture, barrier?: () => Promise<void>) {
   let generation = 0;
-  const sent: number[] = [];
+  const commands: string[] = [];
+  let composer = "", buffer = "";
+  const sessionToken = () => String(f.db.getEvents(0, 1, "SessionStart")[0]?.id ?? 0);
+  const pins: PMStopAuthorityPins = {
+    snapshot: () => ({ generation, sessionToken: sessionToken() }),
+    claim: (entry, sessionId) => entry.generation === generation && entry.sessionToken === sessionToken()
+      ? { generation: entry.generation, sessionToken: entry.sessionToken, sessionId } : null,
+    isCurrent: (a) => a.generation === generation && a.sessionToken === sessionToken(),
+  };
+  const relay = new TmuxRelay(DEFAULT_CONFIG, { pmRuntime: "claude", runShell: async (command: string) => {
+    commands.push(command);
+    if (command.includes("#{pane_id}|#{pane_current_command}")) return { stdout: "%1|claude\n", stderr: "" };
+    if (command.includes("#{pane_pid}")) return { stdout: "321\n", stderr: "" };
+    if (command.startsWith("ps -p 321")) return { stdout: "/opt/claude", stderr: "" };
+    if (command.startsWith("tmux capture-pane")) return { stdout: `${"─".repeat(40)}\n❯ ${composer}\n${"─".repeat(40)}`, stderr: "" };
+    const load = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
+    if (load) buffer = readFileSync(load[1]!, "utf8");
+    if (command.startsWith("tmux paste-buffer")) composer = buffer;
+    if (command.endsWith(" C-u") || command.endsWith(" Enter")) composer = "";
+    return { stdout: "", stderr: "" };
+  } });
+  relay.setDatabase(f.db);
+  const deliveries: Promise<unknown>[] = [];
   const app = new Hono();
-  registerPMSoftBoundary(app, f.db, fakeRelay(), () => {
-    const stopGeneration = ++generation;
-    return retryDeferredPmClearOnStop({
+  const boundary = registerPMSoftBoundary(app, f.db, relay, (authority?: PMStopAuthority) => {
+    assert.ok(authority, "clear delivery always carries the pinned Stop authority");
+    const delivery = retryDeferredPmClearOnStop({
       db: f.db, source: "pm_native_stop", nowMs: Date.now(), staleAfterMs: 0, recentSuppressMs: 0,
       hasRecentClearEvent: false, laterLifecycleEvent: null, backoffMs: 0, settleMs: 0,
-      wait: async () => { throw new Error("no idle timer"); }, isCurrent: () => generation === stopGeneration,
-      isIdleProven: () => true, send: async () => { sent.push(stopGeneration); return { success: true }; },
-    });
-  }, async (sessionId) => {
-    await armPmClearAfterSavedHandoff(f.db, { sessionId, ops: f.ops, files: f.files, requestClear: () => requestPmClearOnce({
-      db: f.db, source: "pm_handoff_saved_stop", nowMs: Date.now(), staleAfterMs: 0, recentSuppressMs: 0,
-      hasRecentClearEvent: false, laterLifecycleEvent: null, deferUntilStop: true, isPMBusy: () => false,
-      send: async () => { throw new Error("arm must never send"); } }) });
+      wait: async () => { throw new Error("no idle timer"); }, isCurrent: () => pins.isCurrent(authority!),
+      isIdleProven: () => true,
+      send: async ({ requestedAt }) => {
+        const written = await boundary.withMaintenanceWriter(() => relay.writePMClearFenced({ paneId: "%1",
+          check: makePmClearWriteFence({ db: f.db, requestedAt, generation: authority!.generation,
+            sessionToken: authority!.sessionToken, currentGeneration: () => generation,
+            currentSessionToken: sessionToken, idleProven: () => true }) }));
+        return { success: written.ok, busy: written.busy, zeroEffect: written.zeroEffect };
+      },
+    }).finally(() => boundary.reconcileFailedMaintenance());
+    deliveries.push(delivery);
+    return delivery;
+  }, async (sessionId, authority) => {
+    if (barrier) await barrier();
+    await armPmClearAfterSavedHandoff(f.db, { sessionId, ops: f.ops, files: f.files,
+      isCurrent: () => !!authority && pins.isCurrent(authority), requestClear: armLatch(f) });
+  }, pins);
+  app.post("/hooks/slot/0", async (c) => {
+    const raw = await c.req.json();
+    if (["UserPromptSubmit", "PreToolUse", "SessionStart"].includes(raw.hook_event_name)) generation++;
+    if (raw.hook_event_name === "SessionStart") f.db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: raw.session_id });
+    return c.json({});
   });
-  app.post("/hooks/slot/0", (c) => c.json({}));
   const hook = (event: string, extra: Record<string, unknown> = {}) => app.request("/hooks/slot/0", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ hook_event_name: event, session_id: "pm", ...extra }) });
-  return { hook, sent, bumpGeneration: () => { generation++; } };
+    body: JSON.stringify({ hook_event_name: event, session_id: "pm", mop_tool_tracking: 1, ...extra }) });
+  const pastes = () => commands.filter((c) => c.startsWith("tmux paste-buffer")).length;
+  const enters = () => commands.filter((c) => c.endsWith(" Enter")).length;
+  return { hook, pastes, enters, settle: async () => { await Promise.all(deliveries); await new Promise((r) => setTimeout(r, 20)); },
+    close: () => relay.setPMBusy(true) };
 }
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+// ── Existing controls (kept) ──────────────────────────────────────────────
 
-test("a due clear opens ONE pm_save_handoff obligation and injects nothing before the save", async () => {
+test("control: a due clear opens ONE pm_save_handoff obligation and injects nothing before the save", async () => {
   const f = fixture();
   try {
-    const first = await requestPmHandoffClear(f.db, { source: "http_clear_endpoint", sessionId: "pm", nowMs: Date.now(), automatic: false, ops: f.ops });
+    const first = await request(f);
     assert.equal(first.kind, "awaiting_handoff");
-    const again = await requestPmHandoffClear(f.db, { source: "session_age_policy", sessionId: "pm", nowMs: Date.now(), automatic: true, ops: f.ops });
-    assert.equal(again.kind, "already_awaiting");
-    assert.equal(f.calls.upserts.length, 1, "exactly one obligation upsert");
-    assert.equal(f.calls.upserts[0]!.pm_stop_actionable, 1);
-    assert.equal(f.db.hasPendingClear(0), false, "no clear latch before the save");
-
+    assert.equal((await request(f, f.ops, "session_age_policy")).kind, "already_awaiting");
+    assert.equal(f.rows().length, 1, "exactly one obligation row");
+    assert.equal(f.rows()[0]!.target_id, handoffRequestKey((first as { requestedAt: string }).requestedAt));
     const h = stopHarness(f);
-    await h.hook("Stop");
-    await settle();
-    assert.equal(h.sent.length, 0, "Stop before the save injects nothing");
-    assert.equal(isPmHandoffPending(f.db), true);
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.pastes(), 0, "Stop before the save injects nothing");
     assert.equal(f.db.hasPendingClear(0), false);
+    h.close();
   } finally { f.close(); }
 });
 
-test("the obligation resolves only when BOTH handoff mtimes advance past the request", async () => {
+test("control: both mtimes must advance; the next Stop injects exactly one /clear and resolves its own row", async () => {
   const f = fixture();
   try {
-    const requested = await requestPmHandoffClear(f.db, { source: "op", sessionId: "pm", nowMs: Date.now(), automatic: false, ops: f.ops });
-    const requestedMs = Date.parse((requested as { requestedAt: string }).requestedAt);
-    assert.equal(handoffFilesSaved(requestedMs, f.files), false);
+    const a = await request(f) as { requestedAt: string };
+    assert.equal(handoffFilesSaved(Date.parse(a.requestedAt), f.files), false);
     f.save(f.files[0]!);
-    assert.equal(handoffFilesSaved(requestedMs, f.files), false, "one file is not enough");
     const h = stopHarness(f);
-    await h.hook("Stop");
-    await settle();
-    assert.equal(h.sent.length, 0);
-    assert.equal(f.calls.resolves.length, 0);
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.pastes(), 0, "one file is not enough");
     f.save(f.files[1]!);
-    assert.equal(handoffFilesSaved(requestedMs, f.files), true);
-    await h.hook("Stop");
-    await settle();
-    assert.equal(f.calls.resolves.length, 1, "MoP resolves the obligation once both files are saved");
-    assert.match(f.calls.resolves[0]!, /handoff files saved/);
-    assert.equal(isPmHandoffPending(f.db), false);
-  } finally { f.close(); }
-});
-
-test("an explicit resolve also counts as saved", async () => {
-  const f = fixture();
-  try {
-    await requestPmHandoffClear(f.db, { source: "op", sessionId: "pm", nowMs: Date.now(), automatic: false, ops: f.ops });
-    f.calls.explicit = true;
-    const { outcome } = await armPmClearAfterSavedHandoff(f.db, { sessionId: "pm", ops: f.ops, files: f.files,
-      requestClear: async () => ({ kind: "deferred_busy" }) });
-    assert.deepEqual(outcome.kind, "ready");
-    assert.equal((outcome as { via: string }).via, "explicit_resolve");
-  } finally { f.close(); }
-});
-
-test("after the save, the NEXT PM Stop injects /clear immediately (no idle timer)", async () => {
-  const f = fixture();
-  try {
-    await requestPmHandoffClear(f.db, { source: "op", sessionId: "pm", nowMs: Date.now(), automatic: false, ops: f.ops });
-    f.save(f.files[0]!); f.save(f.files[1]!);
-    const h = stopHarness(f);
-    await h.hook("Stop");
-    await settle();
-    assert.equal(h.sent.length, 1, "this Stop sent exactly one /clear");
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.pastes(), 1); assert.equal(h.enters(), 1);
     assert.equal(f.db.getConfig("pm_clear_delivery_state"), "awaiting_ack");
-    await h.hook("Stop");
-    await settle();
-    assert.equal(h.sent.length, 1, "a later Stop never resends");
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.pastes(), 1, "ambiguous/possible-effect write is never resent");
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(f.rows()[0]!.status, "resolved");
+    h.close();
   } finally { f.close(); }
 });
 
-test("new input cancels the injection; the next Stop delivers", async () => {
+test("control: an explicit resolve of THIS request's row counts as saved", async () => {
   const f = fixture();
   try {
-    f.db.setPendingClear(0);
-    f.db.setConfig("pm_clear_requested_at", new Date().toISOString());
-    f.db.setConfig("pm_clear_delivery_state", "deferred_busy");
-    let sends = 0;
-    const cancelled = await retryDeferredPmClearOnStop({
-      db: f.db, source: "pm_native_stop", nowMs: Date.now(), staleAfterMs: 0, recentSuppressMs: 0,
-      hasRecentClearEvent: false, laterLifecycleEvent: null, backoffMs: 0, settleMs: 0, wait: async () => {},
-      isCurrent: () => false, // a UserPromptSubmit/PreToolUse bumped the generation
-      isIdleProven: () => true, send: async () => { sends++; return { success: true }; },
-    });
-    assert.equal(cancelled.kind, "skipped");
-    assert.equal(sends, 0, "new input cancels the write");
-    assert.equal(isPmClearUndelivered(f.db), true, "intent kept for the next Stop");
-
-    // Session change cancels a not-yet-armed handoff entirely.
-    f.db.clearPendingClear(0);
-    await requestPmHandoffClear(f.db, { source: "op", sessionId: "pm", nowMs: Date.now(), automatic: false, ops: f.ops });
-    f.save(f.files[0]!); f.save(f.files[1]!);
-    const { outcome } = await armPmClearAfterSavedHandoff(f.db, { sessionId: "pm-new", ops: f.ops, files: f.files,
-      requestClear: async () => { throw new Error("must not arm after a session change"); } });
-    assert.equal(outcome.kind, "cancelled_session_change");
-    assert.equal(isPmHandoffPending(f.db), false);
+    await request(f);
+    const id = f.db.getConfig(PM_HANDOFF_OBLIGATION_KEY)!;
+    assert.ok(await f.ops.resolveById(id, "PM explicit resolve"));
+    const { outcome } = await armPmClearAfterSavedHandoff(f.db, { sessionId: "pm", ops: f.ops, files: f.files, requestClear: armLatch(f) });
+    assert.equal(outcome.kind, "ready");
+    assert.equal(isPmClearUndelivered(f.db), true);
   } finally { f.close(); }
 });
 
-test("a written clear never acknowledged fails open after ONE attempt and is not re-requested", async () => {
+test("control: a written clear never acknowledged fails open after ONE attempt and is not re-requested", async () => {
   const f = fixture();
   try {
     const attempt = Date.now() - 10 * 60_000;
@@ -181,29 +211,166 @@ test("a written clear never acknowledged fails open after ONE attempt and is not
     f.db.setConfig("pm_clear_requested_at", new Date(attempt - 1_000).toISOString());
     f.db.setConfig("pm_clear_stop_retry_at", new Date(attempt).toISOString());
     f.db.setConfig("pm_clear_delivery_state", "awaiting_ack");
-
-    // Inside the bound: still pending (the Stop right after /clear can precede SessionStart:clear).
     assert.equal(failOpenUnobservedPmClear(f.db, { nowMs: attempt + 30_000, sessionId: "pm" }), false);
-    assert.equal(f.db.hasPendingClear(0), true);
-
     let sends = 0;
     const relay = { sendToSlot() { sends++; return true; } } as unknown as TmuxRelay;
     await new HookProcessor(f.db, relay).process(0, { type: "Stop", session_id: "pm" });
-    assert.equal(f.db.hasPendingClear(0), false, "pending flag cleared");
+    assert.equal(f.db.hasPendingClear(0), false);
     assert.equal(f.db.getConfig("pm_clear_delivery_state"), "failed_open");
-    assert.equal(f.db.getEvents(0, 10, "pm_clear_unobserved_fail_open").length, 1, "audit row written");
-    assert.equal(sends, 0, "fail-open never resends");
-
-    const again = await requestPmHandoffClear(f.db, { source: "session_age_policy", sessionId: "pm", nowMs: Date.now(), automatic: true, ops: f.ops });
-    assert.equal(again.kind, "refused_failopen", "no automatic re-request for the same session");
-    assert.equal(f.calls.upserts.length, 0);
+    assert.equal(f.db.getEvents(0, 10, "pm_clear_unobserved_fail_open").length, 1);
+    assert.equal(sends, 0);
+    assert.equal((await request(f, f.ops, "session_age_policy")).kind, "refused_failopen");
+    assert.equal(f.rows().length, 0);
   } finally { f.close(); }
 });
 
+// ── (a) delayed A completion vs successor B ───────────────────────────────
+
+test("(a) a delayed resolve of A never resolves successor B or authorizes B's unsaved clear", async () => {
+  const f = fixture();
+  try {
+    const hold = gate();
+    const delayed: HandoffObligationOps = { ...f.ops,
+      resolveById: async (id, reason) => { await hold.promise; return f.ops.resolveById(id, reason); } };
+    await request(f, delayed, "op", Date.now() - 60_000);
+    const idA = f.db.getConfig(PM_HANDOFF_OBLIGATION_KEY)!;
+    f.saveAll();
+    const armed = await armPmClearAfterSavedHandoff(f.db, { sessionId: "pm", ops: delayed, files: f.files, requestClear: armLatch(f) });
+    assert.equal(armed.outcome.kind, "ready");
+    // A's clear is acknowledged; then B is requested while A's resolve is still in flight.
+    f.db.clearPendingClear(0);
+    for (const file of f.files) { const t = new Date(Date.now() - 30_000); utimesSync(file, t, t); }
+    const b = await request(f);
+    assert.equal(b.kind, "awaiting_handoff");
+    const idB = f.db.getConfig(PM_HANDOFF_OBLIGATION_KEY)!;
+    assert.notEqual(idB, idA, "B never reuses A's row");
+    hold.open();
+    await new Promise((r) => setTimeout(r, 500));
+    const byId = Object.fromEntries(f.rows().map((r) => [String(r.id), r.status]));
+    assert.equal(byId[idA], "resolved", "A's delayed completion resolved A only");
+    assert.equal(byId[idB], "open", "no successor resolution");
+    const later = await armPmClearAfterSavedHandoff(f.db, { sessionId: "pm", ops: f.ops, files: f.files, requestClear: armLatch(f) });
+    assert.equal(later.outcome.kind, "waiting", "B is not authorized without its own save");
+    assert.equal(f.db.hasPendingClear(0), false, "no unsaved clear");
+  } finally { f.close(); }
+});
+
+test("(a) a stale returned ID for A is never published into successor B", async () => {
+  const f = fixture();
+  try {
+    const hold = gate();
+    const slowUpsert: HandoffObligationOps = { ...f.ops,
+      upsert: async (key, evidence) => { await hold.promise; return f.ops.upsert(key, evidence); } };
+    const pendingA = request(f, slowUpsert, "op", Date.now() - 60_000);
+    // Operator re-request supersedes A while A's upsert is still in flight.
+    for (const key of [PM_HANDOFF_REQUESTED_AT_KEY, PM_HANDOFF_SESSION_KEY]) f.db.setConfig(key, "");
+    const b = await request(f) as { requestedAt: string; obligationId: string };
+    hold.open();
+    await pendingA;
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(f.db.getConfig(PM_HANDOFF_OBLIGATION_KEY), b.obligationId, "B keeps its own id");
+    assert.equal(f.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), b.requestedAt);
+    assert.equal(f.db.getEvents(0, 10, "pm_handoff_obligation_stale_id_dropped").length, 1);
+    const open = f.rows().filter((r) => r.status === "open");
+    assert.deepEqual(open.map((r) => String(r.id)), [b.obligationId], "stale A row resolved; only B open");
+  } finally { f.close(); }
+});
+
+// ── (b) failed and lost-ACK creation reconciliation ───────────────────────
+
+test("(b) failed creation keeps requested_at and recovers by a keyed write proven absent", async () => {
+  const f = fixture();
+  try {
+    const failing: HandoffObligationOps = { ...f.ops, upsert: async () => { throw new Error("pm-ops exit=1"); } };
+    const a = await request(f, failing) as { requestedAt: string; obligationId: string | null };
+    assert.equal(a.obligationId, null);
+    assert.equal(f.rows().length, 0);
+    assert.equal(f.db.getEvents(0, 10, "pm_handoff_obligation_uncertain").length, 1);
+    assert.equal(await reconcilePmHandoffObligation(f.db, f.ops), "retried");
+    assert.equal(f.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), a.requestedAt, "requested_at never reset");
+    assert.equal(f.rows().length, 1);
+    assert.equal(f.rows()[0]!.target_id, handoffRequestKey(a.requestedAt));
+  } finally { f.close(); }
+});
+
+test("(b) lost-ACK creation is adopted by lookup, never blindly replayed", async () => {
+  const f = fixture();
+  try {
+    let upserts = 0;
+    const lostAck: HandoffObligationOps = { ...f.ops,
+      upsert: async (key, evidence) => { upserts++; await f.ops.upsert(key, evidence); throw new Error("timeout after write"); } };
+    const a = await request(f, lostAck) as { requestedAt: string };
+    assert.equal(f.rows().length, 1, "the write did land");
+    const spy: HandoffObligationOps = { ...f.ops, upsert: async () => { throw new Error("must not replay an uncertain write"); } };
+    assert.equal(await reconcilePmHandoffObligation(f.db, spy), "adopted");
+    assert.equal(upserts, 1);
+    assert.equal(f.db.getConfig(PM_HANDOFF_OBLIGATION_KEY), String(f.rows()[0]!.id));
+    assert.equal(f.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), a.requestedAt);
+    assert.equal(f.rows().length, 1, "no duplicate row");
+  } finally { f.close(); }
+});
+
+test("(b) an unreadable ledger never leaves a permanent phantom awaiting request", async () => {
+  const f = fixture();
+  try {
+    const dark: HandoffObligationOps = { upsert: async () => null, resolveById: async () => false,
+      lookup: () => ({ status: "unknown", error: "unable to open database file" }) };
+    await request(f, dark);
+    const h = stopHarness(f);
+    const requestedAt = f.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY);
+    for (let i = 0; i < PM_HANDOFF_MAX_RECONCILE_ATTEMPTS; i++) {
+      assert.equal(await reconcilePmHandoffObligation(f.db, dark), "unknown");
+      assert.equal(f.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), requestedAt, "bounded retries keep requested_at");
+    }
+    assert.equal(await reconcilePmHandoffObligation(f.db, dark), "abandoned");
+    assert.equal(isPmHandoffPending(f.db), false, "no permanent phantom request");
+    assert.equal(f.db.getEvents(0, 10, "pm_handoff_request_abandoned").length, 1);
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.pastes(), 0, "abandonment never clears");
+    assert.equal((await request(f)).kind, "awaiting_handoff", "a fresh request works after abandonment");
+    h.close();
+  } finally { f.close(); }
+});
+
+// ── (c) beforeClearStop barrier: new input, completed work, new boot ──────
+
+for (const scenario of ["new-input", "completed-work", "new-boot"] as const) {
+  test(`(c) a Stop held at the beforeClearStop barrier cannot adopt newer work: ${scenario}`, async () => {
+    const f = fixture();
+    try {
+      await request(f);
+      f.saveAll();
+      const hold = gate();
+      let barrierOn = true;
+      const h = stopHarness(f, async () => { if (barrierOn) { barrierOn = false; await hold.promise; } });
+      const oldStop = h.hook("Stop");
+      await new Promise((r) => setTimeout(r, 20));
+      if (scenario === "new-input") await h.hook("UserPromptSubmit");
+      if (scenario === "completed-work") { await h.hook("UserPromptSubmit"); await h.hook("PreToolUse", { tool_use_id: "t1" }); await h.hook("PostToolUse", { tool_use_id: "t1" }); }
+      if (scenario === "new-boot") await h.hook("SessionStart", { source: "startup", session_id: "pm-next" });
+      hold.open();
+      await oldStop; await h.settle();
+      assert.equal(h.pastes(), 0, "no stale paste");
+      assert.equal(h.enters(), 0, "no stale Enter");
+      assert.equal(f.db.hasPendingClear(0), false, "the old Stop armed nothing");
+      if (scenario === "new-boot") {
+        await h.hook("Stop", { session_id: "pm-next" }); await h.settle();
+        assert.equal(h.pastes(), 0, "a new session cancels the handoff, never clears");
+        assert.equal(isPmHandoffPending(f.db), false);
+      } else {
+        assert.equal(isPmHandoffPending(f.db), true, "intent kept for the next current Stop");
+        await h.hook("Stop"); await h.settle();
+        assert.equal(h.pastes(), 1, "the next current Stop injects once");
+        assert.equal(h.enters(), 1);
+      }
+      h.close();
+    } finally { f.close(); }
+  });
+}
+
 test("rule 50: no UserPromptSubmit change and no input gate in the handoff path", () => {
   const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
-  const handoff = read("../src/pmHandoffClear.ts");
-  const code = handoff.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  const code = read("../src/pmHandoffClear.ts").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(code, /UserPromptSubmit/);
   assert.doesNotMatch(code, /permissionDecision|"deny"|setPMBusy|isAdmissionFenced|maintenance/i);
   for (const hook of [
@@ -213,15 +380,8 @@ test("rule 50: no UserPromptSubmit change and no input gate in the handoff path"
   ]) {
     assert.doesNotMatch(read(hook), /UserPromptSubmit/, `${hook} must not touch UserPromptSubmit`);
   }
-  // The legacy self-clear Stop consumer can no longer emit a block.
   assert.doesNotMatch(read("../scripts/pm/shared-assets/claude/hooks/pm-self-clear-stop.sh"), /"decision": "block"/);
-  // The PM UserPromptSubmit relay stays exactly the existing MoP hook-relay entry.
-  const settingsPath = "../scripts/pm/shared-assets/claude/settings.json";
-  try {
-    const settings = JSON.parse(read(settingsPath));
-    const ups = JSON.stringify(settings.hooks?.UserPromptSubmit ?? []);
-    assert.doesNotMatch(ups, /handoff|save_handoff|pm-self-clear/);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
+  // Completion is by exact row id only; never by shared kind/target.
+  assert.match(code, /"obligation-resolve", "--kind", PM_HANDOFF_OBLIGATION_KIND,\s*"--id", id/);
+  assert.doesNotMatch(code, /obligation-resolve[^\n]*--target-id/);
 });
