@@ -89,7 +89,7 @@ const armLatch = (f: Fixture) => () => requestPmClearOnce({
  * (writePMClearFenced + makePmClearWriteFence), pinned Stop authority, and an
  * optional barrier inside beforeClearStop.
  */
-function stopHarness(f: Fixture, barrier?: () => Promise<void>) {
+function stopHarness(f: Fixture, barrier?: () => Promise<void>, ops: HandoffObligationOps = f.ops) {
   let generation = 0;
   const commands: string[] = [];
   let composer = "", buffer = "";
@@ -134,7 +134,7 @@ function stopHarness(f: Fixture, barrier?: () => Promise<void>) {
     return delivery;
   }, async (sessionId, authority) => {
     if (barrier) await barrier();
-    await armPmClearAfterSavedHandoff(f.db, { sessionId, ops: f.ops, files: f.files,
+    await armPmClearAfterSavedHandoff(f.db, { sessionId, ops, files: f.files,
       isCurrent: () => !!authority && pins.isCurrent(authority), requestClear: armLatch(f) });
   }, pins);
   app.post("/hooks/slot/0", async (c) => {
@@ -328,6 +328,60 @@ test("(b) an unreadable ledger never leaves a permanent phantom awaiting request
     await h.hook("Stop"); await h.settle();
     assert.equal(h.pastes(), 0, "abandonment never clears");
     assert.equal((await request(f)).kind, "awaiting_handoff", "a fresh request works after abandonment");
+    h.close();
+  } finally { f.close(); }
+});
+
+// ── single-flight creation (CTO review ts 1793737660.035519) ──────────────
+
+test("single-flight: concurrent Stop, re-request and reconcile never start a second writer while the original upsert is active", async () => {
+  const f = fixture();
+  try {
+    const hold = gate();
+    let upserts = 0;
+    let lookups = 0;
+    const counted: HandoffObligationOps = {
+      upsert: async (key, evidence) => {
+        upserts++;
+        if (upserts === 1) await hold.promise; // ORIGINAL write held before its DB write
+        return f.ops.upsert(key, evidence);
+      },
+      resolveById: f.ops.resolveById,
+      lookup: (key) => { lookups++; return f.ops.lookup(key); },
+    };
+    const original = request(f, counted);
+    await new Promise((r) => setTimeout(r, 20));
+    const requestedAt = f.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY);
+    assert.equal(f.rows().length, 0, "original write is held before the DB");
+
+    const h = stopHarness(f, undefined, counted);
+    const concurrent = await Promise.all([
+      h.hook("Stop"), h.hook("Stop"),
+      request(f, counted, "session_age_policy"), request(f, counted),
+      reconcilePmHandoffObligation(f.db, counted), reconcilePmHandoffObligation(f.db, counted),
+      ...Array.from({ length: PM_HANDOFF_MAX_RECONCILE_ATTEMPTS + 2 }, () => reconcilePmHandoffObligation(f.db, counted)),
+    ]);
+    await h.settle();
+    assert.equal(upserts, 1, "no second writer while the original is active");
+    assert.equal(lookups, 0, "an in-flight write is never judged by an empty lookup");
+    assert.equal(f.db.getEvents(0, 10, "pm_handoff_request_abandoned").length, 0, "no abandonment while active");
+    assert.equal(f.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), requestedAt, "requested_at preserved");
+    assert.equal((concurrent[2] as { kind: string }).kind, "already_awaiting");
+    assert.equal(concurrent[4], "writer_active");
+    assert.equal(h.pastes(), 0);
+
+    hold.open();
+    const settled = await original as { obligationId: string };
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(f.rows().length, 1, "exactly one durable row after settlement");
+    assert.equal(f.db.getConfig(PM_HANDOFF_OBLIGATION_KEY), settled.obligationId);
+    assert.equal(await reconcilePmHandoffObligation(f.db, counted), "created");
+
+    f.saveAll();
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.pastes(), 1, "the saved request clears once");
+    await new Promise((r) => setTimeout(r, 500));
+    assert.deepEqual(f.rows().filter((r) => r.status === "open"), [], "no stale open sibling after completion");
     h.close();
   } finally { f.close(); }
 });

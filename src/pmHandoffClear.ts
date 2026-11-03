@@ -129,10 +129,33 @@ async function resolveOwnRow(db: Db, ops: HandoffObligationOps, requestedAt: str
 }
 
 /**
+ * Single-flight per ORIGINAL request (CTO review ts 1793737660.035519): the
+ * entry lives from before the upsert starts until it settles, and one
+ * reconciliation at a time runs per request. While a writer is active, an
+ * empty lookup proves nothing, so it never authorizes a retry or abandonment.
+ * Process-local is sufficient: MoP's server is the only handoff writer.
+ */
+const handoffWritersInFlight = new Map<string, Promise<string | null>>();
+const handoffReconcilesInFlight = new Map<string, Promise<ReconcileOutcome>>();
+
+export function isPmHandoffWriterActive(requestedAt: string): boolean {
+  return handoffWritersInFlight.has(requestedAt);
+}
+
+/**
  * One obligation write for `requestedAt`. The returned id is published ONLY if
  * that request is still current; a stale id resolves its own row and is dropped.
  */
-async function createHandoffObligation(db: Db, ops: HandoffObligationOps, requestedAt: string): Promise<string | null> {
+function createHandoffObligation(db: Db, ops: HandoffObligationOps, requestedAt: string): Promise<string | null> {
+  const active = handoffWritersInFlight.get(requestedAt);
+  if (active) return active;
+  const writer = createHandoffObligationOnce(db, ops, requestedAt)
+    .finally(() => handoffWritersInFlight.delete(requestedAt));
+  handoffWritersInFlight.set(requestedAt, writer);
+  return writer;
+}
+
+async function createHandoffObligationOnce(db: Db, ops: HandoffObligationOps, requestedAt: string): Promise<string | null> {
   const evidence = {
     producer: "mop-pm-handoff-clear", pm_stop_actionable: 1, requested_at: requestedAt,
     source: db.getConfig(PM_HANDOFF_SOURCE_KEY) ?? "", session_id: db.getConfig(PM_HANDOFF_SESSION_KEY) ?? "",
@@ -167,10 +190,22 @@ async function createHandoffObligation(db: Db, ops: HandoffObligationOps, reques
  * keyed write; unknown -> count it. After the bound the request is abandoned
  * with an audit row, so no permanent phantom awaiting request remains.
  */
-export async function reconcilePmHandoffObligation(db: Db, ops: HandoffObligationOps): Promise<
-  "none" | "created" | "adopted" | "retried" | "unknown" | "abandoned"> {
+export type ReconcileOutcome = "none" | "created" | "adopted" | "retried" | "unknown" | "abandoned" | "writer_active";
+
+export function reconcilePmHandoffObligation(db: Db, ops: HandoffObligationOps): Promise<ReconcileOutcome> {
   const requestedAt = db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY);
-  if (!requestedAt || parseMs(requestedAt) === null) return "none";
+  if (!requestedAt || parseMs(requestedAt) === null) return Promise.resolve("none");
+  // The original (or a retry) writer has not settled: nothing to decide yet.
+  if (handoffWritersInFlight.has(requestedAt)) return Promise.resolve("writer_active");
+  const active = handoffReconcilesInFlight.get(requestedAt);
+  if (active) return active;
+  const run = reconcileOnce(db, ops, requestedAt).finally(() => handoffReconcilesInFlight.delete(requestedAt));
+  handoffReconcilesInFlight.set(requestedAt, run);
+  return run;
+}
+
+async function reconcileOnce(db: Db, ops: HandoffObligationOps, requestedAt: string): Promise<ReconcileOutcome> {
+  if (!isCurrentRequest(db, requestedAt)) return "none";
   if (db.getConfig(PM_HANDOFF_OBLIGATION_STATE_KEY) === "created") return "created";
   const attempts = Number(db.getConfig(PM_HANDOFF_RECONCILE_ATTEMPTS_KEY) || "0") + 1;
   db.setConfig(PM_HANDOFF_RECONCILE_ATTEMPTS_KEY, String(attempts));
