@@ -12,6 +12,16 @@ start, resume, create, inspect, interrupt, or wait for a task. A successful
 queue/add is durable delegation ownership: never create a second owner for that
 dedup key.
 
+## Message readability
+
+Write agent-authored handoffs, corrections, status updates, and terminal returns
+with normal word spacing and readable sentences. Shorten by removing repetition,
+never by joining prose words or using compressed shorthand. Use short paragraphs
+or bullets for separate points. Preserve exact identifiers, paths, commands,
+URLs, quoted source text, and machine-readable fields. Read the actual outgoing
+payload before sending and correct run-together words; preserve user-supplied
+text exactly when verbatim forwarding is required.
+
 ## Required tuple
 
 Obtain all three values before sending:

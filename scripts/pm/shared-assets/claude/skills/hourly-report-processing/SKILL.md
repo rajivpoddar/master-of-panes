@@ -20,6 +20,16 @@ Source: Rajiv, DM D0AMF0XE6TS thread 1791206320.393239, 2026-10-05 18:48 IST:
 - `bash ~/.claude/scripts/heartbeat-slots-block.sh` (live MoP slot state)
 - Open pm-ops obligations: `pm-ops.db` `obligations where status='open'`. The pr_admission, pr_red_unowned and pr_merge_ask rows are due actions.
 
+## Visual waiver sign-off (S109)
+Source: Rajiv DM D0AMF0XE6TS thread 1793721920.626689, ts 1793723647.696169, "go". Every hourly, read all open `visual_waiver_signoff` obligations in the canonical pm-ops ledger, including merged PRs. Check the PR transition thread, merge-alert thread and PR comments for the named verifier's explicit production sign-off; record its permalink and resolve the exact obligation with `pm-ops.py obligation-resolve --kind visual_waiver_signoff --id <id> --reason '<sign-off permalink>'`. Otherwise, once `next_review_at` (deploy + 24h) is due, send ONE reminder total: use the resolved PR transition thread, otherwise the verified PR merge-alert thread in `C0ALZJHGE49`, mentioning the verifier; if neither exists, post a PR comment with no @-mentions and log the fallback. Never invent a thread timestamp. Check both available threads, PR comments and ledger for `visual_waiver_signoff:<id>` before sending; include that marker and record the successful Slack or comment permalink as evidence via the same upsert. Never resend an existing or uncertain send; reconcile first. If verifier identity, ledger, required reads or send result is unavailable or uncertain, report an owned retryable blocker; never assume sign-off.
+
+## Daily feedback and P0 age (Rajiv D0AMF0XE6TS thread 1793729847.114659, ts 1793730455.699259)
+On the first hourly after 00:00 IST each calendar day, run `python3 ~/.claude/scripts/regret-log.py review` and `python3 ~/.claude/scripts/outcome-vs-spend.py --date <previous-IST-date>`; include both outputs in that hourly thread. Check the prior hourly thread for that IST date before posting to avoid duplicates; if the check or command fails, report UNAVAILABLE with an owner and retry next hourly, not zero. `STOP_AND_REPLAN` means pause routine spawning and replan. The outcome metric is a proxy, not verified deployment evidence.
+
+Every hourly list all open issues and PRs, including drafts, via paginated GitHub queries (for example `gh issue list -R heydonna-app/heydonna-app --state open --limit 1000 --json number,createdAt,assignees,labels` and `gh pr list -R heydonna-app/heydonna-app --state open --limit 1000 --json number,createdAt,assignees,labels`), then filter P0 labels locally. Do not use `--label`: GitHub search returned zero despite live matching records on 2026-11-04. Check label variants in the repository too. For each older than 4h, print `P0_AGED <n> <age> <owner>` in the hourly thread and assign exactly one accountable owner in the same turn, using the existing MoP or pm-ops obligation path; preserve any live owner and record the next action. Verify open state and linked PR merge status live. Failed or truncated reads are UNAVAILABLE, never an empty result.
+
+Routine CI-red classification and thread replies are inline or ONE batched agent per hour, not one per alert; at ~12 concurrent PM background agents queue additional launches, while PM continues handling urgent input and same-turn ownership inline (S110).
+
 ## Step 1: Errors (Axiom section)
 For each error class listed:
 1. **Mapped to an open issue/PR AND count at or below the 7-day same-slot median:** no action. Record "tracked by #N".
@@ -28,6 +38,9 @@ For each error class listed:
 Never diagnose from the count alone.
 
 ## Step 2: Open PRs
+**Trend line (mandatory, Rajiv 2026-11-03 C0ALZJHGE49 ts 1793692399.637039: "trace the open pr count each in each hourly report"):** run `python3 ~/.claude/scripts/pm/open-pr-trend.py` and put its single output line FIRST in the hourly reply. It shows open non-draft vs the last hourly, opened/merged in the last 60 min and today, and the last-6 trend vs the 25 cap. If the count rose, name in one line which PRs were opened and why (P0 only while the freeze holds).
+**Then:** run `python3 ~/.claude/scripts/pm/dual-green-sweep.py` and list its new asks, follow-ups, and any errors in the hourly reply. The sweep sends exact-head asks and follows up in the original ask thread after 30 minutes; skipped E2E is manual only. Do not duplicate its asks or follow-ups. Rajiv, C0ALZJHGE49 thread 1793681148.228999, ts 1793683532.171189 and ts 1793683640.762909; no launchd schedule.
+
 Each open PR gets exactly one disposition:
 
 | State | Action (same turn) |

@@ -111,7 +111,7 @@ def test_failed_or_skipped_batch_keeps_first_file_ready_recoverable(tmp_path):
     module.append_jsonl(module.STATE, {'event':'run','ts':(now-timedelta(days=1)).isoformat(),'dry_run':False})
     def convex(table, limit):
         return {'users':[{'userId':uid,'email':'fixture@example.invalid','_creationTime':(now-timedelta(days=10)).timestamp()*1000}],
-                'transcripts':[{'userId':uid,'_id':'f','_creationTime':1,'lastAutoProcessCompletedAt':(now-timedelta(days=5)).timestamp()*1000}]
+                'transcripts':[{'userId':uid,'_id':'f','_creationTime':1,'audioDuration':300,'lastAutoProcessCompletedAt':(now-timedelta(days=5)).timestamp()*1000}]
                }.get(table,[])
     with patch.object(module,'convex',side_effect=convex),patch.object(module,'axiom_activity',return_value=({},{})), \
             patch.object(module,'template_status',return_value={t:'APPROVED' for t in module.TOUCHES}):
@@ -128,18 +128,28 @@ def test_selector_send_allowed_requires_every_template_and_weekday(tmp_path):
     spec = importlib.util.spec_from_file_location('lifecycle_drip', SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    def select(iso='2026-10-27T14:00:00+00:00'):
+    def select(iso='2026-10-27T14:00:00+00:00', duration=300):
+        now = datetime.fromisoformat(iso)
+        def convex(table, limit):
+            return {'users': [{'userId':'u', 'email':'fixture@example.invalid', '_creationTime':(now-timedelta(days=10)).timestamp()*1000}],
+                    'transcripts': [{'userId':'u', '_id':'f', '_creationTime':1, 'audioDuration':duration,
+                                     'lastAutoProcessCompletedAt':(now-timedelta(days=5)).timestamp()*1000}]}.get(table, [])
         with patch.object(module, 'TEMPLATES', tmp_path), patch.object(module, 'read_jsonl', return_value=[]), \
-             patch.object(module, 'convex', return_value=[]), patch.object(module, 'axiom_activity', return_value=({}, {})), \
+             patch.object(module, 'convex', side_effect=convex), patch.object(module, 'axiom_activity', return_value=({}, {})), \
              patch.object(module, 'gmail_recent_manual_recipients', return_value=set()), \
              patch.object(module, 'append_jsonl', side_effect=AssertionError('dry-run wrote state')):
-            return module.select(datetime.fromisoformat(iso), True)['meta']['send_allowed']
-    assert select() is False
+            return module.select(now, True)
+    assert select()['meta']['send_allowed'] is False
     for touch in module.TOUCHES:
         (tmp_path / f'{touch}.txt').write_text('STATUS: APPROVED (Rajiv cited)\n')
-    assert select() is True
+    assert select()['meta']['send_allowed'] is True
     for touch in module.TOUCHES:
         (tmp_path / f'{touch}.txt').write_text('STATUS: DRAFT_PENDING_RAJIV\n')
-        assert select() is False, touch
+        result = select()
+        assert result['meta']['send_allowed'] is (touch == 'TRY_FULL_FILE'), touch
+        if touch == 'TRY_FULL_FILE':
+            short = select(duration=60)
+            assert short['records'][0]['touch'] == 'TRY_FULL_FILE'
+            assert short['meta']['send_allowed'] is False
         (tmp_path / f'{touch}.txt').write_text('STATUS: APPROVED\n')
-    assert select('2026-10-31T14:00:00+00:00') is False
+    assert select('2026-10-31T14:00:00+00:00')['meta']['send_allowed'] is False

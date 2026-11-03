@@ -18,21 +18,21 @@ Launch `lifecycle-email-agent` in the background (`run_in_background=true`) with
   - `record-sent --user-id U --email E --touch T --gmail-id G --attempt-id A`: reconcile an existing exact owned uncertain attempt from an observed Gmail ID; never a resend.
   - `opt-out --email E [--reason ...]`: adds the address to the opt-out list.
 - State: `~/.claude/state/lifecycle-drip.jsonl` (send-once per (userId, touch)). Opt-outs: `~/.claude/state/lifecycle-drip-optout.jsonl`.
-- Templates: `templates/{D0,D1,D3,D7,FIRST_FILE_READY}.txt`. The header holds `STATUS:`, `TOUCH:` and `SUBJECT:`, then `---`, then the body.
+- Templates: `templates/{D0,D1,D3,D7,FIRST_FILE_READY,TRY_FULL_FILE}.txt`. The header holds `STATUS:`, `TOUCH:` and `SUBJECT:`, then `---`, then the body.
 
 ## Rules (selector)
-- D0: signed up < 24h ago. D1: 1–2 days, touched the sample, no own file. D3: 3–4 days, no own upload. D7: 7–8 days, no activity in 5 days. FIRST_FILE_READY: first own-file transcript finished auto-process and this touch is unsent; batch selection never consumes it. At most one touch per user per run (priority FIRST_FILE_READY > D0 > D1 > D3 > D7).
+- D0: signed up < 24h ago. D1: 1–2 days, touched the sample, no own file. D3: 3–4 days, no own upload. D7: 7–8 days, no activity in 5 days. FIRST_FILE_READY: the first own-file transcript of at least 300 seconds has finished auto-process and this touch is unsent; batch selection never consumes it. TRY_FULL_FILE: at least one own-file transcript finished auto-process, all finished own-file durations are known and under 300 seconds, and this touch is unsent. A missing duration never establishes eligibility. A short file does not consume FIRST_FILE_READY; it remains recoverable when a qualifying file finishes. Priority FIRST_FILE_READY > TRY_FULL_FILE > D0 > D1 > D3 > D7; at most one touch per user per run. Rajiv approved, C0C7U35LBKR thread 1793718515.297379, ts 1793720466.850159.
 - Excluded: Scribie cohort (active member of an `externalOrgId=scribie` workspace, `cohort=scribie`, or a scribie.com/.ai source/referrer/landing), abuse-flagged (`adjustment` ledger row with an `abuse:` reason), @heydonna.law / @scribie.com, Rajiv's personal rpoddar@gmail.com (Rajiv C0C7U35LBKR ts 1793196453.744059: "skip rpoddar@gmail. that's me."), opted out, already sent, and anyone rajiv@ emailed manually in the last 3 days (so we don't double-email).
 
 ## Hard gates (agent refuses otherwise)
-1. **Templates approved**: every template used must be `STATUS: APPROVED`. While any is `DRAFT_PENDING_RAJIV`, `meta.send_allowed=false`: run `select --dry-run` only, send nothing, record nothing, and return the would-send list to PM. Only Rajiv flips the status; PM edits the line after his written approval and cites the ts.
+1. **Templates approved**: every template used must be `STATUS: APPROVED`. A draft TRY_FULL_FILE is held per record: its `send_allowed=false`; return it to PM without sending or recording it. Other eligible records may proceed only when their own `send_allowed=true`, even if the batch-level `meta.send_allowed=false` because it contains a held record. The existing batch-wide gate for all other templates remains. Only Rajiv flips a draft status; PM edits the line after his written approval and cites the ts.
 2. **Weekdays only** (America/New_York). `meta.weekday_et=false` means no send.
 3. **Facts only**: personalization uses ONLY the record's `activity_facts`. No invented numbers, names, templates, states or outcomes. If a fact is absent, drop the sentence.
 4. Plain text, Rajiv's founder voice, short. Keep the calendar link https://calendar.app.google/dDdvx2G3UzKrC7zY9 and the last line "Reply 'stop' and I won't email again." Never mention PR/issue numbers, internal terms (pipeline, BoN, ledger) or other users.
 
-## Send loop (only when send_allowed)
-For each record:
-1. Fill the touch template: `{first_name}` (fall back to "Hi there,"), `{credits_left}` / `{audio_hours}` from facts, and replace each `{PERSONALIZE: ...}` with one or two sentences grounded in facts.
+## Send loop (only records with send_allowed=true)
+For each allowed record; never send a held record:
+1. Fill the touch template: `{first_name}` (fall back to "Hi there,"), `{credits_left}` / `{audio_hours}` from facts, and replace each `{PERSONALIZE: ...}` with one or two sentences grounded in facts. If the template has a `SUBJECT_FALLBACK:` line and its condition holds (FIRST_FILE_READY: `audio_hours` rounds to 0.0, or the facts don't establish a deposition), send with the fallback subject and keep the body free of the unsupported claim. Never skip the touch for that reason (Rajiv C0C7U35LBKR ts 1793636052.881709).
 2. Save the personalized body to a unique mode0600 scratch file (`umask 077`). Call `python3 ~/.claude/scripts/growth/lifecycle-drip.py send --user-id U --email E --touch T --subject S --body-file F`. Do not call `gws gmail +send` directly. Rajiv's authenticated founder identity and all selector/human gates above still apply.
 3. The helper returns a confirmed Gmail ID or UNCERTAIN. UNCERTAIN means Gmail may have accepted: stop this user/touch, preserve its attempt and confirmed prefix, and reconcile existing Sent mail before `record-sent --attempt-id A --gmail-id G`. A crash, timeout, nonzero exit or missing output is never permission to retry Gmail. Do not delete or rewrite attempts or sent records. A confirmed duplicate is already sent; do not include it as a new delivery.
 

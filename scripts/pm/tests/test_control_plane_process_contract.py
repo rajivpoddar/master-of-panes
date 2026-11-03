@@ -63,7 +63,8 @@ def test_approval_returns_rollout_to_same_owner_and_cto_only_notifies_pm() -> No
     assert "\"owner\": \"CTO_DECISIONS\"" in contract
     assert "return_approval_to_same_implementation_owner" in contract
     assert "approval back to that same task" in skill
-    assert "never investigates deeply, implements, reviews, publishes" in skill
+    assert "For MoP and PM Operator defects, the current CTO chat owns diagnosis" in skill
+    assert "For other shared control-plane defects, CTO Decisions routes execution to" in skill
     assert "PR Reviews" in skill
     assert "rework/approval returns to that same owner" in wake
     assert "same-owner rollout" in wake
@@ -237,4 +238,5 @@ def test_native_bypass_contract_is_single_fenced_and_ordered() -> None:
     assert "blind rerun" in contract
     # The WAKE_SOP pointer was pruned in 9ad9e00; MONITOR.md carries it now.
     assert "`Native bypass contract (CTO-only, after one high-level refusal)`" in monitor
-    assert "No direct CTO implementation, review, publication" in skill
+    assert "## Direct MoP and PM Operator repair" in skill
+    assert "Obtain one independent functionality-first review" in skill

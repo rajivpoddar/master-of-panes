@@ -913,11 +913,32 @@ if printf '%s' "$PAYLOAD" | grep -qE '<U[0-9A-Z]{8,}>'; then
   echo "ERROR: payload contains an angle-bracketed Slack id WITHOUT the '@' (e.g. <U0BNFGX2UAX>). Slack renders that as literal text and the mention never resolves. Canonical form: <@U0BNFGX2UAX>. Refusing to send." >&2
   exit 1
 fi
-RESULT=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
+if ! RESULT=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
   --config <(printf 'header = "Authorization: Bearer %s"\n' "${SLACK_BOT_TOKEN}") \
   -H "Content-Type: application/json" \
-  -d "$PAYLOAD")
+  -d "$PAYLOAD"); then
+  printf 'SLACK_SEND_FAILED channel=%s thread=%s error=%s\n' "$CHANNEL" "$THREAD_TS" 'transport_error_delivery_uncertain' >&2
+  exit 1
+fi
 
+# Validate the response before routing or recording it as a delivered message.
+if ! python3 -c '
+import json, sys
+channel, thread = sys.argv[1:]
+try:
+    result = json.load(sys.stdin)
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        reason = result.get("error") or "non_ok_response" if isinstance(result, dict) else "invalid_response"
+        raise ValueError(str(reason))
+    if not isinstance(result.get("ts"), str) or not result["ts"].strip():
+        raise ValueError("missing_ts_delivery_uncertain")
+except (ValueError, TypeError) as exc:
+    reason = " ".join(str(exc).splitlines())
+    print(f"SLACK_SEND_FAILED channel={channel} thread={thread} error={reason}", file=sys.stderr)
+    sys.exit(1)
+' "$CHANNEL" "$THREAD_TS" <<< "$RESULT"; then
+  exit 1
+fi
 
 # If message contains @channel/@here or slot @mentions, also route via MoP
 # (Slack Bolt silently drops self-messages, so the bridge never sees them)

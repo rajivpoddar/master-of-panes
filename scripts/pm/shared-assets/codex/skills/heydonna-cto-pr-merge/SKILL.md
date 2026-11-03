@@ -35,6 +35,18 @@ as a substitute for this skill.
   exempt-only PRs untouched. A blocked PR does not stop unrelated eligible
   heads. Report each actual merge or literal blocker; never run admission,
   recovery, or deployment as part of the batch.
+- At a safe same-owner boundary, handle all actually consumed/assigned merge
+  asks in one turn, independently and serially. Reconcile each original key,
+  owner and effect first; never drain preview-only queues, interrupt issued
+  work, replay completed terminals or acquire another owner's assignments.
+  A blocked or UNKNOWN item does not stall independent eligible items.
+  Directly authenticate supplied exact-head run IDs and current substantive
+  attempts/jobs, checking for newer required evidence as necessary, instead
+  of repeating discovery. With IDs absent, retain one bounded native lookup.
+  Reuse applicable unchanged-head review/proof; refresh mutable pre-effect
+  head, relevant-main and protection facts. Preserve individual effects,
+  source writers and terminals, all existing safety/visual gates and no-poll
+  boundaries. Authority: PM1793686857.830059, merge-delay review1793684838.130539.
 - Outside that explicit batch scope, no other-PR sweep. No retired guard,
   PM script/label gate, new reviewer/owner,
   integration/rebase/head push, CI admission/rerun/capture, tests, deployment,
@@ -271,6 +283,16 @@ response loss or an inconclusive effect is `STOPPED-INCOMPLETE` /
 `OUTCOME_UNCERTAIN`. Reconcile that exact effect without retry/re-key/fallback.
 
 ## Deliver the terminal directly to the source thread
+
+**Always reply to every merge ask (Rajiv, C0ALZJHGE49 thread 1793713624.162229, ts 1793714725.867629: "update the cto skill to always reply with the to merge asks").**
+
+Every PM merge ask gets exactly ONE reply in ITS OWN Slack thread, or at its own top-level message when it has no thread. This includes a repeat ask for a head that is already adjudicated, held, blocked, deduplicated or still pending. Never leave an ask silent:
+
+- An existing hold or block on the same PR/head: reply `STILL BLOCKED` with the original verdict's exact failed predicate, the link to the original adjudication, and the ONE PM next step. Silent dedup is not allowed.
+- Not yet processed or queued: reply `RECEIVED, not yet executed`, with the reason and the expected next action.
+- Already merged: reply with the existing merge SHA and time.
+
+The 2026-11-03 trigger: #12535 was asked at 17:44 IST after a 14:35 IST visual-proof block, got no reply, and sat for 2h looking unprocessed.
 
 The actual merge executor posts COMPLETE/MERGED, BLOCKED or
 STOPPED-INCOMPLETE directly to the ORIGINAL merge-ask Slack channel/thread

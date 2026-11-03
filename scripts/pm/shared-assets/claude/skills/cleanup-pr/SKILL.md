@@ -3,6 +3,8 @@
 
 # Cleanup PR
 
+> **Post-cutover transition contract:** Follow `/Users/rajiv/.claude/skills/pm-cleanup-pr/SKILL.md` for all cleanup state transitions. Its journaled `/Users/rajiv/.claude/scripts/pm-cleanup-pr.py` caller supersedes every legacy instruction below invoking `pm-state-replace.sh`, `pm-transition.sh`, or `pm-transition-alert.sh`. Do not invoke those retired helpers or apply terminal labels by hand. Once mandatory cleanup is complete, submit the exact merged PR/head/merge-commit/linked-issue tuple using `post_merge_terminal: true, thread_reply: false`, or the documented issue-less mode. Follow its typed outcome and readback. There is no post-cutover transition-thread mapping: do not block on or fabricate one. Include the tracker in the runner report; post to an independently verified existing thread when available. All other cleanup and customer communication requirements remain in force.
+
 Post-merge cleanup for a PR that Rajiv has already merged. Runs all housekeeping steps.
 
 ## SLA: 10 minutes post-merge (Rajiv directive 2026-05-21 10:47 IST thread `1779340644.135029`)
@@ -572,6 +574,18 @@ EOF
   exit 1
 fi
 ```
+
+### Step 6.5a: Visual waiver and deployed version (S109)
+
+Source: Rajiv DM D0AMF0XE6TS thread 1793721920.626689, ts 1793723647.696169, "go". Read the merged PR body, merge SHA/time and complete changed-file list. For `Visual proof: WAIVED — verifiable in prod by <verifier>` or equivalent naming CTO, Abi, Rajiv or Ernest, use the named verifier as owner. Once the relevant production deploy completes, calculate UTC `DUE` = actual deploy completion + 24h and run:
+
+```bash
+python3 ~/.claude/scripts/pm-ops.py obligation-upsert --kind visual_waiver_signoff --target-type github_pr --target-id "$PR_NUMBER" --pr "$PR_NUMBER" --owner "$VERIFIER" --next-review-at "$DUE" --dedupe-group "visual_waiver_signoff:$PR_NUMBER:$VERIFIER" --title "Production visual sign-off for PR #$PR_NUMBER" --action "Verify in production and record sign-off in the PR transition thread" --evidence "deploy_at=$DEPLOY_AT" --print-id
+```
+
+Keep the same due time and dedupe key on reruns; never reset the deadline. If deploy time or verifier is unknown, report an owned retryable blocker rather than inventing either. Hourly processing sends one overdue reminder and resolves only on recorded sign-off.
+
+For each touched production surface, perform read-only checks after deployment: Cloudflare served app build/version metadata against merged SHA; each affected Modal app (including apps consuming changed shared modules) via `modal app list` and deployment metadata, flagging last deploy before merge; and production Convex `beloved-cardinal-941` deployment metadata/time versus merge when `convex/**` is affected. Record surface, app, observed version/deploy time, merge SHA/time and evidence. A newer deploy time alone is NOT proof of SHA: establish that its source contains the merge (a verified descendant is acceptable); otherwise report UNKNOWN, never matched. Treat unavailable metadata as UNKNOWN, not mismatch or success; preserve an owned follow-up. On a confirmed mismatch post one line naming surface, evidence and `owner=PM`, and upsert `deploy_version_mismatch` with `--target-type github_pr --target-id "$PR_NUMBER" --pr "$PR_NUMBER" --owner PM --dedupe-group "deploy_version_mismatch:$PR_NUMBER:<surface>"`, recording evidence and the next action. Route the notice to the resolved PR transition thread; if unavailable, use the verified PR merge-alert thread in `C0ALZJHGE49`; if neither exists, post a PR comment with no @-mentions and log the fallback and permalink. Never invent a thread timestamp. Check the ledger, both available threads and PR comments for the PR/surface notice before posting; reconcile uncertain sends before retrying. No deploys or other production mutations in this check.
 
 ### Step 6.6: Notify the bug originator ASAP (MANDATORY — Rajiv directive 2026-04-30 11:01; resequenced 2026-06-17)
 

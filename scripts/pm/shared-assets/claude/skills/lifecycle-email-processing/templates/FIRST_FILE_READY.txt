@@ -1,6 +1,7 @@
 STATUS: APPROVED (Rajiv C0ALZJHGE49 ts 1793088244.818019, 2026-10-27)
 TOUCH: FIRST_FILE_READY (first own-file transcript finished processing since last run)
 SUBJECT: Your {audio_hours}-hour deposition is ready
+SUBJECT_FALLBACK: Your transcript is ready (Rajiv C0C7U35LBKR thread 1793632525.799439, ts 1793636052.881709, 2026-11-02: use when audio_hours rounds to 0.0 OR the facts do not establish the document is a deposition. In that case also never call it a "deposition" in the body.)
 ---
 Hi {first_name},
 

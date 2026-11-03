@@ -1,6 +1,6 @@
 ---
 name: heydonna-control-plane-repair
-description: Route one bounded HeyDonna control-plane defect from CTO Decisions to the CP Repairs or Master of Panes task, then through PR Reviews and back to the same execution task for rollout. Use for release automation, CI/E2E/capture orchestration, labels, obligations, slot control, MoP, PM Operator, and deployment adapters. All canonical control-plane source is in the Master of Panes repository; this skill never authorizes inline CTO execution.
+description: Repair bounded MoP and PM Operator defects directly in the current chat through focused proof, one independent review, publication, install, restart, and live verification. Route other shared control-plane defects to CP Repairs. Canonical source is in the Master of Panes repository.
 ---
 
 # HeyDonna Control-Plane Repair
@@ -15,9 +15,14 @@ process-policy change. User-authorized repairs continue through proof, warranted
 independent review, publication, and scoped install without another approval
 hop; only the reserved escalation classes in the shared contract go to Rajiv.
 
-This is a delegation and lifecycle contract. CTO Decisions classifies and
-routes; it never investigates deeply, implements, reviews, publishes, deploys,
-installs, activates, restarts, rolls back, monitors, or waits.
+For MoP and PM Operator defects, the current CTO chat owns diagnosis,
+implementation, focused validation, publication, scoped install, restart,
+live verification, and rollback. Do not hand this work to the Master of Panes
+task. Rajiv-authorized repair and restart requests continue to completion
+without another approval hop. Analysis-only requests remain read-only.
+
+For other shared control-plane defects, CTO Decisions routes execution to
+CP Repairs and consumes its candidate and rollout results as described below.
 
 Canonical control-plane source is
 `/Users/rajiv/Downloads/projects/master-of-panes`. Do not use HeyDonna app
@@ -47,27 +52,30 @@ updated only through the supported
 which preserves scheduler-owned metadata, notification policy, dynamic
 timestamps, and the complete prior prompt/metadata rollback preimage.
 
-## Task affinity
+## Execution ownership
 
 - CP Repairs `01a08f69-45db-71c2-b433-678419139ed7`: shared release and
   control-plane investigation, implementation, publication, deployment,
   activation, restart/readiness, and rollback outside the MoP/PM Operator
   runtime affinity.
-- Master of Panes `01a0d779-9a74-7f52-89ad-167910930d27`: MoP and PM Operator
-  investigation, implementation, caller migration, install, cutover,
-  restart/readiness, rollback, and retirement.
+- Current CTO chat: MoP and PM Operator investigation, implementation,
+  caller migration, install, cutover, restart/readiness, rollback, and
+  retirement. No dedicated MoP task handoff.
 - PR Reviews `01a0b53e-3316-77d3-9610-1c0c58d4ba5b`: the single independent
   functionality-first candidate review. It never implements or deploys.
-- CTO Decisions `01a09112-a09c-7361-9a2a-0ada6a4e9dfb`: bounded
-  classification, routing, verdict consumption, and the final PM communication.
+- CTO Decisions `01a09112-a09c-7361-9a2a-0ada6a4e9dfb`: also classifies and
+  routes non-MoP repairs, consumes verdicts, and handles final PM communication
+  when authorized.
 
 Repository location does not override task affinity. Preserve one
-implementation owner for the exact tuple.
+implementation owner for the exact tuple. Reconcile or transfer any repair
+already active elsewhere before taking over; do not create competing changes
+or restarts.
 
 ## Admission
 
-CTO Decisions may take one bounded read-only snapshot to bind the literal
-blocker, affected tuple, current authority, and likely control point. Classify
+Bind the literal blocker, affected tuple, current authority, and runtime
+control point. Classify
 as `PRODUCT`, `CONTROL_PLANE`, `MIXED`, or `UNKNOWN`.
 
 Proceed only for a bounded `CONTROL_PLANE` scope in the Master of Panes
@@ -75,10 +83,33 @@ repository. Route product/test/harness work to Rescues or the appropriate
 numbered-slot boundary. Escalate `MIXED`, `UNKNOWN`, new writable authority,
 destructive recovery, or an unproven rollback boundary.
 
-## Lifecycle
+## Direct MoP and PM Operator repair
 
-1. CTO Decisions sends one exact implementation brief to CP Repairs or Master
-   of Panes using `$codex-stdio-send-message` with a stable event-specific dedup
+1. Use a clean worktree from verified current `origin/main`. Trace the actual
+   writer, guard, or state transition and make the smallest coherent change
+   with `apply_patch`. Preserve unrelated work and active PM/dev agents.
+2. Run one focused proof plan: reproduce the observed failure, verify the
+   correction and relevant negative or retry cases, and run required
+   syntax/build checks.
+3. Obtain one independent functionality-first review after the final code
+   change. PR Reviews may review the immutable candidate; implementation and
+   rollout stay in this chat. Do not repeat review for unchanged code or
+   delay safe recovery for wording or receipt-only nits.
+4. Publish without force, install the scoped change, restart the canonical
+   service when required, and verify the actual live process and restored
+   capability. Preserve the prior immutable release and rollback preimages.
+5. Report the deployed revision, focused proof, restart/readiness evidence,
+   and material limitations. Stop when the requested outcome and minimum safe
+   proof are satisfied.
+
+For live-user incidents, spend at most 15 minutes on workflow machinery before
+using the safe degraded/manual recovery path. A queued handoff or staged
+release is not a completed repair.
+
+## Delegated lifecycle for other control-plane repairs
+
+1. CTO Decisions sends one exact implementation brief to CP Repairs
+   using `$codex-stdio-send-message` with a stable event-specific dedup
    key. The brief binds authority, repository, base, affected tuple, allowed
    scope, runtime control point, focused proof, rollback, and terminal return.
 2. The implementation task uses a clean worktree from current `origin/main`,
@@ -106,7 +137,7 @@ clean worktree, exact immutable tuple, focused proof, rollback preimages,
 affected product tuple, and explicit no-mutation inventory.
 
 For a MoP rollout, staging or changing a release pointer is not live proof. The
-Master of Panes task must restart the canonical service and return the new child
+current execution owner must restart the canonical service and report the new child
 PID/start time, exact release/cwd, Node runtime/ABI, listener bind, and HTTP 200
 `/health`. Rollback restores the prior immutable release, restarts the service,
 and repeats the same readiness proof.
@@ -114,12 +145,14 @@ and repeats the same readiness proof.
 ## Fail closed
 
 - No numbered product slot for control-plane implementation or proof.
-- No GitHub, Slack, PM, slot, workflow, customer, or live-service mutation
-  before approval, except an explicitly scoped read-only diagnostic.
-- No direct CTO implementation, review, publication, deployment, restart, or
-  rollback, even if the wake or label says `DIRECT` or `EXECUTE_NOW`.
-- No PM review, reviewer marker, duplicate owner, polling, wait loop, or
-  `codex_app` tool.
+- Repair authorization covers the requested control-plane change and scoped
+  rollout. PM alone performs numbered-slot lifecycle and production-DB
+  effects. Slack posts require explicit authorization.
+- Direct CTO implementation and rollout are allowed for authorized MoP and
+  PM Operator repairs. Other control-plane repairs retain the CP Repairs
+  execution boundary.
+- No PM review, reviewer marker, or duplicate implementation owner. Receipt
+  and routing machinery must not delay safe user recovery.
 - Every task handoff and terminal return uses `$codex-stdio-send-message`, the
   exact existing task ID, and a stable event-specific dedup key. A durable queue
   receipt is acceptance; do not retry it or create another owner.

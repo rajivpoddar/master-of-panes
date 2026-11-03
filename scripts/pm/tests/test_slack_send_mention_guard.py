@@ -40,7 +40,7 @@ LIVE_FILE = Path("/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/sl
 def _guard_snippet() -> str:
     text = SOURCE.read_text(encoding="utf-8")
     start = text.index(GUARD_START)
-    end = text.index("RESULT=$(curl", start)
+    end = text.index("if ! RESULT=$(curl", start)
     return text[start:end]
 
 
@@ -82,7 +82,7 @@ def test_non_mention_markup_still_passes() -> None:
 def test_landed_guard_is_byte_identical_to_verified_live() -> None:
     live = LIVE_FILE.read_text(encoding="utf-8")
     start = live.index(GUARD_START)
-    end = live.index("RESULT=$(curl", start)
+    end = live.index("if ! RESULT=$(curl", start)
     assert _guard_snippet() == live[start:end]
 
 

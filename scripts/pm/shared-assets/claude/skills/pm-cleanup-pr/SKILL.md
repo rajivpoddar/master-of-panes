@@ -3,7 +3,9 @@ name: pm-cleanup-pr
 description: Finalize one already-merged HeyDonna PR and linked issue through the direct journaled cleanup caller.
 ---
 
-Pipe one complete JSON object to the manifest-installed `pm-cleanup-pr.py`
+This post-cutover contract overrides legacy cleanup-pr instructions requiring `pm-state-replace.sh`, `pm-transition.sh`, `pm-transition-alert.sh`, or a transition-thread mapping. Those helpers are retired; absence of a mapping is not a cleanup blocker. Record the tracker in the runner's completion report and use an existing verified Slack thread only when one is independently known; never fabricate a mapping.
+
+Pipe one complete JSON object to the manifest-installed `/Users/rajiv/.claude/scripts/pm-cleanup-pr.py`
 exactly once after the canonical merge terminal. It requires repository, PR,
 issue, exact PR head, and merge commit. It verifies the merged/head/link
 tuple against live GitHub, preserves unrelated labels, removes only stale

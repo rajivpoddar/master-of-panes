@@ -58,6 +58,10 @@ def _read(relative: str) -> str:
 def test_adopted_sources_have_zero_retired_references() -> None:
     for relative in ADOPTED:
         text = _read(relative)
+        if relative == "pm-cleanup-pr/SKILL.md":
+            warning = next(line for line in text.splitlines() if "Those helpers are retired" in line)
+            assert "overrides legacy cleanup-pr instructions requiring" in warning
+            text = text.replace(warning, "", 1)
         for name in RETIRED:
             assert name not in text, f"{relative} still references retired {name}"
 

@@ -42,7 +42,8 @@ OPTOUT = Path.home() / ".claude/state/lifecycle-drip-optout.jsonl"
 TEMPLATES = Path.home() / ".claude/skills/lifecycle-email-processing/templates"
 AXIOM_ENV_FILE = Path(os.environ.get("AXIOM_ENV_FILE", str(REPO / ".env.local")))
 ET = ZoneInfo("America/New_York")
-TOUCHES = ["FIRST_FILE_READY", "D0", "D1", "D3", "D7"]  # priority order, one touch per user per run
+TOUCHES = ["FIRST_FILE_READY", "TRY_FULL_FILE", "D0", "D1", "D3", "D7"]  # priority order, one touch per user per run
+MIN_REAL_FILE_SECONDS = 300
 INTERNAL_DOMAINS = ("@heydonna.law", "@scribie.com")
 MANUAL_CONTACT_DAYS = 3
 COHORT_DAYS = 30
@@ -198,7 +199,7 @@ def deliver(args) -> dict:
             email = args.email.lower()
             if (not email or email.endswith(INTERNAL_DOMAINS) or email in {r['email'].lower() for r in read_jsonl(OPTOUT)}
                     or datetime.now(timezone.utc).astimezone(ET).weekday() >= 5
-                    or any(v != 'APPROVED' for v in template_status().values())):
+                    or not template_send_allowed(args.touch, template_status())):
                 raise ValueError('send policy refused')
             body = Path(args.body_file).read_text()
             attempt_id = uuid.uuid4().hex
@@ -229,6 +230,13 @@ def template_status() -> dict[str, str]:
         m = re.search(r"^STATUS:\s*(\S+)", f.read_text(), re.M)
         st[t] = m.group(1) if m else "MISSING_STATUS"
     return st
+
+
+def template_send_allowed(touch: str, statuses: dict[str, str]) -> bool:
+    # The new draft must not block existing approved touches; preserve their
+    # existing batch-wide approval gate for all other templates.
+    return (statuses.get(touch) == "APPROVED"
+            and all(statuses.get(t) == "APPROVED" for t in TOUCHES if t != "TRY_FULL_FILE"))
 
 
 # ---------------------------------------------------------------- facts
@@ -332,10 +340,13 @@ def select(now: datetime, dry_run: bool) -> dict:
 
         # Eligible touches (rules from the approved design)
         elig = []
-        first_ready = own_ready[0] if own_ready else None
+        durations = [t.get("audioDuration") for t in own_ready]
+        valid_duration = lambda d: isinstance(d, (int, float)) and not isinstance(d, bool) and 0 <= d < float("inf")
         # Per-user sent/attempt state owns delivery, not a global selection watermark.
-        if first_ready:
+        if any(valid_duration(d) and d >= MIN_REAL_FILE_SECONDS for d in durations):
             elig.append("FIRST_FILE_READY")
+        elif durations and all(valid_duration(d) and d < MIN_REAL_FILE_SECONDS for d in durations):
+            elig.append("TRY_FULL_FILE")
         if days < 1:
             elig.append("D0")
         if 1 <= days < 3 and touched_sample and not own:
@@ -392,6 +403,7 @@ def select(now: datetime, dry_run: bool) -> dict:
             "first_name": first_name(u),
             "touch": touch,
             "template_status": tstatus.get(touch),
+            "send_allowed": now.astimezone(ET).weekday() < 5 and template_send_allowed(touch, tstatus),
             "activity_facts": {
                 "signup_at": u.get("createdAt"),
                 "days_since_signup": round(days, 1),
@@ -413,7 +425,7 @@ def select(now: datetime, dry_run: bool) -> dict:
     meta = {"generated_at": now.isoformat(), "dry_run": dry_run, "weekday_et": weekday,
             "last_run": datetime.fromtimestamp(last_run_ms / 1000, timezone.utc).isoformat(),
             "template_status": tstatus,
-            "send_allowed": weekday and all(v == "APPROVED" for v in tstatus.values()),
+            "send_allowed": weekday and all(template_send_allowed(r["touch"], tstatus) for r in records),
             "cohort_users": len(users)}
     if not dry_run:
         append_jsonl(STATE, {"event": "run", "ts": now.isoformat(), "dry_run": False,
