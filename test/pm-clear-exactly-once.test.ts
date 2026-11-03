@@ -277,12 +277,13 @@ test("only native Stop dispatches PM clear; status/drain and operator requests c
   assert.doesNotMatch(route, /requestPmClearOnce\(/);
   assert.doesNotMatch(route, /sendClearViaMopSendPath\(/);
   assert.doesNotMatch(route, /sendPendingPmClearAtStop|retryPendingPmClearAfterDrain|retryUndeliveredPmClearOnStop/);
-  assert.match(source, /registerPMSoftBoundary\(app, db, relay, sendPendingPmClearAtStop\)/);
+  assert.match(source, /registerPMSoftBoundary\(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop\)/);
   assert.match(source, /sendClearViaMopSendPath\(0, "pm_native_stop", \{/);
   assert.doesNotMatch(source, /waitForPmIdleDrain|PM_CLEAR_STOP_RETRY_SETTLE_MS|PM_CLEAR_STOP_RETRY_BACKOFF_MS/);
   assert.match(source, /deferUntilStop: true/);
   assert.match(source, /db\.getEvents\(0, 100, "pm_status_idle_drained"\)/);
-  assert.match(source, /operatorReRequest: options\.clearExistingPendingForTargets/);
+  // An operator re-request (clear_existing_pending) restarts the save-handoff request (Rajiv ts 1793732417.459339).
+  assert.match(source, /if \(options\.clearExistingPendingForTargets\) \{\s+for \(const key of \[PM_HANDOFF_REQUESTED_AT_KEY, PM_HANDOFF_SESSION_KEY\]\)/);
 
   const sendRouteStart = source.indexOf('app.post("/slots/:slotNum/send"');
   const pmSubmit = source.indexOf("const submitted = await relay.submitToPM(command)", sendRouteStart);

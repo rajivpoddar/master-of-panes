@@ -39,9 +39,11 @@ function baseOptions(db: MoPDatabase, nowMs: number, counter: { sends: number },
 test("deferred-busy latch: a later Stop retries the guarded send exactly once", async () => {
   const { db, directory } = freshDb("mop-pm-clear-deferred-");
   try {
-    const now = Date.parse("2026-10-07T12:40:00.000Z");
+    // Real clock: the Stop below must land inside the one-attempt fail-open bound.
+    const now = Date.now();
+    const requestedAt = new Date(now - 30_000).toISOString();
     db.setPendingClear(0);
-    db.setConfig("pm_clear_requested_at", "2026-10-07T12:38:06.342Z");
+    db.setConfig("pm_clear_requested_at", requestedAt);
     db.setConfig("pm_clear_delivery_state", "deferred_busy");
     const counter = { sends: 0 };
 
@@ -49,7 +51,7 @@ test("deferred-busy latch: a later Stop retries the guarded send exactly once", 
     assert.equal(first.kind, "sent");
     assert.equal(counter.sends, 1);
     assert.equal(db.getConfig("pm_clear_delivery_state"), "awaiting_ack");
-    assert.equal(db.getConfig("pm_clear_requested_at"), "2026-10-07T12:38:06.342Z");
+    assert.equal(db.getConfig("pm_clear_requested_at"), requestedAt);
 
     // Delivered-awaiting-ack: further Stops never resend.
     const second = await retryDeferredPmClearOnStop(baseOptions(db, now + 120_000, counter));

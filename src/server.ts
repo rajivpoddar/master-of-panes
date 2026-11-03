@@ -15,6 +15,13 @@
 import { resolveAcceptedPmSelfClear } from "./pmSelfClearObligation.js";
 import { resolveBindHost } from "./bindHost.js";
 import { registerPMSoftBoundary } from "./pmSoftBoundary.js";
+import {
+  PM_HANDOFF_REQUESTED_AT_KEY,
+  PM_HANDOFF_SESSION_KEY,
+  armPmClearAfterSavedHandoff,
+  pmOpsHandoffObligationOps,
+  requestPmHandoffClear,
+} from "./pmHandoffClear.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -308,7 +315,7 @@ const eventLoopLagTimer = setInterval(() => {
 }, 60 * 1000);
 
 const app = new Hono();
-const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop);
+const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop);
 
 // ─── MoP Clear Helpers ─────────────────────────────────
 // HTTP path for deterministic schedulers that cannot call MCP tools.
@@ -459,6 +466,40 @@ async function sendPendingPmClearAtStop(): Promise<void> {
         stopFenced: true,
       }),
   }).finally(() => pmSoftBoundary.reconcileFailedMaintenance());
+}
+
+/** Current PM hook session id (latest SessionStart payload). */
+function currentPmSessionId(): string {
+  const event = db.getEvents(0, 1, "SessionStart")[0];
+  try { return String(JSON.parse(event?.payload || "{}").session_id ?? ""); } catch { return ""; }
+}
+
+const pmHandoffOps = pmOpsHandoffObligationOps();
+
+/**
+ * PM Stop: a saved handoff arms the existing Stop-fenced clear latch for THIS
+ * Stop (deferred_busy), so the soft-boundary Stop path injects immediately and
+ * new input / a session change cancels the write. Never blocks the hook.
+ */
+async function armPmClearAfterHandoffAtStop(sessionId: string): Promise<void> {
+  const { delivery } = await armPmClearAfterSavedHandoff(db, {
+    sessionId,
+    ops: pmHandoffOps,
+    requestClear: () => requestPmClearOnce({
+      onTerminalFailure: recordPmClearFailureProof,
+      db,
+      source: "pm_handoff_saved_stop",
+      nowMs: Date.now(),
+      staleAfterMs: PM_CLEAR_STALE_ACK_REPAIR_MS,
+      recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
+      hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
+      laterLifecycleEvent: findLaterPmLifecycleEvent(db.getConfig(PM_CLEAR_REQUESTED_AT_KEY)),
+      deferUntilStop: true,
+      isPMBusy: () => relay.isPMBusy(),
+      send: async () => ({ success: false, zeroEffect: true, error: "deferUntilStop: arm never sends" }),
+    }),
+  });
+  if (delivery) touchPmClearRequestedMarker(delivery as Parameters<typeof touchPmClearRequestedMarker>[0]);
 }
 
 /** Dev-slot session clear through the existing /send path (never PM: PM uses the fenced writer). */
@@ -753,70 +794,34 @@ async function clearSlotsThroughMopHttp(
   }
 
   if (includePmSlot) {
-    const nowMs = Date.now();
-    // Record intent only. Even an already-idle PM waits for its next native Stop.
-    const operatorGeneration = pmClearDrainGeneration;
-    const operatorSessionToken = slotSessionToken(0);
-    const delivery = await requestPmClearOnce({
-      onTerminalFailure: recordPmClearFailureProof,
-      db,
+    // A due PM clear first becomes ONE pm_save_handoff obligation; the /clear
+    // is armed at the next PM Stop after the handoff files are saved
+    // (Rajiv D0AMF0XE6TS ts 1793732417.459339). Nothing is injected here.
+    if (options.clearExistingPendingForTargets) {
+      for (const key of [PM_HANDOFF_REQUESTED_AT_KEY, PM_HANDOFF_SESSION_KEY]) db.setConfig(key, "");
+    }
+    const handoff = await requestPmHandoffClear(db, {
       source: options.source,
-      nowMs,
-      staleAfterMs: PM_CLEAR_STALE_ACK_REPAIR_MS,
-      recentSuppressMs: PM_CLEAR_RECENT_SUPPRESS_MS,
-      hasRecentClearEvent: hasRecentClearEvent(0, PM_CLEAR_RECENT_SUPPRESS_MS),
-      laterLifecycleEvent: findLaterPmLifecycleEvent(db.getConfig(PM_CLEAR_REQUESTED_AT_KEY)),
-      operatorReRequest: options.clearExistingPendingForTargets,
-      deferUntilStop: true,
-      isPMBusy: () => relay.isPMBusy(),
-      send: ({ requestedAt: fencedRequestedAt }) =>
-        sendClearViaMopSendPath(0, options.source, {
-          requestedAt: fencedRequestedAt,
-          generation: operatorGeneration,
-          sessionToken: operatorSessionToken,
-          stopFenced: false,
-        }),
+      sessionId: currentPmSessionId(),
+      nowMs: Date.now(),
+      automatic: options.source.startsWith("session_age"),
+      ops: pmHandoffOps,
     });
-    pmSoftBoundary.reconcileFailedMaintenance();
-    touchPmClearRequestedMarker(delivery.kind);
-    if (["sent", "deferred_busy", "pending"].includes(delivery.kind)) {
-      await resolveAcceptedPmSelfClear(delivery.kind, db.getConfig(PM_CLEAR_REQUESTED_AT_KEY));
+    // The legacy pm-self-clear obligation is discharged: MoP owns the clear now.
+    if (handoff.kind !== "refused_failopen") {
+      await resolveAcceptedPmSelfClear("pending", handoff.requestedAt);
     }
-
-    if (delivery.kind === "pending") {
-      results.push({ slot: 0, name: "PM", status: "skipped (PM clear already requested)" });
-      return results;
+    if (handoff.kind === "refused_failopen") {
+      results.push({ slot: 0, name: "PM", status: "skipped (PM clear already failed open for this session; no automatic re-request)" });
+    } else {
+      results.push({
+        slot: 0,
+        name: "PM",
+        status: handoff.kind === "already_awaiting"
+          ? "deferred (pm_save_handoff already open; /clear injects at the next PM Stop after the save)"
+          : "deferred (pm_save_handoff obligation opened; /clear injects at the next PM Stop after the save)",
+      });
     }
-
-    if (delivery.kind === "recent") {
-      results.push({ slot: 0, name: "PM", status: "skipped (PM clear recently confirmed)" });
-      return results;
-    }
-
-    if (delivery.kind === "deferred_busy") {
-      results.push({ slot: 0, name: "PM", status: "deferred (waiting for next PM Stop hook)" });
-      return results;
-    }
-
-    if (delivery.kind === "failed") {
-      results.push({ slot: 0, name: "PM", status: `failed: ${delivery.error}` });
-      return results;
-    }
-
-    if (delivery.kind === "uncertain") {
-      results.push({ slot: 0, name: "PM", status: `uncertain (no automatic resend): ${delivery.error}` });
-      return results;
-    }
-
-    db.logEvent(0, "clear_pending_queued", null, null, {
-      name: "PM",
-      queued_at: delivery.requestedAt,
-      reason: "PM clear sent through MoP send path; awaiting SessionStart source=clear acknowledgement",
-      via: options.source,
-      delivery: "mop_send_to_slot",
-    });
-
-    results.push({ slot: 0, name: "PM", status: "queued (PM /clear sent; awaiting clear acknowledgement)" });
   }
 
   return results;

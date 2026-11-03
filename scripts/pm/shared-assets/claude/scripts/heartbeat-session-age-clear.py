@@ -11,8 +11,12 @@ can_clear_now: false, materialized_only: true` as an observation only; dev-slot
 clearing belongs to the PM assignment boundary (`mop-assign-slot --class
 new_issue`) or a distinct explicit operator clear. The PM pane path below is
 unchanged.
-For PM, a session age strictly greater than six hours creates or refreshes one
-`pm-self-clear` obligation and leaves it open for the next safe Stop.
+For PM, a session age strictly greater than six hours asks MoP for a PM clear
+(POST /slots/0/clear, source=session_age_policy). MoP opens ONE
+`pm_save_handoff` obligation and injects /clear itself at the next PM Stop
+after the handoff is saved (Rajiv D0AMF0XE6TS ts 1793732417.459339). Repeat
+heartbeats are idempotent; MoP refuses an automatic re-request for a session
+whose clear already failed open.
 
 Session age is measured from the effective session start = the first timestamped
 event in the pane's newest non-sidechain session JSONL. A `/clear` starts a
@@ -37,8 +41,6 @@ PROJECTS = Path.home() / ".claude" / "projects"
 PM_DIR = "-Users-rajiv-Downloads-projects-heydonna-app"
 AGE_DUE_SECONDS = 3 * 60 * 60
 PM_AGE_DUE_SECONDS = 6 * 60 * 60
-PM_TARGET_ID = "pm-dhruva"
-PM_OPS = os.environ.get("PM_OPS", "/Users/rajiv/.claude/scripts/pm-ops.py")
 LATEST = Path(os.environ.get("SESSION_AGE_CLEAR_LATEST", "/tmp/session-age-clear-latest.json"))
 
 
@@ -91,47 +93,22 @@ def _pane_dir(pane: str) -> Path:
     return PROJECTS / f"{PM_DIR}-300{pane}"
 
 
-def _upsert_pm_obligation(session_id: str, start_iso: str, age_seconds: float) -> tuple[str | None, str | None]:
-    """Persist one canonical PM obligation, preserving the existing row key."""
-    if not Path(PM_OPS).is_file():
-        return None, f"pm_ops_unavailable:{PM_OPS}"
-    evidence = json.dumps(
-        {
-            "producer": "heartbeat-session-age-clear",
-            "pane": "pm",
-            "session_id": session_id,
-            "session_started_at": start_iso,
-            "age_seconds": round(age_seconds, 3),
-            "threshold_seconds": PM_AGE_DUE_SECONDS,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
+def _request_mop_handoff_clear(session_id: str) -> tuple[str | None, str | None]:
+    """Ask MoP to open the save-handoff obligation. Fails open when MoP is down."""
+    body = json.dumps({"source": "session_age_policy", "session_id": session_id}).encode()
+    request = urllib.request.Request(
+        f"{MOP_BASE}/slots/0/clear", data=body, method="POST",
+        headers={"Content-Type": "application/json"},
     )
-    command = [
-        PM_OPS,
-        "obligation-upsert",
-        "--kind", "pm-self-clear",
-        "--severity", "high",
-        "--target-type", "session",
-        "--target-id", PM_TARGET_ID,
-        "--owner", "pm",
-        "--title", "PM self-clear context at next safe Stop boundary when session >6h",
-        "--action", "At next safe Stop boundary, if PM session age >6h, self-clear context and prove a fresh boundary before resuming work",
-        "--horizon", "heartbeat",
-        "--dedupe-group", "pm-self-clear:heartbeat:pm",
-        "--evidence-json", evidence,
-        "--print-id",
-    ]
     try:
-        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return None, f"pm_ops_failed:{type(exc).__name__}"
-    if result.returncode != 0:
-        return None, f"pm_ops_failed:exit={result.returncode}"
-    obligation_id = result.stdout.strip().splitlines()[-1:] or []
-    if not obligation_id or not obligation_id[0].isdigit():
-        return None, "pm_ops_failed:missing_obligation_id"
-    return obligation_id[0], None
+        with urllib.request.urlopen(request, timeout=8) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception as exc:  # MoP unreachable: never block the PM (rule 50)
+        return None, f"mop_unreachable:{type(exc).__name__}"
+    for row in payload.get("results", []):
+        if row.get("slot") == 0:
+            return str(row.get("status", "")), None
+    return None, "mop_no_pm_result"
 
 
 def _newest_main_session(dir_path: Path) -> tuple[str | None, str | None]:
@@ -212,29 +189,26 @@ def main() -> int:
         due = age > threshold if pane == "pm" else age >= threshold
         if due:
             if pane == "pm":
-                oid, error = _upsert_pm_obligation(session_id, start_iso, age)
+                mop_status, error = _request_mop_handoff_clear(session_id)
                 if error:
                     blocked = True
                     read_errors[pane] = error
                     results[pane] = {
                         "age_due": True,
-                        "canonical_obligation": False,
-                        "kind": "pm-self-clear",
+                        "kind": "pm_save_handoff",
                         "session_id": session_id,
                         "status": "blocked",
                     }
                     continue
-                obligation_ids[pane] = oid
                 pending.append(pane)
                 results[pane] = {
                     "age_due": True,
-                    "canonical_obligation": True,
-                    "kind": "pm-self-clear",
+                    "kind": "pm_save_handoff",
                     "materialized_only": True,
-                    "obligation_id": int(oid),
+                    "mop_status": mop_status,
                     "pane": pane,
                     "session_id": session_id,
-                    "status": "pending_safe_stop",
+                    "status": "pending_save_handoff",
                 }
                 continue
             oid = _obligation_id(pane, session_id)
@@ -259,7 +233,7 @@ def main() -> int:
 
     out = {
         "due_before": list(pending),
-        "execution": "materialize_numbered_and_upsert_pm",
+        "execution": "materialize_numbered_and_request_pm_handoff",
         "mcp_children_running": _mcp_children_running(),
         "generated_at": _iso_now(),
         "inventory": inventory,
@@ -268,7 +242,7 @@ def main() -> int:
         "pending": list(pending),
         "read_errors": read_errors,
         "results": results,
-        "source": "mop_rest+runtime_jsonl+pm-ops.obligation-upsert",
+        "source": "mop_rest+runtime_jsonl+mop_pm_handoff_clear",
     }
     payload = json.dumps(out, sort_keys=True, indent=2)
     try:

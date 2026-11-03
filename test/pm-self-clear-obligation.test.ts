@@ -20,10 +20,12 @@ test("rejected requests never resolve the obligation", async () => {
     assert.equal(await resolveAcceptedPmSelfClear(delivery, null, async () => { throw new Error("must not call"); }), false);
   }
 });
-test("POST acceptance invokes resolution before returning deferred response", () => {
+test("POST acceptance opens the save-handoff obligation and resolves the legacy one before responding", () => {
+  // Rajiv D0AMF0XE6TS ts 1793732417.459339: save memory first, then MoP injects /clear at the next Stop.
   const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
-  const accept = source.indexOf("touchPmClearRequestedMarker(delivery.kind)");
+  const accept = source.indexOf("const handoff = await requestPmHandoffClear(db, {");
   const resolve = source.indexOf("await resolveAcceptedPmSelfClear", accept);
+  assert.ok(accept > 0);
   assert.ok(resolve > accept);
-  assert.ok(resolve < source.indexOf('if (delivery.kind === "deferred_busy")', accept));
+  assert.ok(resolve < source.indexOf("deferred (pm_save_handoff obligation opened", accept));
 });

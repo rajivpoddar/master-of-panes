@@ -141,7 +141,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops-sync-stop-validator",
-      "sha256": "5820f05a801d84148ee47bfdd7be15c366b73b2615b51daaa68b9b9bc8dbc768",
+      "sha256": "4dac1687e17a720f7073a7294ea1e1e03ee181024063a945fdc5040ce05c517f",
       "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
     },
     {
@@ -150,7 +150,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-self-clear-stop",
-      "sha256": "0b5d802c1ff827f18cb45bbc9c096b656fc674ab0240678dfff7e36237f00997",
+      "sha256": "f7e99d7857cce7a2f5fd72fa5948d3bccc900c671e90a3c7ca4e7892fb92ab3c",
       "source_path": "claude/hooks/pm-self-clear-stop.sh"
     },
     {
@@ -366,7 +366,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-heartbeat-session-age-clear",
-      "sha256": "f4980f2c31b8616c8e76cbe133a0e1d4ec6aa9e397edfd99102cf3502e1c15fb",
+      "sha256": "bdb85219adfa2ce05ee85eb87596134a531d38f5b8a815ebd76de2377d56f16a",
       "source_path": "claude/scripts/heartbeat-session-age-clear.py"
     },
     {

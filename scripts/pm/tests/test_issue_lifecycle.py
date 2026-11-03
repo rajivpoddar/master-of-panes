@@ -104,7 +104,10 @@ def test_failed_sync_does_not_advance_merge_cursor(tmp_path):
     m = load()
     state = tmp_path / 'state.json'
     state.write_text('{"since":"2026-10-26T00:00:00Z"}')
+    # Hermetic: never read the live PM ledger (it failed in full-suite runs with
+    # "unable to open database file" on origin/main 3352a18 as well).
     with patch.object(m, 'STATE', state), patch.object(m, 'collect', return_value=([], [], [], [], lambda n: False)), \
+         patch.object(m, 'active_suppressions', return_value=set()), \
          patch.object(m, 'sync', side_effect=RuntimeError('ledger unavailable')):
         with pytest.raises(RuntimeError):
             m.run()

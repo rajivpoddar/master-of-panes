@@ -235,7 +235,9 @@ export function pendingPMMaintenance(db: MoPDatabase, now = new Date()): Pending
 }
 
 export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRelay,
-  onClearStop?: () => Promise<unknown>): PMSoftBoundary {
+  onClearStop?: () => Promise<unknown>,
+  /** Saved-handoff check: may arm the clear latch for THIS Stop. Never blocks input. */
+  beforeClearStop?: (sessionId: string) => Promise<void>): PMSoftBoundary {
   const boundary = new PMSoftBoundary(db, () => pendingPMMaintenance(db), Date.now, () => relay.setPMBusy(true));
   relay.setPMMaintenanceGate(boundary);
   app.use("/hooks/slot/0", async (c, next) => {
@@ -250,6 +252,10 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     const currentStop = raw.hook_event_name === "Stop"
       && typeof raw.session_id === "string" && raw.session_id.length > 0
       && raw.session_id === JSON.parse(boot?.payload || "{}").session_id;
+    if (currentStop && beforeClearStop) {
+      try { await beforeClearStop(raw.session_id as string); }
+      catch (error) { console.error(`[pm-clear] handoff Stop check failed open: ${String(error)}`); }
+    }
     const clearStop = !!onClearStop && currentStop
       && db.hasPendingClear(0) && db.getConfig("pm_clear_delivery_state") === "deferred_busy";
     if (clearStop) {

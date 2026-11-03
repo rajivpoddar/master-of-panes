@@ -5,6 +5,7 @@
  * plan ready), updates slot state, and relays notifications to PM.
  */
 
+import { failOpenUnobservedPmClear } from "./pmHandoffClear.js";
 import { verifyPMCadenceDelivery } from "./pmCadence.js";
 import { isPmClearUndelivered } from "./pmClearLatch.js";
 import { execFile } from "node:child_process";
@@ -1504,6 +1505,11 @@ export class HookProcessor {
         requested_at: this.db.getConfig(PM_CLEAR_REQUESTED_AT_KEY),
         via: "hook_stop",
       });
+      return {};
+    }
+    // One bounded attempt: a written clear that SessionStart:clear never
+    // acknowledged fails open here instead of staying pending forever.
+    if (slotNum === 0 && failOpenUnobservedPmClear(this.db, { nowMs: Date.now(), sessionId: payload.session_id ?? "" })) {
       return {};
     }
     if (slotNum === 0 && this.db.hasPendingClear(0)) {

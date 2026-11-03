@@ -288,10 +288,23 @@ class HeartbeatSessionAgeClearFoldTests(unittest.TestCase):
             "git", "show", "b0c23f01750856ef974b4ba7418490697192aa1e:scripts/pm/shared-assets/claude/scripts/heartbeat-session-age-clear.py"
         ], cwd=ROOT).decode("utf-8")
         live_tree = ast.parse(prior)
+        # The PM path (main's PM branch and its producer helper) was
+        # intentionally rerouted to MoP's pm_save_handoff flow (Rajiv
+        # D0AMF0XE6TS ts 1793732417.459339). Every numbered-pane helper
+        # must still be byte-identical in code to the docstring-only fold.
+        def helpers(tree):
+            return {
+                node.name: _code_skeleton(ast.Module(body=[node], type_ignores=[]))
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name in {"_iso_now", "_parse_ts", "_mcp_children_running", "_mop_slots",
+                                  "_pane_dir", "_newest_main_session", "_obligation_id"}
+            }
+        self.assertEqual(len(helpers(live_tree)), 7)
         self.assertEqual(
-            _code_skeleton(self.tree),
-            _code_skeleton(live_tree),
-            "the fold must not change any non-docstring statement",
+            helpers(self.tree),
+            helpers(live_tree),
+            "the fold must not change any numbered-pane helper statement",
         )
 
     def test_manifest_row_matches_the_folded_bytes(self) -> None:

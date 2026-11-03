@@ -13,7 +13,7 @@ HOOK = Path(__file__).resolve().parents[1] / "scripts/pm/shared-assets/claude/ho
 
 
 class PendingClearStopTest(unittest.TestCase):
-    def run_hook(self, failed=False):
+    def run_hook(self, failed=False, idle=False):
         with tempfile.TemporaryDirectory(prefix="mop-clear-hook-") as directory:
             root = Path(directory)
             ops = root / "pm-ops.db"
@@ -27,8 +27,8 @@ class PendingClearStopTest(unittest.TestCase):
                            (json.dumps({"session_id": "pm", "session_started_at": old}),))
             with sqlite3.connect(mop) as db:
                 db.execute("CREATE TABLE config (key TEXT, value TEXT)")
-                db.execute("INSERT INTO config VALUES ('clear_pending_0', ?)", ("false" if failed else "true",))
-                db.execute("INSERT INTO config VALUES ('pm_clear_delivery_state', ?)", ("failed" if failed else "deferred_busy",))
+                db.execute("INSERT INTO config VALUES ('clear_pending_0', ?)", ("false" if failed or idle else "true",))
+                db.execute("INSERT INTO config VALUES ('pm_clear_delivery_state', ?)", ("failed" if failed else "failed_open" if idle else "deferred_busy",))
             result = subprocess.run([sys.executable, str(HOOK)], input=json.dumps({
                 "session_id": "pm", "transcript_path": str(transcript)}), text=True,
                 capture_output=True, env={**os.environ, "PM_OPS_DB": str(ops), "MOP_DB_PATH": str(mop)}, check=True)
@@ -45,6 +45,13 @@ class PendingClearStopTest(unittest.TestCase):
         self.assertNotEqual(output.get("decision"), "block")
         self.assertEqual(output["reason"], "mop_clear_delivery_failed")
         self.assertEqual(output["message"], "MoP delivery failed, re-request")
+
+    def test_due_row_with_no_pending_clear_never_blocks(self):
+        # Rajiv D0AMF0XE6TS ts 1793732417.459339: MoP owns the clear via
+        # pm_save_handoff; the 20-minute pm_self_clear_pending block is gone.
+        output = self.run_hook(idle=True)
+        self.assertNotEqual(output.get("decision"), "block")
+        self.assertEqual(output["reason"], "superseded_by_pm_save_handoff")
 
 
 if __name__ == "__main__":

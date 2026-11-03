@@ -256,6 +256,7 @@ try:
           AND (suppress_until IS NULL OR suppress_until='' OR suppress_until <= strftime('%Y-%m-%dT%H:%M:%SZ','now'))
           AND (next_review_at IS NULL OR next_review_at='' OR next_review_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         ORDER BY CASE
+                   WHEN kind = 'pm_save_handoff' THEN -1
                    WHEN pr IS NOT NULL AND kind != 'cleanup_pr' THEN 0
                    WHEN kind = 'cleanup_pr' THEN 1
                    ELSE 2
@@ -293,10 +294,12 @@ try:
         except Exception:
             evidence = {}
         if row["kind"] == "pm-self-clear":
-            actionable, pm_reason = pm_self_clear_decision(row, evidence)
-            if not actionable:
-                deferred_pm_self_clear.append(f"obligation:{row['id']}:{pm_reason}")
-                continue
+            # Superseded: MoP owns the PM clear through pm_save_handoff and
+            # injects /clear itself at the next Stop after the save (Rajiv
+            # D0AMF0XE6TS ts 1793732417.459339). A legacy row never blocks
+            # Stop, so a pending clear cannot wedge the PM (rule 50).
+            deferred_pm_self_clear.append(f"obligation:{row['id']}:superseded_by_pm_save_handoff")
+            continue
         explicitly_actionable = evidence.get("pm_stop_actionable") in (1, True)
         derived_actionable = row["kind"] in DERIVED_EXECUTABLE_KINDS
         if not explicitly_actionable and not derived_actionable:

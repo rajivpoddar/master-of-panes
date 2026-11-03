@@ -457,9 +457,9 @@ test("compiled /send route routes every PM self-clear through the fenced writer 
   assert.ok(fenced < firstGate && fenced < normalKey, "PM clear returns before any other gate or key");
   assert.match(route, /pm_clear_authority_missing/);
   assert.doesNotMatch(route, /allowPmClear && relay\.isPMBusy\(\)/);
-  for (const via of ["pm_native_stop", "options.source"]) {
-    assert.ok(source.includes(`sendClearViaMopSendPath(0, ${via.includes(".") ? via : `"${via}"`}, {`), via);
-  }
+  assert.ok(source.includes('sendClearViaMopSendPath(0, "pm_native_stop", {'), "pm_native_stop");
+  // Operator/session-age requests only open pm_save_handoff; they never write (Rajiv ts 1793732417.459339).
+  assert.ok(!source.includes("sendClearViaMopSendPath(0, options.source, {"), "operator path never sends");
 });
 
 test("fix 1: authority is revalidated after the buffer load, immediately before the paste", async () => {

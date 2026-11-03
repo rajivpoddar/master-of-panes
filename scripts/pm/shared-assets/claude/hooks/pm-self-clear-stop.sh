@@ -159,20 +159,16 @@ def main() -> int:
             "message": "MoP delivery failed, re-request",
             "obligation_id": int(row["id"])}))
         return 0
-    action = row["required_action"] or (
-        "At next safe Stop boundary, self-clear context and prove a fresh boundary before resuming work"
-    )
-    message = (
-        f"[PM_OPS_ACTION_REQUIRED] obligation:{row['id']} "
-        f"{row['title'] or 'PM self-clear context'}. {action}. "
-        "Do not auto-clear from age alone."
-    )
+    # Never block: MoP now owns the PM clear (pm_save_handoff obligation, then
+    # /clear injected at the next Stop after the save; Rajiv D0AMF0XE6TS ts
+    # 1793732417.459339). A legacy pm-self-clear row is reported, never a
+    # Stop block, so a pending clear cannot wedge the PM (rule 50).
     print(json.dumps({
-        "decision": "block",
         "kind": "pm-self-clear",
-        "message": message,
+        "status": "deferred",
+        "reason": "superseded_by_pm_save_handoff",
         "obligation_id": int(row["id"]),
-        "reason": decision_reason,
+        "decision_reason": decision_reason,
     }, sort_keys=True))
     return 0
 
