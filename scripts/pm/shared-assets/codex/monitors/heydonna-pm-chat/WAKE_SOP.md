@@ -67,37 +67,43 @@ finish it here. Use an existing affinity owner and preserve single-flight.
 Creating, forking, or rotating a task still requires the explicit authority in
 Owner routing and transports below.
 
-## Return split (Rajiv 2026-09-16, Ev0C31576QTA; Returns SOP governs detail)
+## Direct delegation and source replies (Rajiv 2026-11-04)
 
-CTO Returns (`01a0a905-0b30-7ca1-8fbd-14ae8f87282f`) is `ACTIVE` for NEW
-briefs: new Decisions briefs name Returns as `return_task_id` with source
-thread, tuple, executor, scope, holds, dedups, and boundary, and require the
-worker to echo the compact brief and deliver COMPLETE/BLOCKED/
-STOPPED-INCOMPLETE even when ACK chatter is suppressed. Decisions keeps
-intake, scope, priorities, architecture, and reserved decisions; Returns
-consumes candidates/verdicts/terminals, reconciles duplicates, continues
-routine authorized work through the same owners, and closes chains with one
-material source-thread completion (five-minute history-backed delivery
-check, one same-owner reminder for a proven missing return, quiet
-otherwise). Final-merge exception (Rajiv 2026-10-15): the actual
-`heydonna-cto-pr-merge` executor posts its outcome directly to the original
-merge-ask Slack thread with guarded Abhijit identity/readback, then sends Returns
-the internal terminal with that receipt or typed delivery failure. Source
-delivery does not wait for Returns; Returns must not duplicate a delivered
-terminal or retry an uncertain post. This overrides older sole-poster briefs
-for in-flight final merges, not completed-outcome replay or other chains.
-Under Rajiv's 2026-09-27 PR-terminal direction, PM owns open-PR
-CI/E2E terminal reads, causal classification, CI fixes through a PM background
-agent or slot, E2E reproduction/rework through a slot, proven-flake evidence,
-and hourly continuity. PM requests CTO Decisions only at an exact-head pair
-admission or final head-pinned merge boundary; Decisions routes those requests
-through the scope-appropriate installed skills: admission stays with PR Merges;
-Returns coordinates final-merge distribution under the roster rule below,
-not merge execution. Merge executors do not own PR-red investigation or fixes;
-Rescues is not a PR-red owner. Direct
-CTO-DM-owned chains stay with CTO DM `01a0911a-a718-7743-b37e-e785f24f3708`;
-later moves need an explicit per-assignment handoff — never queue
-copying/replay/deletion/broadcast.
+Rajiv's direct instruction in CTO Decisions: "drop the routing through returns.
+direct all tasks to respond back on slack directly instead. update SOP".
+This supersedes the former Returns split, distribution and terminal-consumer
+requirements throughout this SOP and older assignment templates.
+
+Decisions sends each brief DIRECTLY to the actual execution/authority owner.
+CTO Returns (`01a0a905-0b30-7ca1-8fbd-14ae8f87282f`) is not a routing,
+review, distribution, continuation or source-publication intermediary.
+Do not name Returns as `return_task_id` or send it new work or terminal copies.
+Each owner carries the original source channel/event/thread, exact tuple,
+assignment dedup, scope and boundary, and posts its own material outcome
+(COMPLETE, PARTIAL, BLOCKED or STOPPED-INCOMPLETE) directly in that Slack
+thread using guarded Abhijit CTO identity and bounded readback. Preserve DM
+threading and existing task-specific identity requirements. Do not invent a
+Slack destination for a non-Slack request; respond in its originating chat
+unless a destination was explicitly supplied.
+
+Source replies include the result, practical limits and next owner/action when
+needed. Private invoice or contact data stays private; post only the authorized
+path or aggregate. A delivered result gets no duplicate completion post.
+A failed/uncertain post retains its actual receipt and no-retry state; report
+that delivery blocker in the originating chat without rekey or fallback.
+Queue acceptance remains delivery custody, not execution or source publication.
+
+Existing executors keep accepted work and effect keys. They adopt direct Slack
+closure at the next stable boundary; completed or UNKNOWN effects never replay.
+Previously accepted work that has not reached an executor is handed directly
+to its intended owner once with its original key and known custody, without
+copying whole queues or interrupting active work. No Returns approval or ACK
+is a prerequisite. Decisions handles genuine new decisions when raised in the
+source thread; routine ACK chatter needs no internal return loop.
+
+PM retains PR-red CI/E2E diagnosis, fixes, rework and rollout. Admission remains
+PR Merges; Decisions selects final-merge executors from the existing roster
+below. CTO DMs retains its policy/DM affinity and publishes its own rulings.
 
 ## Owner routing and transports
 
@@ -118,14 +124,15 @@ execution. Task creation/rotation only on explicit request.
   final-merge roster snapshot below are the only exceptions to the Decisions
   native-tool ban (otherwise no read/wait/list/create/fork/handoff or
   IPC-CLI substitution).
-- Independent delegations and terminal returns: installed
+- Independent delegations: installed
   `codex-stdio-send-message` with exact destination, complete message, and
   stable event-specific dedup. Queue acceptance (`queuedSubmissionId`) is
   single-flight ownership, not execution; `uncertain` without a receipt is
   terminal transport uncertainty (no retry/re-key/fallback);
   `unavailable` may use blocked-owner replacement once. Never poll the
-  recipient. Every delegation prompt names its explicit `return_task_id`
-  (Returns for new chains) and its review/terminal boundary.
+  recipient. Every delegation names its actual executor, original Slack source
+  channel/thread and direct source-reply boundary; no Returns hop or mandatory
+  internal terminal return.
 - Never poll GitHub in any task: one bounded snapshot at wake consumption
   or terminal action only; all progress arrives by event/receipt. No `gh run watch`, no polling heartbeat/automation. An external wait ends the turn;
   resume on the event, not a timer. All admission and final-merge briefs carry the
@@ -158,9 +165,8 @@ HeyDonna tasks in this pool, respecting each request's availability and affinity
 
 Standby and Backup are also the Slack-relay overflow pool (cto-slack-relay SOP, Rajiv 2026-10-22 ts 1792689875.791679); the relay only uses them when idle.
 
-Decisions owns intake, verdict and the exact brief; Returns coordinates
-distribution/reconciliation and consumes terminals, never another merge
-executor. Route independent eligible exact-head requests to an available suitable
+Decisions owns intake, verdict, the exact brief and direct assignment to the
+selected executor. That executor posts its own Slack outcome. Route independent eligible exact-head requests to an available suitable
 executor instead of stacking behind a busy sole queue; reuse an eligible free
 same owner. Preserve active/queued unrelated work; no personal/product task is
 commandeered and no task is permanently assumed idle. A Hotfixes-named task doing
@@ -175,7 +181,7 @@ Before each mutation, refresh main/non-overlap and pin the authorized full head.
 Accepted tuples stay with their owner unless an exact handoff retires the old
 UNISSUED authority. Already-issued/uncertain effects are reconciliation-only,
 never a second command; already-terminal retirement needs no new ceremony.
-Preserve original dedups, source threads and Returns terminal; no blanket queue
+Preserve original dedups, source threads and direct owner outcome; no blanket queue
 clearing/copy/replay. Blocked PRs return to PM correction, not verdict-shopping.
 
 This is capacity routing, not a waiver of genuine exact-head workflows/classifier,
@@ -232,7 +238,7 @@ the result; it never runs these skills.
   hold over a recoverable claimed-message gap was wrong. When a staged
   delivery fix is ready and slot work is blocked, a gap recoverable after a
   short service restart is not by itself a release hold. Take one bounded
-  pre-restart slot/message snapshot; the existing MoP/Returns owner activates
+  pre-restart slot/message snapshot; the existing MoP execution owner activates
   promptly under ordinary rollback control, verifies health and canary, then
   reconciles exact slot epoch/assignment and Slack message identity. Replay
   only messages proved missing, once, and report uncertainty honestly. Do not
@@ -278,8 +284,7 @@ the result; it never runs these skills.
   older PR-red ownership rows in `release-conveyor-contract.md` pending its
   affinity-owned update. PM owns PR CI/E2E terminal processing and hourly
   continuity; only exact-head admission/merge requests route through CTO
-  Decisions: admission to PR Merges, final merges distributed with Returns
-  coordination. PM uses background agents or slots for fixes,
+  Decisions: admission to PR Merges, final merges assigned directly by Decisions to a suitable executor. PM uses background agents or slots for fixes,
   reproduction and proof; the scope-appropriate admission/merge skills stay off-slot. PM
   owns Abi intake end-to-end plus every numbered-slot
   release/clear/assign/refill/delivery (CTO supplies packets, never mutates
@@ -298,7 +303,7 @@ the result; it never runs these skills.
   rework, and status terminals remain PM continuity (hourly audit repairs one
   missed eligible gate wake once, then `TERMINAL_CONTINUITY_BREACH`).
 - Release state machine: PM retains PR-red terminal ownership through
-  capture/CI/E2E diagnosis and correction; Decisions/Returns route only requested
+  capture/CI/E2E diagnosis and correction; Decisions routes only requested
   exact-head admission to PR Merges or final head-pinned merge to the assigned
   distributed executor, or a concrete reserved decision outside this policy.
   Refresh later main only on materially relevant diff; stuck queued runs
@@ -318,36 +323,30 @@ ts 1793200758.332809, supersedes the single-owner wording): `social media`
 `/Users/rajiv/Documents/Codex/2026-10-09/heydonna-social-media/outputs`).
 The relay sends growth-channel (`C0C7U35LBKR`) events WITHOUT a CTO mention
 directly to this pool; Decisions sees growth only when the CTO is @-mentioned.
-When Decisions delegates NEW HeyDonna/Donna social-account/page, profile,
-social-content and media-asset, publication, authorized engagement/follow,
-reporting or other browser briefs, pick the pool IDLE-FIRST (probe with
+Growth work (social accounts/content, marketing, outreach and site/GSC growth
+activity) routes to the existing social pool IDLE-FIRST using
 `python3 /Users/rajiv/.claude/scripts/cto-relay-snapshot.py --probe-thread <id> --route-sop /Users/rajiv/.codex/monitors/cto-slack-relay/WAKE_SOP.md`
-in the order above; first `idle` wins; none idle → queue to `social media`)
-through the existing independent-delegation transport. NEVER delegate
-social/browser work to CP Repairs or any role task (PR Merges, Hotfixes,
-PR Reviews, Rescues, Rescues Backup/Standby, Returns, DMs), and never create
-another social/browser owner.
-**[HIGH] Hand off non-reserved work to an idle social task (Rajiv C0ALZJHGE49 thread
-1793335380.874289, ts 1793341286.829809: "cto decisions should also route to the idle
-social media tasks"; ts 1793341667.502269: "this shoudl be in the wake SOP of decisions
-task").** At the start of EVERY wake, classify the event:
-- RESERVED → Decisions handles it itself: merge/admin-merge asks, admission/ci-head,
-  rollback/revert, deploy/prod data/DB, billing/pricing/refund, security/credentials/
-  secrets, review verdicts (REVISE/AUTHORIZED/APPROVE/BLOCK, re-review, post-deploy
-  review), escalation-ladder rows (`ladder:pel-`), and product/policy decisions.
-- NON-RESERVED → anything else, notably browser-owner work (LinkedIn/profile lookups,
-  approved outreach sends, social posts, research, illustration or other media
-  requests), status checks and lookups that need no CTO authority.
-For NON-RESERVED events, delegate the whole request on THIS wake to the social pool
-IDLE-FIRST using the probe above (`social media` → `(2)` → `(3)`; first `idle` wins).
-Pass the full source envelope and the Slack channel:ts, and name the social task as the
-executor that posts the result in the source thread. Do not do the work in Decisions,
-and do not hold it in Decisions' own queue. If NO pool task is idle, queue it to
-`social media` (never keep it in Decisions). When unsure whether something is reserved,
-treat it as RESERVED. One owner per event; never double-deliver.
+in the order above; first `idle` wins, otherwise queue to `social media`.
+Pass the full source envelope and require the selected owner to reply directly
+in the source Slack thread. Social Media is for growth activities only.
 
-Decisions retains scope and reserved decisions; new briefs name CTO Returns
-as their terminal consumer. Rajiv DM decisions remain with CTO DM
+## Non-growth browser owner (Rajiv 2026-11-04)
+
+All other browser work routes DIRECTLY to `browser owner`
+`01a1a545-24db-7920-be39-bd1637a5e8f6` (local). This includes vendor invoices,
+Resend audience/contact-count inspection and authorized product/admin visual
+verification. Do not route it through Social Media or CTO Returns. Reserved
+policy/billing/security decisions retain their authority owner; browser owner
+performs only the explicitly scoped browser operation. The owner checks its
+own actual native connection and account state; a historical failure in a
+different chat alone does not establish this owner's present capability.
+Preserve private data, exact scope, action custody and no-blind-retry rules.
+Previously accepted or uncertain actions retain their records; owner correction
+never authorizes replay. Do not create another browser task. Deferred browser
+checks stay deferred until their actual existing prerequisites arrive.
+
+Decisions retains scope and reserved decisions; each executor replies directly
+in the original Slack thread. Rajiv DM decisions remain with CTO DM
 `01a0911a-a718-7743-b37e-e785f24f3708`; unrelated access/credential/media
 chains remain unchanged. Already accepted tuples retain their original owner,
 consumer and receipts unless explicitly handed off per assignment; never copy
@@ -404,7 +403,7 @@ For browser work, load the actually enabled native in-app browser API
 documentation, verify the company actor, preserve unrelated tabs and active
 work, and consume each external action once with bounded readback. No
 side-channel driver, hidden authenticated API, uncertain retry or duplicate
-owner. Existing guarded Abhijit Slack identity, source threading, Returns
+owner. Existing guarded Abhijit Slack identity, source threading, direct owner
 closure, no-poll and reserved-decision rules remain in force. Actual posts or
 file captions that satisfy a source effect receive no duplicate completion
 post. The obsolete handle alternatives/TikTok/cadence in
@@ -426,7 +425,7 @@ PR Merges (`01a0324b-68e0-7491-988f-e7e1549f16f7`): dedicated admission,
 including only integration required by its admission skill; also one of the
 seven final-merge executors above, never PR-red investigation or fixes. All
 seven retain their normal affinities outside an explicitly assigned merge-only
-request; Returns coordinates and consumes, never merges.
+request; Decisions assigns directly and the executor posts its own outcome.
 Superseded PM Operator task `01a03c74-fc97-7a62-bb47-001ac7fb0710` receives nothing. Accepted owners
 keep their tuples; rework/approval returns to that same owner; PM has no
 review/approval/marker or direct-admission role; proven-flake admission is
@@ -484,7 +483,7 @@ Envelope (required): `sop_path`, `fingerprint`, `class`, `action_kind`,
   once and end the wake; `RAJIV_DECISION` → verified packet with options +
   recommendation to Rajiv DM `D0BPG55FG72` (`<@UEQTTB97A>`, source
   thread_ts); `PM_CORRECTION` → one exact correction to PM in
-  `#heydonna-dev` only. `MERGE_READY` → exact brief for Returns-coordinated
+  `#heydonna-dev` only. `MERGE_READY` → exact brief for direct Decisions
   distribution to one suitable available merge executor (that assigned owner
   runs the applicable skill + pre-effect checks); `MERGE_READY_INVALID` →
   post only the correction. At most one concise `#heydonna-dev` post when
@@ -550,7 +549,7 @@ Envelope (required): `sop_path`, `fingerprint`, `class`, `action_kind`,
   E2E_FAILURE_REPORT_PENDING / CI_TEST_FAILURE_RECOVERY_COMPLETE /
   E2E_FAILURE_REPORT_COMPLETE / CI_E2E_RUNNER_STUCK → PM-owned PR terminal
   loop above; only explicit exact-head admission or merge requests route to
-  CTO Decisions: admission to PR Merges; final merge via Returns-coordinated
+  CTO Decisions: admission to PR Merges; final merge via direct Decisions
   assignment to one available suitable executor;
   PM_REPLY → quiet ACKs, delegate material; TRANSPORT_FAILURE → verify
   alternate delivery; IGNORE → ledger suppression only. Rescue binds
