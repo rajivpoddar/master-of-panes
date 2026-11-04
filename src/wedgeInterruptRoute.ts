@@ -97,6 +97,38 @@ export function snapshotShowsIdlePromptWithQueuedInput(snapshot: string | null):
   return /press\s+up\s+to\s+edit\s+queued\s+messages/i.test(snapshot);
 }
 
+/**
+ * An Escape-ended turn fires no Stop, so the row stays occupied/active while
+ * the pane sits idle at an empty prompt (2026-11-04: respawn refused "busy",
+ * interrupt-turn has no queued-input evidence there). The row's turn is
+ * settled by abandon-turn; a dev_only exit episode also /exits such a pane.
+ */
+export function idlePromptStaleTurnRemediation(slotNum: number, turnId: unknown): string {
+  return `If slot ${slotNum}'s pane is idle at an empty prompt (turn ended with Escape, so no Stop hook fired), `
+    + `its row still holds turn ${typeof turnId === "string" && turnId ? turnId : "<active_turn_id>"}. Settle it with `
+    + `POST /slots/${slotNum}/abandon-turn {"turn_id":"<active_turn_id>","reason":"...","actor":"pm"} `
+    + "(needs 5 min with no meaningful work), then respawn; or arm POST /exit-pending "
+    + '{"enabled":true,"dev_only":true}, which sends /exit to a dev pane idle at an empty prompt.';
+}
+
+/**
+ * Exact request contract. 2026-11-04: a shell-quoted body brace-expanded into
+ * four non-object posts ("slot":1, "expected_assignment_epoch":1732, ...); the
+ * route parsed {} and reported "identity moved". Missing/malformed pins now say so.
+ */
+export const WEDGE_INTERRUPT_BODY_CONTRACT =
+  'JSON object body {"expected_assignment_epoch": <integer>, "expected_active_turn_id": "<string>"} with '
+  + "content-type application/json, copied from GET /slots/N assignment_epoch and active_turn_id. Build the "
+  + "body with a JSON encoder (e.g. python3 json.dumps or jq -n), not shell-interpolated braces.";
+
+/** Why identity pins failed: absent/malformed body vs a genuine mismatch. */
+export function wedgeIdentityDetail(body: unknown): "pins_missing_or_malformed" | "pins_mismatch" {
+  const b = (body && typeof body === "object" && !Array.isArray(body) ? body : {}) as WedgeInterruptPins;
+  if (!Number.isInteger(b.expected_assignment_epoch) || typeof b.expected_active_turn_id !== "string"
+      || b.expected_active_turn_id.length === 0) return "pins_missing_or_malformed";
+  return "pins_mismatch";
+}
+
 export interface WedgeInterruptPins {
   expected_assignment_epoch?: unknown;
   expected_active_turn_id?: unknown;
@@ -241,6 +273,17 @@ export function registerWedgeInterruptRoute(app: Hono, deps: WedgeInterruptDeps)
       return c.json({ success: false, error: "Invalid slot number" }, 400);
     }
     const body = (await c.req.json().catch(() => ({}))) as WedgeInterruptPins;
+    const refusal = (reason: string) => {
+      if (reason !== "stale_identity") return { success: false, error: refusalText(slotNum, reason), reason };
+      const row = deps.db.getSlot(slotNum) as unknown as { assignment_epoch?: unknown; active_turn_id?: unknown } | undefined;
+      const detail = wedgeIdentityDetail(body);
+      const error = detail === "pins_missing_or_malformed"
+        ? `Slot ${slotNum} interrupt refused: identity pins missing or malformed. Required: ${WEDGE_INTERRUPT_BODY_CONTRACT}`
+        : `Slot ${slotNum} identity moved: current assignment_epoch=${String(row?.assignment_epoch)} `
+          + `active_turn_id=${String(row?.active_turn_id ?? null)}; re-read GET /slots/${slotNum} and retry. `
+          + idlePromptStaleTurnRemediation(slotNum, row?.active_turn_id);
+      return { success: false, error, reason, identity_detail: detail };
+    };
 
     // Sync prechecks over a fresh server-owned row before reserving. The pane
     // snapshot is awaited evidence, so run the pure authorizer with a null
@@ -257,7 +300,7 @@ export function registerWedgeInterruptRoute(app: Hono, deps: WedgeInterruptDeps)
       syncOnly.reason !== "pane_evidence_unavailable" &&
       syncOnly.reason !== "checkout_movement_unverifiable"
     ) {
-      return c.json({ success: false, error: refusalText(slotNum, syncOnly.reason), reason: syncOnly.reason }, 409);
+      return c.json(refusal(syncOnly.reason), 409);
     }
     if (!acquireWedgeInterrupt(slotNum)) {
       return c.json(
@@ -298,7 +341,7 @@ export function registerWedgeInterruptRoute(app: Hono, deps: WedgeInterruptDeps)
         checkout,
       );
       if (!fresh.ok) {
-        return c.json({ success: false, error: refusalText(slotNum, fresh.reason), reason: fresh.reason }, 409);
+        return c.json(refusal(fresh.reason), 409);
       }
       const delivered = await deps.sendInterruptKey(slotNum);
       if (!delivered) {

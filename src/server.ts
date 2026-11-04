@@ -94,6 +94,7 @@ import { Family2ReleaseEffectAdapter } from "./family2ReleaseEffect.js";
 import {
   registerWedgeInterruptRoute,
   WEDGED_BUSY_REMEDIATION,
+  idlePromptStaleTurnRemediation,
   WEDGE_INTERRUPT_KEY,
 } from "./wedgeInterruptRoute.js";
 import type { HookPayload, MoPConfig } from "./types.js";
@@ -1935,9 +1936,14 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   };
   if (slotState && slotState.occupied && !slotState.idle) {
     return c.json({
-      error: `Slot ${slotNum} is busy (not idle). Wait for idle before respawning.`,
+      error: `Slot ${slotNum} is busy (not idle): its row holds active turn ${slotState.active_turn_id ?? "<none>"} `
+        + `(state ${slotState.active_turn_state}). Wait for idle before respawning. `
+        + idlePromptStaleTurnRemediation(slotNum, slotState.active_turn_id),
       reason: "slot_busy_respawn_refused",
+      active_turn_id: slotState.active_turn_id ?? null,
+      active_turn_state: slotState.active_turn_state,
       remediation: WEDGED_BUSY_REMEDIATION,
+      stale_turn_remediation: idlePromptStaleTurnRemediation(slotNum, slotState.active_turn_id),
     }, 409);
   }
 

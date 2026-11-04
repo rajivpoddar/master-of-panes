@@ -74,7 +74,15 @@ for (const prompt of [undefined, "Read /some/path. It's PM's saved prompt.\nResu
       assert.equal(status.continuation_delivery, "delivered"); assert.equal(status.stop_only, true);
       assert.equal(status.cycled[0], true);
       for (let i = 1; i <= 8; i++) assert.equal(status.cycled[i], false);
-      await health.checkExitPending(); // sequence devs do not use already-idle scan
+      // Successor devs exit at Stop, or at an observed idle EMPTY prompt
+      // (f0a1b666); working panes are never sent /exit and PM is never scanned.
+      const scanned: number[] = [];
+      health.getPaneCommand = async () => "claude";
+      health.relay.observeSlotPane = async (slot: number) => { scanned.push(slot); return { paneId: `%${slot}`, text: "" }; };
+      health.relay.getSlotActivityState = async () => "busy";
+      await health.checkExitPending();
+      assert.deepEqual(messages, [prompt ?? "continue"], "no /exit to working devs");
+      assert.equal(scanned.includes(0), false);
     } finally { db.close(); }
   });
 }

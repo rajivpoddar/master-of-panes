@@ -26,6 +26,7 @@ import { DEV_SLOT_NUMBERS, RUNTIME_SLOT_NUMBERS, SLOT_RUNTIME_IDENTITIES } from 
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { pinFrom, pinDrift } from "./interruptBeforeClear.js";
 import { latestSessionStartEventId } from "./sessionStartClearWait.js";
+import { composerText } from "./composer.js";
 
 // ─── Restart Commands ──────────────────────────────────────
 // These are shell aliases defined in ~/.zshrc. Since tmux panes
@@ -639,13 +640,17 @@ export class ProcessHealthChecker {
     if (!this.db.getExitPending()) return;
 
     const status = this.db.getExitStatus();
-    // PM-first episodes and their dev successors fire at Stop only, never on
-    // the already-idle health scan (and never from tracked-tool accounting).
-    if (status.pm_only || status.stop_only) return;
+    // PM-first episodes fire at Stop only, never on the already-idle health
+    // scan (and never from tracked-tool accounting).
+    if (status.pm_only) return;
+    // Dev successors of a PM-first episode (stop_only) also exit a dev slot whose
+    // pane is idle at an EMPTY prompt: a turn ended with Escape fires no Stop,
+    // so episode f0a1b666 (2026-11-04) sat pending while slots were idle.
+    const stopOnly = status.stop_only;
 
     // Dev-only episodes leave PM replacement exclusively to /slots/0/respawn.
     for (const slot of RUNTIME_SLOT_NUMBERS) {
-      if (slot === 0 && status.dev_only) continue;
+      if (slot === 0 && (status.dev_only || stopOnly)) continue;
       // Already cycled — skip
       if (status.cycled[slot]) continue;
 
@@ -670,11 +675,17 @@ export class ProcessHealthChecker {
       const session = () => String(latestSessionStartEventId(this.db, slot));
       const sessionId = session();
       const row = slot > 0 ? this.db.getSlot(slot) : null;
-      if (slot > 0 && (!row || row.active_turn_state !== "inactive")) continue;
+      // A row still marked active (Escape-ended turn, no Stop) qualifies only
+      // when the pane is idle (checked below) with an empty composer; such a
+      // send never presses Escape/C-u, so a working turn is never interrupted.
+      const emptyPrompt = composerText(observed.text) === "";
+      const idlePromptOnly = slot > 0 && !!row && row.active_turn_state !== "inactive";
+      if (slot > 0 && (!row || ((idlePromptOnly || stopOnly) && !emptyPrompt))) continue;
       const pin = row ? pinFrom({ paneId: observed.paneId, checkout: SLOT_RUNTIME_IDENTITIES[slot].checkoutPath }, { ...row, session_id: sessionId }) : null;
       const fence = (): string | null => {
         const freshStatus = this.db.getExitStatus();
-        if (!this.db.getExitPending() || freshStatus.pm_only || freshStatus.stop_only || freshStatus.cycled[slot] || (slot === 0 && freshStatus.dev_only)) return "exit_pending_consumed";
+        if (!this.db.getExitPending() || freshStatus.pm_only || freshStatus.stop_only !== stopOnly || freshStatus.cycled[slot]
+            || (slot === 0 && (freshStatus.dev_only || freshStatus.stop_only))) return "exit_pending_consumed";
         if (session() !== sessionId) return "session_changed";
         if (slot === 0) return null;
         const fresh = this.db.getSlot(slot);
@@ -693,6 +704,7 @@ export class ProcessHealthChecker {
           return fence();
         },
         finalCheck: fence,
+        ...(idlePromptOnly || stopOnly ? { skipSlashClear: true } : {}),
       });
       if (delivered.outcome === "refused_pre_effect") continue;
       // A possible paste/submit consumes this existing episode too; never retry
@@ -780,7 +792,20 @@ export class ProcessHealthChecker {
     if (timer.unref) timer.unref();
   }
 
-  /** Recover only an unattempted episode whose exit is followed by a PM boot. */
+  /**
+   * Recover only an unattempted episode whose exit is followed by a PM boot.
+   *
+   * CTO correction (C0ALZJHGE49 thread 1793754459.969419, ts 1793761597.648009):
+   * an `uncertain` /exit receipt stays uncertain forever and a boot/session id
+   * is never delivery proof (the real --continue boot reuses the same UUID).
+   * The continuation settles independently of exit-submit certainty only when
+   * the watchdog itself observed the PM process die and restarted it AFTER the
+   * attempt (process_dead -> process_restarted, both newer than the receipt),
+   * the latest boot follows that death, and the pane is still owned. The send
+   * goes through the guarded continuation writer behind the durable
+   * waiting -> attempted claim; only its delivered receipt arms dev_only and
+   * releases custody. Anything less stays typed uncertain.
+   */
   private async reconcilePMRestartContinuation(): Promise<void> {
     const status = this.db.getExitStatus();
     if (!status.pending || !status.pm_only || !status.cycled[0]
@@ -792,17 +817,46 @@ export class ProcessHealthChecker {
     let receipt: Record<string, unknown>;
     try { payload = JSON.parse(boot.payload); receipt = JSON.parse(exit.payload); }
     catch { return; }
-    if (receipt.episode !== status.episode || receipt.delivery !== "delivered"
+    if (receipt.episode !== status.episode
         || !["startup", "resume"].includes(String(payload.source))
         || typeof payload.session_id !== "string" || !payload.session_id.trim()) return;
+    let restart: { dead: number; restarted: number } | null = null;
+    if (receipt.delivery !== "delivered") {
+      if (receipt.delivery !== "uncertain") return;
+      const dead = this.db.getEvents(0, 1, "process_dead")[0];
+      const restarted = this.db.getEvents(0, 1, "process_restarted")[0];
+      if (!dead || !restarted || dead.id <= exit.id || restarted.id <= dead.id || boot.id <= dead.id) {
+        this.noteUncertainContinuation(status.episode, "no_watchdog_restart_after_attempt", exit.id, boot.id);
+        return;
+      }
+      restart = { dead: dead.id, restarted: restarted.id };
+    }
     const identity = await verifyPaneIdentity(0);
-    if (!identity.ok || payload.cwd !== identity.snapshot.currentPath) return;
+    if (!identity.ok || payload.cwd !== identity.snapshot.currentPath) {
+      if (restart) this.noteUncertainContinuation(status.episode, "pane_ownership_unverified", exit.id, boot.id);
+      return;
+    }
     if (latestSessionStartEventId(this.db, 0) !== boot.id
         || this.db.getExitStatus().episode !== status.episode) return;
-    await this.deliverPMRestartContinuation(identity.snapshot.paneId, boot.id);
+    await this.deliverPMRestartContinuation(identity.snapshot.paneId, boot.id, restart ? {
+      exit_event_id: exit.id, exit_delivery: "uncertain",
+      process_dead_event_id: restart.dead, process_restarted_event_id: restart.restarted, boot_event_id: boot.id,
+    } : undefined);
   }
 
-  private async deliverPMRestartContinuation(paneId: string, expectedBoot?: number): Promise<void> {
+  private readonly uncertainContinuationNoted = new Set<string>();
+
+  /** Typed, once per episode+reason: the continuation stays waiting; the exit receipt stays uncertain. */
+  private noteUncertainContinuation(episode: string | null, reason: string, exitId: number, bootId: number): void {
+    const key = `${episode}:${reason}`;
+    if (this.uncertainContinuationNoted.has(key)) return;
+    this.uncertainContinuationNoted.add(key);
+    this.db.logEvent(0, "pm_restart_continuation_uncertain", null, null, {
+      episode, reason, exit_event_id: exitId, boot_event_id: bootId,
+    });
+  }
+
+  private async deliverPMRestartContinuation(paneId: string, expectedBoot?: number, claim?: Record<string, unknown>): Promise<void> {
     const status = this.db.getExitStatus();
     if (!status.pending || !status.pm_only || !status.cycled[0]
         || status.continuation_delivery !== "waiting") return;
@@ -810,6 +864,8 @@ export class ProcessHealthChecker {
     const boot = latestSessionStartEventId(this.db, 0);
     if (expectedBoot !== undefined && boot !== expectedBoot) return;
     this.db.setConfig("exit_pending_continuation_delivery", "attempted");
+    // Durable attempt-before-send claim bound to the restart evidence (uncertain-exit path).
+    if (claim) this.db.logEvent(0, "pm_restart_continuation_claim", null, null, { episode: status.episode, ...claim });
     const fence = () => {
       const current = this.db.getExitStatus();
       return !current.pending || !current.pm_only || current.episode !== status.episode || current.continuation_prompt !== status.continuation_prompt
