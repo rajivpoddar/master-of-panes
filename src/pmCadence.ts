@@ -19,6 +19,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { MoPDatabase } from "./db.js";
+import {
+  HOURLY_REPORT_ESCALATE_AFTER_MS,
+  readHourlyReportObligation,
+  upsertHourlyReportObligation,
+  type ObligationState,
+} from "./hourlyReportObligation.js";
 import type { TmuxRelay } from "./relay.js";
 
 export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat" | "growth-daily" | "lifecycle-email" | "daily-pm-restart" | "rtb-split-update";
@@ -204,9 +210,32 @@ function cadenceEventType(taskName: PMCadenceTaskName, dueKey: string): string {
   return `cadence-${taskName}-${dueKey}`;
 }
 
+export type HourlyReportDeps = {
+  upsert: (bucket: string, injectedAt: string, escalated: boolean) => Promise<boolean>;
+  readState: (bucket: string) => ObligationState;
+};
+
+/** Production wiring (server.ts passes this). Writes the live pm-ops ledger. */
+export const PM_OPS_HOURLY_REPORT_DEPS: HourlyReportDeps = {
+  upsert: (bucket, injectedAt, escalated) => upsertHourlyReportObligation(bucket, injectedAt, escalated),
+  readState: (bucket) => readHourlyReportObligation(bucket),
+};
+
+// Default is inert so unit tests constructing a scheduler never touch the live ledger.
+const INERT_HOURLY_REPORT_DEPS: HourlyReportDeps = {
+  upsert: async () => false,
+  readState: () => "unknown",
+};
+
+// MoP-side record of the hourly bucket's obligation: {due_key, injected_at, escalated}.
+const CFG_HOURLY_REPORT_OBLIGATION = "pm_cadence_hourly_report_obligation";
+
+type HourlyReportRecord = { due_key: string; injected_at: string; escalated: boolean };
+
 export class PMCadenceScheduler {
   private db: MoPDatabase;
   private relay: TmuxRelay;
+  private hourlyReport: HourlyReportDeps;
   private timer: NodeJS.Timeout | null = null;
   private bootCatchupTimer: NodeJS.Timeout | null = null;
   private running: boolean = false;
@@ -220,9 +249,10 @@ export class PMCadenceScheduler {
     10
   );
 
-  constructor(db: MoPDatabase, relay: TmuxRelay) {
+  constructor(db: MoPDatabase, relay: TmuxRelay, hourlyReport: HourlyReportDeps = INERT_HOURLY_REPORT_DEPS) {
     this.db = db;
     this.relay = relay;
+    this.hourlyReport = hourlyReport;
   }
 
   start(): void {
@@ -272,6 +302,7 @@ export class PMCadenceScheduler {
       if (lifecycle) results.push(lifecycle);
       const restart = await this.runIfDue("daily-pm-restart", reason);
       if (restart) results.push(restart);
+      if (reason === "scheduled") await this.escalateHourlyReportIfMissed();
       return results;
     } finally {
       this.running = false;
@@ -431,6 +462,7 @@ export class PMCadenceScheduler {
     this.db.setConfig(configKey(task, "last_run_ts"), ts);
     this.db.setConfig(configKey(task, "last_run_reason"), reason);
     this.db.setConfig(configKey(task, "last_injected"), injected ? "true" : "false");
+    if (taskName === "hourly-heartbeat") await this.openHourlyReportObligation(dueKey, ts);
     this.db.logEvent(0, "pm_cadence_triggered", null, null, {
       task: taskName,
       label: task.label,
@@ -457,6 +489,54 @@ export class PMCadenceScheduler {
       queued,
       message,
     };
+  }
+
+  private readHourlyRecord(): HourlyReportRecord | null {
+    const raw = this.db.getConfig(CFG_HOURLY_REPORT_OBLIGATION);
+    if (!raw) return null;
+    try {
+      const rec = JSON.parse(raw) as HourlyReportRecord;
+      return typeof rec?.due_key === "string" && typeof rec?.injected_at === "string" ? rec : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Idempotent per bucket: one pm-ops upsert per hourly bucket, fail open. */
+  private async openHourlyReportObligation(dueKey: string, injectedAt: string): Promise<void> {
+    if (this.readHourlyRecord()?.due_key === dueKey) return;
+    const record: HourlyReportRecord = { due_key: dueKey, injected_at: injectedAt, escalated: false };
+    this.db.setConfig(CFG_HOURLY_REPORT_OBLIGATION, JSON.stringify(record));
+    const ok = await this.hourlyReport.upsert(dueKey, injectedAt, false);
+    this.db.logEvent(0, "pm_cadence_hourly_report_obligation", null, null, { due_key: dueKey, upserted: ok });
+  }
+
+  /**
+   * 20 minutes after the hourly inject, if the bucket's report has not posted
+   * (obligation still open), re-inject the hourly prompt ONCE through normal
+   * prompt delivery. Unknown obligation state never re-injects (fail open).
+   */
+  private async escalateHourlyReportIfMissed(now: Date = new Date()): Promise<void> {
+    const rec = this.readHourlyRecord();
+    if (!rec || rec.escalated) return;
+    if (this.db.getConfig(CFG_GLOBAL_PAUSED) === "true" || this.isTaskPaused("hourly-heartbeat")) return;
+    if (rec.due_key !== hourlyHeartbeatDueKey(now)) return;
+    const injectedMs = Date.parse(rec.injected_at);
+    if (!Number.isFinite(injectedMs) || now.getTime() - injectedMs < HOURLY_REPORT_ESCALATE_AFTER_MS) return;
+    if (this.hourlyReport.readState(rec.due_key) !== "open") return;
+    // Claim synchronously before any await: at most one re-inject per bucket.
+    this.db.setConfig(CFG_HOURLY_REPORT_OBLIGATION, JSON.stringify({ ...rec, escalated: true }));
+    const message =
+      `${HOURLY_HEARTBEAT_TASK.commandDescription} Re-inject: no hourly report posted for ${rec.due_key} after 20 min.`;
+    const submitted = await this.relay.submitToPM(message, `${cadenceEventType("hourly-heartbeat", rec.due_key)}-reinject`);
+    const upserted = await this.hourlyReport.upsert(rec.due_key, rec.injected_at, true);
+    this.db.logEvent(0, "pm_cadence_hourly_report_reinjected", null, null, {
+      due_key: rec.due_key,
+      submitted: submitted.ok,
+      queued: submitted.queued === true,
+      upserted,
+    });
+    console.log(`[pm-cadence] hourly report missing for ${rec.due_key}; re-injected once (ok=${submitted.ok})`);
   }
 
   private isTaskPaused(taskName: PMCadenceTaskName): boolean {

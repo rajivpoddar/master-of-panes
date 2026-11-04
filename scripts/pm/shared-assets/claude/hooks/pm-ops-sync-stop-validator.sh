@@ -94,6 +94,9 @@ DERIVED_EXECUTABLE_KINDS = {
     # obligation; Stop must not run its former bespoke validator.
     "session_age_clear",
     "pm-self-clear",
+    # MoP opens one per hourly-heartbeat bucket; hourly-thread-ts --set
+    # resolves it when the report posts (Rajiv D0AMF0XE6TS ts 1793784122.949659).
+    "hourly_report_due",
 }
 
 # Once the review wait has expired, this continuation is the release handoff

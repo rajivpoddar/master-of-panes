@@ -66,7 +66,7 @@ import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
 import { StuckDetector } from "./stuck.js";
 import { OpsAuditScheduler } from "./opsAudit.js";
-import { PMCadenceScheduler } from "./pmCadence.js";
+import { PM_OPS_HOURLY_REPORT_DEPS, PMCadenceScheduler } from "./pmCadence.js";
 import { P0EscalationWatcher } from "./p0EscalationWatch.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
@@ -278,7 +278,7 @@ opsAuditScheduler.start();
 // ─── PM Cadence Scheduler (3h heartbeat + daily morning brief) ──
 // MoP owns these recurring PM injections so ops cadence state is observable and
 // persisted in one control plane. launchd remains only the MoP watchdog.
-const pmCadenceScheduler = new PMCadenceScheduler(db, relay);
+const pmCadenceScheduler = new PMCadenceScheduler(db, relay, PM_OPS_HOURLY_REPORT_DEPS);
 pmCadenceScheduler.start();
 
 // ─── P0 Escalation Watcher ──────────────────────────────────

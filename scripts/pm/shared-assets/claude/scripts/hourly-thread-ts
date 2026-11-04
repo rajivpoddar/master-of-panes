@@ -13,13 +13,62 @@ further tracking or pr's." The old thread 1790531842.023499 is retired.
 
 import argparse
 import json
+import os
 import re
+import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
 
-STATE = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/hourly-thread.json"
+STATE = Path(os.environ.get(
+    "HOURLY_THREAD_STATE",
+    str(Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/hourly-thread.json"),
+))
 CHANNEL = "C0ALZJHGE49"
+PM_OPS = os.environ.get("PM_OPS", str(Path.home() / ".claude/scripts/pm-ops.py"))
+PM_OPS_DB = os.environ.get(
+    "PM_OPS_DB",
+    str(Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db"),
+)
+HOURLY_KIND = "hourly_report_due"
+
+
+def resolve_hourly_report_due(ts: str) -> list[int]:
+    """Resolve MoP's open hourly_report_due rows for the post's bucket and older.
+
+    Rajiv D0AMF0XE6TS ts 1793784122.949659: "hourly report should never be
+    missed. can MoP add an obligation for it automatically?" MoP opens one row
+    per hourly bucket (YYYY-MM-DD:HH, local); this post resolves the current or
+    most recent bucket(s). Fails open: the thread ts is already recorded.
+    """
+    bucket = time.strftime("%Y-%m-%d:%H", time.localtime(float(ts)))
+    try:
+        con = sqlite3.connect(f"file:{PM_OPS_DB}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = con.execute(
+                "SELECT id, target_id FROM obligations WHERE status='open' AND kind=?",
+                (HOURLY_KIND,),
+            ).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        print(f"hourly_report_due lookup skipped: {exc}", file=sys.stderr)
+        return []
+    resolved: list[int] = []
+    for oid, target in rows:
+        if not isinstance(target, str) or target > bucket:
+            continue
+        try:
+            subprocess.run(
+                [sys.executable, PM_OPS, "obligation-resolve", "--kind", HOURLY_KIND, "--id", str(oid),
+                 "--reason", f"hourly report posted ts={ts} (bucket {bucket})"],
+                check=True, timeout=15, capture_output=True,
+            )
+            resolved.append(int(oid))
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"hourly_report_due resolve failed id={oid}: {exc}", file=sys.stderr)
+    return resolved
 
 
 def main() -> int:
@@ -37,6 +86,8 @@ def main() -> int:
         tmp.write_text(json.dumps({"channel": CHANNEL, "ts": a.set, "recorded_at": int(time.time())}))
         tmp.replace(STATE)
         print(a.set)
+        for oid in resolve_hourly_report_due(a.set):
+            print(f"resolved hourly_report_due obligation {oid}", file=sys.stderr)
         return 0
     try:
         rec = json.loads(STATE.read_text())
