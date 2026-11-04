@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sqlite3
+import pytest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,8 @@ spec.loader.exec_module(composer)
 NOW = datetime(2026, 11, 4, 5, tzinfo=timezone.utc)
 
 
-def test_ledger_selection_suppression_backlog_and_read_only(tmp_path):
+@pytest.mark.parametrize('state', ['consumed/uncertain', 'UNKNOWN_CONSUMED_NO_RETRY', 'UNKNOWN', 'unknown/consumed'])
+def test_ledger_selection_suppression_backlog_and_read_only(tmp_path, state):
     db = tmp_path / 'ops.db'
     with sqlite3.connect(db) as conn:
         conn.execute('CREATE TABLE obligations (id integer, status text, owner text, kind text, created_at text, suppress_until text, issue integer, pr integer, required_action text, title text, blocker text, next_review_at text, external_state text)')
@@ -24,7 +26,7 @@ def test_ledger_selection_suppression_backlog_and_read_only(tmp_path):
             (5, 'resolved', 'pm', 'work', '2026-11-04T03:00:00+00:00', None, None, None, None, None, None, None, None),
             (6, 'open', '', 'work', '2026-11-04T00:00:00+00:00', None, None, None, 'file issue', None, 'awaiting Rajiv decision', None, None),
             (7, 'open', 'PM', 'work', '2026-11-04T02:00:00+00:00', None, None, None, 'follow up', None, None, '2026-11-05T00:00:00Z', None),
-            (8, 'open', 'pm', 'work', '2026-11-04T02:30:00+00:00', None, None, None, 'resend', None, None, None, 'consumed/uncertain'),
+            (8, 'open', 'pm', 'work', '2026-11-04T02:30:00+00:00', None, None, None, 'resend', None, None, None, state),
         ])
     before = db.read_bytes()
     result = composer.pending_obligations(db, NOW)
@@ -34,7 +36,7 @@ def test_ledger_selection_suppression_backlog_and_read_only(tmp_path):
     assert block[1].startswith('• #123 | do it')
     assert any('HELD | hold: awaiting Rajiv decision' in line and 'PM triage (unowned)' in line for line in block)
     assert any('HELD | review: 2026-11-05T00:00:00Z' in line and line.endswith('| PM') for line in block)
-    assert any('HELD | state: consumed/uncertain' in line for line in block)
+    assert any(f'HELD | state: {state}' in line for line in block)
     assert 'resend' not in '\n'.join(block)
     assert len(block) == 5
     assert db.read_bytes() == before

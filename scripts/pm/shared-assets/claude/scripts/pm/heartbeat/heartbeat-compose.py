@@ -463,7 +463,7 @@ def pending_actions_block(obligations: dict, github: dict, now: datetime) -> lis
             review = row.get('next_review_at')
             review_time = _parse_ts(review)
             state = (row.get('external_state') or '').strip()
-            is_held = bool(blocker or (review and (review_time is None or review_time > now)) or re.search(r'\b(?:consumed|uncertain)\b', state, re.I))
+            is_held = bool(blocker or (review and (review_time is None or review_time > now)) or re.search(r'(?<![a-z0-9])(?:consumed|uncertain|unknown)(?![a-z0-9])', state, re.I))
             if is_held:
                 details = []
                 if blocker:
