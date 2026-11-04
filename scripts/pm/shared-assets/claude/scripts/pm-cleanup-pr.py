@@ -257,33 +257,40 @@ class External:
         with build_opener(_NoRedirect).open(f"{MOP_URL}/issue-for-pr?{urlencode(query)}", timeout=5) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
+    def _repository(self, request: dict[str, Any]) -> str:
+        repo = self._gh(["api", f"repos/{request['repository']}"])
+        name = repo.get("full_name") if isinstance(repo, dict) else None
+        if not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name) is None:
+            raise CleanupError("github_repository_invalid", ambiguous=True)
+        return name
+
     def add_pr_label(self, request: dict[str, Any], label: str) -> None:
         self._gh([
-            "api", f"repos/{request['repository']}/issues/{request['pr']}/labels",
+            "api", f"repos/{self._repository(request)}/issues/{request['pr']}/labels",
             "--method", "POST", "--input", "-",
         ], input_bytes=_json_bytes({"labels": [label]}))
 
     def remove_pr_label(self, request: dict[str, Any], label: str) -> None:
         self._gh([
-            "api", f"repos/{request['repository']}/issues/{request['pr']}/labels/{quote(label, safe='')}",
+            "api", f"repos/{self._repository(request)}/issues/{request['pr']}/labels/{quote(label, safe='')}",
             "--method", "DELETE",
         ])
 
     def add_issue_label(self, request: dict[str, Any], label: str) -> None:
         self._gh([
-            "api", f"repos/{request['repository']}/issues/{request['issue']}/labels",
+            "api", f"repos/{self._repository(request)}/issues/{request['issue']}/labels",
             "--method", "POST", "--input", "-",
         ], input_bytes=_json_bytes({"labels": [label]}))
 
     def remove_issue_label(self, request: dict[str, Any], label: str) -> None:
         self._gh([
-            "api", f"repos/{request['repository']}/issues/{request['issue']}/labels/{quote(label, safe='')}",
+            "api", f"repos/{self._repository(request)}/issues/{request['issue']}/labels/{quote(label, safe='')}",
             "--method", "DELETE",
         ])
 
     def close_issue(self, request: dict[str, Any]) -> None:
         self._gh([
-            "api", f"repos/{request['repository']}/issues/{request['issue']}",
+            "api", f"repos/{self._repository(request)}/issues/{request['issue']}",
             "--method", "PATCH", "-f", "state=closed", "-f", "state_reason=completed",
         ])
 
@@ -593,6 +600,10 @@ def run(
         if not isinstance(receipts, dict):
             raise CleanupError("cleanup_receipt_invalid", ambiguous=True)
         key = _cleanup_key(request)
+        original_key = key
+        continuation_key = key + ":continuation"
+        if continuation_key in receipts:
+            key = continuation_key
         prior = receipts.get(key)
         mapping = None
         thread_ts = None
@@ -656,6 +667,24 @@ def run(
             if any(not isinstance(step, dict) or step.get("status") not in {"reserved", "effect_started", "completed", "ambiguous"}
                    for step in prior["steps"].values()):
                 raise _failure("cleanup_receipt_steps_invalid", prior, key, ambiguous=True)
+            reconciliation = receipts.get(key + ":ambiguity_reconciled")
+            name = "pr_label_add:pm-state:closed-clean"
+            step = prior["steps"].get(name)
+            if (isinstance(reconciliation, list) and reconciliation
+                and isinstance(reconciliation[-1], dict)
+                and reconciliation[-1].get("original_step") == step
+                and reconciliation[-1].get("result") in {"effect_absent_by_readback", "effect_present_by_readback"}
+                and prior.get("status") == "ambiguous" and prior.get("ambiguous_steps") == [name]
+                and isinstance(step, dict) and step.get("status") in {"ambiguous", "effect_started"}
+                and all(n == name or s.get("status") not in {"ambiguous", "effect_started"} for n, s in prior["steps"].items())):
+                prior = json.loads(json.dumps(prior))
+                key = continuation_key
+                receipts[key] = prior
+                prior["steps"][name] = {"status": "completed" if reconciliation[-1]["result"] == "effect_present_by_readback" else "reserved"}
+                prior["ambiguous_steps"] = []
+                prior["status"] = "processing"
+                reconciliation.append({"result": "reconciliation_consumed", "timestamp": _now_iso(), "step": name})
+                _write_json(receipt_file, receipts)
             if prior.get("status") == "ambiguous" or prior.get("ambiguous_steps") or any(
                 isinstance(step, dict) and step.get("status") in {"effect_started", "ambiguous"}
                 for step in (prior.get("steps") or {}).values()
@@ -916,13 +945,55 @@ def _thread_reply_readback(external: External, token: str, thread_ts: str, text:
     )
 
 
+def reconcile_ambiguous(pr: int, receipt_file: Path, ext: External | None = None) -> dict[str, Any]:
+    ext = ext or External()
+    name = "pr_label_add:pm-state:closed-clean"
+    with _locked(receipt_file):
+        receipts = _load_json(receipt_file, {})
+        matches = [(k, v) for k, v in receipts.items() if isinstance(v, dict)
+                   and isinstance(v.get("request"), dict) and v["request"].get("pr") == pr
+                   and v.get("status") == "ambiguous" and v.get("ambiguous_steps") == [name]
+                   and isinstance(v.get("steps"), dict) and isinstance(v["steps"].get(name), dict)
+                   and v["steps"][name].get("status") in {"effect_started", "ambiguous"}]
+        if len(matches) != 1:
+            raise CleanupError("reconciliation_receipt_not_unique", ambiguous=True)
+        key, receipt = matches[0]
+        if key + ":continuation" in receipts:
+            raise CleanupError("reconciliation_already_continued", ambiguous=True)
+        if any(n != name and s.get("status") in {"effect_started", "ambiguous"} for n, s in receipt["steps"].items() if isinstance(s, dict)):
+            raise CleanupError("reconciliation_other_ambiguity", ambiguous=True)
+        _validate_plan(receipt.get("plan"))
+        if not any(s.get("name") == name for s in receipt["plan"]):
+            raise CleanupError("reconciliation_step_missing", ambiguous=True)
+        request = receipt["request"]
+        canonical = ext._repository(request)
+        snapshot = ext.read_pr({**request, "repository": canonical})
+        labels = _validate_merged_snapshot_without_ref(request, snapshot)
+        result = "effect_present_by_readback" if "pm-state:closed-clean" in labels else "effect_absent_by_readback"
+        record = {"timestamp": _now_iso(), "pr": pr, "step": name, "result": result,
+                  "original_step": receipt["steps"][name], "reason": "live canonical PR label readback",
+                  "evidence": {"repository": canonical, "number": snapshot["number"], "labels": labels,
+                               "merge_commit": request["merge_commit"], "head": request["head"]}}
+        records = receipts.setdefault(key + ":ambiguity_reconciled", [])
+        if not isinstance(records, list):
+            raise CleanupError("reconciliation_journal_invalid", ambiguous=True)
+        records.append(record)
+        _write_json(receipt_file, receipts)
+        return record
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Finalize one merged PR and linked issue")
     parser.add_argument("--mapping-path", type=Path)
     parser.add_argument("--receipt-path", type=Path)
+    parser.add_argument("--reconcile-ambiguous", type=int, metavar="PR")
     args = parser.parse_args(argv)
     try:
-        result = run(json.load(__import__("sys").stdin), mapping_path=args.mapping_path, receipt_path=args.receipt_path)
+        if args.reconcile_ambiguous is not None:
+            path = args.receipt_path or Path(os.environ.get("MOP_CLEANUP_RECEIPT_PATH", str(DEFAULT_RECEIPT))).expanduser()
+            result = reconcile_ambiguous(args.reconcile_ambiguous, path)
+        else:
+            result = run(json.load(__import__("sys").stdin), mapping_path=args.mapping_path, receipt_path=args.receipt_path)
     except CleanupError as exc:
         print(json.dumps({"success": False, "error": exc.reason, "ambiguous": exc.ambiguous, **exc.details}, separators=(",", ":")))
         return 2
