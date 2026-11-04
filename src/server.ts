@@ -1326,6 +1326,19 @@ app.post("/exit-pending", async (c) => {
   if (body.continuation_prompt !== undefined && (typeof body.continuation_prompt !== "string" || !body.pm_only)) {
     return c.json({ error: "continuation_prompt requires pm_only and must be a string" }, 400);
   }
+  if (recovered) {
+    // CTO REVISE ts 1793757734.688709: recovery applies only while the typed
+    // refused terminal AND the current exit state agree on the SAME ended
+    // episode. Any newer, different or pending episode: 409, zero mutation.
+    let terminal: { episode?: unknown; outcome?: unknown } | null = null;
+    try { terminal = JSON.parse(db.getConfig("pm_exit_terminal") || "null"); } catch { terminal = null; }
+    const current = db.getExitStatus();
+    if (!terminal || terminal.outcome !== "refused_pre_effect" || terminal.episode !== recovered
+        || current.episode !== recovered || current.pending || !current.pm_only
+        || current.continuation_delivery !== "exit_refused") {
+      return c.json({ error: "recover_episode is not the current refused PM exit episode" }, 409);
+    }
+  }
   // REST PM-only arming requires the saved handoff + subagents-stopped ack.
   db.setExitPending(body.enabled, body.dev_only === true, body.pm_only === true, body.continuation_prompt, body.pm_only === true);
   // A new PM-only episode supersedes any refused terminal (its record stays in the event log).

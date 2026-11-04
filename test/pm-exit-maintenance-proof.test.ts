@@ -355,6 +355,34 @@ test("an old Stop held across new work never writes /exit (pinned authority thro
   } finally { h.close(); }
 });
 
+test("delayed recovery of refused episode A after a newer dev_only/global episode B: 409, B byte-identical, zero paste/Enter", async () => {
+  for (const newer of [{ enabled: true, dev_only: true }, { enabled: true }]) {
+    const h = harness();
+    try {
+      await boot(h);
+      await h.arm();
+      h.saveAll();
+      assert.equal((await h.ack()).status, 200);
+      h.setObserveBarrier(async () => { h.setObserveBarrier(null); await h.hook("UserPromptSubmit", { prompt: "typed during Stop" }); });
+      await h.hook("Stop");
+      const a = h.status().exit_terminal as Record<string, unknown>;
+      assert.equal(a.outcome, "refused_pre_effect");
+      // A normal newer episode B through the real route; terminal A survives.
+      assert.equal((await h.post(ctx(newer))).status, 200);
+      const before = JSON.stringify(h.status());
+      const pastesBefore = h.pasted.length, entersBefore = h.enters();
+      assert.ok(h.status().exit_terminal, "old terminal A still recorded");
+      const late = await h.post(ctx({ enabled: true, pm_only: true, recover_episode: a.episode }));
+      assert.equal(late.status, 409);
+      assert.equal(JSON.stringify(h.status()), before, "B's episode/mode/continuation/cycle/attempt state unchanged");
+      await h.hook("Stop");
+      assert.equal(h.pasted.filter((p) => p === "/exit").length, 0);
+      assert.equal(h.pasted.length, pastesBefore, "zero paste");
+      assert.equal(h.enters(), entersBefore, "zero Enter");
+    } finally { h.close(); }
+  }
+});
+
 test("control: a possible/uncertain /exit effect stays consumed (custody kept, no terminal, no resend)", async () => {
   const h = harness();
   try {
