@@ -267,7 +267,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "9e0692f0090b61855f5f36767be4d4d4abb2e48bcb40287a07dba31c55389821",
+      "sha256": "5252fa1417644e8a2bf44214dd8a8ea658a8815012773b888466586ff4075924",
       "source_path": "claude/project-agents/pm-backlog-promoter.md"
     },
     {
@@ -312,7 +312,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "f903000a2401190ceac914e38756409c10fbc122b586cab6c150daed4e0099fc",
+      "sha256": "46065025f01d9ea272aa93e5ed7a8a8349adf1dc52e293ae4fd82dde789c450a",
       "source_path": "claude/scripts/backlog-triage.py"
     },
     {
@@ -764,7 +764,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "802c029ca986672fc46584b918f3366c7ff61675ca027654d726aacb193dee03",
+      "sha256": "d1c21da95f4153b374bde44e25ee0ac5f25562a5a09b23556e5060d3f6a57476",
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
@@ -836,7 +836,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "3c1b0d66c99a15747b6985c1300b483e2d8636e02dcbda173051e8489addba90",
+      "sha256": "0412f5b03e9b78014067993e0632a2bc85a50efa681c2f7c7dcd3e8a2e1d99e8",
       "source_path": "claude/skills/backlog-triage/SKILL.md"
     },
     {
@@ -1016,7 +1016,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "10bf1ef7e88704379fd5fd79fb28714363d98572a319ce4efbcbfcb83ee87874",
+      "sha256": "455126ab2dceafb513f4cdeca8c500688ef5ca5217f10c41f11df3b2e07ee735",
       "source_path": "claude/skills/hourly-ops-audit/SKILL.md"
     },
     {
@@ -1145,7 +1145,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "c9f220ec6783ecc433ed086ded27b664be4c12de3285f30ef7c61d54951a8f83",
+      "sha256": "b5351a7863e5ef8ef48a834a9bff7c00fd645a6cb779eda88c28930a2e53b8c6",
       "source_path": "claude/skills/pm-triage/skill.md"
     },
     {

@@ -39,6 +39,17 @@ You are the PM backlog promoter. Read the complete current triage policy:
 
 ## Procedure for both mode=refill-ready-pool and mode=repair-ready-pool
 
+For an existing Todo with incomplete metadata, use the existing guarded repair
+route directly: `python3 ~/.claude/scripts/backlog-triage.py repair-ready-pool
+--dry-run --issues N`. Write a named `--metadata-json` proposal from the live ACs,
+with required Ready Pool fields, `expected_body_sha256`, and `review_proof`
+containing the source evidence (this legacy field does NOT require a reviewer).
+Then run `repair-ready-pool --apply --metadata-json <file> --issues N` in this
+same run. It validates and reads back membership IN PLACE, preserves dependency/
+wake fields, and needs no backlog round trip or second promotion. If the ICL or
+ACs themselves are incomplete, repair the body from evidence first and validate;
+missing product facts go in the decision batch.
+
 1. Intake: assign a coherent lifecycle and canonical priority after individual
    assessment. Active PR/slot ownership is not claimable queue work.
 2. Inspect blocked/deferred holds, owner and wake; reverify >7-day holds live.

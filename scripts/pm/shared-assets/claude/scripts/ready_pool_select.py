@@ -127,7 +127,7 @@ def parse_dependencies(blockers: str, wake: str) -> list[tuple[int, str]] | None
     pattern = re.compile(r"(?i)(?:(pr|pull request|issue)\s+)?#(\d+)(?:\s+(merge|merges|merged|merging|closed|complete|completed))?")
     for text in (blockers, wake):
         text = (text or '').strip()
-        if text.lower() in ('', 'none', 'n/a', '[]'):
+        if text.lower() in ('', 'none', 'null', 'n/a', '[]'):
             continue
         text = re.sub(r'(?i)^blocked\s+on\s+', '', text)
         text = text.strip('[] ')
@@ -138,17 +138,20 @@ def parse_dependencies(blockers: str, wake: str) -> list[tuple[int, str]] | None
                 return None
             prefix, number, condition = match.groups()
             condition = (condition or '').lower()
-            kind = 'merge' if condition in ('merge', 'merges', 'merged', 'merging') or (not condition and (prefix or '').lower() in ('pr', 'pull request')) else 'complete' if condition in ('complete', 'completed') else 'closed'
+            kind = 'merge' if condition in ('merge', 'merges', 'merged', 'merging') or (not condition and (prefix or '').lower() in ('pr', 'pull request')) else 'complete' if condition in ('complete', 'completed') else 'closed' if condition == 'closed' else 'default'
             number = int(number)
             old = refs.get(number)
-            if old and old != kind and old != 'closed' and kind != 'closed':
+            if old and old != kind and old not in ('closed', 'default') and kind not in ('closed', 'default'):
                 return None
-            if old != 'merge' and (kind != 'closed' or not old):
+            if old != 'merge' and (kind not in ('closed', 'default') or not old or old == 'default'):
                 refs[number] = kind
     return list(refs.items())
 
 
 def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -> None:
+    # Canonical blockers are authoritative even when an advisory label is missing.
+    if str(c.get("blockers") or "").strip().lower() not in {"", "none", "null", "n/a", "[]"}:
+        c["blocking_labels"] = sorted(set(c.get("blocking_labels") or []) | {"pm-blocked:dependency"})
     if "pm-blocked:dependency" not in c.get("blocking_labels", []):
         return
     refs = parse_dependencies(c.get("blockers", ""), c.get("wake_condition", ""))
@@ -175,13 +178,13 @@ def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -
                     pr = json.loads(p.stdout)
                     if not isinstance(pr, dict) or pr.get('state') not in ('OPEN', 'CLOSED', 'MERGED') or 'mergedAt' not in pr or (pr['mergedAt'] is not None and (not isinstance(pr['mergedAt'], str) or not pr['mergedAt'])):
                         raise ValueError('invalid PR state')
-                    satisfied = bool(pr['mergedAt']) if kind in ('merge', 'complete') else pr['state'] in ('CLOSED', 'MERGED')
+                    satisfied = bool(pr['mergedAt']) if kind in ('merge', 'complete', 'default') else pr['state'] in ('CLOSED', 'MERGED')
                     state = pr['state']
                 else:
                     if data.get('state_reason') not in (None, 'completed', 'not_planned', 'reopened'):
                         raise ValueError('invalid issue completion state')
                     state = data['state'].upper()
-                    satisfied = kind != 'merge' and state == 'CLOSED' and (kind != 'complete' or data.get('state_reason') == 'completed')
+                    satisfied = kind != 'merge' and state == 'CLOSED' and (kind not in ('complete', 'default') or data.get('state_reason') == 'completed')
                 cache[key] = (satisfied, state)
             except TimeoutError:
                 raise
@@ -451,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
     gated = gated_p0_candidates(eligible_issues, rework_only, cache, args.no_dependency_check)
     all_dependencies = []
     for issue in issues:
-        if "pm-blocked:dependency" not in _labels(issue):
+        if "pm-blocked:dependency" not in _labels(issue) and ready_pool_value(issue.get("body") or "", "blockers").strip().lower() in {"", "none", "null", "n/a", "[]"}:
             continue
         cls = classify(issue)
         if not cls:

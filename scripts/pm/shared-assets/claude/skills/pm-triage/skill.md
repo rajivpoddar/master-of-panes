@@ -123,6 +123,10 @@ Promotion detector: `python3 ~/.claude/scripts/backlog-triage.py promote --dry-r
 Pool contract audit: `python3 ~/.claude/scripts/backlog-triage.py audit-ready-pool`.
 Actual dispatch check: `python3 ~/.claude/scripts/backlog-triage.py check-dispatch-readiness --issues N`.
 Use that last command for assignment eligibility, not dependency-held membership.
+Existing Todo metadata repair: `backlog-triage.py repair-ready-pool --apply
+--metadata-json <hash-pinned evidence proposal> --issues N`. Run its dry-run first;
+`review_proof` cites source evidence and does not require a reviewer. This repairs
+membership in place and preserves dependency/wake constraints.
 The old `--migrate-blocked-todos` flag is a compatibility no-op under S113.
 
 A dry run or agent launch is not completion. Record actual promoted/closed/held/

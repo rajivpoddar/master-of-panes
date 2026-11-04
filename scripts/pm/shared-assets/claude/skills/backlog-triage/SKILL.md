@@ -30,6 +30,11 @@ architecture review. Dependencies are checked live before assignment.
    Deterministic repair preserves existing ACs/dependencies, validates live bodies,
    and continues through verified promotion in the same invocation. Missing facts
    become exact questions, never invented ACs or generic triage labels.
+For existing Todo metadata defects, use `backlog-triage.py repair-ready-pool
+--dry-run --issues N`, then `--apply --metadata-json <hash-pinned evidence proposal>
+--issues N`. `review_proof` is a legacy field for cited source evidence, not a
+reviewer prerequisite. Repair happens in place; no backlog promotion is needed.
+
 7. Validate changed bodies and run `audit-ready-pool`. Report named dependency
    waits separately from contract defects. PM syncs obligations/pm-todo and uses
    canonical `direct-assign`; never invoke retired sweep or handoff helpers.

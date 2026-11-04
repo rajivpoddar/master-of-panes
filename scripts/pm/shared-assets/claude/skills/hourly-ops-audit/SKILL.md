@@ -674,6 +674,9 @@ review or nested-auditor prerequisite remains. Use the deterministic project
 `ready-pool-contract-repair.py --source-manifest <manifest> --apply` for missing
 contracts and continue to verified promotion in that invocation. Never invent ACs.
 Record exact unresolved questions, owner and wake, and batch genuine decisions.
+For existing Todo metadata defects, use `backlog-triage.py repair-ready-pool
+--apply --metadata-json <hash-pinned evidence proposal> --issues N`; validate
+membership in place, without a backlog round trip or architecture review.
 
 S113: dependency-held app issues of every priority remain in the Ready Pool with
 canonical refs and dependency labels. `TODO_DEPENDENCY_GATED` is a wait count,

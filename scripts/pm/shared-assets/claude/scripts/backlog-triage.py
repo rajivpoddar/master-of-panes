@@ -32,6 +32,7 @@ if str(CONTROL_PLANE_DIR) not in sys.path:
     sys.path.insert(0, str(CONTROL_PLANE_DIR))
 
 from issue_claimability import NON_DISPATCHABLE_CLAIMABLE_TYPES
+from ready_pool_select import candidate as selection_candidate, evaluate_dependency, is_gated
 
 
 REPO = os.environ.get("GH_REPO", "Scribie/heydonna-app")
@@ -1202,7 +1203,7 @@ def open_pr_issue_numbers() -> set[int]:
 
 
 def is_claimable_ready_pool_todo(
-    issue: dict[str, Any], open_nums: set[int], pr_issues: set[int]
+    issue: dict[str, Any], open_nums: set[int], pr_issues: set[int], dependency_cache: dict | None = None
 ) -> bool:
     """Pool count includes only claimable status:todo issues (Rajiv 2026-10-11)."""
     if not is_clean_ready_pool_todo(issue, open_nums):
@@ -1216,12 +1217,17 @@ def is_claimable_ready_pool_todo(
             or name.startswith("pm-nonclaimable")
         ):
             return False
+    selection = selection_candidate(issue, "new_issue")
+    evaluate_dependency(selection, dependency_cache if dependency_cache is not None else {})
+    if is_gated(selection):
+        return False
     return True
 
 
 def clean_ready_pool_todo_count(issues: list[dict[str, Any]], open_nums: set[int]) -> int:
     pr_issues = open_pr_issue_numbers()
-    return sum(1 for issue in issues if is_claimable_ready_pool_todo(issue, open_nums, pr_issues))
+    cache: dict = {}
+    return sum(1 for issue in issues if is_claimable_ready_pool_todo(issue, open_nums, pr_issues, cache))
 
 
 def compute_promotion_deficit(
@@ -1646,9 +1652,24 @@ def repair_todo_ready_pool_issue(
             actual_body_sha256=old_sha,
         )
 
+    # A metadata-only repair must preserve the existing dependency/proof contract.
+    for key in ("blockers", "gate", "wake_condition"):
+        if clean_meta_value(current_meta.get(key)):
+            metadata[key] = current_meta[key]
     block = ready_pool_defaults_block(metadata)
+    extra = {key: value for key, value in current_meta.items() if key not in REQUIRED_READY_POOL_FIELDS}
+    if extra:
+        block = block.replace("\n-->", "\n" + "\n".join(f"{key}: {value}" for key,value in extra.items()) + "\n-->")
     new_body = replace_ready_pool_block(old_body, block)
+    errors = issue_contract_ledger_errors(new_body, require_qa_proof=True)
+    if errors:
+        return promotion_failure(issue, "invalid_repaired_contract", errors=errors)
     tmp = OUT_DIR / f"pm-ready-pool-repair-{number}.md"
+    fresh = gh_issue_view(number)
+    if issue_body_sha256(fresh.get("body") or "") != old_sha or labels(fresh) != names:
+        return promotion_failure(issue, "stale_issue_before_repair")
+    if number in open_pr_issue_numbers():
+        return promotion_failure(issue, "already_owned_by_open_pr")
     tmp.write_text(new_body, encoding="utf-8")
     try:
         run([GH, "issue", "edit", str(number), "--repo", REPO, "--body-file", str(tmp)])
@@ -1680,7 +1701,8 @@ def repair_todo_ready_pool_issue(
     refreshed_meta = ready_pool_metadata(refreshed)
     missing_after = missing_ready_pool_dispatch_fields(refreshed_meta)
     priority_after = canonical_priority_labels(refreshed_names)
-    if refreshed_status != ["status:todo"] or missing_after or priority_after != [metadata["priority"]]:
+    membership = dispatch_readiness_reasons(refreshed, open_nums, allow_backlog=False, allow_dependencies=True)
+    if refreshed_status != ["status:todo"] or missing_after or priority_after != [metadata["priority"]] or membership or (refreshed.get("body") or "").rstrip("\n") != new_body.rstrip("\n"):
         return promotion_failure(
             issue,
             "repair_verification_failed",
@@ -1688,6 +1710,7 @@ def repair_todo_ready_pool_issue(
             missing_ready_pool_fields=missing_after,
             priority_labels=priority_after,
             live_ready_pool=refreshed_meta,
+            membership_reasons=membership,
         )
 
     try:
@@ -1768,20 +1791,12 @@ def write_ready_pool_repair_manifest(
 def repair_ready_pool_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Repair incomplete Ready Pool contracts on existing status:todo issues.")
     parser.add_argument("--dry-run", action="store_true", help="inspect only; default behavior")
-    parser.add_argument("--apply", action="store_true", help="apply agent-reviewed Ready Pool metadata")
+    parser.add_argument("--apply", action="store_true", help="apply hash-pinned, evidence-grounded Ready Pool metadata")
     parser.add_argument("--metadata-json", help="agent-produced repair proposals; required with --apply")
     parser.add_argument("--issues", nargs="+", type=int, required=True, help="status:todo issue numbers")
     args = parser.parse_args(argv)
     if args.apply and not args.metadata_json:
         parser.error("--apply requires --metadata-json")
-    if args.apply:
-        print(
-            "ERROR: in-place repair of status:todo is disabled. Reconcile the issue to "
-            "status:backlog, repair its contract, record Codex architecture approval, "
-            "then use promote --apply with --review-result-manifest.",
-            file=sys.stderr,
-        )
-        return 2
 
     try:
         all_issues = gh_issue_list()
@@ -1938,9 +1953,13 @@ def promote_backlog_issue(
         labels_to_remove = list(admission_status_labels)
         if (
             "pm-blocked:dependency" in labels(admission_issue)
+            and metadata_blockers_clear(ready_pool_metadata(admission_issue))
             and not open_dependencies(admission_issue, open_nums)
         ):
             labels_to_remove.append("pm-blocked:dependency")
+        admission_labels = f"status:todo,{canonical_priority}"
+        if has_dependency_contract(ready_pool_metadata(admission_issue)):
+            admission_labels += ",pm-blocked:dependency"
         run(
             [
                 GH,
@@ -1952,7 +1971,7 @@ def promote_backlog_issue(
                 "--remove-label",
                 ",".join(labels_to_remove),
                 "--add-label",
-                f"status:todo,{canonical_priority}",
+                admission_labels,
             ]
         )
     except subprocess.CalledProcessError as exc:
@@ -2132,7 +2151,7 @@ def write_promoter_manifest(
         "current_ready_pool_count": current_ready_pool_count,
         "promotion_deficit": promotion_deficit,
         "counts": {
-            "auto_promotable": len(candidates),
+            "auto_promotable": len(selected),
             "needs_ready_pool_metadata": len(metadata_candidates),
             "selected": len(selected),
             "promoted": len(promoted),

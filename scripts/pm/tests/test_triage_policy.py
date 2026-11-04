@@ -6,6 +6,10 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import subprocess
+import os
+import time
+from copy import deepcopy
 from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "shared-assets/claude/scripts"
@@ -130,6 +134,72 @@ class TriagePolicyTests(unittest.TestCase):
         held = issue(status="todo", blockers="[#9999]", extra=("pm-blocked:dependency",))
         ranked = selector.rank_candidates([held], offline=True)
         self.assertEqual(ranked, [])  # offline: no lookup means no dispatch authority
+
+    def test_canonical_dependency_without_label_is_still_gated(self):
+        held = issue(status="todo", blockers="[#9999]")
+        self.assertEqual(selector.rank_candidates([held], offline=True), [])
+        gated = selector.gated_p0_candidates([held], offline=True)
+        self.assertEqual(gated[0]["issue"], 1234)
+        self.assertIn("pm-blocked:dependency", gated[0]["blocking_labels"])
+
+    def test_unmerged_pr_and_incomplete_issue_do_not_satisfy_bare_dependency(self):
+        held = issue(status="todo", blockers="[#9999]")
+        def response(cmd, **kwargs):
+            data = {"state":"closed","pull_request":{}} if cmd[1] == "api" else {"state":"CLOSED","mergedAt":None}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(data), "")
+        with patch.object(selector.subprocess, "run", side_effect=response):
+            self.assertEqual(selector.rank_candidates([held]), [])
+        with patch.object(selector.subprocess, "run", return_value=subprocess.CompletedProcess([],0,json.dumps({"state":"closed","state_reason":"not_planned"}),"")):
+            self.assertEqual(selector.rank_candidates([held]), [])
+
+    def test_promotion_adds_dependency_label_and_does_not_clear_it_from_snapshot(self):
+        for original_extra in ((), ("pm-blocked:dependency",)):
+            held = issue(blockers="[#9999]", extra=original_extra)
+            live = issue(status="todo", blockers="[#9999]", extra=("pm-blocked:dependency",))
+            row = bt.promoter_row(held, "clean_ready_pool")
+            with patch.object(bt, "gh_issue_view", side_effect=[held,live]), patch.object(bt, "run") as run, patch.object(bt, "pm_ops_upsert"):
+                result = bt.promote_backlog_issue(row, {1234})  # predecessor closed in snapshot, not proof of merge
+            self.assertTrue(result["ok"], result)
+            cmd = run.call_args_list[0].args[0]
+            self.assertIn("pm-blocked:dependency", cmd[cmd.index("--add-label")+1])
+            self.assertNotIn("pm-blocked:dependency", cmd[cmd.index("--remove-label")+1])
+
+    def test_existing_todo_missing_slug_repairs_in_place_with_dependency_preserved(self):
+        held = issue(status="todo", blockers="[#9999]", extra=("pm-blocked:dependency",))
+        held["body"] = held["body"].replace("branch_slug: preserve-saved-text\n", "").replace("work_type: bug_fix\n", "work_type: bug_fix\nwake_condition: PR #9999 merged\n")
+        current = deepcopy(held)
+        proposal = {**bt.ready_pool_metadata(held), "issue":1234,"branch_slug":"preserve-saved-text",
+                    "blockers":"none", "review_proof":"Existing issue AC-1 and original directive; metadata repair only.",
+                    "expected_body_sha256":bt.issue_body_sha256(held["body"])}
+        def fake_run(cmd, **kwargs):
+            if "--body-file" in cmd:
+                current["body"] = Path(cmd[cmd.index("--body-file")+1]).read_text()
+            return subprocess.CompletedProcess(cmd,0,"","")
+        with tempfile.TemporaryDirectory() as tmp, patch.object(bt,"OUT_DIR",Path(tmp)), \
+             patch.object(bt,"gh_issue_list",return_value=[deepcopy(held)]), patch.object(bt,"issue_num_set",return_value={1234,9999}), \
+             patch.object(bt,"gh_issue_view",side_effect=lambda n:deepcopy(current)), patch.object(bt,"run",side_effect=fake_run), patch.object(bt,"pm_ops_upsert"):
+            path = Path(tmp)/"proposal.json";path.write_text(json.dumps([proposal]))
+            self.assertEqual(bt.repair_ready_pool_main(["--apply","--metadata-json",str(path),"--issues","1234"]),0)
+        meta = bt.ready_pool_metadata(current)
+        self.assertEqual(meta["branch_slug"],"preserve-saved-text")
+        self.assertEqual(meta["blockers"],"[#9999]")
+        self.assertEqual(meta["wake_condition"],"PR #9999 merged")
+        self.assertEqual(bt.strip_ready_pool(current["body"]) if hasattr(bt,"strip_ready_pool") else repair.strip_ready_pool(current["body"]), repair.strip_ready_pool(held["body"]))
+
+    def test_full_stop_hook_accepts_full_pool_with_only_surplus_p3(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(bt,"OUT_DIR",Path(tmp)):
+            root=Path(tmp);hourly=root/"hourly.stdout"
+            hourly.write_text("READY_POOL_LOW clean_todo=4 threshold=10 total_status_todo=4 assigned_todo=0 blocked_todo=0\n")
+            os.utime(hourly,(time.time()-10,time.time()-10))
+            p3=bt.promoter_row(issue(priority="P3"),"clean_ready_pool")
+            manifest=bt.write_promoter_manifest([p3],{"p3_refill_not_needed":[p3]},[],applied=False,current_ready_pool_count=10)
+            self.assertEqual(json.loads(manifest.read_text())["counts"]["auto_promotable"],0)
+            env={**os.environ,"READY_POOL_LOW_HOURLY_GLOB":str(hourly),"READY_POOL_LOW_PROMOTER_GLOB":str(manifest),
+                 "READY_POOL_LOW_FANOUT_GLOB":str(root/"none-fanout*"),"READY_POOL_LOW_DETERMINISTIC_GLOB":str(root/"none-deterministic*"),
+                 "READY_POOL_REPAIR_ACTIVE_FILE":str(root/"none-active.json"),"READY_POOL_REPAIR_LEGACY_SCAN":"0","READY_POOL_LOW_STOP_LOG":str(root/"hook.log")}
+            result=subprocess.run(["bash",str(SCRIPTS.parent/"hooks/ready-pool-low-stop-validator.sh")],input="",text=True,capture_output=True,env=env,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertNotIn('"decision": "block"',result.stdout,result.stdout)
 
     def test_release_gate_requires_exactly_one_actual_release_label(self):
         self.assertFalse(bt.has_release_gate({"P1", "bug"}))
