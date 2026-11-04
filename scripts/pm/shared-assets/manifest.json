@@ -1431,7 +1431,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-automation-prompt-template",
-      "sha256": "6f6aa59b87c700fa9c145d30e1947f6e2d6f96cef4ea75550a4952d096e74dce",
+      "sha256": "f247f41191d6e83fa39cf0edcceb4253859663a878a3c93a71de3d5598d19ca8",
       "source_path": "codex/automations/heydonna-3h-ready-pool-reconciliation/prompt.template"
     },
     {
