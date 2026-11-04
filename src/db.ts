@@ -2491,8 +2491,26 @@ export class MoPDatabase {
     return this.getConfig("exit_pending") === "true";
   }
 
-  setExitPending(enabled: boolean, devOnly = false, pmOnly = false, continuationPrompt?: string): void {
-    this.setConfig("exit_pending_episode", randomUUID());
+  /**
+   * `requireHandoff` (REST PM-only arming only): the /exit waits for the
+   * pm_save_handoff `exit` variant, meaning both handoff files saved after this
+   * request AND the PM's subagents-stopped ack (Rajiv D0AMF0XE6TS thread
+   * 1793731816.594829, ts 1793752982.460979). Direct callers keep the
+   * unconditioned behaviour.
+   */
+  setExitPending(enabled: boolean, devOnly = false, pmOnly = false, continuationPrompt?: string, requireHandoff = false): void {
+    const episode = randomUUID();
+    this.setConfig("exit_pending_episode", episode);
+    const handoff = enabled && pmOnly && requireHandoff;
+    let session = "";
+    if (handoff) {
+      try { session = String(JSON.parse(this.getEvents(0, 1, "SessionStart")[0]?.payload || "{}").session_id ?? ""); } catch { session = ""; }
+    }
+    this.setConfig("pm_exit_handoff_episode", handoff ? episode : "");
+    this.setConfig("pm_exit_handoff_requested_at", handoff ? new Date().toISOString() : "");
+    this.setConfig("pm_exit_handoff_session", handoff ? session : "");
+    this.setConfig("pm_exit_handoff_obligation_id", "");
+    this.setConfig("pm_exit_subagents_stopped_at", "");
     this.setConfig("exit_pending_pm_only", enabled && pmOnly ? "true" : "false");
     this.setConfig("exit_pending_continuation_prompt", enabled ? continuationPrompt ?? "" : "");
     this.setConfig("exit_pending_continuation_delivery", enabled && pmOnly ? "waiting" : "");
@@ -2511,7 +2529,8 @@ export class MoPDatabase {
     this.setConfig(`exit_cycled_${slot}`, "true");
   }
 
-  getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean> } {
+  getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean>;
+    handoff_requested_at: string | null; handoff_obligation_id: string | null; subagents_stopped_at: string | null } {
     const pending = this.getExitPending();
     const cycled: Record<number, boolean> = {};
     for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
@@ -2521,7 +2540,10 @@ export class MoPDatabase {
       pm_only: this.getConfig("exit_pending_pm_only") === "true",
       continuation_prompt: this.getConfig("exit_pending_continuation_prompt") || null,
       continuation_delivery: this.getConfig("exit_pending_continuation_delivery") || null,
-      stop_only: this.getConfig("exit_pending_stop_only") === "true", cycled };
+      stop_only: this.getConfig("exit_pending_stop_only") === "true", cycled,
+      handoff_requested_at: this.getConfig("pm_exit_handoff_requested_at") || null,
+      handoff_obligation_id: this.getConfig("pm_exit_handoff_obligation_id") || null,
+      subagents_stopped_at: this.getConfig("pm_exit_subagents_stopped_at") || null };
   }
 
   // ─── Clear Pending ─────────────────────────────────────

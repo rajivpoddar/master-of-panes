@@ -396,20 +396,29 @@ export function failOpenUnobservedPmClear(db: Db, options: {
   return true;
 }
 
+/** Obligation copy per pm_save_handoff variant; `clear` is the original flow. */
+export type HandoffObligationVariant = { title: string; action: string; dedupeGroup: string };
+export const PM_HANDOFF_CLEAR_VARIANT: HandoffObligationVariant = {
+  title: "Save PM handoff before MoP injects /clear",
+  action: PM_HANDOFF_ACTION,
+  dedupeGroup: "pm_save_handoff:pm",
+};
+
 /** Default obligation ops through the canonical pm-ops.py writer. */
 export function pmOpsHandoffObligationOps(
   execute: (file: string, args: string[], options: { timeout: number }) => Promise<{ stdout: string | Buffer }> = run,
   pmOpsDb: string = PM_OPS_DB,
   pmOps: string = join(homedir(), ".claude/scripts/pm-ops.py"),
+  variant: HandoffObligationVariant = PM_HANDOFF_CLEAR_VARIANT,
 ): HandoffObligationOps {
   return {
     async upsert(requestKey, evidence) {
       const { stdout } = await execute("python3", [pmOps, "obligation-upsert",
         "--kind", PM_HANDOFF_OBLIGATION_KIND, "--target-type", "session", "--target-id", requestKey,
         "--severity", "high", "--owner", "pm", "--horizon", "hourly",
-        "--title", "Save PM handoff before MoP injects /clear",
-        "--action", PM_HANDOFF_ACTION,
-        "--dedupe-group", "pm_save_handoff:pm",
+        "--title", variant.title,
+        "--action", variant.action,
+        "--dedupe-group", variant.dedupeGroup,
         "--evidence-json", JSON.stringify(evidence), "--print-id"], { timeout: 10_000 });
       const last = String(stdout).trim().split("\n").pop() ?? "";
       return /^\d+$/.test(last) ? last : null;

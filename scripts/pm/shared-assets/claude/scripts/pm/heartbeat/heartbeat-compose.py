@@ -220,16 +220,34 @@ def slot_provisioned(n) -> bool:
         return True
 
 
+def active_slot_max() -> int:
+    """Highest active dev slot (Rajiv C0ALZJHGE49 thread 1793753137.367399, ts
+    1793753271.871029: "Remove S5-S8 from the report. They have been decommissioned.")."""
+    try:
+        return int(os.environ.get("PM_ACTIVE_SLOT_MAX", "4"))
+    except ValueError:
+        return 4
+
+
 def slot_block(slots_doc: dict | None, now: datetime, release_seen: dict | None = None) -> tuple[list[str], str, list[str]]:
     """Return (lines, tldr, pm_actions). Rajiv 2026-09-29 13:23 IST:
     "add the slot status to this hourly report as well. idle slots have to be checked."
+    Free slots above PM_ACTIVE_SLOT_MAX (decommissioned) are omitted from the
+    line, the idle count and idle-slot actions; occupied ones still show.
     """
     if slots_doc is None:
         return ["*Slots:* MoP unreachable"], "slots unknown", []
     slots = slots_doc.get("slots", []) if isinstance(slots_doc, dict) else slots_doc
     cells, actions = [], []
+    max_slot = active_slot_max()
     for s in sorted(slots, key=lambda s: s.get("slot", 0)):
         n = s.get("slot")
+        try:
+            above_max = int(n) > max_slot
+        except (TypeError, ValueError):
+            above_max = False
+        if above_max and not s.get("occupied"):
+            continue
         label = f"S{n} {s.get('name') or '?'}"
         if not s.get("occupied") and not slot_provisioned(n):
             # Configured but not provisioned yet (no checkout): never an idle action.

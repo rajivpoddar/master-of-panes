@@ -173,6 +173,9 @@ def owner(pin):
 def arm_pm_exit_pending(saved):
     """Rajiv 1793501776.726249, 1793502261.099499, 1793502605.714159:
     PM exits at its next Stop, resumes its saved prompt, THEN MoP arms dev exits.
+    Rajiv 1793752982.460979 ("implement the pm exit pending the same way ... stop
+    all subagents after save handoff"): MoP opens pm_save_handoff (variant exit);
+    /exit waits for the saved handoff files AND POST /exit-pending/subagents-stopped.
     No maintenance, input gate, idle polling or tracked-tool accounting."""
     if saved.get('pm_exit_pending_armed') is True:
         emit('PM_EXIT_PENDING: already armed for ' + day)
@@ -200,7 +203,9 @@ def arm_pm_exit_pending(saved):
     saved['pm_exit_pending_armed'] = True
     saved['replacement_status'] = 'exit_pending_armed'
     atomic(state, json.dumps(saved))
-    emit('PM_EXIT_PENDING: PM exits at next Stop; watchdog resumes saved prompt, THEN arms dev-only exits (next Stop, DND skipped)')
+    emit('PM_EXIT_PENDING: MoP opened pm_save_handoff (variant exit). PM saves MEMORY-session-handoff-current.md + data/pm-continuation-note.md, '
+         'stops ALL background agents with TaskStop, then POST /exit-pending/subagents-stopped; MoP sends /exit at the next Stop after both. '
+         'Watchdog resumes saved prompt, THEN arms dev-only exits (next Stop, DND skipped)')
 
 def snapshot():
     db = memory.parent / 'state/pm-ops.db'
@@ -245,7 +250,8 @@ def perform():
     prompt = ('Read ' + str(resume) + '. Resume PM from the canonical ledger. Relaunch the listed background agents only after checking their live state; '
               'do not duplicate completed work. Run Skill(daily-pm-restart) post-restart completion: post one line to Rajiv DM D0AMF0XE6TS.')
     emit(f'{"DRY_RUN" if args.dry_run else "RESTART"}: resume={resume}; open_obligations={len(obligations)}; slots={len(slots)}; open_prs={len(prs)}')
-    emit('PM_RELAUNCH: POST /exit-pending pm_only with saved continuation; /exit at next Stop; watchdog uses RESTART_COMMANDS[0]')
+    emit('PM_RELAUNCH: POST /exit-pending pm_only with saved continuation; MoP opens pm_save_handoff exit; PM saves handoff, TaskStops all agents, '
+         'acks POST /exit-pending/subagents-stopped; /exit at the next Stop after save+ack; watchdog uses RESTART_COMMANDS[0]')
     emit('DEV_EXIT_PENDING: only AFTER PM boot and continuation delivery; dev_only, next Stop, DND skipped')
     if args.dry_run:
         pm_children_report()
@@ -280,7 +286,7 @@ def perform():
     saved['handoff_status'] = 'pending'
     atomic(state, json.dumps(saved))
     arm_pm_exit_pending(saved)
-    emit('CHECKPOINTED: PM remains active; MoP sends /exit once at the next Stop')
+    emit('CHECKPOINTED: PM remains active (nothing gated); MoP sends /exit once at the next Stop after the handoff save + subagents-stopped ack')
 
 if args.dry_run:
     perform()

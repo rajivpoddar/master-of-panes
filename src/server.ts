@@ -22,6 +22,14 @@ import {
   pmOpsHandoffObligationOps,
   requestPmHandoffClear,
 } from "./pmHandoffClear.js";
+import {
+  ensurePmExitHandoffObligation,
+  PM_EXIT_HANDOFF_OBLIGATION_KEY,
+  PM_EXIT_HANDOFF_REQUESTED_AT_KEY,
+  PM_HANDOFF_EXIT_VARIANT,
+  recordPmExitSubagentsStopped,
+  resolveSupersededPmExitHandoff,
+} from "./pmHandoffExit.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -489,6 +497,9 @@ function currentPmSessionId(): string {
 }
 
 const pmHandoffOps = pmOpsHandoffObligationOps();
+/** Same pm_save_handoff kind and save detection; `exit` variant copy (subagents-stopped ack). */
+const pmExitHandoffOps = pmOpsHandoffObligationOps(undefined, undefined, undefined, PM_HANDOFF_EXIT_VARIANT);
+processor.pmExitHandoffOps = pmExitHandoffOps;
 
 /**
  * PM Stop: a saved handoff arms the existing Stop-fenced clear latch for THIS
@@ -1239,6 +1250,28 @@ app.post("/slots/:slotNum/dnd", async (c) => {
   return c.json({ ok: true, slot, dnd: body.dnd });
 });
 
+/**
+ * PM-only arming opens the pm_save_handoff `exit` obligation after the route
+ * commits; re-arming or disabling resolves the replaced request's own row.
+ * Never blocks the request outcome (rule 50: fail open).
+ */
+app.use("/exit-pending", async (c, next) => {
+  if (c.req.method !== "POST") return next();
+  const previous = {
+    requestedAt: db.getConfig(PM_EXIT_HANDOFF_REQUESTED_AT_KEY) || "",
+    obligationId: db.getConfig(PM_EXIT_HANDOFF_OBLIGATION_KEY) || null,
+  };
+  await next();
+  const current = db.getConfig(PM_EXIT_HANDOFF_REQUESTED_AT_KEY) || "";
+  if (previous.requestedAt && previous.requestedAt !== current) {
+    void resolveSupersededPmExitHandoff(pmExitHandoffOps, previous,
+      `pm_save_handoff exit for ${previous.requestedAt} superseded by a new exit-pending request`).catch(() => false);
+  }
+  if (current && current !== previous.requestedAt) {
+    await ensurePmExitHandoffObligation(db, pmExitHandoffOps).catch(() => null);
+  }
+});
+
 /** Set or clear the exit_pending flag (REST parity for mop_set_exit_pending). */
 app.post("/exit-pending", async (c) => {
   let body: { enabled?: boolean; dev_only?: boolean; pm_only?: boolean; continuation_prompt?: string } = {};
@@ -1262,11 +1295,29 @@ app.post("/exit-pending", async (c) => {
   if (body.continuation_prompt !== undefined && (typeof body.continuation_prompt !== "string" || !body.pm_only)) {
     return c.json({ error: "continuation_prompt requires pm_only and must be a string" }, 400);
   }
-  db.setExitPending(body.enabled, body.dev_only === true, body.pm_only === true, body.continuation_prompt);
+  // REST PM-only arming requires the saved handoff + subagents-stopped ack.
+  db.setExitPending(body.enabled, body.dev_only === true, body.pm_only === true, body.continuation_prompt, body.pm_only === true);
   db.logEvent(0, body.enabled ? "exit_pending_enabled" : "exit_pending_disabled", null, null, {
     reason: body.enabled ? "PM set exit_pending — slots will /exit at next idle" : "PM cleared exit_pending flag",
   });
   return c.json({ ok: true, enabled: body.enabled, status: db.getExitStatus() });
+});
+
+/**
+ * PM ack for the pm_save_handoff `exit` variant: all background agents/tasks
+ * are stopped. /exit is sent at the next PM Stop once the handoff save is also
+ * detected. Optional `episode` must match the pending PM exit.
+ */
+app.post("/exit-pending/subagents-stopped", async (c) => {
+  let body: { episode?: unknown } = {};
+  try { body = await c.req.json(); } catch { body = {}; }
+  if (body === null || typeof body !== "object") body = {};
+  if (body.episode !== undefined && typeof body.episode !== "string") {
+    return c.json({ error: "Invalid 'episode' string field" }, 400);
+  }
+  const result = recordPmExitSubagentsStopped(db, { nowMs: Date.now(), episode: body.episode as string | undefined });
+  if (!result.ok) return c.json({ error: result.error }, result.status);
+  return c.json({ ...result, status: db.getExitStatus() });
 });
 
 /** Exit-pending status (REST parity for mop_exit_status). */

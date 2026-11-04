@@ -600,7 +600,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-daily-pm-restart",
-      "sha256": "b14fc4abae8e0e23c0f5d83bc4457b451dacc3af3878a8b06cfe6dfd77168e0f",
+      "sha256": "69d61026a56f51d416c356a4ce011c51d829a7ed854efc38c1b3548de2510426",
       "source_path": "claude/scripts/pm/daily-pm-restart.sh"
     },
     {
@@ -627,7 +627,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "7b1390cf9b3cad82e3bb278862e40755ddc674c7d7e6fbf5dc1fe93fb5e2962d",
+      "sha256": "7f317fa6dff3e5067be8c8d1be42f4776e0cae72a591e39d1a7c4a8ab674a1e7",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -881,7 +881,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-daily-pm-restart",
-      "sha256": "3fd6e5da3dececd7919df2208186748d00f0249b1dccef31731c5a7f95e2c5a6",
+      "sha256": "7afb205a2fbbc0cabdb4f4ef6a87eb9e1506c9df78e419b4e2c3cb3ed22c1390",
       "source_path": "claude/skills/daily-pm-restart/SKILL.md"
     },
     {

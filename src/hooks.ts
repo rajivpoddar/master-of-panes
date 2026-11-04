@@ -5,7 +5,13 @@
  * plan ready), updates slot state, and relays notifications to PM.
  */
 
-import { failOpenUnobservedPmClear } from "./pmHandoffClear.js";
+import { failOpenUnobservedPmClear, type HandoffObligationOps } from "./pmHandoffClear.js";
+import {
+  consumePmExitHandoff,
+  ensurePmExitHandoffObligation,
+  evaluatePmExitHandoffAtStop,
+  PM_EXIT_HANDOFF_OBLIGATION_KEY,
+} from "./pmHandoffExit.js";
 import { verifyPMCadenceDelivery } from "./pmCadence.js";
 import { isPmClearUndelivered } from "./pmClearLatch.js";
 import { execFile } from "node:child_process";
@@ -207,6 +213,11 @@ export class HookProcessor {
    * observed by the health monitor.
    */
   private static readonly SLOT_PROMISE_AUDIT_TIMEOUT_MS = 15_000;
+
+  /** pm-ops ops for the pm_save_handoff `exit` variant; set by the server. */
+  pmExitHandoffOps: HandoffObligationOps | null = null;
+  /** Handoff files override (tests); default is the clear flow's PM_HANDOFF_FILES. */
+  pmExitHandoffFiles: readonly string[] | undefined = undefined;
 
   constructor(
     private db: MoPDatabase,
@@ -1464,27 +1475,42 @@ export class HookProcessor {
       try { currentSession = boot && JSON.parse(boot.payload).session_id; } catch { /* Unknown identity refuses the exit. */ }
       if (typeof currentSession !== "string" || !currentSession.trim()
           || payload.session_id !== currentSession) return {};
-      this.db.markSlotExitCycled(0);
-      const workVersion = () => Math.max(...["SessionStart", "UserPromptSubmit", "PreToolUse"].map(
-        type => this.db.getEvents(0, 1, type)[0]?.id ?? 0));
-      const stoppedWork = workVersion();
-      const fence = () => {
-        const current = this.db.getExitStatus();
-        return !current.pending || !current.pm_only || current.episode !== exitStatus.episode ? "exit_pending_cancelled"
-          : workVersion() !== stoppedWork ? "pm_work_changed_after_stop" : null;
-      };
-      const observed = await this.relay.observeSlotPane(0);
-      const delivery = observed ? await this.relay.deliverGuardedToSlot(0, "/exit", {
-        expectedPaneId: observed.paneId,
-        recheck: async () => fence(),
-        finalCheck: fence,
-      }) : { outcome: "refused_pre_effect", reason: "pm_pane_unknown" };
-      this.db.logEvent(0, "exit_pending_triggered", "Stop", null, {
-        source: "pm_only_stop", delivery: delivery.outcome,
-        episode: exitStatus.episode, session_id: currentSession,
-        reason: "PM Stop consumed one /exit attempt; watchdog owns respawn",
+      // pm_save_handoff `exit` variant (Rajiv D0AMF0XE6TS ts 1793752982.460979):
+      // a REST-armed PM exit waits for the saved handoff AND the
+      // subagents-stopped ack. Waiting never blocks: this Stop falls through to
+      // normal PM handling and the exit stays pending (rule 50).
+      const handoff = evaluatePmExitHandoffAtStop(this.db, {
+        currentSessionId: currentSession, ops: this.pmExitHandoffOps, files: this.pmExitHandoffFiles,
       });
-      return {};
+      if (handoff.kind === "cancelled_session_change") return {};
+      if (handoff.kind === "waiting") {
+        if (this.pmExitHandoffOps && !this.db.getConfig(PM_EXIT_HANDOFF_OBLIGATION_KEY)) {
+          void ensurePmExitHandoffObligation(this.db, this.pmExitHandoffOps).catch(() => null);
+        }
+      } else {
+        if (handoff.kind === "ready") consumePmExitHandoff(this.db, this.pmExitHandoffOps, handoff.requestedAt, handoff.via);
+        this.db.markSlotExitCycled(0);
+        const workVersion = () => Math.max(...["SessionStart", "UserPromptSubmit", "PreToolUse"].map(
+          type => this.db.getEvents(0, 1, type)[0]?.id ?? 0));
+        const stoppedWork = workVersion();
+        const fence = () => {
+          const current = this.db.getExitStatus();
+          return !current.pending || !current.pm_only || current.episode !== exitStatus.episode ? "exit_pending_cancelled"
+            : workVersion() !== stoppedWork ? "pm_work_changed_after_stop" : null;
+        };
+        const observed = await this.relay.observeSlotPane(0);
+        const delivery = observed ? await this.relay.deliverGuardedToSlot(0, "/exit", {
+          expectedPaneId: observed.paneId,
+          recheck: async () => fence(),
+          finalCheck: fence,
+        }) : { outcome: "refused_pre_effect", reason: "pm_pane_unknown" };
+        this.db.logEvent(0, "exit_pending_triggered", "Stop", null, {
+          source: "pm_only_stop", delivery: delivery.outcome,
+          episode: exitStatus.episode, session_id: currentSession,
+          reason: "PM Stop consumed one /exit attempt; watchdog owns respawn",
+        });
+        return {};
+      }
     }
     if (slotNum === 0) {
       // Cadence inject delivery check: re-submit a reported-ok cadence prompt

@@ -38,6 +38,11 @@ import { DEFAULT_CONFIG } from "../src/types.js";
 const PM_OPS_LEGACY = new URL("../scripts/pm/shared-assets/claude/scripts/pm-ops-legacy.py", import.meta.url).pathname;
 const run = promisify(execFile);
 
+/** Bounded poll for a ledger effect done by a python subprocess (fixed sleeps flaked under suite load). */
+async function until(done: () => boolean, maxMs = 5_000): Promise<void> {
+  for (let waited = 0; waited < maxMs && !done(); waited += 100) await new Promise((r) => setTimeout(r, 100));
+}
+
 function gate() {
   let open!: () => void;
   const promise = new Promise<void>((resolve) => { open = resolve; });
@@ -185,7 +190,7 @@ test("control: both mtimes must advance; the next Stop injects exactly one /clea
     assert.equal(f.db.getConfig("pm_clear_delivery_state"), "awaiting_ack");
     await h.hook("Stop"); await h.settle();
     assert.equal(h.pastes(), 1, "ambiguous/possible-effect write is never resent");
-    await new Promise((r) => setTimeout(r, 400));
+    await until(() => f.rows()[0]?.status === "resolved");
     assert.equal(f.rows()[0]!.status, "resolved");
     h.close();
   } finally { f.close(); }
@@ -245,7 +250,9 @@ test("(a) a delayed resolve of A never resolves successor B or authorizes B's un
     const idB = f.db.getConfig(PM_HANDOFF_OBLIGATION_KEY)!;
     assert.notEqual(idB, idA, "B never reuses A's row");
     hold.open();
-    await new Promise((r) => setTimeout(r, 500));
+    // Poll (bounded) instead of a fixed 500ms: the resolve is a python subprocess
+    // and flaked under full-suite load.
+    await until(() => f.rows().find((r) => String(r.id) === idA)?.status === "resolved");
     const byId = Object.fromEntries(f.rows().map((r) => [String(r.id), r.status]));
     assert.equal(byId[idA], "resolved", "A's delayed completion resolved A only");
     assert.equal(byId[idB], "open", "no successor resolution");
@@ -267,7 +274,8 @@ test("(a) a stale returned ID for A is never published into successor B", async 
     const b = await request(f) as { requestedAt: string; obligationId: string };
     hold.open();
     await pendingA;
-    await new Promise((r) => setTimeout(r, 500));
+    await until(() => f.rows().filter((r) => r.status === "open").length === 1
+      && f.db.getEvents(0, 10, "pm_handoff_obligation_stale_id_dropped").length === 1);
     assert.equal(f.db.getConfig(PM_HANDOFF_OBLIGATION_KEY), b.obligationId, "B keeps its own id");
     assert.equal(f.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), b.requestedAt);
     assert.equal(f.db.getEvents(0, 10, "pm_handoff_obligation_stale_id_dropped").length, 1);
@@ -380,7 +388,7 @@ test("single-flight: concurrent Stop, re-request and reconcile never start a sec
     f.saveAll();
     await h.hook("Stop"); await h.settle();
     assert.equal(h.pastes(), 1, "the saved request clears once");
-    await new Promise((r) => setTimeout(r, 500));
+    await until(() => f.rows().filter((r) => r.status === "open").length === 0);
     assert.deepEqual(f.rows().filter((r) => r.status === "open"), [], "no stale open sibling after completion");
     h.close();
   } finally { f.close(); }

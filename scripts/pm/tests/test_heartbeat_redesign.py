@@ -702,6 +702,7 @@ def test_lane_start_from_events_uses_newest_contiguous_run():
 
 
 def test_slot_block_shows_unprovisioned_s7_s8_without_idle_actions(monkeypatch):
+    monkeypatch.setenv("PM_ACTIVE_SLOT_MAX", "8")  # provisioning pin, not the decommission cap
     monkeypatch.setattr(compose, "slot_provisioned", lambda n: int(n) <= 6)
     doc = {"slots": [
         {"slot": 6, "name": "Pushya", "occupied": False, "last_activity": "2026-09-29T00:00:00Z"},
@@ -714,6 +715,36 @@ def test_slot_block_shows_unprovisioned_s7_s8_without_idle_actions(monkeypatch):
     assert "S8 Anuradha: not provisioned" in text
     assert not any("S7" in a or "S8" in a for a in actions)
     assert any("S6" in a for a in actions)
+
+
+def test_slot_block_omits_free_decommissioned_slots_above_active_max(monkeypatch):
+    # Rajiv C0ALZJHGE49 thread 1793753137.367399, ts 1793753271.871029:
+    # "Remove S5-S8 from the report. They have been decommissioned."
+    monkeypatch.delenv("PM_ACTIVE_SLOT_MAX", raising=False)  # default 4
+    monkeypatch.setattr(compose, "slot_provisioned", lambda n: True)
+    stale = "2026-09-29T00:00:00Z"
+    doc = {"slots": [
+        {"slot": 3, "name": "Ashwini", "occupied": False, "last_activity": stale},
+        {"slot": 4, "name": "Chitra", "occupied": True, "issue": 44, "last_activity": stale},
+        {"slot": 5, "name": "Revati", "occupied": False, "last_activity": stale},
+        {"slot": 6, "name": "Pushya", "occupied": True, "issue": 66, "last_activity": stale},
+        {"slot": 7, "name": "Swati", "occupied": False, "last_activity": None},
+        {"slot": 8, "name": "Anuradha", "occupied": False, "last_activity": stale},
+    ]}
+    lines, tldr, actions = compose.slot_block(doc, NOW)
+    text = "\n".join(lines)
+    assert lines[0] == "*Slots (3):*"
+    for gone in ("S5", "S7", "S8"):
+        assert gone not in text
+        assert not any(a.startswith(f"idle-slot {gone} ") for a in actions)
+    assert "S6 Pushya" in text, "occupied slots above the max still show"
+    assert any(a.startswith("idle-slot S6 #66") for a in actions)
+    idle = [a for a in actions if a.startswith("idle-slot")]
+    assert sorted(a.split()[1] for a in idle) == ["S3", "S4", "S6"]
+    assert tldr.startswith("3 idle slot(s)")
+    monkeypatch.setenv("PM_ACTIVE_SLOT_MAX", "8")
+    lines8, _, _ = compose.slot_block(doc, NOW)
+    assert lines8[0] == "*Slots (6):*"
 
 
 EMAIL_EMPTY = ({"events": 0, "users": 0, "top": []}, {}, [])
