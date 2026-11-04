@@ -21,8 +21,8 @@ The wake is terminal only when:
 
 - every intake issue is classified;
 - every open issue has exactly one `status:*` label and one canonical priority;
-- every Todo is bounded, dependency-free, dispatch-valid app-code/app-test
-  work claimable by a numbered slot;
+- every Todo has a valid bounded app-code/app-test membership contract; named
+  dependencies may hold assignment at every priority and are checked live;
 - every dependency wait names only live blockers and each chain's current head
   is Todo or has a typed non-Todo hold;
 - no eligible bounded backlog candidate remains parked (a parked P3 per the
@@ -33,7 +33,10 @@ The wake is terminal only when:
   which owns any required PM relay.
 
 Ten clean Todos is a minimum capacity target, never a maximum. Promote every
-eligible bounded candidate found in the pinned surface.
+eligible bounded P0-P2 candidate found in the pinned surface. Runnable P3s may
+refill the claimable deficit after higher priorities. No promoter architecture
+review is required. Read the complete current policy in
+`/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pm-triage/skill.md`.
 
 ## Authority and hard boundaries
 
@@ -74,7 +77,7 @@ Do not replace or silently expand this snapshot later in the wake.
 Run:
 
 ```bash
-python3 scripts/pm/control-plane/backlog-triage.py --dry-run --surface full
+python3 ~/.claude/scripts/backlog-triage.py --dry-run --surface full
 ```
 
 This is a detector, not authority. Read complete live state for every issue
@@ -105,9 +108,10 @@ shared actor alone.
 
 #### `PROMOTE`
 
-Use only for one bounded, executable, dependency-free app-code or app-test
-change suitable for a numbered slot. Repair the complete contract, remove
-backlog/blocker labels, and add `status:todo`.
+Use only for one bounded app-code or app-test change suitable for a numbered slot, including
+named dependency-held work. Repair the complete contract, replace backlog with
+`status:todo`, and preserve live dependency labels/refs. Membership does not
+authorize assignment; the selector checks dependencies live (Rajiv S113).
 
 Parked-P3 exclusion (mandatory before any PROMOTE): a P3 is parked — never
 set `status:todo` — when ALL hold: it carries `status:backlog` or
@@ -137,14 +141,16 @@ a numbered slot. This includes CI/E2E workflow behavior, fixtures/capture
 producers, promotion proof, classifiers, test planners, watchdogs, harnesses,
 and deterministic test infrastructure.
 
-Migration implementation/test work may be Todo, but production execution
-remains CTO-owned and separately authorized.
+Migration implementation/test work may be Todo, but production-DB execution
+is PM-only and separately authorized.
 
 #### `DEPENDENCY_WAIT`
 
-Use `status:backlog + pm-blocked:dependency` for otherwise claimable work with
-a live predecessor or proof gate. Record exact issue/PR blockers, owner, next
-action, wake condition, evidence, and fingerprint.
+Use `status:todo + pm-blocked:dependency` for bounded app-code/app-test work
+with named predecessors. Preserve canonical blockers, owner, next action, wake,
+evidence and fingerprint. These are pool members at every priority, held from
+assignment until the selector verifies dependencies live. Product/external/proof
+requirements that are not named issue/PR dependencies remain typed non-Todo holds.
 
 #### Typed non-Todo hold
 
@@ -222,7 +228,8 @@ Todo invariants:
   CTO/Rajiv promotion;
 - exactly one `status:todo` label;
 - exactly one matching P0/P1/P2/P3 label;
-- `blockers: none`, no dependency label, and no PM blocker label;
+- canonical named dependency refs (or `none`), with only dependency blocker
+  labels allowed; other PM/product/external holds remain nonclaimable;
 - bounded app-code/app-test work only; and
 - `disposition: PROMOTE`, a valid branch slug, and focused validation.
 
@@ -230,7 +237,8 @@ Priority rules:
 
 - P0: verified active critical incident;
 - P1: live-user harm, bug, data/export risk, or user-visible lag;
-- P2: PRM, benchmarking, agency/workspace, and ordinary bounded improvements;
+- P2: benchmarking and agency/workspace features (Academy, multi-doc upload,
+  speaker mapping/sidebar); PRM was dropped for now, not routine promotion work;
 - P3: genuinely low-priority bounded work.
 
 Body priority and label must match exactly.
@@ -252,8 +260,12 @@ Body priority and label must match exactly.
 6. Repair contradictory prose and stale wake conditions after deciding the
    live graph.
 
-Never finish with an eligible head in backlog, a closed/nonexistent stale
-blocker, a blocked Todo, or a downstream child ahead of an open predecessor.
+Never finish with eligible P0-P2 app work hidden in backlog or a stale blocker.
+Dependency-held children may be pool members before their predecessors complete;
+never ASSIGN a downstream child before its live requirements are satisfied.
+Report total membership separately from claimable and dependency-held counts.
+Ten claimable is a floor, not a cap. P3s may refill below ten after P0-P2; preserve
+explicit issue-specific parks. Promotion needs no Codex architecture review.
 
 ## Repository-wide status hygiene
 
@@ -261,7 +273,7 @@ On every wake, query all open issues, not only intake. Repair zero/multiple
 status labels directly after reading the live issue:
 
 - clean bounded app work -> fully repaired Todo;
-- live dependency -> dependency wait;
+- named live dependency -> dependency-held Todo, with live checks at assignment;
 - low-priority explicitly parked work -> `status:deferred`, and a parked P3
   already in `status:backlog` or `status:deferred` keeps that status: never
   "repair" it to `status:todo`;
@@ -279,21 +291,23 @@ unlabeled issues separately; they are not missed open Ready Pool work.
 Validate every changed body:
 
 ```bash
-python3 scripts/pm/control-plane/validate-issue-contract-ledger.py \
+python3 ~/.claude/scripts/validate-issue-contract-ledger.py \
   --json --require-qa-proof
 ```
 
-Validate changed/promoted Todos:
+Validate pool membership with `backlog-triage.py audit-ready-pool`.
+Use the following stricter check only before actual assignment (named dependency
+waits are expected to fail assignment while remaining valid pool members):
 
 ```bash
-python3 scripts/pm/control-plane/backlog-triage.py \
+python3 ~/.claude/scripts/backlog-triage.py \
   check-dispatch-readiness --issues <ISSUES...>
 ```
 
 Then rerun:
 
 ```bash
-python3 scripts/pm/control-plane/backlog-triage.py --dry-run --surface full
+python3 ~/.claude/scripts/backlog-triage.py --dry-run --surface full
 ```
 
 Required zero buckets:
@@ -323,7 +337,7 @@ P0–P2 rows, deferred/blocked dependency handling, unparked P3s, and P3s
 lacking an attributable quoted directive remain governed by the existing
 classifier and promotion rules. Only a newer post-park explicit CTO/Rajiv
 promotion instruction cancels the exclusion. A parked P3 is not a Ready
-Pool member: the dispatchable Ready Pool carries P0–P2, and a P3 enters it
+Pool member: P0-P2 are always considered, and a P3 enters it
 only unparked under the existing promotion rules.
 
 ## CTO decisions handoff and PM relay

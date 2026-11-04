@@ -163,6 +163,15 @@
       "source_path": "claude/hooks/pre-issue-create-audit.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/ready-pool-low-stop-validator.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-triage",
+      "sha256": "64fb84cf4b336888899e1e63c58c5a908b906ba94eec4ff71d72d021a74d8fbf",
+      "source_path": "claude/hooks/ready-pool-low-stop-validator.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/assignmentAuthority.js",
       "dependencies": [],
       "dependency_status": "closed",
@@ -253,6 +262,15 @@
       "source_path": "claude/plugins/master-of-panes/scripts/hook-relay.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/agents/pm-backlog-promoter.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-issue-triage",
+      "sha256": "9e0692f0090b61855f5f36767be4d4d4abb2e48bcb40287a07dba31c55389821",
+      "source_path": "claude/project-agents/pm-backlog-promoter.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/agents/pm-code-reviewer.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -287,6 +305,15 @@
       "ownership_class": "shared-claude-pm-report",
       "sha256": "8b67ea060d935f4be465aa342b0f3fe00e86950ce0ccbb80a58b1e2cc1d94abd",
       "source_path": "claude/scripts/axiom-activity-report.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/backlog-triage.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-triage",
+      "sha256": "f903000a2401190ceac914e38756409c10fbc122b586cab6c150daed4e0099fc",
+      "source_path": "claude/scripts/backlog-triage.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/ci-success-reconciliation.py",
@@ -386,6 +413,15 @@
       "ownership_class": "shared-claude-issue-contract-ledger",
       "sha256": "94cc86a78de638c2b8e63c9dbfddb94562d63ebf07f9a9d8f4bd05eca16c8fab",
       "source_path": "claude/scripts/issue-contract-ledger-hook.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/issue_claimability.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-triage",
+      "sha256": "b07abb890e800301dacb5ee143a7321fe96df16f9a520bc9d4b17b0759632e04",
+      "source_path": "claude/scripts/issue_claimability.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/launch-dev-slot-claude.sh",
@@ -714,6 +750,24 @@
       "source_path": "claude/scripts/qa-visual-proof-gate.py"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ready-pool-contract-repair.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-triage",
+      "sha256": "5cb3bb2ac543a6718632007dd88588e85353df6812de05b8de594d293cdef12b",
+      "source_path": "claude/scripts/ready-pool-contract-repair.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/ready_pool_select.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-issue-triage",
+      "sha256": "802c029ca986672fc46584b918f3366c7ff61675ca027654d726aacb193dee03",
+      "source_path": "claude/scripts/ready_pool_select.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -741,6 +795,24 @@
       "source_path": "claude/scripts/sync-dev-slot-skill-allowlist.mjs"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/test_ready_pool_select.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-issue-triage-tests",
+      "sha256": "0e720d05f8df37fda2af0c9cec597be952a8edf080de9771b04881e661c150c8",
+      "source_path": "claude/scripts/test_ready_pool_select.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_backlog_runnability.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-issue-triage-tests",
+      "sha256": "52a3374bec41a4798c10b11359cd859a6bf255aab3c7d0fc9e8e40a692a7b8e5",
+      "source_path": "claude/scripts/tests/test_backlog_runnability.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/validate-issue-contract-ledger.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -757,6 +829,15 @@
       "ownership_class": "shared-claude-anthropic-529-overload-inline-fallback",
       "sha256": "20768dfefe924ca21c77b08dba08735cfa50211ceeb488f8ddbb74d5ed40a3f5",
       "source_path": "claude/skills/anthropic-529-overload-inline-fallback/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/backlog-triage/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-issue-triage",
+      "sha256": "3c1b0d66c99a15747b6985c1300b483e2d8636e02dcbda173051e8489addba90",
+      "source_path": "claude/skills/backlog-triage/SKILL.md"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
@@ -930,6 +1011,15 @@
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/hourly-ops-audit/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-issue-triage",
+      "sha256": "10bf1ef7e88704379fd5fd79fb28714363d98572a319ce4efbcbfcb83ee87874",
+      "source_path": "claude/skills/hourly-ops-audit/SKILL.md"
+    },
+    {
       "additional_targets": [
         "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/hourly-report-processing/SKILL.md"
       ],
@@ -1048,6 +1138,15 @@
       "ownership_class": "shared-claude-pm-cleanup",
       "sha256": "a12579e0e381947be8dccbe3c648e93858df29ad25556fbb45e4cb37f3dbe4f2",
       "source_path": "claude/skills/pm-cleanup-pr/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pm-triage/skill.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-issue-triage",
+      "sha256": "c9f220ec6783ecc433ed086ded27b664be4c12de3285f30ef7c61d54951a8f83",
+      "source_path": "claude/skills/pm-triage/skill.md"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/pr-state-sweep/SKILL.md",
@@ -1332,7 +1431,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-automation-prompt-template",
-      "sha256": "867e3cf17181b0e85867bbb80dcf3f701422214e853d887f8338bd5302caf470",
+      "sha256": "6f6aa59b87c700fa9c145d30e1947f6e2d6f96cef4ea75550a4952d096e74dce",
       "source_path": "codex/automations/heydonna-3h-ready-pool-reconciliation/prompt.template"
     },
     {
@@ -1359,7 +1458,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-monitor",
-      "sha256": "adec13078aef912fd5ae4cfe1e2178db65f8d9a1368562942721a6527744a579",
+      "sha256": "3316119d30380ba3d94eab742ce136059a4a40fbb41dba9adca652dd1dc703b6",
       "source_path": "codex/monitors/heydonna-issue-triage/WAKE_SOP.md"
     },
     {
@@ -1602,7 +1701,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 174,
+    "selected_count": 185,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1692,7 +1791,20 @@
       "/Users/rajiv/.claude/scripts/cto-relay-snapshot.py",
       "/Users/rajiv/.codex/monitors/cto-slack-relay/WAKE_SOP.md",
       "/Users/rajiv/.codex/monitors/heydonna-social-media/WAKE_SOP.md",
-      "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/pr-delivery-retro.py"
+      "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/pr-delivery-retro.py",
+      "/Users/rajiv/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt",
+      "/Users/rajiv/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
+      "/Users/rajiv/.claude/scripts/backlog-triage.py",
+      "/Users/rajiv/.claude/scripts/ready_pool_select.py",
+      "/Users/rajiv/.claude/scripts/issue_claimability.py",
+      "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/ready-pool-contract-repair.py",
+      "/Users/rajiv/Downloads/projects/heydonna-app/.claude/agents/pm-backlog-promoter.md",
+      "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pm-triage/skill.md",
+      "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/backlog-triage/SKILL.md",
+      "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/hourly-ops-audit/SKILL.md",
+      "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/ready-pool-low-stop-validator.sh",
+      "/Users/rajiv/.claude/scripts/test_ready_pool_select.py",
+      "/Users/rajiv/.claude/scripts/tests/test_backlog_runnability.py"
     ]
   },
   "owner": "master-of-panes",
