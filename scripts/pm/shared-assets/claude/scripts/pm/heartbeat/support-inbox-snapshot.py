@@ -90,6 +90,15 @@ CLOSING_MAX_CHARS = 100
 MAIN_CHECKOUT = Path.home() / "Downloads/projects/heydonna-app"
 OPEN_STATE = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/support-inbox-open.json"
 
+# Total wall budget for the whole collector. The heartbeat composer blocks on this
+# process, so exceeding it stalls the entire report (observed: two missed heartbeats).
+# Override with SUPPORT_INBOX_BUDGET_S.
+SUPPORT_BUDGET_S = float(os.environ.get("SUPPORT_INBOX_BUDGET_S") or 45.0)
+# Cap how many previously-tracked roots one run re-checks (newest first). Roots beyond
+# the cap keep their prior state and are picked up on a later run, so nothing is dropped.
+MAX_CARRY_FORWARD = int(os.environ.get("SUPPORT_MAX_CARRY_FORWARD") or 40)
+
+
 
 def load_env(name: str) -> str | None:
     if os.environ.get(name):
@@ -301,19 +310,41 @@ def save_open_state(open_map: dict, path: Path = OPEN_STATE) -> None:
     tmp.replace(path)
 
 
-def carry_forward(threads: list[dict], prev_tracked, fetch_thread) -> list[dict]:
+def carry_forward(threads: list[dict], prev_tracked, fetch_thread, *, deadline: float | None = None) -> list[dict]:
     """Re-fetch every previously tracked root (answered or not) that fell out of the
     lookback, so a new customer reply on an answered thread flips it back to needs_reply
-    (classify_thread decides from the full reply list)."""
+    (classify_thread decides from the full reply list).
+
+    BOUNDED (#support-inbox-hang): tracked roots accumulate forever by design, so this
+    loop grew to ~196 sequential Slack calls and made the collector exceed the heartbeat's
+    wall budget, stalling the whole report. Two bounds now apply and BOTH are required:
+      - `deadline` (monotonic) stops the loop once the collector's budget is spent; roots
+        not reached keep their prior state and are retried next run (no data is dropped).
+      - `MAX_CARRY_FORWARD` caps how many roots a single run re-checks, newest first, so a
+        large backlog is drained progressively instead of in one unbounded pass.
+    Newest-first matters: a recent reply is the one most likely to need an answer.
+    """
     seen = {t["ts"] for t in threads}
     out = list(threads)
-    for ts in (prev_tracked or {}):
-        if ts in seen:
-            continue
+    pending = [ts for ts in (prev_tracked or {}) if ts not in seen]
+    # Slack ts values are decimal strings, so a float sort orders them chronologically.
+    pending.sort(key=lambda s: float(s) if _is_ts(s) else 0.0, reverse=True)
+    for ts in pending[:MAX_CARRY_FORWARD]:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         item = fetch_thread(ts)
         if item:
             out.append(item)
     return out
+
+
+def _is_ts(value) -> bool:
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
 
 
 def tracked_roots(threads: list[dict], now_ts: float) -> dict[str, float]:
@@ -372,6 +403,7 @@ def main() -> int:
 
     now = datetime.now(timezone.utc)
     now_ts = now.timestamp()
+    deadline = time.monotonic() + SUPPORT_BUDGET_S
     window_start = now_ts - args.hours * 3600
     result: dict = {"threshold_min": needs_reply_threshold_minutes(now), "slack": [], "in_app": [], "failures": []}
     token = load_env("SLACK_BOT_TOKEN")
@@ -386,6 +418,7 @@ def main() -> int:
                 threads = carry_forward(
                     threads, prev_state.get(channel, []),
                     lambda ts, ch=channel: fetch_thread(token, ch, ts, now_ts),
+                    deadline=deadline,
                 )
                 new_state[channel] = tracked_roots(threads, now_ts)
                 result["slack"].extend(select_items(threads, window_start))
