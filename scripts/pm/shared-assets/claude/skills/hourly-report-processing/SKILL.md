@@ -8,7 +8,7 @@ description: PM processing of the posted "Hourly — HH:MM IST" heartbeat report
 Source: Rajiv, DM D0AMF0XE6TS thread 1791206320.393239, 2026-10-05 18:48 IST:
 *"create skill for hourly report processing that investigates any errors, checks the open pr's and handles idle slot. add it to the SOP/buddhi"*
 
-`hourly-heartbeat` PRODUCES the report. This skill CONSUMES it. The report is a work queue, not an FYI. Every line ends in an action, an owner, or an explicit "no action: <reason>".
+`hourly-heartbeat` PRODUCES the report. This skill CONSUMES it. The report is a work queue, not an FYI. Every line ends in an action, an owner, or an explicit "no action: <reason>". Every Pending PM actions line gets an owner or is done in the same PM turn (Rajiv C0ALZJHGE49 thread 1793769935.961309, ts 1793770291.164719).
 
 ## Trigger
 - A HeyDonna Alerts message starting `*Hourly — HH:MM IST*` in C0ALZJHGE49 (the thread ts is the report's ts).

@@ -436,7 +436,9 @@ def test_compose_1h_includes_active_users_block_under_line_budget():
     assert "*Active users (1h):* 3 (prior 5) +1 internal" in lines
     assert "• u0***@x.com (0f), u1***@x.com (1f), u2***@x.com (2f)" in lines
     assert "3 active users" in lines[0]
-    assert len(lines) <= 24  # The remote-box line and its spacer are mandatory.
+    pending = lines.index('*Pending PM actions:*')
+    assert lines[pending + 1:pending + 3] == ['• obligations: UNAVAILABLE (collector not run)', '• GitHub: UNAVAILABLE (collector not run)']
+    assert len(lines) - 4 <= 24  # Existing budget excludes the newly required section and spacer.
 
 
 def test_compose_without_flag_omits_active_users():
@@ -487,7 +489,9 @@ def test_compose_with_slots_active_users_agents_and_empty_decisions_stays_under_
     lines = msg.splitlines()
     assert "*ACTIONS (PM):* idle-slot S2 #8478 idle 25m; idle-slot S3 free idle 40m" in lines
     # Rajiv's Agents line + the spacer and empty Decisions section add 3 lines.
-    assert len(lines) <= 30  # Includes mandatory remote-box line and spacer.
+    pending = lines.index('*Pending PM actions:*')
+    assert lines[pending + 1:pending + 3] == ['• obligations: UNAVAILABLE (collector not run)', '• GitHub: UNAVAILABLE (collector not run)']
+    assert len(lines) - 4 <= 30  # Preserve the existing budget apart from the new section.
 
 
 def test_known_codes_map_marks_code_mapped_not_new(tmp_path):

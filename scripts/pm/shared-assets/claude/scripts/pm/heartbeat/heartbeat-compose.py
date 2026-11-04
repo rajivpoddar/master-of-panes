@@ -375,6 +375,110 @@ def _compact(value, limit: int) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def pending_obligations(path: Path, now: datetime) -> dict:
+    """Read PM-owned open obligations without creating or modifying the ledger."""
+    try:
+        with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM obligations WHERE status='open' AND lower(trim(coalesce(owner,''))) IN ('pm','') ORDER BY created_at, id").fetchall()
+        active = []
+        for row in rows:
+            row = dict(row)
+            until = _parse_ts(row.get('suppress_until'))
+            if row.get('suppress_until') and until is None:
+                return {'error': 'invalid suppression timestamp'}
+            if until and until > now:
+                continue
+            active.append(row)
+        return {'items': [r for r in active if r['kind'] != 'backlog'],
+                'backlog': sum(r['kind'] == 'backlog' for r in active)}
+    except (OSError, sqlite3.Error) as exc:
+        return {'error': type(exc).__name__}
+
+
+_NEXT_ACTION = re.compile(r'(?im)^\s*(?:[-*]\s*)?(?:\*\*)?next_action(?:\*\*)?\s*:\s*(.+)$')
+_MERGE_CONDITION = re.compile(r'\b(?:when|after)\s+(?:PR\s+)?#(\d+)\s+merges\b', re.I)
+
+
+def pending_github(run=subprocess.run) -> dict:
+    """Paginate all open issues and PRs; cache repeated dependency reads in gh."""
+    def api(endpoint):
+        result = run(['gh', 'api', '--cache', '5m', endpoint], capture_output=True,
+                     text=True, errors='replace', timeout=45)
+        if result.returncode:
+            raise RuntimeError('GitHub API unavailable')
+        return json.loads(result.stdout)
+    try:
+        items, page = [], 1
+        while True:
+            batch = api(f'repos/Scribie/heydonna-app/issues?state=open&per_page=100&page={page}')
+            if not isinstance(batch, list):
+                raise ValueError('invalid issue response')
+            items.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+            if page > 100:
+                raise ValueError('issue pagination limit')
+        cache, found = {}, []
+        for item in items:
+            for match in _NEXT_ACTION.finditer(item.get('body') or ''):
+                text = match.group(1)
+                condition = _MERGE_CONDITION.search(text)
+                if not condition or not re.search(r'\bPM\b', text, re.I):
+                    continue
+                number = int(condition.group(1))
+                if number not in cache:
+                    dep = api(f'repos/Scribie/heydonna-app/issues/{number}')
+                    if not isinstance(dep, dict) or 'state' not in dep:
+                        raise ValueError('invalid dependency response')
+                    pr = dep.get('pull_request')
+                    if pr is not None and (not isinstance(pr, dict) or 'merged_at' not in pr):
+                        raise ValueError('invalid PR response')
+                    cache[number] = pr['merged_at'] if pr is not None else None
+                if cache[number]:
+                    if _parse_ts(cache[number]) is None:
+                        raise ValueError('invalid merge timestamp')
+                    found.append({'number': item['number'], 'text': text, 'dependency': number, 'merged_at': cache[number]})
+        return {'items': found}
+    except (OSError, subprocess.TimeoutExpired, ValueError, RuntimeError, KeyError, TypeError) as exc:
+        return {'error': str(exc) if isinstance(exc, (RuntimeError, ValueError)) else type(exc).__name__}
+
+
+def pending_actions_block(obligations: dict, github: dict, now: datetime) -> list[str]:
+    head = '*Pending PM actions:*'
+    lines, ledger, issues = [head], [], []
+    def age(value):
+        started = _parse_ts(value)
+        return _fmt_dur(max(0, int((now - started).total_seconds() // 60))) if started else 'unknown'
+    if 'error' in obligations:
+        lines.append('• obligations: UNAVAILABLE (' + _compact(obligations['error'], 70) + ')')
+    else:
+        lines[0] += f" backlog rows: {obligations['backlog']} (not shown)"
+        for row in obligations['items']:
+            target = f"#{row['issue']}" if row.get('issue') else f"PR#{row['pr']}" if row.get('pr') else f"obligation #{row['id']}"
+            ledger.append(f"• {_compact(target, 35)} | {_compact(row.get('required_action') or row.get('title') or row['kind'], 90)} | {age(row.get('created_at'))} | {_compact(row.get('owner') or 'PM', 20)}")
+    if 'error' in github:
+        lines.append('• GitHub: UNAVAILABLE (' + _compact(github['error'], 70) + ')')
+    else:
+        for item in sorted(github['items'], key=lambda r: (r['merged_at'], r['number'])):
+            text = re.sub(r'\s+', ' ', item['text']).strip()
+            excerpt = text if len(text) <= 140 else text[:55].rstrip() + ' … ' + text[-80:].lstrip()
+            issues.append(f"• #{item['number']} | PM step {_compact(excerpt, 140)} — precondition #{item['dependency']} merged {age(item['merged_at'])} ago | {age(item['merged_at'])} | PM")
+    # Reserve room for both sources so a large ledger cannot hide awakened issue steps.
+    slots = max(0, 8 - (len(lines) - 1))
+    issue_count = min(len(issues), slots // 2) if ledger else min(len(issues), slots)
+    ledger_count = min(len(ledger), slots - issue_count)
+    issue_count = min(len(issues), slots - ledger_count)
+    lines.extend(ledger[:ledger_count]); lines.extend(issues[:issue_count])
+    remaining = len(ledger) + len(issues) - ledger_count - issue_count
+    if remaining:
+        lines.append(f'• +{remaining} more')
+    if len(lines) == 1:
+        lines.append('• none')
+    return lines
+
+
 # Rajiv C0ALZJHGE49/1792637124.844719, ts 1792637256.052779.
 def read_decisions(path: Path = PM_OPS_DB, now: datetime | None = None) -> dict | None:
     """Read only open decision-kind / Rajiv-owned rows; never create or repair the ledger."""
@@ -845,6 +949,7 @@ def compose(
     tracked: list[str] | None = None,
     priority_flags: list[str] | None = None,
     remote_boxes: str | None = None,
+    pending_actions: tuple[dict, dict] | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -913,6 +1018,9 @@ def compose(
         slot_actions = slot_actions + t_acts
     # Exactly one empty spacer before this shared 1h/3h section.
     body += ["", *decision_block(decisions, now)]
+    if mode == "1h":
+        ledger, github = pending_actions if pending_actions is not None else ({'error': 'collector not run'}, {'error': 'collector not run'})
+        body += ["", *pending_actions_block(ledger, github, now)]
 
     asks = []
     if merge_asks:
@@ -1282,6 +1390,7 @@ def main() -> int:
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
         email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
         priority_flags=priority_flags, remote_boxes=remote_boxes_line() if args.mode == "1h" else None,
+        pending_actions=(pending_obligations(PM_OPS_DB, now), pending_github()) if args.mode == "1h" else None,
     ))
     pm_actions += (training[1] if training else [])
     if pm_actions:
