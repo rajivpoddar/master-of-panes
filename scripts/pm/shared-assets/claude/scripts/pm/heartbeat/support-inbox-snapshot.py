@@ -90,6 +90,15 @@ CLOSING_MAX_CHARS = 100
 MAIN_CHECKOUT = Path.home() / "Downloads/projects/heydonna-app"
 OPEN_STATE = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/support-inbox-open.json"
 
+# Total wall budget for the whole collector. The heartbeat composer blocks on this
+# process, so exceeding it stalls the entire report (observed: two missed heartbeats).
+# Override with SUPPORT_INBOX_BUDGET_S.
+SUPPORT_BUDGET_S = float(os.environ.get("SUPPORT_INBOX_BUDGET_S") or 45.0)
+# Cap how many previously-tracked roots one run re-checks (newest first). Roots beyond
+# the cap keep their prior state and are picked up on a later run, so nothing is dropped.
+MAX_CARRY_FORWARD = int(os.environ.get("SUPPORT_MAX_CARRY_FORWARD") or 40)
+
+
 
 def load_env(name: str) -> str | None:
     if os.environ.get(name):
@@ -301,30 +310,112 @@ def save_open_state(open_map: dict, path: Path = OPEN_STATE) -> None:
     tmp.replace(path)
 
 
-def carry_forward(threads: list[dict], prev_tracked, fetch_thread) -> list[dict]:
+# ── carry-forward rotation cursor ────────────────────────────────────────────
+# #support-inbox-hang follow-up: the MAX_CARRY_FORWARD cap alone starves the older tail
+# (the same newest roots are re-read every run and roots 41+ are never reached). The cursor
+# records where the next run resumes so every tracked root is re-checked within
+# ceil(len/MAX) runs. Stored beside the open state; a missing or unreadable file simply
+# starts the rotation at 0.
+CARRY_CURSOR = OPEN_STATE.with_name("support-inbox-carry-cursor.json")
+
+
+def load_carry_cursor(channel, path: Path | None = None) -> int:
+    try:
+        data = json.loads(Path(path or CARRY_CURSOR).read_text(encoding="utf-8"))
+        return int(data.get(str(channel), 0) or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0
+
+
+def save_carry_cursor(channel, value: int, path: Path | None = None) -> None:
+    target = Path(path or CARRY_CURSOR)
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[str(channel)] = int(value)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(target)
+
+
+def carry_forward(threads: list[dict], prev_tracked, fetch_thread, *, deadline: float | None = None,
+                  cursor: int = 0) -> tuple[list[dict], int]:
     """Re-fetch every previously tracked root (answered or not) that fell out of the
     lookback, so a new customer reply on an answered thread flips it back to needs_reply
-    (classify_thread decides from the full reply list)."""
+    (classify_thread decides from the full reply list).
+
+    BOUNDED (#support-inbox-hang): tracked roots accumulate forever by design, so this
+    loop grew to ~196 sequential Slack calls and made the collector exceed the heartbeat's
+    wall budget, stalling the whole report. Two bounds apply and BOTH are required:
+      - `deadline` (monotonic) stops the loop once the collector's budget is spent; roots
+        not reached keep their prior state and are retried next run (no data is dropped).
+      - `MAX_CARRY_FORWARD` caps how many roots a single run re-checks.
+
+    ROTATION (fairness): a plain `pending[:MAX_CARRY_FORWARD]` on a newest-first list would
+    re-read the SAME newest roots every run and never reach the older tail, so a customer
+    reply on an old answered thread would never be rediscovered. `cursor` is the index to
+    resume from; the caller persists the returned cursor and the window wraps around, so
+    every tracked root is re-checked within ceil(len(pending)/MAX_CARRY_FORWARD) runs.
+    Newest-first still determines ORDER within a window, and a full wrap is re-sorted, so a
+    recently active thread is still seen sooner than a dormant one.
+
+    Returns (threads_to_report, next_cursor).
+    """
     seen = {t["ts"] for t in threads}
     out = list(threads)
-    for ts in (prev_tracked or {}):
-        if ts in seen:
-            continue
+    pending = [ts for ts in (prev_tracked or {}) if ts not in seen]
+    if not pending:
+        return out, 0
+    # Slack ts values are decimal strings, so a float sort orders them chronologically.
+    pending.sort(key=lambda s: float(s) if _is_ts(s) else 0.0, reverse=True)
+    total = len(pending)
+    start = cursor % total if total else 0
+    window = [pending[(start + i) % total] for i in range(min(MAX_CARRY_FORWARD, total))]
+    next_cursor = (start + len(window)) % total if total else 0
+    for ts in window:
+        if deadline is not None and time.monotonic() >= deadline:
+            # Budget spent: do NOT advance past what we actually visited.
+            next_cursor = pending.index(ts) % total
+            return out, next_cursor
         item = fetch_thread(ts)
         if item:
             out.append(item)
-    return out
+    return out, next_cursor
 
 
-def tracked_roots(threads: list[dict], now_ts: float) -> dict[str, float]:
+def _is_ts(value) -> bool:
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+
+def tracked_roots(threads: list[dict], now_ts: float,
+                  prev: dict[str, float] | None = None) -> dict[str, float]:
     """All roots to keep tracking with their last-seen reply ts.
 
     `conversations.history` only searches the latest 24h by default, so an answered
     root is the ONLY way a later customer reply on it gets rediscovered. Retain answered
     roots indefinitely (never prune by TRACK_DAYS) -- pruning them silently drops any
     reply that lands after the cutoff (Codex #7 P1).
+
+    #support-inbox-hang follow-up: carry_forward is bounded (deadline + MAX_CARRY_FORWARD),
+    so a run only re-fetches a subset of the previously tracked roots. Any root it did not
+    reach is absent from `threads`, and rebuilding the state from `threads` alone silently
+    DROPPED it from tracking forever -- the opposite of what the bound is documented to do.
+    `prev` is therefore merged in: roots not reached this run keep their prior entry and are
+    retried on the next run. A root that was reached and is genuinely gone (deleted, or no
+    longer readable) is dropped by the caller passing it out of `prev`.
     """
-    return {t["ts"]: t["last_activity"] for t in sorted(threads, key=lambda t: t["ts"])}
+    merged = dict(prev or {})
+    merged.update({t["ts"]: t["last_activity"] for t in threads})
+    return {ts: merged[ts] for ts in sorted(merged, key=lambda s: float(s) if _is_ts(s) else 0.0)}
 
 
 def open_roots(threads: list[dict]) -> list[str]:
@@ -372,6 +463,7 @@ def main() -> int:
 
     now = datetime.now(timezone.utc)
     now_ts = now.timestamp()
+    deadline = time.monotonic() + SUPPORT_BUDGET_S
     window_start = now_ts - args.hours * 3600
     result: dict = {"threshold_min": needs_reply_threshold_minutes(now), "slack": [], "in_app": [], "failures": []}
     token = load_env("SLACK_BOT_TOKEN")
@@ -383,11 +475,14 @@ def main() -> int:
         for channel in CHANNELS:
             try:
                 threads = fetch_channel(token, channel, now_ts - args.lookback_hours * 3600, now_ts)
-                threads = carry_forward(
+                threads, next_cursor = carry_forward(
                     threads, prev_state.get(channel, []),
                     lambda ts, ch=channel: fetch_thread(token, ch, ts, now_ts),
+                    deadline=deadline,
+                    cursor=load_carry_cursor(channel),
                 )
-                new_state[channel] = tracked_roots(threads, now_ts)
+                new_state[channel] = tracked_roots(threads, now_ts, prev_state.get(channel) or {})
+                save_carry_cursor(channel, next_cursor)
                 result["slack"].extend(select_items(threads, window_start))
             except Exception as exc:  # noqa: BLE001
                 # Keep the previous open set for this channel so nothing is dropped.
