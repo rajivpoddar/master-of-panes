@@ -1,6 +1,9 @@
 // CTO REVISE proof packet (C0ALZJHGE49 thread 1793754459.969419, ts 1793754925.429599)
 // for the pm_save_handoff `exit` variant (Rajiv D0AMF0XE6TS thread 1793731816.594829,
-// ts 1793752982.460979). One harness: real Hono + PM soft-boundary middleware (pinned
+// ts 1793752982.460979), amended by Rajiv DM D0AMF0XE6TS thread 1793754554.496299,
+// ts 1793758450.451269: "remove the acks and the gates. as long all subgents are
+// stopped and resume point is saved, it should work." (supersedes the ACK/fence REVISE).
+// One harness: real Hono + PM soft-boundary middleware (pinned
 // pre-await Stop authority, ONE maintenance command per Stop) + real TmuxRelay guarded
 // writers (clear: writePMClearFenced; exit: deliverGuardedToSlot) + real HookProcessor +
 // an isolated actual pm-ops ledger (pm-ops-legacy.py, tmp PM_OPS_DB).
@@ -29,7 +32,6 @@ import {
 import {
   ensurePmExitHandoffObligation,
   exitHandoffRequestKey,
-  recordPmExitSubagentsStopped,
   selectPmStopMaintenance,
   PM_EXIT_HANDOFF_OBLIGATION_KEY,
   PM_EXIT_HANDOFF_OBLIGATION_STATE_KEY,
@@ -89,8 +91,10 @@ function harness() {
   // Fake tmux pane: composer emulation; every paste records the pasted text.
   let generation = 0;
   let composer = "", buffer = "";
+  let busy = false; // PM mid-turn: Claude renders the busy chevron (153;153;153)
   const pasted: string[] = [];
   let enters = 0;
+  let escapes = 0;
   let observeBarrier: (() => Promise<void>) | null = null;
   let onPaste: (() => void) | null = null;
   const relay = new TmuxRelay(DEFAULT_CONFIG, { pmRuntime: "claude", runShell: async (command: string) => {
@@ -99,7 +103,11 @@ function harness() {
     if (command.includes("rev-parse --show-toplevel")) return { stdout: "/Users/rajiv/Downloads/projects/heydonna-app\n", stderr: "" };
     if (command.includes("#{pane_pid}")) return { stdout: "321\n", stderr: "" };
     if (command.startsWith("ps -p 321")) return { stdout: "/opt/claude", stderr: "" };
-    if (command.startsWith("tmux capture-pane")) return { stdout: `${"─".repeat(40)}\n❯ ${composer}\n${"─".repeat(40)}`, stderr: "" };
+    if (command.startsWith("tmux capture-pane")) {
+      const chevron = busy && command.includes(" -e ") ? "\x1b[38;2;153;153;153m❯\x1b[39m" : "❯";
+      return { stdout: `${"─".repeat(40)}\n${chevron} ${composer}\n${"─".repeat(40)}`, stderr: "" };
+    }
+    if (command.endsWith(" Escape")) escapes++;
     const load = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
     if (load) buffer = readFileSync(load[1]!, "utf8");
     if (command.startsWith("tmux paste-buffer")) { composer = buffer; pasted.push(buffer); onPaste?.(); }
@@ -172,15 +180,7 @@ function harness() {
     return response;
   };
   const post = route("/exit-pending", { db });
-  const ackRoute = route("/exit-pending/subagents-stopped", { db, recordPmExitSubagentsStopped, processor });
   const status = () => db.getExitStatus();
-  /** PM's last tool call: PreToolUse(curl) then the bound ACK POST. */
-  const ack = async (ids: { episode?: unknown; requested_at?: unknown } = {
-    episode: status().handoff_episode, requested_at: status().handoff_requested_at,
-  }) => {
-    await hook("PreToolUse", { tool_name: "Bash", tool_input: { command: "curl ... subagents-stopped" } });
-    return ackRoute(ctx(ids));
-  };
   const arm = async () => {
     assert.equal((await post(ctx({ enabled: true, pm_only: true, continuation_prompt: "Read resume. Resume PM." }))).status, 200);
     return ensurePmExitHandoffObligation(db, exitOps);
@@ -188,8 +188,9 @@ function harness() {
   const exits = () => pasted.filter((p) => p === "/exit").length;
   const clears = () => pasted.filter((p) => p === "/clear").length;
   return {
-    db, files, exitOps, clearOps, rows, saveAll, relay, processor, hook, post, ack, ackRoute, arm, status, exits, clears,
-    pasted, enters: () => enters, setOnPaste: (f: (() => void) | null) => { onPaste = f; }, setObserveBarrier: (b: (() => Promise<void>) | null) => { observeBarrier = b; },
+    db, files, exitOps, clearOps, rows, saveAll, relay, processor, hook, post, arm, status, exits, clears,
+    pasted, enters: () => enters, escapes: () => escapes, setBusy: (b: boolean) => { busy = b; },
+    setComposer: (text: string) => { composer = text; }, setOnPaste: (f: (() => void) | null) => { onPaste = f; }, setObserveBarrier: (b: (() => Promise<void>) | null) => { observeBarrier = b; },
     settle: async () => { await Promise.all(deliveries); await new Promise((r) => setTimeout(r, 30)); },
     close: () => { relay.setPMBusy(true); db.close(); rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); },
   };
@@ -199,16 +200,15 @@ async function boot(h: H, session = "pm", source = "startup") {
   await h.hook("SessionStart", { session_id: session, source, cwd: "/Users/rajiv/Downloads/projects/heydonna-app" });
 }
 
-test("healthy flow: save -> stop-agents ACK (last call) -> natural Stop -> one /exit -> continuation -> dev-only", async () => {
+test("healthy flow: save -> natural Stop -> one /exit -> continuation -> dev-only (no ACK)", async () => {
   const h = harness();
   try {
     await boot(h);
     const id = await h.arm();
     assert.ok(id);
     await h.hook("Stop");
-    assert.equal(h.exits(), 0);
+    assert.equal(h.exits(), 0, "nothing before the save");
     h.saveAll();
-    assert.equal((await h.ack()).status, 200);
     await h.hook("Stop");
     await h.hook("Stop");
     assert.equal(h.exits(), 1, "exactly one /exit");
@@ -226,71 +226,62 @@ test("healthy flow: save -> stop-agents ACK (last call) -> natural Stop -> one /
   } finally { h.close(); }
 });
 
-test("a delayed ACK from episode A arriving after B starts is refused and never authorizes B", async () => {
+test("Rajiv proof: request -> save -> PM Stop on a BUSY pane while a new prompt arrives -> exactly one /exit, continuation kept, no ACK", async () => {
   const h = harness();
   try {
     await boot(h);
     await h.arm();
     h.saveAll();
-    const a = { episode: h.status().handoff_episode, requested_at: h.status().handoff_requested_at };
-    await new Promise((r) => setTimeout(r, 5));
-    await h.arm(); // B
-    assert.notEqual(h.status().handoff_episode, a.episode);
-    h.saveAll();
-    const late = await h.ack(a);
-    assert.equal(late.status, 409);
+    // The PM Stop hook keeps the pane busy (due-obligation feedback) and new input lands mid-write.
+    h.setBusy(true);
+    h.setObserveBarrier(async () => { h.setObserveBarrier(null); await h.hook("UserPromptSubmit", { prompt: "slack event" }); });
     await h.hook("Stop");
-    assert.equal(h.exits(), 0, "A's ACK does not authorize B");
-    assert.equal((await h.ack()).status, 200);
+    assert.equal(h.exits(), 1, "exactly one /exit written");
+    assert.equal(h.enters(), 1);
+    assert.equal(h.escapes(), 0, "never Escape into a busy PM turn");
+    const triggered = JSON.parse(h.db.getEvents(0, 1, "exit_pending_triggered")[0]!.payload);
+    assert.equal(triggered.delivery, "delivered");
+    assert.equal(h.db.getEvents(0, 5, "pm_exit_refused_terminal").length, 0);
+    assert.equal(h.status().continuation_prompt, "Read resume. Resume PM.", "continuation preserved");
+    assert.equal(h.status().exit_terminal, null);
+    // Exactly once: later Stops and new work never resend.
+    await h.hook("PreToolUse", { tool_name: "Agent", tool_input: {} });
+    await h.hook("Stop");
     await h.hook("Stop");
     assert.equal(h.exits(), 1);
+    assert.equal(h.db.getEvents(0, 10, "exit_pending_triggered").length, 1);
+    // No ACK anywhere in the flow.
+    assert.equal(h.db.getEvents(0, 10, "pm_exit_subagents_stopped").length, 0);
+    const health = new ProcessHealthChecker(h.db, {
+      deliverGuardedToSlot: async (_s: number, text: string) => { assert.equal(text, "Read resume. Resume PM."); return { outcome: "delivered" }; },
+    } as any) as any;
+    await boot(h, "pm-next", "resume");
+    await health.deliverPMRestartContinuation("%1");
+    assert.equal(h.status().dev_only, true, "dev_only armed after PM continuation");
   } finally { h.close(); }
 });
 
-test("an ACK before the save is refused; empty/unbound ACKs are refused", async () => {
-  const h = harness();
-  try {
-    await boot(h);
-    await h.arm();
-    assert.equal((await h.ackRoute(ctx({}))).status, 400);
-    const early = await h.ack();
-    assert.equal(early.status, 409);
-    await h.hook("Stop");
-    h.saveAll();
-    await h.hook("Stop");
-    assert.equal(h.exits(), 0, "the refused early ACK never counts after the save");
-  } finally { h.close(); }
-});
-
-test("PM work or a subagent launch after the ACK voids readiness; a fresh last-call ACK restores it", async () => {
+test("PM work, a subagent launch or new input after the save never voids readiness", async () => {
   const h = harness();
   try {
     await boot(h);
     await h.arm();
     h.saveAll();
-    assert.equal((await h.ack()).status, 200);
     await h.hook("PreToolUse", { tool_name: "Agent", tool_input: { description: "new subagent" } });
-    await h.hook("Stop");
-    assert.equal(h.exits(), 0, "subagent creation after the ACK voids it");
-    assert.equal((await h.ack()).status, 200);
     await h.hook("UserPromptSubmit", { prompt: "new input" });
     await h.hook("Stop");
-    assert.equal(h.exits(), 0, "new input after the ACK voids it");
-    assert.equal((await h.ack()).status, 200);
-    await h.hook("Stop");
     assert.equal(h.exits(), 1);
   } finally { h.close(); }
 });
 
-test("an old Stop held across new work never writes /exit (pinned authority through paste/Enter fences)", async () => {
+test("a zero-effect refusal (PM draft in the composer) ends in a durable terminal; recovery or a fresh request re-arms", async () => {
   const h = harness();
   try {
     await boot(h);
     await h.arm();
     h.saveAll();
-    assert.equal((await h.ack()).status, 200);
-    // Hold the Stop after its pin; new PM input arrives meanwhile.
-    h.setObserveBarrier(async () => { h.setObserveBarrier(null); await h.hook("UserPromptSubmit", { prompt: "typed during Stop" }); });
+    // A foreign draft is never overwritten: proven zero-effect refusal.
+    h.setObserveBarrier(async () => { h.setObserveBarrier(null); h.setComposer("PM draft"); });
     await h.hook("Stop");
     assert.equal(h.exits(), 0, "no paste");
     assert.equal(h.enters(), 0, "no Enter");
@@ -298,19 +289,17 @@ test("an old Stop held across new work never writes /exit (pinned authority thro
     assert.equal(triggered.delivery, "refused_pre_effect");
     assert.equal(h.db.getEvents(0, 1, "pm_exit_custody_released_zero_effect").length, 1, "proven zero effect releases custody");
     assert.equal(h.status().cycled[0], true, "the attempt record is kept (not erased)");
-    // CTO REVISE ts 1793756803.183959: explicit durable terminal, continuation kept, actionable, no resend.
     const refused = h.status();
     assert.equal(refused.pending, false, "episode is not left indefinitely active/cycled/waiting");
     assert.equal(refused.continuation_delivery, "exit_refused");
     assert.equal(refused.continuation_prompt, "Read resume. Resume PM.", "continuation retained");
     const terminal = refused.exit_terminal as Record<string, unknown>;
     assert.equal(terminal.outcome, "refused_pre_effect");
-    assert.equal(terminal.reason, "pm_work_changed_after_stop");
-    assert.equal(terminal.continuation_prompt, "Read resume. Resume PM.");
+    assert.equal(terminal.reason, "composer_not_empty");
     await until(() => h.rows().some((r) => r.target_id === `pm-dhruva:exit-refused:${terminal.episode}`));
     const refusedRow = h.rows().find((r) => r.target_id === `pm-dhruva:exit-refused:${terminal.episode}`);
     assert.equal(refusedRow?.status, "open", "actionable refused obligation for the owner");
-    // Following Stops and health recovery never resend autonomously.
+    h.setComposer("");
     await h.hook("Stop");
     await h.hook("Stop");
     const health = new ProcessHealthChecker(h.db, {
@@ -319,9 +308,8 @@ test("an old Stop held across new work never writes /exit (pinned authority thro
     await health.deliverPMRestartContinuation("%1");
     await health.checkExitPending();
     assert.equal(h.exits(), 0, "zero paste after the refusal");
-    assert.equal(h.enters(), 0, "zero Enter after the refusal");
     assert.equal(h.db.getEvents(0, 10, "exit_pending_triggered").length, 1, "no autonomous resend");
-    // Same-owner recovery edge: only THIS episode, with the retained continuation; fresh save + ACK required.
+    // Same-owner recovery edge.
     assert.equal((await h.post(ctx({ enabled: true, pm_only: true, recover_episode: "other" }))).status, 409);
     const recover = await h.post(ctx({ enabled: true, pm_only: true, recover_episode: terminal.episode }));
     assert.equal(recover.status, 200);
@@ -331,26 +319,48 @@ test("an old Stop held across new work never writes /exit (pinned authority thro
     assert.notEqual(rearmed.episode, terminal.episode);
     assert.equal(rearmed.continuation_prompt, "Read resume. Resume PM.");
     assert.equal(rearmed.exit_terminal, null);
-    await h.hook("Stop");
-    assert.equal(h.exits(), 0, "recovery itself sends nothing");
+    await until(() => h.rows().find((r) => r.target_id === `pm-dhruva:exit-refused:${terminal.episode}`)?.status === "resolved");
     h.saveAll();
-    assert.equal((await h.ack()).status, 200);
     await h.hook("Stop");
-    assert.equal(h.exits(), 1, "owner-recovered episode exits once after save + ACK");
-    // An old pin reaching HookProcessor after newer work is stale: no consumption.
+    assert.equal(h.exits(), 1, "owner-recovered episode exits once after the save");
+  } finally { h.close(); }
+});
+
+test("a refused episode never blocks a fresh pm_only request with continuation_prompt (a38bee66 recovery)", async () => {
+  const h = harness();
+  try {
+    await boot(h);
+    await h.arm();
+    h.saveAll();
+    h.setObserveBarrier(async () => { h.setObserveBarrier(null); h.setComposer("PM draft"); });
+    await h.hook("Stop");
+    const a = h.status().exit_terminal as Record<string, unknown>;
+    assert.equal(a.outcome, "refused_pre_effect");
+    h.setComposer("");
+    // A fresh request, no recover_episode.
+    const fresh = await h.post(ctx({ enabled: true, pm_only: true, continuation_prompt: "Fresh continuation." }));
+    assert.equal(fresh.status, 200);
+    await ensurePmExitHandoffObligation(h.db, h.exitOps);
+    assert.equal(h.status().exit_terminal, null);
+    assert.equal(h.status().pending, true);
+    await until(() => h.rows().find((r) => r.target_id === `pm-dhruva:exit-refused:${a.episode}`)?.status === "resolved");
+    h.setBusy(true);
+    h.saveAll();
+    await h.hook("Stop");
+    assert.equal(h.exits(), 1);
+    assert.equal(h.status().continuation_prompt, "Fresh continuation.");
+    // An old pin reaching HookProcessor after newer work still exits once (no staleness gate).
     const h2 = harness();
     try {
       await boot(h2);
       await h2.arm();
       h2.saveAll();
-      assert.equal((await h2.ack()).status, 200);
       const { latestPmWork, latestPmBoot } = await import("../src/pmHandoffExit.js");
       const oldPin: PmExitStopPin = { work: latestPmWork(h2.db), boot: latestPmBoot(h2.db).id, selected: true };
       await h2.hook("UserPromptSubmit", { prompt: "newer work" });
       await h2.processor.process(0, { type: "Stop", session_id: "pm" }, oldPin);
-      assert.equal(h2.exits(), 0);
-      assert.equal(h2.status().cycled[0], false, "stale Stop consumes nothing");
-      assert.equal(h2.db.getEvents(0, 1, "pm_exit_stop_stale").length, 1);
+      assert.equal(h2.exits(), 1);
+      assert.equal(h2.db.getEvents(0, 1, "pm_exit_stop_stale").length, 0);
     } finally { h2.close(); }
   } finally { h.close(); }
 });
@@ -362,9 +372,9 @@ test("delayed recovery of refused episode A after a newer dev_only/global episod
       await boot(h);
       await h.arm();
       h.saveAll();
-      assert.equal((await h.ack()).status, 200);
-      h.setObserveBarrier(async () => { h.setObserveBarrier(null); await h.hook("UserPromptSubmit", { prompt: "typed during Stop" }); });
+      h.setObserveBarrier(async () => { h.setObserveBarrier(null); h.setComposer("PM draft"); });
       await h.hook("Stop");
+      h.setComposer("");
       const a = h.status().exit_terminal as Record<string, unknown>;
       assert.equal(a.outcome, "refused_pre_effect");
       // A normal newer episode B through the real route; terminal A survives.
@@ -389,9 +399,8 @@ test("control: a possible/uncertain /exit effect stays consumed (custody kept, n
     await boot(h);
     await h.arm();
     h.saveAll();
-    assert.equal((await h.ack()).status, 200);
-    // New PM work lands after the paste and before Enter: the effect was attempted.
-    h.setOnPaste(() => { h.setOnPaste(null); h.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "pm" }); });
+    // Foreign text joins the composer after the paste and before Enter: the effect was attempted.
+    h.setOnPaste(() => { h.setOnPaste(null); h.setComposer("/exit plus a PM draft"); });
     await h.hook("Stop");
     const triggered = JSON.parse(h.db.getEvents(0, 1, "exit_pending_triggered")[0]!.payload);
     assert.equal(triggered.delivery, "uncertain");
@@ -401,7 +410,7 @@ test("control: a possible/uncertain /exit effect stays consumed (custody kept, n
     assert.equal(status.pending, true);
     assert.equal(status.cycled[0], true);
     assert.equal(status.exit_terminal, null, "uncertain is never treated as proven no-effect");
-    assert.equal(selectPmStopMaintenance(h.db, { sessionId: "pm", workPin: 0, ops: h.exitOps }), "exit_custody");
+    assert.equal(selectPmStopMaintenance(h.db, { ops: h.exitOps }), "exit_custody");
     await h.hook("Stop");
     assert.equal(h.exits(), 1, "no resend");
   } finally { h.close(); }
@@ -415,7 +424,6 @@ test("both intents ready: exactly ONE command (exit); clear intent kept; no lost
     assert.equal(clear.kind, "awaiting_handoff");
     await h.arm();
     h.saveAll(); // satisfies BOTH requests
-    assert.equal((await h.ack()).status, 200);
     await h.hook("Stop");
     await h.settle();
     assert.equal(h.exits(), 1);
@@ -452,21 +460,14 @@ test("a latched clear keeps custody: the ready exit yields (not consumed), exact
     assert.equal(h.db.hasPendingClear(0), true, "clear latch awaiting SessionStart:clear");
     await h.arm();
     h.saveAll();
-    assert.equal((await h.ack()).status, 200);
     await h.hook("Stop");
     await h.settle();
     assert.equal(h.clears(), 1, "never resent");
     assert.equal(h.exits(), 0, "exit yielded to the latched clear");
     assert.equal(h.status().cycled[0], false, "exit not consumed; continuation not stranded");
     assert.ok(h.status().handoff_requested_at, "exit intent kept");
-    // The clear completes; the session-bound ACK is void; a fresh ACK in the new session exits once.
+    // The clear completes; the saved exit then fires once in the new session (no ACK).
     await boot(h, "pm-cleared", "clear");
-    const s2 = h.status();
-    await h.hook("Stop", { session_id: "pm-cleared" });
-    assert.equal(h.exits(), 0);
-    const preAck = await h.hook("PreToolUse", { session_id: "pm-cleared", tool_name: "Bash", tool_input: {} });
-    assert.equal(preAck.status, 200);
-    assert.equal((await h.ackRoute(ctx({ episode: s2.handoff_episode, requested_at: s2.handoff_requested_at }))).status, 200);
     await h.hook("Stop", { session_id: "pm-cleared" });
     await h.settle();
     assert.equal(h.exits(), 1);
@@ -509,7 +510,6 @@ test("obligation custody: accepted upsert with lost ACK, then unknown lookup -> 
     assert.equal(upserts, 1);
     assert.equal(h.rows().length, 1);
     // The adopted completed row is this request's explicit-resolve save evidence.
-    assert.equal((await h.ack()).status, 200);
     await h.hook("Stop");
     assert.equal(h.exits(), 1);
   } finally { h.close(); }

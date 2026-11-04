@@ -114,26 +114,28 @@ test("rearming the same prompt during continuation cannot reset successor dev fl
   } finally { db.close(); }
 });
 
-test("new work after Stop refuses the exit attempt without holding that input", async () => {
+test("new work after Stop does not refuse the exit attempt (no work fence; Rajiv ts 1793758450.451269)", async () => {
   const db = database();
   try {
     db.setExitPending(true, false, true);
     db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "pm" });
-    let delivered = false;
+    const sent: string[] = [];
     const processor = new HookProcessor(db, {
       observeSlotPane: async () => {
         db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, {});
         return { paneId: "%40" };
       },
-      deliverGuardedToSlot: async (_slot: number, _text: string, guard: any) => {
-        assert.equal(await guard.recheck(), "pm_work_changed_after_stop");
-        delivered = guard.finalCheck() === null;
-        return { outcome: "refused_pre_effect" };
+      deliverGuardedToSlot: async (_slot: number, text: string, guard: any) => {
+        assert.equal(await guard.recheck(), null);
+        assert.equal(guard.finalCheck(), null);
+        assert.equal(guard.skipSlashClear, true, "no Escape/C-u into a busy PM turn");
+        sent.push(text);
+        return { outcome: "delivered" };
       },
     } as any);
     await processor.process(0, { type: "Stop", session_id: "pm" });
-    assert.equal(delivered, false);
-    assert.equal(db.getEvents(0, 1, "UserPromptSubmit").length, 1);
+    assert.deepEqual(sent, ["/exit"]);
+    assert.equal(db.getEvents(0, 1, "UserPromptSubmit").length, 1, "input never held");
   } finally { db.close(); }
 });
 

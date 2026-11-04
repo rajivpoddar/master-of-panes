@@ -7,14 +7,17 @@
  * A REST PM-only exit-pending request opens ONE `pm_save_handoff` obligation of
  * variant `exit`. The PM saves the SAME two handoff files the clear flow
  * watches (both mtimes later than the request, or an explicit resolve of this
- * request's own row), stops every background agent with TaskStop, and then, as
- * the LAST tool call of the turn, POSTs /exit-pending/subagents-stopped with
- * this request's exact `episode` and `requested_at`.
+ * request's own row), stops every background agent with TaskStop, and ends the
+ * turn. MoP sends /exit at the next PM Stop once the save is detected.
  *
- * CTO REVISE (C0ALZJHGE49 thread 1793754459.969419, ts 1793754925.429599):
- * - The ACK is bound to the exact episode/request, the current PM session and
- *   the PM work version at ACK time. It is refused before the save evidence.
- *   Any later PM work (prompt, tool call, agent launch, new boot) voids it.
+ * Rajiv, DM D0AMF0XE6TS thread 1793754554.496299, ts 1793758450.451269:
+ * "remove the acks and the gates. as long all subgents are stopped and resume
+ * point is saved, it should work." This supersedes the CTO ACK/fence REVISE
+ * (ts 1793754925.429599): there is no subagents-stopped ACK, no work-bound
+ * readiness invalidation and no busy-pane refusal. Stopping subagents is a PM
+ * duty stated in the obligation text; MoP does not gate on it. A busy pane
+ * queues /exit (Claude Code), so later PM work never voids the exit.
+ * Kept from the CTO REVISE:
  * - The pinned pre-await Stop authority selects exactly ONE maintenance command
  *   (clear or exit). A latched clear keeps custody (exit yields); an exit that
  *   was consumed keeps custody until its episode ends (clear yields). Losing
@@ -39,40 +42,24 @@ export const PM_EXIT_HANDOFF_SESSION_KEY = "pm_exit_handoff_session";
 export const PM_EXIT_HANDOFF_OBLIGATION_KEY = "pm_exit_handoff_obligation_id";
 /** "" | "uncertain": whether this request's obligation write outcome is unknown. */
 export const PM_EXIT_HANDOFF_OBLIGATION_STATE_KEY = "pm_exit_handoff_obligation_state";
-/** Display only (ISO time of the accepted ACK). */
-export const PM_EXIT_SUBAGENTS_STOPPED_KEY = "pm_exit_subagents_stopped_at";
-/** Authoritative bound ACK (JSON). */
-export const PM_EXIT_SUBAGENTS_ACK_KEY = "pm_exit_subagents_ack";
 /** Episode whose single /exit attempt was taken and may have been written. */
 export const PM_EXIT_CONSUMED_EPISODE_KEY = "pm_exit_handoff_consumed_episode";
 
-/** PM work events: any of them after an ACK voids it; after a Stop it makes the Stop stale. */
+/** PM work events (the latest id is logged as a Stop's pinned work; never a gate). */
 const PM_WORK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse"] as const;
-
-export function exitAckCommand(episode: string, requestedAt: string): string {
-  return "curl -s -X POST http://127.0.0.1:3100/exit-pending/subagents-stopped -H 'Content-Type: application/json' "
-    + `-d '${JSON.stringify({ episode, requested_at: requestedAt })}'`;
-}
 
 export const PM_EXIT_HANDOFF_ACTION =
   "PM exit is pending (daily restart). 1) Save the PM handoff: update MEMORY-session-handoff-current.md "
   + "(~/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/memory/) and "
   + "data/pm-continuation-note.md. 2) Stop ALL running background agents/tasks with TaskStop. "
-  + "3) As the LAST tool call of the turn, acknowledge with this request's episode and requested_at "
-  + "(GET /exit-status shows them). A later prompt, tool call or agent launch voids the ACK; re-send it. "
-  + "MoP then sends /exit at the next PM Stop; the watchdog respawns PM with the saved continuation. "
-  + "Nothing is blocked meanwhile.";
+  + "3) End the turn. MoP sends /exit at the next PM Stop after the save (a busy pane queues it); "
+  + "the watchdog respawns PM with the saved continuation. Nothing is blocked meanwhile.";
 
 export const PM_HANDOFF_EXIT_VARIANT: HandoffObligationVariant = {
   title: "Save PM handoff and stop subagents before MoP sends /exit",
   action: PM_EXIT_HANDOFF_ACTION,
   dedupeGroup: "pm_save_handoff:pm:exit",
-  actionFor: (evidence) => {
-    if (evidence.variant === "exit_refused") return pmExitRefusedAction(evidence);
-    const episode = typeof evidence.episode === "string" ? evidence.episode : "";
-    const requestedAt = typeof evidence.requested_at === "string" ? evidence.requested_at : "";
-    return `${PM_EXIT_HANDOFF_ACTION} ACK (last tool call): ${exitAckCommand(episode, requestedAt)}`;
-  },
+  actionFor: (evidence) => evidence.variant === "exit_refused" ? pmExitRefusedAction(evidence) : PM_EXIT_HANDOFF_ACTION,
 };
 
 type Db = Pick<MoPDatabase, "getConfig" | "setConfig" | "logEvent" | "getExitStatus" | "getEvents" | "hasPendingClear">;
@@ -161,7 +148,6 @@ export function ensurePmExitHandoffObligation(db: Db, ops: HandoffObligationOps)
       id = await ops.upsert(exitHandoffRequestKey(live.requestedAt), {
         producer: "mop-pm-handoff-exit", variant: "exit", pm_stop_actionable: 1,
         requested_at: live.requestedAt, episode: live.episode, session_id: live.session, files: PM_HANDOFF_FILES,
-        ack: exitAckCommand(live.episode, live.requestedAt),
       });
     } catch (err) { error = String(err); }
     const still = currentPmExitHandoff(db);
@@ -204,88 +190,24 @@ function saveEvidence(db: Db, live: { requestedAt: string; requestedMs: number }
   return null;
 }
 
-type BoundAck = { episode: string; requested_at: string; session_id: string; work: number; acknowledged_at: string };
-
-function readAck(db: Db): BoundAck | null {
-  try {
-    const ack = JSON.parse(db.getConfig(PM_EXIT_SUBAGENTS_ACK_KEY) || "null");
-    return ack && typeof ack.episode === "string" && typeof ack.requested_at === "string"
-      && typeof ack.session_id === "string" && typeof ack.work === "number" ? ack as BoundAck : null;
-  } catch { return null; }
-}
-
-export type AckResult =
-  | { ok: true; requested_at: string; episode: string; acknowledged_at: string }
-  | { ok: false; status: 400 | 409; error: string };
-
-/**
- * Record the PM's subagents-stopped ACK. Bound to the exact live request
- * (episode + requested_at), the current PM session and the current PM work
- * version; refused when unbound, mismatched, or before the save evidence.
- */
-export function recordPmExitSubagentsStopped(db: Db, options: {
-  nowMs: number;
-  episode?: unknown;
-  requestedAt?: unknown;
-  ops: HandoffObligationOps | null;
-  files?: readonly string[];
-}): AckResult {
-  if (typeof options.episode !== "string" || !options.episode || typeof options.requestedAt !== "string" || !options.requestedAt) {
-    return { ok: false, status: 400, error: "ACK must name this request's 'episode' and 'requested_at' (GET /exit-status)" };
-  }
-  const live = currentPmExitHandoff(db);
-  if (!live) return { ok: false, status: 409, error: "no PM exit handoff is pending" };
-  if (options.episode !== live.episode || options.requestedAt !== live.requestedAt) {
-    db.logEvent(0, "pm_exit_subagents_ack_refused", null, null, {
-      reason: "unbound", episode: options.episode, requested_at: options.requestedAt, live_requested_at: live.requestedAt,
-    });
-    return { ok: false, status: 409, error: "ACK does not match the pending PM exit request" };
-  }
-  const boot = latestPmBoot(db);
-  if (!boot.sessionId) return { ok: false, status: 409, error: "PM session unknown" };
-  const saved = saveEvidence(db, live, options.ops, options.files);
-  if (!saved) {
-    db.logEvent(0, "pm_exit_subagents_ack_refused", null, null, { reason: "before_save", requested_at: live.requestedAt });
-    return { ok: false, status: 409, error: "handoff save not detected yet: save both handoff files, then stop agents, then ACK" };
-  }
-  const acknowledgedAt = new Date(Math.max(options.nowMs, live.requestedMs)).toISOString();
-  const ack: BoundAck = {
-    episode: live.episode, requested_at: live.requestedAt, session_id: boot.sessionId, work: latestPmWork(db), acknowledged_at: acknowledgedAt,
-  };
-  db.setConfig(PM_EXIT_SUBAGENTS_ACK_KEY, JSON.stringify(ack));
-  db.setConfig(PM_EXIT_SUBAGENTS_STOPPED_KEY, acknowledgedAt);
-  db.logEvent(0, "pm_exit_subagents_stopped", null, null, {
-    ...ack, save: saved, reason: "PM acknowledged all background agents/tasks stopped (after the save)",
-  });
-  return { ok: true, requested_at: live.requestedAt, episode: live.episode, acknowledged_at: acknowledgedAt };
-}
-
 export type ExitHandoffReadiness =
   | { kind: "not_required" }
-  | { kind: "waiting"; saved: boolean; acked: boolean }
+  | { kind: "waiting"; saved: false }
   | { kind: "ready"; via: "mtime" | "explicit_resolve"; requestedAt: string };
 
 /**
- * Pure readiness at a PM Stop pinned at `workPin` (the latest PM work id when
- * the Stop arrived). Ready only when this request's save evidence holds and its
- * bound ACK names this request, this session and exactly `workPin` (no PM work
- * between the ACK and the Stop), and nothing newer than the pin exists.
+ * Pure readiness at a PM Stop: ready once this request's resume point is saved
+ * (both handoff files after the request, or an explicit resolve of its own row).
+ * No ACK and no work/session binding (Rajiv ts 1793758450.451269).
  */
 export function pmExitHandoffReadiness(db: Db, options: {
-  currentSessionId: string;
-  workPin: number;
   ops: HandoffObligationOps | null;
   files?: readonly string[];
 }): ExitHandoffReadiness {
   const live = currentPmExitHandoff(db);
   if (!live) return { kind: "not_required" };
   const via = saveEvidence(db, live, options.ops, options.files);
-  const ack = readAck(db);
-  const acked = !!ack && ack.episode === live.episode && ack.requested_at === live.requestedAt
-    && !!options.currentSessionId && ack.session_id === options.currentSessionId
-    && ack.work === options.workPin && latestPmWork(db) === options.workPin;
-  if (via && acked) return { kind: "ready", via, requestedAt: live.requestedAt };
-  return { kind: "waiting", saved: via !== null, acked };
+  return via ? { kind: "ready", via, requestedAt: live.requestedAt } : { kind: "waiting", saved: false };
 }
 
 /** An exit attempt for the current episode was taken and may have been written. */
@@ -303,8 +225,6 @@ export type PmStopMaintenance = "exit" | "exit_custody" | "clear";
  * custody holds the clear. Pure: selects, never mutates.
  */
 export function selectPmStopMaintenance(db: Db, options: {
-  sessionId: string;
-  workPin: number;
   ops: HandoffObligationOps | null;
   files?: readonly string[];
 }): PmStopMaintenance {
@@ -314,9 +234,7 @@ export function selectPmStopMaintenance(db: Db, options: {
   if (!status.pending || !status.pm_only || status.cycled[0]) return "clear";
   const handoffRequired = !!db.getConfig(PM_EXIT_HANDOFF_EPISODE_KEY);
   if (!handoffRequired) return "exit"; // legacy direct arming: unconditioned single-Stop exit
-  const readiness = pmExitHandoffReadiness(db, {
-    currentSessionId: options.sessionId, workPin: options.workPin, ops: options.ops, files: options.files,
-  });
+  const readiness = pmExitHandoffReadiness(db, { ops: options.ops, files: options.files });
   return readiness.kind === "ready" ? "exit" : "clear";
 }
 
@@ -325,12 +243,12 @@ export function consumePmExitHandoff(db: Db, ops: HandoffObligationOps | null, r
   const id = db.getConfig(PM_EXIT_HANDOFF_OBLIGATION_KEY) || null;
   const episode = db.getConfig(PM_EXIT_HANDOFF_EPISODE_KEY) || "";
   for (const key of [PM_EXIT_HANDOFF_EPISODE_KEY, PM_EXIT_HANDOFF_REQUESTED_AT_KEY, PM_EXIT_HANDOFF_SESSION_KEY,
-    PM_EXIT_HANDOFF_OBLIGATION_KEY, PM_EXIT_HANDOFF_OBLIGATION_STATE_KEY, PM_EXIT_SUBAGENTS_ACK_KEY]) db.setConfig(key, "");
+    PM_EXIT_HANDOFF_OBLIGATION_KEY, PM_EXIT_HANDOFF_OBLIGATION_STATE_KEY]) db.setConfig(key, "");
   db.setConfig(PM_EXIT_CONSUMED_EPISODE_KEY, episode);
-  void resolveRow(ops, requestedAt, id, `PM handoff saved (${via}) and subagents stopped; MoP sends /exit at this Stop`);
+  void resolveRow(ops, requestedAt, id, `PM handoff saved (${via}); MoP sends /exit at this Stop`);
   db.logEvent(0, "pm_exit_handoff_ready", "Stop", null, {
     requested_at: requestedAt, via, obligation_id: id, episode,
-    reason: "Handoff saved and subagents stopped; consuming the single PM /exit attempt",
+    reason: "Handoff saved; consuming the single PM /exit attempt",
   });
 }
 
@@ -359,7 +277,7 @@ function pmExitRefusedAction(evidence: Record<string, unknown>): string {
   const reason = typeof evidence.reason === "string" ? evidence.reason : "refused_pre_effect";
   return `PM /exit was REFUSED before any effect (${reason}); the PM did not restart. The saved continuation is kept `
     + "(GET /exit-status exit_terminal). Nothing is resent automatically. To restart, re-arm this same episode "
-    + `(new save + subagents-stopped ACK required): ${pmExitRecoveryCommand(episode)}`;
+    + `(a fresh handoff save is required), or arm a new PM-only exit: ${pmExitRecoveryCommand(episode)}`;
 }
 
 /**

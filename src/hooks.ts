@@ -1485,28 +1485,22 @@ export class HookProcessor {
       if (typeof currentSession !== "string" || !currentSession.trim()
           || payload.session_id !== currentSession) return {};
       // ONE maintenance command per pinned Stop (CTO REVISE ts 1793754925.429599).
-      // The soft-boundary middleware pins work/boot BEFORE its first await and
-      // selects clear OR exit; direct callers (tests) pin here. A REST-armed exit
-      // also needs the saved handoff + bound subagents-stopped ACK. Not selected
-      // never blocks: this Stop falls through to normal handling (rule 50).
-      const pin = stopPin ?? (() => {
-        const work = latestPmWork(this.db);
-        return { work, boot: latestPmBoot(this.db).id, selected: selectPmStopMaintenance(this.db, {
-          sessionId: currentSession, workPin: work, ops: this.pmExitHandoffOps, files: this.pmExitHandoffFiles,
-        }) === "exit" };
-      })();
+      // The soft-boundary middleware selects clear OR exit before its first
+      // await; direct callers (tests) select here. A REST-armed exit needs only
+      // the saved handoff (resume point). No ACK, no work-bound staleness and no
+      // busy-pane refusal (Rajiv ts 1793758450.451269: "remove the acks and the
+      // gates"): later PM work never voids it; a busy pane queues /exit. Not
+      // selected never blocks: this Stop falls through to normal handling (rule 50).
+      const pin = stopPin ?? {
+        work: latestPmWork(this.db), boot: latestPmBoot(this.db).id,
+        selected: selectPmStopMaintenance(this.db, { ops: this.pmExitHandoffOps, files: this.pmExitHandoffFiles }) === "exit",
+      };
       const handoffRequired = !!this.db.getConfig(PM_EXIT_HANDOFF_EPISODE_KEY);
-      const stale = latestPmWork(this.db) !== pin.work || latestPmBoot(this.db).id !== pin.boot;
       const readiness = handoffRequired ? pmExitHandoffReadiness(this.db, {
-        currentSessionId: currentSession, workPin: pin.work, ops: this.pmExitHandoffOps, files: this.pmExitHandoffFiles,
+        ops: this.pmExitHandoffOps, files: this.pmExitHandoffFiles,
       }) : null;
-      const fire = pin.selected && !stale && !this.db.hasPendingClear(0) && (!readiness || readiness.kind === "ready");
+      const fire = pin.selected && !this.db.hasPendingClear(0) && (!readiness || readiness.kind === "ready");
       if (!fire) {
-        if (stale && pin.selected) {
-          this.db.logEvent(0, "pm_exit_stop_stale", "Stop", null, {
-            episode: exitStatus.episode, pinned_work: pin.work, reason: "PM work or boot changed after this Stop; no exit attempt",
-          });
-        }
         if (handoffRequired && this.pmExitHandoffOps && !this.db.getConfig(PM_EXIT_HANDOFF_OBLIGATION_KEY)) {
           void ensurePmExitHandoffObligation(this.db, this.pmExitHandoffOps).catch(() => null);
         }
@@ -1514,17 +1508,19 @@ export class HookProcessor {
         if (readiness?.kind === "ready") consumePmExitHandoff(this.db, this.pmExitHandoffOps, readiness.requestedAt, readiness.via);
         this.db.setConfig(PM_EXIT_CONSUMED_EPISODE_KEY, exitStatus.episode ?? "");
         this.db.markSlotExitCycled(0);
-        // Paste and Enter fences carry the ORIGINAL pinned work/boot authority.
+        // Paste and Enter fences: only a cancelled/replaced episode refuses.
+        // No Escape/C-u (they would interrupt a busy turn) and no idle check:
+        // the PM pane is busy at its own Stop and Claude Code queues /exit.
         const fence = () => {
           const current = this.db.getExitStatus();
-          return !current.pending || !current.pm_only || current.episode !== exitStatus.episode ? "exit_pending_cancelled"
-            : latestPmWork(this.db) !== pin.work || latestPmBoot(this.db).id !== pin.boot ? "pm_work_changed_after_stop" : null;
+          return !current.pending || !current.pm_only || current.episode !== exitStatus.episode ? "exit_pending_cancelled" : null;
         };
         const observed = await this.relay.observeSlotPane(0);
         const delivery = observed ? await this.relay.deliverGuardedToSlot(0, "/exit", {
           expectedPaneId: observed.paneId,
           recheck: async () => fence(),
           finalCheck: fence,
+          skipSlashClear: true,
         }) : { outcome: "refused_pre_effect", reason: "pm_pane_unknown" };
         if (delivery.outcome === "refused_pre_effect") {
           // Proven zero effect: explicit durable terminal + same-owner recovery edge; never resent.

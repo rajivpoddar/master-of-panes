@@ -1572,6 +1572,13 @@ export class TmuxRelay {
       finalCheck?: (stage: "pre_paste" | "pre_enter") => string | null;
       /** Bracketed paste (-p) so a multi-line payload cannot submit early. */
       bracketedPaste?: boolean;
+      /**
+       * Never send the slash pre-clear keys (Escape, C-u) or require an idle
+       * pane for them: Escape interrupts a busy turn. The composer must already
+       * be empty; a busy Claude Code pane queues the command (PM Stop /exit,
+       * Rajiv ts 1793758450.451269).
+       */
+      skipSlashClear?: boolean;
       timing?: { dwellMs?: number; pollMs?: number; payloadGraceMs?: number; payloadStableMs?: number; clearGraceMs?: number };
     },
   ): Promise<GuardedSlotDelivery> {
@@ -1604,7 +1611,7 @@ export class TmuxRelay {
       const before = await capture();
       let prePasteComposer = composerText(before);
       const slash = isSlashCommand(command);
-      if (slash && slashComposerClearable(prePasteComposer, command)) {
+      if (slash && !opts.skipSlashClear && slashComposerClearable(prePasteComposer, command)) {
         const cleared = await this.clearComposerForSlash(paneId, async () => composerText(await capture()), command,
           async () => (await recheck("pre_paste"))
             ?? (await this.getSlotActivityState(slotNum, paneId) !== "idle" ? "pane_not_idle" : null),

@@ -2494,9 +2494,9 @@ export class MoPDatabase {
   /**
    * `requireHandoff` (REST PM-only arming only): the /exit waits for the
    * pm_save_handoff `exit` variant, meaning both handoff files saved after this
-   * request AND the PM's subagents-stopped ack (Rajiv D0AMF0XE6TS thread
-   * 1793731816.594829, ts 1793752982.460979). Direct callers keep the
-   * unconditioned behaviour.
+   * request (Rajiv D0AMF0XE6TS thread 1793731816.594829, ts 1793752982.460979;
+   * no ACK per thread 1793754554.496299, ts 1793758450.451269). Direct callers
+   * keep the unconditioned behaviour.
    */
   setExitPending(enabled: boolean, devOnly = false, pmOnly = false, continuationPrompt?: string, requireHandoff = false): void {
     const episode = randomUUID();
@@ -2510,6 +2510,7 @@ export class MoPDatabase {
     this.setConfig("pm_exit_handoff_requested_at", handoff ? new Date().toISOString() : "");
     this.setConfig("pm_exit_handoff_session", handoff ? session : "");
     this.setConfig("pm_exit_handoff_obligation_id", "");
+    // Retired ACK keys (cleared so a pre-upgrade ACK never lingers).
     this.setConfig("pm_exit_subagents_stopped_at", "");
     this.setConfig("pm_exit_subagents_ack", "");
     this.setConfig("pm_exit_handoff_obligation_state", "");
@@ -2533,7 +2534,7 @@ export class MoPDatabase {
   }
 
   getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean>;
-    handoff_requested_at: string | null; handoff_obligation_id: string | null; subagents_stopped_at: string | null;
+    handoff_requested_at: string | null; handoff_obligation_id: string | null;
     handoff_episode: string | null; exit_terminal: Record<string, unknown> | null } {
     const pending = this.getExitPending();
     const cycled: Record<number, boolean> = {};
@@ -2547,7 +2548,6 @@ export class MoPDatabase {
       stop_only: this.getConfig("exit_pending_stop_only") === "true", cycled,
       handoff_requested_at: this.getConfig("pm_exit_handoff_requested_at") || null,
       handoff_obligation_id: this.getConfig("pm_exit_handoff_obligation_id") || null,
-      subagents_stopped_at: this.getConfig("pm_exit_subagents_stopped_at") || null,
       handoff_episode: this.getConfig("pm_exit_handoff_episode") || null,
       exit_terminal: (() => { try { return JSON.parse(this.getConfig("pm_exit_terminal") || "null"); } catch { return null; } })() };
   }

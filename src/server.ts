@@ -27,7 +27,6 @@ import {
   PM_EXIT_HANDOFF_OBLIGATION_KEY,
   PM_EXIT_HANDOFF_REQUESTED_AT_KEY,
   PM_HANDOFF_EXIT_VARIANT,
-  recordPmExitSubagentsStopped,
   readPmExitTerminal,
   resolvePmExitTerminalRow,
   resolveSupersededPmExitHandoff,
@@ -339,9 +338,7 @@ const pmStopPins: PMStopAuthorityPins = {
 };
 
 const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop, pmStopPins,
-  (sessionId, workPin) => selectPmStopMaintenance(db, {
-    sessionId, workPin, ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles,
-  }));
+  () => selectPmStopMaintenance(db, { ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles }));
 
 // ─── MoP Clear Helpers ─────────────────────────────────
 // HTTP path for deterministic schedulers that cannot call MCP tools.
@@ -504,7 +501,7 @@ function currentPmSessionId(): string {
 }
 
 const pmHandoffOps = pmOpsHandoffObligationOps();
-/** Same pm_save_handoff kind and save detection; `exit` variant copy (subagents-stopped ack). */
+/** Same pm_save_handoff kind and save detection; `exit` variant copy (save + TaskStop, no ACK). */
 const pmExitHandoffOps = pmOpsHandoffObligationOps(undefined, undefined, undefined, PM_HANDOFF_EXIT_VARIANT);
 processor.pmExitHandoffOps = pmExitHandoffOps;
 
@@ -1295,7 +1292,7 @@ app.post("/exit-pending", async (c) => {
   }
   // Same-owner recovery edge for a refused (zero-effect) PM exit terminal
   // (CTO REVISE ts 1793756803.183959): re-arm THAT episode's PM-only restart
-  // with its retained continuation. Fresh save + ACK are required again.
+  // with its retained continuation. A fresh handoff save is required again.
   let recovered: string | null = null;
   if (body.recover_episode !== undefined) {
     let terminal: { episode?: unknown; continuation_prompt?: unknown } | null = null;
@@ -1339,7 +1336,7 @@ app.post("/exit-pending", async (c) => {
       return c.json({ error: "recover_episode is not the current refused PM exit episode" }, 409);
     }
   }
-  // REST PM-only arming requires the saved handoff + subagents-stopped ack.
+  // REST PM-only arming requires the saved handoff (resume point) only.
   db.setExitPending(body.enabled, body.dev_only === true, body.pm_only === true, body.continuation_prompt, body.pm_only === true);
   // A new PM-only episode supersedes any refused terminal (its record stays in the event log).
   if (body.enabled && body.pm_only) db.setConfig("pm_exit_terminal", "");
@@ -1348,24 +1345,6 @@ app.post("/exit-pending", async (c) => {
     ...(recovered ? { recovered_episode: recovered, via: "same_owner_recovery" } : {}),
   });
   return c.json({ ok: true, enabled: body.enabled, status: db.getExitStatus() });
-});
-
-/**
- * PM ACK for the pm_save_handoff `exit` variant: all background agents/tasks
- * are stopped. Body MUST name this request's `episode` and `requested_at`; the
- * ACK is refused before the save evidence, bound to the current PM session and
- * work version, and voided by any later PM work (CTO REVISE ts 1793754925.429599).
- */
-app.post("/exit-pending/subagents-stopped", async (c) => {
-  let body: { episode?: unknown; requested_at?: unknown } = {};
-  try { body = await c.req.json(); } catch { body = {}; }
-  if (body === null || typeof body !== "object") body = {};
-  const result = recordPmExitSubagentsStopped(db, {
-    nowMs: Date.now(), episode: body.episode, requestedAt: body.requested_at,
-    ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles,
-  });
-  if (!result.ok) return c.json({ error: result.error }, result.status);
-  return c.json({ ...result, status: db.getExitStatus() });
 });
 
 /** Exit-pending status (REST parity for mop_exit_status). */
