@@ -58,7 +58,8 @@ STEP 0 — dependency check: the composer/collectors are MoP shared assets insta
   collectors absent (install the MoP release shipping pm/heartbeat)" with an empty
   ACTIONS list.
 
-STEP 1 — compose (prints; never posts):
+STEP 1 — compose (prints; never posts). Record the report bucket at compose time:
+  date +%Y-%m-%d:%H > /tmp/heartbeat-1h-bucket
   bash /Users/rajiv/.claude/scripts/sakshi-heartbeat.sh compose --mode 1h \
     --save-inputs /tmp/heartbeat-1h-latest > /tmp/heartbeat-1h-post.txt
   If PM passed ladder-approved escalations, add one `--escalation "<text>"` each.
@@ -96,9 +97,13 @@ STEP 2 — check: first line is "*Hourly — HH:MM IST*", or starts with
   - "*Remote boxes:*" line (Rajiv 2026-11-02, C0ALZJHGE49 thread 1793619957.716719, ts 1793620021.219069: "Add a blank line before remote boxes"): it goes after Slots, preceded by ONE blank line. If the composer doesn't emit it, add it from `timeout 60 ~/.claude/scripts/remote-test-box.sh list`, using the same blank line.
 
 STEP 3 — post ONE NEW TOP-LEVEL message (no -t):
-  SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-1h-post.txt
-  From the readback `OK ts=<ts>` record the thread:
-  /Users/rajiv/.claude/scripts/hourly-thread-ts --set <ts>
+  Post and record in ONE shell command (agent shells do not keep variables):
+  RECEIPT=$(SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-1h-post.txt) && printf '%s\n' "$RECEIPT" && TS=$(printf '%s' "$RECEIPT" | sed -n 's/.*OK ts=\([0-9.]*\).*/\1/p' | head -1) && /Users/rajiv/.claude/scripts/hourly-thread-ts --set "$TS" --bucket "$(cat /tmp/heartbeat-1h-bucket)" --receipt "$RECEIPT"
+  This records the thread from the readback `OK ts=<ts>` AND clears this bucket's report debt.
+  MoP opens a pm-ops `hourly_report_due` obligation per bucket when it injects this
+  skill (Rajiv D0AMF0XE6TS ts 1793784122.949659: "hourly report should never be
+  missed"). Only --set with the compose bucket and the successful post receipt
+  resolves it; exit 3 means the post was recorded but the debt was NOT resolved.
 
 STEP 4 — build ACTIONS from /tmp/heartbeat-1h-latest/prs.json (live GitHub; re-read
   a head with `gh pr view <n> --json headRefOid` right before listing it):

@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "a06fea2f4fcea991e96d11ac887d71663cd5de094f32e50282aaf835032414cf",
+      "sha256": "3fb749685efbaf51efa14eb12a4e14f549d1e856a2bc16a5e1d94bb2c6e81f34",
       "source_path": "claude/scripts/hourly-thread-ts"
     },
     {
@@ -926,7 +926,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "a3204aa5a173b4c981589b562e7de46b1a66081f5bb6ed87b802f565a43ce50e",
+      "sha256": "bef168e07c6e490d290b1df1b9ec46feb8a7e061a57d122d188d1ba2bb680da8",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {

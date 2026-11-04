@@ -35,7 +35,15 @@ const DEFAULT_PM_OPS_DB =
   "/Users/rajiv/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db";
 
 export type Exec = (file: string, args: string[], options: { timeout: number }) => Promise<unknown>;
-export type ObligationState = "open" | "resolved" | "unknown";
+/** absent = the ledger was read and holds no row for the bucket; unknown = unreadable. */
+export type ObligationState = "open" | "resolved" | "absent" | "unknown";
+/**
+ * created: the writer exited 0. failed: the writer definitely did not commit
+ * (spawn failure or a non-ambiguous non-zero exit). unknown: commit status is
+ * ambiguous (timeout/kill, or exit 2, which pm-ops also returns for an
+ * accepted write whose row id is 2).
+ */
+export type WriterOutcome = "created" | "failed" | "unknown";
 
 function pmOpsScript(): string {
   return process.env.MOP_PM_OPS_SCRIPT ?? join(homedir(), ".claude/scripts/pm-ops.py");
@@ -48,7 +56,7 @@ function isoZ(ms: number): string {
 export function hourlyReportAction(bucket: string): string {
   return (
     `Invoke Skill(hourly-heartbeat); post report for ${bucket}. ` +
-    "hourly-thread-ts --set <ts> resolves this automatically after the post. " +
+    "hourly-thread-ts --set <ts> --bucket <compose bucket> --receipt <slack-send OK line> resolves this after the post. " +
     "If the hourly agent for this bucket is already running, claim it instead: " +
     `pm-ops.py obligation-upsert --kind ${HOURLY_REPORT_KIND} --target-type ${HOURLY_REPORT_TARGET_TYPE} ` +
     `--target-id ${bucket} --suppress-until <UTC now+20min ISO Z>.`
@@ -88,19 +96,31 @@ export function hourlyReportUpsertArgs(
   return args;
 }
 
-/** Upsert through the canonical pm-ops writer. Never throws (fail open). */
+/** Classify a pm-ops writer error without retrying it. */
+export function classifyWriterError(error: unknown): WriterOutcome {
+  const e = error as { code?: unknown; killed?: boolean; signal?: unknown } | null;
+  if (!e || typeof e !== "object") return "unknown";
+  if (e.killed || (typeof e.signal === "string" && e.signal)) return "unknown";
+  if (e.code === 2) return "unknown";
+  if (typeof e.code === "number") return "failed";
+  if (e.code === "ENOENT" || e.code === "EACCES") return "failed";
+  return "unknown";
+}
+
+/** Upsert through the canonical pm-ops writer exactly once. Never throws (fail open). */
 export async function upsertHourlyReportObligation(
   bucket: string,
   injectedAt: string,
   escalated: boolean,
   execute: Exec = run,
-): Promise<boolean> {
+): Promise<WriterOutcome> {
   try {
     await execute("python3", hourlyReportUpsertArgs(bucket, injectedAt, escalated), { timeout: 10_000 });
-    return true;
+    return "created";
   } catch (error) {
-    console.error(`[pm-cadence] hourly_report_due upsert failed bucket=${bucket}: ${String(error)}`);
-    return false;
+    const outcome = classifyWriterError(error);
+    console.error(`[pm-cadence] hourly_report_due upsert ${outcome} bucket=${bucket}: ${String(error)}`);
+    return outcome;
   }
 }
 
@@ -117,7 +137,7 @@ export function readHourlyReportObligation(
          WHERE kind=? AND target_type=? AND target_id=?
          ORDER BY id DESC LIMIT 1`,
       ).get(HOURLY_REPORT_KIND, HOURLY_REPORT_TARGET_TYPE, bucket) as { status?: string } | undefined;
-      if (!row) return "unknown";
+      if (!row) return "absent";
       return row.status === "open" ? "open" : "resolved";
     } finally {
       db.close();

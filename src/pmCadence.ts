@@ -24,8 +24,9 @@ import {
   readHourlyReportObligation,
   upsertHourlyReportObligation,
   type ObligationState,
+  type WriterOutcome,
 } from "./hourlyReportObligation.js";
-import type { TmuxRelay } from "./relay.js";
+import type { PMQueuedEffectVerdict, TmuxRelay } from "./relay.js";
 
 export type PMCadenceTaskName = "heartbeat" | "morning-brief" | "hourly-heartbeat" | "growth-daily" | "lifecycle-email" | "daily-pm-restart" | "rtb-split-update";
 export type PMCadenceTriggerReason = "scheduled" | "manual" | "boot";
@@ -211,26 +212,49 @@ function cadenceEventType(taskName: PMCadenceTaskName, dueKey: string): string {
 }
 
 export type HourlyReportDeps = {
-  upsert: (bucket: string, injectedAt: string, escalated: boolean) => Promise<boolean>;
+  /** One pm-ops upsert attempt. Never retried blindly by the caller. */
+  upsert: (bucket: string, intentAt: string) => Promise<WriterOutcome>;
   readState: (bucket: string) => ObligationState;
 };
 
 /** Production wiring (server.ts passes this). Writes the live pm-ops ledger. */
 export const PM_OPS_HOURLY_REPORT_DEPS: HourlyReportDeps = {
-  upsert: (bucket, injectedAt, escalated) => upsertHourlyReportObligation(bucket, injectedAt, escalated),
+  upsert: (bucket, intentAt) => upsertHourlyReportObligation(bucket, intentAt, false),
   readState: (bucket) => readHourlyReportObligation(bucket),
 };
 
 // Default is inert so unit tests constructing a scheduler never touch the live ledger.
 const INERT_HOURLY_REPORT_DEPS: HourlyReportDeps = {
-  upsert: async () => false,
+  upsert: async () => "unknown",
   readState: () => "unknown",
 };
 
-// MoP-side record of the hourly bucket's obligation: {due_key, injected_at, escalated}.
+// MoP-side durable record of the hourly bucket's report debt.
 const CFG_HOURLY_REPORT_OBLIGATION = "pm_cadence_hourly_report_obligation";
+/** A definite writer failure may be retried once, only after the ledger is read and shows no row. */
+const HOURLY_DEBT_MAX_WRITER_ATTEMPTS = 2;
+/** The verified retry never runs in the same tick as the failure it follows. */
+const HOURLY_DEBT_RETRY_AFTER_MS = 60 * 1000;
 
-type HourlyReportRecord = { due_key: string; injected_at: string; escalated: boolean };
+/**
+ * writer:
+ *  - pending: intent persisted; the single writer attempt has not settled (or MoP crashed).
+ *  - created: the ledger holds (or held) the bucket's row.
+ *  - failed: the writer definitely did not commit; surfaced.
+ *  - unknown: commit status cannot be established; custody kept, no blind write.
+ */
+export type HourlyReportRecord = {
+  due_key: string;
+  intent_at: string;
+  delivered_at?: string;
+  escalated: boolean;
+  escalated_at?: string;
+  writer: "pending" | WriterOutcome;
+  writer_attempts: number;
+  writer_settled_at?: string;
+};
+
+const REINJECT_EVENT_RE = /^cadence-hourly-heartbeat-(\d{4}-\d{2}-\d{2}:\d{2})-reinject$/;
 
 export class PMCadenceScheduler {
   private db: MoPDatabase;
@@ -249,10 +273,15 @@ export class PMCadenceScheduler {
     10
   );
 
+  /** Bucket whose single writer attempt is in flight in THIS process (custody). */
+  private hourlyWriterInflight: string | null = null;
+
   constructor(db: MoPDatabase, relay: TmuxRelay, hourlyReport: HourlyReportDeps = INERT_HOURLY_REPORT_DEPS) {
     this.db = db;
     this.relay = relay;
     this.hourlyReport = hourlyReport;
+    // Revalidate the hourly reminder at the queued-writer effect boundary.
+    relay.setPMQueuedEffectCheck?.((row) => this.revalidateQueuedReminder(row.event_type));
   }
 
   start(): void {
@@ -302,6 +331,7 @@ export class PMCadenceScheduler {
       if (lifecycle) results.push(lifecycle);
       const restart = await this.runIfDue("daily-pm-restart", reason);
       if (restart) results.push(restart);
+      await this.reconcileHourlyDebt();
       if (reason === "scheduled") await this.escalateHourlyReportIfMissed();
       return results;
     } finally {
@@ -327,6 +357,7 @@ export class PMCadenceScheduler {
     check_interval_ms: number;
     boot_catchup_delay_ms: number;
     local_morning_brief_hour: number;
+    hourly_report_debt: HourlyReportRecord | null;
     tasks: Array<{
       task: PMCadenceTaskName;
       label: string;
@@ -347,6 +378,7 @@ export class PMCadenceScheduler {
       check_interval_ms: this.CHECK_INTERVAL_MS,
       boot_catchup_delay_ms: this.BOOT_CATCHUP_DELAY_MS,
       local_morning_brief_hour: LOCAL_MORNING_BRIEF_HOUR,
+      hourly_report_debt: this.readHourlyRecord(),
       tasks: (Object.keys(TASKS) as PMCadenceTaskName[]).map((taskName) => {
         const task = TASKS[taskName];
         const lastDueKey = this.db.getConfig(configKey(task, "last_due_key"));
@@ -442,6 +474,10 @@ export class PMCadenceScheduler {
     let injected = false;
     let queued = false;
 
+    // The report debt exists BEFORE any possible delivery of its prompt, so a
+    // crash after journalled delivery can never leave a bucket without debt.
+    if (taskName === "hourly-heartbeat") await this.ensureHourlyDebt(dueKey);
+
     // submitToPM persists the exact occurrence before entering the shared
     // serialized boundary. Its observation-bound key is Enter only for an
     // explicit idle; busy/unknown uses C-q immediately. Awaiting the result
@@ -462,7 +498,7 @@ export class PMCadenceScheduler {
     this.db.setConfig(configKey(task, "last_run_ts"), ts);
     this.db.setConfig(configKey(task, "last_run_reason"), reason);
     this.db.setConfig(configKey(task, "last_injected"), injected ? "true" : "false");
-    if (taskName === "hourly-heartbeat") await this.openHourlyReportObligation(dueKey, ts);
+    if (taskName === "hourly-heartbeat" && (injected || queued)) this.markHourlyDelivered(dueKey, ts);
     this.db.logEvent(0, "pm_cadence_triggered", null, null, {
       task: taskName,
       label: task.label,
@@ -491,52 +527,147 @@ export class PMCadenceScheduler {
     };
   }
 
-  private readHourlyRecord(): HourlyReportRecord | null {
+  readHourlyRecord(): HourlyReportRecord | null {
     const raw = this.db.getConfig(CFG_HOURLY_REPORT_OBLIGATION);
     if (!raw) return null;
     try {
       const rec = JSON.parse(raw) as HourlyReportRecord;
-      return typeof rec?.due_key === "string" && typeof rec?.injected_at === "string" ? rec : null;
+      return typeof rec?.due_key === "string" && typeof rec?.intent_at === "string" ? rec : null;
     } catch {
       return null;
     }
   }
 
-  /** Idempotent per bucket: one pm-ops upsert per hourly bucket, fail open. */
-  private async openHourlyReportObligation(dueKey: string, injectedAt: string): Promise<void> {
-    if (this.readHourlyRecord()?.due_key === dueKey) return;
-    const record: HourlyReportRecord = { due_key: dueKey, injected_at: injectedAt, escalated: false };
-    this.db.setConfig(CFG_HOURLY_REPORT_OBLIGATION, JSON.stringify(record));
-    const ok = await this.hourlyReport.upsert(dueKey, injectedAt, false);
-    this.db.logEvent(0, "pm_cadence_hourly_report_obligation", null, null, { due_key: dueKey, upserted: ok });
+  private writeHourlyRecord(rec: HourlyReportRecord): void {
+    this.db.setConfig(CFG_HOURLY_REPORT_OBLIGATION, JSON.stringify(rec));
+  }
+
+  /** Settle one writer attempt into the record (re-read: escalation may have moved on). */
+  private settleHourlyWriter(dueKey: string, outcome: WriterOutcome): void {
+    const cur = this.readHourlyRecord();
+    if (!cur || cur.due_key !== dueKey) return;
+    this.writeHourlyRecord({ ...cur, writer: outcome, writer_settled_at: new Date().toISOString() });
+    this.db.logEvent(0, outcome === "created"
+      ? "pm_cadence_hourly_report_obligation"
+      : "pm_cadence_hourly_report_obligation_failed", null, null, {
+      due_key: dueKey, writer: outcome, attempts: cur.writer_attempts,
+    });
+    if (outcome !== "created") {
+      console.error(`[pm-cadence] hourly_report_due for ${dueKey} NOT created (writer=${outcome}); surfaced, no blind retry`);
+    }
+  }
+
+  private async runHourlyWriter(dueKey: string, intentAt: string): Promise<void> {
+    this.hourlyWriterInflight = dueKey;
+    let outcome: WriterOutcome = "unknown";
+    try {
+      outcome = await this.hourlyReport.upsert(dueKey, intentAt);
+    } catch {
+      outcome = "unknown";
+    } finally {
+      this.hourlyWriterInflight = null;
+    }
+    this.settleHourlyWriter(dueKey, outcome);
+  }
+
+  /**
+   * Persist the bucket's debt intent, then make the single writer attempt and
+   * wait for it to settle. An existing record for the bucket is reconciled
+   * against the ledger instead of being written again.
+   */
+  private async ensureHourlyDebt(dueKey: string): Promise<void> {
+    if (this.readHourlyRecord()?.due_key === dueKey) {
+      await this.reconcileHourlyDebt();
+      return;
+    }
+    const intentAt = new Date().toISOString();
+    this.writeHourlyRecord({ due_key: dueKey, intent_at: intentAt, escalated: false, writer: "pending", writer_attempts: 1 });
+    await this.runHourlyWriter(dueKey, intentAt);
+  }
+
+  private markHourlyDelivered(dueKey: string, ts: string): void {
+    const cur = this.readHourlyRecord();
+    if (!cur || cur.due_key !== dueKey || cur.delivered_at) return;
+    this.writeHourlyRecord({ ...cur, delivered_at: ts });
+  }
+
+  /**
+   * Bring the record in line with the ledger. Never writes on an unreadable
+   * ledger or an ambiguous/stale writer; a definite failure gets ONE more
+   * attempt only after a read proves the bucket has no row.
+   */
+  private async reconcileHourlyDebt(now: Date = new Date()): Promise<void> {
+    const rec = this.readHourlyRecord();
+    if (!rec || rec.writer === "created") return;
+    if (this.hourlyWriterInflight === rec.due_key) return;
+    const state = this.hourlyReport.readState(rec.due_key);
+    if (state === "open" || state === "resolved") {
+      this.writeHourlyRecord({ ...rec, writer: "created" });
+      this.db.logEvent(0, "pm_cadence_hourly_report_obligation_reconciled", null, null, {
+        due_key: rec.due_key, from: rec.writer, ledger: state,
+      });
+      return;
+    }
+    if (state !== "absent") return;
+    if (rec.writer === "pending") {
+      // The writer did not settle in a live process (crash). Its custody is unknown.
+      this.writeHourlyRecord({ ...rec, writer: "unknown" });
+      this.db.logEvent(0, "pm_cadence_hourly_report_obligation_failed", null, null, {
+        due_key: rec.due_key, writer: "unknown", reason: "writer-unsettled-after-restart",
+      });
+      return;
+    }
+    if (rec.writer !== "failed") return;
+    if (rec.writer_attempts >= HOURLY_DEBT_MAX_WRITER_ATTEMPTS) return;
+    if (rec.due_key !== hourlyHeartbeatDueKey(now)) return;
+    const settledMs = Date.parse(rec.writer_settled_at ?? "");
+    if (!Number.isFinite(settledMs) || now.getTime() - settledMs < HOURLY_DEBT_RETRY_AFTER_MS) return;
+    this.writeHourlyRecord({ ...rec, writer: "pending", writer_attempts: rec.writer_attempts + 1 });
+    await this.runHourlyWriter(rec.due_key, rec.intent_at);
   }
 
   /**
    * 20 minutes after the hourly inject, if the bucket's report has not posted
    * (obligation still open), re-inject the hourly prompt ONCE through normal
-   * prompt delivery. Unknown obligation state never re-injects (fail open).
+   * prompt delivery. The attempt is consumed before the effect; the ledger is
+   * never written afterwards, so resolved debt is never recreated.
    */
   private async escalateHourlyReportIfMissed(now: Date = new Date()): Promise<void> {
     const rec = this.readHourlyRecord();
     if (!rec || rec.escalated) return;
     if (this.db.getConfig(CFG_GLOBAL_PAUSED) === "true" || this.isTaskPaused("hourly-heartbeat")) return;
     if (rec.due_key !== hourlyHeartbeatDueKey(now)) return;
-    const injectedMs = Date.parse(rec.injected_at);
-    if (!Number.isFinite(injectedMs) || now.getTime() - injectedMs < HOURLY_REPORT_ESCALATE_AFTER_MS) return;
+    const baseMs = Date.parse(rec.delivered_at ?? rec.intent_at);
+    if (!Number.isFinite(baseMs) || now.getTime() - baseMs < HOURLY_REPORT_ESCALATE_AFTER_MS) return;
     if (this.hourlyReport.readState(rec.due_key) !== "open") return;
     // Claim synchronously before any await: at most one re-inject per bucket.
-    this.db.setConfig(CFG_HOURLY_REPORT_OBLIGATION, JSON.stringify({ ...rec, escalated: true }));
+    this.writeHourlyRecord({ ...rec, escalated: true, escalated_at: now.toISOString() });
     const message =
       `${HOURLY_HEARTBEAT_TASK.commandDescription} Re-inject: no hourly report posted for ${rec.due_key} after 20 min.`;
     const submitted = await this.relay.submitToPM(message, `${cadenceEventType("hourly-heartbeat", rec.due_key)}-reinject`);
-    const upserted = await this.hourlyReport.upsert(rec.due_key, rec.injected_at, true);
     this.db.logEvent(0, "pm_cadence_hourly_report_reinjected", null, null, {
       due_key: rec.due_key,
       submitted: submitted.ok,
       queued: submitted.queued === true,
-      upserted,
+      ambiguous: submitted.ambiguous === true,
     });
-    console.log(`[pm-cadence] hourly report missing for ${rec.due_key}; re-injected once (ok=${submitted.ok})`);
+    console.log(`[pm-cadence] hourly report missing for ${rec.due_key}; re-inject attempt consumed (ok=${submitted.ok})`);
+  }
+
+  /**
+   * Effect-boundary check for a queued/retried hourly reminder row. Unrelated
+   * rows always deliver. A reminder for a past bucket or a debt that is no
+   * longer open is dropped; an unreadable ledger retains the row unchanged.
+   */
+  revalidateQueuedReminder(eventType: string, now: Date = new Date()): PMQueuedEffectVerdict {
+    const match = REINJECT_EVENT_RE.exec(eventType);
+    if (!match) return "deliver";
+    const bucket = match[1]!;
+    if (bucket !== hourlyHeartbeatDueKey(now)) return { drop: "hourly-reminder-expired" };
+    const state = this.hourlyReport.readState(bucket);
+    if (state === "open") return "deliver";
+    if (state === "unknown") return "retain";
+    return { drop: state === "resolved" ? "hourly-report-already-posted" : "hourly-debt-absent" };
   }
 
   private isTaskPaused(taskName: PMCadenceTaskName): boolean {

@@ -179,6 +179,13 @@ export function decidePMDrain(
 export type PMSubmitKey = "Enter" | "C-q";
 export type PMRuntime = "claude" | "omp";
 
+/**
+ * Effect-boundary revalidation for a queued PM row: deliver it, keep it queued
+ * unchanged (uncertain), or drop it because its purpose expired/completed.
+ */
+export type PMQueuedEffectVerdict = "deliver" | "retain" | { drop: string };
+export type PMQueuedEffectCheck = (row: { slot: number; event_type: string; enqueued_at: string }) => PMQueuedEffectVerdict;
+
 export type PMSubmitResult = {
   ok: boolean;
   submitKey: PMSubmitKey;
@@ -944,6 +951,13 @@ export class TmuxRelay {
     return result;
   }
 
+  private pmQueuedEffectCheck: PMQueuedEffectCheck | null = null;
+
+  /** One owner-supplied check run immediately before a queued row's paste. */
+  setPMQueuedEffectCheck(check: PMQueuedEffectCheck | null): void {
+    this.pmQueuedEffectCheck = check;
+  }
+
   private async deliverPMRowNow(row: PMQueueRow): Promise<PMSubmitResult> {
     this.pmMaintenanceGate?.deferCLIInput();
     if (!this.db) {
@@ -961,6 +975,29 @@ export class TmuxRelay {
     const submitKey = decidePMSubmitKey(this.pmBusy, this.pmRuntime);
     if (state === "delivered" || state === "started" || state === "ambiguous") {
       return { ok: state === "delivered", submitKey, ambiguous: state !== "delivered" };
+    }
+    let verdict: PMQueuedEffectVerdict = "deliver";
+    try {
+      verdict = this.pmQueuedEffectCheck?.(row) ?? "deliver";
+    } catch {
+      verdict = "retain";
+    }
+    if (verdict === "retain") {
+      this.db.logEvent(row.slot, "pm_queue_delivery_deferred", null, null, {
+        event_type: row.event_type,
+        enqueued_at: row.enqueued_at,
+        reason: "effect-revalidation-uncertain-row-retained",
+      });
+      return { ok: false, submitKey, ambiguous: false };
+    }
+    if (verdict !== "deliver") {
+      this.db.deletePendingPMEvent(row.slot, row.event_type, row.enqueued_at);
+      this.db.logEvent(row.slot, "pm_queue_dropped", null, null, {
+        event_type: row.event_type,
+        enqueued_at: row.enqueued_at,
+        reason: verdict.drop,
+      });
+      return { ok: false, submitKey, ambiguous: false };
     }
     this.db.logEvent(row.slot, "pm_queue_delivery_started", null, null, {
       event_type: row.event_type,

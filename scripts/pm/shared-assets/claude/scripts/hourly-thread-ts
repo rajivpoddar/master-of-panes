@@ -2,7 +2,9 @@
 """Print (or record) the ts of the current hourly-heartbeat thread in #heydonna-dev.
 
   hourly-thread-ts                 print current ts; exit 1 if missing or stale
-  hourly-thread-ts --set <ts>      record a new hourly post (called by Skill(hourly-heartbeat))
+  hourly-thread-ts --set <ts> --bucket <YYYY-MM-DD:HH> --receipt "<slack-send OK line>"
+                                   record a new hourly post (called by Skill(hourly-heartbeat))
+                                   and resolve that report bucket's hourly_report_due debt
   hourly-thread-ts --json          print the full state record
 
 PR tracking replies (admission/merge asks, PR status, CI/capture follow-ups) go to
@@ -34,20 +36,55 @@ PM_OPS_DB = os.environ.get(
 HOURLY_KIND = "hourly_report_due"
 
 
-def resolve_hourly_report_due(ts: str) -> list[int]:
-    """Resolve MoP's open hourly_report_due rows for the post's bucket and older.
+FUTURE_SKEW_S = 120
+# A report proves delivery for its bucket only if it posted within this window.
+REPORT_WINDOW_S = 3 * 3600
+BUCKET_RE = re.compile(r"\d{4}-\d{2}-\d{2}:\d{2}")
+RECEIPT_RE = re.compile(r"OK ts=(\d{10}\.\d{6}) channel=(\S+)")
+
+
+def bucket_start(bucket: str) -> float | None:
+    if not BUCKET_RE.fullmatch(bucket):
+        return None
+    try:
+        return time.mktime(time.strptime(bucket, "%Y-%m-%d:%H"))
+    except ValueError:
+        return None
+
+
+def resolution_refusal(ts: str, bucket: str | None, receipt: str | None, now: float) -> str | None:
+    """Why this post may NOT resolve report debt, or None when it may."""
+    if not bucket or not receipt:
+        return "--bucket and --receipt are required to resolve report debt"
+    start = bucket_start(bucket)
+    if start is None:
+        return f"invalid bucket {bucket!r}"
+    if start > now:
+        return f"bucket {bucket} is in the future"
+    epoch = float(ts)
+    if epoch < start:
+        return f"post ts {ts} predates bucket {bucket}"
+    if epoch > start + REPORT_WINDOW_S:
+        return f"post ts {ts} is too late to certify bucket {bucket}"
+    match = RECEIPT_RE.search(receipt)
+    if not match or match.group(1) != ts or match.group(2) != CHANNEL:
+        return "receipt is not a successful slack-send post of this ts to " + CHANNEL
+    return None
+
+
+def resolve_hourly_report_due(ts: str, bucket: str, supersede_older: bool) -> list[tuple[int, str]]:
+    """Resolve the report bucket's own debt and, for the newest report, older debt.
 
     Rajiv D0AMF0XE6TS ts 1793784122.949659: "hourly report should never be
-    missed. can MoP add an obligation for it automatically?" MoP opens one row
-    per hourly bucket (YYYY-MM-DD:HH, local); this post resolves the current or
-    most recent bucket(s). Fails open: the thread ts is already recorded.
+    missed. can MoP add an obligation for it automatically?" Only rows with
+    target_type hourly_bucket are touched; newer buckets are never resolved.
     """
-    bucket = time.strftime("%Y-%m-%d:%H", time.localtime(float(ts)))
     try:
         con = sqlite3.connect(f"file:{PM_OPS_DB}?mode=ro", uri=True, timeout=5)
         try:
             rows = con.execute(
-                "SELECT id, target_id FROM obligations WHERE status='open' AND kind=?",
+                "SELECT id, target_id FROM obligations "
+                "WHERE status='open' AND kind=? AND target_type='hourly_bucket'",
                 (HOURLY_KIND,),
             ).fetchall()
         finally:
@@ -55,25 +92,42 @@ def resolve_hourly_report_due(ts: str) -> list[int]:
     except sqlite3.Error as exc:
         print(f"hourly_report_due lookup skipped: {exc}", file=sys.stderr)
         return []
-    resolved: list[int] = []
+    resolved: list[tuple[int, str]] = []
     for oid, target in rows:
-        if not isinstance(target, str) or target > bucket:
+        if not isinstance(target, str) or not BUCKET_RE.fullmatch(target):
+            continue
+        if target == bucket:
+            reason = f"hourly report for {bucket} posted ts={ts} (receipt OK)"
+        elif target < bucket and supersede_older:
+            reason = f"superseded: newer hourly report for {bucket} posted ts={ts}"
+        else:
             continue
         try:
             subprocess.run(
                 [sys.executable, PM_OPS, "obligation-resolve", "--kind", HOURLY_KIND, "--id", str(oid),
-                 "--reason", f"hourly report posted ts={ts} (bucket {bucket})"],
+                 "--reason", reason],
                 check=True, timeout=15, capture_output=True,
             )
-            resolved.append(int(oid))
+            resolved.append((int(oid), reason))
         except (OSError, subprocess.SubprocessError) as exc:
             print(f"hourly_report_due resolve failed id={oid}: {exc}", file=sys.stderr)
     return resolved
 
 
+def read_pointer() -> dict | None:
+    try:
+        rec = json.loads(STATE.read_text())
+        float(rec["ts"])
+        return rec
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--set", metavar="TS")
+    p.add_argument("--bucket", help="report bucket YYYY-MM-DD:HH (local) captured when the report was composed")
+    p.add_argument("--receipt", help="slack-send readback containing 'OK ts=<ts> channel=<channel>'")
     p.add_argument("--json", action="store_true")
     p.add_argument("--max-age-min", type=int, default=150, help="treat older records as stale (default 150)")
     a = p.parse_args()
@@ -81,17 +135,29 @@ def main() -> int:
         if not re.fullmatch(r"\d{10}\.\d{6}", a.set):
             print(f"invalid Slack ts: {a.set}", file=sys.stderr)
             return 2
-        STATE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = STATE.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"channel": CHANNEL, "ts": a.set, "recorded_at": int(time.time())}))
-        tmp.replace(STATE)
+        now = time.time()
+        if float(a.set) > now + FUTURE_SKEW_S:
+            print(f"refused: Slack ts {a.set} is in the future; nothing recorded", file=sys.stderr)
+            return 2
+        current = read_pointer()
+        advanced = current is None or float(a.set) >= float(current["ts"])
+        if advanced:
+            STATE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = STATE.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"channel": CHANNEL, "ts": a.set, "recorded_at": int(now)}))
+            tmp.replace(STATE)
+        else:
+            print(f"pointer kept at newer hourly thread {current['ts']}", file=sys.stderr)
         print(a.set)
-        for oid in resolve_hourly_report_due(a.set):
-            print(f"resolved hourly_report_due obligation {oid}", file=sys.stderr)
+        refusal = resolution_refusal(a.set, a.bucket, a.receipt, now)
+        if refusal:
+            print(f"hourly_report_due NOT resolved: {refusal}", file=sys.stderr)
+            return 3 if (a.bucket or a.receipt) else 0
+        for oid, reason in resolve_hourly_report_due(a.set, a.bucket, supersede_older=advanced):
+            print(f"resolved hourly_report_due obligation {oid}: {reason}", file=sys.stderr)
         return 0
-    try:
-        rec = json.loads(STATE.read_text())
-    except (OSError, ValueError):
+    rec = read_pointer()
+    if rec is None:
         print(f"no hourly thread recorded at {STATE}", file=sys.stderr)
         return 1
     if a.json:
