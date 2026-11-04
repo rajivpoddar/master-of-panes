@@ -402,7 +402,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "095c6404d2ba596814f48d17107164579803106ed1acaac003de3bf4bc1b1fd4",
+      "sha256": "a263c9cbb118feb09fee86bb1d70f72827fbeeb5295697bda22ae3a97d02c3b4",
       "source_path": "claude/scripts/launch-slot-1.sh"
     },
     {
@@ -411,7 +411,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "634e2a921e31a659ca5cb8d19803e2f567ffda059ced934c610cb433f14b3a75",
+      "sha256": "419d1ad1b08aefac1cee15b9dcca6ff5fbb9b809c76ccdbce27304d19a691d35",
       "source_path": "claude/scripts/launch-slot-2.sh"
     },
     {
@@ -420,7 +420,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "0e1a0171f1cd8f6a6c541b61e8c7b9cd8ce9b9d2d06d63911b09425ab89caef8",
+      "sha256": "d1154911834e5e612c928d5061699ca85797c622baea30c42061c872659f7b4a",
       "source_path": "claude/scripts/launch-slot-3.sh"
     },
     {
@@ -429,7 +429,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "a57d2df010b2f6aa71fc59c32a462e50e5684a980295cfb012b5939c7a8f1acc",
+      "sha256": "54521c7e3b0438b4bf8b50c985f08970cc39e31f0c042e961c2ccefb46634b36",
       "source_path": "claude/scripts/launch-slot-4.sh"
     },
     {
@@ -438,7 +438,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "e9aa381bb14b6d219dc63c6f20f1864a8bdb4736f5e3de2e3eec22a1ffbb32ff",
+      "sha256": "0ea28013ba4c96d08627c60a16964280d2302d44f478e00cad00340eab4bb3eb",
       "source_path": "claude/scripts/launch-slot-5.sh"
     },
     {
@@ -447,7 +447,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "668afa12876d552429c73dbeea4dd109fb352cd49b240d3347b4efbc1482a9ea",
+      "sha256": "4e1ed56b6e0f2279623b7be5cf0cc424fd513518dd0d4c021fae5adb310551c9",
       "source_path": "claude/scripts/launch-slot-6.sh"
     },
     {
@@ -456,7 +456,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "a49f0cc8cc5aac424712da001b575a3f235420e8a7a9c360d7de93540e1d4677",
+      "sha256": "931b342ce0c6279a7573f36dca02f5e35ad3c7f0f1dfbf53407bc8be28ba13ad",
       "source_path": "claude/scripts/launch-slot-7.sh"
     },
     {
@@ -465,7 +465,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "eef082332a6fe82a935c03048a77bff394a15eb5ccb91183110faa87a23943d5",
+      "sha256": "d543e25acb16644ed1f8f52a2c5685f5ae79489967641a4d5d147fd045aec9f8",
       "source_path": "claude/scripts/launch-slot-8.sh"
     },
     {
