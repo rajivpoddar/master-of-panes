@@ -92,6 +92,7 @@ function harness() {
   const pasted: string[] = [];
   let enters = 0;
   let observeBarrier: (() => Promise<void>) | null = null;
+  let onPaste: (() => void) | null = null;
   const relay = new TmuxRelay(DEFAULT_CONFIG, { pmRuntime: "claude", runShell: async (command: string) => {
     if (command.includes("#{pane_id}|#{pane_current_command}")) return { stdout: "%1|claude\n", stderr: "" };
     if (command.includes("#{pane_id}|#{pane_current_path}")) return { stdout: "%1|/Users/rajiv/Downloads/projects/heydonna-app\n", stderr: "" };
@@ -101,7 +102,7 @@ function harness() {
     if (command.startsWith("tmux capture-pane")) return { stdout: `${"─".repeat(40)}\n❯ ${composer}\n${"─".repeat(40)}`, stderr: "" };
     const load = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
     if (load) buffer = readFileSync(load[1]!, "utf8");
-    if (command.startsWith("tmux paste-buffer")) { composer = buffer; pasted.push(buffer); }
+    if (command.startsWith("tmux paste-buffer")) { composer = buffer; pasted.push(buffer); onPaste?.(); }
     if (command.endsWith(" C-u")) composer = "";
     if (command.endsWith(" Enter")) { enters++; composer = ""; }
     return { stdout: "", stderr: "" };
@@ -188,7 +189,7 @@ function harness() {
   const clears = () => pasted.filter((p) => p === "/clear").length;
   return {
     db, files, exitOps, clearOps, rows, saveAll, relay, processor, hook, post, ack, ackRoute, arm, status, exits, clears,
-    pasted, enters: () => enters, setObserveBarrier: (b: (() => Promise<void>) | null) => { observeBarrier = b; },
+    pasted, enters: () => enters, setOnPaste: (f: (() => void) | null) => { onPaste = f; }, setObserveBarrier: (b: (() => Promise<void>) | null) => { observeBarrier = b; },
     settle: async () => { await Promise.all(deliveries); await new Promise((r) => setTimeout(r, 30)); },
     close: () => { relay.setPMBusy(true); db.close(); rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); },
   };
@@ -296,7 +297,46 @@ test("an old Stop held across new work never writes /exit (pinned authority thro
     const triggered = JSON.parse(h.db.getEvents(0, 1, "exit_pending_triggered")[0]!.payload);
     assert.equal(triggered.delivery, "refused_pre_effect");
     assert.equal(h.db.getEvents(0, 1, "pm_exit_custody_released_zero_effect").length, 1, "proven zero effect releases custody");
-    assert.equal(h.status().cycled[0], true, "the single attempt is not automatically resent");
+    assert.equal(h.status().cycled[0], true, "the attempt record is kept (not erased)");
+    // CTO REVISE ts 1793756803.183959: explicit durable terminal, continuation kept, actionable, no resend.
+    const refused = h.status();
+    assert.equal(refused.pending, false, "episode is not left indefinitely active/cycled/waiting");
+    assert.equal(refused.continuation_delivery, "exit_refused");
+    assert.equal(refused.continuation_prompt, "Read resume. Resume PM.", "continuation retained");
+    const terminal = refused.exit_terminal as Record<string, unknown>;
+    assert.equal(terminal.outcome, "refused_pre_effect");
+    assert.equal(terminal.reason, "pm_work_changed_after_stop");
+    assert.equal(terminal.continuation_prompt, "Read resume. Resume PM.");
+    await until(() => h.rows().some((r) => r.target_id === `pm-dhruva:exit-refused:${terminal.episode}`));
+    const refusedRow = h.rows().find((r) => r.target_id === `pm-dhruva:exit-refused:${terminal.episode}`);
+    assert.equal(refusedRow?.status, "open", "actionable refused obligation for the owner");
+    // Following Stops and health recovery never resend autonomously.
+    await h.hook("Stop");
+    await h.hook("Stop");
+    const health = new ProcessHealthChecker(h.db, {
+      deliverGuardedToSlot: async () => { throw new Error("continuation must not be sent without a delivered exit + boot"); },
+    } as any) as any;
+    await health.deliverPMRestartContinuation("%1");
+    await health.checkExitPending();
+    assert.equal(h.exits(), 0, "zero paste after the refusal");
+    assert.equal(h.enters(), 0, "zero Enter after the refusal");
+    assert.equal(h.db.getEvents(0, 10, "exit_pending_triggered").length, 1, "no autonomous resend");
+    // Same-owner recovery edge: only THIS episode, with the retained continuation; fresh save + ACK required.
+    assert.equal((await h.post(ctx({ enabled: true, pm_only: true, recover_episode: "other" }))).status, 409);
+    const recover = await h.post(ctx({ enabled: true, pm_only: true, recover_episode: terminal.episode }));
+    assert.equal(recover.status, 200);
+    await ensurePmExitHandoffObligation(h.db, h.exitOps);
+    const rearmed = h.status();
+    assert.equal(rearmed.pending, true);
+    assert.notEqual(rearmed.episode, terminal.episode);
+    assert.equal(rearmed.continuation_prompt, "Read resume. Resume PM.");
+    assert.equal(rearmed.exit_terminal, null);
+    await h.hook("Stop");
+    assert.equal(h.exits(), 0, "recovery itself sends nothing");
+    h.saveAll();
+    assert.equal((await h.ack()).status, 200);
+    await h.hook("Stop");
+    assert.equal(h.exits(), 1, "owner-recovered episode exits once after save + ACK");
     // An old pin reaching HookProcessor after newer work is stale: no consumption.
     const h2 = harness();
     try {
@@ -312,6 +352,30 @@ test("an old Stop held across new work never writes /exit (pinned authority thro
       assert.equal(h2.status().cycled[0], false, "stale Stop consumes nothing");
       assert.equal(h2.db.getEvents(0, 1, "pm_exit_stop_stale").length, 1);
     } finally { h2.close(); }
+  } finally { h.close(); }
+});
+
+test("control: a possible/uncertain /exit effect stays consumed (custody kept, no terminal, no resend)", async () => {
+  const h = harness();
+  try {
+    await boot(h);
+    await h.arm();
+    h.saveAll();
+    assert.equal((await h.ack()).status, 200);
+    // New PM work lands after the paste and before Enter: the effect was attempted.
+    h.setOnPaste(() => { h.setOnPaste(null); h.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "pm" }); });
+    await h.hook("Stop");
+    const triggered = JSON.parse(h.db.getEvents(0, 1, "exit_pending_triggered")[0]!.payload);
+    assert.equal(triggered.delivery, "uncertain");
+    assert.equal(h.exits(), 1);
+    assert.equal(h.enters(), 0);
+    const status = h.status();
+    assert.equal(status.pending, true);
+    assert.equal(status.cycled[0], true);
+    assert.equal(status.exit_terminal, null, "uncertain is never treated as proven no-effect");
+    assert.equal(selectPmStopMaintenance(h.db, { sessionId: "pm", workPin: 0, ops: h.exitOps }), "exit_custody");
+    await h.hook("Stop");
+    assert.equal(h.exits(), 1, "no resend");
   } finally { h.close(); }
 });
 

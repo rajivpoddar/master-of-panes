@@ -2534,7 +2534,7 @@ export class MoPDatabase {
 
   getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean>;
     handoff_requested_at: string | null; handoff_obligation_id: string | null; subagents_stopped_at: string | null;
-    handoff_episode: string | null } {
+    handoff_episode: string | null; exit_terminal: Record<string, unknown> | null } {
     const pending = this.getExitPending();
     const cycled: Record<number, boolean> = {};
     for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
@@ -2548,7 +2548,8 @@ export class MoPDatabase {
       handoff_requested_at: this.getConfig("pm_exit_handoff_requested_at") || null,
       handoff_obligation_id: this.getConfig("pm_exit_handoff_obligation_id") || null,
       subagents_stopped_at: this.getConfig("pm_exit_subagents_stopped_at") || null,
-      handoff_episode: this.getConfig("pm_exit_handoff_episode") || null };
+      handoff_episode: this.getConfig("pm_exit_handoff_episode") || null,
+      exit_terminal: (() => { try { return JSON.parse(this.getConfig("pm_exit_terminal") || "null"); } catch { return null; } })() };
   }
 
   // ─── Clear Pending ─────────────────────────────────────

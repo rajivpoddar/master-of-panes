@@ -28,6 +28,8 @@ import {
   PM_EXIT_HANDOFF_REQUESTED_AT_KEY,
   PM_HANDOFF_EXIT_VARIANT,
   recordPmExitSubagentsStopped,
+  readPmExitTerminal,
+  resolvePmExitTerminalRow,
   resolveSupersededPmExitHandoff,
   selectPmStopMaintenance,
 } from "./pmHandoffExit.js";
@@ -1267,7 +1269,12 @@ app.use("/exit-pending", async (c, next) => {
     requestedAt: db.getConfig(PM_EXIT_HANDOFF_REQUESTED_AT_KEY) || "",
     obligationId: db.getConfig(PM_EXIT_HANDOFF_OBLIGATION_KEY) || null,
   };
+  const previousTerminal = readPmExitTerminal(db);
   await next();
+  if (previousTerminal && !readPmExitTerminal(db)) {
+    void resolvePmExitTerminalRow(pmExitHandoffOps, previousTerminal,
+      `PM exit episode ${previousTerminal.episode} re-armed by its owner (recovery)`).catch(() => false);
+  }
   const current = db.getConfig(PM_EXIT_HANDOFF_REQUESTED_AT_KEY) || "";
   if (previous.requestedAt && previous.requestedAt !== current) {
     void resolveSupersededPmExitHandoff(pmExitHandoffOps, previous,
@@ -1280,11 +1287,29 @@ app.use("/exit-pending", async (c, next) => {
 
 /** Set or clear the exit_pending flag (REST parity for mop_set_exit_pending). */
 app.post("/exit-pending", async (c) => {
-  let body: { enabled?: boolean; dev_only?: boolean; pm_only?: boolean; continuation_prompt?: string } = {};
+  let body: { enabled?: boolean; dev_only?: boolean; pm_only?: boolean; continuation_prompt?: string; recover_episode?: unknown } = {};
   try {
     body = await c.req.json();
   } catch {
     body = {};
+  }
+  // Same-owner recovery edge for a refused (zero-effect) PM exit terminal
+  // (CTO REVISE ts 1793756803.183959): re-arm THAT episode's PM-only restart
+  // with its retained continuation. Fresh save + ACK are required again.
+  let recovered: string | null = null;
+  if (body.recover_episode !== undefined) {
+    let terminal: { episode?: unknown; continuation_prompt?: unknown } | null = null;
+    try { terminal = JSON.parse(db.getConfig("pm_exit_terminal") || "null"); } catch { terminal = null; }
+    if (typeof body.recover_episode !== "string" || body.enabled !== true || body.pm_only !== true) {
+      return c.json({ error: "recover_episode requires enabled:true and pm_only:true" }, 400);
+    }
+    if (!terminal || terminal.episode !== body.recover_episode) {
+      return c.json({ error: "recover_episode does not match the refused PM exit terminal" }, 409);
+    }
+    if (body.continuation_prompt === undefined && typeof terminal.continuation_prompt === "string") {
+      body.continuation_prompt = terminal.continuation_prompt;
+    }
+    recovered = body.recover_episode;
   }
   if (typeof body.enabled !== "boolean") {
     return c.json({ error: "Missing 'enabled' boolean field" }, 400);
@@ -1303,8 +1328,11 @@ app.post("/exit-pending", async (c) => {
   }
   // REST PM-only arming requires the saved handoff + subagents-stopped ack.
   db.setExitPending(body.enabled, body.dev_only === true, body.pm_only === true, body.continuation_prompt, body.pm_only === true);
+  // A new PM-only episode supersedes any refused terminal (its record stays in the event log).
+  if (body.enabled && body.pm_only) db.setConfig("pm_exit_terminal", "");
   db.logEvent(0, body.enabled ? "exit_pending_enabled" : "exit_pending_disabled", null, null, {
     reason: body.enabled ? "PM set exit_pending — slots will /exit at next idle" : "PM cleared exit_pending flag",
+    ...(recovered ? { recovered_episode: recovered, via: "same_owner_recovery" } : {}),
   });
   return c.json({ ok: true, enabled: body.enabled, status: db.getExitStatus() });
 });

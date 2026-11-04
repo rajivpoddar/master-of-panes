@@ -68,6 +68,7 @@ export const PM_HANDOFF_EXIT_VARIANT: HandoffObligationVariant = {
   action: PM_EXIT_HANDOFF_ACTION,
   dedupeGroup: "pm_save_handoff:pm:exit",
   actionFor: (evidence) => {
+    if (evidence.variant === "exit_refused") return pmExitRefusedAction(evidence);
     const episode = typeof evidence.episode === "string" ? evidence.episode : "";
     const requestedAt = typeof evidence.requested_at === "string" ? evidence.requested_at : "";
     return `${PM_EXIT_HANDOFF_ACTION} ACK (last tool call): ${exitAckCommand(episode, requestedAt)}`;
@@ -331,6 +332,85 @@ export function consumePmExitHandoff(db: Db, ops: HandoffObligationOps | null, r
     requested_at: requestedAt, via, obligation_id: id, episode,
     reason: "Handoff saved and subagents stopped; consuming the single PM /exit attempt",
   });
+}
+
+/** Durable terminal of a PM-only exit episode whose single /exit was refused before any effect. */
+export const PM_EXIT_TERMINAL_KEY = "pm_exit_terminal";
+
+export type PmExitTerminal = {
+  episode: string; outcome: "refused_pre_effect"; reason: string; continuation_prompt: string | null;
+  at: string; pinned_work: number; session_id: string; obligation_id: string | null;
+};
+
+export function readPmExitTerminal(db: Pick<MoPDatabase, "getConfig">): PmExitTerminal | null {
+  try {
+    const t = JSON.parse(db.getConfig(PM_EXIT_TERMINAL_KEY) || "null");
+    return t && typeof t.episode === "string" && t.outcome === "refused_pre_effect" ? t as PmExitTerminal : null;
+  } catch { return null; }
+}
+
+export function pmExitRecoveryCommand(episode: string): string {
+  return "curl -s -X POST http://127.0.0.1:3100/exit-pending -H 'Content-Type: application/json' "
+    + `-d '${JSON.stringify({ enabled: true, pm_only: true, recover_episode: episode })}'`;
+}
+
+function pmExitRefusedAction(evidence: Record<string, unknown>): string {
+  const episode = typeof evidence.episode === "string" ? evidence.episode : "";
+  const reason = typeof evidence.reason === "string" ? evidence.reason : "refused_pre_effect";
+  return `PM /exit was REFUSED before any effect (${reason}); the PM did not restart. The saved continuation is kept `
+    + "(GET /exit-status exit_terminal). Nothing is resent automatically. To restart, re-arm this same episode "
+    + `(new save + subagents-stopped ACK required): ${pmExitRecoveryCommand(episode)}`;
+}
+
+/**
+ * CTO REVISE (thread 1793754459.969419, ts 1793756803.183959): a refused
+ * (proven zero-effect) /exit ends its episode in an explicit durable terminal
+ * instead of leaving it pending/cycled/waiting for a boot that never comes.
+ * The continuation and the no-effect evidence are kept, the cycled record is
+ * not erased, nothing is resent, and ONE actionable obligation names the
+ * same-owner recovery edge (POST /exit-pending with recover_episode).
+ */
+export function recordPmExitRefusedTerminal(db: Db, ops: HandoffObligationOps | null, options: {
+  episode: string | null; reason: string; pinnedWork: number; sessionId: string; nowMs: number;
+}): boolean {
+  releasePmExitCustodyZeroEffect(db, options.episode, options.reason);
+  const status = db.getExitStatus();
+  if (!options.episode || status.episode !== options.episode || !status.pending || !status.pm_only) return false;
+  const terminal: PmExitTerminal = {
+    episode: options.episode, outcome: "refused_pre_effect", reason: options.reason,
+    continuation_prompt: status.continuation_prompt, at: new Date(options.nowMs).toISOString(),
+    pinned_work: options.pinnedWork, session_id: options.sessionId, obligation_id: null,
+  };
+  db.setConfig(PM_EXIT_TERMINAL_KEY, JSON.stringify(terminal));
+  db.setConfig("exit_pending_continuation_delivery", "exit_refused");
+  db.setConfig("exit_pending", "false"); // episode ends; continuation prompt and cycled record are kept
+  db.logEvent(0, "pm_exit_refused_terminal", "Stop", null, {
+    ...terminal, recovery: pmExitRecoveryCommand(options.episode),
+    reason_text: "PM /exit refused before effect; episode ended, continuation kept, no automatic resend",
+  });
+  if (ops) {
+    void ops.upsert(`pm-dhruva:exit-refused:${options.episode}`, {
+      producer: "mop-pm-handoff-exit", variant: "exit_refused", pm_stop_actionable: 1,
+      requested_at: terminal.at, episode: options.episode, reason: options.reason,
+    }).then((id) => {
+      const current = readPmExitTerminal(db);
+      if (id && current && current.episode === options.episode) {
+        db.setConfig(PM_EXIT_TERMINAL_KEY, JSON.stringify({ ...current, obligation_id: id }));
+      }
+    }).catch(() => undefined);
+  }
+  return true;
+}
+
+/** Resolve the refused-terminal obligation once its episode is recovered (or superseded). */
+export async function resolvePmExitTerminalRow(ops: HandoffObligationOps, terminal: PmExitTerminal, reason: string): Promise<boolean> {
+  let id = terminal.obligation_id;
+  if (!id) {
+    const found = ops.lookup(`pm-dhruva:exit-refused:${terminal.episode}`);
+    if (found.status !== "found" || !found.open) return false;
+    id = found.id;
+  }
+  return ops.resolveById(id, reason).catch(() => false);
 }
 
 /** A /exit write refused before any effect releases custody (proven zero effect); never resent. */

@@ -12,7 +12,7 @@ import {
   latestPmBoot,
   latestPmWork,
   pmExitHandoffReadiness,
-  releasePmExitCustodyZeroEffect,
+  recordPmExitRefusedTerminal,
   selectPmStopMaintenance,
   PM_EXIT_CONSUMED_EPISODE_KEY,
   PM_EXIT_HANDOFF_EPISODE_KEY,
@@ -1527,7 +1527,11 @@ export class HookProcessor {
           finalCheck: fence,
         }) : { outcome: "refused_pre_effect", reason: "pm_pane_unknown" };
         if (delivery.outcome === "refused_pre_effect") {
-          releasePmExitCustodyZeroEffect(this.db, exitStatus.episode, String((delivery as { reason?: string }).reason ?? "refused_pre_effect"));
+          // Proven zero effect: explicit durable terminal + same-owner recovery edge; never resent.
+          recordPmExitRefusedTerminal(this.db, this.pmExitHandoffOps, {
+            episode: exitStatus.episode, reason: String((delivery as { reason?: string }).reason ?? "refused_pre_effect"),
+            pinnedWork: pin.work, sessionId: currentSession, nowMs: Date.now(),
+          });
         }
         this.db.logEvent(0, "exit_pending_triggered", "Stop", null, {
           source: "pm_only_stop", delivery: delivery.outcome,
