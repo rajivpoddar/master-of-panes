@@ -204,7 +204,8 @@ def arm_pm_exit_pending(saved):
     saved['replacement_status'] = 'exit_pending_armed'
     atomic(state, json.dumps(saved))
     emit('PM_EXIT_PENDING: MoP opened pm_save_handoff (variant exit). PM saves MEMORY-session-handoff-current.md + data/pm-continuation-note.md, '
-         'stops ALL background agents with TaskStop, then POST /exit-pending/subagents-stopped; MoP sends /exit at the next Stop after both. '
+         'stops ALL background agents with TaskStop, then (last tool call) POST /exit-pending/subagents-stopped with {episode, requested_at} from /exit-status; '
+         'MoP sends /exit at the next Stop after both (any later PM work voids the ACK). '
          'Watchdog resumes saved prompt, THEN arms dev-only exits (next Stop, DND skipped)')
 
 def snapshot():
@@ -251,7 +252,7 @@ def perform():
               'do not duplicate completed work. Run Skill(daily-pm-restart) post-restart completion: post one line to Rajiv DM D0AMF0XE6TS.')
     emit(f'{"DRY_RUN" if args.dry_run else "RESTART"}: resume={resume}; open_obligations={len(obligations)}; slots={len(slots)}; open_prs={len(prs)}')
     emit('PM_RELAUNCH: POST /exit-pending pm_only with saved continuation; MoP opens pm_save_handoff exit; PM saves handoff, TaskStops all agents, '
-         'acks POST /exit-pending/subagents-stopped; /exit at the next Stop after save+ack; watchdog uses RESTART_COMMANDS[0]')
+         'acks POST /exit-pending/subagents-stopped {episode, requested_at} as its last tool call; /exit at the next Stop after save+bound ack; watchdog uses RESTART_COMMANDS[0]')
     emit('DEV_EXIT_PENDING: only AFTER PM boot and continuation delivery; dev_only, next Stop, DND skipped')
     if args.dry_run:
         pm_children_report()

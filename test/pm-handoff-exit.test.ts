@@ -28,7 +28,7 @@ import {
 } from "../src/pmHandoffClear.js";
 import {
   ensurePmExitHandoffObligation,
-  evaluatePmExitHandoffAtStop,
+  pmExitHandoffReadiness,
   exitHandoffRequestKey,
   recordPmExitSubagentsStopped,
   PM_EXIT_HANDOFF_OBLIGATION_KEY,
@@ -99,15 +99,21 @@ function fixture() {
   processor.pmExitHandoffOps = exitOps;
   processor.pmExitHandoffFiles = files;
   const post = route("/exit-pending", "post", { db });
-  const ack = route("/exit-pending/subagents-stopped", "post", { db, recordPmExitSubagentsStopped });
+  const ack = route("/exit-pending/subagents-stopped", "post", { db, recordPmExitSubagentsStopped, processor });
+  /** The PM's ACK as its last tool call: a PreToolUse (curl) then the bound POST. */
+  const ackNow = async () => {
+    await processor.process(0, { type: "PreToolUse", session_id: "pm", tool_name: "Bash", tool_input: {} });
+    const status = db.getExitStatus();
+    return ack(ctx({ episode: status.handoff_episode, requested_at: status.handoff_requested_at }));
+  };
   const arm = async () => {
     const res = await post(ctx({ enabled: true, pm_only: true, continuation_prompt: "Read resume. Resume PM." }));
     assert.equal(res.status, 200);
     return ensurePmExitHandoffObligation(db, exitOps);
   };
   const stop = (session = "pm") => processor.process(0, { type: "Stop", session_id: session });
-  return { db, files, exitOps, clearOps, argv, rows, save, saveAll, sends, processor, post, ack, arm, stop, directory,
-    close: () => { db.close(); rmSync(directory, { recursive: true, force: true }); } };
+  return { db, files, exitOps, clearOps, argv, rows, save, saveAll, sends, processor, post, ack, ackNow, arm, stop, directory,
+    close: () => { db.close(); rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } };
 }
 const until = async (done: () => boolean) => {
   for (let i = 0; i < 100 && !done(); i++) await new Promise((r) => setTimeout(r, 100));
@@ -138,7 +144,7 @@ test("REST PM-only exit opens ONE pm_save_handoff exit obligation; /exit only af
     assert.equal(f.db.getExitStatus().cycled[0], false);
 
     // Ack: the next Stop sends exactly one /exit and resolves this request's row.
-    const acked = await f.ack(ctx({}));
+    const acked = await f.ackNow();
     assert.equal(acked.status, 200);
     assert.equal(acked.body.ok, true);
     await f.stop();
@@ -152,46 +158,54 @@ test("REST PM-only exit opens ONE pm_save_handoff exit obligation; /exit only af
   } finally { f.close(); }
 });
 
-test("ack without the save keeps waiting; one file saved is not a save", async () => {
+test("ACK before the save is refused; one file saved is not a save; ACK after the save then exits", async () => {
   const f = fixture();
   try {
     await f.arm();
-    assert.equal((await f.ack(ctx({}))).status, 200);
+    const early = await f.ackNow();
+    assert.equal(early.status, 409);
+    assert.match(early.body.error, /save not detected/);
     await f.stop();
     f.save(f.files[0]);
+    assert.equal((await f.ackNow()).status, 409, "one file is not a save");
     await f.stop();
     assert.deepEqual(f.sends, []);
-    assert.deepEqual(evaluatePmExitHandoffAtStop(f.db, { currentSessionId: "pm", ops: f.exitOps, files: f.files }),
-      { kind: "waiting", saved: false, subagentsStopped: true });
     f.save(f.files[1]);
+    await f.stop();
+    assert.deepEqual(f.sends, [], "save without an ACK never exits");
+    assert.equal((await f.ackNow()).status, 200);
     await f.stop();
     assert.deepEqual(f.sends, ["/exit"]);
   } finally { f.close(); }
 });
 
-test("explicit resolve of this request's own row is a save signal (reused clear-flow detection); ack still required", async () => {
+test("explicit resolve of this request's own row is a save signal (reused clear-flow detection); ACK still required", async () => {
   const f = fixture();
   try {
     const id = await f.arm();
     await f.exitOps.resolveById(id!, "PM saved handoff");
     await f.stop();
     assert.deepEqual(f.sends, []);
-    await f.ack(ctx({}));
+    assert.equal((await f.ackNow()).status, 200);
     await f.stop();
     assert.deepEqual(f.sends, ["/exit"]);
   } finally { f.close(); }
 });
 
-test("ack endpoint: 409 without a pending exit or on episode mismatch; re-arming discards an earlier ack", async () => {
+test("ACK endpoint refuses unbound/mismatched ACKs; re-arming discards an earlier ACK; disable clears", async () => {
   const f = fixture();
   try {
-    assert.equal((await f.ack(ctx({}))).status, 409);
+    assert.equal((await f.ack(ctx({}))).status, 400, "empty ACK is unbound");
     await f.arm();
-    assert.equal((await f.ack(ctx({ episode: "other" }))).status, 409);
-    assert.equal((await f.ack(ctx({ episode: 5 }))).status, 400);
-    assert.equal((await f.ack(ctx({ episode: f.db.getExitStatus().episode }))).status, 200);
+    f.saveAll();
+    const status = f.db.getExitStatus();
+    assert.equal((await f.ack(ctx({}))).status, 400);
+    assert.equal((await f.ack(ctx({ episode: status.handoff_episode }))).status, 400, "requested_at required");
+    assert.equal((await f.ack(ctx({ episode: "other", requested_at: status.handoff_requested_at }))).status, 409);
+    assert.equal((await f.ack(ctx({ episode: status.handoff_episode, requested_at: "2026-01-01T00:00:00.000Z" }))).status, 409);
+    assert.equal((await f.ackNow()).status, 200);
     assert.ok(f.db.getExitStatus().subagents_stopped_at);
-    // A new request (new episode) never inherits the old ack.
+    // A new request (new episode) never inherits the old ACK.
     await f.post(ctx({ enabled: true, pm_only: true }));
     assert.equal(f.db.getExitStatus().subagents_stopped_at, null);
     f.saveAll();
@@ -200,23 +214,26 @@ test("ack endpoint: 409 without a pending exit or on episode mismatch; re-arming
     // Disabling clears the handoff entirely.
     await f.post(ctx({ enabled: false }));
     assert.equal(f.db.getExitStatus().handoff_requested_at, null);
-    assert.equal((await f.ack(ctx({}))).status, 409);
+    assert.equal((await f.ack(ctx({ episode: status.handoff_episode, requested_at: status.handoff_requested_at }))).status, 409);
   } finally { f.close(); }
 });
 
-test("PM session change cancels the exit request (as the clear flow does) and resolves its row; no /exit", async () => {
+test("PM session change voids the ACK (session-bound) but keeps the exit intent; a fresh ACK in the new session exits", async () => {
   const f = fixture();
   try {
     await f.arm();
     f.saveAll();
-    await f.ack(ctx({}));
-    f.db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "pm2", source: "clear" });
+    assert.equal((await f.ackNow()).status, 200);
+    await f.processor.process(0, { type: "SessionStart", session_id: "pm2", source: "clear" });
     await f.stop("pm2");
     assert.deepEqual(f.sends, []);
-    assert.equal(f.db.getExitStatus().pending, false);
-    assert.equal(f.db.getEvents(0, 1, "pm_exit_handoff_cancelled").length, 1);
-    await until(() => f.rows()[0].status === "resolved");
-    assert.equal(f.rows()[0].status, "resolved");
+    assert.equal(f.db.getExitStatus().pending, true, "intent kept");
+    assert.ok(f.db.getExitStatus().handoff_requested_at);
+    const status = f.db.getExitStatus();
+    await f.processor.process(0, { type: "PreToolUse", session_id: "pm2", tool_name: "Bash", tool_input: {} });
+    assert.equal((await f.ack(ctx({ episode: status.handoff_episode, requested_at: status.handoff_requested_at }))).status, 200);
+    await f.stop("pm2");
+    assert.deepEqual(f.sends, ["/exit"]);
   } finally { f.close(); }
 });
 
@@ -225,7 +242,7 @@ test("new PM input after the ready Stop refuses the /exit write without holding 
   try {
     await f.arm();
     f.saveAll();
-    await f.ack(ctx({}));
+    await f.ackNow();
     f.processor.relay.observeSlotPane = async () => {
       f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, {});
       return { paneId: "%40" };
@@ -272,7 +289,7 @@ test("full sequence: saved+acked exit -> watchdog boot -> continuation -> dev-on
   try {
     await f.arm();
     f.saveAll();
-    await f.ack(ctx({}));
+    await f.ackNow();
     await f.stop();
     assert.deepEqual(f.sends, ["/exit"]);
     const messages: string[] = [];
@@ -314,8 +331,8 @@ test("clear flow: a pending exit handoff never satisfies, consumes or cancels a 
     await f.arm();
     assert.equal(f.rows().length, 2);
     assert.notEqual(f.rows()[0].target_id, f.rows()[1].target_id);
-    // Ack alone affects neither flow.
-    await f.ack(ctx({}));
+    // An ACK before the save is refused and affects neither flow.
+    assert.equal((await f.ackNow()).status, 409);
     let cleared = 0;
     const armed = await armPmClearAfterSavedHandoff(f.db, {
       sessionId: "pm", ops: f.clearOps, files: f.files,
@@ -350,9 +367,9 @@ test("direct (non-REST) PM-only arming keeps the unconditioned single-Stop /exit
 
 test("rule 50 source pins: no UserPromptSubmit or tool gating added by the exit handoff", () => {
   const exitSrc = source("pmHandoffExit");
-  assert.doesNotMatch(exitSrc, /UserPromptSubmit|PreToolUse|decision:\s*"block"|setTimeout|setInterval/);
+  assert.doesNotMatch(exitSrc, /decision:\s*"block"|permissionDecision|setTimeout|setInterval/);
   const hooks = source("hooks");
-  const start = hooks.indexOf("a REST-armed PM exit waits");
+  const start = hooks.indexOf("ONE maintenance command per pinned Stop");
   assert.ok(start > 0);
   const block = hooks.slice(start, hooks.indexOf("exit_pending_triggered", start));
   assert.doesNotMatch(block, /decision|block:/);

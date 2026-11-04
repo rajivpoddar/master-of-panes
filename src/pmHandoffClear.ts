@@ -397,7 +397,13 @@ export function failOpenUnobservedPmClear(db: Db, options: {
 }
 
 /** Obligation copy per pm_save_handoff variant; `clear` is the original flow. */
-export type HandoffObligationVariant = { title: string; action: string; dedupeGroup: string };
+export type HandoffObligationVariant = {
+  title: string;
+  action: string;
+  dedupeGroup: string;
+  /** Per-request action text (exit variant names its exact ACK arguments). */
+  actionFor?: (evidence: Record<string, unknown>) => string;
+};
 export const PM_HANDOFF_CLEAR_VARIANT: HandoffObligationVariant = {
   title: "Save PM handoff before MoP injects /clear",
   action: PM_HANDOFF_ACTION,
@@ -417,7 +423,7 @@ export function pmOpsHandoffObligationOps(
         "--kind", PM_HANDOFF_OBLIGATION_KIND, "--target-type", "session", "--target-id", requestKey,
         "--severity", "high", "--owner", "pm", "--horizon", "hourly",
         "--title", variant.title,
-        "--action", variant.action,
+        "--action", variant.actionFor ? variant.actionFor(evidence) : variant.action,
         "--dedupe-group", variant.dedupeGroup,
         "--evidence-json", JSON.stringify(evidence), "--print-id"], { timeout: 10_000 });
       const last = String(stdout).trim().split("\n").pop() ?? "";

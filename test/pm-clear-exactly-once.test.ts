@@ -277,7 +277,7 @@ test("only native Stop dispatches PM clear; status/drain and operator requests c
   assert.doesNotMatch(route, /requestPmClearOnce\(/);
   assert.doesNotMatch(route, /sendClearViaMopSendPath\(/);
   assert.doesNotMatch(route, /sendPendingPmClearAtStop|retryPendingPmClearAfterDrain|retryUndeliveredPmClearOnStop/);
-  assert.match(source, /registerPMSoftBoundary\(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop, pmStopPins\)/);
+  assert.match(source, /registerPMSoftBoundary\(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop, pmStopPins,\s*\(sessionId, workPin\) => selectPmStopMaintenance\(/);
   assert.match(source, /sendClearViaMopSendPath\(0, "pm_native_stop", \{/);
   assert.doesNotMatch(source, /waitForPmIdleDrain|PM_CLEAR_STOP_RETRY_SETTLE_MS|PM_CLEAR_STOP_RETRY_BACKOFF_MS/);
   assert.match(source, /deferUntilStop: true/);

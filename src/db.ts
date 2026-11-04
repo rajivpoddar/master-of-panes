@@ -2511,6 +2511,9 @@ export class MoPDatabase {
     this.setConfig("pm_exit_handoff_session", handoff ? session : "");
     this.setConfig("pm_exit_handoff_obligation_id", "");
     this.setConfig("pm_exit_subagents_stopped_at", "");
+    this.setConfig("pm_exit_subagents_ack", "");
+    this.setConfig("pm_exit_handoff_obligation_state", "");
+    this.setConfig("pm_exit_handoff_consumed_episode", "");
     this.setConfig("exit_pending_pm_only", enabled && pmOnly ? "true" : "false");
     this.setConfig("exit_pending_continuation_prompt", enabled ? continuationPrompt ?? "" : "");
     this.setConfig("exit_pending_continuation_delivery", enabled && pmOnly ? "waiting" : "");
@@ -2530,7 +2533,8 @@ export class MoPDatabase {
   }
 
   getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean>;
-    handoff_requested_at: string | null; handoff_obligation_id: string | null; subagents_stopped_at: string | null } {
+    handoff_requested_at: string | null; handoff_obligation_id: string | null; subagents_stopped_at: string | null;
+    handoff_episode: string | null } {
     const pending = this.getExitPending();
     const cycled: Record<number, boolean> = {};
     for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
@@ -2543,7 +2547,8 @@ export class MoPDatabase {
       stop_only: this.getConfig("exit_pending_stop_only") === "true", cycled,
       handoff_requested_at: this.getConfig("pm_exit_handoff_requested_at") || null,
       handoff_obligation_id: this.getConfig("pm_exit_handoff_obligation_id") || null,
-      subagents_stopped_at: this.getConfig("pm_exit_subagents_stopped_at") || null };
+      subagents_stopped_at: this.getConfig("pm_exit_subagents_stopped_at") || null,
+      handoff_episode: this.getConfig("pm_exit_handoff_episode") || null };
   }
 
   // ─── Clear Pending ─────────────────────────────────────

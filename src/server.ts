@@ -29,7 +29,9 @@ import {
   PM_HANDOFF_EXIT_VARIANT,
   recordPmExitSubagentsStopped,
   resolveSupersededPmExitHandoff,
+  selectPmStopMaintenance,
 } from "./pmHandoffExit.js";
+import type { PmExitStopPin } from "./hooks.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -334,7 +336,10 @@ const pmStopPins: PMStopAuthorityPins = {
     authority.generation === pmClearDrainGeneration && authority.sessionToken === slotSessionToken(0),
 };
 
-const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop, pmStopPins);
+const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop, pmStopPins,
+  (sessionId, workPin) => selectPmStopMaintenance(db, {
+    sessionId, workPin, ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles,
+  }));
 
 // ─── MoP Clear Helpers ─────────────────────────────────
 // HTTP path for deterministic schedulers that cannot call MCP tools.
@@ -1170,7 +1175,8 @@ app.post("/hooks/slot/:slotNum", async (c) => {
   } else if (payload.type === "PreToolUse" || payload.type === "PostToolUse") {
     db.touchMeaningfulWork(slotNum, payload.session_id);
   }
-  const response = await processor.process(slotNum, payload);
+  const response = await processor.process(slotNum, payload,
+    (c as unknown as { get(key: string): PmExitStopPin | undefined }).get("pmExitStopPin"));
   if ((payload.type === "Stop" || payload.type === "SessionEnd") && payload.session_id?.trim()) {
     db.finishAgentTurn(slotNum, payload.session_id);
   }
@@ -1304,18 +1310,19 @@ app.post("/exit-pending", async (c) => {
 });
 
 /**
- * PM ack for the pm_save_handoff `exit` variant: all background agents/tasks
- * are stopped. /exit is sent at the next PM Stop once the handoff save is also
- * detected. Optional `episode` must match the pending PM exit.
+ * PM ACK for the pm_save_handoff `exit` variant: all background agents/tasks
+ * are stopped. Body MUST name this request's `episode` and `requested_at`; the
+ * ACK is refused before the save evidence, bound to the current PM session and
+ * work version, and voided by any later PM work (CTO REVISE ts 1793754925.429599).
  */
 app.post("/exit-pending/subagents-stopped", async (c) => {
-  let body: { episode?: unknown } = {};
+  let body: { episode?: unknown; requested_at?: unknown } = {};
   try { body = await c.req.json(); } catch { body = {}; }
   if (body === null || typeof body !== "object") body = {};
-  if (body.episode !== undefined && typeof body.episode !== "string") {
-    return c.json({ error: "Invalid 'episode' string field" }, 400);
-  }
-  const result = recordPmExitSubagentsStopped(db, { nowMs: Date.now(), episode: body.episode as string | undefined });
+  const result = recordPmExitSubagentsStopped(db, {
+    nowMs: Date.now(), episode: body.episode, requestedAt: body.requested_at,
+    ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles,
+  });
   if (!result.ok) return c.json({ error: result.error }, result.status);
   return c.json({ ...result, status: db.getExitStatus() });
 });

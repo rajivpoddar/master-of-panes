@@ -1,3 +1,5 @@
+import type { PmExitStopPin } from "./hooks.js";
+import { latestPmBoot, latestPmWork, type PmStopMaintenance } from "./pmHandoffExit.js";
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -248,11 +250,16 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
   onClearStop?: (authority?: PMStopAuthority) => Promise<unknown>,
   /** Saved-handoff check: may arm the clear latch for THIS Stop. Never blocks input. */
   beforeClearStop?: (sessionId: string, authority?: PMStopAuthority) => Promise<void>,
-  stopPins?: PMStopAuthorityPins): PMSoftBoundary {
+  stopPins?: PMStopAuthorityPins,
+  /** ONE maintenance command per pinned Stop: "exit" | "exit_custody" hold the clear. */
+  selectStop?: (sessionId: string, workPin: number) => PmStopMaintenance): PMSoftBoundary {
   const boundary = new PMSoftBoundary(db, () => pendingPMMaintenance(db), Date.now, () => relay.setPMBusy(true));
   relay.setPMMaintenanceGate(boundary);
   app.use("/hooks/slot/0", async (c, next) => {
     const entry = stopPins?.snapshot();
+    // PM work/boot authority pinned before the first await (CTO REVISE ts 1793754925.429599).
+    const entryWork = latestPmWork(db);
+    const entryBoot = latestPmBoot(db).id;
     let raw: Record<string, unknown>;
     try { raw = await c.req.raw.clone().json(); } catch { return next(); }
     const refusal = boundary.observe(raw);
@@ -268,11 +275,22 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     const authority = currentStop && stopPins && entry ? stopPins.claim(entry, raw.session_id as string) : undefined;
     // A Stop whose pin was superseded (new input, completed work, new boot) arms nothing.
     const pinnedStop = currentStop && (!stopPins || authority != null);
-    if (pinnedStop && beforeClearStop) {
+    const maintenance: PmStopMaintenance = pinnedStop && selectStop ? selectStop(raw.session_id as string, entryWork) : "clear";
+    if (raw.hook_event_name === "Stop") {
+      const pin: PmExitStopPin = { work: entryWork, boot: entryBoot, selected: pinnedStop && maintenance === "exit" };
+      (c as unknown as { set(key: string, value: unknown): void }).set("pmExitStopPin", pin);
+      if (maintenance !== "clear") {
+        db.logEvent(0, "pm_stop_maintenance_selected", "Stop", null, {
+          selected: maintenance, pinned_work: entryWork, pinned_boot: entryBoot,
+          reason: "Exit owns this Stop; clear intent and latch kept untouched (no resend/reset)",
+        });
+      }
+    }
+    if (pinnedStop && beforeClearStop && maintenance === "clear") {
       try { await beforeClearStop(raw.session_id as string, authority ?? undefined); }
       catch (error) { console.error(`[pm-clear] handoff Stop check failed open: ${String(error)}`); }
     }
-    const clearStop = !!onClearStop && pinnedStop
+    const clearStop = !!onClearStop && pinnedStop && maintenance === "clear"
       && (!stopPins || (authority != null && stopPins.isCurrent(authority)))
       && db.hasPendingClear(0) && db.getConfig("pm_clear_delivery_state") === "deferred_busy";
     if (clearStop) {
