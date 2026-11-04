@@ -1579,6 +1579,14 @@ export class TmuxRelay {
        * Rajiv ts 1793758450.451269).
        */
       skipSlashClear?: boolean;
+      /**
+       * Scoped PM-exit mode only (CTO REVISE ts 1793760137.229639): Claude
+       * Code's native "press up to edit queued messages" banner is not foreign
+       * composer text, so it does not refuse the paste/Enter. The exact
+       * empty-composer and own-payload checks still apply, and a banner seen
+       * before the paste or the Enter never counts as proof of this submit.
+       */
+      allowNativeQueuedInput?: boolean;
       timing?: { dwellMs?: number; pollMs?: number; payloadGraceMs?: number; payloadStableMs?: number; clearGraceMs?: number };
     },
   ): Promise<GuardedSlotDelivery> {
@@ -1626,6 +1634,9 @@ export class TmuxRelay {
       const bufName = `mop-guarded-${slotNum}`;
       let enterSent = 0;
       let preEnterRefusal: string | null = null;
+      // A native queued banner observed before the paste/Enter is pre-existing
+      // state, never evidence that THIS send was queued.
+      let nativeQueueSeen = QUEUED_HINT.test(before ?? "");
       try {
         await fs.writeFile(tmpFile, command);
         await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 3_000 });
@@ -1634,7 +1645,9 @@ export class TmuxRelay {
         // File/buffer loading and the caller's fence can yield to a new draft.
         // Read the composer again after those awaits, before the paste effect.
         const loadedSnapshot = await capture();
-        if (slotNum === 0 && QUEUED_HINT.test(loadedSnapshot ?? "")) return refuse("pm_cli_queue_not_empty");
+        const loadedQueued = QUEUED_HINT.test(loadedSnapshot ?? "");
+        if (loadedQueued) nativeQueueSeen = true;
+        if (slotNum === 0 && loadedQueued && !opts.allowNativeQueuedInput) return refuse("pm_cli_queue_not_empty");
         const loadedComposer = composerText(loadedSnapshot);
         if (loadedComposer === null) return refuse("composer_unreadable");
         if (loadedComposer !== "") return refuse("composer_not_empty");
@@ -1650,7 +1663,9 @@ export class TmuxRelay {
             // Substring payload detection is insufficient for a recovery
             // command: foreign text alongside it must never be submitted.
             const submitSnapshot = await capture();
-            if (slotNum === 0 && QUEUED_HINT.test(submitSnapshot ?? "")) throw new GuardedEnterRefused("pm_cli_queue_not_empty");
+            const submitQueued = QUEUED_HINT.test(submitSnapshot ?? "");
+            if (submitQueued) nativeQueueSeen = true;
+            if (slotNum === 0 && submitQueued && !opts.allowNativeQueuedInput) throw new GuardedEnterRefused("pm_cli_queue_not_empty");
             const submitComposer = composerText(submitSnapshot);
             // Opaque collapsed placeholders are owned only by eligible bracketed
             // multiline sends (assignment packets), never by short recovery sends.
@@ -1682,7 +1697,7 @@ export class TmuxRelay {
           enter_presses: submit.enterPresses,
         });
         const confirmed = submit.payloadSeen === true && submit.payloadStable === true
-          && (submit.cleared === true || submit.queued === true)
+          && (submit.cleared === true || (submit.queued === true && !(opts.allowNativeQueuedInput && nativeQueueSeen)))
           && (submit.enterPresses === 1 || (slash && submit.enterPresses === 2));
         if (confirmed) return { outcome: "delivered", paneId };
         return {

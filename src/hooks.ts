@@ -1521,6 +1521,7 @@ export class HookProcessor {
           recheck: async () => fence(),
           finalCheck: fence,
           skipSlashClear: true,
+          allowNativeQueuedInput: true,
         }) : { outcome: "refused_pre_effect", reason: "pm_pane_unknown" };
         if (delivery.outcome === "refused_pre_effect") {
           // Proven zero effect: explicit durable terminal + same-owner recovery edge; never resent.

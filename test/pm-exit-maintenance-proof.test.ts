@@ -92,6 +92,9 @@ function harness() {
   let generation = 0;
   let composer = "", buffer = "";
   let busy = false; // PM mid-turn: Claude renders the busy chevron (153;153;153)
+  let queuedBanner = false; // Claude's native queued-input banner below an EMPTY composer
+  let swallowEnter = false;
+  let ctrlU = 0;
   const pasted: string[] = [];
   let enters = 0;
   let escapes = 0;
@@ -105,14 +108,15 @@ function harness() {
     if (command.startsWith("ps -p 321")) return { stdout: "/opt/claude", stderr: "" };
     if (command.startsWith("tmux capture-pane")) {
       const chevron = busy && command.includes(" -e ") ? "\x1b[38;2;153;153;153m❯\x1b[39m" : "❯";
-      return { stdout: `${"─".repeat(40)}\n${chevron} ${composer}\n${"─".repeat(40)}`, stderr: "" };
+      const banner = queuedBanner ? "\n  ⏵ press up to edit queued messages" : "";
+      return { stdout: `${"─".repeat(40)}\n${chevron} ${composer}\n${"─".repeat(40)}${banner}`, stderr: "" };
     }
     if (command.endsWith(" Escape")) escapes++;
     const load = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
     if (load) buffer = readFileSync(load[1]!, "utf8");
     if (command.startsWith("tmux paste-buffer")) { composer = buffer; pasted.push(buffer); onPaste?.(); }
-    if (command.endsWith(" C-u")) composer = "";
-    if (command.endsWith(" Enter")) { enters++; composer = ""; }
+    if (command.endsWith(" C-u")) { ctrlU++; composer = ""; }
+    if (command.endsWith(" Enter")) { enters++; if (!swallowEnter) composer = ""; }
     return { stdout: "", stderr: "" };
   } } as any);
   relay.setDatabase(db);
@@ -166,6 +170,18 @@ function harness() {
     return c.json(await processor.process(0, { type: hook_event_name, ...rest }, pin) ?? {});
   });
   let toolSeq = 0;
+  /** A hook whose request body is held open: the middleware snapshots, then awaits body parsing. */
+  const holdHook = (event: string, extra: Record<string, unknown> = {}) => {
+    let release!: () => void;
+    const text = JSON.stringify({ hook_event_name: event, session_id: "pm", mop_tool_tracking: 1, ...extra });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { release = () => { controller.enqueue(new TextEncoder().encode(text)); controller.close(); }; },
+    });
+    const response = app.request("/hooks/slot/0", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body, duplex: "half",
+    } as RequestInit);
+    return { response, release: () => release() };
+  };
   const hook = async (event: string, extra: Record<string, unknown> = {}) => {
     const send = (name: string, body: Record<string, unknown>) => app.request("/hooks/slot/0", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -189,7 +205,8 @@ function harness() {
   const clears = () => pasted.filter((p) => p === "/clear").length;
   return {
     db, files, exitOps, clearOps, rows, saveAll, relay, processor, hook, post, arm, status, exits, clears,
-    pasted, enters: () => enters, escapes: () => escapes, setBusy: (b: boolean) => { busy = b; },
+    pasted, enters: () => enters, escapes: () => escapes, ctrlU: () => ctrlU, holdHook, setBusy: (b: boolean) => { busy = b; },
+    setQueuedBanner: (b: boolean) => { queuedBanner = b; }, setSwallowEnter: (b: boolean) => { swallowEnter = b; },
     setComposer: (text: string) => { composer = text; }, setOnPaste: (f: (() => void) | null) => { onPaste = f; }, setObserveBarrier: (b: (() => Promise<void>) | null) => { observeBarrier = b; },
     settle: async () => { await Promise.all(deliveries); await new Promise((r) => setTimeout(r, 30)); },
     close: () => { relay.setPMBusy(true); db.close(); rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); },
@@ -259,6 +276,70 @@ test("Rajiv proof: request -> save -> PM Stop on a BUSY pane while a new prompt 
     await health.deliverPMRestartContinuation("%1");
     assert.equal(h.status().dev_only, true, "dev_only armed after PM continuation");
   } finally { h.close(); }
+});
+
+test("CTO REVISE ts 1793760137.229639: Stop body held while a new prompt is admitted + native queued banner -> exactly one /exit", async () => {
+  const h = harness();
+  try {
+    await boot(h);
+    await h.arm();
+    h.saveAll();
+    h.setBusy(true);
+    h.setQueuedBanner(true); // native banner, EMPTY composer, before paste and before Enter
+    const held = h.holdHook("Stop");
+    await new Promise((r) => setTimeout(r, 20)); // middleware has pinned and is awaiting the body
+    await h.hook("UserPromptSubmit", { prompt: "slack event admitted before selection" });
+    held.release();
+    await held.response;
+    assert.equal(h.db.getEvents(0, 5, "pm_stop_maintenance_selected").length, 1, "exit selected despite the failed clear claim");
+    assert.equal(h.exits(), 1, "exactly one /exit submission");
+    assert.equal(h.enters(), 1);
+    assert.equal(h.escapes(), 0, "zero Escape");
+    assert.equal(h.ctrlU(), 0, "zero C-u");
+    const triggered = JSON.parse(h.db.getEvents(0, 1, "exit_pending_triggered")[0]!.payload);
+    assert.equal(triggered.delivery, "delivered", "confirmed by the composer clearing, not by the pre-existing banner");
+    assert.equal(h.status().continuation_prompt, "Read resume. Resume PM.", "continuation retained");
+    assert.equal(h.status().exit_terminal, null);
+    assert.equal(h.db.getEvents(0, 5, "pm_exit_subagents_stopped").length, 0, "no ACK");
+    // No work voiding and no resend.
+    await h.hook("PreToolUse", { tool_name: "Agent", tool_input: {} });
+    await h.hook("Stop");
+    await h.hook("Stop");
+    assert.equal(h.exits(), 1);
+    assert.equal(h.db.getEvents(0, 10, "exit_pending_triggered").length, 1);
+  } finally { h.close(); }
+});
+
+test("native queued banner negatives: a foreign draft is never touched; a pre-existing banner is never proof of submit", async () => {
+  const draft = harness();
+  try {
+    await boot(draft);
+    await draft.arm();
+    draft.saveAll();
+    draft.setQueuedBanner(true);
+    draft.setComposer("PM is typing a draft");
+    await draft.hook("Stop");
+    assert.equal(draft.exits(), 0, "no paste over a foreign draft");
+    assert.equal(draft.enters(), 0);
+    assert.equal(draft.ctrlU(), 0);
+    assert.equal(draft.escapes(), 0);
+    assert.equal(JSON.parse(draft.db.getEvents(0, 1, "exit_pending_triggered")[0]!.payload).delivery, "refused_pre_effect");
+  } finally { draft.close(); }
+  const swallowed = harness();
+  try {
+    await boot(swallowed);
+    await swallowed.arm();
+    swallowed.saveAll();
+    swallowed.setQueuedBanner(true);
+    swallowed.setSwallowEnter(true); // /exit stays in the composer under a pre-existing banner
+    await swallowed.hook("Stop");
+    const delivery = JSON.parse(swallowed.db.getEvents(0, 1, "exit_pending_triggered")[0]!.payload).delivery;
+    assert.equal(delivery, "uncertain", "pre-existing banner never confirms this submit");
+    assert.equal(swallowed.status().exit_terminal, null, "uncertain stays consumed, no terminal");
+    assert.equal(swallowed.ctrlU(), 0);
+    await swallowed.hook("Stop");
+    assert.equal(swallowed.db.getEvents(0, 10, "exit_pending_triggered").length, 1, "no resend");
+  } finally { swallowed.close(); }
 });
 
 test("PM work, a subagent launch or new input after the save never voids readiness", async () => {

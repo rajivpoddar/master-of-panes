@@ -275,9 +275,13 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     const authority = currentStop && stopPins && entry ? stopPins.claim(entry, raw.session_id as string) : undefined;
     // A Stop whose pin was superseded (new input, completed work, new boot) arms nothing.
     const pinnedStop = currentStop && (!stopPins || authority != null);
-    const maintenance: PmStopMaintenance = pinnedStop && selectStop ? selectStop(raw.session_id as string, entryWork) : "clear";
+    // Episode-owned PM-exit selection is NOT gated on the clear work-generation
+    // claim (CTO REVISE ts 1793760137.229639): new input during body parsing
+    // must not strand a saved exit. Clear still needs the pinned claim, and one
+    // command per Stop holds: exit/exit_custody always skip the clear below.
+    const maintenance: PmStopMaintenance = currentStop && selectStop ? selectStop(raw.session_id as string, entryWork) : "clear";
     if (raw.hook_event_name === "Stop") {
-      const pin: PmExitStopPin = { work: entryWork, boot: entryBoot, selected: pinnedStop && maintenance === "exit" };
+      const pin: PmExitStopPin = { work: entryWork, boot: entryBoot, selected: currentStop && maintenance === "exit" };
       (c as unknown as { set(key: string, value: unknown): void }).set("pmExitStopPin", pin);
       if (maintenance !== "clear") {
         db.logEvent(0, "pm_stop_maintenance_selected", "Stop", null, {
