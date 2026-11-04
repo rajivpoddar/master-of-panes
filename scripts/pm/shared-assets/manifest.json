@@ -1314,7 +1314,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heydonna-product-rules",
-      "sha256": "3cea30c91194abcabda0fa948f5a0b53867c5bc0cd78e3c1eb26222656cffe47",
+      "sha256": "a731ed33fdbfb81dabcc5746b7b078811b68395f96eeb63637aa448d2699f3fb",
       "source_path": "claude/user-rules/33-heydonna-ui-product-rules.md"
     },
     {
