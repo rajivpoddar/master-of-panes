@@ -455,9 +455,28 @@ def pending_actions_block(obligations: dict, github: dict, now: datetime) -> lis
         lines.append('• obligations: UNAVAILABLE (' + _compact(obligations['error'], 70) + ')')
     else:
         lines[0] += f" backlog rows: {obligations['backlog']} (not shown)"
+        held = []
         for row in obligations['items']:
             target = f"#{row['issue']}" if row.get('issue') else f"PR#{row['pr']}" if row.get('pr') else f"obligation #{row['id']}"
-            ledger.append(f"• {_compact(target, 35)} | {_compact(row.get('required_action') or row.get('title') or row['kind'], 90)} | {age(row.get('created_at'))} | {_compact(row.get('owner') or 'PM', 20)}")
+            owner = _compact(row.get('owner') or 'PM triage (unowned)', 40)
+            blocker = (row.get('blocker') or '').strip()
+            review = row.get('next_review_at')
+            review_time = _parse_ts(review)
+            state = (row.get('external_state') or '').strip()
+            is_held = bool(blocker or (review and (review_time is None or review_time > now)) or re.search(r'\b(?:consumed|uncertain)\b', state, re.I))
+            if is_held:
+                details = []
+                if blocker:
+                    details.append('hold: ' + _compact(blocker, 180))
+                if state:
+                    details.append('state: ' + _compact(state, 80))
+                if review:
+                    details.append('review: ' + _compact(review, 50))
+                held.append(f"• {_compact(target, 35)} | HELD | {'; '.join(details)} | {age(row.get('created_at'))} | {owner}")
+            else:
+                timing = f" | review: {_compact(review, 50)}" if review else ''
+                ledger.append(f"• {_compact(target, 35)} | {_compact(row.get('required_action') or row.get('title') or row['kind'], 90)}{timing} | {age(row.get('created_at'))} | {owner}")
+        ledger.extend(held)
     if 'error' in github:
         lines.append('• GitHub: UNAVAILABLE (' + _compact(github['error'], 70) + ')')
     else:
