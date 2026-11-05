@@ -20,7 +20,11 @@ date: 2026-06-12
 
 # Todo Prioritize
 
-Single source of truth for the PM dispatch queue is the PM ops SQLite ledger at `~/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db`. This skill refreshes Ready Pool obligations and then renders `pm-todo.md` so `Skill(direct-assign)` can dispatch work in current priority order. In Rajiv-facing mode it posts a concise plan and waits for Rajiv approval before updating the ledger. In hourly-ops-audit mode, the audit action itself is PM authority to rewrite the queue projection when objective drift criteria are met.
+The PM dispatch queue is the live GitHub Ready Pool and existing selector;
+dispatch uses `Skill(direct-assign)` with current MoP state. The pm-ops ledger
+tracks explicit commitments, not copies of ordinary issues or queue membership.
+This skill checks the queue and reports a plan. Product-priority changes retain
+their existing approval boundary; routine reconciliation needs no new approval.
 
 ## When to Use
 
@@ -37,7 +41,10 @@ Choose exactly one mode at the start:
 - **Rajiv-facing planning mode:** user/Rajiv asks "what's next?", PM wants approval, or the change would reorder product priorities in a way Rajiv should see. Post to Slack, wait for approval, then update PM ops obligations and render `pm-todo.md`.
 - **Hourly-ops-audit mode:** invoked from an hourly ops audit action item whose evidence names stale Ready Pool order, unqueued `status:todo`, new P0/P1, newly unblocked work, stale PM ops/rendered `pm-todo.md`, or issue-count burst. Do not post for Rajiv approval by default; update PM ops obligations directly and reply to the ops audit with proof.
 
-Hourly-ops-audit mode is allowed to reorder the queue projection and add missing queued PM ops `ready_pool` obligations. It is NOT allowed to change GitHub priority labels, rewrite Ready Pool frontmatter priority values, resolve product-scope conflicts, or dispatch work directly. If those are required, emit a blocked proof pointing to `pm-triage`.
+Hourly-ops-audit mode checks the live queue without creating PM ops mirrors.
+It is NOT allowed to change GitHub priority labels, rewrite Ready Pool frontmatter
+priority values, resolve product-scope conflicts, or dispatch work directly.
+If those are required, emit a blocked proof pointing to `pm-triage`.
 
 ## Slot Affinity Rule (current sweep/claim contract)
 
@@ -274,21 +281,22 @@ In hourly-ops-audit mode: the audit action is PM authority for routine queue rec
 
 `BLOCKED proof: needs pm-triage for priority/frontmatter change; no PM ops queue rewrite`
 
-### Step 9: Update PM ops queue obligations and render `pm-todo.md`
+### Step 9: Use the GitHub Ready Pool; render explicit commitments separately
 
-After approval in Rajiv-facing mode, or immediately in hourly-ops-audit mode when the change is routine queue reconciliation, the approved/current plan becomes PM ops Ready Pool state. `Skill(direct-assign)` consumes this projection alongside live GitHub/MoP state. `pm-todo.md` is generated from PM ops; direct dispatch still goes only through `Skill(direct-assign)`.
+After approval in Rajiv-facing mode, or immediately for routine reconciliation,
+use current GitHub Ready Pool metadata and the live selector for the plan.
+`Skill(direct-assign)` remains the sole dispatch path. Rajiv's 2026-11-05
+tracking rule (C0ALZJHGE49/1793882883.242249) supersedes queue-mirroring
+instructions in this skill: routine issues and membership do not create
+obligations. `pm-todo.md` renders actual commitments; it is not a second
+authoritative Ready Pool. Explicit issue-linked promises remain trackable.
 
 The kanban file DOES include the "Rajiv merge queue" section (PM uses it internally to track in-review PRs awaiting Rajiv's merge). This section is intentionally absent from the Slack post in Step 6 — Rajiv reads merge queue separately via `gh pr list`.
 
-For each queued issue, upsert a PM ops `ready_pool` obligation, then render:
+Do not upsert a `ready_pool` obligation for each queued issue. If the existing
+commitment view needs refreshing, render it without another live repository scan:
 
 ```bash
-python3 /Users/rajiv/.claude/scripts/pm-ops.py obligation-upsert \
-  --kind ready_pool --target-type issue --target-id <NNNN> --issue <NNNN> \
-  --owner pm --title "#<NNNN> <slug>" \
-  --action "Keep queued in Ready Pool until Skill(direct-assign) assigns or PM blocks it." \
-  --evidence "priority=<P0|P1|P2|P3>" --evidence "lane=<lane>" --evidence "preferred_slot=<slot|queued>"
-
 python3 /Users/rajiv/.claude/scripts/pm-ops.py sync --write --no-live --reason todo-prioritize
 ```
 

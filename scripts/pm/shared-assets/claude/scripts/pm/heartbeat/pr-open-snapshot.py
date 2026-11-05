@@ -876,18 +876,17 @@ def main() -> int:
     parser.add_argument("--text", action="store_true")
     parser.add_argument(
         "--sync-obligations", action="store_true",
-        help="Create/resolve pr_admission|pr_red_unowned|pr_merge_ask pm-ops "
-             "obligations for open PRs (see sync_pr_obligations).",
+        help="Compatibility no-op: routine PR tracking stays in GitHub and the PR report.",
     )
     args = parser.parse_args()
-    observed_at = _utc_stamp()  # before any live read: rows written later are newer observations
-    mop_owned_prs = fetch_mop_owned_prs()
-    raw_prs = fetch_open_prs(with_threads=not args.sync_obligations)
-    claims = {} if args.sync_obligations else fetch_live_claims(raw_prs)
     if args.sync_obligations:
-        created = sync_pr_obligations(raw_prs, mop_owned_prs, observed_at=observed_at)
-        print(json.dumps({"obligations_synced": created}, indent=2))
+        # Historical callers must not recreate mirrors or resolve an explicit
+        # incident, admission hold, or pending handoff with the same PR/kind.
+        print(json.dumps({"obligations_synced": []}))
         return 0
+    mop_owned_prs = fetch_mop_owned_prs()
+    raw_prs = fetch_open_prs()
+    claims = fetch_live_claims(raw_prs)
     holds = {}
     for pr in raw_prs:
         number = pr.get("number")

@@ -69,6 +69,18 @@ Owner routing and transports below.
 
 ## Direct delegation and source replies (Rajiv 2026-11-04)
 
+Obligation scope (Rajiv C0ALZJHGE49/thread 1793872014.789359/event
+1793882883.242249): track explicit requests, actual commitments and real
+operational/acceptance follow-ups. Do not automatically mirror issue/PR
+lifecycle, dependencies or Ready Pool/retained-triage membership. Use their
+existing GitHub, selector, PM and conveyor surfaces. A future feature/backlog
+item is not automatically a promised follow-up. Preserve intentional
+issue-linked commitments, customer recovery, financial/safety uncertainty,
+UNKNOWN/no-retry effects, live claims and pending handoffs. Retire only proven
+redundant records through exact-ID guarded resolution, retaining scope and
+history; a lower count is not product completion. The normal obligation-upsert
+writer remains available for deliberate tracking, without a new registry/gate.
+
 Rajiv's direct instruction in CTO Decisions: "drop the routing through returns.
 direct all tasks to respond back on slack directly instead. update SOP".
 This supersedes the former Returns split, distribution and terminal-consumer

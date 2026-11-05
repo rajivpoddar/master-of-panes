@@ -39,13 +39,12 @@ EXTERNAL_ROOT (pm-blocked:external/product/cto or partner/decision wording in th
 ready-pool gate/wake/blockers), DEAD_ROOT (root closed without satisfying the condition) and
 AGED (gated >= 7d: pm-blocked:dependency LabeledEvent time, else updatedAt as a lower bound).
 `dependency_hotspots` lists each open root gating >= 3 pool issues once.
-`--sync-obligations` upserts pm-ops `dependency_hell` obligations (owner PM) and resolves
-those that cleared (state: ~/.claude/state/ready_pool_dependency_hell.json; resolution is
-skipped when a lookup batch failed). Exit codes are unchanged.
+Dependency warnings stay in this selector's output. `--sync-obligations` is a
+compatibility no-op; explicit follow-ups use the ordinary pm-ops writer.
 
 Usage:
   ready_pool_select.py                 # ranked JSON, pick first
-  ready_pool_select.py --sync-obligations   # also mirror dependency hell into pm-ops
+  ready_pool_select.py --sync-obligations   # compatibility flag; no ledger writes
   ready_pool_select.py --rework-only   # WIP cap hit: existing-PR work only
   ready_pool_select.py --check 11462   # validate a PM pick before mop-assign-slot
 
@@ -1053,7 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-dependency-check", action="store_true", help="leave dependencies gated without live lookups")
     ap.add_argument("--selftest", action="store_true", help="check dependency parsing without network access")
     ap.add_argument("--sync-obligations", action="store_true",
-                    help="upsert pm-ops dependency_hell obligations (owner PM) and resolve cleared ones")
+                    help="compatibility flag; dependency warnings do not mirror into pm-ops")
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest()
@@ -1115,11 +1114,8 @@ def main(argv: list[str] | None = None) -> int:
         hell_meta = {"nodes_fetched": len(nodes), "batch_failures": failures,
                      "complete": not failures, "lookup_failed_dependencies": bool(lookup_failed),
                      "seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 1)}
-        if args.sync_obligations:
-            hell_meta["sync"] = sync_obligations(obligation_targets(dependency_hell, dependency_hotspots),
-                                                 complete=not lookup_failed)
-    elif args.sync_obligations:
-        hell_meta["sync"] = {"skipped": "--no-dependency-check disables the analysis; nothing synced or resolved"}
+    if args.sync_obligations:
+        hell_meta["sync"] = {"skipped": "routine dependency tracking stays in the selector; no obligations written or resolved"}
 
     pick = ranked[0] if ranked else None
     print(json.dumps({

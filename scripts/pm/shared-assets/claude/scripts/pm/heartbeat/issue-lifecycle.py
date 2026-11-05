@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Hourly issue lifecycle findings; GitHub/MoP are read-only, pm-ops owns writes.
+"""Read-only hourly issue lifecycle findings; GitHub/MoP retain routine tracking.
 
 Uses the existing Unblockable now section. Never changes labels or invents ACs.
 The first run backfills partial merges for 24h; all open issue timelines are
-checked regardless of age. A failed collection/upsert never advances the cursor.
+checked regardless of age. A failed collection never advances the cursor.
 """
 from __future__ import annotations
 
@@ -138,7 +138,7 @@ def render(findings, carried=frozenset()):
         evidence = ('; PR ' + ', '.join('#' + str(n) for n in row['prs'])) if row['prs'] else ''
         lines.append(f'• #{row["issue"]}: ' + ', '.join(row['reasons']) + evidence)
     if len(shown) > 10:
-        lines.append(f'• +{len(shown) - 10} more; all in orphaned_issue obligations.')
+        lines.append(f'• +{len(shown) - 10} more; all in the saved lifecycle findings.')
     return lines
 
 
@@ -423,16 +423,12 @@ def run(dry_run=False):
         lines = render(actionable, carried)
         if len(actionable) != len(findings):
             lines.append(f'• {len(findings) - len(actionable)} dispositioned issues suppressed until their recorded review/wake; not actions.')
-        previous = saved.get('findings', [])
-        cursor = int(saved.get('recheck_cursor') or 0)
         if dry_run:
-            would = recheck(findings, slots, open_prs, previous, cursor, write=False, now=now)
-            return dict(dry_run=True, findings=actionable, lines=lines, would_resolve=would['resolved'], recheck=would)
-        sync(actionable)
-        rechecked = recheck(findings, slots, open_prs, previous, cursor, now=now)
+            return dict(dry_run=True, findings=actionable, lines=lines, would_resolve=[])
+        # Routine lifecycle findings live in this report and GitHub. Neither
+        # create mirrors nor resolve an explicitly tracked issue commitment.
         doc = dict(since=now.strftime('%Y-%m-%dT%H:%M:%SZ'), findings=actionable, lines=lines,
-                   scanned_since=since, reported_blockers_resolved=sorted(resolved),
-                   recheck=rechecked, recheck_cursor=rechecked['cursor'])
+                   scanned_since=since, reported_blockers_resolved=sorted(resolved))
         temporary = STATE.with_suffix('.new')
         temporary.write_text(json.dumps(doc, indent=2) + '\n')
         temporary.replace(STATE)

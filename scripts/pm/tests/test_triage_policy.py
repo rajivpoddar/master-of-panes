@@ -116,11 +116,12 @@ class TriagePolicyTests(unittest.TestCase):
     def test_promotion_preserves_dependency_metadata_and_label(self):
         held = issue(blockers="[#9999]", extra=("pm-blocked:dependency",))
         live = {**held, "labels": [{"name": "status:todo"}, {"name": "P1"}, {"name": "pm-blocked:dependency"}]}
-        with patch.object(bt, "gh_issue_view", side_effect=[held, live]), patch.object(bt, "run") as run, patch.object(bt, "pm_ops_upsert"):
+        with patch.object(bt, "gh_issue_view", side_effect=[held, live]), patch.object(bt, "run") as run, patch.object(bt, "pm_ops_upsert") as upsert:
             result = bt.promote_backlog_issue(bt.promoter_row(held, "clean_ready_pool"), {1234,9999})
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["live_ready_pool"]["blockers"], "[#9999]")
         self.assertNotIn("pm-blocked:dependency", run.call_args_list[0].args[0][run.call_args_list[0].args[0].index("--remove-label")+1])
+        upsert.assert_not_called()
 
     def test_contract_repair_allows_p3_and_preserves_dependencies(self):
         with patch.object(repair, "_triage", return_value=bt), patch.object(repair, "ledger_errors", return_value=[]):

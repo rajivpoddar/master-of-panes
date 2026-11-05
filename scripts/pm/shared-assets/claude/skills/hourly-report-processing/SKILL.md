@@ -10,6 +10,32 @@ Source: Rajiv, DM D0AMF0XE6TS thread 1791206320.393239, 2026-10-05 18:48 IST:
 
 `hourly-heartbeat` PRODUCES the report. This skill CONSUMES it. The report is a work queue, not an FYI. Every line ends in an action, an owner, or an explicit "no action: <reason>". Every Pending PM actions line gets an owner or is done in the same PM turn (Rajiv C0ALZJHGE49 thread 1793769935.961309, ts 1793770291.164719).
 
+## What belongs in obligations (Rajiv 2026-11-05)
+
+Source: C0ALZJHGE49/thread 1793872014.789359/event 1793882883.242249:
+"can it be skipped for routine stuff like issues and ready pools. we need it for things we want to track."
+
+Use obligations for an explicit "track/follow up" request, an actual agent
+commitment, customer recovery, financial uncertainty, safety/UNKNOWN custody,
+and promised operational or served acceptance. Keep the source, owner, action
+and actual completion/unblock evidence. An issue or PR reference is allowed;
+it neither creates a commitment nor makes an existing one disposable.
+
+Routine issue lifecycle, dependency/Ready Pool/retained-triage membership and
+PR status stay in GitHub, the existing selector, reports and conveyor. Do not
+create `ready_pool`, `triage_retained_scope`, `orphaned_issue`,
+`hourly_pr_owner` or admission/status mirrors merely because a row appears.
+A future feature/backlog item is not automatically a promised follow-up.
+Act on the direct report without creating a second queue. Keep actual CI
+failures, live ownership, merge holds and pending handoff receipts visible.
+Use the existing `pm-ops.py obligation-upsert` for a deliberate commitment;
+do not ban a kind or silently drop an intentional issue-linked upsert.
+
+Retire a redundant record only by exact-ID guarded resolution after checking
+its current claim, fingerprint and full remaining scope. Preserve any unique
+commitment first. Record "routine tracking retained in GitHub/PM", never
+"feature completed". Do not force claims, erase UNKNOWN or rewrite history.
+
 ## Trigger
 - A HeyDonna Alerts message starting `*Hourly — HH:MM IST*` in C0ALZJHGE49 (the thread ts is the report's ts).
 - Rajiv asking about that report ("are PRs moving?", "any limbo?", "why is S2 idle?").
@@ -18,7 +44,7 @@ Source: Rajiv, DM D0AMF0XE6TS thread 1791206320.393239, 2026-10-05 18:48 IST:
 - Report text: the error classes, open PRs and Slots block.
 - `gh pr list --state open --json number,headRefOid,isDraft,labels,updatedAt`
 - `bash ~/.claude/scripts/heartbeat-slots-block.sh` (live MoP slot state)
-- Open pm-ops obligations: `pm-ops.db` `obligations where status='open'`. The pr_admission, pr_red_unowned and pr_merge_ask rows are due actions.
+- Open pm-ops commitments: `pm-ops.db` `obligations where status='open'`. Preserve intentional holds/asks regardless of their kind; routine PR actions come from the live PR report/conveyor.
 
 ## Visual waiver sign-off (S109)
 Source: Rajiv DM D0AMF0XE6TS thread 1793721920.626689, ts 1793723647.696169, "go". Every hourly, read all open `visual_waiver_signoff` obligations in the canonical pm-ops ledger, including merged PRs. Check the PR transition thread, merge-alert thread and PR comments for the named verifier's explicit production sign-off; record its permalink and resolve the exact obligation with `pm-ops.py obligation-resolve --kind visual_waiver_signoff --id <id> --reason '<sign-off permalink>'`. Otherwise, once `next_review_at` (deploy + 24h) is due, send ONE reminder total: use the resolved PR transition thread, otherwise the verified PR merge-alert thread in `C0ALZJHGE49`, mentioning the verifier; if neither exists, post a PR comment with no @-mentions and log the fallback. Never invent a thread timestamp. Check both available threads, PR comments and ledger for `visual_waiver_signoff:<id>` before sending; include that marker and record the successful Slack or comment permalink as evidence via the same upsert. Never resend an existing or uncertain send; reconcile first. If verifier identity, ledger, required reads or send result is unavailable or uncertain, report an owned retryable blocker; never assume sign-off.
@@ -46,7 +72,7 @@ Each open PR gets exactly one disposition:
 | State | Action (same turn) |
 |---|---|
 | Not draft, no `ci-head:<live head>` | `pm-admission-reviewer`. On PASS, run `pm-admit-ci.sh <PR>` yourself; reviewers cannot change PR state. |
-| CI/E2E red, unowned | CI red → `ci-repair-agent`. E2E red → `e2e-failure-investigator`. Claim the obligation with `--owner` and `--suppress-until`. |
+| CI/E2E red, unowned | CI red → `ci-repair-agent`. E2E red → `e2e-failure-investigator`. Retain the accepted owner in the existing incident/PR path; claim an existing explicit obligation without creating a routine status mirror. |
 | Dual green at the live head | Exact-head merge ask to CTO in the PR's CI-success alert thread, with the 12b.1 screenshot line. |
 | Green, held for screenshots/proof | Confirm a slot or agent owns the proof. If none, queue it first for the next free slot. |
 | Queued run older than 30 min | Check job state before calling it a stall (`gh run view --json jobs`). Follow-on jobs waiting on the single ops runner are a backlog, not a stall. A real stall goes to `ci-repair-agent` (SOP §15). |
@@ -187,11 +213,10 @@ The hourly report extends this SAME section as `*Unblockable now / issue lifecyc
 ### Issue lifecycle dispositions (every hourly)
 Source: Rajiv, DM D0AMF0XE6TS thread 1793084931.341779, ts 1793086564.280889: "add the lifecycle reconciler to the hourly report and its corresponding processing skill. there's already a section there for it."
 
-The composer runs `issue-lifecycle.py`: GitHub/MoP reads only, with issue-keyed
-`orphaned_issue` upserts through the existing pm-ops CLI. Read ALL open
-`orphaned_issue` obligations from the canonical ledger, not only the report's
-top ten. Re-read each issue's live body/ACs, MoP ownership, PR references and
-blocker states. Choose exactly ONE disposition for each finding:
+The composer runs `issue-lifecycle.py` without obligation writes. Read ALL
+findings in its existing saved output, not only the report's top ten. Re-read
+each issue's live body/ACs, MoP ownership, PR references and blocker states.
+Preserve any separately tracked commitment. Choose ONE disposition per finding:
 
 - **Re-queue:** quote the exact next unchecked AC and identifier from the issue
   body; use the existing `ready-pool-contract-repair` path to add/refresh the
@@ -210,11 +235,11 @@ blocker states. Choose exactly ONE disposition for each finding:
   or next-review time. Preserve live ownership/WIP; missing references and
   unavailable providers are unknown, never "resolved".
 
-Record issue, disposition, exact AC/evidence, owner and wake on the existing
-obligation using the pm-ops CLI. Resolve it only after verifying the chosen
-transition; an unresolved wait needs a live owned follow-up row. Repeated hourly
-findings refresh the same issue-keyed row. Include per-issue dispositions in
-Step 4 as PM. An unavailable collector/upsert is a retryable failure, not zero;
+Record issue, disposition, exact AC/evidence, owner and real unblock event in
+the existing issue/PR/source thread. A routine wait needs no obligation mirror.
+Update or resolve an explicit commitment only when its own scope is satisfied.
+Include per-issue dispositions in Step 4 as PM. An unavailable collector is
+UNAVAILABLE, not zero;
 never advance its merge cursor manually. The first run backfills 24h of partial
 merges; historical merged closing references are checked for all open issues
 regardless of that cursor.

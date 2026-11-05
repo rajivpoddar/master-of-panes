@@ -1364,17 +1364,8 @@ def main() -> int:
     prs = _load(args.prs_json)
     if prs is None and not args.prs_json:
         prs = _run_json([py, str(SCRIPTS / "pr-open-snapshot.py")], failures, "pr-open-snapshot")
-        # Deterministic every-turn open-PR obligations (Rajiv 2026-09-30,
-        # thread C0ALZJHGE49/1790707604.948989): piggyback on this same
-        # existing hourly/3h producer call, fire-and-forget, never blocks or
-        # fails the heartbeat compose itself.
-        try:
-            subprocess.run(
-                [py, str(SCRIPTS / "pr-open-snapshot.py"), "--sync-obligations"],
-                capture_output=True, text=True, errors="replace", timeout=60, check=False,
-            )
-        except Exception:
-            pass
+        # The snapshot already supplies direct PR actions. Routine PR progress
+        # does not create a second queue in the obligations ledger.
 
     # Idle-slot actions are only rendered into the post's ACTIONS line by `compose()`.
     # The runtime contract requires them in the structured ACTIONS: channel the agent

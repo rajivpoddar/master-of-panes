@@ -1713,29 +1713,7 @@ def repair_todo_ready_pool_issue(
             membership_reasons=membership,
         )
 
-    try:
-        pm_ops_upsert(
-            "ready_pool",
-            "high",
-            f"#{number} Ready Pool contract repaired",
-            f"Dispatch #{number} through Skill(direct-assign); keep queued if no eligible slot is free.",
-            number,
-            (
-                "ready-pool-contract-repair "
-                f"review_proof={clean_meta_value(proposal.get('review_proof'))} "
-                f"body_sha256={issue_body_sha256(refreshed.get('body') or '')}"
-            ),
-            horizon="hourly",
-        )
-    except subprocess.CalledProcessError as exc:
-        return promotion_failure(
-            issue,
-            "pm_ops_upsert_failed_after_github_repair",
-            changed=True,
-            returncode=exc.returncode,
-            stdout=exc.stdout,
-            stderr=exc.stderr,
-        )
+    # The verified GitHub contract is the queue entry; no obligation mirror.
     return {
         "ok": True,
         "changed": True,
@@ -2096,22 +2074,7 @@ def promote_backlog_issue(
             readiness_reasons=final_readiness,
         )
 
-    pm_ops_upsert(
-        "ready_pool",
-        "high",
-        f"#{issue} promoted from backlog to Ready Pool",
-        (
-            f"Check #{issue}'s dependencies live before Skill(direct-assign). If no slot is free, keep it queued "
-            "as status:todo with explicit ownership instead of returning it to backlog."
-        ),
-        issue,
-        (
-            "backlog-promoter:clean_ready_pool "
-            f"priority={row.get('priority','')} lane={row.get('lane','')} "
-            f"claimable_slot_type={row.get('claimable_slot_type','')}"
-        ),
-        horizon="hourly",
-    )
+    # GitHub status:todo and Ready Pool metadata retain this work for selection.
     return {
         "ok": True,
         "issue": issue,
@@ -2545,48 +2508,7 @@ def migrate_dependency_blocked_todos(buckets: dict[str, list[dict[str, Any]]]) -
 def upsert_triage_obligations(
     buckets: dict[str, list[dict[str, Any]]], issue_filter: set[int] | None
 ) -> None:
-    for row in buckets["todo_priority_label_drift"]:
-        if issue_filter and int(row["number"]) not in issue_filter:
-            continue
-        issue = int(row["number"])
-        pm_ops_upsert(
-            "ready_pool",
-            "high",
-            f"#{issue} has non-canonical Ready Pool priority labels",
-            (
-                "Repair GitHub priority to exactly one P0/P1/P2/P3 label matching "
-                "Ready Pool priority, remove deprecated aliases, then dispatch with Skill(direct-assign)."
-            ),
-            issue,
-            f"backlog-triage:{row.get('reason','priority_label_drift')}",
-            horizon="hourly",
-        )
-
-    for row in buckets["backlog_promote_candidate"]:
-        if issue_filter and int(row["number"]) not in issue_filter:
-            continue
-        issue = int(row["number"])
-        pm_ops_upsert(
-            "priority_review",
-            "high",
-            f"#{issue} looks like unblocked backlog that may need promotion",
-            "Review against Rajiv priority, add/repair ready-pool frontmatter, then move to status:todo or document the blocker.",
-            issue,
-            "backlog-triage:important_unblocked_backlog",
-        )
-
-    for row in buckets["backlog_metadata_missing"]:
-        if issue_filter and int(row["number"]) not in issue_filter:
-            continue
-        issue = int(row["number"])
-        pm_ops_upsert(
-            "backlog",
-            "medium",
-            f"#{issue} backlog parking contract is incomplete",
-            "Add parent/blocker, unblock condition, and owner/next reviewer, or promote to status:todo if it is runnable now.",
-            issue,
-            f"backlog-triage:{row.get('reason','metadata_missing')}",
-        )
+    """Compatibility no-op: routine triage findings stay in GitHub/the report."""
 
 
 def write_manifest(
@@ -2848,7 +2770,8 @@ def main() -> int:
     if args.apply:
         if args.migrate_blocked_todos:
             migrate_dependency_blocked_todos(buckets)
-        upsert_triage_obligations(buckets, issue_filter)
+        # Routine triage results are already retained in the report and GitHub.
+        # Explicit commitments remain available through pm-ops obligation-upsert.
         if PM_OPS.exists():
             # The triage pass above already read live GitHub state and wrote the
             # affected obligations. Rendering that ledger must not start a

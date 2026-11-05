@@ -114,7 +114,7 @@ Scripts are MoP-installed at `~/.claude/scripts/pm/heartbeat/` (Axiom queries in
 | Code → issue | `heartbeat-error-map.py` (open GitHub issues/PRs, open pm-ops rows, `docs/investigations/`); unmapped = `NEW` |
 | Support | `support-inbox-snapshot.py` (C0A56RX6FNW + C0AGWPQFKHA via the PM bot token; in-app `feedback` via `npx convex data feedback --prod`, PM-only per rule 11c) |
 | Usage | `~/.claude/scripts/usage-snapshot.py` (Claude + Codex weekly %, reset, burn/ETA); ALWAYS in the 3h post |
-| Open PRs / slots | NOT in the 3h post (Rajiv 2026-10-07 12:25 IST, C0ALZJHGE49 thread 1791355967.794539: "drop the open pr and slots report from 3h weekly hearbeat. make sure that codex and claude usage are always there."). They stay in the hourly report. `pr-open-snapshot.py --sync-obligations` still runs for obligations. |
+| Open PRs / slots | NOT in the 3h post (Rajiv 2026-10-07 12:25 IST, C0ALZJHGE49 thread 1791355967.794539: "drop the open pr and slots report from 3h weekly hearbeat. make sure that codex and claude usage are always there."). They stay in the hourly report. Routine PR status does not create obligation mirrors (Rajiv 2026-11-05/1793882883.242249). |
 
 Rules the composer enforces:
 - One-sentence TL;DR on line 1, after the CTO mention.

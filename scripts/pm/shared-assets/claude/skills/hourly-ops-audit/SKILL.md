@@ -603,7 +603,7 @@ hourly-ops-audit mode before closing the item when any of these are true:
 - issue count increased materially and the current queue was not regenerated;
 - Ready Pool rows are missing priority/lane/next-action proof.
 
-`todo-prioritize` may update PM ops queue obligations, render `pm-todo.md`, and then run
+`todo-prioritize` uses the live GitHub/selector queue, may render existing commitments in `pm-todo.md`, and then runs
 `Skill(direct-assign)`. It must not change GitHub priority labels or Ready Pool
 frontmatter priority values; those require `pm-triage`. Completion proof must name
 changed issue numbers or `no_order_change`, cite `pm-todo.md`, and include the
@@ -692,7 +692,7 @@ work goes to PM obligations, not application slots.
 
 1. **TRANSITION: traced + TARGET: misc** → investigation. Read the EVIDENCE, decide follow-through, execute (Slack reply, GitHub label, slot dispatch, alert close). For PR/Codex traces, include live `reviewThreads` state in the proof line if the action changes readiness or rework state.
 2. **TRANSITION: assigned** → PM owns the assignment. Re-verify slot availability via `mop_all_slots`, then hand off the concrete packet to the chosen slot and verify receipt via MoP event proof: delivery event plus subsequent same-slot pickup/response event. If not visible within 30s, use the `message-slot` fallback pattern and keep the action blocked until receipt proof exists.
-3. **TRANSITION: queued** → verify the item already appears as a PM ops `ready_pool` obligation and in rendered `pm-todo.md` with Ready Pool frontmatter (CP #17). If absent, queue it now through `pm-ops.py obligation-upsert` and `pm-ops.py sync --write --no-live`.
+3. **TRANSITION: queued** → verify the current GitHub issue's Ready Pool metadata and selector eligibility. Do not create a `ready_pool` obligation mirror (Rajiv C0ALZJHGE49/1793882883.242249). Preserve an explicit commitment separately; routine queue membership is already tracked in GitHub.
 4. **TRANSITION: demoted** → first apply the Codex review / merge-readiness freshness gate above. If a blocker remains live, flip standalone `merge-ready` → `pm-state:blocked-rework` per `pr-mark-ready` Phase B-revoke template and cite the live audit evidence on the PR. Do not demote on stale Codex alerts whose threads are already resolved with valid P2 follow-up rationale.
 5. **TRANSITION: rerun** → ALWAYS combine with `ci-failure-investigation` Step 7
    verdict BEFORE rerunning. Naked rerun is a process violation (CP #14). Every
