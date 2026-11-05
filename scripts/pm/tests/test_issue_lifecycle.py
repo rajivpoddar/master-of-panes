@@ -326,3 +326,74 @@ def test_upsert_during_live_read_survives_real_writer(tmp_path):
     con.close()
     assert rows[0][1] == 'open' and 'partial_merge' in rows[0][2]
     assert rows[1][1] == 'resolved'
+
+
+def test_live_issue_requires_well_formed_state_and_labels():
+    m = load()
+    good = dict(number=5, state='open', labels=[], assignees=[])
+    with patch.object(m, 'gh', return_value=good):
+        assert m.live_issue(5) == dict(state='OPEN', labels=set(), assignees=[])
+    for bad in (dict(number=5, state='open'), dict(number=5, state='open', labels=''),
+                dict(number=5, state='open', labels=None), dict(number=5, state='open', labels=[{'nope': 1}]),
+                dict(number=5, state='open', labels=['status:in-progress']), dict(number=5, labels=[]),
+                dict(number=5, state='weird', labels=[]), dict(number=6, state='open', labels=[]),
+                dict(number=5, state='open', labels=[], assignees='x')):
+        with patch.object(m, 'gh', return_value=bad), pytest.raises(ValueError):
+            m.live_issue(5)
+
+
+def test_recheck_packet_through_real_live_issue_and_writer(tmp_path):
+    """CTO packet: changed reasons/head during the held read, valid-empty vs missing/malformed labels,
+    unchanged resolution, and claim / failed-read / mixed-partial preservation, all through the real
+    live_issue decoder and the real pm-ops writer."""
+    m = load()
+    legacy = ROOT / 'shared-assets/claude/scripts/pm-ops-legacy.py'
+    db = str(tmp_path / 'packet.db')
+    env = dict(__import__('os').environ, PM_OPS_DB=db)
+    future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def upsert(n, reasons, *extra):
+        m.subprocess.run([m.sys.executable, str(legacy), 'obligation-upsert', '--kind', 'orphaned_issue',
+                          '--target-type', 'github_issue', '--target-id', str(n), '--issue', str(n), '--title', 't',
+                          '--evidence-json', json.dumps(dict(issue=n, reasons=reasons)), *extra],
+                         env=env, capture_output=True, text=True, check=False)
+    plan = {  # issue -> (stored reasons, upsert extras, gh payload or exception)
+        101: (['unowned_lifecycle'], [], dict(number=101, state='open', labels=[], assignees=[])),      # valid empty
+        102: (['unowned_lifecycle'], [], dict(number=102, state='open', assignees=[])),                 # labels missing
+        103: (['unowned_lifecycle'], [], dict(number=103, state='open', labels='', assignees=[])),      # labels ""
+        104: (['unowned_lifecycle'], [], dict(number=104, state='open', labels=[{'x': 1}], assignees=[])),  # malformed
+        105: (['done_open'], [], dict(number=105, state='closed', labels=[], assignees=[])),            # changed mid-read
+        106: (['done_open'], [], dict(number=106, state='closed', labels=[], assignees=[])),            # unchanged
+        107: (['done_open'], ['--owner', 'agent', '--suppress-until', future],
+              dict(number=107, state='closed', labels=[], assignees=[])),                               # claimed
+        108: (['done_open'], [], m.subprocess.CalledProcessError(1, ['gh'])),                           # failed read
+        109: (['done_open', 'partial_merge'], [], dict(number=109, state='closed', labels=[], assignees=[])),  # mixed
+        110: (['unowned_lifecycle'], [], dict(number=110, state='open', labels=[{'name': 'status:in-progress'}],
+                                              assignees=[])),                                           # still holds
+    }
+    for n, (reasons, extra, _) in plan.items():
+        upsert(n, reasons, *extra)
+
+    def fake_gh(*args):
+        n = int(args[-1].rsplit('/', 1)[-1])
+        payload = plan[n][2]
+        if isinstance(payload, Exception):
+            raise payload
+        if n == 105:   # held read: a fresh finding is canonically upserted before the read returns
+            upsert(105, ['done_open', 'partial_merge'])
+        return payload
+    with patch.object(m, 'PM_OPS', legacy), patch.dict('os.environ', {'PM_OPS_DB': db}), \
+         patch.object(m, 'ledger_path', return_value=Path(db)), patch.object(m, 'gh', side_effect=fake_gh):
+        report = m.recheck([], [], [], [])
+    con = __import__('sqlite3').connect(db)
+    status = {issue: (st, ev) for issue, st, ev in con.execute('SELECT issue, status, evidence_json FROM obligations')}
+    con.close()
+    ids = {n: i for i, n in enumerate(sorted(plan), start=1)}
+    assert set(report['resolved']) == {ids[101], ids[106]}
+    assert set(report['skipped_gh_failure']) == {ids[102], ids[103], ids[104], ids[108]}
+    assert report['skipped_changed'] == [ids[105]]
+    assert report['skipped_claimed'] == [ids[107]]
+    assert report['kept_window_or_unknown'] == [ids[109]]
+    assert report['kept_not_cleared'] == [ids[110]]
+    assert {n for n, (st, _) in status.items() if st == 'resolved'} == {101, 106}
+    assert 'partial_merge' in status[105][1]

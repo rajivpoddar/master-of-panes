@@ -302,12 +302,27 @@ def claimed(row, now):
 
 
 def live_issue(number):
-    """Live issue state; any gh failure raises and the caller skips the row."""
+    """Live issue state; any gh failure or malformed payload raises and the row is kept.
+
+    The REST payload must carry a well-formed state ('open'/'closed') and label
+    collection (a list of {name: str}); a missing or malformed label collection
+    must never decode to "no labels" and clear a warning. A valid empty list may.
+    """
     doc = gh('api', f'repos/{REPO}/issues/{number}')
-    if not isinstance(doc, dict) or doc.get('number') != number or 'state' not in doc:
+    if not isinstance(doc, dict) or doc.get('number') != number:
         raise ValueError('unexpected issue payload')
-    return dict(state=str(doc['state']).upper(), labels=labels(doc),
-                assignees=[a.get('login') for a in doc.get('assignees') or [] if isinstance(a, dict)])
+    state = doc.get('state')
+    if not isinstance(state, str) or state.lower() not in ('open', 'closed'):
+        raise ValueError('malformed issue state')
+    raw_labels = doc.get('labels')
+    if not isinstance(raw_labels, list) or not all(
+            isinstance(v, dict) and isinstance(v.get('name'), str) and v['name'] for v in raw_labels):
+        raise ValueError('malformed issue labels')
+    raw_assignees = doc.get('assignees', [])
+    if not isinstance(raw_assignees, list):
+        raise ValueError('malformed issue assignees')
+    return dict(state=state.upper(), labels={v['name'] for v in raw_labels},
+                assignees=[a.get('login') for a in raw_assignees if isinstance(a, dict) and a.get('login')])
 
 
 def reason_cleared(reason, number, issue, owned, open_prs, narrowed):
