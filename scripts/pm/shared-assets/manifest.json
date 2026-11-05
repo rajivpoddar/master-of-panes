@@ -764,7 +764,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "958a69e0a62420702507d41a4c8978c93cfee82bd5289d2f98b2a3e65c6ad618",
+      "sha256": "cef2a6713a545148108b9c1500d7abecb62bb0aad1a32627a52dadf972162d46",
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
@@ -1028,7 +1028,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "8da8eedc89caa8aaca7512eb524e0d3673542d6a406ce123a2fdfaec1d8d0a9f",
+      "sha256": "be81f044a02eab4b1133116f481b4d635a6533faf5ca9f0abb70f5d54986fb87",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
@@ -1172,7 +1172,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-brief-contract",
-      "sha256": "d4117f2aae3a718837109351d43b779d172b2d558dd406fcd6423943311abfd0",
+      "sha256": "d54895ae711b2affedee937fdc2032b7fbbeb3e6164dee18c552d33f444911c7",
       "source_authority": {
         "commit": "2bc454d9603dff1c2c485bd2cd51e92d005a7c6",
         "path": "scripts/pm/shared-assets/claude/skills/qa-brief/SKILL.md",
@@ -1606,40 +1606,40 @@
       "source_path": "codex/skills/heydonna-cto-pr-merge/SKILL.md"
     },
     {
-      "source_path": "codex/skills/heydonna-file-promote-issue/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-codex-issue-triage",
       "sha256": "67c5b900ae379f60b7539a654f319f07fc995f92d9cd14d77f5d0feb423cacf3",
-      "mode": 420,
-      "ownership_class": "shared-codex-issue-triage",
-      "dependency_status": "closed",
-      "dependencies": []
+      "source_path": "codex/skills/heydonna-file-promote-issue/SKILL.md"
     },
     {
-      "source_path": "codex/skills/heydonna-file-promote-issue/agents/openai.yaml",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/agents/openai.yaml",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-codex-issue-triage",
       "sha256": "54bd0390cd0eec420f08434dd367bfbf546a893c02f4f058e5302267116889e8",
-      "mode": 420,
-      "ownership_class": "shared-codex-issue-triage",
-      "dependency_status": "closed",
-      "dependencies": []
+      "source_path": "codex/skills/heydonna-file-promote-issue/agents/openai.yaml"
     },
     {
-      "source_path": "codex/skills/heydonna-file-promote-issue/references/issue-contract.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/references/issue-contract.md",
-      "sha256": "1c95033f061b67af0e588d88921bcef7b7182293af162bfc65383906eb8f69e3",
+      "dependencies": [],
+      "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-issue-triage",
-      "dependency_status": "closed",
-      "dependencies": []
+      "sha256": "1c95033f061b67af0e588d88921bcef7b7182293af162bfc65383906eb8f69e3",
+      "source_path": "codex/skills/heydonna-file-promote-issue/references/issue-contract.md"
     },
     {
-      "source_path": "codex/skills/heydonna-file-promote-issue/scripts/validate_candidate.py",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/scripts/validate_candidate.py",
-      "sha256": "0a4cb6c5d7c788d3c8e7f16a9056e681d98361beb6ae7e08dab76b5f9fc63c1c",
+      "dependencies": [],
+      "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-codex-issue-triage",
-      "dependency_status": "closed",
-      "dependencies": []
+      "sha256": "0a4cb6c5d7c788d3c8e7f16a9056e681d98361beb6ae7e08dab76b5f9fc63c1c",
+      "source_path": "codex/skills/heydonna-file-promote-issue/scripts/validate_candidate.py"
     },
     {
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",

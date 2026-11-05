@@ -66,7 +66,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-REPO = "heydonna-app/heydonna-app"
+REPO = "Scribie/heydonna-app"  # repo moved; old slug redirects reads but heavy list calls fail (2026-11-05)
 PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 UNKNOWN_RANK = 9
 CLASS_RANK = {"rework": 0, "repro": 1, "new_issue": 2}
