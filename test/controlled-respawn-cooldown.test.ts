@@ -21,6 +21,7 @@ test("an in-flight health tick cannot cross a controlled respawn fence", async (
     restartSlot: (slot: number) => Promise<{ success: boolean; reason: string }>;
   };
   internals.startTime = 0;
+  (checker as unknown as { isSlotProvisioned: (slot: number) => boolean }).isSlotProvisioned = () => true;
   let releasePaneRead: ((command: string) => void) | undefined;
   let paneReadStarted: (() => void) | undefined;
   const paneReadIsStarted = new Promise<void>((resolve) => {
@@ -74,6 +75,7 @@ test("an ordinary unfenced dead shell still launches exactly once", async () => 
     scheduleContinueInjection: (slot: number) => void;
   };
   internals.startTime = 0;
+  (checker as unknown as { isSlotProvisioned: (slot: number) => boolean }).isSlotProvisioned = () => true;
   internals.getPaneCommand = async (slot) => slot === 4 ? "zsh" : null;
   let launches = 0;
   internals.restartSlot = async () => {
@@ -107,6 +109,7 @@ test("launcher failure is logged and queued without counting a restart success",
     restartCounts: Map<number, { count: number; windowStart: number }>;
   };
   internals.startTime = 0;
+  (checker as unknown as { isSlotProvisioned: (slot: number) => boolean }).isSlotProvisioned = () => true;
   internals.getPaneCommand = async (slot) => slot === 4 ? "zsh" : null;
   internals.restartSlot = async () => ({ success: false, reason: "launcher exited nonzero" });
 
@@ -151,6 +154,7 @@ test("only verified restarts consume the hourly crash limit", async () => {
     restartCounts: Map<number, { count: number; windowStart: number }>;
   };
   internals.startTime = 0;
+  (checker as unknown as { isSlotProvisioned: (slot: number) => boolean }).isSlotProvisioned = () => true;
   internals.isRestartSuppressed = () => false;
   internals.getPaneCommand = async (slot) => slot === 4 ? "zsh" : null;
   internals.restartSlot = async () => ({ success: true, reason: "agent boot verified (claude)" });
@@ -186,6 +190,7 @@ test("an unprovisioned slot's empty shell is never launched or reported", async 
     isSlotProvisioned: (slot: number) => boolean;
   };
   internals.startTime = 0;
+  (checker as unknown as { isSlotProvisioned: (slot: number) => boolean }).isSlotProvisioned = () => true;
   const paneReads: number[] = [];
   internals.getPaneCommand = async (slot) => {
     paneReads.push(slot);
