@@ -331,8 +331,9 @@ def _load_shared_manifest(release_dir: Path) -> dict[str, Any]:
             raise InstallerError(f"invalid shared asset mode: {target}")
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise InstallerError(f"invalid shared asset digest: {target}")
-        if sha256(source_path) != digest or stat.S_IMODE(source_path.stat().st_mode) != mode:
-            raise InstallerError(f"shared asset source digest/mode mismatch: {source}")
+        # Git stores only the executable bit; the manifest owns the installed mode.
+        if sha256(source_path) != digest:
+            raise InstallerError(f"shared asset source digest mismatch: {source}")
         if entry.get("dependency_status") != "closed" or entry.get("dependencies") != []:
             raise InstallerError(f"shared asset dependency closure is unresolved: {source}")
     compatibility = manifest.get("rollback_compatibility", [])

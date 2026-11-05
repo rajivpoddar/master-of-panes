@@ -82,7 +82,7 @@ class SharedStdioSkillInstallTests(unittest.TestCase):
             source = self.release / "scripts" / "pm" / "shared-assets" / entry["source_path"]
             target = self.targets / entry["canonical_target"].lstrip("/")
             self.assertEqual(source.read_bytes(), target.read_bytes())
-            self.assertEqual(stat.S_IMODE(source.stat().st_mode), stat.S_IMODE(target.stat().st_mode))
+            self.assertEqual(entry["mode"], stat.S_IMODE(target.stat().st_mode))
 
     def test_release_conveyor_matrix_has_guarded_control_plane_refusal(self) -> None:
         shared = self.release / "scripts" / "pm" / "shared-assets"

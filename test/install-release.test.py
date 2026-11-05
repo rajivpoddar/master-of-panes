@@ -317,6 +317,21 @@ class LiveDriftGateTests(unittest.TestCase):
         self.assertEqual(self.dep(self.T1).read_text(), "v2\n")
         self.assertEqual(self.dep(self.ALIAS).read_text(), "v2\n")
 
+    def test_manifest_install_mode_independent_of_git_source_mode_and_hash_checked(self) -> None:
+        cand = self._release("cand", {"guard.sh": "v2\n", "zz-other.sh": "o1\n"})
+        manifest_path = cand / module.SHARED_ASSET_MANIFEST
+        manifest = json.loads(manifest_path.read_text())
+        manifest["entries"][0]["mode"] = 0o700
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        source = self.src(cand, "guard.sh")
+        self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o755)
+        self.assertEqual(self.cli("shared-install", candidate=cand), 0)
+        self.assertEqual(stat.S_IMODE(self.dep(self.T1).stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(self.dep(self.ALIAS).stat().st_mode), 0o700)
+        source.write_text("tampered\n")
+        with self.assertRaises(module.InstallerError):
+            module._load_shared_manifest(cand)
+
     def test_drift_check_is_read_only(self) -> None:
         self.dep(self.T1).write_text("live\n")
         before = self.snapshot()

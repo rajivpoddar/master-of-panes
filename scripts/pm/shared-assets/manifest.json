@@ -768,6 +768,24 @@
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-capture-runtime.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-remote-qa",
+      "sha256": "168033e5ac2c6359e7c79c32b631617e7e3109ea10e6a453ed04baa0f3857640",
+      "source_path": "claude/scripts/remote-qa-capture-runtime.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-convex.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 448,
+      "ownership_class": "shared-claude-remote-qa",
+      "sha256": "1dfd7949ad849fbd245ff70df0de0af99d9f15fd801acbcdef806ea28fc2f28f",
+      "source_path": "claude/scripts/remote-qa-convex.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1701,7 +1719,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 185,
+    "selected_count": 187,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
