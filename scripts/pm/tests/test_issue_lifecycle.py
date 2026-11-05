@@ -151,7 +151,7 @@ def _recheck(m, rows, live, findings=(), slots=(), open_prs=(), previous=(), out
             raise value
         return value
 
-    def write(rid, reason):
+    def write(rid, reason, *fingerprint):
         calls.append((rid, reason))
         return outcome
     with patch.object(m, 'open_rows', return_value=rows), patch.object(m, 'live_issue', side_effect=fetch) as gh, \
@@ -280,3 +280,49 @@ def test_recheck_unowned_lifecycle_clears_when_lifecycle_label_gone():
     assert report['kept_not_cleared'] == [2]
     assert report['kept_window_or_unknown'] == [3]
     assert calls[0][1] == 'live_recheck_cleared:unowned_lifecycle:open'
+
+
+def test_recheck_passes_row_fingerprint_and_reports_changed():
+    m = load()
+    row = _row(1, 10, ['done_open'])
+    row.update(updated_at='2026-11-05T01:00:00Z', evidence_sha256='ab' * 32)
+    seen = []
+
+    def write(rid, reason, updated_at=None, evidence_sha256=None):
+        seen.append((updated_at, evidence_sha256))
+        return 'skipped_changed'
+    with patch.object(m, 'open_rows', return_value=[row]), patch.object(m, 'live_issue', return_value=_live('CLOSED')), \
+         patch.object(m, 'resolve_if_unclaimed', side_effect=write):
+        report = m.recheck([], [], [], [])
+    assert seen == [('2026-11-05T01:00:00Z', 'ab' * 32)]
+    assert report['skipped_changed'] == [1] and report['resolved'] == []
+
+
+def test_upsert_during_live_read_survives_real_writer(tmp_path):
+    """Hold the live read, canonically upsert new reasons, release: the newer row survives."""
+    m = load()
+    legacy = ROOT / 'shared-assets/claude/scripts/pm-ops-legacy.py'
+    db = str(tmp_path / 'race.db')
+    env = dict(__import__('os').environ, PM_OPS_DB=db)
+
+    def upsert(n, reasons):
+        m.subprocess.run([m.sys.executable, str(legacy), 'obligation-upsert', '--kind', 'orphaned_issue',
+                          '--target-type', 'github_issue', '--target-id', str(n), '--issue', str(n), '--title', 't',
+                          '--evidence-json', json.dumps(dict(issue=n, reasons=reasons))],
+                         env=env, capture_output=True, text=True, check=False)
+    upsert(10, ['done_open'])          # stale-able row: will be "cleared" by the live read
+    upsert(20, ['done_open'])          # unchanged control: resolves normally
+
+    def held_live_read(n):
+        if n == 10:                    # while the read is "in flight", a fresh finding lands
+            upsert(10, ['done_open', 'partial_merge'])
+        return _live('CLOSED')
+    with patch.object(m, 'PM_OPS', legacy), patch.dict('os.environ', {'PM_OPS_DB': db}), \
+         patch.object(m, 'ledger_path', return_value=Path(db)), patch.object(m, 'live_issue', side_effect=held_live_read):
+        report = m.recheck([], [], [], [])
+    assert report['skipped_changed'] == [1] and report['resolved'] == [2]
+    con = __import__('sqlite3').connect(db)
+    rows = con.execute('SELECT issue, status, evidence_json FROM obligations ORDER BY id').fetchall()
+    con.close()
+    assert rows[0][1] == 'open' and 'partial_merge' in rows[0][2]
+    assert rows[1][1] == 'resolved'

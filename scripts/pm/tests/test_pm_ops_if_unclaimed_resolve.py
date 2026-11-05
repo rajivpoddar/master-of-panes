@@ -138,3 +138,49 @@ def test_resolve_racing_a_concurrent_resolve_is_skipped_not_open(tmp_path):
     assert proc.returncode == 0, stderr
     assert stdout.strip() == "skipped_not_open"
     assert row(db, rid) == ("resolved", 0)
+
+
+def _fp(db: str, rid: str) -> tuple[str, str]:
+    import hashlib
+    con = sqlite3.connect(db)
+    try:
+        updated, evidence = con.execute("SELECT updated_at, evidence_json FROM obligations WHERE id=?", (rid,)).fetchone()
+    finally:
+        con.close()
+    return updated, hashlib.sha256((evidence or "").encode()).hexdigest()
+
+
+def test_fingerprint_match_resolves_and_mismatch_is_skipped_changed(tmp_path):
+    db = str(tmp_path / "fp.db")
+    rid = seed(db, "--evidence-json", '{"reasons": ["done_open"]}')
+    updated, digest = _fp(db, rid)
+    stale = run(db, "obligation-resolve", "--kind", "orphaned_issue", "--id", rid, "--if-unclaimed", "--reason", "t",
+                "--expect-updated-at", updated, "--expect-evidence-sha256", "0" * 64)
+    assert stale.returncode == 0 and stale.stdout.strip() == "skipped_changed"
+    stale_ts = run(db, "obligation-resolve", "--kind", "orphaned_issue", "--id", rid, "--if-unclaimed", "--reason", "t",
+                   "--expect-updated-at", "1999-01-01T00:00:00Z", "--expect-evidence-sha256", digest)
+    assert stale_ts.stdout.strip() == "skipped_changed" and row(db, rid) == ("open", 0)
+    ok = run(db, "obligation-resolve", "--kind", "orphaned_issue", "--id", rid, "--if-unclaimed", "--reason", "t",
+             "--expect-updated-at", updated, "--expect-evidence-sha256", digest)
+    assert ok.stdout.strip() == "resolved" and row(db, rid) == ("resolved", 1)
+
+
+def test_upsert_landing_while_resolver_waits_is_skipped_changed(tmp_path):
+    """Fingerprint taken, then an upsert holds the write lock and changes evidence; the waiting
+    resolver re-checks under BEGIN IMMEDIATE and skips."""
+    db = str(tmp_path / "fprace.db")
+    rid = seed(db, "--evidence-json", '{"reasons": ["done_open"]}')
+    updated, digest = _fp(db, rid)
+    con = sqlite3.connect(db, isolation_level=None, timeout=15)
+    con.execute("BEGIN IMMEDIATE")
+    con.execute("UPDATE obligations SET evidence_json=? WHERE id=?", ('{"reasons": ["done_open", "partial_merge"]}', rid))
+    proc = subprocess.Popen([sys.executable, str(CANDIDATE), "obligation-resolve", "--kind", "orphaned_issue",
+                             "--id", rid, "--if-unclaimed", "--reason", "t",
+                             "--expect-updated-at", updated, "--expect-evidence-sha256", digest],
+                            env=dict(os.environ, PM_OPS_DB=db), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(1.0)
+    con.execute("COMMIT")
+    con.close()
+    stdout, stderr = proc.communicate(timeout=60)
+    assert proc.returncode == 0, stderr
+    assert stdout.strip() == "skipped_changed" and row(db, rid) == ("open", 0)

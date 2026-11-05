@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -238,20 +239,25 @@ def sync(findings):
             '--evidence-json', json.dumps(row)], capture_output=True, text=True, timeout=30, check=True)
 
 
-def resolve_if_unclaimed(row_id, reason):
-    """Resolve one exact open orphaned_issue row unless it is actively claimed.
+def resolve_if_unclaimed(row_id, reason, updated_at=None, evidence_sha256=None):
+    """Resolve one exact open orphaned_issue row unless it is claimed or changed.
 
-    pm-ops does the open+unclaimed check and the write in one BEGIN IMMEDIATE
-    transaction, so a claim landing after our read is never overwritten.
-    Returns 'resolved', 'skipped_claimed' or 'skipped_not_open'.
+    pm-ops does the open+unclaimed+fingerprint check and the write in one BEGIN
+    IMMEDIATE transaction: a claim, or a canonical upsert (new reasons/evidence)
+    landing after our read, is never overwritten on our stale verification.
+    Returns 'resolved', 'skipped_claimed', 'skipped_changed' or 'skipped_not_open'.
     """
-    proc = subprocess.run([sys.executable, str(PM_OPS), 'obligation-resolve', '--kind', 'orphaned_issue',
-        '--id', str(row_id), '--if-unclaimed', '--reason', reason],
-        capture_output=True, text=True, timeout=30)
+    argv = [sys.executable, str(PM_OPS), 'obligation-resolve', '--kind', 'orphaned_issue',
+            '--id', str(row_id), '--if-unclaimed', '--reason', reason]
+    if updated_at is not None:
+        argv += ['--expect-updated-at', updated_at]
+    if evidence_sha256 is not None:
+        argv += ['--expect-evidence-sha256', evidence_sha256]
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
     if proc.returncode:
         raise RuntimeError(f'obligation-resolve failed for row {row_id}: {proc.stderr.strip()}')
     outcome = (proc.stdout.strip().splitlines() or [''])[-1]
-    if outcome not in ('resolved', 'skipped_claimed', 'skipped_not_open'):
+    if outcome not in ('resolved', 'skipped_claimed', 'skipped_changed', 'skipped_not_open'):
         raise RuntimeError(f'obligation-resolve unexpected output for row {row_id}: {outcome!r}')
     return outcome
 
@@ -265,18 +271,20 @@ def ledger_path():
 def open_rows():
     """Open issue-keyed orphaned_issue rows: id, issue, owner, suppress_until, reasons."""
     with sqlite3.connect(ledger_path().as_uri() + '?mode=ro', uri=True) as connection:
-        rows = connection.execute("SELECT id, issue, owner, suppress_until, evidence_json FROM obligations "
+        rows = connection.execute("SELECT id, issue, owner, suppress_until, evidence_json, updated_at FROM obligations "
                                   "WHERE kind='orphaned_issue' AND status='open' AND issue IS NOT NULL "
                                   "ORDER BY id").fetchall()
     out = []
-    for row_id, issue, owner, until, evidence in rows:
+    for row_id, issue, owner, until, evidence, updated_at in rows:
+        fingerprint = hashlib.sha256((evidence or '').encode('utf-8')).hexdigest()
         try:
             reasons = json.loads(evidence or '{}').get('reasons')
         except (ValueError, AttributeError):
             reasons = None
         if not (isinstance(reasons, list) and reasons and all(isinstance(r, str) for r in reasons)):
             reasons = None  # PM-written or unknown evidence: never auto-resolved
-        out.append(dict(id=int(row_id), issue=int(issue), owner=owner, suppress_until=until, reasons=reasons))
+        out.append(dict(id=int(row_id), issue=int(issue), owner=owner, suppress_until=until, reasons=reasons,
+                        updated_at=updated_at, evidence_sha256=fingerprint))
     return out
 
 
@@ -333,7 +341,7 @@ def recheck(findings, slots, open_prs, previous, cursor=0, write=True, now=None)
     narrowed = {r['issue'] for r in previous if 'blockers_resolved' in r.get('reasons', [])} - current
     rows = [r for r in open_rows() if r['issue'] not in current]
     rows = [r for r in rows if r['id'] > cursor] + [r for r in rows if r['id'] <= cursor]
-    report = dict(resolved=[], skipped_claimed=[], skipped_not_open=[], kept_window_or_unknown=[],
+    report = dict(resolved=[], skipped_claimed=[], skipped_changed=[], skipped_not_open=[], kept_window_or_unknown=[],
                   kept_not_cleared=[], skipped_gh_failure=[], checked=0, cursor=cursor)
     for row in rows:
         if row['reasons'] is None or set(row['reasons']) - LIVE_CHECKABLE:
@@ -359,7 +367,7 @@ def recheck(findings, slots, open_prs, previous, cursor=0, write=True, now=None)
             report['resolved'].append(row['id'])
             continue
         reason = 'live_recheck_cleared:' + ','.join(sorted(row['reasons'])) + ':' + issue['state'].lower()
-        report[resolve_if_unclaimed(row['id'], reason)].append(row['id'])
+        report[resolve_if_unclaimed(row['id'], reason, row.get('updated_at'), row.get('evidence_sha256'))].append(row['id'])
     else:
         report['cursor'] = 0  # full pass completed; restart from the oldest row
     return report

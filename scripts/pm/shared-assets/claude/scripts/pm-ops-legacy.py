@@ -824,6 +824,11 @@ def upsert_obligation(args: argparse.Namespace) -> int:
     return oid
 
 
+def evidence_fingerprint(evidence_json: str | None) -> str:
+    """sha256 of the stored evidence_json text (empty string for NULL)."""
+    return hashlib.sha256((evidence_json or "").encode("utf-8")).hexdigest()
+
+
 def resolve_obligation(args: argparse.Namespace) -> None:
     init_db()
     now = utc_now()
@@ -848,7 +853,7 @@ def resolve_obligation(args: argparse.Namespace) -> None:
             raise SystemExit("obligation-resolve --if-unclaimed requires --id")
         con.execute("BEGIN IMMEDIATE")
         claim = con.execute(
-            "SELECT owner, suppress_until FROM obligations WHERE status='open' AND id=? AND kind=?",
+            "SELECT owner, suppress_until, updated_at, evidence_json FROM obligations WHERE status='open' AND id=? AND kind=?",
             (exact_id, kind),
         ).fetchone()
         if claim is None:
@@ -875,6 +880,19 @@ def resolve_obligation(args: argparse.Namespace) -> None:
                 con.close()
                 print("skipped_claimed")
                 return
+        # Fingerprint guard: the caller verified the row as it was at
+        # (updated_at, evidence sha256).  Any canonical upsert since then
+        # (new reasons, new head) changes the fingerprint; skip, never close a
+        # fresher obligation on stale evidence.
+        expect_updated = getattr(args, "expect_updated_at", None)
+        expect_evidence = getattr(args, "expect_evidence_sha256", None)
+        if (expect_updated is not None and str(claim["updated_at"] or "") != expect_updated) or (
+            expect_evidence is not None and evidence_fingerprint(claim["evidence_json"]) != expect_evidence
+        ):
+            con.commit()
+            con.close()
+            print("skipped_changed")
+            return
     resolved_ids: list[int] = []
     receipt_slot: int | None = None
     if exact_id is not None:
@@ -2574,6 +2592,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--reason")
     p.add_argument("--external-state")
     p.add_argument("--if-unclaimed", action="store_true", help="atomically skip actively claimed rows; requires --id")
+    p.add_argument("--expect-updated-at", help="with --if-unclaimed: skip (skipped_changed) unless the row's updated_at still equals this")
+    p.add_argument("--expect-evidence-sha256", help="with --if-unclaimed: skip (skipped_changed) unless sha256(evidence_json) still equals this")
 
     p = sub.add_parser("obligation-resolve-target")
     p.add_argument("--kind")

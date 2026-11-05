@@ -70,7 +70,9 @@ class _Env:
 
 
 def test_resolve_uses_exact_id_and_if_unclaimed():
-    with patch.object(prsnap, "PM_OPS_CLI", LEGACY), patch.object(prsnap, "_open_row_ids", return_value=[11, 12]), \
+    rows = [{"id": 11, "updated_at": "2026-11-05T00:00:00Z", "head": "", "evidence_sha256": "a" * 64},
+            {"id": 12, "updated_at": "2026-11-05T00:00:01Z", "head": "", "evidence_sha256": "b" * 64}]
+    with patch.object(prsnap, "PM_OPS_CLI", LEGACY), patch.object(prsnap, "_open_rows", return_value=rows), \
          patch("subprocess.run") as run:
         run.return_value = subprocess.CompletedProcess([], 0, "resolved\n", "")
         assert prsnap._obligation_resolve(kind="pr_admission", pr=5, reason="r") == ["resolved", "resolved"]
@@ -78,6 +80,8 @@ def test_resolve_uses_exact_id_and_if_unclaimed():
         argv = call.args[0]
         assert argv[argv.index("--id") + 1] == rid
         assert "--if-unclaimed" in argv and "--pr" not in argv and "--target-id" not in argv
+        assert argv[argv.index("--expect-updated-at") + 1].startswith("2026-11-05T00:00:0")
+        assert len(argv[argv.index("--expect-evidence-sha256") + 1]) == 64
 
 
 def test_claimed_row_survives_in_list_resolve_and_unclaimed_resolves(tmp_path):
@@ -96,6 +100,7 @@ def test_stale_rows_resolve_only_when_live_read_proves_closed(tmp_path):
     still_open = _seed(db, "pr_admission", 2)  # beyond a truncated --limit 100 list
     failed = _seed(db, "pr_merge_ask", 3)
     listed = _seed(db, "pr_admission", 4)
+    __import__("time").sleep(1.1)  # rows predate the live read (same-second writes count as newer)
     states = {1: "MERGED", 2: "OPEN", 3: None}
     with _Env(db), patch.object(prsnap, "_live_pr_state", side_effect=lambda n: states[n]) as live:
         prsnap._resolve_stale_pr_obligations({4})
@@ -141,3 +146,43 @@ def test_live_pr_state_failure_is_none():
         assert prsnap._live_pr_state(6) == "MERGED"
     with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(["gh"], 15)):
         assert prsnap._live_pr_state(6) is None
+
+
+def _upsert_head(db, kind, pr, head):
+    subprocess.run([sys.executable, str(LEGACY), "obligation-upsert", "--kind", kind, "--target-type", "github_pr",
+                    "--target-id", str(pr), "--pr", str(pr), "--title", "t",
+                    "--evidence-json", json.dumps({"pm_stop_actionable": True, "head": head})],
+                   env=dict(os.environ, PM_OPS_DB=db), capture_output=True, text=True, timeout=60)
+
+
+def test_row_rewritten_for_new_head_after_observation_survives(tmp_path):
+    """Hold the live read at head H1, canonically upsert head H2, release: H2's row survives."""
+    db = str(tmp_path / "race.db")
+    _upsert_head(db, "pr_red_unowned", 7, "1" * 40)
+    _upsert_head(db, "pr_red_unowned", 8, "1" * 40)       # unchanged control
+    import time
+    time.sleep(1.1)
+    observed = prsnap._utc_stamp()                       # live read of PR 7 at H1 starts here
+    _upsert_head(db, "pr_red_unowned", 7, "2" * 40)       # concurrent producer: PR 7 red again at H2
+    future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _Env(db):
+        assert prsnap._obligation_resolve(kind="pr_red_unowned", pr=7, reason="required_gates_not_red",
+                                          head="1" * 40, observed_at=observed) == ["skipped_changed"]
+        assert prsnap._obligation_resolve(kind="pr_red_unowned", pr=8, reason="required_gates_not_red",
+                                          head="1" * 40, observed_at=future) == ["resolved"]
+    con = sqlite3.connect(db)
+    rows = dict(con.execute("SELECT pr, status FROM obligations").fetchall())
+    head7 = json.loads(con.execute("SELECT evidence_json FROM obligations WHERE pr=7").fetchone()[0])["head"]
+    con.close()
+    assert rows == {7: "open", 8: "resolved"} and head7 == "2" * 40
+
+
+def test_writer_rechecks_fingerprint_between_select_and_write(tmp_path):
+    db = str(tmp_path / "fp.db")
+    _upsert_head(db, "pr_admission", 9, "1" * 40)
+    with _Env(db):
+        stale = prsnap._open_rows("pr_admission", 9)      # selected and verified
+        _upsert_head(db, "pr_admission", 9, "2" * 40)     # canonical upsert lands before the write
+        with patch.object(prsnap, "_open_rows", return_value=stale):
+            assert prsnap._obligation_resolve(kind="pr_admission", pr=9, reason="r") == ["skipped_changed"]
+        assert prsnap._obligation_resolve(kind="pr_admission", pr=9, reason="r") == ["resolved"]

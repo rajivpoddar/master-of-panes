@@ -369,51 +369,74 @@ def _read_ci_reconciliation(pr: dict) -> dict | None:
     return receipt if isinstance(receipt, dict) else None
 
 
-def _open_row_ids(kind: str, pr: int) -> list[int]:
-    """Read-only: ids of open (kind, pr) rows. Failure -> [] (nothing resolved)."""
+def _utc_stamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _open_rows(kind: str, pr: int) -> list[dict]:
+    """Read-only: open (kind, pr) rows with their fingerprint. Failure -> []."""
     if not PM_OPS_DB.is_file():
         return []
     try:
+        import hashlib
         import sqlite3
 
         con = sqlite3.connect(f"file:{PM_OPS_DB}?mode=ro", uri=True, timeout=2)
         rows = con.execute(
-            "SELECT id FROM obligations WHERE status='open' AND kind=? AND pr=? ORDER BY id",
+            "SELECT id, updated_at, evidence_json FROM obligations WHERE status='open' AND kind=? AND pr=? ORDER BY id",
             (kind, pr),
         ).fetchall()
         con.close()
     except Exception:
         return []
-    return [int(r[0]) for r in rows]
+    out = []
+    for row_id, updated_at, evidence in rows:
+        try:
+            head = (json.loads(evidence or "{}") or {}).get("head") or ""
+        except Exception:
+            head = ""
+        out.append({"id": int(row_id), "updated_at": updated_at or "", "head": head,
+                    "evidence_sha256": hashlib.sha256((evidence or "").encode("utf-8")).hexdigest()})
+    return out
 
 
-def _obligation_resolve(*, kind: str, pr: int, reason: str) -> list[str]:
+def _obligation_resolve(*, kind: str, pr: int, reason: str, head: str | None = None,
+                        observed_at: str | None = None) -> list[str]:
     """Resolve each open (kind, pr) row by exact id through
-    obligation-resolve --if-unclaimed: pm-ops checks open + unclaimed and writes
-    in one BEGIN IMMEDIATE transaction, so an owner+suppress_until claim is
-    never overwritten. Best-effort; returns the per-row outcomes."""
+    obligation-resolve --if-unclaimed, bound to the observation that justified it.
+
+    `observed_at` is when the live PR state (at classified `head`) was read. A row
+    written at or after that instant carries a newer observation (e.g. a
+    canonical upsert that installed head H2 or new evidence) and is skipped as
+    skipped_changed. The row's (updated_at, evidence sha256) fingerprint is also
+    passed to pm-ops, which re-checks it, the claim and open status in one
+    BEGIN IMMEDIATE transaction, so an upsert between this read and the write is
+    never closed on stale evidence. Best-effort; returns per-row outcomes."""
     if not PM_OPS_CLI.is_file():
         return []
     outcomes: list[str] = []
-    for row_id in _open_row_ids(kind, pr):
+    for row in _open_rows(kind, pr):
+        if observed_at and row["updated_at"] >= observed_at:
+            outcomes.append("skipped_changed")
+            continue
         try:
-            proc = subprocess.run(
-                [
-                    sys.executable, str(PM_OPS_CLI), "obligation-resolve",
-                    "--kind", kind,
-                    "--id", str(row_id),
-                    "--if-unclaimed",
-                    "--reason", reason,
-                ],
-                capture_output=True, text=True, errors="replace", timeout=20, check=False,
-            )
+            argv = [
+                sys.executable, str(PM_OPS_CLI), "obligation-resolve",
+                "--kind", kind,
+                "--id", str(row["id"]),
+                "--if-unclaimed",
+                "--expect-updated-at", row["updated_at"],
+                "--expect-evidence-sha256", row["evidence_sha256"],
+                "--reason", reason + (f" @head {head[:12]}" if head else ""),
+            ]
+            proc = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=20, check=False)
             outcomes.append(((proc.stdout or "").strip().splitlines() or ["error"])[-1] if proc.returncode == 0 else "error")
         except Exception:
             outcomes.append("error")  # best-effort: the row stays open
     return outcomes
 
 
-def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
+def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int], observed_at: str | None = None) -> list[dict]:
     """Create/resolve pr_admission|pr_red_unowned|pr_merge_ask obligations.
 
     Fails open: any gh/pm-ops error must never raise; a skipped sync just
@@ -423,6 +446,8 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
     """
     created: list[dict] = []
     seen_open_prs: set[int] = set()
+    # When the PR list was read; resolves are bound to this observation.
+    observed_at = observed_at or _utc_stamp()
     for pr in prs:
         number = pr.get("number")
         head = pr.get("headRefOid") or ""
@@ -438,7 +463,7 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
             # Owned/blocked/draft: an in-flight obligation for this PR is no
             # longer PM's to chase; resolve any that are still open.
             for kind in OBLIGATION_KINDS:
-                _obligation_resolve(kind=kind, pr=number, reason="owned_by_slot_or_blocked_or_draft")
+                _obligation_resolve(kind=kind, pr=number, reason="owned_by_slot_or_blocked_or_draft", head=head, observed_at=observed_at)
             continue
 
         admitted = f"ci-head:{head}" in labels
@@ -458,7 +483,7 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
                 pass  # red exempt PR: pr_red_unowned below owns it; merge ask resolved below
             elif _is_ci_exempt(pr):
                 # CI-exempt paths need a direct merge ask, not 12b admission.
-                _obligation_resolve(kind="pr_admission", pr=number, reason="ci_exempt_merge_ask")
+                _obligation_resolve(kind="pr_admission", pr=number, reason="ci_exempt_merge_ask", head=head, observed_at=observed_at)
                 _obligation_upsert(
                     kind="pr_merge_ask", pr=number, head=head,
                     title=f"PR #{number} CI-exempt, no merge ask: {title}",
@@ -473,7 +498,7 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
                 )
                 created.append({"pr": number, "kind": "pr_admission"})
         else:
-            _obligation_resolve(kind="pr_admission", pr=number, reason="ci-head_matches_current_head")
+            _obligation_resolve(kind="pr_admission", pr=number, reason="ci-head_matches_current_head", head=head, observed_at=observed_at)
 
         if gates["required_red"]:
             if _is_fresh_owner_claim(_existing_obligation("pr_red_unowned", number)):
@@ -486,11 +511,11 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
                 )
                 created.append({"pr": number, "kind": "pr_red_unowned"})
         else:
-            _obligation_resolve(kind="pr_red_unowned", pr=number, reason="required_gates_not_red")
+            _obligation_resolve(kind="pr_red_unowned", pr=number, reason="required_gates_not_red", head=head, observed_at=observed_at)
 
         if admitted and gates["green_ready"] and not gates["required_red"]:
             if merge_ask_next(pr) != "CTO merge ask":
-                _obligation_resolve(kind="pr_merge_ask", pr=number, reason="readiness_not_merge_ready")
+                _obligation_resolve(kind="pr_merge_ask", pr=number, reason="readiness_not_merge_ready", head=head, observed_at=observed_at)
             elif _is_fresh_owner_claim(_existing_obligation("pr_merge_ask", number)):
                 pass
             else:
@@ -503,7 +528,7 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
         elif not admitted and _is_ci_exempt(pr) and not gates["required_red"]:
             pass  # CI-exempt merge ask row is owned by the not-admitted branch above
         else:
-            _obligation_resolve(kind="pr_merge_ask", pr=number, reason="not_green_or_not_admitted")
+            _obligation_resolve(kind="pr_merge_ask", pr=number, reason="not_green_or_not_admitted", head=head, observed_at=observed_at)
 
     _resolve_stale_pr_obligations(seen_open_prs)
     return created
@@ -575,10 +600,11 @@ def _resolve_stale_pr_obligations(seen_open_prs: set[int]) -> None:
         if checked >= STALE_RECHECK_CAP:
             break
         checked += 1
+        observed = _utc_stamp()
         if _live_pr_state(pr_number) not in ("CLOSED", "MERGED"):
             continue
         for kind in OBLIGATION_KINDS:
-            _obligation_resolve(kind=kind, pr=pr_number, reason="pr_no_longer_open")
+            _obligation_resolve(kind=kind, pr=pr_number, reason="pr_no_longer_open", observed_at=observed)
 
 
 def fetch_mop_owned_prs() -> set[int]:
@@ -854,11 +880,12 @@ def main() -> int:
              "obligations for open PRs (see sync_pr_obligations).",
     )
     args = parser.parse_args()
+    observed_at = _utc_stamp()  # before any live read: rows written later are newer observations
     mop_owned_prs = fetch_mop_owned_prs()
     raw_prs = fetch_open_prs(with_threads=not args.sync_obligations)
     claims = {} if args.sync_obligations else fetch_live_claims(raw_prs)
     if args.sync_obligations:
-        created = sync_pr_obligations(raw_prs, mop_owned_prs)
+        created = sync_pr_obligations(raw_prs, mop_owned_prs, observed_at=observed_at)
         print(json.dumps({"obligations_synced": created}, indent=2))
         return 0
     holds = {}
