@@ -126,6 +126,30 @@ def post_assignment_notice(
         f"Assignment: {priority} {repository_id} issue {issue} assigned to slot {slot} "
         f"(assignment epoch {assignment_epoch}).\n{summary}"
     )
+    binding = {"repository_id": repository_id, "issue": issue, "slot": slot,
+               "assignment_epoch": assignment_epoch}
+    notice_key = "assignment-notice:v1:" + hashlib.sha256(
+        json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    # Reuse the canonical event writer's unique dedupe key. Its durable insert
+    # precedes any possible Slack effect, including concurrent fresh responses.
+    try:
+        reserved = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("pm-ops-legacy.py")), "record",
+             "--source", "mop-assign-slot", "--actor", "pm", "--event", "assignment_notice_attempt",
+             "--target-type", "assignment", "--target-id", notice_key,
+             "--issue", str(issue), "--slot", str(slot), "--dedupe-key", notice_key,
+             "--payload-json", json.dumps(binding, sort_keys=True), "--print-id"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        event_id = int(reserved.stdout.strip()) if reserved.returncode == 0 else -1
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        return {"posted": False, "delivery": "not_attempted", "reason": "notice_reservation_unavailable",
+                "custody_key": notice_key, "native_receipt": {"error_type": type(error).__name__}}
+    if event_id <= 0:
+        return {"posted": False, "delivery": "not_retried" if event_id == 0 else "not_attempted",
+                "reason": "notice_attempt_consumed" if event_id == 0 else "notice_reservation_failed",
+                "custody_key": notice_key, "native_receipt": {"returncode": reserved.returncode,
+                "stdout": reserved.stdout[-1000:], "stderr": reserved.stderr[-1000:]}}
     try:
         result = subprocess.run(
             [sender, "-c", "C0ALZJHGE49", "-f"],
@@ -139,11 +163,14 @@ def post_assignment_notice(
         )
     except OSError as error:
         return {"posted": False, "delivery": "not_attempted", "reason": "slack_publisher_unavailable",
+                "custody_key": notice_key, "event_id": event_id,
                 "native_receipt": {"error_type": type(error).__name__, "detail": str(error)}}
     except subprocess.SubprocessError as error:
         return {"posted": False, "delivery": "unknown", "reason": f"slack_send_failed:{type(error).__name__}",
+                "custody_key": notice_key, "event_id": event_id,
                 "native_receipt": {"error_type": type(error).__name__, "detail": str(error)}}
-    native = {"returncode": result.returncode, "stdout": result.stdout[-1000:], "stderr": result.stderr[-1000:]}
+    native = {"custody_key": notice_key, "event_id": event_id, "returncode": result.returncode,
+              "stdout": result.stdout[-1000:], "stderr": result.stderr[-1000:]}
     if result.returncode != 0:
         return {"posted": False, "delivery": "unknown", "reason": "slack_send_failed", "native_receipt": native}
     for line in result.stdout.splitlines():
@@ -307,7 +334,8 @@ def main(argv: list[str] | None = None) -> int:
                 }
             else:
                 terminal["assignment_notice"] = post_assignment_notice(
-                    args.repo_id, args.issue, args.slot, epoch, priority, task,
+                    (payload.get("ownership_receipt") or {}).get("repository_id") or args.repo_id,
+                    args.issue, args.slot, epoch, priority, task,
                 )
         return emit(terminal, 0)
     if payload.get("status") == "refused":

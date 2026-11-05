@@ -127,6 +127,8 @@ class MopAssignSlotClientTests(unittest.TestCase):
             "MOP_PORT": str(self.port),
             "PATH": str(self.bin) + ":/usr/bin:/bin",
             "MOP_ASSIGN_SLACK_SEND": str(self.default_sender),
+            "HOME": self.temp.name,
+            "PM_OPS_DB": str(Path(self.temp.name) / "pm-ops.db"),
         }
 
     def tearDown(self) -> None:
@@ -282,6 +284,29 @@ class MopAssignSlotClientTests(unittest.TestCase):
         self.assertEqual(first["assignment_notice"]["native_receipt"]["returncode"], 0)
         self.assertEqual(second["assignment_notice"]["delivery"], "not_retried")
         self.assertEqual(marker.read_text(), "called")
+
+    def test_overlapping_fresh_responses_reserve_one_tuple_before_sending(self) -> None:
+        subprocess.run([sys.executable, str(SCRIPT.with_name("pm-ops-legacy.py")), "init"],
+                       env=self.env(), check=True, capture_output=True, text=True)
+        marker = Path(self.temp.name) / "calls"
+        sender = self.write_notice_sender('printf called >> "$CALLS"\nprintf \'OK ts=1793899000.123456 channel=C0ALZJHGE49\\n\'\n')
+        # Both responses may finish a previously unfinished assignment path.
+        self.server.responses = [(200, {"status": "assigned", "slot": 3,
+            "assignment_epoch": 42, "idempotent": False}) for _ in range(2)]
+        self.server.post_barrier = threading.Barrier(2)
+        results = []
+        env = {"MOP_ASSIGN_SLACK_SEND": str(sender), "CALLS": str(marker)}
+        threads = [threading.Thread(target=lambda: results.append(self.run_script(env_overrides=env))) for _ in range(2)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(timeout=120)
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(r.returncode == 0 for r in results))
+        self.assertEqual(sorted(json.loads(r.stdout)["assignment_notice"]["delivery"] for r in results), ["not_retried", "sent"])
+        self.assertEqual(marker.read_text(), "called")
+        import sqlite3
+        with sqlite3.connect(Path(self.temp.name) / "pm-ops.db") as con:
+            self.assertEqual(con.execute("SELECT count(*) FROM events WHERE event_type='assignment_notice_attempt'").fetchone()[0], 1)
+            self.assertEqual(con.execute("SELECT count(*) FROM obligations").fetchone()[0], 0)
 
     def test_missing_custody_or_unchanged_epoch_cannot_announce_again(self) -> None:
         marker = Path(self.temp.name) / "calls"
