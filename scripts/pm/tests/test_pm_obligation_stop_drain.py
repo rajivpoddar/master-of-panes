@@ -4,6 +4,7 @@ Never invokes a live hook, MoP, GitHub, a collector, or a publisher.
 """
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
@@ -57,7 +58,9 @@ def add(lane, ident, **extra):
     if "evidence_json" in extra and isinstance(extra["evidence_json"], dict):
         extra["evidence_json"] = json.dumps(extra["evidence_json"])
     row.update(extra)
-    with sqlite3.connect(db) as con:
+    # A transaction context commits but does not close the connection. Close
+    # fixture writers before byte snapshots so later GC cannot checkpoint WAL.
+    with closing(sqlite3.connect(db)) as con, con:
         con.execute(f"INSERT INTO obligations ({','.join(row)}) VALUES ({','.join('?' for _ in row)})", list(row.values()))
 
 
@@ -81,14 +84,14 @@ def reason(result):
 
 def resolve(lane, ident):
     _, db, env, _ = lane
-    with sqlite3.connect(db) as con:
+    with closing(sqlite3.connect(db)) as con, con:
         updated, evidence, kind = con.execute("SELECT updated_at,evidence_json,kind FROM obligations WHERE id=?", (ident,)).fetchone()
     result = subprocess.run([sys.executable, str(WRITER), "obligation-resolve", "--kind", kind,
                              "--id", str(ident), "--if-unclaimed", "--expect-updated-at", updated,
                              "--expect-evidence-sha256", hashlib.sha256(evidence.encode()).hexdigest(),
                              "--reason", "fixture action completed"], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr + result.stdout
-    with sqlite3.connect(db) as con:
+    with closing(sqlite3.connect(db)) as con, con:
         assert con.execute("SELECT status FROM obligations WHERE id=?", (ident,)).fetchone()[0] == "resolved"
 
 
@@ -150,7 +153,7 @@ def test_waits_visible_and_last_runnable_completion_allows_stop(lane):
     resolve(lane, 301)
     result, _ = invoke(lane)
     assert result.get("decision") != "block" and "open commitments=3" in reason(result)
-    with sqlite3.connect(lane[1]) as con:
+    with closing(sqlite3.connect(lane[1])) as con, con:
         assert con.execute("SELECT count(*) FROM obligations WHERE status='open'").fetchone()[0] == 3
 
 
@@ -188,7 +191,7 @@ def test_actual_native_queue_success_waits_without_redispatch(lane, binding):
     resolve(lane, 302)
     result, _ = invoke(lane)
     assert result.get("decision") != "block" and "in_flight=1" in reason(result)
-    with sqlite3.connect(lane[1]) as con:
+    with closing(sqlite3.connect(lane[1])) as con, con:
         assert con.execute("SELECT status FROM obligations WHERE id=301").fetchone()[0] == "open"
 
 
@@ -272,7 +275,7 @@ def test_read_failure_or_malformed_state_is_visible_fail_open(lane, mode):
     elif mode == "malformed_db":
         db.write_bytes(b"not a sqlite database")
     elif mode == "malformed_schema":
-        with sqlite3.connect(db) as con:
+        with closing(sqlite3.connect(db)) as con, con:
             con.execute("DROP TABLE obligations")
     elif mode == "malformed_row":
         add(lane, 301, evidence_json="not JSON")
