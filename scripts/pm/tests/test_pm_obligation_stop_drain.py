@@ -195,6 +195,17 @@ def test_unestablished_prerequisite_is_safe_classification(lane):
     assert "tell the customer it is live" not in reason(result)
 
 
+def test_later_merge_or_review_clause_does_not_hide_current_next_step(lane):
+    add(lane, 301, required_action="Next: drive the existing PR and route its remaining child. After both land, record final proof.",
+        blocker="Remaining child and final proof are incomplete.")
+    add(lane, 302, required_action="Add the already-authorized local report correction now. Review the budget on the agreed future date.",
+        blocker="Local report correction remains unfinished.", next_review_at=FUTURE)
+    result, _ = invoke(lane)
+    assert result.get("decision") == "block"
+    assert "obligation:301 [classify]" in reason(result) and "obligation:302 [classify]" in reason(result)
+    assert "held=" not in reason(result) and "future=" not in reason(result)
+
+
 def test_unavailable_row_does_not_hide_unrelated_local_work(lane):
     add(lane, 301, blocker="MoP evidence unavailable; retain current owner.")
     add(lane, 302)

@@ -79,7 +79,6 @@ def classify(row):
 
     wait = " ".join((blocker, compact(evidence.get("hold_reason")),
                      compact(evidence.get("review_reason")))).lower()
-    text = " ".join((action, wait)).lower()
     # Unavailable evidence is not evidence of runnable work or of completion.
     if re.search(r"\b(unavailable|unreachable|lookup.failed|access denied|denied access)\b", wait):
         return "unverified", "Required evidence unavailable: " + compact(wait)
@@ -90,15 +89,16 @@ def classify(row):
 
     future = max((t for t in (review, suppress) if t is not None), default=None)
     review_reason = evidence.get("review_reason") or evidence.get("hold_reason")
-    scheduled = re.search(r"\b(review|observe|observation|monitor|window|at|after|until|waiting|awaiting)\b", text)
+    # A trailing review clause must not hide an earlier runnable next step.
+    scheduled = re.match(r"\s*(review|observe|monitor|wait|await)\b", action.lower())
     if future and future > NOW and (review_reason or (blocker and scheduled)):
         return "future", f"Review {future.isoformat()}: {blocker or compact(review_reason)}"
 
     # Conditional customer/release work is never an unconditional effect.
     # A concrete cached blocker is visible; an unestablished prerequisite is
     # a safe classification step rather than permission to execute the action.
-    conditional = re.search(r"\b(after|once|when|until|on)\b.{0,100}\b(merge|merged|deploy|deployed|complet|approval|receipt|terminal)\w*", action.lower())
-    if conditional and blocker and not evidence.get("prerequisite_met"):
+    conditional = re.match(r"\s*(after|once|when|until|on)\b.{0,100}\b(merge|merged|deploy|deployed|complet|approval|receipt|terminal)\w*", action.lower())
+    if conditional and blocker.lower() not in {"", "none", "no blocker", "n/a"} and not evidence.get("prerequisite_met"):
         return "held", "Prerequisite retained: " + blocker
     if conditional and evidence.get("prerequisite_met") is not True:
         return "classify", "Establish the stated prerequisite from existing receipts; if unavailable record the specific wait. Do not perform the conditional effect."
