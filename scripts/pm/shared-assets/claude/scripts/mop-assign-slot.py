@@ -114,6 +114,30 @@ def slot_state_after(payload: Any) -> str:
     return "unknown"
 
 
+def post_assignment_notice(issue: int, slot: int, task: str) -> dict[str, Any]:
+    """Post the new-issue transition as status; Slack failure never undoes assignment."""
+    sender = os.environ.get("MOP_ASSIGN_SLACK_SEND", "/Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh")
+    summary = next((line.strip() for line in task.splitlines() if line.strip()), "Assignment completed.")
+    body = f"Assignment: Issue {issue} assigned to slot {slot}.\n{summary}"
+    try:
+        result = subprocess.run(
+            [sender, "-c", "C0ALZJHGE49", "-f"],
+            input=body,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"posted": False, "reason": f"slack_send_failed:{type(error).__name__}"}
+    if result.returncode != 0:
+        return {"posted": False, "reason": "slack_send_failed"}
+    for line in result.stdout.splitlines():
+        if line.startswith("OK ts="):
+            return {"posted": True, "thread_ts": line.removeprefix("OK ts=").strip()}
+    return {"posted": False, "reason": "slack_receipt_missing"}
+
+
 def check_selection(args: argparse.Namespace) -> dict[str, Any]:
     """Use the installed selector's decision for every NEW assignment."""
     command = [sys.executable, str(Path(__file__).with_name("ready_pool_select.py")),
@@ -235,7 +259,10 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(payload, dict):
         return emit(refusal("ownership", "assignment_effect_response_unreadable", "unknown"), 2)
     if status == 200 and payload.get("status") == "assigned":
-        return emit({**payload, "selection_receipt": selection}, 0)
+        terminal = {**payload, "selection_receipt": selection}
+        if args.selection_class == "new_issue":
+            terminal["assignment_notice"] = post_assignment_notice(args.issue, args.slot, task)
+        return emit(terminal, 0)
     if payload.get("status") == "refused":
         return emit(payload, 2)
     return emit(refusal("ownership", str(payload.get("reason") or payload.get("error") or "assignment_effect_failed"), slot_state_after(payload)), 2)

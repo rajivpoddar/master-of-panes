@@ -158,13 +158,12 @@ class MopAssignSlotClientTests(unittest.TestCase):
             encoding="utf-8",
         )
         sender.chmod(0o755)
-        env = {
-            "MOP_PORT": str(self.port),
-            "PATH": "/usr/bin:/bin",
+        env = self.env()
+        env.update({
             "MOP_ASSIGN_SLACK_SEND": str(sender),
             "CAPTURE_ARGS": str(Path(self.temp.name) / "slack-args"),
             "CAPTURE_BODY": str(Path(self.temp.name) / "slack-body"),
-        }
+        })
         command = [
             sys.executable, str(SCRIPT), "--slot", "3", "--issue", "8110",
             "--branch", "fix/8110-assignment-boundary", "--task-file", str(self.task_file),
@@ -184,13 +183,10 @@ class MopAssignSlotClientTests(unittest.TestCase):
 
     def test_assignment_succeeds_when_transition_post_fails(self) -> None:
         sender = Path(self.temp.name) / "slack-send.sh"
-        sender.write_text("#!/bin/sh\\nexit 1\\n", encoding="utf-8")
+        sender.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         sender.chmod(0o755)
-        env = {
-            "MOP_PORT": str(self.port),
-            "PATH": "/usr/bin:/bin",
-            "MOP_ASSIGN_SLACK_SEND": str(sender),
-        }
+        env = self.env()
+        env["MOP_ASSIGN_SLACK_SEND"] = str(sender)
         command = [sys.executable, str(SCRIPT), "--slot", "3", "--issue", "8110"]
         completed = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
