@@ -18,16 +18,17 @@ second assignment.
 
 Thin surface (Rajiv directive 2026-09-23): the only required flags are
 --slot and --issue.  Assigning an occupied slot implicitly releases it
-first; the session clear is done by MoP as part of the assign.  The ONLY
-refusal is a lane already bound to another occupied slot
-(`duplicate_assignment`, naming that slot).  No epochs, acks, expected
+first; the session clear is done by MoP as part of the assign. New operations
+must pass the existing Ready Pool selector before any assignment effect;
+known durable operations resume without re-admitting already committed work.
+No caller opt-out is provided. No epochs, acks, expected
 tuple ceremony, or retries for the caller.
 
 stdout is exactly one JSON terminal:
 
   success  {"status":"assigned","slot":N,"assignment_epoch":E,
             "ownership_receipt":{...},"delivery_receipt":{...}}   exit 0
-  refusal  {"status":"refused","step_failed":"clean|ownership|delivery|readback",
+  refusal  {"status":"refused","step_failed":"selection|clean|ownership|delivery|readback",
             "reason":"<typed>","slot_state_after":"<state>",
             "sanctioned_path":"mop-assign-slot"}                  exit non-zero
 """
@@ -38,10 +39,13 @@ import argparse
 import hashlib
 import json
 import os
+from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlencode
 
 
 SELECTION_CLASSES = ("new_issue", "repro", "rework")
@@ -110,6 +114,29 @@ def slot_state_after(payload: Any) -> str:
     return "unknown"
 
 
+def check_selection(args: argparse.Namespace) -> dict[str, Any]:
+    """Use the installed selector's decision for every NEW assignment."""
+    command = [sys.executable, str(Path(__file__).with_name("ready_pool_select.py")),
+               "--check", str(args.issue), "--selection-class", args.selection_class]
+    if args.pr is not None:
+        command += ["--pr", str(args.pr)]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError("selector result is not an object")
+        pick = payload.get("pick") or {}
+        if not isinstance(pick, dict):
+            raise ValueError("selector pick is not an object")
+        if result.returncode == 0 and payload.get("status") == "ok" and pick.get("issue") == args.issue and pick.get("class") == args.selection_class:
+            return payload
+        if payload.get("status") == "ok":
+            return {"status": "LOOKUP_FAILED", "reason": "selector_result_mismatch"}
+        return payload
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return {"status": "LOOKUP_FAILED", "reason": "selection_check_unavailable"}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Assign one numbered slot atomically through MoP.")
     parser.add_argument("--slot", type=int, required=True)
@@ -171,6 +198,30 @@ def main(argv: list[str] | None = None) -> int:
     task_digest = hashlib.sha256(task_bytes).hexdigest()
     effect_id = compute_effect_id(binding, task_digest)
 
+    # Existing durable receipt distinguishes a resume from a new admission.
+    # Re-checking current eligibility after ownership committed would strand
+    # pending delivery: the now-owned issue correctly leaves the Ready Pool.
+    receipt_status, receipt = http_json(
+        "GET", f"{base}/slots/{args.slot}/assignment-effect-receipt?" + urlencode({"effect_id": effect_id}),
+    )
+    existing = (receipt_status == 200 and isinstance(receipt, dict)
+                and receipt.get("success") is True and receipt.get("effect_id") == effect_id
+                and receipt.get("slot") == args.slot and receipt.get("selection_class") == args.selection_class
+                and receipt.get("state") in {"planned", "pending_delivery", "delivered"}
+                and receipt.get("task_digest") == task_digest
+                and isinstance(receipt.get("desired_tuple"), dict)
+                and (receipt.get("desired_tuple") or {}).get("issue") == args.issue)
+    if existing:
+        selection = {"status": "existing_effect_resume", "effect_id": effect_id}
+    elif receipt_status == 404 and isinstance(receipt, dict) and receipt.get("code") == "assignment_effect_receipt_not_found":
+        selection = check_selection(args)
+        if selection.get("status") != "ok":
+            rejected = refusal("selection", str(selection.get("status") or "LOOKUP_FAILED"), slot_state_after(current))
+            rejected["selection_result"] = selection
+            return emit(rejected, 2)
+    else:
+        return emit(refusal("selection", "assignment_receipt_unavailable", slot_state_after(current)), 2)
+
     body = {
         "effect_id": effect_id,
         "selection_class": args.selection_class,
@@ -184,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(payload, dict):
         return emit(refusal("ownership", "assignment_effect_response_unreadable", "unknown"), 2)
     if status == 200 and payload.get("status") == "assigned":
-        return emit(payload, 0)
+        return emit({**payload, "selection_receipt": selection}, 0)
     if payload.get("status") == "refused":
         return emit(payload, 2)
     return emit(refusal("ownership", str(payload.get("reason") or payload.get("error") or "assignment_effect_failed"), slot_state_after(payload)), 2)

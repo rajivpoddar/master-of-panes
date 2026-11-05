@@ -27,8 +27,10 @@ pm-nonclaimable:tracking, umbrella, and Ready Pool claimable_slot_type values
 that are not slot work.
 
 Dependency-blocked candidates of all priorities are listed in the pool. Their
-referenced issues and PRs are checked live before picking or checking; unresolved
-or unparseable dependencies remain gated. Other P0 gates remain gated. Offline
+referenced PR must be merged, or a referenced issue must have exactly one
+authoritatively linked implementation PR that is merged. Issue closure, deploy
+and verification are not dependency requirements (Rajiv 1793896514.652319).
+Missing/ambiguous linkage stays gated. Other P0 gates remain gated. Offline
 mode disables dependency lookups and leaves dependencies gated.
 
 Dependency hell (Rajiv DM D0AMF0XE6TS thread 1793816247.442119, ts 1793855417.837589):
@@ -64,9 +66,12 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
-REPO = "heydonna-app/heydonna-app"
+REPO = "Scribie/heydonna-app"
+ASSOCIATED_PRS = ('closedByPullRequestsReferences(first:2,includeClosedPrs:true) '
+                  '{ nodes { number state mergedAt } pageInfo { hasNextPage } }')
 PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 UNKNOWN_RANK = 9
 CLASS_RANK = {"rework": 0, "repro": 1, "new_issue": 2}
@@ -131,9 +136,11 @@ def prio_name(rank: int) -> str:
     return f"P{rank}" if rank in PRIORITY_RANK.values() else "P?"
 
 
-def classify(issue: dict[str, Any]) -> str | None:
+def classify(issue: dict[str, Any], requested_class: str | None = None) -> str | None:
     """Return the selection class for an eligible issue, else None."""
     labels = _labels(issue)
+    if issue.get("state", "OPEN").upper() != "OPEN":
+        return None
     excluded = EXCLUDE_LABELS - ({"status:blocked"} if "pm-blocked:dependency" in labels else set())
     if labels & excluded or any(l.startswith("slot:") for l in labels):
         return None
@@ -141,6 +148,8 @@ def classify(issue: dict[str, Any]) -> str | None:
         return None
     if ready_pool_value(issue.get("body") or "", "claimable_slot_type").lower() in NON_SLOT_TYPES:
         return None
+    if requested_class in {"rework", "repro"}:
+        return requested_class
     if labels & REWORK_LABELS:
         return "rework"
     if "status:todo" in labels or "pm-blocked:dependency" in labels:
@@ -262,6 +271,37 @@ def run_lookup(cmd: list[str], timeout: int = 45) -> subprocess.CompletedProcess
     raise RuntimeError('unreachable')
 
 
+def dependency_satisfaction(node: dict | None) -> tuple[bool, str]:
+    """Merged implementation PR only; missing/ambiguous linkage stays unknown.
+
+    GitHub's closing-PR relation is authoritative. Body mentions and historical
+    partial PRs cannot invent that relation or disambiguate multiple linked PRs.
+    """
+    if not isinstance(node, dict):
+        return False, "LOOKUP_FAILED"
+    if "mergedAt" in node:
+        merged, state = node.get("mergedAt"), node.get("state")
+        if state not in {"OPEN", "CLOSED", "MERGED"} or (merged is not None and (not isinstance(merged, str) or _ts(merged) is None)):
+            return False, "LOOKUP_FAILED"
+        return bool(merged) and state == "MERGED", state
+    if node.get("state") not in {"OPEN", "CLOSED"}:
+        return False, "LOOKUP_FAILED"
+    links = node.get("closedByPullRequestsReferences")
+    if not isinstance(links, dict) or not isinstance(links.get("nodes"), list):
+        return False, "LOOKUP_FAILED"
+    if not isinstance(links.get("pageInfo"), dict):
+        return False, "LOOKUP_FAILED"
+    prs, more = links["nodes"], links["pageInfo"].get("hasNextPage")
+    if more is not False:
+        return False, "AMBIGUOUS_ASSOCIATED_PR" if more is True else "LOOKUP_FAILED"
+    if not prs:
+        return False, "NO_ASSOCIATED_PR"
+    if len(prs) != 1:
+        return False, "AMBIGUOUS_ASSOCIATED_PR"
+    ok, state = dependency_satisfaction(prs[0])
+    return ok, f"ASSOCIATED_PR_{state}"
+
+
 def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -> None:
     issue_body = c.pop('issue_body', '')
     comment_text = c.pop('comment_text', '')
@@ -289,25 +329,7 @@ def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -
         key = (number, kind)
         if key not in cache:
             try:
-                cmd = ["gh", "api", f"repos/Scribie/heydonna-app/issues/{number}"]
-                p = run_lookup(cmd)
-                data = json.loads(p.stdout)
-                if not isinstance(data, dict) or data.get('state') not in ('open', 'closed'):
-                    raise ValueError('invalid issue state')
-                is_pr = 'pull_request' in data
-                if is_pr:
-                    p = run_lookup(['gh', 'pr', 'view', str(number), '-R', 'Scribie/heydonna-app', '--json', 'mergedAt,state'])
-                    pr = json.loads(p.stdout)
-                    if not isinstance(pr, dict) or pr.get('state') not in ('OPEN', 'CLOSED', 'MERGED') or 'mergedAt' not in pr or (pr['mergedAt'] is not None and (not isinstance(pr['mergedAt'], str) or not pr['mergedAt'])):
-                        raise ValueError('invalid PR state')
-                    satisfied = bool(pr['mergedAt']) if kind in ('merge', 'complete', 'default') else pr['state'] in ('CLOSED', 'MERGED')
-                    state = pr['state']
-                else:
-                    if data.get('state_reason') not in (None, 'completed', 'not_planned', 'reopened'):
-                        raise ValueError('invalid issue completion state')
-                    state = data['state'].upper()
-                    satisfied = kind != 'merge' and state == 'CLOSED' and (kind not in ('complete', 'default') or data.get('state_reason') == 'completed')
-                cache[key] = (satisfied, state)
+                cache[key] = dependency_satisfaction(graphql_nodes([number]).get(number))
             except TimeoutError:
                 raise
             except (OSError, subprocess.SubprocessError, ValueError, TypeError):
@@ -326,11 +348,14 @@ def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -
         c["dependency_reason"] = "other_blocking_labels"
 
 
-def graphql_nodes(numbers: list[int], comments: bool = False) -> dict[int, dict]:
+def graphql_nodes(numbers: list[int], comments: bool = False, candidate_details: bool = False) -> dict[int, dict]:
     result = {}
     for start in range(0, len(numbers), 50):
         batch = numbers[start:start + 50]
-        fields = '... on Issue { number state stateReason comments(last: 20) { nodes { body } } }' if comments else '... on Issue { number state stateReason } ... on PullRequest { number state mergedAt }'
+        fields = ('... on Issue { number state stateReason comments(last: 20) { nodes { body } } }'
+                  if comments else '... on Issue { number state stateReason ' + ASSOCIATED_PRS
+                  + (' title body createdAt labels(first:100){nodes{name} pageInfo{hasNextPage}}' if candidate_details else '')
+                  + ' } ... on PullRequest { number state mergedAt }')
         aliases = ' '.join(f'i{n}: issueOrPullRequest(number:{n}) {{ {fields} }}' for n in batch)
         query = '{ repository(owner:"Scribie",name:"heydonna-app") { ' + aliases + ' } }'
         try:
@@ -373,12 +398,7 @@ def prefetch_dependencies(issues: list[dict], cache: dict) -> None:
         if not node:
             cache[(number, kind)] = (False, 'LOOKUP_FAILED')
             continue
-        state = node.get('state', '')
-        if 'mergedAt' in node:
-            satisfied = bool(node['mergedAt']) if kind in ('merge', 'complete', 'default') else state in ('CLOSED', 'MERGED')
-        else:
-            satisfied = kind != 'merge' and state == 'CLOSED' and (kind not in ('complete', 'default') or node.get('stateReason') == 'COMPLETED')
-        cache[(number, kind)] = (satisfied, state or 'LOOKUP_FAILED')
+        cache[(number, kind)] = dependency_satisfaction(node)
 
 
 def candidate(issue: dict[str, Any], cls: str) -> dict[str, Any]:
@@ -419,6 +439,8 @@ def rank_candidates(issues: list[dict[str, Any]], extra: list[dict[str, Any]] | 
     for issue in issues:
         cls = classify(issue)
         if cls:
+            if cls == "new_issue" and issue.get("_implementation_merged"):
+                continue
             if cls == "new_issue" and contract_reasons(issue):
                 continue
             c = candidate(issue, cls)
@@ -427,20 +449,19 @@ def rank_candidates(issues: list[dict[str, Any]], extra: list[dict[str, Any]] | 
                 best[c["issue"]] = c
     for row in extra or []:
         cls = row.get("class", "rework")
+        source = next((i for i in issues if int(i["number"]) == int(row["issue"])), None)
+        if source is None or classify(source, cls) is None:
+            continue
         if cls == "new_issue":
             # A PM-supplied row cannot bypass the live issue contract.
-            source = next((i for i in issues if int(i["number"]) == int(row["issue"])), None)
-            if source is None or classify(source) != "new_issue" or contract_reasons(source):
+            if classify(source) != "new_issue" or contract_reasons(source) or source.get("_implementation_merged"):
                 continue
-            c = candidate(source, cls)
-            evaluate_dependency(c, cache, offline)
-            if is_gated(c):
-                continue
-        else:
-            rank = PRIORITY_RANK.get(str(row.get("priority", "")).upper(), UNKNOWN_RANK)
-            c = {"issue": int(row["issue"]), "class": cls, "priority": prio_name(rank), "priority_rank": rank,
-                 "created_at": row.get("created_at", ""), "title": row.get("title", ""),
-                 **({"pr": row["pr"]} if row.get("pr") else {})}
+        c = candidate(source, cls)
+        if row.get("pr"):
+            c["pr"] = row["pr"]
+        evaluate_dependency(c, cache, offline)
+        if is_gated(c):
+            continue
         if c["issue"] in gated:  # PM row cannot ungate a pm-blocked P0
             continue
         old = best.get(c["issue"])
@@ -460,6 +481,8 @@ def gated_p0_candidates(issues: list[dict[str, Any]], rework_only: bool = False,
     for issue in issues:
         cls = classify(issue)
         if not cls:
+            continue
+        if cls == "new_issue" and issue.get("_implementation_merged"):
             continue
         if cls == "new_issue" and contract_reasons(issue):
             continue
@@ -527,15 +550,58 @@ def priority_inversions(slots: list[dict[str, Any]], issue_prio: dict[int, int],
     return out
 
 
-def load_open_issues(timeout: int = 120) -> list[dict[str, Any]]:
-    proc = run_lookup(
-        ["gh", "issue", "list", "--repo", REPO, "--state", "open", "--limit", "1000",
-         "--json", "number,title,labels,body,createdAt"], timeout=timeout,
-    )
-    return json.loads(proc.stdout or "[]")
+def candidate_node(node: dict) -> dict:
+    labels = node.get("labels") or {}
+    if not isinstance(labels, dict) or (labels.get("pageInfo") or {}).get("hasNextPage") is not False:
+        raise ValueError("incomplete candidate labels")
+    ok, state = dependency_satisfaction(node)
+    if state == "LOOKUP_FAILED":
+        raise ValueError("candidate implementation association unavailable")
+    return {**node, "labels": labels["nodes"], "_implementation_merged": ok}
 
 
-def load_open_prs(timeout: int = 120) -> list[dict[str, Any]]:
+def load_open_issues(timeout: int = 60) -> list[dict[str, Any]]:
+    """Complete candidate-label union, not a truncated all-open body scan."""
+    deadline, result = monotonic() + timeout, {}
+    fields = ('number title body state createdAt labels(first:100){nodes{name} pageInfo{hasNextPage}} '
+              + ASSOCIATED_PRS)
+    for label in ["status:todo", *sorted(REWORK_LABELS), "pm-blocked:dependency"]:
+        cursor, seen, expected = None, set(), None
+        while True:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError("candidate snapshot deadline reached")
+            query = ('query($cursor:String){repository(owner:"Scribie",name:"heydonna-app"){'
+                     'issues(first:50,after:$cursor,states:OPEN,labels:[' + json.dumps(label) + '],'
+                     'orderBy:{field:CREATED_AT,direction:ASC}){totalCount nodes{' + fields
+                     + '} pageInfo{hasNextPage endCursor}}}}')
+            cmd = ["gh", "api", "graphql", "-f", "query=" + query]
+            if cursor:
+                cmd += ["-f", "cursor=" + cursor]
+            payload = json.loads(run_lookup(cmd, timeout=max(1, min(20, int(remaining / 2)))).stdout)
+            if payload.get("errors"):
+                raise ValueError("candidate lookup failed")
+            page = payload["data"]["repository"]["issues"]
+            if expected is not None and expected != page["totalCount"]:
+                raise ValueError("candidate population changed during pagination")
+            expected = page["totalCount"]
+            for raw in page["nodes"]:
+                number = int(raw["number"])
+                if number in seen:
+                    raise ValueError("duplicate candidate page")
+                seen.add(number)
+                result[number] = candidate_node(raw)
+            if not page["pageInfo"]["hasNextPage"]:
+                if len(seen) != expected:
+                    raise ValueError("incomplete candidate pagination")
+                break
+            cursor = page["pageInfo"].get("endCursor")
+            if not cursor:
+                raise ValueError("missing candidate cursor")
+    return list(result.values())
+
+
+def load_open_prs(timeout: int = 30) -> list[dict[str, Any]]:
     proc = run_lookup(
         ["gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "1000",
          "--json", "number,isDraft,body,updatedAt,closingIssuesReferences"], timeout=timeout,
@@ -580,6 +646,7 @@ NONE_VALUES = {"", "none", "null", "n/a", "[]"}
 DEP_HELL_STATE = Path.home() / ".claude" / "state" / "ready_pool_dependency_hell.json"
 PM_OPS = Path.home() / ".claude" / "scripts" / "pm-ops.py"
 _ISSUE_DETAIL = ('... on Issue { number state stateReason title updatedAt body '
+                 + ASSOCIATED_PRS + ' '
                  'assignees(first:5){nodes{login}} labels(first:50){nodes{name}} '
                  'timelineItems(itemTypes:[LABELED_EVENT], last:40)'
                  '{nodes{... on LabeledEvent{createdAt label{name}}}} }')
@@ -617,6 +684,7 @@ def normalize_node(raw: dict | None) -> dict | None:
         "assignees": [a.get("login", "") for a in (raw.get("assignees") or {}).get("nodes") or [] if a],
         "labels": sorted(l.get("name", "") for l in (raw.get("labels") or {}).get("nodes") or [] if l),
         "body": raw.get("body") or "",
+        "closedByPullRequestsReferences": raw.get("closedByPullRequestsReferences"),
         "dep_label_at": dep_at,
     }
 
@@ -653,17 +721,15 @@ def node_satisfied(node: dict | None, kind: str) -> bool:
     """Same satisfaction semantics as prefetch_dependencies()."""
     if not node:
         return False
-    if node["is_pr"]:
-        return bool(node["merged_at"]) if kind in ("merge", "complete", "default") else node["state"] in ("CLOSED", "MERGED")
-    return kind != "merge" and node["state"] == "CLOSED" and (
-        kind not in ("complete", "default") or node.get("state_reason") == "COMPLETED")
+    raw = {"state": node["state"], "mergedAt": node["merged_at"]} if node["is_pr"] else node
+    return dependency_satisfaction(raw)[0]
 
 
 def declared_deps(node: dict | None) -> list[tuple[int, str]]:
     """Declared blockers of an OPEN issue node, mirroring evaluate_dependency() (structured
     `blockers:` or a pm-blocked:dependency label; prose body fallback). Comments are not read
     for transitive nodes. PRs and closed nodes are leaves."""
-    if not node or node["is_pr"] or node["state"] != "OPEN":
+    if not node or node["is_pr"] or node["state"] != "OPEN" or node_satisfied(node, "default"):
         return []
     body, labels = node["body"], set(node["labels"])
     blockers = ready_pool_value(body, "blockers")
@@ -1089,6 +1155,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--extra-json", help="PM-supplied rework/repro candidate rows (JSON list)")
     ap.add_argument("--issues-json", help="use this saved `gh issue list` JSON instead of live GitHub")
     ap.add_argument("--check", type=int, help="validate a PM pick; exit 3 on PRIORITY_INVERSION")
+    ap.add_argument("--selection-class", choices=tuple(CLASS_RANK), help="assignment caller's existing work class")
+    ap.add_argument("--pr", type=int, help="assignment caller's existing PR binding")
     ap.add_argument("--limit", type=int, default=15)
     ap.add_argument("--no-dependency-check", action="store_true", help="leave dependencies gated without live lookups")
     ap.add_argument("--selftest", action="store_true", help="check dependency parsing without network access")
@@ -1101,6 +1169,15 @@ def main(argv: list[str] | None = None) -> int:
 
     issues = json.load(open(args.issues_json)) if args.issues_json else load_open_issues()
     extra = json.load(open(args.extra_json)) if args.extra_json else []
+    if args.selection_class:
+        if args.check is None:
+            raise ValueError("selection-class requires --check")
+        if args.selection_class != "new_issue":
+            extra.append({"issue": args.check, "class": args.selection_class, "pr": args.pr})
+    missing_extra = sorted({int(r["issue"]) for r in extra} - {int(i["number"]) for i in issues})
+    for node in graphql_nodes(missing_extra, candidate_details=True).values():
+        if isinstance(node, dict) and "mergedAt" not in node:
+            issues.append(candidate_node(node))
     prs = load_open_prs()
     contract_defects = [
         {"issue": int(i["number"]), "reasons": reasons}
@@ -1114,9 +1191,7 @@ def main(argv: list[str] | None = None) -> int:
     owned, uncertain = owned_issues(prs)
     # Existing PRs own new work, not rework/repro on that same PR.
     eligible_issues = [i for i in issues if classify(i) != "new_issue" or int(i["number"]) not in owned]
-    blocked_issue_numbers = {int(i["number"]) for i in issues if blocking_labels(_labels(i))}
-    eligible_extra = [r for r in extra if int(r["issue"]) not in blocked_issue_numbers
-                      and (r.get("class", "rework") != "new_issue" or int(r["issue"]) not in owned)]
+    eligible_extra = [r for r in extra if r.get("class", "rework") != "new_issue" or int(r["issue"]) not in owned]
     ranked = rank_candidates(eligible_issues, eligible_extra, rework_only, cache, args.no_dependency_check)
     gated = gated_p0_candidates(eligible_issues, rework_only, cache, args.no_dependency_check)
     all_dependencies = []
@@ -1147,6 +1222,8 @@ def main(argv: list[str] | None = None) -> int:
             res = {"status": "PR_CAP", "issue": args.check, "reason": "PR_CAP: new_issue is not permitted in rework-only mode", "open_pr_count": open_pr_count}
         else:
             res = check_pick(args.check, ranked, gated)
+        if res["status"] == "ok" and args.selection_class and res["pick"]["class"] != args.selection_class:
+            res = {"status": "not_eligible", "issue": args.check, "reason": "selection_class_mismatch"}
         print(json.dumps(res, sort_keys=True))
         return {"ok": 0, "PRIORITY_INVERSION": 3, "DEPENDENCY_OPEN": 4, "GATED": 5, "PR_CAP": 6}.get(res["status"], 4)
 
@@ -1200,6 +1277,6 @@ if __name__ == "__main__":
     except TimeoutError:
         print(json.dumps({'status': 'not_eligible', 'reason': 'LOOKUP_TIMEOUT'}))
         sys.exit(4)
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
         print(json.dumps({'status': 'not_eligible', 'reason': 'LOOKUP_FAILED', 'detail': str(exc)}))
         sys.exit(4)

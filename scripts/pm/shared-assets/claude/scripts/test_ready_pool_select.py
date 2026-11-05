@@ -93,7 +93,8 @@ class RankTests(unittest.TestCase):
         self.assertEqual([c["issue"] for c in rps.rank_candidates(issues)], [41])
 
     def test_rework_only_and_extra_rows(self):
-        issues = [issue(50, ["P0", "status:todo"]), issue(51, ["P2", "status:qa-rework"])]
+        issues = [issue(50, ["P0", "status:todo"]), issue(51, ["P2", "status:qa-rework"]),
+                  issue(52, ["P1"])]  # live source for the unlabelled explicit rework lane
         extra = [{"issue": 52, "class": "rework", "priority": "P1", "pr": 900}]
         ranked = rps.rank_candidates(issues, extra, rework_only=True)
         self.assertEqual([c["issue"] for c in ranked], [52, 51])

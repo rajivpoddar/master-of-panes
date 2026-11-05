@@ -1,0 +1,192 @@
+"""Merge-only dependency decision and its mandatory assignment caller; no live I/O."""
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+from pathlib import Path
+import re
+import subprocess
+from urllib.parse import parse_qs, urlparse
+from types import SimpleNamespace
+
+import pytest
+
+ASSETS = Path(__file__).resolve().parents[1] / "shared-assets/claude/scripts"
+
+
+def load(name, filename):
+    spec = importlib.util.spec_from_file_location(name, ASSETS / filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def selector(monkeypatch):
+    module = load("merged_pr_selector", "ready_pool_select.py")
+    monkeypatch.setattr(module, "run_lookup", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("unexpected network")))
+    return module
+
+
+def issue(n, priority="P1", blockers="none", labels=()):
+    # Reuse the existing canonical valid-contract fixture, not a copied policy.
+    fixtures = load("existing_ready_pool_fixtures", "test_ready_pool_select.py")
+    body = "<!-- ready-pool:\nblockers: " + blockers + "\n-->"
+    return fixtures.issue(n, [priority, "status:todo", *labels], body=body)
+
+
+def linked_issue(prs=(), more=False, state="OPEN"):
+    return {"state": state, "closedByPullRequestsReferences": {
+        "nodes": list(prs), "pageInfo": {"hasNextPage": more}}}
+
+
+MERGED = {"number": 77, "state": "MERGED", "mergedAt": "2026-11-05T10:00:00Z"}
+
+
+def github_fixture(selector, monkeypatch, states):
+    def lookup(command, **kwargs):
+        query = next(s[6:] for s in command if s.startswith("query="))
+        assert "deployment" not in query.lower() and "verification" not in query.lower()
+        numbers = [int(n) for n in re.findall(r"i(\d+): issueOrPullRequest", query)]
+        data = {"data": {"repository": {f"i{n}": states.get(n) for n in numbers}}}
+        return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
+    monkeypatch.setattr(selector, "run_lookup", lookup)
+
+
+def test_open_issue_and_merged_associated_pr_unblock_before_p1(selector, monkeypatch):
+    rows = [issue(100, "P0", "#10", ["pm-blocked:dependency"]), issue(101)]
+    github_fixture(selector, monkeypatch, {10: linked_issue([MERGED])})
+    cache = {}
+    selector.prefetch_dependencies(rows, cache)
+    ranked = selector.rank_candidates(rows, cache=cache)
+    assert [r["issue"] for r in ranked] == [100, 101]
+    assert selector.check_pick(101, ranked)["status"] == "PRIORITY_INVERSION"
+    assert cache[(10, "default")][0] is True
+
+
+@pytest.mark.parametrize("node", [
+    {"state": "CLOSED", "mergedAt": None},
+    {"state": "OPEN", "mergedAt": None},
+    linked_issue([]), linked_issue([MERGED, {**MERGED, "number": 78}]),
+    linked_issue([MERGED], more=True), None, {"state": "CLOSED", "stateReason": "COMPLETED"},
+    {"state": "MERGED", "mergedAt": "malformed"},
+])
+def test_unmerged_missing_ambiguous_or_failed_link_keeps_p0_gated(selector, monkeypatch, node):
+    rows = [issue(100, "P0", "#10", ["pm-blocked:dependency"]), issue(101)]
+    github_fixture(selector, monkeypatch, {10: node})
+    cache = {}
+    selector.prefetch_dependencies(rows, cache)
+    ranked = selector.rank_candidates(rows, cache=cache)
+    assert [r["issue"] for r in ranked] == [101]
+    assert selector.check_pick(101, ranked)["status"] == "ok"
+    assert selector.check_pick(100, ranked, selector.gated_p0_candidates(rows, cache=cache))["status"] == "DEPENDENCY_OPEN"
+
+
+def test_direct_pr_closed_condition_still_requires_merge(selector):
+    assert not selector.dependency_satisfaction({"state": "CLOSED", "mergedAt": None})[0]
+    assert selector.dependency_satisfaction(MERGED)[0]
+    for state in ["OPEN", "CLOSED"]:
+        assert selector.dependency_satisfaction(linked_issue([MERGED], state=state))[0]
+
+
+def test_other_hold_occupied_and_offline_remain_excluded(selector, monkeypatch):
+    rows = [issue(100, "P0", "#10", ["pm-blocked:dependency", "pm-blocked:product"]),
+            issue(102, "P0", labels=["slot:2"]), issue(101)]
+    github_fixture(selector, monkeypatch, {10: linked_issue([MERGED])})
+    cache = {}; selector.prefetch_dependencies(rows, cache)
+    assert [r["issue"] for r in selector.rank_candidates(rows, cache=cache)] == [101]
+    assert [r["issue"] for r in selector.rank_candidates([issue(100, "P0", "#10"), issue(101)], offline=True)] == [101]
+
+
+def test_own_merged_implementation_does_not_become_new_issue(selector):
+    done = issue(100, "P0")
+    raw = {**done, **linked_issue([MERGED]), "labels": {"nodes": done["labels"], "pageInfo": {"hasNextPage": False}}}
+    assert [r["issue"] for r in selector.rank_candidates([selector.candidate_node(raw), issue(101)])] == [101]
+
+
+def test_extra_rework_keeps_source_priority_and_structured_dependency(selector, monkeypatch):
+    rows = [issue(100, "P2", "#10"), issue(101)]
+    extra = [{"issue": 100, "class": "rework", "priority": "P0"}]
+    github_fixture(selector, monkeypatch, {10: linked_issue([])})
+    cache = {}; selector.prefetch_dependencies(rows, cache)
+    assert [r["issue"] for r in selector.rank_candidates(rows, extra, cache=cache)] == [101]
+    github_fixture(selector, monkeypatch, {10: linked_issue([MERGED])})
+    cache = {}; selector.prefetch_dependencies(rows, cache)
+    ranked = selector.rank_candidates(rows, extra, cache=cache)
+    assert [r["issue"] for r in ranked] == [101, 100] and ranked[1]["priority"] == "P2"
+
+
+def test_loader_is_complete_label_union_with_merged_metadata(selector, monkeypatch):
+    calls = []
+    def lookup(command, **kwargs):
+        calls.append(command)
+        query = next(s[6:] for s in command if s.startswith("query="))
+        assert "closedByPullRequestsReferences" in query and "states:OPEN,labels:" in query
+        rows = [issue(100)] if 'labels:["status:todo"]' in query else []
+        nodes = [{**r, **linked_issue(), "labels": {"nodes": r["labels"], "pageInfo": {"hasNextPage": False}}} for r in rows]
+        return subprocess.CompletedProcess(command, 0, json.dumps({"data": {"repository": {"issues": {"nodes": nodes, "totalCount": len(nodes), "pageInfo": {"hasNextPage": False}}}}}), "")
+    monkeypatch.setattr(selector, "run_lookup", lookup)
+    assert [r["number"] for r in selector.load_open_issues()] == [100]
+    assert len(calls) == 5 and all(c[:3] == ["gh", "api", "graphql"] for c in calls)
+
+
+def drive_caller(selector, monkeypatch, requested, rows, states, resume=False, unavailable=False):
+    client = load("canonical_assignment_client", "mop-assign-slot.py")
+    github_fixture(selector, monkeypatch, states)
+    monkeypatch.setattr(selector, "load_open_issues", lambda: rows)
+    monkeypatch.setattr(selector, "load_open_prs", lambda: [])
+    checks, http = [], []
+    def run(command, **kwargs):
+        checks.append(command)
+        if unavailable:
+            raise subprocess.TimeoutExpired(command, 90)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = selector.main(command[2:])
+        return subprocess.CompletedProcess(command, code, output.getvalue(), "")
+    monkeypatch.setattr(client, "subprocess", SimpleNamespace(run=run, SubprocessError=subprocess.SubprocessError), raising=False)
+    def api(method, url, body=None):
+        http.append((method, url, body))
+        if "assignment-effect-receipt" in url:
+            if not resume:
+                return 404, {"code": "assignment_effect_receipt_not_found"}
+            return 200, {"success": True, "slot": 3, "effect_id": parse_qs(urlparse(url).query)["effect_id"][0],
+                         "state": "pending_delivery", "selection_class": "new_issue",
+                         "task_digest": hashlib.sha256(b"").hexdigest(), "desired_tuple": {"issue": requested}}
+        if method == "GET":
+            return 200, {"slot": 3, "occupied": resume, "issue": requested if resume else None, "assignment_epoch": 4}
+        return 200, {"status": "assigned", "slot": 3, "assignment_epoch": 5}
+    monkeypatch.setattr(client, "http_json", api)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = client.main(["--slot", "3", "--issue", str(requested)])
+    return code, json.loads(output.getvalue()), checks, http
+
+
+def test_actual_caller_refuses_inversion_before_any_assignment_effect(selector, monkeypatch):
+    rows = [issue(100, "P0", "#10"), issue(101)]
+    code, result, checks, http = drive_caller(selector, monkeypatch, 101, rows, {10: linked_issue([MERGED])})
+    assert code == 2 and result["reason"] == "PRIORITY_INVERSION"
+    assert len(checks) == 1 and not any(method == "POST" for method, _, _ in http)
+
+
+def test_actual_caller_accepts_the_same_merged_dependency_decision(selector, monkeypatch):
+    rows = [issue(100, "P0", "#10"), issue(101)]
+    code, result, checks, http = drive_caller(selector, monkeypatch, 100, rows, {10: linked_issue([MERGED])})
+    assert code == 0 and result["selection_receipt"]["pick"]["issue"] == 100
+    assert len(checks) == 1 and sum(method == "POST" for method, _, _ in http) == 1
+
+
+def test_unknown_check_has_no_assignment_effect(selector, monkeypatch):
+    code, result, _, http = drive_caller(selector, monkeypatch, 100, [issue(100)], {}, unavailable=True)
+    assert code == 2 and result["reason"] == "LOOKUP_FAILED"
+    assert not any(method == "POST" for method, _, _ in http)
+
+
+def test_known_pending_delivery_resumes_without_re_admission(selector, monkeypatch):
+    code, result, checks, http = drive_caller(selector, monkeypatch, 100, [], {}, resume=True)
+    assert code == 0 and result["selection_receipt"]["status"] == "existing_effect_resume"
+    assert not checks and sum(method == "POST" for method, _, _ in http) == 1

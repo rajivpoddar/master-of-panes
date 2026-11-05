@@ -56,6 +56,10 @@ class WorkKindGuardTest(unittest.TestCase):
             return 400, {"status": "refused", "reason": "probe", "step_failed": "ownership"}
 
         module.http_json = fake_http  # type: ignore[attr-defined]
+        module.check_selection = lambda args: {"status": "ok", "pick": {"issue": args.issue, "class": args.selection_class}}
+        original_http = module.http_json
+        module.http_json = lambda method, url, body=None: ((404, {"code": "assignment_effect_receipt_not_found"})
+            if "assignment-effect-receipt" in url else original_http(method, url, body))
         module.emit = lambda payload, exit_code: exit_code  # type: ignore[attr-defined]
         module.main(["--slot", "2", "--issue", "7994", "--work-kind", "rework", "--handoff", "h1"])  # type: ignore[attr-defined]
         methods = [m for m, _ in calls]

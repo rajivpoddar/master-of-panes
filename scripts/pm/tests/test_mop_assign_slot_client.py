@@ -11,6 +11,7 @@ assignment.
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).parents[3]
 SCRIPT = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "scripts" / "mop-assign-slot.py"
@@ -40,6 +42,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - stdlib signature
         server = self.server  # type: ignore[assignment]
         server.requests.append(("GET", self.path, None))
+        if "assignment-effect-receipt" in self.path:
+            effect_id = parse_qs(urlparse(self.path).query)["effect_id"][0]
+            receipt = server.receipts.get(effect_id)
+            self._send(200 if receipt else 404, receipt or {"code": "assignment_effect_receipt_not_found"})
+            return
         self._send(200, {"slot": 3, "occupied": False, "assignment_epoch": 41})
 
     def do_POST(self):  # noqa: N802 - stdlib signature
@@ -54,6 +61,12 @@ class _Handler(BaseHTTPRequestHandler):
             "ownership_receipt": {"issue": 8110},
             "delivery_receipt": {"verified": True},
         })
+        server.receipts[body["effect_id"]] = {
+            "success": True, "effect_id": body["effect_id"], "slot": 3,
+            "selection_class": body["selection_class"], "state": "pending_delivery",
+            "desired_tuple": {"issue": body["issue"]},
+            "task_digest": hashlib.sha256(body["task"].encode()).hexdigest(),
+        }
         self._send(*scripted)
 
 
@@ -67,12 +80,36 @@ class MopAssignSlotClientTests(unittest.TestCase):
         self.server = _Server(("127.0.0.1", 0), _Handler)
         self.server.requests = []
         self.server.responses = []
+        self.server.receipts = {}
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.port = self.server.server_address[1]
         self.temp = tempfile.TemporaryDirectory()
         self.task_file = Path(self.temp.name) / "task.md"
         self.task_file.write_text(TASK_TEXT, encoding="utf-8")
+        # Real selector and caller; only GitHub is replaced, never the check.
+        spec = __import__("importlib.util", fromlist=["util"]).spec_from_file_location(
+            "existing_ready_fixture", SCRIPT.with_name("test_ready_pool_select.py"))
+        fixture = __import__("importlib.util", fromlist=["util"]).module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        rows = [fixture.issue(n, ["P1", "status:todo"]) for n in [8110, 8131]]
+        for row in rows:
+            row["state"] = "OPEN"
+            row["labels"] = {"nodes": row["labels"], "pageInfo": {"hasNextPage": False}}
+            row["closedByPullRequestsReferences"] = {"nodes": [], "pageInfo": {"hasNextPage": False}}
+        self.bin = Path(self.temp.name) / "bin"
+        self.bin.mkdir()
+        gh = self.bin / "gh"
+        gh.write_text("#!" + sys.executable + "\nimport json,sys\nrows=" + repr(rows) + "\n"
+            "if sys.argv[1:3]==['pr','list']: print('[]')\n"
+            "else:\n q=next(s[6:] for s in sys.argv if s.startswith('query='))\n"
+            " if 'issues(first:50' in q:\n  nodes=rows if 'labels:[\\\"status:todo\\\"]' in q else []\n"
+            "  print(json.dumps({'data':{'repository':{'issues':{'nodes':nodes,'totalCount':len(nodes),'pageInfo':{'hasNextPage':False}}}}}))\n"
+            " else: print(json.dumps({'data':{'repository':{}}}))\n")
+        gh.chmod(0o755)
+
+    def env(self):
+        return {"MOP_PORT": str(self.port), "PATH": str(self.bin) + ":/usr/bin:/bin"}
 
     def tearDown(self) -> None:
         self.server.shutdown()
@@ -94,7 +131,7 @@ class MopAssignSlotClientTests(unittest.TestCase):
             "--task-file", str(task_file or self.task_file),
             *extra,
         ]
-        env = {"MOP_PORT": str(self.port), "PATH": "/usr/bin:/bin"}
+        env = self.env()
         return subprocess.run(command, capture_output=True, text=True, env=env, check=False)
 
     def test_success_emits_one_json_terminal_with_both_receipts(self) -> None:
@@ -148,7 +185,7 @@ class MopAssignSlotClientTests(unittest.TestCase):
             "--slot", "3",
             "--issue", "8131",
         ]
-        env = {"MOP_PORT": str(self.port), "PATH": "/usr/bin:/bin"}
+        env = self.env()
         completed = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         terminal = json.loads(completed.stdout.strip())

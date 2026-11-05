@@ -528,7 +528,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-assign-slot",
-      "sha256": "0616e7faa966318252cdfaae8d42f93193aaf2dee2351772e636e27a80a1aab5",
+      "sha256": "db9845188daca80c40b936f5d8a5dcbd8fc4754c7dac8ae7e54db26d29b3145c",
       "source_path": "claude/scripts/mop-assign-slot.py"
     },
     {
@@ -764,7 +764,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "958a69e0a62420702507d41a4c8978c93cfee82bd5289d2f98b2a3e65c6ad618",
+      "sha256": "9bb136fed43561e18968511f03262a1979f29185dc9f1d5c1cd66c90ec09420a",
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
@@ -800,7 +800,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage-tests",
-      "sha256": "f23ec7d9f8f741cc3bf764fa4665e5fce3a849f5c8eadbd632ebcc879b3d42c3",
+      "sha256": "3eed240596b68acefa6f5078c0b92ccdfa9541bec040c161b836536cd8471177",
       "source_path": "claude/scripts/test_ready_pool_select.py"
     },
     {
@@ -971,7 +971,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-direct-assign",
-      "sha256": "a9f8cc64d752376abafdc4a0a9b6a9303b15d8fb99b0bf3e14d5c902ebbc50ee",
+      "sha256": "69f53a9e73ecc61cdd6bee03a4640e3ae16d77fd6f6760fa079d141f116c3d76",
       "source_path": "claude/skills/direct-assign/SKILL.md"
     },
     {

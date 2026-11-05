@@ -11,10 +11,26 @@ Pick the next slot work by priority label first: P0 before P1 before P2 before P
 
 ```text
 python3 ~/.claude/scripts/ready_pool_select.py [--rework-only] [--extra-json rows.json]   # ranked; take .pick
-python3 ~/.claude/scripts/ready_pool_select.py --check <issue>   # REQUIRED before mop-assign-slot; exit 3 = PRIORITY_INVERSION, do not assign
+python3 ~/.claude/scripts/ready_pool_select.py --check <issue>   # optional preview; exit 3 = PRIORITY_INVERSION
 ```
 
 `--rework-only` applies while the WIP cap is hit. `--extra-json` adds PR rework/repro lanes that carry no rework label (`[{"issue":N,"class":"rework","priority":"P1","pr":M}]`). When the pick is P2 or lower, copy the selector's `priority_reason` line into the task file and the `#heydonna-dev` assignment post. That line is the assignment receipt. Feature priority overrides live in `~/.claude/scripts/pm/heartbeat/tracked-features-groups.json` (`priority` per group) and are mirrored as the issues' P-labels.
+
+The canonical `mop-assign-slot.py` now invokes this same `--check` decision for
+every NEW assignment before any clear, ownership or delivery effect. It uses
+the requested work class and live source priority/dependency data, with no
+opt-out. Do not run a second mandatory preview: the caller returns the actual
+`selection_receipt`. Refusal/unknown means no new assignment effect. The check
+has a 90-second subprocess bound. A matching existing durable effect receipt
+resumes that operation instead of re-admitting already-owned work. This closes
+the previous skill-only enforcement gap; the check belongs here until the same
+decision is enforced at a replacement canonical assignment boundary.
+
+Dependency satisfaction is merged implementation PR evidence only (Rajiv
+1793896514.652319). A referenced issue can stay open for release follow-up;
+exactly one GitHub-linked merged implementation PR suffices. Missing/multiple
+associations or a closed-unmerged PR stay gated. Release/deploy/verification
+acceptance and explicit independent safety/product holds remain separate.
 
 ## Execution contract
 
