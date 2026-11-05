@@ -234,7 +234,7 @@ def test_unbound_receipt_reconciliation_converges_to_documented_wait(lane, wait_
             "--target-type", "task", "--target-id", "301", "--severity", "normal",
             "--horizon", "daily", "--action", action, "--blocker", blocker, "--print-id"]
     if wait_kind == "future":
-        evidence["review_reason"] = "Agreed review window for the unavailable correspondence evidence."
+        evidence["review_reason"] = "Agreed review window for checking correspondence evidence."
         args += ["--next-review-at", FUTURE]
     args += ["--evidence-json", json.dumps(evidence)]
     recorded = subprocess.run(args, env=lane[2], capture_output=True, text=True)
