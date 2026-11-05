@@ -86,6 +86,13 @@ threading and existing task-specific identity requirements. Do not invent a
 Slack destination for a non-Slack request; respond in its originating chat
 unless a destination was explicitly supplied.
 
+Every Slack response must start with `TL;DR:` followed by a short, plain-language
+summary of the outcome, decision or blocker. This applies to channel and DM
+replies, including acknowledgements, progress updates, corrections, refusals
+and delegated owner outcomes. A one-line response may consist entirely of its
+`TL;DR:` sentence. Include this requirement in every delegated Slack reply brief
+and check the outgoing text before posting.
+
 Source replies include the result, practical limits and next owner/action when
 needed. Private invoice or contact data stays private; post only the authorized
 path or aggregate. A delivered result gets no duplicate completion post.
@@ -524,7 +531,8 @@ Envelope (required): `sop_path`, `fingerprint`, `class`, `action_kind`,
 - Suppression: routine PM ACKs/progress are ledger-only unless carrying a
   material delta (new risk, changed head/authority/owner, failed predicate,
   typed blocker needing CTO action, explicit release/merge decision).
-  Ordinary posts: `TL;DR` + ≤3 bullets + ~120 words; merge refusals use the
+  Every Slack response starts with `TL;DR:` as required above. Ordinary posts:
+  that summary + ≤3 bullets + ~120 words; merge refusals use the
   one-line `TL;DR: PR #<number> — merge refused: <reason>.` (Rajiv
   `Ev0C15CJFNLW`) with no hashes/history. Never infer overrides.
 - Heartbeats (backstops, never status reports): three-hour run keeps
