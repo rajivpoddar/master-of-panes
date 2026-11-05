@@ -32,6 +32,7 @@ NON_DEPENDENCY = {'pm-blocked:pm-gate', 'pm-blocked:infra', 'pm-blocked:product'
 # merged-PR window, so its absence in a later run proves nothing: never auto-resolved.
 LIVE_CHECKABLE = {'unowned_lifecycle', 'done_open', 'merged_closes_open', 'blockers_resolved'}
 WINDOW_ONLY = {'partial_merge'}
+LIFECYCLE_LABELS = {'status:in-review', 'status:in-progress'}
 RECHECK_CAP = 50
 BLOCKERS = re.compile(r'(?im)^[^\n]*?\b(?:blockers?\**\s*:|blocked\s+(?:by|on)|depends\s+on|after|waits?\s+on|until|unblock[_ ]condition\s*[:=])\**\s+([^\n]+)')
 SOURCE = '''nodes { ... on CrossReferencedEvent { source { ... on PullRequest {
@@ -307,7 +308,10 @@ def reason_cleared(reason, number, issue, owned, open_prs, narrowed):
     if reason in WINDOW_ONLY:
         return False  # derived from a rolling merged-PR window; absence proves nothing
     if reason == 'unowned_lifecycle':
-        return closed or number in owned or any(referenced(p, number) for p in open_prs)
+        # The finding needs a lifecycle label AND no owner; either half gone clears it
+        # (PM decision 2026-11-05: lifecycle label gone counts as cleared).
+        return (closed or number in owned or any(referenced(p, number) for p in open_prs)
+                or not issue['labels'] & LIFECYCLE_LABELS)
     if reason in ('merged_closes_open', 'done_open'):
         return closed
     if reason == 'blockers_resolved':

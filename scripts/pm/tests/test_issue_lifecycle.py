@@ -267,3 +267,16 @@ def test_resolve_if_unclaimed_end_to_end_against_real_writer(tmp_path):
     con = __import__('sqlite3').connect(db)
     assert [r[0] for r in con.execute('SELECT status FROM obligations ORDER BY id')] == ['resolved', 'open']
     con.close()
+
+
+def test_recheck_unowned_lifecycle_clears_when_lifecycle_label_gone():
+    m = load()
+    rows = [_row(1, 10, ['unowned_lifecycle']), _row(2, 20, ['unowned_lifecycle']),
+            _row(3, 30, ['unowned_lifecycle', 'partial_merge'])]
+    live = {10: _live(labs={'status:backlog', 'P1'}), 20: _live(labs={'status:in-review'}),
+            30: _live(labs={'status:backlog'})}
+    report, calls, _ = _recheck(m, rows, live)
+    assert report['resolved'] == [1]
+    assert report['kept_not_cleared'] == [2]
+    assert report['kept_window_or_unknown'] == [3]
+    assert calls[0][1] == 'live_recheck_cleared:unowned_lifecycle:open'
