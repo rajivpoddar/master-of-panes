@@ -86,6 +86,7 @@ def test_same_head_live_canonical_claim_and_true_unowned_remain_distinct(lane, m
     unowned = next(r for r in rows if r["number"] == 12822)
     assert owned["state"].startswith("red: test") and "unowned" not in owned["state"]
     assert "owner: ci-repair-agent" in owned["owner"] and not owned["actions"]
+    assert owned["next"] == "await existing owner terminal"
     assert "unowned" in unowned["state"] and "ci-repair-agent" in unowned["actions"][0]
     assert "preserve existing incident ownership" not in unowned["actions"][0]
     text = report(composer, rows)
@@ -106,6 +107,7 @@ def test_stale_or_unbound_owner_is_unknown_not_known_live(lane, monkeypatch, cap
     row = rows[0]
     assert row["state"] == "red: test, ownership unknown"
     assert row["owner"] == "ownership unknown"
+    assert row["next"] == "reconcile ownership evidence"
     assert "reconcile ownership evidence before dispatch" in row["actions"][0]
     assert "owner: ci-repair-agent" not in report(lane[2], rows)
 

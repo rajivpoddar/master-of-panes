@@ -761,6 +761,7 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
         if claim_now and claim_now.get("ownership_unknown"):
             state += ", ownership unknown"
             owner = "ownership unknown"
+            nxt = "reconcile ownership evidence"
             actions.append(f"PR#{number}@{head} -> reconcile ownership evidence before dispatch; preserve incident custody")
         elif red_is_unowned(
             slot_label=bool(slots),
@@ -831,6 +832,8 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
         if state.endswith(", unowned"):
             state = state[: -len(", unowned")]
         owner = _claim_owner_label(claim)
+        if state.startswith("red:"):
+            nxt = "await existing owner terminal"
     if advisory_red:
         state += " (advisory red: " + ",".join(advisory_red[:3]) + ")"
     if codex and codex["outdated"]:
