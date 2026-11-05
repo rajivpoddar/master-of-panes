@@ -145,15 +145,6 @@
       "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
     },
     {
-      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-stop-group-runner.py",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 493,
-      "ownership_class": "shared-claude-pm-stop-group-runner",
-      "sha256": "4a19fd34e6eec5b9f556a2a71cbfb513d1400179749a75e68bd572d669ed07f7",
-      "source_path": "claude/hooks/pm-stop-group-runner.py"
-    },
-    {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-self-clear-stop.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -161,6 +152,15 @@
       "ownership_class": "shared-claude-pm-self-clear-stop",
       "sha256": "f7e99d7857cce7a2f5fd72fa5948d3bccc900c671e90a3c7ca4e7892fb92ab3c",
       "source_path": "claude/hooks/pm-self-clear-stop.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-stop-group-runner.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-stop-group-runner",
+      "sha256": "4a19fd34e6eec5b9f556a2a71cbfb513d1400179749a75e68bd572d669ed07f7",
+      "source_path": "claude/hooks/pm-stop-group-runner.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/hooks/pre-issue-create-audit.sh",
@@ -1746,7 +1746,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 189,
+    "selected_count": 190,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
