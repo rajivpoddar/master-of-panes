@@ -215,6 +215,43 @@ def test_foreign_or_unbound_acceptance_requires_safe_reconciliation(lane, mode):
     assert "Dispatch another worker" not in reason(result)
 
 
+@pytest.mark.parametrize("wait_kind", ["authority", "unavailable", "future"])
+def test_unbound_receipt_reconciliation_converges_to_documented_wait(lane, wait_kind):
+    receipt = {"status": "running", "run_id": "unrelated-run"}
+    evidence = {"receipt": receipt}
+    action = "Dispatch another worker for this item."
+    add(lane, 301, required_action=action, evidence_json=evidence)
+    add(lane, 302)
+    result, _ = invoke(lane)
+    assert result.get("decision") == "block" and "obligation:301 [classify]" in reason(result)
+    assert "Do not redispatch or replay" in reason(result)
+    blocker, disposition = {
+        "authority": ("Waiting for Rajiv approval in the original thread.", "held"),
+        "unavailable": ("Required correspondence evidence unavailable; retain the original receipt.", "unverified"),
+        "future": ("Review remains scheduled at the agreed evidence window.", "future"),
+    }[wait_kind]
+    args = [sys.executable, str(WRITER), "obligation-upsert", "--kind", "followup",
+            "--target-type", "task", "--target-id", "301", "--severity", "normal",
+            "--horizon", "daily", "--action", action, "--blocker", blocker, "--print-id"]
+    if wait_kind == "future":
+        evidence["review_reason"] = "Agreed review window for the unavailable correspondence evidence."
+        args += ["--next-review-at", FUTURE]
+    args += ["--evidence-json", json.dumps(evidence)]
+    recorded = subprocess.run(args, env=lane[2], capture_output=True, text=True)
+    assert recorded.returncode == 0 and recorded.stdout.strip() == "301", recorded.stdout + recorded.stderr
+    result, _ = invoke(lane)
+    assert result.get("decision") == "block" and "obligation:302 [runnable]" in reason(result)
+    assert f"obligation:301 [{disposition}]" in reason(result)
+    assert "obligation:301 [classify]" not in reason(result)
+    assert action not in reason(result)
+    resolve(lane, 302)
+    result, _ = invoke(lane)
+    assert result.get("decision") != "block" and f"obligation:301 [{disposition}]" in reason(result)
+    with closing(sqlite3.connect(lane[1])) as con, con:
+        status, retained = con.execute("SELECT status,evidence_json FROM obligations WHERE id=301").fetchone()
+    assert status == "open" and json.loads(retained)["receipt"] == receipt
+
+
 def test_inventory_excluded_without_hiding_waits(lane):
     add(lane, 301, kind="ready_pool")
     add(lane, 302, kind="triage_retained_scope")

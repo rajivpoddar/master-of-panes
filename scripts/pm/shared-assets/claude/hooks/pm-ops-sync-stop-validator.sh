@@ -97,7 +97,6 @@ def classify(row):
                              for k in ("threadId", "clientUserMessageId", "queuedSubmissionId")))
         if same and bound and identity and (native_queued or accepted in {"accepted", "queued", "running", "in progress"}):
             return "in_flight", "Accepted execution receipt retained; consume its real terminal, do not duplicate."
-        return "classify", "Reconcile this retained receipt against the current item and recorded native execution IDs. Do not redispatch or replay; if correspondence is unavailable, record that specific wait."
 
     wait = " ".join((blocker, compact(evidence.get("hold_reason")),
                      compact(evidence.get("review_reason")))).lower()
@@ -115,6 +114,11 @@ def classify(row):
     scheduled = re.match(r"\s*(review|observe|monitor|wait|await)\b", action.lower())
     if future and future > NOW and (review_reason or (blocker and scheduled)):
         return "future", f"Review {future.isoformat()}: {blocker or compact(review_reason)}"
+
+    # An unmatched receipt is not an exemption, but must not override a
+    # documented wait above or prevent reconciliation from converging to it.
+    if isinstance(receipt, dict):
+        return "classify", "Reconcile this retained receipt against the current item and recorded native execution IDs. Do not redispatch or replay; if correspondence is unavailable, record that specific wait."
 
     # Conditional customer/release work is never an unconditional effect.
     # A concrete cached blocker is visible; an unestablished prerequisite is
