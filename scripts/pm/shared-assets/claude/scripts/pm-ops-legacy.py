@@ -704,7 +704,7 @@ def continuation_upsert_refusal(*, kind, evidence, owner, required_action):
     return None
 
 
-def upsert_obligation(args: argparse.Namespace) -> int:
+def upsert_obligation(args: argparse.Namespace) -> int | None:
     # Validate BEFORE init_db()/connect(): a refused continuation upsert must write zero
     # rows and leave no partial state.
     _evidence_for_contract = parse_payload(args.evidence, args.evidence_json)
@@ -717,7 +717,7 @@ def upsert_obligation(args: argparse.Namespace) -> int:
     )
     if _refusal:
         print(f"REFUSED: {_refusal}", file=sys.stderr)
-        return 2
+        return None
     init_db()
     now = utc_now()
     evidence = parse_payload(args.evidence, args.evidence_json)
@@ -2684,11 +2684,10 @@ def main(argv: list[str]) -> int:
     elif args.cmd == "record":
         record_event(args)
     elif args.cmd == "obligation-upsert":
-        # Propagate ONLY the typed contract refusal (2). upsert_obligation also returns
-        # truthy values on SUCCESS (it reports the affected id), so a bare truthiness check
-        # would turn every successful upsert into a non-zero exit.
+        # A success returns the affected row ID, including 2. Only the distinct
+        # refusal result maps to CLI exit 2; never interpret an inserted ID as an exit code.
         _upsert_rc = upsert_obligation(args)
-        if _upsert_rc == 2:
+        if _upsert_rc is None:
             return 2
     elif args.cmd == "obligation-resolve":
         resolve_obligation(args)
