@@ -111,6 +111,54 @@ class MopAssignSlotClientTests(unittest.TestCase):
         self.assertEqual(posts[0][1], "/slots/3/assign-effect")
         self.assertEqual(posts[0][2]["task"], TASK_TEXT)
 
+    def test_successful_new_issue_assignment_posts_transition_fail_open(self) -> None:
+        sender = Path(self.temp.name) / "slack-send.sh"
+        sender.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$@\" > \"$CAPTURE_ARGS\"\n"
+            "cat > \"$CAPTURE_BODY\"\n"
+            "printf 'OK ts=1793899000.123456\\n'\n",
+            encoding="utf-8",
+        )
+        sender.chmod(0o755)
+        env = {
+            "MOP_PORT": str(self.port),
+            "PATH": "/usr/bin:/bin",
+            "MOP_ASSIGN_SLACK_SEND": str(sender),
+            "CAPTURE_ARGS": str(Path(self.temp.name) / "slack-args"),
+            "CAPTURE_BODY": str(Path(self.temp.name) / "slack-body"),
+        }
+        command = [
+            sys.executable, str(SCRIPT), "--slot", "3", "--issue", "8110",
+            "--branch", "fix/8110-assignment-boundary", "--task-file", str(self.task_file),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        terminal = json.loads(completed.stdout.strip())
+        self.assertEqual(terminal["status"], "assigned")
+        self.assertTrue(terminal["assignment_notice"]["posted"])
+        self.assertEqual(terminal["assignment_notice"]["thread_ts"], "1793899000.123456")
+        args = (Path(self.temp.name) / "slack-args").read_text(encoding="utf-8")
+        body = (Path(self.temp.name) / "slack-body").read_text(encoding="utf-8")
+        self.assertIn("C0ALZJHGE49", args)
+        self.assertIn("Issue 8110", body)
+        self.assertIn("slot 3", body)
+        self.assertNotIn("<@U0BNFGX2UAX>", body)
+
+    def test_assignment_succeeds_when_transition_post_fails(self) -> None:
+        sender = Path(self.temp.name) / "slack-send.sh"
+        sender.write_text("#!/bin/sh\\nexit 1\\n", encoding="utf-8")
+        sender.chmod(0o755)
+        env = {
+            "MOP_PORT": str(self.port),
+            "PATH": "/usr/bin:/bin",
+            "MOP_ASSIGN_SLACK_SEND": str(sender),
+        }
+        command = [sys.executable, str(SCRIPT), "--slot", "3", "--issue", "8110"]
+        completed = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout.strip())["status"], "assigned")
+
     def test_typed_refusal_exits_non_zero_and_names_the_sanctioned_path(self) -> None:
         self.server.responses = [(502, {
             "status": "refused",
