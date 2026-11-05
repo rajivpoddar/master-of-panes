@@ -6,6 +6,7 @@ import test from "node:test";
 import { Hono } from "hono";
 
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
+import { setPaneCheckExecutor } from "../src/sessionDelivery.js";
 import { MoPDatabase } from "../src/db.js";
 import {
   SUPERSEDED_REASON,
@@ -75,9 +76,11 @@ async function withRoute(
     db,
     createGhIssueOwnershipProjection({ runGh: gh.runner, repository: "Scribie/heydonna-app" }),
   );
+  setPaneCheckExecutor(async (target) => ({ state: "live", paneId: target }));
   try {
     await run(app, db);
   } finally {
+    setPaneCheckExecutor(null);
     db.close();
     rmSync(directory, { recursive: true, force: true });
   }

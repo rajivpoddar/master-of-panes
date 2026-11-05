@@ -8,6 +8,7 @@ import { Hono } from "hono";
 import { applyLabelsApi } from "./gh-labels-api-stub.js";
 
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
+import { setPaneCheckExecutor } from "../src/sessionDelivery.js";
 import { MoPDatabase, computeFamily2ReleaseDigest, slotAssignmentTuple } from "../src/db.js";
 import {
   createGhIssueOwnershipProjection,
@@ -200,9 +201,11 @@ async function withAssignmentRoute(
   const db = new MoPDatabase(config);
   const app = new Hono();
   registerAssignmentRoute(app, db, projection);
+  setPaneCheckExecutor(async (target) => ({ state: "live", paneId: target }));
   try {
     await run(app, db);
   } finally {
+    setPaneCheckExecutor(null);
     db.close();
     rmSync(directory, { recursive: true, force: true });
   }

@@ -6,6 +6,7 @@ import test from "node:test";
 import { Hono } from "hono";
 import { MoPDatabase } from "../src/db.js";
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
+import { setPaneCheckExecutor } from "../src/sessionDelivery.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 import {
   DEFAULT_DEV_SLOT_COUNT,
@@ -200,6 +201,7 @@ test("assignment HTTP accepts S8 and refuses S9 before mutation", async () => {
   try {
     const app = new Hono();
     registerAssignmentRoute(app, db);
+    setPaneCheckExecutor(async (target) => ({ state: "live", paneId: target }));
     const body = {
       task: "S6 bound fixture",
       repository_id: "github:heydonna-app/heydonna-app",
@@ -223,6 +225,7 @@ test("assignment HTTP accepts S8 and refuses S9 before mutation", async () => {
     assert.equal(refused.status, 400);
     assert.equal(db.getSlot(9), undefined);
   } finally {
+    setPaneCheckExecutor(null);
     db.close();
     rmSync(directory, { recursive: true, force: true });
   }

@@ -7,6 +7,7 @@ import { Hono } from "hono";
 
 import { registerAssignmentRoute } from "../src/assignmentRoute.js";
 import { MoPDatabase } from "../src/db.js";
+import { setPaneCheckExecutor } from "../src/sessionDelivery.js";
 import type { IssueOwnershipProjection, IssueProjectionOutcome } from "../src/issueProjection.js";
 import type { MoPConfig } from "../src/types.js";
 
@@ -61,10 +62,12 @@ function harness(): Harness {
   };
   const app = new Hono();
   registerAssignmentRoute(app, db, projection);
+  setPaneCheckExecutor(async (target) => ({ state: "live", paneId: target }));
   return { db, directory, calls, app };
 }
 
 function close(value: Harness): void {
+  setPaneCheckExecutor(null);
   value.db.close();
   rmSync(value.directory, { recursive: true, force: true });
 }
