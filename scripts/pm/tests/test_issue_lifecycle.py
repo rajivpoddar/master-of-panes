@@ -76,18 +76,22 @@ def test_partial_links_are_explicit_and_open_only():
     assert [(r['issue'], r['prs']) for r in m.detect(rows, [], [], merged, lambda n: False)] == [(1, [10]), (2, [10])]
 
 
-def test_sync_one_obligation_per_issue_and_failure_is_not_silent():
+def test_run_never_upserts_orphaned_issue_rows(tmp_path):
+    """Routine issue findings stay in the report/STATE (CTO C0ALZJHGE49 ts 1793883179.092259)."""
     m = load()
-    findings = m.detect([issue(1, 'status:in-review', 'status:done')], [], [], [], lambda n: False)
-    with patch.object(m.subprocess, 'run') as run:
-        m.sync(findings)
-        assert run.call_count == 1
-        argv = run.call_args.args[0]
-        assert argv[argv.index('--kind') + 1] == 'orphaned_issue'
-        assert argv[argv.index('--target-id') + 1] == '1'
-        assert argv[argv.index('--issue') + 1] == '1'
-        assert json.loads(argv[argv.index('--evidence-json') + 1])['reasons'] == ['done_open', 'unowned_lifecycle']
-        assert run.call_args.kwargs['check'] is True
+    assert not hasattr(m, 'sync')
+    findings_rows = [issue(1, 'status:in-review', 'status:done')]
+    state = tmp_path / 'state.json'
+    with patch.object(m, 'STATE', state), \
+         patch.object(m, 'collect', return_value=(findings_rows, [], [], [], lambda n: False)), \
+         patch.object(m, 'active_suppressions', return_value=set()), \
+         patch.object(m, 'recheck', return_value=dict(cursor=0)), \
+         patch.object(m.subprocess, 'run') as run:
+        doc = m.run()
+    assert run.call_count == 0
+    assert [r['issue'] for r in doc['findings']] == [1]
+    assert doc['findings'][0]['reasons'] == ['done_open', 'unowned_lifecycle']
+    assert any('#1: done_open, unowned_lifecycle' in line for line in doc['lines'])
 
 
 def test_collection_paginates_timeline_and_refuses_search_truncation():
@@ -101,7 +105,7 @@ def test_collection_paginates_timeline_and_refuses_search_truncation():
         assert query.call_args.args[1]['cursor'] == 'next'
 
 
-def test_failed_sync_does_not_advance_merge_cursor(tmp_path):
+def test_failed_recheck_does_not_advance_merge_cursor(tmp_path):
     m = load()
     state = tmp_path / 'state.json'
     state.write_text('{"since":"2026-10-26T00:00:00Z"}')
@@ -109,7 +113,7 @@ def test_failed_sync_does_not_advance_merge_cursor(tmp_path):
     # "unable to open database file" on origin/main 3352a18 as well).
     with patch.object(m, 'STATE', state), patch.object(m, 'collect', return_value=([], [], [], [], lambda n: False)), \
          patch.object(m, 'active_suppressions', return_value=set()), \
-         patch.object(m, 'sync', side_effect=RuntimeError('ledger unavailable')):
+         patch.object(m, 'recheck', side_effect=RuntimeError('ledger unavailable')):
         with pytest.raises(RuntimeError):
             m.run()
     assert json.loads(state.read_text())['since'] == '2026-10-26T00:00:00Z'

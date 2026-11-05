@@ -1447,6 +1447,13 @@ def classify(
     return buckets
 
 
+# Routine issue / Ready Pool membership kinds never create obligations (CTO
+# C0ALZJHGE49 thread 1793872014.789359, ts 1793883179.092259: "routine issues,
+# PR status and Ready Pool membership must NOT automatically create
+# obligations"). The triage report, manifest and GitHub issue state carry them.
+RETIRED_ROUTINE_KINDS = frozenset({"ready_pool", "priority_review", "backlog"})
+
+
 def pm_ops_upsert(
     kind: str,
     severity: str,
@@ -1457,6 +1464,8 @@ def pm_ops_upsert(
     *,
     horizon: str = "daily",
 ) -> None:
+    if kind in RETIRED_ROUTINE_KINDS:
+        return
     if not PM_OPS.exists():
         print(f"WARN pm-ops missing: {PM_OPS}", file=sys.stderr)
         return

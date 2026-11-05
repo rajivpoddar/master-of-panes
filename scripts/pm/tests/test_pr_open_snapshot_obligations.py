@@ -94,8 +94,8 @@ def test_sync_creates_pr_admission_when_unowned_and_unadmitted():
         created = prsnap.sync_pr_obligations([pr], mop_owned_prs=set())
     kinds = {c["kind"] for c in created}
     assert "pr_admission" in kinds
-    up_kinds = {call.kwargs["kind"] for call in up.call_args_list}
-    assert "pr_admission" in up_kinds
+    # Routine PR status is surfaced, never upserted (CTO ts 1793883179.092259).
+    up.assert_not_called()
     res_kinds = {call.kwargs["kind"] for call in res.call_args_list}
     # admission was created (not resolved) but red/merge_ask should resolve
     assert "pr_red_unowned" in res_kinds
@@ -110,6 +110,7 @@ def test_sync_creates_pr_red_unowned_when_required_gate_fails():
     kinds = {c["kind"] for c in created}
     assert "pr_red_unowned" in kinds
     assert "pr_admission" not in kinds  # ci-head label matches current head
+    up.assert_not_called()
 
 
 def test_sync_creates_pr_merge_ask_when_green_admitted_and_readiness_confirmed():
@@ -378,3 +379,70 @@ def test_ci_exempt_with_red_gate_gets_no_merge_ask_and_keeps_red():
     assert "pr_merge_ask" not in {c.kwargs["kind"] for c in up.call_args_list}
     assert "pr_merge_ask" in {c.kwargs["kind"] for c in res.call_args_list}
     assert prsnap.admission_hold(pr, {"pr_merge_ask": ask}) is None
+
+
+# --- routine PR status is surfaced through the live actions file, not rows ------------
+# CTO C0ALZJHGE49 thread 1793872014.789359, ts 1793883179.092259.
+
+
+def test_sync_surfaces_admission_and_red_without_upserting():
+    head = "c" * 40
+    unadmitted = _pr(300, head=head, checks=[_check("test", conclusion="FAILURE"), _check("e2e")])
+    surfaced = []
+    with patch.object(prsnap, "_obligation_upsert") as up, patch.object(prsnap, "_obligation_resolve"), \
+         patch.object(prsnap, "_resolve_stale_pr_obligations"), \
+         patch.object(prsnap, "_existing_obligation", return_value=None):
+        created = prsnap.sync_pr_obligations([unadmitted], mop_owned_prs=set(), surfaced=surfaced)
+    up.assert_not_called()
+    assert {(c["pr"], c["kind"]) for c in created} == {(300, "pr_admission"), (300, "pr_red_unowned")}
+    by_kind = {s["kind"]: s for s in surfaced}
+    assert set(by_kind) == {"pr_admission", "pr_red_unowned"}
+    assert by_kind["pr_admission"]["head"] == head
+    assert by_kind["pr_admission"]["action"].startswith("launch pm-admission-reviewer")
+    assert by_kind["pr_red_unowned"]["title"].startswith("PR #300 red at cccccccccccc")
+
+
+def test_merge_ask_is_still_an_obligation_row():
+    pr = _pr(301)
+    pr["files"] = [{"path": "docs-site/pages/faq.mdx"}]
+    surfaced = []
+    with patch.object(prsnap, "_obligation_upsert") as up, patch.object(prsnap, "_obligation_resolve"), \
+         patch.object(prsnap, "_resolve_stale_pr_obligations"), \
+         patch.object(prsnap, "_existing_obligation", return_value=None):
+        prsnap.sync_pr_obligations([pr], mop_owned_prs=set(), surfaced=surfaced)
+    assert [c.kwargs["kind"] for c in up.call_args_list] == ["pr_merge_ask"]
+    assert surfaced == []
+
+
+def test_write_live_pr_actions_is_atomic_and_fail_open(tmp_path):
+    import json as _json
+
+    target = tmp_path / "state" / "actions.json"
+    items = [{"pr": 1, "kind": "pr_admission", "head": "h", "title": "t", "action": "a"}]
+    assert prsnap.write_live_pr_actions(items, "2026-11-05T00:00:00Z", target) is True
+    doc = _json.loads(target.read_text())
+    assert doc == {"observed_at": "2026-11-05T00:00:00Z", "items": items}
+    assert not list(target.parent.glob("*.tmp"))
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    assert prsnap.write_live_pr_actions(items, "2026-11-05T00:00:00Z", blocker / "sub" / "a.json") is False
+
+
+def test_main_sync_writes_live_actions_file(tmp_path, capsys):
+    import json as _json
+
+    target = tmp_path / "actions.json"
+    pr = _pr(302)
+    with patch.object(prsnap, "LIVE_PR_ACTIONS_STATE", target), \
+         patch.object(prsnap, "fetch_mop_owned_prs", return_value=set()), \
+         patch.object(prsnap, "fetch_open_prs", return_value=[pr]), \
+         patch.object(prsnap, "_obligation_upsert") as up, patch.object(prsnap, "_obligation_resolve"), \
+         patch.object(prsnap, "_resolve_stale_pr_obligations"), \
+         patch.object(prsnap, "_existing_obligation", return_value=None), \
+         patch.object(sys, "argv", ["pr-open-snapshot.py", "--sync-obligations"]):
+        assert prsnap.main() == 0
+    up.assert_not_called()
+    out = _json.loads(capsys.readouterr().out)
+    assert out == {"obligations_synced": [], "live_pr_actions": [{"pr": 302, "kind": "pr_admission"}]}
+    doc = _json.loads(target.read_text())
+    assert [(i["pr"], i["kind"]) for i in doc["items"]] == [(302, "pr_admission")]

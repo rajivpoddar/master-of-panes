@@ -32,6 +32,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
         HOURLY_THREAD_STATE=str(tmp_path / "hourly-thread.json"),
         PR_OPEN_SNAPSHOT=str(tmp_path / "absent-snapshot.py"),
         PM_OPS_STOP_LOG=str(tmp_path / "stop.log"),
+        PR_OPEN_ACTIONS_STATE=str(tmp_path / "absent-pr-actions.json"),
     )
     return env
 

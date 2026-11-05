@@ -187,9 +187,9 @@ The hourly report extends this SAME section as `*Unblockable now / issue lifecyc
 ### Issue lifecycle dispositions (every hourly)
 Source: Rajiv, DM D0AMF0XE6TS thread 1793084931.341779, ts 1793086564.280889: "add the lifecycle reconciler to the hourly report and its corresponding processing skill. there's already a section there for it."
 
-The composer runs `issue-lifecycle.py`: GitHub/MoP reads only, with issue-keyed
-`orphaned_issue` upserts through the existing pm-ops CLI. Read ALL open
-`orphaned_issue` obligations from the canonical ledger, not only the report's
+The composer runs `issue-lifecycle.py`: GitHub/MoP reads only; findings are NOT
+upserted as `orphaned_issue` obligations (CTO C0ALZJHGE49 thread 1793872014.789359, ts 1793883179.092259: routine issues, PR status and Ready Pool membership do not create obligations). Read ALL findings from
+`~/.claude/state/issue-lifecycle.json` (`findings`), not only the report's
 top ten. Re-read each issue's live body/ACs, MoP ownership, PR references and
 blocker states. Choose exactly ONE disposition for each finding:
 

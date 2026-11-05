@@ -53,10 +53,11 @@ REWORK_OWNER_RE = re.compile(r"rework|block|revise", re.IGNORECASE)
 # IST, thread C0ALZJHGE49/1790707604.948989: "the pr's should never get
 # stuck" / "there's already an obligation system we have. reuse that instead
 # of adding a new hook"). Each open, non-draft, non-pm-blocked, non-slot-owned
-# PR gets up to three pm-ops obligation rows (one per concern below), created
-# and resolved through the existing writer so the existing
-# pm-ops-sync-stop-validator Stop hook surfaces them every PM turn like any
-# other due obligation. No new hook, no new cadence.
+# PR gets up to three concerns (below). Since CTO ts 1793883179.092259 only
+# pr_merge_ask is still written as a pm-ops row; pr_admission/pr_red_unowned
+# are surfaced through LIVE_PR_ACTIONS_STATE, which the existing
+# pm-ops-sync-stop-validator Stop hook renders every PM turn. No new hook,
+# no new cadence.
 PM_OPS_CLI = Path(
     __import__("os").environ.get("PM_OPS_CLI", str(Path.home() / ".claude/scripts/pm-ops.py"))
 )
@@ -71,6 +72,20 @@ PM_OPS_DB = Path(
 )
 GREEN_MIN_DURATION_SECONDS = 5 * 60
 OBLIGATION_KINDS = ("pr_admission", "pr_red_unowned", "pr_merge_ask")
+# Routine PR status no longer creates obligation rows (CTO C0ALZJHGE49 thread
+# 1793872014.789359, ts 1793883179.092259: routine issues, PR status and Ready
+# Pool membership must NOT automatically create obligations). The sync pass
+# writes these live PR actions to LIVE_PR_ACTIONS_STATE instead; the
+# pm-ops-sync-stop-validator Stop hook reads that file (fail-open) so the PM
+# still sees them every turn. Open rows of these kinds (PM claims/holds) are
+# still read and still resolved when the PR state clears.
+SURFACE_ONLY_KINDS = ("pr_admission", "pr_red_unowned")
+LIVE_PR_ACTIONS_STATE = Path(
+    __import__("os").environ.get(
+        "PR_OPEN_ACTIONS_STATE",
+        str(Path.home() / ".claude/state/pr-open-snapshot-actions.json"),
+    )
+)
 # PM claims ownership of an in-flight PR obligation (e.g. right after
 # launching ci-repair-agent on a red PR) with the one-liner documented in
 # .claude/rules/20-buddhi-pm.md §12b -- --owner names the claimant and
@@ -436,13 +451,37 @@ def _obligation_resolve(*, kind: str, pr: int, reason: str, head: str | None = N
     return outcomes
 
 
-def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int], observed_at: str | None = None) -> list[dict]:
-    """Create/resolve pr_admission|pr_red_unowned|pr_merge_ask obligations.
+def _surface(surfaced: list[dict] | None, *, kind: str, pr: int, head: str, title: str, action: str) -> None:
+    """Record a live PR action for the Stop hook instead of upserting a row."""
+    if surfaced is not None:
+        surfaced.append({"pr": pr, "kind": kind, "head": head, "title": title[:200], "action": action})
+
+
+def write_live_pr_actions(surfaced: list[dict], observed_at: str, path: Path | None = None) -> bool:
+    """Atomically write the live PR actions file. Best-effort; never raises."""
+    path = path or LIVE_PR_ACTIONS_STATE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({"observed_at": observed_at, "items": surfaced}, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+        return True
+    except Exception:
+        return False
+
+
+def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int], observed_at: str | None = None,
+                        surfaced: list[dict] | None = None) -> list[dict]:
+    """Surface pr_admission|pr_red_unowned live actions; create/resolve pr_merge_ask rows.
+
+    pr_admission / pr_red_unowned are routine PR status: they are appended to
+    `surfaced` (written to LIVE_PR_ACTIONS_STATE by main) and never upserted.
+    Existing open rows of those kinds (PM claims/holds) are still honoured and
+    resolved when the live state clears.
 
     Fails open: any gh/pm-ops error must never raise; a skipped sync just
     means the Stop hook's next due-obligation pass is unchanged, never a
-    block storm. Returns the list of {pr, kind, action} rows actually
-    upserted, for callers that want to report what was created.
+    block storm. Returns the list of {pr, kind} actions raised this pass.
     """
     created: list[dict] = []
     seen_open_prs: set[int] = set()
@@ -491,10 +530,9 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int], observed_at: s
                 )
                 created.append({"pr": number, "kind": "pr_merge_ask"})
             else:
-                _obligation_upsert(
-                    kind="pr_admission", pr=number, head=head, title=f"PR #{number} not admitted: {title}",
+                _surface(
+                    surfaced, kind="pr_admission", pr=number, head=head, title=f"PR #{number} not admitted: {title}",
                     action="launch pm-admission-reviewer now (PASS -> pm-admit-ci.sh same turn)",
-                    owner="PM",
                 )
                 created.append({"pr": number, "kind": "pr_admission"})
         else:
@@ -504,8 +542,8 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int], observed_at: s
             if _is_fresh_owner_claim(_existing_obligation("pr_red_unowned", number)):
                 pass  # e.g. ci-repair-agent already claimed this PR/head
             else:
-                _obligation_upsert(
-                    kind="pr_red_unowned", pr=number, head=head,
+                _surface(
+                    surfaced, kind="pr_red_unowned", pr=number, head=head,
                     title=f"PR #{number} red at {head[:12]}: {title}",
                     action="ci-repair-agent / e2e-failure-investigator / slot repro",
                 )
@@ -885,8 +923,11 @@ def main() -> int:
     raw_prs = fetch_open_prs(with_threads=not args.sync_obligations)
     claims = {} if args.sync_obligations else fetch_live_claims(raw_prs)
     if args.sync_obligations:
-        created = sync_pr_obligations(raw_prs, mop_owned_prs, observed_at=observed_at)
-        print(json.dumps({"obligations_synced": created}, indent=2))
+        surfaced: list[dict] = []
+        created = sync_pr_obligations(raw_prs, mop_owned_prs, observed_at=observed_at, surfaced=surfaced)
+        write_live_pr_actions(surfaced, observed_at)
+        print(json.dumps({"obligations_synced": [c for c in created if c["kind"] not in SURFACE_ONLY_KINDS],
+                          "live_pr_actions": [{"pr": s["pr"], "kind": s["kind"]} for s in surfaced]}, indent=2))
         return 0
     holds = {}
     for pr in raw_prs:

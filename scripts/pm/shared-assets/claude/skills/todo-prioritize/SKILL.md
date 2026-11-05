@@ -280,15 +280,9 @@ After approval in Rajiv-facing mode, or immediately in hourly-ops-audit mode whe
 
 The kanban file DOES include the "Rajiv merge queue" section (PM uses it internally to track in-review PRs awaiting Rajiv's merge). This section is intentionally absent from the Slack post in Step 6 — Rajiv reads merge queue separately via `gh pr list`.
 
-For each queued issue, upsert a PM ops `ready_pool` obligation, then render:
+Ready Pool membership lives in the issue (`status:todo` + Ready Pool frontmatter) and `ready_pool_select.py`; do NOT upsert a `ready_pool` obligation per queued issue (CTO C0ALZJHGE49 thread 1793872014.789359, ts 1793883179.092259: routine issues, PR status and Ready Pool membership do not create obligations). Render:
 
 ```bash
-python3 /Users/rajiv/.claude/scripts/pm-ops.py obligation-upsert \
-  --kind ready_pool --target-type issue --target-id <NNNN> --issue <NNNN> \
-  --owner pm --title "#<NNNN> <slug>" \
-  --action "Keep queued in Ready Pool until Skill(direct-assign) assigns or PM blocks it." \
-  --evidence "priority=<P0|P1|P2|P3>" --evidence "lane=<lane>" --evidence "preferred_slot=<slot|queued>"
-
 python3 /Users/rajiv/.claude/scripts/pm-ops.py sync --write --no-live --reason todo-prioritize
 ```
 

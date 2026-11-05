@@ -12,8 +12,9 @@ HOOK_INPUT="$(cat 2>/dev/null || true)"
 
 # Deterministic every-turn open-PR drive (Rajiv 2026-09-30 01:xx IST, thread
 # C0ALZJHGE49/1790707604.948989): the hourly/3h heartbeat alone recreates the
-# hourly gap this validator exists to close. Refresh the pr_admission /
-# pr_red_unowned / pr_merge_ask obligations here too, cached at 120s so
+# hourly gap this validator exists to close. Refresh the live PR actions file
+# (pr_admission / pr_red_unowned; no rows since CTO ts 1793883179.092259) and
+# the pr_merge_ask obligations here too, cached at 120s so
 # back-to-back Stop turns don't hammer GitHub, bounded to 8s, and fully
 # fail-open -- a gh/pm-ops error here must never block or fail this hook.
 HB_INSTALLED="/Users/rajiv/.claude/scripts/pm/heartbeat"  # MoP-installed collectors (manifest)
@@ -43,6 +44,7 @@ STATUS_JSON=$(python3 "$PM_OPS" status --format json --read-only 2>>"$LOG" || ec
 python3 - "$STATUS_JSON" "$HOOK_INPUT" <<'PYEOF'
 from __future__ import annotations
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -221,6 +223,8 @@ p0_actions = []
 due_actions = []
 continuation_actions = []
 deferred_pm_self_clear = []
+save_handoff_actions = []
+claimed_pr_keys = set()
 resolved_this_turn = False
 turn_started_at = current_turn_started_at()
 
@@ -270,6 +274,20 @@ try:
                  created_at ASC, id ASC
         """
     ).fetchall()
+    # Open PR-status rows still silence the live PR actions file: a PM claim
+    # (owner + future suppress_until) or a row this hook already renders.
+    claimed_pr_keys = {
+        (row["kind"], row["pr"])
+        for row in con.execute(
+            """
+            SELECT kind, pr FROM obligations
+            WHERE status='open' AND pr IS NOT NULL
+              AND kind IN ('pr_admission','pr_red_unowned')
+              AND suppress_until IS NOT NULL AND suppress_until != ''
+              AND suppress_until > strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            """
+        ).fetchall()
+    }
     if turn_started_at:
         resolved_this_turn = con.execute(
             """
@@ -322,10 +340,46 @@ try:
             f"obligation:{row['id']} {title} ({target}). {row['required_action']}"
         )
         due_actions.append(rendered_action)
+        if row["kind"] == "pm_save_handoff":
+            save_handoff_actions.append(rendered_action)
+        if row["pr"] is not None:
+            claimed_pr_keys.add((row["kind"], row["pr"]))
         if row["kind"] in NON_WAIVABLE_CONTINUATION_KINDS:
             continuation_actions.append(rendered_action)
 except Exception:
     sys.exit(0)
+
+# Live PR state (pr_admission / pr_red_unowned) comes from the pr-open-snapshot
+# actions file, not from obligation rows (CTO C0ALZJHGE49 ts
+# 1793883179.092259). Missing, stale or malformed file -> nothing (fail open).
+LIVE_PR_ACTIONS_MAX_AGE_SECONDS = 15 * 60
+live_pr_actions = []
+try:
+    actions_path = os.environ.get("PR_OPEN_ACTIONS_STATE") or os.path.expanduser(
+        "~/.claude/state/pr-open-snapshot-actions.json"
+    )
+    with open(actions_path, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    observed = parse_ts(doc.get("observed_at"))
+    age = (datetime.now(timezone.utc) - observed).total_seconds() if observed else None
+    if age is not None and 0 <= age <= LIVE_PR_ACTIONS_MAX_AGE_SECONDS:
+        for item in doc.get("items") or []:
+            kind, pr = item.get("kind"), item.get("pr")
+            if kind not in ("pr_admission", "pr_red_unowned") or not isinstance(pr, int):
+                continue
+            if (kind, pr) in claimed_pr_keys:
+                continue
+            title = str(item.get("title") or f"PR #{pr} {kind}")
+            live_pr_actions.append(
+                f"live-pr:{kind}:{pr} {title} (github_pr:{pr} pr:{pr}). {item.get('action') or ''}".rstrip()
+            )
+except Exception:
+    live_pr_actions = []
+if live_pr_actions:
+    # Same order as the former PR rows: after a pending save-handoff, before
+    # every other due obligation.
+    lead = [a for a in due_actions if a in save_handoff_actions]
+    due_actions = lead + live_pr_actions + [a for a in due_actions if a not in save_handoff_actions]
 
 hard = []
 if p0_actions:

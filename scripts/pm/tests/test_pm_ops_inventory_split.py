@@ -22,7 +22,8 @@ def _env(tmp_path: Path) -> dict[str, str]:
     env = dict(os.environ)
     env.update(PM_OPS_DB=str(tmp_path / "pm-ops.db"), PM_OPS=str(LEGACY),
                PR_OPEN_SNAPSHOT=str(tmp_path / "absent-snapshot.py"), PM_OPS_STOP_LOG=str(tmp_path / "stop.log"),
-               PR_SYNC_CACHE_STAMP=str(tmp_path / "stamp"))
+               PR_SYNC_CACHE_STAMP=str(tmp_path / "stamp"),
+               PR_OPEN_ACTIONS_STATE=str(tmp_path / "absent-pr-actions.json"))
     return env
 
 

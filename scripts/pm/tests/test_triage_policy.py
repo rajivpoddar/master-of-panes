@@ -103,6 +103,20 @@ class TriagePolicyTests(unittest.TestCase):
         run.assert_not_called()
         upsert.assert_not_called()
 
+    def test_routine_ready_pool_and_triage_kinds_never_create_obligations(self):
+        # CTO C0ALZJHGE49 ts 1793883179.092259: routine issues / Ready Pool membership.
+        with tempfile.TemporaryDirectory() as tmp, patch.object(bt, "PM_OPS", Path(tmp) / "pm-ops.py"), \
+             patch.object(bt, "run") as run:
+            (Path(tmp) / "pm-ops.py").write_text("")
+            for kind in ("ready_pool", "priority_review", "backlog"):
+                bt.pm_ops_upsert(kind, "high", "t", "a", 1234, "e", horizon="hourly")
+            buckets = {k: [] for k in ("todo_priority_label_drift", "backlog_promote_candidate", "backlog_metadata_missing")}
+            buckets["todo_priority_label_drift"].append({"number": 1, "reason": "drift"})
+            buckets["backlog_promote_candidate"].append({"number": 2})
+            buckets["backlog_metadata_missing"].append({"number": 3})
+            bt.upsert_triage_obligations(buckets, None)
+        run.assert_not_called()
+
     def test_p3_refills_only_deficit_after_all_higher_priorities(self):
         rows = [bt.promoter_row(issue(i, p), "clean_ready_pool") for i,p in [(1234,"P1"),(1235,"P2"),(1236,"P3"),(1237,"P3")]]
         self.assertEqual([r["number"] for r in bt.select_promotion_rows(rows, 8)], [1234,1235])

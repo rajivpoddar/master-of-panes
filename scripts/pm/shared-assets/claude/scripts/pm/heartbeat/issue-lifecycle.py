@@ -3,7 +3,8 @@
 
 Uses the existing Unblockable now section. Never changes labels or invents ACs.
 The first run backfills partial merges for 24h; all open issue timelines are
-checked regardless of age. A failed collection/upsert never advances the cursor.
+checked regardless of age. A failed collection/recheck never advances the cursor.
+Findings are not upserted as obligations (CTO C0ALZJHGE49 ts 1793883179.092259).
 """
 from __future__ import annotations
 
@@ -229,16 +230,6 @@ def collect(since):
     return issues, open_prs, slots, merged, known.get
 
 
-def sync(findings):
-    for row in findings:
-        subprocess.run([sys.executable, str(PM_OPS), 'obligation-upsert',
-            '--kind', 'orphaned_issue', '--severity', 'high', '--horizon', 'hourly',
-            '--target-type', 'github_issue', '--target-id', str(row['issue']), '--issue', str(row['issue']),
-            '--title', f'Issue #{row["issue"]}: ' + ', '.join(row['reasons']),
-            '--action', 'Read issue ACs; choose one: re-queue via ready-pool-contract-repair, close with evidence, unblock, or park with reason. Never invent ACs.',
-            '--evidence-json', json.dumps(row)], capture_output=True, text=True, timeout=30, check=True)
-
-
 def resolve_if_unclaimed(row_id, reason, updated_at=None, evidence_sha256=None):
     """Resolve one exact open orphaned_issue row unless it is claimed or changed.
 
@@ -428,7 +419,9 @@ def run(dry_run=False):
         if dry_run:
             would = recheck(findings, slots, open_prs, previous, cursor, write=False, now=now)
             return dict(dry_run=True, findings=actionable, lines=lines, would_resolve=would['resolved'], recheck=would)
-        sync(actionable)
+        # No orphaned_issue upsert: routine issue findings stay in this report and
+        # STATE only (CTO C0ALZJHGE49 ts 1793883179.092259). Existing rows still
+        # go through the guarded live recheck below.
         rechecked = recheck(findings, slots, open_prs, previous, cursor, now=now)
         doc = dict(since=now.strftime('%Y-%m-%dT%H:%M:%SZ'), findings=actionable, lines=lines,
                    scanned_since=since, reported_blockers_resolved=sorted(resolved),
