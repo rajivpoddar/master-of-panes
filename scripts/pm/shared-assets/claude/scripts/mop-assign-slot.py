@@ -114,11 +114,16 @@ def slot_state_after(payload: Any) -> str:
     return "unknown"
 
 
-def post_assignment_notice(issue: int, slot: int, task: str) -> dict[str, Any]:
-    """Post the new-issue transition as status; Slack failure never undoes assignment."""
-    sender = os.environ.get("MOP_ASSIGN_SLACK_SEND", "/Users/rajiv/.claude/skills/slack-message/scripts/slack-send.sh")
+def post_assignment_notice(
+    repository_id: str, issue: int, slot: int, assignment_epoch: int, priority: str, task: str,
+) -> dict[str, Any]:
+    """Post status for the committed assignment; Slack uncertainty never retries or undoes it."""
+    sender = os.environ.get("MOP_ASSIGN_SLACK_SEND", "/Users/rajiv/.claude/scripts/slack-send.sh")
     summary = next((line.strip() for line in task.splitlines() if line.strip()), "Assignment completed.")
-    body = f"Assignment: Issue {issue} assigned to slot {slot}.\n{summary}"
+    body = (
+        f"Assignment: {priority} {repository_id} issue {issue} assigned to slot {slot} "
+        f"(assignment epoch {assignment_epoch}).\n{summary}"
+    )
     try:
         result = subprocess.run(
             [sender, "-c", "C0ALZJHGE49", "-f"],
@@ -129,13 +134,17 @@ def post_assignment_notice(issue: int, slot: int, task: str) -> dict[str, Any]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        return {"posted": False, "reason": f"slack_send_failed:{type(error).__name__}"}
+        return {"posted": False, "delivery": "unknown", "reason": f"slack_send_failed:{type(error).__name__}"}
     if result.returncode != 0:
-        return {"posted": False, "reason": "slack_send_failed"}
+        return {"posted": False, "delivery": "unknown", "reason": "slack_send_failed"}
     for line in result.stdout.splitlines():
         if line.startswith("OK ts="):
-            return {"posted": True, "thread_ts": line.removeprefix("OK ts=").strip()}
-    return {"posted": False, "reason": "slack_receipt_missing"}
+            receipt = dict(part.split("=", 1) for part in line.split()[1:] if "=" in part)
+            thread_ts = receipt.get("ts")
+            channel = receipt.get("channel")
+            if thread_ts and channel:
+                return {"posted": True, "delivery": "sent", "thread_ts": thread_ts, "channel": channel}
+    return {"posted": False, "delivery": "unknown", "reason": "slack_receipt_missing"}
 
 
 def check_selection(args: argparse.Namespace) -> dict[str, Any]:
@@ -261,7 +270,32 @@ def main(argv: list[str] | None = None) -> int:
     if status == 200 and payload.get("status") == "assigned":
         terminal = {**payload, "selection_receipt": selection}
         if args.selection_class == "new_issue":
-            terminal["assignment_notice"] = post_assignment_notice(args.issue, args.slot, task)
+            # The returned committed assignment-effect receipt is the one-use
+            # custody: only idempotent=false may publish. Any resume (including
+            # an earlier UNKNOWN Slack outcome) records no-retry and never sends.
+            pick = selection.get("pick") if isinstance(selection, dict) else None
+            priority = pick.get("priority") if isinstance(pick, dict) else None
+            epoch = payload.get("assignment_epoch")
+            if payload.get("idempotent") is True:
+                terminal["assignment_notice"] = {
+                    "posted": False, "delivery": "not_retried", "reason": "assignment_effect_resume",
+                }
+            elif payload.get("idempotent") is not False:
+                terminal["assignment_notice"] = {
+                    "posted": False, "delivery": "unknown", "reason": "assignment_effect_custody_missing",
+                }
+            elif selection.get("status") != "ok":
+                terminal["assignment_notice"] = {
+                    "posted": False, "delivery": "not_attempted", "reason": "fresh_selection_receipt_missing",
+                }
+            elif not isinstance(priority, str) or not priority.strip() or not isinstance(epoch, int):
+                terminal["assignment_notice"] = {
+                    "posted": False, "delivery": "not_attempted", "reason": "committed_assignment_receipt_incomplete",
+                }
+            else:
+                terminal["assignment_notice"] = post_assignment_notice(
+                    args.repo_id, args.issue, args.slot, epoch, priority, task,
+                )
         return emit(terminal, 0)
     if payload.get("status") == "refused":
         return emit(payload, 2)
