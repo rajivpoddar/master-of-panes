@@ -179,7 +179,7 @@ def test_only_current_session_counts_after_clear(tmp_path):
     assert [r["description"] for r in doc["stale"]] == ["agent-current-too-old"]
     line = composer.agents_line(doc)
     assert line.startswith("*Agents:* 4 listed · 1 running · 1 completed · 1 inactive · 1 stale (quiet >3h or uncollected, oldest 3h)"
-                           " — PM stops C+I+stale in Step 3c: ")
+                           ": ")
     assert "ancient" not in line and "Pre clear" not in line
 
 
@@ -249,7 +249,7 @@ def test_shared_composer_orders_agents_and_exactly_one_decision_spacer(mode):
         # Live edit (Rajiv 2026-10-24): blank line before Agents and before Training.
         assert lines[i - 2] == "*Training:* no run active"
         assert lines[i - 3] == ""
-        assert lines[i - 4] == "*Agents:* 1 listed · 1 running · 0 completed · 0 inactive — PM stops C+I+stale in Step 3c"
+        assert lines[i - 4] == "*Agents:* 1 listed · 1 running · 0 completed · 0 inactive"
         assert lines[i - 5] == ""
         assert out.index("*Slots") < out.index("*Agents") < out.index(HEADER)
         assert not out.startswith(composer.CTO)

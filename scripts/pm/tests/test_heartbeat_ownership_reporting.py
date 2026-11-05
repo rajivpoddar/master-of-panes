@@ -69,11 +69,12 @@ def snapshot_rows(lane, monkeypatch, capsys, prs):
 def report(composer, rows):
     now = datetime(2026, 11, 5, 21, 46, tzinfo=timezone.utc)
     slots = {"slots": [{"slot": n, "occupied": True, "issue": issue, "assigned_at": "2026-11-05T20:00:00Z",
-                         "last_activity": now.isoformat(), "status": "working"}
+                         "last_activity": now.isoformat(), "active_turn_state": "active", "status": "working"}
                         for n, issue in enumerate([12674, 12034, 11995, 12791], 1)]}
     return composer.compose("1h", now, {"events": 4, "users": 1, "top": []}, {}, rows,
                             slots=slots, include_slots=True, agents={"running": 3, "completed": [], "inactive": []},
-                            training=("*Training:* retained metric", []), pending_actions=({}, {}))
+                            training=("*Training:* retained metric", []),
+                            pending_actions=({"backlog": 0, "items": []}, {"items": []}))
 
 
 def test_same_head_live_canonical_claim_and_true_unowned_remain_distinct(lane, monkeypatch, capsys):
