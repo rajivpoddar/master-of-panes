@@ -2513,7 +2513,8 @@ def print_status(args: argparse.Namespace) -> None:
     print(f"PM ops SQLite ledger needs sync: {', '.join(status['reasons'])}")
     print(f"DB: {status['db']}")
     print(f"pm-todo.md lines: {status['pm_todo_lines']}; open obligations: {status['open_obligations']}")
-    print(inventory_line(status["inventory_obligations"]))
+    if status.get("inventory_obligations") is not None:
+        print(inventory_line(status["inventory_obligations"]))
     print("Reconcile through the current PM workflow using MoP/GitHub and the supported heartbeat views.")
     print("Legacy background sync orchestration is retired; this status does not authorize a sweep.")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
