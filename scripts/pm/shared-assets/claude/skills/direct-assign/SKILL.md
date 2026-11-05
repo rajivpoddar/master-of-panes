@@ -255,12 +255,18 @@ Screenshots: use Skill(remote-editor-screenshots): remote-browser-box.sh capture
 ```
 Keep in sync with the MoP-side dispatch/handoff template.
 
-After successful `new_issue` assignment, post exactly one new top-level
-`#heydonna-dev` transition parent containing the issue, slot and assignment
-summary, with NO CTO @-mention (Rajiv 2026-09-28 15:34 IST, thread
+The canonical client automatically posts the `new_issue` assignment transition
+to `#heydonna-dev`, including repository, priority, issue, slot and committed
+assignment epoch, with NO CTO @-mention (Rajiv 2026-09-28 15:34 IST, thread
 `1790589863.207179`: *"this is an ack. why is this being sent to the cto? it's not required."*).
-Assignment notices are status, never a CTO wake. Record its `thread_ts`; all later PR transitions for
-that assignment reply in that thread. For `repro` and `rework`, reuse the
+Assignment notices are status, never a CTO wake. Read `assignment_notice` in the
+single JSON terminal. On `delivery=sent`, retain its native `thread_ts` and
+channel; do not post another parent. Later PR transitions reply in that thread.
+Slack failure does not undo the assignment. `unknown` and `not_retried` mean
+no automatic resend or repeated assignment; reconcile the native receipt and
+existing outbound record. Only a proven `not_attempted` notice may use the
+existing manual publisher after reconciling that exact assignment tuple.
+For `repro` and `rework`, reuse the
 existing authoritative PR transition thread when present and never create a
 new-issue parent. A missing or ambiguous thread mapping is a typed blocker and
 must not cause another assignment or delivery.
