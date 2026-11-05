@@ -1,0 +1,10 @@
+{
+  "artifact_sha256": "7dd0b84f6b4802ff4ec0fa248f3281221230cc9f183445922ee951c0c7edd45b",
+  "pr_heads": {
+    "12858": "c450050ba6df5fe16064a5851f9f8ef517d2b70b",
+    "12822": "e79b6b27810b99d9e5d86423dbef6ffbd103df4c"
+  },
+  "observed_agent_line": "*Agents:* 3 listed · 3 running · 0 completed · 0 inactive — PM stops C+I+stale in Step 3c",
+  "native_refusal": "HEARTBEAT_BLOCKED: `/tmp/heartbeat-1h-post.txt` contains a housekeeping instruction and incorrectly marks already-owned PRs #12858 and #12822 as unowned. Nothing posted.",
+  "metrics": {"active_users": 8, "errors": 4, "error_users": 1, "slots": 4, "agents_running": 3}
+}

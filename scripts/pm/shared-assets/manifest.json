@@ -672,7 +672,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "6c3a0545eb9e6fda43319797f04099e6bd75b20e0dd72f255f3e09e2239ad8e3",
+      "sha256": "4183ed3a6bf6014f784906f08add82a2094ff47747e2b09c5c180ccd486008f6",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -708,7 +708,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "f21a95bd4a475077f5c70b6de9d6d1c92acb81535874f58f2a00763859475030",
+      "sha256": "f324cdffaca51db2c8bc4b2c6fa131757bf4519c2b0a9980c269d54f7c0c440b",
       "source_path": "claude/scripts/pm/heartbeat/pr-open-snapshot.py"
     },
     {

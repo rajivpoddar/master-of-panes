@@ -148,10 +148,10 @@ def test_agent_collector_reads_tail_and_metadata_without_mutation(tmp_path):
     # Live edit (Rajiv 2026-10-25): quiet >3h (<=24h) agents are reported as stale, not dropped.
     assert [r["description"] for r in doc["stale"]] == ["agent-expired"]
     assert composer.agents_line(doc) == ("*Agents:* 5 listed · 1 running · 1 completed · 2 inactive · 1 stale (quiet >3h or uncollected, oldest 3h)"
-        " — PM stops C+I+stale in Step 3c: "
+        ": "
         "agent-done (completed, last write 30m ago), Review report (inactive 85m), specialist (inactive 70m)")
     plain = composer.agents_line({"running": 2, "inactive": [], "unreadable": 0})
-    assert plain == "*Agents:* 2 listed · 2 running · 0 completed · 0 inactive — PM stops C+I+stale in Step 3c"
+    assert plain == "*Agents:* 2 listed · 2 running · 0 completed · 0 inactive"
 
 
 def test_only_current_session_counts_after_clear(tmp_path):

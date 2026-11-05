@@ -16,6 +16,7 @@ import argparse
 import datetime
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 import urllib.request
@@ -139,7 +140,7 @@ def _obligation_upsert(*, kind: str, pr: int, head: str, title: str, action: str
         pass
 
 
-def _existing_obligation(kind: str, pr: int) -> dict | None:
+def _existing_obligation(kind: str, pr: int, *, strict: bool = False) -> dict | None:
     """Read-only lookup of the current open (kind, pr) row, or None.
 
     Used only to detect an agent's ownership claim before deciding whether to
@@ -147,6 +148,8 @@ def _existing_obligation(kind: str, pr: int) -> dict | None:
     unclaimed, same as today).
     """
     if not PM_OPS_DB.is_file():
+        if strict:
+            raise OSError("ownership ledger unavailable")
         return None
     try:
         import sqlite3
@@ -155,7 +158,7 @@ def _existing_obligation(kind: str, pr: int) -> dict | None:
         con.row_factory = sqlite3.Row
         row = con.execute(
             """
-            SELECT owner, updated_at, suppress_until, evidence_json FROM obligations
+            SELECT id, pr, owner, updated_at, suppress_until, evidence_json FROM obligations
             WHERE status='open' AND kind=? AND pr=?
             ORDER BY id DESC LIMIT 1
             """,
@@ -163,6 +166,8 @@ def _existing_obligation(kind: str, pr: int) -> dict | None:
         ).fetchone()
         con.close()
     except Exception:
+        if strict:
+            raise
         return None
     return dict(row) if row else None
 
@@ -219,17 +224,37 @@ def _claim_owner_label(claim: dict) -> str:
 
 
 def fetch_live_claims(prs: list[dict]) -> dict[int, dict]:
-    """Read-only: PR number -> PM wait over open pr_* obligation rows."""
+    """Read-only: bind canonical live claims to the fetched PR's exact head.
+
+    Owner text alone, an old-head claim, or a failed lookup cannot establish
+    live ownership. Keep that uncertainty visible instead of dispatching again.
+    """
     claims: dict[int, dict] = {}
     for pr in prs:
         number = pr.get("number")
         if not isinstance(number, int):
             continue
+        unknown = None
         for kind in OBLIGATION_KINDS:
-            claim = pm_wait_from_row(_existing_obligation(kind, number))
-            if claim:
-                claims[number] = claim
-                break
+            try:
+                row = _existing_obligation(kind, number, strict=True)
+                claim = pm_wait_from_row(row)
+                if not claim:
+                    continue
+                evidence = json.loads(row.get("evidence_json") or "{}")
+                recorded_head = evidence.get("head") if isinstance(evidence, dict) else None
+                if (isinstance(recorded_head, str) and re.fullmatch(r"[0-9a-f]{40}", recorded_head)
+                        and recorded_head == pr.get("headRefOid") and active_claim(row)):
+                    claims[number] = {**claim, "head": recorded_head, "row_id": row["id"]}
+                    break
+                unknown = {"owner": row.get("owner"), "ownership_unknown": True,
+                           "reason": "claim head missing/mismatched or live claim window expired"}
+            except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+                unknown = {"owner": "unknown", "ownership_unknown": True,
+                           "reason": "ownership evidence unavailable or malformed"}
+        else:
+            if unknown:
+                claims[number] = unknown
     return claims
 
 
@@ -733,13 +758,17 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
         number = pr.get("number")
         claim_now = (claims or {}).get(number)
         review_hold = bool((holds or {}).get(number)) or _has_12b_block(pr, head)
-        if red_is_unowned(
+        if claim_now and claim_now.get("ownership_unknown"):
+            state += ", ownership unknown"
+            owner = "ownership unknown"
+            actions.append(f"PR#{number}@{head} -> reconcile ownership evidence before dispatch; preserve incident custody")
+        elif red_is_unowned(
             slot_label=bool(slots),
             mop_owned=number in mop_owned_prs,
             pm_wait=bool(claim_now) or gates_pending or review_hold,
         ):
             state += ", unowned"
-            actions.append(f"PR#{number}@{head} -> {nxt}; preserve existing incident ownership")
+            actions.append(f"PR#{number}@{head} -> {nxt}; check existing incident custody before dispatch")
     elif gates_pending or (admitted and not gates_green and checks["pending"]):
         state, nxt = "CI running", "CI running" if stale_admission else "await terminal"
     elif gates_green:
@@ -793,7 +822,7 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
         actions.append(
             f"PR#{pr.get('number')}@{head} -> {nxt}; reconcile existing owner/ask custody first"
         )
-    if claim and (
+    if claim and not claim.get("ownership_unknown") and (
         state.endswith(", unowned")
         or state.startswith("red:")
         or state in ("not admitted", "stale admission")

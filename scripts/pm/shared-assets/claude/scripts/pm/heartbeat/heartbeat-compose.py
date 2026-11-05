@@ -740,7 +740,6 @@ def agents_line(doc: dict | None) -> str:
             f"{len(inactive)} inactive")
     if stale:
         line += f" · {len(stale)} stale (quiet >3h or uncollected, oldest {stale[0]['idle_min'] // 60}h)"
-    line += " — PM stops C+I+stale in Step 3c"
     names = [f"{_compact(r['description'], 64)} (completed, last write {r['idle_min']}m ago)" for r in completed]
     names += [f"{_compact(r['description'], 64)} (inactive {r['idle_min']}m)" for r in inactive]
     if names:
