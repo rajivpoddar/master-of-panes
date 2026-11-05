@@ -53,7 +53,10 @@ def classify(row):
     owner = compact(row.get("owner"))
     custody = " ".join(tokens(evidence.get(k)) for k in
                        ("state", "status", "outcome", "disposition", "delivery", "effect_state"))
-    receipt = evidence.get("handoff") or evidence.get("execution") or evidence.get("receipt")
+    records = [evidence[k] for k in ("receipt", "handoff", "execution")
+               if isinstance(evidence.get(k), dict)]
+    receipt = next((r for r in records if r.get("status") or r.get("state")),
+                   records[0] if records else None)
     if isinstance(receipt, dict):
         custody += " " + tokens(receipt.get("status") or receipt.get("state"))
     custody = custody.replace("root cause unknown", "")
@@ -64,18 +67,37 @@ def classify(row):
     if row.get("kind") == "pm-self-clear":
         return "held", "Legacy clear row superseded by the existing MoP save-handoff path."
 
-    # A bare owner/claim/wake is not an accepted handoff. Retain an actual
-    # native acceptance/run receipt, and reject a receipt naming another item.
+    # Receipt existence is not correspondence. Bind to this item or to its
+    # separately retained native execution IDs; every supplied binding must
+    # agree. Missing/foreign acceptance is a safe reconciliation, never resend.
     if isinstance(receipt, dict):
-        same = all(str(receipt[k]) == str(row.get(k)) for k in
-                   ("issue", "pr", "target_id") if k in receipt)
-        same = same and ("obligation_id" not in receipt or
-                         str(receipt["obligation_id"]) == str(row["id"]))
+        item = {"obligation_id": row["id"], "issue": row.get("issue"),
+                "pr": row.get("pr"), "target_id": row.get("target_id")}
+        identity_keys = ("threadId", "clientUserMessageId", "queuedSubmissionId",
+                         "submission_id", "run_id", "effect_id", "receipt_id")
+        supplied = [k for k in item if receipt.get(k) not in (None, "")]
+        same = all(str(receipt[k]) == str(item[k]) for k in supplied)
+        bound = bool(supplied) and same
+        for recorded in [evidence] + [r for r in records if r is not receipt]:
+            expected = [k for k in identity_keys if recorded.get(k) not in (None, "")]
+            if not expected:
+                continue
+            same_item = all(str(recorded[k]) == str(item[k]) for k in item
+                            if recorded.get(k) not in (None, ""))
+            matches = same_item and all(str(receipt.get(k)) == str(recorded[k]) for k in expected)
+            same = same and matches
+            bound = bound or matches
         accepted = tokens(receipt.get("status") or receipt.get("state"))
         identity = any(receipt.get(k) for k in
                        ("queuedSubmissionId", "submission_id", "run_id", "effect_id", "receipt_id"))
-        if same and identity and accepted in {"accepted", "queued", "running", "in progress"}:
+        native_queued = (accepted == "queued for task consumption" and
+                         receipt.get("queueAccepted") is True and
+                         receipt.get("executionOwnership") == "queued" and
+                         all(isinstance(receipt.get(k), str) and receipt[k].strip()
+                             for k in ("threadId", "clientUserMessageId", "queuedSubmissionId")))
+        if same and bound and identity and (native_queued or accepted in {"accepted", "queued", "running", "in progress"}):
             return "in_flight", "Accepted execution receipt retained; consume its real terminal, do not duplicate."
+        return "classify", "Reconcile this retained receipt against the current item and recorded native execution IDs. Do not redispatch or replay; if correspondence is unavailable, record that specific wait."
 
     wait = " ".join((blocker, compact(evidence.get("hold_reason")),
                      compact(evidence.get("review_reason")))).lower()

@@ -164,6 +164,54 @@ def test_claim_wake_or_wrong_unaccepted_receipt_does_not_handle(lane, extra):
     assert invoke(lane)[0].get("decision") == "block"
 
 
+def native_queue_receipt(**extra):
+    return {"status": "queued_for_task_consumption", "queueAccepted": True,
+            "executionOwnership": "queued", "queuedSubmissionId": "native-submission-A",
+            "clientUserMessageId": "native-client-A", "threadId": "existing-owner-A", **extra}
+
+
+@pytest.mark.parametrize("binding", ["item", "execution"])
+def test_actual_native_queue_success_waits_without_redispatch(lane, binding):
+    receipt = native_queue_receipt(**({"obligation_id": 301} if binding == "item" else {}))
+    evidence = {"receipt": receipt}
+    if binding == "execution":
+        evidence["execution"] = {k: receipt[k] for k in ("threadId", "clientUserMessageId", "queuedSubmissionId")}
+        evidence["execution"]["obligation_id"] = 301
+    add(lane, 301, required_action="Dispatch another worker for this item.", evidence_json=evidence)
+    add(lane, 302)
+    before = lane[1].read_bytes()
+    result, _ = invoke(lane)
+    assert result.get("decision") == "block" and "in_flight=1" in reason(result)
+    assert "obligation:302 [runnable]" in reason(result)
+    assert "Dispatch another worker" not in reason(result)
+    assert lane[1].read_bytes() == before
+    resolve(lane, 302)
+    result, _ = invoke(lane)
+    assert result.get("decision") != "block" and "in_flight=1" in reason(result)
+    with sqlite3.connect(lane[1]) as con:
+        assert con.execute("SELECT status FROM obligations WHERE id=301").fetchone()[0] == "open"
+
+
+@pytest.mark.parametrize("mode", ["copied_item", "missing_binding", "wrong_native_execution", "generic_unbound"])
+def test_foreign_or_unbound_acceptance_requires_safe_reconciliation(lane, mode):
+    receipt = native_queue_receipt()
+    evidence = {"receipt": receipt}
+    if mode == "copied_item":
+        receipt["obligation_id"] = 999
+    elif mode == "wrong_native_execution":
+        receipt["obligation_id"] = 301
+        evidence["execution"] = {"obligation_id": 301, "threadId": "another-owner-B",
+                                 "clientUserMessageId": "another-client-B", "queuedSubmissionId": "another-submission-B"}
+    elif mode == "generic_unbound":
+        evidence = {"receipt": {"status": "running", "run_id": "unrelated-run"}}
+    add(lane, 301, required_action="Dispatch another worker for this item.", evidence_json=evidence)
+    result, _ = invoke(lane)
+    assert result.get("decision") == "block" and "obligation:301 [classify]" in reason(result)
+    assert "in_flight=" not in reason(result)
+    assert "Do not redispatch or replay" in reason(result)
+    assert "Dispatch another worker" not in reason(result)
+
+
 def test_inventory_excluded_without_hiding_waits(lane):
     add(lane, 301, kind="ready_pool")
     add(lane, 302, kind="triage_retained_scope")
