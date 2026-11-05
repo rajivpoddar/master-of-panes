@@ -298,7 +298,10 @@ def test_stale_codex_label_with_zero_live_threads_is_not_a_wait_and_emits_action
     r = prsnap.classify_pr(pr)
     assert "codex" not in r["state"] and "codex" not in r["next"]
     assert r["next"] == "CTO merge ask"
-    assert r["actions"] == [f"stale pm-blocked:codex label PR#8400@{HEAD} (0 live Codex P0/P1 threads) -> remove label"]
+    assert r["actions"] == [
+        f"stale pm-blocked:codex label PR#8400@{HEAD} (0 live Codex P0/P1 threads) -> remove label",
+        f"PR#8400@{HEAD} -> CTO merge ask; reconcile existing owner/ask custody first",
+    ]
 
 
 def test_unresolved_codex_p1_thread_is_a_wait_even_without_label():
