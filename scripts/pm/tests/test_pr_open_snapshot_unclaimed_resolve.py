@@ -178,11 +178,12 @@ def test_row_rewritten_for_new_head_after_observation_survives(tmp_path):
 
 
 def test_writer_rechecks_fingerprint_between_select_and_write(tmp_path):
+    # pr_merge_ask: pr_admission is a continuation kind whose upsert requires an owner shape.
     db = str(tmp_path / "fp.db")
-    _upsert_head(db, "pr_admission", 9, "1" * 40)
+    _upsert_head(db, "pr_merge_ask", 9, "1" * 40)
     with _Env(db):
-        stale = prsnap._open_rows("pr_admission", 9)      # selected and verified
-        _upsert_head(db, "pr_admission", 9, "2" * 40)     # canonical upsert lands before the write
+        stale = prsnap._open_rows("pr_merge_ask", 9)      # selected and verified
+        _upsert_head(db, "pr_merge_ask", 9, "2" * 40)     # canonical upsert lands before the write
         with patch.object(prsnap, "_open_rows", return_value=stale):
-            assert prsnap._obligation_resolve(kind="pr_admission", pr=9, reason="r") == ["skipped_changed"]
-        assert prsnap._obligation_resolve(kind="pr_admission", pr=9, reason="r") == ["resolved"]
+            assert prsnap._obligation_resolve(kind="pr_merge_ask", pr=9, reason="r") == ["skipped_changed"]
+        assert prsnap._obligation_resolve(kind="pr_merge_ask", pr=9, reason="r") == ["resolved"]
