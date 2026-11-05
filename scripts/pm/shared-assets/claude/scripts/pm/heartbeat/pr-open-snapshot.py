@@ -739,6 +739,7 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
             pm_wait=bool(claim_now) or gates_pending or review_hold,
         ):
             state += ", unowned"
+            actions.append(f"PR#{number}@{head} -> {nxt}; preserve existing incident ownership")
     elif gates_pending or (admitted and not gates_green and checks["pending"]):
         state, nxt = "CI running", "CI running" if stale_admission else "await terminal"
     elif gates_green:
@@ -783,6 +784,15 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
         else:
             nxt = "PM 12b review"
     claim = (claims or {}).get(pr.get("number"))
+    if not claim and nxt in {
+        "PM 12b review", "12b done -> admit", "not admitted: no merge ask",
+        "CI-exempt -> merge ask", "CTO merge ask",
+    }:
+        # The existing report consumer drives this exact-head next edge. No
+        # obligation mirror is required, and an existing ask must not resend.
+        actions.append(
+            f"PR#{pr.get('number')}@{head} -> {nxt}; reconcile existing owner/ask custody first"
+        )
     if claim and (
         state.endswith(", unowned")
         or state.startswith("red:")

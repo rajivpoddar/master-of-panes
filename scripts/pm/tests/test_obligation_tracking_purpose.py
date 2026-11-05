@@ -46,6 +46,9 @@ def ledger(tmp_path, monkeypatch):
             suppress_until="2099-01-01T00:00:00Z" if kind == "customer_followup" else None,
         )
         ops.upsert_obligation(args)
+    # Apply the writer's existing idempotent horizon migration before taking
+    # preservation snapshots; this is fixture setup, not the collector effect.
+    ops.init_db()
     return ops
 
 
@@ -102,6 +105,15 @@ def test_pr_summary_keeps_red_actions_and_explicit_holds(monkeypatch, capsys):
     assert report["actions"]  # work remains visible without a second obligation
     hold = {"owner": "pm-hotfix-rework", "evidence_json": json.dumps({"head": head})}
     assert m.admission_hold(pr, {"pr_admission": hold})
+    assert not m.classify_pr(pr, set(), holds={99: "REWORK_QUEUED"})["actions"]
+    assert not m.classify_pr(pr, {99})["actions"]
+    unadmitted = dict(pr, number=100, labels=[], statusCheckRollup=[])
+    assert "12b" in m.classify_pr(unadmitted, set())["actions"][0]
+    green = dict(pr, number=101, statusCheckRollup=[
+        {"name": name, "conclusion": "SUCCESS", "status": "COMPLETED"}
+        for name in ("test", "e2e")],
+        ci_reconciliation={"pr": 101, "head_sha": head, "status": "resolved", "resolution": "merge_ready"})
+    assert "CTO merge ask" in m.classify_pr(green, set())["actions"][0]
 
 
 def test_triage_findings_do_not_mirror_into_ledger(ledger, monkeypatch):
