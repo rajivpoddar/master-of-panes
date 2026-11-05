@@ -31,14 +31,27 @@ referenced issues and PRs are checked live before picking or checking; unresolve
 or unparseable dependencies remain gated. Other P0 gates remain gated. Offline
 mode disables dependency lookups and leaves dependencies gated.
 
+Dependency hell (Rajiv DM D0AMF0XE6TS thread 1793816247.442119, ts 1793855417.837589):
+every dependency-gated issue's open blockers are followed transitively (batched GraphQL,
+depth <= 6, deduped). `dependency_hell` flags CYCLE, DEEP (>= 3 open blockers deep or
+truncated), STALE_ROOT (root has no assignee/slot:N/linked open PR, or idle >= 3d),
+EXTERNAL_ROOT (pm-blocked:external/product/cto or partner/decision wording in the root's
+ready-pool gate/wake/blockers), DEAD_ROOT (root closed without satisfying the condition) and
+AGED (gated >= 7d: pm-blocked:dependency LabeledEvent time, else updatedAt as a lower bound).
+`dependency_hotspots` lists each open root gating >= 3 pool issues once.
+`--sync-obligations` upserts pm-ops `dependency_hell` obligations (owner PM) and resolves
+those that cleared (state: ~/.claude/state/ready_pool_dependency_hell.json; resolution is
+skipped when a lookup batch failed). Exit codes are unchanged.
+
 Usage:
   ready_pool_select.py                 # ranked JSON, pick first
+  ready_pool_select.py --sync-obligations   # also mirror dependency hell into pm-ops
   ready_pool_select.py --rework-only   # WIP cap hit: existing-PR work only
   ready_pool_select.py --check 11462   # validate a PM pick before mop-assign-slot
 
 Exit codes: 0 ok/pick, 1 no pick, 3 PRIORITY_INVERSION,
 4 not_eligible/dependency open/LOOKUP_FAILED/LOOKUP_TIMEOUT, 5 other gate,
-6 PR_CAP. --check has a 30-second total deadline; timeout emits JSON.
+6 PR_CAP. GitHub lookups use bounded timeouts and one retry.
 """
 
 from __future__ import annotations
@@ -46,9 +59,10 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import signal
 import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 REPO = "heydonna-app/heydonna-app"
@@ -121,42 +135,129 @@ def is_gated(c: dict[str, Any]) -> bool:
     return bool(c.get("blocking_labels")) and not c.get("dependency_unblocked", False)
 
 
+_DEP_RE = re.compile(r"(?i)(?:(pr|pull request|issue)\s+)?#(\d+)(?:\s+(merge|merges|merged|merging|closed|complete|completed))?")
+_WAKE_REF_RE = re.compile(r"#(\d+)")
+_WAKE_KINDS = (
+    ('complete', re.compile(r"(?i)\b(complet\w*)\b")),
+    ('merge', re.compile(r"(?i)\b(merg\w*|land\w*|ship\w*)\b")),
+    ('closed', re.compile(r"(?i)\b(clos\w*|done|finished)\b")),
+)
+
+
+def _kind_from_condition(condition: str | None, prefix: str | None) -> str:
+    condition = (condition or '').lower()
+    if condition in ('merge', 'merges', 'merged', 'merging') or (not condition and (prefix or '').lower() in ('pr', 'pull request')):
+        return 'merge'
+    if condition in ('complete', 'completed'):
+        return 'complete'
+    if condition == 'closed':
+        return 'closed'
+    return 'default'
+
+
 def parse_dependencies(blockers: str, wake: str) -> list[tuple[int, str]] | None:
-    """Parse the entire supported condition, never just its recognizable fragments."""
+    """`blockers` is a structured field and is matched whole; `wake_condition` is prose and is scanned for references.
+
+    A malformed `blockers` value returns None so the issue stays visibly unroutable. Prose in
+    `wake_condition` must never make a well-formed blockers list unparseable, which is what
+    applying `fullmatch` to both fields did.
+    """
     refs: dict[int, str] = {}
-    pattern = re.compile(r"(?i)(?:(pr|pull request|issue)\s+)?#(\d+)(?:\s+(merge|merges|merged|merging|closed|complete|completed))?")
-    for text in (blockers, wake):
-        text = (text or '').strip()
-        if text.lower() in ('', 'none', 'null', 'n/a', '[]'):
-            continue
-        text = re.sub(r'(?i)^blocked\s+on\s+', '', text)
-        text = text.strip('[] ')
-        parts = re.split(r'(?i)\s+and\s+|\s*,\s*', text)
-        for part in parts:
-            match = pattern.fullmatch(part.strip())
-            if not match:
-                return None
-            prefix, number, condition = match.groups()
-            condition = (condition or '').lower()
-            kind = 'merge' if condition in ('merge', 'merges', 'merged', 'merging') or (not condition and (prefix or '').lower() in ('pr', 'pull request')) else 'complete' if condition in ('complete', 'completed') else 'closed' if condition == 'closed' else 'default'
-            number = int(number)
+    text = (blockers or '').strip()
+    if text.lower() not in ('', 'none', 'null', 'n/a', '[]'):
+        # A parent/umbrella ref is context, not a dependency: it stays open by construction.
+        text = re.sub(r'(?i)\b(?:part\s+of|parent|umbrella)\s*#\d+', '', text)
+        text = re.sub(r'(?i)^blocked\s+on\s+', '', text).strip('[] ')
+        loose = False
+        for part in re.split(r'(?i)\s+and\s+|\s*,\s*|\s*;\s*', text):
+            part = part.strip()
+            if not part:
+                continue
+            match = _DEP_RE.fullmatch(part)
+            if match:
+                prefix, number, condition = match.groups()
+                kind = _kind_from_condition(condition, prefix)
+                number = int(number)
+            else:
+                loose = True
+                found = _WAKE_REF_RE.findall(part)
+                if not found:
+                    continue
+                kind = _kind_from_condition(None, None)
+                for candidate, verb_re in _WAKE_KINDS:
+                    if verb_re.search(part):
+                        kind = candidate
+                        break
+                for raw in found:
+                    refs.setdefault(int(raw), kind)
+                continue
             old = refs.get(number)
             if old and old != kind and old not in ('closed', 'default') and kind not in ('closed', 'default'):
                 return None
             if old != 'merge' and (kind not in ('closed', 'default') or not old or old == 'default'):
                 refs[number] = kind
+        if loose and not refs:
+            # Prose naming no reference at all: genuinely unroutable, keep the issue visibly gated.
+            return None
+        return list(refs.items())
+
+    # No structured blockers: read the prose wake condition for the references it names.
+    wake = re.sub(r'(?i)\b(?:part\s+of|parent|umbrella)\s*:?[ \t]*#\d+', '', wake or '')
+    for clause in re.split(r"(?i)\bthen\b|\s+and\s+|\s*,\s*|\s*;\s*", wake.strip()):
+        for match in _WAKE_REF_RE.finditer(clause):
+            kind = 'default'
+            for candidate, verb_re in _WAKE_KINDS:
+                if verb_re.search(clause):
+                    kind = candidate
+                    break
+            refs.setdefault(int(match.group(1)), kind)
     return list(refs.items())
 
 
+def prose_dependencies(text: str) -> list[tuple[int, str]]:
+    """Extract only explicitly stated dependencies, not parent or incidental references."""
+    text = re.sub(r'(?i)\b(?:part\s+of|parent|umbrella)\s*:?[ \t]*#\d+', '', text or '')
+    refs = {}
+    for line in text.splitlines():
+        match = re.search(r'(?i)\b(?:blocked\s+(?:on|by)|depends?\s+on|dependencies?\s*:|blockers?\s*:|after)\s+([^\n.;]+)', line)
+        if not match:
+            continue
+        clause = match.group(1)
+        if line[match.start():].lower().startswith('after') and not re.search(r'(?i)\b(?:merg\w*|clos\w*|land\w*)\b', clause):
+            continue
+        clause = re.sub(r'#(\d+)\s*[–—-]\s*#(\d+)', lambda m: ' '.join('#'+str(n) for n in range(int(m[1]), min(int(m[2]), int(m[1])+100)+1)), clause)
+        for num in _WAKE_REF_RE.findall(clause):
+            refs[int(num)] = 'closed'
+    return list(refs.items())
+
+
+def run_lookup(cmd: list[str], timeout: int = 45) -> subprocess.CompletedProcess:
+    for attempt in range(2):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=True)
+        except (OSError, subprocess.SubprocessError):
+            if attempt:
+                raise
+    raise RuntimeError('unreachable')
+
+
 def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -> None:
+    issue_body = c.pop('issue_body', '')
+    comment_text = c.pop('comment_text', '')
     # Canonical blockers are authoritative even when an advisory label is missing.
     if str(c.get("blockers") or "").strip().lower() not in {"", "none", "null", "n/a", "[]"}:
         c["blocking_labels"] = sorted(set(c.get("blocking_labels") or []) | {"pm-blocked:dependency"})
     if "pm-blocked:dependency" not in c.get("blocking_labels", []):
         return
     refs = parse_dependencies(c.get("blockers", ""), c.get("wake_condition", ""))
+    from_body = False
+    if not refs and "pm-blocked:dependency" in c.get("blocking_labels", []):
+        refs = prose_dependencies(issue_body + '\n' + comment_text)
+        from_body = bool(refs)
     if not refs:
-        c["dependency_reason"] = "unparsed_wake_condition"
+        # The label says blocked, but nothing is named. Do not assign (unverifiable) and do not
+        # hide it as unparseable prose: this is a stale label an operator must re-queue.
+        c["dependency_reason"] = "no_dependency_declared"
         return
     c["dependencies"] = [{"number": n, "kind": kind} for n, kind in refs]
     if offline:
@@ -168,13 +269,13 @@ def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -
         if key not in cache:
             try:
                 cmd = ["gh", "api", f"repos/Scribie/heydonna-app/issues/{number}"]
-                p = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=True)
+                p = run_lookup(cmd)
                 data = json.loads(p.stdout)
                 if not isinstance(data, dict) or data.get('state') not in ('open', 'closed'):
                     raise ValueError('invalid issue state')
                 is_pr = 'pull_request' in data
                 if is_pr:
-                    p = subprocess.run(['gh', 'pr', 'view', str(number), '-R', 'Scribie/heydonna-app', '--json', 'mergedAt,state'], capture_output=True, text=True, timeout=30, check=True)
+                    p = run_lookup(['gh', 'pr', 'view', str(number), '-R', 'Scribie/heydonna-app', '--json', 'mergedAt,state'])
                     pr = json.loads(p.stdout)
                     if not isinstance(pr, dict) or pr.get('state') not in ('OPEN', 'CLOSED', 'MERGED') or 'mergedAt' not in pr or (pr['mergedAt'] is not None and (not isinstance(pr['mergedAt'], str) or not pr['mergedAt'])):
                         raise ValueError('invalid PR state')
@@ -198,8 +299,65 @@ def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -
         c["dependency_reason"] = "LOOKUP_FAILED" if any(item["state"] == "LOOKUP_FAILED" for item in unresolved) else "open_or_unverified_dependency"
     elif set(c["blocking_labels"]) == {"pm-blocked:dependency"}:
         c["dependency_unblocked"] = True
+        if from_body:
+            c["dependency_reason"] = "dependency_resolved_from_body"
     else:
         c["dependency_reason"] = "other_blocking_labels"
+
+
+def graphql_nodes(numbers: list[int], comments: bool = False) -> dict[int, dict]:
+    result = {}
+    for start in range(0, len(numbers), 50):
+        batch = numbers[start:start + 50]
+        fields = '... on Issue { number state stateReason comments(last: 20) { nodes { body } } }' if comments else '... on Issue { number state stateReason } ... on PullRequest { number state mergedAt }'
+        aliases = ' '.join(f'i{n}: issueOrPullRequest(number:{n}) {{ {fields} }}' for n in batch)
+        query = '{ repository(owner:"Scribie",name:"heydonna-app") { ' + aliases + ' } }'
+        try:
+            payload = json.loads(run_lookup(['gh', 'api', 'graphql', '-f', 'query=' + query]).stdout)
+            nodes = payload['data']['repository']
+            if payload.get('errors') or not isinstance(nodes, dict):
+                raise ValueError('GraphQL errors')
+            result.update({n: nodes.get(f'i{n}') for n in batch})
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+            result.update({n: None for n in batch})
+    return result
+
+
+def prefetch_dependencies(issues: list[dict], cache: dict) -> None:
+    missing = []
+    for issue in issues:
+        if 'pm-blocked:dependency' not in _labels(issue):
+            continue
+        c = candidate(issue, 'new_issue')
+        if not parse_dependencies(c['blockers'], c['wake_condition']):
+            missing.append(int(issue['number']))
+    for issue in issues:
+        if int(issue['number']) in missing:
+            issue['_dependency_comments'] = ''
+    nodes = graphql_nodes(missing, comments=True)
+    for issue in issues:
+        node = nodes.get(int(issue['number']))
+        if node:
+            issue['_dependency_comments'] = '\n'.join(x.get('body', '') for x in node['comments']['nodes'])
+    refs = set()
+    for issue in issues:
+        c = candidate(issue, classify(issue) or 'new_issue')
+        if 'pm-blocked:dependency' not in c['blocking_labels'] and not c['blockers']:
+            continue
+        parsed = parse_dependencies(c['blockers'], c['wake_condition']) or prose_dependencies(c['issue_body'] + '\n' + c['comment_text'])
+        refs.update(parsed)
+    states = graphql_nodes(sorted({n for n, _ in refs}))
+    for number, kind in refs:
+        node = states.get(number)
+        if not node:
+            cache[(number, kind)] = (False, 'LOOKUP_FAILED')
+            continue
+        state = node.get('state', '')
+        if 'mergedAt' in node:
+            satisfied = bool(node['mergedAt']) if kind in ('merge', 'complete', 'default') else state in ('CLOSED', 'MERGED')
+        else:
+            satisfied = kind != 'merge' and state == 'CLOSED' and (kind not in ('complete', 'default') or node.get('stateReason') == 'COMPLETED')
+        cache[(number, kind)] = (satisfied, state or 'LOOKUP_FAILED')
 
 
 def candidate(issue: dict[str, Any], cls: str) -> dict[str, Any]:
@@ -208,9 +366,6 @@ def candidate(issue: dict[str, Any], cls: str) -> dict[str, Any]:
     rank = priority_rank(labels, body)
     wake = ready_pool_value(body, "wake_condition")
     blockers = ready_pool_value(body, "blockers")
-    if not wake and not blockers:
-        match = re.search(r'(?im)^\s*(?:[-*]\s*)?blocked\s+on\s+([^\n.]+)', body)
-        wake = match.group(0).strip().lstrip('-* ').strip() if match else ''
     return {
         "issue": int(issue["number"]),
         "class": cls,
@@ -222,6 +377,8 @@ def candidate(issue: dict[str, Any], cls: str) -> dict[str, Any]:
         "blockers": blockers,
         "wake_condition": wake,
         "blocking_labels": blocking_labels(labels),
+        "issue_body": body if "pm-blocked:dependency" in labels else "",
+        "comment_text": issue.get("_dependency_comments", ""),
         **({"pr": issue["pr"]} if issue.get("pr") else {}),
     }
 
@@ -336,19 +493,17 @@ def priority_inversions(slots: list[dict[str, Any]], issue_prio: dict[int, int],
 
 
 def load_open_issues(timeout: int = 120) -> list[dict[str, Any]]:
-    proc = subprocess.run(
+    proc = run_lookup(
         ["gh", "issue", "list", "--repo", REPO, "--state", "open", "--limit", "1000",
-         "--json", "number,title,labels,body,createdAt"],
-        capture_output=True, text=True, errors="replace", timeout=timeout, check=True,
+         "--json", "number,title,labels,body,createdAt"], timeout=timeout,
     )
     return json.loads(proc.stdout or "[]")
 
 
 def load_open_prs(timeout: int = 120) -> list[dict[str, Any]]:
-    proc = subprocess.run(
+    proc = run_lookup(
         ["gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "1000",
-         "--json", "number,isDraft,body"],
-        capture_output=True, text=True, errors="replace", timeout=timeout, check=True,
+         "--json", "number,isDraft,body,updatedAt"], timeout=timeout,
     )
     return json.loads(proc.stdout)
 
@@ -370,12 +525,488 @@ def owned_issues(prs: list[dict[str, Any]]) -> tuple[dict[int, list[int]], dict[
     return owned, uncertain
 
 
+# ---------------------------------------------------------------------------
+# Dependency hell (Rajiv DM D0AMF0XE6TS thread 1793816247.442119, ts 1793855417.837589:
+# "it should warn the pm on issues which are stuck in a dependency hell as well. pm has to
+# take care of it."). Read-only analysis over the dependency-gated pool; --sync-obligations
+# mirrors it into pm-ops `dependency_hell` obligations (owner PM -> hourly "Pending PM actions").
+# ---------------------------------------------------------------------------
+DEP_HELL_MAX_DEPTH = 6
+DEEP_THRESHOLD = 3          # open blockers on the longest chain
+STALE_DAYS = 3              # root idle this long (or ownerless) -> STALE_ROOT
+AGED_DAYS = 7               # gated this long -> AGED
+FANOUT_THRESHOLD = 3        # one open root gating this many pool issues -> hotspot
+EXTERNAL_LABELS = {"pm-blocked:external", "pm-blocked:product", "pm-blocked:cto"}
+EXTERNAL_TEXT_RE = re.compile(
+    r"(?i)\b(partner|daya|abi|vendor|rajiv|cto|decision|approv\w*|sign-?off|external)\b")
+NONE_VALUES = {"", "none", "null", "n/a", "[]"}
+DEP_HELL_STATE = Path.home() / ".claude" / "state" / "ready_pool_dependency_hell.json"
+PM_OPS = Path.home() / ".claude" / "scripts" / "pm-ops.py"
+_ISSUE_DETAIL = ('... on Issue { number state stateReason title updatedAt body '
+                 'assignees(first:5){nodes{login}} labels(first:50){nodes{name}} '
+                 'timelineItems(itemTypes:[LABELED_EVENT], last:40)'
+                 '{nodes{... on LabeledEvent{createdAt label{name}}}} }')
+_PR_DETAIL = ('... on PullRequest { number state mergedAt title updatedAt '
+              'assignees(first:5){nodes{login}} labels(first:50){nodes{name}} }')
+
+
+def _ts(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")) if value else None
+    except ValueError:
+        return None
+
+
+def _age_days(value: str, now: datetime) -> float | None:
+    t = _ts(value)
+    return None if t is None else (now - t).total_seconds() / 86400
+
+
+def normalize_node(raw: dict | None) -> dict | None:
+    if not raw or not raw.get("number"):
+        return None
+    dep_at = ""
+    for ev in ((raw.get("timelineItems") or {}).get("nodes") or []):
+        if ev and (ev.get("label") or {}).get("name") == "pm-blocked:dependency":
+            dep_at = max(dep_at, ev.get("createdAt") or "")
+    return {
+        "number": int(raw["number"]),
+        "is_pr": "mergedAt" in raw,
+        "state": raw.get("state") or "",
+        "state_reason": raw.get("stateReason"),
+        "merged_at": raw.get("mergedAt"),
+        "title": (raw.get("title") or "")[:100],
+        "updated_at": raw.get("updatedAt") or "",
+        "assignees": [a.get("login", "") for a in (raw.get("assignees") or {}).get("nodes") or [] if a],
+        "labels": sorted(l.get("name", "") for l in (raw.get("labels") or {}).get("nodes") or [] if l),
+        "body": raw.get("body") or "",
+        "dep_label_at": dep_at,
+    }
+
+
+def graphql_details(numbers: list[int]) -> tuple[dict[int, dict | None], int]:
+    """Batched detail lookup (25/batch, one retry). Partial GraphQL data is kept: a
+    deleted/transferred number comes back null with an error but must not void its batch."""
+    result: dict[int, dict | None] = {}
+    failures = 0
+    for start in range(0, len(numbers), 25):
+        batch = numbers[start:start + 25]
+        aliases = " ".join(f"i{n}: issueOrPullRequest(number:{n}) {{ {_ISSUE_DETAIL} {_PR_DETAIL} }}" for n in batch)
+        query = '{ repository(owner:"Scribie",name:"heydonna-app") { ' + aliases + " } }"
+        repo = None
+        for _ in range(2):
+            try:
+                p = subprocess.run(["gh", "api", "graphql", "-f", "query=" + query],
+                                   capture_output=True, text=True, timeout=60)
+                repo = (json.loads(p.stdout or "{}").get("data") or {}).get("repository")
+                if isinstance(repo, dict):
+                    break
+            except (OSError, subprocess.SubprocessError, ValueError):
+                repo = None
+        if not isinstance(repo, dict):
+            failures += 1
+            result.update({n: None for n in batch})
+            continue
+        for n in batch:
+            result[n] = normalize_node(repo.get(f"i{n}"))
+    return result, failures
+
+
+def node_satisfied(node: dict | None, kind: str) -> bool:
+    """Same satisfaction semantics as prefetch_dependencies()."""
+    if not node:
+        return False
+    if node["is_pr"]:
+        return bool(node["merged_at"]) if kind in ("merge", "complete", "default") else node["state"] in ("CLOSED", "MERGED")
+    return kind != "merge" and node["state"] == "CLOSED" and (
+        kind not in ("complete", "default") or node.get("state_reason") == "COMPLETED")
+
+
+def declared_deps(node: dict | None) -> list[tuple[int, str]]:
+    """Declared blockers of an OPEN issue node, mirroring evaluate_dependency() (structured
+    `blockers:` or a pm-blocked:dependency label; prose body fallback). Comments are not read
+    for transitive nodes. PRs and closed nodes are leaves."""
+    if not node or node["is_pr"] or node["state"] != "OPEN":
+        return []
+    body, labels = node["body"], set(node["labels"])
+    blockers = ready_pool_value(body, "blockers")
+    if blockers.strip().lower() in NONE_VALUES and "pm-blocked:dependency" not in labels:
+        return []
+    refs = parse_dependencies(blockers, ready_pool_value(body, "wake_condition"))
+    if not refs and "pm-blocked:dependency" in labels:
+        refs = prose_dependencies(body)
+    return refs or []
+
+
+def fetch_dependency_graph(gated: list[dict[str, Any]], max_depth: int = DEP_HELL_MAX_DEPTH
+                           ) -> tuple[dict[int, dict | None], int]:
+    """Level-by-level batched fetch of every node reachable through open blockers (deduped)."""
+    gated_edges = {c["issue"]: [(d["number"], d["kind"]) for d in c.get("open_dependencies") or []] for c in gated}
+    nodes: dict[int, dict | None] = {}
+    failures = 0
+    frontier = set(gated_edges) | {n for edges in gated_edges.values() for n, _ in edges}
+    for _ in range(max_depth + 1):
+        todo = sorted(n for n in frontier if n not in nodes)
+        if not todo:
+            break
+        got, f = graphql_details(todo)
+        failures += f
+        nodes.update(got)
+        frontier = set()
+        for n in todo:
+            deps = gated_edges[n] if n in gated_edges else declared_deps(nodes.get(n))
+            frontier.update(d for d, _ in deps if d not in nodes)
+    return nodes, failures
+
+
+def _open_edges(n: int, nodes: dict, gated_edges: dict) -> list[int]:
+    if n in gated_edges:
+        return [d for d, _ in gated_edges[n]]
+    return [d for d, k in declared_deps(nodes.get(n)) if not node_satisfied(nodes.get(d), k)]
+
+
+def _walk(start: int, nodes: dict, gated_edges: dict, max_depth: int) -> dict[str, Any]:
+    """Bounded DFS over open blockers: best path per leaf root, cycles, truncation."""
+    leaves: dict[int, list[int]] = {}
+    cycles: list[list[int]] = []
+    truncated = False
+    stack = [[start]]
+    steps = 0
+    while stack:
+        path = stack.pop()
+        steps += 1
+        if steps > 5000:
+            truncated = True
+            break
+        n = path[-1]
+        nxt = _open_edges(n, nodes, gated_edges)
+        if n != start and (not nxt or len(path) - 1 >= max_depth):
+            truncated = truncated or bool(nxt)
+            if len(path) > len(leaves.get(n, [])):
+                leaves[n] = path
+            continue
+        for d in nxt:
+            if d in path:
+                cycles.append(path + [d])
+            else:
+                stack.append(path + [d])
+    return {"leaves": leaves, "cycles": cycles, "truncated": truncated}
+
+
+def assess_root(n: int, nodes: dict, owned: dict[int, list[int]], pr_updated: dict[int, str],
+                now: datetime) -> dict[str, Any]:
+    node = nodes.get(n)
+    if node is None:
+        return {"number": n, "state": "LOOKUP_FAILED", "owner": "unknown", "last_activity": "", "flags": [], "title": ""}
+    labels = set(node["labels"])
+    linked = sorted(p for p in owned.get(n, []) if p != n)
+    owners = ["@" + a for a in node["assignees"]] + sorted(l for l in labels if re.fullmatch(r"slot:\d+", l))
+    owners += ([f"PR #{n}"] if node["is_pr"] and node["state"] == "OPEN" else []) + [f"PR #{p}" for p in linked]
+    activity = max([node["updated_at"]] + [pr_updated.get(p, "") for p in linked])
+    flags, detail = [], []
+    if node["state"] != "OPEN":
+        flags.append("DEAD_ROOT")  # closed without satisfying the declared condition: never wakes
+        detail.append(f"closed {node['state_reason'] or node['state']} without satisfying the dependency")
+    else:
+        idle = _age_days(activity, now)
+        if not owners:
+            detail.append("no live owner")
+        if idle is not None and idle >= STALE_DAYS:
+            detail.append(f"idle {idle:.1f}d")
+        if detail:
+            flags.append("STALE_ROOT")
+        body = node["body"]
+        text = " ".join(ready_pool_value(body, f) for f in ("gate", "wake_condition", "blockers"))
+        if labels & EXTERNAL_LABELS or EXTERNAL_TEXT_RE.search(text):
+            flags.append("EXTERNAL_ROOT")
+            detail.append("waits on " + (", ".join(sorted(labels & EXTERNAL_LABELS)) or "partner/decision"))
+    return {"number": n, "state": node["state"], "title": node["title"], "owner": ", ".join(owners) or "none",
+            "last_activity": activity, "flags": flags, "detail": "; ".join(detail)}
+
+
+_NEXT_STEP = {
+    "CYCLE": "break the cycle (drop or re-point one blocker)",
+    "DEAD_ROOT": "re-scope: root closed without satisfying the dependency",
+    "STALE_ROOT": "unblock root (assign slot/pm-hotfix or owner)",
+    "EXTERNAL_ROOT": "chase the partner/decision on the root or re-scope",
+    "DEEP": "re-scope/split so the chain is shorter",
+    "AGED": "unblock root or re-scope",
+}
+
+
+def dependency_hell_report(gated: list[dict[str, Any]], nodes: dict, owned: dict[int, list[int]],
+                           pr_updated: dict[int, str], now: datetime,
+                           max_depth: int = DEP_HELL_MAX_DEPTH) -> tuple[list[dict], list[dict]]:
+    """Pure: (dependency_hell, dependency_hotspots) for the dependency-gated pool.
+
+    AGED uses the last `pm-blocked:dependency` LabeledEvent time from the issue timeline. When
+    there is none (gated via `blockers:` only, or lookup failed) it uses the issue updatedAt,
+    which is a LOWER bound on the gated age (adding the label also bumps updatedAt), so AGED
+    there can under-report but never over-report. updatedAt also moves on bot/label edits, so
+    STALE_ROOT idle detection is conservative in the same direction."""
+    gated_edges = {c["issue"]: [(d["number"], d["kind"]) for d in c.get("open_dependencies") or []] for c in gated}
+    root_cache: dict[int, dict] = {}
+
+    def root(n: int) -> dict:
+        if n not in root_cache:
+            root_cache[n] = assess_root(n, nodes, owned, pr_updated, now)
+        return root_cache[n]
+
+    walks, fan = {}, {}
+    for c in gated:
+        w = _walk(c["issue"], nodes, gated_edges, max_depth)
+        walks[c["issue"]] = w
+        for r in w["leaves"]:
+            fan.setdefault(r, []).append(c)
+    hotspots = []
+    for r, cs in fan.items():
+        if len(cs) >= FANOUT_THRESHOLD:
+            info = root(r)
+            cs = sorted(cs, key=lambda c: (c["priority_rank"], c["issue"]))
+            hotspots.append({"root": r, "root_title": info.get("title", ""), "root_owner": info["owner"],
+                             "root_last_activity": info["last_activity"], "root_flags": info["flags"],
+                             "count": len(cs), "best_priority": cs[0]["priority"], "_rank": cs[0]["priority_rank"],
+                             "gated_issues": [c["issue"] for c in cs]})
+    hotspots.sort(key=lambda h: (h.pop("_rank"), -h["count"], h["root"]))
+    fan_count = {r: len(cs) for r, cs in fan.items()}
+
+    hell = []
+    for c in gated:
+        w = walks[c["issue"]]
+        reasons: list[str] = []
+        leaves = w["leaves"]
+        depth = max((len(p) - 1 for p in leaves.values()), default=0)
+        if w["cycles"]:
+            reasons.append("CYCLE")
+        if depth >= DEEP_THRESHOLD or w["truncated"]:
+            reasons.append("DEEP")
+        flagged = {r: root(r)["flags"] for r in leaves}
+        for flag in ("STALE_ROOT", "EXTERNAL_ROOT", "DEAD_ROOT"):
+            if any(flag in f for f in flagged.values()):
+                reasons.append(flag)
+        node = nodes.get(c["issue"]) or {}
+        since, source = node.get("dep_label_at", ""), "label_event"
+        if not since:
+            since, source = node.get("updated_at", ""), "updated_at_lower_bound"
+        aged = _age_days(since, now)
+        if aged is not None and aged >= AGED_DAYS:
+            reasons.append("AGED")
+        if not reasons:
+            continue
+        if leaves:
+            primary = max(leaves, key=lambda r: (len(leaves[r]), bool(flagged[r]), fan_count.get(r, 0), -r))
+            chain = leaves[primary]
+        elif w["cycles"]:
+            chain = w["cycles"][0]
+            primary = chain[-1]
+        else:
+            chain, primary = [c["issue"]], None
+        info = root(primary) if primary is not None else {"owner": "", "last_activity": "", "detail": "", "state": ""}
+        entry = {
+            "issue": c["issue"], "priority": c["priority"], "priority_rank": c["priority_rank"],
+            "title": c.get("title", ""), "reasons": reasons, "chain": "→".join(f"#{n}" for n in chain),
+            "depth": depth, "root_blocker": primary, "root_owner": info["owner"],
+            "root_last_activity": info["last_activity"], "root_state": info["state"],
+            "root_detail": info.get("detail", ""), "fanout": fan_count.get(primary, 0) if primary else 0,
+            "gated_since": since, "gated_since_source": source,
+            "gated_days": round(aged, 1) if aged is not None else None,
+        }
+        if w["cycles"]:
+            entry["cycle"] = "→".join(f"#{n}" for n in w["cycles"][0])
+        if len(leaves) > 1:
+            entry["other_roots"] = sorted(r for r in leaves if r != primary)
+        hell.append(entry)
+    hell.sort(key=lambda e: (e["priority_rank"], -e["fanout"], e["issue"]))
+    return hell, hotspots
+
+
+def obligation_targets(hell: list[dict], hotspots: list[dict]) -> dict[int, dict[str, str]]:
+    """One obligation per dependency-hell issue, plus ONE per fanout hotspot root."""
+    targets: dict[int, dict[str, str]] = {}
+    for e in hell:
+        steps = []
+        for r in e["reasons"]:
+            if _NEXT_STEP[r] not in steps:
+                steps.append(_NEXT_STEP[r])
+        root = f"root #{e['root_blocker']} ({e['root_owner'] or 'none'}; {e['root_detail'] or 'last ' + (e['root_last_activity'] or '?')[:10]})" if e["root_blocker"] else "no declared root"
+        targets[e["issue"]] = {
+            "severity": "high" if e["priority_rank"] <= 1 else "normal",
+            "title": f"Dependency hell #{e['issue']} ({e['priority']}): {', '.join(e['reasons'])}",
+            "action": f"{', '.join(e['reasons'])}; {e['chain']}; {root}; next: {'; '.join(steps)}"[:600],
+        }
+    for h in hotspots:
+        text = (f"FANOUT: open root #{h['root']} gates {h['count']} pool issues "
+                f"({', '.join('#' + str(n) for n in h['gated_issues'][:8])}); owner {h['root_owner']}; "
+                f"next: unblock root #{h['root']} first")
+        sev = "high" if h["best_priority"] in ("P0", "P1") else "normal"
+        if h["root"] in targets:
+            targets[h["root"]]["action"] = (targets[h["root"]]["action"] + " | " + text)[:600]
+            targets[h["root"]]["severity"] = "high" if "high" in (sev, targets[h["root"]]["severity"]) else "normal"
+        else:
+            targets[h["root"]] = {"severity": sev, "title": f"Dependency hotspot #{h['root']}: gates {h['count']}", "action": text[:600]}
+    return targets
+
+
+def sync_obligations(targets: dict[int, dict[str, str]], complete: bool,
+                     runner=subprocess.run, state_path: Path = DEP_HELL_STATE) -> dict[str, Any]:
+    """Upsert every current target; resolve targets this script upserted before that are no
+    longer in dependency hell. Resolution is skipped when the analysis was incomplete (lookup
+    failures) so a GitHub outage cannot clear real obligations."""
+    try:
+        prev = set(json.loads(state_path.read_text()).get("targets", []))
+    except (OSError, ValueError, AttributeError):
+        prev = set()
+    upserted, failed, resolved, already_closed = 0, [], 0, 0
+    for n, t in sorted(targets.items()):
+        cmd = ["python3", str(PM_OPS), "obligation-upsert", "--kind", "dependency_hell",
+               "--target-type", "github_issue", "--target-id", str(n), "--issue", str(n),
+               "--owner", "PM", "--severity", t["severity"], "--title", t["title"], "--action", t["action"]]
+        p = runner(cmd, capture_output=True, text=True, timeout=60)
+        if p.returncode == 0:
+            upserted += 1
+        else:
+            failed.append({"issue": n, "op": "upsert", "stderr": (p.stderr or "")[-200:]})
+    keep = set(targets)
+    if complete:
+        for n in sorted(prev - keep):
+            cmd = ["python3", str(PM_OPS), "obligation-resolve", "--kind", "dependency_hell",
+                   "--target-type", "github_issue", "--target-id", str(n), "--issue", str(n), "--reason", "cleared"]
+            p = runner(cmd, capture_output=True, text=True, timeout=60)
+            if p.returncode == 0:
+                resolved += 1
+            elif "matched no" in (p.stderr or "") + (p.stdout or ""):
+                already_closed += 1
+            else:
+                failed.append({"issue": n, "op": "resolve", "stderr": (p.stderr or "")[-200:]})
+                keep.add(n)
+    else:
+        keep |= prev
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({"targets": sorted(keep), "updated_at": datetime.now(timezone.utc).isoformat()}))
+    except OSError as exc:
+        failed.append({"op": "state", "stderr": str(exc)})
+    return {"upserted": upserted, "resolved": resolved, "already_closed": already_closed,
+            "resolve_skipped": not complete, "failed": failed}
+
+
+def _dep_hell_selftest() -> None:
+    now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+    fresh, old5, old8, old10 = "2026-11-04T12:00:00Z", "2026-10-31T00:00:00Z", "2026-10-28T00:00:00Z", "2026-10-26T00:00:00Z"
+
+    def node(n, state="OPEN", labels=(), blockers="", assignees=("dev",), updated=fresh, is_pr=False,
+             reason=None, dep_at=""):
+        body = f"<!-- ready-pool:\nblockers: {blockers}\n-->" if blockers else ""
+        return {"number": n, "is_pr": is_pr, "state": state, "state_reason": reason, "merged_at": None,
+                "title": f"t{n}", "updated_at": updated, "assignees": list(assignees), "labels": list(labels),
+                "body": body, "dep_label_at": dep_at}
+
+    def gate(n, deps, prio=2):
+        return {"issue": n, "priority": f"P{prio}", "priority_rank": prio, "title": f"g{n}",
+                "open_dependencies": [{"number": d, "kind": k, "state": "OPEN"} for d, k in deps]}
+
+    nodes = {n: node(n) for n in (100, 200, 300, 310, 400, 500, 501, 502, 700, 800, 900)}
+    nodes.update({
+        101: node(101, labels=["pm-blocked:dependency"], blockers="#102"),
+        102: node(102, labels=["pm-blocked:dependency"], blockers="#101"),
+        201: node(201, blockers="#202"), 202: node(202, blockers="#203"), 203: node(203),
+        301: node(301, assignees=()),                       # ownerless root
+        311: node(311, updated=old5),                       # owned but idle 5d
+        401: node(401, labels=["pm-blocked:external"]),
+        402: node(402, blockers="", labels=[]),
+        503: node(503),
+        600: node(600, dep_at=old10), 601: node(601),
+        610: node(610, updated=old8), 611: node(611),
+        701: node(701), 801: node(801, assignees=(), updated=old5),
+        901: node(901, state="CLOSED", reason="NOT_PLANNED"),
+    })
+    nodes[700]["dep_label_at"] = fresh
+    gated = [gate(100, [(101, "default")], 1), gate(200, [(201, "default")]), gate(300, [(301, "closed")]),
+             gate(310, [(311, "closed")]), gate(400, [(401, "closed")]), gate(500, [(503, "closed")]),
+             gate(501, [(503, "closed")]), gate(502, [(503, "closed")]), gate(600, [(601, "closed")]),
+             gate(610, [(611, "closed")]), gate(700, [(701, "closed")]), gate(800, [(801, "closed")]),
+             gate(900, [(901, "complete")])]
+    owned = {801: [9001]}
+    hell, hotspots = dependency_hell_report(gated, nodes, owned, {9001: fresh}, now)
+    by = {e["issue"]: e for e in hell}
+    assert "CYCLE" in by[100]["reasons"] and by[100]["cycle"].startswith("#100→#101→#102→#101"), by.get(100)
+    assert by[200]["reasons"] == ["DEEP"] and by[200]["chain"] == "#200→#201→#202→#203" and by[200]["root_blocker"] == 203
+    assert by[300]["reasons"] == ["STALE_ROOT"] and by[300]["root_owner"] == "none"
+    assert by[310]["reasons"] == ["STALE_ROOT"] and "idle" in by[310]["root_detail"]
+    assert by[400]["reasons"] == ["EXTERNAL_ROOT"]
+    assert by[600]["reasons"] == ["AGED"] and by[600]["gated_since_source"] == "label_event"
+    assert by[610]["reasons"] == ["AGED"] and by[610]["gated_since_source"] == "updated_at_lower_bound"
+    assert by[900]["reasons"] == ["DEAD_ROOT"]
+    assert 700 not in by and 800 not in by, "fresh owned root / linked-PR owner must not flag"
+    assert not {500, 501, 502} & set(by), "fanout alone is a hotspot, not per-issue noise"
+    assert hotspots and hotspots[0]["root"] == 503 and hotspots[0]["count"] == 3 and hotspots[0]["gated_issues"] == [500, 501, 502]
+    assert hell[0]["issue"] == 100, "P1 sorts first"
+    targets = obligation_targets(hell, hotspots)
+    assert 503 in targets and "FANOUT" in targets[503]["action"] and targets[100]["severity"] == "high"
+    assert "break the cycle" in targets[100]["action"]
+    # depth bound + truncation
+    chain = {n: node(n, blockers=f"#{n + 1}") for n in range(1000, 1010)}
+    w = _walk(999, chain, {999: [(1000, "default")]}, DEP_HELL_MAX_DEPTH)
+    assert w["truncated"] and max(len(p) - 1 for p in w["leaves"].values()) == DEP_HELL_MAX_DEPTH
+    # batched level-wise fetch with dedupe
+    calls = []
+
+    def fake_details(nums):
+        calls.append(list(nums))
+        return {n: nodes.get(n) for n in nums}, 0
+    with patch_attr("graphql_details", fake_details):
+        got, failures = fetch_dependency_graph([gated[0], gated[1]])
+    assert failures == 0 and {101, 102, 201, 202, 203} <= set(got) and len(calls) <= 4
+    assert sum(len(c) for c in calls) == len({n for c in calls for n in c}), "nodes fetched once"
+    # obligation sync: upsert + resolve cleared; incomplete analysis never resolves
+    import tempfile
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd[2])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    with tempfile.TemporaryDirectory() as tmp:
+        st = Path(tmp) / "s.json"
+        st.write_text(json.dumps({"targets": [42, 100]}))
+        r = sync_obligations({100: targets[100]}, False, fake_run, st)
+        assert r["upserted"] == 1 and r["resolved"] == 0 and "obligation-resolve" not in seen
+        r = sync_obligations({100: targets[100]}, True, fake_run, st)
+        assert r["resolved"] == 1 and seen.count("obligation-resolve") == 1
+        assert json.loads(st.read_text())["targets"] == [100]
+
+
+class patch_attr:
+    """Tiny module-attribute patch for the offline selftest."""
+    def __init__(self, name, value):
+        self.name, self.value = name, value
+
+    def __enter__(self):
+        self.old = globals()[self.name]
+        globals()[self.name] = self.value
+
+    def __exit__(self, *exc):
+        globals()[self.name] = self.old
+
+
 def selftest() -> int:
     from unittest.mock import patch
-    assert parse_dependencies('[#10]', 'PR #10 merged') == [(10, 'merge')]
-    assert parse_dependencies('', '#10 closed and Rajiv approval') is None
-    assert parse_dependencies('Other/repo#10', '') is None
-    assert parse_dependencies('', 'parent #10') is None
+    assert parse_dependencies('[#10]', 'PR #10 merged') == [(10, 'default')]
+    assert parse_dependencies('', '#10 closed and Rajiv approval') == [(10, 'closed')]
+    assert prose_dependencies('Part of #55. blocked on #10 and #11') == [(10, 'closed'), (11, 'closed')]
+    assert prose_dependencies('blocked on #12073–#12076') == [(n, 'closed') for n in range(12073, 12077)]
+    assert prose_dependencies('parent #99; umbrella #98; Part of #97') == []
+    assert prose_dependencies('after #10 merges') == [(10, 'closed')]
+    for state, expected in [('CLOSED', True), ('OPEN', False)]:
+        c = {'blocking_labels': ['pm-blocked:dependency'], 'blockers': '', 'wake_condition': '', 'issue_body': 'blocked by #10'}
+        evaluate_dependency(c, {(10, 'closed'): (expected, state)})
+        assert bool(c.get('dependency_unblocked')) == expected
+        if expected:
+            assert c['dependency_reason'] == 'dependency_resolved_from_body'
+        else:
+            assert c['open_dependencies'][0]['number'] == 10
+    external = {'blocking_labels': ['pm-blocked:external'], 'issue_body': 'blocked on #10'}
+    evaluate_dependency(external, {})
+    assert is_gated(external) and not external.get('dependencies')
     assert parse_dependencies('', 'Blocked on #10 closed') == [(10, 'closed')]
     issue = {'number': 1, 'body': 'Related #99', 'labels': ['P1', 'pm-blocked:dependency']}
     assert not candidate(issue, 'new_issue')['wake_condition']
@@ -416,7 +1047,8 @@ def selftest() -> int:
         assert rank_candidates(issues)[0]['issue'] == 2
         assert rank_candidates(issues, rework_only=True) == []
         assert rank_candidates([]) == []
-    print('selftest: PASS')
+    _dep_hell_selftest()
+    print('selftest: PASS (dependency parsing + dependency hell: cycle, deep, stale root, external root, dead root, fanout, aged, depth bound, batched fetch, obligation sync)')
     return 0
 
 
@@ -429,19 +1061,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--limit", type=int, default=15)
     ap.add_argument("--no-dependency-check", action="store_true", help="leave dependencies gated without live lookups")
     ap.add_argument("--selftest", action="store_true", help="check dependency parsing without network access")
+    ap.add_argument("--sync-obligations", action="store_true",
+                    help="upsert pm-ops dependency_hell obligations (owner PM) and resolve cleared ones")
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest()
-    if args.check is not None:
-        def deadline(_signum, _frame):
-            raise TimeoutError('LOOKUP_TIMEOUT')
-        signal.signal(signal.SIGALRM, deadline)
-        signal.setitimer(signal.ITIMER_REAL, 30)
     cache: dict = {}
 
     issues = json.load(open(args.issues_json)) if args.issues_json else load_open_issues()
     extra = json.load(open(args.extra_json)) if args.extra_json else []
     prs = load_open_prs()
+    if not args.no_dependency_check:
+        prefetch_dependencies(issues, cache)
     open_pr_count = sum(not pr["isDraft"] for pr in prs)
     rework_only = args.rework_only or open_pr_count > 25
     owned, uncertain = owned_issues(prs)
@@ -481,6 +1112,24 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(res, sort_keys=True))
         return {"ok": 0, "PRIORITY_INVERSION": 3, "DEPENDENCY_OPEN": 4, "GATED": 5, "PR_CAP": 6}.get(res["status"], 4)
 
+    dependency_hell, dependency_hotspots, hell_meta = [], [], {"skipped": "offline"}
+    if not args.no_dependency_check:
+        started = datetime.now(timezone.utc)
+        nodes, failures = fetch_dependency_graph(dependency_gated)
+        pr_updated = {int(pr["number"]): pr.get("updatedAt") or "" for pr in prs}
+        dependency_hell, dependency_hotspots = dependency_hell_report(
+            dependency_gated, nodes, owned, pr_updated, started)
+        lookup_failed = failures or any(d.get("state") == "LOOKUP_FAILED" for c in dependency_gated
+                                        for d in c.get("open_dependencies") or [])
+        hell_meta = {"nodes_fetched": len(nodes), "batch_failures": failures,
+                     "complete": not failures, "lookup_failed_dependencies": bool(lookup_failed),
+                     "seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 1)}
+        if args.sync_obligations:
+            hell_meta["sync"] = sync_obligations(obligation_targets(dependency_hell, dependency_hotspots),
+                                                 complete=not failures)
+    elif args.sync_obligations:
+        hell_meta["sync"] = {"skipped": "--no-dependency-check disables the analysis; nothing synced or resolved"}
+
     pick = ranked[0] if ranked else None
     print(json.dumps({
         "schema": "ready-pool-select/v1",
@@ -495,10 +1144,15 @@ def main(argv: list[str] | None = None) -> int:
         "pool_count": len({c["issue"] for c in ranked + gated + all_dependencies}),
         "dependency_gated_count": len(dependency_gated),
         "dependency_gated": dependency_gated,
+        "needs_dependency_declaration": [{"number": c["issue"], "priority": c["priority"], "title": c["title"]} for c in dependency_gated if c.get("dependency_reason") == "no_dependency_declared"],
         "now_unblocked_count": len(unblocked),
         "now_unblocked": unblocked,
         "gated_p0_count": len(gated_p0),
         "gated_p0": gated_p0,
+        "dependency_hell_count": len(dependency_hell),
+        "dependency_hell": dependency_hell,
+        "dependency_hotspots": dependency_hotspots,
+        "dependency_hell_meta": hell_meta,
     }, indent=2, sort_keys=True))
     return 0 if pick else 1
 

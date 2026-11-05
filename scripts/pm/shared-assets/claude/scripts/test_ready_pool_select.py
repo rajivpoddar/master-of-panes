@@ -175,5 +175,62 @@ class InversionTests(unittest.TestCase):
         self.assertEqual(rps.priority_inversions(slots, {}, ranked), [])
 
 
+class ParseDependenciesTests(unittest.TestCase):
+    """Regression tests for the two defects that gated 27 issues as `unparsed_wake_condition`.
+
+    Defect 1: `fullmatch` was applied to `blockers` AND `wake_condition`, but `wake_condition`
+              is prose, so it always returned None and hid a well-formed blockers list.
+    Defect 2: a prose blocker naming a real issue (`#11785 slice A merged; ...`) was treated as
+              unparseable instead of yielding that issue.
+    """
+
+    def test_prose_wake_does_not_hide_structured_blockers(self):
+        self.assertEqual(rps.parse_dependencies("#12773", "Merge of #12773"), [(12773, "default")])
+
+    def test_prose_blocker_yields_its_references(self):
+        refs = rps.parse_dependencies(
+            "#11785 slice A merged; #11891 billing design (CTO review)", "")
+        self.assertEqual(refs, [(11785, "merge"), (11891, "default")])
+
+    def test_parent_umbrella_ref_is_context_not_dependency(self):
+        refs = rps.parse_dependencies(
+            "PR #12507 (Part of #12504) merge; PM split ruling 2026-11-02", "")
+        self.assertEqual(refs, [(12507, "merge")])
+
+    def test_wake_prose_without_refs_parses_empty(self):
+        self.assertEqual(rps.parse_dependencies("", "none"), [])
+
+    def test_blocker_prose_naming_no_ref_stays_unparseable(self):
+        # A real dependency we cannot see must not silently become assignable.
+        self.assertIsNone(rps.parse_dependencies(
+            "CTO product decision ts 1793358878.091759 unanswered", ""))
+
+    def test_blocked_label_with_no_declared_dependency_is_not_assignable(self):
+        for blockers, wake in (("", ""), ("none", "none")):
+            c = {"blockers": blockers, "wake_condition": wake, "blocking_labels": ["pm-blocked:dependency"]}
+            rps.evaluate_dependency(c, {}, offline=True)
+            self.assertEqual(c["dependency_reason"], "no_dependency_declared")
+            self.assertNotIn("dependency_unblocked", c)
+
+
+class ShippedProseWakeCaseTests(unittest.TestCase):
+    """The exact blocker text from issue #12362 and #12791 that gated them before the fix."""
+
+    def setUp(self):
+        for p in (patch.object(rps, "load_open_prs", return_value=[]),
+                  patch.object(rps.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], 0, json.dumps({"state": "open"}), ""))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_12362_shape_is_evaluated_not_unparsed(self):
+        c = {"blockers": "PR #12507 (Part of #12504) merge; PM split ruling 2026-11-02",
+             "wake_condition": "#12507 server-fencing gate ACTIVATED",
+             "blocking_labels": ["pm-blocked:dependency"]}
+        rps.evaluate_dependency(c, {})
+        self.assertNotEqual(c.get("dependency_reason"), "unparsed_wake_condition")
+        self.assertEqual([d["number"] for d in c["dependencies"]], [12507])
+
+
 if __name__ == "__main__":
     unittest.main()
