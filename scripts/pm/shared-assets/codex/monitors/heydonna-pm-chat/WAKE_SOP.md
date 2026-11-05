@@ -345,6 +345,20 @@ Previously accepted or uncertain actions retain their records; owner correction
 never authorizes replay. Do not create another browser task. Deferred browser
 checks stay deferred until their actual existing prerequisites arrive.
 
+For `Browser is not available: iab` or an absent native in-app browser provider,
+use the [Codex in-app browser recovery skill](/Users/rajiv/.codex/skills/codex-in-app-browser-recovery/SKILL.md)
+within the assignment's authorized recovery scope. Check fresh native inventory
+first; reuse an available provider's current ID rather than a stale numeric ID.
+An empty tab list alone is not a connection failure. If the provider is absent,
+make one bounded same-chat foreground attempt with the skill's `show_chat.py`
+helper and the exact existing owner UUID, then verify fresh native inventory
+and a successful tab state/DOM read. Helper success alone is not recovery.
+Respect explicit assignment recovery limits; do not restart Codex, reset the
+runtime, switch drivers, change login/access/configuration or create a new task.
+Resume only the original authorized work after verified recovery, preserving
+all completed, consumed and UNKNOWN/no-retry effects. If the bounded recovery
+fails, report the actual blocker directly in the source thread.
+
 Decisions retains scope and reserved decisions; each executor replies directly
 in the original Slack thread. Rajiv DM decisions remain with CTO DM
 `01a0911a-a718-7743-b37e-e785f24f3708`; unrelated access/credential/media
