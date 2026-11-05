@@ -39,13 +39,14 @@ EXTERNAL_ROOT (pm-blocked:external/product/cto or partner/decision wording in th
 ready-pool gate/wake/blockers), DEAD_ROOT (root closed without satisfying the condition) and
 AGED (gated >= 7d: pm-blocked:dependency LabeledEvent time, else updatedAt as a lower bound).
 `dependency_hotspots` lists each open root gating >= 3 pool issues once.
-`--sync-obligations` upserts pm-ops `dependency_hell` obligations (owner PM) and resolves
-those that cleared (state: ~/.claude/state/ready_pool_dependency_hell.json; resolution is
-skipped when a lookup batch failed). Exit codes are unchanged.
+`--sync-obligations` no longer upserts `dependency_hell` obligations (CTO ts
+1793883179.092259: routine issue state never creates obligations); it only resolves rows
+an earlier version upserted (state: ~/.claude/state/ready_pool_dependency_hell.json;
+resolution is skipped when a lookup batch failed). Exit codes are unchanged.
 
 Usage:
   ready_pool_select.py                 # ranked JSON, pick first
-  ready_pool_select.py --sync-obligations   # also mirror dependency hell into pm-ops
+  ready_pool_select.py --sync-obligations   # resolve legacy dependency_hell rows (no upserts)
   ready_pool_select.py --rework-only   # WIP cap hit: existing-PR work only
   ready_pool_select.py --check 11462   # validate a PM pick before mop-assign-slot
 
@@ -528,8 +529,8 @@ def owned_issues(prs: list[dict[str, Any]]) -> tuple[dict[int, list[int]], dict[
 # ---------------------------------------------------------------------------
 # Dependency hell (Rajiv DM D0AMF0XE6TS thread 1793816247.442119, ts 1793855417.837589:
 # "it should warn the pm on issues which are stuck in a dependency hell as well. pm has to
-# take care of it."). Read-only analysis over the dependency-gated pool; --sync-obligations
-# mirrors it into pm-ops `dependency_hell` obligations (owner PM -> hourly "Pending PM actions").
+# take care of it."). Read-only analysis over the dependency-gated pool, reported in the JSON
+# output. Since CTO ts 1793883179.092259 --sync-obligations only resolves legacy rows.
 # ---------------------------------------------------------------------------
 DEP_HELL_MAX_DEPTH = 6
 DEEP_THRESHOLD = 3          # open blockers on the longest chain
@@ -837,24 +838,17 @@ def obligation_targets(hell: list[dict], hotspots: list[dict]) -> dict[int, dict
 
 def sync_obligations(targets: dict[int, dict[str, str]], complete: bool,
                      runner=subprocess.run, state_path: Path = DEP_HELL_STATE) -> dict[str, Any]:
-    """Upsert every current target; resolve targets this script upserted before that are no
-    longer in dependency hell. Resolution is skipped when the analysis was incomplete (lookup
+    """Resolve-only: routine dependency state no longer creates obligations (CTO C0ALZJHGE49
+    thread 1793872014.789359, ts 1793883179.092259); the report JSON (dependency_hell /
+    dependency_hotspots) still carries every current target. Rows this script upserted
+    before are resolved; resolution is skipped when the analysis was incomplete (lookup
     failures) so a GitHub outage cannot clear real obligations."""
     try:
         prev = set(json.loads(state_path.read_text()).get("targets", []))
     except (OSError, ValueError, AttributeError):
         prev = set()
     upserted, failed, resolved, already_closed = 0, [], 0, 0
-    for n, t in sorted(targets.items()):
-        cmd = ["python3", str(PM_OPS), "obligation-upsert", "--kind", "dependency_hell",
-               "--target-type", "github_issue", "--target-id", str(n), "--issue", str(n),
-               "--owner", "PM", "--severity", t["severity"], "--title", t["title"], "--action", t["action"]]
-        p = runner(cmd, capture_output=True, text=True, timeout=60)
-        if p.returncode == 0:
-            upserted += 1
-        else:
-            failed.append({"issue": n, "op": "upsert", "stderr": (p.stderr or "")[-200:]})
-    keep = set(targets)
+    keep: set[int] = set()
     if complete:
         for n in sorted(prev - keep):
             cmd = ["python3", str(PM_OPS), "obligation-resolve", "--kind", "dependency_hell",
@@ -949,7 +943,7 @@ def _dep_hell_selftest() -> None:
         got, failures = fetch_dependency_graph([gated[0], gated[1]])
     assert failures == 0 and {101, 102, 201, 202, 203} <= set(got) and len(calls) <= 4
     assert sum(len(c) for c in calls) == len({n for c in calls for n in c}), "nodes fetched once"
-    # obligation sync: upsert + resolve cleared; incomplete analysis never resolves
+    # obligation sync: resolve-only (no upserts); incomplete analysis never resolves
     import tempfile
     seen = []
 
@@ -960,10 +954,12 @@ def _dep_hell_selftest() -> None:
         st = Path(tmp) / "s.json"
         st.write_text(json.dumps({"targets": [42, 503]}))
         r = sync_obligations({503: targets[503]}, False, fake_run, st)
-        assert r["upserted"] == 1 and r["resolved"] == 0 and "obligation-resolve" not in seen
+        assert r["upserted"] == 0 and r["resolved"] == 0 and seen == []
+        assert json.loads(st.read_text())["targets"] == [42, 503]  # incomplete: legacy rows kept
         r = sync_obligations({503: targets[503]}, True, fake_run, st)
-        assert r["resolved"] == 1 and seen.count("obligation-resolve") == 1
-        assert json.loads(st.read_text())["targets"] == [503]
+        assert r["resolved"] == 2 and seen == ["obligation-resolve", "obligation-resolve"]
+        assert "obligation-upsert" not in seen
+        assert json.loads(st.read_text())["targets"] == []
 
 
 class patch_attr:
@@ -1053,7 +1049,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-dependency-check", action="store_true", help="leave dependencies gated without live lookups")
     ap.add_argument("--selftest", action="store_true", help="check dependency parsing without network access")
     ap.add_argument("--sync-obligations", action="store_true",
-                    help="upsert pm-ops dependency_hell obligations (owner PM) and resolve cleared ones")
+                    help="resolve legacy pm-ops dependency_hell rows; never upserts (CTO ts 1793883179.092259)")
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest()

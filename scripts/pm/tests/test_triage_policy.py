@@ -117,6 +117,20 @@ class TriagePolicyTests(unittest.TestCase):
             bt.upsert_triage_obligations(buckets, None)
         run.assert_not_called()
 
+    def test_dependency_hell_sync_is_resolve_only(self):
+        # CTO ts 1793883179.092259: the report keeps dependency hell; no obligation rows.
+        selector._dep_hell_selftest()
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append(cmd[2])
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            st = Path(tmp) / "s.json"
+            r = selector.sync_obligations({7: {"severity": "high", "title": "t", "action": "a"}}, True, fake_run, st)
+        self.assertEqual(r["upserted"], 0)
+        self.assertNotIn("obligation-upsert", seen)
+
     def test_p3_refills_only_deficit_after_all_higher_priorities(self):
         rows = [bt.promoter_row(issue(i, p), "clean_ready_pool") for i,p in [(1234,"P1"),(1235,"P2"),(1236,"P3"),(1237,"P3")]]
         self.assertEqual([r["number"] for r in bt.select_promotion_rows(rows, 8)], [1234,1235])
