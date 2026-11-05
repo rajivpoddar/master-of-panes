@@ -528,7 +528,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-assign-slot",
-      "sha256": "db9845188daca80c40b936f5d8a5dcbd8fc4754c7dac8ae7e54db26d29b3145c",
+      "sha256": "0648f278fd2820ae89c3dd3e81383af92deb87ab960e0c59c4790ea76c55619a",
       "source_path": "claude/scripts/mop-assign-slot.py"
     },
     {
@@ -1606,40 +1606,40 @@
       "source_path": "codex/skills/heydonna-cto-pr-merge/SKILL.md"
     },
     {
-      "source_path": "codex/skills/heydonna-file-promote-issue/SKILL.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-codex-issue-triage",
       "sha256": "67c5b900ae379f60b7539a654f319f07fc995f92d9cd14d77f5d0feb423cacf3",
-      "mode": 420,
-      "ownership_class": "shared-codex-issue-triage",
-      "dependency_status": "closed",
-      "dependencies": []
+      "source_path": "codex/skills/heydonna-file-promote-issue/SKILL.md"
     },
     {
-      "source_path": "codex/skills/heydonna-file-promote-issue/agents/openai.yaml",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/agents/openai.yaml",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-codex-issue-triage",
       "sha256": "54bd0390cd0eec420f08434dd367bfbf546a893c02f4f058e5302267116889e8",
-      "mode": 420,
-      "ownership_class": "shared-codex-issue-triage",
-      "dependency_status": "closed",
-      "dependencies": []
+      "source_path": "codex/skills/heydonna-file-promote-issue/agents/openai.yaml"
     },
     {
-      "source_path": "codex/skills/heydonna-file-promote-issue/references/issue-contract.md",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/references/issue-contract.md",
-      "sha256": "1c95033f061b67af0e588d88921bcef7b7182293af162bfc65383906eb8f69e3",
+      "dependencies": [],
+      "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-issue-triage",
-      "dependency_status": "closed",
-      "dependencies": []
+      "sha256": "1c95033f061b67af0e588d88921bcef7b7182293af162bfc65383906eb8f69e3",
+      "source_path": "codex/skills/heydonna-file-promote-issue/references/issue-contract.md"
     },
     {
-      "source_path": "codex/skills/heydonna-file-promote-issue/scripts/validate_candidate.py",
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/scripts/validate_candidate.py",
-      "sha256": "0a4cb6c5d7c788d3c8e7f16a9056e681d98361beb6ae7e08dab76b5f9fc63c1c",
+      "dependencies": [],
+      "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-codex-issue-triage",
-      "dependency_status": "closed",
-      "dependencies": []
+      "sha256": "0a4cb6c5d7c788d3c8e7f16a9056e681d98361beb6ae7e08dab76b5f9fc63c1c",
+      "source_path": "codex/skills/heydonna-file-promote-issue/scripts/validate_candidate.py"
     },
     {
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",

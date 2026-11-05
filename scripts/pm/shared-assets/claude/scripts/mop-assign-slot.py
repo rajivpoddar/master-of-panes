@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -120,6 +121,7 @@ def post_assignment_notice(
     """Post status for the committed assignment; Slack uncertainty never retries or undoes it."""
     sender = os.environ.get("MOP_ASSIGN_SLACK_SEND", "/Users/rajiv/.claude/scripts/slack-send.sh")
     summary = next((line.strip() for line in task.splitlines() if line.strip()), "Assignment completed.")
+    summary = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     body = (
         f"Assignment: {priority} {repository_id} issue {issue} assigned to slot {slot} "
         f"(assignment epoch {assignment_epoch}).\n{summary}"
@@ -132,19 +134,27 @@ def post_assignment_notice(
             text=True,
             timeout=30,
             check=False,
+            cwd=str(Path(sender).resolve().parent),
+            env={**os.environ, "SLACK_SEND_AS": "pm"},
         )
-    except (OSError, subprocess.SubprocessError) as error:
-        return {"posted": False, "delivery": "unknown", "reason": f"slack_send_failed:{type(error).__name__}"}
+    except OSError as error:
+        return {"posted": False, "delivery": "not_attempted", "reason": "slack_publisher_unavailable",
+                "native_receipt": {"error_type": type(error).__name__, "detail": str(error)}}
+    except subprocess.SubprocessError as error:
+        return {"posted": False, "delivery": "unknown", "reason": f"slack_send_failed:{type(error).__name__}",
+                "native_receipt": {"error_type": type(error).__name__, "detail": str(error)}}
+    native = {"returncode": result.returncode, "stdout": result.stdout[-1000:], "stderr": result.stderr[-1000:]}
     if result.returncode != 0:
-        return {"posted": False, "delivery": "unknown", "reason": "slack_send_failed"}
+        return {"posted": False, "delivery": "unknown", "reason": "slack_send_failed", "native_receipt": native}
     for line in result.stdout.splitlines():
         if line.startswith("OK ts="):
             receipt = dict(part.split("=", 1) for part in line.split()[1:] if "=" in part)
             thread_ts = receipt.get("ts")
             channel = receipt.get("channel")
-            if thread_ts and channel:
-                return {"posted": True, "delivery": "sent", "thread_ts": thread_ts, "channel": channel}
-    return {"posted": False, "delivery": "unknown", "reason": "slack_receipt_missing"}
+            if thread_ts and re.fullmatch(r"[0-9]+\.[0-9]+", thread_ts) and channel == "C0ALZJHGE49":
+                return {"posted": True, "delivery": "sent", "thread_ts": thread_ts, "channel": channel,
+                        "native_receipt": native}
+    return {"posted": False, "delivery": "unknown", "reason": "slack_receipt_missing", "native_receipt": native}
 
 
 def check_selection(args: argparse.Namespace) -> dict[str, Any]:

@@ -272,6 +272,42 @@ class MopAssignSlotClientTests(unittest.TestCase):
         self.assertEqual(sorted(bool(outcome) for _, outcome in self.server.effect_responses), [False, True])
         self.assertEqual(len(self.server.receipts), 1)
 
+    def test_lost_publisher_ack_retains_native_result_without_resend(self) -> None:
+        marker = Path(self.temp.name) / "calls"
+        sender = self.write_notice_sender('printf called >> "$CALLS"\nexit 0\n')
+        env = {"MOP_ASSIGN_SLACK_SEND": str(sender), "CALLS": str(marker)}
+        first = json.loads(self.run_script(env_overrides=env).stdout)
+        second = json.loads(self.run_script(env_overrides=env).stdout)
+        self.assertEqual(first["assignment_notice"]["delivery"], "unknown")
+        self.assertEqual(first["assignment_notice"]["native_receipt"]["returncode"], 0)
+        self.assertEqual(second["assignment_notice"]["delivery"], "not_retried")
+        self.assertEqual(marker.read_text(), "called")
+
+    def test_missing_custody_or_unchanged_epoch_cannot_announce_again(self) -> None:
+        marker = Path(self.temp.name) / "calls"
+        sender = self.write_notice_sender('printf called >> "$CALLS"\n')
+        base = {"status": "assigned", "slot": 3, "assignment_epoch": 42}
+        for extra in [{}, {"idempotent": False, "assignment_epoch": 41}]:
+            with self.subTest(extra=extra):
+                self.server.receipts.clear()
+                self.server.responses = [(200, {**base, **extra})]
+                result = self.run_script(env_overrides={"MOP_ASSIGN_SLACK_SEND": str(sender), "CALLS": str(marker)})
+                self.assertEqual(result.returncode, 0)
+                self.assertFalse(json.loads(result.stdout)["assignment_notice"]["posted"])
+                self.assertFalse(marker.exists())
+
+    def test_notice_summary_does_not_ping_or_route_task_mentions(self) -> None:
+        body = Path(self.temp.name) / "body"
+        sender = self.write_notice_sender('cat > "$CAPTURE_BODY"\nprintf \'OK ts=1793899000.123456 channel=C0ALZJHGE49\\n\'\n')
+        task = Path(self.temp.name) / "mention-task.md"
+        task.write_text("Investigate <@U0BNFGX2UAX> <!channel> and <!here>\n")
+        result = self.run_script(task_file=task, env_overrides={"MOP_ASSIGN_SLACK_SEND": str(sender), "CAPTURE_BODY": str(body)})
+        self.assertEqual(json.loads(result.stdout)["assignment_notice"]["delivery"], "sent")
+        rendered = body.read_text()
+        self.assertNotIn("<@U0BNFGX2UAX>", rendered)
+        self.assertNotIn("<!channel>", rendered)
+        self.assertIn("&lt;!channel&gt;", rendered)
+
     def test_typed_refusal_exits_non_zero_and_names_the_sanctioned_path(self) -> None:
         self.server.responses = [(502, {
             "status": "refused",
