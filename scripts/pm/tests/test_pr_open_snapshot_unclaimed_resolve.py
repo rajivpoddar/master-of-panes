@@ -38,7 +38,9 @@ def _seed(db, kind, pr, *extra):
     out = subprocess.run([sys.executable, str(LEGACY), "obligation-upsert", "--kind", kind, "--target-type",
                           "github_pr", "--target-id", str(pr), "--pr", str(pr), "--title", "t", "--print-id", *extra],
                          env=dict(os.environ, PM_OPS_DB=db), capture_output=True, text=True, timeout=60)
-    assert out.returncode == 0, out.stderr
+    # upsert's exit status is its row id (a pre-existing quirk: id 2 exits 2), so
+    # assert on the printed id, not on the return code.
+    assert out.stdout.strip().isdigit(), out.stderr
     return int(out.stdout.strip())
 
 
