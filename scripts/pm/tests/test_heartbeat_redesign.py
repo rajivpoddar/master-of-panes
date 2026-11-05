@@ -136,7 +136,7 @@ def test_old_open_thread_outside_lookback_is_carried_forward_until_answered(tmp_
         fetched.append(ts)
         return old
 
-    threads = support.carry_forward([], ["1000.000000"], fetch)
+    threads, _ = support.carry_forward([], ["1000.000000"], fetch)
     assert fetched == ["1000.000000"] and threads[0]["state"] == "needs_reply"
     assert support.select_items(threads, 1000 + 27 * 3600) == [dict(threads[0], overdue=True)]
     path = tmp_path / "open.json"
@@ -144,7 +144,8 @@ def test_old_open_thread_outside_lookback_is_carried_forward_until_answered(tmp_
     assert support.load_open_state(path) == {"C1": {"1000.000000": 0.0}}  # legacy list format still loads
     # Once answered it drops out of the persisted open set.
     answered = support.classify_thread([_m(CUST, 1000), _m("UEQTTB97A", 1100, "done")], 2000)
-    assert support.open_roots(support.carry_forward([], ["1000.000000"], lambda ts: answered)) == []
+    answered_threads, _ = support.carry_forward([], ["1000.000000"], lambda ts: answered)
+    assert support.open_roots(answered_threads) == []
     # Already-fetched roots are not refetched.
     fetched.clear()
     support.carry_forward([old], ["1000.000000"], fetch)
@@ -524,7 +525,7 @@ def test_answered_thread_is_tracked_and_reopens_on_new_customer_reply(tmp_path):
         [_m(CUST, 1000, "export broken"), _m("UEQTTB97A", 1100, "fixed now"), _m(CUST, 5000, "still failing on page 3")],
         6000)
     fetched = []
-    threads = support.carry_forward([], prev, lambda ts: fetched.append(ts) or reopened)
+    threads, _ = support.carry_forward([], prev, lambda ts: fetched.append(ts) or reopened)
     assert fetched == [answered["ts"]]
     assert threads[0]["state"] == "needs_reply"
     assert support.select_items(threads, 5900) == [dict(threads[0], overdue=True)]
