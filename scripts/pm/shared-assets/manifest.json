@@ -267,7 +267,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "5252fa1417644e8a2bf44214dd8a8ea658a8815012773b888466586ff4075924",
+      "sha256": "ce34d9446252080f3d06ee919f26a02b391d20d7af53b2561b5421e90b80157e",
       "source_path": "claude/project-agents/pm-backlog-promoter.md"
     },
     {
@@ -312,7 +312,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "3bba31a8127087ecb61284b8f1e37ec1adabd9bc013540a52c60a14edaf438f8",
+      "sha256": "7fc2dcc0dafa1e9e2abb16dee2d16ae22c14c78e0aa21a5578f255c18d994f92",
       "source_path": "claude/scripts/backlog-triage.py"
     },
     {
@@ -764,7 +764,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "cb06fa313a1c45d49ecc87d5145943a9179e3cb2274d4677fcf79355d13a14f1",
+      "sha256": "5b5fd71f3aea44c79e42b6e81e6af041098a04d550f28bfb44a75a14373ff958",
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
@@ -800,7 +800,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage-tests",
-      "sha256": "a0fd95c3cb81a44a1d3d903030a4d568a29a38f5d1bf177e9b2652ea2abc9500",
+      "sha256": "f23ec7d9f8f741cc3bf764fa4665e5fce3a849f5c8eadbd632ebcc879b3d42c3",
       "source_path": "claude/scripts/test_ready_pool_select.py"
     },
     {
@@ -1145,7 +1145,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "b5351a7863e5ef8ef48a834a9bff7c00fd645a6cb779eda88c28930a2e53b8c6",
+      "sha256": "4d8546a3deda4e24793d923058ac746637a0c9ecefdce7066a43a52f9023403e",
       "source_path": "claude/skills/pm-triage/skill.md"
     },
     {
@@ -1606,6 +1606,42 @@
       "source_path": "codex/skills/heydonna-cto-pr-merge/SKILL.md"
     },
     {
+      "source_path": "codex/skills/heydonna-file-promote-issue/SKILL.md",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/SKILL.md",
+      "sha256": "67c5b900ae379f60b7539a654f319f07fc995f92d9cd14d77f5d0feb423cacf3",
+      "mode": 420,
+      "ownership_class": "shared-codex-issue-triage",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/skills/heydonna-file-promote-issue/agents/openai.yaml",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/agents/openai.yaml",
+      "sha256": "54bd0390cd0eec420f08434dd367bfbf546a893c02f4f058e5302267116889e8",
+      "mode": 420,
+      "ownership_class": "shared-codex-issue-triage",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/skills/heydonna-file-promote-issue/references/issue-contract.md",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/references/issue-contract.md",
+      "sha256": "1c95033f061b67af0e588d88921bcef7b7182293af162bfc65383906eb8f69e3",
+      "mode": 420,
+      "ownership_class": "shared-codex-issue-triage",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
+      "source_path": "codex/skills/heydonna-file-promote-issue/scripts/validate_candidate.py",
+      "canonical_target": "/Users/rajiv/.codex/skills/heydonna-file-promote-issue/scripts/validate_candidate.py",
+      "sha256": "0a4cb6c5d7c788d3c8e7f16a9056e681d98361beb6ae7e08dab76b5f9fc63c1c",
+      "mode": 493,
+      "ownership_class": "shared-codex-issue-triage",
+      "dependency_status": "closed",
+      "dependencies": []
+    },
+    {
       "canonical_target": "/Users/rajiv/.codex/skills/heydonna-open-pr-status/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1701,7 +1737,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 185,
+    "selected_count": 189,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1804,7 +1840,8 @@
       "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/hourly-ops-audit/SKILL.md",
       "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/ready-pool-low-stop-validator.sh",
       "/Users/rajiv/.claude/scripts/test_ready_pool_select.py",
-      "/Users/rajiv/.claude/scripts/tests/test_backlog_runnability.py"
+      "/Users/rajiv/.claude/scripts/tests/test_backlog_runnability.py",
+      "~/.codex/skills/heydonna-file-promote-issue"
     ]
   },
   "owner": "master-of-panes",

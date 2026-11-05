@@ -32,7 +32,7 @@ if str(CONTROL_PLANE_DIR) not in sys.path:
     sys.path.insert(0, str(CONTROL_PLANE_DIR))
 
 from issue_claimability import NON_DISPATCHABLE_CLAIMABLE_TYPES
-from ready_pool_select import candidate as selection_candidate, evaluate_dependency, is_gated
+from ready_pool_select import candidate as selection_candidate, evaluate_dependency, is_gated, owned_issues, prefetch_dependencies
 
 
 REPO = os.environ.get("GH_REPO", "Scribie/heydonna-app")
@@ -830,7 +830,10 @@ def issue_contract_ledger_errors(
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return ["icl_validator_failed"]
-    return [str(reason) for reason in payload.get("errors", [])]
+    if not isinstance(payload, dict) or not isinstance(payload.get("errors"), list):
+        return ["icl_validator_failed"]
+    errors = [str(reason) for reason in payload["errors"]]
+    return errors or (["icl_validator_failed"] if proc.returncode else [])
 
 
 def icl_enforcement_applies(issue: dict[str, Any]) -> bool:
@@ -852,13 +855,10 @@ def is_non_dispatchable_contract(issue: dict[str, Any], meta: dict[str, str]) ->
     work_type = clean_meta_value(meta.get("work_type")).lower()
     disposition = clean_meta_value(meta.get("disposition")).lower()
     title = str(issue.get("title") or "").strip().lower()
-    body = str(issue.get("body") or "").lower()
     docs_only = (
         work_type in {"docs", "docs-only", "documentation", "documentation-only"}
         or "documentation" in names
         or title.startswith(("docs:", "docs(", "documentation:"))
-        or "docs-only" in body
-        or "documentation-only" in body
     )
     return (
         claimable in NON_DISPATCHABLE_CLAIMABLE_TYPES
@@ -885,10 +885,6 @@ def is_non_dispatchable_contract(issue: dict[str, Any], meta: dict[str, str]) ->
             for name in names
         )
         or docs_only
-        or "tracking only" in body
-        or "tracking-only" in body
-        or "not claimable" in body
-        or "not-claimable" in body
         or bool({"epic", "tracking"} & names)
         or "pm-nonclaimable:tracking" in names
     )
@@ -1078,6 +1074,15 @@ def classify_promoter(
                 else:
                     skipped["priority_label_drift"].append(row)
                 continue
+            contract_reasons = ready_pool_contract_reasons(
+                issue, open_nums, allow_backlog=True, allow_dependencies=True,
+            )
+            if contract_reasons:
+                skipped["missing_ready_pool_contract"].append(promoter_row(
+                    issue, "invalid_ready_pool_contract:" + ";".join(contract_reasons),
+                    meta=meta, deps=deps, priority=priority,
+                ))
+                continue
             preflight_ok, preflight_reason = handoff_preflight_ok(number)
             if not preflight_ok:
                 skipped["handoff_preflight_failed"].append(
@@ -1126,14 +1131,18 @@ def is_clean_ready_pool_todo(issue: dict[str, Any], open_nums: set[int]) -> bool
     return not dispatch_readiness_reasons(issue, open_nums, allow_backlog=False)
 
 
-def dispatch_readiness_reasons(
+def ready_pool_contract_reasons(
     issue: dict[str, Any],
     open_nums: set[int],
     *,
     allow_backlog: bool,
     allow_dependencies: bool = False,
 ) -> list[str]:
-    """Check assignment by default; promotion/audit opt into dependency-held membership."""
+    """Pure contract checks shared by promotion, selection and pool reporting.
+
+    Dependencies and live ownership are checked separately by their existing
+    authorities. Historical/quoted prose cannot change the issue's work type.
+    """
     names = labels(issue)
     status_labels = sorted(name for name in names if name.startswith(STATUS_PREFIX))
     allowed_status = ["status:backlog"] if allow_backlog else ["status:todo"]
@@ -1150,12 +1159,15 @@ def dispatch_readiness_reasons(
     if not meta or not has_ready_pool_dispatch_contract(meta):
         missing = missing_ready_pool_dispatch_fields(meta)
         reasons.append("missing_ready_pool_fields:" + ",".join(missing or REQUIRED_READY_POOL_FIELDS))
+    if len(clean_meta_value(meta.get("ac_summary"))) > 140:
+        reasons.append("ac_summary_exceeds_140_chars")
     deps = open_dependencies(issue, open_nums)
-    if deps and not allow_dependencies:
-        reasons.append("open_dependency:" + ",".join(str(dep) for dep in deps))
     readiness_blocker_labels = names
     if allow_dependencies or not deps:
         readiness_blocker_labels = names - {"pm-blocked:dependency"}
+    if allow_dependencies and status_labels == ["status:todo"] and "P0" in names:
+        # Preserve existing gated-P0 membership; assignment still checks gates.
+        readiness_blocker_labels = {n for n in names if not n.startswith("pm-blocked:")}
     if has_pm_blocker_label(readiness_blocker_labels):
         reasons.append("pm_blocker_label")
     if meta and not metadata_blockers_clear(meta) and not has_dependency_contract(meta):
@@ -1163,7 +1175,7 @@ def dispatch_readiness_reasons(
     contract_issue = issue
     if allow_dependencies or not deps:
         # A resolved dependency label is cleared at apply; judge the contract alone.
-        contract_issue = {**issue, "labels": [l for l in issue.get("labels", []) if l.get("name") != "pm-blocked:dependency"]}
+        contract_issue = {**issue, "labels": [{"name": name} for name in readiness_blocker_labels]}
     if is_tracker(issue) or is_non_dispatchable_contract(contract_issue, meta):
         reasons.append("tracking_or_non_dispatchable")
     if any(re.fullmatch(r"slot:\d+", name) for name in names):
@@ -1175,6 +1187,23 @@ def dispatch_readiness_reasons(
         issue.get("body") or "", require_qa_proof=True
     ):
         reasons.append("issue_contract:" + error)
+    return reasons
+
+
+def dispatch_readiness_reasons(
+    issue: dict[str, Any],
+    open_nums: set[int],
+    *,
+    allow_backlog: bool,
+    allow_dependencies: bool = False,
+) -> list[str]:
+    reasons = ready_pool_contract_reasons(
+        issue, open_nums, allow_backlog=allow_backlog,
+        allow_dependencies=allow_dependencies,
+    )
+    deps = open_dependencies(issue, open_nums)
+    if deps and not allow_dependencies:
+        reasons.append("open_dependency:" + ",".join(str(dep) for dep in deps))
     if reasons:
         return reasons
     preflight_ok, preflight_reason = handoff_preflight_ok(int(issue["number"]))
@@ -1192,14 +1221,7 @@ def open_pr_issue_numbers() -> set[int]:
     )
     if proc.returncode != 0:
         raise RuntimeError("open_pr_ownership_lookup_failed")
-    found: set[int] = set()
-    for pr in json.loads(proc.stdout or "[]"):
-        for ref in pr.get("closingIssuesReferences") or []:
-            if ref.get("number"):
-                found.add(int(ref["number"]))
-        for m in re.finditer(r"(?i)\b(?:closes|fixes|resolves|part of|refs?)\s+#(\d+)", pr.get("body") or ""):
-            found.add(int(m.group(1)))
-    return found
+    return set(owned_issues(json.loads(proc.stdout or "[]"))[0])
 
 
 def is_claimable_ready_pool_todo(
@@ -2620,39 +2642,29 @@ def audit_ready_pool_main(argv: list[str]) -> int:
     dependency_rows: list[dict[str, Any]] = []
     clean_issues: list[int] = []
     gated_p0_issues: list[int] = []
+    dependency_cache: dict = {}
+    prefetch_dependencies(todos, dependency_cache)
     for issue in todos:
         number = int(issue["number"])
         names = labels(issue)
         meta = ready_pool_metadata(issue)
-        reasons: list[str] = []
+        reasons = ready_pool_contract_reasons(
+            issue, open_nums, allow_backlog=False, allow_dependencies=True,
+        )
         if number in pr_owned or any(re.fullmatch(r"slot:\d+", name) for name in names):
             reasons.append("already_owned_reconcile_lifecycle")
-        missing = missing_ready_pool_dispatch_fields(meta)
-        if missing:
-            reasons.append("missing_ready_pool_fields:" + ",".join(missing))
-        drift = priority_label_drift(issue, meta, require_label=True)
-        if drift:
-            reasons.append("priority_label_drift:" + drift)
-        # S113: dependency-held membership applies to every priority.
-        contract_issue = {**issue, "labels": [l for l in issue.get("labels", []) if l.get("name") != "pm-blocked:dependency"]}
-        if has_pm_blocker_label(names - {"pm-blocked:dependency"}):
-            reasons.append("pm_blocker_label")
-        if meta and not metadata_blockers_clear(meta) and not has_dependency_contract(meta):
-            reasons.append("metadata_blocker")
-        if is_tracker(issue) or is_non_dispatchable_contract(contract_issue, meta):
-            reasons.append("tracking_or_non_dispatchable")
-        if icl_enforcement_applies(issue):
-            for error in issue_contract_ledger_errors(issue.get("body") or ""):
-                reasons.append("issue_contract_ledger:" + error)
 
-        deps = open_dependencies(issue, open_nums)
-        if deps:
+        selection = selection_candidate(issue, "new_issue")
+        evaluate_dependency(selection, dependency_cache)
+        held = is_gated(selection)
+        deps = [int(dep["number"]) for dep in selection.get("open_dependencies", [])]
+        if held and not reasons and "pm-blocked:dependency" in selection.get("blocking_labels", []):
             dependency_rows.append(
                 {
                     "issue": number,
                     "title": issue.get("title") or "",
                     "open_dependencies": deps,
-                    "reason": "open_dependency",
+                    "reason": selection.get("dependency_reason") or "unresolved_gate",
                 }
             )
         if reasons:
@@ -2661,9 +2673,9 @@ def audit_ready_pool_main(argv: list[str]) -> int:
                 "title": issue.get("title") or "",
                 "reasons": reasons,
             }
-        if not reasons and deps and is_ready_gated_p0(names, meta):
+        if not reasons and held and is_ready_gated_p0(names, meta):
             gated_p0_issues.append(number)
-        if not reasons and not deps:
+        if not reasons and not held:
             clean_issues.append(number)
 
     clean_issues.sort()

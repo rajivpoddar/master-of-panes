@@ -56,6 +56,8 @@ Exit codes: 0 ok/pick, 1 no pick, 3 PRIORITY_INVERSION,
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
+import importlib.util
 import json
 import re
 import subprocess
@@ -79,6 +81,26 @@ NON_SLOT_TYPES = {
     "docs-only", "documentation", "documentation-only", "rajiv", "external",
 }
 READY_POOL_RE = re.compile(r"<!--\s*ready-pool:\s*(.*?)-->", re.DOTALL | re.IGNORECASE)
+
+
+@lru_cache(maxsize=1)
+def contract_policy():
+    """Use the promoter's pure contract validator; never invoke its writers."""
+    path = Path(__file__).with_name("backlog-triage.py")
+    spec = importlib.util.spec_from_file_location("ready_pool_contract_policy", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("canonical Ready Pool contract policy unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def contract_reasons(issue: dict[str, Any]) -> list[str]:
+    issue = {**issue, "labels": [{"name": name} for name in _labels(issue)]}
+    return contract_policy().ready_pool_contract_reasons(
+        issue, set(), allow_backlog="status:todo" not in _labels(issue),
+        allow_dependencies=True,
+    )
 
 
 def _labels(issue: dict[str, Any]) -> set[str]:
@@ -397,12 +419,19 @@ def rank_candidates(issues: list[dict[str, Any]], extra: list[dict[str, Any]] | 
     for issue in issues:
         cls = classify(issue)
         if cls:
+            if cls == "new_issue" and contract_reasons(issue):
+                continue
             c = candidate(issue, cls)
             evaluate_dependency(c, cache, offline)
             if not is_gated(c):
                 best[c["issue"]] = c
     for row in extra or []:
         cls = row.get("class", "rework")
+        if cls == "new_issue":
+            # A PM-supplied row cannot bypass the live issue contract.
+            source = next((i for i in issues if int(i["number"]) == int(row["issue"])), None)
+            if source is None or classify(source) != "new_issue" or contract_reasons(source):
+                continue
         rank = PRIORITY_RANK.get(str(row.get("priority", "")).upper(), UNKNOWN_RANK)
         c = {"issue": int(row["issue"]), "class": cls, "priority": prio_name(rank), "priority_rank": rank,
              "created_at": row.get("created_at", ""), "title": row.get("title", ""),
@@ -426,6 +455,8 @@ def gated_p0_candidates(issues: list[dict[str, Any]], rework_only: bool = False,
     for issue in issues:
         cls = classify(issue)
         if not cls:
+            continue
+        if cls == "new_issue" and contract_reasons(issue):
             continue
         c = candidate(issue, cls)
         evaluate_dependency(c, cache, offline)
@@ -502,7 +533,7 @@ def load_open_issues(timeout: int = 120) -> list[dict[str, Any]]:
 def load_open_prs(timeout: int = 120) -> list[dict[str, Any]]:
     proc = run_lookup(
         ["gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "1000",
-         "--json", "number,isDraft,body,updatedAt"], timeout=timeout,
+         "--json", "number,isDraft,body,updatedAt,closingIssuesReferences"], timeout=timeout,
     )
     return json.loads(proc.stdout)
 
@@ -512,13 +543,15 @@ def owned_issues(prs: list[dict[str, Any]]) -> tuple[dict[int, list[int]], dict[
     owned: dict[int, list[int]] = {}
     uncertain: dict[int, list[int]] = {}
     for pr in prs:
+        for ref in pr.get("closingIssuesReferences") or []:
+            if ref.get("number"):
+                owned.setdefault(int(ref["number"]), []).append(int(pr["number"]))
         body = pr.get("body") or ""
-        for match in re.finditer(r"\b(closes|part\s+of)\s+#(\d+)\b", body, re.IGNORECASE):
+        for match in re.finditer(r"\b(closes?|fix(?:es)?|resolves?|part\s+of|refs?)\s+#(\d+)\b", body, re.IGNORECASE):
+            if re.search(r"(?:\bnot|\bnever|n't|n’t)\s+$", body[max(0, match.start() - 20):match.start()], re.I):
+                continue
             issue = int(match.group(2))
-            if match.group(1).lower() != "closes":
-                # An explicit remaining-AC statement means this is a partial slice.
-                if re.search(r"(?im)^\s*(?:#{1,6}\s*)?(?:remaining|outstanding)\s+(?:acceptance criteria|ACs?)\s*:\s*(?!none\b|no\b|n/?a\b|$)\S", body):
-                    continue
+            if match.group(1).lower() in {"part of", "ref", "refs"}:
                 uncertain.setdefault(issue, []).append(int(pr["number"]))
             owned.setdefault(issue, []).append(int(pr["number"]))
     return owned, uncertain
@@ -1008,7 +1041,10 @@ def selftest() -> int:
         14: {'state': 'closed', 'pull_request': {}},
         15: {'state': 'bad'},
     }
+    real_run = subprocess.run
     def stub(cmd, **kwargs):
+        if any(str(part).endswith("validate-issue-contract-ledger.py") for part in cmd):
+            return real_run(cmd, **kwargs)
         if cmd[1] == 'api':
             number = int(cmd[-1].split('/')[-1])
             if number == 16:
@@ -1034,7 +1070,7 @@ def selftest() -> int:
         assert check('#15 closed')['open_dependencies'][0]['state'] == 'LOOKUP_FAILED'
         assert check('#16 closed')['open_dependencies'][0]['state'] == 'LOOKUP_FAILED'
         issues = [{'number': 1, 'labels': ['P0', 'pm-blocked:dependency'], 'body': '<!-- ready-pool:\nblockers: #11\n-->'}, {'number': 2, 'labels': ['P1', 'status:todo'], 'body': ''}]
-        assert rank_candidates(issues)[0]['issue'] == 2
+        assert rank_candidates(issues) == [], "incomplete contracts cannot become picks"
         assert rank_candidates(issues, rework_only=True) == []
         assert rank_candidates([]) == []
     _dep_hell_selftest()
@@ -1061,6 +1097,11 @@ def main(argv: list[str] | None = None) -> int:
     issues = json.load(open(args.issues_json)) if args.issues_json else load_open_issues()
     extra = json.load(open(args.extra_json)) if args.extra_json else []
     prs = load_open_prs()
+    contract_defects = [
+        {"issue": int(i["number"]), "reasons": reasons}
+        for i in issues if classify(i) == "new_issue"
+        if (reasons := contract_reasons(i))
+    ]
     if not args.no_dependency_check:
         prefetch_dependencies(issues, cache)
     open_pr_count = sum(not pr["isDraft"] for pr in prs)
@@ -1074,11 +1115,13 @@ def main(argv: list[str] | None = None) -> int:
     ranked = rank_candidates(eligible_issues, eligible_extra, rework_only, cache, args.no_dependency_check)
     gated = gated_p0_candidates(eligible_issues, rework_only, cache, args.no_dependency_check)
     all_dependencies = []
-    for issue in issues:
+    for issue in eligible_issues:
         if "pm-blocked:dependency" not in _labels(issue) and ready_pool_value(issue.get("body") or "", "blockers").strip().lower() in {"", "none", "null", "n/a", "[]"}:
             continue
         cls = classify(issue)
         if not cls:
+            continue
+        if cls == "new_issue" and contract_reasons(issue):
             continue
         c = candidate(issue, cls)
         evaluate_dependency(c, cache, args.no_dependency_check)
@@ -1127,6 +1170,8 @@ def main(argv: list[str] | None = None) -> int:
         "pick": pick,
         "priority_reason": priority_reason(pick, ranked) if pick else "",
         "eligible_count": len(ranked),
+        "contract_defect_count": len(contract_defects),
+        "contract_defects": contract_defects,
         "ranked": ranked[: args.limit],
         "pool_count": len({c["issue"] for c in ranked + gated + all_dependencies}),
         "dependency_gated_count": len(dependency_gated),

@@ -35,10 +35,14 @@ and smallest production-path proof. Require a valid Issue Contract Ledger (ICL)
 and complete Ready Pool metadata. Repair from existing evidence in this run;
 never invent ACs, rewrite away constraints, or silently weaken acceptance.
 
-A slice has at most THREE ACs, is independently shippable, and takes half a day
+A slice has at most THREE primary outcome ACs, is independently shippable, and takes half a day
 or less. Split broader work before assignment. Heavy QA/capture/model experiments
 may need their own slice. A P1 umbrella keeps its next child pre-split and ready.
 The parent/tracker remains nonclaimable.
+
+Negative requirements, forbidden approaches and proof obligations remain mandatory
+across those primary outcomes. They do not need separate primary ACs, and moving
+them into the ledger never waives them or makes a genuinely oversized slice small.
 
 Customer/file/artifact issues need a grounded investigation before root-cause
 claims or implementation ACs. Use actual source files, runs, logs and artifacts;
@@ -110,6 +114,11 @@ work regardless of a stale infra label. Tracking, investigations, external actio
 unresolved product decisions and direct-main work are nonclaimable. Production-DB
 effects are PM-only; preparation is distinct from authorized execution.
 
+Classify the issue's own structured routing and actual runtime control point.
+Historical quotations or descriptions of separate archived records (for example,
+"tracking only" or "docs-only") do not classify the current issue. Explicit
+tracker/operational metadata and genuine holds remain nonclaimable.
+
 ## State, commands and completion
 
 GitHub is the label store; `pm-ops.db` is the workflow ledger; `pm-todo.md` is its
@@ -117,6 +126,15 @@ generated projection, not a separate queue to hand-edit. Keep exactly one cohere
 status, one priority and the prescribed release gate. Update obligations and sync
 with `python3 ~/.claude/scripts/pm-ops.py sync --write --no-live --reason pm-triage`.
 GitHub Projects membership is not required.
+
+The selector, promoter and pool audit use the same canonical pure contract
+validation. Report contract defects separately from claimable work; preserve
+named-dependency membership, then check live dependencies and PR/slot ownership
+before selection/assignment. A PM-supplied new-issue row cannot bypass its actual
+issue contract. Routine ready_pool and triage_retained_scope inventory mirrors
+are retired: keep requirements on actual delivery issues and create operational
+obligations only for real owner/action/wake duties. Administrative retirement
+does not satisfy their requirements or gates.
 
 Read-only audit: `python3 ~/.claude/scripts/backlog-triage.py --dry-run`.
 Promotion detector: `python3 ~/.claude/scripts/backlog-triage.py promote --dry-run`.

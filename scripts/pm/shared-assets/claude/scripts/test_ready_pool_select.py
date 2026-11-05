@@ -18,6 +18,34 @@ _spec.loader.exec_module(rps)
 
 
 def issue(n, labels, created="2026-10-01T00:00:00Z", body=""):
+    # Ranking fixtures are valid contracts; individual tests override fields
+    # to exercise the actual exclusion/priority behavior.
+    import re
+    priority = next((p for p in labels if p in rps.PRIORITY_RANK), "P1")
+    fields = {"priority": priority, "lane": "editor", "branch_slug": "bounded-repair",
+              "ac_summary": "Preserve current work through the owning boundary.",
+              "claimable_slot_type": "dev", "work_type": "app-code",
+              "blockers": "#999999" if "pm-blocked:dependency" in labels else "none"}
+    match = rps.READY_POOL_RE.search(body)
+    if match:
+        fields.update(dict(re.findall(r"(?m)^\s*([a-z_]+):\s*(.*?)\s*$", match.group(1))))
+        body = body[:match.start()] + body[match.end():]
+    body = "<!-- ready-pool:\n" + "\n".join(f"{k}: {v}" for k, v in fields.items()) + "\n-->\n" + body + """
+<!-- qa-proof-schema: 1 -->
+## Acceptance criteria
+1. AC-1: Preserve current work through the owning boundary.
+   - Surface: nonvisual
+   - QA reachability: deterministic
+   - Required proof: integration
+## Issue Contract Ledger
+| Contract row | Requirement |
+| --- | --- |
+| Positive AC | Preserve current work through the owning boundary. |
+| Negative AC | Never lose valid edits or newer bytes. |
+| Forbidden implementation | Never weaken the save admission guard. |
+| Determinism | Fixed identity and controlled boundary ordering. |
+| Required proof | Owning integration covers accepted and refused saves. |
+"""
     return {"number": n, "title": f"t{n}", "labels": [{"name": l} for l in labels],
             "createdAt": created, "body": body}
 
@@ -57,12 +85,12 @@ class RankTests(unittest.TestCase):
             issue(31, ["status:todo"], body="<!-- ready-pool:\npriority: P1\n-->"),
             issue(32, ["P2", "status:todo"]),
         ]
-        self.assertEqual([c["issue"] for c in rps.rank_candidates(issues)], [31, 32, 30])
+        self.assertEqual([c["issue"] for c in rps.rank_candidates(issues)], [32])
 
     def test_label_wins_over_stale_ready_pool_priority(self):
         issues = [issue(40, ["P2", "status:todo"], body="<!-- ready-pool:\npriority: P1\n-->"),
                   issue(41, ["P1", "status:todo"], "2026-10-28T00:00:00Z")]
-        self.assertEqual([c["issue"] for c in rps.rank_candidates(issues)], [41, 40])
+        self.assertEqual([c["issue"] for c in rps.rank_candidates(issues)], [41])
 
     def test_rework_only_and_extra_rows(self):
         issues = [issue(50, ["P0", "status:todo"]), issue(51, ["P2", "status:qa-rework"])]
@@ -102,8 +130,13 @@ GATED_BODY = ("<!-- ready-pool:\npriority: P0\ngate: dependency:#12000\n"
 
 class GatedDependencyTests(unittest.TestCase):
     def setUp(self):
+        real_run = subprocess.run
+        def lookup(cmd, **kwargs):
+            if any(str(part).endswith("validate-issue-contract-ledger.py") for part in cmd):
+                return real_run(cmd, **kwargs)
+            return subprocess.CompletedProcess([], 0, json.dumps({"state": "open"}), "")
         for p in (patch.object(rps, "load_open_prs", return_value=[]),
-                  patch.object(rps.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps({"state":"open"}), ""))):
+                  patch.object(rps.subprocess, "run", side_effect=lookup)):
             p.start()
             self.addCleanup(p.stop)
         self.issues = [

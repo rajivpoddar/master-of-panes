@@ -1,0 +1,4 @@
+interface:
+  display_name: "HeyDonna File and Promote Issue"
+  short_description: "File claimable HeyDonna issues correctly"
+  default_prompt: "Use $heydonna-file-promote-issue to file this bounded HeyDonna app-code issue and promote it into the Ready Pool."
