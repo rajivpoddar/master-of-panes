@@ -745,6 +745,12 @@ def upsert_obligation(args: argparse.Namespace) -> int:
             }
         )
     con = connect()
+    # Lookup and write are ONE write transaction: a guarded resolve can no
+    # longer commit between our open-row lookup and our UPDATE (which would
+    # write fresh evidence onto a RESOLVED row and lose the debt).  After a
+    # competing resolve has committed, the lookup finds no open row and a new
+    # OPEN row is inserted.  Validation above stays outside the lock.
+    con.execute("BEGIN IMMEDIATE")
     row = con.execute(
         """
         SELECT id FROM obligations
@@ -768,7 +774,7 @@ def upsert_obligation(args: argparse.Namespace) -> int:
                 blocker=COALESCE(?, blocker), horizon=?, next_review_at=COALESCE(?, next_review_at),
                 suppress_until=COALESCE(?, suppress_until), dedupe_group=COALESCE(?, dedupe_group),
                 evidence_json=?
-            WHERE id=?
+            WHERE id=? AND status='open'
             """,
             (
                 now,
