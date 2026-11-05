@@ -141,7 +141,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops-sync-stop-validator",
-      "sha256": "b4fd3c347591969848406d6b25e9b57eeb10050d505c615d927255993110b63a",
+      "sha256": "b6eea75c210c761966d766e06d339e724878a5838232262d5d671610eb090e48",
       "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
     },
     {
@@ -591,7 +591,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops",
-      "sha256": "e1afb539c7592fed98142b6fc8b6cd58945898d41e155f7e0588fa8657c417db",
+      "sha256": "c6ee5ad5364b4a1a5185d014eb3f6f89571dec260e47b9732fe506cdfed46191",
       "source_path": "claude/scripts/pm-ops-legacy.py"
     },
     {
@@ -663,7 +663,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "fb889de4c24e5b3bf7a68af30024782f60e2306436e86249a4cf5d101d2dc97f",
+      "sha256": "2a1b9a157f53688cc4f74f3fb0cb678f50abd0ac8da94779cf720c60b5ba3e20",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {

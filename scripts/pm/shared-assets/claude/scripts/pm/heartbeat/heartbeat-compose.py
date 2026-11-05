@@ -375,12 +375,21 @@ def _compact(value, limit: int) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+INVENTORY_KINDS = ('ready_pool', 'triage_retained_scope')
+
+
 def pending_obligations(path: Path, now: datetime) -> dict:
     """Read PM-owned open obligations without creating or modifying the ledger."""
     try:
         with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT * FROM obligations WHERE status='open' AND lower(trim(coalesce(owner,''))) IN ('pm','') ORDER BY created_at, id").fetchall()
+            rows = conn.execute("SELECT * FROM obligations WHERE status='open' AND lower(trim(coalesce(owner,''))) IN ('pm','') "
+                                "AND kind NOT IN ('ready_pool','triage_retained_scope') ORDER BY created_at, id").fetchall()
+            # Inventory rows are counted separately, never listed as PM actions.
+            inventory = {k: 0 for k in INVENTORY_KINDS}
+            for kind, count in conn.execute("SELECT kind, COUNT(*) FROM obligations WHERE status='open' "
+                                            "AND kind IN ('ready_pool','triage_retained_scope') GROUP BY kind"):
+                inventory[kind] = int(count)
         active = []
         for row in rows:
             row = dict(row)
@@ -391,7 +400,8 @@ def pending_obligations(path: Path, now: datetime) -> dict:
                 continue
             active.append(row)
         return {'items': [r for r in active if r['kind'] != 'backlog'],
-                'backlog': sum(r['kind'] == 'backlog' for r in active)}
+                'backlog': sum(r['kind'] == 'backlog' for r in active),
+                'inventory': inventory}
     except (OSError, sqlite3.Error) as exc:
         return {'error': type(exc).__name__}
 
@@ -477,6 +487,11 @@ def pending_actions_block(obligations: dict, github: dict, now: datetime) -> lis
                 timing = f" | review: {_compact(review, 50)}" if review else ''
                 ledger.append(f"• {_compact(target, 35)} | {_compact(row.get('required_action') or row.get('title') or row['kind'], 90)}{timing} | {age(row.get('created_at'))} | {owner}")
         ledger.extend(held)
+    inventory_line = None
+    if 'error' not in obligations and sum((obligations.get('inventory') or {}).values()):
+        inv = obligations['inventory']
+        inventory_line = (f"• Inventory: {inv.get('ready_pool', 0)} ready-pool, "
+                          f"{inv.get('triage_retained_scope', 0)} triage (not actions)")
     if 'error' in github:
         lines.append('• GitHub: UNAVAILABLE (' + _compact(github['error'], 70) + ')')
     else:
@@ -495,6 +510,8 @@ def pending_actions_block(obligations: dict, github: dict, now: datetime) -> lis
         lines.append(f'• +{remaining} more')
     if len(lines) == 1:
         lines.append('• none')
+    if inventory_line:
+        lines.append(inventory_line)
     return lines
 
 

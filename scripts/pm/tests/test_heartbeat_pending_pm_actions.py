@@ -75,3 +75,22 @@ def test_section_cap_and_mode_placement():
     assert report.index('*Decisions pending on Rajiv:*') < report.index('*Pending PM actions:*')
     report3 = composer.compose('3h', NOW, None, {}, [], decisions={'items': [], 'stale': 0})
     assert '*Pending PM actions:*' not in report3
+
+
+def test_inventory_rows_are_counted_not_listed_as_pending_actions(tmp_path):
+    db = tmp_path / 'inv.db'
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE obligations (id integer, status text, owner text, kind text, created_at text, suppress_until text, issue integer, pr integer, required_action text, title text, blocker text, next_review_at text, external_state text)')
+        conn.executemany('INSERT INTO obligations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
+            (1, 'open', 'pm', 'work', '2026-11-04T01:00:00+00:00', None, 123, None, 'do it', None, None, None, None),
+            (2, 'open', 'pm', 'ready_pool', '2026-11-04T01:00:00+00:00', None, 200, None, 'assign', None, None, None, None),
+            (3, 'open', '', 'ready_pool', '2026-11-04T01:00:00+00:00', None, 201, None, 'assign', None, None, None, None),
+            (4, 'open', 'CTO / PM', 'triage_retained_scope', '2026-11-04T01:00:00+00:00', None, 300, None, 'triage', None, None, None, None),
+            (5, 'resolved', 'pm', 'ready_pool', '2026-11-04T01:00:00+00:00', None, 202, None, 'assign', None, None, None, None),
+        ])
+    result = composer.pending_obligations(db, NOW)
+    assert [r['id'] for r in result['items']] == [1]
+    assert result['inventory'] == {'ready_pool': 2, 'triage_retained_scope': 1}
+    block = composer.pending_actions_block(result, {'items': []}, NOW)
+    assert block[-1] == '• Inventory: 2 ready-pool, 1 triage (not actions)'
+    assert not any('#200' in line or '#300' in line for line in block)

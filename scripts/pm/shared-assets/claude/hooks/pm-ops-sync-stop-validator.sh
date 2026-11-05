@@ -256,6 +256,8 @@ try:
           )
           AND COALESCE(required_action,'') != ''
           AND lower(COALESCE(owner,'')) != 'rajiv'
+          -- Inventory rows (Ready Pool / retained triage) are never Stop actions.
+          AND kind NOT IN ('ready_pool','triage_retained_scope')
           AND (suppress_until IS NULL OR suppress_until='' OR suppress_until <= strftime('%Y-%m-%dT%H:%M:%SZ','now'))
           AND (next_review_at IS NULL OR next_review_at='' OR next_review_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         ORDER BY CASE

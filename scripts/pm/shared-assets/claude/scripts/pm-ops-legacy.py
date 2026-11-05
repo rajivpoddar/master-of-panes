@@ -38,6 +38,12 @@ _GRAPHQL_OBJECT_FIELDS = {
     "issue": "number state closedAt updatedAt labels(first:100){nodes{name}}",
 }
 HORIZONS = ("hourly", "heartbeat", "daily")
+# Inventory rows (one per Ready Pool / retained-triage issue) are a backlog
+# listing, not PM actions: they are kept, but excluded from actionable open
+# counts, the Stop-hook action gate and the hourly Pending PM actions
+# (Rajiv C0ALZJHGE49 thread 1793864837.357739, ts 1793867355.054319).
+INVENTORY_KINDS = ("ready_pool", "triage_retained_scope")
+NOT_INVENTORY_SQL = "kind NOT IN (" + ",".join("'%s'" % k for k in INVENTORY_KINDS) + ")"
 HORIZON_ORDER = {name: idx for idx, name in enumerate(HORIZONS)}
 PR_ASSIGNMENT_SATISFIED_KINDS = {
     "blocked_rework",
@@ -2336,28 +2342,35 @@ def status_dict(*, read_only: bool = False) -> dict[str, Any]:
     con = connect_readonly() if read_only else connect()
     event_max = con.execute("SELECT COALESCE(MAX(id), 0) AS m FROM events").fetchone()["m"]
     sync_row = con.execute("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
-    open_count = con.execute("SELECT COUNT(*) AS c FROM obligations WHERE status='open'").fetchone()["c"]
+    open_all_count = con.execute("SELECT COUNT(*) AS c FROM obligations WHERE status='open'").fetchone()["c"]
+    inventory_counts = {kind: 0 for kind in INVENTORY_KINDS}
+    for row in con.execute(
+        f"SELECT kind, COUNT(*) AS c FROM obligations WHERE status='open' AND NOT ({NOT_INVENTORY_SQL}) GROUP BY kind"
+    ).fetchall():
+        inventory_counts[row["kind"]] = int(row["c"])
+    open_count = con.execute(f"SELECT COUNT(*) AS c FROM obligations WHERE status='open' AND {NOT_INVENTORY_SQL}").fetchone()["c"]
     horizon_counts = {
         row["horizon"]: row["c"]
         for row in con.execute(
-            "SELECT horizon, COUNT(*) AS c FROM obligations WHERE status='open' GROUP BY horizon"
+            f"SELECT horizon, COUNT(*) AS c FROM obligations WHERE status='open' AND {NOT_INVENTORY_SQL} GROUP BY horizon"
         ).fetchall()
     }
     high_horizon_counts = {
         row["horizon"]: row["c"]
         for row in con.execute(
-            "SELECT horizon, COUNT(*) AS c FROM obligations WHERE status='open' AND severity IN ('critical','high') GROUP BY horizon"
+            f"SELECT horizon, COUNT(*) AS c FROM obligations WHERE status='open' AND {NOT_INVENTORY_SQL} AND severity IN ('critical','high') GROUP BY horizon"
         ).fetchall()
     }
     pending_packet_count = con.execute("SELECT COUNT(*) AS c FROM transition_packets WHERE status='pending'").fetchone()["c"]
-    critical_count = con.execute("SELECT COUNT(*) AS c FROM obligations WHERE status='open' AND severity IN ('critical','high')").fetchone()["c"]
+    critical_count = con.execute(f"SELECT COUNT(*) AS c FROM obligations WHERE status='open' AND {NOT_INVENTORY_SQL} AND severity IN ('critical','high')").fetchone()["c"]
     hourly_critical_count = con.execute(
-        "SELECT COUNT(*) AS c FROM obligations WHERE status='open' AND horizon='hourly' AND severity IN ('critical','high')"
+        f"SELECT COUNT(*) AS c FROM obligations WHERE status='open' AND {NOT_INVENTORY_SQL} AND horizon='hourly' AND severity IN ('critical','high')"
     ).fetchone()["c"]
     pending_rajiv_count = con.execute(
         """
         SELECT COUNT(*) AS c FROM obligations
         WHERE status='open'
+          AND kind NOT IN ('ready_pool','triage_retained_scope')
           AND severity IN ('critical','high')
           AND (
             kind='pending_rajiv'
@@ -2375,6 +2388,7 @@ def status_dict(*, read_only: bool = False) -> dict[str, Any]:
         """
         SELECT COUNT(*) AS c FROM obligations
         WHERE status='open'
+          AND kind NOT IN ('ready_pool','triage_retained_scope')
           AND horizon='hourly'
           AND severity IN ('critical','high')
           AND (
@@ -2432,6 +2446,9 @@ def status_dict(*, read_only: bool = False) -> dict[str, Any]:
         "last_sync_id": int(sync_row["id"]) if sync_row else None,
         "last_sync_ts": sync_row["ts"] if sync_row else None,
         "open_obligations": open_count,
+        "open_obligations_all": open_all_count,
+        "inventory_obligations": inventory_counts,
+        "inventory_open_obligations": sum(inventory_counts.values()),
         "open_obligations_by_horizon": horizon_counts,
         "pending_transition_packets": pending_packet_count,
         "high_open_obligations": critical_count,
@@ -2446,6 +2463,45 @@ def status_dict(*, read_only: bool = False) -> dict[str, Any]:
     }
 
 
+def inventory_line(counts: dict[str, int]) -> str:
+    return (f"Inventory: {int(counts.get('ready_pool', 0))} ready-pool, "
+            f"{int(counts.get('triage_retained_scope', 0))} triage (not actions)")
+
+
+def list_obligations(args: argparse.Namespace) -> None:
+    """Read-only listing of open obligations, split actionable vs inventory."""
+    con = connect_readonly()
+    clauses = ["status='open'"]
+    if args.actionable:
+        clauses.append(NOT_INVENTORY_SQL)
+    elif args.inventory:
+        clauses.append(f"NOT ({NOT_INVENTORY_SQL})")
+    if args.kind:
+        clauses.append("kind=?")
+    rows = con.execute(
+        "SELECT id, kind, severity, horizon, owner, suppress_until, target_type, target_id, pr, issue, title "
+        "FROM obligations WHERE " + " AND ".join(clauses) + " ORDER BY kind, id",
+        [args.kind] if args.kind else [],
+    ).fetchall()
+    con.close()
+    by_kind: dict[str, int] = {}
+    for row in rows:
+        by_kind[row["kind"]] = by_kind.get(row["kind"], 0) + 1
+    scope = "actionable" if args.actionable else "inventory" if args.inventory else "all"
+    if args.format == "json":
+        print(json.dumps({"scope": scope, "count": len(rows), "by_kind": by_kind,
+                          "rows": [] if args.counts else [dict(r) for r in rows]}, sort_keys=True))
+        return
+    print(f"{scope} open obligations: {len(rows)}")
+    for kind, count in sorted(by_kind.items(), key=lambda kv: (-kv[1], kv[0])):
+        print(f"  {kind}: {count}")
+    if not args.counts:
+        for row in rows:
+            target = row["target_id"] or row["pr"] or row["issue"] or "misc"
+            print(f"- obligation:{row['id']} {row['kind']}#{target} [{row['severity']}/{row['horizon']}] "
+                  f"owner={row['owner'] or '-'} {row['title'] or ''}")
+
+
 def print_status(args: argparse.Namespace) -> None:
     status = status_dict(read_only=bool(getattr(args, "read_only", False)))
     if args.format == "json":
@@ -2457,6 +2513,7 @@ def print_status(args: argparse.Namespace) -> None:
     print(f"PM ops SQLite ledger needs sync: {', '.join(status['reasons'])}")
     print(f"DB: {status['db']}")
     print(f"pm-todo.md lines: {status['pm_todo_lines']}; open obligations: {status['open_obligations']}")
+    print(inventory_line(status["inventory_obligations"]))
     print("Reconcile through the current PM workflow using MoP/GitHub and the supported heartbeat views.")
     print("Legacy background sync orchestration is retired; this status does not authorize a sweep.")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -2582,6 +2639,14 @@ def main(argv: list[str]) -> int:
     p.add_argument("--format", choices=["text", "json"], default="text")
     p.add_argument("--read-only", action="store_true", help="do not ingest sentinels, auto-reconcile, or touch last_surface_at")
 
+    p = sub.add_parser("obligation-list")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--actionable", action="store_true", help="exclude inventory kinds (ready_pool, triage_retained_scope)")
+    group.add_argument("--inventory", action="store_true", help="only inventory kinds")
+    p.add_argument("--kind")
+    p.add_argument("--counts", action="store_true", help="per-kind counts only")
+    p.add_argument("--format", choices=["text", "json"], default="text")
+
     p = sub.add_parser("status")
     p.add_argument("--format", choices=["prompt", "json"], default="prompt")
     p.add_argument("--read-only", action="store_true", help="read the ledger without sentinel ingestion or live reconciliation")
@@ -2616,6 +2681,8 @@ def main(argv: list[str]) -> int:
         print_snapshot(args)
     elif args.cmd == "status":
         print_status(args)
+    elif args.cmd == "obligation-list":
+        list_obligations(args)
     return 0
 
 
