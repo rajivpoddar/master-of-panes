@@ -369,23 +369,48 @@ def _read_ci_reconciliation(pr: dict) -> dict | None:
     return receipt if isinstance(receipt, dict) else None
 
 
-def _obligation_resolve(*, kind: str, pr: int, reason: str) -> None:
-    if not PM_OPS_CLI.is_file():
-        return
+def _open_row_ids(kind: str, pr: int) -> list[int]:
+    """Read-only: ids of open (kind, pr) rows. Failure -> [] (nothing resolved)."""
+    if not PM_OPS_DB.is_file():
+        return []
     try:
-        subprocess.run(
-            [
-                sys.executable, str(PM_OPS_CLI), "obligation-resolve",
-                "--kind", kind,
-                "--target-type", "github_pr",
-                "--target-id", str(pr),
-                "--pr", str(pr),
-                "--reason", reason,
-            ],
-            capture_output=True, text=True, errors="replace", timeout=20, check=False,
-        )
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{PM_OPS_DB}?mode=ro", uri=True, timeout=2)
+        rows = con.execute(
+            "SELECT id FROM obligations WHERE status='open' AND kind=? AND pr=? ORDER BY id",
+            (kind, pr),
+        ).fetchall()
+        con.close()
     except Exception:
-        pass  # best-effort: no matching open row is not an error here
+        return []
+    return [int(r[0]) for r in rows]
+
+
+def _obligation_resolve(*, kind: str, pr: int, reason: str) -> list[str]:
+    """Resolve each open (kind, pr) row by exact id through
+    obligation-resolve --if-unclaimed: pm-ops checks open + unclaimed and writes
+    in one BEGIN IMMEDIATE transaction, so an owner+suppress_until claim is
+    never overwritten. Best-effort; returns the per-row outcomes."""
+    if not PM_OPS_CLI.is_file():
+        return []
+    outcomes: list[str] = []
+    for row_id in _open_row_ids(kind, pr):
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable, str(PM_OPS_CLI), "obligation-resolve",
+                    "--kind", kind,
+                    "--id", str(row_id),
+                    "--if-unclaimed",
+                    "--reason", reason,
+                ],
+                capture_output=True, text=True, errors="replace", timeout=20, check=False,
+            )
+            outcomes.append(((proc.stdout or "").strip().splitlines() or ["error"])[-1] if proc.returncode == 0 else "error")
+        except Exception:
+            outcomes.append("error")  # best-effort: the row stays open
+    return outcomes
 
 
 def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
@@ -484,46 +509,73 @@ def sync_pr_obligations(prs: list[dict], mop_owned_prs: set[int]) -> list[dict]:
     return created
 
 
-def _resolve_stale_pr_obligations(seen_open_prs: set[int]) -> None:
-    """Resolve pr_* obligations for PRs no longer open (merged/closed).
+STALE_RECHECK_CAP = 50
 
-    Read-only DB lookup to find candidates; the actual resolve still goes
-    through the canonical obligation-resolve CLI. Best-effort: any failure
-    here is silently skipped, never raised.
-    """
-    db_path = Path(
-        __import__("os").environ.get(
-            "PM_OPS_DB",
-            str(
-                Path.home()
-                / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db"
-            ),
+
+def _live_pr_state(pr: int) -> str | None:
+    """Live PR state (OPEN/CLOSED/MERGED) or None when the gh read fails."""
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "view", str(pr), "--repo", REPO, "--json", "number,state"],
+            capture_output=True, text=True, errors="replace", timeout=15,
         )
-    )
-    if not db_path.is_file():
+        if proc.returncode != 0:
+            return None
+        doc = json.loads(proc.stdout)
+        if doc.get("number") != pr:
+            return None
+        state = str(doc.get("state") or "").upper()
+        return state if state in ("OPEN", "CLOSED", "MERGED") else None
+    except Exception:
+        return None
+
+
+def _resolve_stale_pr_obligations(seen_open_prs: set[int]) -> None:
+    """Resolve pr_* obligations for PRs proven no longer open (merged/closed).
+
+    `gh pr list --limit 100` can truncate, so absence from the list is NOT
+    proof: each candidate PR is re-read live (at most STALE_RECHECK_CAP per
+    run) and resolved only when gh says CLOSED/MERGED. A failed read or an
+    OPEN PR keeps its rows; PRs whose rows are all actively claimed are not
+    re-read. Writes go through obligation-resolve --if-unclaimed.
+    """
+    if not PM_OPS_DB.is_file():
         return
     try:
         import sqlite3
 
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        con = sqlite3.connect(f"file:{PM_OPS_DB}?mode=ro", uri=True, timeout=2)
         con.row_factory = sqlite3.Row
         placeholders = ",".join("?" for _ in OBLIGATION_KINDS)
         rows = con.execute(
             f"""
-            SELECT DISTINCT pr FROM obligations
+            SELECT pr, owner, suppress_until FROM obligations
             WHERE status='open' AND kind IN ({placeholders}) AND pr IS NOT NULL
+            ORDER BY pr
             """,
             OBLIGATION_KINDS,
         ).fetchall()
         con.close()
     except Exception:
         return
+    candidates: dict[int, bool] = {}
     for row in rows:
         try:
             pr_number = int(row["pr"])
         except Exception:
             continue
         if pr_number in seen_open_prs:
+            continue
+        unclaimed = active_claim(dict(row)) is None
+        candidates[pr_number] = candidates.get(pr_number, False) or unclaimed
+    checked = 0
+    for pr_number, any_unclaimed in sorted(candidates.items()):
+        if not any_unclaimed:
+            continue
+        if checked >= STALE_RECHECK_CAP:
+            break
+        checked += 1
+        if _live_pr_state(pr_number) not in ("CLOSED", "MERGED"):
             continue
         for kind in OBLIGATION_KINDS:
             _obligation_resolve(kind=kind, pr=pr_number, reason="pr_no_longer_open")

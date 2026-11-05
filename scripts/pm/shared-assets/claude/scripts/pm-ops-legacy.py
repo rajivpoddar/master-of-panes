@@ -836,6 +836,39 @@ def resolve_obligation(args: argparse.Namespace) -> None:
             "obligation-resolve refused: first_boundary_reservation rows resolve only by exact --id after validated consumption"
         )
     con = connect()
+    if getattr(args, "if_unclaimed", False):
+        if exact_id is None:
+            con.close()
+            raise SystemExit("obligation-resolve --if-unclaimed requires --id")
+        con.execute("BEGIN IMMEDIATE")
+        claim = con.execute(
+            "SELECT owner, suppress_until FROM obligations WHERE status='open' AND id=? AND kind=?",
+            (exact_id, kind),
+        ).fetchone()
+        if claim is None:
+            con.commit()
+            con.close()
+            print("skipped_not_open")
+            return
+        # A live claim is owner + suppress_until in the future (rule 20 S45:
+        # "BOTH owner+suppress required, only suppress silences").  An owner
+        # with no suppress_until (e.g. the producer-set generic "PM") is not a
+        # claim.  A present but unparseable suppress_until is treated as a
+        # claim (conservative skip).  Naive timestamps are read as UTC.
+        raw_until = str(claim["suppress_until"] or "").strip()
+        if str(claim["owner"] or "").strip() and raw_until:
+            try:
+                until = dt.datetime.fromisoformat(raw_until.replace("Z", "+00:00"))
+                if until.tzinfo is None:
+                    until = until.replace(tzinfo=dt.timezone.utc)
+                expired = until <= dt.datetime.now(dt.timezone.utc)
+            except (ValueError, TypeError, OverflowError):
+                expired = False
+            if not expired:
+                con.commit()
+                con.close()
+                print("skipped_claimed")
+                return
     resolved_ids: list[int] = []
     receipt_slot: int | None = None
     if exact_id is not None:
@@ -943,6 +976,8 @@ def resolve_obligation(args: argparse.Namespace) -> None:
         )
     con.commit()
     con.close()
+    if getattr(args, "if_unclaimed", False):
+        print("resolved")
 
 
 def resolve_target_obligations(args: argparse.Namespace) -> None:
@@ -2480,6 +2515,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--slot", type=int)
     p.add_argument("--reason")
     p.add_argument("--external-state")
+    p.add_argument("--if-unclaimed", action="store_true", help="atomically skip actively claimed rows; requires --id")
 
     p = sub.add_parser("obligation-resolve-target")
     p.add_argument("--kind")

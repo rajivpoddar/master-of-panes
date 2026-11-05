@@ -28,7 +28,11 @@ CLOSES = re.compile(r'\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+((?:#\d+[ \t
 DEPENDENCY = 'pm-blocked:dependency'
 NON_DEPENDENCY = {'pm-blocked:pm-gate', 'pm-blocked:infra', 'pm-blocked:product',
                   'pm-blocked:external', 'pm-blocked:cto'}
-NARROWED = 'collector_narrowed_not_dependency_gated'
+# Reasons a live read can prove cleared. partial_merge comes from the rolling
+# merged-PR window, so its absence in a later run proves nothing: never auto-resolved.
+LIVE_CHECKABLE = {'unowned_lifecycle', 'done_open', 'merged_closes_open', 'blockers_resolved'}
+WINDOW_ONLY = {'partial_merge'}
+RECHECK_CAP = 50
 BLOCKERS = re.compile(r'(?im)^[^\n]*?\b(?:blockers?\**\s*:|blocked\s+(?:by|on)|depends\s+on|after|waits?\s+on|until|unblock[_ ]condition\s*[:=])\**\s+([^\n]+)')
 SOURCE = '''nodes { ... on CrossReferencedEvent { source { ... on PullRequest {
  number state body title headRefName mergedAt
@@ -233,26 +237,133 @@ def sync(findings):
             '--evidence-json', json.dumps(row)], capture_output=True, text=True, timeout=30, check=True)
 
 
-def resolve_narrowed(previous, findings):
-    """Resolve orphaned_issue rows for issues that only qualified under the old broad rule."""
+def resolve_if_unclaimed(row_id, reason):
+    """Resolve one exact open orphaned_issue row unless it is actively claimed.
+
+    pm-ops does the open+unclaimed check and the write in one BEGIN IMMEDIATE
+    transaction, so a claim landing after our read is never overwritten.
+    Returns 'resolved', 'skipped_claimed' or 'skipped_not_open'.
+    """
+    proc = subprocess.run([sys.executable, str(PM_OPS), 'obligation-resolve', '--kind', 'orphaned_issue',
+        '--id', str(row_id), '--if-unclaimed', '--reason', reason],
+        capture_output=True, text=True, timeout=30)
+    if proc.returncode:
+        raise RuntimeError(f'obligation-resolve failed for row {row_id}: {proc.stderr.strip()}')
+    outcome = (proc.stdout.strip().splitlines() or [''])[-1]
+    if outcome not in ('resolved', 'skipped_claimed', 'skipped_not_open'):
+        raise RuntimeError(f'obligation-resolve unexpected output for row {row_id}: {outcome!r}')
+    return outcome
+
+
+def ledger_path():
+    proc = subprocess.run([sys.executable, str(PM_OPS), 'status', '--format', 'json', '--read-only'],
+                          capture_output=True, text=True, timeout=30, check=True)
+    return Path(json.loads(proc.stdout)['db']).resolve()
+
+
+def open_rows():
+    """Open issue-keyed orphaned_issue rows: id, issue, owner, suppress_until, reasons."""
+    with sqlite3.connect(ledger_path().as_uri() + '?mode=ro', uri=True) as connection:
+        rows = connection.execute("SELECT id, issue, owner, suppress_until, evidence_json FROM obligations "
+                                  "WHERE kind='orphaned_issue' AND status='open' AND issue IS NOT NULL "
+                                  "ORDER BY id").fetchall()
+    out = []
+    for row_id, issue, owner, until, evidence in rows:
+        try:
+            reasons = json.loads(evidence or '{}').get('reasons')
+        except (ValueError, AttributeError):
+            reasons = None
+        if not (isinstance(reasons, list) and reasons and all(isinstance(r, str) for r in reasons)):
+            reasons = None  # PM-written or unknown evidence: never auto-resolved
+        out.append(dict(id=int(row_id), issue=int(issue), owner=owner, suppress_until=until, reasons=reasons))
+    return out
+
+
+def claimed(row, now):
+    """Mirror of the pm-ops --if-unclaimed rule; a cheap pre-filter only."""
+    if not (row.get('owner') or '').strip() or not (row.get('suppress_until') or '').strip():
+        return False
+    try:
+        until = dt.datetime.fromisoformat(row['suppress_until'].replace('Z', '+00:00'))
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=dt.timezone.utc)
+        return until > now
+    except (ValueError, TypeError):
+        return True
+
+
+def live_issue(number):
+    """Live issue state; any gh failure raises and the caller skips the row."""
+    doc = gh('api', f'repos/{REPO}/issues/{number}')
+    if not isinstance(doc, dict) or doc.get('number') != number or 'state' not in doc:
+        raise ValueError('unexpected issue payload')
+    return dict(state=str(doc['state']).upper(), labels=labels(doc),
+                assignees=[a.get('login') for a in doc.get('assignees') or [] if isinstance(a, dict)])
+
+
+def reason_cleared(reason, number, issue, owned, open_prs, narrowed):
+    """True only when the live state proves this finding no longer holds."""
+    closed = issue['state'] == 'CLOSED'
+    if reason in WINDOW_ONLY:
+        return False  # derived from a rolling merged-PR window; absence proves nothing
+    if reason == 'unowned_lifecycle':
+        return closed or number in owned or any(referenced(p, number) for p in open_prs)
+    if reason in ('merged_closes_open', 'done_open'):
+        return closed
+    if reason == 'blockers_resolved':
+        return closed or bool(issue['assignees']) or DEPENDENCY not in issue['labels'] or narrowed
+    return False  # unknown reason stays open
+
+
+def recheck(findings, slots, open_prs, previous, cursor=0, write=True, now=None):
+    """Live-recheck open orphaned_issue rows the current run no longer reports.
+
+    Rows still reported are current by construction. For the rest, every stored
+    reason must be proven cleared by a live read (at most RECHECK_CAP per run,
+    rotating from `cursor`); window-only/unknown reasons, claimed rows and
+    failed reads are kept. Writes go only through obligation-resolve --if-unclaimed.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    owned = {int(s['issue']) for s in slots if s.get('occupied') is True and s.get('issue')}
     current = {r['issue'] for r in findings}
-    dropped = sorted({r['issue'] for r in previous if 'blockers_resolved' in r.get('reasons', [])} - current)
-    for n in dropped:
-        proc = subprocess.run([sys.executable, str(PM_OPS), 'obligation-resolve', '--kind', 'orphaned_issue',
-            '--target-type', 'github_issue', '--target-id', str(n), '--issue', str(n), '--reason', NARROWED],
-            capture_output=True, text=True, timeout=30)
-        # rc=1 'matched no open row' = already resolved/never upserted; that is fine.
-        if proc.returncode and 'matched no open row' not in (proc.stderr + proc.stdout):
-            raise RuntimeError(f'obligation-resolve failed for #{n}: {proc.stderr.strip()}')
-    return dropped
+    narrowed = {r['issue'] for r in previous if 'blockers_resolved' in r.get('reasons', [])} - current
+    rows = [r for r in open_rows() if r['issue'] not in current]
+    rows = [r for r in rows if r['id'] > cursor] + [r for r in rows if r['id'] <= cursor]
+    report = dict(resolved=[], skipped_claimed=[], skipped_not_open=[], kept_window_or_unknown=[],
+                  kept_not_cleared=[], skipped_gh_failure=[], checked=0, cursor=cursor)
+    for row in rows:
+        if row['reasons'] is None or set(row['reasons']) - LIVE_CHECKABLE:
+            report['kept_window_or_unknown'].append(row['id'])
+            continue
+        if claimed(row, now):
+            report['skipped_claimed'].append(row['id'])
+            continue
+        if report['checked'] >= RECHECK_CAP:
+            break
+        report['checked'] += 1
+        report['cursor'] = row['id']
+        try:
+            issue = live_issue(row['issue'])
+        except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError):
+            report['skipped_gh_failure'].append(row['id'])
+            continue
+        if not all(reason_cleared(r, row['issue'], issue, owned, open_prs, row['issue'] in narrowed)
+                   for r in row['reasons']):
+            report['kept_not_cleared'].append(row['id'])
+            continue
+        if not write:
+            report['resolved'].append(row['id'])
+            continue
+        reason = 'live_recheck_cleared:' + ','.join(sorted(row['reasons'])) + ':' + issue['state'].lower()
+        report[resolve_if_unclaimed(row['id'], reason)].append(row['id'])
+    else:
+        report['cursor'] = 0  # full pass completed; restart from the oldest row
+    return report
 
 
 def active_suppressions(now):
     """Read PM's authoritative dispositions; never renew or overwrite them."""
-    proc = subprocess.run([sys.executable, str(PM_OPS), 'status', '--format', 'json', '--read-only'],
-                          capture_output=True, text=True, timeout=30, check=True)
-    database = Path(json.loads(proc.stdout)['db']).resolve()
-    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as connection:
+    with sqlite3.connect(ledger_path().as_uri() + '?mode=ro', uri=True) as connection:
         rows = connection.execute("SELECT issue, suppress_until FROM obligations "
                                   "WHERE kind='orphaned_issue' AND status='open' "
                                   "AND owner IS NOT NULL AND owner != '' AND suppress_until IS NOT NULL")
@@ -274,7 +385,9 @@ def run(dry_run=False):
         now = dt.datetime.now(dt.timezone.utc)
         saved = json.loads(STATE.read_text()) if STATE.exists() else {}
         since = saved.get('since') or (now - dt.timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%SZ')
-        findings = detect(*collect(since))
+        collected = collect(since)
+        findings = detect(*collected)
+        _issues, open_prs, slots = collected[0], collected[1], collected[2]
         resolved = {r['issue'] for r in findings if 'blockers_resolved' in r['reasons']}
         reported = set(saved.get('reported_blockers_resolved', []))
         suppressed = active_suppressions(now)
@@ -283,14 +396,16 @@ def run(dry_run=False):
         lines = render(actionable, carried)
         if len(actionable) != len(findings):
             lines.append(f'• {len(findings) - len(actionable)} dispositioned issues suppressed until their recorded review/wake; not actions.')
+        previous = saved.get('findings', [])
+        cursor = int(saved.get('recheck_cursor') or 0)
         if dry_run:
-            dropped = sorted({r['issue'] for r in saved.get('findings', []) if 'blockers_resolved' in r.get('reasons', [])}
-                             - {r['issue'] for r in findings})
-            return dict(dry_run=True, findings=actionable, lines=lines, would_resolve=dropped)
+            would = recheck(findings, slots, open_prs, previous, cursor, write=False, now=now)
+            return dict(dry_run=True, findings=actionable, lines=lines, would_resolve=would['resolved'], recheck=would)
         sync(actionable)
-        dropped = resolve_narrowed(saved.get('findings', []), findings)
+        rechecked = recheck(findings, slots, open_prs, previous, cursor, now=now)
         doc = dict(since=now.strftime('%Y-%m-%dT%H:%M:%SZ'), findings=actionable, lines=lines,
-                   scanned_since=since, reported_blockers_resolved=sorted(resolved), resolved_narrowed=dropped)
+                   scanned_since=since, reported_blockers_resolved=sorted(resolved),
+                   recheck=rechecked, recheck_cursor=rechecked['cursor'])
         temporary = STATE.with_suffix('.new')
         temporary.write_text(json.dumps(doc, indent=2) + '\n')
         temporary.replace(STATE)
