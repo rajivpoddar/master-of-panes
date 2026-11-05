@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 
 import { assignmentIdentityPatchFields, registerAssignmentRoute } from "../src/assignmentRoute.js";
 import { MoPDatabase } from "../src/db.js";
+import { setPaneCheckExecutor } from "../src/sessionDelivery.js";
 import type { MoPConfig } from "../src/types.js";
 
 /**
@@ -20,6 +21,7 @@ const RETIRED_AUTHORITY_VALUE = "pm-transition-v1";
 
 async function withAssignmentRoute(
   run: (app: Hono, db: MoPDatabase, directory: string) => Promise<void>,
+  paneState: "live" | "dead" = "live",
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "mop-assignment-route-"));
   const config: MoPConfig = {
@@ -33,9 +35,13 @@ async function withAssignmentRoute(
   const db = new MoPDatabase(config);
   const app = new Hono();
   registerAssignmentRoute(app, db);
+  setPaneCheckExecutor(async (target) => paneState === "live"
+    ? { state: "live", paneId: target }
+    : { state: "dead" });
   try {
     await run(app, db, directory);
   } finally {
+    setPaneCheckExecutor(null);
     db.close();
     rmSync(directory, { recursive: true, force: true });
   }
@@ -126,6 +132,17 @@ test("a stale authority header is ignored, and assignment needs no header at all
     assert.equal(db.getSlot(1)?.issue, assignment.issue);
   });
 });
+test("assignment refuses a missing pane without changing the slot", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    const before = db.getSlot(1);
+    const response = await app.request("/slots/1/assign", assignmentRequest(undefined, assignment));
+    assert.equal(response.status, 409);
+    assert.equal((await response.json() as Record<string, unknown>).reason, "session_delivery_unverified");
+    assert.deepEqual(db.getSlot(1), before);
+    assert.equal(db.getEvents(1, 10, "slot_assigned").length, 0);
+  }, "dead");
+});
+
 test("numbered assignment routes reject the slot-0 PM boundary", async () => {
   await withAssignmentRoute(async (app) => {
     for (const path of ["/slots/0/assign", "/slots/0/adopt-issue-claim"]) {
