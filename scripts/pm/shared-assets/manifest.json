@@ -141,8 +141,17 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops-sync-stop-validator",
-      "sha256": "b6eea75c210c761966d766e06d339e724878a5838232262d5d671610eb090e48",
+      "sha256": "7d703624f574af9ce71acbbc783df670e5801eaf7f483e497249e1879701473e",
       "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-stop-group-runner.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-pm-stop-group-runner",
+      "sha256": "4a19fd34e6eec5b9f556a2a71cbfb513d1400179749a75e68bd572d669ed07f7",
+      "source_path": "claude/hooks/pm-stop-group-runner.py"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-self-clear-stop.sh",

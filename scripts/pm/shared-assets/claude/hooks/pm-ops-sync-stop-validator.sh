@@ -1,368 +1,173 @@
 #!/usr/bin/env bash
-# Stop hook: surface due executable PM obligations before the PM turn closes.
-
-set -euo pipefail
+# Stop only: drain runnable commitments without touching the ledger or services.
+set -uo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
-
-PM_OPS="${PM_OPS:-/Users/rajiv/.claude/scripts/pm-ops.py}"
-LOG="${PM_OPS_STOP_LOG:-/tmp/pm-ops-sync-stop-validator.log}"
-HOOK_INPUT="$(cat 2>/dev/null || true)"
-
-[ -x "$PM_OPS" ] || exit 0
-
-# Deterministic every-turn open-PR drive (Rajiv 2026-09-30 01:xx IST, thread
-# C0ALZJHGE49/1790707604.948989): the hourly/3h heartbeat alone recreates the
-# hourly gap this validator exists to close. Refresh the pr_admission /
-# pr_red_unowned / pr_merge_ask obligations here too, cached at 120s so
-# back-to-back Stop turns don't hammer GitHub, bounded to 8s, and fully
-# fail-open -- a gh/pm-ops error here must never block or fail this hook.
-HB_INSTALLED="/Users/rajiv/.claude/scripts/pm/heartbeat"  # MoP-installed collectors (manifest)
-if [ -n "${PR_OPEN_SNAPSHOT:-}" ]; then
-  PR_SNAPSHOT="$PR_OPEN_SNAPSHOT"
-elif [ -f "$HB_INSTALLED/pr-open-snapshot.py" ]; then
-  PR_SNAPSHOT="$HB_INSTALLED/pr-open-snapshot.py"
-else  # transition fallback until heydonna-app PR #8494 removes the repo copy
-  PR_SNAPSHOT="/Users/rajiv/Downloads/projects/heydonna-app/scripts/pm/heartbeat/pr-open-snapshot.py"
-fi
-PR_SYNC_CACHE="${PR_SYNC_CACHE_STAMP:-/tmp/pr-open-snapshot-sync.stamp}"
-PR_SYNC_TTL=120
-if [ -f "$PR_SNAPSHOT" ]; then
-  now_epoch=$(date +%s 2>/dev/null || echo 0)
-  last_epoch=0
-  if [ -f "$PR_SYNC_CACHE" ]; then
-    last_epoch=$(stat -f %m "$PR_SYNC_CACHE" 2>/dev/null || stat -c %Y "$PR_SYNC_CACHE" 2>/dev/null || echo 0)
-  fi
-  if [ "$now_epoch" -gt 0 ] && [ $(( now_epoch - last_epoch )) -ge "$PR_SYNC_TTL" ]; then
-    touch "$PR_SYNC_CACHE" 2>/dev/null || true
-    timeout 8 python3 "$PR_SNAPSHOT" --sync-obligations >>"$LOG" 2>&1 || true
-  fi
-fi
-
-STATUS_JSON=$(python3 "$PM_OPS" status --format json --read-only 2>>"$LOG" || echo '{}')
-
-python3 - "$STATUS_JSON" "$HOOK_INPUT" <<'PYEOF'
+# Consume the hook payload, never the transcript or a remote status/collector.
+cat >/dev/null
+exec python3 - <<'PYEOF'
 from __future__ import annotations
-import json
-import sqlite3
-import sys
+
+from collections import Counter
 from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import time
 
 
-# These obligation kinds are executable PM/CTO handoffs even when older
-# producers did not persist evidence_json.pm_stop_actionable. Waiting and
-# in-flight kinds (for example dependency_watch and ci_rerun_after_preflight)
-# are intentionally absent so the Stop hook cannot deadlock on passive work.
-DERIVED_EXECUTABLE_KINDS = {
-    # Communications formerly checked by direct Stop validators.
-    "alert",
-    "customer_followup",
-    "customer_incident",
-    # CI/release and cleanup.
-    "blocked_rework",
-    "ci_rework",
-    "ci_local_preflight",
-    "ci_reconcile",
-    "cleanup",
-    "cleanup_closeout",
-    "cleanup_pr",
-    "cto_rescue",
-    "evidence_gate",
-    "merge_ready_invalid",
-    "pm_gate",
-    "pm_review_pending",
-    # Capture terminal/rework work.
-    "capture_alert",
-    "capture_closure_queued",
-    "capture_local_preflight",
-    "capture_rework_assignment",
-    # Kanban and post-issue routing drift.
-    "issue_routing",
-    "pr_state_missing",
-    "pr_state_reconcile",
-    "pr_scope_audit",
-    "rescope_final_patch",
-    "rescope_override",
-    "rescope_split_execution",
-    "review_loop_rescope",
-    "slot_state_drift",
-    # Slot-to-PM nudges are created by pm-context-injector on every nudge
-    # arrival; PM must process them (assign a free slot / release an
-    # occupied slot at >=20m) before stopping.
-    "slot_nudge",
-    "stale_slot_label",
-    # Session clearing is produced by the heartbeat and consumed as an
-    # obligation; Stop must not run its former bespoke validator.
-    "session_age_clear",
-    "pm-self-clear",
-    # MoP opens one per hourly-heartbeat bucket; hourly-thread-ts --set
-    # resolves it when the report posts (Rajiv D0AMF0XE6TS ts 1793784122.949659).
-    "hourly_report_due",
-}
-
-# Once the review wait has expired, this continuation is the release handoff
-# itself. Resolving an unrelated obligation in the same turn must not hide it;
-# otherwise busy PM turns can starve a ready PR indefinitely.
-NON_WAIVABLE_CONTINUATION_KINDS = {
-    "pm_review_pending",
-    "review_loop_rescope",
-}
+DEFAULT_DB = ("/Users/rajiv/.claude/projects/"
+              "-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db")
+INVENTORY = {"ready_pool", "triage_retained_scope"}
+NOW = datetime.now(timezone.utc)
+DEADLINE = time.monotonic() + 0.75
 
 
-try:
-    status = json.loads(sys.argv[1])
-except Exception:
-    sys.exit(0)
-try:
-    hook_input = json.loads(sys.argv[2] or "{}")
-except Exception:
-    hook_input = {}
-
-
-def current_turn_started_at() -> str | None:
-    """Return the latest real user prompt timestamp from this transcript.
-
-    Tool results and Stop-hook feedback are stored as user records too. They do
-    not begin a new PM turn, so exclude non-string content and isMeta records.
-    """
-    transcript_path = hook_input.get("transcript_path")
-    if not isinstance(transcript_path, str) or not transcript_path:
+def stamp(value):
+    if not value:
         return None
-    latest = None
-    try:
-        with open(transcript_path, encoding="utf-8", errors="replace") as transcript:
-            for raw in transcript:
-                try:
-                    entry = json.loads(raw)
-                except Exception:
-                    continue
-                if entry.get("type") != "user" or entry.get("isMeta"):
-                    continue
-                message = entry.get("message")
-                content = message.get("content") if isinstance(message, dict) else None
-                timestamp = entry.get("timestamp")
-                if isinstance(content, str) and isinstance(timestamp, str) and timestamp:
-                    latest = timestamp
-    except OSError:
-        return None
-    return latest
-
-
-PM_AGE_DUE_SECONDS = 6 * 60 * 60
-
-
-def parse_ts(value):
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        raise ValueError("timestamp lacks timezone")
     return parsed.astimezone(timezone.utc)
 
 
-def current_session_age():
-    session_id = hook_input.get("session_id")
-    transcript_path = hook_input.get("transcript_path")
-    if not isinstance(session_id, str) or not session_id.strip():
-        return None, None, "current_session_identity_unavailable"
-    if not isinstance(transcript_path, str) or not transcript_path:
-        return session_id, None, "current_session_age_unavailable"
-    started_at = None
-    try:
-        with open(transcript_path, encoding="utf-8", errors="replace") as transcript:
-            for raw in transcript:
-                try:
-                    entry = json.loads(raw)
-                except Exception:
-                    continue
-                if entry.get("isSidechain") is True:
-                    continue
-                started_at = parse_ts(entry.get("timestamp"))
-                if started_at is not None:
-                    break
-    except OSError:
-        return session_id, None, "current_session_age_unavailable"
-    if started_at is None:
-        return session_id, None, "current_session_age_unavailable"
-    age_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
-    if age_seconds < 0:
-        return session_id, None, "current_session_age_unavailable"
-    return session_id, age_seconds, None
+def compact(value, limit=220):
+    return " ".join(str(value or "").split())[:limit]
 
 
-def pm_self_clear_decision(row, evidence):
+def tokens(value):
+    # Only current custody fields, never historical/quoted issue contracts.
+    return re.sub(r"[_/\s-]+", " ", str(value or "").lower())
+
+
+def classify(row):
+    evidence = json.loads(row.get("evidence_json") or "{}")
     if not isinstance(evidence, dict):
-        return False, "pm_self_clear_evidence_unavailable"
-    current_session_id, age_seconds, age_reason = current_session_age()
-    recorded_session_id = evidence.get("session_id")
-    if not isinstance(recorded_session_id, str) or not recorded_session_id:
-        return False, "pm_self_clear_evidence_unavailable"
-    if parse_ts(evidence.get("session_started_at")) is None:
-        return False, "pm_self_clear_evidence_unavailable"
-    if not current_session_id:
-        return False, "current_session_identity_unavailable"
-    if recorded_session_id != current_session_id:
-        return False, "current_session_mismatch"
-    if age_reason or age_seconds is None:
-        return False, age_reason or "current_session_age_unavailable"
-    if hook_input.get("stop_hook_active") is True:
-        return False, "stop_hook_active"
-    if age_seconds <= PM_AGE_DUE_SECONDS:
-        return False, "current_session_not_due"
-    return True, "pm_self_clear_pending"
+        raise ValueError("evidence is not an object")
+    review = stamp(row.get("next_review_at"))
+    suppress = stamp(row.get("suppress_until"))
+    action = compact(row.get("required_action"), 800)
+    blocker = compact(row.get("blocker"), 500)
+    owner = compact(row.get("owner"))
+    custody = " ".join(tokens(evidence.get(k)) for k in
+                       ("state", "status", "outcome", "disposition", "delivery", "effect_state"))
+    receipt = evidence.get("handoff") or evidence.get("execution") or evidence.get("receipt")
+    if isinstance(receipt, dict):
+        custody += " " + tokens(receipt.get("status") or receipt.get("state"))
+    custody = custody.replace("root cause unknown", "")
+    if ("no retry" in custody or "consumed" in custody or
+            re.search(r"\b(unknown|uncertain|ambiguous|unconfirmed)\b", custody) or
+            re.search(r"\b(no retry|consumed|unknown consumed|uncertain effect)\b", tokens(action + " " + blocker))):
+        return "held", "Protected effect custody: read retained receipts only; no resend, charge or replay."
+    if row.get("kind") == "pm-self-clear":
+        return "held", "Legacy clear row superseded by the existing MoP save-handoff path."
 
-db_path = status.get("db") or (
-    "/Users/rajiv/.claude/projects/"
-    "-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db"
-)
-p0_actions = []
-due_actions = []
-continuation_actions = []
-deferred_pm_self_clear = []
-resolved_this_turn = False
-turn_started_at = current_turn_started_at()
+    # A bare owner/claim/wake is not an accepted handoff. Retain an actual
+    # native acceptance/run receipt, and reject a receipt naming another item.
+    if isinstance(receipt, dict):
+        same = all(str(receipt[k]) == str(row.get(k)) for k in
+                   ("issue", "pr", "target_id") if k in receipt)
+        same = same and ("obligation_id" not in receipt or
+                         str(receipt["obligation_id"]) == str(row["id"]))
+        accepted = tokens(receipt.get("status") or receipt.get("state"))
+        identity = any(receipt.get(k) for k in
+                       ("queuedSubmissionId", "submission_id", "run_id", "effect_id", "receipt_id"))
+        if same and identity and accepted in {"accepted", "queued", "running", "in progress"}:
+            return "in_flight", "Accepted execution receipt retained; consume its real terminal, do not duplicate."
 
-try:
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
-    con.row_factory = sqlite3.Row
-    p0_rows = con.execute(
-        """
-        SELECT id, title, required_action, target_id
-        FROM obligations
-        WHERE status='open'
-          AND kind='p0_escalation'
-          AND (suppress_until IS NULL OR suppress_until='' OR suppress_until <= strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-          AND (
-            (next_review_at IS NOT NULL AND next_review_at != '' AND next_review_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-            OR (created_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now','-30 minutes'))
-          )
-        ORDER BY updated_at DESC, id DESC
-        LIMIT 3
-        """
-    ).fetchall()
+    wait = " ".join((blocker, compact(evidence.get("hold_reason")),
+                     compact(evidence.get("review_reason")))).lower()
+    text = " ".join((action, wait)).lower()
+    # Unavailable evidence is not evidence of runnable work or of completion.
+    if re.search(r"\b(unavailable|unreachable|lookup.failed|access denied|denied access)\b", wait):
+        return "unverified", "Required evidence unavailable: " + compact(wait)
+    authority = re.search(r"\b(rajiv|cto|customer|vendor|provider|external)\b", wait)
+    waiting = re.search(r"\b(wait|waiting|await|awaiting|approval|authority|permission|response|reply|decision|blocked|requires|required|pending)\b", wait)
+    if owner.lower() == "rajiv" or (authority and waiting):
+        return "held", "Authority/external wait: " + (blocker or owner)
 
-    candidates = con.execute(
-        """
-        SELECT id, kind, severity, title, required_action, target_type,
-               target_id, pr, issue, slot, owner, created_at, evidence_json
-        FROM obligations
-        WHERE status='open'
-          AND severity IN ('critical','high')
-          AND (
-            horizon='hourly'
-            OR (kind IN ('session_age_clear', 'pm-self-clear') AND horizon='heartbeat')
-          )
-          AND COALESCE(required_action,'') != ''
-          AND lower(COALESCE(owner,'')) != 'rajiv'
-          -- Inventory rows (Ready Pool / retained triage) are never Stop actions.
-          AND kind NOT IN ('ready_pool','triage_retained_scope')
-          AND (suppress_until IS NULL OR suppress_until='' OR suppress_until <= strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-          AND (next_review_at IS NULL OR next_review_at='' OR next_review_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-        ORDER BY CASE
-                   WHEN kind = 'pm_save_handoff' THEN -1
-                   WHEN pr IS NOT NULL AND kind != 'cleanup_pr' THEN 0
-                   WHEN kind = 'cleanup_pr' THEN 1
-                   ELSE 2
-                 END,
-                 CASE severity WHEN 'critical' THEN 0 ELSE 1 END,
-                 created_at ASC, id ASC
-        """
-    ).fetchall()
-    if turn_started_at:
-        resolved_this_turn = con.execute(
-            """
-            SELECT 1
-            FROM obligations
-            WHERE status='resolved'
-              AND resolved_at IS NOT NULL
-              AND julianday(resolved_at) >= julianday(?)
-            LIMIT 1
-            """,
-            (turn_started_at,),
-        ).fetchone() is not None
-    con.close()
+    future = max((t for t in (review, suppress) if t is not None), default=None)
+    review_reason = evidence.get("review_reason") or evidence.get("hold_reason")
+    scheduled = re.search(r"\b(review|observe|observation|monitor|window|at|after|until|waiting|awaiting)\b", text)
+    if future and future > NOW and (review_reason or (blocker and scheduled)):
+        return "future", f"Review {future.isoformat()}: {blocker or compact(review_reason)}"
 
-    for row in p0_rows:
-        title = row["title"] or f"P0 escalation obligation {row['id']}"
-        target = row["target_id"] or "<thread_ts>"
-        action = row["required_action"] or (
-            "Invoke Skill(alert-processing); inspect the alert thread, then "
-            f"execute the canonical escalation for {target}."
-        )
-        p0_actions.append(f"obligation:{row['id']} {title}. {action}")
+    # Conditional customer/release work is never an unconditional effect.
+    # A concrete cached blocker is visible; an unestablished prerequisite is
+    # a safe classification step rather than permission to execute the action.
+    conditional = re.search(r"\b(after|once|when|until|on)\b.{0,100}\b(merge|merged|deploy|deployed|complet|approval|receipt|terminal)\w*", action.lower())
+    if conditional and blocker and not evidence.get("prerequisite_met"):
+        return "held", "Prerequisite retained: " + blocker
+    if conditional and evidence.get("prerequisite_met") is not True:
+        return "classify", "Establish the stated prerequisite from existing receipts; if unavailable record the specific wait. Do not perform the conditional effect."
+    if not action or (blocker and blocker.lower() not in {"none", "no blocker", "n/a"}):
+        return "classify", "Reconcile the recorded blocker/readiness using retained evidence, then record the concrete next step or external/review wait. Do not repeat an uncertain effect."
+    return "runnable", action
 
-    for row in candidates:
+
+def emit_unavailable(reason):
+    print(json.dumps({"continue": True, "reason":
+          "[PM_OBLIGATION_DRAIN_UNAVAILABLE] " + reason +
+          "; obligation readiness/count UNKNOWN. Stop is permitted; retain custody and repair the read path."}))
+
+
+def main():
+    con = None
+    try:
+        path = Path(os.environ.get("PM_OPS_DB", DEFAULT_DB)).expanduser().resolve()
+        con = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.15)
+        con.row_factory = sqlite3.Row
+        con.set_progress_handler(lambda: int(time.monotonic() > DEADLINE), 500)
+        # One consistent read; no status CLI, ingestion, MoP or provider call.
+        rows = [dict(r) for r in con.execute(
+            "SELECT id, kind, severity, horizon, owner, title, required_action, blocker, "
+            "target_id, issue, pr, next_review_at, suppress_until, evidence_json "
+            "FROM obligations WHERE status='open' ORDER BY id")]
+    except (OSError, ValueError, sqlite3.Error) as error:
+        emit_unavailable(type(error).__name__ + ": " + compact(error))
+        return
+    finally:
+        if con is not None:
+            con.close()
+
+    findings = []
+    for row in rows:
+        if time.monotonic() > DEADLINE:
+            emit_unavailable("local decision deadline exceeded")
+            return
+        if row.get("kind") in INVENTORY:
+            continue
         try:
-            evidence = json.loads(row["evidence_json"] or "{}")
-        except Exception:
-            evidence = {}
-        if row["kind"] == "pm-self-clear":
-            # Superseded: MoP owns the PM clear through pm_save_handoff and
-            # injects /clear itself at the next Stop after the save (Rajiv
-            # D0AMF0XE6TS ts 1793732417.459339). A legacy row never blocks
-            # Stop, so a pending clear cannot wedge the PM (rule 50).
-            deferred_pm_self_clear.append(f"obligation:{row['id']}:superseded_by_pm_save_handoff")
-            continue
-        explicitly_actionable = evidence.get("pm_stop_actionable") in (1, True)
-        derived_actionable = row["kind"] in DERIVED_EXECUTABLE_KINDS
-        if not explicitly_actionable and not derived_actionable:
-            continue
+            disposition, step = classify(row)
+        except (ValueError, TypeError, OverflowError) as error:
+            disposition, step = "unverified", "Malformed local evidence/timing: " + compact(error)
+        findings.append((row, disposition, step))
+    counts = Counter(d for _, d, _ in findings)
+    runnable = [(r, d, s) for r, d, s in findings if d in {"runnable", "classify"}]
+    runnable.sort(key=lambda item: (
+        {"critical": 0, "high": 1, "medium": 2, "normal": 3}.get(item[0].get("severity"), 4), item[0]["id"]))
+    waiting = [(r, d, s) for r, d, s in findings if d not in {"runnable", "classify"}]
+    parts = [f"open commitments={len(findings)}; " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))]
+    for row, disposition, step in runnable[:3]:
+        parts.append(f"obligation:{row['id']} [{disposition}] owner={compact(row.get('owner')) or 'PM triage'} "
+                     f"{compact(row.get('title'), 100)}: {compact(step, 450)}")
+    if len(runnable) > 3:
+        parts.append(f"remaining runnable/classification={len(runnable) - 3}")
+    for row, disposition, step in waiting[:3]:
+        parts.append(f"obligation:{row['id']} [{disposition}] {compact(step, 240)}")
+    if len(waiting) > 3:
+        parts.append(f"remaining held/future/in-flight/unverified={len(waiting) - 3}")
+    parts.append("Inspect remaining rows with pm-ops.py obligation-list --actionable --format json. "
+                 "Use original authority/owners and canonical protected writers. No bulk close, unsafe replay or moved-wake waiver.")
+    if runnable:
+        parts.insert(0, "[PM_OBLIGATION_DRAIN] Handle every currently runnable PM step before Stop; one unrelated resolution does not waive the rest.")
+        message = " | ".join(parts)
+        print(json.dumps({"decision": "block", "message": message, "reason": message}))
+    else:
+        print(json.dumps({"continue": True, "reason": "[PM_OBLIGATION_DRAIN_STATUS] " + " | ".join(parts)}))
 
-        title = row["title"] or f"PM obligation {row['id']}"
-        target = f"{row['target_type'] or 'target'}:{row['target_id'] or 'unknown'}"
-        if row["pr"] is not None:
-            target += f" pr:{row['pr']}"
-        elif row["issue"] is not None:
-            target += f" issue:{row['issue']}"
-        if row["slot"] is not None:
-            target += f" slot:{row['slot']}"
-        rendered_action = (
-            f"obligation:{row['id']} {title} ({target}). {row['required_action']}"
-        )
-        due_actions.append(rendered_action)
-        if row["kind"] in NON_WAIVABLE_CONTINUATION_KINDS:
-            continuation_actions.append(rendered_action)
-except Exception:
-    sys.exit(0)
 
-hard = []
-if p0_actions:
-    hard.append("P0 escalation call pending: " + " | ".join(p0_actions))
-if continuation_actions:
-    shown = continuation_actions[:3]
-    remaining = len(continuation_actions) - len(shown)
-    suffix = f" | remaining_continuations={remaining}" if remaining else ""
-    hard.append(
-        f"{len(continuation_actions)} release-critical PM review continuations "
-        "are due and cannot be waived by unrelated obligation progress. "
-        "Complete one through its canonical typed transition before stopping. "
-        "Top actions: "
-        + " | ".join(shown)
-        + suffix
-    )
-elif due_actions and not resolved_this_turn:
-    shown = due_actions[:3]
-    remaining = len(due_actions) - len(shown)
-    suffix = f" | remaining_due={remaining}" if remaining else ""
-    hard.append(
-        f"{len(due_actions)} executable PM obligations are due. "
-        "Resolve at least one obligation in this PM turn before stopping; "
-        "do not use raw label/state edits. Top actions: "
-        + " | ".join(shown)
-        + suffix
-    )
-
-if not hard:
-    if deferred_pm_self_clear:
-        print(json.dumps({
-            "kind": "pm-self-clear",
-            "status": "deferred",
-            "reason": ",".join(deferred_pm_self_clear),
-        }, sort_keys=True))
-    sys.exit(0)
-
-message = "[PM_OPS_ACTION_REQUIRED] " + "; ".join(hard)
-print(json.dumps({"decision": "block", "message": message, "reason": message}))
+main()
 PYEOF
