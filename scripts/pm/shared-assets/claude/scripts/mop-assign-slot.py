@@ -288,7 +288,10 @@ def main(argv: list[str] | None = None) -> int:
                 terminal["assignment_notice"] = {
                     "posted": False, "delivery": "not_attempted", "reason": "fresh_selection_receipt_missing",
                 }
-            elif not isinstance(priority, str) or not priority.strip() or not isinstance(epoch, int):
+            elif (payload.get("idempotent") is not False
+                  or not isinstance(priority, str) or not priority.strip()
+                  or type(epoch) is not int or type(current.get("assignment_epoch")) is not int
+                  or epoch <= current["assignment_epoch"]):
                 terminal["assignment_notice"] = {
                     "posted": False, "delivery": "not_attempted", "reason": "committed_assignment_receipt_incomplete",
                 }
