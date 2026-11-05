@@ -139,6 +139,15 @@ class ContractConsistencyTests(unittest.TestCase):
             self.assertTrue(triage.ready_pool_contract_reasons(row, set(), allow_backlog=False, allow_dependencies=True))
             self.assertEqual(selector.rank_candidates([row], [{"issue": row["number"], "class": "new_issue", "priority": "P1"}], offline=True), [])
 
+    def test_new_issue_extra_cannot_override_source_priority_age_or_dependencies(self):
+        rows = [issue(101, "P1"), issue(102, "P2")]
+        extra = [{"issue": 102, "class": "new_issue", "priority": "P0", "created_at": "2000-01-01T00:00:00Z"}]
+        ranked = selector.rank_candidates(rows, extra, offline=True)
+        self.assertEqual([(r["issue"], r["priority"]) for r in ranked], [(101, "P1"), (102, "P2")])
+        self.assertEqual(ranked[1]["created_at"], rows[1]["createdAt"])
+        rows[1] = issue(102, "P2", "#999")
+        self.assertEqual([r["issue"] for r in selector.rank_candidates(rows, extra, cache={(999, "default"): (False, "OPEN")})], [101])
+
     def test_p3_dependency_is_a_member_but_never_picked_unresolved(self):
         row = issue(priority="P3", blockers="#999")
         self.assertEqual(triage.ready_pool_contract_reasons(row, {999}, allow_backlog=False, allow_dependencies=True), [])

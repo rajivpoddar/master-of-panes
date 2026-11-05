@@ -432,10 +432,15 @@ def rank_candidates(issues: list[dict[str, Any]], extra: list[dict[str, Any]] | 
             source = next((i for i in issues if int(i["number"]) == int(row["issue"])), None)
             if source is None or classify(source) != "new_issue" or contract_reasons(source):
                 continue
-        rank = PRIORITY_RANK.get(str(row.get("priority", "")).upper(), UNKNOWN_RANK)
-        c = {"issue": int(row["issue"]), "class": cls, "priority": prio_name(rank), "priority_rank": rank,
-             "created_at": row.get("created_at", ""), "title": row.get("title", ""),
-             **({"pr": row["pr"]} if row.get("pr") else {})}
+            c = candidate(source, cls)
+            evaluate_dependency(c, cache, offline)
+            if is_gated(c):
+                continue
+        else:
+            rank = PRIORITY_RANK.get(str(row.get("priority", "")).upper(), UNKNOWN_RANK)
+            c = {"issue": int(row["issue"]), "class": cls, "priority": prio_name(rank), "priority_rank": rank,
+                 "created_at": row.get("created_at", ""), "title": row.get("title", ""),
+                 **({"pr": row["pr"]} if row.get("pr") else {})}
         if c["issue"] in gated:  # PM row cannot ungate a pm-blocked P0
             continue
         old = best.get(c["issue"])
