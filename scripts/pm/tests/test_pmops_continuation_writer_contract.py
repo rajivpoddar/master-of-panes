@@ -103,7 +103,7 @@ class WriterContract(unittest.TestCase):
         src = WRITER.read_text()
         body = src.split("def upsert_obligation(")[1].split("\ndef ")[0]
         # locate the real STATEMENT, not the comment that mentions it
-        db_stmt = re.search(r"^\s+init_db\(\)\s*$", body, re.M).start()
+        db_stmt = re.search(r"^\s+init_db\(reclassify_horizons=False\)\s*$", body, re.M).start()
         validate_call = re.search(r"^\s*_refusal = continuation_upsert_refusal", body, re.M).start()
         self.assertLess(validate_call, db_stmt,
                         "validation must run before init_db()/connect()")
