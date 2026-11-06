@@ -255,7 +255,8 @@ def test_retire_refuses_when_backup_payload_is_corrupt() -> None:
                 destination.write_bytes(b"TRANSIENT UNREVIEWED BYTES")
 
         with mock.patch.object(INSTALLER, "_copy_payload", corrupting_copy):
-            with pytest.raises(INSTALLER.InstallerError, match="rollback payload drifted"):
+            # The capture now validates payloads before returning the bundle.
+            with pytest.raises(INSTALLER.InstallerError, match="rollback payload mismatch"):
                 INSTALLER.retire_shared_assets(
                     release_dir=release,
                     installed_roots=[root / "Users/rajiv/.claude/hooks"],

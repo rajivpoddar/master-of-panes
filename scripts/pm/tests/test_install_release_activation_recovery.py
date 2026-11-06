@@ -38,6 +38,7 @@ class RecoveryTests(unittest.TestCase):
             release_dir=self.new, current=self.current, expected_old=self.old,
             delete_targets=[], rollback_bundle=self.bundle,
             restart=restart, health=health, canary=canary or (lambda: {"status": 200}),
+            reconcile_stopped=lambda: True,
         )
 
     def test_normal_activation_unchanged(self) -> None:
@@ -59,7 +60,7 @@ class RecoveryTests(unittest.TestCase):
 
         def restart():
             state["restarts"] += 1
-            if state["restarts"] in (1, 2):  # activation attempt + first rollback attempt
+            if state["restarts"] == 1:
                 raise RuntimeError("restart boom")
 
         def health():
@@ -71,9 +72,10 @@ class RecoveryTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("activation failed and baseline restored", message)
         self.assertIn("RuntimeError: restart boom", message)
-        self.assertIn("prior release healthy after restart attempt 2", message)
+        # CTO 1793943342.931249: one baseline start after fresh absence and paired restoration.
+        self.assertIn("prior release healthy", message)
         self.assertEqual(self.current.resolve(), self.old.resolve(), "baseline pointer restored")
-        self.assertEqual(state["restarts"], 3)  # 1 activation + 2 bounded recovery attempts
+        self.assertEqual(state["restarts"], 2)
 
     def test_irrecoverable_restart_reports_recovery_failed(self) -> None:
         def restart():
@@ -82,10 +84,10 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(MODULE.InstallerError) as ctx:
             self.activate(restart, lambda: {"status": 200})
         message = str(ctx.exception)
-        self.assertTrue(message.startswith("RECOVERY_FAILED"), message)
+        self.assertTrue(message.startswith("RECOVERY_BLOCKED"), message)
         self.assertIn("RuntimeError: restart boom", message)
         self.assertIn("activation_error", message)
-        self.assertIn("rollback_restart_errors", message)
+        self.assertIn("phases", message)
         self.assertIn(str(self.current), message)
         self.assertEqual(self.current.resolve(), self.old.resolve(), "pointer restored even on recovery failure")
 
@@ -106,9 +108,11 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(MODULE.InstallerError) as ctx:
             self.activate(restart, lambda: {"status": 200})
         message = str(ctx.exception)
+        # CTO 1793942238.234939: incomplete paired restoration starts nothing.
+        self.assertIn("RECOVERY_BLOCKED", message)
         self.assertIn("asset restore boom", message)
-        self.assertIn("prior release healthy after restart attempt", message)
-        self.assertEqual(self.current.resolve(), self.old.resolve())
+        self.assertEqual(state["restarts"], 1)
+        self.assertEqual(self.current.resolve(), self.new.resolve())
 
     def test_pointer_restore_failure_reports_service_healthy_on_pointer_release(self) -> None:
         calls = {"switches": 0, "restarts": 0}
@@ -133,9 +137,11 @@ class RecoveryTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertNotIn("baseline restored", message)
         self.assertNotIn("prior release healthy", message)
-        self.assertIn("POINTER_RESTORE_FAILED", message)
+        # CTO 1793942238.234939: never start with an un-restored pointer.
+        self.assertIn("RECOVERY_BLOCKED", message)
         self.assertIn("rollback switch boom", message)
         self.assertIn(str(self.new.resolve()), message, "fresh pointer target must be reported")
+        self.assertEqual(calls["restarts"], 1)
         self.assertEqual(self.current.resolve(), self.new.resolve(), "pointer still selects the refused release")
 
 

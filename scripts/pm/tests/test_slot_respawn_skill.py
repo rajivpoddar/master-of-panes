@@ -42,8 +42,12 @@ def test_each_slot_installs_the_same_thin_skill_and_canonical_runner_wrapper() -
         skill_bodies.add((source_root / "SKILL.md").read_bytes())
         wrapper_bodies.add((source_root / "scripts" / "respawn.sh").read_bytes())
         target_root = f"/Users/rajiv/Downloads/projects/heydonna-app-300{slot}/.claude/skills/respawn"
-        assert f"{target_root}/SKILL.md" in by_target
-        assert f"{target_root}/scripts/respawn.sh" in by_target
+        # CTO 1793943470.924319 retires only the absent slot-6/8 mappings.
+        for suffix in ("SKILL.md", "scripts/respawn.sh"):
+            if slot in (6, 8):
+                assert f"{target_root}/{suffix}" not in by_target
+            else:
+                assert f"{target_root}/{suffix}" in by_target
 
     assert len(skill_bodies) == 1
     assert len(wrapper_bodies) == 1
