@@ -222,6 +222,21 @@ def classify_obligation_horizon(row: sqlite3.Row | dict[str, Any], prefer_explic
     return "daily"
 
 
+def obligation_deferred(row, now):
+    """A future wake on either field postpones an open obligation."""
+    for key in ("suppress_until", "next_review_at"):
+        value = row[key]
+        if not value:
+            continue
+        try:
+            parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is not None and parsed.astimezone(dt.timezone.utc) > now:
+                return True
+        except (ValueError, TypeError, OverflowError):
+            continue
+    return False
+
+
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -771,7 +786,7 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
             UPDATE obligations
             SET updated_at=?, severity=?, slot=COALESCE(?, slot), owner=COALESCE(?, owner),
                 title=COALESCE(?, title), required_action=COALESCE(?, required_action),
-                blocker=COALESCE(?, blocker), horizon=?, next_review_at=COALESCE(?, next_review_at),
+                blocker=CASE WHEN ? IS NULL THEN blocker ELSE NULLIF(?, '') END, horizon=?, next_review_at=COALESCE(?, next_review_at),
                 suppress_until=COALESCE(?, suppress_until), dedupe_group=COALESCE(?, dedupe_group),
                 evidence_json=?
             WHERE id=? AND status='open'
@@ -783,6 +798,7 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
                 args.owner,
                 args.title,
                 args.action,
+                args.blocker,
                 args.blocker,
                 horizon,
                 getattr(args, "next_review_at", None),
@@ -814,7 +830,7 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
                 args.owner,
                 args.title,
                 args.action,
-                args.blocker,
+                args.blocker or None,
                 horizon,
                 getattr(args, "next_review_at", None),
                 getattr(args, "suppress_until", None),
@@ -2503,11 +2519,14 @@ def list_obligations(args: argparse.Namespace) -> None:
     if args.kind:
         clauses.append("kind=?")
     rows = con.execute(
-        "SELECT id, kind, severity, horizon, owner, suppress_until, target_type, target_id, pr, issue, title "
+        "SELECT id, kind, severity, horizon, owner, suppress_until, next_review_at, target_type, target_id, pr, issue, title "
         "FROM obligations WHERE " + " AND ".join(clauses) + " ORDER BY kind, id",
         [args.kind] if args.kind else [],
     ).fetchall()
     con.close()
+    if args.actionable:
+        now = dt.datetime.now(dt.timezone.utc)
+        rows = [row for row in rows if not obligation_deferred(row, now)]
     by_kind: dict[str, int] = {}
     for row in rows:
         by_kind[row["kind"]] = by_kind.get(row["kind"], 0) + 1

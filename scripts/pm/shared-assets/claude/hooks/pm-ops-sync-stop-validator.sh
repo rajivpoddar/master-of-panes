@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timezone
 import json
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -43,6 +44,8 @@ def tokens(value):
 
 
 def classify(row):
+    if obligation_deferred(row, NOW):
+        return "future", "Postponed until its recorded review or suppression time."
     evidence = json.loads(row.get("evidence_json") or "{}")
     if not isinstance(evidence, dict):
         raise ValueError("evidence is not an object")
@@ -107,13 +110,6 @@ def classify(row):
     waiting = re.search(r"\b(wait|waiting|await|awaiting|approval|authority|permission|response|reply|decision|blocked|requires|required|pending)\b", wait)
     if owner.lower() == "rajiv" or (authority and waiting):
         return "held", "Authority/external wait: " + (blocker or owner)
-
-    future = max((t for t in (review, suppress) if t is not None), default=None)
-    review_reason = evidence.get("review_reason") or evidence.get("hold_reason")
-    # A trailing review clause must not hide an earlier runnable next step.
-    scheduled = re.match(r"\s*(review|observe|monitor|wait|await)\b", action.lower())
-    if future and future > NOW and (review_reason or (blocker and scheduled)):
-        return "future", f"Review {future.isoformat()}: {blocker or compact(review_reason)}"
 
     # An unmatched receipt is not an exemption, but must not override a
     # documented wait above or prevent reconciliation from converging to it.
@@ -195,5 +191,14 @@ def main():
         print(json.dumps({"continue": True, "reason": "[PM_OBLIGATION_DRAIN_STATUS] " + " | ".join(parts)}))
 
 
-main()
+try:
+    spec = importlib.util.spec_from_file_location("pm_ops_legacy", os.environ.get(
+        "PM_OPS_LEGACY", "/Users/rajiv/.claude/scripts/pm-ops-legacy.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    obligation_deferred = module.obligation_deferred
+except Exception as error:
+    emit_unavailable("postponement rule unavailable: " + compact(error))
+else:
+    main()
 PYEOF
