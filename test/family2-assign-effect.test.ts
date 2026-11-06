@@ -12,6 +12,7 @@ import {
   registerAssignmentEffectRoutes,
   type AssignmentEffectClearResult,
   type AssignmentEffectDeliveryResult,
+  type AssignmentEffectDependencies,
 } from "../src/assignmentEffectRoutes.js";
 import { pinFrom } from "../src/interruptBeforeClear.js";
 
@@ -50,12 +51,13 @@ interface Harness {
   /** Simulated `gh` label-call latency, to prove the response never awaits it. */
   projectorDelayMs: number;
   orderLog: string[];
+  restart: () => void;
   close: () => void;
 }
 
 function harness(): Harness {
   const directory = mkdtempSync(join(tmpdir(), "mop-assign-effect-"));
-  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+  let db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
   const state: Harness = {
     db,
     app: new Hono(),
@@ -75,12 +77,19 @@ function harness(): Harness {
     projectorThrowOn: null,
     projectorDelayMs: 0,
     orderLog: [],
+    restart: () => {
+      db.close();
+      db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+      state.db = db;
+      state.app = new Hono();
+      registerAssignmentEffectRoutes(state.app, { ...dependencies, db });
+    },
     close: () => {
       db.close();
       rmSync(directory, { recursive: true, force: true });
     },
   };
-  registerAssignmentEffectRoutes(state.app, {
+  const dependencies: AssignmentEffectDependencies = {
     db,
     clearSlot: async (slot) => {
       state.clearCalls.push(slot);
@@ -144,7 +153,8 @@ function harness(): Harness {
         receipt: { slot, pane: "%1", mode: "file", verified: state.deliveryVerified },
       } satisfies AssignmentEffectDeliveryResult;
     },
-  });
+  };
+  registerAssignmentEffectRoutes(state.app, dependencies);
   return state;
 }
 
@@ -255,8 +265,9 @@ test("UNKNOWN transport outcome is retained and never sent twice", async () => {
     const first = await post(h.app, 4, effectBody(4, epoch));
     assert.equal(first.json.step_failed, "delivery");
     h.deliverError = null;
+    h.restart();
     await post(h.app, 4, effectBody(4, epoch));
-    assert.equal(h.deliverCalls.length, 1, "an uncertain effect must not be resent");
+    assert.equal(h.deliverCalls.length, 1, "an uncertain effect must not be resent after restart");
     assert.ok(h.db.getAssignmentEffectIntent("assign-4-8110")!.delivery_receipt);
   } finally { h.close(); }
 });
