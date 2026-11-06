@@ -152,15 +152,44 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertFalse(self.owned)
         self.assertFalse(any(x.startswith("bootstrap") for x in self.events))
 
-    def test_start_failure_restores_pair_without_a_second_start(self):
-        # CTO 1793942238.234939: reconcile a failed start; never blindly retry.
+    def test_start_failure_reconciles_and_restores_pair_before_one_old_start(self):
+        # CTO 1793943342.931249: fresh affirmative absence permits one baseline start.
         self.set_inventory()
         self.start_error = "refused"
         self.assertEqual(self.activate(), 2)
-        self.assertEqual(self.events, ["bootout", "replace", "bootstrap:new"])
+        self.assertEqual(self.events, ["bootout", "replace", "bootstrap:new", "bootstrap:old"])
         self.assertEqual(self.current.resolve(), self.old)
         self.assertEqual(self.helper.read_text(), "old client\n")
-        self.assertFalse(self.owned)
+        self.assertTrue(self.owned)
+
+    def test_unknown_after_failed_bootstrap_never_starts_again(self):
+        # CTO 1793943342.931249: absence before bootstrap is not fresh evidence.
+        self.set_inventory()
+        self.start_error = "refused"
+        original = self.transport
+        def unknown_after_failure(argv, **kwargs):
+            if argv[:2] == ["launchctl", "print"] and "bootstrap:new" in self.events:
+                return subprocess.CompletedProcess(argv, 1, "", "probe unavailable")
+            return original(argv, **kwargs)
+        with patch.object(self, "transport", side_effect=unknown_after_failure):
+            self.assertEqual(self.activate(), 2)
+        self.assertEqual(self.events, ["bootout", "replace", "bootstrap:new"])
+        self.assertEqual(self.current.resolve(), self.new)
+        self.assertEqual(self.helper.read_text(), "new client\n")
+
+    def test_foreign_listener_after_failed_bootstrap_never_starts_again(self):
+        self.set_inventory()
+        self.start_error = "refused"
+        original = self.transport
+        def foreign_after_failure(argv, **kwargs):
+            if argv[0] == "lsof" and "bootstrap:new" in self.events:
+                return subprocess.CompletedProcess(argv, 0, "p9999\n", "")
+            return original(argv, **kwargs)
+        with patch.object(self, "transport", side_effect=foreign_after_failure):
+            self.assertEqual(self.activate(), 2)
+        self.assertEqual(self.events, ["bootout", "replace", "bootstrap:new"])
+        self.assertEqual(self.current.resolve(), self.new)
+        self.assertEqual(self.helper.read_text(), "new client\n")
 
     def test_restore_failure_blocks_any_recovery_start(self):
         # CTO 1793942238.234939: failed restore must leave the service stopped.

@@ -1480,6 +1480,7 @@ def activate(
     stop: Callable[[], None] = lambda: None,
     install_shared: bool = False,
     shared_target_root: Path | None = None,
+    reconcile_stopped: Callable[[], bool] = lambda: False,
 ) -> dict[str, Any]:
     if not release_dir.is_dir() or release_dir.is_symlink():
         raise InstallerError(f"release is not an immutable directory: {release_dir}")
@@ -1579,7 +1580,11 @@ def activate(
         # Stop/reconcile the candidate first. BOTH assets and pointer must match
         # the baseline before starting the old server; never boot a mixed pair.
         try:
-            stop()
+            if start_attempted and not start_returned:
+                if not reconcile_stopped():
+                    raise InstallerError("bootstrap ownership not affirmatively absent; no recovery start")
+            else:
+                stop()
             phases["service"] = "stopped"
             if current.resolve(strict=True) not in {old, release_dir.resolve(strict=True)}:
                 raise InstallerError("pointer changed after cutover; preserve newer custody")
@@ -1600,9 +1605,14 @@ def activate(
             if current.resolve(strict=True) != old:
                 raise InstallerError("prior pointer recovery incomplete")
             phases["pointer"] = "restored to prior release"
-            if start_attempted and not start_returned:
-                phases["service"] = "stopped; bootstrap outcome requires ownership reconciliation"
-                raise InstallerError("bootstrap outcome requires ownership reconciliation; no second start")
+            if start_attempted and not start_returned and not reconcile_stopped():
+                raise InstallerError("bootstrap ownership changed during restoration; no recovery start")
+            # Recheck the paired baseline immediately before the one recovery start.
+            if current.resolve(strict=True) != old:
+                raise InstallerError("prior pointer changed before recovery start")
+            for name, preimage in old_preimages.items():
+                if file_record(_shared_target_path(name, shared_target_root), name) != preimage:
+                    raise InstallerError(f"shared preimage changed before recovery start: {name}")
             restart()
             health()
             phases["service"] = "prior release healthy"
@@ -1764,6 +1774,7 @@ def main(argv: list[str] | None = None) -> int:
                                   delete_targets=delete_targets, rollback_bundle=args.rollback_bundle,
                                   stop=lambda: _default_stop(args.service, port),
                                   restart=lambda: _default_restart(args.service, port),
+                                  reconcile_stopped=lambda: not _service_observation(args.service, port)[0],
                                   install_shared=True, shared_target_root=args.shared_assets_root,
                                   health=lambda: _bound_health(args.health_url, service=args.service, current=args.current),
                                   canary=lambda: _default_canary(args.canary_url))
