@@ -1480,7 +1480,7 @@ if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "--priority-inversion-worker":
         try:
             worker_slots = json.load(sys.stdin)
-            result = _priority_inversion_worker(sys.argv[2], worker_slots, int(sys.argv[3]))
+            result = _priority_inversion_worker(sys.argv[2], worker_slots, float(sys.argv[3]))
             print(json.dumps(result))
             raise SystemExit(0)
         except Exception as exc:
