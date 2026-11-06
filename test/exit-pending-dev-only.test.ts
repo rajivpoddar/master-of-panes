@@ -29,7 +29,7 @@ function stopExit(db: MoPDatabase, sent: number[]) {
   const exit = find(method, n => ts.isIfStatement(n) && n.expression.getText(tree).startsWith("this.db.getExitPending()"))!;
   const dnd = find(method, n => ts.isIfStatement(n) && n.expression.getText(tree) === "slot.dnd")!;
   const js = ts.transpileModule(`async function run(slotNum: number) { const slot = this.db.getSlot(slotNum) || {}; ${dnd.getText(tree)} ${exit.getText(tree)} }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  return new Function(`${js}; return run;`)().bind({ db, relay: { sendToSlotAsync: async (slot: number) => sent.push(slot), injectToPM() {} } });
+  return new Function(`${js}; return run;`)().bind({ db, relay: { sendToSlot: (slot: number) => sent.push(slot), injectToPM() {} } });
 }
 
 test("REST accepts and persists dev-only scope; omission restores legacy global scope", async () => {

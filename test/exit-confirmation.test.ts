@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { Hono } from "hono";
+import ts from "typescript";
 import { MoPDatabase } from "../src/db.js";
 import { HookProcessor } from "../src/hooks.js";
 import { ProcessHealthChecker } from "../src/health.js";
@@ -11,25 +14,45 @@ import { DEFAULT_CONFIG } from "../src/types.js";
 const rule = "─".repeat(40);
 const dialog = "Background work is running\n❯ 1. Exit and stop tasks\n  2. Move to background and exit\n  3. Stay\nEnter to confirm · Esc to cancel";
 
-function harness(slot: number, options: { persistent?: boolean; noDialog?: boolean; delay?: number } = {}) {
+function actualHookRoute(db: MoPDatabase, processor: HookProcessor, slot: number) {
+  const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const tree = ts.createSourceFile("server.ts", source, ts.ScriptTarget.Latest, true);
+  let callback: ts.Node | undefined;
+  const find = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.getText(tree) === "app.post"
+        && node.arguments[0]?.getText(tree) === JSON.stringify("/hooks/slot/:slotNum")) callback = node.arguments[1];
+    ts.forEachChild(node, find);
+  };
+  find(tree); assert.ok(callback);
+  const js = ts.transpileModule(`const handler = ${callback.getText(tree)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const handler = new Function("db", "processor", "slotParamSchema", "hookPayloadSchema", "normalizePayload",
+    `let pmClearDrainGeneration = 0; ${js}; return handler;`)(db, processor,
+      { safeParse: () => ({ success: true, data: slot }) },
+      { safeParse: (body: unknown) => ({ success: true, data: body }) }, (body: unknown) => body);
+  const app = new Hono(); app.post("/hooks/slot/:slotNum", handler);
+  return app;
+}
+
+function harness(slot: number, options: { persistent?: boolean; noDialog?: boolean; delay?: number; afterStop?: boolean } = {}) {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
   db.setExitPending(true, slot !== 0, slot === 0);
   db.logEvent(slot, "SessionStart", "SessionStart", null, { session_id: "original" });
-  if (slot) db.updateSlot(slot, { active_turn_state: "inactive", idle: true });
+  if (slot) db.startAgentTurn(slot, "original");
   const path = slot ? `/Users/rajiv/Downloads/projects/heydonna-app-${3000 + slot}` : "/Users/rajiv/Downloads/projects/heydonna-app";
-  const pane = { id: "%40", process: "100 Mon Nov 2 00:00:00 2026 claude", composer: "", buffer: "", exitAt: 0,
+  const pane = { id: "%40", process: "100 100 S+ Mon Nov 2 00:00:00 2026 claude", composer: "", buffer: "", exitAt: 0, stopRespondedAt: 0,
     showing: !options.noDialog, exitEnters: 0, keys: [] as string[], onVisible: undefined as undefined | (() => void),
     onOne: undefined as undefined | (() => void), onConfirmation: undefined as undefined | (() => void), failOne: false };
   const shell = async (command: string) => {
     let stdout = "";
-    if (command.startsWith("tmux display-message")) stdout = command.includes("pane_pid") ? `${pane.id}|100|/dev/pts/1|${path}\n` : `${pane.id}|${path}\n`;
+    if (command.startsWith("tmux display-message")) stdout = command.includes("pane_pid") ? `${pane.id}|100|/dev/pts/1|${path}|claude\n` : `${pane.id}|${path}\n`;
     else if (command.startsWith("git -C")) stdout = path + "\n";
     else if (command.startsWith("ps -t")) stdout = pane.process;
     else if (command.startsWith("tmux capture-pane")) {
       if (command.includes(" -S -")) stdout = `${rule}\n❯ ${pane.composer}\n${rule}`;
       else {
         pane.onVisible?.();
-        stdout = pane.exitAt && pane.showing && Date.now() - pane.exitAt >= (options.delay ?? 0) ? dialog : "shell $";
+        const renderAt = options.afterStop ? pane.stopRespondedAt : pane.exitAt;
+        stdout = renderAt && pane.showing && Date.now() - renderAt >= (options.delay ?? 0) ? dialog : "shell $";
       }
     } else if (command.startsWith("tmux load-buffer")) {
       pane.buffer = await readFile(command.match(/'([^']+)'\s*$/)![1], "utf8");
@@ -49,11 +72,31 @@ function harness(slot: number, options: { persistent?: boolean; noDialog?: boole
   (relay as any).slashSubmitTiming = () => ({ dwellMs: 0, pollMs: 5, payloadStableMs: 1, payloadGraceMs: 40, clearGraceMs: 20 });
   const processor = new HookProcessor(db, relay) as any;
   const episode = db.getExitStatus().episode!;
-  const send = () => relay.deliverGuardedToSlot(slot, "/exit", {
+  let finish!: () => void;
+  const finished = new Promise<void>(resolve => { finish = resolve; });
+  const setConfig = db.setConfig.bind(db);
+  db.setConfig = (key, value) => {
+    setConfig(key, value);
+    if (key === `exit_dialog_confirmation_${slot}` && JSON.parse(value).done) finish();
+  };
+  const dispatch = () => relay.deliverGuardedToSlot(slot, "/exit", {
     expectedPaneId: "%40", recheck: async () => null, skipSlashClear: true, exitEpisode: episode,
     timing: { dwellMs: 0, pollMs: 5, payloadStableMs: 1, payloadGraceMs: 40, clearGraceMs: 20 },
   });
-  return { db, pane, relay, processor, episode, send };
+  const send = async () => { const result = await dispatch(); await finished; return result; };
+  const app = actualHookRoute(db, processor, slot);
+  const serverStop = async () => {
+    const response = await app.request(`/hooks/slot/${slot}`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "Stop", session_id: "original" }) });
+    pane.stopRespondedAt = Date.now();
+    return response;
+  };
+  const awaitExit = async () => {
+    await (relay as any).pendingExitDispatch.get(slot)?.work;
+    assert.equal(pane.exitEnters, 1, "the actual server-ordered Stop must submit one /exit");
+    await finished;
+  };
+  return { db, pane, relay, processor, episode, send, dispatch, serverStop, awaitExit, finished };
 }
 
 test("recognizes only the visible exit dialog; quoted/history text and a successor prompt are not a dialog", () => {
@@ -65,14 +108,17 @@ test("recognizes only the visible exit dialog; quoted/history text and a success
 });
 
 for (const slot of [0, 1]) test(`${slot ? "dev" : "PM"} actual Stop sends /exit, then 1 and Enter exactly once`, async () => {
-  const h = harness(slot); const before = h.db.getSlot(1)?.assignment_epoch;
+  const h = harness(slot, { afterStop: true }); const before = h.db.getSlot(1)?.assignment_epoch;
   try {
-    await h.processor.process(slot, { type: "Stop", session_id: "original" });
-    await h.processor.process(slot, { type: "Stop", session_id: "original" });
+    assert.equal((await h.serverStop()).status, 200);
+    assert.deepEqual(h.pane.keys, [], "Stop response precedes dialog confirmation");
+    await h.awaitExit();
+    await h.serverStop();
     assert.equal(h.pane.exitEnters, 1);
     assert.deepEqual(h.pane.keys, ["1", "Enter"]);
     assert.equal(h.db.getExitStatus().cycled[slot], true);
     assert.equal(h.db.getSlot(1)?.assignment_epoch, before);
+    if (slot) assert.equal(h.db.getSlot(slot)?.active_turn_state, "inactive");
   } finally { h.db.close(); }
 });
 
@@ -83,6 +129,7 @@ test("idle dev health entry uses the same confirmation path", async () => {
     health.getPaneCommand = async (slot: number) => slot === 1 ? "claude" : null;
     h.relay.getSlotActivityState = async () => "idle";
     await health.checkExitPending();
+    await h.finished;
     await health.checkExitPending();
     assert.equal(h.pane.exitEnters, 1); assert.deepEqual(h.pane.keys, ["1", "Enter"]);
   } finally { h.db.close(); }
@@ -94,9 +141,14 @@ test("no dialog adds no input after the original exit", async () => {
   finally { h.db.close(); }
 });
 
-test("the short bounded render interval recognizes a delayed dialog", async () => {
-  const h = harness(0, { delay: 150 });
-  try { await h.send(); assert.deepEqual(h.pane.keys, ["1", "Enter"]); }
+test("a PM dialog appearing after the Stop response and later than the first capture is recognized", async () => {
+  const h = harness(0, { delay: 900, afterStop: true });
+  try {
+    await h.serverStop();
+    assert.deepEqual(h.pane.keys, []);
+    await h.awaitExit();
+    assert.deepEqual(h.pane.keys, ["1", "Enter"]);
+  }
   finally { h.db.close(); }
 });
 
@@ -122,7 +174,7 @@ for (const change of ["pane", "process", "episode", "session", "input"]) test(`$
   const h = harness(0);
   h.pane.onVisible = () => {
     if (change === "pane") h.pane.id = "%41";
-    if (change === "process") h.pane.process = "200 Tue Nov 3 00:00:00 2026 claude";
+    if (change === "process") h.pane.process = "200 200 S+ Tue Nov 3 00:00:00 2026 claude";
     if (change === "episode") h.db.setExitPending(true, false, true);
     if (change === "session") h.db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "successor" });
     if (change === "input") h.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, {});
@@ -133,6 +185,27 @@ for (const change of ["pane", "process", "episode", "session", "input"]) test(`$
 
 test("process change after one confirmed attempt prevents the second attempt", async () => {
   const h = harness(1, { persistent: true }); h.pane.onConfirmation = () => { h.pane.process = "200 successor claude"; };
+  try { await h.send(); assert.deepEqual(h.pane.keys, ["1", "Enter"]); }
+  finally { h.db.close(); }
+});
+
+test("new work after the Stop response keeps its busy fence before the consumed dev send", async () => {
+  const h = harness(1, { afterStop: true });
+  try {
+    await h.serverStop();
+    h.db.startAgentTurn(1, "successor");
+    h.db.logEvent(1, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "successor" });
+    await (h.relay as any).pendingExitDispatch.get(1)?.work;
+    assert.equal(h.pane.exitEnters, 0); assert.deepEqual(h.pane.keys, []);
+    assert.equal(h.db.getSlot(1)?.active_turn_id, "successor");
+    assert.equal(h.db.getSlot(1)?.active_turn_state, "active");
+  } finally { h.db.close(); }
+});
+
+test("a Stop hook child leaving the TTY does not change the pinned Claude leader", async () => {
+  const h = harness(0);
+  h.pane.process += "\n101 100 S+ Mon Nov 2 00:00:01 2026 hook-child";
+  h.pane.onVisible = () => { h.pane.process = h.pane.process.split("\n")[0]; };
   try { await h.send(); assert.deepEqual(h.pane.keys, ["1", "Enter"]); }
   finally { h.db.close(); }
 });

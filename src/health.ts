@@ -729,7 +729,7 @@ export class ProcessHealthChecker {
     // Check if all slots have now cycled
     const updatedStatus = this.db.getExitStatus();
     const allCycled = Object.entries(updatedStatus.cycled).every(([slot, v]) => (updatedStatus.dev_only && Number(slot) === 0) || v);
-    if (allCycled) {
+    if (allCycled && !this.relay.hasPendingExitConfirmation?.(updatedStatus.episode)) {
       this.db.setExitPending(false);
       this.relay.injectToPM("# All exit_pending attempts consumed — flag auto-cleared; this is not restart verification");
       this.db.logEvent(0, "exit_pending_complete", null, null, {

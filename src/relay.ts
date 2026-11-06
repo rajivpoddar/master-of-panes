@@ -297,6 +297,7 @@ export class TmuxRelay {
   /** Serialize queue selection through post-submit deletion as one operation. */
   private pmDrainChain: Promise<number> = Promise.resolve(0);
   private directInjectSeq = 0;
+  private pendingExitDispatch = new Map<number, { episode: string; work: Promise<unknown> }>();
   private runShell: typeof execShell;
   private readonly pmPaneReadyOverride?: () => Promise<boolean>;
   private readonly pmIdleHandoff?: () => Promise<void>;
@@ -1290,9 +1291,34 @@ export class TmuxRelay {
    *
    * `force` parameter is now a no-op (kept for callsite compatibility).
    */
-  sendToSlot(slotNum: number, command: string, _force = false, raw = false): boolean {
+  sendToSlot(slotNum: number, command: string, _force = false, raw = false, exitEpisode?: string): boolean {
+    if (command === "/exit" && exitEpisode) {
+      if (this.pendingExitDispatch.get(slotNum)?.episode === exitEpisode) return true;
+      // The server closes this Stop's matching turn after process() returns.
+      // Continue the SAME consumed send only after that response can complete.
+      const work = sleep(0).then(() => this.sendToSlotAsync(slotNum, command, _force, raw, exitEpisode));
+      const pending = { episode: exitEpisode, work };
+      this.pendingExitDispatch.set(slotNum, pending);
+      void work.catch(() => undefined).finally(() => {
+        if (this.pendingExitDispatch.get(slotNum) === pending) this.pendingExitDispatch.delete(slotNum);
+      });
+      return true;
+    }
     void this.sendToSlotAsync(slotNum, command, _force, raw);
     return true;
+  }
+
+  /** Keep only this bounded exit continuation's episode alive until it settles. */
+  hasPendingExitConfirmation(episode: string | null): boolean {
+    if (!episode) return false;
+    if ([...this.pendingExitDispatch.values()].some(pending => pending.episode === episode)) return true;
+    if (!this.db) return false;
+    return [0, ...this.db.getAllSlots().map(slot => slot.slot)].some(slot => {
+      try {
+        const state = JSON.parse(this.db!.getConfig(`exit_dialog_confirmation_${slot}`) || "null");
+        return state?.episode === episode && !state.done && state.deadline > Date.now();
+      } catch { return false; }
+    });
   }
 
   /** Resolve the owning numbered pane's current Git worktree root. */
@@ -1556,21 +1582,41 @@ export class TmuxRelay {
   private async exitProcessIdentity(_slotNum: number, paneId: string, deadline = Date.now() + 2_000): Promise<string | null> {
     try {
       if (Date.now() >= deadline) return null;
-      const probe = await this.runShell(`tmux display-message -t ${paneId} -p '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_path}'`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      const probe = await this.runShell(`tmux display-message -t ${paneId} -p '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_path}|#{pane_current_command}'`, { timeout: Math.min(1_000, deadline - Date.now()) });
       const [id, pid, tty] = probe.stdout.trim().split("|");
       if (id !== paneId || !/^\d+$/.test(pid) || !/^\/dev\/[\w/.-]+$/.test(tty ?? "") || Date.now() >= deadline) return null;
-      const processes = await this.runShell(`ps -t ${shellEscape(tty)} -o pid=,lstart=,comm=`, { timeout: Math.min(1_000, deadline - Date.now()) });
-      if (!processes.stdout.trim()) return null;
-      return JSON.stringify([paneId, probe.stdout.trim(), processes.stdout.trim()]);
+      const processes = await this.runShell(`ps -t ${shellEscape(tty)} -o pid=,pgid=,stat=,lstart=,comm=`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      // Hook/MCP children may finish normally after Stop. Pin the foreground
+      // process-group leader, not every transient child sharing its terminal.
+      const leaders = processes.stdout.split(/\r?\n/).flatMap(line => {
+        const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
+        return row && row[1] === row[2] && row[3].includes("+") ? [`${row[1]}|${row[2]}|${row[4]}`] : [];
+      });
+      return leaders.length === 1 ? JSON.stringify([paneId, probe.stdout.trim(), leaders[0]]) : null;
     } catch { return null; }
   }
 
-  /** Called only after our /exit Enter, inside the existing slot send lock. */
+  /** Claim one bounded continuation after our /exit Enter; never replay it. */
+  private scheduleExitConfirmation(slotNum: number, paneId: string, episode: string, process: string, owner: string): void {
+    if (!this.db) return;
+    const key = `exit_dialog_confirmation_${slotNum}`;
+    try {
+      const saved = JSON.parse(this.db.getConfig(key) || "null");
+      if (saved?.episode === episode) return;
+    } catch { return; }
+    try {
+      this.db.setConfig(key, JSON.stringify({ episode, process, attempts: 0, done: false, deadline: Date.now() + 5_000 }));
+      // Do not await our own send lock or the dialog from the HTTP Stop handler.
+      // The finite continuation acquires the same lock after /exit delivery returns.
+      void withSlotSendLock(slotNum, () => this.confirmExitDialog(slotNum, paneId, episode, process, owner)).catch(() => undefined);
+    } catch { /* Never change the original /exit receipt or retry an uncertain claim. */ }
+  }
+
+  /** One claimed continuation, after the original /exit/Stop can complete. */
   private async confirmExitDialog(slotNum: number, paneId: string, episode: string, process: string,
     owner: string): Promise<void> {
     const db = this.db;
     if (!db) return;
-    const deadline = Date.now() + 5_000;
     const key = `exit_dialog_confirmation_${slotNum}`;
     const token = () => JSON.stringify([
       db.getEvents(slotNum, 1, "SessionStart")[0]?.id,
@@ -1578,41 +1624,47 @@ export class TmuxRelay {
       db.getSlot(slotNum)?.assignment_epoch,
       db.getSlot(slotNum)?.active_turn_id,
     ]);
-    const current = () => Date.now() < deadline && db.getExitPending() && db.getExitStatus().episode === episode && token() === owner;
-    let state: { episode: string; process: string; attempts: number; done: boolean };
+    let state: { episode: string; process: string; attempts: number; done: boolean; deadline: number };
     try {
       const saved = JSON.parse(db.getConfig(key) || "null");
-      if (saved?.episode === episode) {
-        if (saved.process !== process || saved.done || !Number.isInteger(saved.attempts) || saved.attempts < 0 || saved.attempts > 2) return;
-        state = saved;
-      } else state = { episode, process, attempts: 0, done: false };
+      if (saved?.episode !== episode || saved.process !== process || saved.done || !Number.isFinite(saved.deadline)
+          || !Number.isInteger(saved.attempts) || saved.attempts < 0 || saved.attempts > 2) return;
+      state = saved;
     } catch { return; } // Unknown retained custody never grants more attempts.
+    const deadline = state.deadline;
+    const current = () => Date.now() < deadline && db.getExitPending() && db.getExitStatus().episode === episode && token() === owner;
     const save = () => db.setConfig(key, JSON.stringify(state));
     const inspect = async () => {
-      if (!current() || await this.exitProcessIdentity(slotNum, paneId, deadline) !== process || !current()) return false;
+      if (!current() || await this.exitProcessIdentity(slotNum, paneId, deadline) !== process || !current()) return "changed";
       // Visible screen only: a historical dialog in scrollback is not authority.
       const screen = await this.runShell(`tmux capture-pane -t ${paneId} -p`, { timeout: Math.min(1_000, deadline - Date.now()) });
-      return await this.exitProcessIdentity(slotNum, paneId, deadline) === process
-        && current() && isExitConfirmationDialog(screen.stdout);
+      if (await this.exitProcessIdentity(slotNum, paneId, deadline) !== process || !current()) return "changed";
+      return isExitConfirmationDialog(screen.stdout) ? "dialog" : "absent";
     };
+    let seen = false;
+    let enterPresses = 0;
     try {
-      while (state.attempts < 2) {
+      while (state.attempts < 2 && current()) {
         await sleep(350); // Allow the dialog to render after /exit or the prior Enter.
-        if (!await inspect()) break;
+        const screen = await inspect();
+        if (screen === "changed" || (screen === "absent" && seen)) break;
+        if (screen === "absent") continue; // Initial absence never finishes the render window.
+        seen = true;
         state.attempts++;
         save(); // Consume before any key: unknown key delivery cannot renew the budget.
         if (!current()) break;
         await this.runShell(`tmux send-keys -t ${paneId} 1`, { timeout: Math.min(1_000, deadline - Date.now()) });
-        if (!await inspect()) break; // A manual answer/resume must not receive Enter.
+        if (await inspect() !== "dialog") break; // A manual answer/resume must not receive Enter.
         await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: Math.min(1_000, deadline - Date.now()) });
+        enterPresses++;
       }
       state.done = true;
       save();
-      db.logEvent(slotNum, "exit_dialog_confirmation", null, null, { episode, paneId, attempts: state.attempts });
+      db.logEvent(slotNum, "exit_dialog_confirmation", null, null, { episode, paneId, attempts: state.attempts, dialog_seen: seen, enter_presses: enterPresses });
     } catch {
       state.done = true;
       save();
-      db.logEvent(slotNum, "exit_dialog_confirmation", null, null, { episode, paneId, attempts: state.attempts, outcome: "unknown_no_retry" });
+      db.logEvent(slotNum, "exit_dialog_confirmation", null, null, { episode, paneId, attempts: state.attempts, dialog_seen: seen, enter_presses: enterPresses, outcome: "unknown_no_retry" });
     }
   }
 
@@ -1846,7 +1898,7 @@ export class TmuxRelay {
         if (enterSent > 0 && opts.exitEpisode && exitProcess) {
           // Preserve the original /exit disposition, including UNKNOWN. This
           // answers only its visible dialog; it never resends /exit.
-          await this.confirmExitDialog(slotNum, paneId, opts.exitEpisode, exitProcess, exitOwner).catch(() => undefined);
+          this.scheduleExitConfirmation(slotNum, paneId, opts.exitEpisode, exitProcess, exitOwner);
         }
       }
     });

@@ -1689,7 +1689,7 @@ export class HookProcessor {
     // watchdog restarts the slot with --continue and it goes idle again).
     if (this.db.getExitPending() && !this.db.getExitStatus().pm_only && !(slotNum === 0 && this.db.getExitStatus().dev_only) && !this.db.getExitStatus().cycled[slotNum]) {
       this.db.markSlotExitCycled(slotNum);
-      await this.relay.sendToSlotAsync(slotNum, "/exit", true, false, this.db.getExitStatus().episode ?? undefined);
+      this.relay.sendToSlot(slotNum, "/exit", true, false, this.db.getExitStatus().episode ?? undefined);
       this.db.logEvent(slotNum, "exit_pending_triggered", "Stop", null, {
         task: slot.task,
         branch: slot.branch,
@@ -1703,7 +1703,7 @@ export class HookProcessor {
       const status = this.db.getExitStatus();
       const allCycled = Object.entries(status.cycled)
         .every(([slot, v]) => (status.dev_only && Number(slot) === 0) || v);
-      if (allCycled) {
+      if (allCycled && !this.relay.hasPendingExitConfirmation?.(status.episode)) {
         this.db.setExitPending(false);
         this.relay.injectToPM(
           "# ✅ All slots have cycled — exit_pending auto-cleared",
