@@ -42,7 +42,24 @@ def tokens(value):
     return re.sub(r"[_/\s-]+", " ", str(value or "").lower())
 
 
+def obligation_deferred(row, now):
+    """Only an explicit future suppression postpones an open obligation."""
+    for key in ("suppress_until",):
+        value = row[key]
+        if not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is not None and parsed.astimezone(timezone.utc) > now:
+                return True
+        except (ValueError, TypeError, OverflowError):
+            continue
+    return False
+
+
 def classify(row):
+    if obligation_deferred(row, NOW):
+        return "future", "Postponed until its recorded review or suppression time."
     evidence = json.loads(row.get("evidence_json") or "{}")
     if not isinstance(evidence, dict):
         raise ValueError("evidence is not an object")

@@ -158,13 +158,41 @@ def test_waits_visible_and_last_runnable_completion_allows_stop(lane):
 
 
 @pytest.mark.parametrize("extra", [
-    {"owner": "pm -> assigned-worker", "suppress_until": FUTURE},
     {"evidence_json": {"handoff": {"status": "accepted"}}},
     {"evidence_json": {"handoff": {"status": "running", "run_id": "one", "obligation_id": 999}}},
 ])
 def test_claim_wake_or_wrong_unaccepted_receipt_does_not_handle(lane, extra):
     add(lane, 301, **extra)
     assert invoke(lane)[0].get("decision") == "block"
+
+
+def test_future_suppress_until_defers_explicitly_postponed_row(lane):
+    """Rajiv C0ALZJHGE49 thread 1793935184.677639, ts 1793935184.677639 and 1793935270.961189: postpone so Stop does not flag it."""
+    add(lane, 301, owner="pm -> assigned-worker", suppress_until=FUTURE)
+    result, _ = invoke(lane)
+    assert result.get("decision") != "block"
+    assert "obligation:301 [future]" in reason(result)
+
+
+def test_postpone_list_and_clear_blocker(lane):
+    env = lane[2]
+    base = [sys.executable, str(WRITER), "obligation-upsert", "--kind", "followup",
+            "--target-type", "task", "--target-id", "postpone", "--action", "Do work"]
+    subprocess.run(base + ["--blocker", "blocked", "--suppress-until", FUTURE],
+                   env=env, check=True, capture_output=True)
+    def rows():
+        result = subprocess.run([sys.executable, str(WRITER), "obligation-list", "--actionable", "--format", "json"],
+                                env=env, check=True, capture_output=True, text=True)
+        return json.loads(result.stdout)["rows"]
+    assert rows() == []
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    subprocess.run(base + ["--blocker", "", "--suppress-until", past, "--next-review-at", FUTURE],
+                   env=env, check=True, capture_output=True)
+    with closing(sqlite3.connect(lane[1])) as con:
+        assert con.execute("SELECT blocker FROM obligations WHERE target_id='postpone'").fetchone()[0] is None
+    assert len(rows()) == 1
+    result, _ = invoke(lane)
+    assert result.get("decision") == "block" and "[runnable]" in reason(result)
 
 
 def native_queue_receipt(**extra):
