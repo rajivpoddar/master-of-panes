@@ -152,14 +152,24 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertFalse(self.owned)
         self.assertFalse(any(x.startswith("bootstrap") for x in self.events))
 
-    def test_start_failure_restores_both_before_old_bootstrap(self):
+    def test_start_failure_restores_pair_without_a_second_start(self):
+        # CTO 1793942238.234939: reconcile a failed start; never blindly retry.
         self.set_inventory()
         self.start_error = "refused"
         self.assertEqual(self.activate(), 2)
-        self.assertEqual(self.events, ["bootout", "replace", "bootstrap:new", "bootstrap:old"])
+        self.assertEqual(self.events, ["bootout", "replace", "bootstrap:new"])
         self.assertEqual(self.current.resolve(), self.old)
         self.assertEqual(self.helper.read_text(), "old client\n")
-        self.assertTrue(self.owned)
+        self.assertFalse(self.owned)
+
+    def test_restore_failure_blocks_any_recovery_start(self):
+        # CTO 1793942238.234939: failed restore must leave the service stopped.
+        self.set_inventory()
+        self.fail_health = True
+        with patch.object(m, "restore_rollback_bundle", side_effect=m.InstallerError("restore failed")):
+            self.assertEqual(self.activate(), 2)
+        self.assertEqual(self.events, ["bootout", "replace", "bootstrap:new", "bootout"])
+        self.assertFalse(self.owned)
 
     def test_unhealthy_new_owner_stopped_before_paired_recovery(self):
         self.set_inventory()

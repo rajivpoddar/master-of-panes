@@ -1490,9 +1490,15 @@ def activate(
     old_manifest = old / SHARED_ASSET_MANIFEST
     baseline_digest = sha256(old_manifest) if install_shared else None
     planned: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    old_preimages: dict[str, dict[str, Any]] = {}
     if install_shared:
         baseline = {target: entry for entry in _load_shared_manifest(old)["entries"]
                     for target in _shared_entry_targets(entry)}
+        for name, prior in baseline.items():
+            expected = {"path": name, "kind": "file", "mode": prior["mode"], "sha256": prior["sha256"]}
+            if file_record(_shared_target_path(name, shared_target_root), name) != expected:
+                raise InstallerError(f"REFUSE: pinned old preimage drift: {name}")
+            old_preimages[name] = expected
         for entry in _load_shared_manifest(release_dir)["entries"]:
             for name in _shared_entry_targets(entry):
                 prior = baseline.get(name)
@@ -1507,14 +1513,21 @@ def activate(
     rollback = create_rollback_bundle(delete_targets, rollback_bundle)
     shared_bundle = rollback_bundle / "shared-preimages"
     if install_shared:
-        create_rollback_bundle([_shared_target_path(n, shared_target_root) for n, _, _ in planned], shared_bundle)
+        captured = create_rollback_bundle(
+            [_shared_target_path(name, shared_target_root) for name in old_preimages], shared_bundle
+        )
+        for record, (name, expected) in zip(captured["entries"], old_preimages.items()):
+            if not record.get("present") or any(record.get(key) != expected[key] for key in ("kind", "mode", "sha256")):
+                raise InstallerError(f"REFUSE: captured old preimage changed: {name}")
         _write_json(rollback_bundle / "CUTOVER.json", {
             "old_release": str(old), "old_manifest_sha256": baseline_digest,
-            "candidate": str(release_dir), "preimages": [p for _, p, _ in planned],
+            "candidate": str(release_dir), "preimages": list(old_preimages.values()),
         })
         _fsync_directory(rollback_bundle)
     switched = False
     stop_attempted = False
+    start_attempted = False
+    start_returned = False
     written: dict[str, str] = {}
     installed: list[dict[str, Any]] = []
     try:
@@ -1523,7 +1536,7 @@ def activate(
         if install_shared:
             if sha256(old_manifest) != baseline_digest:
                 raise InstallerError("pinned old manifest changed before shutdown")
-            for name, preimage, _ in planned:
+            for name, preimage in old_preimages.items():
                 if file_record(_shared_target_path(name, shared_target_root), name) != preimage:
                     raise InstallerError(f"pinned preimage changed before shutdown: {name}")
         stop_attempted = True
@@ -1538,7 +1551,9 @@ def activate(
             )
             written[str(_shared_target_path(name, shared_target_root))] = entry["sha256"]
             installed.append(result)
+        start_attempted = True
         restart()
+        start_returned = True
         health_result = health()
         canary_result = canary()
         delete_after_readiness(delete_targets, rollback)
@@ -1575,7 +1590,7 @@ def activate(
                     raise InstallerError(f"fresh shared drift during recovery: {name}; kept fresh bytes")
             if install_shared:
                 restore_rollback_bundle(shared_bundle, only_if_current=written)
-                for name, preimage, _ in planned:
+                for name, preimage in old_preimages.items():
                     if file_record(_shared_target_path(name, shared_target_root), name) != preimage:
                         raise InstallerError(f"shared preimage recovery incomplete: {name}")
             restore_rollback_bundle(rollback_bundle)
@@ -1585,12 +1600,15 @@ def activate(
             if current.resolve(strict=True) != old:
                 raise InstallerError("prior pointer recovery incomplete")
             phases["pointer"] = "restored to prior release"
-            restart()  # ONE reconciled bootstrap; no blind retry on EIO/lost ACK.
+            if start_attempted and not start_returned:
+                phases["service"] = "stopped; bootstrap outcome requires ownership reconciliation"
+                raise InstallerError("bootstrap outcome requires ownership reconciliation; no second start")
+            restart()
             health()
             phases["service"] = "prior release healthy"
         except Exception as recovery_exc:
             phases["error"] = f"{type(recovery_exc).__name__}: {recovery_exc}"
-            raise InstallerError("RECOVERY_FAILED " + json.dumps({
+            raise InstallerError("RECOVERY_BLOCKED " + json.dumps({
                 "activation_error": activation_error, "phases": phases,
                 "current": str(current), "release_dir": str(release_dir),
             }, sort_keys=True)) from exc

@@ -650,7 +650,8 @@ class StartupBudgetTests(ReleaseInstallerTests):
         for seconds in elapsed:
             self.assertGreaterEqual(seconds, module.STARTUP_GRACE_SECONDS)
             self.assertLess(seconds, module.STARTUP_GRACE_SECONDS + 5)
-        self.assertIn("RECOVERY_FAILED", str(raised.exception))
+        # CTO 1793942238.234939: report a failed recovery as blocked.
+        self.assertIn("RECOVERY_BLOCKED", str(raised.exception))
 
     def test_launchd_recovery_start_failure_is_not_blindly_retried(self):
         calls = {"n": 0}
