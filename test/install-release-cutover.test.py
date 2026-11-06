@@ -270,6 +270,20 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertEqual(self.events, ["bootout", "replace", "bootstrap:new", "bootout"])
         self.assertFalse(self.owned)
 
+    def test_retired_target_unknown_absence_refuses_before_stop(self):
+        _, target = self.add_retired_old_target()
+        self.set_inventory()
+        original = Path.lstat
+        def denied(path):
+            if path == target:
+                raise PermissionError("cannot inspect retired target")
+            return original(path)
+        with patch.object(Path, "lstat", denied):
+            self.assertEqual(self.activate(), 2)
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.owned)
+        self.assertEqual(self.current.resolve(), self.old)
+
     def test_required_present_asset_disappearing_refuses(self):
         self.set_inventory()
         original = m.create_rollback_bundle

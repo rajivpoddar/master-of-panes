@@ -1506,8 +1506,13 @@ def activate(
     def verify_retired_absent() -> None:
         for name in retired_absent:
             target = _shared_target_path(name, shared_target_root)
-            if target.exists() or target.is_symlink():
-                raise InstallerError(f"REFUSE: retired absent target reappeared: {target}; preserved")
+            try:
+                target.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise InstallerError(f"REFUSE: retired target absence unknown: {target}: {exc}") from exc
+            raise InstallerError(f"REFUSE: retired absent target reappeared: {target}; preserved")
 
     if install_shared:
         baseline = {target: entry for entry in _load_shared_manifest(old)["entries"]
