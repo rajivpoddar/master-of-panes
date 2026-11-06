@@ -970,7 +970,7 @@ def remote_boxes_line(timeout: int = 20) -> str:
             pieces.append(f"{name} pool {count('free')} free / {target} (" + "; ".join(details) + ")")
         return "*Remote boxes:* " + " · ".join(pieces)
     except subprocess.TimeoutExpired:
-        reason = "collector timeout"
+        reason = f"UNAVAILABLE (timeout {timeout}s)"
     except (OSError, ValueError) as exc:
         reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
     return f"*Remote boxes:* unavailable ({reason})"
