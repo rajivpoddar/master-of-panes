@@ -652,7 +652,7 @@ class StartupBudgetTests(ReleaseInstallerTests):
             self.assertLess(seconds, module.STARTUP_GRACE_SECONDS + 5)
         self.assertIn("RECOVERY_FAILED", str(raised.exception))
 
-    def test_launchd_start_failure_still_gets_a_second_recovery_start(self):
+    def test_launchd_recovery_start_failure_is_not_blindly_retried(self):
         calls = {"n": 0}
 
         def restart():
@@ -678,7 +678,7 @@ class StartupBudgetTests(ReleaseInstallerTests):
                 health=health,
                 canary=lambda: {"slots": []},
             )
-        self.assertEqual(calls["n"], 3, "restart failure (not slow start) is the only reason to retry")
+        self.assertEqual(calls["n"], 2, "a failed recovery start is consumed, not blindly retried")
         self.assertEqual(self.current.resolve(), self.old.resolve())
 
 
