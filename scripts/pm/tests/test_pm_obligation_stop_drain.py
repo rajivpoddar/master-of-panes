@@ -195,6 +195,42 @@ def test_postpone_list_and_clear_blocker(lane):
     assert result.get("decision") == "block" and "[runnable]" in reason(result)
 
 
+@pytest.mark.parametrize("evidence", [
+    {"outcome": "UNKNOWN"},
+    {"handoff": {"status": "accepted", "queuedSubmissionId": "accepted-1",
+                 "obligation_id": 301, "target_id": "301"}},
+])
+def test_metadata_upsert_preserves_custody_and_scheduling(lane, evidence):
+    add(lane, 301, severity="high", horizon="daily", owner="worker-claim",
+        blocker="waiting", next_review_at=FUTURE, evidence_json=evidence,
+        required_action="Resend notification")
+    add(lane, 302)
+    def read():
+        with closing(sqlite3.connect(lane[1])) as con:
+            con.row_factory = sqlite3.Row
+            return dict(con.execute("SELECT * FROM obligations WHERE id=301").fetchone())
+    before = read()
+    base = [sys.executable, str(WRITER), "obligation-upsert", "--kind", "followup",
+            "--target-type", "task", "--target-id", "301"]
+    subprocess.run(base + ["--suppress-until", FUTURE, "--blocker", ""],
+                   env=lane[2], check=True, capture_output=True)
+    after = read()
+    assert {k: v for k, v in after.items() if k not in {"updated_at", "blocker", "suppress_until"}} == {
+        k: v for k, v in before.items() if k not in {"updated_at", "blocker", "suppress_until"}}
+    assert after["blocker"] is None and after["suppress_until"] == FUTURE
+    result, _ = invoke(lane)
+    assert result.get("decision") == "block" and "obligation:302 [runnable]" in reason(result)
+    assert "obligation:301 [future]" in reason(result)
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    subprocess.run(base + ["--suppress-until", past], env=lane[2], check=True, capture_output=True)
+    result, _ = invoke(lane)
+    assert "obligation:302 [runnable]" in reason(result)
+    assert "Resend notification" not in reason(result)
+    assert read()["evidence_json"] == before["evidence_json"]
+    subprocess.run(base + ["--evidence-json", "{}"], env=lane[2], check=True, capture_output=True)
+    assert read()["evidence_json"] == "{}"
+
+
 def native_queue_receipt(**extra):
     return {"status": "queued_for_task_consumption", "queueAccepted": True,
             "executionOwnership": "queued", "queuedSubmissionId": "native-submission-A",
