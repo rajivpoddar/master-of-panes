@@ -1467,6 +1467,15 @@ def retire_shared_assets(
     }
 
 
+# CTO 1793943470.924319: only these decommissioned install mappings may
+# have an absent old preimage. Never recreate or remove a reappearing file.
+RETIRED_ABSENT_TARGETS = frozenset(
+    str(Path.home() / "Downloads/projects" / f"heydonna-app-{slot}" / suffix)
+    for slot in (3006, 3008)
+    for suffix in (".claude/skills/respawn/SKILL.md", ".claude/skills/respawn/scripts/respawn.sh")
+)
+
+
 def activate(
     *,
     release_dir: Path,
@@ -1492,10 +1501,26 @@ def activate(
     baseline_digest = sha256(old_manifest) if install_shared else None
     planned: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     old_preimages: dict[str, dict[str, Any]] = {}
+    retired_absent: set[str] = set()
+
+    def verify_retired_absent() -> None:
+        for name in retired_absent:
+            target = _shared_target_path(name, shared_target_root)
+            if target.exists() or target.is_symlink():
+                raise InstallerError(f"REFUSE: retired absent target reappeared: {target}; preserved")
+
     if install_shared:
         baseline = {target: entry for entry in _load_shared_manifest(old)["entries"]
                     for target in _shared_entry_targets(entry)}
+        candidate_manifest = _load_shared_manifest(release_dir)
+        candidate_targets = {name for entry in candidate_manifest["entries"] for name in _shared_entry_targets(entry)}
+        retired_absent = (baseline.keys() - candidate_targets) & RETIRED_ABSENT_TARGETS
+        if baseline.keys() - candidate_targets - RETIRED_ABSENT_TARGETS:
+            raise InstallerError("REFUSE: candidate removes unapproved shared targets")
+        verify_retired_absent()
         for name, prior in baseline.items():
+            if name in retired_absent:
+                continue
             expected = {"path": name, "kind": "file", "mode": prior["mode"], "sha256": prior["sha256"]}
             if file_record(_shared_target_path(name, shared_target_root), name) != expected:
                 raise InstallerError(f"REFUSE: pinned old preimage drift: {name}")
@@ -1515,14 +1540,19 @@ def activate(
     shared_bundle = rollback_bundle / "shared-preimages"
     if install_shared:
         captured = create_rollback_bundle(
-            [_shared_target_path(name, shared_target_root) for name in old_preimages], shared_bundle
+            [_shared_target_path(name, shared_target_root) for name in old_preimages]
+            + [_shared_target_path(name, shared_target_root) for name in sorted(retired_absent)], shared_bundle
         )
         for record, (name, expected) in zip(captured["entries"], old_preimages.items()):
             if not record.get("present") or any(record.get(key) != expected[key] for key in ("kind", "mode", "sha256")):
                 raise InstallerError(f"REFUSE: captured old preimage changed: {name}")
+        for record in captured["entries"][len(old_preimages):]:
+            if record.get("present"):
+                raise InstallerError(f"REFUSE: retired target appeared during capture: {record['path']}")
         _write_json(rollback_bundle / "CUTOVER.json", {
             "old_release": str(old), "old_manifest_sha256": baseline_digest,
             "candidate": str(release_dir), "preimages": list(old_preimages.values()),
+            "retired_absent": sorted(retired_absent),
         })
         _fsync_directory(rollback_bundle)
     switched = False
@@ -1537,11 +1567,13 @@ def activate(
         if install_shared:
             if sha256(old_manifest) != baseline_digest:
                 raise InstallerError("pinned old manifest changed before shutdown")
+            verify_retired_absent()
             for name, preimage in old_preimages.items():
                 if file_record(_shared_target_path(name, shared_target_root), name) != preimage:
                     raise InstallerError(f"pinned preimage changed before shutdown: {name}")
         stop_attempted = True
         stop()
+        verify_retired_absent()
         atomic_switch(current, release_dir, expected_old)
         switched = True
         for index, (name, preimage, entry) in enumerate(planned):
@@ -1552,6 +1584,7 @@ def activate(
             )
             written[str(_shared_target_path(name, shared_target_root))] = entry["sha256"]
             installed.append(result)
+        verify_retired_absent()
         start_attempted = True
         restart()
         start_returned = True
@@ -1586,6 +1619,7 @@ def activate(
             else:
                 stop()
             phases["service"] = "stopped"
+            verify_retired_absent()
             if current.resolve(strict=True) not in {old, release_dir.resolve(strict=True)}:
                 raise InstallerError("pointer changed after cutover; preserve newer custody")
             for name, preimage, entry in planned:
@@ -1608,6 +1642,7 @@ def activate(
             if start_attempted and not start_returned and not reconcile_stopped():
                 raise InstallerError("bootstrap ownership changed during restoration; no recovery start")
             # Recheck the paired baseline immediately before the one recovery start.
+            verify_retired_absent()
             if current.resolve(strict=True) != old:
                 raise InstallerError("prior pointer changed before recovery start")
             for name, preimage in old_preimages.items():

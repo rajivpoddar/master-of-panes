@@ -219,6 +219,51 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertEqual(self.activate(), 0)
         self.assertEqual(self.events.count("bootstrap:new"), 1)
 
+    def add_retired_old_target(self):
+        name = sorted(m.RETIRED_ABSENT_TARGETS)[0]
+        manifest_path = self.old / m.SHARED_ASSET_MANIFEST
+        manifest = json.loads(manifest_path.read_text())
+        old_entry = dict(manifest["entries"][0], canonical_target=name)
+        manifest["entries"].append(old_entry)
+        manifest["inventory"]["selected_count"] += 1
+        manifest_path.write_text(json.dumps(manifest))
+        return name, self.targets / name.lstrip("/")
+
+    def test_retired_absence_is_captured_and_preserved(self):
+        name, target = self.add_retired_old_target()
+        self.set_inventory()
+        self.assertEqual(self.activate(), 0)
+        self.assertFalse(target.exists())
+        plan = json.loads((self.root / "rollback/CUTOVER.json").read_text())
+        self.assertEqual(plan["retired_absent"], [name])
+        backup = json.loads((self.root / "rollback/shared-preimages/ROLLBACK_MANIFEST.json").read_text())
+        self.assertTrue(any(e["path"] == str(target) and e["present"] is False for e in backup["entries"]))
+
+    def test_retired_target_appearing_after_capture_is_preserved(self):
+        _, target = self.add_retired_old_target()
+        self.set_inventory()
+        def race(path):
+            self.replace(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("fresh user file\n")
+        self.assertEqual(self.activate(race), 2)
+        self.assertEqual(target.read_text(), "fresh user file\n")
+        self.assertFalse(any(event.startswith("bootstrap") for event in self.events))
+
+    def test_required_present_asset_disappearing_refuses(self):
+        self.set_inventory()
+        original = m.create_rollback_bundle
+        def remove_after_capture(targets, bundle):
+            result = original(targets, bundle)
+            if bundle.name == "shared-preimages":
+                self.helper.unlink()
+            return result
+        with patch.object(m, "create_rollback_bundle", side_effect=remove_after_capture):
+            self.assertEqual(self.activate(), 2)
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.owned)
+        self.assertEqual(self.current.resolve(), self.old)
+
     def test_candidate_equal_installed_file_is_not_an_old_preimage(self):
         self.set_inventory()
         self.helper.write_text("new client\n")
