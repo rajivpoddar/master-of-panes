@@ -301,7 +301,7 @@ test("production assignment route accepts the minimal issue contract", async () 
     assert.notDeepEqual(db.getSlot(1), initial);
     const assigned = await authorized.json() as Record<string, unknown>;
     assert.equal(assigned.occupied, true);
-    assert.equal(assigned.repository_id, "heydonna-app/heydonna-app");
+    assert.equal(assigned.repository_id, "Scribie/heydonna-app");
     assert.equal(assigned.issue, assignment.issue);
     assert.equal(assigned.pr, null);
     assert.equal(assigned.branch, null);

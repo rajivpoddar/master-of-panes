@@ -58,7 +58,7 @@ import {
   respawnWorkToken,
   type RespawnWhenIdleRequest,
 } from "./respawnWhenIdle.js";
-import { createGhIssueOwnershipProjection } from "./issueProjection.js";
+import { createGhIssueOwnershipProjection, configuredProjectionRepository } from "./issueProjection.js";
 import { registerFamily2Routes } from "./family2Routes.js";
 import { registerAssignmentEffectRoutes } from "./assignmentEffectRoutes.js";
 import { TmuxRelay } from "./relay.js";
@@ -1196,7 +1196,7 @@ app.get("/slots", (c) => {
 
 /** Read-only: resolve the issue MoP assigned for a PR (pr, then branch). */
 app.get("/issue-for-pr", (c) => {
-  const repo = c.req.query("repo") || "heydonna-app/heydonna-app";
+  const repo = c.req.query("repo") || configuredProjectionRepository();
   const prRaw = c.req.query("pr");
   const pr = prRaw && /^\d+$/.test(prRaw) ? Number(prRaw) : null;
   const branch = c.req.query("branch")?.trim() || null;

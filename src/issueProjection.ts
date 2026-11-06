@@ -77,6 +77,9 @@ async function withIssueLock<T>(issue: number, work: () => Promise<T>): Promise<
 }
 
 export const DEFAULT_PROJECTION_REPOSITORY = "Scribie/heydonna-app";
+export function configuredProjectionRepository(): string {
+  return process.env.MOP_PROJECTION_REPOSITORY ?? DEFAULT_PROJECTION_REPOSITORY;
+}
 // Stored assignment identities predate the repository transfer; do not migrate them.
 const LEGACY_PROJECTION_REPOSITORY = "heydonna-app/heydonna-app";
 export const DEFAULT_LEGACY_REPOSITORY_ID = "992731533";
@@ -158,9 +161,7 @@ export function createGhIssueOwnershipProjection(
   options: IssueProjectionOptions = {},
 ): IssueOwnershipProjection {
   const runGh = options.runGh ?? defaultRunGh(options.timeoutMs ?? 20_000);
-  const repository = options.repository
-    ?? process.env.MOP_PROJECTION_REPOSITORY
-    ?? DEFAULT_PROJECTION_REPOSITORY;
+  const repository = options.repository ?? configuredProjectionRepository();
   const legacyIds = new Set([
     process.env.MOP_LEGACY_REPOSITORY_ID ?? DEFAULT_LEGACY_REPOSITORY_ID,
     ...(options.legacyRepositoryIds ?? []),

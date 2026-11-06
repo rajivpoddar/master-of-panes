@@ -52,6 +52,7 @@ from urllib.parse import urlencode
 SELECTION_CLASSES = ("new_issue", "repro", "rework")
 WORK_KINDS = ("implementation", "rework", "repro", "review")
 SANCTIONED_PATH = "mop-assign-slot"
+DEFAULT_REPOSITORY_ID = os.environ.get("MOP_PROJECTION_REPOSITORY", "Scribie/heydonna-app")
 
 
 def mop_base_url() -> str:
@@ -115,6 +116,13 @@ def slot_state_after(payload: Any) -> str:
     return "unknown"
 
 
+def display_repository_id(repository_id: str) -> str:
+    value = repository_id.removeprefix("github:")
+    if value == "heydonna-app/heydonna-app":
+        return DEFAULT_REPOSITORY_ID.removeprefix("github:")
+    return value
+
+
 def post_assignment_notice(
     repository_id: str, issue: int, slot: int, assignment_epoch: int, priority: str, task: str,
 ) -> dict[str, Any]:
@@ -123,7 +131,7 @@ def post_assignment_notice(
     summary = next((line.strip() for line in task.splitlines() if line.strip()), "Assignment completed.")
     summary = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     body = (
-        f"Assignment: {priority} {repository_id} issue {issue} assigned to slot {slot} "
+        f"Assignment: {priority} {display_repository_id(repository_id)} issue {issue} assigned to slot {slot} "
         f"(assignment epoch {assignment_epoch}).\n{summary}"
     )
     binding = {"repository_id": repository_id, "issue": issue, "slot": slot,
@@ -212,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--slot", type=int, required=True)
     parser.add_argument("--issue", type=int, required=True)
     parser.add_argument("--class", dest="selection_class", choices=SELECTION_CLASSES, default="new_issue")
-    parser.add_argument("--repo-id", dest="repo_id", default="github:heydonna-app/heydonna-app")
+    parser.add_argument("--repo-id", dest="repo_id", default=DEFAULT_REPOSITORY_ID)
     parser.add_argument("--pr", type=int, default=None)
     parser.add_argument("--branch", default=None)
     parser.add_argument("--head", default=None)

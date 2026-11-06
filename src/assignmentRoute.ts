@@ -38,6 +38,7 @@ import {
   type SlotPredecessorContext,
 } from "./db.js";
 import {
+  configuredProjectionRepository,
   NO_ISSUE_PROJECTION,
   type IssueOwnershipProjection,
   type IssueProjectionOutcome,
@@ -411,7 +412,7 @@ export function registerAssignmentRoute(
     } else {
       const repositoryId = (
         typeof body.repository_id === "string" || typeof body.repository_id === "number"
-      ) ? body.repository_id : (process.env.MOP_LEGACY_REPOSITORY_ID ?? "heydonna-app/heydonna-app");
+      ) ? body.repository_id : configuredProjectionRepository();
       result = db.assignIssueToSlot(
         slotParse.data,
         body.issue as number,
