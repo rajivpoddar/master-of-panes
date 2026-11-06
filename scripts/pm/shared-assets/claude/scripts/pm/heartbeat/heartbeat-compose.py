@@ -1276,19 +1276,44 @@ def _fetch_slots(url: str = MOP_SLOTS_URL, timeout: int = 5):
 CLEANUP_STATUS = Path("/tmp/stale-process-cleanup-status.json")
 
 
-def priority_inversion_flags(slots_doc, failures: list[str], timeout: int = COLLECTOR_TIMEOUTS["priority-inversion"]) -> list[str] | None:
-    """Return inversions, or None when the bounded priority check is unavailable."""
+def _priority_inversion_worker(selector_path: str, slots_doc: dict | list | None, timeout: int) -> list[str]:
+    spec = importlib.util.spec_from_file_location("ready_pool_select", selector_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("priority selector unavailable")
+    rps = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rps)
+    slots = slots_doc.get("slots", []) if isinstance(slots_doc, dict) else (slots_doc or [])
+    issues = rps.load_open_issues(timeout=timeout)
+    prio = {int(i["number"]): rps.priority_rank({l["name"] for l in i.get("labels") or []}, i.get("body") or "")
+            for i in issues}
+    return rps.priority_inversions(slots, prio, rps.rank_candidates(issues))
+
+
+def priority_inversion_flags(slots_doc, failures: list[str], timeout: int = COLLECTOR_TIMEOUTS["priority-inversion"],
+                             selector_path: Path | None = None) -> list[str] | None:
+    """Run load and dependency ranking in a killable process under one wall-clock deadline."""
+    import signal
+
+    selector_path = selector_path or Path.home() / ".claude/scripts/ready_pool_select.py"
+    proc = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "--priority-inversion-worker", str(selector_path), str(timeout)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    slots = slots_doc.get("slots", []) if isinstance(slots_doc, dict) else (slots_doc or [])
     try:
-        spec = importlib.util.spec_from_file_location(
-            "ready_pool_select", Path.home() / ".claude/scripts/ready_pool_select.py")
-        rps = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(rps)
-        slots = slots_doc.get("slots", []) if isinstance(slots_doc, dict) else (slots_doc or [])
-        issues = rps.load_open_issues(timeout=timeout)
-        prio = {int(i["number"]): rps.priority_rank({l["name"] for l in i.get("labels") or []}, i.get("body") or "")
-                for i in issues}
-        return rps.priority_inversions(slots, prio, rps.rank_candidates(issues))
-    except TimeoutError:
+        stdout, _ = proc.communicate(input=json.dumps(slots), timeout=timeout)
+        if proc.returncode != 0:
+            raise RuntimeError("priority worker failed")
+        result = json.loads(stdout)
+        if not isinstance(result, list) or any(not isinstance(flag, str) for flag in result):
+            raise ValueError("invalid priority worker response")
+        return result
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
         failures.append(f"priority-inversion: UNAVAILABLE (timeout {timeout}s)")
         return None
     except Exception as exc:  # noqa: BLE001 - heartbeat must still post
@@ -1452,5 +1477,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "--priority-inversion-worker":
+        try:
+            worker_slots = json.load(sys.stdin)
+            result = _priority_inversion_worker(sys.argv[2], worker_slots, int(sys.argv[3]))
+            print(json.dumps(result))
+            raise SystemExit(0)
+        except Exception as exc:
+            print(f"priority worker failed: {type(exc).__name__}", file=sys.stderr)
+            raise SystemExit(1)
     sys.exit(main())
 

@@ -98,6 +98,31 @@ def test_collector_deadlines_fit_budget_and_timeout_is_unavailable(monkeypatch):
     assert "no inversions" not in report.lower()
 
 
+def test_priority_collector_bounds_dependency_ranking_and_renders_timeout(tmp_path):
+    selector = tmp_path / 'stalled-selector.py'
+    selector.write_text('''import time
+\ndef load_open_issues(timeout):
+    return [{"number": 42, "labels": [], "body": ""}]
+\ndef priority_rank(labels, body):
+    return 0
+\ndef rank_candidates(issues):
+    time.sleep(10)
+    return []
+\ndef priority_inversions(slots, priorities, ranked):
+    return []
+''')
+    failures = []
+    result = composer.priority_inversion_flags({'slots': []}, failures, timeout=0.2,
+                                               selector_path=selector)
+    assert result is None
+    assert failures == ['priority-inversion: UNAVAILABLE (timeout 0.2s)']
+    report = composer.compose('1h', NOW, None, {}, [], slots={'slots': []}, include_slots=True,
+                              priority_flags=result, priority_unavailable='UNAVAILABLE (timeout 0.2s)',
+                              decisions={'items': [], 'stale': 0})
+    assert 'Priority check: UNAVAILABLE (timeout 0.2s)' in report
+    assert 'no inversions' not in report.lower()
+
+
 def test_pending_github_enforces_total_deadline(monkeypatch):
     clock = [0.0]
     monkeypatch.setattr(composer, "monotonic", lambda: clock[0])
