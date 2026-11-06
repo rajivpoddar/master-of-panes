@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 from classifier_requirements import classify as workflow_requirements
 
-REPO = "heydonna-app/heydonna-app"
+REPO = "Scribie/heydonna-app"
 WORKFLOWS = ("ci.yml", "e2e.yml")
 
 

@@ -12,8 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 from classifier_requirements import classify as workflow_requirements
 
-REPO = "heydonna-app/heydonna-app"
-SAME_REPO_NAMES = {REPO.lower(), "scribie/heydonna-app"}
+REPO = "Scribie/heydonna-app"
+SAME_REPO_NAMES = {REPO.lower(), "heydonna-app/heydonna-app"}
 WORKFLOWS = {"ci.yml": ("typescript", "python", "test"), "e2e.yml": ("e2e",)}
 SITE_EXEMPTION_WORKFLOW = "ci-dummy.yml"
 SITE_CLASSIFIER_JOB_NAME = "detect-docs-only"
