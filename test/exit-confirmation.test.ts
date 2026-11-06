@@ -41,10 +41,14 @@ function harness(slot: number, options: { persistent?: boolean; noDialog?: boole
   const path = slot ? `/Users/rajiv/Downloads/projects/heydonna-app-${3000 + slot}` : "/Users/rajiv/Downloads/projects/heydonna-app";
   const pane = { id: "%40", process: "100 100 S+ Mon Nov 2 00:00:00 2026 claude", composer: "", buffer: "", exitAt: 0, stopRespondedAt: 0,
     showing: !options.noDialog, exitEnters: 0, keys: [] as string[], onVisible: undefined as undefined | (() => void),
-    onOne: undefined as undefined | (() => void), onConfirmation: undefined as undefined | (() => void), failOne: false };
+    onOne: undefined as undefined | (() => void), onConfirmation: undefined as undefined | (() => void),
+    onIdentity: undefined as undefined | (() => void), failOne: false };
   const shell = async (command: string) => {
     let stdout = "";
-    if (command.startsWith("tmux display-message")) stdout = command.includes("pane_pid") ? `${pane.id}|100|/dev/pts/1|${path}|claude\n` : `${pane.id}|${path}\n`;
+    if (command.startsWith("tmux display-message")) {
+      if (!command.includes("pane_pid")) pane.onIdentity?.();
+      stdout = command.includes("pane_pid") ? `${pane.id}|100|/dev/pts/1|${path}|claude\n` : `${pane.id}|${path}\n`;
+    }
     else if (command.startsWith("git -C")) stdout = path + "\n";
     else if (command.startsWith("ps -t")) stdout = pane.process;
     else if (command.startsWith("tmux capture-pane")) {
@@ -209,6 +213,32 @@ test("a Stop hook child leaving the TTY does not change the pinned Claude leader
   try { await h.send(); assert.deepEqual(h.pane.keys, ["1", "Enter"]); }
   finally { h.db.close(); }
 });
+
+for (const change of ["epoch-before-timer", "boot-before-timer", "boot-during-pane-lookup", "input-before-timer"]) {
+  test(`the consumed Stop never adopts an inactive successor: ${change}`, async () => {
+    const h = harness(1, { afterStop: true });
+    try {
+      await h.serverStop();
+      const replaceBoot = () => {
+        h.db.logEvent(1, "SessionStart", "SessionStart", null, { session_id: "replacement" });
+        h.db.updateSlot(1, { active_turn_id: null, active_turn_started_at: null, active_turn_state: "inactive" });
+      };
+      if (change === "epoch-before-timer") {
+        (h.db as any).db.prepare("UPDATE slots SET assignment_epoch = assignment_epoch + 1 WHERE slot = ?").run(1);
+      } else if (change === "boot-before-timer") replaceBoot();
+      else if (change === "boot-during-pane-lookup") h.pane.onIdentity = () => { h.pane.onIdentity = undefined; replaceBoot(); };
+      else {
+        h.db.startAgentTurn(1, "original");
+        h.db.logEvent(1, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "original" });
+        h.db.finishAgentTurn(1, "original");
+      }
+      await (h.relay as any).pendingExitDispatch.get(1)?.work;
+      assert.equal(h.pane.exitEnters, 0); assert.deepEqual(h.pane.keys, []);
+      assert.equal(h.db.getSlot(1)?.active_turn_state, "inactive", "successor need not be busy to be protected");
+      assert.equal(h.db.getExitStatus().cycled[1], true, "the old operation stays consumed, never resent");
+    } finally { h.db.close(); }
+  });
+}
 
 test("lost key acknowledgment is consumed and never retries", async () => {
   const h = harness(1, { persistent: true }); h.pane.failOne = true;

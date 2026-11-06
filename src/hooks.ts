@@ -1689,7 +1689,7 @@ export class HookProcessor {
     // watchdog restarts the slot with --continue and it goes idle again).
     if (this.db.getExitPending() && !this.db.getExitStatus().pm_only && !(slotNum === 0 && this.db.getExitStatus().dev_only) && !this.db.getExitStatus().cycled[slotNum]) {
       this.db.markSlotExitCycled(slotNum);
-      this.relay.sendToSlot(slotNum, "/exit", true, false, this.db.getExitStatus().episode ?? undefined);
+      this.relay.sendToSlot(slotNum, "/exit", true, false, this.db.getExitStatus().episode ?? undefined, payload.session_id);
       this.db.logEvent(slotNum, "exit_pending_triggered", "Stop", null, {
         task: slot.task,
         branch: slot.branch,
