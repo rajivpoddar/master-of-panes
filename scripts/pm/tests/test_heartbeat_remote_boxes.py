@@ -42,7 +42,7 @@ def test_failure_is_rendered_in_hourly(monkeypatch):
         raise subprocess.TimeoutExpired(args[0], 20)
     monkeypatch.setattr(composer.subprocess, "run", timeout)
     line = composer.remote_boxes_line()
-    assert line == "*Remote boxes:* unavailable (collector timeout)"
+    assert line == "*Remote boxes:* unavailable (UNAVAILABLE (timeout 20s))"
     post = composer.compose("1h", datetime.now(timezone.utc), None, {}, [], training=("*Training:* no run active", []), remote_boxes=line)
     assert "\n\n" + line in post
 
