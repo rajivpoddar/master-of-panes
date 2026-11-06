@@ -1508,7 +1508,7 @@ export class MoPDatabase {
     return this.db.prepare(`
       UPDATE assignment_effect_intents SET delivery_receipt = '{"custody":"unknown"}'
       WHERE effect_id = ? AND state = 'pending_delivery'
-        AND delivery_receipt = '{"custody":"unissued"}'
+        AND json_valid(delivery_receipt) AND json_extract(delivery_receipt, '$.custody') = 'unissued'
     `).run(effectId).changes === 1;
   }
 
@@ -1517,7 +1517,7 @@ export class MoPDatabase {
       UPDATE assignment_effect_intents SET delivery_receipt = ?
       WHERE effect_id = ? AND state = 'pending_delivery'
         AND delivery_receipt = '{"custody":"unknown"}'
-    `).run(JSON.stringify({ custody: verified ? "delivered" : "unknown", receipt }), effectId);
+    `).run(JSON.stringify({ custody: verified ? "delivered" : receipt.outcome === "refused_pre_effect" ? "unissued" : "unknown", receipt }), effectId);
   }
 
   /** Advance a minted intent to pending-delivery once ownership is committed. */

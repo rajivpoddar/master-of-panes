@@ -132,7 +132,7 @@ function harness(): Harness {
         return {
           verified: false,
           reason: state.deliverError,
-          receipt: { slot, verified: false },
+          receipt: { slot, verified: false, outcome: state.deliverError === "refused_pre_effect" ? "refused_pre_effect" : "uncertain" },
         } satisfies AssignmentEffectDeliveryResult;
       }
       return {
@@ -269,7 +269,7 @@ test("a failed delivery leaves a NAMED recoverable state and never rolls ownersh
     assert.equal(after.assignment_epoch, epoch0 + 1);
     const intent = h.db.getAssignmentEffectIntent("assign-4-8110")!;
     assert.equal(intent.state, "pending_delivery");
-    assert.equal(intent.delivery_receipt, null, "a refused delivery must remain unfinalized");
+    assert.equal(JSON.parse(intent.delivery_receipt!).custody, "unknown", "CTO 1793939423.848049: unverified delivery retains UNKNOWN custody");
     const ownershipEvent = h.db.getEvents(4, 20, "assignment_effect_ownership_bound")[0];
     assert.equal(JSON.parse(ownershipEvent.payload).delivery_state, "pending");
     assert.equal(h.db.getEvents(4, 20, "assignment_effect_committed").length, 0);
@@ -280,10 +280,11 @@ test("a failed delivery leaves a NAMED recoverable state and never rolls ownersh
   }
 });
 
-test("retrying a pending delivery resumes delivery without a second ownership commit", async () => {
+test("proven unissued delivery resumes without a second ownership commit", async () => {
   const h = harness();
   try {
-    h.deliverError = "session_delivery_unverified";
+    // CTO 1793939423.848049: retry is allowed only after a proven pre-effect refusal.
+    h.deliverError = "refused_pre_effect";
     const epoch0 = h.db.getSlot(5)!.assignment_epoch;
     const failed = await post(h.app, 5, effectBody(5, epoch0));
     assert.equal(failed.json.step_failed, "delivery");
@@ -999,8 +1000,8 @@ test("REVISE-1: failed delivery then resume unwinds the displaced lane without r
     );
     assert.equal(seeded.ok, true);
     const occupiedEpoch = h.db.getSlot(3)!.assignment_epoch;
-    // Attempt 1: delivery fails AFTER the commit. No labels may run yet.
-    h.deliverError = "session_delivery_unverified";
+    // CTO 1793939423.848049: a proven pre-effect refusal may resume.
+    h.deliverError = "refused_pre_effect";
     const failed = await post(h.app, 3, effectBody(3, occupiedEpoch, {
       effect_id: "assign-3-resume-release",
       selection_class: "rework",
@@ -1042,7 +1043,8 @@ test("REVISE-1-negative: resume with no recorded displacement projects only the 
   const h = harness();
   try {
     const epoch0 = h.db.getSlot(3)!.assignment_epoch;
-    h.deliverError = "session_delivery_unverified";
+    // CTO 1793939423.848049: only proven unissued delivery may resume.
+    h.deliverError = "refused_pre_effect";
     const failed = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-resume-nodeplaced" }));
     assert.equal(failed.json.step_failed, "delivery");
     assert.equal(h.db.getAssignmentEffectIntent("assign-3-resume-nodeplaced")!.displaced_tuple, null);
@@ -1092,7 +1094,8 @@ test("REVISE-3: refused duplicate new_issue is side-effect free and names the ho
 test("rerun after a delivery refusal resumes with the committed epoch (mop-assign-slot sends the live epoch)", async () => {
   const h = harness();
   try {
-    h.deliverError = "session_delivery_unverified";
+    // CTO 1793939423.848049: only proven unissued delivery may resume.
+    h.deliverError = "refused_pre_effect";
     const epoch0 = h.db.getSlot(1)!.assignment_epoch;
     const failed = await post(h.app, 1, effectBody(1, epoch0, { effect_id: "assign-1-rerun" }));
     assert.equal(failed.json.step_failed, "delivery");
