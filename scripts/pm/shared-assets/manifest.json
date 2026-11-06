@@ -141,7 +141,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops-sync-stop-validator",
-      "sha256": "fa7d9d2a0bd8469bd3211c8ed8f0acbe56a74bc58ea0b77ab90da4196686e9cf",
+      "sha256": "be2958cfafd3bb0fc1479ed0bd99a3d136b61cf979b4dad831c8d13dda1422a5",
       "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
     },
     {
@@ -600,7 +600,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops",
-      "sha256": "87293648b605ae97637fef7b69fb1dcb205799f680d51dc4227ddac005dbe168",
+      "sha256": "27e3894dbc2073f2735341dbf43606b317524dde65cbdc565770dff0f3bc0481",
       "source_path": "claude/scripts/pm-ops-legacy.py"
     },
     {
