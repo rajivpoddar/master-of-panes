@@ -224,6 +224,32 @@ test("replaying the same binding is idempotent: no second epoch bump and no seco
   }
 });
 
+test("UNKNOWN transport outcome is retained and never sent twice", async () => {
+  const h = harness();
+  try {
+    const epoch = h.db.getSlot(4)!.assignment_epoch;
+    h.deliverError = "unknown:response_lost";
+    const first = await post(h.app, 4, effectBody(4, epoch));
+    assert.equal(first.json.step_failed, "delivery");
+    h.deliverError = null;
+    await post(h.app, 4, effectBody(4, epoch));
+    assert.equal(h.deliverCalls.length, 1, "an uncertain effect must not be resent");
+    assert.ok(h.db.getAssignmentEffectIntent("assign-4-8110")!.delivery_receipt);
+  } finally { h.close(); }
+});
+
+test("verified delivery with inconsistent readback is never sent twice", async () => {
+  const h = harness();
+  try {
+    const epoch = h.db.getSlot(4)!.assignment_epoch;
+    h.corruptTaskAfterDelivery = true;
+    const first = await post(h.app, 4, effectBody(4, epoch));
+    assert.equal(first.json.step_failed, "readback");
+    await post(h.app, 4, effectBody(4, epoch));
+    assert.equal(h.deliverCalls.length, 1, "readback retry must not resend delivery");
+  } finally { h.close(); }
+});
+
 test("a failed delivery leaves a NAMED recoverable state and never rolls ownership back", async () => {
   const h = harness();
   try {
