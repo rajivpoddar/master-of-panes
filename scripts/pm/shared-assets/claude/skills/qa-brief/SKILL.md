@@ -5,6 +5,10 @@ description: Generate the exact-head QA brief consumed by the existing QA tester
 
 # QA brief contract
 
+## Test project: clone the sample (Rajiv 2026-11-06)
+
+Rajiv: "update the agent browser skills with this method" (DM D0AMF0XE6TS thread 1793961247.204519, ts 1793961404.966929). For remote HeyDonna QA, provision `--seed-project medium`, open the dashboard and click **Try a sample deposition** to clone `[Test] E2E Seed - Medium Deposition (Frazier)` (`api.projects.cloneSampleProject`; `app/(pages)/dashboard/page.tsx`). Add only AC-needed data through the real UI, then run the requested action. Fresh jobsheet + MP3 projects are only for creation, upload or audio-processing ACs; preserve exact-artifact diagnostic requirements.
+
 The implementing slot generates one JSON brief from the issue's structured
 acceptance contract. It contains the issue number, PR number, complete 40-hex
 head, required proof types, and the privacy-safe identity/locator of any named
@@ -17,6 +21,7 @@ inspection of the emitted customer DOCX/OOXML; a named file, template, or
 artifact must be that exact artifact, not a seeded substitute. Do not invent an
 artifact identity from prose outside the acceptance contract.
 
+On a box provisioned with `--seed-project medium`, the seeded Frazier project is already present and the dashboard hides **Try a sample deposition**. Use that seeded project directly (it's disposable test data). For a separate copy, use Account menu → **Start Tour**, which runs the same sample-clone handler. Never delete the seed to unhide the button.
 ## Browser scenario setup
 
 Default to cloning the canonical sample project/file first, then run the
