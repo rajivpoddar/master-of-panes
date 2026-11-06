@@ -1197,7 +1197,7 @@ def _service_observation(label: str, port: int) -> tuple[bool, str]:
 
 
 def _default_stop(label: str, port: int = 3100) -> None:
-    owned, _ = _service_observation(label, port)
+    owned, original_pid = _service_observation(label, port)
     if owned:
         # A nonzero/response-loss result is reconciled, never blindly repeated.
         try:
@@ -1205,9 +1205,19 @@ def _default_stop(label: str, port: int = 3100) -> None:
                            capture_output=True, text=True, timeout=20)
         except subprocess.TimeoutExpired:
             pass
-    owned, _ = _service_observation(label, port)
-    if owned:
-        raise InstallerError("bootout did not establish stopped-service custody")
+    # bootout can return before its child has finished shutting down. Reconcile
+    # that one request for a finite interval; never stop a replacement child.
+    deadline = time.monotonic() + 10.0
+    while True:
+        owned, observed_pid = _service_observation(label, port)
+        if not owned:
+            return
+        if observed_pid and observed_pid != original_pid:
+            raise InstallerError("service child changed during shutdown; preserve successor custody")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise InstallerError("bootout did not establish stopped-service custody within 10 seconds")
+        time.sleep(min(0.2, remaining))
 
 
 def _default_restart(label: str, port: int = 3100) -> None:
