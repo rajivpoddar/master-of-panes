@@ -38,6 +38,7 @@ interface Harness {
   clearResult: AssignmentEffectClearResult;
   deliveryVerified: boolean;
   deliverError: string | null;
+  beforeDelivery: (() => Promise<void>) | null;
   corruptTaskAfterDelivery: boolean;
   interruptCalls: number[];
   interruptResult: { ok: boolean; reason: string };
@@ -63,6 +64,7 @@ function harness(): Harness {
     clearResult: { ok: true, reason: "cleared" },
     deliveryVerified: true,
     deliverError: null,
+    beforeDelivery: null,
     corruptTaskAfterDelivery: false,
     interruptCalls: [],
     interruptResult: { ok: true, reason: "interrupt_sent" },
@@ -123,6 +125,7 @@ function harness(): Harness {
     deliverTaskFile: async (slot, filePath) => {
       state.deliverCalls.push(`${slot}:${filePath}`);
       state.orderLog.push("deliver");
+      if (state.beforeDelivery) await state.beforeDelivery();
       if (state.corruptTaskAfterDelivery) {
         // Simulate a durable row that does not corroborate the delivery: the
         // ownership tuple survives but the recorded task text is gone.
@@ -224,6 +227,26 @@ test("replaying the same binding is idempotent: no second epoch bump and no seco
   }
 });
 
+test("overlapping callers cannot repeat an in-flight delivery", async () => {
+  const h = harness();
+  let release!: () => void;
+  let entered!: () => void;
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  h.beforeDelivery = async () => { entered(); await wait; };
+  try {
+    const epoch = h.db.getSlot(4)!.assignment_epoch;
+    const first = post(h.app, 4, effectBody(4, epoch));
+    await started;
+    const second = await post(h.app, 4, effectBody(4, h.db.getSlot(4)!.assignment_epoch));
+    assert.equal(second.json.reason, "delivery_outcome_unknown");
+    assert.equal(h.deliverCalls.length, 1);
+    release();
+    assert.equal((await first).json.status, "assigned");
+    assert.equal(h.deliverCalls.length, 1);
+  } finally { release(); h.close(); }
+});
+
 test("UNKNOWN transport outcome is retained and never sent twice", async () => {
   const h = harness();
   try {
@@ -247,6 +270,10 @@ test("verified delivery with inconsistent readback is never sent twice", async (
     assert.equal(first.json.step_failed, "readback");
     await post(h.app, 4, effectBody(4, epoch));
     assert.equal(h.deliverCalls.length, 1, "readback retry must not resend delivery");
+    h.db.updateSlot(4, { task: TASK });
+    const recovered = await post(h.app, 4, effectBody(4, epoch));
+    assert.equal(recovered.json.status, "assigned");
+    assert.equal(h.deliverCalls.length, 1);
   } finally { h.close(); }
 });
 
