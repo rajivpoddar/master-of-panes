@@ -186,6 +186,40 @@ def test_unknown_check_has_no_assignment_effect(selector, monkeypatch):
     assert not any(method == "POST" for method, _, _ in http)
 
 
+def test_pre_upgrade_default_receipt_resumes_original_effect_without_notice(monkeypatch):
+    client = load("legacy_assignment_resume", "mop-assign-slot.py")
+    binding = {"slot": 3, "selection_class": "new_issue", "repository_id": "github:heydonna-app/heydonna-app",
+               "issue": 100, "pr": None, "branch": None, "head_sha": None, "work_kind": None,
+               "handoff_id": None, "claimed_at": None, "task_file": ""}
+    digest = hashlib.sha256(b"").hexdigest()
+    original = client.compute_effect_id(binding, digest)
+    requests = []
+    monkeypatch.setattr(client, "check_selection", lambda args: pytest.fail("fresh selection"))
+    monkeypatch.setattr(client, "post_assignment_notice", lambda *args: pytest.fail("duplicate/unknown notice retry"))
+    def api(method, url, body=None):
+        requests.append((method, url, body))
+        if "assignment-effect-receipt" in url:
+            effect = parse_qs(urlparse(url).query)["effect_id"][0]
+            if effect != original:
+                return 404, {"code": "assignment_effect_receipt_not_found"}
+            return 200, {"success": True, "slot": 3, "effect_id": original, "state": "pending_delivery",
+                         "selection_class": "new_issue", "task_digest": digest,
+                         "desired_tuple": {"issue": 100, "repository_id": binding["repository_id"]}}
+        if method == "GET":
+            return 200, {"slot": 3, "occupied": True, "issue": 100, "assignment_epoch": 4}
+        assert body["effect_id"] == original and body["repository_id"] == binding["repository_id"]
+        assert body["expected_epoch"] == 4
+        return 200, {"status": "assigned", "slot": 3, "assignment_epoch": 4, "idempotent": True}
+    monkeypatch.setattr(client, "http_json", api)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = client.main(["--slot", "3", "--issue", "100"])
+    result = json.loads(output.getvalue())
+    assert code == 0 and result["selection_receipt"] == {"status": "existing_effect_resume", "effect_id": original}
+    assert result["assignment_epoch"] == 4 and result["assignment_notice"]["delivery"] == "not_retried"
+    assert sum(method == "POST" for method, _, _ in requests) == 1
+
+
 def test_known_pending_delivery_resumes_without_re_admission(selector, monkeypatch):
     code, result, checks, http = drive_caller(selector, monkeypatch, 100, [], {}, resume=True)
     assert code == 0 and result["selection_receipt"]["status"] == "existing_effect_resume"

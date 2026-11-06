@@ -1348,8 +1348,8 @@ export class MoPDatabase {
     this.db.prepare(`
       INSERT INTO assignment_effect_intents (
         effect_id, request_digest, slot, selection_class, state,
-        before_epoch, committed_epoch, desired_tuple, task_digest
-      ) VALUES (?, ?, ?, ?, 'planned', ?, NULL, ?, ?)
+        before_epoch, committed_epoch, desired_tuple, task_digest, delivery_receipt
+      ) VALUES (?, ?, ?, ?, 'planned', ?, NULL, ?, ?, '{"custody":"unissued"}')
     `).run(
       intent.effect_id,
       intent.request_digest,
@@ -1460,7 +1460,10 @@ export class MoPDatabase {
     pr: number | null,
     branch: string | null,
   ): { issue: number | null; source: "pr" | "branch" | null; ambiguous: boolean } {
-    const repoId = repository.startsWith("github:") ? repository : `github:${repository}`;
+    const bareRepo = repository.startsWith("github:") ? repository.slice(7) : repository;
+    const repos = ["heydonna-app/heydonna-app", "Scribie/heydonna-app"].includes(bareRepo)
+      ? ["heydonna-app/heydonna-app", "github:heydonna-app/heydonna-app", "Scribie/heydonna-app", "github:Scribie/heydonna-app"]
+      : [bareRepo, `github:${bareRepo}`];
     // Only established delivery is evidence (CTO REVISE 2026-10-03 09:01 IST):
     // planned / pending_delivery intents never resolve an issue.
     const rows = (field: "pr" | "branch", value: number | string) => this.db.prepare(`
@@ -1469,9 +1472,9 @@ export class MoPDatabase {
              json_extract(desired_tuple, '$.pr') AS pr
       FROM assignment_effect_intents
       WHERE state = 'delivered' AND committed_epoch IS NOT NULL
-        AND json_extract(desired_tuple, '$.repository_id') = ?
+        AND json_extract(desired_tuple, '$.repository_id') IN (${repos.map(() => "?").join(", ")})
         AND json_extract(desired_tuple, '$.${field}') = ?
-    `).all(repoId, value) as Array<{ selection_class: string; issue: number | null; pr: number | null }>;
+    `).all(...repos, value) as Array<{ selection_class: string; issue: number | null; pr: number | null }>;
     const decide = (issues: number[], source: "pr" | "branch") => {
       const distinct = [...new Set(issues)];
       if (distinct.length === 1) return { issue: distinct[0], source, ambiguous: false };
@@ -1498,6 +1501,23 @@ export class MoPDatabase {
       if (hit) return hit;
     }
     return { issue: null, source: null, ambiguous: false };
+  }
+
+  /** Claim one delivery before its external effect; legacy NULL is unknown. */
+  claimAssignmentDelivery(effectId: string): boolean {
+    return this.db.prepare(`
+      UPDATE assignment_effect_intents SET delivery_receipt = '{"custody":"unknown"}'
+      WHERE effect_id = ? AND state = 'pending_delivery'
+        AND json_valid(delivery_receipt) AND json_extract(delivery_receipt, '$.custody') = 'unissued'
+    `).run(effectId).changes === 1;
+  }
+
+  recordAssignmentDelivery(effectId: string, receipt: Record<string, unknown>, verified: boolean): void {
+    this.db.prepare(`
+      UPDATE assignment_effect_intents SET delivery_receipt = ?
+      WHERE effect_id = ? AND state = 'pending_delivery'
+        AND delivery_receipt = '{"custody":"unknown"}'
+    `).run(JSON.stringify({ custody: verified ? "delivered" : receipt.outcome === "refused_pre_effect" ? "unissued" : "unknown", receipt }), effectId);
   }
 
   /** Advance a minted intent to pending-delivery once ownership is committed. */

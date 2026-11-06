@@ -899,9 +899,28 @@ export function registerAssignmentEffectRoutes(
       const preDelivery = await fence("pre_delivery");
       if (preDelivery) return driftRefusal(preDelivery);
     }
-    const delivery = needsDelivery
-      ? await dependencies.deliverTaskFile(slotNum, request.task_file, opPin ?? undefined)
-      : { verified: true, receipt: { slot: slotNum, skipped: "no_task_text", verified: true } };
+    let delivery: AssignmentEffectDeliveryResult = {
+      verified: true, receipt: { slot: slotNum, skipped: "no_task_text", verified: true },
+    };
+    if (needsDelivery) {
+      if (db.claimAssignmentDelivery(request.effect_id)) {
+        try {
+          delivery = await dependencies.deliverTaskFile(slotNum, request.task_file, opPin ?? undefined);
+          db.recordAssignmentDelivery(request.effect_id, delivery.receipt, delivery.verified);
+        } catch {
+          db.recordAssignmentDelivery(request.effect_id, { reason: "delivery_threw" }, false);
+          return c.json(refusal("delivery", "delivery_outcome_unknown", slotStateSummary(db.getSlot(slotNum))), 409);
+        }
+      } else {
+        const stored = db.getAssignmentEffectIntent(request.effect_id)?.delivery_receipt;
+        let custody: unknown;
+        try { custody = stored ? JSON.parse(stored) : null; } catch { custody = null; }
+        if (!isRecord(custody) || custody.custody !== "delivered" || !isRecord(custody.receipt)) {
+          return c.json(refusal("delivery", "delivery_outcome_unknown", slotStateSummary(db.getSlot(slotNum))), 409);
+        }
+        delivery = { verified: true, receipt: custody.receipt };
+      }
+    }
     if (!delivery.verified) {
       return c.json(
         refusal("delivery", delivery.reason ?? "session_delivery_unverified", slotStateSummary(db.getSlot(slotNum))),

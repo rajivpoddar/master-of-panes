@@ -12,6 +12,7 @@ import {
   registerAssignmentEffectRoutes,
   type AssignmentEffectClearResult,
   type AssignmentEffectDeliveryResult,
+  type AssignmentEffectDependencies,
 } from "../src/assignmentEffectRoutes.js";
 import { pinFrom } from "../src/interruptBeforeClear.js";
 
@@ -38,6 +39,7 @@ interface Harness {
   clearResult: AssignmentEffectClearResult;
   deliveryVerified: boolean;
   deliverError: string | null;
+  beforeDelivery: (() => Promise<void>) | null;
   corruptTaskAfterDelivery: boolean;
   interruptCalls: number[];
   interruptResult: { ok: boolean; reason: string };
@@ -49,12 +51,13 @@ interface Harness {
   /** Simulated `gh` label-call latency, to prove the response never awaits it. */
   projectorDelayMs: number;
   orderLog: string[];
+  restart: () => void;
   close: () => void;
 }
 
 function harness(): Harness {
   const directory = mkdtempSync(join(tmpdir(), "mop-assign-effect-"));
-  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+  let db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
   const state: Harness = {
     db,
     app: new Hono(),
@@ -63,6 +66,7 @@ function harness(): Harness {
     clearResult: { ok: true, reason: "cleared" },
     deliveryVerified: true,
     deliverError: null,
+    beforeDelivery: null,
     corruptTaskAfterDelivery: false,
     interruptCalls: [],
     interruptResult: { ok: true, reason: "interrupt_sent" },
@@ -73,12 +77,19 @@ function harness(): Harness {
     projectorThrowOn: null,
     projectorDelayMs: 0,
     orderLog: [],
+    restart: () => {
+      db.close();
+      db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+      state.db = db;
+      state.app = new Hono();
+      registerAssignmentEffectRoutes(state.app, { ...dependencies, db });
+    },
     close: () => {
       db.close();
       rmSync(directory, { recursive: true, force: true });
     },
   };
-  registerAssignmentEffectRoutes(state.app, {
+  const dependencies: AssignmentEffectDependencies = {
     db,
     clearSlot: async (slot) => {
       state.clearCalls.push(slot);
@@ -123,6 +134,7 @@ function harness(): Harness {
     deliverTaskFile: async (slot, filePath) => {
       state.deliverCalls.push(`${slot}:${filePath}`);
       state.orderLog.push("deliver");
+      if (state.beforeDelivery) await state.beforeDelivery();
       if (state.corruptTaskAfterDelivery) {
         // Simulate a durable row that does not corroborate the delivery: the
         // ownership tuple survives but the recorded task text is gone.
@@ -132,7 +144,7 @@ function harness(): Harness {
         return {
           verified: false,
           reason: state.deliverError,
-          receipt: { slot, verified: false },
+          receipt: { slot, verified: false, outcome: state.deliverError === "refused_pre_effect" ? "refused_pre_effect" : "uncertain" },
         } satisfies AssignmentEffectDeliveryResult;
       }
       return {
@@ -141,7 +153,8 @@ function harness(): Harness {
         receipt: { slot, pane: "%1", mode: "file", verified: state.deliveryVerified },
       } satisfies AssignmentEffectDeliveryResult;
     },
-  });
+  };
+  registerAssignmentEffectRoutes(state.app, dependencies);
   return state;
 }
 
@@ -224,6 +237,57 @@ test("replaying the same binding is idempotent: no second epoch bump and no seco
   }
 });
 
+test("overlapping callers cannot repeat an in-flight delivery", async () => {
+  const h = harness();
+  let release!: () => void;
+  let entered!: () => void;
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  h.beforeDelivery = async () => { entered(); await wait; };
+  try {
+    const epoch = h.db.getSlot(4)!.assignment_epoch;
+    const first = post(h.app, 4, effectBody(4, epoch));
+    await started;
+    const second = await post(h.app, 4, effectBody(4, h.db.getSlot(4)!.assignment_epoch));
+    assert.equal(second.json.reason, "delivery_outcome_unknown");
+    assert.equal(h.deliverCalls.length, 1);
+    release();
+    assert.equal((await first).json.status, "assigned");
+    assert.equal(h.deliverCalls.length, 1);
+  } finally { release(); h.close(); }
+});
+
+test("UNKNOWN transport outcome is retained and never sent twice", async () => {
+  const h = harness();
+  try {
+    const epoch = h.db.getSlot(4)!.assignment_epoch;
+    h.deliverError = "unknown:response_lost";
+    const first = await post(h.app, 4, effectBody(4, epoch));
+    assert.equal(first.json.step_failed, "delivery");
+    h.deliverError = null;
+    h.restart();
+    await post(h.app, 4, effectBody(4, epoch));
+    assert.equal(h.deliverCalls.length, 1, "an uncertain effect must not be resent after restart");
+    assert.ok(h.db.getAssignmentEffectIntent("assign-4-8110")!.delivery_receipt);
+  } finally { h.close(); }
+});
+
+test("verified delivery with inconsistent readback is never sent twice", async () => {
+  const h = harness();
+  try {
+    const epoch = h.db.getSlot(4)!.assignment_epoch;
+    h.corruptTaskAfterDelivery = true;
+    const first = await post(h.app, 4, effectBody(4, epoch));
+    assert.equal(first.json.step_failed, "readback");
+    await post(h.app, 4, effectBody(4, epoch));
+    assert.equal(h.deliverCalls.length, 1, "readback retry must not resend delivery");
+    h.db.updateSlot(4, { task: TASK });
+    const recovered = await post(h.app, 4, effectBody(4, epoch));
+    assert.equal(recovered.json.status, "assigned");
+    assert.equal(h.deliverCalls.length, 1);
+  } finally { h.close(); }
+});
+
 test("a failed delivery leaves a NAMED recoverable state and never rolls ownership back", async () => {
   const h = harness();
   try {
@@ -243,7 +307,7 @@ test("a failed delivery leaves a NAMED recoverable state and never rolls ownersh
     assert.equal(after.assignment_epoch, epoch0 + 1);
     const intent = h.db.getAssignmentEffectIntent("assign-4-8110")!;
     assert.equal(intent.state, "pending_delivery");
-    assert.equal(intent.delivery_receipt, null, "a refused delivery must remain unfinalized");
+    assert.equal(JSON.parse(intent.delivery_receipt!).custody, "unknown", "CTO 1793939423.848049: unverified delivery retains UNKNOWN custody");
     const ownershipEvent = h.db.getEvents(4, 20, "assignment_effect_ownership_bound")[0];
     assert.equal(JSON.parse(ownershipEvent.payload).delivery_state, "pending");
     assert.equal(h.db.getEvents(4, 20, "assignment_effect_committed").length, 0);
@@ -254,10 +318,11 @@ test("a failed delivery leaves a NAMED recoverable state and never rolls ownersh
   }
 });
 
-test("retrying a pending delivery resumes delivery without a second ownership commit", async () => {
+test("proven unissued delivery resumes without a second ownership commit", async () => {
   const h = harness();
   try {
-    h.deliverError = "session_delivery_unverified";
+    // CTO 1793939423.848049: retry is allowed only after a proven pre-effect refusal.
+    h.deliverError = "refused_pre_effect";
     const epoch0 = h.db.getSlot(5)!.assignment_epoch;
     const failed = await post(h.app, 5, effectBody(5, epoch0));
     assert.equal(failed.json.step_failed, "delivery");
@@ -973,8 +1038,8 @@ test("REVISE-1: failed delivery then resume unwinds the displaced lane without r
     );
     assert.equal(seeded.ok, true);
     const occupiedEpoch = h.db.getSlot(3)!.assignment_epoch;
-    // Attempt 1: delivery fails AFTER the commit. No labels may run yet.
-    h.deliverError = "session_delivery_unverified";
+    // CTO 1793939423.848049: a proven pre-effect refusal may resume.
+    h.deliverError = "refused_pre_effect";
     const failed = await post(h.app, 3, effectBody(3, occupiedEpoch, {
       effect_id: "assign-3-resume-release",
       selection_class: "rework",
@@ -1016,7 +1081,8 @@ test("REVISE-1-negative: resume with no recorded displacement projects only the 
   const h = harness();
   try {
     const epoch0 = h.db.getSlot(3)!.assignment_epoch;
-    h.deliverError = "session_delivery_unverified";
+    // CTO 1793939423.848049: only proven unissued delivery may resume.
+    h.deliverError = "refused_pre_effect";
     const failed = await post(h.app, 3, effectBody(3, epoch0, { effect_id: "assign-3-resume-nodeplaced" }));
     assert.equal(failed.json.step_failed, "delivery");
     assert.equal(h.db.getAssignmentEffectIntent("assign-3-resume-nodeplaced")!.displaced_tuple, null);
@@ -1066,7 +1132,8 @@ test("REVISE-3: refused duplicate new_issue is side-effect free and names the ho
 test("rerun after a delivery refusal resumes with the committed epoch (mop-assign-slot sends the live epoch)", async () => {
   const h = harness();
   try {
-    h.deliverError = "session_delivery_unverified";
+    // CTO 1793939423.848049: only proven unissued delivery may resume.
+    h.deliverError = "refused_pre_effect";
     const epoch0 = h.db.getSlot(1)!.assignment_epoch;
     const failed = await post(h.app, 1, effectBody(1, epoch0, { effect_id: "assign-1-rerun" }));
     assert.equal(failed.json.step_failed, "delivery");

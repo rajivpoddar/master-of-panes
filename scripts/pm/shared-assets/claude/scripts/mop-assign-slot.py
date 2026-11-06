@@ -276,29 +276,41 @@ def main(argv: list[str] | None = None) -> int:
     task_digest = hashlib.sha256(task_bytes).hexdigest()
     effect_id = compute_effect_id(binding, task_digest)
 
-    # Existing durable receipt distinguishes a resume from a new admission.
-    # Re-checking current eligibility after ownership committed would strand
-    # pending delivery: the now-owned issue correctly leaves the Ready Pool.
-    receipt_status, receipt = http_json(
-        "GET", f"{base}/slots/{args.slot}/assignment-effect-receipt?" + urlencode({"effect_id": effect_id}),
-    )
-    existing = (receipt_status == 200 and isinstance(receipt, dict)
-                and receipt.get("success") is True and receipt.get("effect_id") == effect_id
-                and receipt.get("slot") == args.slot and receipt.get("selection_class") == args.selection_class
-                and receipt.get("state") in {"planned", "pending_delivery", "delivered"}
-                and receipt.get("task_digest") == task_digest
-                and isinstance(receipt.get("desired_tuple"), dict)
-                and (receipt.get("desired_tuple") or {}).get("issue") == args.issue)
+    # Probe historical identities first; retain the exact original tuple when
+    # resuming so the server's durable request digest and notice custody match.
+    aliases = [args.repo_id]
+    known = ("github:heydonna-app/heydonna-app", "heydonna-app/heydonna-app",
+             "github:Scribie/heydonna-app", "Scribie/heydonna-app")
+    if args.repo_id in known:
+        aliases = list(known)
+    existing = False
+    for repo_id in aliases:
+        candidate_id = compute_effect_id({**binding, "repository_id": repo_id}, task_digest)
+        receipt_status, receipt = http_json(
+            "GET", f"{base}/slots/{args.slot}/assignment-effect-receipt?" + urlencode({"effect_id": candidate_id}),
+        )
+        if receipt_status == 404 and isinstance(receipt, dict) and receipt.get("code") == "assignment_effect_receipt_not_found":
+            continue
+        existing = (receipt_status == 200 and isinstance(receipt, dict)
+                    and receipt.get("success") is True and receipt.get("effect_id") == candidate_id
+                    and receipt.get("slot") == args.slot and receipt.get("selection_class") == args.selection_class
+                    and receipt.get("state") in {"planned", "pending_delivery", "delivered"}
+                    and receipt.get("task_digest") == task_digest
+                    and isinstance(receipt.get("desired_tuple"), dict)
+                    and (receipt.get("desired_tuple") or {}).get("issue") == args.issue)
+        if not existing:
+            return emit(refusal("selection", "assignment_receipt_unavailable", slot_state_after(current)), 2)
+        effect_id = candidate_id
+        desired_tuple["repository_id"] = repo_id
+        break
     if existing:
         selection = {"status": "existing_effect_resume", "effect_id": effect_id}
-    elif receipt_status == 404 and isinstance(receipt, dict) and receipt.get("code") == "assignment_effect_receipt_not_found":
+    else:
         selection = check_selection(args)
         if selection.get("status") != "ok":
             rejected = refusal("selection", str(selection.get("status") or "LOOKUP_FAILED"), slot_state_after(current))
             rejected["selection_result"] = selection
             return emit(rejected, 2)
-    else:
-        return emit(refusal("selection", "assignment_receipt_unavailable", slot_state_after(current)), 2)
 
     body = {
         "effect_id": effect_id,

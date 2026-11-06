@@ -49,6 +49,21 @@ test("pr match resolves the issue", () => withDb((db) => {
   assert.deepEqual(db.resolveIssueForPr(REPO, 8701, null), { issue: 8700, source: "pr", ambiguous: false });
 }));
 
+test("known repository aliases resolve all delivered forms without crossing repositories", () => withDb((db) => {
+  const aliases = ["heydonna-app/heydonna-app", "github:heydonna-app/heydonna-app", "Scribie/heydonna-app", "github:Scribie/heydonna-app"];
+  for (let i = 0; i < aliases.length; i++) {
+    mint(db, { repository_id: aliases[i], issue: 9000 + i, pr: 9100 + i });
+  }
+  for (const repo of aliases) {
+    for (let i = 0; i < aliases.length; i++) {
+      assert.deepEqual(db.resolveIssueForPr(repo, 9100 + i, null), { issue: 9000 + i, source: "pr", ambiguous: false });
+    }
+  }
+  assert.equal(db.resolveIssueForPr("github:fork/heydonna-app", 9100, null).issue, null);
+  mint(db, { repository_id: aliases[3], issue: 9999, pr: 9100 });
+  assert.deepEqual(db.resolveIssueForPr(aliases[0], 9100, null), { issue: null, source: "pr", ambiguous: true });
+}));
+
 test("bare owner/name repository is accepted", () => withDb((db) => {
   mint(db, { issue: 8700, pr: 8701 });
   assert.equal(db.resolveIssueForPr("heydonna-app/heydonna-app", 8701, null).issue, 8700);
