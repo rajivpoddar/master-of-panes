@@ -1098,7 +1098,9 @@ def compose(
     if cleanup_alert:
         lines.append(f"*ALERT:* {cleanup_alert}")
     if failures:
-        lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:80] for f in failures[:2]))
+        timed_out = [f for f in failures if "UNAVAILABLE (timeout " in f]
+        shown = timed_out + [f for f in failures if f not in timed_out]
+        lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:100] for f in shown[:4]))
     return "\n".join(lines)
 
 

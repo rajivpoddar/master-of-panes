@@ -87,6 +87,10 @@ def test_collector_deadlines_fit_budget_and_timeout_is_unavailable(monkeypatch):
     assert composer._run_json(["collector"], failures, "sample", timeout=7) is None
     assert failures == ["sample: UNAVAILABLE (timeout 7s)"]
 
+    report = composer.compose("1h", NOW, None, {}, [], failures=failures,
+                              decisions={"items": [], "stale": 0})
+    assert "sample: UNAVAILABLE (timeout 7s)" in report
+
     report = composer.compose("1h", NOW, None, {}, [], slots={"slots": []}, include_slots=True,
                               priority_flags=None, priority_unavailable="UNAVAILABLE (timeout 20s)",
                               decisions={"items": [], "stale": 0})
