@@ -4,7 +4,7 @@
 # The CI/E2E trigger is the exact `ci-head:<40-hex head>` label (e2e.yml/ci.yml `labeled` gate).
 # Related-tests gate (Rajiv "go", DM D0AMF0XE6TS thread 1791298729.215119): vitest related + tsc on the PR head before admission.
 # Usage: pm-admit-ci.sh <PR> [--no-update] [--dry-run] [--skip-related-tests "<reason>"] [--force-ci "<reason>"] [--allow-main-red "<reason>"]
-# Main-red gate (Rajiv DM ts 1791877690.725089): refuses admission while the latest completed main ci.yml run is red and the PR does not touch a failing test; override: --allow-main-red "<reason>".
+# Main-red gate REMOVED (Rajiv C0ALZJHGE49 thread 1793958692.281499, ts 1793960417.571149: "remove it outright. note main red flakes have to be rerun. ... the skip pr has to be immediately merged with a followup issue. for affected pr's, merge main and re-admit."). Supersedes DM ts 1791877690.725089. --allow-main-red is still accepted (no-op) for compatibility.
 # Scope gate (Rajiv 2026-10-08, DM thread 1791461793.117869): site/docs-only PRs are refused (no CI/E2E); PM may override with --force-ci.
 set -euo pipefail
 PR="$1"; shift; REPO=Scribie/heydonna-app
@@ -212,16 +212,56 @@ if [ "$DRY" = 1 ]; then
   echo "DRY RUN PR #$PR head=$H"
   rc=0; scope_gate "$H" || rc=$?
   [ $rc -ne 0 ] && { echo "DRY RUN done (scope gate rc=$rc); nothing admitted"; exit $rc; }
-  rc=0; main_red_gate || rc=$?
-  [ $rc -ne 0 ] && { echo "DRY RUN done (main-red gate rc=$rc); nothing admitted"; exit $rc; }
   rc=0; related_tests_gate "$H" || rc=$?
   echo "DRY RUN done (gate rc=$rc); nothing admitted"; exit $rc
 fi
 
 H0=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
+PRSTATE=$(gh_get pr_state ok gh pr view "$PR" --repo "$REPO" --json state --jq .state) || api_fail pr_state
+[ "$PRSTATE" = "OPEN" ] || { echo "REFUSE: PR #$PR is $PRSTATE, not OPEN; nothing admitted"; exit 8; }
+# Closing-reference gate (Rajiv C0ALZJHGE49 thread 1793953549.727149, ts 1793971953.982729 "yes, do it";
+# ts 1793972664.618549: "pr admit ci should add the closes #N if it's not already present instead of refusing it").
+# Every admitted PR must close its own issue. If closingIssuesReferences is empty, derive exactly one issue number
+# (body "Part of #N" > branch "<type>/<N>-..." > title "(#N)"), add "Closes #N" to the PR body, and read it back.
+# Refuse only when no single issue number can be derived or the readback still shows no closing reference.
+closes_of() { gh_get pr_closes ok gh pr view "$PR" --repo "$REPO" --json closingIssuesReferences --jq '[.closingIssuesReferences[].number]|map(tostring)|join(",")'; }
+CLOSES=$(closes_of) || api_fail pr_closes
+if [ -z "$CLOSES" ]; then
+  PRMETA=$(gh_get pr_meta ok gh pr view "$PR" --repo "$REPO" --json body,headRefName,title) || api_fail pr_meta
+  # A body saying "Part of #N" declares a partial slice: never rewrite it into "Closes #N" (CTO C0ALZJHGE49
+  # thread 1793977537.654329, ts 1793977860.637639: "Do not blindly rewrite Part of #12752 into Closes #12752").
+  # The slice needs its own child issue (rule 06), so refuse with that exact remedy.
+  SLICE=$(printf '%s' "$PRMETA" | python3 -c '
+import json,re,sys
+b=json.load(sys.stdin).get("body") or ""
+print(",".join(sorted(set(re.findall(r"(?i)\bpart of #(\d+)",b)))))')
+  [ -z "$SLICE" ] || { echo "REFUSE: PR #$PR is a partial slice (body says Part of #$SLICE) with no closing reference. File a child issue for this slice, add 'Closes #<child>' and keep 'Part of #$SLICE' (CTO ts 1793977860.637639); nothing admitted"; exit 9; }
+  CAND=$(printf '%s' "$PRMETA" | python3 -c '
+import json,re,sys
+d=json.load(sys.stdin); body=d.get("body") or ""; br=d.get("headRefName") or ""; t=d.get("title") or ""
+c=set()
+if not c:
+    m=re.match(r"^[a-z]+/(?:issue-)?(\d+)[-_](?!\d{2}-\d{2})",br); c={m.group(1)} if m else set()  # dated branches (content/2026-11-06-x) are not issue numbers
+if not c:
+    c=set(re.findall(r"\(#(\d+)\)",t))
+print(next(iter(c)) if len(c)==1 else "")')
+  [ -n "$CAND" ] || { echo "REFUSE: PR #$PR has no closing issue reference and no single issue number could be derived (add Closes #N; Rajiv ts 1793971953.982729); nothing admitted"; exit 9; }
+  if [ "$DRY" = 1 ]; then echo "DRY RUN: would add 'Closes #$CAND' to PR #$PR body"; else
+    NEWBODY=$(printf '%s' "$PRMETA" | CAND="$CAND" python3 -c '
+import json,os,re,sys
+b=json.load(sys.stdin).get("body") or ""; n=os.environ["CAND"]
+b2=re.sub(r"(?i)\bpart of #"+n+r"\b","Closes #"+n,b)
+print(b2 if b2!=b else "Closes #"+n+"\n\n"+b)')
+    BF=$(mktemp /tmp/admit-closes-body.XXXXXX); printf '%s' "$NEWBODY" > "$BF"
+    gh_do add_closes gh pr edit "$PR" --repo "$REPO" --body-file "$BF"; rm -f "$BF"
+    CLOSES=$(closes_of) || api_fail pr_closes_readback
+    [ -n "$CLOSES" ] || { echo "REFUSE: added 'Closes #$CAND' to PR #$PR but closingIssuesReferences readback is still empty; nothing admitted"; exit 9; }
+    echo "closing-reference gate: ADDED 'Closes #$CAND' to PR #$PR body (readback closes #$CLOSES)"
+  fi
+fi
+echo "closing-reference gate: closes #${CLOSES:-$CAND}"
 clean_bad_ci_head_labels
 scope_gate "$H0" || exit 5
-main_red_gate || exit 6
 related_tests_gate "$H0" || exit 4
 
 if [ "$NO_UPDATE" = 0 ]; then

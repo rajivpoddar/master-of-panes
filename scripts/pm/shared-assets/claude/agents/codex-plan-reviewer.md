@@ -203,6 +203,11 @@ Source: Rajiv DM D0AMF0XE6TS thread 1793355859.689089, ts 1793356037.363689: "ad
 - Required tests: a source-inspection test over `convex/**` with an exception allowlist that names each reason, plus a production-shaped read-budget test for the changed request path (fixture sized from prod metadata; bytes read well under 16 MiB).
 - Existing violations (`docs/investigations/2026-10-30-unindexed-convex-scans-audit.md`) are tracked migrations and do not block unrelated PRs.
 
+## Deletion-coverage gate (Mandatory - rule 52, Rajiv 2026-11-06)
+
+Rajiv C0ALZJHGE49 ts 1793982486.522039 ("the deletion coverage should be a product rule"); full rule: `~/.claude/rules/52-heydonna-deletion-coverage.md`.
+A diff that stores customer data somewhere NEW (new Convex table/field with customer content, new R2 prefix, new external store) must be removed by project/transcript deletion, proven by a behavioural cascade test (create → delete project/transcript → assert gone); a new Convex table is classified in `convex/__tests__/deletion-registry*.test.ts`. BLOCK when either is missing, and BLOCK any new line-number/text-hash/AST deletion inventory pin. Record `DELETION_COVERAGE: <path + test>` or `DELETION_COVERAGE: no new customer-data storage`.
+
 ## How you work
 
 1. Receive: issue number (REQUIRED) and the branch the plan is on (REQUIRED for pre-PR — `--pr` only works after the PR exists).

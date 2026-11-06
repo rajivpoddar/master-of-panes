@@ -19,7 +19,61 @@ if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/nu
   printf '%s\n' '{"decision":"block","message":"BLOCKED: the issue-contract-ledger input could not be classified (jq extraction failed or the input was malformed); no issue was mutated."}'
   exit 0
 fi
+CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 [ -n "$CMD" ] || exit 0
+
+# Tracker-only feature groupings belong in milestones, not new issues.
+TRACKER_RESULT=$(CMD_TEXT="$CMD" HOOK_CWD="$CWD" PARSER="$PARSER" python3 - <<'PY'
+import importlib.util
+import os
+import re
+import sys
+
+path = os.environ['PARSER']
+sys.path.insert(0, os.path.dirname(path))
+spec = importlib.util.spec_from_file_location('issue_parser', path)
+parser = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(parser)
+for command in parser.shell_commands(os.environ['CMD_TEXT']):
+    parts = parser.command_tokens(command)
+    if parts[:3] != ['gh', 'issue', 'create']:
+        continue
+    title = (parser.values(parts, {'--title', '-t'}) or [''])[-1]
+    labels = parser.labels_arg(parts, {'--label', '-l'})
+    files = parser.values(parts, {'--body-file', '-F'})
+    inline = parser.values(parts, {'--body', '-b'})
+    body = inline[-1] if inline else ''
+    if files and not inline:
+        file = os.path.expanduser(files[-1])
+        if not os.path.isabs(file):
+            file = os.path.join(os.environ.get('HOOK_CWD') or os.getcwd(), file)
+        try:
+            with open(file, encoding='utf-8') as stream:
+                body = stream.read()
+        except OSError:
+            body = ''
+    ac = re.search(r'^##\s+Acceptance criteria\s*#*\s*$', body, re.I | re.M)
+    section = re.split(r'^##\s+', body[ac.end():], maxsplit=1, flags=re.M)[0] if ac else ''
+    testable = bool(re.search(r'^\s*(?:[-*]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+|AC-\d+\s*[:.])(?=\S)(?!#\d+\b).{5,}', section, re.M))
+    children = len(re.findall(r'(?<![\w])#\d+\b', body))
+    escape = testable and children <= 2
+    title_match = re.search(r'tracker|tracking issue|umbrella|epic|meta-issue|roadmap', title, re.I)
+    label_match = any(label.lower() in {'tracking', 'tracker', 'epic', 'umbrella'} for label in labels)
+    checklist = len(re.findall(r'^\s*-\s+(?:\[ \]\s*)?#\d+\b', body, re.M)) >= 3 and not ac
+    if (title_match or label_match or checklist) and not escape:
+        print('block')
+        break
+PY
+) || TRACKER_RESULT=error
+if [ "$TRACKER_RESULT" = error ]; then
+  printf '%s\n' '{"decision":"block","message":"BLOCKED: tracker issue classification failed; no issue was mutated."}'
+  exit 0
+fi
+if [ "$TRACKER_RESULT" = block ]; then
+  jq -n --arg message "Tracker issues are not filed (Rajiv ts 1793976431.298289). Create or reuse a milestone instead: \`gh api -X POST repos/Scribie/heydonna-app/milestones -f title='<feature>' -f description='<goal + link>'\`, then file each child with \`--milestone '<feature>'\`." '{decision:"block",message:$message}'
+  exit 0
+fi
+
 
 set +e
 PY_OUT=$(
@@ -92,3 +146,4 @@ cat <<EOF
 {"decision":"block","message":"BLOCKED: '${TARGET}' requires a valid Issue Contract Ledger (${ERRORS}). Put the complete issue body in a named --body-file before the Bash call, validate it, then run exactly one gh issue create/edit mutation."}
 EOF
 exit 0
+
