@@ -1419,11 +1419,11 @@ def main() -> int:
     email_doc = None
     if args.mode == "3h":
         try:
-            ep = subprocess.run([py, str(Path(__file__).with_name("email-digest.py")), "--hours", "3", "--json"], capture_output=True, text=True, errors="replace", timeout=120)
+            ep = subprocess.run([py, str(Path(__file__).with_name("email-digest.py")), "--hours", "3", "--json"], capture_output=True, text=True, errors="replace", timeout=COLLECTOR_TIMEOUTS["email"])
             email_doc = json.loads(ep.stdout)
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")
-    training = training_line() if args.mode == "1h" else None
+    training = training_line(probe=spark_probe(timeout=COLLECTOR_TIMEOUTS["training"])) if args.mode == "1h" else None
     # Tracked features and issue lifecycle moved to their own thread replies
     # (tracked-features-report.py / issue-lifecycle-report.py, invoked by slack-send.sh
     # after the Hourly parent, like pr-status-report.py). Rajiv C0ALZJHGE49
