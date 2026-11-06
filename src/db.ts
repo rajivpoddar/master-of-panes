@@ -1460,7 +1460,10 @@ export class MoPDatabase {
     pr: number | null,
     branch: string | null,
   ): { issue: number | null; source: "pr" | "branch" | null; ambiguous: boolean } {
-    const repoId = repository.startsWith("github:") ? repository : `github:${repository}`;
+    const bareRepo = repository.startsWith("github:") ? repository.slice(7) : repository;
+    const repos = ["heydonna-app/heydonna-app", "Scribie/heydonna-app"].includes(bareRepo)
+      ? ["heydonna-app/heydonna-app", "github:heydonna-app/heydonna-app", "Scribie/heydonna-app", "github:Scribie/heydonna-app"]
+      : [bareRepo, `github:${bareRepo}`];
     // Only established delivery is evidence (CTO REVISE 2026-10-03 09:01 IST):
     // planned / pending_delivery intents never resolve an issue.
     const rows = (field: "pr" | "branch", value: number | string) => this.db.prepare(`
@@ -1469,9 +1472,9 @@ export class MoPDatabase {
              json_extract(desired_tuple, '$.pr') AS pr
       FROM assignment_effect_intents
       WHERE state = 'delivered' AND committed_epoch IS NOT NULL
-        AND json_extract(desired_tuple, '$.repository_id') = ?
+        AND json_extract(desired_tuple, '$.repository_id') IN (${repos.map(() => "?").join(", ")})
         AND json_extract(desired_tuple, '$.${field}') = ?
-    `).all(repoId, value) as Array<{ selection_class: string; issue: number | null; pr: number | null }>;
+    `).all(...repos, value) as Array<{ selection_class: string; issue: number | null; pr: number | null }>;
     const decide = (issues: number[], source: "pr" | "branch") => {
       const distinct = [...new Set(issues)];
       if (distinct.length === 1) return { issue: distinct[0], source, ambiguous: false };
