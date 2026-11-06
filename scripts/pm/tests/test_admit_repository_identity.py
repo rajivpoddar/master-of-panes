@@ -2,10 +2,11 @@
 """Hermetic coverage for canonical repository identity admission guards."""
 
 import importlib.util
-import os
+from pathlib import Path
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SPEC = importlib.util.spec_from_file_location("admit_identity_under_test", os.path.join(HERE, "admit.py"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ADMIT_PATH = REPO_ROOT / "pm" / "shared-assets" / "codex" / "skills" / "heydonna-cto-label-gated-ci" / "scripts" / "admit.py"
+SPEC = importlib.util.spec_from_file_location("admit_identity_under_test", ADMIT_PATH)
 admit = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(admit)
 
