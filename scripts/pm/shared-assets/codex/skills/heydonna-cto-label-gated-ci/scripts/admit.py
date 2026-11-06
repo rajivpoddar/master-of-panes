@@ -13,6 +13,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 from classifier_requirements import classify as workflow_requirements
 
+# Canonical repository after the move (Rajiv 2026-11-06, C0ALZJHGE49 thread 1793926051.510819,
+# ts 1793929424.420239: "fix the admin.py directly"). The old slug only redirects reads; native
+# PR metadata reports Scribie/heydonna-app, so the same-repository check below refused every PR.
 REPO = "Scribie/heydonna-app"
 WORKFLOWS = ("ci.yml", "e2e.yml")
 

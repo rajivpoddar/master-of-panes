@@ -252,7 +252,7 @@ def t7_partial_clone_falls_through_to_network(mod):
 
 def t8_duplicate_semantics_unchanged(mod):
     pr = {"number": 7941, "head": {"sha": HEAD, "ref": BRANCH,
-          "repo": {"full_name": "heydonna-app/heydonna-app"}},
+          "repo": {"full_name": "Scribie/heydonna-app"}},
           "state": "open", "draft": False, "base": {"ref": "main"},
           "labels": [{"name": f"ci-head:{HEAD}"}]}
     run = {"id": 1, "head_sha": HEAD, "event": "pull_request", "head_branch": BRANCH,
@@ -262,11 +262,11 @@ def t8_duplicate_semantics_unchanged(mod):
     def fake(*args, **kwargs):
         argv = list(args)
         import json as _json
-        if argv[-1] == "repos/heydonna-app/heydonna-app/pulls/7941":
+        if argv[-1] == "repos/Scribie/heydonna-app/pulls/7941":
             return _json.dumps(pr)
-        if argv[-1] == "repos/heydonna-app/heydonna-app/git/ref/heads/main":
+        if argv[-1] == "repos/Scribie/heydonna-app/git/ref/heads/main":
             return _json.dumps({"object": {"sha": MAIN}})
-        if argv[-1].startswith("repos/heydonna-app/heydonna-app/compare/"):
+        if argv[-1].startswith("repos/Scribie/heydonna-app/compare/"):
             return _json.dumps({"merge_base_commit": {"sha": MAIN}})
         if "workflows" in argv[-1]:
             return _json.dumps([{"workflow_runs": [run]}])
