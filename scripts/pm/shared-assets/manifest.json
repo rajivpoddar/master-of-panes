@@ -537,7 +537,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-assign-slot",
-      "sha256": "3120a58e61c70e1464dfb49ba2706cc0c59b0c70179c7c4ab85ef769ea753946",
+      "sha256": "f63c2850260ab0c8aa911fb40633d08fad43102d9c65756b9f0378e7ea5a07bd",
       "source_path": "claude/scripts/mop-assign-slot.py"
     },
     {
