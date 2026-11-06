@@ -1348,8 +1348,8 @@ export class MoPDatabase {
     this.db.prepare(`
       INSERT INTO assignment_effect_intents (
         effect_id, request_digest, slot, selection_class, state,
-        before_epoch, committed_epoch, desired_tuple, task_digest
-      ) VALUES (?, ?, ?, ?, 'planned', ?, NULL, ?, ?)
+        before_epoch, committed_epoch, desired_tuple, task_digest, delivery_receipt
+      ) VALUES (?, ?, ?, ?, 'planned', ?, NULL, ?, ?, '{"custody":"unissued"}')
     `).run(
       intent.effect_id,
       intent.request_digest,
@@ -1501,6 +1501,23 @@ export class MoPDatabase {
       if (hit) return hit;
     }
     return { issue: null, source: null, ambiguous: false };
+  }
+
+  /** Claim one delivery before its external effect; legacy NULL is unknown. */
+  claimAssignmentDelivery(effectId: string): boolean {
+    return this.db.prepare(`
+      UPDATE assignment_effect_intents SET delivery_receipt = '{"custody":"unknown"}'
+      WHERE effect_id = ? AND state = 'pending_delivery'
+        AND delivery_receipt = '{"custody":"unissued"}'
+    `).run(effectId).changes === 1;
+  }
+
+  recordAssignmentDelivery(effectId: string, receipt: Record<string, unknown>, verified: boolean): void {
+    this.db.prepare(`
+      UPDATE assignment_effect_intents SET delivery_receipt = ?
+      WHERE effect_id = ? AND state = 'pending_delivery'
+        AND delivery_receipt = '{"custody":"unknown"}'
+    `).run(JSON.stringify({ custody: verified ? "delivered" : "unknown", receipt }), effectId);
   }
 
   /** Advance a minted intent to pending-delivery once ownership is committed. */
