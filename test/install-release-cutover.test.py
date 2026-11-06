@@ -188,6 +188,20 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertTrue(self.owned)
         self.assertEqual(self.current.resolve(), self.old)
 
+    def test_backup_bytes_are_verified_before_shutdown(self):
+        self.set_inventory()
+        original = m._copy_payload
+        def corrupt(source, destination):
+            original(source, destination)
+            if "shared-preimages" in str(destination):
+                destination.write_text("corrupt backup\n")
+        with patch.object(m, "_copy_payload", side_effect=corrupt):
+            self.assertEqual(self.activate(), 2)
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.owned)
+        self.assertEqual(self.current.resolve(), self.old)
+        self.assertEqual(self.helper.read_text(), "old client\n")
+
 
 if __name__ == "__main__":
     unittest.main()

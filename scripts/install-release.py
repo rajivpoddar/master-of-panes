@@ -920,6 +920,7 @@ def create_rollback_bundle(targets: list[Path], bundle: Path) -> dict[str, Any]:
             # chmod follows backup symlinks to the live referent. Preserve
             # link metadata where supported without touching that referent.
             os.lchmod(payload, record["mode"])
+        _assert_rollback_payload(payload, record)
         entries.append({**record, "path": str(target), "present": True, "payload": str(payload.relative_to(bundle))})
     manifest = {"schema": "master_of_panes_rollback", "version": 1, "entries": entries}
     _write_json(bundle / ROLLBACK_MANIFEST, manifest)
