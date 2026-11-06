@@ -223,8 +223,13 @@ class StoppedCutoverTests(unittest.TestCase):
         name = sorted(m.RETIRED_ABSENT_TARGETS)[0]
         manifest_path = self.old / m.SHARED_ASSET_MANIFEST
         manifest = json.loads(manifest_path.read_text())
-        old_entry = dict(manifest["entries"][0], canonical_target=name)
+        source = self.old / "scripts/pm/shared-assets/retired/respawn"
+        source.parent.mkdir(parents=True)
+        source.write_text("old client\n")
+        source.chmod(0o755)
+        old_entry = dict(manifest["entries"][0], canonical_target=name, source_path="retired/respawn")
         manifest["entries"].append(old_entry)
+        manifest["entries"].sort(key=lambda entry: entry["source_path"])
         manifest["inventory"]["selected_count"] += 1
         manifest_path.write_text(json.dumps(manifest))
         return name, self.targets / name.lstrip("/")
