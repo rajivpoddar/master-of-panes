@@ -1590,6 +1590,7 @@ def activate(
         start_returned = True
         health_result = health()
         canary_result = canary()
+        verify_retired_absent()
         delete_after_readiness(delete_targets, rollback)
         return {
             "status": "ACTIVATED",

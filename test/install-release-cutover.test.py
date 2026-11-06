@@ -255,6 +255,21 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "fresh user file\n")
         self.assertFalse(any(event.startswith("bootstrap") for event in self.events))
 
+    def test_retired_target_appearing_during_health_is_preserved(self):
+        _, target = self.add_retired_old_target()
+        self.set_inventory()
+        original = self.health
+        def health(*args, **kwargs):
+            result = original(*args, **kwargs)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("fresh during health\n")
+            return result
+        with patch.object(self, "health", side_effect=health):
+            self.assertEqual(self.activate(), 2)
+        self.assertEqual(target.read_text(), "fresh during health\n")
+        self.assertEqual(self.events, ["bootout", "replace", "bootstrap:new", "bootout"])
+        self.assertFalse(self.owned)
+
     def test_required_present_asset_disappearing_refuses(self):
         self.set_inventory()
         original = m.create_rollback_bundle
