@@ -77,6 +77,39 @@ def test_section_cap_and_mode_placement():
     assert '*Pending PM actions:*' not in report3
 
 
+def test_collector_deadlines_fit_budget_and_timeout_is_unavailable(monkeypatch):
+    assert composer.COMPOSE_COLLECTOR_BUDGET <= 150
+    failures = []
+    def timed_out(*args, **kwargs):
+        assert kwargs["timeout"] == 7
+        raise composer.subprocess.TimeoutExpired(args[0], 7)
+    monkeypatch.setattr(composer.subprocess, "run", timed_out)
+    assert composer._run_json(["collector"], failures, "sample", timeout=7) is None
+    assert failures == ["sample: UNAVAILABLE (timeout 7s)"]
+
+    report = composer.compose("1h", NOW, None, {}, [], slots={"slots": []}, include_slots=True,
+                              priority_flags=None, priority_unavailable="UNAVAILABLE (timeout 20s)",
+                              decisions={"items": [], "stale": 0})
+    assert "Priority check: UNAVAILABLE (timeout 20s)" in report
+    assert "no inversions" not in report.lower()
+
+
+def test_pending_github_enforces_total_deadline(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(composer, "monotonic", lambda: clock[0])
+    calls = []
+    def run(args, **kwargs):
+        calls.append(kwargs["timeout"])
+        assert kwargs["timeout"] <= 45
+        clock[0] += 21
+        return SimpleNamespace(returncode=0, stdout=json.dumps([{"number": n, "body": ""} for n in range(100)]))
+    result = composer.pending_github(run, timeout=20)
+    assert len(calls) == 1 and calls[0] == 20
+    assert result == {"error": "UNAVAILABLE (timeout 20s)"}
+    rendered = "\\n".join(composer.pending_actions_block({"items": [], "backlog": 0}, result, NOW))
+    assert "UNAVAILABLE (timeout 20s)" in rendered
+
+
 def test_inventory_rows_are_counted_not_listed_as_pending_actions(tmp_path):
     db = tmp_path / 'inv.db'
     with sqlite3.connect(db) as conn:

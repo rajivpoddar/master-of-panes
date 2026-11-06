@@ -29,6 +29,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from time import monotonic
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +38,15 @@ CTO = "<@U0BNFGX2UAX>"
 IST = timezone(timedelta(hours=5, minutes=30))
 SCRIPTS = Path(__file__).resolve().parent
 AXIOM_REPORT = SCRIPTS / "heartbeat-axiom.py"  # MoP-side helper (moved from heydonna-app)
+# Sequential collector deadlines sum to <150s; leave headroom in the 170s compose budget.
+COLLECTOR_TIMEOUTS = {
+    "axiom": 30, "active-users": 10, "error-map": 8, "support": 15,
+    "pr-open-snapshot": 12, "priority-inversion": 18,
+    "pending-github": 18, "remote-boxes": 8, "training": 6,
+    "usage": 12, "email": 12,
+}
+COMPOSE_COLLECTOR_BUDGET = sum(COLLECTOR_TIMEOUTS.values())
+assert COMPOSE_COLLECTOR_BUDGET <= 150
 MAX_CODES = 5
 MAX_SUPPORT = 5
 MAX_PRS = 8
@@ -410,11 +420,16 @@ _NEXT_ACTION = re.compile(r'(?im)^\s*(?:[-*]\s*)?(?:\*\*)?next_action(?:\*\*)?\s
 _MERGE_CONDITION = re.compile(r'\b(?:when|after)\s+(?:PR\s+)?#(\d+)\s+merges\b', re.I)
 
 
-def pending_github(run=subprocess.run) -> dict:
-    """Paginate all open issues and PRs; cache repeated dependency reads in gh."""
+def pending_github(run=subprocess.run, timeout: int = COLLECTOR_TIMEOUTS["pending-github"]) -> dict:
+    """Paginate all open issues and PRs under one overall wall-clock deadline."""
+    deadline = monotonic() + timeout
+
     def api(endpoint):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired('gh api', timeout)
         result = run(['gh', 'api', '--cache', '5m', endpoint], capture_output=True,
-                     text=True, errors='replace', timeout=45)
+                     text=True, errors='replace', timeout=min(45, remaining))
         if result.returncode:
             raise RuntimeError('GitHub API unavailable')
         return json.loads(result.stdout)
@@ -451,7 +466,9 @@ def pending_github(run=subprocess.run) -> dict:
                         raise ValueError('invalid merge timestamp')
                     found.append({'number': item['number'], 'text': text, 'dependency': number, 'merged_at': cache[number]})
         return {'items': found}
-    except (OSError, subprocess.TimeoutExpired, ValueError, RuntimeError, KeyError, TypeError) as exc:
+    except subprocess.TimeoutExpired:
+        return {'error': f'UNAVAILABLE (timeout {timeout}s)'}
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
         return {'error': str(exc) if isinstance(exc, (RuntimeError, ValueError)) else type(exc).__name__}
 
 
@@ -814,7 +831,7 @@ def spark_probe(timeout: int = 8) -> tuple[dict | None, str]:
             capture_output=True, text=True, errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return None, "ssh timeout"
+        return None, f"UNAVAILABLE (timeout {timeout}s)"
     except Exception as exc:
         return None, type(exc).__name__
     if r.returncode != 0 and "##C" not in r.stdout:
@@ -983,6 +1000,7 @@ def compose(
     unblockable: list[str] | None = None,
     tracked: list[str] | None = None,
     priority_flags: list[str] | None = None,
+    priority_unavailable: str | None = None,
     remote_boxes: str | None = None,
     pending_actions: tuple[dict, dict] | None = None,
 ) -> str:
@@ -1030,7 +1048,10 @@ def compose(
     slot_actions: list[str] = []
     if include_slots:
         sl_lines, sl_tldr, slot_actions = slot_block(slots, now, release_seen)
-        if priority_flags:
+        if priority_unavailable:
+            sl_tldr += f", priority check {priority_unavailable}"
+            sl_lines = [*sl_lines, "• Priority check: " + priority_unavailable]
+        elif priority_flags:
             # Rajiv C0ALZJHGE49 thread 1793195119.674919, ts 1793202340.562609: P2 lane while a P0 is ready.
             sl_tldr += f", {len(priority_flags)} PRIORITY_INVERSION"
             sl_lines = [*sl_lines, *("• ⚠ " + f for f in priority_flags)]
@@ -1213,11 +1234,11 @@ def unblockable_block(failures: list[str], issues: list[dict] | None = None, res
 # ---------------------------------------------------------------------------
 
 
-def _run_json(cmd: list[str], failures: list[str], label: str, timeout: int = 300):
+def _run_json(cmd: list[str], failures: list[str], label: str, timeout: int = 20):
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
-        failures.append(f"{label}: timeout")
+        failures.append(f"{label}: UNAVAILABLE (timeout {timeout}s)")
         return None
     if proc.returncode != 0:
         failures.append(f"{label}: rc={proc.returncode} {proc.stderr.strip()[-120:]}")
@@ -1253,22 +1274,24 @@ def _fetch_slots(url: str = MOP_SLOTS_URL, timeout: int = 5):
 CLEANUP_STATUS = Path("/tmp/stale-process-cleanup-status.json")
 
 
-def priority_inversion_flags(slots_doc, failures: list[str]) -> list[str]:
-    """PRIORITY_INVERSION: an occupied slot on a P2/P3 lane while a P0 is ready and unassigned.
-    Rajiv C0ALZJHGE49 thread 1793195119.674919, ts 1793202340.562609. Never fails the compose."""
+def priority_inversion_flags(slots_doc, failures: list[str], timeout: int = COLLECTOR_TIMEOUTS["priority-inversion"]) -> list[str] | None:
+    """Return inversions, or None when the bounded priority check is unavailable."""
     try:
         spec = importlib.util.spec_from_file_location(
             "ready_pool_select", Path.home() / ".claude/scripts/ready_pool_select.py")
         rps = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(rps)
         slots = slots_doc.get("slots", []) if isinstance(slots_doc, dict) else (slots_doc or [])
-        issues = rps.load_open_issues(timeout=90)
+        issues = rps.load_open_issues(timeout=timeout)
         prio = {int(i["number"]): rps.priority_rank({l["name"] for l in i.get("labels") or []}, i.get("body") or "")
                 for i in issues}
         return rps.priority_inversions(slots, prio, rps.rank_candidates(issues))
+    except TimeoutError:
+        failures.append(f"priority-inversion: UNAVAILABLE (timeout {timeout}s)")
+        return None
     except Exception as exc:  # noqa: BLE001 - heartbeat must still post
         failures.append(f"priority-inversion: {type(exc).__name__}")
-        return []
+        return None
 
 
 def cleanup_status_alert(path: Path = CLEANUP_STATUS) -> str | None:
@@ -1320,13 +1343,13 @@ def main() -> int:
     if axiom is None and not args.axiom_json:
         axiom = _run_json(
             [py, str(AXIOM_REPORT), "--hours", hours, "--errors-by-code", "--compare"],
-            failures, "axiom",
+            failures, "axiom", COLLECTOR_TIMEOUTS["axiom"],
         )
     active = None
     if not args.no_active_users:
         active = _load(args.active_json)
         if active is None and not args.active_json:
-            active = _run_json([py, str(AXIOM_REPORT), "--hours", hours, "--active-users"], failures, "active-users")
+            active = _run_json([py, str(AXIOM_REPORT), "--hours", hours, "--active-users"], failures, "active-users", COLLECTOR_TIMEOUTS["active-users"])
     slots = None
     if not args.no_slots:
         slots = _load(args.slots_json)
@@ -1347,7 +1370,7 @@ def main() -> int:
     mapping_doc = _load(args.map_json)
     if mapping_doc is None and axiom:
         codes = [a for row in axiom.get("top", []) for a in ("--code", row["code"])]
-        mapping_doc = _run_json([py, str(SCRIPTS / "heartbeat-error-map.py"), *codes], failures, "error-map") if codes else {}
+        mapping_doc = _run_json([py, str(SCRIPTS / "heartbeat-error-map.py"), *codes], failures, "error-map", COLLECTOR_TIMEOUTS["error-map"]) if codes else {}
     mapping_doc = mapping_doc or {}
     failures += mapping_doc.get("failures", [])
     support = None
@@ -1357,12 +1380,12 @@ def main() -> int:
             cmd = [py, str(SCRIPTS / "support-inbox-snapshot.py"), "--hours", hours]
             if args.no_in_app:
                 cmd.append("--no-in-app")
-            support = _run_json(cmd, failures, "support")
+            support = _run_json(cmd, failures, "support", COLLECTOR_TIMEOUTS["support"])
         if support:
             failures += support.get("failures", [])
     prs = _load(args.prs_json)
     if prs is None and not args.prs_json:
-        prs = _run_json([py, str(SCRIPTS / "pr-open-snapshot.py")], failures, "pr-open-snapshot")
+        prs = _run_json([py, str(SCRIPTS / "pr-open-snapshot.py")], failures, "pr-open-snapshot", COLLECTOR_TIMEOUTS["pr-open-snapshot"])
         # The snapshot already supplies direct PR actions. Routine PR progress
         # does not create a second queue in the obligations ledger.
 
@@ -1370,11 +1393,11 @@ def main() -> int:
     # The runtime contract requires them in the structured ACTIONS: channel the agent
     # copies into its return value, so compute + persist them here too (Codex #7 P2).
     slot_actions: list[str] = []
-    priority_flags: list[str] = []
+    priority_flags: list[str] | None = []
     if slots is not None and not args.no_slots:
         _, _, slot_actions = slot_block(slots, datetime.now(timezone.utc), release_seen)
         priority_flags = priority_inversion_flags(slots, failures)
-        slot_actions += priority_flags
+        slot_actions += priority_flags or []
     pm_actions = [a for r in (prs or []) for a in r.get("actions") or []] + slot_actions
 
     if args.save_inputs:
@@ -1386,7 +1409,7 @@ def main() -> int:
     usage_lines = None
     if args.mode == "3h":
         try:
-            up = subprocess.run([py, str(Path.home() / ".claude/scripts/usage-snapshot.py")], capture_output=True, text=True, errors="replace", timeout=120)
+            up = subprocess.run([py, str(Path.home() / ".claude/scripts/usage-snapshot.py")], capture_output=True, text=True, errors="replace", timeout=COLLECTOR_TIMEOUTS["usage"])
             # Rajiv 2026-10-27 (C0ALZJHGE49 ts 1793096042.185159): drop Fable from the Claude accounts.
             usage_lines = [l for l in up.stdout.splitlines() if l.strip() and "fable" not in l.lower()]
             if up.returncode != 0 and not usage_lines:
@@ -1415,8 +1438,10 @@ def main() -> int:
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
         email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
-        priority_flags=priority_flags, remote_boxes=remote_boxes_line() if args.mode == "1h" else None,
-        pending_actions=(pending_obligations(PM_OPS_DB, now), pending_github()) if args.mode == "1h" else None,
+        priority_flags=priority_flags,
+        priority_unavailable=(f"UNAVAILABLE (timeout {COLLECTOR_TIMEOUTS['priority-inversion']}s)" if priority_flags is None else None),
+        remote_boxes=remote_boxes_line(timeout=COLLECTOR_TIMEOUTS["remote-boxes"]) if args.mode == "1h" else None,
+        pending_actions=(pending_obligations(PM_OPS_DB, now), pending_github(timeout=COLLECTOR_TIMEOUTS["pending-github"])) if args.mode == "1h" else None,
     ))
     pm_actions += (training[1] if training else [])
     if pm_actions:
