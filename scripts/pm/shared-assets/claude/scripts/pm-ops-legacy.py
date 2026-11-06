@@ -261,7 +261,7 @@ def connect_readonly() -> sqlite3.Connection:
     return con
 
 
-def init_db() -> None:
+def init_db(*, reclassify_horizons: bool = True) -> None:
     con = connect()
     con.executescript(
         """
@@ -396,6 +396,10 @@ def init_db() -> None:
         if col not in existing_cols:
             con.execute(ddl)
     con.execute("CREATE INDEX IF NOT EXISTS idx_obligations_horizon ON obligations(status, horizon, updated_at)")
+    if not reclassify_horizons:
+        con.commit()
+        con.close()
+        return
     known_classified_kinds = {
         "ready_pool",
         "backlog",
@@ -733,17 +737,19 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
     if _refusal:
         print(f"REFUSED: {_refusal}", file=sys.stderr)
         return None
-    init_db()
+    init_db(reclassify_horizons=False)
     now = utc_now()
     evidence = parse_payload(args.evidence, args.evidence_json)
+    evidence_supplied = args.evidence is not None or args.evidence_json is not None
     kind, target_type, target_id, pr, issue = obligation_key(args)
     horizon = normalize_horizon(getattr(args, "horizon", None))
     if kind == "p0_escalation":
         # Explicit --horizon hourly is retained for CLI compatibility but is
         # never allowed to move this obligation off the heartbeat surface.
         horizon = "heartbeat"
-    elif horizon is None:
-        horizon = classify_obligation_horizon(
+    insert_horizon = horizon
+    if insert_horizon is None:
+        insert_horizon = classify_obligation_horizon(
             {
                 "kind": kind,
                 "severity": args.severity,
@@ -768,7 +774,7 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
     con.execute("BEGIN IMMEDIATE")
     row = con.execute(
         """
-        SELECT id FROM obligations
+        SELECT id, evidence_json, owner, required_action FROM obligations
         WHERE status='open'
           AND kind=?
           AND COALESCE(target_type,'')=COALESCE(?,'')
@@ -780,15 +786,35 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
         (kind, target_type, target_id, pr, issue),
     ).fetchone()
     if row:
+        if not evidence_supplied and kind in CONTINUATION_KIND_LANES:
+            try:
+                retained = json.loads(row["evidence_json"])
+                if not isinstance(retained, dict):
+                    raise ValueError("evidence is not an object")
+            except (TypeError, ValueError):
+                con.rollback()
+                con.close()
+                print("REFUSED: continuation_retained_evidence_invalid", file=sys.stderr)
+                return None
+            refusal = continuation_upsert_refusal(
+                kind=kind, evidence=retained,
+                owner=args.owner if args.owner is not None else row["owner"],
+                required_action=args.action if args.action is not None else row["required_action"],
+            )
+            if refusal:
+                con.rollback()
+                con.close()
+                print(f"REFUSED: {refusal}", file=sys.stderr)
+                return None
         oid = int(row["id"])
         con.execute(
             """
             UPDATE obligations
-            SET updated_at=?, severity=?, slot=COALESCE(?, slot), owner=COALESCE(?, owner),
+            SET updated_at=?, severity=COALESCE(?, severity), slot=COALESCE(?, slot), owner=COALESCE(?, owner),
                 title=COALESCE(?, title), required_action=COALESCE(?, required_action),
-                blocker=CASE WHEN ? IS NULL THEN blocker ELSE NULLIF(?, '') END, horizon=?, next_review_at=COALESCE(?, next_review_at),
+                blocker=CASE WHEN ? IS NULL THEN blocker ELSE NULLIF(?, '') END, horizon=COALESCE(?, horizon), next_review_at=COALESCE(?, next_review_at),
                 suppress_until=COALESCE(?, suppress_until), dedupe_group=COALESCE(?, dedupe_group),
-                evidence_json=?
+                evidence_json=COALESCE(?, evidence_json)
             WHERE id=? AND status='open'
             """,
             (
@@ -804,7 +830,7 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
                 getattr(args, "next_review_at", None),
                 getattr(args, "suppress_until", None),
                 getattr(args, "dedupe_group", None),
-                json.dumps(evidence, sort_keys=True),
+                json.dumps(evidence, sort_keys=True) if evidence_supplied else None,
                 oid,
             ),
         )
@@ -821,7 +847,7 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
                 now,
                 now,
                 kind,
-                args.severity,
+                args.severity or "normal",
                 target_type,
                 target_id,
                 pr,
@@ -831,7 +857,7 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
                 args.title,
                 args.action,
                 args.blocker or None,
-                horizon,
+                insert_horizon,
                 getattr(args, "next_review_at", None),
                 getattr(args, "suppress_until", None),
                 getattr(args, "dedupe_group", None),
@@ -2588,7 +2614,7 @@ def main(argv: list[str]) -> int:
 
     p = sub.add_parser("obligation-upsert")
     p.add_argument("--kind", required=True)
-    p.add_argument("--severity", default="normal")
+    p.add_argument("--severity")
     p.add_argument("--target-type")
     p.add_argument("--target-id")
     p.add_argument("--pr", type=int)

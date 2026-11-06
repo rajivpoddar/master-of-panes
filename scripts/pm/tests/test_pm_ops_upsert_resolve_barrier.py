@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 LEGACY = Path(__file__).resolve().parents[1] / "shared-assets" / "claude" / "scripts" / "pm-ops-legacy.py"
-LOOKUP = "SELECT id FROM obligations\n        WHERE status='open'"
+LOOKUP = "SELECT id, evidence_json, owner, required_action FROM obligations\n        WHERE status='open'"
 KEY = ["--kind", "orphaned_issue", "--target-type", "github_issue", "--target-id", "77", "--issue", "77",
        "--title", "t"]
 
