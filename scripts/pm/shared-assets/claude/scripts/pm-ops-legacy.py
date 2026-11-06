@@ -774,7 +774,7 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
     con.execute("BEGIN IMMEDIATE")
     row = con.execute(
         """
-        SELECT id FROM obligations
+        SELECT id, evidence_json, owner, required_action FROM obligations
         WHERE status='open'
           AND kind=?
           AND COALESCE(target_type,'')=COALESCE(?,'')
@@ -786,6 +786,26 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
         (kind, target_type, target_id, pr, issue),
     ).fetchone()
     if row:
+        if not evidence_supplied and kind in CONTINUATION_KIND_LANES:
+            try:
+                retained = json.loads(row["evidence_json"])
+                if not isinstance(retained, dict):
+                    raise ValueError("evidence is not an object")
+            except (TypeError, ValueError):
+                con.rollback()
+                con.close()
+                print("REFUSED: continuation_retained_evidence_invalid", file=sys.stderr)
+                return None
+            refusal = continuation_upsert_refusal(
+                kind=kind, evidence=retained,
+                owner=args.owner if args.owner is not None else row["owner"],
+                required_action=args.action if args.action is not None else row["required_action"],
+            )
+            if refusal:
+                con.rollback()
+                con.close()
+                print(f"REFUSED: {refusal}", file=sys.stderr)
+                return None
         oid = int(row["id"])
         con.execute(
             """

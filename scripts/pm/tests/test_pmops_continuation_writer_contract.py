@@ -178,6 +178,36 @@ class WriterRefusalEndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(_rows(self.db), 1)
 
+    def test_metadata_claim_validates_retained_continuation_atomically(self):
+        import json
+        base = ("obligation-upsert", "--kind", "capture_recovery", "--pr", "7721")
+        evidence = json.dumps({"head": HEAD, "receipt": {"status": "UNKNOWN"}})
+        seed = _run_writer(self.db, *base, "--owner", "pm", "--action", GOOD_ACTION,
+                           "--evidence-json", evidence)
+        self.assertEqual(seed.returncode, 0, seed.stderr)
+        def row():
+            with sqlite3.connect(self.db) as con:
+                return con.execute("SELECT * FROM obligations WHERE pr=7721").fetchone()
+        before = row()
+        claim = _run_writer(self.db, *base, "--owner", "worker", "--suppress-until", "2099-01-01T00:00:00Z")
+        self.assertEqual(claim.returncode, 0, claim.stderr)
+        with sqlite3.connect(self.db) as con:
+            stored = con.execute("SELECT evidence_json,owner FROM obligations WHERE pr=7721").fetchone()
+        self.assertEqual(json.loads(stored[0]), json.loads(evidence))
+        self.assertEqual(stored[1], "worker")
+        claimed = row()
+        for extra, reason in [(("--owner", "unknown"), "continuation_owner_placeholder"),
+                              (("--action", "unknown"), "continuation_action_placeholder")]:
+            refused = _run_writer(self.db, *base, *extra, "--blocker", "", "--suppress-until", "2098-01-01T00:00:00Z")
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn("REFUSED: " + reason, refused.stderr)
+            self.assertEqual(row(), claimed)
+        updated = _run_writer(self.db, *base, "--owner", "worker", "--action", GOOD_ACTION,
+                              "--evidence-json", json.dumps({"head": HEAD, "receipt": {"status": "accepted"}}))
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        with sqlite3.connect(self.db) as con:
+            self.assertEqual(json.loads(con.execute("SELECT evidence_json FROM obligations WHERE pr=7721").fetchone()[0])["receipt"]["status"], "accepted")
+
     def test_ordinary_non_continuation_kind_still_writes(self):
         r = _run_writer(self.db, "obligation-upsert", "--kind", "cleanup_pr", "--pr", "7721",
                         "--owner", "pm", "--title", "t", "--action", "seed", "--evidence-json", "{}")
