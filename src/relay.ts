@@ -24,6 +24,17 @@ export type SlotActivityState = "active" | "idle" | "unknown";
 /** Shared PM + numbered-slot paste->Enter dwell (see composer.ts). */
 export const PM_INJECT_ENTER_DELAY_MS: number = INJECT_ENTER_DELAY_MS;
 
+/** Visible Claude exit dialog, not a phrase left in scrollback or a new composer. */
+export function isExitConfirmationDialog(text: string): boolean {
+  const lines = text.replace(/\x1b\[[0-9;]*m/g, "").split(/\r?\n/);
+  const title = lines.reduce((last, line, index) => /^\s*[│┃║]?\s*Background work is running[.!]?\s*$/.test(line) ? index : last, -1);
+  if (title < 0) return false;
+  const dialog = lines.slice(title + 1);
+  return dialog.some(line => /^[\s│┃║❯>]*1[.)]\s+Exit and stop tasks\s*[│┃║]?\s*$/.test(line))
+    && dialog.some(line => /Enter to confirm/i.test(line))
+    && !dialog.some(line => /^\s*[❯>]\s*/.test(line) && !/^\s*[❯>]\s*[123][.)]\s/.test(line));
+}
+
 // v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
 // wrapper. Kept for reference / fallback diagnostic; no longer invoked by
 // sendToSlot. send-to-slot.sh waits for chevron-idle confirmation that
@@ -1302,7 +1313,7 @@ export class TmuxRelay {
     }
   }
 
-  async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false): Promise<boolean> {
+  async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false, exitEpisode?: string): Promise<boolean> {
     void _force; // v3: every send is unconditional
     if (slotNum === 0 && !raw) {
       // Text delivery to PM must use the observation-bound submit key. Raw
@@ -1335,12 +1346,14 @@ export class TmuxRelay {
           row.last_meaningful_work_at], event?.payload]);
       };
       const original = owner();
-      const fence = () => owner() !== original ? "slot_owner_changed"
+      const fence = () => exitEpisode && (!this.db?.getExitPending() || this.db.getExitStatus().episode !== exitEpisode) ? "exit_episode_changed"
+        : owner() !== original ? "slot_owner_changed"
         : this.db?.getSlot(slotNum)?.active_turn_state === "active" ? "slot_busy" : null;
       return (await this.deliverGuardedToSlot(slotNum, command, {
         expectedPaneId: paneTarget,
         recheck: async () => fence() ?? (await this.getSlotActivityState(slotNum, paneTarget) !== "idle" ? "pane_not_idle" : fence()),
         finalCheck: fence,
+        exitEpisode,
       })).outcome === "delivered";
     }
     const cooldownKey = `${slotNum}:${command.slice(0, 80)}`;
@@ -1539,6 +1552,70 @@ export class TmuxRelay {
     }
   }
 
+  /** Pin the actual terminal processes as well as the immutable pane. No input. */
+  private async exitProcessIdentity(_slotNum: number, paneId: string, deadline = Date.now() + 2_000): Promise<string | null> {
+    try {
+      if (Date.now() >= deadline) return null;
+      const probe = await this.runShell(`tmux display-message -t ${paneId} -p '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_path}'`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      const [id, pid, tty] = probe.stdout.trim().split("|");
+      if (id !== paneId || !/^\d+$/.test(pid) || !/^\/dev\/[\w/.-]+$/.test(tty ?? "") || Date.now() >= deadline) return null;
+      const processes = await this.runShell(`ps -t ${shellEscape(tty)} -o pid=,lstart=,comm=`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      if (!processes.stdout.trim()) return null;
+      return JSON.stringify([paneId, probe.stdout.trim(), processes.stdout.trim()]);
+    } catch { return null; }
+  }
+
+  /** Called only after our /exit Enter, inside the existing slot send lock. */
+  private async confirmExitDialog(slotNum: number, paneId: string, episode: string, process: string,
+    owner: string): Promise<void> {
+    const db = this.db;
+    if (!db) return;
+    const deadline = Date.now() + 5_000;
+    const key = `exit_dialog_confirmation_${slotNum}`;
+    const token = () => JSON.stringify([
+      db.getEvents(slotNum, 1, "SessionStart")[0]?.id,
+      db.getEvents(slotNum, 1, "UserPromptSubmit")[0]?.id,
+      db.getSlot(slotNum)?.assignment_epoch,
+      db.getSlot(slotNum)?.active_turn_id,
+    ]);
+    const current = () => Date.now() < deadline && db.getExitPending() && db.getExitStatus().episode === episode && token() === owner;
+    let state: { episode: string; process: string; attempts: number; done: boolean };
+    try {
+      const saved = JSON.parse(db.getConfig(key) || "null");
+      if (saved?.episode === episode) {
+        if (saved.process !== process || saved.done || !Number.isInteger(saved.attempts) || saved.attempts < 0 || saved.attempts > 2) return;
+        state = saved;
+      } else state = { episode, process, attempts: 0, done: false };
+    } catch { return; } // Unknown retained custody never grants more attempts.
+    const save = () => db.setConfig(key, JSON.stringify(state));
+    const inspect = async () => {
+      if (!current() || await this.exitProcessIdentity(slotNum, paneId, deadline) !== process || !current()) return false;
+      // Visible screen only: a historical dialog in scrollback is not authority.
+      const screen = await this.runShell(`tmux capture-pane -t ${paneId} -p`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      return await this.exitProcessIdentity(slotNum, paneId, deadline) === process
+        && current() && isExitConfirmationDialog(screen.stdout);
+    };
+    try {
+      while (state.attempts < 2) {
+        await sleep(350); // Allow the dialog to render after /exit or the prior Enter.
+        if (!await inspect()) break;
+        state.attempts++;
+        save(); // Consume before any key: unknown key delivery cannot renew the budget.
+        if (!current()) break;
+        await this.runShell(`tmux send-keys -t ${paneId} 1`, { timeout: Math.min(1_000, deadline - Date.now()) });
+        if (!await inspect()) break; // A manual answer/resume must not receive Enter.
+        await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      }
+      state.done = true;
+      save();
+      db.logEvent(slotNum, "exit_dialog_confirmation", null, null, { episode, paneId, attempts: state.attempts });
+    } catch {
+      state.done = true;
+      save();
+      db.logEvent(slotNum, "exit_dialog_confirmation", null, null, { episode, paneId, attempts: state.attempts, outcome: "unknown_no_retry" });
+    }
+  }
+
   /** Activity evidence for a previously verified immutable pane, never a
    * numeric address or is-active.sh's error-as-idle exit status. Missing
    * capture/prompt or an unrecognized foreground color is unknown. */
@@ -1624,6 +1701,8 @@ export class TmuxRelay {
        * before the paste or the Enter never counts as proof of this submit.
        */
       allowNativeQueuedInput?: boolean;
+      /** Only an already-authorized exit-pending episode may answer its exit dialog. */
+      exitEpisode?: string;
       timing?: { dwellMs?: number; pollMs?: number; payloadGraceMs?: number; payloadStableMs?: number; clearGraceMs?: number };
     },
   ): Promise<GuardedSlotDelivery> {
@@ -1647,6 +1726,14 @@ export class TmuxRelay {
       return opts.recheck(stage, capture);
     };
     const result = await withSlotSendLock(slotNum, async (): Promise<GuardedSlotDelivery> => {
+      const exitOwner = this.db ? JSON.stringify([
+        this.db.getEvents(slotNum, 1, "SessionStart")[0]?.id,
+        this.db.getEvents(slotNum, 1, "UserPromptSubmit")[0]?.id,
+        this.db.getSlot(slotNum)?.assignment_epoch,
+        this.db.getSlot(slotNum)?.active_turn_id,
+      ]) : "";
+      const exitProcess = command === "/exit" && opts.exitEpisode
+        ? await this.exitProcessIdentity(slotNum, paneId) : null;
       const prePaste = await recheck("pre_paste");
       if (prePaste) return { outcome: "refused_pre_effect", reason: prePaste, paneId };
       let effectAttempted = false;
@@ -1756,6 +1843,11 @@ export class TmuxRelay {
           : { outcome: "refused_pre_effect", reason: "load_buffer_failed", paneId };
       } finally {
         await fs.unlink(tmpFile).catch(() => undefined);
+        if (enterSent > 0 && opts.exitEpisode && exitProcess) {
+          // Preserve the original /exit disposition, including UNKNOWN. This
+          // answers only its visible dialog; it never resends /exit.
+          await this.confirmExitDialog(slotNum, paneId, opts.exitEpisode, exitProcess, exitOwner).catch(() => undefined);
+        }
       }
     });
     this.db?.logEvent(slotNum, "guarded_delivery", null, null, { ...result, command: command.slice(0, 200) });

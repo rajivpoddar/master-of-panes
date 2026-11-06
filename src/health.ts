@@ -684,7 +684,7 @@ export class ProcessHealthChecker {
       const pin = row ? pinFrom({ paneId: observed.paneId, checkout: SLOT_RUNTIME_IDENTITIES[slot].checkoutPath }, { ...row, session_id: sessionId }) : null;
       const fence = (): string | null => {
         const freshStatus = this.db.getExitStatus();
-        if (!this.db.getExitPending() || freshStatus.pm_only || freshStatus.stop_only !== stopOnly || freshStatus.cycled[slot]
+        if (!this.db.getExitPending() || freshStatus.episode !== status.episode || freshStatus.pm_only || freshStatus.stop_only !== stopOnly || freshStatus.cycled[slot]
             || (slot === 0 && (freshStatus.dev_only || freshStatus.stop_only))) return "exit_pending_consumed";
         if (session() !== sessionId) return "session_changed";
         if (slot === 0) return null;
@@ -698,6 +698,7 @@ export class ProcessHealthChecker {
       const exitLabel = slot === 0 ? "PM" : `slot ${slot}`;
       console.log(`[health] exit_pending: ${exitLabel} already idle — sending /exit`);
       const delivered = await this.relay.deliverGuardedToSlot(slot, "/exit", {
+        exitEpisode: status.episode ?? undefined,
         expectedPaneId: observed.paneId,
         recheck: async () => {
           if ((await this.relay.getSlotActivityState(slot, observed.paneId)) !== "idle") return "pane_not_idle";

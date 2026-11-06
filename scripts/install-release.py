@@ -29,6 +29,8 @@ SCHEMA = "master_of_panes_release"
 MANIFEST = "RELEASE_MANIFEST.json"
 ROLLBACK_MANIFEST = "ROLLBACK_MANIFEST.json"
 SHARED_ASSET_MANIFEST = "scripts/pm/shared-assets/manifest.json"
+RUNTIME_ONLY_RECORD = "RUNTIME_ONLY.json"
+EXIT_RUNTIME_PATHS = {"src/hooks.ts", "src/relay.ts", "src/health.ts"}
 PROTECTED_NAMES = {".git"}
 # These files are part of the running service contract, not optional payload.
 # Keep the list deliberately narrow so release packaging remains additive.
@@ -175,14 +177,22 @@ def stage_release(
     current: Path | None = None,
     shared_target_root: Path | None = None,
     accept_overwrite: Iterable[str] = (),
+    runtime_only: bool = False,
+    expected_old: Path | None = None,
+    preimage_bundle: Path | None = None,
 ) -> dict[str, Any]:
     tree = assert_clean_source(repo, candidate)
-    assert_no_live_drift(
-        active_release=_active_release(current if current is not None else release_root.parent / "current"),
-        candidate_root=repo,
-        target_root=shared_target_root,
-        accept_overwrite=accept_overwrite,
-    )
+    if runtime_only:
+        if not current or not expected_old or not preimage_bundle or accept_overwrite:
+            raise InstallerError("runtime-only stage requires current, expected-old, private preimage bundle; no overwrite")
+        _assert_runtime_scope(repo, candidate, base, current, expected_old)
+    else:
+        assert_no_live_drift(
+            active_release=_active_release(current if current is not None else release_root.parent / "current"),
+            candidate_root=repo,
+            target_root=shared_target_root,
+            accept_overwrite=accept_overwrite,
+        )
     if not node_bin:
         raise InstallerError("stage requires --node-bin for the pinned native runtime rebuild")
     release_root.mkdir(parents=True, exist_ok=True)
@@ -194,8 +204,13 @@ def stage_release(
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("commit") != candidate or manifest.get("tree") != tree:
             raise InstallerError("existing release manifest does not bind the candidate")
+        if bool(manifest.get("runtime_only")) != runtime_only:
+            raise InstallerError("existing release has a different install scope")
+        if runtime_only:
+            _verify_runtime_preimages(release_dir, expected_old, shared_target_root)
         return {"status": "ALREADY_STAGED", "release_dir": str(release_dir), "manifest": manifest}
 
+    runtime_record = _capture_runtime_preimages(repo, expected_old, shared_target_root, preimage_bundle) if runtime_only else None
     temporary = Path(tempfile.mkdtemp(prefix=f".{candidate}.", dir=release_root))
     try:
         for relative in _tracked_paths(repo):
@@ -216,6 +231,10 @@ def stage_release(
         _run([str(npm_bin), "rebuild", "better-sqlite3", "--no-audit", "--no-fund"], cwd=temporary, env=environment)
         tracked = _tracked_paths(repo)
         generated = [str(path.relative_to(temporary)) for path in (temporary / "dist").rglob("*") if path.is_file()]
+        if runtime_record is not None:
+            _write_json(temporary / RUNTIME_ONLY_RECORD, runtime_record)
+            _verify_runtime_preimages(temporary, expected_old, shared_target_root)
+            generated.append(RUNTIME_ONLY_RECORD)
         dependencies = [
             str(path.relative_to(temporary))
             for path in node_modules.rglob("*")
@@ -243,6 +262,8 @@ def stage_release(
         }
         if shared_metadata is not None:
             manifest["shared_assets"] = shared_metadata
+        if runtime_record is not None:
+            manifest["runtime_only"] = True
         _write_json(temporary / MANIFEST, manifest)
         os.replace(temporary, release_dir)
         temporary = Path()
@@ -280,6 +301,75 @@ def verify_staged(*, repo: Path, release_dir: Path, candidate: str) -> dict[str,
         if observed != record:
             raise InstallerError(f"staged digest/mode/link mismatch: {path}")
     return manifest
+
+
+def _assert_runtime_scope(repo: Path, candidate: str, base: str, current: Path, old: Path) -> None:
+    if not re.fullmatch(r"[0-9a-f]{40}", base) or old.resolve().name != base or current.resolve() != old.resolve():
+        raise InstallerError("runtime-only base must be the exact current immutable release")
+    _run(["git", "merge-base", "--is-ancestor", base, candidate], cwd=repo)
+    changed = _run(["git", "diff", "--name-only", base, candidate], cwd=repo).stdout.splitlines()
+    if any(path not in EXIT_RUNTIME_PATHS and path != "scripts/install-release.py" and not path.startswith("test/") for path in changed):
+        raise InstallerError("runtime-only candidate exceeds the three exit runtime paths and installer/tests")
+    if not set(changed).intersection(EXIT_RUNTIME_PATHS):
+        raise InstallerError("runtime-only candidate has no exit runtime correction")
+    if sha256(repo / SHARED_ASSET_MANIFEST) != sha256(old / SHARED_ASSET_MANIFEST):
+        raise InstallerError("runtime-only candidate changes the shared manifest")
+
+
+def _runtime_targets(release: Path, target_root: Path | None) -> list[Path]:
+    return sorted({_shared_target_path(name, target_root) for entry in _load_shared_manifest(release)["entries"]
+                   for name in _shared_entry_targets(entry)})
+
+
+def _runtime_record(path: Path) -> dict[str, Any]:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return {"path": str(path), "present": False}
+    return {**file_record(path, str(path)), "present": True}
+
+
+def _capture_runtime_preimages(release: Path, old: Path, target_root: Path | None, bundle: Path) -> dict[str, Any]:
+    targets = _runtime_targets(old, target_root)
+    before = [_runtime_record(path) for path in targets]
+    backup = create_rollback_bundle(targets, bundle)
+    captured = [{key: value for key, value in entry.items() if key != "payload"} for entry in backup["entries"]]
+    if captured != before or [_runtime_record(path) for path in targets] != before:
+        raise InstallerError("runtime-only shared preimage changed during capture; backup retained")
+    record = {"schema": "mop_exit_runtime_only", "version": 1, "baseline": str(old.resolve()),
+              "shared_manifest_sha256": sha256(old / SHARED_ASSET_MANIFEST), "targets": before,
+              "private_preimage_bundle": str(bundle.resolve())}
+    _write_json(bundle / RUNTIME_ONLY_RECORD, record)
+    return record
+
+
+def _verify_runtime_preimages(release: Path, old: Path, target_root: Path | None) -> dict[str, Any]:
+    try:
+        return _read_runtime_preimages(release, old, target_root)
+    except InstallerError:
+        raise
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise InstallerError(f"runtime-only preimage evidence unavailable: {type(exc).__name__}") from exc
+
+
+def _read_runtime_preimages(release: Path, old: Path, target_root: Path | None) -> dict[str, Any]:
+    record = json.loads((release / RUNTIME_ONLY_RECORD).read_text())
+    if record.get("schema") != "mop_exit_runtime_only" or record.get("version") != 1 or record.get("baseline") != str(old.resolve()):
+        raise InstallerError("runtime-only baseline record mismatch")
+    if record.get("shared_manifest_sha256") != sha256(old / SHARED_ASSET_MANIFEST) or sha256(release / SHARED_ASSET_MANIFEST) != sha256(old / SHARED_ASSET_MANIFEST):
+        raise InstallerError("runtime-only shared manifest changed")
+    expected = record.get("targets")
+    actual = [_runtime_record(path) for path in _runtime_targets(old, target_root)]
+    if expected != actual:
+        raise InstallerError("runtime-only shared preimage changed; preserve newer bytes and refuse")
+    bundle = Path(record["private_preimage_bundle"])
+    backup = json.loads((bundle / ROLLBACK_MANIFEST).read_text())
+    if [{key: value for key, value in entry.items() if key != "payload"} for entry in backup["entries"]] != expected:
+        raise InstallerError("runtime-only backup manifest mismatch")
+    for entry in backup["entries"]:
+        if entry.get("present"):
+            _assert_rollback_payload(bundle / entry["payload"], _rollback_entry_expected(entry))
+    return record
 
 
 def _load_shared_manifest(release_dir: Path) -> dict[str, Any]:
@@ -914,13 +1004,18 @@ def create_rollback_bundle(targets: list[Path], bundle: Path) -> dict[str, Any]:
         _copy_payload(target, payload)
         if record["kind"] == "file":
             os.chmod(payload, record["mode"])
+            with payload.open("rb") as handle:
+                os.fsync(handle.fileno())
         elif hasattr(os, "lchmod"):
             # chmod follows backup symlinks to the live referent. Preserve
             # link metadata where supported without touching that referent.
             os.lchmod(payload, record["mode"])
+        _assert_rollback_payload(payload, record)
         entries.append({**record, "path": str(target), "present": True, "payload": str(payload.relative_to(bundle))})
     manifest = {"schema": "master_of_panes_rollback", "version": 1, "entries": entries}
     _write_json(bundle / ROLLBACK_MANIFEST, manifest)
+    _fsync_directory(bundle / "payload")
+    _fsync_directory(bundle)
     return manifest
 
 
@@ -1082,9 +1177,56 @@ def atomic_switch(current: Path, release_dir: Path, expected_old: Path) -> None:
         raise InstallerError("atomic release switch readback failed")
 
 
-def _default_restart(label: str) -> None:
-    uid = str(os.getuid())
-    _run(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"])
+def _service_observation(label: str, port: int) -> tuple[bool, str]:
+    """Recognize ownership/absence explicitly; failed probes are not absence."""
+    owner = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                           capture_output=True, text=True, timeout=10)
+    listeners = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+                               capture_output=True, text=True, timeout=10)
+    absent = (owner.returncode == 113 and "Could not find service" in owner.stdout + owner.stderr)
+    clean = listeners.returncode == 1 and not listeners.stdout and not listeners.stderr
+    if absent and clean:
+        return False, ""
+    match = re.search(r"^\s*pid = (\d+)", owner.stdout, re.M)
+    if owner.returncode == 0:
+        pid = match.group(1) if match else ""
+        observed = set(re.findall(r"^p(\d+)", listeners.stdout, re.M))
+        if (pid and listeners.returncode == 0 and observed == {pid}) or clean:
+            return True, pid
+    raise InstallerError("service/listener custody UNKNOWN; no start or pointer/asset recovery")
+
+
+def _default_stop(label: str, port: int = 3100) -> None:
+    owned, _ = _service_observation(label, port)
+    if owned:
+        # A nonzero/response-loss result is reconciled, never blindly repeated.
+        try:
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+                           capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            pass
+    owned, _ = _service_observation(label, port)
+    if owned:
+        raise InstallerError("bootout did not establish stopped-service custody")
+
+
+def _default_restart(label: str, port: int = 3100) -> None:
+    owned, _ = _service_observation(label, port)
+    if owned:
+        raise InstallerError("refusing bootstrap: service already owns a child")
+    plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+    try:
+        started = subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)],
+                                 capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        # A timeout may have started the service. Observe before any recovery.
+        started = None
+    owned, _ = _service_observation(label, port)
+    if not owned:
+        detail = "response lost" if started is None else (started.stderr or started.stdout).strip()
+        raise InstallerError(f"bootstrap has no observed owner: {detail}")
+    # EIO/response loss with an actual launchd child proceeds to bound health;
+    # there is no second bootstrap or kickstart.
 
 
 # One finite startup budget shared by the installer and the launchd healthcheck
@@ -1415,6 +1557,15 @@ def retire_shared_assets(
     }
 
 
+# CTO 1793943470.924319: only these decommissioned install mappings may
+# have an absent old preimage. Never recreate or remove a reappearing file.
+RETIRED_ABSENT_TARGETS = frozenset(
+    str(Path.home() / "Downloads/projects" / f"heydonna-app-{slot}" / suffix)
+    for slot in (3006, 3008)
+    for suffix in (".claude/skills/respawn/SKILL.md", ".claude/skills/respawn/scripts/respawn.sh")
+)
+
+
 def activate(
     *,
     release_dir: Path,
@@ -1425,18 +1576,121 @@ def activate(
     restart: Callable[[], None],
     health: Callable[[], dict[str, Any]],
     canary: Callable[[], dict[str, Any]],
+    stop: Callable[[], None] = lambda: None,
+    install_shared: bool = False,
+    shared_target_root: Path | None = None,
+    reconcile_stopped: Callable[[], bool] = lambda: False,
+    shared_preimage_check: Callable[[], Any] = lambda: None,
 ) -> dict[str, Any]:
     if not release_dir.is_dir() or release_dir.is_symlink():
         raise InstallerError(f"release is not an immutable directory: {release_dir}")
     _verify_required_runtime_files(release_dir)
+    # Retain the OLD manifest and full installed records before moving current.
+    # Candidate equality/absence is not evidence of the old preimage.
+    old = expected_old.resolve(strict=True)
+    old_manifest = old / SHARED_ASSET_MANIFEST
+    baseline_digest = sha256(old_manifest) if install_shared else None
+    planned: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    old_preimages: dict[str, dict[str, Any]] = {}
+    retired_absent: set[str] = set()
+
+    def verify_retired_absent() -> None:
+        for name in retired_absent:
+            target = _shared_target_path(name, shared_target_root)
+            try:
+                target.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise InstallerError(f"REFUSE: retired target absence unknown: {target}: {exc}") from exc
+            raise InstallerError(f"REFUSE: retired absent target reappeared: {target}; preserved")
+
+    if install_shared:
+        baseline = {target: entry for entry in _load_shared_manifest(old)["entries"]
+                    for target in _shared_entry_targets(entry)}
+        candidate_manifest = _load_shared_manifest(release_dir)
+        candidate_targets = {name for entry in candidate_manifest["entries"] for name in _shared_entry_targets(entry)}
+        retired_absent = (baseline.keys() - candidate_targets) & RETIRED_ABSENT_TARGETS
+        if baseline.keys() - candidate_targets - RETIRED_ABSENT_TARGETS:
+            raise InstallerError("REFUSE: candidate removes unapproved shared targets")
+        verify_retired_absent()
+        for name, prior in baseline.items():
+            if name in retired_absent:
+                continue
+            expected = {"path": name, "kind": "file", "mode": prior["mode"], "sha256": prior["sha256"]}
+            if file_record(_shared_target_path(name, shared_target_root), name) != expected:
+                raise InstallerError(f"REFUSE: pinned old preimage drift: {name}")
+            old_preimages[name] = expected
+        for entry in _load_shared_manifest(release_dir)["entries"]:
+            for name in _shared_entry_targets(entry):
+                prior = baseline.get(name)
+                if prior is None:
+                    raise InstallerError(f"REFUSE: no pinned old manifest preimage for {name}")
+                target = _shared_target_path(name, shared_target_root)
+                expected = {"path": name, "kind": "file", "mode": prior["mode"], "sha256": prior["sha256"]}
+                if file_record(target, name) != expected:
+                    raise InstallerError(f"REFUSE: pinned old preimage drift: {target}")
+                if (entry["sha256"], entry["mode"]) != (prior["sha256"], prior["mode"]):
+                    planned.append((name, expected, entry))
     rollback = create_rollback_bundle(delete_targets, rollback_bundle)
+    shared_bundle = rollback_bundle / "shared-preimages"
+    if install_shared:
+        captured = create_rollback_bundle(
+            [_shared_target_path(name, shared_target_root) for name in old_preimages]
+            + [_shared_target_path(name, shared_target_root) for name in sorted(retired_absent)], shared_bundle
+        )
+        for record, (name, expected) in zip(captured["entries"], old_preimages.items()):
+            if not record.get("present") or any(record.get(key) != expected[key] for key in ("kind", "mode", "sha256")):
+                raise InstallerError(f"REFUSE: captured old preimage changed: {name}")
+        for record in captured["entries"][len(old_preimages):]:
+            if record.get("present"):
+                raise InstallerError(f"REFUSE: retired target appeared during capture: {record['path']}")
+        _write_json(rollback_bundle / "CUTOVER.json", {
+            "old_release": str(old), "old_manifest_sha256": baseline_digest,
+            "candidate": str(release_dir), "preimages": list(old_preimages.values()),
+            "retired_absent": sorted(retired_absent),
+        })
+        _fsync_directory(rollback_bundle)
     switched = False
+    stop_attempted = False
+    start_attempted = False
+    start_returned = False
+    written: dict[str, str] = {}
+    installed: list[dict[str, Any]] = []
     try:
+        shared_preimage_check()
+        if current.resolve(strict=True) != old:
+            raise InstallerError("current pointer changed before shutdown")
+        if install_shared:
+            if sha256(old_manifest) != baseline_digest:
+                raise InstallerError("pinned old manifest changed before shutdown")
+            verify_retired_absent()
+            for name, preimage in old_preimages.items():
+                if file_record(_shared_target_path(name, shared_target_root), name) != preimage:
+                    raise InstallerError(f"pinned preimage changed before shutdown: {name}")
+        stop_attempted = True
+        stop()
+        shared_preimage_check()
+        verify_retired_absent()
         atomic_switch(current, release_dir, expected_old)
         switched = True
+        for index, (name, preimage, entry) in enumerate(planned):
+            result = install_one_shared_asset(
+                release_dir=release_dir, target_root=shared_target_root, target_name=name,
+                expected_preimage_sha256=preimage["sha256"], expected_preimage_mode=preimage["mode"],
+                rollback_bundle=rollback_bundle / f"shared-one-{index:04d}",
+            )
+            written[str(_shared_target_path(name, shared_target_root))] = entry["sha256"]
+            installed.append(result)
+        verify_retired_absent()
+        shared_preimage_check()
+        start_attempted = True
         restart()
+        start_returned = True
         health_result = health()
         canary_result = canary()
+        shared_preimage_check()
+        verify_retired_absent()
         delete_after_readiness(delete_targets, rollback)
         return {
             "status": "ACTIVATED",
@@ -1446,86 +1700,66 @@ def activate(
             "canary": canary_result,
             "rollback_bundle": str(rollback_bundle),
             "deleted": [str(path) for path in delete_targets],
+            "shared_assets": installed,
+            "old_release": str(old),
+            "old_manifest_sha256": baseline_digest,
         }
     except Exception as exc:
         activation_error = f"{type(exc).__name__}: {exc}"
-        if not switched:
+        if not stop_attempted:
             # The switch never happened: the prior release is still selected and
             # the service was never touched, so no recovery restart is due.
             raise InstallerError(f"activation refused before switch: {activation_error}") from exc
         phases: dict[str, str] = {}
-        # Recovery is exception-safe: a failure in any restore substep must not
-        # skip the bounded service-restoration attempt below.
-        pointer_restored = False
+        # Stop/reconcile the candidate first. BOTH assets and pointer must match
+        # the baseline before starting the old server; never boot a mixed pair.
         try:
-            atomic_switch(current, expected_old, release_dir)
-            if current.resolve(strict=True) == expected_old.resolve(strict=True):
-                pointer_restored = True
-                phases["pointer"] = "restored to prior release"
+            if start_attempted and not start_returned:
+                if not reconcile_stopped():
+                    raise InstallerError("bootstrap ownership not affirmatively absent; no recovery start")
             else:
-                phases["pointer"] = "failed: pointer readback does not select the prior release"
-        except Exception as restore_exc:
-            phases["pointer"] = f"failed: {type(restore_exc).__name__}: {restore_exc}"
-        try:
-            pointer_target = str(current.resolve(strict=True))
-        except Exception:
-            pointer_target = "unresolvable"
-        try:
+                stop()
+            phases["service"] = "stopped"
+            verify_retired_absent()
+            if current.resolve(strict=True) not in {old, release_dir.resolve(strict=True)}:
+                raise InstallerError("pointer changed after cutover; preserve newer custody")
+            for name, preimage, entry in planned:
+                observed = file_record(_shared_target_path(name, shared_target_root), name)
+                replacement = {"path": name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+                if observed != preimage and (str(_shared_target_path(name, shared_target_root)) not in written or observed != replacement):
+                    raise InstallerError(f"fresh shared drift during recovery: {name}; kept fresh bytes")
+            if install_shared:
+                restore_rollback_bundle(shared_bundle, only_if_current=written)
+                for name, preimage in old_preimages.items():
+                    if file_record(_shared_target_path(name, shared_target_root), name) != preimage:
+                        raise InstallerError(f"shared preimage recovery incomplete: {name}")
             restore_rollback_bundle(rollback_bundle)
             phases["assets"] = "restored"
-        except Exception as restore_exc:
-            phases["assets"] = f"failed: {type(restore_exc).__name__}: {restore_exc}"
-        service_errors: list[str] = []
-        healthy_after = None
-        for attempt in (1, 2):
-            started = False
-            try:
-                restart()
-                started = True
-                health()
-                healthy_after = attempt
-                break
-            except Exception as service_exc:
-                service_errors.append(f"attempt {attempt}: {type(service_exc).__name__}: {service_exc}")
-                if started:
-                    # launchd accepted the start and the full startup budget
-                    # elapsed unhealthy: another kickstart would only kill the
-                    # child that is still the single owner. Fail finitely.
-                    break
-        if healthy_after is not None and pointer_restored:
-            phases["service"] = f"prior release healthy after restart attempt {healthy_after}"
-            raise InstallerError(
-                f"activation failed and baseline restored: {activation_error} | recovery="
-                f"{json.dumps({**phases, 'current_pointer_target': pointer_target}, sort_keys=True)}"
-            ) from exc
-        if healthy_after is not None:
-            # Pointer restoration failed but the service is up: report exactly
-            # that, and never claim the baseline was restored or that the prior
-            # release is the one now serving.
-            phases["service"] = (
-                f"service healthy after restart attempt {healthy_after} on the pointer-selected release"
-            )
-            detail = {
-                "status": "POINTER_RESTORE_FAILED",
-                "activation_error": activation_error,
-                "rollback_restart_errors": service_errors,
-                "phases": phases,
-                "current_pointer_target": pointer_target,
-                "current": str(current),
-                "release_dir": str(release_dir),
-            }
-            raise InstallerError("POINTER_RESTORE_FAILED " + json.dumps(detail, sort_keys=True)) from exc
-        phases["service"] = "failed: " + " | ".join(service_errors)
-        detail = {
-            "status": "RECOVERY_FAILED",
-            "activation_error": activation_error,
-            "rollback_restart_errors": service_errors,
-            "phases": phases,
-            "current_pointer_target": pointer_target,
-            "current": str(current),
-            "release_dir": str(release_dir),
-        }
-        raise InstallerError("RECOVERY_FAILED " + json.dumps(detail, sort_keys=True)) from exc
+            if switched:
+                atomic_switch(current, expected_old, release_dir)
+            if current.resolve(strict=True) != old:
+                raise InstallerError("prior pointer recovery incomplete")
+            phases["pointer"] = "restored to prior release"
+            if start_attempted and not start_returned and not reconcile_stopped():
+                raise InstallerError("bootstrap ownership changed during restoration; no recovery start")
+            # Recheck the paired baseline immediately before the one recovery start.
+            verify_retired_absent()
+            if current.resolve(strict=True) != old:
+                raise InstallerError("prior pointer changed before recovery start")
+            for name, preimage in old_preimages.items():
+                if file_record(_shared_target_path(name, shared_target_root), name) != preimage:
+                    raise InstallerError(f"shared preimage changed before recovery start: {name}")
+            restart()
+            health()
+            phases["service"] = "prior release healthy"
+        except Exception as recovery_exc:
+            phases["error"] = f"{type(recovery_exc).__name__}: {recovery_exc}"
+            raise InstallerError("RECOVERY_BLOCKED " + json.dumps({
+                "activation_error": activation_error, "phases": phases,
+                "current": str(current), "release_dir": str(release_dir),
+            }, sort_keys=True)) from exc
+        raise InstallerError(f"activation failed and baseline restored: {activation_error} | recovery="
+                             + json.dumps(phases, sort_keys=True)) from exc
 
 
 def check_install(
@@ -1588,10 +1822,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expect-preimage-sha256", help="shared-install-one: reviewed preimage sha256")
     parser.add_argument("--expect-preimage-mode", help="shared-install-one: reviewed preimage mode (octal, e.g. 700)")
     parser.add_argument("--service", default="com.heydonna.mop-server")
+    parser.add_argument("--runtime-only", action="store_true", help="exit repair only: active baseline, pinned shared preimages, no shared writes")
     parser.add_argument("--health-url", default="http://127.0.0.1:3100/health")
     parser.add_argument("--canary-url", default="http://127.0.0.1:3100")
     args = parser.parse_args(argv)
     try:
+        if args.runtime_only and (args.mode not in {"stage", "activate", "check"} or args.accept_overwrite or args.sync_drift):
+            raise InstallerError("runtime-only cannot install/sync/overwrite shared assets")
         refuse_claude_plugin_cache(args.release_root, label="--release-root")
         refuse_claude_plugin_cache(args.current, label="--current")
         if args.mode != "drift-check" and args.rollback_bundle is None:
@@ -1613,7 +1850,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode == "stage":
             if not args.repo or not args.candidate or not args.base or not args.patch_id:
                 raise InstallerError("stage requires --repo, --candidate, --base, and --patch-id")
-            result = stage_release(repo=args.repo, candidate=args.candidate, base=args.base, patch_id=args.patch_id, release_root=args.release_root, node_bin=args.node_bin, current=current_pointer, shared_target_root=args.shared_assets_root, accept_overwrite=args.accept_overwrite)
+            result = stage_release(repo=args.repo, candidate=args.candidate, base=args.base, patch_id=args.patch_id, release_root=args.release_root, node_bin=args.node_bin, current=current_pointer, shared_target_root=args.shared_assets_root, accept_overwrite=args.accept_overwrite, runtime_only=args.runtime_only, expected_old=args.expected_old, preimage_bundle=args.rollback_bundle)
         elif args.mode == "shared-retire":
             release_dir = args.release_root / args.candidate if args.candidate else None
             if release_dir is None:
@@ -1661,22 +1898,42 @@ def main(argv: list[str] | None = None) -> int:
             release_dir = args.release_root / args.candidate
             repo = args.repo
             if args.mode == "activate":
-                if not args.current or not args.expected_old or not args.inventory or not args.repo:
+                if not args.current or not args.expected_old or not args.repo or (not args.runtime_only and not args.inventory):
                     raise InstallerError("activate requires --repo, --current, --expected-old, and explicit --inventory")
-                delete_targets = _inventory_paths(args.inventory, "DELETE", args.installed_root)
-                assert_no_live_drift(
-                    active_release=_active_release(args.current),
-                    candidate_root=release_dir,
-                    target_root=args.shared_assets_root,
-                    accept_overwrite=args.accept_overwrite,
-                )
-                verify_staged(repo=args.repo, release_dir=release_dir, candidate=args.candidate)
-                result = activate(release_dir=release_dir, current=args.current, expected_old=args.expected_old, delete_targets=delete_targets, rollback_bundle=args.rollback_bundle, restart=lambda: _default_restart(args.service), health=lambda: _bound_health(args.health_url, service=args.service, current=args.current), canary=lambda: _default_canary(args.canary_url))
+                staged = verify_staged(repo=args.repo, release_dir=release_dir, candidate=args.candidate)
+                if bool(staged.get("runtime_only")) != args.runtime_only:
+                    raise InstallerError("activation install scope differs from staged scope")
+                if args.runtime_only:
+                    _assert_runtime_scope(args.repo, args.candidate, staged["base"], args.current, args.expected_old)
+                    if args.inventory and any(item.get("disposition") == "DELETE" for item in json.loads(args.inventory.read_text()).get("items", [])):
+                        raise InstallerError("runtime-only cannot retire shared targets")
+                    delete_targets = []
+                    _verify_runtime_preimages(release_dir, args.expected_old, args.shared_assets_root)
+                else:
+                    delete_targets = _inventory_paths(args.inventory, "DELETE", args.installed_root)
+                    assert_no_live_drift(active_release=_active_release(args.current), candidate_root=release_dir,
+                                         target_root=args.shared_assets_root, accept_overwrite=args.accept_overwrite)
+                port = urllib.parse.urlparse(args.health_url).port or 80
+                result = activate(release_dir=release_dir, current=args.current, expected_old=args.expected_old,
+                                  delete_targets=delete_targets, rollback_bundle=args.rollback_bundle,
+                                  stop=lambda: _default_stop(args.service, port),
+                                  restart=lambda: _default_restart(args.service, port),
+                                  reconcile_stopped=lambda: not _service_observation(args.service, port)[0],
+                                  install_shared=not args.runtime_only, shared_target_root=args.shared_assets_root,
+                                  shared_preimage_check=(lambda: _verify_runtime_preimages(release_dir, args.expected_old, args.shared_assets_root)) if args.runtime_only else (lambda: None),
+                                  health=lambda: _bound_health(args.health_url, service=args.service, current=args.current),
+                                  canary=lambda: _default_canary(args.canary_url))
             else:
-                if not args.current or not args.inventory:
+                if not args.current or (not args.runtime_only and not args.inventory):
                     raise InstallerError("check requires --current and explicit --inventory")
-                delete_targets = _inventory_paths(args.inventory, "DELETE", args.installed_root)
-                keep_targets = _inventory_paths(args.inventory, "KEEP_IN_HEYDONNA_APP", args.installed_root)
+                if args.runtime_only:
+                    if not args.expected_old:
+                        raise InstallerError("runtime-only check requires --expected-old")
+                    _verify_runtime_preimages(release_dir, args.expected_old, args.shared_assets_root)
+                    delete_targets, keep_targets = [], []
+                else:
+                    delete_targets = _inventory_paths(args.inventory, "DELETE", args.installed_root)
+                    keep_targets = _inventory_paths(args.inventory, "KEEP_IN_HEYDONNA_APP", args.installed_root)
                 result = check_install(release_dir=release_dir, current=args.current, delete_targets=delete_targets, keep_targets=keep_targets, rollback_bundle=args.rollback_bundle)
                 result["launchd"] = _check_launchd(current=args.current, service=args.service)
                 result["health"] = _bound_health(args.health_url, service=args.service, current=args.current)
