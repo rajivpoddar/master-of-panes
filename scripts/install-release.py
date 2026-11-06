@@ -1724,9 +1724,11 @@ def activate(
         # Stop/reconcile the candidate first. BOTH assets and pointer must match
         # the baseline before starting the old server; never boot a mixed pair.
         try:
-            if start_attempted and not start_returned:
+            if not start_returned:
+                # An initial stop refusal or uncertain bootstrap owns no
+                # candidate child we may stop. Reconcile without a new bootout.
                 if not reconcile_stopped():
-                    raise InstallerError("bootstrap ownership not affirmatively absent; no recovery start")
+                    raise InstallerError("service ownership not affirmatively absent; no recovery stop or start")
             else:
                 stop()
             phases["service"] = "stopped"
@@ -1750,7 +1752,7 @@ def activate(
             if current.resolve(strict=True) != old:
                 raise InstallerError("prior pointer recovery incomplete")
             phases["pointer"] = "restored to prior release"
-            if start_attempted and not start_returned and not reconcile_stopped():
+            if not start_returned and not reconcile_stopped():
                 raise InstallerError("bootstrap ownership changed during restoration; no recovery start")
             # Recheck the paired baseline immediately before the one recovery start.
             verify_retired_absent()
