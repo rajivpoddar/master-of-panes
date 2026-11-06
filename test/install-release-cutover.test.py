@@ -274,9 +274,13 @@ class StoppedCutoverTests(unittest.TestCase):
         _, target = self.add_retired_old_target()
         self.set_inventory()
         original = Path.lstat
+        checks = 0
         def denied(path):
+            nonlocal checks
             if path == target:
-                raise PermissionError("cannot inspect retired target")
+                checks += 1
+                if checks > 1:  # Let the earlier drift gate establish its own observation.
+                    raise PermissionError("cannot inspect retired target")
             return original(path)
         with patch.object(Path, "lstat", denied):
             self.assertEqual(self.activate(), 2)
