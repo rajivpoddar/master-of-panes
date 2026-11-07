@@ -945,7 +945,7 @@ def remote_boxes_line(timeout: int = 20) -> str:
                 name, state = row.groups()
                 if not name.startswith("rtb-tpool-" if current == "test" else "rtb-pool-"):
                     raise ValueError("box in wrong pool")
-                if state not in {"free", "leased", "releasing", "expired", "broken", "preempting", "rebuilding"}:
+                if state not in {"free", "leased", "releasing", "expired", "broken", "preempting", "rebuilding", "borrowed"}:
                     raise ValueError("unknown box state")
                 pools[current]["rows"].append((name, state))
             summary = re.match(r"^pool:\s*(\d+) free / (\d+),", line.strip())

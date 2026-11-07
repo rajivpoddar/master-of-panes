@@ -13,6 +13,7 @@ Output (JSON, or --text one line per PR):
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import json
 import re
@@ -858,18 +859,19 @@ def format_line(row: dict) -> str:
 
 
 def fetch_open_prs(with_threads: bool = True) -> list[dict]:
-    proc = subprocess.run(
-        [
-            "gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "100",
-            "--json", "number,headRefOid,title,isDraft,labels,statusCheckRollup,files,body,comments",
-        ],
-        capture_output=True, text=True, errors="replace", timeout=120,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"gh pr list failed: {proc.stderr.strip()[:200]}")
-    prs = json.loads(proc.stdout)
-    # --sync-obligations runs under the Stop hook's 8s budget and never reads review threads.
-    threads = fetch_review_threads() if with_threads else None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        threads_future = pool.submit(fetch_review_threads) if with_threads else None
+        proc = subprocess.run(
+            [
+                "gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "100",
+                "--json", "number,headRefOid,title,isDraft,labels,statusCheckRollup,files,body,comments",
+            ],
+            capture_output=True, text=True, errors="replace", timeout=120,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"gh pr list failed: {proc.stderr.strip()[:200]}")
+        prs = json.loads(proc.stdout)
+        threads = threads_future.result() if threads_future else None
     for pr in prs:
         pr["reviewThreads"] = None if threads is None else threads.get(pr.get("number"), [])
         pr["ci_reconciliation"] = _read_ci_reconciliation(pr)

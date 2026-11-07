@@ -18,7 +18,7 @@ import subprocess
 import sys
 import urllib.request
 
-REPO = 'heydonna-app/heydonna-app'
+REPO = 'Scribie/heydonna-app'
 STATE = Path.home() / '.claude/state/issue-lifecycle.json'
 PM_OPS = Path.home() / '.claude/scripts/pm-ops.py'
 HEADER = '*Unblockable now / issue lifecycle:*'
@@ -148,7 +148,7 @@ def timeline(number, page):
         out.extend(node['source'] for node in page['nodes'] if (node.get('source') or {}).get('number'))
         if not page['pageInfo']['hasNextPage']:
             return out
-        query = '''query($number:Int!, $cursor:String) { repository(owner:"heydonna-app", name:"heydonna-app") {
+        query = '''query($number:Int!, $cursor:String) { repository(owner:"Scribie", name:"heydonna-app") {
  issue(number:$number) { timelineItems(first:100, after:$cursor, itemTypes:[CROSS_REFERENCED_EVENT]) { ''' + SOURCE + ' } } } }'
         page = graphql(query, dict(number=number, cursor=page['pageInfo']['endCursor']))['repository']['issue']['timelineItems']
 
@@ -162,7 +162,7 @@ def blocker_states(numbers):
         aliases = {f'b{n}': n for n in batch}
         fields = ' '.join(f'{a}:issueOrPullRequest(number:{n}) {{ __typename ... on Issue {{ state }} ... on PullRequest {{ merged }} }}'
                           for a, n in aliases.items())
-        query = 'query { repository(owner:"heydonna-app",name:"heydonna-app") { ' + fields + ' } }'
+        query = 'query { repository(owner:"Scribie",name:"heydonna-app") { ' + fields + ' } }'
         try:
             doc = gh('api', 'graphql', '-f', 'query=' + query)
         except subprocess.CalledProcessError as error:
@@ -191,7 +191,7 @@ def blocker_states(numbers):
 def collect(since):
     issues, cursor = [], None
     while True:
-        query = '''query($cursor:String) { repository(owner:"heydonna-app", name:"heydonna-app") {
+        query = '''query($cursor:String) { repository(owner:"Scribie", name:"heydonna-app") {
  issues(first:30, after:$cursor, states:OPEN) { nodes { number title body state
  labels(first:100) { nodes { name } pageInfo { hasNextPage } }
  timelineItems(first:100, itemTypes:[CROSS_REFERENCED_EVENT]) { ''' + SOURCE + ''' }
@@ -210,7 +210,7 @@ def collect(since):
         slots = json.load(response)['slots']
     merged, cursor = [], None
     while True:
-        query = '''query($cursor:String) { repository(owner:"heydonna-app", name:"heydonna-app") {
+        query = '''query($cursor:String) { repository(owner:"Scribie", name:"heydonna-app") {
  pullRequests(first:100, after:$cursor, states:MERGED, orderBy:{field:UPDATED_AT, direction:DESC}) {
  nodes { number body mergedAt updatedAt } pageInfo { hasNextPage endCursor } } } }'''
         page = graphql(query, dict(cursor=cursor))['repository']['pullRequests']
@@ -436,4 +436,14 @@ def run(dry_run=False):
 
 
 if __name__ == '__main__':
-    print(json.dumps(run(dry_run='--dry-run' in sys.argv)))
+    try:
+        print(json.dumps(run(dry_run='--dry-run' in sys.argv)))
+    except subprocess.CalledProcessError as error:
+        # Do not emit command arguments or raw stderr, which may contain secrets.
+        stderr = error.stderr or ''
+        status = re.search(r'HTTP\s+\d{3}', stderr, re.I)
+        reasons = ('rate limit', 'timeout', 'timed out', 'connection refused',
+                   'connection reset', 'not found', 'authentication', 'permission denied')
+        reason = next((value for value in reasons if value in stderr.lower()), 'GitHub command failed')
+        print(f'{reason}' + (f' ({status.group(0)})' if status else ''), file=sys.stderr)
+        sys.exit(error.returncode or 1)
