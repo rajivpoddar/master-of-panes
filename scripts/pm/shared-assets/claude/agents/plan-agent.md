@@ -195,6 +195,8 @@ Source: Rajiv, C0ALZJHGE49 thread 1793215184.709299. ts 1793215326.517839: "it s
 - BLOCK / REQUEST_CHANGES when a plan or diff: withholds the result on exhaustion; falls back to the source or original text for a non-corruption failure; or refuses a manual-mode result for non-corruption. The 6 corruption classes are unchanged.
 - Required test: every rung fails non-corruption, the best candidate (not the source) is published or applied with the warning, and RED-on-revert proves it.
 
+The corruption-only rule governs rejection of model content on content/quality grounds. It does not override authorization, writer custody, edited-source/currentness, save CAS, pricing authority or uncertain-publication safeguards. A warning-only quality result is applied or published only when those existing admission conditions permit it. Operational failure or UNKNOWN does not authorize a resend. Classify and log the actual cause; do not label a safety precondition as corruption or convert it into forced application.
+
 ## No-unindexed-query Planning Gate (rule 51)
 Source: Rajiv DM D0AMF0XE6TS thread 1793355859.689089, ts 1793356037.363689: "add a product rule for indexed queries. audit the code for where else we do a unindexed full-table scan"; trigger P0 #12099 (`docxTemplates` `.filter().collect()` crossed Convex's 16 MiB read limit; 15/19 partner creates returned 500). Rule: `~/.claude/rules/51-heydonna-indexed-convex-queries.md`.
 - The plan lists every new or changed `ctx.db.query` with its index. BLOCK/REQUEST_CHANGES when a plan adds or changes a `ctx.db.query(...)` on a request or cron path that reaches `.collect()`/`.first()`/`.unique()`/`.take()`/`.paginate()`/iteration without `.withIndex`/`.withSearchIndex`, or reads with `.filter()` alone (still a full-table scan), and names no exception. Allowed exceptions: an explicit small page size, a fixed-size table (<100 rows) or a one-off migration/admin script that requests can't reach, each with a one-line comment naming the bound.
@@ -202,6 +204,11 @@ Source: Rajiv DM D0AMF0XE6TS thread 1793355859.689089, ts 1793356037.363689: "ad
 - Required tests: a source-inspection test over `convex/**` with an exception allowlist that names each reason, plus a production-shaped read-budget test for the changed request path (fixture sized from prod metadata; bytes read well under 16 MiB).
 - Existing violations (`docs/investigations/2026-10-30-unindexed-convex-scans-audit.md`) are tracked migrations and do not block unrelated PRs.
 
+
+## Deletion-coverage Planning Gate (rule 52, Rajiv 2026-11-06)
+
+Rajiv C0ALZJHGE49 ts 1793982486.522039 ("the deletion coverage should be a product rule"); full rule: `~/.claude/rules/52-heydonna-deletion-coverage.md`.
+A diff that stores customer data somewhere NEW (new Convex table/field with customer content, new R2 prefix, new external store) must be removed by project/transcript deletion, proven by a behavioural cascade test (create → delete project/transcript → assert gone); a new Convex table is classified in `convex/__tests__/deletion-registry*.test.ts`. Plans adding such storage name the deletion path and cascade test; reviewers BLOCK when either is missing, and BLOCK any new line-number/text-hash/AST deletion inventory pin. Record `DELETION_COVERAGE: <path + test>` or `DELETION_COVERAGE: no new customer-data storage`.
 
 ## Input
 
@@ -323,6 +330,10 @@ Grep commands executed (paste exit codes + line counts):
 
 Codex plan-review CHECK 26 will reject any plan introducing a routing/fallback/lookup layer without this audit. See CLAUDE.md "Planning Agent Gates" Phase 1 step 1.5d for the repo-tracked rule slots inherit at session start. Companion memo: `feedback_plan_agent_grep_call_sites_for_new_routing_layer`.
 
+
+#### [HIGH] Model-output refusal-site inventory (2026-11-06)
+
+For changed model-response handling, search relevant paths across `modal/`, `convex/`, `lib/`, `app/`, `hooks/`, `components/`, then trace the affected production flow through reachable unchanged callers, fallbacks, callbacks and final persistence/editor admission. Grep hits are leads, not proof of refusal or completeness. Inventory each reachable refusal/noop, with condition, class and disposition: deterministic content corruption; model-quality rejection; authorization/custody/currentness/metering precondition; or operational failure/UNKNOWN. Rule 34 governs content/quality, not leases, edited source, stale CAS, pricing authority or uncertain publication; cite the existing contract or standing decision for preconditions, with no fresh approval required for unchanged guards. Actual refusals/noops must log causal reason and run/transcript identity without transcript text. Rework reuses the inventory and reviews its delta, not a fresh repository audit. Request revision for an unanalyzed material branch or a concrete reachable risk; name the branch and risk (silent discard, corruption, overwritten edits or authorization bypass). A missing heading, stale line or unmatched grep hit alone is not a blocker; safe format/provenance nits can follow up. Any later CI backstop must exercise refusal behavior and reason propagation; source patterns alone cannot prove corruption or authorize guard removal. Source: C0ALZJHGE49 thread 1793944749.704259 ts 1793956653.526929.
 
 #### Phase 1 step 1.5d1 — Behavioral AC proof contract (MANDATORY)
 
@@ -823,9 +834,13 @@ architecture.
 
 Enumerate EVERY new or changed `raise`, validator failure, strict-parse reject, retry/BoN/fallback trigger, withhold / "refusing to publish" path, and failed-status write in the plan (as a mandatory `## Hard-reject ledger` section). Classify each as exactly one of the 6 content-corruption classes: (1) empty output from non-empty input, (2) provider truncation, (3) material word/content loss, (4) hallucinated insertion or runaway repetition, (5) extreme shrink/expansion, (6) structure so malformed that transcript semantics are destroyed. Anything else (placeholder/unfilled `{{TOKEN}}`, speaker/Q-A/formatting quality, residual raw labels, ordering/ranking, confidence proxies, preference) is a BLOCKING finding (plan fails self-review): require the soft_warn / quality_warning pattern plus a test proving the transcript publishes with the warning. A hard reject always triggers a retry, so a non-corruption reject wastes tokens as well as withholding the transcript. An unclassified item counts as a failure of this check. Sources: Rajiv 2026-09-28 thread 1790565390.460619; 2026-09-29 thread 1790647403.075549 ("The hard rejects are only for content corruption. It's always followed by retry as well. We do not want to waste tokens unnecessarily."). Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md` (precedent #8407).
 
+The corruption-only rule governs rejection of model content on content/quality grounds. It does not override authorization, writer custody, edited-source/currentness, save CAS, pricing authority or uncertain-publication safeguards. A warning-only quality result is applied or published only when those existing admission conditions permit it. Operational failure or UNKNOWN does not authorize a resend. Classify and log the actual cause; do not label a safety precondition as corruption or convert it into forced application.
+
 ### Client apply/admission guards are hard rejects too (Rajiv C0ALZJHGE49 thread 1793190232.455079, ts 1793194172.168679)
 - Scope (Rajiv C0ALZJHGE49 thread 1793190232.455079, ts 1793194525.103039): "fix the product rule. no hard rejects except for content corruption should apply to all model responses, both server and client side." Scope = ALL model responses: validators, BoN/fallback triggers, status writes, client apply/admission guards, execute-* actions.
 - `{success:false}`/`error:` returns, "not applied" toasts or refusals of an AI result in `lib/editor/**/apply-diff/**`, mark-operations, corruption-admission, `lib/utils/*apply*`, `execute-*` actions ARE hard rejects; enumerate them in the same ledger.
 - Allowed only for the 6 corruption classes. Speaker identity/metadata mismatch, mid-line labels, Q/A labelling, pending-change overlap etc. must APPLY with a soft_warn toast plus a test proving it applies with the warning.
+
+The corruption-only rule governs rejection of model content on content/quality grounds. It does not override authorization, writer custody, edited-source/currentness, save CAS, pricing authority or uncertain-publication safeguards. A warning-only quality result is applied or published only when those existing admission conditions permit it. Operational failure or UNKNOWN does not authorize a resend. Classify and log the actual cause; do not label a safety precondition as corruption or convert it into forced application.
 - Otherwise the plan fails self-review. Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md`.
 
