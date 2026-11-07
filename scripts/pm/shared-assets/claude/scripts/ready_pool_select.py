@@ -1266,7 +1266,7 @@ def selftest() -> int:
             number = int(cmd[-1].split('/')[-1])
             if number == 16:
                 raise OSError('unavailable')
-            data = states[number]
+            data = {'data': {'repository': {f'i{number}': states[number]}}}
         else:
             number = int(cmd[3])
             data = {'state': 'MERGED' if number == 13 else 'CLOSED', 'mergedAt': '2026-01-01T00:00:00Z' if number == 13 else None}

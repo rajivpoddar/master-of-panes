@@ -321,7 +321,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "5868fec80dce331423672a4174dbd12bf641f51be0e5115b0e207a817da99be4",
+      "sha256": "bbcbfaf5523bf977eccc7f6065d07fcc8a6e93f0cfe1430b04b490f5baca4b13",
       "source_path": "claude/scripts/backlog-triage.py"
     },
     {
@@ -773,7 +773,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "27ced578b13d6b167a478e80c2a90c63d5134c9bf37ccfdcb4c58ad650e9b00e",
+      "sha256": "cc77929d7a9f11a82eaa4413aabf5a7278bb3d9ac80604d5372fe7103468afbc",
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {

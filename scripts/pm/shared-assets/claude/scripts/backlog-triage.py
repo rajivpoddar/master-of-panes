@@ -1173,6 +1173,9 @@ def ready_pool_contract_reasons(
     readiness_blocker_labels = names
     if allow_dependencies or not deps:
         readiness_blocker_labels = names - {"pm-blocked:dependency"}
+    if "sub:waiting-on-issue" in readiness_blocker_labels:
+        readiness_blocker_labels.remove("sub:waiting-on-issue")
+        readiness_blocker_labels.add("pm-blocked:dependency")
     if allow_dependencies and status_labels == ["status:todo"] and "P0" in names:
         # Preserve existing gated-P0 membership; assignment still checks gates.
         readiness_blocker_labels = {n for n in names if not n.startswith("pm-blocked:")}
