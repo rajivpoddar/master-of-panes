@@ -28,7 +28,7 @@ function stopExit(db: MoPDatabase, sent: number[]) {
   const method = find(tree, n => ts.isMethodDeclaration(n) && n.name.getText(tree) === "handleStop")!;
   const exit = find(method, n => ts.isIfStatement(n) && n.expression.getText(tree).startsWith("this.db.getExitPending()"))!;
   const dnd = find(method, n => ts.isIfStatement(n) && n.expression.getText(tree) === "slot.dnd")!;
-  const js = ts.transpileModule(`function run(slotNum: number) { const slot = this.db.getSlot(slotNum) || {}; ${dnd.getText(tree)} ${exit.getText(tree)} }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const js = ts.transpileModule(`async function run(slotNum: number) { const payload = { session_id: "scope-test" }; const slot = this.db.getSlot(slotNum) || {}; ${dnd.getText(tree)} ${exit.getText(tree)} }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   return new Function(`${js}; return run;`)().bind({ db, relay: { sendToSlot: (slot: number) => sent.push(slot), injectToPM() {} } });
 }
 
@@ -68,24 +68,24 @@ test("dev-only scope and cycled state survive reopening the database", () => {
 });
 
 for (const devOnly of [false, true]) {
-  test(`Stop exit scope dev_only=${devOnly}: PM guard, DND, and completion`, () => {
+  test(`Stop exit scope dev_only=${devOnly}: PM guard, DND, and completion`, async () => {
     const db = database();
     try {
       const sent: number[] = [];
       const stop = stopExit(db, sent);
       db.setExitPending(true, devOnly);
       if (devOnly) {
-        stop(0);
+        await stop(0);
         assert.deepEqual(sent, [], "PM Stop must not exit while a dev-only episode is pending");
         assert.equal(db.getExitStatus().cycled[0], false);
       }
       db.updateSlot(1, { dnd: true });
-      stop(1);
+      await stop(1);
       assert.deepEqual(sent, []);
       db.updateSlot(1, { dnd: false });
-      for (const slot of Object.keys(db.getExitStatus().cycled).map(Number).filter(n => n > 0)) stop(slot);
+      for (const slot of Object.keys(db.getExitStatus().cycled).map(Number).filter(n => n > 0)) await stop(slot);
       assert.equal(db.getExitStatus().pending, !devOnly, "dev-only completes without PM; legacy waits for PM");
-      stop(0);
+      await stop(0);
       assert.equal(sent.includes(0), !devOnly);
       assert.equal(db.getExitPending(), false);
     } finally { db.close(); }

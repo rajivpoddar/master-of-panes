@@ -1522,6 +1522,7 @@ export class HookProcessor {
           finalCheck: fence,
           skipSlashClear: true,
           allowNativeQueuedInput: true,
+          exitEpisode: exitStatus.episode ?? undefined,
         }) : { outcome: "refused_pre_effect", reason: "pm_pane_unknown" };
         if (delivery.outcome === "refused_pre_effect") {
           // Proven zero effect: explicit durable terminal + same-owner recovery edge; never resent.
@@ -1687,8 +1688,8 @@ export class HookProcessor {
     // Guard: skip if this slot already cycled (prevents restart loops after
     // watchdog restarts the slot with --continue and it goes idle again).
     if (this.db.getExitPending() && !this.db.getExitStatus().pm_only && !(slotNum === 0 && this.db.getExitStatus().dev_only) && !this.db.getExitStatus().cycled[slotNum]) {
-      this.relay.sendToSlot(slotNum, "/exit", true);
       this.db.markSlotExitCycled(slotNum);
+      this.relay.sendToSlot(slotNum, "/exit", true, false, this.db.getExitStatus().episode ?? undefined, payload.session_id);
       this.db.logEvent(slotNum, "exit_pending_triggered", "Stop", null, {
         task: slot.task,
         branch: slot.branch,
@@ -1702,7 +1703,7 @@ export class HookProcessor {
       const status = this.db.getExitStatus();
       const allCycled = Object.entries(status.cycled)
         .every(([slot, v]) => (status.dev_only && Number(slot) === 0) || v);
-      if (allCycled) {
+      if (allCycled && !this.relay.hasPendingExitConfirmation?.(status.episode)) {
         this.db.setExitPending(false);
         this.relay.injectToPM(
           "# ✅ All slots have cycled — exit_pending auto-cleared",

@@ -21,8 +21,30 @@ import type { PMClearFenceRefusal } from "./pmClearLatch.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
+type ExitOwnerPin = Readonly<{
+  assignment: string;
+  boot: number | null;
+  input: number | null;
+  work: string | null;
+  turn: string | null;
+  turnStarted: string | null;
+  turnState: string;
+  stopSession: string | null;
+}>;
+
 /** Shared PM + numbered-slot paste->Enter dwell (see composer.ts). */
 export const PM_INJECT_ENTER_DELAY_MS: number = INJECT_ENTER_DELAY_MS;
+
+/** Visible Claude exit dialog, not a phrase left in scrollback or a new composer. */
+export function isExitConfirmationDialog(text: string): boolean {
+  const lines = text.replace(/\x1b\[[0-9;]*m/g, "").split(/\r?\n/);
+  const title = lines.reduce((last, line, index) => /^\s*[│┃║]?\s*Background work is running[.!]?\s*$/.test(line) ? index : last, -1);
+  if (title < 0) return false;
+  const dialog = lines.slice(title + 1);
+  return dialog.some(line => /^[\s│┃║❯>]*1[.)]\s+Exit and stop tasks\s*[│┃║]?\s*$/.test(line))
+    && dialog.some(line => /Enter to confirm/i.test(line))
+    && !dialog.some(line => /^\s*[❯>]\s*/.test(line) && !/^\s*[❯>]\s*[123][.)]\s/.test(line));
+}
 
 // v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
 // wrapper. Kept for reference / fallback diagnostic; no longer invoked by
@@ -286,6 +308,7 @@ export class TmuxRelay {
   /** Serialize queue selection through post-submit deletion as one operation. */
   private pmDrainChain: Promise<number> = Promise.resolve(0);
   private directInjectSeq = 0;
+  private pendingExitDispatch = new Map<number, { episode: string; work: Promise<unknown> }>();
   private runShell: typeof execShell;
   private readonly pmPaneReadyOverride?: () => Promise<boolean>;
   private readonly pmIdleHandoff?: () => Promise<void>;
@@ -1279,9 +1302,81 @@ export class TmuxRelay {
    *
    * `force` parameter is now a no-op (kept for callsite compatibility).
    */
-  sendToSlot(slotNum: number, command: string, _force = false, raw = false): boolean {
+  sendToSlot(slotNum: number, command: string, _force = false, raw = false, exitEpisode?: string, stopSession?: string): boolean {
+    if (command === "/exit" && exitEpisode) {
+      if (this.pendingExitDispatch.get(slotNum)?.episode === exitEpisode) return true;
+      // Capture at consumption, before the timer OR pane verification can yield.
+      const ownerPin = this.captureExitOwner(slotNum, stopSession);
+      if (!ownerPin) {
+        this.db?.logEvent(slotNum, "guarded_delivery", null, null, { outcome: "refused_pre_effect", reason: "exit_owner_unbound", command, episode: exitEpisode });
+        return false;
+      }
+      // The server closes this Stop's matching turn after process() returns.
+      // Continue the SAME consumed send only after that response can complete.
+      const work = sleep(0).then(() => this.sendToSlotAsync(slotNum, command, _force, raw, exitEpisode, ownerPin));
+      const pending = { episode: exitEpisode, work };
+      this.pendingExitDispatch.set(slotNum, pending);
+      void work.catch(() => undefined).finally(() => {
+        if (this.pendingExitDispatch.get(slotNum) === pending) this.pendingExitDispatch.delete(slotNum);
+      });
+      return true;
+    }
     void this.sendToSlotAsync(slotNum, command, _force, raw);
     return true;
+  }
+
+  private exitAssignment(slot: SlotState): string {
+    return JSON.stringify([slot.assignment_epoch, slot.repository_id, slot.issue,
+      slot.branch_ref, slot.occupied, slot.dnd]);
+  }
+
+  private captureExitOwner(slotNum: number, stopSession?: string): ExitOwnerPin | null {
+    if (!this.db) return null;
+    const slot = this.db.getSlot(slotNum);
+    if (!slot) return null;
+    const boot = this.db.getEvents(slotNum, 1, "SessionStart")[0];
+    if (stopSession && slot.active_turn_id && slot.active_turn_id !== stopSession) return null;
+    if (stopSession && boot) {
+      try {
+        const session = JSON.parse(boot.payload).session_id;
+        if (session && session !== stopSession) return null;
+      } catch { return null; }
+    }
+    return {
+      assignment: this.exitAssignment(slot), boot: boot?.id ?? null,
+      input: this.db.getEvents(slotNum, 1, "UserPromptSubmit")[0]?.id ?? null,
+      work: slot.last_meaningful_work_at, turn: slot.active_turn_id,
+      turnStarted: slot.active_turn_started_at, turnState: slot.active_turn_state,
+      stopSession: stopSession ?? null,
+    };
+  }
+
+  private exitOwnerRefusal(slotNum: number, pin: ExitOwnerPin): string | null {
+    if (!this.db) return "exit_owner_unbound";
+    const slot = this.db.getSlot(slotNum);
+    if (!slot || this.exitAssignment(slot) !== pin.assignment
+        || (this.db.getEvents(slotNum, 1, "SessionStart")[0]?.id ?? null) !== pin.boot
+        || (this.db.getEvents(slotNum, 1, "UserPromptSubmit")[0]?.id ?? null) !== pin.input
+        || slot.last_meaningful_work_at !== pin.work) return "slot_owner_changed";
+    const sameTurn = slot.active_turn_id === pin.turn && slot.active_turn_started_at === pin.turnStarted
+      && slot.active_turn_state === pin.turnState;
+    // The server may close ONLY this Stop's matching turn. No successor is adopted.
+    const matchingClosure = pin.stopSession !== null && pin.turn === pin.stopSession
+      && slot.active_turn_id === null && slot.active_turn_started_at === null && slot.active_turn_state === "inactive";
+    return sameTurn || matchingClosure ? null : "slot_owner_changed";
+  }
+
+  /** Keep only this bounded exit continuation's episode alive until it settles. */
+  hasPendingExitConfirmation(episode: string | null): boolean {
+    if (!episode) return false;
+    if ([...this.pendingExitDispatch.values()].some(pending => pending.episode === episode)) return true;
+    if (!this.db) return false;
+    return [0, ...this.db.getAllSlots().map(slot => slot.slot)].some(slot => {
+      try {
+        const state = JSON.parse(this.db!.getConfig(`exit_dialog_confirmation_${slot}`) || "null");
+        return state?.episode === episode && !state.done && state.deadline > Date.now();
+      } catch { return false; }
+    });
   }
 
   /** Resolve the owning numbered pane's current Git worktree root. */
@@ -1302,8 +1397,13 @@ export class TmuxRelay {
     }
   }
 
-  async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false): Promise<boolean> {
+  async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false, exitEpisode?: string, exitOwnerPin?: ExitOwnerPin): Promise<boolean> {
     void _force; // v3: every send is unconditional
+    const pinnedRefusal = exitEpisode ? (exitOwnerPin ? this.exitOwnerRefusal(slotNum, exitOwnerPin) : "exit_owner_unbound") : null;
+    if (pinnedRefusal) {
+      this.db?.logEvent(slotNum, "guarded_delivery", null, null, { outcome: "refused_pre_effect", reason: pinnedRefusal, command, episode: exitEpisode });
+      return false;
+    }
     if (slotNum === 0 && !raw) {
       // Text delivery to PM must use the observation-bound submit key. Raw
       // key sequences intentionally remain the explicit low-level escape
@@ -1335,12 +1435,16 @@ export class TmuxRelay {
           row.last_meaningful_work_at], event?.payload]);
       };
       const original = owner();
-      const fence = () => owner() !== original ? "slot_owner_changed"
+      const fence = () => exitEpisode && (!this.db?.getExitPending() || this.db.getExitStatus().episode !== exitEpisode) ? "exit_episode_changed"
+        : exitOwnerPin && this.exitOwnerRefusal(slotNum, exitOwnerPin) ? "slot_owner_changed"
+        : owner() !== original ? "slot_owner_changed"
         : this.db?.getSlot(slotNum)?.active_turn_state === "active" ? "slot_busy" : null;
       return (await this.deliverGuardedToSlot(slotNum, command, {
         expectedPaneId: paneTarget,
         recheck: async () => fence() ?? (await this.getSlotActivityState(slotNum, paneTarget) !== "idle" ? "pane_not_idle" : fence()),
         finalCheck: fence,
+        exitEpisode,
+        exitOwnerPin,
       })).outcome === "delivered";
     }
     const cooldownKey = `${slotNum}:${command.slice(0, 80)}`;
@@ -1539,6 +1643,97 @@ export class TmuxRelay {
     }
   }
 
+  /** Pin the actual terminal processes as well as the immutable pane. No input. */
+  private async exitProcessIdentity(_slotNum: number, paneId: string, deadline = Date.now() + 2_000): Promise<string | null> {
+    try {
+      if (Date.now() >= deadline) return null;
+      const probe = await this.runShell(`tmux display-message -t ${paneId} -p '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_path}|#{pane_current_command}'`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      const [id, pid, tty] = probe.stdout.trim().split("|");
+      if (id !== paneId || !/^\d+$/.test(pid) || !/^\/dev\/[\w/.-]+$/.test(tty ?? "") || Date.now() >= deadline) return null;
+      const processes = await this.runShell(`ps -t ${shellEscape(tty)} -o pid=,pgid=,stat=,lstart=,comm=`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      // Hook/MCP children may finish normally after Stop. Pin the foreground
+      // process-group leader, not every transient child sharing its terminal.
+      const leaders = processes.stdout.split(/\r?\n/).flatMap(line => {
+        const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
+        return row && row[1] === row[2] && row[3].includes("+") ? [`${row[1]}|${row[2]}|${row[4]}`] : [];
+      });
+      return leaders.length === 1 ? JSON.stringify([paneId, probe.stdout.trim(), leaders[0]]) : null;
+    } catch { return null; }
+  }
+
+  /** Claim one bounded continuation after our /exit Enter; never replay it. */
+  private scheduleExitConfirmation(slotNum: number, paneId: string, episode: string, process: string, owner: string, ownerPin?: ExitOwnerPin): void {
+    if (!this.db) return;
+    const key = `exit_dialog_confirmation_${slotNum}`;
+    try {
+      const saved = JSON.parse(this.db.getConfig(key) || "null");
+      if (saved?.episode === episode) return;
+    } catch { return; }
+    try {
+      this.db.setConfig(key, JSON.stringify({ episode, process, attempts: 0, done: false, deadline: Date.now() + 5_000, owner_pin: ownerPin ?? null }));
+      // Do not await our own send lock or the dialog from the HTTP Stop handler.
+      // The finite continuation acquires the same lock after /exit delivery returns.
+      void withSlotSendLock(slotNum, () => this.confirmExitDialog(slotNum, paneId, episode, process, owner, ownerPin)).catch(() => undefined);
+    } catch { /* Never change the original /exit receipt or retry an uncertain claim. */ }
+  }
+
+  /** One claimed continuation, after the original /exit/Stop can complete. */
+  private async confirmExitDialog(slotNum: number, paneId: string, episode: string, process: string,
+    owner: string, ownerPin?: ExitOwnerPin): Promise<void> {
+    const db = this.db;
+    if (!db) return;
+    const key = `exit_dialog_confirmation_${slotNum}`;
+    const token = () => JSON.stringify([
+      db.getEvents(slotNum, 1, "SessionStart")[0]?.id,
+      db.getEvents(slotNum, 1, "UserPromptSubmit")[0]?.id,
+      db.getSlot(slotNum)?.assignment_epoch,
+      db.getSlot(slotNum)?.active_turn_id,
+    ]);
+    let state: { episode: string; process: string; attempts: number; done: boolean; deadline: number };
+    try {
+      const saved = JSON.parse(db.getConfig(key) || "null");
+      if (saved?.episode !== episode || saved.process !== process || saved.done || !Number.isFinite(saved.deadline)
+          || !Number.isInteger(saved.attempts) || saved.attempts < 0 || saved.attempts > 2) return;
+      state = saved;
+    } catch { return; } // Unknown retained custody never grants more attempts.
+    const deadline = state.deadline;
+    const current = () => Date.now() < deadline && db.getExitPending() && db.getExitStatus().episode === episode
+      && (ownerPin ? this.exitOwnerRefusal(slotNum, ownerPin) === null : token() === owner);
+    const save = () => db.setConfig(key, JSON.stringify(state));
+    const inspect = async () => {
+      if (!current() || await this.exitProcessIdentity(slotNum, paneId, deadline) !== process || !current()) return "changed";
+      // Visible screen only: a historical dialog in scrollback is not authority.
+      const screen = await this.runShell(`tmux capture-pane -t ${paneId} -p`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      if (await this.exitProcessIdentity(slotNum, paneId, deadline) !== process || !current()) return "changed";
+      return isExitConfirmationDialog(screen.stdout) ? "dialog" : "absent";
+    };
+    let seen = false;
+    let enterPresses = 0;
+    try {
+      while (state.attempts < 2 && current()) {
+        await sleep(350); // Allow the dialog to render after /exit or the prior Enter.
+        const screen = await inspect();
+        if (screen === "changed" || (screen === "absent" && seen)) break;
+        if (screen === "absent") continue; // Initial absence never finishes the render window.
+        seen = true;
+        state.attempts++;
+        save(); // Consume before any key: unknown key delivery cannot renew the budget.
+        if (!current()) break;
+        await this.runShell(`tmux send-keys -t ${paneId} 1`, { timeout: Math.min(1_000, deadline - Date.now()) });
+        if (await inspect() !== "dialog") break; // A manual answer/resume must not receive Enter.
+        await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: Math.min(1_000, deadline - Date.now()) });
+        enterPresses++;
+      }
+      state.done = true;
+      save();
+      db.logEvent(slotNum, "exit_dialog_confirmation", null, null, { episode, paneId, attempts: state.attempts, dialog_seen: seen, enter_presses: enterPresses });
+    } catch {
+      state.done = true;
+      save();
+      db.logEvent(slotNum, "exit_dialog_confirmation", null, null, { episode, paneId, attempts: state.attempts, dialog_seen: seen, enter_presses: enterPresses, outcome: "unknown_no_retry" });
+    }
+  }
+
   /** Activity evidence for a previously verified immutable pane, never a
    * numeric address or is-active.sh's error-as-idle exit status. Missing
    * capture/prompt or an unrecognized foreground color is unknown. */
@@ -1624,10 +1819,17 @@ export class TmuxRelay {
        * before the paste or the Enter never counts as proof of this submit.
        */
       allowNativeQueuedInput?: boolean;
+      /** Only an already-authorized exit-pending episode may answer its exit dialog. */
+      exitEpisode?: string;
+      /** Original consumed Stop owner, captured before deferred dispatch. */
+      exitOwnerPin?: ExitOwnerPin;
       timing?: { dwellMs?: number; pollMs?: number; payloadGraceMs?: number; payloadStableMs?: number; clearGraceMs?: number };
     },
   ): Promise<GuardedSlotDelivery> {
     if (!isValidRuntimeSlot(slotNum)) return { outcome: "refused_pre_effect", reason: "unknown_slot", paneId: null };
+    const ownerRefusal = () => opts.exitOwnerPin ? this.exitOwnerRefusal(slotNum, opts.exitOwnerPin) : null;
+    const finalCheck = (stage: "pre_paste" | "pre_enter") => ownerRefusal() ?? opts.finalCheck?.(stage) ?? null;
+    if (ownerRefusal()) return { outcome: "refused_pre_effect", reason: "slot_owner_changed", paneId: null };
     const identity = await verifyPaneIdentity(slotNum, this.runShell);
     if (!identity.ok) return { outcome: "refused_pre_effect", reason: `pane_identity:${identity.reason}`, paneId: null };
     const paneId = identity.snapshot.paneId;
@@ -1644,9 +1846,17 @@ export class TmuxRelay {
     const recheck = async (stage: "pre_paste" | "pre_enter"): Promise<string | null> => {
       const current = await verifyPaneIdentity(slotNum, this.runShell);
       if (!current.ok || current.snapshot.paneId !== paneId) return "pane_changed_since_observation";
-      return opts.recheck(stage, capture);
+      return ownerRefusal() ?? await opts.recheck(stage, capture) ?? ownerRefusal();
     };
     const result = await withSlotSendLock(slotNum, async (): Promise<GuardedSlotDelivery> => {
+      const exitOwner = !opts.exitOwnerPin && this.db ? JSON.stringify([
+        this.db.getEvents(slotNum, 1, "SessionStart")[0]?.id,
+        this.db.getEvents(slotNum, 1, "UserPromptSubmit")[0]?.id,
+        this.db.getSlot(slotNum)?.assignment_epoch,
+        this.db.getSlot(slotNum)?.active_turn_id,
+      ]) : "";
+      const exitProcess = command === "/exit" && opts.exitEpisode
+        ? await this.exitProcessIdentity(slotNum, paneId) : null;
       const prePaste = await recheck("pre_paste");
       if (prePaste) return { outcome: "refused_pre_effect", reason: prePaste, paneId };
       let effectAttempted = false;
@@ -1660,7 +1870,7 @@ export class TmuxRelay {
         const cleared = await this.clearComposerForSlash(paneId, async () => composerText(await capture()), command,
           async () => (await recheck("pre_paste"))
             ?? (await this.getSlotActivityState(slotNum, paneId) !== "idle" ? "pane_not_idle" : null),
-          () => opts.finalCheck?.("pre_paste") ?? null,
+          () => finalCheck("pre_paste"),
           () => { effectAttempted = true; }).catch(() => ({ composer: null, reason: "clear_check_failed" }));
         if (cleared.reason) return refuse(cleared.reason);
         prePasteComposer = cleared.composer;
@@ -1688,7 +1898,7 @@ export class TmuxRelay {
         const loadedComposer = composerText(loadedSnapshot);
         if (loadedComposer === null) return refuse("composer_unreadable");
         if (loadedComposer !== "") return refuse("composer_not_empty");
-        const prePasteFence = opts.finalCheck?.("pre_paste") ?? null;
+        const prePasteFence = finalCheck("pre_paste");
         if (prePasteFence) return refuse(prePasteFence);
         effectAttempted = true;
         await this.runShell(`tmux paste-buffer${opts.bracketedPaste ? " -p" : ""} -b ${bufName} -t ${paneId} -d`, { timeout: 3_000 });
@@ -1712,7 +1922,7 @@ export class TmuxRelay {
                 prePasteComposer,
               }) ? "composer_not_owned_by_send" : null;
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
-            preEnterRefusal = opts.finalCheck?.("pre_enter") ?? null;
+            preEnterRefusal = finalCheck("pre_enter");
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
             enterSent++;
             await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: 3_000 });
@@ -1756,6 +1966,11 @@ export class TmuxRelay {
           : { outcome: "refused_pre_effect", reason: "load_buffer_failed", paneId };
       } finally {
         await fs.unlink(tmpFile).catch(() => undefined);
+        if (enterSent > 0 && opts.exitEpisode && exitProcess) {
+          // Preserve the original /exit disposition, including UNKNOWN. This
+          // answers only its visible dialog; it never resends /exit.
+          this.scheduleExitConfirmation(slotNum, paneId, opts.exitEpisode, exitProcess, exitOwner, opts.exitOwnerPin);
+        }
       }
     });
     this.db?.logEvent(slotNum, "guarded_delivery", null, null, { ...result, command: command.slice(0, 200) });
