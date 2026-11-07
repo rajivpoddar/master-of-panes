@@ -19,7 +19,7 @@ architecture review. Dependencies are checked live before assignment.
 2. Inspect no-status/no-priority intake, blocked/deferred issues, and stale holds.
    Reverify blockers, owner and wake. Operational work goes to PM obligations.
 3. Run `python3 ~/.claude/scripts/backlog-triage.py promote --dry-run`.
-4. Launch PM's background `pm-backlog-promoter` for full triage plus contract
+4. Launch PM's background `pm-triage-agent` for full triage plus contract
    repair in the SAME run, regardless of pool size if eligible P0-P2 remain.
 5. Apply valid candidates with `python3 ~/.claude/scripts/backlog-triage.py
    promote --apply --issues N ...`. The optional hash-pinned PM decision manifest

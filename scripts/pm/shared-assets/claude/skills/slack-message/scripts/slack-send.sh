@@ -454,6 +454,62 @@ if [ -n "$THREAD_TS" ] && [ "$CHANNEL_EXPLICIT" = false ]; then
   exit 2
 fi
 
+# Verify the requested parent in this exact channel before constructing or
+# sending the message. Lookup failures are fail-open; confirmed mismatches refuse.
+if [ -n "$THREAD_TS" ]; then
+  THREAD_CHECK=$(curl -sS --max-time 5 -G "https://slack.com/api/conversations.replies" \
+    --config <(printf 'header = "Authorization: Bearer %s"\n' "${SLACK_BOT_TOKEN}") \
+    --data-urlencode "channel=${CHANNEL}" \
+    --data-urlencode "ts=${THREAD_TS}" \
+    --data-urlencode "limit=1" 2>/dev/null) || THREAD_CHECK=""
+  if [ -z "$THREAD_CHECK" ]; then
+    printf 'SLACK_SEND_THREAD_CHECK_UNKNOWN channel=%s thread=%s reason=transport_or_timeout\n' "$CHANNEL" "$THREAD_TS" >&2
+  else
+    THREAD_CHECK_RESULT=$(python3 -c '
+import json, sys
+channel, thread = sys.argv[1:]
+try:
+    result = json.load(sys.stdin)
+except Exception:
+    print("unknown")
+    raise SystemExit
+if not isinstance(result, dict):
+    print("unknown")
+elif result.get("error") in ("thread_not_found", "message_not_found"):
+    print("refuse")
+elif result.get("ok") is not True:
+    # Missing scope and channel access errors may vary by conversation type;
+    # preserve legitimate replies when Slack cannot authorize this read.
+    print("unknown")
+else:
+    matches = [m for m in result.get("messages", [])
+               if isinstance(m, dict) and m.get("ts") == thread]
+    if not matches:
+        print("refuse")
+    else:
+        parent = matches[0]
+        canonical = parent.get("thread_ts")
+        if canonical and canonical != parent.get("ts"):
+            print("reply:" + canonical)
+        else:
+            print("pass")
+' "$CHANNEL" "$THREAD_TS" <<< "$THREAD_CHECK")
+    case "$THREAD_CHECK_RESULT" in
+      refuse)
+        printf 'SLACK_SEND_REFUSED channel=%s thread=%s error=thread_parent_not_in_channel\n' "$CHANNEL" "$THREAD_TS" >&2
+        exit 1
+        ;;
+      unknown)
+        printf 'SLACK_SEND_THREAD_CHECK_UNKNOWN channel=%s thread=%s reason=slack_check_unavailable\n' "$CHANNEL" "$THREAD_TS" >&2
+        ;;
+      reply:*)
+        THREAD_TS="${THREAD_CHECK_RESULT#reply:}"
+        printf 'SLACK_SEND_THREAD_PARENT_NORMALIZED channel=%s thread=%s\n' "$CHANNEL" "$THREAD_TS" >&2
+        ;;
+    esac
+  fi
+fi
+
 # Get message text
 if [ "$FROM_STDIN" = true ]; then
   # -f means "read the message body from STDIN" and takes NO argument.

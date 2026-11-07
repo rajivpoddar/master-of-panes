@@ -141,7 +141,7 @@ python3 /Users/rajiv/.claude/scripts/pm-ops.py snapshot --surface heartbeat --li
 
 Needs a human (one `_Ops:_` thread reply each):
 - `READY_POOL_LOW` / `READY_POOL_CONTRACT_REPAIR_REQUIRED` → PM launches
-  `pm-backlog-promoter`.
+  `pm-triage-agent`.
 - A probe or script exit ≠ 0.
 
 ### Session-age policy (unchanged contract)

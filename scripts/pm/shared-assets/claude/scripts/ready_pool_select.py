@@ -144,15 +144,53 @@ def prio_name(rank: int) -> str:
     return f"P{rank}" if rank in PRIORITY_RANK.values() else "P?"
 
 
+SUB_TO_BLOCKER = {"sub:waiting-on-issue": "pm-blocked:dependency", "sub:pm-gate": "pm-blocked:pm-gate",
+                  "sub:external": "pm-blocked:external", "sub:decision": "pm-blocked:decision",
+                  "sub:infra": "pm-blocked:infra"}
+
+
+def issue_holds(issue: dict[str, Any]) -> set[str]:
+    labels = _labels(issue)
+    body = issue.get("body") or ""
+    raw = ready_pool_value(body, "holds")
+    holds = set()
+    for entry in re.split(r"[;,]", raw):
+        value = entry.strip().lstrip("- ")
+        if value:
+            holds.add(value if value.startswith("pm-blocked:") else "pm-blocked:" + value.removeprefix("sub:"))
+    holds |= {SUB_TO_BLOCKER[l] for l in labels & SUB_TO_BLOCKER.keys()}
+    holds |= {l for l in labels if l.startswith("pm-blocked:")}
+    return holds
+
+
 def classify(issue: dict[str, Any], requested_class: str | None = None) -> str | None:
     """Return the selection class for an eligible issue, else None."""
     labels = _labels(issue)
-    if issue.get("state", "OPEN").upper() != "OPEN":
+    holds = issue_holds(issue)
+    status = {l for l in labels if l.startswith("status:")}
+    subs = {l for l in labels if l.startswith("sub:")}
+    declared_holds = ready_pool_value(issue.get("body") or "", "holds")
+    declared = {entry.strip().lstrip("- ") for entry in re.split(r"[;,]", declared_holds) if entry.strip()}
+    declared = {value if value.startswith("pm-blocked:") else "pm-blocked:" + value.removeprefix("sub:") for value in declared}
+    mapped_subs = {SUB_TO_BLOCKER[sub] for sub in subs if sub in SUB_TO_BLOCKER}
+    if declared_holds and mapped_subs and not mapped_subs <= declared:
         return None
-    excluded = EXCLUDE_LABELS - ({"status:blocked"} if "pm-blocked:dependency" in labels else set())
+    if issue.get("state", "OPEN").upper() != "OPEN" or len(status) != 1 or len(subs) > 1:
+        return None
+    current_status = next(iter(status))
+    if subs and ((current_status == "status:todo" and subs != {"sub:waiting-on-issue"})
+                 or (current_status == "status:blocked" and not subs <= {"sub:pm-gate", "sub:external", "sub:decision", "sub:infra"})
+                 or (current_status == "status:backlog" and not subs <= {"sub:needs-contract", "sub:pm-owned"})
+                 or current_status not in {"status:todo", "status:blocked", "status:backlog"}):
+        return None
+    if current_status == "status:blocked" and holds == {"pm-blocked:dependency"}:
+        return None
+    if current_status == "status:todo" and any(h != "pm-blocked:dependency" for h in holds):
+        return None
+    excluded = EXCLUDE_LABELS - ({"status:blocked"} if holds == {"pm-blocked:dependency"} else set())
     if labels & excluded or any(l.startswith("slot:") for l in labels):
         return None
-    if blocking_labels(labels) and "P0" not in labels and "pm-blocked:dependency" not in labels:
+    if holds and holds != {"pm-blocked:dependency"} and "P0" not in labels:
         return None
     if ready_pool_value(issue.get("body") or "", "claimable_slot_type").lower() in NON_SLOT_TYPES:
         return None
@@ -160,13 +198,13 @@ def classify(issue: dict[str, Any], requested_class: str | None = None) -> str |
         return requested_class
     if labels & REWORK_LABELS:
         return "rework"
-    if "status:todo" in labels or "pm-blocked:dependency" in labels:
+    if current_status == "status:todo":
         return "new_issue"
     return None
 
 
-def blocking_labels(labels: set[str]) -> list[str]:
-    return sorted(l for l in labels if l.startswith("pm-blocked:"))
+def blocking_labels(labels: set[str], issue: dict[str, Any] | None = None) -> list[str]:
+    return sorted(issue_holds(issue) if issue is not None else {l for l in labels if l.startswith("pm-blocked:")})
 
 
 def is_gated(c: dict[str, Any]) -> bool:
@@ -525,8 +563,8 @@ def candidate(issue: dict[str, Any], cls: str) -> dict[str, Any]:
         "gate": ready_pool_value(body, "gate"),
         "blockers": blockers,
         "wake_condition": wake,
-        "blocking_labels": blocking_labels(labels),
-        "issue_body": body if "pm-blocked:dependency" in labels else "",
+        "blocking_labels": blocking_labels(labels, issue),
+        "issue_body": body if "pm-blocked:dependency" in labels or "sub:waiting-on-issue" in labels else "",
         "comment_text": issue.get("_dependency_comments", ""),
         **({"pr": issue["pr"]} if issue.get("pr") else {}),
     }

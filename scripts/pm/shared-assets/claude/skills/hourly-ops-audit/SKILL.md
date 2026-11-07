@@ -661,7 +661,7 @@ already superseded, then archives the file or creates `<file>.resolved`. Hourly
 audit ignores `*.resolved`, `*.processed`, `*-processed-*`, and `/tmp/resolved/*`;
 leave no acted-on live file behind.
 
-The hourly detector launches one PM background `pm-backlog-promoter` when
+The hourly detector launches one PM background `pm-triage-agent` when
 READY_POOL_LOW or CONTRACT_REPAIR_REQUIRED fires, or when it finds eligible
 P0-P2, a resolved prior park, or untriaged P0/P1 intake, REGARDLESS of pool size.
 Use `mode=refill-ready-pool` or `mode=repair-ready-pool issues=#...`; each mode
