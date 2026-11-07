@@ -34,10 +34,10 @@ function route(path: string, method: string, deps: Record<string, unknown>) {
 const context = (body: unknown) => ({ req: { json: async () => body }, json: (b: unknown, status = 200) => ({ body: b, status }) });
 
 test("launcher contract: cliproxy default; direct uses launch-pm.sh; deepseek stays on the proxy", () => {
-  assert.equal(pmFreshLaunchCommand("opus", "direct"), `bash ${SCRIPTS}/launch-pm.sh --model claude-opus-5-5`);
-  assert.equal(pmFreshLaunchCommand("claude-opus-5-5", "direct"), `bash ${SCRIPTS}/launch-pm.sh --model claude-opus-5-5`);
-  assert.equal(pmFreshLaunchCommand("deepseek", "direct"), `bash ${SCRIPTS}/launch-pm-cliproxy.sh --model deepseek`);
-  assert.equal(pmFreshLaunchCommand("opus"), `bash ${SCRIPTS}/launch-pm-cliproxy.sh --model claude-opus-5-5`);
+  assert.equal(pmFreshLaunchCommand("opus", "direct"), `bash ${SCRIPTS}/launch-pm.sh --via direct --model claude-opus-5-5`);
+  assert.equal(pmFreshLaunchCommand("claude-opus-5-5", "direct"), `bash ${SCRIPTS}/launch-pm.sh --via direct --model claude-opus-5-5`);
+  assert.equal(pmFreshLaunchCommand("deepseek", "direct"), `bash ${SCRIPTS}/launch-pm.sh --via cliproxy --model deepseek`);
+  assert.equal(pmFreshLaunchCommand("opus"), `bash ${SCRIPTS}/launch-pm.sh --via cliproxy --model claude-opus-5-5`);
   assert.equal(RESTART_COMMANDS[0], pmFreshLaunchCommand("opus", "cliproxy"));
   for (const launcher of ["cliproxy", "direct"] as const) assert.doesNotMatch(pmFreshLaunchCommand("opus", launcher), /--continue/);
   const db = database();
@@ -46,7 +46,7 @@ test("launcher contract: cliproxy default; direct uses launch-pm.sh; deepseek st
     db.setConfig(PM_LAUNCHER_CONFIG_KEY, "bogus");
     assert.equal(pmConfiguredLauncher(db), "cliproxy");
     db.setConfig(PM_LAUNCHER_CONFIG_KEY, "direct");
-    assert.deepEqual(pmLaunchPlan(db), { launcher: "direct", model: "opus", command: `bash ${SCRIPTS}/launch-pm.sh --model claude-opus-5-5` });
+    assert.deepEqual(pmLaunchPlan(db), { launcher: "direct", model: "opus", command: `bash ${SCRIPTS}/launch-pm.sh --via direct --model claude-opus-5-5` });
   } finally { db.close(); }
 });
 
@@ -59,7 +59,7 @@ test("POST /pm-launch-config switches the backend for the NEXT restart and valid
     assert.equal(get(context(null)).body.launcher, "cliproxy");
     const ok = await post(context({ launcher: "direct" }));
     assert.equal(ok.status, 200);
-    assert.equal(ok.body.command, `bash ${SCRIPTS}/launch-pm.sh --model claude-opus-5-5`);
+    assert.equal(ok.body.command, `bash ${SCRIPTS}/launch-pm.sh --via direct --model claude-opus-5-5`);
     assert.equal(ok.body.effective, "next PM restart");
     assert.equal(db.getConfig(PM_LAUNCHER_CONFIG_KEY), "direct");
     for (const bad of [{}, { launcher: "proxy" }, { model: "x; touch /tmp/pwn" }, { model: 5 }]) {
@@ -67,7 +67,7 @@ test("POST /pm-launch-config switches the backend for the NEXT restart and valid
     }
     assert.equal(db.getConfig(PM_LAUNCHER_CONFIG_KEY), "direct", "a refused request mutates nothing");
     assert.equal((await post(context({ launcher: "cliproxy", model: "deepseek" }))).body.command,
-      `bash ${SCRIPTS}/launch-pm-cliproxy.sh --model deepseek`);
+      `bash ${SCRIPTS}/launch-pm.sh --via cliproxy --model deepseek`);
     assert.equal(db.getEvents(0, 5, "pm_launch_config_set").length, 2);
   } finally { db.close(); }
 });

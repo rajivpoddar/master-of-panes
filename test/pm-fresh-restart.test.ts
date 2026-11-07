@@ -21,25 +21,33 @@ type PaneState = "busy" | "idle" | "exiting" | "printing" | "shell" | "booting" 
 function harness(options: { state?: PaneState; exitAfterPolls?: number; bootSessionStart?: boolean; neverBoots?: boolean } = {}) {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
   const pane = { state: options.state ?? "exiting" as PaneState, polls: 0, typed: [] as string[], shell: [] as string[], sends: [] as string[],
-    pid: "500", child: "501", onPoll: undefined as undefined | ((polls: number) => void) };
+    pid: "500", child: "501", onPoll: undefined as undefined | ((polls: number) => void),
+    pgrepError: false, failPaste: false, onEnter: undefined as undefined | (() => void), bootPanePid: "" };
   const order: string[] = [];
   const runShell = async (command: string) => {
     pane.shell.push(command);
     let stdout = "";
-    if (command.startsWith("tmux display-message") && command.includes("#{pane_pid}")) stdout = `${pane.pid}\n`;
+    if (command.startsWith("tmux display-message") && command.includes("#{pane_pid}")) stdout = `${pane.pid}|/dev/ttys009\n`;
     else if (command.startsWith("tmux display-message")) stdout = `%7|${PM_PATH}\n`;
-    else if (command.startsWith("pgrep -P")) {
+    else if (command.startsWith("ps -t") && pane.pgrepError) throw Object.assign(new Error("probe failed"), { code: 2 });
+    else if (command.startsWith("ps -t")) {
+      // The pane terminal listing: the pane shell, plus its Claude child when alive.
       const alive = !["shell", "printing", "booting"].includes(pane.state);
-      if (!alive || !pane.child) throw new Error("no child");
-      stdout = `${pane.child}\n`;
+      stdout = `${pane.pid} 1 -zsh\n` + (alive && pane.child ? `${pane.child} ${pane.pid} claude --model claude-opus-5-5\n` : "");
     }
     else if (command.startsWith("git -C")) stdout = `${PM_PATH}\n`;
     else if (command.startsWith("tmux respawn-pane")) { pane.state = "shell"; pane.pid = "600"; order.push("respawn"); }
-    else if (command.startsWith("tmux send-keys -l")) { pane.typed.push(command); order.push("type"); }
+    else if (command.startsWith("tmux send-keys -l")) {
+      if (pane.failPaste) throw new Error("paste timed out");
+      pane.typed.push(command); order.push("type");
+    }
     else if (command.startsWith("tmux send-keys") && command.endsWith(" Enter")) {
+      pane.onEnter?.();
       order.push("enter");
       if (pane.state === "shell" && pane.typed.length) {
         pane.state = options.neverBoots ? "booting" : "fresh";
+        if (!options.neverBoots) pane.child = "502"; // the launched Claude is a NEW child of the same shell
+        if (pane.bootPanePid) pane.pid = pane.bootPanePid;
         if (!options.neverBoots && options.bootSessionStart !== false) {
           db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "fresh-session", cwd: PM_PATH });
         }
@@ -97,8 +105,8 @@ function armPmOnlyEpisode(db: MoPDatabase, prompt?: string, delivery = "delivere
 const launchTyped = (pane: { typed: string[] }) => pane.typed.map((cmd) => cmd.replace(/^tmux send-keys -l -t %7 /, ""));
 
 test("launcher contract: fresh start, configured model, default opus, never --continue", () => {
-  assert.equal(pmFreshLaunchCommand("opus"), "bash /Users/rajiv/.claude/scripts/launch-pm-cliproxy.sh --model claude-opus-5-5");
-  assert.equal(pmFreshLaunchCommand("deepseek"), "bash /Users/rajiv/.claude/scripts/launch-pm-cliproxy.sh --model deepseek");
+  assert.equal(pmFreshLaunchCommand("opus"), "bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5");
+  assert.equal(pmFreshLaunchCommand("deepseek"), "bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model deepseek");
   assert.equal(pmFreshLaunchCommand("bad; rm -rf /"), pmFreshLaunchCommand("opus"), "malformed model never reaches the shell");
   assert.equal(RESTART_COMMANDS[0], pmFreshLaunchCommand("opus"));
   assert.doesNotMatch(RESTART_COMMANDS[0], /--continue/);
@@ -131,7 +139,7 @@ for (const prompt of [undefined, "Read /saved/resume.md and resume."]) {
       assert.equal(result.success, true, result.reason);
       // Nothing was typed before the pane showed the shell prompt.
       assert.ok(h.pane.polls >= 4);
-      assert.deepEqual(launchTyped(h.pane), [`'cd '\\''${PM_PATH}'\\'' && bash /Users/rajiv/.claude/scripts/launch-pm-cliproxy.sh --model claude-opus-5-5'`]);
+      assert.deepEqual(launchTyped(h.pane), [`'cd '\\''${PM_PATH}'\\'' && bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5'`]);
       assert.equal(h.pane.shell.some((cmd) => cmd.includes("--continue")), false);
       assert.deepEqual(h.pane.sends, [prompt ?? PM_RESTART_CONTINUATION_PROMPT]);
       assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
@@ -152,7 +160,7 @@ test("configured deepseek model is passed to the launcher", async () => {
     h.db.setConfig(PM_MODEL_CONFIG_KEY, "deepseek");
     const result = await h.health.restartPMFresh("crash");
     assert.equal(result.success, true, result.reason);
-    assert.match(launchTyped(h.pane)[0], /launch-pm-cliproxy\.sh --model deepseek'$/);
+    assert.match(launchTyped(h.pane)[0], /launch-pm\.sh --via cliproxy --model deepseek'$/);
   } finally { h.db.close(); }
 });
 
@@ -295,7 +303,7 @@ test("pm_launcher=direct: the same fresh restart types launch-pm.sh, then one co
     h.db.setConfig("pm_launcher", "direct");
     const result = await h.health.restartPMFresh("crash");
     assert.equal(result.success, true, result.reason);
-    assert.match(launchTyped(h.pane)[0], /&& bash \/Users\/rajiv\/\.claude\/scripts\/launch-pm\.sh --model claude-opus-5-5'$/);
+    assert.match(launchTyped(h.pane)[0], /&& bash \/Users\/rajiv\/\.claude\/scripts\/launch-pm\.sh --via direct --model claude-opus-5-5'$/);
     assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
     assert.equal(JSON.parse(h.db.getEvents(0, 1, "pm_restart_started")[0].payload).launcher, "direct");
   } finally { h.db.close(); }
@@ -367,5 +375,102 @@ test("an exit restart writes the durable launch record that binds its boot", asy
     assert.equal(record.episode, episode);
     assert.equal(record.pane_id, "%7");
     assert.ok(record.launch_event_id > 0);
+  } finally { h.db.close(); }
+});
+
+// CTO REVISE ts 1794019803.549589: a planned launch is not an issued launch, and
+// an unknown process identity never passes the kill guard.
+test("a failed paste leaves the launch UNKNOWN; it is never resent and its record never takes a continuation", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    h.pane.failPaste = true;
+    const first = await h.health.restartPMFresh("exit", episode);
+    assert.match(first.reason, /launcher send failed/);
+    assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).status, "unknown");
+    h.pane.failPaste = false;
+    (h.health as any).lastRestart.clear();
+    const second = await h.health.restartPMFresh("exit", episode);
+    assert.equal(second.reason, "uncertain_launch_no_resend");
+    assert.deepEqual(h.pane.typed, [], "no second launcher");
+    // A PM started by hand afterwards never receives the old continuation.
+    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "manual", cwd: PM_PATH });
+    await h.health.reconcilePMRestartContinuation();
+    assert.deepEqual(h.pane.sends, []);
+  } finally { h.db.close(); }
+});
+
+test("a refused Enter after the typed launcher is UNKNOWN (not refused) and blocks a resend", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    let typedSeen = false;
+    const origLog = h.db.getEvents.bind(h.db);
+    // A successor PM boot lands between the text and the Enter keystroke.
+    (h.db as any).getEvents = (...args: any[]) => {
+      if (!typedSeen && h.pane.typed.length) {
+        typedSeen = true;
+        h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "successor", cwd: PM_PATH });
+      }
+      return origLog(...args);
+    };
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.reason, "pm_session_changed");
+    assert.equal(h.order.includes("enter"), false);
+    assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).status, "unknown");
+  } finally { h.db.close(); }
+});
+
+test("a MoP crash after a PLANNED launch: a later boot is not bound (first-in-time is not ownership)", async () => {
+  const h = harness({ state: "fresh" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    h.db.setConfig("pm_restart_launch", JSON.stringify({
+      episode, launch_event_id: h.db.getEvents(0, 1)[0].id, pane_id: "%7", command: "x", status: "planned", pane_pid: "500",
+    }));
+    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "manual", cwd: PM_PATH });
+    await h.health.reconcilePMRestartContinuation();
+    assert.deepEqual(h.pane.sends, []);
+    assert.equal(JSON.parse(h.db.getEvents(0, 1, "pm_restart_continuation_uncertain")[0].payload).reason, "boot_not_bound_to_mop_launch");
+  } finally { h.db.close(); }
+});
+
+for (const shape of ["probe_error", "both_unknown"] as const) {
+  test(`unknown process identity never passes the kill guard (${shape})`, async () => {
+    const h = harness({ state: "idle" });
+    try {
+      const episode = armPmOnlyEpisode(h.db);
+      if (shape === "both_unknown") h.pane.pgrepError = true; // pin AND current probes fail: two nulls never match
+      else h.pane.onPoll = (polls) => { if (polls === 2) h.pane.pgrepError = true; };
+      const result = await h.health.restartPMFresh("exit", episode);
+      assert.equal(result.reason, "no_force:pm_process_unknown");
+      assert.equal(h.pane.shell.some((cmd) => cmd.startsWith("tmux respawn-pane")), false);
+    } finally { h.db.close(); }
+  });
+}
+
+test("a boot whose Claude is not a child of the launched shell is unowned: no continuation", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    h.pane.bootPanePid = "900"; // a different shell/pane process produced the Claude
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.reason, "launch_boot_process_unowned");
+    assert.deepEqual(h.pane.sends, []);
+    assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).status, "issued");
+  } finally { h.db.close(); }
+});
+
+test("the success path records planned -> issued -> booted with the owned process", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, true, result.reason);
+    const record = JSON.parse(h.db.getConfig("pm_restart_launch")!);
+    assert.equal(record.status, "booted");
+    assert.equal(record.process, "500:502");
+    assert.equal(record.pane_pid, "500");
+    assert.equal(record.boot_event_id, h.db.getEvents(0, 1, "SessionStart")[0].id);
   } finally { h.db.close(); }
 });

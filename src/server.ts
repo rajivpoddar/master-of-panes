@@ -68,7 +68,8 @@ import { StuckDetector } from "./stuck.js";
 import { OpsAuditScheduler } from "./opsAudit.js";
 import { PM_OPS_HOURLY_REPORT_DEPS, PMCadenceScheduler } from "./pmCadence.js";
 import { P0EscalationWatcher } from "./p0EscalationWatch.js";
-import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS, pmLaunchPlan, PM_LAUNCHER_CONFIG_KEY, PM_MODEL_CONFIG_KEY } from "./health.js";
+import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS, pmLaunchPlan, PM_LAUNCHER_CONFIG_KEY, PM_MODEL_CONFIG_KEY,
+  pmFreshLaunchCommand, pmConfiguredModel, pmConfiguredLauncher } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
 import {
   clearOwnedRefusedPasteComposer,
@@ -1394,7 +1395,7 @@ app.post("/exit-pending", async (c) => {
 /**
  * PM restart launch config (Rajiv DM D0AMF0XE6TS thread 1794015303.639509,
  * ts 1794018254.090169: "for direct claude, it has to use launch-pm.sh").
- * `launcher`: cliproxy (default, launch-pm-cliproxy.sh) | direct (launch-pm.sh);
+ * `launcher`: cliproxy (default) | direct, passed as `launch-pm.sh --via <launcher>`;
  * `model`: opus (default) | deepseek (cliproxy only) | a claude-* id.
  * Takes effect at the NEXT PM restart; never restarts, holds or gates the PM.
  */
@@ -2089,9 +2090,14 @@ app.post("/slots/:slotNum/respawn", async (c) => {
     // RESTART_COMMANDS[slot] looks like `bash /abs/path/launch-slot-N.sh --continue`.
     // Rebuild as `bash /abs/path/launch-slot-N.sh [model] [--continue]` so the slot's
     // shared launcher lib can switch env vars based on the model arg.
-    const baseCmd = restartCmd.replace(" --continue", "");
+    // PM (slot 0): the single launcher with an explicit --via from MoP config
+    // (pm_launcher), so this respawn can never go direct (or proxy) silently;
+    // a requested model becomes --model, never a positional prompt argument.
+    const baseCmd = slotNum === 0
+      ? pmFreshLaunchCommand(model ?? pmConfiguredModel(db), pmConfiguredLauncher(db))
+      : restartCmd.replace(" --continue", "");
     const parts = [baseCmd];
-    if (model) parts.push(model);
+    if (model && slotNum !== 0) parts.push(model);
     if (continueSession) parts.push("--continue");
     const launchCmd = parts.join(" ");
     const launchEventId = db.getEvents(slotNum, 1)[0]?.id ?? 0;

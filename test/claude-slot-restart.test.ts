@@ -32,6 +32,6 @@ test("numbered slot auto-restarts preserve the Ornith context/output contract", 
 test("PM restart keeps CLIProxy routing and launches fresh with the default opus model", () => {
   assert.equal(
     RESTART_COMMANDS[0],
-    "bash /Users/rajiv/.claude/scripts/launch-pm-cliproxy.sh --model claude-opus-5-5",
+    "bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5",
   );
 });

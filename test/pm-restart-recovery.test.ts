@@ -56,7 +56,9 @@ for (const session of [undefined, "", "old"]) {
 test("startup health scan recovers only waiting delivery bound to the episode's successor boot", async () => {
   const bin = mkdtempSync(join(tmpdir(), "mop-recovery-test-"));
   const oldPath = process.env.PATH;
-  writeFileSync(join(bin, "tmux"), `#!/bin/sh\nprintf '%s\\n' '%40|${cwd}'\n`, { mode: 0o700 });
+  // pane_pid probes answer the owned process identity (CTO REVISE ts 1794019803.549589).
+  writeFileSync(join(bin, "tmux"), `#!/bin/sh\ncase "$*" in *pane_pid*) echo '4000|/dev/ttys040';; *) printf '%s\\n' '%40|${cwd}';; esac\n`, { mode: 0o700 });
+  writeFileSync(join(bin, "ps"), "#!/bin/sh\nprintf '4000 1 -zsh\\n4001 4000 claude --model claude-opus-5-5\\n'\n", { mode: 0o700 });
   writeFileSync(join(bin, "git"), `#!/bin/sh\nprintf '%s\\n' '${cwd}'\n`, { mode: 0o700 });
   process.env.PATH = `${bin}:${oldPath}`;
   try {
@@ -74,12 +76,15 @@ test("startup health scan recovers only waiting delivery bound to the episode's 
           const exitId = db.logEvent(0, "exit_pending_triggered", "Stop", null, {
             episode: db.getExitStatus().episode, delivery: "delivered",
           });
-          // MoP's own fresh launch (CTO REVISE ts 1794018596.287469) records the
-          // launch that binds the ONE boot allowed to take the continuation.
-          db.setConfig("pm_restart_launch", JSON.stringify({
-            episode: db.getExitStatus().episode, launch_event_id: Number(exitId ?? db.getEvents(0, 1)[0].id), pane_id: "%40", command: "launch",
-          }));
-          if (recovered) boot();
+          // MoP's own fresh launch (CTO REVISE ts 1794018596.287469 / 1794019803.549589)
+          // records the launch and, once its owned Claude process booted, binds that boot.
+          if (recovered) {
+            const bootId = boot();
+            db.setConfig("pm_restart_launch", JSON.stringify({
+              episode: db.getExitStatus().episode, launch_event_id: exitId, pane_id: "%40", command: "launch",
+              status: "booted", pane_pid: "4000", boot_event_id: bootId, process: "4000:4001",
+            }));
+          }
           // New instance models loss of every in-memory post-restart timer.
           const health = new ProcessHealthChecker(db, {
             // Successor dev panes are working: the idle-prompt dev exit never fires.
@@ -120,7 +125,9 @@ test("uncertain /exit continuation matrix: watchdog restart settles once; boot a
   const { pmExitInCustody, PM_EXIT_CONSUMED_EPISODE_KEY } = await import("../src/pmHandoffExit.js");
   const bin = mkdtempSync(join(tmpdir(), "mop-recovery-test-"));
   const oldPath = process.env.PATH;
-  writeFileSync(join(bin, "tmux"), `#!/bin/sh\nprintf '%s\\n' '%40|${cwd}'\n`, { mode: 0o700 });
+  // pane_pid probes answer the owned process identity (CTO REVISE ts 1794019803.549589).
+  writeFileSync(join(bin, "tmux"), `#!/bin/sh\ncase "$*" in *pane_pid*) echo '4000|/dev/ttys040';; *) printf '%s\\n' '%40|${cwd}';; esac\n`, { mode: 0o700 });
+  writeFileSync(join(bin, "ps"), "#!/bin/sh\nprintf '4000 1 -zsh\\n4001 4000 claude --model claude-opus-5-5\\n'\n", { mode: 0o700 });
   writeFileSync(join(bin, "git"), `#!/bin/sh\nprintf '%s\\n' '${cwd}'\n`, { mode: 0o700 });
   process.env.PATH = `${bin}:${oldPath}`;
   const configRows = (db: any) => JSON.stringify(db.db.prepare("SELECT key, value FROM config WHERE key LIKE 'exit\\_%' ESCAPE '\\' OR key LIKE 'pm\\_exit\\_%' ESCAPE '\\' ORDER BY key").all());
@@ -143,10 +150,12 @@ test("uncertain /exit continuation matrix: watchdog restart settles once; boot a
           db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "pm-new", cwd });
         } else {
           db.logEvent(0, "process_dead", null, null, { pane_command: "zsh" });
+          const launchId = db.getEvents(0, 1)[0].id;
+          const bootId = db.logEvent(0, "SessionStart", "SessionStart", null, { source: "resume", session_id: "pm", cwd });
           db.setConfig("pm_restart_launch", JSON.stringify({
-            episode, launch_event_id: db.getEvents(0, 1)[0].id, pane_id: "%40", command: "launch-pm-cliproxy.sh --model claude-opus-5-5",
+            episode, launch_event_id: launchId, pane_id: "%40", command: "launch-pm.sh --via cliproxy --model claude-opus-5-5",
+            status: "booted", pane_pid: "4000", boot_event_id: bootId, process: "4000:4001",
           }));
-          db.logEvent(0, "SessionStart", "SessionStart", null, { source: "resume", session_id: "pm", cwd });
           db.logEvent(0, "agent_booted", null, null, { command: "claude" });
           db.logEvent(0, "process_restarted", null, null, { command: "launch-pm --continue" });
         }

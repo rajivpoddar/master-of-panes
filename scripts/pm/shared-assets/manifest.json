@@ -971,7 +971,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-daily-pm-restart",
-      "sha256": "b0c43a799ea5fe5f1cca58727ad598be46045dd0af5a3102439174ea3d4ecf74",
+      "sha256": "a68a578a65909de3c25c3647ae6d3d710c306630ae7de63ad7a181cf53d276b9",
       "source_path": "claude/skills/daily-pm-restart/SKILL.md"
     },
     {

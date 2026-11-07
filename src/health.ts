@@ -60,10 +60,10 @@ export const PM_MODEL_CONFIG_KEY = "pm_model";
 /** Rajiv switched the PM pane to Opus (DM D0AMF0XE6TS ts 1794015590.986679). */
 export const PM_DEFAULT_MODEL = "opus";
 /**
- * Config value -> launcher `--model` argument. launch-pm-cliproxy.sh accepts
- * `--model <proxy-alias>` and maps `deepseek` itself; `opus` is pinned to the
- * launcher's own default id so Claude Code never resolves a bare alias the
- * CLIProxy route does not serve.
+ * Config value -> launcher `--model` argument. launch-pm.sh accepts
+ * `--model <alias|id>`; the cliproxy route maps `deepseek` itself. `opus` is
+ * pinned to the launcher's default id so Claude Code never resolves a bare
+ * alias the CLIProxy route does not serve.
  */
 const PM_MODEL_LAUNCH_ARGS: Record<string, string> = {
   opus: "claude-opus-5-5",
@@ -81,12 +81,16 @@ export function pmConfiguredModel(db: Pick<MoPDatabase, "getConfig">): string {
 }
 
 /**
- * PM backend (Rajiv DM D0AMF0XE6TS thread 1794015303.639509, ts 1794018254.090169:
- * "for direct claude, it has to use launch-pm.sh"). MoP config `pm_launcher`:
- * - `cliproxy` (default): launch-pm-cliproxy.sh, the shared CLIProxyAPI route;
- * - `direct`: launch-pm.sh, direct Claude (Max subscription, no proxy).
- * The model stays a separate key (`pm_model`). A non-Claude model (deepseek)
- * exists only on the proxy, so `direct` with such a model keeps cliproxy.
+ * PM backend. One launcher, `launch-pm.sh --via cliproxy|direct` (Rajiv DM
+ * D0AMF0XE6TS thread 1794015303.639509, ts 1794018254.090169: "for direct
+ * claude, it has to use launch-pm.sh"; ts 1794019433.856239: "can we combine
+ * the launcher script into one and make cliproxy or direct a param").
+ * MoP config `pm_launcher`:
+ * - `cliproxy` (default): the shared CLIProxyAPI route;
+ * - `direct`: direct Claude (Max subscription, no proxy).
+ * `--via` is ALWAYS passed explicitly, so no restart path can go direct by
+ * omission. The model stays a separate key (`pm_model`). A non-Claude model
+ * (deepseek) exists only on the proxy, so `direct` with it keeps cliproxy.
  * The fresh-start + continuation contract is identical for both.
  */
 export const PM_LAUNCHER_CONFIG_KEY = "pm_launcher";
@@ -94,10 +98,6 @@ export const PM_LAUNCHER_CONFIG_KEY = "pm_launcher";
 export const PM_RESTART_LAUNCH_KEY = "pm_restart_launch";
 export type PmLauncher = "cliproxy" | "direct";
 export const PM_DEFAULT_LAUNCHER: PmLauncher = "cliproxy";
-const PM_LAUNCHER_SCRIPTS: Record<PmLauncher, string> = {
-  cliproxy: "launch-pm-cliproxy.sh",
-  direct: "launch-pm.sh",
-};
 
 /** The configured PM backend; an absent or unknown value keeps cliproxy. */
 export function pmConfiguredLauncher(db: Pick<MoPDatabase, "getConfig">): PmLauncher {
@@ -111,7 +111,7 @@ export function pmFreshLaunchCommand(model: string = PM_DEFAULT_MODEL, launcher:
   const safe = /^[A-Za-z0-9._-]{1,64}$/.test(model) ? model : PM_DEFAULT_MODEL;
   const arg = PM_MODEL_LAUNCH_ARGS[safe] ?? safe;
   const effective: PmLauncher = launcher === "direct" && arg.startsWith("claude-") ? "direct" : "cliproxy";
-  return `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/${PM_LAUNCHER_SCRIPTS[effective]} --model ${arg}`;
+  return `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-pm.sh --via ${effective} --model ${arg}`;
 }
 
 /** The launch the next PM restart will use, from MoP config. */
@@ -488,23 +488,50 @@ export class ProcessHealthChecker {
     return run;
   }
 
-  /** Pane pid + direct Claude child pid of the PM pane (read-only process identity). */
+  /**
+   * Pane pid + direct Claude child pid of the PM pane (read-only process
+   * identity): "<pane>:<child>", "<pane>:" when the pane's terminal listing
+   * provably has no Claude child of the pane shell, or null when the identity is
+   * UNKNOWN or ambiguous (a probe error, a listing without the pane shell, a
+   * non-numeric pane pid, or more than one Claude child).
+   * Callers must refuse on null, never compare two nulls as a match
+   * (CTO REVISE ts 1794019803.549589).
+   */
   private async pmAgentProcess(paneId: string): Promise<string | null> {
+    let pane = "";
+    let tty = "";
     try {
-      const pane = (await this.runShell(`tmux display-message -t ${paneId} -p '#{pane_pid}'`, { timeout: 5_000 })).stdout.trim();
-      if (!/^\d+$/.test(pane)) return null;
-      let child = "";
-      try {
-        child = (await this.runShell(`pgrep -P ${pane} -f '^claude( |$)'`, { timeout: 5_000 })).stdout.trim().split(/\s+/)[0] ?? "";
-      } catch { child = ""; }
-      return `${pane}:${child}`;
+      [pane, tty] = (await this.runShell(`tmux display-message -t ${paneId} -p '#{pane_pid}|#{pane_tty}'`, { timeout: 5_000 }))
+        .stdout.trim().split("|");
     } catch {
       return null;
     }
+    if (!/^\d+$/.test(pane ?? "") || !/^\/dev\/[\w/.-]+$/.test(tty ?? "")) return null;
+    // The pane's own terminal (the same `ps -t` read the exit-dialog identity
+    // uses); a probe error or an unreadable listing is UNKNOWN, never "none".
+    let listing = "";
+    try {
+      listing = (await this.runShell(`ps -t ${shellEscape(tty.replace(/^\/dev\//, ""))} -o pid=,ppid=,command=`, { timeout: 5_000 })).stdout;
+    } catch {
+      return null;
+    }
+    const rows = listing.split(/\r?\n/).map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).filter(Boolean) as RegExpExecArray[];
+    if (!rows.some((row) => row[1] === pane)) return null;
+    const children = rows.filter((row) => row[2] === pane && /^claude( |$)/.test(row[3])).map((row) => row[1]);
+    if (children.length > 1) return null;
+    return `${pane}:${children[0] ?? ""}`;
+  }
+
+  /** A known identity with exactly one live Claude child. */
+  private static ownedAgent(identity: string | null): boolean {
+    return identity !== null && /^\d+:\d+$/.test(identity);
   }
 
   /** The durable MoP launch record of the last PM restart (survives a MoP restart). */
-  private pmLaunchRecord(): { episode: string | null; launch_event_id: number; pane_id: string; command: string } | null {
+  private pmLaunchRecord(): {
+    episode: string | null; launch_event_id: number; pane_id: string; command: string;
+    status?: "planned" | "refused" | "unknown" | "issued" | "booted"; pane_pid?: string; boot_event_id?: number; process?: string;
+  } | null {
     try {
       const record = JSON.parse(this.db.getConfig(PM_RESTART_LAUNCH_KEY) || "null");
       return record && typeof record.launch_event_id === "number" ? record : null;
@@ -568,6 +595,23 @@ export class ProcessHealthChecker {
       return null;
     };
 
+    // Never resend an uncertain launcher (CTO REVISE ts 1794019803.549589): a
+    // planned/unknown/issued launch in this pane that no PM boot followed may
+    // still be pending (typed, submitting or booting). It stays UNKNOWN.
+    const prior = this.pmLaunchRecord();
+    if (prior && prior.pane_id === pin.paneId && ["planned", "unknown", "issued"].includes(String(prior.status))
+        && latestSessionStartEventId(this.db, 0) <= prior.launch_event_id) {
+      return fail("uncertain_launch_no_resend", false, { prior_status: prior.status, prior_launch_event_id: prior.launch_event_id });
+    }
+    // The kill guard: same pane/boot/episode AND the same KNOWN live process.
+    const killRefusal = async (): Promise<string | null> => {
+      const owner = await ownerRefusal();
+      if (owner) return owner;
+      const current = await this.pmAgentProcess(pin.paneId);
+      if (!ProcessHealthChecker.ownedAgent(pin.process) || !ProcessHealthChecker.ownedAgent(current)) return "pm_process_unknown";
+      return current === pin.process ? null : "pm_process_changed";
+    };
+
     // 1. zsh prompt (pane read). Fallback: respawn-pane to a fresh login shell,
     //    only for the SAME pinned process and only when it is gone or shows an
     //    idle prompt, for EVERY trigger; a busy PM turn is never killed.
@@ -582,19 +626,23 @@ export class ProcessHealthChecker {
         // was launched by someone else and is never killed.
         return fail("shell_prompt_timeout_agent_running_no_force", false, { pane_command: command });
       }
-      const refusal = await ownerRefusal();
+      // A live agent may be killed only if it is the SAME, KNOWN process pinned
+      // at the trigger; an unknown or ambiguous identity refuses. With no agent
+      // left the pane must provably be a bare shell (known, no Claude child).
+      const guard = agentAlive ? killRefusal : async () => {
+        const owner = await ownerRefusal();
+        if (owner) return owner;
+        const current = await this.pmAgentProcess(pin.paneId);
+        return current !== null && current.endsWith(":") ? null : "pm_process_unknown";
+      };
+      const refusal = await guard();
       if (refusal) return fail(`no_force:${refusal}`, false, { pane_command: command });
-      // A live agent may be killed only if it is the SAME process pinned at the
-      // trigger; with no agent left the pane is a bare shell (nothing to protect).
-      if (agentAlive && (await this.pmAgentProcess(pin.paneId)) !== pin.process) {
-        return fail("no_force:pm_process_changed", false, { pane_command: command });
-      }
       if (agentAlive && (await this.relay.getSlotActivityState(0, pin.paneId)) !== "idle") {
         // An unchanged screen/JSONL/event counter is not proof of idle.
         return fail("shell_prompt_timeout_pm_busy_no_force", false, { pane_command: command });
       }
-      // Last pre-effect recheck: nothing may yield between it and the kill.
-      const finalRefusal = await ownerRefusal();
+      // Last pre-effect recheck INCLUDING the process: nothing yields between it and the kill.
+      const finalRefusal = await guard();
       if (finalRefusal) return fail(`no_force:${finalRefusal}`, false, { pane_command: command });
       this.db.logEvent(0, "pm_restart_force_respawn", null, null, {
         trigger, episode, pane_command: command, process: pin.process, reason: "shell prompt not observed within bound",
@@ -616,27 +664,42 @@ export class ProcessHealthChecker {
 
     // 2. Fresh launcher with the configured model, typed at the verified prompt.
     //    The durable launch record binds the ONE boot this launch produces.
+    //    The record carries the ACTUAL disposition (CTO REVISE ts
+    //    1794019803.549589): planned -> refused (proven zero effect) | unknown
+    //    (a key may have landed) | issued (both keys sent) -> booted (owned
+    //    process + its SessionStart). Only `booted` can take a continuation.
     const launchEventId = this.db.getEvents(0, 1)[0]?.id ?? 0;
     const typed = `cd ${shellEscape(cwd)} && ${launchCommand}`;
+    const shellProcess = await this.pmAgentProcess(pin.paneId);
+    if (shellProcess === null || !shellProcess.endsWith(":")) return fail("launch_refused:pm_shell_process_unknown");
+    const record = {
+      episode: pin.episode, launch_event_id: launchEventId, pane_id: pin.paneId, command: launchCommand,
+      pane_pid: shellProcess.slice(0, -1), at: new Date().toISOString(), status: "planned",
+    } as Record<string, unknown>;
+    const setRecord = (fields: Record<string, unknown>) => {
+      Object.assign(record, fields);
+      this.db.setConfig(PM_RESTART_LAUNCH_KEY, JSON.stringify(record));
+    };
+    setRecord({});
+    let effect = false;
     const refusal = await withSlotSendLock(0, async () => {
       for (const key of ["text", "Enter"] as const) {
         const owner = await ownerRefusal();
         if (owner) return owner;
         const command = await this.getPaneCommand(0);
         if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
-        if (key === "text") {
-          this.db.setConfig(PM_RESTART_LAUNCH_KEY, JSON.stringify({
-            episode: pin.episode, launch_event_id: launchEventId, pane_id: pin.paneId, command: launchCommand,
-            at: new Date().toISOString(),
-          }));
-        }
+        effect = true;
         await this.runShell(key === "text"
           ? `tmux send-keys -l -t ${pin.paneId} ${shellEscape(typed)}`
           : `tmux send-keys -t ${pin.paneId} Enter`, { timeout: 10_000 });
       }
       return null;
     }).catch((err) => `launcher send failed: ${String(err).slice(0, 200)}`);
-    if (refusal) return fail(refusal);
+    if (refusal) {
+      setRecord({ status: effect ? "unknown" : "refused", reason: refusal });
+      return fail(refusal, false, { launch_disposition: record.status });
+    }
+    setRecord({ status: "issued", issued_at: new Date().toISOString() });
     this.db.logEvent(0, "pm_restart_launched", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
 
     // 3. Claude input prompt (pane read, bounded).
@@ -659,13 +722,21 @@ export class ProcessHealthChecker {
     }
     if (!boot) return fail("session_start_not_observed_for_launch", true);
     if (latestSessionStartEventId(this.db, 0) !== boot.id) return fail("successor_boot_after_launch", true);
+    // First-in-time is not ownership: the boot must be a Claude child of the
+    // SAME shell this launch typed into, and the only boot since the launch.
+    const bootProcess = await this.pmAgentProcess(pin.paneId);
+    if (!ProcessHealthChecker.ownedAgent(bootProcess) || !bootProcess!.startsWith(`${record.pane_pid}:`)) {
+      return fail("launch_boot_process_unowned", true, { boot_process: bootProcess });
+    }
+    setRecord({ status: "booted", boot_event_id: boot.id, process: bootProcess });
+    const processGuard = async () => (await this.pmAgentProcess(pin.paneId)) === bootProcess ? null : "pm_process_changed";
 
     // 4. ONE continuation. A PM-only exit episode keeps its durable
     //    waiting -> attempted claim (and its saved continuation); every other
     //    restart claims this boot once.
     const status = this.db.getExitStatus();
     if (pin.episode && status.pending && status.pm_only && status.cycled[0] && status.episode === pin.episode) {
-      await this.reconcilePMRestartContinuation(boot.id);
+      await this.reconcilePMRestartContinuation(boot.id);  // binds the booted record + process inside
       // Read this episode's continuation receipt: a with_devs episode whose devs
       // all cycled ends (and resets its flags) as soon as the PM part lands.
       let delivery: string | null = null;
@@ -678,20 +749,21 @@ export class ProcessHealthChecker {
       if (delivered) void this.relay.drainPMQueue();
       return { success: delivered, launched: true, reason: `continuation ${delivery ?? "unknown"}` };
     }
-    const outcome = await this.deliverPMFreshContinuation(pin.paneId, boot.id, trigger);
+    const outcome = await this.deliverPMFreshContinuation(pin.paneId, boot.id, trigger, processGuard);
     if (outcome === "delivered") void this.relay.drainPMQueue();
     return { success: outcome === "delivered", launched: true, reason: `continuation ${outcome}` };
   }
 
   /** Exactly-once continuation for a non-episode PM restart, claimed per boot before the send. */
-  private async deliverPMFreshContinuation(paneId: string, bootId: number, trigger: string): Promise<string> {
+  private async deliverPMFreshContinuation(paneId: string, bootId: number, trigger: string,
+    processGuard: () => Promise<string | null>): Promise<string> {
     const claimKey = "pm_restart_continuation_boot";
     if (this.db.getConfig(claimKey) === String(bootId)) return "already_claimed";
     this.db.setConfig(claimKey, String(bootId));
     const fence = () => latestSessionStartEventId(this.db, 0) !== bootId ? "pm_session_changed" : null;
     const result = await this.relay.deliverGuardedToSlot(0, PM_RESTART_CONTINUATION_PROMPT, {
       expectedPaneId: paneId,
-      recheck: async () => fence(),
+      recheck: async () => fence() ?? await processGuard() ?? fence(),
       finalCheck: fence,
       bracketedPaste: true,
     });
@@ -1246,13 +1318,21 @@ export class ProcessHealthChecker {
     // Only the boot MoP itself launched for THIS episode receives its
     // continuation (CTO REVISE ts 1794018596.287469). A recovered or successor
     // PM started outside that launch never inherits an older restart's prompt.
+    // CTO REVISE ts 1794019803.549589: a planned/issued record is not a
+    // launch; only a `booted` record (owned Claude process + its SessionStart)
+    // binds the boot, and that same process must still own the pane.
     const launch = this.pmLaunchRecord();
-    const bound = launch && launch.episode === status.episode && launch.launch_event_id >= exit.id
-      ? this.launchBoot(launch.launch_event_id) : null;
-    if (!bound || bound.id !== boot.id) {
+    if (!launch || launch.status !== "booted" || launch.episode !== status.episode || launch.launch_event_id < exit.id
+        || launch.boot_event_id !== boot.id || !ProcessHealthChecker.ownedAgent(launch.process ?? null)) {
       this.noteUncertainContinuation(status.episode, "boot_not_bound_to_mop_launch", exit.id, boot.id);
       return;
     }
+    const ownedProcess = launch.process!;
+    if ((await this.pmAgentProcess(launch.pane_id)) !== ownedProcess) {
+      this.noteUncertainContinuation(status.episode, "boot_process_not_owned", exit.id, boot.id);
+      return;
+    }
+    const processGuard = async () => (await this.pmAgentProcess(launch.pane_id)) === ownedProcess ? null : "pm_process_changed";
     let payload: Record<string, unknown>;
     let receipt: Record<string, unknown>;
     try { payload = JSON.parse(boot.payload); receipt = JSON.parse(exit.payload); }
@@ -1278,10 +1358,11 @@ export class ProcessHealthChecker {
     }
     if (latestSessionStartEventId(this.db, 0) !== boot.id
         || this.db.getExitStatus().episode !== status.episode) return;
+    if (identity.snapshot.paneId !== launch.pane_id) return;
     await this.deliverPMRestartContinuation(identity.snapshot.paneId, boot.id, restart ? {
       exit_event_id: exit.id, exit_delivery: "uncertain",
       process_dead_event_id: restart.dead, process_restarted_event_id: restart.restarted, boot_event_id: boot.id,
-    } : undefined);
+    } : undefined, processGuard);
   }
 
   private readonly uncertainContinuationNoted = new Set<string>();
@@ -1296,7 +1377,8 @@ export class ProcessHealthChecker {
     });
   }
 
-  private async deliverPMRestartContinuation(paneId: string, expectedBoot?: number, claim?: Record<string, unknown>): Promise<void> {
+  private async deliverPMRestartContinuation(paneId: string, expectedBoot?: number, claim?: Record<string, unknown>,
+    processGuard?: () => Promise<string | null>): Promise<void> {
     const status = this.db.getExitStatus();
     if (!status.pending || !status.pm_only || !status.cycled[0]
         || status.continuation_delivery !== "waiting") return;
@@ -1315,7 +1397,7 @@ export class ProcessHealthChecker {
     };
     const result = await this.relay.deliverGuardedToSlot(0, prompt, {
       expectedPaneId: paneId,
-      recheck: async () => fence(), finalCheck: fence, bracketedPaste: true,
+      recheck: async () => fence() ?? (processGuard ? await processGuard() : null) ?? fence(), finalCheck: fence, bracketedPaste: true,
     });
     this.db.logEvent(0, "pm_restart_continuation", null, null, {
       episode: status.episode, boot_event_id: boot, delivery: result.outcome,
