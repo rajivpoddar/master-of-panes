@@ -296,6 +296,12 @@ export function createGhIssueOwnershipProjection(
         return outcome("failed", "issue_projection_ambiguous_status", repository, issue, slot);
       }
       const targetStatus = otherLifecycle[0] ?? (before.state === "OPEN" ? "status:todo" : "status:done");
+      const compatibleSubs = before.labels.filter(
+        (label) => label.startsWith("sub:") && (SUB_STATUS_BY_STATUS[targetStatus ?? ""] ?? []).includes(label),
+      );
+      if (compatibleSubs.length > 1) {
+        return outcome("failed", "issue_projection_ambiguous_sub", repository, issue, slot);
+      }
       if (before.labels.includes("status:in-progress")) remove.push("status:in-progress");
       if (targetStatus && !before.labels.includes(targetStatus)) add.push(targetStatus);
       for (const label of before.labels) {

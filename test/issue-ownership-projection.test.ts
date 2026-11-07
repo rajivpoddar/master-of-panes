@@ -102,6 +102,17 @@ test("assignment replaces every prior status and incompatible sub-status without
   }
 });
 
+test("release refuses multiple compatible blocked sub-labels before any label write", async () => {
+  const labels = ["status:in-progress", "status:blocked", "slot:2", "sub:external", "sub:decision"];
+  const gh = fakeGh({ labels });
+  const projection = createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO });
+  const result = await projection.onReleased(12324, 2, null);
+  assert.equal(result.status, "failed");
+  assert.equal(result.reason, "issue_projection_ambiguous_sub");
+  assert.deepEqual(gh.edits, []);
+  assert.deepEqual(gh.labels(), labels);
+});
+
 test("release removes a stale in-progress status while preserving review", async () => {
   const gh = fakeGh({ labels: ["status:in-progress", "status:in-review", "slot:2", "sub:waiting-on-issue", "P1"] });
   const projection = createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO });
