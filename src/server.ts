@@ -1287,7 +1287,7 @@ app.use("/exit-pending", async (c, next) => {
 
 /** Set or clear the exit_pending flag (REST parity for mop_set_exit_pending). */
 app.post("/exit-pending", async (c) => {
-  let body: { enabled?: boolean; dev_only?: boolean; pm_only?: boolean; with_devs?: boolean; continuation_prompt?: string; recover_episode?: unknown } = {};
+  let body: { enabled?: boolean; dev_only?: boolean; pm_only?: boolean; with_devs?: boolean; continuation_prompt?: string; recover_episode?: unknown; reason?: unknown } = {};
   try {
     body = await c.req.json();
   } catch {
@@ -1344,34 +1344,47 @@ app.post("/exit-pending", async (c) => {
   }
   // REST PM-only arming requires the saved handoff (resume point) only.
   // with_devs (04:00 occurrence, obligation 30559): the SAME episode also arms
-  // every dev slot; DND slots are skipped by the existing Stop/scan paths.
-  db.setExitPending(body.enabled, body.dev_only === true, body.pm_only === true, body.continuation_prompt, body.pm_only === true,
-    body.pm_only === true && body.with_devs === true);
-  if (body.enabled && body.pm_only === true && body.with_devs === true) {
-    // Only ACTIVE non-DND dev slots belong to the 04:00 episode (CTO ts
-    // 1793889129.015359; S5-S8 decommissioned per S111). A DND slot, or one with
-    // no running agent (decommissioned/unprovisioned panes), can never Stop, so
-    // it is exempted (marked consumed) at arm time instead of holding the
-    // episode pending forever. Free slots cannot be DND by design.
-    const armed = db.getExitStatus().episode;
+  // the dev slots. Only ACTIVE non-DND dev sessions belong to it (CTO ts
+  // 1793889129.015359 and REVISE ts 1794018596.287469; S5-S8 decommissioned per
+  // S111). The running-agent probe happens BEFORE arming; the arm, the
+  // exemptions and each slot's arm-time session/epoch are then written with no
+  // await in between, so no Stop can act on an unbound slot. A DND slot, a slot
+  // with no running agent or no known session can never be this occurrence's
+  // exit: it is exempted (consumed) instead of holding the episode pending.
+  const withDevs = body.enabled === true && body.pm_only === true && body.with_devs === true;
+  const running = new Map<number, boolean>();
+  if (withDevs) {
     for (const slot of devSlots(DEFAULT_DEV_SLOT_COUNT)) {
-      let reason: string | null = db.getSlot(slot)?.dnd ? "dnd" : null;
-      if (!reason) {
-        const command = await healthChecker.getPaneCommandPublic(slot).catch(() => null);
-        if (!command || !(AGENT_COMMANDS.has(command) || /^\d+\.\d+\.\d+$/.test(command))) {
-          reason = `no_running_agent:${command ?? "pane_unverified"}`;
-        }
+      const command = await healthChecker.getPaneCommandPublic(slot).catch(() => null);
+      running.set(slot, !!command && (AGENT_COMMANDS.has(command) || /^\d+\.\d+\.\d+$/.test(command)));
+    }
+  }
+  const previousEpisode = db.getExitStatus();
+  db.setExitPending(body.enabled, body.dev_only === true, body.pm_only === true, body.continuation_prompt, body.pm_only === true,
+    withDevs);
+  if (withDevs) {
+    const armed = db.getExitStatus().episode ?? "";
+    for (const slot of devSlots(DEFAULT_DEV_SLOT_COUNT)) {
+      const row = db.getSlot(slot);
+      const session = db.latestSessionId(slot);
+      const reason = row?.dnd ? "dnd" : !running.get(slot) ? "no_running_agent" : !session ? "session_unknown" : null;
+      if (reason) {
+        db.markSlotExitCycled(slot);
+        db.logEvent(slot, "exit_pending_slot_exempt", null, null, { episode: armed, reason });
+      } else {
+        db.recordExitArm(slot, armed, session, row?.assignment_epoch ?? null);
       }
-      if (!reason) continue;
-      if (db.getExitStatus().episode !== armed) break;
-      db.markSlotExitCycled(slot);
-      db.logEvent(slot, "exit_pending_slot_exempt", null, null, { episode: armed, reason });
     }
   }
   // A new PM-only episode supersedes any refused terminal (its record stays in the event log).
   if (body.enabled && body.pm_only) db.setConfig("pm_exit_terminal", "");
   db.logEvent(0, body.enabled ? "exit_pending_enabled" : "exit_pending_disabled", null, null, {
     reason: body.enabled ? "PM set exit_pending — slots will /exit at next idle" : "PM cleared exit_pending flag",
+    // An explicit supersede reason is recorded as such, never as completion.
+    ...(typeof body.reason === "string" && body.reason.trim() ? {
+      supersede_reason: body.reason.slice(0, 500), superseded_episode: previousEpisode.episode,
+      superseded_pending: previousEpisode.pending, superseded_cycled: previousEpisode.cycled,
+    } : {}),
     ...(recovered ? { recovered_episode: recovered, via: "same_owner_recovery" } : {}),
   });
   return c.json({ ok: true, enabled: body.enabled, status: db.getExitStatus() });

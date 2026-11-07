@@ -2548,6 +2548,7 @@ export class MoPDatabase {
     this.setConfig("exit_pending_stop_only", "false");
     this.setConfig("exit_pending_dev_only", enabled && devOnly ? "true" : "false");
     this.setConfig("exit_pending", enabled ? "true" : "false");
+    for (const i of devSlots(this.config.slotCount)) this.setConfig(`exit_arm_${i}`, "");
     if (enabled) {
       // PM-first restart must not reset any dev episode before PM has resumed.
       for (const i of pmOnly && !withDevs ? [PM_SLOT] : devOnly ? devSlots(this.config.slotCount) : [PM_SLOT, ...devSlots(this.config.slotCount)]) {
@@ -2558,6 +2559,31 @@ export class MoPDatabase {
 
   markSlotExitCycled(slot: number): void {
     this.setConfig(`exit_cycled_${slot}`, "true");
+  }
+
+  /**
+   * Arm-time cohort of a with_devs (04:00) episode (CTO REVISE ts
+   * 1794018596.287469): the exact session and assignment epoch each armed dev
+   * slot had when the occurrence fired. Exit consumers act only on that same
+   * session/epoch; a later session never inherits the old exit.
+   */
+  recordExitArm(slot: number, episode: string, sessionId: string, epoch: number | null): void {
+    this.setConfig(`exit_arm_${slot}`, JSON.stringify({ episode, session_id: sessionId, epoch }));
+  }
+
+  exitArmCheck(slot: number, sessionId: string | null | undefined): "match" | "not_armed" | "session_changed" | "epoch_changed" {
+    let arm: { episode?: unknown; session_id?: unknown; epoch?: unknown } | null = null;
+    try { arm = JSON.parse(this.getConfig(`exit_arm_${slot}`) || "null"); } catch { arm = null; }
+    const episode = this.getConfig("exit_pending_episode");
+    if (!arm || arm.episode !== episode || typeof arm.session_id !== "string") return "not_armed";
+    if (!sessionId || sessionId !== arm.session_id) return "session_changed";
+    const epoch = this.getSlot(slot)?.assignment_epoch ?? null;
+    return epoch === (arm.epoch ?? null) ? "match" : "epoch_changed";
+  }
+
+  /** Session id of the slot's latest SessionStart row ("" when unknown). */
+  latestSessionId(slot: number): string {
+    try { return String(JSON.parse(this.getEvents(slot, 1, "SessionStart")[0]?.payload || "{}").session_id ?? ""); } catch { return ""; }
   }
 
   getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; with_devs: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean>;

@@ -1586,6 +1586,20 @@ export class HookProcessor {
     const slot = this.db.getSlot(slotNum);
     if (!slot) return {};
 
+    // with_devs (04:00) cohort (CTO REVISE ts 1794018596.287469): only the
+    // session/epoch armed at the occurrence may take its exit. A DND slot, a
+    // later session or a new assignment consumes the slot's flag without an
+    // exit (retained), so no successor ever inherits the old exit.
+    if (slotNum > 0 && this.db.getExitPending() && this.db.getExitStatus().with_devs && !this.db.getExitStatus().cycled[slotNum]) {
+      const cohort = slot.dnd ? "dnd" : this.db.exitArmCheck(slotNum, payload.session_id);
+      if (cohort !== "match") {
+        this.db.markSlotExitCycled(slotNum);
+        this.db.logEvent(slotNum, "exit_pending_cohort_superseded", "Stop", null, {
+          episode: this.db.getExitStatus().episode, reason: cohort, session_id: payload.session_id ?? null,
+        });
+      }
+    }
+
     // Skip if DND — slot is under Rajiv's control
     if (slot.dnd) {
       this.db.logEvent(slotNum, "stop_skipped_dnd", "Stop", null, {

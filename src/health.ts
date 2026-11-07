@@ -90,6 +90,8 @@ export function pmConfiguredModel(db: Pick<MoPDatabase, "getConfig">): string {
  * The fresh-start + continuation contract is identical for both.
  */
 export const PM_LAUNCHER_CONFIG_KEY = "pm_launcher";
+/** Durable record of the last MoP PM launch: binds the ONE boot it produced. */
+export const PM_RESTART_LAUNCH_KEY = "pm_restart_launch";
 export type PmLauncher = "cliproxy" | "direct";
 export const PM_DEFAULT_LAUNCHER: PmLauncher = "cliproxy";
 const PM_LAUNCHER_SCRIPTS: Record<PmLauncher, string> = {
@@ -486,6 +488,52 @@ export class ProcessHealthChecker {
     return run;
   }
 
+  /** Pane pid + direct Claude child pid of the PM pane (read-only process identity). */
+  private async pmAgentProcess(paneId: string): Promise<string | null> {
+    try {
+      const pane = (await this.runShell(`tmux display-message -t ${paneId} -p '#{pane_pid}'`, { timeout: 5_000 })).stdout.trim();
+      if (!/^\d+$/.test(pane)) return null;
+      let child = "";
+      try {
+        child = (await this.runShell(`pgrep -P ${pane} -f '^claude( |$)'`, { timeout: 5_000 })).stdout.trim().split(/\s+/)[0] ?? "";
+      } catch { child = ""; }
+      return `${pane}:${child}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The durable MoP launch record of the last PM restart (survives a MoP restart). */
+  private pmLaunchRecord(): { episode: string | null; launch_event_id: number; pane_id: string; command: string } | null {
+    try {
+      const record = JSON.parse(this.db.getConfig(PM_RESTART_LAUNCH_KEY) || "null");
+      return record && typeof record.launch_event_id === "number" ? record : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The ONE boot a MoP launch produced: the first PM SessionStart after the
+   * launch keystroke, from the PM checkout, with a session id. Any later
+   * SessionStart is a successor and never "this launch" (CTO REVISE ts
+   * 1794018596.287469).
+   */
+  private launchBoot(launchEventId: number): { id: number; session: string } | null {
+    const after = this.db.getEvents(0, 50, "SessionStart").filter((event) => event.id > launchEventId)
+      .sort((a, b) => a.id - b.id);
+    const first = after[0];
+    if (!first) return null;
+    try {
+      const payload = JSON.parse(first.payload);
+      if (!["startup", "resume"].includes(String(payload.source)) || payload.cwd !== SLOT_CWDS[0]
+          || typeof payload.session_id !== "string" || !payload.session_id.trim()) return null;
+      return { id: first.id, session: payload.session_id };
+    } catch {
+      return null;
+    }
+  }
+
   private async runPMFreshRestart(trigger: "exit" | "crash" | "unresponsive", episode: string | null):
     Promise<{ success: boolean; launched: boolean; reason: string }> {
     const { model, launcher, command: launchCommand } = pmLaunchPlan(this.db);
@@ -497,43 +545,69 @@ export class ProcessHealthChecker {
     };
     this.db.logEvent(0, "pm_restart_started", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
 
+    // Ownership pin (CTO REVISE ts 1794018596.287469): the pane, the PM boot,
+    // the agent process and the exit episode observed at the trigger. Every
+    // effect below re-checks it, so a recovered or successor PM is never
+    // killed, typed into, or handed this restart's continuation.
+    const pinned = await verifyPaneIdentity(0, this.runShell);
+    if (!pinned.ok) return fail(`pane identity unavailable: ${pinned.detail}`);
+    const pin = {
+      paneId: pinned.snapshot.paneId,
+      boot: latestSessionStartEventId(this.db, 0),
+      process: await this.pmAgentProcess(pinned.snapshot.paneId),
+      episode: trigger === "exit" ? episode : null,
+    };
+    const ownerRefusal = async (): Promise<string | null> => {
+      const identity = await verifyPaneIdentity(0, this.runShell);
+      if (!identity.ok || identity.snapshot.paneId !== pin.paneId) return "pane_identity_changed";
+      if (latestSessionStartEventId(this.db, 0) !== pin.boot) return "pm_session_changed";
+      if (pin.episode) {
+        const current = this.db.getExitStatus();
+        if (!current.pending || current.episode !== pin.episode) return "exit_episode_changed";
+      }
+      return null;
+    };
+
     // 1. zsh prompt (pane read). Fallback: respawn-pane to a fresh login shell,
-    //    only when Claude is gone or idle; a busy PM turn is never killed.
+    //    only for the SAME pinned process and only when it is gone or shows an
+    //    idle prompt, for EVERY trigger; a busy PM turn is never killed.
     let shell = await this.waitForPMShellPrompt(trigger === "unresponsive" ? 0 : this.PM_EXIT_SHELL_TIMEOUT_MS);
+    if (shell && shell.paneId !== pin.paneId) return fail("pane_identity_changed");
     if (!shell) {
       const command = await this.getPaneCommand(0);
-      const identity = await verifyPaneIdentity(0, this.runShell);
-      if (!identity.ok) return fail(`pane identity unavailable: ${identity.detail}`);
-      const paneId = identity.snapshot.paneId;
-      const agentAlive = this.isAgentCommand(0, command);
       if (!command) return fail("shell_prompt_timeout_pane_unknown");
+      const agentAlive = this.isAgentCommand(0, command);
       if (agentAlive && trigger === "crash") {
         // A crash restart started from an observed shell; an agent now running
         // was launched by someone else and is never killed.
         return fail("shell_prompt_timeout_agent_running_no_force", false, { pane_command: command });
       }
-      if (agentAlive && trigger === "exit") {
-        // Force an idle PM only while its own consumed /exit episode still
-        // waits for the restart; a busy PM turn is never killed.
-        const current = this.db.getExitStatus();
-        if (episode && (!current.pending || current.episode !== episode)) {
-          return fail("shell_prompt_timeout_episode_changed_no_force", false, { pane_command: command });
-        }
-        if ((await this.relay.getSlotActivityState(0, paneId)) !== "idle") {
-          return fail("shell_prompt_timeout_pm_busy_no_force", false, { pane_command: command });
-        }
+      const refusal = await ownerRefusal();
+      if (refusal) return fail(`no_force:${refusal}`, false, { pane_command: command });
+      // A live agent may be killed only if it is the SAME process pinned at the
+      // trigger; with no agent left the pane is a bare shell (nothing to protect).
+      if (agentAlive && (await this.pmAgentProcess(pin.paneId)) !== pin.process) {
+        return fail("no_force:pm_process_changed", false, { pane_command: command });
       }
+      if (agentAlive && (await this.relay.getSlotActivityState(0, pin.paneId)) !== "idle") {
+        // An unchanged screen/JSONL/event counter is not proof of idle.
+        return fail("shell_prompt_timeout_pm_busy_no_force", false, { pane_command: command });
+      }
+      // Last pre-effect recheck: nothing may yield between it and the kill.
+      const finalRefusal = await ownerRefusal();
+      if (finalRefusal) return fail(`no_force:${finalRefusal}`, false, { pane_command: command });
       this.db.logEvent(0, "pm_restart_force_respawn", null, null, {
-        trigger, episode, pane_command: command, reason: "shell prompt not observed within bound",
+        trigger, episode, pane_command: command, process: pin.process, reason: "shell prompt not observed within bound",
       });
       try {
-        await this.runShell(`tmux respawn-pane -k -t ${paneId} -c ${shellEscape(cwd)}`, { timeout: 10_000 });
+        await this.runShell(`tmux respawn-pane -k -t ${pin.paneId} -c ${shellEscape(cwd)}`, { timeout: 10_000 });
         this.lastForceRespawn.set(0, Date.now());
       } catch (err) {
         return fail(`force respawn failed: ${String(err).slice(0, 200)}`);
       }
       shell = await this.waitForPMShellPrompt(this.PM_FORCE_SHELL_TIMEOUT_MS);
       if (!shell) return fail("shell_prompt_not_observed_after_force_respawn");
+      if (shell.paneId !== pin.paneId) return fail("pane_identity_changed");
     }
     this.unresponsiveStates.delete(0);
     this.db.logEvent(0, "process_dead", null, null, {
@@ -541,25 +615,32 @@ export class ProcessHealthChecker {
     });
 
     // 2. Fresh launcher with the configured model, typed at the verified prompt.
+    //    The durable launch record binds the ONE boot this launch produces.
     const launchEventId = this.db.getEvents(0, 1)[0]?.id ?? 0;
     const typed = `cd ${shellEscape(cwd)} && ${launchCommand}`;
     const refusal = await withSlotSendLock(0, async () => {
       for (const key of ["text", "Enter"] as const) {
-        const identity = await verifyPaneIdentity(0, this.runShell);
-        if (!identity.ok || identity.snapshot.paneId !== shell!.paneId) return "pane_identity_mismatch";
+        const owner = await ownerRefusal();
+        if (owner) return owner;
         const command = await this.getPaneCommand(0);
         if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
+        if (key === "text") {
+          this.db.setConfig(PM_RESTART_LAUNCH_KEY, JSON.stringify({
+            episode: pin.episode, launch_event_id: launchEventId, pane_id: pin.paneId, command: launchCommand,
+            at: new Date().toISOString(),
+          }));
+        }
         await this.runShell(key === "text"
-          ? `tmux send-keys -l -t ${shell!.paneId} ${shellEscape(typed)}`
-          : `tmux send-keys -t ${shell!.paneId} Enter`, { timeout: 10_000 });
+          ? `tmux send-keys -l -t ${pin.paneId} ${shellEscape(typed)}`
+          : `tmux send-keys -t ${pin.paneId} Enter`, { timeout: 10_000 });
       }
       return null;
     }).catch((err) => `launcher send failed: ${String(err).slice(0, 200)}`);
     if (refusal) return fail(refusal);
-    this.db.logEvent(0, "pm_restart_launched", null, null, { trigger, episode, model, launch_command: launchCommand });
+    this.db.logEvent(0, "pm_restart_launched", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
 
     // 3. Claude input prompt (pane read, bounded).
-    const bootCommand = await this.waitForPMClaudePrompt(shell.paneId, this.PM_PROMPT_TIMEOUT_MS);
+    const bootCommand = await this.waitForPMClaudePrompt(pin.paneId, this.PM_PROMPT_TIMEOUT_MS);
     if (!bootCommand) return fail(`claude prompt not observed within ${this.PM_PROMPT_TIMEOUT_MS}ms`, true);
     this.db.logEvent(0, "agent_booted", null, null, {
       command: bootCommand, launch_command: launchCommand, observed_at: new Date().toISOString(),
@@ -568,21 +649,23 @@ export class ProcessHealthChecker {
       command: launchCommand, restarted_at: new Date().toISOString(), trigger, model,
     });
 
-    // This launch's SessionStart row binds the continuation to this boot.
+    // This launch's FIRST SessionStart binds the continuation to this boot; a
+    // later (successor) boot never inherits it.
     const bootDeadline = Date.now() + this.PM_BOOT_EVENT_TIMEOUT_MS;
-    let boot = this.db.getEvents(0, 1, "SessionStart")[0];
-    while ((!boot || boot.id <= launchEventId) && Date.now() < bootDeadline) {
+    let boot = this.launchBoot(launchEventId);
+    while (!boot && Date.now() < bootDeadline) {
       await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, bootDeadline - Date.now()));
-      boot = this.db.getEvents(0, 1, "SessionStart")[0];
+      boot = this.launchBoot(launchEventId);
     }
-    if (!boot || boot.id <= launchEventId) return fail("session_start_not_observed_for_launch", true);
+    if (!boot) return fail("session_start_not_observed_for_launch", true);
+    if (latestSessionStartEventId(this.db, 0) !== boot.id) return fail("successor_boot_after_launch", true);
 
     // 4. ONE continuation. A PM-only exit episode keeps its durable
     //    waiting -> attempted claim (and its saved continuation); every other
     //    restart claims this boot once.
     const status = this.db.getExitStatus();
-    if (status.pending && status.pm_only && status.cycled[0]) {
-      await this.reconcilePMRestartContinuation();
+    if (pin.episode && status.pending && status.pm_only && status.cycled[0] && status.episode === pin.episode) {
+      await this.reconcilePMRestartContinuation(boot.id);
       // Read this episode's continuation receipt: a with_devs episode whose devs
       // all cycled ends (and resets its flags) as soon as the PM part lands.
       let delivery: string | null = null;
@@ -595,7 +678,7 @@ export class ProcessHealthChecker {
       if (delivered) void this.relay.drainPMQueue();
       return { success: delivered, launched: true, reason: `continuation ${delivery ?? "unknown"}` };
     }
-    const outcome = await this.deliverPMFreshContinuation(shell.paneId, boot.id, trigger);
+    const outcome = await this.deliverPMFreshContinuation(pin.paneId, boot.id, trigger);
     if (outcome === "delivered") void this.relay.drainPMQueue();
     return { success: outcome === "delivered", launched: true, reason: `continuation ${outcome}` };
   }
@@ -990,6 +1073,15 @@ export class ProcessHealthChecker {
       if (slot > 0) {
         try {
           const slotState = this.db.getSlot(slot);
+          // with_devs cohort (CTO REVISE ts 1794018596.287469): only the
+          // session/epoch armed at the occurrence may exit; DND or a later
+          // session consumes the flag (retained) without an exit.
+          const cohort = status.with_devs ? (slotState?.dnd ? "dnd" : this.db.exitArmCheck(slot, this.db.latestSessionId(slot))) : "match";
+          if (cohort !== "match") {
+            this.db.markSlotExitCycled(slot);
+            this.db.logEvent(slot, "exit_pending_cohort_superseded", null, null, { episode: status.episode, reason: cohort, source: "health_check" });
+            continue;
+          }
           if (slotState?.dnd) continue;
         } catch {
           continue;
@@ -1024,6 +1116,7 @@ export class ProcessHealthChecker {
         if (slot === 0) return null;
         const fresh = this.db.getSlot(slot);
         if (!fresh || fresh.dnd) return "slot_unavailable";
+        if (freshStatus.with_devs && this.db.exitArmCheck(slot, this.db.latestSessionId(slot)) !== "match") return "exit_cohort_changed";
         return pinDrift(pin!, { ...fresh, session_id: session() });
       };
       if ((await this.relay.getSlotActivityState(slot, observed.paneId)) !== "idle" || fence()) continue;
@@ -1142,13 +1235,24 @@ export class ProcessHealthChecker {
    * waiting -> attempted claim; only its delivered receipt arms dev_only and
    * releases custody. Anything less stays typed uncertain.
    */
-  private async reconcilePMRestartContinuation(): Promise<void> {
+  private async reconcilePMRestartContinuation(expectedBoot?: number): Promise<void> {
     const status = this.db.getExitStatus();
     if (!status.pending || !status.pm_only || !status.cycled[0]
         || status.continuation_delivery !== "waiting") return;
     const exit = this.db.getEvents(0, 1, "exit_pending_triggered")[0];
     const boot = this.db.getEvents(0, 1, "SessionStart")[0];
     if (!exit || !boot || boot.id <= exit.id) return;
+    if (expectedBoot !== undefined && boot.id !== expectedBoot) return;
+    // Only the boot MoP itself launched for THIS episode receives its
+    // continuation (CTO REVISE ts 1794018596.287469). A recovered or successor
+    // PM started outside that launch never inherits an older restart's prompt.
+    const launch = this.pmLaunchRecord();
+    const bound = launch && launch.episode === status.episode && launch.launch_event_id >= exit.id
+      ? this.launchBoot(launch.launch_event_id) : null;
+    if (!bound || bound.id !== boot.id) {
+      this.noteUncertainContinuation(status.episode, "boot_not_bound_to_mop_launch", exit.id, boot.id);
+      return;
+    }
     let payload: Record<string, unknown>;
     let receipt: Record<string, unknown>;
     try { payload = JSON.parse(boot.payload); receipt = JSON.parse(exit.payload); }
@@ -1221,8 +1325,8 @@ export class ProcessHealthChecker {
       // 04:00 single occurrence (obligation 30559): the devs were armed in THIS
       // episode already. Keep the episode and every dev cycle flag (no second
       // dev phase); the PM part is done. Clear when every dev has cycled.
+      // with_devs stays set: it marks this episode's arm-time dev cohort.
       this.db.setConfig("exit_pending_pm_only", "false");
-      this.db.setConfig("exit_pending_with_devs", "false");
       this.db.setConfig("exit_pending_dev_only", "true");
       this.db.setConfig("exit_pending_stop_only", "true");
       this.db.setConfig("exit_pending_continuation_delivery", "delivered");

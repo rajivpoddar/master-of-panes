@@ -20,14 +20,21 @@ type PaneState = "busy" | "idle" | "exiting" | "printing" | "shell" | "booting" 
 
 function harness(options: { state?: PaneState; exitAfterPolls?: number; bootSessionStart?: boolean; neverBoots?: boolean } = {}) {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
-  const pane = { state: options.state ?? "exiting" as PaneState, polls: 0, typed: [] as string[], shell: [] as string[], sends: [] as string[] };
+  const pane = { state: options.state ?? "exiting" as PaneState, polls: 0, typed: [] as string[], shell: [] as string[], sends: [] as string[],
+    pid: "500", child: "501", onPoll: undefined as undefined | ((polls: number) => void) };
   const order: string[] = [];
   const runShell = async (command: string) => {
     pane.shell.push(command);
     let stdout = "";
-    if (command.startsWith("tmux display-message")) stdout = `%7|${PM_PATH}\n`;
+    if (command.startsWith("tmux display-message") && command.includes("#{pane_pid}")) stdout = `${pane.pid}\n`;
+    else if (command.startsWith("tmux display-message")) stdout = `%7|${PM_PATH}\n`;
+    else if (command.startsWith("pgrep -P")) {
+      const alive = !["shell", "printing", "booting"].includes(pane.state);
+      if (!alive || !pane.child) throw new Error("no child");
+      stdout = `${pane.child}\n`;
+    }
     else if (command.startsWith("git -C")) stdout = `${PM_PATH}\n`;
-    else if (command.startsWith("tmux respawn-pane")) { pane.state = "shell"; order.push("respawn"); }
+    else if (command.startsWith("tmux respawn-pane")) { pane.state = "shell"; pane.pid = "600"; order.push("respawn"); }
     else if (command.startsWith("tmux send-keys -l")) { pane.typed.push(command); order.push("type"); }
     else if (command.startsWith("tmux send-keys") && command.endsWith(" Enter")) {
       order.push("enter");
@@ -70,6 +77,7 @@ function harness(options: { state?: PaneState; exitAfterPolls?: number; bootSess
   health.PM_BOOT_EVENT_TIMEOUT_MS = 50;
   health.getPaneCommand = async () => {
     pane.polls++;
+    pane.onPoll?.(pane.polls);
     if (pane.state === "exiting" && pane.polls >= (options.exitAfterPolls ?? 3)) pane.state = "shell";
     if (pane.state === "printing" && pane.polls >= (options.exitAfterPolls ?? 3)) pane.state = "shell";
     return pane.state === "shell" || pane.state === "printing" ? "zsh" : pane.state === "booting" ? "zsh" : "claude";
@@ -290,5 +298,74 @@ test("pm_launcher=direct: the same fresh restart types launch-pm.sh, then one co
     assert.match(launchTyped(h.pane)[0], /&& bash \/Users\/rajiv\/\.claude\/scripts\/launch-pm\.sh --model claude-opus-5-5'$/);
     assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
     assert.equal(JSON.parse(h.db.getEvents(0, 1, "pm_restart_started")[0].payload).launcher, "direct");
+  } finally { h.db.close(); }
+});
+
+// CTO REVISE ts 1794018596.287469: ownership and busy protection for EVERY trigger.
+test("unresponsive trigger never kills a BUSY PM (an unchanged screen is not proof of idle)", async () => {
+  const h = harness({ state: "busy" });
+  try {
+    const result = await h.health.restartPMFresh("unresponsive");
+    assert.equal(result.reason, "shell_prompt_timeout_pm_busy_no_force");
+    assert.equal(h.pane.shell.some((cmd) => cmd.startsWith("tmux respawn-pane")), false);
+    assert.deepEqual(h.order, []);
+  } finally { h.db.close(); }
+});
+
+test("a different PM process than the one pinned at the trigger is never killed", async () => {
+  const h = harness({ state: "idle" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    h.pane.onPoll = (polls) => { if (polls === 2) h.pane.child = "777"; };
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.reason, "no_force:pm_process_changed");
+    assert.equal(h.pane.shell.some((cmd) => cmd.startsWith("tmux respawn-pane")), false);
+  } finally { h.db.close(); }
+});
+
+test("a successor PM boot during the wait stops the restart: no kill, no launcher, no continuation", async () => {
+  const h = harness({ state: "idle" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    h.pane.onPoll = (polls) => {
+      if (polls === 2) h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "successor", cwd: PM_PATH });
+    };
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.reason, "no_force:pm_session_changed");
+    assert.deepEqual(h.order, []);
+    assert.deepEqual(h.pane.sends, []);
+  } finally { h.db.close(); }
+});
+
+test("only the FIRST boot after the launch is this launch; a successor boot gets no continuation", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    const origLog = h.db.logEvent.bind(h.db);
+    // The launch boots, then a second (successor) SessionStart lands before delivery.
+    (h.db as any).logEvent = (slot: number, type: string, hook: any, tool: any, payload: any) => {
+      const id = origLog(slot, type, hook, tool, payload);
+      if (type === "SessionStart" && payload.session_id === "fresh-session") {
+        origLog(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "successor", cwd: PM_PATH });
+      }
+      return id;
+    };
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.reason, "successor_boot_after_launch");
+    assert.deepEqual(h.pane.sends, []);
+    assert.equal(h.db.getExitStatus().continuation_delivery, "waiting");
+  } finally { h.db.close(); }
+});
+
+test("an exit restart writes the durable launch record that binds its boot", async () => {
+  const h = harness({ state: "exiting" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, true, result.reason);
+    const record = JSON.parse(h.db.getConfig("pm_restart_launch")!);
+    assert.equal(record.episode, episode);
+    assert.equal(record.pane_id, "%7");
+    assert.ok(record.launch_event_id > 0);
   } finally { h.db.close(); }
 });

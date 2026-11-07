@@ -71,9 +71,14 @@ test("startup health scan recovers only waiting delivery bound to the episode's 
             source: "resume", session_id: "pm", cwd,
           });
           if (!recovered) boot();
-          db.logEvent(0, "exit_pending_triggered", "Stop", null, {
+          const exitId = db.logEvent(0, "exit_pending_triggered", "Stop", null, {
             episode: db.getExitStatus().episode, delivery: "delivered",
           });
+          // MoP's own fresh launch (CTO REVISE ts 1794018596.287469) records the
+          // launch that binds the ONE boot allowed to take the continuation.
+          db.setConfig("pm_restart_launch", JSON.stringify({
+            episode: db.getExitStatus().episode, launch_event_id: Number(exitId ?? db.getEvents(0, 1)[0].id), pane_id: "%40", command: "launch",
+          }));
           if (recovered) boot();
           // New instance models loss of every in-memory post-restart timer.
           const health = new ProcessHealthChecker(db, {
@@ -138,6 +143,9 @@ test("uncertain /exit continuation matrix: watchdog restart settles once; boot a
           db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "pm-new", cwd });
         } else {
           db.logEvent(0, "process_dead", null, null, { pane_command: "zsh" });
+          db.setConfig("pm_restart_launch", JSON.stringify({
+            episode, launch_event_id: db.getEvents(0, 1)[0].id, pane_id: "%40", command: "launch-pm-cliproxy.sh --model claude-opus-5-5",
+          }));
           db.logEvent(0, "SessionStart", "SessionStart", null, { source: "resume", session_id: "pm", cwd });
           db.logEvent(0, "agent_booted", null, null, { command: "claude" });
           db.logEvent(0, "process_restarted", null, null, { command: "launch-pm --continue" });
@@ -186,7 +194,8 @@ test("uncertain /exit continuation matrix: watchdog restart settles once; boot a
           assert.equal(pmExitInCustody(db), true, "uncertain custody kept");
           const typed = db.getEvents(0, 5, "pm_restart_continuation_uncertain");
           assert.equal(typed.length, 1, "typed uncertain, once");
-          assert.equal(JSON.parse(typed[0].payload).reason, "no_watchdog_restart_after_attempt");
+          // No MoP launch produced this boot: it can never take the continuation.
+          assert.equal(JSON.parse(typed[0].payload).reason, "boot_not_bound_to_mop_launch");
           assert.equal(configRows(db), before);
         } else {
           assert.deepEqual(sent, []); assert.equal(claims.length, 0);

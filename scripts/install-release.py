@@ -1196,6 +1196,24 @@ def _service_observation(label: str, port: int) -> tuple[bool, str]:
     raise InstallerError("service/listener custody UNKNOWN; no start or pointer/asset recovery")
 
 
+def _old_service_running_pair(label: str, port: int) -> bool:
+    """True ONLY for an actual bound running child: launchd reports a pid and
+    exactly that pid listens on the port. A loaded label with no child, or no
+    listener, is not a running pair (CTO REVISE ts 1794018596.287469). Probe
+    failures are never a running pair."""
+    try:
+        owner = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                               capture_output=True, text=True, timeout=10)
+        listeners = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+                                   capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    match = re.search(r"^\s*pid = (\d+)", owner.stdout, re.M)
+    if owner.returncode != 0 or not match:
+        return False
+    return listeners.returncode == 0 and set(re.findall(r"^p(\d+)", listeners.stdout, re.M)) == {match.group(1)}
+
+
 def _default_stop(label: str, port: int = 3100) -> None:
     owned, original_pid = _service_observation(label, port)
     if owned:
@@ -1680,6 +1698,25 @@ def activate(
             "retired_absent": sorted(retired_absent),
         })
         _fsync_directory(rollback_bundle)
+    planned_names = {name for name, _, _ in planned}
+
+    def verify_captured(stage: str) -> None:
+        """Every captured target still holds exactly its pinned bytes (or, once
+        replaced, exactly this run's write). Fresh bytes are preserved and the
+        activation stops as UNKNOWN; recovery never overwrites them."""
+        if not install_shared:
+            return
+        for name, preimage in old_preimages.items():
+            target = _shared_target_path(name, shared_target_root)
+            observed = file_record(target, name)
+            if name in planned_names and str(target) in written:
+                entry = next(e for n, _, e in planned if n == name)
+                expected = {"path": name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+            else:
+                expected = preimage
+            if observed != expected:
+                raise InstallerError(f"UNKNOWN: fresh shared bytes on captured target {name} {stage}; preserved, not overwritten")
+
     switched = False
     stop_attempted = False
     start_attempted = False
@@ -1713,6 +1750,7 @@ def activate(
             installed.append(result)
         verify_retired_absent()
         shared_preimage_check()
+        verify_captured("before startup")
         start_attempted = True
         restart()
         start_returned = True
@@ -1720,6 +1758,7 @@ def activate(
         canary_result = canary()
         shared_preimage_check()
         verify_retired_absent()
+        verify_captured("at readiness")
         delete_after_readiness(delete_targets, rollback)
         return {
             "status": "ACTIVATED",
@@ -1950,7 +1989,7 @@ def main(argv: list[str] | None = None) -> int:
                                   stop=lambda: _default_stop(args.service, port),
                                   restart=lambda: _default_restart(args.service, port),
                                   reconcile_stopped=lambda: not _service_observation(args.service, port)[0],
-                                  old_service_running=lambda: _service_observation(args.service, port)[0],
+                                  old_service_running=lambda: _old_service_running_pair(args.service, port),
                                   install_shared=not args.runtime_only, shared_target_root=args.shared_assets_root,
                                   shared_preimage_check=(lambda: _verify_runtime_preimages(release_dir, args.expected_old, args.shared_assets_root)) if args.runtime_only else (lambda: None),
                                   health=lambda: _bound_health(args.health_url, service=args.service, current=args.current),

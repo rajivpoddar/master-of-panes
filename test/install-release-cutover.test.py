@@ -36,6 +36,9 @@ class StoppedCutoverTests(unittest.TestCase):
         self.events = []
         self.start_error = None
         self.fail_health = False
+        self.label_only = False
+        self.after_bootout = None
+        self.bootstrap_calls = []
 
     def release(self, name, body):
         root = self.releases / name
@@ -58,6 +61,10 @@ class StoppedCutoverTests(unittest.TestCase):
 
     def transport(self, argv, **kwargs):
         self.assertNotIn("kickstart", argv)
+        if argv[:2] == ["launchctl", "print"] and self.label_only:
+            return subprocess.CompletedProcess(argv, 0, "state = not running\n", "")
+        if argv[0] == "lsof" and self.label_only:
+            return subprocess.CompletedProcess(argv, 1, "", "")
         if argv[:2] == ["launchctl", "print"]:
             return subprocess.CompletedProcess(argv, 0 if self.owned else 113,
                                                "pid = 1234\n" if self.owned else "",
@@ -68,8 +75,11 @@ class StoppedCutoverTests(unittest.TestCase):
         if argv[:2] == ["launchctl", "bootout"]:
             self.events.append("bootout")
             self.owned = False
+            if self.after_bootout:
+                self.after_bootout()
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[:2] == ["launchctl", "bootstrap"]:
+            self.bootstrap_calls.append(self.current.resolve().name)
             self.assertFalse(self.owned, "never start a second owner")
             selected = self.current.resolve().name
             self.assertEqual(self.helper.read_text(), selected + " client\n", "pointer/assets paired BEFORE bootstrap")
@@ -139,6 +149,27 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertEqual(self.helper.read_text(), "new client\n")
         plan = json.loads((self.root / "rollback/CUTOVER.json").read_text())
         self.assertEqual(plan["preimages"][0]["sha256"], hashlib.sha256(b"new client\n").hexdigest())
+
+    def test_candidate_equal_needs_a_bound_running_child_not_just_a_loaded_label(self):
+        # CTO REVISE ts 1794018596.287469: a loaded launchd label with no child
+        # and no listener is not the running old pair.
+        self.helper.write_text("new client\n")
+        self.set_inventory()
+        self.label_only = True
+        self.assertEqual(self.activate(), 2)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.current.resolve(), self.old)
+        self.assertEqual(self.helper.read_text(), "new client\n")
+
+    def test_post_stop_edit_to_an_accepted_asset_stops_before_startup_and_is_preserved(self):
+        # An untouched candidate-equal asset edited after the stop must not reach
+        # bootstrap unnoticed; the fresh bytes are kept, never overwritten.
+        self.helper.write_text("new client\n")
+        self.set_inventory()
+        self.after_bootout = lambda: self.helper.write_text("fresh post-stop edit\n")
+        self.assertEqual(self.activate(), 2)
+        self.assertNotIn("new", self.bootstrap_calls, "the candidate never starts over unverified bytes")
+        self.assertEqual(self.helper.read_text(), "fresh post-stop edit\n")
 
     def test_live_matching_neither_old_nor_candidate_still_refuses(self):
         self.helper.write_text("unknown live edit\n")

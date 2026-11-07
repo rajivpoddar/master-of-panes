@@ -76,17 +76,22 @@ test("with_devs arming exempts DND and non-running dev slots (decommissioned S5-
   const db = database();
   try {
     db.updateSlot(3, { occupied: true, dnd: true });
+    for (const slot of [1, 2, 3]) db.logEvent(slot, "SessionStart", "SessionStart", null, { session_id: `s${slot}` });
     const running = new Set([1, 2, 3, 4]);
     const healthChecker = { getPaneCommandPublic: async (slot: number) => running.has(slot) ? (slot === 2 ? "2.1.312" : "claude") : null };
     const post = route("/exit-pending", "post", { db, healthChecker, devSlots, DEFAULT_DEV_SLOT_COUNT, AGENT_COMMANDS });
     assert.equal((await post(context({ enabled: true, pm_only: true, with_devs: true, continuation_prompt: "resume" }))).status, 200);
     const status = db.getExitStatus();
     assert.equal(status.with_devs, true);
-    assert.deepEqual([0, 1, 2, 4].map((slot) => status.cycled[slot]), [false, false, false, false], "PM and live devs armed");
-    assert.deepEqual([3, 5, 6, 7, 8].map((slot) => status.cycled[slot]), [true, true, true, true, true], "DND and non-running exempt");
-    const reasons = [3, 5].map((slot) => JSON.parse(db.getEvents(slot, 1, "exit_pending_slot_exempt")[0].payload).reason);
-    assert.equal(reasons[0], "dnd");
-    assert.match(reasons[1], /^no_running_agent:/);
+    assert.deepEqual([0, 1, 2].map((slot) => status.cycled[slot]), [false, false, false], "PM and live devs armed");
+    assert.deepEqual([3, 4, 5, 6, 7, 8].map((slot) => status.cycled[slot]), [true, true, true, true, true, true],
+      "DND, session-unknown and non-running exempt");
+    const reasons = [3, 4, 5].map((slot) => JSON.parse(db.getEvents(slot, 1, "exit_pending_slot_exempt")[0].payload).reason);
+    assert.deepEqual(reasons, ["dnd", "session_unknown", "no_running_agent"]);
+    // Each armed slot is bound to its arm-time session/epoch.
+    assert.equal(db.exitArmCheck(1, "s1"), "match");
+    assert.equal(db.exitArmCheck(2, "s2"), "match");
+    assert.equal(db.exitArmCheck(1, "later"), "session_changed");
     // A plain pm_only arm probes nothing and exempts nothing.
     const quiet = route("/exit-pending", "post", {
       db, healthChecker: { getPaneCommandPublic: async () => { throw new Error("must not probe"); } },
