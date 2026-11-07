@@ -97,7 +97,7 @@ Apply exactly one destination rule to each eligible event:
    CTO DM task `01a0911a-a718-7743-b37e-e785f24f3708` and replace the first
    `SOP path:` line with
    `/Users/rajiv/.codex/monitors/cto-dms/WAKE_SOP.md`. If the DM task is not
-   idle, apply the overflow rule below (Rajiv 2026-10-22).
+   idle, queue to that same task; DMs never overflow.
 4. Otherwise, every qualifying bridge event is HeyDonna. Send it to CTO
    decisions task `01a09112-a09c-7361-9a2a-0ada6a4e9dfb` and replace the first
    `SOP path:` line with
@@ -117,52 +117,29 @@ Do not use Slack thread timestamps, quoted message text, users, keywords, or
 historical route tables to choose a task. Do not route any Superproofer event
 to a HeyDonna task or any HeyDonna event to the Godavari task.
 
-### Overflow pool (Rajiv 2026-10-22, C0C7U35LBKR/1792670433.869629, ts 1792689875.791679)
+### Growth-only overflow pool
 
-Rajiv: "the cto dm's task is also backed up. we need to distribute it to the
-idle tasks when social media is busy."
+Rajiv C0C7U35LBKR ts `1793173420.182639` / `1793173715.413409` limits
+`overflow_pool` to `social media`, `social media (2)`, `social media (3)`.
+Probe them in table order, skipping the intended owner; no other task is an
+overflow target. Eligible growth events use this pool; CTO DMs is never a
+growth fallback.
 
-- Growth (`C0C7U35LBKR`) goes to the Social pool (see rule 1; the all-messages gate is active).
-  The CTO DMs task is NEVER a growth fallback.
-- When the intended owner (Social, or the DMs task for `message.im`) is busy,
-  queued, notLoaded-and-mid-turn or unknown, the helper probes `overflow_pool`
-  in table order and queues to the FIRST task whose native/persisted state is
-  `idle` with an empty queue. The consumer SOP path stays the intended owner's;
-  the wake carries a "Relay overflow" note. The pool is only the existing
-  standby executors `Standby` and `Backup`; role-owned tasks (PR Merges,
-  Hotfixes, CP Repairs, PR Reviews, Rescues, Decisions, Returns, Social,
-  DMs) are never pool members.
-- If no pool task is idle, queue to the intended owner and record
-  `availability.overflow.reason` in the frozen `relay_route`. Never mis-route.
-- Idle is read from the task's persisted rollout lifecycle (last
-  `task_started` vs `task_complete`) plus `thread/queue/list`, because a fresh
-  stdio app-server reports every GUI task as `notLoaded`. The choice is frozen
-  in the existing claim (`growth_availability` / `direct_message_availability`).
-- An in-flight DM claim that predates this rule keeps the DMs owner.
-- Overflow executors have FULL capability (Rajiv C0C7U35LBKR/1792670433.869629,
-  ts 1792695362.355229: "all tasks on codex have access to the same in app browser.
-  my logins will work across all tasks."). An overflow task executes the growth
-  event end to end (posting, follows, DMs) under the Social SOP and caps, not
-  triage-only. This supersedes PM's 2026-10-22 triage-only note.
-- Capability check (PM 2026-10-23, after the Tori readback BLOCKED at ts 1792696778.746499):
-  an overflow task whose session lacks the browser tool (mcp__node_repl__js) must NOT
-  attempt browser effects. It records the gap and hands the browser step back to the
-  Social task (queued even if busy). Overflow does triage, drafts and ledger-only work
-  until the browser MCP is enabled on Standby/Backup.
-- Browser-capable tasks (Rajiv C0C7U35LBKR ts 1792697913.003309): the browser tool works in
-  Backup (Rescues Backup), Hotfixes and PR Reviews; it does NOT work in Rescues or Standby
-  (Rescues Standby) (Rajiv ts 1792698007.071829). Backup is therefore probed FIRST
-  for overflow. Standby takes overflow only for triage/draft/ledger work and hands browser
-  steps back. Role tasks (Hotfixes, PR Reviews, Rescues) stay out of the pool.
-
-- SUPERSEDES all overflow prose above (Rajiv C0C7U35LBKR ts 1793173420.182639 and
-  ts 1793173715.413409: "drop the overflow to backup/standby. 3 tasks shoudl be enough."):
-  `overflow_pool` is ONLY `social media`, `social media (2)`, `social media (3)`, probed in
-  that order (the intended owner is skipped). Backup and Standby are never overflow targets;
-  the helper fails closed if they reappear. Growth: social media → (2) → (3), else queue to
-  `social media`. DMs (`message.im`): ALWAYS the DMs task only, no overflow;
-  when busy they queue to it (Rajiv ts 1793173970.438699: "dm's should not go to social
-  media tasks, only to dms task."). `overflow_pool` serves growth only.
+- When the intended Social owner is busy, queued, notLoaded-and-mid-turn or
+  unknown, select the FIRST pool task whose native/persisted state is `idle`
+  with an empty queue. Keep the Social consumer SOP and the "Relay overflow"
+  note. If none is idle, queue to `social media` and record
+  `availability.overflow.reason` in the frozen `relay_route`.
+- Read idle from the persisted rollout lifecycle (last `task_started` vs
+  `task_complete`) plus `thread/queue/list`; a fresh stdio app-server alone
+  reports GUI tasks as `notLoaded`. Freeze the selection in the existing claim
+  (`growth_availability`); preserve already-frozen owners and receipts.
+- DMs (`message.im`) ALWAYS queue to the DMs task, even when busy; they never
+  overflow (Rajiv ts `1793173970.438699`).
+- A selected Social task handles an authorized growth event end to end under
+  the Social SOP, caps and existing account authority. If its session lacks
+  the required browser tool, do not attempt browser effects: retain triage,
+  drafts and ledger-only work and return the browser step to the Social owner.
 
 ### Current all-message growth cutover
 

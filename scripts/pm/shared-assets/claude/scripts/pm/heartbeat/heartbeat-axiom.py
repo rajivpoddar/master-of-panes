@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 AXIOM_API_URL = "https://api.axiom.co/v1/datasets/_apl?format=legacy"
@@ -131,7 +131,12 @@ def run_apl_query(token: str, apl: str, start_time: str, end_time: str) -> dict:
         except HTTPError as error:
             return error.code, error.read().decode("utf-8", errors="replace")
 
-    status, body = post()
+    try:
+        status, body = post()
+    except (URLError, TimeoutError, OSError) as exc:
+        print(f"Axiom response UNAVAILABLE: HTTP status unavailable (transport error: {type(exc).__name__})", file=sys.stderr)
+        AXIOM_QUERY_FAILED.append(0)
+        return {"matches": [], "buckets": {"series": [], "totals": []}}
     if status == 429:
         print("  [rate-limited] Waiting 10s before retry...", file=sys.stderr)
         time.sleep(10)
@@ -151,8 +156,11 @@ def run_apl_query(token: str, apl: str, start_time: str, end_time: str) -> dict:
         return {"matches": [], "buckets": {"series": [], "totals": []}}
 
     if status != 200:
-        print(f"Error: Axiom API returned {status}: {body}", file=sys.stderr)
+        print(f"Axiom response UNAVAILABLE: HTTP {status}", file=sys.stderr)
         AXIOM_QUERY_FAILED.append(status)
+        return {"matches": [], "buckets": {"series": [], "totals": []}}
+
+    if not body.strip():
         return {"matches": [], "buckets": {"series": [], "totals": []}}
 
     try:

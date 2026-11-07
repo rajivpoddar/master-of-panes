@@ -266,5 +266,41 @@ class ShippedProseWakeCaseTests(unittest.TestCase):
         self.assertEqual([d["number"] for d in c["dependencies"]], [12507])
 
 
+class IssueLabelCompatibilityTests(unittest.TestCase):
+    def test_dependency_only_old_and_new_representations_match(self):
+        old = issue(300, ["P0", "status:todo", "pm-blocked:dependency"])
+        new = issue(300, ["P0", "status:todo", "sub:waiting-on-issue"],
+                    body="<!-- ready-pool:\nblockers: #999999\nholds: dependency\n-->")
+        self.assertEqual(rps.classify(old), rps.classify(new))
+        self.assertEqual(rps.blocking_labels(rps._labels(old), old),
+                         rps.blocking_labels(rps._labels(new), new))
+
+    def test_dependency_cleared_but_another_hold_remains(self):
+        item = issue(301, ["P0", "status:blocked", "sub:external", "pm-blocked:dependency"],
+                     body="<!-- ready-pool:\nholds: dependency, external\n-->")
+        self.assertIsNone(rps.classify(item))
+        self.assertEqual(rps.blocking_labels(rps._labels(item), item),
+                         ["pm-blocked:dependency", "pm-blocked:external"])
+
+    def test_dependency_cleared_pm_gate_still_blocks(self):
+        before = issue(304, ["P0", "status:blocked", "sub:pm-gate", "pm-blocked:dependency",
+                             "pm-blocked:pm-gate"],
+                       body="<!-- ready-pool:\nholds: dependency, pm-gate\n-->")
+        after = issue(304, ["P0", "status:blocked", "sub:pm-gate", "pm-blocked:pm-gate"],
+                      body="<!-- ready-pool:\nholds: pm-gate\n-->")
+        self.assertIsNone(rps.classify(before))
+        self.assertIsNone(rps.classify(after))
+        self.assertEqual(rps.blocking_labels(rps._labels(after), after), ["pm-blocked:pm-gate"])
+
+    def test_incomplete_contract_stays_unassignable(self):
+        item = issue(302, ["P1", "status:todo", "sub:waiting-on-issue"], body="")
+        self.assertEqual(rps.rank_candidates([item]), [])
+
+    def test_dependency_only_hold_must_be_todo_not_blocked(self):
+        item = issue(303, ["P0", "status:blocked", "sub:waiting-on-issue"],
+                     body="<!-- ready-pool:\nholds: dependency\n-->")
+        self.assertIsNone(rps.classify(item))
+
+
 if __name__ == "__main__":
     unittest.main()

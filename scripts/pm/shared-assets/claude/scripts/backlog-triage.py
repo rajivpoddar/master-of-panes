@@ -152,12 +152,20 @@ def gh_issue_view(issue: int) -> dict[str, Any]:
     return json.loads(proc.stdout)
 
 
+SUB_TO_BLOCKER = {"sub:waiting-on-issue": "pm-blocked:dependency", "sub:pm-gate": "pm-blocked:pm-gate",
+                  "sub:external": "pm-blocked:external", "sub:decision": "pm-blocked:decision",
+                  "sub:infra": "pm-blocked:infra"}
+
+
 def labels(issue: dict[str, Any]) -> set[str]:
-    return {
-        str(label.get("name", ""))
-        for label in issue.get("labels", [])
-        if str(label.get("name", ""))
-    }
+    names = {str(label.get("name", "")) for label in issue.get("labels", []) if str(label.get("name", ""))}
+    names |= {legacy for sub, legacy in SUB_TO_BLOCKER.items() if sub in names}
+    meta = ready_pool_metadata(issue)
+    for entry in re.split(r"[;,]", clean_meta_value(meta.get("holds"))):
+        hold = entry.strip().lstrip("- ")
+        if hold:
+            names.add(hold if hold.startswith("pm-blocked:") else "pm-blocked:" + hold.removeprefix("sub:"))
+    return names
 
 
 def canonical_priority_labels(names: set[str]) -> list[str]:
@@ -1781,7 +1789,7 @@ def write_ready_pool_repair_manifest(
             if applied and not failed and repaired
             else "refresh live Ready Pool state; no repair remains"
             if applied and not failed and superseded
-            else "launch Agent(subagent_type=pm-backlog-promoter, run_in_background=true, mode=repair-ready-pool)"
+            else "launch Agent(subagent_type=pm-triage-agent, run_in_background=true, mode=repair-ready-pool)"
         ),
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1876,7 +1884,7 @@ def repair_ready_pool_main(argv: list[str]) -> int:
             f"body_sha256={candidate['expected_body_sha256']} title={candidate['title']}"
         )
     if not args.apply:
-        print("next=PM background Agent(pm-backlog-promoter) mode=repair-ready-pool must write --metadata-json and apply")
+        print("next=PM background Agent(pm-triage-agent) mode=repair-ready-pool must write --metadata-json and apply")
         return 0
 
     failed = [result for result in results if not result.get("ok")]
@@ -2149,7 +2157,7 @@ def write_promoter_manifest(
         "promoted": promoted,
         "promotion_failed": promotion_failed,
         "next_command": (
-            "Agent(subagent_type=pm-backlog-promoter,run_in_background=true,"
+            "Agent(subagent_type=pm-triage-agent,run_in_background=true,"
             f"mode=refill-ready-pool)  # repair contracts and promote every eligible P0-P2; refill P3 only below {READY_POOL_TARGET}"
         ),
         "skipped": skipped,
@@ -2255,7 +2263,7 @@ def write_promoter_degraded_manifest(*, stage: str, error: str, applied: bool) -
         "needs_ready_pool_metadata": [],
         "promoted": [],
         "promotion_failed": [],
-        "next_command": "rerun background Agent(pm-backlog-promoter) mode=refill-ready-pool; this degraded manifest is not closure",
+        "next_command": "rerun background Agent(pm-triage-agent) mode=refill-ready-pool; this degraded manifest is not closure",
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
@@ -2319,7 +2327,7 @@ def print_promoter_summary(
             print(f"- #{result['issue']} reason={result.get('reason','unknown')}")
     if not applied:
         print(
-            "next=Agent(subagent_type=pm-backlog-promoter,run_in_background=true,mode=refill-ready-pool) "
+            "next=Agent(subagent_type=pm-triage-agent,run_in_background=true,mode=refill-ready-pool) "
             f"(no architecture-review prerequisite; promote all eligible P0-P2)"
         )
 

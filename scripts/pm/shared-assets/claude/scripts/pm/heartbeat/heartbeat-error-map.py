@@ -112,6 +112,26 @@ def search_investigations(code: str, root: Path = REPO_ROOT / "docs/investigatio
     return hits
 
 
+def parse_axiom_payload(raw: str) -> dict:
+    """Empty successful Axiom output means there were no rows; malformed output is an error."""
+    if not raw.strip():
+        return {"top": []}
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("invalid Axiom JSON: expected an object")
+    return value
+
+
+def _self_test() -> None:
+    assert parse_axiom_payload("\n  ") == {"top": []}
+    try:
+        parse_axiom_payload("{")
+    except json.JSONDecodeError:
+        pass
+    else:
+        raise AssertionError("malformed Axiom JSON must fail")
+
+
 def map_codes(codes: list[str]) -> tuple[dict, list[str]]:
     result: dict[str, dict] = {}
     failures: list[str] = []
@@ -137,11 +157,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--axiom-json", help="axiom --errors-by-code JSON (default: stdin)")
     parser.add_argument("--code", action="append", default=[], help="map an explicit code (repeatable)")
+    parser.add_argument("--self-test", action="store_true", help="assert empty and malformed payload handling")
     args = parser.parse_args()
+    if args.self_test:
+        _self_test()
+        print("self-test passed")
+        return 0
     codes = list(args.code)
     if not codes:
         raw = Path(args.axiom_json).read_text() if args.axiom_json else sys.stdin.read()
-        codes = [row["code"] for row in json.loads(raw).get("top", [])]
+        try:
+            codes = [row["code"] for row in parse_axiom_payload(raw).get("top", [])]
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(f"Axiom response unavailable: {exc}", file=sys.stderr)
+            return 1
     mapping, failures = map_codes(codes)
     print(json.dumps({"mapping": mapping, "failures": failures}, indent=2))
     return 0

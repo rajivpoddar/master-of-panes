@@ -175,14 +175,9 @@ HeyDonna tasks in this pool, respecting each request's availability and affinity
 | Executor | Existing task ID |
 | --- | --- |
 | PR Merges | `01a0324b-68e0-7491-988f-e7e1549f16f7` |
-| Rescues | `01a16c6b-69bc-76f2-86d2-6110fb97ba18` |
-| Standby | `01a176ae-6bfe-7342-972a-dd79a7533638` |
-| Backup | `01a176af-ce21-7ea3-ac51-96caa53e946e` |
 | Hotfixes | `01a095ce-4e47-7a42-b3e5-a09fbd1ed60a` |
 | CP Repairs | `01a08f69-45db-71c2-b433-678419139ed7` |
 | PR Reviews | `01a0b53e-3316-77d3-9610-1c0c58d4ba5b` |
-
-Standby and Backup are also the Slack-relay overflow pool (cto-slack-relay SOP, Rajiv 2026-10-22 ts 1792689875.791679); the relay only uses them when idle.
 
 Decisions owns intake, verdict, the exact brief and direct assignment to the
 selected executor. That executor posts its own Slack outcome. Route independent eligible exact-head requests to an available suitable
@@ -228,16 +223,16 @@ the result; it never runs these skills.
   App, mixed, or unknown scope needs one exact-head CI/E2E pair; unknown scope
   is never exempt. Avoid only genuine duplicates and product-relevant
   conflicts. Slot-origin product work skips PR Reviews (companion review
-  covers it); hotfix/Rescues-origin work needs the single PR Reviews gate
+  covers it); hotfix-origin work needs the single PR Reviews gate
   (Rajiv 2026-09-18, `Ev0C2BE61939`). PM runs its own PM PR review agent on
   slot-origin PRs and posts a verdict before it asks for CI admission.
   Decisions routes admission only after that verdict. A
   re-review is needed only when a new head changes authored bytes; a clean
   main integration does not (Rajiv 2026-09-23, thread 1790131666.264829 ts
-  1790143579.210689). This covers Rescues corrections to a slot PR: Rescues
+  1790143579.210689). For corrections to a slot PR, the implementation owner
   pushes and returns the head without arming CI, PM reviews it, then Decisions
-  routes the pair. Every PR-origin exact-head pair, including hotfix/Rescues-
-  origin PRs, goes through CTO-requested PR Merges admission; the separate
+  routes the pair. Every PR-origin exact-head pair, including hotfix-origin
+  PRs, goes through CTO-requested PR Merges admission; the separate
   main-branch emergency/hotfix path remains unchanged.
 - Merge (assigned distributed executor): confirmed marketing-only site scope requires its
   authoritative exact-head site receipt and relevant site proof, not app
@@ -445,10 +440,7 @@ current approved brief.
 
 ## Execution owners (lookup; verify liveness before new work)
 
-Rescues (`01a16c6b-69bc-76f2-86d2-6110fb97ba18`) / backup (`01a176af-ce21-7ea3-ac51-96caa53e946e`) / standby (`01a176ae-6bfe-7342-972a-dd79a7533638`): bounded rescue work outside PR-red CI/E2E terminal processing
-(off-slot, full-suite, non-force publication); idle-first selection by live
-status (Rajiv `Ev0C3BPT9PJ4` supersedes older fences). `hotfixes`
-(`01a095ce-4e47-7a42-b3e5-a09fbd1ed60a`): all new hotfixes incl. shared E2E auth/runner and
+`hotfixes` (`01a095ce-4e47-7a42-b3e5-a09fbd1ed60a`): all new hotfixes incl. shared E2E auth/runner and
 control-plane hotfixes; full canonical suite on final bytes. CP Repairs
 (`01a08f69-45db-71c2-b433-678419139ed7`): non-hotfix shared release/control-plane repair outside MoP
 affinity (never capture app-CI code; never numbered slots); installed-skill
@@ -456,8 +448,8 @@ edits go here or MoP by affinity, never the DM lane. MoP (`01a0d779-9a74-7f52-89
 single functionality-first review; adjudication consumes, never re-reviews.
 PR Merges (`01a0324b-68e0-7491-988f-e7e1549f16f7`): dedicated admission,
 including only integration required by its admission skill; also one of the
-seven final-merge executors above, never PR-red investigation or fixes. All
-seven retain their normal affinities outside an explicitly assigned merge-only
+four final-merge executors above, never PR-red investigation or fixes. All
+four retain their normal affinities outside an explicitly assigned merge-only
 request; Decisions assigns directly and the executor posts its own outcome.
 Superseded PM Operator task `01a03c74-fc97-7a62-bb47-001ac7fb0710` receives nothing. Accepted owners
 keep their tuples; rework/approval returns to that same owner; PM has no
@@ -531,8 +523,8 @@ Envelope (required): `sop_path`, `fingerprint`, `class`, `action_kind`,
   PM request one exact-head pair admission through CTO Decisions; final green
   heads similarly request head-pinned merge. No blind rerun, lost green leg,
   red merge, or notifier-prose inference. PR Merges executes admission; the
-  assigned distributed executor performs final merge, not investigation;
-  Rescues owns no PR-red work. Main-branch P0/hotfix and
+  assigned distributed executor performs final merge, not investigation.
+  Main-branch P0/hotfix and
   production-deploy exceptions remain on their separate established paths.
 - Slack (only for concrete ambiguity): resolve channel/ts/thread_ts;
   read via postback skill + bot token; authoritative newer replies count;
@@ -592,7 +584,7 @@ Envelope (required): `sop_path`, `fingerprint`, `class`, `action_kind`,
 - Standing guardrails (never): merge on moved head or non-green real
   pull_request CI/E2E except the confirmed site-only exception above; run
   skills/integrate/admit/merge/investigate in
-  Decisions; execute/monitor rescues, hotfixes, repairs, or MoP work here;
+  Decisions; execute/monitor recovery work, hotfixes, repairs, or MoP work here;
   route PM-Operator anywhere but MoP `01a0d779-9a74-7f52-89ad-167910930d27`;
   keep any executing/monitoring/waiting work here (return after handoff);
   product-code rescue without explicit Rajiv authority; interrupt/duplicate

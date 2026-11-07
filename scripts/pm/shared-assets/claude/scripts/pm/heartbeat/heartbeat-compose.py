@@ -38,15 +38,16 @@ CTO = "<@U0BNFGX2UAX>"
 IST = timezone(timedelta(hours=5, minutes=30))
 SCRIPTS = Path(__file__).resolve().parent
 AXIOM_REPORT = SCRIPTS / "heartbeat-axiom.py"  # MoP-side helper (moved from heydonna-app)
-# Sequential collector deadlines sum to <150s; leave headroom in the 170s compose budget.
+# Priority inversion and pending GitHub checks complete paginated, live reads; allow one
+# bounded 45s extension for those legitimately necessary probes.
 COLLECTOR_TIMEOUTS = {
     "axiom": 30, "active-users": 10, "error-map": 8, "support": 15,
-    "pr-open-snapshot": 12, "priority-inversion": 18,
-    "pending-github": 18, "remote-boxes": 8, "training": 6,
+    "pr-open-snapshot": 12, "priority-inversion": 63,
+    "pending-github": 63, "remote-boxes": 8, "training": 6,
     "usage": 12, "email": 12,
 }
 COMPOSE_COLLECTOR_BUDGET = sum(COLLECTOR_TIMEOUTS.values())
-assert COMPOSE_COLLECTOR_BUDGET <= 150
+assert COMPOSE_COLLECTOR_BUDGET <= 240
 MAX_CODES = 5
 MAX_SUPPORT = 5
 MAX_PRS = 8
@@ -1318,7 +1319,7 @@ def priority_inversion_flags(slots_doc, failures: list[str], timeout: int = COLL
         except ProcessLookupError:
             pass
         proc.communicate()
-        failures.append(f"priority-inversion: UNAVAILABLE (timeout {timeout}s)")
+        failures.append(f"priority-inversion: UNAVAILABLE (timeout {timeout}s; ready_pool_select.load_open_issues/rank_candidates GraphQL candidate and dependency lookups)")
         return None
     except Exception as exc:  # noqa: BLE001 - heartbeat must still post
         failures.append(f"priority-inversion: {type(exc).__name__}")

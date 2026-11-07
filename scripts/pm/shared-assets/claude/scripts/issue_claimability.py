@@ -59,6 +59,7 @@ def issue_rescope_forward_state(issue: dict[str, Any]) -> str:
         claimable_type in NON_DISPATCHABLE_CLAIMABLE_TYPES
         or disposition == "TRACKING_ONLY"
         or "pm-nonclaimable:tracking" in labels
+        or "sub:pm-owned" in labels
     ):
         return "status:deferred"
     return "status:todo"

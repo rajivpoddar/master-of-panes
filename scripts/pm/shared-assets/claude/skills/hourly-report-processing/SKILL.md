@@ -266,11 +266,11 @@ Classify every `*Unblockable now:*` item (and every other stuck dependency seen 
 
 | # | Class (example) | One-line action | Owner |
 |---|---|---|---|
-| 1 | Blocker merged/closed, contract still valid | Promote to the Ready Pool via pm-backlog-promoter (metadata READY, status:todo), then assign on the next free slot. | PM + pm-backlog-promoter |
+| 1 | Blocker merged/closed, contract still valid | Promote to the Ready Pool via pm-triage-agent (metadata READY, status:todo), then assign on the next free slot. | PM + pm-triage-agent |
 | 2 | Blocker merged but design changed underneath (#11041/#11042 after #11038) | Contract rewrite first via issue-contract-auditor (blockers/ACs/next_action against what landed), THEN promote. Never promote a stale contract. | PM + issue-contract-auditor |
 | 3 | Blocker PR closed UNMERGED, wake condition can never fire (#10294/#10323 waiting on #10322) | Re-slice: file a new slice OR rewrite the wake condition the same hour. | PM |
 | 4 | Gate needs a plan-only step first (#11244, CTO AC-0 plan) | Assign as planning-only (plan-agent, no implementation) within caps (cap25 / slot idle rules). | PM -> free slot |
-| 5 | Unowned upstream that is itself claimable (#10537 unblocks #10538-10540) | Promote the upstream FIRST as the highest-leverage item; children follow when it lands. | PM + pm-backlog-promoter |
+| 5 | Unowned upstream that is itself claimable (#10537 unblocks #10538-10540) | Promote the upstream FIRST as the highest-leverage item; children follow when it lands. | PM + pm-triage-agent |
 | 6 | Waiting on a Rajiv or product decision (#10248 Clio approval, #11009 product call on #9334) | Same-turn DM to Rajiv (D0AMF0XE6TS) with the exact question and a PM default (S9). Product/pricing calls go to the CTO first and the DM cites the CTO ts (S84). Record the decision ts on the issue/obligation. | PM (CTO first for product) |
 | 7 | Waiting on a bench/baseline refresh (#10016) | Launch a PM bg bench agent (S61), never a slot. Representative bench, 3 reps (rule 44). | PM bg bench agent |
 | 8 | Waiting on a real recurrence/telemetry, instrumentation already merged (#10703, #9852, #8153) | Park with an explicit wake query: name the Axiom/event query that would fire. No wake condition (#6904) -> write one now. | PM |
