@@ -43,6 +43,9 @@ case "$VIA" in
       # DeepSeek V4.1 Flash: 1M = 1,048,576 tokens (input + output).
       # Use Claude Code's explicit limit while preserving the CLIProxyAPI alias.
       export CLAUDE_CODE_MAX_CONTEXT_TOKENS=1048576
+      # CLIProxyAPI 8.0.50 ConvertClaudeRequestToOpenAI drops output_config.effort
+      # without thinking; keep adaptive thinking present until upstream is fixed.
+      export MAX_THINKING_TOKENS=2048
     fi
     [[ "$MODEL" == claude-* ]] || export API_TIMEOUT_MS="${API_TIMEOUT_MS:-1200000}"
     ;;
