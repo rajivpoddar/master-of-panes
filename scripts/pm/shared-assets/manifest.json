@@ -645,7 +645,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-daily-pm-restart",
-      "sha256": "998194ee77b85877c9d4428dba228980c26219e8410a35695952ea3ea91894c1",
+      "sha256": "fd7ba32fdcda83949fed8cb051883a7e2718af592431e8dce7a42b9b7f4b4fb1",
       "source_path": "claude/scripts/pm/daily-pm-restart.sh"
     },
     {
@@ -971,7 +971,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-daily-pm-restart",
-      "sha256": "ff8bc4a7294e3258e8b0976f852f10f0f30edb2d8e74a1abd9f34d19d25241d6",
+      "sha256": "f182f09ffef366502f58fd3cb4bfe5ae17acc80a98b718651b0a22613e749c3e",
       "source_path": "claude/skills/daily-pm-restart/SKILL.md"
     },
     {

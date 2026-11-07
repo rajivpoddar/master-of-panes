@@ -171,8 +171,13 @@ def owner(pin):
     return {k:v for k,v in pin.items() if k != 'work'}
 
 def arm_pm_exit_pending(saved):
-    """Rajiv 1793501776.726249, 1793502261.099499, 1793502605.714159:
-    PM exits at its next Stop, resumes its saved prompt, THEN MoP arms dev exits.
+    """Rajiv 1793713170.231979 ("just turn on exit pending on all slots in mop at 4 am")
+    and 1793713304.405779 (PM subagents stopped first); CTO rewrite of obligation
+    30559 (C0ALZJHGE49 ts 1793889129.015359): this ONE 04:00 occurrence arms the PM
+    AND the dev slots together (with_devs). PM exits at its next Stop after the
+    handoff save; MoP relaunches it fresh with the configured model and injects the
+    saved continuation. Each non-DND dev exits at its own next Stop / idle empty
+    prompt in the same episode. No second dev phase.
     Rajiv 1793752982.460979 ("implement the pm exit pending the same way ... stop
     all subagents after save handoff"): MoP opens pm_save_handoff (variant exit);
     /exit waits only for the saved handoff files. Rajiv 1793758450.451269 ("remove
@@ -183,10 +188,10 @@ def arm_pm_exit_pending(saved):
         return
     with urllib.request.urlopen('http://127.0.0.1:3100/exit-status', timeout=15) as response:
         status = json.load(response)
-    if 'pm_only' not in status or 'dev_only' not in status:
+    if 'pm_only' not in status or 'dev_only' not in status or 'with_devs' not in status:
         saved['pm_exit_pending_armed'] = 'blocked_mop_pm_only_scope_missing'
         atomic(state, json.dumps(saved))
-        emit('PM_EXIT_PENDING_BLOCKED: MoP lacks PM-first exit-pending support; no global or dev-only fallback')
+        emit('PM_EXIT_PENDING_BLOCKED: MoP lacks PM+dev single-episode exit-pending support; no global or dev-only fallback')
         return
     # Persist intent before HTTP: an accepted request with lost ACK must not
     # reset the PM cycle flag and cause another restart on a repeated skill.
@@ -195,19 +200,21 @@ def arm_pm_exit_pending(saved):
     saved['handoff_status'] = 'armed'
     atomic(state, json.dumps(saved))
     request = urllib.request.Request('http://127.0.0.1:3100/exit-pending',
-        data=json.dumps({'enabled': True, 'pm_only': True, 'continuation_prompt': saved['continuation_prompt']}).encode(),
+        data=json.dumps({'enabled': True, 'pm_only': True, 'with_devs': True, 'continuation_prompt': saved['continuation_prompt']}).encode(),
         headers={'Content-Type': 'application/json'}, method='POST')
     with urllib.request.urlopen(request, timeout=15) as response:
         body = json.load(response)
-    if body.get('ok') is not True or (body.get('status') or {}).get('pm_only') is not True:
+    if body.get('ok') is not True or (body.get('status') or {}).get('pm_only') is not True \
+            or (body.get('status') or {}).get('with_devs') is not True:
         raise RuntimeError('MoP refused PM-only safe-point exit; retain intent, no automatic retry')
     saved['pm_exit_pending_armed'] = True
     saved['replacement_status'] = 'exit_pending_armed'
     atomic(state, json.dumps(saved))
     emit('PM_EXIT_PENDING: MoP opened pm_save_handoff (variant exit). PM saves MEMORY-session-handoff-current.md + data/pm-continuation-note.md, '
          'stops ALL background agents with TaskStop, then ends the turn; '
-         'MoP sends /exit at the next Stop after the save (a busy pane queues it). '
-         'Watchdog resumes saved prompt, THEN arms dev-only exits (next Stop, DND skipped)')
+         'MoP sends /exit at the next Stop after the save (a busy pane queues it), waits for the zsh prompt, '
+         'relaunches PM fresh with the configured model and injects the saved continuation. '
+         'Dev slots are armed in the SAME episode: each exits at its own next Stop, DND skipped')
 
 def snapshot():
     db = memory.parent / 'state/pm-ops.db'
@@ -252,9 +259,9 @@ def perform():
     prompt = ('Read ' + str(resume) + '. Resume PM from the canonical ledger. Relaunch the listed background agents only after checking their live state; '
               'do not duplicate completed work. Run Skill(daily-pm-restart) post-restart completion: post one line to Rajiv DM D0AMF0XE6TS.')
     emit(f'{"DRY_RUN" if args.dry_run else "RESTART"}: resume={resume}; open_obligations={len(obligations)}; slots={len(slots)}; open_prs={len(prs)}')
-    emit('PM_RELAUNCH: POST /exit-pending pm_only with saved continuation; MoP opens pm_save_handoff exit; PM saves handoff, TaskStops all agents, '
-         'ends the turn; /exit at the next Stop after the save; watchdog uses RESTART_COMMANDS[0]')
-    emit('DEV_EXIT_PENDING: only AFTER PM boot and continuation delivery; dev_only, next Stop, DND skipped')
+    emit('PM_RELAUNCH: POST /exit-pending pm_only+with_devs with saved continuation; MoP opens pm_save_handoff exit; PM saves handoff, '
+         'TaskStops all agents, ends the turn; /exit at the next Stop after the save; zsh prompt; fresh launcher with the configured model; continuation')
+    emit('DEV_EXIT_PENDING: same 04:00 episode; each dev exits at its own next Stop / idle empty prompt, DND skipped')
     if args.dry_run:
         pm_children_report()
         return

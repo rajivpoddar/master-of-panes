@@ -551,7 +551,14 @@ export class ProcessHealthChecker {
     const status = this.db.getExitStatus();
     if (status.pending && status.pm_only && status.cycled[0]) {
       await this.reconcilePMRestartContinuation();
-      const delivery = this.db.getExitStatus().continuation_delivery;
+      // Read this episode's continuation receipt: a with_devs episode whose devs
+      // all cycled ends (and resets its flags) as soon as the PM part lands.
+      let delivery: string | null = null;
+      const receipt = this.db.getEvents(0, 1, "pm_restart_continuation")[0];
+      try {
+        const payload = receipt ? JSON.parse(receipt.payload) : null;
+        if (payload && payload.episode === status.episode && receipt!.id > launchEventId) delivery = String(payload.delivery);
+      } catch { delivery = null; }
       const delivered = delivery === "delivered";
       if (delivered) void this.relay.drainPMQueue();
       return { success: delivered, launched: true, reason: `continuation ${delivery ?? "unknown"}` };
@@ -930,12 +937,16 @@ export class ProcessHealthChecker {
 
     const status = this.db.getExitStatus();
     // PM-first episodes fire at Stop only, never on the already-idle health
-    // scan (and never from tracked-tool accounting).
-    if (status.pm_only) return;
+    // scan (and never from tracked-tool accounting). A with_devs episode (04:00,
+    // obligation 30559) still scans its dev slots; the PM stays Stop-only.
+    const withDevs = (s: { pm_only: boolean; with_devs: boolean }) => s.pm_only && s.with_devs;
+    if (status.pm_only && !withDevs(status)) return;
     // Dev successors of a PM-first episode (stop_only) also exit a dev slot whose
     // pane is idle at an EMPTY prompt: a turn ended with Escape fires no Stop,
     // so episode f0a1b666 (2026-11-04) sat pending while slots were idle.
-    const stopOnly = status.stop_only;
+    // with_devs devs follow the same empty-prompt-only rule.
+    const effectiveStopOnly = (s: { stop_only: boolean; pm_only: boolean; with_devs: boolean }) => s.stop_only || withDevs(s);
+    const stopOnly = effectiveStopOnly(status);
 
     // Dev-only episodes leave PM replacement exclusively to /slots/0/respawn.
     for (const slot of RUNTIME_SLOT_NUMBERS) {
@@ -973,8 +984,10 @@ export class ProcessHealthChecker {
       const pin = row ? pinFrom({ paneId: observed.paneId, checkout: SLOT_RUNTIME_IDENTITIES[slot].checkoutPath }, { ...row, session_id: sessionId }) : null;
       const fence = (): string | null => {
         const freshStatus = this.db.getExitStatus();
-        if (!this.db.getExitPending() || freshStatus.episode !== status.episode || freshStatus.pm_only || freshStatus.stop_only !== stopOnly || freshStatus.cycled[slot]
-            || (slot === 0 && (freshStatus.dev_only || freshStatus.stop_only))) return "exit_pending_consumed";
+        const freshStopOnly = effectiveStopOnly(freshStatus);
+        if (!this.db.getExitPending() || freshStatus.episode !== status.episode || (freshStatus.pm_only && !withDevs(freshStatus))
+            || freshStopOnly !== stopOnly || freshStatus.cycled[slot]
+            || (slot === 0 && (freshStatus.dev_only || freshStopOnly))) return "exit_pending_consumed";
         if (session() !== sessionId) return "session_changed";
         if (slot === 0) return null;
         const fresh = this.db.getSlot(slot);
@@ -1018,7 +1031,8 @@ export class ProcessHealthChecker {
     // Check if all slots have now cycled
     const updatedStatus = this.db.getExitStatus();
     const allCycled = Object.entries(updatedStatus.cycled).every(([slot, v]) => (updatedStatus.dev_only && Number(slot) === 0) || v);
-    if (allCycled && !this.relay.hasPendingExitConfirmation?.(updatedStatus.episode)) {
+    // A with_devs episode stays pending until the PM continuation is delivered.
+    if (allCycled && !updatedStatus.pm_only && !this.relay.hasPendingExitConfirmation?.(updatedStatus.episode)) {
       this.db.setExitPending(false);
       this.relay.injectToPM("# All exit_pending attempts consumed — flag auto-cleared; this is not restart verification");
       this.db.logEvent(0, "exit_pending_complete", null, null, {
@@ -1171,6 +1185,30 @@ export class ProcessHealthChecker {
       episode: status.episode, boot_event_id: boot, delivery: result.outcome,
     });
     if (result.outcome !== "delivered" || fence()) return;
+    if (status.with_devs) {
+      // 04:00 single occurrence (obligation 30559): the devs were armed in THIS
+      // episode already. Keep the episode and every dev cycle flag (no second
+      // dev phase); the PM part is done. Clear when every dev has cycled.
+      this.db.setConfig("exit_pending_pm_only", "false");
+      this.db.setConfig("exit_pending_with_devs", "false");
+      this.db.setConfig("exit_pending_dev_only", "true");
+      this.db.setConfig("exit_pending_stop_only", "true");
+      this.db.setConfig("exit_pending_continuation_delivery", "delivered");
+      const after = this.db.getExitStatus();
+      const devsDone = Object.entries(after.cycled).every(([slot, v]) => Number(slot) === 0 || v);
+      this.db.logEvent(0, "pm_restart_continuation_with_devs", null, null, {
+        episode: status.episode, devs_all_cycled: devsDone,
+        reason: "PM continuation delivered; dev slots of the same episode keep their cycle flags",
+      });
+      if (devsDone && !this.relay.hasPendingExitConfirmation?.(after.episode)) {
+        this.db.setExitPending(false);
+        this.db.logEvent(0, "exit_pending_complete", null, null, {
+          source: "pm_restart_continuation", reason: "PM continuation delivered and every dev slot already cycled",
+        });
+      }
+      this.unresponsiveStates.delete(0);
+      return;
+    }
     // Rajiv 1793502605.714159: only AFTER PM has booted and received its
     // continuation do we reset dev flags. DND and normal Stop handling remain.
     this.db.setExitPending(true, true);

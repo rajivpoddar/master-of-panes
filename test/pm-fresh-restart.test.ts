@@ -263,3 +263,20 @@ test("crash restart never force-kills an agent that is running when the prompt w
     assert.deepEqual(h.order, []);
   } finally { h.db.close(); }
 });
+
+test("04:00 with_devs episode: the fresh PM restart delivers the continuation and ends the episode when devs are done", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old-session", cwd: PM_PATH });
+    h.db.setExitPending(true, false, true, "Read /saved/resume.md.", true, true);
+    const episode = h.db.getExitStatus().episode;
+    for (let i = 0; i <= 8; i++) h.db.markSlotExitCycled(i);
+    h.db.logEvent(0, "exit_pending_triggered", "Stop", null, { source: "pm_only_stop", delivery: "delivered", episode });
+    (h.relay as any).hasPendingExitConfirmation = () => false;
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, true, result.reason);
+    assert.deepEqual(h.pane.sends, ["Read /saved/resume.md."]);
+    assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
+    assert.equal(h.db.getExitStatus().pending, false, "single episode complete; no second dev phase");
+  } finally { h.db.close(); }
+});

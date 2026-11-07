@@ -1287,7 +1287,7 @@ app.use("/exit-pending", async (c, next) => {
 
 /** Set or clear the exit_pending flag (REST parity for mop_set_exit_pending). */
 app.post("/exit-pending", async (c) => {
-  let body: { enabled?: boolean; dev_only?: boolean; pm_only?: boolean; continuation_prompt?: string; recover_episode?: unknown } = {};
+  let body: { enabled?: boolean; dev_only?: boolean; pm_only?: boolean; with_devs?: boolean; continuation_prompt?: string; recover_episode?: unknown } = {};
   try {
     body = await c.req.json();
   } catch {
@@ -1323,6 +1323,9 @@ app.post("/exit-pending", async (c) => {
   if (body.pm_only && body.dev_only) {
     return c.json({ error: "pm_only and dev_only are mutually exclusive" }, 400);
   }
+  if (body.with_devs !== undefined && (typeof body.with_devs !== "boolean" || (body.with_devs && !body.pm_only))) {
+    return c.json({ error: "with_devs requires pm_only and must be a boolean" }, 400);
+  }
   if (body.continuation_prompt !== undefined && (typeof body.continuation_prompt !== "string" || !body.pm_only)) {
     return c.json({ error: "continuation_prompt requires pm_only and must be a string" }, 400);
   }
@@ -1340,7 +1343,10 @@ app.post("/exit-pending", async (c) => {
     }
   }
   // REST PM-only arming requires the saved handoff (resume point) only.
-  db.setExitPending(body.enabled, body.dev_only === true, body.pm_only === true, body.continuation_prompt, body.pm_only === true);
+  // with_devs (04:00 occurrence, obligation 30559): the SAME episode also arms
+  // every dev slot; DND slots are skipped by the existing Stop/scan paths.
+  db.setExitPending(body.enabled, body.dev_only === true, body.pm_only === true, body.continuation_prompt, body.pm_only === true,
+    body.pm_only === true && body.with_devs === true);
   // A new PM-only episode supersedes any refused terminal (its record stays in the event log).
   if (body.enabled && body.pm_only) db.setConfig("pm_exit_terminal", "");
   db.logEvent(0, body.enabled ? "exit_pending_enabled" : "exit_pending_disabled", null, null, {

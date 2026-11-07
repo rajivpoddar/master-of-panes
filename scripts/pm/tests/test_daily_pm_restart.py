@@ -82,12 +82,12 @@ def execute(home, dry, effects, race=None, phase='checkpoint', soft=False):
                         'boot_id': boot_id, 'session_id': 'other' if race == 'proof_session' else 's'}
                 return io.BytesIO(json.dumps(status).encode())
             if request.endswith('/exit-status'):
-                return io.BytesIO(json.dumps({} if race == 'no_dev_scope' else {'dev_only': False, 'pm_only': False}).encode())
+                return io.BytesIO(json.dumps({} if race == 'no_dev_scope' else {'dev_only': False, 'pm_only': False, 'with_devs': False}).encode())
             return io.BytesIO(json.dumps({'slots': [{'slot': 2, 'issue': 12, 'assignment_epoch': 8}]}).encode())
         if request.full_url.endswith('/exit-pending'):
             effects.append(['exit-pending', request.data.decode()])
             if race == 'uncertain': raise TimeoutError('accepted response lost')
-            return io.BytesIO(b'{"ok":true,"status":{"pm_only":true}}')
+            return io.BytesIO(b'{"ok":true,"status":{"pm_only":true,"with_devs":true}}')
         if request.full_url.endswith('/slots/0/respawn'):
             effects.append(['mop-respawn', request.data.decode()])
             saved, = (home / '.claude/state').glob('daily-pm-restart-*.json')
@@ -139,7 +139,7 @@ def test_dry_run_snapshots_but_does_not_restart_or_write_resume(tmp_path, capsys
     assert '(old.md)' in (base / 'memory/MEMORY.md').read_text()
 
 
-def test_apply_checkpoints_then_arms_pm_first_without_dev_exit_or_replacement(tmp_path):
+def test_apply_checkpoints_then_arms_pm_and_devs_in_one_episode_without_replacement(tmp_path):
     base = environment(tmp_path)
     effects = []
     execute(tmp_path, False, effects)
@@ -152,6 +152,8 @@ def test_apply_checkpoints_then_arms_pm_first_without_dev_exit_or_replacement(tm
     requests = [json.loads(e[1]) for e in effects if e[0] == 'exit-pending']
     assert len(requests) == 1
     assert requests[0]['enabled'] is True and requests[0]['pm_only'] is True
+    # Obligation 30559 (CTO ts 1793889129.015359): ONE 04:00 arm covers PM AND devs.
+    assert requests[0]['with_devs'] is True
     assert 'dev_only' not in requests[0]
     assert resume.name in requests[0]['continuation_prompt']
     saved, = (tmp_path / '.claude/state').glob('daily-pm-restart-*.json')

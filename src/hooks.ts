@@ -1695,7 +1695,9 @@ export class HookProcessor {
     // instead of normal idle notification. Watchdog will restart it.
     // Guard: skip if this slot already cycled (prevents restart loops after
     // watchdog restarts the slot with --continue and it goes idle again).
-    if (this.db.getExitPending() && !this.db.getExitStatus().pm_only && !(slotNum === 0 && this.db.getExitStatus().dev_only) && !this.db.getExitStatus().cycled[slotNum]) {
+    // A PM-only episode armed with_devs (04:00, obligation 30559) also exits each dev at its Stop.
+    if (this.db.getExitPending() && (!this.db.getExitStatus().pm_only || (this.db.getExitStatus().with_devs && slotNum > 0))
+        && !(slotNum === 0 && this.db.getExitStatus().dev_only) && !this.db.getExitStatus().cycled[slotNum]) {
       this.db.markSlotExitCycled(slotNum);
       this.relay.sendToSlot(slotNum, "/exit", true, false, this.db.getExitStatus().episode ?? undefined, payload.session_id);
       this.db.logEvent(slotNum, "exit_pending_triggered", "Stop", null, {
@@ -1711,7 +1713,8 @@ export class HookProcessor {
       const status = this.db.getExitStatus();
       const allCycled = Object.entries(status.cycled)
         .every(([slot, v]) => (status.dev_only && Number(slot) === 0) || v);
-      if (allCycled && !this.relay.hasPendingExitConfirmation?.(status.episode)) {
+      // A with_devs episode stays pending until the PM continuation is delivered.
+      if (allCycled && !status.pm_only && !this.relay.hasPendingExitConfirmation?.(status.episode)) {
         this.db.setExitPending(false);
         this.relay.injectToPM(
           "# ✅ All slots have cycled — exit_pending auto-cleared",

@@ -2518,7 +2518,13 @@ export class MoPDatabase {
    * no ACK per thread 1793754554.496299, ts 1793758450.451269). Direct callers
    * keep the unconditioned behaviour.
    */
-  setExitPending(enabled: boolean, devOnly = false, pmOnly = false, continuationPrompt?: string, requireHandoff = false): void {
+  /**
+   * `withDevs` (PM-only episodes only; obligation 30559, CTO ts 1793889129.015359):
+   * ONE episode arms the PM (save-handoff, Stop-only exit, fresh restart +
+   * continuation) AND the dev slots together; each non-DND dev exits at its own
+   * next Stop / idle empty prompt. No second dev phase after the PM restart.
+   */
+  setExitPending(enabled: boolean, devOnly = false, pmOnly = false, continuationPrompt?: string, requireHandoff = false, withDevs = false): void {
     const episode = randomUUID();
     this.setConfig("exit_pending_episode", episode);
     const handoff = enabled && pmOnly && requireHandoff;
@@ -2536,6 +2542,7 @@ export class MoPDatabase {
     this.setConfig("pm_exit_handoff_obligation_state", "");
     this.setConfig("pm_exit_handoff_consumed_episode", "");
     this.setConfig("exit_pending_pm_only", enabled && pmOnly ? "true" : "false");
+    this.setConfig("exit_pending_with_devs", enabled && pmOnly && withDevs ? "true" : "false");
     this.setConfig("exit_pending_continuation_prompt", enabled ? continuationPrompt ?? "" : "");
     this.setConfig("exit_pending_continuation_delivery", enabled && pmOnly ? "waiting" : "");
     this.setConfig("exit_pending_stop_only", "false");
@@ -2543,7 +2550,7 @@ export class MoPDatabase {
     this.setConfig("exit_pending", enabled ? "true" : "false");
     if (enabled) {
       // PM-first restart must not reset any dev episode before PM has resumed.
-      for (const i of pmOnly ? [PM_SLOT] : devOnly ? devSlots(this.config.slotCount) : [PM_SLOT, ...devSlots(this.config.slotCount)]) {
+      for (const i of pmOnly && !withDevs ? [PM_SLOT] : devOnly ? devSlots(this.config.slotCount) : [PM_SLOT, ...devSlots(this.config.slotCount)]) {
         this.setConfig(`exit_cycled_${i}`, "false");
       }
     }
@@ -2553,7 +2560,7 @@ export class MoPDatabase {
     this.setConfig(`exit_cycled_${slot}`, "true");
   }
 
-  getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean>;
+  getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; with_devs: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean>;
     handoff_requested_at: string | null; handoff_obligation_id: string | null;
     handoff_episode: string | null; exit_terminal: Record<string, unknown> | null } {
     const pending = this.getExitPending();
@@ -2563,6 +2570,7 @@ export class MoPDatabase {
     }
     return { pending, episode: this.getConfig("exit_pending_episode"), dev_only: this.getConfig("exit_pending_dev_only") === "true",
       pm_only: this.getConfig("exit_pending_pm_only") === "true",
+      with_devs: this.getConfig("exit_pending_with_devs") === "true",
       continuation_prompt: this.getConfig("exit_pending_continuation_prompt") || null,
       continuation_delivery: this.getConfig("exit_pending_continuation_delivery") || null,
       stop_only: this.getConfig("exit_pending_stop_only") === "true", cycled,
