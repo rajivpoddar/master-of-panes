@@ -93,6 +93,10 @@ class AssignmentNoticeTitleTests(unittest.TestCase):
         for lookup, expected in [
             (subprocess.CompletedProcess([], 0, "<work & more>\n", ""), " — &lt;work &amp; more&gt; —"),
             (subprocess.CompletedProcess([], 0, "x" * 110, ""), " — " + "x" * 99 + "… —"),
+            *[(subprocess.CompletedProcess([], 0, "title " + bad, ""), "") for bad in (
+                "U0BNFGX2UAU", "U0BNFGX2UAT", "U0BNFGX2UAY", "UEQTTB97B", "UEQTTB97C", "<U0BNFGX2UAX>",
+            )],
+            (subprocess.CompletedProcess([], 0, "safe <@U0BNFGX2UAX>", ""), " — safe &lt;@U0BNFGX2UAX&gt; —"),
             (subprocess.CompletedProcess([], 1, "", "error"), ""),
             (subprocess.TimeoutExpired("gh", 5), ""),
             (FileNotFoundError(), ""),

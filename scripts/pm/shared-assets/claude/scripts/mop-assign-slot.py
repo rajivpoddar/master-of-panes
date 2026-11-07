@@ -123,6 +123,18 @@ def display_repository_id(repository_id: str) -> str:
     return value
 
 
+def sanitize_notice_title(title: str) -> str:
+    """Omit titles rejected by slack-send's pre-POST mention guards."""
+    title = " ".join(title.split())
+    if re.search(r"U0BNFGX2UAU|U0BNFGX2UAT|U0BNFGX2UAY|UEQTTB97B|UEQTTB97C", title) or re.search(
+        r"<U[0-9A-Z]{8,}>", title
+    ):
+        return ""
+    if len(title) > 100:
+        title = title[:99] + "…"
+    return title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def post_assignment_notice(
     repository_id: str, issue: int, slot: int, assignment_epoch: int, priority: str, task: str,
 ) -> dict[str, Any]:
@@ -138,12 +150,9 @@ def post_assignment_notice(
             capture_output=True, text=True, timeout=5, check=False,
         )
         if result.returncode == 0:
-            title = " ".join(result.stdout.split())
+            title = sanitize_notice_title(result.stdout)
     except (OSError, subprocess.SubprocessError, UnicodeError):
         pass
-    if len(title) > 100:
-        title = title[:99] + "…"
-    title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     title_part = f" — {title} —" if title else ""
     body = (
         f"Assignment: {priority} {display_repository_id(repository_id)} issue {issue}{title_part} assigned to slot {slot} "
