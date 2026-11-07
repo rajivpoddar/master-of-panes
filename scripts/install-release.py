@@ -1591,6 +1591,7 @@ def activate(
     shared_target_root: Path | None = None,
     reconcile_stopped: Callable[[], bool] = lambda: False,
     shared_preimage_check: Callable[[], Any] = lambda: None,
+    old_service_running: Callable[[], bool] = lambda: False,
 ) -> dict[str, Any]:
     if not release_dir.is_dir() or release_dir.is_symlink():
         raise InstallerError(f"release is not an immutable directory: {release_dir}")
@@ -1624,12 +1625,30 @@ def activate(
         if baseline.keys() - candidate_targets - RETIRED_ABSENT_TARGETS:
             raise InstallerError("REFUSE: candidate removes unapproved shared targets")
         verify_retired_absent()
+        # Candidate equality is not evidence of the old preimage, EXCEPT while
+        # the old release's service is running and owned: then the live bytes
+        # are the proven current running pair (a live edit synced into main
+        # under a runtime-only release that pins an older manifest). A failed
+        # recovery leaves the service stopped and keeps refusing. The observed
+        # bytes are pinned and captured as the rollback preimage; no write is
+        # planned for them. Every other mismatch still refuses.
+        # Ops ruling: pm-escalation-ladder row pel-mw5rdoqk-fad6ae96 (pm_act).
+        candidate_records = {name: {"path": name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+                             for entry in candidate_manifest["entries"] for name in _shared_entry_targets(entry)}
+        running_pair: bool | None = None
         for name, prior in baseline.items():
             if name in retired_absent:
                 continue
             expected = {"path": name, "kind": "file", "mode": prior["mode"], "sha256": prior["sha256"]}
-            if file_record(_shared_target_path(name, shared_target_root), name) != expected:
-                raise InstallerError(f"REFUSE: pinned old preimage drift: {name}")
+            observed = file_record(_shared_target_path(name, shared_target_root), name)
+            if observed != expected:
+                if observed != candidate_records.get(name):
+                    raise InstallerError(f"REFUSE: pinned old preimage drift: {name}")
+                if running_pair is None:
+                    running_pair = bool(old_service_running())
+                if not running_pair:
+                    raise InstallerError(f"REFUSE: pinned old preimage drift: {name} (candidate-equal bytes need the running old service)")
+                expected = observed
             old_preimages[name] = expected
         for entry in _load_shared_manifest(release_dir)["entries"]:
             for name in _shared_entry_targets(entry):
@@ -1637,10 +1656,10 @@ def activate(
                 if prior is None:
                     raise InstallerError(f"REFUSE: no pinned old manifest preimage for {name}")
                 target = _shared_target_path(name, shared_target_root)
-                expected = {"path": name, "kind": "file", "mode": prior["mode"], "sha256": prior["sha256"]}
+                expected = old_preimages.get(name) or {"path": name, "kind": "file", "mode": prior["mode"], "sha256": prior["sha256"]}
                 if file_record(target, name) != expected:
                     raise InstallerError(f"REFUSE: pinned old preimage drift: {target}")
-                if (entry["sha256"], entry["mode"]) != (prior["sha256"], prior["mode"]):
+                if (entry["sha256"], entry["mode"]) != (expected["sha256"], expected["mode"]):
                     planned.append((name, expected, entry))
     rollback = create_rollback_bundle(delete_targets, rollback_bundle)
     shared_bundle = rollback_bundle / "shared-preimages"
@@ -1931,6 +1950,7 @@ def main(argv: list[str] | None = None) -> int:
                                   stop=lambda: _default_stop(args.service, port),
                                   restart=lambda: _default_restart(args.service, port),
                                   reconcile_stopped=lambda: not _service_observation(args.service, port)[0],
+                                  old_service_running=lambda: _service_observation(args.service, port)[0],
                                   install_shared=not args.runtime_only, shared_target_root=args.shared_assets_root,
                                   shared_preimage_check=(lambda: _verify_runtime_preimages(release_dir, args.expected_old, args.shared_assets_root)) if args.runtime_only else (lambda: None),
                                   health=lambda: _bound_health(args.health_url, service=args.service, current=args.current),

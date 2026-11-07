@@ -95,7 +95,7 @@ class StoppedCutoverTests(unittest.TestCase):
 
     def activate(self, hook=None):
         with patch.object(m.subprocess, "run", side_effect=self.transport), \
-             patch.object(m, "verify_staged"), \
+             patch.object(m, "verify_staged", return_value={"runtime_only": False}), \
              patch.object(m, "_bound_health", side_effect=self.health), \
              patch.object(m, "_default_canary", return_value={"slots": []}), \
              patch.object(m, "_before_replace_hook", side_effect=hook or self.replace), \
@@ -126,6 +126,27 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertEqual(plan["preimages"][0]["sha256"], hashlib.sha256(b"old client\n").hexdigest())
         backup = json.loads((self.root / "rollback/shared-preimages/ROLLBACK_MANIFEST.json").read_text())
         self.assertEqual(backup["entries"][0]["mode"], 0o755)
+
+    def test_live_already_at_candidate_activates_without_overwrite(self):
+        # Runtime-only active release pins the old manifest while the live edit
+        # was synced into the candidate: live == candidate and the old service is
+        # running (proven current pair), so nothing is written and the live
+        # bytes are the rollback preimage.
+        self.helper.write_text("new client\n")
+        self.set_inventory()
+        self.assertEqual(self.activate(), 0)
+        self.assertEqual(self.events, ["bootout", "bootstrap:new"], "no replacement write")
+        self.assertEqual(self.helper.read_text(), "new client\n")
+        plan = json.loads((self.root / "rollback/CUTOVER.json").read_text())
+        self.assertEqual(plan["preimages"][0]["sha256"], hashlib.sha256(b"new client\n").hexdigest())
+
+    def test_live_matching_neither_old_nor_candidate_still_refuses(self):
+        self.helper.write_text("unknown live edit\n")
+        self.set_inventory()
+        self.assertEqual(self.activate(), 2)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.current.resolve(), self.old)
+        self.assertEqual(self.helper.read_text(), "unknown live edit\n")
 
     def test_pre_shutdown_drift_refuses_without_service_effect(self):
         self.set_inventory()
@@ -303,11 +324,14 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertEqual(self.current.resolve(), self.old)
 
     def test_candidate_equal_installed_file_is_not_an_old_preimage(self):
+        # With the old service stopped (e.g. after a failed recovery) candidate
+        # equality is no evidence of the running pair: refuse, no effect.
         self.set_inventory()
         self.helper.write_text("new client\n")
+        self.owned = False
         self.assertEqual(self.activate(), 2)
         self.assertEqual(self.events, [])
-        self.assertTrue(self.owned)
+        self.assertFalse(self.owned)
         self.assertEqual(self.current.resolve(), self.old)
 
     def test_backup_bytes_are_verified_before_shutdown(self):
