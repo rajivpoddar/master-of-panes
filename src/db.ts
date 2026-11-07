@@ -847,8 +847,16 @@ export class MoPDatabase {
     return (this.db.prepare("SELECT * FROM pm_send_custody WHERE scope = ?").get(scope) as CustodyRow | undefined) ?? null;
   }
 
+  /**
+   * Age out ONLY proven-unissued custody (`refused_zero_effect`: nothing was ever written to a
+   * pane, so forgetting it cannot change what a retry does). `started`, `ambiguous`, `queued`
+   * and `accepted` rows are the evidence that a key was consumed or is UNKNOWN; deleting them
+   * would let an old key execute anew, so they are kept (a few hundred bytes each).
+   */
   pruneSendCustody(olderThanMs: number): number {
-    return this.db.prepare("DELETE FROM pm_send_custody WHERE updated_at < ?").run(olderThanMs).changes;
+    return this.db
+      .prepare("DELETE FROM pm_send_custody WHERE state = 'refused_zero_effect' AND updated_at < ?")
+      .run(olderThanMs).changes;
   }
 
   /**

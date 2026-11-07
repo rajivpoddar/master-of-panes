@@ -274,11 +274,35 @@ test("keys are untrusted header values", () => {
   assert.equal(parseIdempotencyKey(undefined), null);
 });
 
-test("custody rows are pruned by age", () => withDb(async (open) => {
+test("proven-unissued custody is pruned by age; recent rows are kept", () => withDb(async (open) => {
   const db = open();
   db.beginSendCustody(request({ scope: "0:old", key: "old" }), 1_000);
+  db.finishSendCustody("0:old", "refused_zero_effect", "pane_identity_mismatch", 1_000);
   db.beginSendCustody(request({ scope: "0:new", key: "new" }), 9_000);
+  db.finishSendCustody("0:new", "refused_zero_effect", "pane_identity_mismatch", 9_000);
   assert.equal(db.pruneSendCustody(5_000), 1);
   assert.equal(db.getSendCustody("0:old"), null);
   assert.notEqual(db.getSendCustody("0:new"), null);
+}));
+
+test("AGE PRUNING never erases consumed or UNKNOWN custody: an old key cannot execute anew", () => withDb(async (open) => {
+  const db = open();
+  const old = 1_000;
+  const journal = new SendCustodyJournal(store(db));
+  for (const [key, state] of [["acc", "accepted"], ["amb", "ambiguous"], ["que", "queued"], ["zer", "refused_zero_effect"]] as const) {
+    db.beginSendCustody(request({ scope: `0:${key}`, key }), old);
+    db.finishSendCustody(`0:${key}`, state, null, old);
+  }
+  db.beginSendCustody(request({ scope: "0:sta", key: "sta" }), old); // started, never finished
+  assert.equal(db.pruneSendCustody(Date.now()), 1, "only the proven-unissued row is aged out");
+  assert.equal(db.getSendCustody("0:zer"), null);
+
+  let executions = 0;
+  const exec = async () => { executions++; return accepted; };
+  assert.equal((await journal.run(request({ scope: "0:acc", key: "acc" }), exec)).kind, "duplicate");
+  assert.equal((await journal.run(request({ scope: "0:que", key: "que" }), exec)).kind, "duplicate");
+  assert.equal((await journal.run(request({ scope: "0:amb", key: "amb" }), exec)).kind, "rejected");
+  assert.equal((await journal.run(request({ scope: "0:sta", key: "sta" }), exec)).kind, "rejected");
+  assert.equal(executions, 0, "no old key was executed again");
+  assert.equal((await journal.run(request({ scope: "0:zer", key: "zer" }), exec)).kind, "executed", "forgetting proven-unissued custody changes nothing");
 }));

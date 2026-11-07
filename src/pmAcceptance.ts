@@ -1,18 +1,23 @@
 /**
- * Proof that the PM CLI actually took a pasted prompt.
+ * Proof that the PM CLI took the exact prompt a specific paste wrote.
  *
- * `tmux paste-buffer` + `send-keys Enter` returning success only proves tmux wrote
- * bytes to the pty. 2026-11-08 00:43 IST a CTO message was pasted this way, MoP
- * answered `verified: true`, and the CLI never recorded it (no UserPromptSubmit,
- * no transcript entry); only a bridge.db read revealed the loss.
+ * `tmux paste-buffer` + `send-keys Enter` returning success only proves tmux wrote bytes to
+ * the pty. 2026-11-08 00:43 IST a CTO message was pasted, MoP answered `verified: true`, and
+ * the CLI never recorded it. The CLI appends every prompt it accepts to the session transcript
+ * as a `queue-operation` `enqueue`, a `user`, or an `attachment` `queued_command` record.
  *
- * The CLI appends every prompt it accepts to the session transcript as one of
- *   - a `queue-operation` `enqueue` record (accepted while a turn is running),
- *   - a `user` record (accepted at idle),
- *   - an `attachment` `queued_command` record.
- * Acceptance is: such a record, written AFTER the paste began, whose text is the text
- * we sent. Matching is on the prompt record's own text, never on a substring of some
- * other record (a quoted copy inside a tool result or a model message is not a prompt).
+ * Acceptance is such a record that
+ *   1. carries EXACTLY the pasted text (after supported structural normalization only:
+ *      line endings, outer whitespace, the CLI's `<pasted_content>` wrapper);
+ *   2. belongs to THIS paste: it starts at or after the cursor sampled inside the serialized
+ *      writer immediately before this paste, before the next paste's cursor, and its own
+ *      timestamp is not earlier than the paste;
+ *   3. is credited at most once (a record can never satisfy two sends);
+ *   4. lives in the same file generation the cursor was taken in (replacement, rotation or
+ *      truncation of the transcript is UNKNOWN);
+ *   5. is observed while the recipient is still the pinned pane and session.
+ * Anything else, including a later manual copy of the text, leaves the send UNKNOWN. Quoted
+ * copies in tool results, model text or request blobs are not prompt records and never count.
  */
 
 import { open, stat } from "node:fs/promises";
@@ -51,47 +56,86 @@ export function promptTextsOf(record: TranscriptRecord): string[] {
 const PASTE_WRAPPER_OPEN = /^<pasted_content id="[^"]*">\n/;
 const PASTE_WRAPPER_CLOSE = /\n<\/pasted_content id="[^"]*">$/;
 
+/** The only normalization applied to either side: line endings, outer whitespace, paste wrapper. */
 export function normalizePrompt(text: string): string {
   return text.replace(/\r\n/g, "\n").trim().replace(PASTE_WRAPPER_OPEN, "").replace(PASTE_WRAPPER_CLOSE, "").trim();
 }
 
-export function promptMatchesSent(recordText: string, sentCommand: string): boolean {
-  const a = normalizePrompt(recordText);
-  const b = normalizePrompt(sentCommand);
-  if (b.length === 0) return false;
-  if (a === b) return true;
-  // Long bodies may be re-wrapped by the CLI; require both ends to match, never a mere substring.
-  return b.length > 400 && a.length > 400 && a.startsWith(b.slice(0, 200)) && a.endsWith(b.slice(-100));
+/** Exact equality after normalization. A prompt that merely shares its ends is a different prompt. */
+export function promptMatchesSent(recordText: string, sentText: string): boolean {
+  const sent = normalizePrompt(sentText);
+  return sent.length > 0 && normalizePrompt(recordText) === sent;
 }
 
-/** Scan appended transcript text (jsonl) for an accepted prompt equal to `sentCommand`. */
-export function chunkContainsAcceptedPrompt(chunk: string, sentCommand: string): boolean {
-  // Cheap prefilter on the JSON-escaped form of one distinctive line, before parsing.
-  const probeLine = normalizePrompt(sentCommand).split("\n").find((line) => line.trim().length >= 8)?.trim().slice(0, 24) ?? "";
-  const probe = probeLine ? JSON.stringify(probeLine).slice(1, -1) : "";
-  for (const line of chunk.split("\n")) {
-    if (!line || (probe && !line.includes(probe))) continue;
-    let record: TranscriptRecord;
-    try {
-      record = JSON.parse(line) as TranscriptRecord;
-    } catch {
-      continue;
-    }
-    if (promptTextsOf(record).some((text) => promptMatchesSent(text, sentCommand))) return true;
+export type TranscriptIdentity = { dev: number; ino: number; size: number };
+
+/** What one paste is bound to. Taken inside the serialized writer, per paste. */
+export type PasteCursor = {
+  path: string;
+  dev: number;
+  ino: number;
+  /** Transcript size (a line boundary) immediately before this paste. */
+  size: number;
+  startedAtMs: number;
+  text: string;
+};
+
+export type PasteWindow = {
+  cursor: PasteCursor;
+  textKey: string;
+  /** Start of the NEXT paste into the same transcript, once there is one; this paste's records end before it. */
+  upper: number | null;
+  settled: boolean;
+};
+
+/** Process-local bookkeeping that makes record credit unique and per-paste. */
+export class AcceptanceLedger {
+  private readonly claimed = new Map<string, number>();
+  private readonly last = new Map<string, PasteWindow>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /** Open this paste's window and close the previous one on the same transcript. */
+  open(cursor: PasteCursor): { window: PasteWindow; overlapsIdentical: boolean } {
+    const key = `${cursor.dev}:${cursor.ino}:${cursor.path}`;
+    const previous = this.last.get(key);
+    const textKey = normalizePrompt(cursor.text);
+    if (previous && previous.upper === null) previous.upper = cursor.size;
+    // The same text pasted again while the earlier identical paste is still awaiting its own
+    // record cannot be told apart from it by content: the later one stays UNKNOWN.
+    const overlapsIdentical = previous !== undefined && !previous.settled && previous.textKey === textKey;
+    const window: PasteWindow = { cursor, textKey, upper: null, settled: false };
+    this.last.set(key, window);
+    return { window, overlapsIdentical };
   }
-  return false;
+
+  isClaimed(path: string, offset: number): boolean {
+    return this.claimed.has(`${path}:${offset}`);
+  }
+
+  claim(path: string, offset: number): boolean {
+    const now = this.now();
+    for (const [claim, at] of this.claimed) if (now - at > 60 * 60 * 1000) this.claimed.delete(claim);
+    const key = `${path}:${offset}`;
+    if (this.claimed.has(key)) return false;
+    this.claimed.set(key, now);
+    return true;
+  }
 }
 
 export type AcceptanceDeps = {
-  /** Current transcript size; call BEFORE the paste and pass the result as `fromOffset`. */
-  size: (path: string) => Promise<number>;
+  identity: (path: string) => Promise<TranscriptIdentity>;
+  /** Bytes [from, to) decoded as UTF-8. */
   read: (path: string, from: number, to: number) => Promise<string>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
 };
 
 export const defaultAcceptanceDeps: AcceptanceDeps = {
-  size: async (path) => (await stat(path)).size,
+  identity: async (path) => {
+    const info = await stat(path);
+    return { dev: info.dev, ino: info.ino, size: info.size };
+  },
   read: async (path, from, to) => {
     const handle = await open(path, "r");
     try {
@@ -107,37 +151,103 @@ export const defaultAcceptanceDeps: AcceptanceDeps = {
   now: Date.now,
 };
 
+/** Complete jsonl lines in `text` with their absolute byte offsets; a trailing partial line is dropped. */
+export function* completeLines(text: string, baseOffset: number): Generator<{ offset: number; line: string; end: number }> {
+  let offset = baseOffset;
+  let start = 0;
+  for (;;) {
+    const newline = text.indexOf("\n", start);
+    if (newline < 0) return;
+    const line = text.slice(start, newline);
+    const end = offset + Buffer.byteLength(line, "utf8") + 1;
+    yield { offset, line, end };
+    offset = end;
+    start = newline + 1;
+  }
+}
+
+/** Offset of the first record in `text` that is exactly the pasted prompt, written at/after the paste. */
+export function findAcceptedPrompt(
+  text: string,
+  baseOffset: number,
+  sentText: string,
+  notBeforeMs: number,
+  isClaimed: (offset: number) => boolean,
+): { offset: number; end: number } | null {
+  for (const { offset, line, end } of completeLines(text, baseOffset)) {
+    if (!line || isClaimed(offset)) continue;
+    let record: TranscriptRecord;
+    try {
+      record = JSON.parse(line) as TranscriptRecord;
+    } catch {
+      continue;
+    }
+    if (!promptTextsOf(record).some((candidate) => promptMatchesSent(candidate, sentText))) continue;
+    const written = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : Number.NaN;
+    // A record without a usable timestamp, or older than the paste, is not this paste's prompt.
+    if (!Number.isFinite(written) || written < notBeforeMs) continue;
+    return { offset, end };
+  }
+  return null;
+}
+
+/** Clock slack between the CLI's record timestamp and MoP's paste time, same host. */
+const TIMESTAMP_SLACK_MS = 1_000;
+
 export async function confirmPmAcceptance(options: {
-  transcriptPath: string | null;
-  /** Transcript size sampled before the paste. */
-  fromOffset: number | null;
-  command: string;
+  ledger: AcceptanceLedger;
+  cursor: PasteCursor | null;
+  window: PasteWindow | null;
+  overlapsIdentical?: boolean;
+  /** True while the recipient is still the pane and session the send was pinned to. */
+  recipientIntact: () => Promise<boolean>;
   timeoutMs: number;
   pollMs?: number;
   deps?: AcceptanceDeps;
 }): Promise<{ accepted: boolean; reason: string }> {
   const deps = options.deps ?? defaultAcceptanceDeps;
-  if (!options.transcriptPath || options.fromOffset === null) {
-    return { accepted: false, reason: "transcript_unavailable" };
+  const { cursor, window, ledger } = options;
+  if (!cursor || !window) return { accepted: false, reason: "no_paste_cursor" };
+  if (options.overlapsIdentical) {
+    window.settled = true;
+    return { accepted: false, reason: "identical_prompt_in_flight" };
   }
-  const deadline = deps.now() + options.timeoutMs;
-  let offset = options.fromOffset;
-  let carry = "";
-  for (;;) {
-    try {
-      const size = await deps.size(options.transcriptPath);
-      if (size > offset) {
-        const text = carry + (await deps.read(options.transcriptPath, offset, size));
-        offset = size;
-        const lastNewline = text.lastIndexOf("\n");
-        const complete = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
-        carry = lastNewline >= 0 ? text.slice(lastNewline + 1) : text;
-        if (chunkContainsAcceptedPrompt(complete, options.command)) return { accepted: true, reason: "transcript_prompt_record" };
+  try {
+    const deadline = deps.now() + options.timeoutMs;
+    let offset = cursor.size;
+    for (;;) {
+      try {
+        const identity = await deps.identity(cursor.path);
+        if (identity.dev !== cursor.dev || identity.ino !== cursor.ino) {
+          return { accepted: false, reason: "transcript_replaced" };
+        }
+        if (identity.size < offset) return { accepted: false, reason: "transcript_truncated" };
+        const limit = window.upper === null ? identity.size : Math.min(identity.size, window.upper);
+        if (limit > offset) {
+          const text = await deps.read(cursor.path, offset, limit);
+          const hit = findAcceptedPrompt(
+            text,
+            offset,
+            cursor.text,
+            cursor.startedAtMs - TIMESTAMP_SLACK_MS,
+            (candidate) => ledger.isClaimed(cursor.path, candidate),
+          );
+          if (hit) {
+            if (!(await options.recipientIntact())) return { accepted: false, reason: "recipient_changed_during_send" };
+            if (!ledger.claim(cursor.path, hit.offset)) return { accepted: false, reason: "record_already_credited" };
+            return { accepted: true, reason: "transcript_prompt_record" };
+          }
+          // Advance only past complete lines so a record split across reads is not lost.
+          const lastNewline = text.lastIndexOf("\n");
+          if (lastNewline >= 0) offset += Buffer.byteLength(text.slice(0, lastNewline + 1), "utf8");
+        }
+      } catch {
+        // A transient read error is not evidence either way; keep polling until the deadline.
       }
-    } catch {
-      // A transient read error is not evidence either way; keep polling until the deadline.
+      if (deps.now() >= deadline) return { accepted: false, reason: "pm_acceptance_unconfirmed" };
+      await deps.sleep(options.pollMs ?? 200);
     }
-    if (deps.now() >= deadline) return { accepted: false, reason: "pm_acceptance_unconfirmed" };
-    await deps.sleep(options.pollMs ?? 200);
+  } finally {
+    window.settled = true;
   }
 }

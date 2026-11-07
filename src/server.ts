@@ -121,7 +121,8 @@ import {
 import { pinnedComposerCleanup, pinnedGuardedSend, type OperationFence } from "./pinnedWriters.js";
 import { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } from "./assignmentTaskPacket.js";
 import { SendCustodyJournal } from "./sendCustody.js";
-import { registerSendCustody } from "./sendCustodyRoutes.js";
+import { registerSendCustody, currentSendGuard, type PmPin } from "./sendCustodyRoutes.js";
+import { AcceptanceLedger } from "./pmAcceptance.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -2842,38 +2843,37 @@ const sendCustody = new SendCustodyJournal({
   get: (scope) => db.getSendCustody(scope),
 });
 
-/** Transcript of the PM's current session, from the newest hook event that carries it. */
-function pmTranscriptPath(): string | null {
-  let best: { id: number; path: string } | null = null;
-  for (const type of ["SessionStart", "UserPromptSubmit", "Stop"]) {
-    const event = db.getEvents(0, 1, type)[0];
-    if (!event) continue;
+/**
+ * The PM recipient a keyed send is pinned to: the immutable pane id, the session token (the id
+ * of the newest SessionStart event) and the transcript path from THAT SessionStart event. A
+ * delayed hook from an older session can never select another file, and a /clear, compact or
+ * respawn changes the token.
+ */
+async function resolvePmPin(slotNum: number): Promise<PmPin | null> {
+  const identity = await verifyPaneIdentity(slotNum).catch(() => null);
+  if (!identity || !identity.ok) return null;
+  const start = db.getEvents(slotNum, 1, "SessionStart")[0];
+  let transcriptPath: string | null = null;
+  if (start) {
     try {
-      const path = (JSON.parse(event.payload) as { transcript_path?: unknown }).transcript_path;
-      if (typeof path === "string" && path && (!best || event.id > best.id)) best = { id: event.id, path };
+      const path = (JSON.parse(start.payload) as { transcript_path?: unknown }).transcript_path;
+      if (typeof path === "string" && path) transcriptPath = path;
     } catch {
-      // An unreadable payload is simply not a source.
+      // No usable path: acceptance stays UNKNOWN.
     }
   }
-  return best?.path ?? null;
-}
-
-/** The recipient a send is bound to: the immutable pane id plus the current session. */
-async function sendDestination(slotNum: number): Promise<string> {
-  const identity = await verifyPaneIdentity(slotNum).catch(() => null);
-  const pane = identity && identity.ok ? identity.snapshot.paneId : "pane_unverified";
-  return `${pane}|session:${slotSessionToken(slotNum)}`;
+  return { paneId: identity.snapshot.paneId, session: slotSessionToken(slotNum), transcriptPath };
 }
 
 registerSendCustody(app, {
   journal: sendCustody,
+  ledger: new AcceptanceLedger(),
   parseSlot: (raw) => {
     const parsed = slotParamSchema.safeParse(raw);
     return parsed.success ? parsed.data : null;
   },
   customSlot: PM_SLOT,
-  destination: sendDestination,
-  transcriptPath: pmTranscriptPath,
+  resolvePin: resolvePmPin,
   acceptanceTimeoutMs: PM_ACCEPTANCE_TIMEOUT_MS,
   logEvent: (slot, type, payload) => db.logEvent(slot, type, null, null, payload),
 });
@@ -3192,13 +3192,13 @@ app.post("/slots/:slotNum/send", async (c) => {
         // PM file deliveries use the shared submit path. It requires a booted
         // runtime; native Claude preserves its Enter composer behavior, while
         // OMP selects its busy-aware submit key.
-        const submitted = await relay.submitToPM(filePayload.toString("utf8"));
+        const submitted = await relay.submitToPM(filePayload.toString("utf8"), undefined, currentSendGuard());
         if (!submitted.ok) {
           // `ambiguous` means a paste was invoked before the failure: text may have reached the pane.
           return c.json({
             success: false,
             error: "PM pane file submit failed (tmux send-keys).",
-            reason: submitted.ambiguous ? "pm_submit_outcome_ambiguous" : "tmux_exec_error",
+            reason: submitted.refused ? `pm_paste_refused_${submitted.refused}` : submitted.ambiguous ? "pm_submit_outcome_ambiguous" : "tmux_exec_error",
             ambiguous: submitted.ambiguous === true,
             zero_effect: submitted.ambiguous !== true,
             submit: submitted.submitKey,
@@ -3273,7 +3273,7 @@ app.post("/slots/:slotNum/send", async (c) => {
         // Slot 0 is the PM pane. Submit through the relay so it can verify the
         // runtime is booted and apply runtime-specific paste/submit semantics.
         const bytes = Buffer.byteLength(command, "utf8");
-        const submitted = await relay.submitToPM(command);
+        const submitted = await relay.submitToPM(command, undefined, currentSendGuard());
         if (!submitted.ok) {
           db.logEvent(slotNum, "send_error", null, null, {
             error: "pm_submit_failed",
@@ -3285,7 +3285,7 @@ app.post("/slots/:slotNum/send", async (c) => {
             {
               success: false,
               error: "PM pane submit failed (tmux send-keys).",
-              reason: submitted.ambiguous ? "pm_submit_outcome_ambiguous" : "tmux_exec_error",
+              reason: submitted.refused ? `pm_paste_refused_${submitted.refused}` : submitted.ambiguous ? "pm_submit_outcome_ambiguous" : "tmux_exec_error",
               ambiguous: submitted.ambiguous === true,
               zero_effect: submitted.ambiguous !== true,
             },

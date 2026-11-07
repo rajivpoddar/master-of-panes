@@ -4,29 +4,61 @@
  * against a stand-in handler.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Hono } from "hono";
-import { confirmPmAcceptance, defaultAcceptanceDeps, type AcceptanceDeps } from "./pmAcceptance.js";
-import { SendCustodyJournal, parseIdempotencyKey, sendRequestDigest } from "./sendCustody.js";
+import type { PasteGuard } from "./pasteGuard.js";
+import {
+  AcceptanceLedger,
+  confirmPmAcceptance,
+  defaultAcceptanceDeps,
+  type AcceptanceDeps,
+  type PasteCursor,
+  type PasteWindow,
+} from "./pmAcceptance.js";
+import { SendCustodyJournal, isAffirmativeZeroEffect, parseIdempotencyKey, sendRequestDigest } from "./sendCustody.js";
+
+/** The recipient a keyed send is pinned to, and the transcript of THAT session. */
+export type PmPin = {
+  /** Immutable tmux pane id. */
+  paneId: string;
+  /** Session token: the id of the newest SessionStart event. A /clear, compact or respawn changes it. */
+  session: string;
+  /** Transcript path from that SessionStart event itself, never from another hook type. */
+  transcriptPath: string | null;
+};
 
 export type SendCustodyRouteDeps = {
   journal: SendCustodyJournal;
+  ledger: AcceptanceLedger;
   /** Parses the :slotNum param; null when invalid. */
   parseSlot: (raw: string) => number | null;
   /** Only this slot has acceptance evidence; other slots keep their existing behaviour. */
   customSlot: number;
-  destination: (slot: number) => Promise<string>;
-  transcriptPath: () => string | null;
+  /** Resolve the current recipient; null when it cannot be verified. */
+  resolvePin: (slot: number) => Promise<PmPin | null>;
   acceptanceTimeoutMs: number;
   acceptanceDeps?: AcceptanceDeps;
   pollMs?: number;
+  /** Wall clock used to stamp a paste; defaults to Date.now. */
+  wallClock?: () => number;
   logEvent: (slot: number, type: string, payload: Record<string, unknown>) => void;
 };
 
 const json = (body: unknown, status: number): Response =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
+const sendContext = new AsyncLocalStorage<{ guard: PasteGuard }>();
+
+/** The pin enforced inside the serialized writer for the keyed request being handled, if any. */
+export function currentSendGuard(): PasteGuard | undefined {
+  return sendContext.getStore()?.guard;
+}
+
+const samePin = (a: PmPin, b: PmPin | null): boolean => b !== null && a.paneId === b.paneId && a.session === b.session;
+
 export function registerSendCustody(app: Hono, deps: SendCustodyRouteDeps): void {
   const acceptanceDeps = deps.acceptanceDeps ?? defaultAcceptanceDeps;
+  const wallClock = deps.wallClock ?? Date.now;
 
   app.use("/slots/:slotNum/send", async (c, next) => {
     const key = c.req.method === "POST" ? parseIdempotencyKey(c.req.header("idempotency-key")) : null;
@@ -36,22 +68,56 @@ export function registerSendCustody(app: Hono, deps: SendCustodyRouteDeps): void
     if (!body || typeof body !== "object") return next();
     const { digest, commandDigest } = sendRequestDigest(body);
 
+    const pin = await deps.resolvePin(slot);
+    if (!pin) {
+      // No verifiable recipient: nothing is written and nothing is recorded.
+      return json({ success: false, reason: "pane_identity_mismatch", zero_effect: true, safe_to_retry: true, idempotency_key: key }, 409);
+    }
+
     const run = await deps.journal.run(
-      { scope: `${slot}:${key}`, slot, key, digest, commandDigest, destination: await deps.destination(slot) },
+      { scope: `${slot}:${key}`, slot, key, digest, commandDigest, destination: `${pin.paneId}|session:${pin.session}` },
       async () => {
-        const transcriptPath = deps.transcriptPath();
-        const fromOffset = transcriptPath ? await acceptanceDeps.size(transcriptPath).catch(() => null) : null;
-        await next();
+        let cursor: PasteCursor | null = null;
+        let window: PasteWindow | null = null;
+        let overlapsIdentical = false;
+        const guard: PasteGuard = {
+          paneId: pin.paneId,
+          // Runs inside the relay's serialized writer, right before paste-buffer.
+          async beforePaste(text) {
+            if (!samePin(pin, await deps.resolvePin(slot))) return { ok: false, reason: "recipient_changed" };
+            if (pin.transcriptPath) {
+              const identity = await acceptanceDeps.identity(pin.transcriptPath).catch(() => null);
+              if (identity) {
+                cursor = { path: pin.transcriptPath, dev: identity.dev, ino: identity.ino, size: identity.size, startedAtMs: wallClock(), text };
+                const opened = deps.ledger.open(cursor);
+                window = opened.window;
+                overlapsIdentical = opened.overlapsIdentical;
+              }
+            }
+            return { ok: true };
+          },
+        };
+
+        await sendContext.run({ guard }, () => next());
         const status = c.res.status;
         const original = (await c.res.clone().json().catch(() => ({}))) as Record<string, unknown>;
-        if (!(status >= 200 && status < 300 && original.success === true) || original.queued === true) {
-          return { status, body: original };
+        if (!(status >= 200 && status < 300 && original.success === true)) {
+          const outcome = { status, body: original };
+          if (!isAffirmativeZeroEffect(outcome)) return outcome;
+          // Tell the caller, in one place, that this refusal had no effect and may be retried.
+          const refusal = { ...original, zero_effect: true, safe_to_retry: true };
+          c.res = json(refusal, status);
+          return { status, body: refusal };
         }
-        // The paste returned success at tmux level. It only counts once the CLI recorded the prompt.
+        if (original.queued === true) return { status, body: original };
+
+        // The paste returned success at tmux level. It only counts once the CLI recorded THIS prompt.
         const proof = await confirmPmAcceptance({
-          transcriptPath,
-          fromOffset,
-          command: typeof body.command === "string" ? body.command : "",
+          ledger: deps.ledger,
+          cursor,
+          window,
+          overlapsIdentical,
+          recipientIntact: async () => samePin(pin, await deps.resolvePin(slot)),
           timeoutMs: deps.acceptanceTimeoutMs,
           pollMs: deps.pollMs,
           deps: acceptanceDeps,

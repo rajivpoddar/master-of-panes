@@ -18,6 +18,7 @@ import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } fr
 import { QUEUED_HINT, composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, isSlashCommand, resolveSlashCommandEnterDelayMs, slashComposerClearable, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 import type { PMClearFenceRefusal } from "./pmClearLatch.js";
+import type { PasteGuard } from "./pasteGuard.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
@@ -215,6 +216,8 @@ export type PMSubmitResult = {
   ambiguous: boolean;
   /** True when MoP durably accepted the message but the pane was not booted. */
   queued?: boolean;
+  /** Set when a PasteGuard refused before any pane write (a proven zero-effect). */
+  refused?: string;
 };
 
 type PMQueueRow = {
@@ -228,6 +231,8 @@ type DirectSubmitResult = {
   ok: boolean;
   ambiguous: boolean;
   notReady?: boolean;
+  /** A PasteGuard refused before any pane write. */
+  refused?: string;
 };
 
 /**
@@ -764,7 +769,7 @@ export class TmuxRelay {
    * selects the key that queues a follow-up in OMP instead of steering the
    * active turn when PM is busy.
    */
-  async submitToPM(message: string, eventTypeOverride?: string): Promise<PMSubmitResult> {
+  async submitToPM(message: string, eventTypeOverride?: string, guard?: PasteGuard): Promise<PMSubmitResult> {
     this.pmMaintenanceGate?.deferCLIInput();
     // Cadence has an exact durable event identity. Native Claude must use the
     // same attempt journal as queue drains, not the ordinary inbound fast path.
@@ -777,7 +782,7 @@ export class TmuxRelay {
       }
       const parsed = parseRelayMessage(message);
       const decorated = withMopSlotHeader(message, parsed);
-      const result = await this.injectDirectWithSubmitKey(decorated, "Enter");
+      const result = await this.injectDirectWithSubmitKey(decorated, "Enter", guard);
       if (result.notReady && this.db) {
         this.enqueuePMMessage(message, eventTypeOverride, "submitToPM-pane-became-not-ready");
         return { ok: true, submitKey: "Enter", ambiguous: false, queued: true };
@@ -960,8 +965,8 @@ export class TmuxRelay {
     }
   }
 
-  private injectDirectWithSubmitKey(message: string, submitKey: PMSubmitKey): Promise<DirectSubmitResult> {
-    const run = (): Promise<DirectSubmitResult> => this.injectDirectNow(message, submitKey);
+  private injectDirectWithSubmitKey(message: string, submitKey: PMSubmitKey, guard?: PasteGuard): Promise<DirectSubmitResult> {
+    const run = (): Promise<DirectSubmitResult> => this.injectDirectNow(message, submitKey, guard);
     const result = this.directInjectChain.then(run, run);
     this.directInjectChain = result.then(() => undefined, () => undefined);
     return result;
@@ -1062,8 +1067,10 @@ export class TmuxRelay {
     return { ok: true, submitKey, ambiguous: false };
   }
 
-  private async injectDirectNow(message: string, submitKey: PMSubmitKey): Promise<DirectSubmitResult> {
+  private async injectDirectNow(message: string, submitKey: PMSubmitKey, guard?: PasteGuard): Promise<DirectSubmitResult> {
     let pasted = false;
+    // A guarded send targets the pinned immutable pane id, never the mutable PM address.
+    const target = guard?.paneId ?? this.pmPaneAddress;
     const effectiveSubmitKey = submitKey;
     try {
       if (!(await this.isPMPaneReady())) return { ok: false, ambiguous: false, notReady: true };
@@ -1082,15 +1089,30 @@ export class TmuxRelay {
         await fs.writeFile(tmpFile, message);
         try {
           await this.runShell(`tmux load-buffer -b ${bufName} ${shellEscape(tmpFile)}`, { timeout: 10_000 });
+          if (guard) {
+            // Inside the serialized writer, immediately before the paste: recheck the pin and
+            // take this paste's own transcript cursor. A refusal here wrote nothing.
+            let verdict: { ok: true } | { ok: false; reason: string };
+            try {
+              verdict = await guard.beforePaste(message);
+            } catch (guardError) {
+              console.error("[relay] PasteGuard threw; refusing before paste:", guardError);
+              verdict = { ok: false, reason: "guard_error" };
+            }
+            if (!verdict.ok) {
+              await this.runShell(`tmux delete-buffer -b ${bufName}`, { timeout: 5_000 }).catch(() => undefined);
+              return { ok: false, ambiguous: false, refused: verdict.reason };
+            }
+          }
           // `-p` wraps this as a bracketed paste. Claude Code 2.1.282 keeps a
           // plain multiline paste in its composer after Enter; bracketed paste
           // lets the same single Enter submit the complete message.
           // Once invoked, tmux may have accepted the paste even if its ACK is lost.
           // Conservatively retain an ambiguous attempt instead of replaying it.
           pasted = true;
-          await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${this.pmPaneAddress} -d`, { timeout: 10_000 });
+          await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${target} -d`, { timeout: 10_000 });
           await sleep(PM_INJECT_ENTER_DELAY_MS);
-          await this.runShell(`tmux send-keys -t ${this.pmPaneAddress} ${effectiveSubmitKey}`, { timeout: 10_000 });
+          await this.runShell(`tmux send-keys -t ${target} ${effectiveSubmitKey}`, { timeout: 10_000 });
           await sleep(500);
         } finally {
           await fs.unlink(tmpFile).catch(() => undefined);
