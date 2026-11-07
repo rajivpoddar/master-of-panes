@@ -267,6 +267,8 @@ stuckDetector.start();
 // ─── Process Health (Phase 4) ───────────────────────────
 const healthChecker = new ProcessHealthChecker(db, relay);
 healthChecker.start();
+// PM-only /exit -> zsh prompt -> fresh configured-model launcher -> one continuation.
+processor.pmExitRestartHandler = (episode, delivery) => healthChecker.onPmExitDispatched(episode, delivery);
 
 // ─── Ops Audit Scheduler (hourly PM-pane exceptions review) ──
 // Owns cadence (1h), in-process lock, PM busy queueing (via TmuxRelay).

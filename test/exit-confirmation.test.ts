@@ -55,8 +55,12 @@ function harness(slot: number, options: { persistent?: boolean; noDialog?: boole
       if (command.includes(" -S -")) stdout = `${rule}\n❯ ${pane.composer}\n${rule}`;
       else {
         pane.onVisible?.();
+        // Before /exit is submitted the pane is an idle Claude composer; the
+        // dialog can only render after the submitted /exit (the dev Stop path
+        // rechecks pane idleness before its single send).
         const renderAt = options.afterStop ? pane.stopRespondedAt : pane.exitAt;
-        stdout = renderAt && pane.showing && Date.now() - renderAt >= (options.delay ?? 0) ? dialog : "shell $";
+        stdout = !pane.exitAt ? `${rule}\n❯ \n${rule}`
+          : renderAt && pane.showing && Date.now() - renderAt >= (options.delay ?? 0) ? dialog : "shell $";
       }
     } else if (command.startsWith("tmux load-buffer")) {
       pane.buffer = await readFile(command.match(/'([^']+)'\s*$/)![1], "utf8");

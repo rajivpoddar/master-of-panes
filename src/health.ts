@@ -11,9 +11,15 @@
  * The --continue flag resumes the most recent session in the pane's cwd,
  * restoring conversation context including any in-progress work.
  *
- * PM auto-revival: When the PM process (pane 0:0.0) dies, MoP detects it
- * and restarts with `launch-pm-cliproxy.sh --continue`. This is the most critical case —
- * PM coordinates all slots, so downtime must be minimized.
+ * PM restart (Rajiv, DM D0AMF0XE6TS thread 1793979986.975849, ts 1793988738.009889
+ * and 1793989226.288339): "MoP injects /exit, waits for the zsh prompt, then injects
+ * launch-pm.sh or launch-pm-cliproxy.sh with opus/deepseek. then injects the
+ * continuation pompt at the claude prompt" ... "switching models with continue is not
+ * probably a good idea. MoP should run the right launcher and then inject the
+ * continuation prompt or point to the saved handoff file." The PM is therefore
+ * relaunched FRESH (no --continue) with the configured model, and receives ONE
+ * continuation prompt once its Claude input prompt is up. PM crash recovery uses
+ * the same path. Dev slots keep `--continue` + "continue".
  */
 
 import { createHash } from "node:crypto";
@@ -23,10 +29,11 @@ import type { MoPDatabase } from "./db.js";
 import { recentJsonlActivity } from "./jsonlActivity.js";
 import type { TmuxRelay } from "./relay.js";
 import { DEV_SLOT_NUMBERS, RUNTIME_SLOT_NUMBERS, SLOT_RUNTIME_IDENTITIES } from "./slotConfig.js";
-import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity, type PaneCommandRunner } from "./paneIdentity.js";
 import { pinFrom, pinDrift } from "./interruptBeforeClear.js";
 import { latestSessionStartEventId } from "./sessionStartClearWait.js";
 import { composerText } from "./composer.js";
+import { withSlotSendLock } from "./slotSendLock.js";
 
 // ─── Restart Commands ──────────────────────────────────────
 // These are shell aliases defined in ~/.zshrc. Since tmux panes
@@ -47,10 +54,57 @@ export const CLAUDE_SLOT_RUNTIME_ENV = [
   "DEV_SLOT_SPARK_MAX_THINKING_TOKENS=2048",
   "MAX_THINKING_TOKENS=2048",
 ].join(" ");
-// Health checker: always --continue (crash recovery preserves session/work).
+// ─── PM fresh-launch contract ───────────────────────────
+/** MoP config key holding the PM model passed to the PM launcher. */
+export const PM_MODEL_CONFIG_KEY = "pm_model";
+/** Rajiv switched the PM pane to Opus (DM D0AMF0XE6TS ts 1794015590.986679). */
+export const PM_DEFAULT_MODEL = "opus";
+/**
+ * Config value -> launcher `--model` argument. launch-pm-cliproxy.sh accepts
+ * `--model <proxy-alias>` and maps `deepseek` itself; `opus` is pinned to the
+ * launcher's own default id so Claude Code never resolves a bare alias the
+ * CLIProxy route does not serve.
+ */
+const PM_MODEL_LAUNCH_ARGS: Record<string, string> = {
+  opus: "claude-opus-5-5",
+  deepseek: "deepseek",
+};
+export const PM_RESTART_CONTINUATION_PROMPT =
+  "Session restarted. Continue PM work: read /Users/rajiv/Downloads/projects/heydonna-app/data/pm-continuation-note.md "
+  + "and memory MEMORY-session-handoff-current.md, reconcile live pm-ops.db, MoP slots and open PRs, then resume the next actions.";
+
+/** The configured PM model; an absent or malformed value falls back to the default. */
+export function pmConfiguredModel(db: Pick<MoPDatabase, "getConfig">): string {
+  let value = "";
+  try { value = (db.getConfig(PM_MODEL_CONFIG_KEY) ?? "").trim(); } catch { value = ""; }
+  return /^[A-Za-z0-9._-]{1,64}$/.test(value) ? value : PM_DEFAULT_MODEL;
+}
+
+/** Fresh PM launcher command (never --continue) for a model. */
+export function pmFreshLaunchCommand(model: string = PM_DEFAULT_MODEL): string {
+  const safe = /^[A-Za-z0-9._-]{1,64}$/.test(model) ? model : PM_DEFAULT_MODEL;
+  return `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-pm-cliproxy.sh --model ${PM_MODEL_LAUNCH_ARGS[safe] ?? safe}`;
+}
+
+/**
+ * True when the pane's bottom line is an empty interactive shell prompt (zsh
+ * jreese theme renders `user@host <cwd> »` then `$ `). Read from the pane, never
+ * inferred from elapsed time. Claude's composer chevron is not a shell prompt.
+ */
+export function isShellPromptVisible(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const lines = text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split(/\r?\n/).map((line) => line.trimEnd())
+    .filter((line) => line.trim() !== "");
+  const last = lines.at(-1)?.trim();
+  if (!last || /^Pane is dead/.test(last)) return false;
+  return /^(?:\S.*\s)?[$%#»]$/.test(last);
+}
+
+// Dev slots: always --continue (crash recovery preserves session/work).
+// PM: fresh launch with the configured model, then one continuation prompt.
 // Respawn skill: --continue is optional arg (fresh start for atma updates).
 export const RESTART_COMMANDS: Record<number, string> = {
-  0: `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-pm-cliproxy.sh --continue`,
+  0: pmFreshLaunchCommand(PM_DEFAULT_MODEL),
   ...Object.fromEntries(DEV_SLOT_NUMBERS.map((slot) => [
     slot,
     `env ${CLAUDE_SLOT_RUNTIME_ENV} bash ${SLOT_RUNTIME_IDENTITIES[slot].launchScript} --continue`,
@@ -86,7 +140,9 @@ type UnresponsiveState = PaneProbe & {
 };
 
 function shellEscape(value: string): string {
-  return `'${value.replace(/'/g, `'\''`)}'`;
+  // Inside a template literal a bare `'\''` evaluates to `'''`; escape the
+  // backslash so the shell receives the standard '\'' quote break.
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function typedLaunchCommandForPane(slotNum: number): string | null {
@@ -128,6 +184,21 @@ export class ProcessHealthChecker {
   private unresponsiveStates = new Map<number, UnresponsiveState>();
   /** slot -> timestamp of last force respawn for unresponsive cmd=claude pane. */
   private lastForceRespawn = new Map<number, number>();
+
+  // PM fresh restart bounds. Every wait reads the pane; none is a fixed sleep.
+  private PM_RESTART_POLL_MS = 1_000;
+  /** /exit (plus any exit-confirmation dialog) -> zsh prompt. */
+  private PM_EXIT_SHELL_TIMEOUT_MS = 120_000;
+  /** respawn-pane (force path) -> zsh prompt. */
+  private PM_FORCE_SHELL_TIMEOUT_MS = 30_000;
+  /** launcher typed -> idle Claude input prompt. */
+  private PM_PROMPT_TIMEOUT_MS = 90_000;
+  /** idle prompt -> this launch's SessionStart hook row. */
+  private PM_BOOT_EVENT_TIMEOUT_MS = 20_000;
+  /** tmux runner for the PM restart effects (tests substitute a fake pane). */
+  private runShell: PaneCommandRunner = execShell;
+  /** Single owner of a PM restart; concurrent triggers join it. */
+  private pmRestartInFlight: Promise<{ success: boolean; reason: string }> | null = null;
 
   constructor(
     private db: MoPDatabase,
@@ -307,6 +378,207 @@ export class ProcessHealthChecker {
     }
   }
 
+  // ─── PM fresh restart (Rajiv ts 1793988738.009889 / 1793989226.288339) ───
+
+  /** Hook-side entry: the PM-only Stop consumed its single /exit attempt. */
+  onPmExitDispatched(episode: string | null, delivery: string): void {
+    if (delivery === "refused_pre_effect") return;
+    void this.restartPMFresh("exit", episode).catch((err) => {
+      console.error("[health] PM fresh restart after /exit failed:", err);
+    });
+  }
+
+  private sleepMs(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+  }
+
+  /** Poll the PM pane until an empty shell prompt is visible, bounded. */
+  private async waitForPMShellPrompt(timeoutMs: number): Promise<{ paneId: string } | null> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const command = await this.getPaneCommand(0);
+      if (command && SHELL_COMMANDS.has(command)) {
+        const observed = await this.relay.observeSlotPane(0);
+        if (observed && isShellPromptVisible(observed.text)) return { paneId: observed.paneId };
+      }
+      if (Date.now() >= deadline) return null;
+      await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
+    }
+  }
+
+  /** Poll until the PM pane runs the agent AND shows an idle Claude input prompt, bounded. */
+  private async waitForPMClaudePrompt(paneId: string, timeoutMs: number): Promise<string | null> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const command = await this.getPaneCommand(0);
+      if (this.isAgentCommand(0, command)
+          && (await this.relay.getSlotActivityState(0, paneId)) === "idle") return command;
+      if (Date.now() >= deadline) return null;
+      await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
+    }
+  }
+
+  /**
+   * The PM restart contract: wait for the zsh prompt after /exit (pane read,
+   * bounded; respawn-pane to a fresh shell is the fallback), type the
+   * configured-model launcher as a FRESH start, wait for the Claude input
+   * prompt (bounded), then deliver ONE continuation through the guarded writer.
+   * Never force-kills a busy PM turn. Used for /exit episodes and PM crashes.
+   */
+  restartPMFresh(trigger: "exit" | "crash" | "unresponsive", episode: string | null = null): Promise<{ success: boolean; reason: string }> {
+    if (this.pmRestartInFlight) return this.pmRestartInFlight;
+    if (this.pmInitiatedRespawns.has(0)) return Promise.resolve({ success: false, reason: "controlled_respawn_owns_pm" });
+    // A just-completed restart owns the cooldown: a late duplicate trigger must
+    // never relaunch (or force-respawn) the freshly booted PM.
+    if (this.isRestartSuppressed(0)) return Promise.resolve({ success: false, reason: "restart_cooldown" });
+    this.pmInitiatedRespawns.add(0);
+    const run = (async () => {
+      let launched = false;
+      try {
+        const result = await this.runPMFreshRestart(trigger, episode);
+        launched = result.launched;
+        return { success: result.success, reason: result.reason };
+      } finally {
+        if (launched) {
+          this.recordRestart(0);
+          this.completePmInitiatedRespawn(0);
+        } else {
+          this.lastRestart.set(0, Date.now());
+          this.pmInitiatedRespawns.delete(0);
+        }
+        this.pmRestartInFlight = null;
+      }
+    })();
+    this.pmRestartInFlight = run;
+    return run;
+  }
+
+  private async runPMFreshRestart(trigger: "exit" | "crash" | "unresponsive", episode: string | null):
+    Promise<{ success: boolean; launched: boolean; reason: string }> {
+    const model = pmConfiguredModel(this.db);
+    const launchCommand = pmFreshLaunchCommand(model);
+    const cwd = SLOT_CWDS[0];
+    const fail = (reason: string, launched = false, extra: Record<string, unknown> = {}) => {
+      this.db.logEvent(0, "pm_restart_failed", null, null, { trigger, episode, model, reason, ...extra });
+      console.error(`[health][pm-restart] ${trigger}: ${reason}`);
+      return { success: false, launched, reason };
+    };
+    this.db.logEvent(0, "pm_restart_started", null, null, { trigger, episode, model, launch_command: launchCommand });
+
+    // 1. zsh prompt (pane read). Fallback: respawn-pane to a fresh login shell,
+    //    only when Claude is gone or idle; a busy PM turn is never killed.
+    let shell = await this.waitForPMShellPrompt(trigger === "unresponsive" ? 0 : this.PM_EXIT_SHELL_TIMEOUT_MS);
+    if (!shell) {
+      const command = await this.getPaneCommand(0);
+      const identity = await verifyPaneIdentity(0, this.runShell);
+      if (!identity.ok) return fail(`pane identity unavailable: ${identity.detail}`);
+      const paneId = identity.snapshot.paneId;
+      const agentAlive = this.isAgentCommand(0, command);
+      if (!command) return fail("shell_prompt_timeout_pane_unknown");
+      if (agentAlive && trigger === "crash") {
+        // A crash restart started from an observed shell; an agent now running
+        // was launched by someone else and is never killed.
+        return fail("shell_prompt_timeout_agent_running_no_force", false, { pane_command: command });
+      }
+      if (agentAlive && trigger === "exit") {
+        // Force an idle PM only while its own consumed /exit episode still
+        // waits for the restart; a busy PM turn is never killed.
+        const current = this.db.getExitStatus();
+        if (episode && (!current.pending || current.episode !== episode)) {
+          return fail("shell_prompt_timeout_episode_changed_no_force", false, { pane_command: command });
+        }
+        if ((await this.relay.getSlotActivityState(0, paneId)) !== "idle") {
+          return fail("shell_prompt_timeout_pm_busy_no_force", false, { pane_command: command });
+        }
+      }
+      this.db.logEvent(0, "pm_restart_force_respawn", null, null, {
+        trigger, episode, pane_command: command, reason: "shell prompt not observed within bound",
+      });
+      try {
+        await this.runShell(`tmux respawn-pane -k -t ${paneId} -c ${shellEscape(cwd)}`, { timeout: 10_000 });
+        this.lastForceRespawn.set(0, Date.now());
+      } catch (err) {
+        return fail(`force respawn failed: ${String(err).slice(0, 200)}`);
+      }
+      shell = await this.waitForPMShellPrompt(this.PM_FORCE_SHELL_TIMEOUT_MS);
+      if (!shell) return fail("shell_prompt_not_observed_after_force_respawn");
+    }
+    this.unresponsiveStates.delete(0);
+    this.db.logEvent(0, "process_dead", null, null, {
+      detected_at: new Date().toISOString(), pane_command: "shell_prompt", trigger, episode,
+    });
+
+    // 2. Fresh launcher with the configured model, typed at the verified prompt.
+    const launchEventId = this.db.getEvents(0, 1)[0]?.id ?? 0;
+    const typed = `cd ${shellEscape(cwd)} && ${launchCommand}`;
+    const refusal = await withSlotSendLock(0, async () => {
+      for (const key of ["text", "Enter"] as const) {
+        const identity = await verifyPaneIdentity(0, this.runShell);
+        if (!identity.ok || identity.snapshot.paneId !== shell!.paneId) return "pane_identity_mismatch";
+        const command = await this.getPaneCommand(0);
+        if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
+        await this.runShell(key === "text"
+          ? `tmux send-keys -l -t ${shell!.paneId} ${shellEscape(typed)}`
+          : `tmux send-keys -t ${shell!.paneId} Enter`, { timeout: 10_000 });
+      }
+      return null;
+    }).catch((err) => `launcher send failed: ${String(err).slice(0, 200)}`);
+    if (refusal) return fail(refusal);
+    this.db.logEvent(0, "pm_restart_launched", null, null, { trigger, episode, model, launch_command: launchCommand });
+
+    // 3. Claude input prompt (pane read, bounded).
+    const bootCommand = await this.waitForPMClaudePrompt(shell.paneId, this.PM_PROMPT_TIMEOUT_MS);
+    if (!bootCommand) return fail(`claude prompt not observed within ${this.PM_PROMPT_TIMEOUT_MS}ms`, true);
+    this.db.logEvent(0, "agent_booted", null, null, {
+      command: bootCommand, launch_command: launchCommand, observed_at: new Date().toISOString(),
+    });
+    this.db.logEvent(0, "process_restarted", null, null, {
+      command: launchCommand, restarted_at: new Date().toISOString(), trigger, model,
+    });
+
+    // This launch's SessionStart row binds the continuation to this boot.
+    const bootDeadline = Date.now() + this.PM_BOOT_EVENT_TIMEOUT_MS;
+    let boot = this.db.getEvents(0, 1, "SessionStart")[0];
+    while ((!boot || boot.id <= launchEventId) && Date.now() < bootDeadline) {
+      await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, bootDeadline - Date.now()));
+      boot = this.db.getEvents(0, 1, "SessionStart")[0];
+    }
+    if (!boot || boot.id <= launchEventId) return fail("session_start_not_observed_for_launch", true);
+
+    // 4. ONE continuation. A PM-only exit episode keeps its durable
+    //    waiting -> attempted claim (and its saved continuation); every other
+    //    restart claims this boot once.
+    const status = this.db.getExitStatus();
+    if (status.pending && status.pm_only && status.cycled[0]) {
+      await this.reconcilePMRestartContinuation();
+      const delivery = this.db.getExitStatus().continuation_delivery;
+      const delivered = delivery === "delivered";
+      if (delivered) void this.relay.drainPMQueue();
+      return { success: delivered, launched: true, reason: `continuation ${delivery ?? "unknown"}` };
+    }
+    const outcome = await this.deliverPMFreshContinuation(shell.paneId, boot.id, trigger);
+    if (outcome === "delivered") void this.relay.drainPMQueue();
+    return { success: outcome === "delivered", launched: true, reason: `continuation ${outcome}` };
+  }
+
+  /** Exactly-once continuation for a non-episode PM restart, claimed per boot before the send. */
+  private async deliverPMFreshContinuation(paneId: string, bootId: number, trigger: string): Promise<string> {
+    const claimKey = "pm_restart_continuation_boot";
+    if (this.db.getConfig(claimKey) === String(bootId)) return "already_claimed";
+    this.db.setConfig(claimKey, String(bootId));
+    const fence = () => latestSessionStartEventId(this.db, 0) !== bootId ? "pm_session_changed" : null;
+    const result = await this.relay.deliverGuardedToSlot(0, PM_RESTART_CONTINUATION_PROMPT, {
+      expectedPaneId: paneId,
+      recheck: async () => fence(),
+      finalCheck: fence,
+      bracketedPaste: true,
+    });
+    this.db.logEvent(0, "pm_restart_continuation", null, null, {
+      episode: null, trigger, boot_event_id: bootId, delivery: result.outcome,
+    });
+    return result.outcome;
+  }
+
   private isAgentCommand(slotNum: number, command: string | null): boolean {
     return command !== null && (AGENT_COMMANDS.has(command)
       || (slotNum === 0 && /^\d+\.\d+\.\d+$/.test(command)));
@@ -472,8 +744,15 @@ export class ProcessHealthChecker {
     this.db.logEvent(slotNum, "pane_unresponsive_force_respawn", null, null, {
       unchanged_checks: state.unchangedChecks,
       probe_sent_at: state.probeSentAt ? new Date(state.probeSentAt).toISOString() : null,
-      command: RESTART_COMMANDS[slotNum],
+      command: slotNum === 0 ? pmFreshLaunchCommand(pmConfiguredModel(this.db)) : RESTART_COMMANDS[slotNum],
     });
+
+    if (slotNum === 0) {
+      // PM crash recovery uses the fresh-launch + continuation contract.
+      this.unresponsiveStates.delete(0);
+      void this.restartPMFresh("unresponsive").catch((err) => console.error("[health] PM unresponsive restart failed:", err));
+      return;
+    }
 
     const restarted = await this.forceRespawnSlot(slotNum, `unchanged_checks=${state.unchangedChecks}`);
     if (restarted) {
@@ -553,6 +832,16 @@ export class ProcessHealthChecker {
             `# 🔴 slot ${slot} in crash loop — ${this.MAX_RESTARTS_PER_HOUR}+ restarts in the last hour. Manual intervention needed.`,
           );
         }
+        continue;
+      }
+
+      // ─── PM is dead — fresh relaunch + one continuation ──
+      // Runs detached under its own fence so dev-slot health ticks continue.
+      if (slot === 0) {
+        console.log("[health] PM process DEAD — fresh relaunch with configured model + continuation");
+        const status = this.db.getExitStatus();
+        const trigger = status.pending && status.pm_only && status.cycled[0] ? "exit" : "crash";
+        void this.restartPMFresh(trigger, status.episode).catch((err) => console.error("[health] PM restart failed:", err));
         continue;
       }
 
@@ -832,7 +1121,7 @@ export class ProcessHealthChecker {
       }
       restart = { dead: dead.id, restarted: restarted.id };
     }
-    const identity = await verifyPaneIdentity(0);
+    const identity = await verifyPaneIdentity(0, this.runShell);
     if (!identity.ok || payload.cwd !== identity.snapshot.currentPath) {
       if (restart) this.noteUncertainContinuation(status.episode, "pane_ownership_unverified", exit.id, boot.id);
       return;
@@ -861,7 +1150,9 @@ export class ProcessHealthChecker {
     const status = this.db.getExitStatus();
     if (!status.pending || !status.pm_only || !status.cycled[0]
         || status.continuation_delivery !== "waiting") return;
-    const prompt = status.continuation_prompt ?? "continue";
+    // The fresh PM has no resumed session: a saved episode continuation wins,
+    // otherwise the standard handoff-pointing continuation (never bare "continue").
+    const prompt = status.continuation_prompt ?? PM_RESTART_CONTINUATION_PROMPT;
     const boot = latestSessionStartEventId(this.db, 0);
     if (expectedBoot !== undefined && boot !== expectedBoot) return;
     this.db.setConfig("exit_pending_continuation_delivery", "attempted");

@@ -26,9 +26,12 @@ test("numbered slot auto-restarts preserve the Ornith context/output contract", 
   assert.doesNotMatch(CLAUDE_SLOT_RUNTIME_ENV, /MAX_OUTPUT_TOKENS=2048(?:\s|$)/);
 });
 
-test("PM restart preserves CLIProxy routing and session continuation", () => {
+// Rajiv DM D0AMF0XE6TS thread 1793979986.975849, ts 1793989226.288339: "switching models with
+// continue is not probably a good idea. MoP should run the right launcher and then inject the
+// continuation prompt". The PM keeps CLIProxy routing and starts fresh with the configured model.
+test("PM restart keeps CLIProxy routing and launches fresh with the default opus model", () => {
   assert.equal(
     RESTART_COMMANDS[0],
-    "bash /Users/rajiv/.claude/scripts/launch-pm-cliproxy.sh --continue",
+    "bash /Users/rajiv/.claude/scripts/launch-pm-cliproxy.sh --model claude-opus-5-5",
   );
 });

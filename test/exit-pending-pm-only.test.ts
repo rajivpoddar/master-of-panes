@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MoPDatabase } from "../src/db.js";
 import { HookProcessor } from "../src/hooks.js";
-import { ProcessHealthChecker } from "../src/health.js";
+import { PM_RESTART_CONTINUATION_PROMPT, ProcessHealthChecker } from "../src/health.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
 const database = () => new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
@@ -68,7 +68,8 @@ for (const prompt of [undefined, "Read /some/path. It's PM's saved prompt.\nResu
       } as any) as any;
       await health.deliverPMRestartContinuation("%40");
       await health.deliverPMRestartContinuation("%40");
-      assert.deepEqual(messages, [prompt ?? "continue"]);
+      // Fresh PM launch: the fallback is the handoff-pointing continuation, never bare "continue".
+      assert.deepEqual(messages, [prompt ?? PM_RESTART_CONTINUATION_PROMPT]);
       const status = db.getExitStatus();
       assert.equal(status.pm_only, false); assert.equal(status.dev_only, true);
       assert.equal(status.continuation_delivery, "delivered"); assert.equal(status.stop_only, true);
@@ -81,7 +82,7 @@ for (const prompt of [undefined, "Read /some/path. It's PM's saved prompt.\nResu
       health.relay.observeSlotPane = async (slot: number) => { scanned.push(slot); return { paneId: `%${slot}`, text: "" }; };
       health.relay.getSlotActivityState = async () => "busy";
       await health.checkExitPending();
-      assert.deepEqual(messages, [prompt ?? "continue"], "no /exit to working devs");
+      assert.deepEqual(messages, [prompt ?? PM_RESTART_CONTINUATION_PROMPT], "no /exit to working devs");
       assert.equal(scanned.includes(0), false);
     } finally { db.close(); }
   });

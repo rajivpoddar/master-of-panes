@@ -227,6 +227,12 @@ export class HookProcessor {
   pmExitHandoffOps: HandoffObligationOps | null = null;
   /** Handoff files override (tests); default is the clear flow's PM_HANDOFF_FILES. */
   pmExitHandoffFiles: readonly string[] | undefined = undefined;
+  /**
+   * Set by the server: after the PM-only Stop takes its single /exit attempt,
+   * MoP waits for the zsh prompt and relaunches the PM fresh with the
+   * configured model, then injects one continuation (health.restartPMFresh).
+   */
+  pmExitRestartHandler: ((episode: string | null, delivery: string) => void) | null = null;
 
   constructor(
     private db: MoPDatabase,
@@ -1536,6 +1542,8 @@ export class HookProcessor {
           episode: exitStatus.episode, session_id: currentSession, pinned_work: pin.work, pinned_boot: pin.boot,
           reason: "PM Stop consumed one /exit attempt; watchdog owns respawn",
         });
+        try { this.pmExitRestartHandler?.(exitStatus.episode, delivery.outcome); }
+        catch (err) { debugLog(`[hooks] PM exit restart handler failed: ${String(err)}`); }
         return {};
       }
     }
