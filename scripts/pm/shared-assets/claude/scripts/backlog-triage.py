@@ -1170,12 +1170,16 @@ def ready_pool_contract_reasons(
     if len(clean_meta_value(meta.get("ac_summary"))) > 140:
         reasons.append("ac_summary_exceeds_140_chars")
     deps = open_dependencies(issue, open_nums)
-    readiness_blocker_labels = names
+    # Rule 54 compat: the new dependency-wait form (sub:waiting-on-issue) must judge
+    # identically to the old pm-blocked:dependency label. Normalize BEFORE the
+    # dependency removal so both forms are dropped/kept in the same cases.
+    norm_names = set(names)
+    if "sub:waiting-on-issue" in norm_names:
+        norm_names.discard("sub:waiting-on-issue")
+        norm_names.add("pm-blocked:dependency")
+    readiness_blocker_labels = norm_names
     if allow_dependencies or not deps:
-        readiness_blocker_labels = names - {"pm-blocked:dependency"}
-    if "sub:waiting-on-issue" in readiness_blocker_labels:
-        readiness_blocker_labels.remove("sub:waiting-on-issue")
-        readiness_blocker_labels.add("pm-blocked:dependency")
+        readiness_blocker_labels = norm_names - {"pm-blocked:dependency"}
     if allow_dependencies and status_labels == ["status:todo"] and "P0" in names:
         # Preserve existing gated-P0 membership; assignment still checks gates.
         readiness_blocker_labels = {n for n in names if not n.startswith("pm-blocked:")}

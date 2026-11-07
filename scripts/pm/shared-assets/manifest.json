@@ -321,7 +321,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "bbcbfaf5523bf977eccc7f6065d07fcc8a6e93f0cfe1430b04b490f5baca4b13",
+      "sha256": "b722499936664b438fae384278531809374801797f649327dc71aa4be9d01cfc",
       "source_path": "claude/scripts/backlog-triage.py"
     },
     {
