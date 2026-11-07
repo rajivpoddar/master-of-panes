@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
@@ -400,28 +401,27 @@ def main() -> int:
     start_dt = end_dt - timedelta(hours=a.hours)
     s, e = _fmt(start_dt), _fmt(end_dt)
     token = load_token()
-    if a.active_users:
-        rows = query_active_user_files(token, s, e)
-        time.sleep(QUERY_DELAY_SECONDS)
-        prior = query_active_user_files(token, _fmt(start_dt - (end_dt - start_dt)), s)
-        report = build_active_users_report(rows, prior)
-    else:
-        codes = query_errors_by_code(token, s, e)
-        time.sleep(QUERY_DELAY_SECONDS)
-        totals = query_error_totals(token, s, e)
-        prior = same_slot = None
-        if a.compare:
-            w = compare_windows(start_dt, end_dt)
-            time.sleep(QUERY_DELAY_SECONDS)
-            prior = query_error_totals(token, _fmt(w["prior"][0]), _fmt(w["prior"][1]))
-            same_slot = []
-            for sd, ed in w["same_slot"]:
-                time.sleep(QUERY_DELAY_SECONDS)
-                same_slot.append(query_error_totals(token, _fmt(sd), _fmt(ed)))
-        report = build_error_code_report(codes, totals, prior, same_slot, top=a.top)
-        report["all_codes"] = codes
-        time.sleep(QUERY_DELAY_SECONDS)
-        report["superseded_saves"] = query_superseded_saves(token, s, e)
+    with ThreadPoolExecutor(max_workers=11) as pool:
+        if a.active_users:
+            current = pool.submit(query_active_user_files, token, s, e)
+            previous = pool.submit(query_active_user_files, token, _fmt(start_dt - (end_dt - start_dt)), s)
+            report = build_active_users_report(current.result(), previous.result())
+        else:
+            codes_future = pool.submit(query_errors_by_code, token, s, e)
+            totals_future = pool.submit(query_error_totals, token, s, e)
+            saves_future = pool.submit(query_superseded_saves, token, s, e)
+            prior_future = None
+            same_futures = []
+            if a.compare:
+                w = compare_windows(start_dt, end_dt)
+                prior_future = pool.submit(query_error_totals, token, _fmt(w['prior'][0]), _fmt(w['prior'][1]))
+                same_futures = [pool.submit(query_error_totals, token, _fmt(sd), _fmt(ed)) for sd, ed in w['same_slot']]
+            codes = codes_future.result()
+            prior = prior_future.result() if prior_future else None
+            same_slot = [f.result() for f in same_futures] if a.compare else None
+            report = build_error_code_report(codes, totals_future.result(), prior, same_slot, top=a.top)
+            report['all_codes'] = codes
+            report['superseded_saves'] = saves_future.result()
     report["window"] = {"start": s, "end": e}
     if AXIOM_QUERY_FAILED:
         report["ops_error"] = f"axiom_query_failed statuses={sorted(set(AXIOM_QUERY_FAILED))}"

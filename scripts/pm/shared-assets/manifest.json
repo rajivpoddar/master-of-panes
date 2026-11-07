@@ -663,7 +663,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "99a2d6e7e09ca9c1c87139fa781d2c635eb6bc2e7ee7a0336e20c2e8acf4f8b1",
+      "sha256": "f3b555e9bfa65670f80c83168187065b14788126060707cb43edf3266a267c9c",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-axiom.py"
     },
     {
