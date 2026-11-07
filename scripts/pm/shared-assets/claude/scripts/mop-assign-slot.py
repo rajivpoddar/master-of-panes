@@ -130,8 +130,23 @@ def post_assignment_notice(
     sender = os.environ.get("MOP_ASSIGN_SLACK_SEND", "/Users/rajiv/.claude/scripts/slack-send.sh")
     summary = next((line.strip() for line in task.splitlines() if line.strip()), "Assignment completed.")
     summary = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    title = ""
+    try:
+        result = subprocess.run(
+            ["gh", "issue", "view", str(issue), "--repo", repository_id.removeprefix("github:"),
+             "--json", "title", "--jq", ".title"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if result.returncode == 0:
+            title = " ".join(result.stdout.split())
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        pass
+    if len(title) > 100:
+        title = title[:99] + "…"
+    title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    title_part = f" — {title} —" if title else ""
     body = (
-        f"Assignment: {priority} {display_repository_id(repository_id)} issue {issue} assigned to slot {slot} "
+        f"Assignment: {priority} {display_repository_id(repository_id)} issue {issue}{title_part} assigned to slot {slot} "
         f"(assignment epoch {assignment_epoch}).\n{summary}"
     )
     binding = {"repository_id": repository_id, "issue": issue, "slot": slot,

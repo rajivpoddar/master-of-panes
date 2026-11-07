@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import importlib.util
+from unittest.mock import patch
 import subprocess
 import sys
 import tempfile
@@ -81,6 +83,37 @@ class _Handler(BaseHTTPRequestHandler):
 class _Server(ThreadingHTTPServer):
     requests: list
     responses: list
+
+
+class AssignmentNoticeTitleTests(unittest.TestCase):
+    def test_title_and_lookup_failures(self):
+        spec = importlib.util.spec_from_file_location("mop_assign_notice", SCRIPT)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        for lookup, expected in [
+            (subprocess.CompletedProcess([], 0, "<work & more>\n", ""), " — &lt;work &amp; more&gt; —"),
+            (subprocess.CompletedProcess([], 0, "x" * 110, ""), " — " + "x" * 99 + "… —"),
+            (subprocess.CompletedProcess([], 1, "", "error"), ""),
+            (subprocess.TimeoutExpired("gh", 5), ""),
+            (FileNotFoundError(), ""),
+        ]:
+            with self.subTest(lookup=lookup):
+                calls = []
+                def run(args, **kwargs):
+                    calls.append((args, kwargs))
+                    if args[0] == "gh":
+                        if isinstance(lookup, Exception):
+                            raise lookup
+                        return lookup
+                    if "record" in args:
+                        return subprocess.CompletedProcess(args, 0, "1", "")
+                    return subprocess.CompletedProcess(args, 0, "OK ts=1.0 channel=C0ALZJHGE49\n", "")
+                with patch.object(client.subprocess, "run", side_effect=run):
+                    result = client.post_assignment_notice("github:org/repo", 12, 4, 5, "P1", "task")
+                self.assertTrue(result["posted"])
+                self.assertEqual(calls[0][0], ["gh", "issue", "view", "12", "--repo", "org/repo", "--json", "title", "--jq", ".title"])
+                self.assertEqual(calls[0][1]["timeout"], 5)
+                self.assertEqual(calls[-1][1]["input"], f"Assignment: P1 org/repo issue 12{expected} assigned to slot 4 (assignment epoch 5).\ntask")
 
 
 class MopAssignSlotClientTests(unittest.TestCase):
