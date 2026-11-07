@@ -8,10 +8,8 @@
  * caller has to hand-edit labels.
  *
  * Contracts:
- * - only ever touches the exact `slot:<slot>` label and the issue lifecycle
- *   labels this projection owns (`status:in-progress` on claim, `status:todo`
- *   when unwinding a claim); priority, OPEN state and unrelated labels are
- *   preserved;
+ * - reconciles derived slot, status and incompatible sub-status labels while
+ *   preserving priority, OPEN state and unrelated labels;
  * - label operations are computed from a live read and applied idempotently, so
  *   a retry on an already-projected or already-released issue performs no
  *   duplicate work;
@@ -132,15 +130,11 @@ interface IssueSnapshot {
   labels: string[];
 }
 
-const LIFECYCLE_LABELS = [
-  "status:todo",
-  "status:in-progress",
-  "status:in-review",
-  "status:blocked",
-  "status:done",
-  "status:backlog",
-  "status:deferred",
-];
+const SUB_STATUS_BY_STATUS: Record<string, string[]> = {
+  "status:todo": ["sub:waiting-on-issue"],
+  "status:blocked": ["sub:pm-gate", "sub:external", "sub:decision", "sub:infra"],
+  "status:backlog": ["sub:needs-contract", "sub:pm-owned"],
+};
 
 function defaultRunGh(timeoutMs: number): GhRunner {
   return async (args: string[]): Promise<string> => {
@@ -277,8 +271,10 @@ export function createGhIssueOwnershipProjection(
       if (!before.labels.includes(slotLabel)) {
         add.push(slotLabel);
       }
-      if (before.labels.includes("status:todo")) {
-        remove.push("status:todo");
+      for (const label of before.labels) {
+        if ((label.startsWith("status:") && label !== "status:in-progress") || label.startsWith("sub:")) {
+          remove.push(label);
+        }
       }
       // A foreign slot label is stale derived state, never a second owner
       // model, so it is corrected to the durable owner.
@@ -292,16 +288,19 @@ export function createGhIssueOwnershipProjection(
         remove.push(slotLabel);
       }
       const otherLifecycle = before.labels.filter(
-        (label) => LIFECYCLE_LABELS.includes(label) && label !== "status:in-progress",
+        (label) => label.startsWith("status:") && label !== "status:in-progress",
       );
-      if (before.labels.includes("status:in-progress") && otherLifecycle.length === 0) {
-        if (before.state === "OPEN") {
-          remove.push("status:in-progress");
-          add.push("status:todo");
-        } else {
-          // Terminal issue: drop only the derived slot label and never invent
-          // a lifecycle status on a closed issue.
-          remove.push("status:in-progress");
+      // Preserve an independently projected lifecycle rather than reverting it to todo.
+      // Multiple independent statuses have no safe precedence; refuse to guess.
+      if (otherLifecycle.length > 1) {
+        return outcome("failed", "issue_projection_ambiguous_status", repository, issue, slot);
+      }
+      const targetStatus = otherLifecycle[0] ?? (before.state === "OPEN" ? "status:todo" : "status:done");
+      if (before.labels.includes("status:in-progress")) remove.push("status:in-progress");
+      if (targetStatus && !before.labels.includes(targetStatus)) add.push(targetStatus);
+      for (const label of before.labels) {
+        if (label.startsWith("sub:") && !(SUB_STATUS_BY_STATUS[targetStatus ?? ""] ?? []).includes(label)) {
+          remove.push(label);
         }
       }
     }
@@ -331,8 +330,11 @@ export function createGhIssueOwnershipProjection(
       );
     }
     if (!live()) return superseded();
+    const statuses = after.labels.filter((label) => label.startsWith("status:"));
     const verified = add.every((label) => after.labels.includes(label))
-      && remove.every((label) => !after.labels.includes(label));
+      && remove.every((label) => !after.labels.includes(label))
+      && (mode !== "assign" || (statuses.length === 1 && statuses[0] === "status:in-progress"))
+      && (mode !== "release" || statuses.length === 1);
     if (!verified) {
       return outcome(
         "failed",

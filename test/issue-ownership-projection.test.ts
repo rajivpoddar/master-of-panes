@@ -91,6 +91,25 @@ test("assignment projects status:in-progress and the exact slot label, preservin
   assert.ok(gh.edits.every((args) => !args.includes("edit")));
 });
 
+test("assignment replaces every prior status and incompatible sub-status without touching other families", async () => {
+  for (const prior of ["status:in-review", "status:todo"]) {
+    const gh = fakeGh({ labels: [prior, "sub:waiting-on-issue", "P1", "pm-state:blocked-rework"] });
+    const projection = createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO });
+    const result = await projection.onAssigned(12324, 2, null);
+    assert.equal(result.verified, true);
+    assert.deepEqual([...gh.labels()].sort(), ["status:in-progress", "slot:2", "P1", "pm-state:blocked-rework"].sort());
+    assert.equal((await projection.onAssigned(12324, 2, null)).status, "unchanged");
+  }
+});
+
+test("release removes a stale in-progress status while preserving review", async () => {
+  const gh = fakeGh({ labels: ["status:in-progress", "status:in-review", "slot:2", "sub:waiting-on-issue", "P1"] });
+  const projection = createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO });
+  const result = await projection.onReleased(12324, 2, null);
+  assert.equal(result.verified, true);
+  assert.deepEqual([...gh.labels()].sort(), ["status:in-review", "P1"].sort());
+});
+
 test("a killed gh write is reported with the timeout reason and replays idempotently", async () => {
   const gh = fakeGh({ labels: ["status:todo"] });
   const real = gh.runner;
@@ -145,13 +164,13 @@ test("release removes the slot label and unwinds only the claim lifecycle it own
   assert.deepEqual(reviewReleased.added_labels, []);
   assert.deepEqual([...inReview.labels()].sort(), ["P1", "status:in-review"].sort());
 
-  // A closed issue never gains an invented lifecycle status.
+  // A closed issue without another lifecycle projects its terminal status.
   const closed = fakeGh({ state: "CLOSED", labels: ["status:in-progress", "slot:3"] });
   const closedProjection = createGhIssueOwnershipProjection({ runGh: closed.runner, repository: REPO });
   const closedReleased = await closedProjection.onReleased(7952, 3, "992731533");
-  assert.deepEqual(closedReleased.added_labels, [], "a closed issue must never gain a lifecycle status");
+  assert.deepEqual(closedReleased.added_labels, ["status:done"]);
   assert.deepEqual(closedReleased.removed_labels, ["slot:3", "status:in-progress"]);
-  assert.deepEqual([...closed.labels()].sort(), []);
+  assert.deepEqual([...closed.labels()].sort(), ["status:done"]);
 });
 
 test("projection failures and unmapped repositories are typed, never thrown", async () => {
