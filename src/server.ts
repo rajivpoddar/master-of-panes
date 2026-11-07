@@ -120,6 +120,7 @@ import {
 } from "./interruptBeforeClear.js";
 import { pinnedComposerCleanup, pinnedGuardedSend, type OperationFence } from "./pinnedWriters.js";
 import { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } from "./assignmentTaskPacket.js";
+import { SendIdempotencyJournal, isConfirmedSend, parseIdempotencyKey } from "./sendIdempotency.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -947,6 +948,9 @@ app.get("/health", (c) => {
     status: "ok",
     uptime: process.uptime(),
     lastLagMs: Math.round(lastLagSampleMs),
+    // Callers gate behaviour on these: send_idempotency_v1 means POST /slots/:n/send
+    // enforces the Idempotency-Key header, so repeating a keyed send cannot paste twice.
+    capabilities: ["send_idempotency_v1"],
   });
 });
 
@@ -2818,6 +2822,59 @@ app.post("/slots/:slotNum/clear-composer", async (c) => {
     ...(result.fenceReason ? { fence_reason: result.fenceReason } : {}),
     before_chars: result.beforeChars,
   }, result.cleared ? 200 : 409);
+});
+
+// ─── Send idempotency ───────────────────────────────────
+// A caller that lost the response (timeout, reset, restart) repeats the send with
+// the same `Idempotency-Key`; a confirmed key is answered with the earlier outcome
+// (`duplicate: true`) and never pasted again. 2026-11-07: the Slack bridge timed out
+// on four PM sends while this process's event loop was starved; three were pasted
+// ~6 minutes later and the caller had no safe way to know. See src/sendIdempotency.ts.
+const SEND_IDEMPOTENCY_EVENT = "send_idempotent_recorded";
+const SEND_IDEMPOTENCY_TTL_MS = 6 * 60 * 60 * 1000;
+const sendIdempotency = new SendIdempotencyJournal(SEND_IDEMPOTENCY_TTL_MS);
+try {
+  sendIdempotency.hydrate(
+    db.getEvents(undefined, 2000, SEND_IDEMPOTENCY_EVENT).flatMap((event) => {
+      try {
+        const key = (JSON.parse(event.payload) as { key?: unknown }).key;
+        const at = Date.parse(`${event.timestamp}Z`);
+        return typeof key === "string" && Number.isFinite(at) ? [{ scope: `${event.slot}:${key}`, at }] : [];
+      } catch {
+        return [];
+      }
+    }),
+  );
+} catch (error) {
+  console.error("[send-idempotency] journal hydration failed; keys confirmed before this start are not recognised:", error);
+}
+
+app.use("/slots/:slotNum/send", async (c, next) => {
+  const key = c.req.method === "POST" ? parseIdempotencyKey(c.req.header("idempotency-key")) : null;
+  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
+  if (!key || !slotParse.success) return next();
+  const slotNum = slotParse.data;
+  const { outcome, duplicate } = await sendIdempotency.run(
+    `${slotNum}:${key}`,
+    async () => {
+      await next();
+      return { status: c.res.status, body: (await c.res.clone().json().catch(() => ({}))) as Record<string, unknown> };
+    },
+    (confirmed) => {
+      db.logEvent(slotNum, SEND_IDEMPOTENCY_EVENT, null, null, {
+        key,
+        status: confirmed.status,
+        queued: confirmed.body.queued === true,
+        verified: confirmed.body.verified === true,
+      });
+    },
+  );
+  if (!duplicate) return;
+  db.logEvent(slotNum, "send_idempotent_duplicate", null, null, { key, original_confirmed: isConfirmedSend(outcome) });
+  return new Response(JSON.stringify({ ...outcome.body, duplicate: true, idempotency_key: key }), {
+    status: outcome.status,
+    headers: { "Content-Type": "application/json" },
+  });
 });
 
 app.post("/slots/:slotNum/send", async (c) => {
