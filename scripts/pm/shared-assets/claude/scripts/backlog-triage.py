@@ -2642,22 +2642,29 @@ def audit_ready_pool_main(argv: list[str]) -> int:
     dependency_rows: list[dict[str, Any]] = []
     clean_issues: list[int] = []
     gated_p0_issues: list[int] = []
+    parked_or_owned: list[dict[str, Any]] = []
     dependency_cache: dict = {}
     prefetch_dependencies(todos, dependency_cache)
     for issue in todos:
         number = int(issue["number"])
         names = labels(issue)
         meta = ready_pool_metadata(issue)
-        reasons = ready_pool_contract_reasons(
-            issue, open_nums, allow_backlog=False, allow_dependencies=True,
-        )
-        if number in pr_owned or any(re.fullmatch(r"slot:\d+", name) for name in names):
-            reasons.append("already_owned_reconcile_lifecycle")
-
         selection = selection_candidate(issue, "new_issue")
         evaluate_dependency(selection, dependency_cache)
         held = is_gated(selection)
         deps = [int(dep["number"]) for dep in selection.get("open_dependencies", [])]
+        # Preserve named dependency waits in the pool, but don't send explicit
+        # parks, trackers or existing owners to contract repair.
+        owned = number in pr_owned or any(re.fullmatch(r"slot:\d+", name) for name in names)
+        parked = has_pm_blocker_label(names) or is_tracker(issue)
+        if owned or parked:
+            parked_or_owned.append({"issue": number, "reason": "owned" if owned else "parked"})
+            if held and "pm-blocked:dependency" in selection.get("blocking_labels", []):
+                dependency_rows.append({"issue": number, "title": issue.get("title") or "", "open_dependencies": deps, "reason": selection.get("dependency_reason") or "unresolved_gate"})
+            continue
+        reasons = ready_pool_contract_reasons(
+            issue, open_nums, allow_backlog=False, allow_dependencies=True,
+        )
         if held and not reasons and "pm-blocked:dependency" in selection.get("blocking_labels", []):
             dependency_rows.append(
                 {
@@ -2691,6 +2698,7 @@ def audit_ready_pool_main(argv: list[str]) -> int:
         "todo_count": len(todos),
         "clean_todo_count": len(clean_issues),
         "clean_issues": clean_issues,
+        "parked_or_owned": sorted(parked_or_owned, key=lambda row: row["issue"]),
         "ready_gated_p0": sorted(gated_p0_issues),
         "contract_defects": contract_defects,
         "dependency_defects": dependency_defects,

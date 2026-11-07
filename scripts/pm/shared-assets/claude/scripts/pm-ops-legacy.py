@@ -2534,6 +2534,24 @@ def inventory_line(counts: dict[str, int]) -> str:
             f"{int(counts.get('triage_retained_scope', 0))} triage (not actions)")
 
 
+def owner_class(owner: str | None) -> str:
+    """Classify an obligation owner for drain agents (obligation 31021).
+
+    Owner strings are free text and legitimately carry annotations, e.g.
+    'pm (open; mechanical drain 16:45, re-review 6h)', 'PM (evidence check)' or
+    'pm:ci-receipt'. A drain that string-matches exactly 'pm' silently skips
+    every annotated row -- at 2026-11-07 01:35 that was 38 of 130 open rows.
+
+    Classification is by the leading token, case-insensitive, and only treats
+    end-of-string, whitespace or ':' as a separator so unrelated owners such as
+    'autoscaler-main-repair' are not misread as PM.
+    """
+    text = (owner or "").strip().lower()
+    if text == "pm" or text.startswith("pm ") or text.startswith("pm:") or text.startswith("pm("):
+        return "pm"
+    return "other"
+
+
 def list_obligations(args: argparse.Namespace) -> None:
     """Read-only listing of open obligations, split actionable vs inventory."""
     con = connect_readonly()
@@ -2558,8 +2576,12 @@ def list_obligations(args: argparse.Namespace) -> None:
         by_kind[row["kind"]] = by_kind.get(row["kind"], 0) + 1
     scope = "actionable" if args.actionable else "inventory" if args.inventory else "all"
     if args.format == "json":
-        print(json.dumps({"scope": scope, "count": len(rows), "by_kind": by_kind,
-                          "rows": [] if args.counts else [dict(r) for r in rows]}, sort_keys=True))
+        out_rows = [] if args.counts else [
+            {**dict(r), "owner_class": owner_class(r["owner"])} for r in rows
+        ]
+        print(json.dumps({"scope": scope, "count": len(rows),
+                          "pm_owned": sum(1 for r in rows if owner_class(r["owner"]) == "pm"),
+                          "by_kind": by_kind, "rows": out_rows}, sort_keys=True))
         return
     print(f"{scope} open obligations: {len(rows)}")
     for kind, count in sorted(by_kind.items(), key=lambda kv: (-kv[1], kv[0])):

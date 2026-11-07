@@ -186,6 +186,9 @@ Rajiv 2026-10-23 (C0ALZJHGE49 thread 1792770386.754829, ts 1792770807.935489): *
 5. The Step 4 reply includes the line `Agents: N running · stopped K inactive (<description, idle Xm>…)`, or `none inactive`.
 The hourly heartbeat post carries the same count once the composer supports it (MoP change; until then the PM reply is the record).
 
+## Step 3d: Social digest cycle receipts (CTO 2026-11-06, C0ALZJHGE49 thread 1793951140.445569, ts 1793954568.068649)
+Every scheduled `donna-daily-social-digest` cycle (IST 00:30, 03:30 … 21:30) posts a receipt in C0C7U35LBKR showing attempts / confirmed / UNKNOWN / reason, even when it sends 0. Each hourly, check the cycles due in the last 3h. If a cycle has no receipt 45 min after its slot, flag it `MISSING` in the Step 4 reply (or `UNKNOWN` if a partial receipt exists) and report it in the CP Repairs thread. Missing proof is not proof that the slot never ran, and it is never a replay trigger. Add no new timer or registry.
+
 ## Step 4: Close the loop
 Post ONE reply in the report thread with this content:
 - TL;DR line.
@@ -280,7 +283,7 @@ An Unblockable item may NOT appear in two consecutive hourlies without an action
 Rajiv, DM D0AMF0XE6TS thread 1793324569.896659, ts 1793417547.753829: *"Why am I having to nudge for ready pool promotion and draft pr's? The hourly report processing skill should be doing all this. Update it."* Trigger: on 2026-10-31 the pool sat at 0–5 for 3h+. 26 P0s were open, 7 of them backlog leaves nobody promoted or split. Rajiv had to ask 5 times.
 
 Every hourly, IN THE SAME TURN and without waiting to be asked:
-1. **Measure the real pool.** Run `python3 ~/.claude/scripts/ready_pool_select.py`. Count only picks that are actually dispatchable: not already on a slot or PR, not a tracker, no open blocker. Post `ready_pool: <real>/<listed> (P0 a · P1 b · P2 c)` in the reply.
+1. **Measure the real pool.** Run `python3 ~/.claude/scripts/ready_pool_select.py`. The claimable total is the JSON field `eligible_count`, counted before `--limit` truncation. `ranked` is only the displayed shortlist (default `--limit` 15) and must never be reported as the count (CTO ts 1793963776.093039). `now_unblocked` lists issues whose dependency checks currently pass; it is not a count of changes caused by a cleanup. Count only picks that are actually dispatchable: not already on a slot or PR, not a tracker, no open blocker. Post `ready_pool: eligible <eligible_count> (snapshot HH:MM IST; displayed <len(ranked)>) (P0 a · P1 b · P2 c)` in the reply.
 2. **If the real pool is under 10, OR any open P0/P1 is in backlog with no `pm-blocked:*` label:** launch ONE `pm-arch-reviewer` MODE: PROMOTE batch over every open P0, then every open P1, then backlog leaves. Act on its verdicts in the same turn:
    - READY: promote (status:todo).
    - NEEDS_SPLIT or TRACKER: launch ONE agent that files a bounded ≤3-AC child from the parent's own AC text (ICL ledger, internal-followup marker, validator) and promotes it.

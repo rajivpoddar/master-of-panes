@@ -72,7 +72,31 @@ def test_migrate_skips_ready_gated_p0():
         bt.run = orig
     assert calls == []
 
+def test_audit_separates_parked_and_owned_from_missing_contract(tmp_path, monkeypatch):
+    import json
+    def issue(number, *extra):
+        return {"number": number, "title": str(number), "body": "", "labels": [
+            {"name": name} for name in ("status:todo", "P1", *extra)
+        ]}
+    issues = [issue(1, "pm-blocked:external"), issue(2, "slot:1"),
+              issue(3), issue(4), issue(5, "tracking"), issue(6, "pm-blocked:dependency")]
+    monkeypatch.setattr(bt, "gh_issue_list", lambda: issues)
+    monkeypatch.setattr(bt, "issue_num_set", lambda rows: {row["number"] for row in rows})
+    monkeypatch.setattr(bt, "open_pr_issue_numbers", lambda: {3})
+    monkeypatch.setattr(bt, "prefetch_dependencies", lambda *args: None)
+    monkeypatch.setattr(bt, "selection_candidate", lambda issue, kind: {})
+    monkeypatch.setattr(bt, "evaluate_dependency", lambda *args: None)
+    monkeypatch.setattr(bt, "is_gated", lambda selection: False)
+    monkeypatch.setattr(bt, "issue_contract_ledger_errors", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bt, "OUT_DIR", tmp_path)
+    assert bt.audit_ready_pool_main([]) == 0
+    manifest = json.loads(next(tmp_path.glob("pm-ready-pool-audit-*.json")).read_text())
+    assert {row["issue"] for row in manifest["parked_or_owned"]} == {1, 2, 3, 5, 6}
+    assert [row["issue"] for row in manifest["contract_defects"]] == [4]
+    assert any(reason.startswith("missing_ready_pool_fields:") for reason in manifest["contract_defects"][0]["reasons"])
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
-        if name.startswith("test_") and callable(fn): fn()
+        if name.startswith("test_") and callable(fn) and name != "test_audit_separates_parked_and_owned_from_missing_contract": fn()
     print("ok")

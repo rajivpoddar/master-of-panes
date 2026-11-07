@@ -156,6 +156,11 @@ Source: Rajiv D0AMF0XE6TS ts 1793075323.957449: "all keys are generated from wor
 - Only key-ids, endpoint URLs and hostnames are exchanged. One credential per direction/purpose.
 - BLOCK any plan/runbook/diff with a staff- or script-generated partner secret meant for delivery, or a secret-transmission step. Require the admin-account flow (admin-only, shown-once, stored hashed/encrypted, rotate/revoke) with tests.
 
+## Deletion-coverage gate (rule 52, Rajiv 2026-11-06)
+
+Rajiv C0ALZJHGE49 ts 1793982486.522039 ("the deletion coverage should be a product rule"); full rule: `~/.claude/rules/52-heydonna-deletion-coverage.md`.
+A diff that stores customer data somewhere NEW (new Convex table/field with customer content, new R2 prefix, new external store) must be removed by project/transcript deletion, proven by a behavioural cascade test (create → delete project/transcript → assert gone); a new Convex table is classified in `convex/__tests__/deletion-registry*.test.ts`. BLOCK when either is missing, and BLOCK any new line-number/text-hash/AST deletion inventory pin. Record `DELETION_COVERAGE: <path + test>` or `DELETION_COVERAGE: no new customer-data storage`.
+
 ## Review Source Invariant
 
 Before reading the plan file, adjudicating the plan, or writing a `/tmp` plan
