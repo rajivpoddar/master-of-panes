@@ -12,6 +12,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { EventLogEntry, MoPConfig, OpsJobRecord, OpsJobStatus, SlotState, SlotStatus } from "./types.js";
 import { devSlots, PM_SLOT, runtimeIdentity } from "./slotConfig.js";
+import type { BeginDecision, BeginRequest, CustodyRow, CustodyState } from "./sendCustody.js";
 
 export interface SlotPredecessorContext {
   issue: number | null;
@@ -625,6 +626,25 @@ export class MoPDatabase {
         ON assignment_effect_intents(slot, created_at DESC);
     `);
 
+    // Durable custody for keyed POST /slots/:n/send (src/sendCustody.ts). A row is
+    // written BEFORE any pane I/O; `started` that never reaches an outcome is UNKNOWN.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pm_send_custody (
+        scope TEXT PRIMARY KEY,
+        slot INTEGER NOT NULL,
+        key TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        command_digest TEXT,
+        destination TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('started', 'refused_zero_effect', 'queued', 'ambiguous', 'accepted')),
+        reason TEXT,
+        attempts INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pm_send_custody_updated ON pm_send_custody(updated_at);
+    `);
+
     // Migration: persist the displaced prior lane on the intent so a resume
     // that completes delivery can unwind its labels (assign-effect label
     // projection). NULL means no displacement was recorded.
@@ -778,6 +798,57 @@ export class MoPDatabase {
     params.push(limit);
 
     return this.db.prepare(sql).all(...params) as EventLogEntry[];
+  }
+
+  /**
+   * Atomically decide what a keyed send may do. `started` is written here, before the
+   * caller performs any pane I/O. Rules: see src/sendCustody.ts.
+   */
+  beginSendCustody(request: BeginRequest, nowMs: number): BeginDecision {
+    const read = this.db.prepare("SELECT * FROM pm_send_custody WHERE scope = ?");
+    return this.db.transaction((): BeginDecision => {
+      const existing = read.get(request.scope) as CustodyRow | undefined;
+      if (!existing) {
+        this.db.prepare(`
+          INSERT INTO pm_send_custody
+            (scope, slot, key, digest, command_digest, destination, state, reason, attempts, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'started', NULL, 1, ?, ?)
+        `).run(request.scope, request.slot, request.key, request.digest, request.commandDigest,
+          request.destination, nowMs, nowMs);
+        return { kind: "execute", row: read.get(request.scope) as CustodyRow };
+      }
+      if (existing.digest !== request.digest) return { kind: "conflict", row: existing };
+      switch (existing.state) {
+        case "accepted":
+        case "queued":
+          return { kind: "duplicate", row: existing };
+        case "started":
+          return { kind: "in_progress", row: existing };
+        case "ambiguous":
+          return { kind: "unknown", row: existing };
+        case "refused_zero_effect":
+          // Nothing was written to a pane: retry is allowed, bound to the CURRENT destination.
+          this.db.prepare(`
+            UPDATE pm_send_custody
+            SET state = 'started', reason = NULL, destination = ?, attempts = attempts + 1, updated_at = ?
+            WHERE scope = ?
+          `).run(request.destination, nowMs, request.scope);
+          return { kind: "execute", row: read.get(request.scope) as CustodyRow };
+      }
+    }).immediate();
+  }
+
+  finishSendCustody(scope: string, state: CustodyState, reason: string | null, nowMs: number): void {
+    this.db.prepare("UPDATE pm_send_custody SET state = ?, reason = ?, updated_at = ? WHERE scope = ?")
+      .run(state, reason, nowMs, scope);
+  }
+
+  getSendCustody(scope: string): CustodyRow | null {
+    return (this.db.prepare("SELECT * FROM pm_send_custody WHERE scope = ?").get(scope) as CustodyRow | undefined) ?? null;
+  }
+
+  pruneSendCustody(olderThanMs: number): number {
+    return this.db.prepare("DELETE FROM pm_send_custody WHERE updated_at < ?").run(olderThanMs).changes;
   }
 
   /**

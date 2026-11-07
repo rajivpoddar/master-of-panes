@@ -120,7 +120,8 @@ import {
 } from "./interruptBeforeClear.js";
 import { pinnedComposerCleanup, pinnedGuardedSend, type OperationFence } from "./pinnedWriters.js";
 import { ASSIGNMENT_INLINE_TASK_MAX_BYTES, buildAssignmentTaskPacket } from "./assignmentTaskPacket.js";
-import { SendIdempotencyJournal, isConfirmedSend, parseIdempotencyKey } from "./sendIdempotency.js";
+import { SendCustodyJournal } from "./sendCustody.js";
+import { registerSendCustody } from "./sendCustodyRoutes.js";
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -246,6 +247,7 @@ const family2ReleaseEffectAdapter = new Family2ReleaseEffectAdapter();
 const eventRetentionMaxRows = parseInt(process.env.MOP_EVENT_RETENTION_MAX_ROWS ?? "200000", 10);
 const eventRetentionDays = parseInt(process.env.MOP_EVENT_RETENTION_DAYS ?? "14", 10);
 const pruneEvents = (): void => {
+  db.pruneSendCustody(Date.now() - 14 * 24 * 60 * 60 * 1000);
   const removed = db.pruneEvents(eventRetentionMaxRows, eventRetentionDays);
   if (removed > 0) {
     console.log(`[mop] pruned ${removed} old events; retention rows=${eventRetentionMaxRows} days=${eventRetentionDays}`);
@@ -948,9 +950,9 @@ app.get("/health", (c) => {
     status: "ok",
     uptime: process.uptime(),
     lastLagMs: Math.round(lastLagSampleMs),
-    // Callers gate behaviour on these: send_idempotency_v1 means POST /slots/:n/send
-    // enforces the Idempotency-Key header, so repeating a keyed send cannot paste twice.
-    capabilities: ["send_idempotency_v1"],
+    // Informational only: no caller may treat this as authority to resend (a probe cannot
+    // fence a later send across a rollback). Custody is checked per key at send time.
+    capabilities: ["send_custody_v2"],
   });
 });
 
@@ -2824,57 +2826,56 @@ app.post("/slots/:slotNum/clear-composer", async (c) => {
   }, result.cleared ? 200 : 409);
 });
 
-// ─── Send idempotency ───────────────────────────────────
-// A caller that lost the response (timeout, reset, restart) repeats the send with
-// the same `Idempotency-Key`; a confirmed key is answered with the earlier outcome
-// (`duplicate: true`) and never pasted again. 2026-11-07: the Slack bridge timed out
-// on four PM sends while this process's event loop was starved; three were pasted
-// ~6 minutes later and the caller had no safe way to know. See src/sendIdempotency.ts.
-const SEND_IDEMPOTENCY_EVENT = "send_idempotent_recorded";
-const SEND_IDEMPOTENCY_TTL_MS = 6 * 60 * 60 * 1000;
-const sendIdempotency = new SendIdempotencyJournal(SEND_IDEMPOTENCY_TTL_MS);
-try {
-  sendIdempotency.hydrate(
-    db.getEvents(undefined, 2000, SEND_IDEMPOTENCY_EVENT).flatMap((event) => {
-      try {
-        const key = (JSON.parse(event.payload) as { key?: unknown }).key;
-        const at = Date.parse(`${event.timestamp}Z`);
-        return typeof key === "string" && Number.isFinite(at) ? [{ scope: `${event.slot}:${key}`, at }] : [];
-      } catch {
-        return [];
-      }
-    }),
-  );
-} catch (error) {
-  console.error("[send-idempotency] journal hydration failed; keys confirmed before this start are not recognised:", error);
+// ─── Keyed send custody ─────────────────────────────────
+// A caller that loses the response (timeout, reset, crash) asks MoP instead of guessing.
+// Custody is written durably BEFORE any pane I/O; only affirmative zero-effect outcomes may
+// be retried; the key binds the payload and the recipient; "accepted" means the PM CLI
+// recorded the prompt, not that tmux returned success. See src/sendCustody.ts and
+// src/pmAcceptance.ts. 2026-11-07/08: four sends timed out during a 405 s event-loop
+// stall (three pasted late, one never connected) and one later paste was reported
+// verified but never reached the CLI.
+const SEND_CUSTODY_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+const PM_ACCEPTANCE_TIMEOUT_MS = Math.max(1_000, parseInt(process.env.MOP_PM_ACCEPTANCE_TIMEOUT_MS ?? "15000", 10) || 15_000);
+const sendCustody = new SendCustodyJournal({
+  begin: (request, nowMs) => db.beginSendCustody(request, nowMs),
+  finish: (scope, state, reason, nowMs) => db.finishSendCustody(scope, state, reason, nowMs),
+  get: (scope) => db.getSendCustody(scope),
+});
+
+/** Transcript of the PM's current session, from the newest hook event that carries it. */
+function pmTranscriptPath(): string | null {
+  let best: { id: number; path: string } | null = null;
+  for (const type of ["SessionStart", "UserPromptSubmit", "Stop"]) {
+    const event = db.getEvents(0, 1, type)[0];
+    if (!event) continue;
+    try {
+      const path = (JSON.parse(event.payload) as { transcript_path?: unknown }).transcript_path;
+      if (typeof path === "string" && path && (!best || event.id > best.id)) best = { id: event.id, path };
+    } catch {
+      // An unreadable payload is simply not a source.
+    }
+  }
+  return best?.path ?? null;
 }
 
-app.use("/slots/:slotNum/send", async (c, next) => {
-  const key = c.req.method === "POST" ? parseIdempotencyKey(c.req.header("idempotency-key")) : null;
-  const slotParse = slotParamSchema.safeParse(c.req.param("slotNum"));
-  if (!key || !slotParse.success) return next();
-  const slotNum = slotParse.data;
-  const { outcome, duplicate } = await sendIdempotency.run(
-    `${slotNum}:${key}`,
-    async () => {
-      await next();
-      return { status: c.res.status, body: (await c.res.clone().json().catch(() => ({}))) as Record<string, unknown> };
-    },
-    (confirmed) => {
-      db.logEvent(slotNum, SEND_IDEMPOTENCY_EVENT, null, null, {
-        key,
-        status: confirmed.status,
-        queued: confirmed.body.queued === true,
-        verified: confirmed.body.verified === true,
-      });
-    },
-  );
-  if (!duplicate) return;
-  db.logEvent(slotNum, "send_idempotent_duplicate", null, null, { key, original_confirmed: isConfirmedSend(outcome) });
-  return new Response(JSON.stringify({ ...outcome.body, duplicate: true, idempotency_key: key }), {
-    status: outcome.status,
-    headers: { "Content-Type": "application/json" },
-  });
+/** The recipient a send is bound to: the immutable pane id plus the current session. */
+async function sendDestination(slotNum: number): Promise<string> {
+  const identity = await verifyPaneIdentity(slotNum).catch(() => null);
+  const pane = identity && identity.ok ? identity.snapshot.paneId : "pane_unverified";
+  return `${pane}|session:${slotSessionToken(slotNum)}`;
+}
+
+registerSendCustody(app, {
+  journal: sendCustody,
+  parseSlot: (raw) => {
+    const parsed = slotParamSchema.safeParse(raw);
+    return parsed.success ? parsed.data : null;
+  },
+  customSlot: PM_SLOT,
+  destination: sendDestination,
+  transcriptPath: pmTranscriptPath,
+  acceptanceTimeoutMs: PM_ACCEPTANCE_TIMEOUT_MS,
+  logEvent: (slot, type, payload) => db.logEvent(slot, type, null, null, payload),
 });
 
 app.post("/slots/:slotNum/send", async (c) => {
@@ -3193,12 +3194,15 @@ app.post("/slots/:slotNum/send", async (c) => {
         // OMP selects its busy-aware submit key.
         const submitted = await relay.submitToPM(filePayload.toString("utf8"));
         if (!submitted.ok) {
+          // `ambiguous` means a paste was invoked before the failure: text may have reached the pane.
           return c.json({
             success: false,
             error: "PM pane file submit failed (tmux send-keys).",
-            reason: "tmux_exec_error",
+            reason: submitted.ambiguous ? "pm_submit_outcome_ambiguous" : "tmux_exec_error",
+            ambiguous: submitted.ambiguous === true,
+            zero_effect: submitted.ambiguous !== true,
             submit: submitted.submitKey,
-          }, 500);
+          }, submitted.ambiguous ? 502 : 500);
         }
         db.logEvent(slotNum, "send_file", null, null, {
           file: filePath,
@@ -3276,13 +3280,16 @@ app.post("/slots/:slotNum/send", async (c) => {
             command: command.slice(0, 200),
             submit: submitted.submitKey,
           });
+          // `ambiguous` means a paste was invoked before the failure: text may have reached the pane.
           return c.json(
             {
               success: false,
               error: "PM pane submit failed (tmux send-keys).",
-              reason: "tmux_exec_error",
+              reason: submitted.ambiguous ? "pm_submit_outcome_ambiguous" : "tmux_exec_error",
+              ambiguous: submitted.ambiguous === true,
+              zero_effect: submitted.ambiguous !== true,
             },
-            500,
+            submitted.ambiguous ? 502 : 500,
           );
         }
         db.logEvent(slotNum, "send_command", null, null, {
