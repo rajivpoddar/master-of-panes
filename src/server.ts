@@ -68,7 +68,7 @@ import { StuckDetector } from "./stuck.js";
 import { OpsAuditScheduler } from "./opsAudit.js";
 import { PM_OPS_HOURLY_REPORT_DEPS, PMCadenceScheduler } from "./pmCadence.js";
 import { P0EscalationWatcher } from "./p0EscalationWatch.js";
-import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS } from "./health.js";
+import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS, pmLaunchPlan, PM_LAUNCHER_CONFIG_KEY, PM_MODEL_CONFIG_KEY } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
 import {
   clearOwnedRefusedPasteComposer,
@@ -1347,6 +1347,27 @@ app.post("/exit-pending", async (c) => {
   // every dev slot; DND slots are skipped by the existing Stop/scan paths.
   db.setExitPending(body.enabled, body.dev_only === true, body.pm_only === true, body.continuation_prompt, body.pm_only === true,
     body.pm_only === true && body.with_devs === true);
+  if (body.enabled && body.pm_only === true && body.with_devs === true) {
+    // Only ACTIVE non-DND dev slots belong to the 04:00 episode (CTO ts
+    // 1793889129.015359; S5-S8 decommissioned per S111). A DND slot, or one with
+    // no running agent (decommissioned/unprovisioned panes), can never Stop, so
+    // it is exempted (marked consumed) at arm time instead of holding the
+    // episode pending forever. Free slots cannot be DND by design.
+    const armed = db.getExitStatus().episode;
+    for (const slot of devSlots(DEFAULT_DEV_SLOT_COUNT)) {
+      let reason: string | null = db.getSlot(slot)?.dnd ? "dnd" : null;
+      if (!reason) {
+        const command = await healthChecker.getPaneCommandPublic(slot).catch(() => null);
+        if (!command || !(AGENT_COMMANDS.has(command) || /^\d+\.\d+\.\d+$/.test(command))) {
+          reason = `no_running_agent:${command ?? "pane_unverified"}`;
+        }
+      }
+      if (!reason) continue;
+      if (db.getExitStatus().episode !== armed) break;
+      db.markSlotExitCycled(slot);
+      db.logEvent(slot, "exit_pending_slot_exempt", null, null, { episode: armed, reason });
+    }
+  }
   // A new PM-only episode supersedes any refused terminal (its record stays in the event log).
   if (body.enabled && body.pm_only) db.setConfig("pm_exit_terminal", "");
   db.logEvent(0, body.enabled ? "exit_pending_enabled" : "exit_pending_disabled", null, null, {
@@ -1357,6 +1378,36 @@ app.post("/exit-pending", async (c) => {
 });
 
 /** Exit-pending status (REST parity for mop_exit_status). */
+/**
+ * PM restart launch config (Rajiv DM D0AMF0XE6TS thread 1794015303.639509,
+ * ts 1794018254.090169: "for direct claude, it has to use launch-pm.sh").
+ * `launcher`: cliproxy (default, launch-pm-cliproxy.sh) | direct (launch-pm.sh);
+ * `model`: opus (default) | deepseek (cliproxy only) | a claude-* id.
+ * Takes effect at the NEXT PM restart; never restarts, holds or gates the PM.
+ */
+app.get("/pm-launch-config", (c) => c.json(pmLaunchPlan(db)));
+
+app.post("/pm-launch-config", async (c) => {
+  let body: { launcher?: unknown; model?: unknown } = {};
+  try { body = await c.req.json(); } catch { body = {}; }
+  if (body.launcher === undefined && body.model === undefined) {
+    return c.json({ error: "Provide 'launcher' (cliproxy|direct) and/or 'model'" }, 400);
+  }
+  if (body.launcher !== undefined && body.launcher !== "cliproxy" && body.launcher !== "direct") {
+    return c.json({ error: "Invalid 'launcher': expected cliproxy or direct" }, 400);
+  }
+  if (body.model !== undefined && (typeof body.model !== "string" || !/^[A-Za-z0-9._-]{1,64}$/.test(body.model))) {
+    return c.json({ error: "Invalid 'model'" }, 400);
+  }
+  if (typeof body.launcher === "string") db.setConfig(PM_LAUNCHER_CONFIG_KEY, body.launcher);
+  if (typeof body.model === "string") db.setConfig(PM_MODEL_CONFIG_KEY, body.model);
+  const plan = pmLaunchPlan(db);
+  db.logEvent(0, "pm_launch_config_set", null, null, {
+    launcher: body.launcher ?? null, model: body.model ?? null, command: plan.command,
+  });
+  return c.json({ ok: true, ...plan, effective: "next PM restart" });
+});
+
 app.get("/exit-status", (c) => {
   return c.json(db.getExitStatus());
 });

@@ -280,3 +280,15 @@ test("04:00 with_devs episode: the fresh PM restart delivers the continuation an
     assert.equal(h.db.getExitStatus().pending, false, "single episode complete; no second dev phase");
   } finally { h.db.close(); }
 });
+
+test("pm_launcher=direct: the same fresh restart types launch-pm.sh, then one continuation", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    h.db.setConfig("pm_launcher", "direct");
+    const result = await h.health.restartPMFresh("crash");
+    assert.equal(result.success, true, result.reason);
+    assert.match(launchTyped(h.pane)[0], /&& bash \/Users\/rajiv\/\.claude\/scripts\/launch-pm\.sh --model claude-opus-5-5'$/);
+    assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
+    assert.equal(JSON.parse(h.db.getEvents(0, 1, "pm_restart_started")[0].payload).launcher, "direct");
+  } finally { h.db.close(); }
+});

@@ -80,10 +80,43 @@ export function pmConfiguredModel(db: Pick<MoPDatabase, "getConfig">): string {
   return /^[A-Za-z0-9._-]{1,64}$/.test(value) ? value : PM_DEFAULT_MODEL;
 }
 
-/** Fresh PM launcher command (never --continue) for a model. */
-export function pmFreshLaunchCommand(model: string = PM_DEFAULT_MODEL): string {
+/**
+ * PM backend (Rajiv DM D0AMF0XE6TS thread 1794015303.639509, ts 1794018254.090169:
+ * "for direct claude, it has to use launch-pm.sh"). MoP config `pm_launcher`:
+ * - `cliproxy` (default): launch-pm-cliproxy.sh, the shared CLIProxyAPI route;
+ * - `direct`: launch-pm.sh, direct Claude (Max subscription, no proxy).
+ * The model stays a separate key (`pm_model`). A non-Claude model (deepseek)
+ * exists only on the proxy, so `direct` with such a model keeps cliproxy.
+ * The fresh-start + continuation contract is identical for both.
+ */
+export const PM_LAUNCHER_CONFIG_KEY = "pm_launcher";
+export type PmLauncher = "cliproxy" | "direct";
+export const PM_DEFAULT_LAUNCHER: PmLauncher = "cliproxy";
+const PM_LAUNCHER_SCRIPTS: Record<PmLauncher, string> = {
+  cliproxy: "launch-pm-cliproxy.sh",
+  direct: "launch-pm.sh",
+};
+
+/** The configured PM backend; an absent or unknown value keeps cliproxy. */
+export function pmConfiguredLauncher(db: Pick<MoPDatabase, "getConfig">): PmLauncher {
+  let value = "";
+  try { value = (db.getConfig(PM_LAUNCHER_CONFIG_KEY) ?? "").trim(); } catch { value = ""; }
+  return value === "direct" ? "direct" : PM_DEFAULT_LAUNCHER;
+}
+
+/** Fresh PM launcher command (never --continue) for a model and backend. */
+export function pmFreshLaunchCommand(model: string = PM_DEFAULT_MODEL, launcher: PmLauncher = PM_DEFAULT_LAUNCHER): string {
   const safe = /^[A-Za-z0-9._-]{1,64}$/.test(model) ? model : PM_DEFAULT_MODEL;
-  return `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/launch-pm-cliproxy.sh --model ${PM_MODEL_LAUNCH_ARGS[safe] ?? safe}`;
+  const arg = PM_MODEL_LAUNCH_ARGS[safe] ?? safe;
+  const effective: PmLauncher = launcher === "direct" && arg.startsWith("claude-") ? "direct" : "cliproxy";
+  return `bash ${CLAUDE_SLOT_SCRIPTS_DIR}/${PM_LAUNCHER_SCRIPTS[effective]} --model ${arg}`;
+}
+
+/** The launch the next PM restart will use, from MoP config. */
+export function pmLaunchPlan(db: Pick<MoPDatabase, "getConfig">): { launcher: PmLauncher; model: string; command: string } {
+  const launcher = pmConfiguredLauncher(db);
+  const model = pmConfiguredModel(db);
+  return { launcher, model, command: pmFreshLaunchCommand(model, launcher) };
 }
 
 /**
@@ -455,15 +488,14 @@ export class ProcessHealthChecker {
 
   private async runPMFreshRestart(trigger: "exit" | "crash" | "unresponsive", episode: string | null):
     Promise<{ success: boolean; launched: boolean; reason: string }> {
-    const model = pmConfiguredModel(this.db);
-    const launchCommand = pmFreshLaunchCommand(model);
+    const { model, launcher, command: launchCommand } = pmLaunchPlan(this.db);
     const cwd = SLOT_CWDS[0];
     const fail = (reason: string, launched = false, extra: Record<string, unknown> = {}) => {
       this.db.logEvent(0, "pm_restart_failed", null, null, { trigger, episode, model, reason, ...extra });
       console.error(`[health][pm-restart] ${trigger}: ${reason}`);
       return { success: false, launched, reason };
     };
-    this.db.logEvent(0, "pm_restart_started", null, null, { trigger, episode, model, launch_command: launchCommand });
+    this.db.logEvent(0, "pm_restart_started", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
 
     // 1. zsh prompt (pane read). Fallback: respawn-pane to a fresh login shell,
     //    only when Claude is gone or idle; a busy PM turn is never killed.
@@ -751,7 +783,7 @@ export class ProcessHealthChecker {
     this.db.logEvent(slotNum, "pane_unresponsive_force_respawn", null, null, {
       unchanged_checks: state.unchangedChecks,
       probe_sent_at: state.probeSentAt ? new Date(state.probeSentAt).toISOString() : null,
-      command: slotNum === 0 ? pmFreshLaunchCommand(pmConfiguredModel(this.db)) : RESTART_COMMANDS[slotNum],
+      command: slotNum === 0 ? pmLaunchPlan(this.db).command : RESTART_COMMANDS[slotNum],
     });
 
     if (slotNum === 0) {
