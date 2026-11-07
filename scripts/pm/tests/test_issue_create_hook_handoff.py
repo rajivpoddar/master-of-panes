@@ -78,15 +78,43 @@ Internal engineering follow-up: the CI helper prints a stale summary line.
 """
 
 
+# The ledger hook preserves a blocked control-plane draft under
+# $HOME/.claude/control-plane-artifacts/blocked-issues and upserts a REAL
+# pm-ops obligation unless overridden. Unisolated runs left 383 drafts and live
+# obligations (e.g. 31134, PM 2026-11-07). Every hook run below is pinned to
+# tmp_path, and any write to the live directory fails the test.
+LIVE_CP_ARTIFACTS = Path.home() / ".claude" / "control-plane-artifacts" / "blocked-issues"
+
+
+def _live_artifacts() -> list[str]:
+    return sorted(p.name for p in LIVE_CP_ARTIFACTS.iterdir()) if LIVE_CP_ARTIFACTS.is_dir() else []
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_live_control_plane_artifacts():
+    before = _live_artifacts()
+    yield
+    assert _live_artifacts() == before, f"test wrote into the LIVE {LIVE_CP_ARTIFACTS}"
+
+
 def _env(tmp_path: Path) -> dict[str, str]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
     curl = fake_bin / "curl"
     curl.write_text("#!/bin/sh\nprintf '%s\\n' '{\"ok\":false,\"events\":[]}'\n")
     curl.chmod(0o755)
+    pm_ops = tmp_path / "pm-ops-recorder.py"
+    pm_ops.write_text(
+        "import sys\n"
+        f"open({str(tmp_path / 'pm-ops-calls.log')!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "print(4242)\n"
+    )
+    pm_ops.chmod(0o755)
     return dict(
         os.environ,
         PATH=f"{fake_bin}:{os.environ['PATH']}",
+        BLOCKED_CP_ISSUE_ARTIFACTS=str(tmp_path / "cp-artifacts"),
+        PM_OPS=str(pm_ops),
         EXPLORE_ISSUE_LATCH_GUARD=str(ROOT / "test/fixtures/explore-issue-latch-guard.sh"),
         EXPLORE_ISSUE_ENV_LOCAL=str(tmp_path / "no-credentials.env"),
         SLACK_BOT_TOKEN="",
@@ -254,6 +282,10 @@ def test_control_plane_draft_keeps_the_existing_control_plane_refusal(tmp_path):
     assert rc == 0
     message = _decision(out)["message"]
     assert "control-plane" in message.lower()
+    # The preserved draft and the obligation upsert stay inside tmp_path.
+    preserved = list((tmp_path / "cp-artifacts").glob("*-fix-control-plane-release-CLI-summary.md"))
+    assert len(preserved) == 1 and str(preserved[0]) in message
+    assert "obligation-upsert" in (tmp_path / "pm-ops-calls.log").read_text()
 
 
 LEDGER_BOILERPLATE_BODY = VALID_BODY + """
