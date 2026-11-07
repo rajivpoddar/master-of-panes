@@ -966,6 +966,8 @@ def remote_boxes_line(timeout: int = 20) -> str:
                 details.append(f"{count('preempting')} preempting")
             if count("rebuilding"):
                 details.append(f"{count('rebuilding')} rebuilding")
+            if count("borrowed"):
+                details.append(f"{count('borrowed')} borrowed")
             for state in ("expired", "broken"):
                 affected = [box for box, s in rows if s == state]
                 details.append(f"{len(affected)} {state}" + (f": {', '.join(affected)}" if affected else ""))
