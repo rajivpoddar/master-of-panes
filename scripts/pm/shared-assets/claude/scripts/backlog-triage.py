@@ -163,8 +163,15 @@ def labels(issue: dict[str, Any]) -> set[str]:
     meta = ready_pool_metadata(issue)
     for entry in re.split(r"[;,]", clean_meta_value(meta.get("holds"))):
         hold = entry.strip().lstrip("- ")
-        if hold:
-            names.add(hold if hold.startswith("pm-blocked:") else "pm-blocked:" + hold.removeprefix("sub:"))
+        if not hold or hold.lower() in {"none", "n/a", "-"}:
+            continue
+        # Rule 54 parity: header holds map through the same sub->legacy table as labels,
+        # so `waiting-on-issue` judges exactly like `pm-blocked:dependency`.
+        sub = hold if hold.startswith("sub:") else "sub:" + hold
+        mapped = hold if hold.startswith("pm-blocked:") else SUB_TO_BLOCKER.get(sub, "pm-blocked:" + hold.removeprefix("sub:"))
+        if mapped == "pm-blocked:dependency" and issue.get("_dependency_cleared"):
+            continue  # the caller already cleared the dependency wait for this contract check
+        names.add(mapped)
     return names
 
 
@@ -1190,7 +1197,8 @@ def ready_pool_contract_reasons(
     contract_issue = issue
     if allow_dependencies or not deps:
         # A resolved dependency label is cleared at apply; judge the contract alone.
-        contract_issue = {**issue, "labels": [{"name": name} for name in readiness_blocker_labels]}
+        contract_issue = {**issue, "labels": [{"name": name} for name in readiness_blocker_labels],
+                          "_dependency_cleared": True}
     if is_tracker(issue) or is_non_dispatchable_contract(contract_issue, meta):
         reasons.append("tracking_or_non_dispatchable")
     if any(re.fullmatch(r"slot:\d+", name) for name in names):
