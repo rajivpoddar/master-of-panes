@@ -474,3 +474,49 @@ test("the success path records planned -> issued -> booted with the owned proces
     assert.equal(record.boot_event_id, h.db.getEvents(0, 1, "SessionStart")[0].id);
   } finally { h.db.close(); }
 });
+
+// CTO REVISE ts 1794021484.838249: an unresolved same-episode launch stays consumed
+// across newer (manual) boots; only reconciliation or a superseding request retires it.
+test("unresolved episode launch custody survives a newer manual boot: no second launcher, record kept", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    h.pane.failPaste = true;
+    assert.match((await h.health.restartPMFresh("exit", episode)).reason, /launcher send failed/);
+    const unresolved = h.db.getConfig("pm_restart_launch");
+    assert.equal(JSON.parse(unresolved!).status, "unknown");
+    h.pane.failPaste = false;
+    // An operator starts PM M by hand; reconcile refuses it; M then exits.
+    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "manual-M", cwd: PM_PATH });
+    await h.health.reconcilePMRestartContinuation();
+    assert.deepEqual(h.pane.sends, []);
+    (h.health as any).lastRestart.clear();
+    const again = await h.health.restartPMFresh("exit", episode);
+    assert.equal(again.reason, "uncertain_launch_no_resend");
+    assert.deepEqual(h.pane.typed, [], "the uncertain launcher is never resent");
+    assert.equal(h.db.getConfig("pm_restart_launch"), unresolved, "E's unresolved record is never overwritten");
+    assert.equal(JSON.parse(h.db.getEvents(0, 1, "pm_restart_failed")[0].payload).custody, "episode");
+    // The health tick's crash path for the dead PM is held by the same custody.
+    (h.health as any).lastRestart.clear();
+    assert.equal((await h.health.restartPMFresh("crash")).reason, "uncertain_launch_no_resend");
+    assert.deepEqual(h.pane.sends, []);
+  } finally { h.db.close(); }
+});
+
+test("an explicitly superseding exit request retires the old unresolved custody", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const old = armPmOnlyEpisode(h.db);
+    h.pane.failPaste = true;
+    await h.health.restartPMFresh("exit", old);
+    h.pane.failPaste = false;
+    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "manual-M", cwd: PM_PATH });
+    // A NEW pm_only request supersedes E; its own launch proceeds normally.
+    const fresh = armPmOnlyEpisode(h.db, "Read /new/resume.md.");
+    (h.health as any).lastRestart.clear();
+    const result = await h.health.restartPMFresh("exit", fresh);
+    assert.equal(result.success, true, result.reason);
+    assert.deepEqual(h.pane.sends, ["Read /new/resume.md."]);
+    assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).episode, fresh);
+  } finally { h.db.close(); }
+});

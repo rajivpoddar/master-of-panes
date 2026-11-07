@@ -595,13 +595,26 @@ export class ProcessHealthChecker {
       return null;
     };
 
-    // Never resend an uncertain launcher (CTO REVISE ts 1794019803.549589): a
-    // planned/unknown/issued launch in this pane that no PM boot followed may
-    // still be pending (typed, submitting or booting). It stays UNKNOWN.
+    // Never resend an uncertain launcher (CTO REVISE ts 1794019803.549589 and
+    // 1794021484.838249). An unresolved (planned/unknown/issued) launch of a
+    // still-pending exit episode keeps that episode's launch custody CONSUMED,
+    // across ANY newer boot (e.g. an operator's manual PM that then exits): its
+    // record is never overwritten and no launcher is sent again for that
+    // episode. Custody retires only by reconciliation (the record becomes
+    // `booted`) or an explicitly superseding request (a new or disabled
+    // exit-pending episode). An episode-less (crash) launch blocks only until a
+    // PM boot follows it in this pane.
     const prior = this.pmLaunchRecord();
-    if (prior && prior.pane_id === pin.paneId && ["planned", "unknown", "issued"].includes(String(prior.status))
-        && latestSessionStartEventId(this.db, 0) <= prior.launch_event_id) {
-      return fail("uncertain_launch_no_resend", false, { prior_status: prior.status, prior_launch_event_id: prior.launch_event_id });
+    if (prior && ["planned", "unknown", "issued"].includes(String(prior.status))) {
+      const current = this.db.getExitStatus();
+      const episodeCustody = prior.episode !== null && current.pending && current.episode === prior.episode;
+      const paneUnresolved = prior.pane_id === pin.paneId && latestSessionStartEventId(this.db, 0) <= prior.launch_event_id;
+      if (episodeCustody || paneUnresolved) {
+        return fail("uncertain_launch_no_resend", false, {
+          prior_status: prior.status, prior_launch_event_id: prior.launch_event_id, prior_episode: prior.episode,
+          custody: episodeCustody ? "episode" : "pane",
+        });
+      }
     }
     // The kill guard: same pane/boot/episode AND the same KNOWN live process.
     const killRefusal = async (): Promise<string | null> => {
