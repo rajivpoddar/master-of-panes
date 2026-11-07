@@ -945,7 +945,7 @@ def remote_boxes_line(timeout: int = 20) -> str:
                 name, state = row.groups()
                 if not name.startswith("rtb-tpool-" if current == "test" else "rtb-pool-"):
                     raise ValueError("box in wrong pool")
-                if state not in {"free", "leased", "releasing", "expired", "broken", "preempting"}:
+                if state not in {"free", "leased", "releasing", "expired", "broken", "preempting", "rebuilding"}:
                     raise ValueError("unknown box state")
                 pools[current]["rows"].append((name, state))
             summary = re.match(r"^pool:\s*(\d+) free / (\d+),", line.strip())
@@ -964,6 +964,8 @@ def remote_boxes_line(timeout: int = 20) -> str:
             details = [f"{count('leased')} leased", f"{count('releasing')} releasing"]
             if count("preempting"):
                 details.append(f"{count('preempting')} preempting")
+            if count("rebuilding"):
+                details.append(f"{count('rebuilding')} rebuilding")
             for state in ("expired", "broken"):
                 affected = [box for box, s in rows if s == state]
                 details.append(f"{len(affected)} {state}" + (f": {', '.join(affected)}" if affected else ""))
