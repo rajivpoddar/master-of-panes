@@ -31,10 +31,14 @@ test("a guarded paste targets the pinned immutable pane id and the guard runs be
       seen.push(`loaded=${commands.some((c) => c.includes("load-buffer"))} pasted=${commands.some((c) => c.includes("paste-buffer"))}`);
       return { ok: true };
     },
+    beforeSubmit: async () => {
+      seen.push(`submit-check pasted=${commands.some((c) => c.includes("paste-buffer"))} enters=${commands.filter((c) => c.includes("send-keys")).length}`);
+      return { ok: true };
+    },
   };
   const result = await relay.submitToPM(TEXT, undefined, guard);
   assert.equal(result.ok, true);
-  assert.deepEqual(seen, [TEXT, "loaded=true pasted=false"]);
+  assert.deepEqual(seen, [TEXT, "loaded=true pasted=false", "submit-check pasted=true enters=0"]);
   const paste = commands.find((c) => c.includes("paste-buffer"))!;
   const enter = commands.find((c) => c.includes("send-keys"))!;
   assert.match(paste, /-t %7 /);
@@ -45,7 +49,7 @@ test("a guarded paste targets the pinned immutable pane id and the guard runs be
 test("a guard refusal means nothing was pasted and the result says so", async () => {
   const commands: string[] = [];
   const relay = relayWith(commands);
-  const result = await relay.submitToPM(TEXT, undefined, { paneId: "%7", beforePaste: async () => ({ ok: false, reason: "recipient_changed" }) });
+  const result = await relay.submitToPM(TEXT, undefined, { paneId: "%7", beforePaste: async () => ({ ok: false, reason: "recipient_changed" }), beforeSubmit: async () => ({ ok: true }) });
   assert.deepEqual([result.ok, result.ambiguous, result.refused], [false, false, "recipient_changed"]);
   assert.ok(!commands.some((c) => c.includes("paste-buffer") || c.includes("send-keys")));
   assert.ok(commands.some((c) => c.includes("delete-buffer")), "the loaded buffer is discarded");
@@ -54,7 +58,7 @@ test("a guard refusal means nothing was pasted and the result says so", async ()
 test("a guard that throws is a refusal before any write, never an ambiguous paste", async () => {
   const commands: string[] = [];
   const relay = relayWith(commands);
-  const result = await relay.submitToPM(TEXT, undefined, { paneId: "%7", beforePaste: async () => { throw new Error("tmux probe hung"); } });
+  const result = await relay.submitToPM(TEXT, undefined, { paneId: "%7", beforePaste: async () => { throw new Error("tmux probe hung"); }, beforeSubmit: async () => ({ ok: true }) });
   assert.deepEqual([result.ok, result.ambiguous, result.refused], [false, false, "guard_error"]);
   assert.ok(!commands.some((c) => c.includes("paste-buffer")));
 });
@@ -66,6 +70,7 @@ test("the guard runs inside the serialized writer: the second paste's guard star
   const guardFor = (name: string): PasteGuard => ({
     paneId: "%7",
     beforePaste: async () => { order.push(`${name}:guard after_enters=${commands.filter((c) => c.includes("send-keys")).length}`); return { ok: true }; },
+    beforeSubmit: async () => ({ ok: true }),
   });
   await Promise.all([relay.submitToPM(TEXT, undefined, guardFor("A")), relay.submitToPM(TEXT + "2", undefined, guardFor("B"))]);
   assert.deepEqual(order, ["A:guard after_enters=0", "B:guard after_enters=1"]);
@@ -77,4 +82,42 @@ test("an unguarded send keeps the existing behaviour: the mutable PM address, no
   const result = await relay.submitToPM(TEXT);
   assert.equal(result.ok, true);
   assert.match(commands.find((c) => c.includes("paste-buffer"))!, new RegExp(`-t ${DEFAULT_CONFIG.pmPaneAddress.replace(/[.]/g, "\\.")} `));
+});
+
+test("a guard that refuses before Enter: the paste may have landed, so NO key is sent and the result is ambiguous, never zero-effect", async () => {
+  const commands: string[] = [];
+  const relay = relayWith(commands);
+  const result = await relay.submitToPM(TEXT, undefined, {
+    paneId: "%7",
+    beforePaste: async () => ({ ok: true }),
+    beforeSubmit: async () => ({ ok: false, reason: "recipient_changed" }),
+  });
+  assert.deepEqual([result.ok, result.ambiguous, result.refused, result.withheld], [false, true, undefined, "recipient_changed"]);
+  assert.equal(commands.filter((c) => c.includes("paste-buffer")).length, 1, "the paste was already invoked");
+  assert.equal(commands.filter((c) => c.includes("send-keys")).length, 0, "no Enter and no other key reaches the pane");
+});
+
+test("a guard that throws before Enter withholds Enter and keeps the send ambiguous", async () => {
+  const commands: string[] = [];
+  const relay = relayWith(commands);
+  const result = await relay.submitToPM(TEXT, undefined, {
+    paneId: "%7",
+    beforePaste: async () => ({ ok: true }),
+    beforeSubmit: async () => { throw new Error("tmux probe hung"); },
+  });
+  assert.deepEqual([result.ok, result.ambiguous, result.withheld], [false, true, "guard_error"]);
+  assert.equal(commands.filter((c) => c.includes("send-keys")).length, 0);
+});
+
+test("the pre-Enter check runs inside the serialized writer: the second send's paste and check start only after the first send finished", async () => {
+  const order: string[] = [];
+  const commands: string[] = [];
+  const relay = relayWith(commands);
+  const guardFor = (name: string): PasteGuard => ({
+    paneId: "%7",
+    beforePaste: async () => { order.push(`${name}:paste-check`); return { ok: true }; },
+    beforeSubmit: async () => { order.push(`${name}:enter-check enters=${commands.filter((c) => c.includes("send-keys")).length}`); return { ok: true }; },
+  });
+  await Promise.all([relay.submitToPM(TEXT, undefined, guardFor("A")), relay.submitToPM(TEXT + "2", undefined, guardFor("B"))]);
+  assert.deepEqual(order, ["A:paste-check", "A:enter-check enters=0", "B:paste-check", "B:enter-check enters=1"]);
 });

@@ -80,21 +80,31 @@ export function registerSendCustody(app: Hono, deps: SendCustodyRouteDeps): void
         let cursor: PasteCursor | null = null;
         let window: PasteWindow | null = null;
         let overlapsIdentical = false;
+        const recipientIntact = async (): Promise<boolean> => samePin(pin, await deps.resolvePin(slot));
         const guard: PasteGuard = {
           paneId: pin.paneId,
           // Runs inside the relay's serialized writer, right before paste-buffer.
           async beforePaste(text) {
-            if (!samePin(pin, await deps.resolvePin(slot))) return { ok: false, reason: "recipient_changed" };
-            if (pin.transcriptPath) {
-              const identity = await acceptanceDeps.identity(pin.transcriptPath).catch(() => null);
-              if (identity) {
-                cursor = { path: pin.transcriptPath, dev: identity.dev, ino: identity.ino, size: identity.size, startedAtMs: wallClock(), text };
-                const opened = deps.ledger.open(cursor);
-                window = opened.window;
-                overlapsIdentical = opened.overlapsIdentical;
-              }
+            // The transcript identity read is asynchronous, and a SessionStart can land during it.
+            // So the pin is rechecked AFTER that preparation completes, and the evidence window is
+            // opened only after the recheck passes (synchronously, with no await between that
+            // recheck and the verdict), so a refusal leaves no window behind.
+            const identity = pin.transcriptPath
+              ? await acceptanceDeps.identity(pin.transcriptPath).catch(() => null)
+              : null;
+            if (!(await recipientIntact())) return { ok: false, reason: "recipient_changed" };
+            if (identity && pin.transcriptPath) {
+              cursor = { path: pin.transcriptPath, dev: identity.dev, ino: identity.ino, size: identity.size, startedAtMs: wallClock(), text };
+              const opened = deps.ledger.open(cursor);
+              window = opened.window;
+              overlapsIdentical = opened.overlapsIdentical;
             }
             return { ok: true };
+          },
+          // Runs inside the same writer, after the paste and its dwell, immediately before Enter.
+          // A refusal here follows a possible paste: the relay sends no key and the send stays UNKNOWN.
+          async beforeSubmit() {
+            return (await recipientIntact()) ? { ok: true } : { ok: false, reason: "recipient_changed" };
           },
         };
 
@@ -117,7 +127,7 @@ export function registerSendCustody(app: Hono, deps: SendCustodyRouteDeps): void
           cursor,
           window,
           overlapsIdentical,
-          recipientIntact: async () => samePin(pin, await deps.resolvePin(slot)),
+          recipientIntact,
           timeoutMs: deps.acceptanceTimeoutMs,
           pollMs: deps.pollMs,
           deps: acceptanceDeps,

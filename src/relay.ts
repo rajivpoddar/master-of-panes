@@ -218,6 +218,8 @@ export type PMSubmitResult = {
   queued?: boolean;
   /** Set when a PasteGuard refused before any pane write (a proven zero-effect). */
   refused?: string;
+  /** Set when a PasteGuard withheld Enter AFTER the paste: the text may be in the pane, never zero-effect. */
+  withheld?: string;
 };
 
 type PMQueueRow = {
@@ -233,6 +235,8 @@ type DirectSubmitResult = {
   notReady?: boolean;
   /** A PasteGuard refused before any pane write. */
   refused?: string;
+  /** A PasteGuard withheld Enter after the paste; no further key was sent. */
+  withheld?: string;
 };
 
 /**
@@ -1112,6 +1116,23 @@ export class TmuxRelay {
           pasted = true;
           await this.runShell(`tmux paste-buffer -p -b ${bufName} -t ${target} -d`, { timeout: 10_000 });
           await sleep(PM_INJECT_ENTER_DELAY_MS);
+          if (guard) {
+            // The dwell above is an await: the recipient may have been replaced since the paste.
+            // Recheck the same pin immediately before Enter, still inside the serialized writer.
+            // A paste may already have landed, so on any refusal NO further key is sent and the
+            // outcome stays ambiguous (UNKNOWN, never resent).
+            let verdict: { ok: true } | { ok: false; reason: string };
+            try {
+              verdict = await guard.beforeSubmit();
+            } catch (guardError) {
+              console.error("[relay] PasteGuard threw before Enter; withholding Enter:", guardError);
+              verdict = { ok: false, reason: "guard_error" };
+            }
+            if (!verdict.ok) {
+              this.db?.logEvent(0, "pm_submit_withheld", null, null, { reason: verdict.reason, pane_id: target, pasted: true });
+              return { ok: false, ambiguous: true, withheld: verdict.reason };
+            }
+          }
           await this.runShell(`tmux send-keys -t ${target} ${effectiveSubmitKey}`, { timeout: 10_000 });
           await sleep(500);
         } finally {

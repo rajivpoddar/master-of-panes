@@ -3198,7 +3198,7 @@ app.post("/slots/:slotNum/send", async (c) => {
           return c.json({
             success: false,
             error: "PM pane file submit failed (tmux send-keys).",
-            reason: submitted.refused ? `pm_paste_refused_${submitted.refused}` : submitted.ambiguous ? "pm_submit_outcome_ambiguous" : "tmux_exec_error",
+            reason: submitted.refused ? `pm_paste_refused_${submitted.refused}` : submitted.withheld ? `pm_submit_withheld_${submitted.withheld}` : submitted.ambiguous ? "pm_submit_outcome_ambiguous" : "tmux_exec_error",
             ambiguous: submitted.ambiguous === true,
             zero_effect: submitted.ambiguous !== true,
             submit: submitted.submitKey,
@@ -3285,7 +3285,7 @@ app.post("/slots/:slotNum/send", async (c) => {
             {
               success: false,
               error: "PM pane submit failed (tmux send-keys).",
-              reason: submitted.refused ? `pm_paste_refused_${submitted.refused}` : submitted.ambiguous ? "pm_submit_outcome_ambiguous" : "tmux_exec_error",
+              reason: submitted.refused ? `pm_paste_refused_${submitted.refused}` : submitted.withheld ? `pm_submit_withheld_${submitted.withheld}` : submitted.ambiguous ? "pm_submit_outcome_ambiguous" : "tmux_exec_error",
               ambiguous: submitted.ambiguous === true,
               zero_effect: submitted.ambiguous !== true,
             },
