@@ -12,8 +12,16 @@
  * Rules honoured here:
  * - Rule 50: this never touches PM input, tools or the UserPromptSubmit hook chain. The
  *   scheduler only talks to Slack and its own table.
- * - A Slack failure is recorded on the row and retried with a bounded backoff; it never
- *   falls back to another token and never throws out of the tick.
+ * - Delivery is classified. Only an AFFIRMATIVE zero-effect failure (a known pre-post Slack
+ *   `ok:false` error, a 429, or a connection that never opened) restores the due time and retries
+ *   with a bounded backoff. A timeout, lost response, unparseable reply, 5xx or unlisted Slack
+ *   error may already have posted, so that occurrence stays consumed and the row records an
+ *   UNKNOWN disposition; it is never retried (a retry could post twice). Never falls back to
+ *   another token and never throws out of the tick.
+ * - Every claim carries a per-row generation. Immediately before each send the exact claim and
+ *   binding are revalidated, and the completion writes are fenced to the same generation, so a
+ *   row that was cancelled, replaced, expired or whose stop obligation closed during a batch is
+ *   not sent and a stale completion can never touch its replacement.
  * - `until_at` is mandatory and at most seven days out, so no reminder can run unbounded.
  */
 
@@ -35,6 +43,7 @@ const CHANNEL_RE = /^[CGD][A-Z0-9]{8,12}$/;
 const THREAD_TS_RE = /^\d{9,11}\.\d{6}$/;
 
 export type AlertReminderStatus = "active" | "stopped" | "expired";
+export type AlertReminderOutcome = "posted" | "failed" | "unknown";
 
 export interface AlertReminderRow {
   key: string;
@@ -59,6 +68,14 @@ export interface AlertReminderRow {
   source_ref: string | null;
   created_at: number;
   updated_at: number;
+  /** Bumped by every claim and every add/replace/revive; fences send and completion to one claim. */
+  claim_gen: number;
+  /** Disposition of the most recent occurrence for the current claim. */
+  last_outcome: AlertReminderOutcome | null;
+  /** Occurrences whose delivery is unknown (may or may not have posted). Never retried. */
+  unknown_count: number;
+  last_unknown_at: number | null;
+  last_unknown_reason: string | null;
 }
 
 export interface AlertReminderAddInput {
@@ -83,6 +100,15 @@ export type AlertReminderAddResult =
   | { ok: true; outcome: AlertReminderAddOutcome; row: AlertReminderRow }
   | { ok: false; error: string; status: 400 | 404 | 409 | 503; differs?: string[]; row?: AlertReminderRow };
 
+/** Columns added after the first release. Additive with defaults, so rollback to the old code is safe. */
+const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
+  ["claim_gen", "INTEGER NOT NULL DEFAULT 0"],
+  ["last_outcome", "TEXT"],
+  ["unknown_count", "INTEGER NOT NULL DEFAULT 0"],
+  ["last_unknown_at", "INTEGER"],
+  ["last_unknown_reason", "TEXT"],
+];
+
 export function ensureAlertReminderSchema(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS alert_reminders (
@@ -105,11 +131,19 @@ export function ensureAlertReminderSchema(db: Database.Database): void {
       created_by TEXT,
       source_ref TEXT,
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      ${ADDED_COLUMNS.map(([name, ddl]) => `${name} ${ddl}`).join(",\n      ")}
     );
     CREATE INDEX IF NOT EXISTS idx_alert_reminders_status_next
       ON alert_reminders(status, next_at);
   `);
+  // A table created by the first release lacks the added columns; existing rows keep their data.
+  const present = new Set(
+    (db.prepare("PRAGMA table_info(alert_reminders)").all() as Array<{ name: string }>).map((column) => column.name),
+  );
+  for (const [name, ddl] of ADDED_COLUMNS) {
+    if (!present.has(name)) db.exec(`ALTER TABLE alert_reminders ADD COLUMN ${name} ${ddl}`);
+  }
 }
 
 // ─── Pure helpers ────────────────────────────────────────
@@ -236,18 +270,30 @@ export function alertReminderView(row: AlertReminderRow): Record<string, unknown
     source_ref: row.source_ref,
     created_at: iso(row.created_at),
     updated_at: iso(row.updated_at),
+    claim_gen: row.claim_gen,
+    last_outcome: row.last_outcome,
+    unknown_count: row.unknown_count,
+    last_unknown_at: iso(row.last_unknown_at),
+    last_unknown_reason: row.last_unknown_reason,
   };
 }
 
 // ─── Store ───────────────────────────────────────────────
 
 export interface ClaimedReminder {
+  /** The row exactly as it was when claimed: this is the binding the send is validated against. */
   row: AlertReminderRow;
-  /** next_at before the claim; restored when the post fails. */
+  /** `claim_gen` written by the claim; every send check and completion write is fenced to it. */
+  generation: number;
+  /** next_at before the claim; restored only when the post is a proven zero-effect failure. */
   previousNextAt: number;
   /** next_at written by the claim (the following grid point). */
   claimedNextAt: number;
 }
+
+export type ClaimStaleReason = "row_missing" | "claim_superseded" | "binding_changed" | "not_active" | "past_cutoff";
+
+export type ClaimCheck = { ok: true; row: AlertReminderRow } | { ok: false; reason: ClaimStaleReason };
 
 export class AlertReminderStore {
   constructor(private readonly db: Database.Database) {}
@@ -269,6 +315,11 @@ export class AlertReminderStore {
    * Idempotent on key. Same args on an active row is a no-op; different args are refused unless
    * `replace`; an inactive row (stopped or expired) is revived as a fresh schedule.
    * `verifyObligation` runs only when a write is about to happen.
+   *
+   * A replace or revive bumps `claim_gen`, so any claim still in flight for the old binding is
+   * stale: it is not sent if it has not gone out yet, and its completion writes match no row.
+   * `unknown_count` / `last_unknown_*` are kept: an occurrence whose delivery is already unknown
+   * stays on record for the key and is never replayed.
    */
   add(
     input: AlertReminderAddInput,
@@ -306,7 +357,8 @@ export class AlertReminderStore {
             post_count = 0, last_post_ts = NULL, last_posted_at = NULL, last_error = NULL,
             fail_count = 0, retry_at = NULL, created_by = excluded.created_by,
             source_ref = excluded.source_ref, created_at = excluded.created_at,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            claim_gen = alert_reminders.claim_gen + 1, last_outcome = NULL
         `)
         .run(
           input.key, input.channel, input.thread_ts, input.text, input.interval_s, input.first_at,
@@ -366,54 +418,192 @@ export class AlertReminderStore {
           ORDER BY next_at ASC, key ASC LIMIT ?
         `)
         .all(nowMs, nowMs, nowMs, limit) as AlertReminderRow[];
-      const advance = this.db.prepare("UPDATE alert_reminders SET next_at = ?, updated_at = ? WHERE key = ?");
+      const advance = this.db.prepare(
+        "UPDATE alert_reminders SET next_at = ?, claim_gen = claim_gen + 1, updated_at = ? WHERE key = ?",
+      );
       return due.map((row) => {
         const claimedNextAt = advanceByWholeIntervals(row.next_at, row.interval_s * 1000, nowMs);
         advance.run(claimedNextAt, nowMs, row.key);
-        return { row, previousNextAt: row.next_at, claimedNextAt };
+        return { row, generation: row.claim_gen + 1, previousNextAt: row.next_at, claimedNextAt };
       });
     });
     return run();
   }
 
-  recordPost(key: string, slackTs: string, nowMs: number): void {
-    this.db
+  /**
+   * Revalidate a claim immediately before its send: the row must still be the exact claim (same
+   * generation and binding), active, and not past `until_at`. The stop obligation is checked by
+   * the scheduler right after this, with no await in between.
+   */
+  checkClaim(claim: ClaimedReminder, nowMs: number): ClaimCheck {
+    const current = this.get(claim.row.key);
+    if (!current) return { ok: false, reason: "row_missing" };
+    if (current.claim_gen !== claim.generation) return { ok: false, reason: "claim_superseded" };
+    const bound = claim.row;
+    if (
+      current.channel !== bound.channel ||
+      current.thread_ts !== bound.thread_ts ||
+      current.text !== bound.text ||
+      current.stop_obligation_id !== bound.stop_obligation_id
+    ) {
+      return { ok: false, reason: "binding_changed" };
+    }
+    if (current.status !== "active") return { ok: false, reason: "not_active" };
+    if (nowMs > current.until_at) return { ok: false, reason: "past_cutoff" };
+    return { ok: true, row: current };
+  }
+
+  /** Stop a row on behalf of one claim; a replaced or re-claimed row is left alone. */
+  stopClaimed(claim: ClaimedReminder, reason: string, nowMs: number): boolean {
+    return (
+      this.db
+        .prepare(
+          "UPDATE alert_reminders SET status = 'stopped', stop_reason = ?, updated_at = ? WHERE key = ? AND claim_gen = ? AND status = 'active'",
+        )
+        .run(reason, nowMs, claim.row.key, claim.generation).changes > 0
+    );
+  }
+
+  /**
+   * Record a delivered post. Fenced to the claim: when the row was replaced or re-claimed in the
+   * meantime nothing is written and false is returned, so a stale completion cannot clear errors
+   * or attach its receipt to a replacement.
+   */
+  recordPost(claim: ClaimedReminder, slackTs: string, nowMs: number): boolean {
+    const result = this.db
       .prepare(`
         UPDATE alert_reminders
         SET post_count = post_count + 1, last_post_ts = ?, last_posted_at = ?, last_error = NULL,
-            fail_count = 0, retry_at = NULL, updated_at = ?
-        WHERE key = ?
+            last_outcome = 'posted', fail_count = 0, retry_at = NULL, updated_at = ?
+        WHERE key = ? AND claim_gen = ?
       `)
-      .run(slackTs, nowMs, nowMs, key);
-    // The final scheduled post has gone out when the following grid point is past until_at.
+      .run(slackTs, nowMs, nowMs, claim.row.key, claim.generation);
+    if (result.changes === 0) return false;
+    this.completeIfScheduleDone(claim, nowMs);
+    return true;
+  }
+
+  /**
+   * Record a failure that is KNOWN to have had no effect on Slack: restore the due time (only if
+   * the row is still exactly where this claim left it) and back off. Fenced to the claim. Never
+   * used for an ambiguous outcome; see recordUnknown.
+   */
+  recordFailure(claim: ClaimedReminder, error: string, nowMs: number): boolean {
+    const failCountBefore = claim.row.fail_count;
+    const restored = this.db
+      .prepare(`
+        UPDATE alert_reminders
+        SET next_at = ?, last_error = ?, last_outcome = 'failed', fail_count = fail_count + 1,
+            retry_at = ?, updated_at = ?
+        WHERE key = ? AND claim_gen = ? AND status = 'active' AND next_at = ?
+      `)
+      .run(claim.previousNextAt, error, nowMs + retryBackoffMs(failCountBefore), nowMs, claim.row.key, claim.generation, claim.claimedNextAt);
+    // Keep the error visible even if the row was cancelled while the post was in flight.
+    const visible = this.db
+      .prepare("UPDATE alert_reminders SET last_error = ?, last_outcome = 'failed', updated_at = ? WHERE key = ? AND claim_gen = ? AND status != 'active'")
+      .run(error, nowMs, claim.row.key, claim.generation);
+    return restored.changes + visible.changes > 0;
+  }
+
+  /**
+   * Record an occurrence whose delivery is UNKNOWN (timeout, lost response, unparseable reply,
+   * 5xx, unlisted Slack error, a throwing poster). The occurrence stays consumed: `next_at` keeps
+   * the value the claim wrote, no retry is scheduled, and the row shows the uncertainty. Fenced
+   * to the claim.
+   */
+  recordUnknown(claim: ClaimedReminder, reason: string, nowMs: number): boolean {
+    const result = this.db
+      .prepare(`
+        UPDATE alert_reminders
+        SET last_outcome = 'unknown', last_error = ?, unknown_count = unknown_count + 1,
+            last_unknown_at = ?, last_unknown_reason = ?, fail_count = 0, retry_at = NULL, updated_at = ?
+        WHERE key = ? AND claim_gen = ?
+      `)
+      .run(reason, nowMs, reason, nowMs, claim.row.key, claim.generation);
+    if (result.changes === 0) return false;
+    this.completeIfScheduleDone(claim, nowMs);
+    return true;
+  }
+
+  /** The final scheduled occurrence has been consumed when the following grid point is past until_at. */
+  private completeIfScheduleDone(claim: ClaimedReminder, nowMs: number): void {
     this.db
       .prepare(`
         UPDATE alert_reminders SET status = 'expired', stop_reason = 'schedule_complete', updated_at = ?
-        WHERE key = ? AND status = 'active' AND next_at > until_at
+        WHERE key = ? AND claim_gen = ? AND status = 'active' AND next_at > until_at
       `)
-      .run(nowMs, key);
-  }
-
-  /** Record a failed post: restore the due time (only if the row is still where the claim left it) and back off. */
-  recordFailure(claim: ClaimedReminder, error: string, nowMs: number): void {
-    const failCountBefore = claim.row.fail_count;
-    this.db
-      .prepare(`
-        UPDATE alert_reminders
-        SET next_at = ?, last_error = ?, fail_count = fail_count + 1, retry_at = ?, updated_at = ?
-        WHERE key = ? AND status = 'active' AND next_at = ?
-      `)
-      .run(claim.previousNextAt, error, nowMs + retryBackoffMs(failCountBefore), nowMs, claim.row.key, claim.claimedNextAt);
-    // Keep the error visible even if the row was cancelled while the post was in flight.
-    this.db
-      .prepare("UPDATE alert_reminders SET last_error = ?, updated_at = ? WHERE key = ? AND status != 'active'")
-      .run(error, nowMs, claim.row.key);
+      .run(nowMs, claim.row.key, claim.generation);
   }
 }
 
 // ─── Slack transport (Alerts bot) ────────────────────────
 
-export type AlertPostResult = { ok: true; ts: string } | { ok: false; error: string };
+/**
+ * Outcome of one chat.postMessage attempt.
+ * `effect: "none"`: the attempt is KNOWN to have posted nothing, so retrying cannot duplicate it.
+ * `effect: "unknown"`: the message may or may not have been posted; the occurrence must never be
+ * retried. When in doubt a failure is "unknown".
+ */
+export type AlertPostResult = { ok: true; ts: string } | { ok: false; error: string; effect: "none" | "unknown" };
+
+/**
+ * Slack `ok:false` errors that are returned before anything is posted (auth, channel, rate limit,
+ * request-shape rejections). Anything not listed is treated as unknown, in particular
+ * internal/server-side errors such as fatal_error, internal_error, service_unavailable and
+ * request_timeout, which can occur after the message was accepted.
+ */
+const ZERO_EFFECT_SLACK_ERRORS: ReadonlySet<string> = new Set([
+  "not_in_channel",
+  "channel_not_found",
+  "is_archived",
+  "invalid_auth",
+  "not_authed",
+  "account_inactive",
+  "token_revoked",
+  "token_expired",
+  "missing_scope",
+  "access_denied",
+  "ratelimited",
+  "rate_limited",
+  "msg_too_long",
+  "no_text",
+  "restricted_action",
+  "invalid_arguments",
+  "invalid_arg_name",
+  "invalid_charset",
+  "invalid_form_data",
+]);
+
+/** Socket error codes raised while the connection is being opened, i.e. before any request byte is sent. */
+const PRE_SEND_CONNECT_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+]);
+
+function errorCodes(error: unknown, depth = 0): string[] {
+  if (!error || typeof error !== "object" || depth > 3) return [];
+  const record = error as { code?: unknown; cause?: unknown; errors?: unknown };
+  const codes: string[] = typeof record.code === "string" ? [record.code] : [];
+  if (Array.isArray(record.errors)) for (const inner of record.errors) codes.push(...errorCodes(inner, depth + 1));
+  codes.push(...errorCodes(record.cause, depth + 1));
+  return codes;
+}
+
+/**
+ * A thrown fetch is zero-effect ONLY when every socket error code says the connection never
+ * opened. Timeouts, aborts, resets and anything unrecognised may have sent the request.
+ */
+export function classifyTransportError(error: unknown): { error: string; effect: "none" | "unknown" } {
+  const codes = errorCodes(error);
+  if (codes.length > 0 && codes.every((code) => PRE_SEND_CONNECT_CODES.has(code))) {
+    return { error: `slack_connect_${codes[0].slice(0, 40)}`, effect: "none" };
+  }
+  const name = error instanceof Error ? error.name : "error";
+  return { error: `slack_transport_${String(name).slice(0, 40)}`, effect: "unknown" };
+}
 
 export interface AlertPoster {
   post(channel: string, threadTs: string, text: string): Promise<AlertPostResult>;
@@ -448,22 +638,36 @@ export class SlackAlertsPoster implements AlertPoster {
 
   async post(channel: string, threadTs: string, text: string): Promise<AlertPostResult> {
     const token = readAlertsToken(this.envFile);
-    if (!token) return { ok: false, error: "alerts_token_missing" };
+    if (!token) return { ok: false, error: "alerts_token_missing", effect: "none" };
+    let response: Response;
     try {
-      const response = await this.fetchImpl("https://slack.com/api/chat.postMessage", {
+      response = await this.fetchImpl("https://slack.com/api/chat.postMessage", {
         method: "POST",
         headers: { "Content-Type": "application/json; charset=utf-8", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ channel, thread_ts: threadTs, text, unfurl_links: false, unfurl_media: false }),
         signal: AbortSignal.timeout(15_000),
       });
-      if (response.status === 429) return { ok: false, error: "ratelimited" };
-      const payload = (await response.json()) as { ok?: boolean; ts?: string; error?: string };
-      if (payload.ok === true && typeof payload.ts === "string") return { ok: true, ts: payload.ts };
-      return { ok: false, error: `slack_${String(payload.error ?? `http_${response.status}`).slice(0, 80)}` };
     } catch (error) {
-      const name = error instanceof Error ? error.name : "error";
-      return { ok: false, error: `slack_transport_${String(name).slice(0, 40)}` };
+      return { ok: false, ...classifyTransportError(error) };
     }
+    // 429 is answered by Slack's edge before the request is processed.
+    if (response.status === 429) return { ok: false, error: "ratelimited", effect: "none" };
+    // A 5xx can be returned after the message was accepted.
+    if (response.status >= 500) return { ok: false, error: `slack_http_${response.status}`, effect: "unknown" };
+    type Payload = { ok?: boolean; ts?: string; error?: string } | null;
+    let payload: Payload;
+    try {
+      payload = (await response.json()) as Payload;
+    } catch {
+      return { ok: false, error: "slack_response_unparseable", effect: "unknown" };
+    }
+    if (payload?.ok === true) {
+      if (typeof payload.ts === "string") return { ok: true, ts: payload.ts };
+      return { ok: false, error: "slack_ok_without_ts", effect: "unknown" };
+    }
+    const slackError = String(payload?.error ?? `http_${response.status}`).slice(0, 80);
+    const known = payload?.ok === false && ZERO_EFFECT_SLACK_ERRORS.has(slackError);
+    return { ok: false, error: `slack_${slackError}`, effect: known ? "none" : "unknown" };
   }
 }
 
@@ -496,7 +700,14 @@ export interface AlertReminderTickResult {
   stopped: string[];
   claimed: number;
   posted: string[];
+  /** Known zero-effect failures: due time restored, retried after a backoff. */
   failed: string[];
+  /** Delivery unknown (may have posted): occurrence consumed, never retried. */
+  unknown: string[];
+  /** Claimed but not sent: cancelled, replaced, expired or obligation closed before the send. */
+  skipped: string[];
+  /** Sent, but the row was replaced or re-claimed meanwhile, so the completion was discarded. */
+  stale: string[];
 }
 
 export interface AlertReminderSchedulerDeps {
@@ -552,7 +763,9 @@ export class AlertReminderScheduler {
   }
 
   async tick(): Promise<AlertReminderTickResult> {
-    const result: AlertReminderTickResult = { expired: [], stopped: [], claimed: 0, posted: [], failed: [] };
+    const result: AlertReminderTickResult = {
+      expired: [], stopped: [], claimed: 0, posted: [], failed: [], unknown: [], skipped: [], stale: [],
+    };
     if (this.ticking) return result;
     this.ticking = true;
     const { store, poster } = this.deps;
@@ -578,16 +791,64 @@ export class AlertReminderScheduler {
       result.claimed = claims.length;
       for (const claim of claims) {
         const { row } = claim;
-        const outcome = await poster.post(row.channel, row.thread_ts, row.text);
+        const base = { key: row.key, channel: row.channel, thread_ts: row.thread_ts, generation: claim.generation };
+
+        // The batch is claimed up front and sent one by one, so by now the row may have been
+        // cancelled, replaced, expired or lost its stop obligation. Revalidate the exact claim
+        // immediately before the send. Nothing awaits between this check and the post call below,
+        // so nothing in this process can interleave. A skipped claim stays consumed: no restore.
+        const sendMs = now();
+        const gate = store.checkClaim(claim, sendMs);
+        if (!gate.ok) {
+          result.skipped.push(row.key);
+          log("alert_reminder_send_skipped", { ...base, reason: gate.reason });
+          continue;
+        }
+        if (
+          this.deps.obligationState &&
+          row.stop_obligation_id !== null &&
+          this.deps.obligationState(row.stop_obligation_id) === "closed"
+        ) {
+          if (store.stopClaimed(claim, "obligation_resolved", sendMs)) {
+            result.stopped.push(row.key);
+            log("alert_reminder_stopped", { key: row.key, reason: "obligation_resolved", obligation_id: row.stop_obligation_id });
+          }
+          result.skipped.push(row.key);
+          log("alert_reminder_send_skipped", { ...base, reason: "obligation_resolved" });
+          continue;
+        }
+
+        let outcome: AlertPostResult;
+        try {
+          outcome = await poster.post(row.channel, row.thread_ts, row.text);
+        } catch {
+          // A throw can happen after the request left: the delivery is unknown, never a retry.
+          outcome = { ok: false, error: "poster_threw", effect: "unknown" };
+        }
         const doneMs = now();
+
         if (outcome.ok) {
-          store.recordPost(row.key, outcome.ts, doneMs);
-          result.posted.push(row.key);
-          log("alert_reminder_posted", { key: row.key, channel: row.channel, thread_ts: row.thread_ts, slack_ts: outcome.ts, next_at: new Date(claim.claimedNextAt).toISOString() });
+          if (store.recordPost(claim, outcome.ts, doneMs)) {
+            result.posted.push(row.key);
+            log("alert_reminder_posted", { ...base, slack_ts: outcome.ts, next_at: new Date(claim.claimedNextAt).toISOString() });
+          } else {
+            result.stale.push(row.key);
+            log("alert_reminder_stale_completion", { ...base, outcome: "posted", slack_ts: outcome.ts });
+          }
+        } else if (outcome.effect === "none") {
+          if (store.recordFailure(claim, outcome.error, doneMs)) {
+            result.failed.push(row.key);
+            log("alert_reminder_post_failed", { ...base, error: outcome.error });
+          } else {
+            result.stale.push(row.key);
+            log("alert_reminder_stale_completion", { ...base, outcome: "failed", error: outcome.error });
+          }
+        } else if (store.recordUnknown(claim, outcome.error, doneMs)) {
+          result.unknown.push(row.key);
+          log("alert_reminder_post_unknown", { ...base, reason: outcome.error });
         } else {
-          store.recordFailure(claim, outcome.error, doneMs);
-          result.failed.push(row.key);
-          log("alert_reminder_post_failed", { key: row.key, channel: row.channel, thread_ts: row.thread_ts, error: outcome.error });
+          result.stale.push(row.key);
+          log("alert_reminder_stale_completion", { ...base, outcome: "unknown", reason: outcome.error });
         }
       }
     } catch (error) {
