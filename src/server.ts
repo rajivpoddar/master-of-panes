@@ -341,7 +341,15 @@ const yskNoticeTick = (): void => {
       // PM input. The lock is taken only when a top-level notice is visible,
       // and the drive re-checks the pane inside that lock.
       const peek = parseYskCapture(await capturePaneSnapshot(config.pmPaneAddress));
-      if (peek.kind !== "top") return;
+      if (peek.kind !== "top") {
+        const reason = peek.kind === "uncertain" ? peek.reason
+          : peek.kind === "draft" ? "draft_present"
+          : peek.kind === "unreadable" ? "composer_unreadable"
+          : peek.kind === "submenu" ? "submenu_without_attempt"
+          : "no_notice";
+        console.log(`[ysk-notice] outcome=noop reason=${reason} keys=0 enter=0`);
+        return;
+      }
       await withSlotSendLock(PM_SLOT, () => driveYskNotice({
         capture: () => capturePaneSnapshot(config.pmPaneAddress),
         sendLiteral: async (text) => {
