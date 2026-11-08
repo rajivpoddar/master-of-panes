@@ -160,36 +160,75 @@ interface IssueSnapshot {
 /** Statuses a release may restore from the prior-status record. `in-review` needs a live PR and is never restored. */
 const RESTORABLE_PRIOR_STATUSES = new Set(["status:todo", "status:blocked", "status:backlog", "status:deferred"]);
 
+/** Raw `holds:` value of the live ready-pool header, or null when there is no header or no holds field. */
+function readyPoolHoldsField(body: string): string | null {
+  const header = /<!--\s*ready-pool:([\s\S]*?)-->/.exec(body);
+  const holds = header ? /^\s*holds:\s*(.*)$/m.exec(header[1]) : null;
+  return holds ? holds[1] : null;
+}
+
 /**
  * Rule 54 status implied by the live ready-pool header: a hold other than
  * `dependency` means `blocked` (dependency-only waits may stay `todo`). Returns
  * null when the header implies nothing, leaving the caller's default in place.
  */
 export function statusFromReadyPoolHeader(body: string): string | null {
-  const header = /<!--\s*ready-pool:([\s\S]*?)-->/.exec(body);
-  const holds = header ? /^\s*holds:\s*(.*)$/m.exec(header[1]) : null;
-  if (!holds) return null;
-  const nonDependency = holds[1]
+  const holds = readyPoolHoldsField(body);
+  if (holds === null) return null;
+  const nonDependency = holds
     .split(",")
     .map((hold) => hold.trim())
     .filter((hold) => hold.length > 0 && hold !== "none" && hold !== "dependency");
   return nonDependency.length > 0 ? "status:blocked" : null;
 }
 
+// Mirrors NON_DISPATCHABLE_CLAIMABLE_TYPES in ~/.claude/scripts/issue_claimability.py
+// (the Ready Pool claimability classifier). Keep the two sets identical.
+const NON_DISPATCHABLE_CLAIMABLE_TYPES = new Set([
+  "none", "no", "no-slot", "no_slot", "not-claimable", "not_claimable", "unclaimable",
+  "pm", "pm-direct", "pm_direct", "direct-main", "infra", "infrastructure",
+  "docs", "docs-only", "documentation", "documentation-only", "rajiv", "external",
+]);
+
+function readyPoolField(body: string, field: string): string {
+  const header = /<!--\s*ready-pool:\s*([\s\S]*?)-->/i.exec(body);
+  if (!header) return "";
+  const match = new RegExp(`^\\s*${field}:\\s*(.*?)\\s*$`, "im").exec(header[1]);
+  return match ? match[1].trim() : "";
+}
+
 /**
- * Status a released issue returns to. An open PR that closes the issue wins
- * (`in-review`); otherwise an independently projected lifecycle is kept, then
- * the recorded pre-assignment status, then the live header, then `todo`.
+ * Nonclaimable or PM-owned work, using the same markers as issue_claimability.py
+ * (`sub:pm-owned`, `pm-nonclaimable:tracking`, a non-dispatchable claimable type,
+ * or a TRACKING_ONLY disposition). Such an issue must never be released to todo.
+ */
+export function isNonclaimableIssue(labels: string[], body: string): boolean {
+  if (labels.includes("sub:pm-owned") || labels.includes("pm-nonclaimable:tracking")) return true;
+  if (NON_DISPATCHABLE_CLAIMABLE_TYPES.has(readyPoolField(body, "claimable_slot_type").toLowerCase())) return true;
+  return readyPoolField(body, "disposition").toUpperCase() === "TRACKING_ONLY";
+}
+
+/**
+ * Status a released issue returns to, or null when no truthful status can be
+ * derived (the caller then writes nothing and reports the release unresolved).
+ * Order: a closed issue keeps its terminal status; an open PR that closes the
+ * issue wins (`in-review`); PM-owned or nonclaimable work returns to `backlog`;
+ * an independently projected lifecycle is kept; then the recorded pre-assignment
+ * status; then the live header (a non-dependency hold means `blocked`, a header
+ * without such holds means `todo`). Without any of these, there is no fallback to
+ * `todo`: a historical preimage is never invented.
  */
 export function releaseTargetStatus(
-  snapshot: Pick<IssueSnapshot, "state" | "body" | "linkedPullRequests">,
+  snapshot: Pick<IssueSnapshot, "state" | "body" | "labels" | "linkedPullRequests">,
   otherStatus: string | null,
   recorded: string | null,
-): string {
+): string | null {
   if (snapshot.state !== "OPEN") return otherStatus ?? "status:done";
   if (snapshot.linkedPullRequests > 0) return "status:in-review";
+  if (isNonclaimableIssue(snapshot.labels, snapshot.body)) return "status:backlog";
   if (otherStatus) return otherStatus;
   if (recorded && RESTORABLE_PRIOR_STATUSES.has(recorded)) return recorded;
+  if (readyPoolHoldsField(snapshot.body) === null) return null;
   return statusFromReadyPoolHeader(snapshot.body) ?? "status:todo";
 }
 
@@ -245,10 +284,10 @@ export function createGhIssueOwnershipProjection(
   }
 
   async function readIssue(issue: number): Promise<IssueSnapshot> {
-    // One read: `closedByPullRequestsReferences` lists PRs whose closing keyword
-    // targets this issue. It carries no PR state, so an open-PR check is
-    // approximated by any closing reference (a merged PR on an open issue is an
-    // anomaly that resolves to `in-review`, which is never assignable).
+    // One read: `closedByPullRequestsReferences` lists the PRs whose closing keyword
+    // targets this issue. gh 2.95.0 returns open PRs only by default
+    // (includeClosedPrs=false), so any entry counts as an open closing PR; the
+    // list carries no PR state of its own.
     const stdout = await runGh([
       "issue", "view", String(issue),
       "--repo", repository,
@@ -353,11 +392,17 @@ export function createGhIssueOwnershipProjection(
       const priorStatuses = before.labels.filter(
         (label) => label.startsWith("status:") && label !== "status:in-progress",
       );
+      // Multiple independent statuses have no safe precedence (same rule as release).
+      // Refuse the label projection before any write: the labels and the record stay
+      // as they are. This does not gate the MoP assignment itself.
+      if (priorStatuses.length > 1) {
+        return outcome("failed", "issue_projection_ambiguous_status", repository, issue, slot);
+      }
       // Record what the stripped status was. A re-assign of a claimed issue (already
       // in-progress, nothing to strip) keeps the record from the first claim.
       try {
         if (priorStatuses.length === 1) priorStatus.set(issue, priorStatuses[0]);
-        else if (priorStatuses.length > 1 || !before.labels.includes("status:in-progress")) priorStatus.set(issue, null);
+        else if (!before.labels.includes("status:in-progress")) priorStatus.set(issue, null);
       } catch (error) {
         return outcome("failed", reasonFor("issue_projection_prior_status_write_failed", error), repository, issue, slot);
       }
@@ -397,8 +442,12 @@ export function createGhIssueOwnershipProjection(
         return outcome("failed", reasonFor("issue_projection_prior_status_read_failed", error), repository, issue, slot);
       }
       // Never reset a released issue to todo by default: it returns to the status it had
-      // before the claim, or to in-review when a PR closes it (rule 54).
+      // before the claim, or to in-review when a PR closes it (rule 54). When no truthful
+      // status can be derived, nothing is written and the prior record is kept as evidence.
       const targetStatus = releaseTargetStatus(before, otherLifecycle[0] ?? null, recorded);
+      if (targetStatus === null) {
+        return outcome("failed", "issue_projection_release_unresolved", repository, issue, slot);
+      }
       const compatibleSubs = before.labels.filter(
         (label) => label.startsWith("sub:") && (SUB_STATUS_BY_STATUS[targetStatus] ?? []).includes(label),
       );

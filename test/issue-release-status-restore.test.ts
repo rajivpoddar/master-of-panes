@@ -99,12 +99,57 @@ test("unknown prior status reads the live header: dependency-only stays todo, ot
   assert.deepEqual(held.labels(), ["status:blocked"]);
 });
 
-test("a recorded in-review is never restored without a live PR, and no record defaults to todo", async () => {
+test("a recorded in-review is never restored without a live PR; the release is unresolved and the record is kept", async () => {
   const gh = ghIssue({ labels: ["status:in-progress", "slot:3"] });
   const priorStatus = memoryStore();
   priorStatus.set(8003, "status:in-review");
-  await createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO, priorStatus }).onReleased(8003, 3, null);
-  assert.deepEqual(gh.labels(), ["status:todo"]);
+  const released = await createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO, priorStatus })
+    .onReleased(8003, 3, null);
+  assert.equal(released.status, "failed");
+  assert.equal(released.reason, "issue_projection_release_unresolved");
+  assert.deepEqual(gh.labels(), ["slot:3", "status:in-progress"], "nothing is written without a truthful status");
+  assert.equal(priorStatus.entries.get(8003), "status:in-review", "the evidence record is kept");
+});
+
+test("release of PM-owned work with no record or header returns to backlog and keeps sub:pm-owned", async () => {
+  const gh = ghIssue({ labels: ["status:in-progress", "slot:3", "P1", "sub:pm-owned"] });
+  const released = await createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO, priorStatus: memoryStore() })
+    .onReleased(8005, 3, null);
+  assert.equal(released.status, "projected");
+  assert.deepEqual(gh.labels(), ["P1", "status:backlog", "sub:pm-owned"]);
+});
+
+test("PM ownership added during a claim beats a recorded todo: release goes to backlog, not the Ready Pool", async () => {
+  const gh = ghIssue({ labels: ["status:in-progress", "slot:3", "P1", "sub:pm-owned"] });
+  const priorStatus = memoryStore();
+  priorStatus.set(8006, "status:todo");
+  const released = await createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO, priorStatus })
+    .onReleased(8006, 3, null);
+  assert.equal(released.status, "projected");
+  assert.deepEqual(gh.labels(), ["P1", "status:backlog", "sub:pm-owned"]);
+  assert.equal(priorStatus.entries.has(8006), false);
+});
+
+test("a tracking-only issue with no record or header is not released to todo", async () => {
+  const gh = ghIssue({
+    labels: ["status:in-progress", "slot:3", "pm-nonclaimable:tracking"],
+    body: "<!-- ready-pool:\npriority: P2\n-->",
+  });
+  await createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO, priorStatus: memoryStore() })
+    .onReleased(8007, 3, null);
+  assert.deepEqual(gh.labels(), ["pm-nonclaimable:tracking", "status:backlog"]);
+});
+
+test("ambiguous prior statuses refuse the assign before any label write and keep the record", async () => {
+  const gh = ghIssue({ labels: ["status:todo", "status:blocked", "P1"] });
+  const priorStatus = memoryStore();
+  priorStatus.set(8008, "status:backlog");
+  const assigned = await createGhIssueOwnershipProjection({ runGh: gh.runner, repository: REPO, priorStatus })
+    .onAssigned(8008, 3, null);
+  assert.equal(assigned.status, "failed");
+  assert.equal(assigned.reason, "issue_projection_ambiguous_status");
+  assert.deepEqual(gh.labels(), ["P1", "status:blocked", "status:todo"], "the live labels are not stripped");
+  assert.equal(priorStatus.entries.get(8008), "status:backlog", "the record is not cleared");
 });
 
 test("a re-assign of a claimed issue keeps the record from the first claim", async () => {
