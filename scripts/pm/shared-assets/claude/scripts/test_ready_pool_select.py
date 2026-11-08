@@ -50,6 +50,37 @@ def issue(n, labels, created="2026-10-01T00:00:00Z", body=""):
             "createdAt": created, "body": body}
 
 
+class HoldCompatibilityTests(unittest.TestCase):
+    def test_old_new_and_mixed_holds_across_dependency_states(self):
+        forms = (
+            (["pm-blocked:dependency"], "dependency"),
+            (["sub:waiting-on-issue"], "waiting-on-issue"),
+            (["pm-blocked:dependency", "sub:waiting-on-issue"], "sub:waiting-on-issue"),
+        )
+        for labels, hold in forms:
+            for state in ("open", "cleared_other_hold", "incomplete_contract"):
+                with self.subTest(labels=labels, state=state):
+                    extra = "; external" if state == "cleared_other_hold" else ""
+                    row = issue(901, ["P1", "status:todo", *labels], body=(
+                        f"<!-- ready-pool:\nblockers: #902\nholds: {hold}{extra}\n-->"))
+                    if state == "incomplete_contract":
+                        row["body"] = "<!-- ready-pool:\nclaimable_slot_type: dev\n-->"
+                    if state == "incomplete_contract":
+                        self.assertIsNone(rps.classify(row))
+                        continue
+                    candidate = rps.candidate(row, "new_issue")
+                    resolved = state == "cleared_other_hold"
+                    rps.evaluate_dependency(candidate, {('native', 901): [], (902, "default"): (resolved, "CLOSED" if resolved else "OPEN")}, offline=False)
+                    self.assertFalse(candidate.get("dependency_unblocked", False))
+                    if resolved:
+                        self.assertIn("pm-blocked:external", candidate["blocking_labels"])
+                        self.assertEqual(candidate.get("dependency_reason"), "other_blocking_labels")
+                        self.assertIsNone(rps.classify(row))
+                    else:
+                        self.assertEqual(rps.classify(row), "new_issue")
+                        self.assertTrue(candidate.get("open_dependencies"))
+
+
 class DispatchContentTests(unittest.TestCase):
     def test_pm_owned_incidents_and_non_dev_need_investigation(self):
         for header in (

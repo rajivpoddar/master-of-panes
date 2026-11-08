@@ -164,18 +164,23 @@ SUB_TO_BLOCKER = {"sub:waiting-on-issue": "pm-blocked:dependency", "sub:pm-gate"
                   "sub:infra": "pm-blocked:infra"}
 
 
-def issue_holds(issue: dict[str, Any]) -> set[str]:
-    labels = _labels(issue)
-    body = issue.get("body") or ""
-    raw = ready_pool_value(body, "holds")
+def declared_issue_holds(issue: dict[str, Any]) -> set[str]:
+    raw = ready_pool_value(issue.get("body") or "", "holds")
     holds = set()
     for entry in re.split(r"[;,]", raw):
         value = entry.strip().lstrip("- ")
-        if value:
-            holds.add(value if value.startswith("pm-blocked:") else "pm-blocked:" + value.removeprefix("sub:"))
-    holds |= {SUB_TO_BLOCKER[l] for l in labels & SUB_TO_BLOCKER.keys()}
-    holds |= {l for l in labels if l.startswith("pm-blocked:")}
+        if not value or value.lower() in {"none", "n/a", "-"}:
+            continue
+        sub = value if value.startswith("sub:") else "sub:" + value
+        holds.add(value if value.startswith("pm-blocked:") else SUB_TO_BLOCKER.get(sub, "pm-blocked:" + value.removeprefix("sub:")))
     return holds
+
+
+def issue_holds(issue: dict[str, Any]) -> set[str]:
+    labels = _labels(issue)
+    return (declared_issue_holds(issue)
+            | {SUB_TO_BLOCKER[l] for l in labels & SUB_TO_BLOCKER.keys()}
+            | {l for l in labels if l.startswith("pm-blocked:")})
 
 
 def classify(issue: dict[str, Any], requested_class: str | None = None, *, light: bool = False) -> str | None:
@@ -187,8 +192,7 @@ def classify(issue: dict[str, Any], requested_class: str | None = None, *, light
     status = {l for l in labels if l.startswith("status:")}
     subs = {l for l in labels if l.startswith("sub:")}
     declared_holds = ready_pool_value(issue.get("body") or "", "holds")
-    declared = {entry.strip().lstrip("- ") for entry in re.split(r"[;,]", declared_holds) if entry.strip()}
-    declared = {value if value.startswith("pm-blocked:") else "pm-blocked:" + value.removeprefix("sub:") for value in declared}
+    declared = declared_issue_holds(issue)
     mapped_subs = {SUB_TO_BLOCKER[sub] for sub in subs if sub in SUB_TO_BLOCKER}
     if declared_holds and mapped_subs and not mapped_subs <= declared:
         return None
@@ -535,7 +539,7 @@ def graphql_nodes(numbers: list[int], comments: bool = False, candidate_details:
 def prefetch_dependencies(issues: list[dict], cache: dict) -> None:
     missing = []
     for issue in issues:
-        if 'pm-blocked:dependency' not in _labels(issue) or '_dependency_comments' in issue:
+        if 'pm-blocked:dependency' not in issue_holds(issue) or '_dependency_comments' in issue:
             continue  # already prefetched (fast --check re-evaluates the picked issue per chunk)
         c = candidate(issue, 'new_issue')
         if not parse_dependencies(c['blockers'], c['wake_condition']):
@@ -581,7 +585,7 @@ def candidate(issue: dict[str, Any], cls: str) -> dict[str, Any]:
         "blockers": blockers,
         "wake_condition": wake,
         "blocking_labels": blocking_labels(labels, issue),
-        "issue_body": body if "pm-blocked:dependency" in labels or "sub:waiting-on-issue" in labels else "",
+        "issue_body": body if "pm-blocked:dependency" in issue_holds(issue) else "",
         "comment_text": issue.get("_dependency_comments", ""),
         **({"pr": issue["pr"]} if issue.get("pr") else {}),
     }
