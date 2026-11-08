@@ -42,6 +42,49 @@ def test_build_error_code_report_top_rest_and_deltas():
     assert r["delta_vs_median"] == 17
 
 
+def test_active_users_430_is_unavailable_with_at_most_two_queries(monkeypatch, capsys):
+    from urllib.error import HTTPError
+    import io
+    calls = []
+    def fail(request, timeout):
+        calls.append(request)
+        raise HTTPError(request.full_url, 430, "unavailable", {}, io.BytesIO(b""))
+    monkeypatch.setattr(axiom, "urlopen", fail)
+    monkeypatch.setattr(axiom, "load_token", lambda: "token")
+    monkeypatch.setattr(sys, "argv", ["heartbeat-axiom", "--hours", "1", "--active-users"])
+    axiom.AXIOM_QUERY_FAILED.clear()
+    try:
+        assert axiom.main() == 1
+        result = json.loads(capsys.readouterr().out)
+        assert len(calls) <= 2 and "UNAVAILABLE" in result["ops_error"] and "430" in result["ops_error"]
+        assert "count" not in result
+    finally:
+        axiom.AXIOM_QUERY_FAILED.clear()
+
+
+def test_axiom_430_stops_error_comparison_fanout(monkeypatch, capsys):
+    from urllib.error import HTTPError
+    import io
+
+    calls = []
+    def fail(request, timeout):
+        calls.append(request)
+        raise HTTPError(request.full_url, 430, "unavailable", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(axiom, "urlopen", fail)
+    monkeypatch.setattr(axiom, "load_token", lambda: "token")
+    monkeypatch.setattr(sys, "argv", ["heartbeat-axiom", "--hours", "1", "--errors-by-code", "--compare"])
+    axiom.AXIOM_QUERY_FAILED.clear()
+    try:
+        assert axiom.main() == 1
+        output = capsys.readouterr()
+        assert len(calls) == 1
+        assert "430" in json.loads(output.out)["ops_error"]
+        assert "UNAVAILABLE" in output.err
+    finally:
+        axiom.AXIOM_QUERY_FAILED.clear()
+
+
 def test_compare_windows_prior_and_same_slot():
     start = datetime(2026, 9, 29, 2, 30, tzinfo=timezone.utc)
     w = axiom.compare_windows(start, NOW)
@@ -150,6 +193,32 @@ def test_old_open_thread_outside_lookback_is_carried_forward_until_answered(tmp_
     fetched.clear()
     support.carry_forward([old], ["1000.000000"], fetch)
     assert fetched == []
+
+
+def test_support_deadline_and_failure_are_visible(monkeypatch):
+    monkeypatch.setattr(support, "DEADLINE", support.time.monotonic() - 1)
+    with pytest.raises(TimeoutError, match="deadline"):
+        support.remaining_budget()
+    lines, status = compose.support_block({"failures": ["Slack: timed out"], "slack": [], "in_app": []}, "3h")
+    assert "UNAVAILABLE" in lines[0] and "timed out" in lines[0]
+    assert status == "support unavailable"
+
+
+def test_fetch_channel_skips_replies_for_internal_roots(monkeypatch):
+    calls = []
+    roots = [dict(_m("U0BNFGX2UAX", 1000), reply_count=3),
+             dict(_m(CUST, 1100), reply_count=1)]
+
+    def get(token, method, params):
+        calls.append((method, params))
+        if method == "conversations.history":
+            return {"messages": roots}
+        return {"messages": [roots[1], _m("UEQTTB97A", 1200, "done")]}
+
+    monkeypatch.setattr(support, "slack_get", get)
+    result = support.fetch_channel("token", "C0A56RX6FNW", 0, 1300)
+    assert len(result) == 1 and result[0]["state"] == "answered"
+    assert [p["ts"] for method, p in calls if method == "conversations.replies"] == ["1100.000000"]
 
 
 def test_feedback_rows_window_and_link():
@@ -406,15 +475,31 @@ def test_active_users_report_groups_by_userid_and_splits_internal():
         {"userId": "unknown", "emails": ["cron"], "actions": 9, "files": 0},
     ]
     prior = [{"userId": "user_A", "emails": ["b***@gmail.com"], "actions": 1, "files": 1}]
-    r = axiom.build_active_users_report(rows, prior)
-    assert r["count"] == 2 and r["internal"] == 2 and r["prior_count"] == 1
+    db = {f"user_{letter}": {"cohort": "organic"} for letter in "ABCD"}
+    db["user_C"] = {"cohort": "scribie"}
+    r = axiom.build_active_users_report(rows, prior, db)
+    assert r["count"] == 2 and r["internal"] == 1 and r["excluded_scribie"] == 1 and r["prior_count"] == 1
     assert [u["user"] for u in r["users"]] == ["bo***@law.com", "b**in**i@gmail.com"]
+
+
+def test_active_users_cohort_authoritative_and_missing_fallback():
+    rows = [{"userId": f"user_{x}", "emails": ["person@scribie.com"], "actions": 1} for x in "ABCD"]
+    db = {"user_A": {"cohort": "scribie", "email": "person@other.com"},
+          "user_B": {"cohort": "organic", "email": "person@scribie.com"},
+          "user_C": {"email": "person@scribie.com"},
+          "user_D": {"cohort": "organic", "email": "person@other.com"}}
+    result = axiom.build_active_users_report(rows, rows, db)
+    assert result["count"] == 2 and result["prior_count"] == 2
+    assert result["excluded_scribie"] == 2 and "cohort" in result["method"]
+    assert "2 Scribie excluded" in compose.active_users_block(result, "1h")[0][0]
+    with pytest.raises(RuntimeError, match="missing"):
+        axiom.build_active_users_report(rows, None, {})
 
 
 def test_internal_matching_survives_masking():
     assert axiom.is_internal_identity("user_x", "e**-r**ne*@gmail.com")
     assert axiom.is_internal_identity("user_x", "q*-b**@gmail.com")
-    assert axiom.is_internal_identity("user_x", "a**@scribie.com")
+    assert not axiom.is_internal_identity("user_x", "a**@scribie.com")
     assert not axiom.is_internal_identity("user_x", "e***@gmail.com")
     assert not axiom.is_internal_identity("user_x", "b**in**i@gmail.com")
     # 12b must-fix: masked customer names must not hit separator-terminated prefixes

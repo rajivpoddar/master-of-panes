@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -285,7 +286,31 @@ def build_error_code_report(
 IDENTITY_SENTINELS = {"not_collected", "userid-only", "unknown", "pseudonymous", "cron", ""}
 
 
-INTERNAL_DOMAINS = ("scribie.com", "heydonna.com", "heydonna.app", "example.com")
+INTERNAL_DOMAINS = ("heydonna.com", "heydonna.app", "example.com")
+
+
+def load_prod_users() -> dict[str, dict]:
+    """Read the production users table; reject truncation rather than guess cohorts."""
+    limit = 100000
+    env = {k: v for k, v in os.environ.items() if k != "CONVEX_DEPLOY_KEY"}
+    proc = subprocess.run(
+        ["npx", "convex", "data", "users", "--deployment", "beloved-cardinal-941",
+         "--format", "jsonl", "--limit", str(limit)],
+        cwd=Path.home() / "Downloads/projects/heydonna-app", env=env,
+        capture_output=True, text=True, timeout=8,
+    )
+    if proc.returncode:
+        raise RuntimeError(f"production users read failed (rc={proc.returncode})")
+    rows = [json.loads(line) for line in proc.stdout.splitlines() if line.startswith("{")]
+    if len(rows) >= limit:
+        raise RuntimeError("production users read truncated")
+    return {str(row['userId']): row for row in rows if row.get('userId')}
+
+
+def scribie_user(user: dict) -> bool:
+    if 'cohort' in user:
+        return user['cohort'] == 'scribie'
+    return str(user.get('email') or '').strip().lower().endswith('@scribie.com')
 
 
 INTERNAL_LOCAL_PREFIXES = ("e2e-", "e2e+", "e2e.", "qa-", "qa+", "playwright", "test+", "test-")
@@ -360,7 +385,7 @@ def _display_email(emails) -> str:
     return sorted(real, key=lambda e: (-len(e), e))[0] if real else ""
 
 
-def build_active_users_report(rows: list[dict], prior_rows: list[dict] | None = None) -> dict:
+def build_active_users_report(rows: list[dict], prior_rows: list[dict] | None = None, db_users: dict | None = None) -> dict:
     """Pure: one entry per Clerk userId; external users (masked email) vs an internal count."""
     def split(rs):
         by_uid: dict[str, dict] = {}
@@ -373,8 +398,14 @@ def build_active_users_report(rows: list[dict], prior_rows: list[dict] | None = 
             cur["files"] = max(cur["files"], int(r.get("files") or 0))
             em = r.get("emails", r.get("email"))
             cur["emails"] += em if isinstance(em, list) else [em]
-        ext, internal = [], 0
+        ext, internal, excluded = [], 0, 0
         for uid, u in by_uid.items():
+            if db_users is not None:
+                if uid not in db_users:
+                    raise RuntimeError("active user missing from production users table")
+                if scribie_user(db_users[uid]):
+                    excluded += 1
+                    continue
             email = _display_email(u["emails"])
             if is_internal_identity(uid, email):
                 internal += 1
@@ -382,10 +413,12 @@ def build_active_users_report(rows: list[dict], prior_rows: list[dict] | None = 
             ext.append({"user": mask_email(email) if email else uid[-6:], "files": u["files"],
                         "actions": u["actions"]})
         ext.sort(key=lambda u: (-u["files"], -u["actions"], u["user"]))
-        return ext, internal
+        return ext, internal, excluded
 
-    users, internal = split(rows)
-    report = {"count": len(users), "internal": internal, "users": users}
+    users, internal, excluded = split(rows)
+    report = {"count": len(users), "internal": internal, "users": users,
+              "excluded_scribie": excluded,
+              "method": "Axiom active userId joined to production users; exclude Scribie cohort, email fallback only if cohort missing."}
     if prior_rows is not None:
         report["prior_count"] = len(split(prior_rows)[0])
     return report
@@ -413,9 +446,22 @@ def main() -> int:
         if a.active_users:
             current = pool.submit(query_active_user_files, token, s, e)
             previous = pool.submit(query_active_user_files, token, _fmt(start_dt - (end_dt - start_dt)), s)
-            report = build_active_users_report(current.result(), previous.result())
+            try:
+                current_rows, previous_rows = current.result(), previous.result()
+                if AXIOM_QUERY_FAILED:
+                    raise RuntimeError(f"axiom_query_failed statuses={sorted(set(AXIOM_QUERY_FAILED))}")
+                report = build_active_users_report(current_rows, previous_rows, load_prod_users())
+            except Exception as exc:
+                print(json.dumps({"ops_error": f"active users UNAVAILABLE: {exc}"}))
+                return 1
         else:
-            codes_future = pool.submit(query_errors_by_code, token, s, e)
+            # Probe before fanning out the comparison queries. In particular, a 430
+            # outage must not produce eleven simultaneous requests for every report.
+            codes = query_errors_by_code(token, s, e)
+            if AXIOM_QUERY_FAILED:
+                print(json.dumps({"window": {"start": s, "end": e},
+                                  "ops_error": f"axiom_query_failed statuses={sorted(set(AXIOM_QUERY_FAILED))}"}))
+                return 1
             totals_future = pool.submit(query_error_totals, token, s, e)
             saves_future = pool.submit(query_superseded_saves, token, s, e)
             prior_future = None
@@ -424,7 +470,6 @@ def main() -> int:
                 w = compare_windows(start_dt, end_dt)
                 prior_future = pool.submit(query_error_totals, token, _fmt(w['prior'][0]), _fmt(w['prior'][1]))
                 same_futures = [pool.submit(query_error_totals, token, _fmt(sd), _fmt(ed)) for sd, ed in w['same_slot']]
-            codes = codes_future.result()
             prior = prior_future.result() if prior_future else None
             same_slot = [f.result() for f in same_futures] if a.compare else None
             report = build_error_code_report(codes, totals_future.result(), prior, same_slot, top=a.top)

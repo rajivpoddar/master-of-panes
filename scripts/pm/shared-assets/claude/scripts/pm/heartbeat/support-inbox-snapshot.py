@@ -93,7 +93,15 @@ OPEN_STATE = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-hey
 # Total wall budget for the whole collector. The heartbeat composer blocks on this
 # process, so exceeding it stalls the entire report (observed: two missed heartbeats).
 # Override with SUPPORT_INBOX_BUDGET_S.
-SUPPORT_BUDGET_S = float(os.environ.get("SUPPORT_INBOX_BUDGET_S") or 45.0)
+SUPPORT_BUDGET_S = min(float(os.environ.get("SUPPORT_INBOX_BUDGET_S") or 12.0), 12.0)
+DEADLINE: float | None = None
+
+
+def remaining_budget() -> float:
+    remaining = (DEADLINE - time.monotonic()) if DEADLINE is not None else SUPPORT_BUDGET_S
+    if remaining <= 0:
+        raise TimeoutError("support collector deadline exceeded; results incomplete")
+    return remaining
 # Cap how many previously-tracked roots one run re-checks (newest first). Roots beyond
 # the cap keep their prior state and are picked up on a later run, so nothing is dropped.
 MAX_CARRY_FORWARD = int(os.environ.get("SUPPORT_MAX_CARRY_FORWARD") or 40)
@@ -229,12 +237,14 @@ def slack_get(token: str, method: str, params: dict) -> dict:
     url = f"https://slack.com/api/{method}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     for attempt in range(3):
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=min(2.0, remaining_budget())) as resp:
             body = json.load(resp)
         if body.get("ok"):
             return body
         if body.get("error") == "ratelimited" and attempt < 2:
-            time.sleep(5)
+            if remaining_budget() <= 1:
+                raise TimeoutError(f"slack {method}: rate limited; support deadline exceeded")
+            time.sleep(min(1, remaining_budget()))
             continue
         raise RuntimeError(f"slack {method}: {body.get('error')}")
     raise RuntimeError(f"slack {method}: ratelimited")
@@ -271,6 +281,9 @@ def fetch_channel(token: str, channel: str, oldest: float, now_ts: float) -> lis
             seen_roots.add(parent)
             root = slack_get(token, "conversations.replies", {"channel": channel, "ts": parent, "limit": 1})["messages"][0]
         seen_roots.add(root["ts"])
+        # Internal/bot roots cannot be support threads; avoid fetching all their replies.
+        if not is_human(root) or (is_team(root) and root.get("user") != "U09L1CTGP9T"):
+            continue
         messages = [root]
         if root.get("reply_count"):
             replies = slack_get(token, "conversations.replies", {"channel": channel, "ts": root["ts"], "limit": 200})
@@ -378,7 +391,8 @@ def carry_forward(threads: list[dict], prev_tracked, fetch_thread, *, deadline: 
     next_cursor = (start + len(window)) % total if total else 0
     for ts in window:
         if deadline is not None and time.monotonic() >= deadline:
-            # Budget spent: do NOT advance past what we actually visited.
+            # Preserve rotation progress, but the caller must report this collector as
+            # unavailable because a partial set cannot support an unanswered count.
             next_cursor = pending.index(ts) % total
             return out, next_cursor
         item = fetch_thread(ts)
@@ -446,7 +460,7 @@ def classify_feedback_rows(rows: list[dict], window_start_ms: int) -> list[dict]
 def fetch_in_app(window_start_ms: int, limit: int = 50) -> list[dict]:
     proc = subprocess.run(
         ["npx", "convex", "data", "feedback", "--prod", "--limit", str(limit), "--order", "desc", "--format", "jsonl"],
-        capture_output=True, text=True, errors="replace", timeout=120, cwd=str(MAIN_CHECKOUT),
+        capture_output=True, text=True, errors="replace", timeout=min(3.0, remaining_budget()), cwd=str(MAIN_CHECKOUT),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"convex data feedback failed: {proc.stderr.strip()[-200:]}")
@@ -463,7 +477,8 @@ def main() -> int:
 
     now = datetime.now(timezone.utc)
     now_ts = now.timestamp()
-    deadline = time.monotonic() + SUPPORT_BUDGET_S
+    global DEADLINE
+    DEADLINE = deadline = time.monotonic() + SUPPORT_BUDGET_S
     window_start = now_ts - args.hours * 3600
     result: dict = {"threshold_min": needs_reply_threshold_minutes(now), "slack": [], "in_app": [], "failures": []}
     token = load_env("SLACK_BOT_TOKEN")
@@ -481,8 +496,13 @@ def main() -> int:
                     deadline=deadline,
                     cursor=load_carry_cursor(channel),
                 )
-                new_state[channel] = tracked_roots(threads, now_ts, prev_state.get(channel) or {})
                 save_carry_cursor(channel, next_cursor)
+                if time.monotonic() >= deadline:
+                    # Keep the old tracked state and report unavailable; a partial
+                    # channel snapshot cannot support a trustworthy unanswered count.
+                    result["failures"].append(f"{CHANNELS[channel]}: support collector deadline exceeded; results incomplete")
+                    continue
+                new_state[channel] = tracked_roots(threads, now_ts, prev_state.get(channel) or {})
                 result["slack"].extend(select_items(threads, window_start))
             except Exception as exc:  # noqa: BLE001
                 # Keep the previous open set for this channel so nothing is dropped.

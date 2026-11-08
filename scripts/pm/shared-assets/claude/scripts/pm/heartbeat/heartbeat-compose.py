@@ -98,6 +98,8 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
 def support_block(support: dict | None, window_label: str) -> tuple[list[str], str]:
     if support is None:
         return [f"*Support ({window_label}):* unavailable"], "support unavailable"
+    if support.get("failures"):
+        return [f"*Support ({window_label}):* UNAVAILABLE ({'; '.join(support['failures'])})"], "support unavailable"
     threshold = support.get("threshold_min", 60)
     slack = support.get("slack", [])
     in_app = support.get("in_app", [])
@@ -147,6 +149,9 @@ def active_users_block(active: dict | None, window_label: str) -> tuple[list[str
         head += f" (prior {active['prior_count']})"
     if active.get("internal"):
         head += f" +{active['internal']} internal"
+    if "excluded_scribie" in active:
+        head += f"; {active['excluded_scribie']} Scribie excluded"
+        head += f" — {active.get('method', '')}"
     users = active.get("users", [])
     if not users:
         return [head + " — quiet"], f"{count} active users"
