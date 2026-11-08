@@ -416,11 +416,13 @@ def build_active_users_report(rows: list[dict], prior_rows: list[dict] | None = 
         return ext, internal, excluded
 
     users, internal, excluded = split(rows)
-    report = {"count": len(users), "internal": internal, "users": users,
-              "excluded_scribie": excluded,
-              "method": "Axiom active userId joined to production users; exclude Scribie cohort, email fallback only if cohort missing."}
+    report = {"count": len(users), "non_scribie_count": len(users) + internal,
+              "internal": internal, "users": users, "excluded_scribie": excluded,
+              "method": "Axiom userId joined to production users; exclude cohort=scribie, fallback to @scribie.com only when cohort is missing."}
     if prior_rows is not None:
-        report["prior_count"] = len(split(prior_rows)[0])
+        prior_users, prior_internal, _ = split(prior_rows)
+        report["prior_count"] = len(prior_users)
+        report["prior_non_scribie_count"] = len(prior_users) + prior_internal
     return report
 
 

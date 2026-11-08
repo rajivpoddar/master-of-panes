@@ -478,7 +478,9 @@ def test_active_users_report_groups_by_userid_and_splits_internal():
     db = {f"user_{letter}": {"cohort": "organic"} for letter in "ABCD"}
     db["user_C"] = {"cohort": "scribie"}
     r = axiom.build_active_users_report(rows, prior, db)
-    assert r["count"] == 2 and r["internal"] == 1 and r["excluded_scribie"] == 1 and r["prior_count"] == 1
+    assert r["count"] == 2 and r["non_scribie_count"] == 3
+    assert r["internal"] == 1 and r["excluded_scribie"] == 1
+    assert r["prior_count"] == 1 and r["prior_non_scribie_count"] == 1
     assert [u["user"] for u in r["users"]] == ["bo***@law.com", "b**in**i@gmail.com"]
 
 
@@ -489,9 +491,11 @@ def test_active_users_cohort_authoritative_and_missing_fallback():
           "user_C": {"email": "person@scribie.com"},
           "user_D": {"cohort": "organic", "email": "person@other.com"}}
     result = axiom.build_active_users_report(rows, rows, db)
-    assert result["count"] == 2 and result["prior_count"] == 2
+    assert result["count"] == 2 and result["non_scribie_count"] == 2
+    assert result["prior_count"] == 2 and result["prior_non_scribie_count"] == 2
     assert result["excluded_scribie"] == 2 and "cohort" in result["method"]
-    assert "2 Scribie excluded" in compose.active_users_block(result, "1h")[0][0]
+    line = compose.active_users_block(result, "1h")[0][0]
+    assert "2 non-Scribie" in line and "2 Scribie excluded" in line and "fallback" in line
     with pytest.raises(RuntimeError, match="missing"):
         axiom.build_active_users_report(rows, None, {})
 

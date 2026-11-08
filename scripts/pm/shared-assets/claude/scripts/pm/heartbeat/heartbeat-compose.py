@@ -144,24 +144,36 @@ def active_users_block(active: dict | None, window_label: str) -> tuple[list[str
     if active is None:
         return [f"*Active users ({window_label}):* unavailable"], "active users unavailable"
     count = active.get("count", 0)
-    head = f"*Active users ({window_label}):* {count}"
-    if active.get("prior_count") is not None:
+    non_scribie_count = active.get("non_scribie_count")
+    if non_scribie_count is None:
+        head = f"*Active users ({window_label}):* {count}"
+    else:
+        head = f"*Active users ({window_label}):* {non_scribie_count} non-Scribie"
+        head += f" ({count} external +{active.get('internal', 0)} internal)"
+    if active.get("prior_non_scribie_count") is not None:
+        head += f" (prior {active['prior_non_scribie_count']})"
+    elif active.get("prior_count") is not None:
         head += f" (prior {active['prior_count']})"
-    if active.get("internal"):
+    if non_scribie_count is None and active.get("internal"):
         head += f" +{active['internal']} internal"
     if "excluded_scribie" in active:
         head += f"; {active['excluded_scribie']} Scribie excluded"
         head += f" — {active.get('method', '')}"
     users = active.get("users", [])
     if not users:
-        return [head + " — quiet"], f"{count} active users"
+        total = non_scribie_count if non_scribie_count is not None else count
+        suffix = " — quiet" if total == 0 else ""
+        label = "non-Scribie active users" if non_scribie_count is not None else "active users"
+        return [head + suffix], f"{total} {label}"
     shown = [f"{u['user']} ({u['files']}f)" for u in users[:MAX_USERS * 2]]
     lines = [head]
     for i in range(0, min(len(shown), MAX_USERS * 2), 3):
         lines.append("• " + ", ".join(shown[i:i + 3]))
     if len(users) > MAX_USERS * 2:
         lines.append(f"• +{len(users) - MAX_USERS * 2} more")
-    return lines, f"{count} active users"
+    total = non_scribie_count if non_scribie_count is not None else count
+    label = "non-Scribie active users" if non_scribie_count is not None else "active users"
+    return lines, f"{total} {label}"
 
 
 IDLE_SLOT_MIN = 20  # slots must not stay idle > 20 min (20-buddhi-pm.md rule 23)
