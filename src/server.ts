@@ -336,10 +336,11 @@ const yskNoticeTick = (): void => {
   yskInFlight = true;
   void (async () => {
     try {
-      if (db.getExitPending()) return;
       // Peek without the send lock. The common case (no notice) must not delay
       // PM input. The lock is taken only when a top-level notice is visible,
-      // and the drive re-checks the pane inside that lock.
+      // and the drive re-checks the pane inside that lock. A stuck
+      // exit_pending latch must not disable this: keystrokes still require an
+      // idle claude pane and an empty composer.
       const peek = parseYskCapture(await capturePaneSnapshot(config.pmPaneAddress));
       if (peek.kind !== "top") {
         const reason = peek.kind === "uncertain" ? peek.reason
