@@ -14,6 +14,10 @@ Usage: mop <subcommand> [options]
   exit-pending --on|--off | exit-status | capture --slot N [--lines N]
   approve-plan --slot N [--option 2|4] [--comment T]
   ops-audit run|status|job|pause | pm-cadence status|run|pause
+  reminder add --key K --thread TS --text T --every 30m|1h --until <ISO|+12h>
+               [--channel C] [--stop-obligation N] [--first-at <ISO|+5m>] [--replace]
+           list [--status active|stopped|expired|all] | cancel --key K
+           (recurring HeyDonna Alerts bot posts into a Slack thread, owned by MoP)
 
 stdout is JSON. Exit 0 on success, non-zero on refusal/transport failure.
 Sanctioned path: mop (this CLI). The mop_* MCP tools are a deprecated
@@ -25,9 +29,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
@@ -58,6 +65,60 @@ def http_json(method: str, url: str, body: dict[str, Any] | None = None) -> tupl
             return error.code, {"error": raw[:400]}
     except URLError as error:
         return 0, {"error": f"mop_unreachable: {error}", "sanctioned_path": SANCTIONED_PATH}
+
+
+REMINDER_MIN_INTERVAL_S = 600
+REMINDER_MAX_HORIZON_S = 7 * 24 * 3600
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration_s(value: str) -> int:
+    """`30m`, `1h`, `2d`, `900s` -> seconds."""
+    match = re.fullmatch(r"(\d+)([smhd])", value.strip())
+    if not match:
+        raise ValueError(f"invalid duration {value!r}; use e.g. 30m, 1h, 2d")
+    return int(match.group(1)) * _DURATION_UNITS[match.group(2)]
+
+
+def parse_when(value: str, now: datetime | None = None) -> tuple[str, bool]:
+    """`+12h` or an ISO timestamp -> (UTC ISO string, was_relative). Naive ISO means local time."""
+    now = now or datetime.now(timezone.utc)
+    text = value.strip()
+    if text.startswith("+"):
+        return (now + timedelta(seconds=parse_duration_s(text[1:]))).isoformat(), True
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"invalid time {value!r}; use +12h or an ISO timestamp") from error
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()  # local time, same as alerts-reminder.py --at
+    return parsed.astimezone(timezone.utc).isoformat(), False
+
+
+def build_reminder_add_body(args: argparse.Namespace, now: datetime | None = None) -> dict[str, Any]:
+    interval_s = parse_duration_s(args.every)
+    if interval_s < REMINDER_MIN_INTERVAL_S:
+        raise ValueError(f"--every must be at least {REMINDER_MIN_INTERVAL_S // 60}m")
+    until_at, until_relative = parse_when(args.until, now)
+    body: dict[str, Any] = {
+        "key": args.key,
+        "thread_ts": args.thread,
+        "text": args.text,
+        "interval_s": interval_s,
+        "until_at": until_at,
+        "until_relative": until_relative,
+        "replace": bool(args.replace),
+        "created_by": args.created_by,
+    }
+    if args.channel:
+        body["channel"] = args.channel
+    if args.stop_obligation is not None:
+        body["stop_obligation_id"] = args.stop_obligation
+    if args.first_at:
+        body["first_at"] = parse_when(args.first_at, now)[0]
+    if args.source_ref:
+        body["source_ref"] = args.source_ref
+    return body
 
 
 def emit(payload: Any, exit_code: int) -> int:
@@ -133,6 +194,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("pm-cadence", help="pm-cadence passthrough")
     p.add_argument("action", choices=["status", "run", "pause"])
+
+    p = sub.add_parser("reminder", help="recurring HeyDonna Alerts reminders (/alert-reminders)")
+    rsub = p.add_subparsers(dest="reminder_action", required=True)
+    r = rsub.add_parser("add", help="create a recurring reminder; idempotent on --key")
+    r.add_argument("--key", required=True)
+    r.add_argument("--thread", required=True, help="Slack thread root ts, e.g. 1793953549.727149")
+    r.add_argument("--text", required=True)
+    r.add_argument("--every", required=True, help="interval, minimum 10m (e.g. 30m, 1h)")
+    r.add_argument("--until", required=True, help="stop time, ISO or +12h; at most 7 days out")
+    r.add_argument("--channel", default=None, help="default C0ALZJHGE49")
+    r.add_argument("--stop-obligation", type=int, default=None, help="pm-ops obligation id; reminder stops when it resolves")
+    r.add_argument("--first-at", default=None, help="first post time, ISO or +5m (default: one interval from now)")
+    r.add_argument("--replace", action="store_true", help="overwrite an active reminder that has different args")
+    r.add_argument("--created-by", default="cli")
+    r.add_argument("--source-ref", default=None)
+    r = rsub.add_parser("list", help="list reminders")
+    r.add_argument("--status", default="active", choices=["active", "stopped", "expired", "all"])
+    r = rsub.add_parser("cancel", help="stop a reminder")
+    r.add_argument("--key", required=True)
 
     return parser
 
@@ -221,6 +301,19 @@ def main(argv: list[str] | None = None) -> int:
         else:
             code, data = http_json("POST", f"{base}/pm-cadence/{args.action}", {})
         return emit(data, 0 if code == 200 else 1)
+    if cmd == "reminder":
+        if args.reminder_action == "add":
+            try:
+                body = build_reminder_add_body(args)
+            except ValueError as error:
+                return emit({"error": str(error), "sanctioned_path": SANCTIONED_PATH}, 2)
+            code, data = http_json("POST", f"{base}/alert-reminders", body)
+        elif args.reminder_action == "list":
+            code, data = http_json("GET", f"{base}/alert-reminders?status={args.status}")
+        else:
+            code, data = http_json("POST", f"{base}/alert-reminders/{quote(args.key, safe='')}/cancel", {})
+        ok = code == 200 and isinstance(data, dict) and data.get("success") is True
+        return emit(data, 0 if ok else 1)
     return emit({"error": f"unknown subcommand {cmd}", "sanctioned_path": SANCTIONED_PATH}, 2)
 
 

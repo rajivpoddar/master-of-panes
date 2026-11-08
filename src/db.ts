@@ -13,6 +13,7 @@ import { dirname } from "node:path";
 import type { EventLogEntry, MoPConfig, OpsJobRecord, OpsJobStatus, SlotState, SlotStatus } from "./types.js";
 import { devSlots, PM_SLOT, runtimeIdentity } from "./slotConfig.js";
 import type { BeginDecision, BeginRequest, CustodyRow, CustodyState } from "./sendCustody.js";
+import { AlertReminderStore, ensureAlertReminderSchema } from "./alertReminders.js";
 
 export interface SlotPredecessorContext {
   issue: number | null;
@@ -662,6 +663,9 @@ export class MoPDatabase {
     if (!intentColumns.some((c) => c.name === "displaced_tuple")) {
       this.db.exec("ALTER TABLE assignment_effect_intents ADD COLUMN displaced_tuple TEXT");
     }
+
+    // Durable recurring Alerts reminders (src/alertReminders.ts). Additive table.
+    ensureAlertReminderSchema(this.db);
 
     // Initialize config KV table
     this.initConfig();
@@ -3527,6 +3531,11 @@ export class MoPDatabase {
       slot: row.slot,
       details: `tool=${row.tool_name}, matched in events DB`,
     };
+  }
+
+  /** Store for the recurring Alerts reminders table. */
+  alertReminderStore(): AlertReminderStore {
+    return new AlertReminderStore(this.db);
   }
 
   close(): void {

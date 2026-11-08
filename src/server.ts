@@ -68,6 +68,12 @@ import { StuckDetector } from "./stuck.js";
 import { OpsAuditScheduler } from "./opsAudit.js";
 import { PM_OPS_HOURLY_REPORT_DEPS, PMCadenceScheduler } from "./pmCadence.js";
 import { P0EscalationWatcher } from "./p0EscalationWatch.js";
+import {
+  AlertReminderScheduler,
+  lookupObligationState,
+  registerAlertReminderRoutes,
+  SlackAlertsPoster,
+} from "./alertReminders.js";
 import { ProcessHealthChecker, RESTART_COMMANDS, SHELL_COMMANDS, AGENT_COMMANDS, pmLaunchPlan, PM_LAUNCHER_CONFIG_KEY, PM_MODEL_CONFIG_KEY,
   pmFreshLaunchCommand, pmConfiguredModel, pmConfiguredLauncher } from "./health.js";
 import { execShell, execShellOk, sleep } from "./asyncCommand.js";
@@ -299,6 +305,24 @@ pmCadenceScheduler.start();
 // commands and never clears PM obligations.
 const p0EscalationWatcher = new P0EscalationWatcher(db, relay);
 p0EscalationWatcher.start();
+
+// ─── Recurring Alerts Reminders ─────────────────────────────
+// Durable `alert_reminders` rows posted into Slack threads as the HeyDonna Alerts
+// bot. Never touches PM input, tools or hooks (rule 50). See src/alertReminders.ts.
+const alertReminderStore = db.alertReminderStore();
+const alertReminderScheduler = new AlertReminderScheduler({
+  store: alertReminderStore,
+  poster: new SlackAlertsPoster(),
+  obligationState: (id) => lookupObligationState(id),
+  logEvent: (type, payload) => {
+    try {
+      db.logEvent(0, type, null, null, payload);
+    } catch {
+      /* event ring is best-effort; the reminder row already records the outcome */
+    }
+  },
+});
+alertReminderScheduler.start();
 
 // ─── Log Rotation (every 10 minutes) ────────────────────
 let rotationInFlight = false;
@@ -989,6 +1013,7 @@ app.get("/ready", (c) => {
       opsAuditScheduler: !!opsAuditScheduler,
       pmCadenceScheduler: !!pmCadenceScheduler,
       p0EscalationWatcher: !!p0EscalationWatcher,
+      alertReminderScheduler: !!alertReminderScheduler,
       rotationTimer: !!rotationTimer,
       eventLoopLagTimer: !!eventLoopLagTimer,
     },
@@ -1099,6 +1124,13 @@ app.post("/ops-audit/pause", async (c) => {
   }
   opsAuditScheduler.setPaused(body.paused);
   return c.json({ success: true, status: opsAuditScheduler.getStatus() });
+});
+
+// ─── Alert Reminder Endpoints ──────────────────────────────
+// `mop reminder add|list|cancel` talks to these. See src/alertReminders.ts.
+registerAlertReminderRoutes(app, {
+  store: alertReminderStore,
+  scheduler: alertReminderScheduler,
 });
 
 // ─── PM Cadence Endpoints ─────────────────────────────────
@@ -3746,6 +3778,7 @@ process.on("SIGINT", () => {
   opsAuditScheduler.stop();
   pmCadenceScheduler.stop();
   p0EscalationWatcher.stop();
+  alertReminderScheduler.stop();
   clearInterval(rotationTimer);
   clearInterval(eventLoopLagTimer);
   clearInterval(eventRetentionTimer);
@@ -3763,6 +3796,7 @@ process.on("SIGTERM", () => {
   opsAuditScheduler.stop();
   pmCadenceScheduler.stop();
   p0EscalationWatcher.stop();
+  alertReminderScheduler.stop();
   clearInterval(rotationTimer);
   clearInterval(eventLoopLagTimer);
   clearInterval(eventRetentionTimer);
