@@ -316,6 +316,17 @@ Every hourly, IN THE SAME TURN, each open draft PR with no live owner (no slot l
 - **PARK:** blocked on a named open dependency or decision. Label it `pm-blocked:<kind>`, and record the wake condition and owner in a PR comment.
 - **READY-FOR-12B:** complete. Merge main, run 12b, admit.
 Run the classification in ONE background agent when there are more than 5 drafts. Then PM executes its verdicts in the same turn. The reply lists every draft with its verdict (Step 2d format). An unowned draft carried over two hourlies with no verdict action is a MISS.
+- **Move drafts with proxies (Rajiv 2026-11-08, C0ALZJHGE49 thread 1794141994.059929, ts 1794142651.070669: "why are there so many draft pr's? can we move them with proxy agents?").** A draft counts as "owned" only if its owner made progress in the last 60 min: a new commit, a live px-* window whose output changed, or a slot actively working it. Any draft with no progress for over 60 min gets a `pm-hotfix MODE: REWORK` proxy in the SAME turn. Model by priority: sol for P0/P1/sync, terra for P1 otherwise, luna for P2/P3. Give each proxy its own box owner name (`pm-agent-<issue>`). The brief must carry the exact next step: the open Codex P1s, the failing test, or the conflict. The goal of each draft proxy is "ready + head sent to PM". Only explicit holds (merge_hold, atomic release, CTO containment, privacy SAFETY_BLOCK awaiting a named decision) stay parked, and each needs its wake condition recorded.
+
+## [HIGH] Step 2g: Broken remote boxes are repaired the same turn; stuck sessions are redone (Rajiv 2026-11-08)
+Rajiv, C0ALZJHGE49 thread 1794141994.059929: ts 1794142432.901929 "just reset them and put them back into service asap. we're paying for these dammit. the stuck sessions have to be redone."; ts 1794142651.070669 "update the hourly report processing skill. broken boxes have to repaired asap. the stuck sessions have to be redone."
+Every hourly (and on any heartbeat line showing `broken`/`expired` boxes), IN THE SAME TURN:
+1. List them: `~/.claude/scripts/remote-test-box.sh list | grep -E 'broken|expired'`.
+2. Reset each through the admin path, from a clean cwd: `cd $HOME && env -i HOME=$HOME PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin USER=$USER ~/.claude/scripts/remote-test-box.sh pool-reset <box>`. If a lease isn't quarantined, use `down <lease-alias>` (never the bare server name). This standing Rajiv authorization covers resetting stuck/fenced boxes. Do not wait for proof of idleness beyond what the script itself checks.
+3. If pool-reset quarantines on unfenced/unaccounted processes, try `pool-reset <box> --rebuild`. If that still refuses, launch ONE `pm-ops-tooling` proxy (sol) to list the items, preserve any QA artifacts to ~/.heydonna/box-preserve/<box>/, terminate only that stuck lease's leftovers through a sanctioned path, and rebuild. Report the box free.
+4. Redo the stuck session: identify the lane whose lease owner it was (slot N, pm-agent-<issue>, qa-capture/qa-spec run) and re-dispatch that work (rerun the proof/QA for that PR/issue) unless the lane has since moved on with a fresh box; record which.
+5. The hourly reply lists each box: reset/rebuilt/free, plus the redone session or "lane moved on".
+Never use raw hcloud deletes; never touch a live lease (the script's own checks decide).
 
 ## [HIGH] P0/P1 never wait for a slot (S103, Rajiv 2026-10-29)
 Rajiv, D0AMF0XE6TS thread 1793254511.567489, ts 1793256031.251919: "P0 and p1's should be done with pm hotfix agent when slots are not available."
