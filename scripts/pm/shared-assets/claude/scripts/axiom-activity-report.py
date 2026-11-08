@@ -505,8 +505,6 @@ def query_active_users(token: str, start_time: str, end_time: str) -> list[dict]
 SOFT_FAIL_ACTIONS = [
     # Hallucination firewall
     "hallucination_firewall",
-    "hallucination_firewall_cand1",
-    "hallucination_firewall_cand2",
     "hallucination_firewall_error",
     # Format validator
     "format_validator_log_only",
@@ -553,7 +551,24 @@ def query_soft_fail_counts(token: str, start_time: str, end_time: str) -> list[d
         f"| summarize count() by ['action'] | order by count_ desc"
     )
     raw = run_apl_query(token, apl, start_time, end_time)
-    return extract_aggregations(raw)
+    counts = extract_aggregations(raw)
+    # These are evaluation events, including successful evaluations. Count only
+    # explicit immediate escalations, which represent firewall refusals.
+    evaluations = (
+        f"['{DATASET}'] {PROD_FILTER} "
+        "| where ['action'] in ('bon_cand1_escalation_check', "
+        "'hallucination_firewall_cand1', 'hallucination_firewall_cand2') "
+        "| summarize count() by ['action'], ['meta']"
+    )
+    rows = extract_aggregations(run_apl_query(token, evaluations, start_time, end_time))
+    fires = {"hallucination_firewall_cand1": 0, "hallucination_firewall_cand2": 0}
+    for row in rows:
+        if _parse_meta(row.get("meta")).get("immediate_escalate") is True:
+            action = row.get("action")
+            key = "hallucination_firewall_cand2" if action == "hallucination_firewall_cand2" else "hallucination_firewall_cand1"
+            fires[key] += int(row.get("count_", 0))
+    counts.extend({"action": action, "count_": count} for action, count in fires.items())
+    return counts
 
 
 def query_convex_proceedings_degraded(token: str, start_time: str, end_time: str) -> int:
@@ -679,14 +694,12 @@ def build_soft_fail_report(counts: list[dict], total_runs: int, convex_proceedin
         "total_auto_process_runs": total_runs,
         "categories": {
             "hallucination_firewall": {
-                "total": get("hallucination_firewall", "hallucination_firewall_cand1",
-                             "hallucination_firewall_cand2", "hallucination_firewall_error"),
-                "rate": rate(get("hallucination_firewall", "hallucination_firewall_cand1",
-                                  "hallucination_firewall_cand2", "hallucination_firewall_error")),
+                "total": get("hallucination_firewall_cand1", "hallucination_firewall_cand2"),
+                "rate": rate(get("hallucination_firewall_cand1", "hallucination_firewall_cand2")),
                 "breakdown": {
                     "cand1_fires": by_action.get("hallucination_firewall_cand1", 0),
                     "cand2_fires": by_action.get("hallucination_firewall_cand2", 0),
-                    "primary_fires": by_action.get("hallucination_firewall", 0),
+                    "selected_chunks": by_action.get("hallucination_firewall", 0),
                     "errors": by_action.get("hallucination_firewall_error", 0),
                 },
             },
@@ -733,8 +746,7 @@ def build_soft_fail_report(counts: list[dict], total_runs: int, convex_proceedin
             },
         },
         "rates_vs_auto_process": {
-            "firewall_rate": rate(get("hallucination_firewall", "hallucination_firewall_cand1",
-                                       "hallucination_firewall_cand2")),
+            "firewall_rate": rate(get("hallucination_firewall_cand1", "hallucination_firewall_cand2")),
             "format_validator_rollback_rate": rate(by_action.get("format_validator_rollback_in_docx", 0)),
             "speaker_correction_reject_rate": rate(get("speaker_correction_ratio_rejected",
                                                         "speaker_correction_ratio_rejected_step",
@@ -773,7 +785,7 @@ def print_soft_fail_report(report: dict):
     print(f"  Hallucination Firewall: {format_number(fw.get('total', 0))} fires ({rates.get('firewall_rate', 'n/a')} of runs)")
     bd = fw.get("breakdown", {})
     print(f"    cand1: {bd.get('cand1_fires', 0)}  cand2: {bd.get('cand2_fires', 0)}  "
-          f"primary: {bd.get('primary_fires', 0)}  errors: {bd.get('errors', 0)}")
+          f"selected chunks: {bd.get('selected_chunks', 0)}  errors: {bd.get('errors', 0)}")
     print()
 
     fv = cats.get("format_validator", {})
