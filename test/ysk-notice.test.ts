@@ -64,6 +64,7 @@ function harness(
     },
     ready,
     revalidate: async () => ({ ok: true }),
+    authority: () => null,
     log: (result) => logs.push(result),
     submenuTimeoutMs: 0,
     quoteTimeoutMs: 0,
@@ -263,6 +264,27 @@ test("the paste path does not grow its own noticeAppend hole", () => {
   assert.match(notice, /maxEnterPresses:\s*1/);
   assert.match(server, /beginSendCustody/);
   assert.doesNotMatch(server, /yskSeenMemory|slice\(-50\)/);
+});
+
+test("a SessionStart during the awaited capture after revalidate sends no key or Enter", async () => {
+  let session: string = PIN.sessionId;
+  let captures = 0;
+  const box = harness(async () => {
+    captures += 1;
+    // Capture 1 classifies the notice. Capture 2 is blocked()'s await, after
+    // revalidate has already returned ok. The screen is still the old notice.
+    if (captures >= 2) session = "sess-successor";
+    return top();
+  });
+  box.deps.revalidate = async () => ({ ok: true });
+  box.deps.authority = () => (session === PIN.sessionId ? null : "session_replaced");
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "session_replaced");
+  assert.equal(result.outcome, "noop");
+  assert.deepEqual(box.keys, []);
+  assert.equal(box.enters(), 0);
+  assert.equal(box.rows.size, 0);
+  assert.ok(captures >= 2);
 });
 
 test("a replaced pane receives no further key", async () => {

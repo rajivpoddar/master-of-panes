@@ -408,13 +408,20 @@ const yskNoticeTick = (): void => {
       }
       await withSlotSendLock(PM_SLOT, () => driveYskNotice({
         capture: (pin) => capturePaneSnapshot(shellEscape(pin.paneId)),
+        authority: (pin) => noticeSessionFence(pin),
         sendLiteral: async (text, pin) => {
+          // Same fence as relay.ts writePMClearFencedNow: after every await,
+          // immediately before the write. A SessionStart here sends nothing.
+          const refusal = noticeSessionFence(pin);
+          if (refusal) throw new Error(refusal);
           await execShell(
             `tmux send-keys -t ${shellEscape(pin.paneId)} -l ${shellEscape(text)}`,
             { timeout: 5_000 },
           );
         },
         pressEnter: async (pin) => {
+          const refusal = noticeSessionFence(pin);
+          if (refusal) throw new Error(refusal);
           await execShell(`tmux send-keys -t ${shellEscape(pin.paneId)} Enter`, { timeout: 5_000 });
         },
         sleep,
@@ -682,6 +689,12 @@ async function sendPendingPmClearAtStop(authority?: PMStopAuthority): Promise<vo
 function currentPmSessionId(): string {
   const event = db.getEvents(0, 1, "SessionStart")[0];
   try { return String(JSON.parse(event?.payload || "{}").session_id ?? ""); } catch { return ""; }
+}
+
+/** Synchronous. Empty or replaced hook session must not authorize a notice key. */
+function noticeSessionFence(pin: { sessionId: string }): string | null {
+  const sessionId = currentPmSessionId();
+  return sessionId && sessionId === pin.sessionId ? null : "session_replaced";
 }
 
 const pmHandoffOps = pmOpsHandoffObligationOps();

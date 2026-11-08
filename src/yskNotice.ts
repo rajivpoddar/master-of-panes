@@ -20,7 +20,10 @@
  * verified the exact quoted note. Any uncertainty does nothing. The first
  * digit is claimed in the send-custody store before it is typed, and every
  * later key re-checks the pinned pane, process, session and visible stage.
- * A consumed or uncertain claim is never typed again, including after restart.
+ * The session fence is synchronous after each awaited revalidate/capture and
+ * again inside the literal and Enter writers, so a SessionStart during a
+ * capture cannot authorize the next key. A consumed or uncertain claim is
+ * never typed again, including after restart.
  */
 
 import { createHash } from "node:crypto";
@@ -145,6 +148,12 @@ export type YskDriveDeps = {
   ready: () => Promise<{ ok: true; pin: YskPin } | { ok: false; reason: string }>;
   /** Same pane id, process and session, still claude, still idle, mode allowed. */
   revalidate: (pin: YskPin) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  /**
+   * Synchronous session fence. Read the latest hook session, do not await.
+   * Called after awaited observations and immediately inside the writers.
+   * A reason stops the attempt; an already-claimed note stays consumed.
+   */
+  authority: (pin: YskPin) => string | null;
   log: (result: YskDriveResult) => void;
   submenuTimeoutMs?: number;
   quoteTimeoutMs?: number;
@@ -223,15 +232,23 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     const note = parsed.note;
     const noteHash = yskNoteHash(note);
     const ownedQuote = note;
+    const sessionFence = (): string | null => deps.authority(pin);
     const blocked = async (expect: (snapshot: string | null) => boolean): Promise<string | null> => {
       const check = await deps.revalidate(pin);
       if (!check.ok) return check.reason;
+      // revalidate awaited. A SessionStart can land before the capture starts.
+      const afterRevalidate = sessionFence();
+      if (afterRevalidate) return afterRevalidate;
       let snapshot: string | null;
       try {
         snapshot = await deps.capture(pin);
       } catch {
         return "capture_failed";
       }
+      // The capture is the await a successor session can win. Do not accept
+      // that screen, and do not send the key that follows this check.
+      const afterCapture = sessionFence();
+      if (afterCapture) return afterCapture;
       return expect(snapshot) ? null : "ui_stage_changed";
     };
 
