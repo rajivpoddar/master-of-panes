@@ -376,7 +376,7 @@ const readPmNoticePin = async (): Promise<{ ok: true; pin: YskPin } | { ok: fals
     const activity = await relay.getPaneActivityState(id);
     const activityRefusal = yskActivityRefusal(activity);
     if (activityRefusal) return { ok: false, reason: activityRefusal };
-    return { ok: true, pin: { paneId: id, processId: pid, sessionId } };
+    return { ok: true, pin: { paneId: id, processId: pid, sessionId, activity } };
   } catch {
     return { ok: false, reason: "pane_unreadable" };
   }
@@ -393,7 +393,7 @@ const yskNoticeTick = (): void => {
       // exit_pending latch must not disable this: keystrokes still require a
       // readable claude pane (idle or mid-turn) and an empty composer. A
       // running turn queues the note; it does not defer it.
-      const peek = parseYskCapture(await capturePaneSnapshot(config.pmPaneAddress));
+      const peek = parseYskCapture(await capturePaneSnapshot(config.pmPaneAddress, true));
       if (peek.kind !== "top") {
         const reason = peek.kind === "uncertain" ? peek.reason
           : peek.kind === "draft" ? "draft_present"
@@ -409,7 +409,7 @@ const yskNoticeTick = (): void => {
         return;
       }
       await withSlotSendLock(PM_SLOT, () => driveYskNotice({
-        capture: (pin) => capturePaneSnapshot(shellEscape(pin.paneId)),
+        capture: (pin) => capturePaneSnapshot(shellEscape(pin.paneId), true),
         authority: (pin) => noticeSessionFence(pin),
         sendLiteral: async (text, pin) => {
           // Same fence as relay.ts writePMClearFencedNow: after every await,
@@ -427,10 +427,23 @@ const yskNoticeTick = (): void => {
           await execShell(`tmux send-keys -t ${shellEscape(pin.paneId)} Enter`, { timeout: 5_000 });
         },
         sleep,
+        noticeCustody: (noteHash) => {
+          try {
+            const row = db.getSendCustody(yskNoticeCustodyScope(noteHash));
+            if (!row) return null;
+            return {
+              retryable: row.state === "started" && row.reason === "submenu_missing" && row.attempts < 3,
+              terminal: row.state === "ambiguous" && row.reason === "failed",
+              attempts: row.attempts,
+            };
+          } catch {
+            return null;
+          }
+        },
         claimNotice: (noteHash, destination) => {
           if (yskLegacyUnreadable) return null;
           try {
-            const decision = db.beginSendCustody({
+            return db.claimYskNotice({
               scope: yskNoticeCustodyScope(noteHash),
               slot: PM_SLOT,
               key: noteHash,
@@ -438,13 +451,19 @@ const yskNoticeTick = (): void => {
               commandDigest: noteHash,
               destination,
             }, Date.now());
-            return decision.kind === "execute" ? "execute" : "consumed";
           } catch {
             return null;
           }
         },
-        finishNotice: (noteHash, state, reason) => {
-          db.finishSendCustody(yskNoticeCustodyScope(noteHash), state, reason, Date.now());
+        finishNotice: (noteHash, state, reason, extra) => {
+          const scope = yskNoticeCustodyScope(noteHash);
+          if (state === "retryable") {
+            const marked = db.markYskSubmenuMissing(scope, extra?.paneTail ?? null, Date.now());
+            return marked.terminal ? "terminal" : "retryable";
+          }
+          const detail = extra?.paneTail ?? (extra?.enterPresses != null ? `enter=${extra.enterPresses}` : null);
+          db.finishSendCustody(scope, state, reason, Date.now(), detail);
+          return state;
         },
         ready: readPmNoticePin,
         revalidate: async (pin) => {
@@ -456,6 +475,7 @@ const yskNoticeTick = (): void => {
           return { ok: true };
         },
         log: (result) => {
+          if (result.pmLog === false) return;
           console.log(`[ysk-notice] outcome=${result.outcome} reason=${result.reason} keys=${result.keysSent.length} enter=${result.enterPresses}`);
           try {
             db.logEvent(PM_SLOT, "ysk_notice", null, null, {
@@ -464,6 +484,7 @@ const yskNoticeTick = (): void => {
               note_hash: result.noteHash ?? null,
               keys: result.keysSent.length,
               enter_presses: result.enterPresses,
+              pane_tail: result.paneTail ?? null,
             });
           } catch {
             /* the console line is the receipt; a log failure must not retry the note */
@@ -2547,9 +2568,12 @@ async function clearComposerResidueAfterReleaseInterrupt(
   });
 }
 
-async function capturePaneSnapshot(paneAddress: string): Promise<string | null> {
+async function capturePaneSnapshot(paneAddress: string, joinWrapped = false): Promise<string | null> {
   try {
-    const result = await execShell(`tmux capture-pane -t ${paneAddress} -p`, { timeout: 5000 });
+    // -J joins terminal wraps back into logical lines. The notice quote is
+    // exact, so a wrapped capture would never equal the side-agent block.
+    const flags = joinWrapped ? "-J -p" : "-p";
+    const result = await execShell(`tmux capture-pane -t ${paneAddress} ${flags}`, { timeout: 5000 });
     return result.stdout;
   } catch {
     return null;
@@ -2806,8 +2830,8 @@ async function pastePayloadWithTmuxBuffer(
     // Enter over a non-empty composer, so pasting would only append to it and
     // leave the pane worse (slot 6, 2026-10-19: three PM sends concatenated).
     // The one exception is not this path: You-should-know appends the exact
-    // suffix " process this notice" only after driveYskNotice verified the
-    // quote (yskNoticeAppendException in submitWithComposerCheck).
+    // suffix (a blank line plus "process this") only after driveYskNotice
+    // verified the side-agent quote (yskNoticeAppendException).
     const preComposer = composerText(preSnapshot);
     if (preComposer !== null && preComposer !== "") {
       const reason = "composer not empty before paste (stale draft or earlier refused send); nothing was pasted. "

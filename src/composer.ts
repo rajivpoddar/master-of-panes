@@ -98,9 +98,13 @@ export function composerText(snapshot: string | null | undefined): string | null
 /**
  * Exact characters appended to a verified You-should-know quote. The
  * non-empty composer guard allows nothing else.
- * Rajiv DM D0AMF0XE6TS thread 1794143890.463219 / ts 1794144815.513229.
+ * Rajiv DM D0AMF0XE6TS thread 1794143890.463219 / ts 1794144815.513229 said
+ * "process this notice". The rendered quote (session 2026-11-08T18:09:58Z,
+ * ts 1794161451.282159) is a side-agent block, and the text that actually
+ * submitted it was a blank line plus "process this" — not a suffix glued
+ * onto the quote. Anything else still fails the exact-ownership check.
  */
-export const YSK_NOTICE_PROCESS_SUFFIX = " process this notice";
+export const YSK_NOTICE_PROCESS_SUFFIX = "\n\nprocess this";
 
 export type YskNoticeAppend = { verifiedQuote: string };
 

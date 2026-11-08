@@ -9,9 +9,10 @@
  *   Heads up · <text>
  *   1: Learn more   2: Knew this already   0: Dismiss
  * Typing 1 opens Learn more (Understood / Chat in main session / Dismiss).
- * Typing 2 quotes the note into the prompt. Only then may we append
- * " process this notice" and press Enter. That append is the only
- * non-empty-composer exception (yskNoticeAppendException).
+ * Typing 2 quotes the learn-more body as a side-agent block. Only then may
+ * we append a blank line and "process this", after a short settle, and press
+ * Enter. That append is the only non-empty-composer exception
+ * (yskNoticeAppendException). Foreign text never matches.
  *
  * Rule 50: this never gates, holds, or delays PM input except for the brief
  * send lock it shares with every other PM keystroke. Keystrokes are sent
@@ -28,6 +29,16 @@
  * again inside the literal and Enter writers, so a SessionStart during a
  * capture cannot authorize the next key. A consumed or uncertain claim is
  * never typed again, including after restart.
+ *
+ * submenu_missing with enter=0 is the only retry. The row stays started.
+ * A later tick may type 1 again only when the same top note is visible, the
+ * PM pane is idle, and the composer is empty. Three misses become terminal
+ * `failed` and are logged once. Every abort stores the last 40 pane lines.
+ *
+ * Choice 2 does not insert the bare note. The 18:09Z composer was exactly
+ * "Here is a note offered by a side agent:" plus a blockquote of the learn-more
+ * body. Enter is still refused unless the composer is that exact quote and,
+ * after the suffix, that quote plus the suffix and nothing else.
  */
 
 import { createHash } from "node:crypto";
@@ -50,10 +61,16 @@ export type YskPin = {
   paneId: string;
   processId: string;
   sessionId: string;
+  /** Idle is required only when retrying a submenu_missing miss. */
+  activity: YskPaneActivity;
 };
 const CHOICES_TAIL_LINES = 6;
 const NOTE_LOOKBACK_LINES = 8;
+/** Learn-more body can be longer than the one-line summary (18:09Z quote was 8 lines). */
+const SUBMENU_BODY_LOOKBACK_LINES = 40;
 const MIN_NOTE_CHARS = 12;
+export const YSK_ABORT_TAIL_LINES = 40;
+export const YSK_SIDE_AGENT_PREFIX = "Here is a note offered by a side agent:\n\n";
 
 const TOP_LEARN = /1:\s*Learn more/i;
 const TOP_KNEW = /2:\s*Knew this already/i;
@@ -147,7 +164,63 @@ export type YskDriveResult = {
   noteHash?: string;
   keysSent: string[];
   enterPresses: number;
+  /** Last 40 capture lines. Set on every abort. */
+  paneTail?: string;
+  /** False suppresses the PM-visible log. Terminal `failed` is logged once. */
+  pmLog?: boolean;
 };
+
+export type YskNoticeCustody = {
+  retryable: boolean;
+  terminal: boolean;
+  attempts: number;
+};
+
+/** Last lines of a capture, persisted with an abort. */
+export function yskAbortPaneTail(snapshot: string | null | undefined): string {
+  if (!snapshot) return "";
+  const lines = snapshot.split("\n");
+  return lines.slice(-YSK_ABORT_TAIL_LINES).join("\n");
+}
+
+/**
+ * Lines of the open Learn-more submenu, from its Heads-up line through the
+ * line above the choice cluster. Null when that cluster is not on screen.
+ */
+export function submenuBodyLines(snapshot: string | null | undefined): string[] | null {
+  const frame = composerFrame(snapshot);
+  if (!frame) return null;
+  const lines = frame.above.split("\n");
+  const tailStart = Math.max(0, lines.length - CHOICES_TAIL_LINES);
+  for (let i = lines.length - 1; i >= tailStart; i--) {
+    if (clusterAt(lines, i) !== "submenu") continue;
+    const start = Math.max(0, i - SUBMENU_BODY_LOOKBACK_LINES);
+    let head = -1;
+    for (let j = i - 1; j >= start; j--) {
+      if (HEADS_UP.test(lines[j].trim())) {
+        head = j;
+        break;
+      }
+    }
+    if (head < 0) return null;
+    const body = lines.slice(head, i).map((line) => line.replace(/\s+$/, ""));
+    while (body.length > 0 && body[body.length - 1] === "") body.pop();
+    return body.length ? body : null;
+  }
+  return null;
+}
+
+/** Exact composer text Choice 2 inserts for a learn-more body. */
+export function yskSideAgentQuote(bodyLines: string[]): string | null {
+  const lines = bodyLines.map((line) => line.replace(/\s+$/, ""));
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  if (!lines.length) return null;
+  const quoted = lines.map((line) => {
+    const trimmed = line.trim().replace(/^✦\s*/, "");
+    return trimmed ? `> ${trimmed}` : ">";
+  }).join("\n");
+  return YSK_SIDE_AGENT_PREFIX + quoted;
+}
 
 export type YskDriveDeps = {
   capture: (pin: YskPin) => Promise<string | null>;
@@ -158,9 +231,23 @@ export type YskDriveDeps = {
    * Custody before the first digit. "consumed" includes started, ambiguous,
    * accepted and queued rows. null means the store cannot be read: send nothing.
    */
-  claimNotice: (noteHash: string, destination: string) => "execute" | "consumed" | null;
-  /** Durable outcome. Never a zero-effect state: a typed attempt stays consumed. */
-  finishNotice: (noteHash: string, state: "ambiguous" | "accepted", reason: string) => void;
+  claimNotice: (noteHash: string, destination: string) => "execute" | "consumed" | "terminal" | null;
+  /**
+   * Read the row before claiming a retry. Absent on callers that only drive
+   * a first attempt. A retryable row is submenu_missing, not yet terminal.
+   */
+  noticeCustody?: (noteHash: string) => YskNoticeCustody | null;
+  /**
+   * Durable outcome. `retryable` is only submenu_missing with enter=0; the
+   * store returns `terminal` on the third miss. Every other typed attempt
+   * stays consumed. `extra.paneTail` is the abort capture.
+   */
+  finishNotice: (
+    noteHash: string,
+    state: "ambiguous" | "accepted" | "retryable",
+    reason: string,
+    extra?: { paneTail?: string; enterPresses?: number },
+  ) => "terminal" | "retryable" | "ambiguous" | "accepted" | void;
   ready: () => Promise<{ ok: true; pin: YskPin } | { ok: false; reason: string }>;
   /** Same pane id, process and session, still claude, idle or mid-turn, mode allowed. */
   revalidate: (pin: YskPin) => Promise<{ ok: true } | { ok: false; reason: string }>;
@@ -217,27 +304,45 @@ function composerOf(snapshot: string | null): string | null {
 export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult> {
   const keysSent: string[] = [];
   let claimedHash: string | null = null;
+  let lastSnapshot: string | null = null;
+  const captureSeen = async (pin: YskPin): Promise<string | null> => {
+    const snapshot = await deps.capture(pin);
+    if (typeof snapshot === "string") lastSnapshot = snapshot;
+    return snapshot;
+  };
+  const tracked: YskDriveDeps = { ...deps, capture: captureSeen };
   const finish = (result: YskDriveResult): YskDriveResult => {
+    const abort = result.outcome === "abort";
+    const paneTail = abort ? yskAbortPaneTail(lastSnapshot) : undefined;
+    let logged = abort ? { ...result, paneTail } : result;
     if (claimedHash && result.outcome !== "submitted") {
+      const retryable = result.reason === "submenu_missing" && result.enterPresses === 0;
       try {
-        deps.finishNotice(claimedHash, "ambiguous", result.reason);
+        const disposition = deps.finishNotice(
+          claimedHash,
+          retryable ? "retryable" : "ambiguous",
+          result.reason,
+          { paneTail },
+        );
+        if (disposition === "terminal") logged = { ...logged, reason: "failed" };
       } catch {
         /* a failed finish leaves the started row, which is still consumed */
       }
     }
+    if (logged.pmLog === false) return logged;
     try {
-      deps.log(result);
+      deps.log(logged);
     } catch {
       /* logging is not a reason to type again */
     }
-    return result;
+    return logged;
   };
   try {
     const ready = await deps.ready();
     if (!ready.ok) return finish({ outcome: "noop", reason: ready.reason, keysSent, enterPresses: 0 });
     const pin = ready.pin;
 
-    const first = await deps.capture(pin);
+    const first = await captureSeen(pin);
     const parsed = parseYskCapture(first);
     if (parsed.kind === "unreadable") return finish({ outcome: "noop", reason: "composer_unreadable", keysSent, enterPresses: 0 });
     if (parsed.kind === "none") return finish({ outcome: "noop", reason: "no_notice", keysSent, enterPresses: 0 });
@@ -247,7 +352,14 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
 
     const note = parsed.note;
     const noteHash = yskNoteHash(note);
-    const ownedQuote = note;
+    const prior = deps.noticeCustody?.(noteHash) ?? null;
+    if (prior?.terminal) {
+      return finish({ outcome: "noop", reason: "deduped", noteHash, keysSent, enterPresses: 0, pmLog: false });
+    }
+    // Later tick only. The first attempt may run during a live PM turn.
+    if (prior?.retryable && pin.activity !== "idle") {
+      return finish({ outcome: "noop", reason: "retry_waits_for_idle", noteHash, keysSent, enterPresses: 0 });
+    }
     const sessionFence = (): string | null => deps.authority(pin);
     const blocked = async (expect: (snapshot: string | null) => boolean): Promise<string | null> => {
       const check = await deps.revalidate(pin);
@@ -257,7 +369,7 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
       if (afterRevalidate) return afterRevalidate;
       let snapshot: string | null;
       try {
-        snapshot = await deps.capture(pin);
+        snapshot = await captureSeen(pin);
       } catch {
         return "capture_failed";
       }
@@ -276,6 +388,9 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
 
     const claim = deps.claimNotice(noteHash, `${pin.paneId}|${pin.processId}|${pin.sessionId}`);
     if (claim === null) return finish({ outcome: "noop", reason: "custody_unreadable", noteHash, keysSent, enterPresses: 0 });
+    if (claim === "terminal") {
+      return finish({ outcome: "noop", reason: "deduped", noteHash, keysSent, enterPresses: 0, pmLog: false });
+    }
     if (claim === "consumed") return finish({ outcome: "noop", reason: "deduped", noteHash, keysSent, enterPresses: 0 });
     claimedHash = noteHash;
 
@@ -286,7 +401,7 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     if (stillTop) return finish({ outcome: "abort", reason: stillTop, noteHash, keysSent, enterPresses: 0 });
     await deps.sendLiteral("1", pin);
     keysSent.push("1");
-    const submenu = await pollCapture(deps, pin, deps.submenuTimeoutMs ?? 2000, (snapshot) => {
+    const submenu = await pollCapture(tracked, pin, deps.submenuTimeoutMs ?? 2000, (snapshot) => {
       const screen = parseYskCapture(snapshot);
       if (screen.kind !== "submenu" || screen.composer !== "") return false;
       const frame = composerFrame(snapshot);
@@ -302,9 +417,13 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
       return screen.kind === "submenu" && screen.composer === "" && !!frame && squashHas(frame.above, note);
     });
     if (beforeChat) return finish({ outcome: "abort", reason: beforeChat, noteHash, keysSent, enterPresses: 0 });
+    const ownedQuote = yskSideAgentQuote(submenuBodyLines(submenu) ?? []);
+    if (!ownedQuote) {
+      return finish({ outcome: "abort", reason: "quote_unreadable", noteHash, keysSent, enterPresses: 0 });
+    }
     await deps.sendLiteral("2", pin);
     keysSent.push("2");
-    const quoted = await pollCapture(deps, pin, deps.quoteTimeoutMs ?? 2000, (snapshot) => {
+    const quoted = await pollCapture(tracked, pin, deps.quoteTimeoutMs ?? 2000, (snapshot) => {
       return composerOf(snapshot) === ownedQuote;
     });
     if (!quoted) {
@@ -318,7 +437,7 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     const timing = deps.submitTiming ?? {};
     const expectedSubmit = ownedQuote + YSK_NOTICE_PROCESS_SUFFIX;
     const submit: SubmitCheckResult = await submitWithComposerCheck(expectedSubmit, {
-      capture: () => deps.capture(pin),
+      capture: () => captureSeen(pin),
       pressSubmit: async () => {
         const beforeEnter = await blocked((snapshot) => composerOf(snapshot) === expectedSubmit);
         if (beforeEnter) throw new Error(beforeEnter);
@@ -327,7 +446,7 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
       sleep: deps.sleep,
       prePasteComposer: ownedQuote,
       noticeAppend: { verifiedQuote: ownedQuote },
-      dwellMs: timing.dwellMs ?? 400,
+      dwellMs: timing.dwellMs ?? 1500,
       payloadStableMs: timing.payloadStableMs ?? 200,
       payloadGraceMs: timing.payloadGraceMs ?? 1200,
       payloadStableGraceMs: timing.payloadGraceMs ?? 1500,
@@ -345,7 +464,7 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
       });
     }
     try {
-      deps.finishNotice(noteHash, "accepted", "process_this_notice");
+      deps.finishNotice(noteHash, "accepted", "process_this_notice", { enterPresses: submit.enterPresses });
     } catch {
       /* started/accepted either way: the row stays consumed */
     }

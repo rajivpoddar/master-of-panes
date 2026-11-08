@@ -37,6 +37,8 @@ export type CustodyRow = {
   destination: string;
   state: CustodyState;
   reason: string | null;
+  /** Abort pane tail, or `enter=<n>` after an accepted notice submit. */
+  detail?: string | null;
   attempts: number;
   created_at: number;
   updated_at: number;
