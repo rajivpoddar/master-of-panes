@@ -123,7 +123,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-feedback-draft-queue-stop",
-      "sha256": "3410c62a46759db1dd3129f2a83330bd910b102cee58cea94e624664f56c713e",
+      "sha256": "9bdc1593a048aee63ddf8a3975daeab9eede9c937c349a4e9b0b8288d6bfdb9f",
       "source_path": "claude/hooks/feedback-draft-queue-stop.py"
     },
     {
@@ -717,7 +717,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "12773a5d69d7dbc9c5e01f335ae496999b5df02cb75eb1acfc35c731900683f9",
+      "sha256": "38922ef66090bcfa0b01a1a1ce4301c9c68398b132ca6fdef4a6e777e8ae3f4f",
       "source_path": "claude/scripts/pm/heartbeat/pr-status-report.py"
     },
     {

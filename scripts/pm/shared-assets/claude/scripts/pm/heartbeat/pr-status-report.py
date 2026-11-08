@@ -67,7 +67,7 @@ def collect():
             for attempt in range(2):
                 try:
                     pr = gh('pr', 'view', str(item['number']), '--repo', REPO, '--json',
-                            'number,isDraft,headRefOid,headRefName,labels,mergeable')
+                            'number,isDraft,headRefOid,headRefName,labels,mergeable,comments')
                     break
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as exc:
                     print(f'WARN pr view #{item["number"]} failed (attempt {attempt + 1}): {exc}', file=sys.stderr)
@@ -94,7 +94,7 @@ def collect():
         obligations = [dict(row) for row in con.execute(
             "SELECT id, pr, target_type, target_id, owner, suppress_until, kind, evidence_json FROM obligations "
             "WHERE status='open' AND (target_type='github_pr' OR "
-            "kind IN ('pr_red_unowned','pr_admission','pr_merge_ask')) ORDER BY id DESC")]
+            "kind IN ('pr_red_unowned','pr_admission','pr_merge_ask','merge_hold')) ORDER BY id DESC")]
     bridge = HOME / 'Downloads/projects/tmux-slack-bridge/bridge.db'
     if bridge.exists():
         with sqlite3.connect(f'file:{bridge}?mode=ro', uri=True, timeout=5) as con:
@@ -130,16 +130,39 @@ def claim_evidence(row):
 
 
 MERGEABLE_OK = {'MERGEABLE', 'CLEAN'}
+PM_12B_PASS_RE = re.compile(r'PM[ _-]?12b|PM_OPUS_REVIEW:\s*PASS', re.IGNORECASE)
+PM_12B_BLOCK_RE = re.compile(r'PM_OPUS_REVIEW:\s*(BLOCK|REVISE|REQUEST_CHANGES)|PM[ _-]?12b[^\n]{0,40}\b(BLOCK|REVISE)\b', re.IGNORECASE)
+
+
+def latest_12b_verdict(pr, head):
+    """Latest PM 12b verdict explicitly bound to the current head."""
+    verdict = None
+    for comment in pr.get('comments') or []:
+        body = comment.get('body') or ''
+        if not head or head[:7] not in body:
+            continue
+        if PM_12B_BLOCK_RE.search(body):
+            verdict = 'BLOCK'
+        elif PM_12B_PASS_RE.search(body):
+            verdict = 'PASS'
+    return verdict
 
 
 def hold_reason(pr, obligations):
     """Shared hold check: pm-blocked:*, pm-state:blocked-*, or an open pr_admission 'HELD' obligation."""
-    labels = [item['name'] for item in pr['labels']]
+    labels = [item['name'] for item in pr.get('labels', [])]
     held = sorted(x for x in labels if x.startswith('pm-blocked:') or x.startswith('pm-state:blocked-'))
     if held:
         return ','.join(held)
     for row in obligations or []:
-        if row.get('pr') != pr['number'] or row.get('kind') != 'pr_admission':
+        target_pr = row.get('pr')
+        if target_pr is None and row.get('target_type') == 'github_pr':
+            target_pr = row.get('target_id')
+        if str(target_pr) != str(pr['number']):
+            continue
+        if row.get('kind') == 'merge_hold':
+            return f'merge_hold obligation {row.get("id", "open")}'
+        if row.get('kind') != 'pr_admission':
             continue
         raw = row.get('evidence_json') or ''
         texts = [raw] + list(claim_evidence(row).keys())
@@ -179,6 +202,8 @@ def merge_gate(pr, runs, obligations, e2e_required=None):
         if not e2e_required:
             e2e = 'NOT_REQUIRED'
     hold = hold_reason(pr, obligations)
+    if not hold and latest_12b_verdict(pr, head) == 'BLOCK':
+        hold = 'latest-head PM 12b BLOCK'
     mergeable = pr.get('mergeable') or 'UNKNOWN'
     if pr['isDraft']:
         gate, action = 'draft-rework', 'finish rework'
