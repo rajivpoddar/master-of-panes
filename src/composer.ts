@@ -60,7 +60,12 @@ export const QUEUED_HINT = /press\s+up\s+to\s+edit\s+queued\s+messages|ctrl\+x\s
  * runtimes, dialogs, unexpected layouts). Callers treat null as "cannot
  * judge" and keep their previous verification behaviour.
  */
-export function composerText(snapshot: string | null | undefined): string | null {
+/**
+ * The Claude composer box and the screen above it. `composer` is "" for an
+ * empty input line (including the queued-message placeholder). Null when no
+ * ❯ box can be recognised — callers must not type.
+ */
+export function composerFrame(snapshot: string | null | undefined): { above: string; composer: string } | null {
   if (!snapshot) return null;
   const lines = snapshot.replace(/\s+$/, "").split("\n");
   for (let bottom = lines.length - 1; bottom > 0; bottom--) {
@@ -79,9 +84,42 @@ export function composerText(snapshot: string | null | undefined): string | null
       .trim();
     // While a busy turn holds queued messages (rendered above the box),
     // Claude shows this placeholder on an otherwise EMPTY input line.
-    return QUEUED_INPUT_PLACEHOLDER.test(text) ? "" : text;
+    const composer = QUEUED_INPUT_PLACEHOLDER.test(text) ? "" : text;
+    return { above: lines.slice(0, top).join("\n"), composer };
   }
   return null;
+}
+
+export function composerText(snapshot: string | null | undefined): string | null {
+  const frame = composerFrame(snapshot);
+  return frame ? frame.composer : null;
+}
+
+/**
+ * Exact characters appended to a verified You-should-know quote. The
+ * non-empty composer guard allows nothing else.
+ * Rajiv DM D0AMF0XE6TS thread 1794143890.463219 / ts 1794144815.513229.
+ */
+export const YSK_NOTICE_PROCESS_SUFFIX = " process this notice";
+
+export type YskNoticeAppend = { verifiedQuote: string };
+
+/**
+ * Narrow exception to the non-empty-composer guard. True only when this
+ * submit is the You-should-know step that appends {@link YSK_NOTICE_PROCESS_SUFFIX}
+ * onto the composer string just verified to be the quoted note. Any other
+ * payload, quote, or caller is refused.
+ */
+export function yskNoticeAppendException(
+  payload: string,
+  prePasteComposer: string | null | undefined,
+  noticeAppend: YskNoticeAppend | undefined,
+): boolean {
+  if (!noticeAppend) return false;
+  const quote = noticeAppend.verifiedQuote;
+  if (!quote.trim()) return false;
+  if (prePasteComposer !== quote) return false;
+  return payload === quote + YSK_NOTICE_PROCESS_SUFFIX;
 }
 
 /** Maintenance must not treat Claude's empty-looking queued-input placeholder
@@ -468,6 +506,12 @@ export type SubmitCheckDeps = {
   prePasteComposer?: string | null;
   dwellMs?: number;
   payloadGraceMs?: number;
+  /**
+   * You-should-know only. When set, a non-empty pre-paste composer is allowed
+   * solely if {@link yskNoticeAppendException} matches this payload. Every
+   * other non-empty composer still blocks Enter.
+   */
+  noticeAppend?: YskNoticeAppend;
   /** Time the complete visible composer must remain unchanged before Enter. */
   payloadStableMs?: number;
   /** Bounded time to reach a stable complete composer after it first appears. */
@@ -493,7 +537,8 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
   const clearGraceMs = deps.clearGraceMs ?? 5000;
   const pollMs = deps.pollMs ?? 250;
 
-  if (deps.prePasteComposer !== undefined && deps.prePasteComposer !== "") {
+  const noticeAppendOk = yskNoticeAppendException(payload, deps.prePasteComposer, deps.noticeAppend);
+  if (deps.prePasteComposer !== undefined && deps.prePasteComposer !== "" && !noticeAppendOk) {
     return {
       payloadSeen: deps.prePasteComposer === null ? null : false,
       payloadStable: deps.prePasteComposer === null ? null : false,
@@ -517,8 +562,10 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
       payloadStable = null;
       break;
     }
-    payloadSeen = composerHoldsPayload(composer, payload)
-      || composerShowsNewPastePlaceholder(composer, deps.prePasteComposer);
+    payloadSeen = noticeAppendOk
+      ? !/\[Pasted text/i.test(composer) && squash(composer) === squash(payload)
+      : composerHoldsPayload(composer, payload)
+        || composerShowsNewPastePlaceholder(composer, deps.prePasteComposer);
     if (payloadSeen) {
       payloadDiscovered = true;
       if (composer === stableComposer) {

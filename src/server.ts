@@ -90,6 +90,7 @@ import {
   clearComposerText,
   shouldUseBracketedPaste,
 } from "./composer.js";
+import { YSK_SEEN_CONFIG_KEY, driveYskNotice, parseYskCapture } from "./yskNotice.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 import { composerClearFence, makeComposerClearKeyWriter } from "./clearComposerFence.js";
 import { DEFAULT_CONFIG } from "./types.js";
@@ -323,6 +324,95 @@ const alertReminderScheduler = new AlertReminderScheduler({
   },
 });
 alertReminderScheduler.start();
+
+// You-should-know notices on the PM pane. Keystrokes only while the note is
+// visible and the prompt is empty (one verified-quote append excepted).
+// Never gates PM input; skips the tick if a drive is already waiting.
+// Rajiv DM D0AMF0XE6TS thread 1794143890.463219.
+const yskSeenMemory = new Set<string>();
+let yskInFlight = false;
+const yskNoticeTick = (): void => {
+  if (yskInFlight) return;
+  yskInFlight = true;
+  void (async () => {
+    try {
+      if (db.getExitPending()) return;
+      // Peek without the send lock. The common case (no notice) must not delay
+      // PM input. The lock is taken only when a top-level notice is visible,
+      // and the drive re-checks the pane inside that lock.
+      const peek = parseYskCapture(await capturePaneSnapshot(config.pmPaneAddress));
+      if (peek.kind !== "top") return;
+      await withSlotSendLock(PM_SLOT, () => driveYskNotice({
+        capture: () => capturePaneSnapshot(config.pmPaneAddress),
+        sendLiteral: async (text) => {
+          await execShell(
+            `tmux send-keys -t ${shellEscape(config.pmPaneAddress)} -l ${shellEscape(text)}`,
+            { timeout: 5_000 },
+          );
+        },
+        pressEnter: async () => {
+          await execShell(`tmux send-keys -t ${shellEscape(config.pmPaneAddress)} Enter`, { timeout: 5_000 });
+        },
+        sleep,
+        loadSeen: () => {
+          try {
+            const raw = db.getConfig(YSK_SEEN_CONFIG_KEY);
+            if (raw) {
+              const parsed = JSON.parse(raw) as unknown;
+              if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) return null;
+              for (const hash of parsed) yskSeenMemory.add(hash);
+            }
+            return [...yskSeenMemory];
+          } catch {
+            return null;
+          }
+        },
+        saveSeen: (hashes) => {
+          for (const hash of hashes) yskSeenMemory.add(hash);
+          const capped = [...yskSeenMemory].slice(-50);
+          db.setConfig(YSK_SEEN_CONFIG_KEY, JSON.stringify(capped));
+        },
+        ready: async () => {
+          try {
+            const shown = await execShell(
+              `tmux display-message -t ${shellEscape(config.pmPaneAddress)} -p '#{pane_id}|#{pane_current_command}|#{pane_in_mode}'`,
+              { timeout: 3_000 },
+            );
+            const [id, cmd, mode] = shown.stdout.trim().split("|");
+            if (cmd !== "claude") return { ok: false, reason: "pane_not_claude" };
+            if (paneInputModeRefusalReason(mode)) return { ok: false, reason: "pane_mode_refused" };
+            if (!/^%\d+$/.test(id ?? "")) return { ok: false, reason: "pane_id_unreadable" };
+            const activity = await relay.getPaneActivityState(id);
+            if (activity !== "idle") return { ok: false, reason: activity === "active" ? "pm_busy" : "pm_activity_unknown" };
+            return { ok: true };
+          } catch {
+            return { ok: false, reason: "pane_unreadable" };
+          }
+        },
+        log: (result) => {
+          console.log(`[ysk-notice] outcome=${result.outcome} reason=${result.reason} keys=${result.keysSent.length} enter=${result.enterPresses}`);
+          try {
+            db.logEvent(PM_SLOT, "ysk_notice", null, null, {
+              outcome: result.outcome,
+              reason: result.reason,
+              note_hash: result.noteHash ?? null,
+              keys: result.keysSent.length,
+              enter_presses: result.enterPresses,
+            });
+          } catch {
+            /* the console line is the receipt; a log failure must not retry the note */
+          }
+        },
+      }));
+    } catch (err) {
+      console.error(`[ysk-notice] tick failed: ${err instanceof Error ? err.message : "unknown"}`);
+    } finally {
+      yskInFlight = false;
+    }
+  })();
+};
+const yskNoticeFirst = setTimeout(yskNoticeTick, 3_000);
+const yskNoticeTimer = setInterval(yskNoticeTick, 15_000);
 
 // ─── Log Rotation (every 10 minutes) ────────────────────
 let rotationInFlight = false;
@@ -2643,6 +2733,9 @@ async function pastePayloadWithTmuxBuffer(
     // stale draft or an earlier refused send). The submit check never presses
     // Enter over a non-empty composer, so pasting would only append to it and
     // leave the pane worse (slot 6, 2026-10-19: three PM sends concatenated).
+    // The one exception is not this path: You-should-know appends the exact
+    // suffix " process this notice" only after driveYskNotice verified the
+    // quote (yskNoticeAppendException in submitWithComposerCheck).
     const preComposer = composerText(preSnapshot);
     if (preComposer !== null && preComposer !== "") {
       const reason = "composer not empty before paste (stale draft or earlier refused send); nothing was pasted. "
@@ -3779,6 +3872,8 @@ process.on("SIGINT", () => {
   pmCadenceScheduler.stop();
   p0EscalationWatcher.stop();
   alertReminderScheduler.stop();
+  clearTimeout(yskNoticeFirst);
+  clearInterval(yskNoticeTimer);
   clearInterval(rotationTimer);
   clearInterval(eventLoopLagTimer);
   clearInterval(eventRetentionTimer);
@@ -3797,6 +3892,8 @@ process.on("SIGTERM", () => {
   pmCadenceScheduler.stop();
   p0EscalationWatcher.stop();
   alertReminderScheduler.stop();
+  clearTimeout(yskNoticeFirst);
+  clearInterval(yskNoticeTimer);
   clearInterval(rotationTimer);
   clearInterval(eventLoopLagTimer);
   clearInterval(eventRetentionTimer);
