@@ -574,33 +574,8 @@ const ZERO_EFFECT_SLACK_ERRORS: ReadonlySet<string> = new Set([
   "invalid_form_data",
 ]);
 
-/** Socket error codes raised while the connection is being opened, i.e. before any request byte is sent. */
-const PRE_SEND_CONNECT_CODES: ReadonlySet<string> = new Set([
-  "ECONNREFUSED",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "ENETUNREACH",
-  "EHOSTUNREACH",
-]);
-
-function errorCodes(error: unknown, depth = 0): string[] {
-  if (!error || typeof error !== "object" || depth > 3) return [];
-  const record = error as { code?: unknown; cause?: unknown; errors?: unknown };
-  const codes: string[] = typeof record.code === "string" ? [record.code] : [];
-  if (Array.isArray(record.errors)) for (const inner of record.errors) codes.push(...errorCodes(inner, depth + 1));
-  codes.push(...errorCodes(record.cause, depth + 1));
-  return codes;
-}
-
-/**
- * A thrown fetch is zero-effect ONLY when every socket error code says the connection never
- * opened. Timeouts, aborts, resets and anything unrecognised may have sent the request.
- */
-export function classifyTransportError(error: unknown): { error: string; effect: "none" | "unknown" } {
-  const codes = errorCodes(error);
-  if (codes.length > 0 && codes.every((code) => PRE_SEND_CONNECT_CODES.has(code))) {
-    return { error: `slack_connect_${codes[0].slice(0, 40)}`, effect: "none" };
-  }
+/** A fetch throw cannot prove whether Slack accepted the request. */
+export function classifyTransportError(error: unknown): { error: string; effect: "unknown" } {
   const name = error instanceof Error ? error.name : "error";
   return { error: `slack_transport_${String(name).slice(0, 40)}`, effect: "unknown" };
 }
@@ -643,6 +618,7 @@ export class SlackAlertsPoster implements AlertPoster {
     try {
       response = await this.fetchImpl("https://slack.com/api/chat.postMessage", {
         method: "POST",
+        redirect: "manual",
         headers: { "Content-Type": "application/json; charset=utf-8", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ channel, thread_ts: threadTs, text, unfurl_links: false, unfurl_media: false }),
         signal: AbortSignal.timeout(15_000),
@@ -652,8 +628,8 @@ export class SlackAlertsPoster implements AlertPoster {
     }
     // 429 is answered by Slack's edge before the request is processed.
     if (response.status === 429) return { ok: false, error: "ratelimited", effect: "none" };
-    // A 5xx can be returned after the message was accepted.
-    if (response.status >= 500) return { ok: false, error: `slack_http_${response.status}`, effect: "unknown" };
+    // Only a first-hop 200 has Slack's documented application response semantics.
+    if (response.status !== 200) return { ok: false, error: `slack_http_${response.status}`, effect: "unknown" };
     type Payload = { ok?: boolean; ts?: string; error?: string } | null;
     let payload: Payload;
     try {

@@ -538,7 +538,8 @@ function slackFixture(behaviours: FetchBehaviour[]) {
   writeFileSync(envFile, "SLACK_ALERTS_BOT_TOKEN=xoxb-alerts-secret\n");
   const queue = [...behaviours];
   let fetchCalls = 0;
-  const fetchImpl = (async () => {
+  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    assert.equal(init?.redirect, "manual");
     fetchCalls += 1;
     const next = queue.shift() ?? { kind: "reply", status: 200, body: { ok: true, ts: "1794000000.000999" } };
     if (next.kind === "throw") throw next.error;
@@ -561,12 +562,14 @@ test("SlackAlertsPoster marks only affirmative zero-effect outcomes as retryable
     { name: "invalid_auth", behaviour: { kind: "reply", status: 200, body: { ok: false, error: "invalid_auth" } }, effect: "none", error: /slack_invalid_auth/ },
     { name: "ratelimited error body", behaviour: { kind: "reply", status: 200, body: { ok: false, error: "ratelimited" } }, effect: "none", error: /slack_ratelimited/ },
     { name: "HTTP 429", behaviour: { kind: "reply", status: 429, body: {} }, effect: "none", error: /^ratelimited$/ },
-    { name: "connection refused", behaviour: { kind: "throw", error: connectError("ECONNREFUSED") }, effect: "none", error: /slack_connect_ECONNREFUSED/ },
+    { name: "redirect with misleading error", behaviour: { kind: "reply", status: 302, body: { ok: false, error: "invalid_auth" } }, effect: "unknown", error: /slack_http_302/ },
+    { name: "non-200 with misleading success", behaviour: { kind: "reply", status: 201, body: { ok: true, ts: "1.2" } }, effect: "unknown", error: /slack_http_201/ },
+    { name: "connection refused", behaviour: { kind: "throw", error: connectError("ECONNREFUSED") }, effect: "unknown", error: /slack_transport_TypeError/ },
     {
       name: "connection refused on every address",
       behaviour: { kind: "throw", error: Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new AggregateError([connectError("ECONNREFUSED"), connectError("ENETUNREACH")]), { code: "ECONNREFUSED" }) }) },
-      effect: "none",
-      error: /slack_connect_/,
+      effect: "unknown",
+      error: /slack_transport_TypeError/,
     },
     { name: "timeout", behaviour: { kind: "throw", error: new DOMException("The operation was aborted due to timeout", "TimeoutError") }, effect: "unknown", error: /slack_transport_TimeoutError/ },
     { name: "connection reset after send", behaviour: { kind: "throw", error: connectError("ECONNRESET") }, effect: "unknown", error: /slack_transport_TypeError/ },
@@ -597,6 +600,8 @@ test("SlackAlertsPoster marks only affirmative zero-effect outcomes as retryable
 
 test("a lost ACK, timeout, unparseable reply or 5xx is never retried: the occurrence is consumed and UNKNOWN is recorded", async () => {
   const ambiguous: Array<{ name: string; behaviour: FetchBehaviour; reason: RegExp }> = [
+    { name: "connection refused", behaviour: { kind: "throw", error: connectError("ECONNREFUSED") }, reason: /slack_transport_TypeError/ },
+    { name: "redirect", behaviour: { kind: "reply", status: 302, body: { ok: false, error: "invalid_auth" } }, reason: /slack_http_302/ },
     { name: "timeout", behaviour: { kind: "throw", error: new DOMException("timeout", "TimeoutError") }, reason: /slack_transport_TimeoutError/ },
     { name: "lost response", behaviour: { kind: "throw", error: connectError("ECONNRESET") }, reason: /slack_transport_TypeError/ },
     { name: "parse failure", behaviour: { kind: "unparseable", status: 200 }, reason: /slack_response_unparseable/ },
@@ -652,13 +657,12 @@ test("a lost ACK, timeout, unparseable reply or 5xx is never retried: the occurr
   }
 });
 
-test("a zero-effect error (not_in_channel, 429, connection refused) restores the due time and is retried after the backoff", async () => {
+test("a zero-effect error (not_in_channel, 429) restores the due time and is retried after the backoff", async () => {
   const zeroEffect: Array<{ name: string; behaviour: FetchBehaviour; error: RegExp }> = [
     { name: "not_in_channel", behaviour: { kind: "reply", status: 200, body: { ok: false, error: "not_in_channel" } }, error: /slack_not_in_channel/ },
     { name: "channel_not_found", behaviour: { kind: "reply", status: 200, body: { ok: false, error: "channel_not_found" } }, error: /slack_channel_not_found/ },
     { name: "invalid_auth", behaviour: { kind: "reply", status: 200, body: { ok: false, error: "invalid_auth" } }, error: /slack_invalid_auth/ },
     { name: "429", behaviour: { kind: "reply", status: 429, body: {} }, error: /^ratelimited$/ },
-    { name: "connection refused", behaviour: { kind: "throw", error: connectError("ECONNREFUSED") }, error: /slack_connect_ECONNREFUSED/ },
   ];
   for (const { name, behaviour, error } of zeroEffect) {
     const slack = slackFixture([behaviour]);
