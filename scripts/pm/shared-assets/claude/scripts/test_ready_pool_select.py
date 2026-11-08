@@ -67,11 +67,22 @@ class DispatchContentTests(unittest.TestCase):
         row = issue(12944, ["P1", "status:todo"], body="<!-- ready-pool:\nowner: Dhruva PM\ndisposition: READY\n-->")
         self.assertEqual(rps.classify(row), "new_issue")
 
-    def test_ac_excludes_product_code_and_pm_only_investigation(self):
-        for text in ("No product code change in this slice.", "PM-only investigation."):
-            row = issue(11890, ["P1", "status:todo"])
-            row["body"] = row["body"].replace("AC-1: Preserve current work through the owning boundary.", "AC-1: " + text)
-            self.assertIsNone(rps.classify(row))
+    def test_dev_no_product_code_change_is_eligible(self):
+        row = issue(11890, ["P1", "status:todo"])
+        row["body"] = row["body"].replace("AC-1: Preserve current work through the owning boundary.", "AC-1: No product code change in this slice.")
+        self.assertEqual(rps.classify(row), "new_issue")
+
+    def test_quoted_and_aliased_dev_is_eligible(self):
+        row = issue(11891, ["P1", "status:todo"])
+        row["body"] = row["body"].replace("claimable_slot_type: dev", 'slot_type: "dev"')
+        self.assertEqual(rps.classify(row), "new_issue")
+
+    def test_last_header_controls_dispatch(self):
+        row = issue(11892, ["P1", "status:todo"])
+        row["body"] = '<!-- ready-pool:\nclaimable_slot_type: pm\ndisposition: PARKED\n-->\n' + row["body"]
+        self.assertEqual(rps.classify(row), "new_issue")
+        row["body"] += '\n<!-- ready-pool:\nclaimable_slot_type: pm\ndisposition: PARKED\n-->'
+        self.assertIsNone(rps.classify(row))
 
     def test_ready_header_not_blocked_by_stale_or_negated_comments(self):
         row = issue(12063, ["P1", "status:todo"])

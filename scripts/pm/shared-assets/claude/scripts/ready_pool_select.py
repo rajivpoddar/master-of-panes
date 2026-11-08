@@ -124,15 +124,11 @@ def _labels(issue: dict[str, Any]) -> set[str]:
 
 
 def ready_pool_value(body: str, field: str) -> str:
-    m = READY_POOL_RE.search(body or "")
-    if not m:
-        return ""
-    f = re.search(rf"(?mi)^\s*{re.escape(field)}\s*:\s*(.*?)\s*$", m.group(1))
-    return f.group(1).strip() if f else ""
+    return contract_policy().ready_pool_metadata({"body": body or ""}).get(field, "")
 
 
 def dispatch_content_refusals(issue: dict[str, Any]) -> list[str]:
-    """Screen authoritative Ready Pool fields and ACs, never issue comments."""
+    """Screen authoritative Ready Pool fields, never historical prose or comments."""
     body = issue.get("body") or ""
     reasons = []
     claimable = ready_pool_value(body, "claimable_slot_type").lower()
@@ -147,10 +143,6 @@ def dispatch_content_refusals(issue: dict[str, Any]) -> list[str]:
         reasons.append("disposition_not_dispatchable")
     if re.search(r"(?i)\bneeds[_ -]investigation\b", disposition) and claimable not in {"dev", "sync"}:
         reasons.append("non_dev_needs_investigation")
-    match = re.search(r"(?im)^\s*#{1,6}\s*acceptance criteria\b[^\n]*\n(.*?)(?=^\s*#{1,6}\s|\Z)", body, re.DOTALL)
-    ac = match.group(1) if match else ""
-    if re.search(r"(?i)\bno\s+product\s+code\b|\bpm[- ]only\s+investigation\b", ac):
-        reasons.append("acceptance_criteria_not_dispatchable")
     return reasons
 
 
