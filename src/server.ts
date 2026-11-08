@@ -457,11 +457,17 @@ const yskNoticeTick = (): void => {
         },
         finishNotice: (noteHash, state, reason, extra) => {
           const scope = yskNoticeCustodyScope(noteHash);
+          const detail = JSON.stringify({
+            stage: extra?.stage ?? "submit",
+            reason,
+            screenHash: extra?.screenHash ?? null,
+            attempt: db.getSendCustody(scope)?.attempts ?? null,
+            destinationPinId: extra?.destinationPinId ?? null,
+          });
           if (state === "retryable") {
-            const marked = db.markYskSubmenuMissing(scope, extra?.paneTail ?? null, Date.now());
+            const marked = db.markYskSubmenuMissing(scope, detail, Date.now());
             return marked.terminal ? "terminal" : "retryable";
           }
-          const detail = extra?.paneTail ?? (extra?.enterPresses != null ? `enter=${extra.enterPresses}` : null);
           db.finishSendCustody(scope, state, reason, Date.now(), detail);
           return state;
         },
@@ -484,7 +490,10 @@ const yskNoticeTick = (): void => {
               note_hash: result.noteHash ?? null,
               keys: result.keysSent.length,
               enter_presses: result.enterPresses,
-              pane_tail: result.paneTail ?? null,
+              stage: result.stage ?? null,
+              screen_hash: result.screenHash ?? null,
+              attempt: result.attempt ?? null,
+              destination_pin_id: result.destinationPinId ?? null,
             });
           } catch {
             /* the console line is the receipt; a log failure must not retry the note */

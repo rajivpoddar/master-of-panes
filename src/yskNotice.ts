@@ -33,7 +33,7 @@
  * submenu_missing with enter=0 is the only retry. The row stays started.
  * A later tick may type 1 again only when the same top note is visible, the
  * PM pane is idle, and the composer is empty. Three misses become terminal
- * `failed` and are logged once. Every abort stores the last 40 pane lines.
+ * `failed` and are logged once. Every abort stores structured metadata only, never pane or composer text.
  *
  * Choice 2 does not insert the bare note. The 18:09Z composer was exactly
  * "Here is a note offered by a side agent:" plus a blockquote of the learn-more
@@ -69,7 +69,6 @@ const NOTE_LOOKBACK_LINES = 8;
 /** Learn-more body can be longer than the one-line summary (18:09Z quote was 8 lines). */
 const SUBMENU_BODY_LOOKBACK_LINES = 40;
 const MIN_NOTE_CHARS = 12;
-export const YSK_ABORT_TAIL_LINES = 40;
 export const YSK_SIDE_AGENT_PREFIX = "Here is a note offered by a side agent:\n\n";
 
 const TOP_LEARN = /1:\s*Learn more/i;
@@ -164,8 +163,11 @@ export type YskDriveResult = {
   noteHash?: string;
   keysSent: string[];
   enterPresses: number;
-  /** Last 40 capture lines. Set on every abort. */
-  paneTail?: string;
+  /** Safe diagnostics only; raw captures never leave the driver. */
+  screenHash?: string;
+  stage?: string;
+  attempt?: number;
+  destinationPinId?: string;
   /** False suppresses the PM-visible log. Terminal `failed` is logged once. */
   pmLog?: boolean;
 };
@@ -176,11 +178,9 @@ export type YskNoticeCustody = {
   attempts: number;
 };
 
-/** Last lines of a capture, persisted with an abort. */
-export function yskAbortPaneTail(snapshot: string | null | undefined): string {
-  if (!snapshot) return "";
-  const lines = snapshot.split("\n");
-  return lines.slice(-YSK_ABORT_TAIL_LINES).join("\n");
+/** One-way digest of a capture; never return raw diagnostic content. */
+export function yskAbortScreenHash(snapshot: string | null | undefined): string {
+  return createHash("sha256").update(snapshot ?? "", "utf8").digest("hex");
 }
 
 /**
@@ -240,13 +240,13 @@ export type YskDriveDeps = {
   /**
    * Durable outcome. `retryable` is only submenu_missing with enter=0; the
    * store returns `terminal` on the third miss. Every other typed attempt
-   * stays consumed. `extra.paneTail` is the abort capture.
+   * stays consumed. `extra` contains only safe diagnostic metadata.
    */
   finishNotice: (
     noteHash: string,
     state: "ambiguous" | "accepted" | "retryable",
     reason: string,
-    extra?: { paneTail?: string; enterPresses?: number },
+    extra?: { screenHash?: string; stage?: string; attempt?: number; destinationPinId?: string; enterPresses?: number },
   ) => "terminal" | "retryable" | "ambiguous" | "accepted" | void;
   ready: () => Promise<{ ok: true; pin: YskPin } | { ok: false; reason: string }>;
   /** Same pane id, process and session, still claude, idle or mid-turn, mode allowed. */
@@ -305,6 +305,8 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
   const keysSent: string[] = [];
   let claimedHash: string | null = null;
   let lastSnapshot: string | null = null;
+  let attempt = 1;
+  let destinationPinId: string | undefined;
   const captureSeen = async (pin: YskPin): Promise<string | null> => {
     const snapshot = await deps.capture(pin);
     if (typeof snapshot === "string") lastSnapshot = snapshot;
@@ -313,8 +315,14 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
   const tracked: YskDriveDeps = { ...deps, capture: captureSeen };
   const finish = (result: YskDriveResult): YskDriveResult => {
     const abort = result.outcome === "abort";
-    const paneTail = abort ? yskAbortPaneTail(lastSnapshot) : undefined;
-    let logged = abort ? { ...result, paneTail } : result;
+    const diagnostics = {
+      stage: keysSent.length === 0 ? "top" : keysSent.length === 1 ? "learn_more" : "quote",
+      reason: result.reason,
+      screenHash: yskAbortScreenHash(lastSnapshot),
+      attempt,
+      destinationPinId,
+    };
+    let logged = abort ? { ...result, ...diagnostics } : result;
     if (claimedHash && result.outcome !== "submitted") {
       const retryable = result.reason === "submenu_missing" && result.enterPresses === 0;
       try {
@@ -322,7 +330,7 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
           claimedHash,
           retryable ? "retryable" : "ambiguous",
           result.reason,
-          { paneTail },
+          diagnostics,
         );
         if (disposition === "terminal") logged = { ...logged, reason: "failed" };
       } catch {
@@ -341,6 +349,7 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     const ready = await deps.ready();
     if (!ready.ok) return finish({ outcome: "noop", reason: ready.reason, keysSent, enterPresses: 0 });
     const pin = ready.pin;
+    destinationPinId = yskAbortScreenHash(`${pin.paneId}|${pin.processId}|${pin.sessionId}`);
 
     const first = await captureSeen(pin);
     const parsed = parseYskCapture(first);
@@ -353,6 +362,7 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     const note = parsed.note;
     const noteHash = yskNoteHash(note);
     const prior = deps.noticeCustody?.(noteHash) ?? null;
+    attempt = (prior?.attempts ?? 0) + 1;
     if (prior?.terminal) {
       return finish({ outcome: "noop", reason: "deduped", noteHash, keysSent, enterPresses: 0, pmLog: false });
     }

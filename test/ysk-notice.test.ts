@@ -16,7 +16,7 @@ import {
   normalizeYskNote,
   parseYskCapture,
   submenuBodyLines,
-  yskAbortPaneTail,
+  yskAbortScreenHash,
   yskActivityRefusal,
   yskNoteHash,
   yskSideAgentQuote,
@@ -493,7 +493,7 @@ test("submenu_missing retries only while idle, three times, then one failed log"
     finishNotice: (_hash, state, reason, extra) => {
       if (!row.current) return;
       if (state === "retryable") {
-        row.current.detail = extra?.paneTail ?? null;
+        row.current.detail = extra?.screenHash ?? null;
         if (row.current.attempts >= 3) {
           row.current.state = "ambiguous";
           row.current.reason = "failed";
@@ -519,8 +519,8 @@ test("submenu_missing retries only while idle, three times, then one failed log"
   assert.equal(first.reason, "submenu_missing");
   assert.equal(first.enterPresses, 0);
   assert.equal(row.current?.reason, "submenu_missing");
-  assert.ok((first.paneTail ?? "").includes("Heads up"));
-  assert.equal(first.paneTail, yskAbortPaneTail(top()));
+  assert.match(first.screenHash ?? "", /^[a-f0-9]{64}$/);
+  assert.equal(first.screenHash, yskAbortScreenHash(top()));
 
   const busy = await driveYskNotice(deps("active"));
   assert.equal(busy.reason, "retry_waits_for_idle");
@@ -538,10 +538,10 @@ test("submenu_missing retries only while idle, three times, then one failed log"
   assert.equal(again.pmLog, false);
   assert.deepEqual(keys, ["1", "1", "1"]);
   assert.equal(logs.filter((line) => line.reason === "failed").length, 1);
-  assert.equal(row.current?.detail, third.paneTail);
+  assert.equal(row.current?.detail, third.screenHash);
 });
 
-test("custody retries submenu_missing at most three times and stores the abort tail", async () => {
+test("custody retries submenu_missing at most three times and stores only safe abort metadata", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-ysk-retry-"));
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
   try {
@@ -555,8 +555,8 @@ test("custody retries submenu_missing at most three times and stores the abort t
       destination: "%1|1|sess",
     };
     const tail = Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n");
-    const stored = yskAbortPaneTail(tail);
-    assert.equal(stored.split("\n").length, 40);
+    const stored = yskAbortScreenHash(tail);
+    assert.match(stored, /^[a-f0-9]{64}$/);
     for (let attempt = 1; attempt <= 3; attempt++) {
       assert.equal(db.claimYskNotice(request, attempt), "execute");
       const marked = db.markYskSubmenuMissing(scope, stored, attempt);
@@ -595,4 +595,44 @@ test("the notice server path claims through custody and does not gate PM input",
   assert.match(notice, /YSK_NOTICE_PROCESS_SUFFIX/);
   assert.match(notice, /composerOf\(snapshot\) === ownedQuote/);
   assert.doesNotMatch(server, /UserPromptSubmit/);
+});
+
+test("retry cannot rebind original session, process, pane or unreadable destination", () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-ysk-pin-"));
+  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+  try {
+    const request = { scope: "ysk-notice:pin", slot: 0, key: "pin", digest: "pin", commandDigest: "pin", destination: "%11|4242|sess-a" };
+    assert.equal(db.claimYskNotice(request, 1), "execute");
+    db.markYskSubmenuMissing(request.scope, null, 2);
+    const original = db.getSendCustody(request.scope);
+    for (const destination of ["%11|4242|sess-b", "%11|9999|sess-a", "%12|4242|sess-a", ""]) {
+      assert.equal(db.claimYskNotice({ ...request, destination }, 3), "consumed");
+      assert.deepEqual(db.getSendCustody(request.scope), original);
+    }
+  } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("foreign sensitive abort capture never reaches custody or events", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mop-ysk-privacy-"));
+  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
+  const sentinel = "SENSITIVE_FOREIGN_CREDENTIAL_SENTINEL";
+  const scope = "ysk-notice:" + yskNoteHash(NOTE);
+  let reads = 0;
+  const box = harness(async () => ++reads <= 3 ? top() : pane([sentinel], sentinel));
+  box.deps.submenuTimeoutMs = 0;
+  box.deps.claimNotice = (hash, destination) => db.claimYskNotice({ scope, slot: 0, key: hash, digest: hash, commandDigest: hash, destination }, 1);
+  box.deps.finishNotice = (_hash, _state, reason, extra) => {
+    db.markYskSubmenuMissing(scope, JSON.stringify({ ...extra, reason }), 2);
+    return "retryable";
+  };
+  box.deps.log = result => { db.logEvent(0, "ysk_notice", null, null, { ...result }); };
+  try {
+    const result = await driveYskNotice(box.deps);
+    assert.equal(result.outcome, "abort");
+    assert.match(result.screenHash ?? "", /^[a-f0-9]{64}$/);
+    assert.equal(result.screenHash, yskAbortScreenHash(pane([sentinel], sentinel)));
+    assert.ok(!JSON.stringify(db.getSendCustody(scope)).includes(sentinel));
+    assert.ok(!JSON.stringify(db.getEvents(0)).includes(sentinel));
+    assert.ok(!JSON.stringify(result).includes(sentinel));
+  } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
 });

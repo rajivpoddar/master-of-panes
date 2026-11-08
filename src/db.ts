@@ -891,7 +891,10 @@ export class MoPDatabase {
           request.destination, nowMs, nowMs);
         return "execute";
       }
-      if (existing.digest !== request.digest) return "consumed";
+      // Attempt one owns this immutable recipient. Missing or changed bindings
+      // stay consumed; per-attempt fences cannot authorize a different recipient.
+      if (existing.digest !== request.digest || !existing.destination ||
+          !request.destination || existing.destination !== request.destination) return "consumed";
       if (existing.state === "ambiguous") return existing.reason === "failed" ? "terminal" : "consumed";
       if (existing.state !== "started" || existing.reason !== "submenu_missing") return "consumed";
       if (existing.attempts >= 3) {
@@ -904,9 +907,9 @@ export class MoPDatabase {
       }
       this.db.prepare(`
         UPDATE pm_send_custody
-        SET state = 'started', reason = NULL, destination = ?, attempts = attempts + 1, updated_at = ?
+        SET state = 'started', reason = NULL, attempts = attempts + 1, updated_at = ?
         WHERE scope = ?
-      `).run(request.destination, nowMs, request.scope);
+      `).run(nowMs, request.scope);
       return "execute";
     }).immediate();
   }
@@ -916,7 +919,7 @@ export class MoPDatabase {
    * Attempts 1 and 2 stay started+submenu_missing so a later idle tick can
    * claim again. The third miss becomes terminal `failed` and is not retried.
    */
-  markYskSubmenuMissing(scope: string, paneTail: string | null, nowMs: number): { terminal: boolean; attempts: number } {
+  markYskSubmenuMissing(scope: string, diagnostics: string | null, nowMs: number): { terminal: boolean; attempts: number } {
     const read = this.db.prepare("SELECT * FROM pm_send_custody WHERE scope = ?");
     return this.db.transaction((): { terminal: boolean; attempts: number } => {
       const existing = read.get(scope) as CustodyRow | undefined;
@@ -928,14 +931,14 @@ export class MoPDatabase {
           UPDATE pm_send_custody
           SET state = 'ambiguous', reason = 'failed', detail = ?, updated_at = ?
           WHERE scope = ?
-        `).run(paneTail, nowMs, scope);
+        `).run(diagnostics, nowMs, scope);
         return { terminal: true, attempts: existing.attempts };
       }
       this.db.prepare(`
         UPDATE pm_send_custody
         SET reason = 'submenu_missing', detail = ?, updated_at = ?
         WHERE scope = ? AND state = 'started'
-      `).run(paneTail, nowMs, scope);
+      `).run(diagnostics, nowMs, scope);
       return { terminal: false, attempts: existing.attempts };
     }).immediate();
   }
