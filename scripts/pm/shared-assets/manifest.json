@@ -773,7 +773,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "831a535776513748b91b3b3f97831a8289651c0bde8ed267e4c7abff190e4228",
+      "sha256": "5ad867da4cf6b2e19236d980d4a744bfeb71b610700a7d2c56fa1fb00f787c7e",
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
@@ -809,7 +809,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage-tests",
-      "sha256": "84ff95510989562eeb554d117b7ddff32ea31828ea5d6bae20cb33318ed418ae",
+      "sha256": "be63c7c5a2e6a39810f9cacbcfe06b2255b1b3890343a34bbc024478f12a9ded",
       "source_path": "claude/scripts/test_ready_pool_select.py"
     },
     {

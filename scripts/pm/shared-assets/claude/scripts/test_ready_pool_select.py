@@ -51,6 +51,40 @@ def issue(n, labels, created="2026-10-01T00:00:00Z", body=""):
 
 
 class HoldCompatibilityTests(unittest.TestCase):
+    def test_transitive_prose_discovery_for_all_hold_forms(self):
+        forms = (
+            (["pm-blocked:dependency"], ""),
+            (["sub:waiting-on-issue"], ""),
+            ([], "holds: waiting-on-issue\n"),
+            (["pm-blocked:dependency", "sub:waiting-on-issue"], "holds: dependency\n"),
+        )
+        for labels, header in forms:
+            with self.subTest(labels=labels, header=header):
+                node = {"number": 902, "is_pr": False, "state": "OPEN", "merged_at": None,
+                        "labels": labels, "body": f"<!-- ready-pool:\n{header}-->\nBlocked by #903"}
+                self.assertEqual(rps.declared_deps(node), [(903, "default")])
+                leaf = {"number": 903, "is_pr": False, "state": "OPEN", "merged_at": None,
+                        "labels": [], "body": ""}
+                root = {"number": 901, "is_pr": False, "state": "OPEN", "merged_at": None,
+                        "labels": [], "body": ""}
+                all_nodes = {901: root, 902: node, 903: leaf}
+                with patch.object(rps, "graphql_details", side_effect=lambda nums: ({n: all_nodes[n] for n in nums}, 0)):
+                    graph, failures = rps.fetch_dependency_graph([{"issue": 901, "open_dependencies": [{"number": 902, "kind": "default"}]}])
+                self.assertEqual(failures, 0)
+                self.assertIn(903, graph)
+
+    def test_native_lookup_failure_does_not_clear_resolved_header(self):
+        for native in (None, []):
+            with self.subTest(native=native):
+                row = issue(901, ["P1", "status:todo", "sub:waiting-on-issue"], body=(
+                    "<!-- ready-pool:\nblockers: #902\nholds: waiting-on-issue\n-->"))
+                candidate = rps.candidate(row, "new_issue")
+                rps.evaluate_dependency(candidate, {('native', 901): native, (902, 'default'): (True, 'CLOSED')})
+                self.assertEqual(candidate.get('dependency_unblocked', False), native == [])
+                if native is None:
+                    self.assertEqual(candidate['dependency_reason'], 'LOOKUP_FAILED')
+                    self.assertTrue(rps.is_gated(candidate))
+
     def test_old_new_and_mixed_holds_across_dependency_states(self):
         forms = (
             (["pm-blocked:dependency"], "dependency"),
@@ -66,7 +100,7 @@ class HoldCompatibilityTests(unittest.TestCase):
                     if state == "incomplete_contract":
                         row["body"] = "<!-- ready-pool:\nclaimable_slot_type: dev\n-->"
                     if state == "incomplete_contract":
-                        self.assertIsNone(rps.classify(row))
+                        self.assertTrue(rps.contract_reasons(row))
                         continue
                     candidate = rps.candidate(row, "new_issue")
                     resolved = state == "cleared_other_hold"

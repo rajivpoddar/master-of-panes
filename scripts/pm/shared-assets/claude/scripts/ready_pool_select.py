@@ -459,6 +459,10 @@ def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -
     if str(c.get("blockers") or "").strip().lower() not in {"", "none", "null", "n/a", "[]"}:
         c["blocking_labels"] = sorted(set(c.get("blocking_labels") or []) | {"pm-blocked:dependency"})
     native = native_dependencies(c['issue'], cache) if not offline and c.get('issue') else []
+    if native is None:
+        c['blocking_labels'] = sorted(set(c.get('blocking_labels') or []) | {'pm-blocked:dependency'})
+        c['dependency_reason'] = 'LOOKUP_FAILED'
+        return
     if native:
         c['blocking_labels'] = sorted(set(c.get('blocking_labels') or []) | {'pm-blocked:dependency'})
     if "pm-blocked:dependency" not in c.get("blocking_labels", []):
@@ -894,16 +898,17 @@ def node_satisfied(node: dict | None, kind: str) -> bool:
 
 def declared_deps(node: dict | None) -> list[tuple[int, str]]:
     """Declared blockers of an OPEN issue node, mirroring evaluate_dependency() (structured
-    `blockers:` or a pm-blocked:dependency label; prose body fallback). Comments are not read
+    `blockers:` or a normalized dependency hold; prose body fallback). Comments are not read
     for transitive nodes. PRs and closed nodes are leaves."""
     if not node or node["is_pr"] or node["state"] != "OPEN" or node_satisfied(node, "default"):
         return []
-    body, labels = node["body"], set(node["labels"])
+    body = node["body"]
+    dependency_hold = "pm-blocked:dependency" in issue_holds(node)
     blockers = ready_pool_value(body, "blockers")
-    if blockers.strip().lower() in NONE_VALUES and "pm-blocked:dependency" not in labels:
+    if blockers.strip().lower() in NONE_VALUES and not dependency_hold:
         return []
     refs = parse_dependencies(blockers, ready_pool_value(body, "wake_condition"))
-    if not refs and "pm-blocked:dependency" in labels:
+    if not refs and dependency_hold:
         refs = prose_dependencies(body)
     return refs or []
 
