@@ -26,6 +26,7 @@ import json
 import importlib.util
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -998,6 +999,147 @@ def remote_boxes_line(timeout: int = 20) -> str:
     return f"*Remote boxes:* unavailable ({reason})"
 
 
+def _elapsed_minutes(value: str) -> int:
+    days, sep, rest = value.partition('-')
+    if not sep:
+        rest, days = days, '0'
+    parts = [int(x) for x in rest.split(':')]
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + part
+    return int(days) * 1440 + seconds // 60
+
+
+def proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completions: list[dict]) -> dict:
+    """Read-only best-effort view; never inspect environment or runner files."""
+    processes = {}
+    for line in ps_text.splitlines():
+        match = re.match(r'^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$', line)
+        if match:
+            pid, ppid, age, command = match.groups()
+            processes[int(pid)] = (int(ppid), age, command)
+    windows = []
+    for line in tmux_text.splitlines():
+        parts = line.split('\t')
+        if len(parts) != 4:
+            continue
+        session, name, pid, dead = parts
+        if not ((session == '0' and name.startswith('px-')) or session == 'proxies'):
+            continue
+        try:
+            windows.append((session, name, int(pid), dead == '1'))
+        except ValueError:
+            continue
+
+    def descendants(root):
+        found = {root}
+        while True:
+            more = {pid for pid, (parent, _, _) in processes.items() if parent in found}
+            if more <= found:
+                return found
+            found |= more
+
+    rows, used = [], set()
+    for session, window, root, dead in windows + [('', '', 0, False)]:
+        family = descendants(root) if root else set(processes) - used
+        claudes = []
+        for pid in family:
+            if pid not in processes:
+                continue
+            _, age, command = processes[pid]
+            if not re.search(r'(?:^|/)claude\s', command) or not re.search(r'(?:^|\s)-p(?:\s|$)', command):
+                continue
+            name = re.search(r'(?:^|\s)--name(?:=|\s+)(proxy-[\w.-]+)', command)
+            if name:
+                claudes.append((pid, age, command, name.group(1)))
+        if window and not claudes:
+            rows.append({'name': f'{session}:{window}', 'state': 'dead window' if dead else 'left-over window'})
+        for pid, age, command, name in claudes:
+            if pid in used:
+                continue
+            used.add(pid)
+            model = re.search(r'(?:^|\s)--model(?:=|\s+)([^\s]+)', command)
+            turns = re.search(r'(?:^|\s)--max-turns(?:=|\s+)(\d+)', command)
+            age_min = _elapsed_minutes(age)
+            output = None
+            agent = 'unknown'
+            out = None
+            parent = processes[pid][0]
+            for other, (ppid, _, cmd) in processes.items():
+                if ppid != parent or 'proxy-agent-stream.py ' not in cmd:
+                    continue
+                try:
+                    argv = shlex.split(cmd)
+                    index = next(i for i, v in enumerate(argv) if v.endswith('/proxy-agent-stream.py'))
+                    out = Path(argv[index + 1])
+                    live = Path(argv[index + 2])
+                    output = next((p for p in (live, out.with_suffix('.log'), out) if p.is_file()), None)
+                except (ValueError, IndexError, StopIteration):
+                    pass
+                break
+            if out is not None:
+                for _, (_, _, cmd) in processes.items():
+                    try:
+                        argv = shlex.split(cmd)
+                        index = next(i for i, v in enumerate(argv) if v.endswith('/proxy-agent.sh'))
+                        if '--out' in argv and Path(argv[argv.index('--out') + 1]) == out:
+                            agent = argv[index + 1]
+                            break
+                    except (ValueError, IndexError, StopIteration):
+                        continue
+            idle = None
+            if output:
+                try:
+                    idle = max(0, int((now.timestamp() - output.stat().st_mtime) // 60))
+                except OSError:
+                    pass
+            # Conservative budget estimate: two minutes per max-turn, stale after twice that.
+            stale = (idle is not None and idle >= 20) or (turns is not None and age_min > 4 * int(turns.group(1)))
+            rows.append({'name': name, 'agent': agent, 'model': model.group(1) if model else 'unknown',
+                         'age': age_min, 'idle': idle, 'state': 'STALE' if stale else 'running'})
+    return {'rows': rows, 'completions': completions}
+
+
+def read_proxies(now: datetime) -> dict | None:
+    try:
+        tmux = subprocess.run(['tmux', 'list-panes', '-a', '-F', '#{session_name}\t#{window_name}\t#{pane_pid}\t#{pane_dead}'], capture_output=True, text=True, timeout=5, check=True).stdout
+        ps = subprocess.run(['ps', '-ww', '-axo', 'pid,ppid,etime,command'], capture_output=True, text=True, timeout=5, check=True).stdout
+        db = Path.home() / '.local/share/master-of-panes/data/mop.db'
+        with closing(sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=3)) as conn:
+            entries = conn.execute("SELECT payload FROM events WHERE event_type='send_command' AND timestamp >= ? ORDER BY id DESC", ((now - timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%S'),)).fetchall()
+        completed = []
+        for (payload,) in entries:
+            command = json.loads(payload).get('command', '')
+            match = re.match(r'PROXY_STOP name=(\S+) rc=(\S+)\s', command)
+            if match:
+                completed.append({'name': match.group(1), 'rc': match.group(2), 'result': 'unknown'})
+        return proxy_snapshot(tmux, ps, now, completed)
+    except (OSError, subprocess.SubprocessError, sqlite3.Error, ValueError):
+        return None
+
+
+def proxies_block(doc: dict | None) -> list[str]:
+    if doc is None:
+        return ['*Proxies:* unavailable']
+    completed = doc['completions']
+    failed = sum(c['rc'] != '0' for c in completed)
+    lines = [f"*Proxies:* {len(completed)} finished last hour (best effort; {failed} rc≠0, RESULT unknown for truncated records)"]
+    rows = []
+    for row in doc['rows']:
+        if 'age' not in row:
+            rows.append(f"• {row['name']} — {row['state']}")
+        else:
+            idle = f"{row['idle']}m" if row['idle'] is not None else 'unknown'
+            rows.append(f"• {row['name']} · {row['agent']} · {row['model']} · age {row['age']}m · output {idle} · {row['state']}")
+    for row in completed:
+        if row['rc'] != '0' or row['result'] != 'ok':
+            rows.append(f"• {row['name']} · finished · rc={row['rc']} · RESULT {row['result']}")
+    lines.extend(rows[:9])
+    if len(rows) > 9:
+        lines.append(f'• +{len(rows) - 9} more')
+    return lines
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -1025,6 +1167,7 @@ def compose(
     priority_unavailable: str | None = None,
     remote_boxes: str | None = None,
     pending_actions: tuple[dict, dict] | None = None,
+    proxies: dict | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -1091,6 +1234,7 @@ def compose(
         if unblockable:
             body += ["", *unblockable]
         body += ["", agents_line(agents)]
+        body += ["", *proxies_block(proxies)]
         tl, t_acts = training if training is not None else training_line()
         body += ["", tl]
         slot_actions = slot_actions + t_acts
@@ -1491,6 +1635,7 @@ def main() -> int:
         priority_unavailable=(f"UNAVAILABLE (timeout {COLLECTOR_TIMEOUTS['priority-inversion']}s)" if priority_flags is None else None),
         remote_boxes=remote_boxes_line(timeout=COLLECTOR_TIMEOUTS["remote-boxes"]) if args.mode == "1h" else None,
         pending_actions=(pending_obligations(PM_OPS_DB, now), pending_github(timeout=COLLECTOR_TIMEOUTS["pending-github"])) if args.mode == "1h" else None,
+        proxies=read_proxies(now) if args.mode == "1h" else None,
     ))
     pm_actions += (training[1] if training else [])
     if pm_actions:
