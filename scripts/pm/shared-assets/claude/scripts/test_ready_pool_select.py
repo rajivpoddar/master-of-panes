@@ -63,6 +63,10 @@ class DispatchContentTests(unittest.TestCase):
                 row = issue(11310, ["P1", "status:todo"], body=f"<!-- ready-pool:\n{header}\n-->")
                 self.assertIsNone(rps.classify(row))
 
+    def test_dev_with_pm_routing_owner_remains_eligible(self):
+        row = issue(12944, ["P1", "status:todo"], body="<!-- ready-pool:\nowner: Dhruva PM\ndisposition: READY\n-->")
+        self.assertEqual(rps.classify(row), "new_issue")
+
     def test_ac_excludes_product_code_and_pm_only_investigation(self):
         for text in ("No product code change in this slice.", "PM-only investigation."):
             row = issue(11890, ["P1", "status:todo"])
