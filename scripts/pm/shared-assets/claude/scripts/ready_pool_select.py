@@ -131,6 +131,29 @@ def ready_pool_value(body: str, field: str) -> str:
     return f.group(1).strip() if f else ""
 
 
+def dispatch_content_refusals(issue: dict[str, Any]) -> list[str]:
+    """Screen authoritative Ready Pool fields and ACs, never issue comments."""
+    body = issue.get("body") or ""
+    reasons = []
+    claimable = ready_pool_value(body, "claimable_slot_type").lower()
+    if claimable and claimable not in {"dev", "sync"}:
+        reasons.append("claimable_slot_type_not_dev")
+    for field in ("owner", "lane"):
+        value = ready_pool_value(body, field)
+        if re.search(r"(?i)(?<![a-z0-9])(?:pm|cto|pm-hotfix)(?![a-z0-9])", value):
+            reasons.append(f"{field}_reserved_lane")
+    disposition = ready_pool_value(body, "disposition")
+    if re.search(r"(?i)(?<![a-z0-9])(?:blocked|parked|deferred)[a-z0-9_]*", disposition):
+        reasons.append("disposition_not_dispatchable")
+    if re.search(r"(?i)\bneeds[_ -]investigation\b", disposition) and claimable not in {"dev", "sync"}:
+        reasons.append("non_dev_needs_investigation")
+    match = re.search(r"(?im)^\s*#{1,6}\s*acceptance criteria\b[^\n]*\n(.*?)(?=^\s*#{1,6}\s|\Z)", body, re.DOTALL)
+    ac = match.group(1) if match else ""
+    if re.search(r"(?i)\bno\s+product\s+code\b|\bpm[- ]only\s+investigation\b", ac):
+        reasons.append("acceptance_criteria_not_dispatchable")
+    return reasons
+
+
 def priority_rank(labels: set[str], body: str = "") -> int:
     """Label wins; Ready Pool `priority:` is the fallback; unknown sorts last."""
     found = sorted(PRIORITY_RANK[name] for name in labels if name in PRIORITY_RANK)
@@ -163,8 +186,10 @@ def issue_holds(issue: dict[str, Any]) -> set[str]:
     return holds
 
 
-def classify(issue: dict[str, Any], requested_class: str | None = None) -> str | None:
-    """Return the selection class for an eligible issue, else None."""
+def classify(issue: dict[str, Any], requested_class: str | None = None, *, light: bool = False) -> str | None:
+    """Return the selection class; light mode is only a non-authoritative prefilter."""
+    if not light and (not isinstance(issue.get("body"), str) or not issue["body"].strip() or dispatch_content_refusals(issue)):
+        return None
     labels = _labels(issue)
     holds = issue_holds(issue)
     status = {l for l in labels if l.startswith("status:")}
@@ -1402,7 +1427,7 @@ def fast_check(args) -> dict[str, Any]:
     pick_key = (pick["priority_rank"], CLASS_RANK.get(pick["class"], 9))
     possible = []
     for light in load_light_candidates():
-        if int(light["number"]) == args.check or classify(light) is None:
+        if int(light["number"]) == args.check or classify(light, light=True) is None:
             continue
         labels = _labels(light)
         ranks = [PRIORITY_RANK[name] for name in labels if name in PRIORITY_RANK]

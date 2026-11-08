@@ -50,6 +50,42 @@ def issue(n, labels, created="2026-10-01T00:00:00Z", body=""):
             "createdAt": created, "body": body}
 
 
+class DispatchContentTests(unittest.TestCase):
+    def test_pm_owned_incidents_and_non_dev_need_investigation(self):
+        for header in (
+            "claimable_slot_type: pm-hotfix\nowner: PM\ndisposition: PM_OWNED BLOCKED_INVESTIGATION",
+            "claimable_slot_type: dev\nlane: PM\ndisposition: READY",
+            "claimable_slot_type: dev\ndisposition: PARKED_NO_CAUSAL_CHAIN",
+            "claimable_slot_type: dev\ndisposition: DEFERRED_FOR_DECISION",
+            "claimable_slot_type: none\ndisposition: NEEDS_INVESTIGATION",
+        ):
+            with self.subTest(header=header):
+                row = issue(11310, ["P1", "status:todo"], body=f"<!-- ready-pool:\n{header}\n-->")
+                self.assertIsNone(rps.classify(row))
+
+    def test_ac_excludes_product_code_and_pm_only_investigation(self):
+        for text in ("No product code change in this slice.", "PM-only investigation."):
+            row = issue(11890, ["P1", "status:todo"])
+            row["body"] = row["body"].replace("AC-1: Preserve current work through the owning boundary.", "AC-1: " + text)
+            self.assertIsNone(rps.classify(row))
+
+    def test_ready_header_not_blocked_by_stale_or_negated_comments(self):
+        row = issue(12063, ["P1", "status:todo"])
+        row["comments"] = [{"body": "PM parked this previously"}, {"body": "not blocked"}]
+        self.assertEqual(rps.dispatch_content_refusals(row), [])
+        self.assertEqual(rps.classify(row), "new_issue")
+
+    def test_clean_dev_and_light_candidate_remain_eligible(self):
+        row = issue(12052, ["P1", "status:todo"])
+        self.assertEqual(rps.classify(row), "new_issue")
+        for body in (None, "", "   "):
+            row["body"] = body
+            self.assertIsNone(rps.classify(row))
+        del row["body"]
+        self.assertIsNone(rps.classify(row))
+        self.assertEqual(rps.classify(row, light=True), "new_issue")
+
+
 class RankTests(unittest.TestCase):
     def test_priority_beats_class_and_age(self):
         issues = [
