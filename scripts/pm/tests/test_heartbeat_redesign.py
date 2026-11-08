@@ -42,6 +42,19 @@ def test_build_error_code_report_top_rest_and_deltas():
     assert r["delta_vs_median"] == 17
 
 
+def test_cli_reports_failure_before_query_without_leaking_secrets(monkeypatch, capsys):
+    def fail():
+        raise RuntimeError("Axiom query token not found in environment or AXIOM_ENV_FILE")
+    monkeypatch.setattr(axiom, "load_token", fail)
+    monkeypatch.setattr(sys, "argv", ["heartbeat-axiom", "--hours", "1", "--active-users"])
+    assert axiom.cli() == 1
+    assert "token not found" in json.loads(capsys.readouterr().out)["ops_error"]
+    monkeypatch.setattr(axiom, "main", lambda: (_ for _ in ()).throw(ValueError("secret-value")))
+    assert axiom.cli() == 1
+    error = json.loads(capsys.readouterr().out)["ops_error"]
+    assert "ValueError" in error and "secret-value" not in error
+
+
 def test_active_users_430_is_unavailable_with_at_most_two_queries(monkeypatch, capsys):
     from urllib.error import HTTPError
     import io
@@ -511,10 +524,20 @@ def test_active_users_excludes_cohort_and_domain_independently():
     assert result["excluded_scribie"] == 3 and "cohort" in result["method"]
     line = compose.active_users_block(result, "1h")[0][0]
     assert "1 non-Scribie" in line and "3 Scribie excluded" in line and "independently" in line
-    with pytest.raises(RuntimeError, match="missing"):
-        axiom.build_active_users_report(rows, None, {})
-    with pytest.raises(RuntimeError, match="exclusion unknown"):
-        axiom.build_active_users_report([rows[0]], None, {"user_A": {"cohort": "organic"}})
+    missing = axiom.build_active_users_report(rows, None, {})
+    assert missing["unclassified"] == 4 and missing["count"] == 0
+    no_email = axiom.build_active_users_report([rows[0]], None, {"user_A": {"cohort": "organic"}})
+    assert no_email["unclassified"] == 1 and no_email["unclassified_users"] == ["***user_A"]
+    assert "unclassified 1 (***user_A)" in compose.active_users_block(no_email, "1h")[0][0]
+
+
+def test_active_users_missing_user_does_not_hide_known_users():
+    rows = [{"userId": "user_3Goiv26LLvSOCHFTKYZVwBhM7F9", "actions": 2},
+            {"userId": "user_known", "emails": ["customer@example.org"], "actions": 1}]
+    result = axiom.build_active_users_report(rows, rows, {"user_known": {"email": "customer@example.org"}})
+    assert result["unclassified"] == 1 and result["unclassified_users"] == ["***BhM7F9"]
+    assert result["count"] == 1 and result["prior_count"] == 1
+    assert result["users"][0]["user"] == "cu***@example.org"
 
 
 def test_internal_matching_survives_masking():

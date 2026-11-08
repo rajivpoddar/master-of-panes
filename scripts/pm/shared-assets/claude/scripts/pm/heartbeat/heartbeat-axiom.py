@@ -102,8 +102,7 @@ def load_token() -> str:
             if var in found:
                 return found[var]
 
-    print("Error: AXIOM_API_TOKEN or AXIOM_QUERY_TOKEN not found in environment or AXIOM_ENV_FILE", file=sys.stderr)
-    sys.exit(1)
+    raise RuntimeError("Axiom query token not found in environment or AXIOM_ENV_FILE")
 
 
 # Non-200/malformed Axiom responses append their status here so `main()` can surface a
@@ -144,8 +143,7 @@ def run_apl_query(token: str, apl: str, start_time: str, end_time: str) -> dict:
         status, body = post()
 
     if status == 401:
-        print("Error: Axiom API returned 401 Unauthorized. Check your AXIOM_API_TOKEN.", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError("Axiom API returned HTTP 401 Unauthorized")
 
     if status == 403:
         print(
@@ -291,7 +289,9 @@ INTERNAL_DOMAINS = ("heydonna.com", "heydonna.app", "example.com")
 
 def load_prod_users() -> dict[str, dict]:
     """Read the production users table; reject truncation rather than guess cohorts."""
-    limit = 100000
+    # The CLI requests limit + 1 to detect truncation; 100001 exceeds Convex's
+    # pagination limit. Still reject a full page rather than misclassify users.
+    limit = 9999
     env = {k: v for k, v in os.environ.items() if k != "CONVEX_DEPLOY_KEY"}
     proc = subprocess.run(
         ["npx", "convex", "data", "users", "--deployment", "beloved-cardinal-941",
@@ -398,16 +398,19 @@ def build_active_users_report(rows: list[dict], prior_rows: list[dict] | None = 
             cur["files"] = max(cur["files"], int(r.get("files") or 0))
             em = r.get("emails", r.get("email"))
             cur["emails"] += em if isinstance(em, list) else [em]
-        ext, internal, excluded = [], 0, 0
+        ext, internal, excluded, unclassified = [], 0, 0, []
         for uid, u in by_uid.items():
             if db_users is not None:
-                if uid not in db_users:
-                    raise RuntimeError("active user missing from production users table")
-                if scribie_user(db_users[uid]):
+                user = db_users.get(uid)
+                if user is None:
+                    unclassified.append("***" + uid[-6:])
+                    continue
+                if scribie_user(user):
                     excluded += 1
                     continue
-                if not str(db_users[uid].get('email') or '').strip():
-                    raise RuntimeError("active user missing production email; exclusion unknown")
+                if not str(user.get('email') or '').strip():
+                    unclassified.append("***" + uid[-6:])
+                    continue
             email = _display_email(u["emails"])
             if is_internal_identity(uid, email):
                 internal += 1
@@ -415,14 +418,15 @@ def build_active_users_report(rows: list[dict], prior_rows: list[dict] | None = 
             ext.append({"user": mask_email(email) if email else uid[-6:], "files": u["files"],
                         "actions": u["actions"]})
         ext.sort(key=lambda u: (-u["files"], -u["actions"], u["user"]))
-        return ext, internal, excluded
+        return ext, internal, excluded, sorted(unclassified)
 
-    users, internal, excluded = split(rows)
+    users, internal, excluded, unclassified = split(rows)
     report = {"count": len(users), "non_scribie_count": len(users) + internal,
               "internal": internal, "users": users, "excluded_scribie": excluded,
+              "unclassified": len(unclassified), "unclassified_users": unclassified,
               "method": "Axiom userId joined to production users; exclude cohort=scribie or email @scribie.com independently."}
     if prior_rows is not None:
-        prior_users, prior_internal, _ = split(prior_rows)
+        prior_users, prior_internal, _, _ = split(prior_rows)
         report["prior_count"] = len(prior_users)
         report["prior_non_scribie_count"] = len(prior_users) + prior_internal
     return report
@@ -431,6 +435,17 @@ def build_active_users_report(rows: list[dict], prior_rows: list[dict] | None = 
 
 def _fmt(d: datetime) -> str:
     return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def print_ops_error(exc: BaseException) -> None:
+    # Only our own RuntimeError messages are safe to print: arbitrary exception
+    # strings can contain credentials or response bodies.
+    known = ("Axiom query token not found", "Axiom API returned HTTP 401",
+             "production users read failed", "production users read truncated",
+             "axiom_query_failed statuses=")
+    message = str(exc)
+    cause = f"{type(exc).__name__}: {message}" if type(exc) is RuntimeError and message.startswith(known) else type(exc).__name__
+    print(json.dumps({"ops_error": f"heartbeat Axiom UNAVAILABLE: {cause}"}))
 
 
 def main() -> int:
@@ -456,7 +471,7 @@ def main() -> int:
                     raise RuntimeError(f"axiom_query_failed statuses={sorted(set(AXIOM_QUERY_FAILED))}")
                 report = build_active_users_report(current_rows, previous_rows, load_prod_users())
             except Exception as exc:
-                print(json.dumps({"ops_error": f"active users UNAVAILABLE: {exc}"}))
+                print_ops_error(exc)
                 return 1
         else:
             # Probe before fanning out the comparison queries. In particular, a 430
@@ -486,5 +501,18 @@ def main() -> int:
     return 1 if AXIOM_QUERY_FAILED else 0
 
 
+def cli() -> int:
+    try:
+        return main()
+    except SystemExit as exc:
+        rc = exc.code if isinstance(exc.code, int) else 1
+        if rc:
+            print_ops_error(exc)
+        return rc
+    except Exception as exc:
+        print_ops_error(exc)
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli())

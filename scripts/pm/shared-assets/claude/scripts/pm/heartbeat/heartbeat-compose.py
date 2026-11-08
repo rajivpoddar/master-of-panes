@@ -166,10 +166,12 @@ def active_users_block(active: dict | None, window_label: str) -> tuple[list[str
     if "excluded_scribie" in active:
         head += f"; {active['excluded_scribie']} Scribie excluded"
         head += f" — {active.get('method', '')}"
+    if active.get("unclassified"):
+        head += f"; unclassified {active['unclassified']} ({', '.join(active.get('unclassified_users', []))})"
     users = active.get("users", [])
     if not users:
         total = non_scribie_count if non_scribie_count is not None else count
-        suffix = " — quiet" if total == 0 else ""
+        suffix = " — quiet" if total == 0 and not active.get("unclassified") else ""
         label = "non-Scribie active users" if non_scribie_count is not None else "active users"
         return [head + suffix], f"{total} {label}"
     shown = [f"{u['user']} ({u['files']}f)" for u in users[:MAX_USERS * 2]]
