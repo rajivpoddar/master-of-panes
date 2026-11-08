@@ -30,6 +30,8 @@ import shlex
 import sqlite3
 import subprocess
 import sys
+import threading
+from itertools import islice
 from time import monotonic
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -45,7 +47,7 @@ COLLECTOR_TIMEOUTS = {
     "axiom": 30, "active-users": 10, "error-map": 8, "support": 15,
     "pr-open-snapshot": 12, "priority-inversion": 63,
     "pending-github": 63, "remote-boxes": 8, "training": 6,
-    "usage": 12, "email": 12,
+    "usage": 12, "email": 12, "proxies": 1,
 }
 COMPOSE_COLLECTOR_BUDGET = sum(COLLECTOR_TIMEOUTS.values())
 assert COMPOSE_COLLECTOR_BUDGET <= 240
@@ -1013,7 +1015,9 @@ def _elapsed_minutes(value: str) -> int:
 def proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completions: list[dict]) -> dict:
     """Read-only best-effort view; never inspect environment or runner files."""
     processes = {}
-    for line in ps_text.splitlines():
+    ps_lines = ps_text.splitlines()
+    truncated = len(ps_lines) > 2000
+    for line in islice(ps_lines, 2000):
         match = re.match(r'^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$', line)
         if match:
             pid, ppid, age, command = match.groups()
@@ -1097,33 +1101,52 @@ def proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completions: lis
             stale = (idle is not None and idle >= 20) or (turns is not None and age_min > 4 * int(turns.group(1)))
             rows.append({'name': name, 'agent': agent, 'model': model.group(1) if model else 'unknown',
                          'age': age_min, 'idle': idle, 'state': 'STALE' if stale else 'running'})
-    return {'rows': rows, 'completions': completions}
+    return {'rows': rows, 'completions': completions, 'truncated': truncated}
 
 
-def read_proxies(now: datetime) -> dict | None:
+def _read_proxies(now: datetime) -> dict | None:
     try:
         tmux = subprocess.run(['tmux', 'list-panes', '-a', '-F', '#{session_name}\t#{window_name}\t#{pane_pid}\t#{pane_dead}'], capture_output=True, text=True, timeout=5, check=True).stdout
         ps = subprocess.run(['ps', '-ww', '-axo', 'pid,ppid,etime,command'], capture_output=True, text=True, timeout=5, check=True).stdout
         db = Path.home() / '.local/share/master-of-panes/data/mop.db'
         with closing(sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=3)) as conn:
-            entries = conn.execute("SELECT payload FROM events WHERE event_type='send_command' AND timestamp >= ? ORDER BY id DESC", ((now - timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%S'),)).fetchall()
+            entries = conn.execute("SELECT payload FROM events WHERE event_type='send_command' AND timestamp >= ? AND payload LIKE '%PROXY_STOP%' ORDER BY id DESC LIMIT 200", ((now - timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%S'),)).fetchall()
         completed = []
         for (payload,) in entries:
             command = json.loads(payload).get('command', '')
             match = re.match(r'PROXY_STOP name=(\S+) rc=(\S+)\s', command)
             if match:
                 completed.append({'name': match.group(1), 'rc': match.group(2), 'result': 'unknown'})
-        return proxy_snapshot(tmux, ps, now, completed)
+        snapshot = proxy_snapshot(tmux, ps, now, completed)
+        snapshot['truncated'] = snapshot['truncated'] or len(entries) == 200
+        return snapshot
     except (OSError, subprocess.SubprocessError, sqlite3.Error, ValueError):
         return None
+
+
+def read_proxies(now: datetime) -> dict | None:
+    # The entire operation is bounded, including SQLite and snapshot parsing.
+    # A daemon cannot hold the composer open if an OS call stalls.
+    result = []
+    def collect():
+        result.append(_read_proxies(now))
+    worker = threading.Thread(target=collect, daemon=True)
+    worker.start()
+    worker.join(COLLECTOR_TIMEOUTS['proxies'])
+    if worker.is_alive():
+        return {'budget_exhausted': True}
+    return result[0] if result else None
 
 
 def proxies_block(doc: dict | None) -> list[str]:
     if doc is None:
         return ['*Proxies:* unavailable']
+    if doc.get('budget_exhausted'):
+        return ['*Proxies:* unavailable (collector budget)']
     completed = doc['completions']
     failed = sum(c['rc'] != '0' for c in completed)
-    lines = [f"*Proxies:* {len(completed)} finished last hour (best effort; {failed} rc≠0, RESULT unknown for truncated records)"]
+    suffix = '; truncated' if doc.get('truncated') else ''
+    lines = [f"*Proxies:* {len(completed)} finished last hour (best effort; {failed} rc≠0, RESULT unknown for truncated records{suffix})"]
     rows = []
     for row in doc['rows']:
         if 'age' not in row:

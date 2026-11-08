@@ -26,3 +26,31 @@ def test_proxy_tmux_ps_fixture(tmp_path):
     assert doc['rows'][2]['model'] == 'terra'
     rendered = '\n'.join(module.proxies_block(doc))
     assert 'best effort' in rendered and 'proxy-failed' in rendered and 'rc=1' in rendered
+
+
+def test_proxy_collector_budget_bounds_slow_ps_and_sqlite(monkeypatch):
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    now = datetime(2026, 11, 8, tzinfo=timezone.utc)
+    monkeypatch.setitem(module.COLLECTOR_TIMEOUTS, 'proxies', 0.05)
+    for slow in ('ps', 'sqlite'):
+        release = threading.Event()
+        def run(args, _slow=slow, _release=release, **kwargs):
+            if _slow == 'ps' and args[0] == 'ps':
+                _release.wait(2)
+            return SimpleNamespace(stdout='')
+        def connect(*args, _slow=slow, _release=release, **kwargs):
+            if _slow == 'sqlite':
+                _release.wait(2)
+            raise module.sqlite3.OperationalError('stubbed')
+        monkeypatch.setattr(module.subprocess, 'run', run)
+        monkeypatch.setattr(module.sqlite3, 'connect', connect)
+        start = time.monotonic()
+        try:
+            doc = module.read_proxies(now)
+            assert time.monotonic() - start < 0.5
+            assert module.proxies_block(doc) == ['*Proxies:* unavailable (collector budget)']
+        finally:
+            release.set()
