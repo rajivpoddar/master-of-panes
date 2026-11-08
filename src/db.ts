@@ -645,6 +645,16 @@ export class MoPDatabase {
       CREATE INDEX IF NOT EXISTS idx_pm_send_custody_updated ON pm_send_custody(updated_at);
     `);
 
+    // Pre-assignment `status:` label per issue, written when an assignment strips it and
+    // consumed when the claim is released (issueProjection release target). Additive table.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS issue_prior_status (
+        issue INTEGER PRIMARY KEY,
+        status TEXT NOT NULL,
+        recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+      );
+    `);
+
     // Migration: persist the displaced prior lane on the intent so a resume
     // that completes delivery can unwind its labels (assign-effect label
     // projection). NULL means no displacement was recorded.
@@ -2582,6 +2592,27 @@ export class MoPDatabase {
         value = excluded.value,
         updated_at = excluded.updated_at
     `).run(key, value);
+  }
+
+  getIssuePriorStatus(issue: number): string | null {
+    const row = this.db
+      .prepare("SELECT status FROM issue_prior_status WHERE issue = ?")
+      .get(issue) as { status: string } | undefined;
+    return row?.status ?? null;
+  }
+
+  setIssuePriorStatus(issue: number, status: string | null): void {
+    if (status === null) {
+      this.db.prepare("DELETE FROM issue_prior_status WHERE issue = ?").run(issue);
+      return;
+    }
+    this.db.prepare(`
+      INSERT INTO issue_prior_status (issue, status, recorded_at)
+      VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+      ON CONFLICT(issue) DO UPDATE SET
+        status = excluded.status,
+        recorded_at = excluded.recorded_at
+    `).run(issue, status);
   }
 
   // ─── Exit Pending ──────────────────────────────────────

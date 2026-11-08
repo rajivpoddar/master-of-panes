@@ -118,16 +118,79 @@ export interface GhRunner {
   (args: string[]): Promise<string>;
 }
 
+/**
+ * Durable record, per issue, of the `status:` label the issue carried before the
+ * assignment stripped it. Written at assign, consumed at release, so a released
+ * issue returns to its real lifecycle instead of being reset to `status:todo`.
+ * `null` clears the record (unknown or consumed).
+ */
+export interface IssuePriorStatusStore {
+  get(issue: number): string | null;
+  set(issue: number, status: string | null): void;
+}
+
+function memoryPriorStatusStore(): IssuePriorStatusStore {
+  const map = new Map<number, string>();
+  return {
+    get: (issue) => map.get(issue) ?? null,
+    set: (issue, status) => {
+      if (status === null) map.delete(issue);
+      else map.set(issue, status);
+    },
+  };
+}
+
 export interface IssueProjectionOptions {
   runGh?: GhRunner;
   repository?: string;
   legacyRepositoryIds?: string[];
   timeoutMs?: number;
+  /** Durable pre-assignment status store; defaults to an in-process map (tests). */
+  priorStatus?: IssuePriorStatusStore;
 }
 
 interface IssueSnapshot {
   state: string;
   labels: string[];
+  body: string;
+  /** Count of PRs that carry a closing reference to this issue (see readIssue). */
+  linkedPullRequests: number;
+}
+
+/** Statuses a release may restore from the prior-status record. `in-review` needs a live PR and is never restored. */
+const RESTORABLE_PRIOR_STATUSES = new Set(["status:todo", "status:blocked", "status:backlog", "status:deferred"]);
+
+/**
+ * Rule 54 status implied by the live ready-pool header: a hold other than
+ * `dependency` means `blocked` (dependency-only waits may stay `todo`). Returns
+ * null when the header implies nothing, leaving the caller's default in place.
+ */
+export function statusFromReadyPoolHeader(body: string): string | null {
+  const header = /<!--\s*ready-pool:([\s\S]*?)-->/.exec(body);
+  const holds = header ? /^\s*holds:\s*(.*)$/m.exec(header[1]) : null;
+  if (!holds) return null;
+  const nonDependency = holds[1]
+    .split(",")
+    .map((hold) => hold.trim())
+    .filter((hold) => hold.length > 0 && hold !== "none" && hold !== "dependency");
+  return nonDependency.length > 0 ? "status:blocked" : null;
+}
+
+/**
+ * Status a released issue returns to. An open PR that closes the issue wins
+ * (`in-review`); otherwise an independently projected lifecycle is kept, then
+ * the recorded pre-assignment status, then the live header, then `todo`.
+ */
+export function releaseTargetStatus(
+  snapshot: Pick<IssueSnapshot, "state" | "body" | "linkedPullRequests">,
+  otherStatus: string | null,
+  recorded: string | null,
+): string {
+  if (snapshot.state !== "OPEN") return otherStatus ?? "status:done";
+  if (snapshot.linkedPullRequests > 0) return "status:in-review";
+  if (otherStatus) return otherStatus;
+  if (recorded && RESTORABLE_PRIOR_STATUSES.has(recorded)) return recorded;
+  return statusFromReadyPoolHeader(snapshot.body) ?? "status:todo";
 }
 
 const SUB_STATUS_BY_STATUS: Record<string, string[]> = {
@@ -156,6 +219,7 @@ export function createGhIssueOwnershipProjection(
 ): IssueOwnershipProjection {
   const runGh = options.runGh ?? defaultRunGh(options.timeoutMs ?? 20_000);
   const repository = options.repository ?? configuredProjectionRepository();
+  const priorStatus = options.priorStatus ?? memoryPriorStatusStore();
   const legacyIds = new Set([
     process.env.MOP_LEGACY_REPOSITORY_ID ?? DEFAULT_LEGACY_REPOSITORY_ID,
     ...(options.legacyRepositoryIds ?? []),
@@ -181,17 +245,28 @@ export function createGhIssueOwnershipProjection(
   }
 
   async function readIssue(issue: number): Promise<IssueSnapshot> {
+    // One read: `closedByPullRequestsReferences` lists PRs whose closing keyword
+    // targets this issue. It carries no PR state, so an open-PR check is
+    // approximated by any closing reference (a merged PR on an open issue is an
+    // anomaly that resolves to `in-review`, which is never assignable).
     const stdout = await runGh([
       "issue", "view", String(issue),
       "--repo", repository,
-      "--json", "state,labels",
+      "--json", "state,labels,body,closedByPullRequestsReferences",
     ]);
-    const parsed = JSON.parse(stdout) as { state?: string; labels?: Array<{ name?: string }> };
+    const parsed = JSON.parse(stdout) as {
+      state?: string;
+      labels?: Array<{ name?: string }>;
+      body?: string;
+      closedByPullRequestsReferences?: unknown[];
+    };
     return {
       state: String(parsed.state ?? "").toUpperCase(),
       labels: (parsed.labels ?? [])
         .map((label) => String(label?.name ?? ""))
         .filter((name) => name.length > 0),
+      body: String(parsed.body ?? ""),
+      linkedPullRequests: (parsed.closedByPullRequestsReferences ?? []).length,
     };
   }
 
@@ -219,6 +294,16 @@ export function createGhIssueOwnershipProjection(
       applied.removed.push(label);
     }
     return true;
+  }
+
+  // A stale record is harmless (the next assign overwrites it), so a store error
+  // here must not turn a completed release into a thrown error.
+  function clearPriorStatus(issue: number): void {
+    try {
+      priorStatus.set(issue, null);
+    } catch {
+      // intentionally ignored; see above
+    }
   }
 
   function project(
@@ -265,6 +350,17 @@ export function createGhIssueOwnershipProjection(
     const add: string[] = [];
     const remove: string[] = [];
     if (mode === "assign") {
+      const priorStatuses = before.labels.filter(
+        (label) => label.startsWith("status:") && label !== "status:in-progress",
+      );
+      // Record what the stripped status was. A re-assign of a claimed issue (already
+      // in-progress, nothing to strip) keeps the record from the first claim.
+      try {
+        if (priorStatuses.length === 1) priorStatus.set(issue, priorStatuses[0]);
+        else if (priorStatuses.length > 1 || !before.labels.includes("status:in-progress")) priorStatus.set(issue, null);
+      } catch (error) {
+        return outcome("failed", reasonFor("issue_projection_prior_status_write_failed", error), repository, issue, slot);
+      }
       if (!before.labels.includes("status:in-progress")) {
         add.push("status:in-progress");
       }
@@ -290,28 +386,40 @@ export function createGhIssueOwnershipProjection(
       const otherLifecycle = before.labels.filter(
         (label) => label.startsWith("status:") && label !== "status:in-progress",
       );
-      // Preserve an independently projected lifecycle rather than reverting it to todo.
       // Multiple independent statuses have no safe precedence; refuse to guess.
       if (otherLifecycle.length > 1) {
         return outcome("failed", "issue_projection_ambiguous_status", repository, issue, slot);
       }
-      const targetStatus = otherLifecycle[0] ?? (before.state === "OPEN" ? "status:todo" : "status:done");
+      let recorded: string | null;
+      try {
+        recorded = priorStatus.get(issue);
+      } catch (error) {
+        return outcome("failed", reasonFor("issue_projection_prior_status_read_failed", error), repository, issue, slot);
+      }
+      // Never reset a released issue to todo by default: it returns to the status it had
+      // before the claim, or to in-review when a PR closes it (rule 54).
+      const targetStatus = releaseTargetStatus(before, otherLifecycle[0] ?? null, recorded);
       const compatibleSubs = before.labels.filter(
-        (label) => label.startsWith("sub:") && (SUB_STATUS_BY_STATUS[targetStatus ?? ""] ?? []).includes(label),
+        (label) => label.startsWith("sub:") && (SUB_STATUS_BY_STATUS[targetStatus] ?? []).includes(label),
       );
       if (compatibleSubs.length > 1) {
         return outcome("failed", "issue_projection_ambiguous_sub", repository, issue, slot);
       }
       if (before.labels.includes("status:in-progress")) remove.push("status:in-progress");
-      if (targetStatus && !before.labels.includes(targetStatus)) add.push(targetStatus);
+      // Exactly one status after release: an in-review PR link replaces any other lifecycle label.
+      for (const label of otherLifecycle) {
+        if (label !== targetStatus) remove.push(label);
+      }
+      if (!before.labels.includes(targetStatus)) add.push(targetStatus);
       for (const label of before.labels) {
-        if (label.startsWith("sub:") && !(SUB_STATUS_BY_STATUS[targetStatus ?? ""] ?? []).includes(label)) {
+        if (label.startsWith("sub:") && !(SUB_STATUS_BY_STATUS[targetStatus] ?? []).includes(label)) {
           remove.push(label);
         }
       }
     }
 
     if (add.length === 0 && remove.length === 0) {
+      if (mode === "release") clearPriorStatus(issue);
       return outcome("unchanged", null, repository, issue, slot, [], [], true);
     }
     try {
@@ -352,6 +460,7 @@ export function createGhIssueOwnershipProjection(
         remove,
       );
     }
+    if (mode === "release") clearPriorStatus(issue);
     return outcome("projected", null, repository, issue, slot, add, remove, true);
   }
 

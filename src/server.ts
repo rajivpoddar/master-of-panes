@@ -219,7 +219,12 @@ async function observeCheckout(checkoutPath: string): Promise<CheckoutReadOnlyOb
   }
 }
 
-const issueProjection = createGhIssueOwnershipProjection();
+const issueProjection = createGhIssueOwnershipProjection({
+  priorStatus: {
+    get: (issue) => db.getIssuePriorStatus(issue),
+    set: (issue, status) => db.setIssuePriorStatus(issue, status),
+  },
+});
 const nativeSlotRelease = new NativeSlotReleaseCoordinator({
   db,
   issueProjection,
