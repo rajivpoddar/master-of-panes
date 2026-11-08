@@ -64,6 +64,7 @@ For each error class listed:
 Never diagnose from the count alone.
 
 ## Step 2: Open PRs
+**[HIGH] The "*Hourly per-PR status*" alert is processed with `Skill(hourly-per-pr-processing)` the same turn it arrives** (Rajiv 2026-11-08, C0ALZJHGE49 thread 1794120614.633259, ts 1794121118.991139). That skill owns the per-PR dispositions below, using proxy agents for reworks; this section stays as the reference table.
 **Trend line (mandatory, Rajiv 2026-11-03 C0ALZJHGE49 ts 1793692399.637039: "trace the open pr count each in each hourly report"):** run `python3 ~/.claude/scripts/pm/open-pr-trend.py` and put its single output line FIRST in the hourly reply. It shows open non-draft vs the last hourly, opened/merged in the last 60 min and today, and the last-6 trend vs the 25 cap. If the count rose, name in one line which PRs were opened and why (P0 only while the freeze holds).
 **Then:** run `python3 ~/.claude/scripts/pm/dual-green-sweep.py` and list its new asks, follow-ups, and any errors in the hourly reply. The sweep sends exact-head asks and follows up in the original ask thread after 30 minutes; skipped E2E is manual only. Do not duplicate its asks or follow-ups. Rajiv, C0ALZJHGE49 thread 1793681148.228999, ts 1793683532.171189 and ts 1793683640.762909; no launchd schedule.
 
@@ -185,6 +186,14 @@ Rajiv 2026-10-23 (C0ALZJHGE49 thread 1792770386.754829, ts 1792770807.935489): *
 4. If a stopped agent owned unfinished work, record its last state on the owning pm-ops row (or create one) so the work is re-launched deliberately, never silently dropped.
 5. The Step 4 reply includes the line `Agents: N running · stopped K inactive (<description, idle Xm>…)`, or `none inactive`.
 The hourly heartbeat post carries the same count once the composer supports it (MoP change; until then the PM reply is the record).
+
+## Step 3c-2: Dead proxy windows (Rajiv 2026-11-08, C0ALZJHGE49 thread 1794120614.633259, ts 1794120794.458589)
+*"close the dead proxy windows. update hourly report processing skill to do it automatically?"*
+Each hourly, PM closes every proxy tmux window whose pane process has exited (`pane_dead=1`): `px-*` windows in session `0` and `proxy-*` windows in session `proxies`. A dead pane has no live process, so closing it loses nothing; the run's out/log/jsonl files and its PROXY_STOP message are the record.
+```bash
+for s in 0 proxies; do for w in $(tmux list-windows -t $s -F '#{window_id}:#{window_name}:#{pane_dead}' 2>/dev/null | awk -F: '($2 ~ /^px-|^proxy-/) && $3==1 {print $1}'); do tmux kill-window -t "$w"; done; done
+```
+Never close a window whose pane is alive (`pane_dead=0`), even when the heartbeat marks it STALE. A stale live proxy is triaged instead: read its feed, then steer it with SendMessage, or kill it and relaunch, recording the owner. The Step 4 reply includes `Proxy windows: closed N dead`.
 
 ## Step 3d: Social digest cycle receipts (CTO 2026-11-06, C0ALZJHGE49 thread 1793951140.445569, ts 1793954568.068649)
 Every scheduled `donna-daily-social-digest` cycle (IST 00:30, 03:30 … 21:30) posts a receipt in C0C7U35LBKR showing attempts / confirmed / UNKNOWN / reason, even when it sends 0. Each hourly, check the cycles due in the last 3h. If a cycle has no receipt 45 min after its slot, flag it `MISSING` in the Step 4 reply (or `UNKNOWN` if a partial receipt exists) and report it in the CP Repairs thread. Missing proof is not proof that the slot never ran, and it is never a replay trigger. Add no new timer or registry.
