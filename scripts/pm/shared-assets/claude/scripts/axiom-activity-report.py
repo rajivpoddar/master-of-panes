@@ -148,18 +148,20 @@ def run_apl_query(token: str, apl: str, start_time: str, end_time: str) -> dict:
             "  Set AXIOM_API_TOKEN to an API token with query access (not an ingest-only token).",
             file=sys.stderr,
         )
-        return {"matches": [], "buckets": {"series": [], "totals": []}}
+        return {"_unavailable": "http_403"}
 
     if status != 200:
-        print(f"Error: Axiom API returned {status}: {body}", file=sys.stderr)
-        return {"matches": [], "buckets": {"series": [], "totals": []}}
+        print(f"Error: Axiom API returned {status}", file=sys.stderr)
+        return {"_unavailable": f"http_{status}"}
 
     try:
         value = json.loads(body)
     except json.JSONDecodeError:
         print("Error: Axiom API returned invalid JSON", file=sys.stderr)
-        return {"matches": [], "buckets": {"series": [], "totals": []}}
-    return value if isinstance(value, dict) else {"matches": [], "buckets": {"series": [], "totals": []}}
+        return {"_unavailable": "invalid_json"}
+    if not isinstance(value, dict):
+        return {"_unavailable": "non_object"}
+    return value
 
 
 def format_number(n: int) -> str:
@@ -552,6 +554,8 @@ def query_soft_fail_counts(token: str, start_time: str, end_time: str) -> list[d
     )
     raw = run_apl_query(token, apl, start_time, end_time)
     counts = extract_aggregations(raw)
+    if raw.get("_unavailable"):
+        counts.append({"_selection_unavailable": raw["_unavailable"]})
     # These are evaluation events, including successful evaluations. Count only
     # explicit immediate escalations, which represent firewall refusals.
     evaluations = (
@@ -560,14 +564,31 @@ def query_soft_fail_counts(token: str, start_time: str, end_time: str) -> list[d
         "'hallucination_firewall_cand1', 'hallucination_firewall_cand2') "
         "| summarize count() by ['action'], ['meta']"
     )
-    rows = extract_aggregations(run_apl_query(token, evaluations, start_time, end_time))
+    result = run_apl_query(token, evaluations, start_time, end_time)
+    reason = result.get("_unavailable")
+    buckets = result.get("buckets")
+    if not reason and (not isinstance(buckets, dict) or not isinstance(buckets.get("totals"), list)):
+        reason = "invalid_evaluation_response"
     fires = {"hallucination_firewall_cand1": 0, "hallucination_firewall_cand2": 0}
-    for row in rows:
-        if _parse_meta(row.get("meta")).get("immediate_escalate") is True:
-            action = row.get("action")
-            key = "hallucination_firewall_cand2" if action == "hallucination_firewall_cand2" else "hallucination_firewall_cand1"
-            fires[key] += int(row.get("count_", 0))
-    counts.extend({"action": action, "count_": count} for action, count in fires.items())
+    if not reason:
+        try:
+            rows = extract_aggregations(result)
+            for row in rows:
+                meta = _parse_meta(row.get("meta"))
+                if not isinstance(meta.get("immediate_escalate"), bool):
+                    reason = "invalid_evaluation_metadata"
+                    break
+                count = int(row["count_"])
+                if meta["immediate_escalate"]:
+                    action = row.get("action")
+                    key = "hallucination_firewall_cand2" if action == "hallucination_firewall_cand2" else "hallucination_firewall_cand1"
+                    fires[key] += count
+        except (TypeError, ValueError, KeyError, AttributeError):
+            reason = "invalid_evaluation_response"
+    if reason:
+        counts.append({"_evaluation_unavailable": reason})
+    else:
+        counts.extend({"action": action, "count_": count} for action, count in fires.items())
     return counts
 
 
@@ -680,6 +701,8 @@ def build_soft_fail_report(counts: list[dict], total_runs: int, convex_proceedin
     `trigger_source_breakdown` is the #6249 per-source run count (from
     query_auto_process_by_trigger_source), added to the returned dict when present.
     """
+    evaluation_error = next((row["_evaluation_unavailable"] for row in counts if "_evaluation_unavailable" in row), None)
+    selection_error = next((row["_selection_unavailable"] for row in counts if "_selection_unavailable" in row), None)
     by_action = {row.get("action", ""): int(row.get("count_", 0)) for row in counts}
 
     def get(*keys: str) -> int:
@@ -694,13 +717,18 @@ def build_soft_fail_report(counts: list[dict], total_runs: int, convex_proceedin
         "total_auto_process_runs": total_runs,
         "categories": {
             "hallucination_firewall": {
-                "total": get("hallucination_firewall_cand1", "hallucination_firewall_cand2"),
-                "rate": rate(get("hallucination_firewall_cand1", "hallucination_firewall_cand2")),
+                "status": "partial" if evaluation_error or selection_error else "complete",
+                "evaluation_status": "unavailable" if evaluation_error else "complete",
+                "evaluation_error": evaluation_error,
+                "selection_status": "unavailable" if selection_error else "complete",
+                "selection_error": selection_error,
+                "total": None if evaluation_error else get("hallucination_firewall_cand1", "hallucination_firewall_cand2"),
+                "rate": None if evaluation_error else rate(get("hallucination_firewall_cand1", "hallucination_firewall_cand2")),
                 "breakdown": {
-                    "cand1_fires": by_action.get("hallucination_firewall_cand1", 0),
-                    "cand2_fires": by_action.get("hallucination_firewall_cand2", 0),
-                    "selected_chunks": by_action.get("hallucination_firewall", 0),
-                    "errors": by_action.get("hallucination_firewall_error", 0),
+                    "cand1_fires": None if evaluation_error else by_action.get("hallucination_firewall_cand1", 0),
+                    "cand2_fires": None if evaluation_error else by_action.get("hallucination_firewall_cand2", 0),
+                    "selected_chunks": None if selection_error else by_action.get("hallucination_firewall", 0),
+                    "errors": None if selection_error else by_action.get("hallucination_firewall_error", 0),
                 },
             },
             "format_validator": {
@@ -746,7 +774,7 @@ def build_soft_fail_report(counts: list[dict], total_runs: int, convex_proceedin
             },
         },
         "rates_vs_auto_process": {
-            "firewall_rate": rate(get("hallucination_firewall_cand1", "hallucination_firewall_cand2")),
+            "firewall_rate": None if evaluation_error else rate(get("hallucination_firewall_cand1", "hallucination_firewall_cand2")),
             "format_validator_rollback_rate": rate(by_action.get("format_validator_rollback_in_docx", 0)),
             "speaker_correction_reject_rate": rate(get("speaker_correction_ratio_rejected",
                                                         "speaker_correction_ratio_rejected_step",
@@ -782,10 +810,17 @@ def print_soft_fail_report(report: dict):
     print()
 
     fw = cats.get("hallucination_firewall", {})
-    print(f"  Hallucination Firewall: {format_number(fw.get('total', 0))} fires ({rates.get('firewall_rate', 'n/a')} of runs)")
+    total_fw = fw.get("total")
+    if total_fw is None:
+        print(f"  Hallucination Firewall: evaluation unavailable ({fw.get('evaluation_error', 'unknown')}); totals and rates suppressed")
+    else:
+        print(f"  Hallucination Firewall: {format_number(total_fw)} fires ({rates.get('firewall_rate', 'n/a')} of runs)")
     bd = fw.get("breakdown", {})
-    print(f"    cand1: {bd.get('cand1_fires', 0)}  cand2: {bd.get('cand2_fires', 0)}  "
-          f"selected chunks: {bd.get('selected_chunks', 0)}  errors: {bd.get('errors', 0)}")
+    show = lambda value: "unavailable" if value is None else str(value)
+    print(f"    cand1: {show(bd.get('cand1_fires'))}  cand2: {show(bd.get('cand2_fires'))}  "
+          f"selected chunks: {show(bd.get('selected_chunks'))}  errors: {show(bd.get('errors'))}")
+    if fw.get("selection_error"):
+        print(f"    selection data unavailable ({fw['selection_error']})")
     print()
 
     fv = cats.get("format_validator", {})
