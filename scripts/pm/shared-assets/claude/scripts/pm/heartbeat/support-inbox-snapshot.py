@@ -250,6 +250,30 @@ def slack_get(token: str, method: str, params: dict) -> dict:
     raise RuntimeError(f"slack {method}: ratelimited")
 
 
+def slack_pages(token: str, method: str, params: dict):
+    """Yield complete pages; never treat an unconsumed cursor as complete."""
+    params = dict(params)
+    seen = set()
+    while True:
+        page = slack_get(token, method, params)
+        yield page.get("messages", [])
+        cursor = (page.get("response_metadata") or {}).get("next_cursor", "")
+        if not cursor:
+            if page.get("has_more"):
+                raise RuntimeError(f"slack {method}: more results without cursor")
+            return
+        if cursor in seen:
+            raise RuntimeError(f"slack {method}: repeated cursor")
+        seen.add(cursor)
+        params["cursor"] = cursor
+
+
+class PartialChannel(Exception):
+    def __init__(self, message: str, threads: list[dict]):
+        super().__init__(message)
+        self.threads = threads
+
+
 def parent_thread_ts(msg: dict) -> str | None:
     """Pure: parent root ts when msg is a thread reply (incl. a reply broadcast to the channel)."""
     t = msg.get("thread_ts")
@@ -257,41 +281,42 @@ def parent_thread_ts(msg: dict) -> str | None:
 
 
 def fetch_thread(token: str, channel: str, ts: str, now_ts: float) -> dict | None:
-    replies = slack_get(token, "conversations.replies", {"channel": channel, "ts": ts, "limit": 200})
-    parent = parent_thread_ts(replies.get("messages", [{}])[0])
+    messages = [m for page in slack_pages(token, "conversations.replies", {"channel": channel, "ts": ts, "limit": 100}) for m in page]
+    parent = parent_thread_ts(messages[0]) if messages else None
     if parent:
-        replies = slack_get(token, "conversations.replies", {"channel": channel, "ts": parent, "limit": 200})
-    item = classify_thread(replies.get("messages", []), now_ts)
+        messages = [m for page in slack_pages(token, "conversations.replies", {"channel": channel, "ts": parent, "limit": 100}) for m in page]
+    item = classify_thread(messages, now_ts)
     if item:
         item["channel"] = CHANNELS.get(channel, channel)
     return item
 
 
 def fetch_channel(token: str, channel: str, oldest: float, now_ts: float) -> list[dict]:
-    hist = slack_get(token, "conversations.history", {"channel": channel, "oldest": f"{oldest:.6f}", "limit": 200})
     out = []
     seen_roots: set[str] = set()
-    for root in hist.get("messages", []):
-        # A reply broadcast to the channel shows up in history as its own message; judge the
-        # whole thread via its parent, never the reply alone (it would look unanswered).
-        parent = parent_thread_ts(root)
-        if parent:
-            if parent in seen_roots:
-                continue
-            seen_roots.add(parent)
-            root = slack_get(token, "conversations.replies", {"channel": channel, "ts": parent, "limit": 1})["messages"][0]
-        seen_roots.add(root["ts"])
-        # Internal/bot roots cannot be support threads; avoid fetching all their replies.
-        if not is_human(root) or (is_team(root) and root.get("user") != "U09L1CTGP9T"):
-            continue
-        messages = [root]
-        if root.get("reply_count"):
-            replies = slack_get(token, "conversations.replies", {"channel": channel, "ts": root["ts"], "limit": 200})
-            messages = replies.get("messages", [root])
-        item = classify_thread(messages, now_ts)
-        if item:
-            item["channel"] = CHANNELS.get(channel, channel)
-            out.append(item)
+    try:
+        pages = slack_pages(token, "conversations.history", {"channel": channel, "oldest": f"{oldest:.6f}", "limit": 100})
+        for page in pages:
+            for root in page:
+                parent = parent_thread_ts(root)
+                ts = parent or root["ts"]
+                if ts in seen_roots:
+                    continue
+                seen_roots.add(ts)
+                if parent:
+                    item = fetch_thread(token, channel, parent, now_ts)
+                elif not is_human(root) or (is_team(root) and root.get("user") != "U09L1CTGP9T"):
+                    continue
+                elif root.get("reply_count"):
+                    item = fetch_thread(token, channel, ts, now_ts)
+                else:
+                    item = classify_thread([root], now_ts)
+                    if item:
+                        item["channel"] = CHANNELS.get(channel, channel)
+                if item:
+                    out.append(item)
+    except Exception as exc:
+        raise PartialChannel(str(exc), out) from exc
     return out
 
 
@@ -395,7 +420,10 @@ def carry_forward(threads: list[dict], prev_tracked, fetch_thread, *, deadline: 
             # unavailable because a partial set cannot support an unanswered count.
             next_cursor = pending.index(ts) % total
             return out, next_cursor
-        item = fetch_thread(ts)
+        try:
+            item = fetch_thread(ts)
+        except Exception as exc:
+            raise PartialChannel(str(exc), out) from exc
         if item:
             out.append(item)
     return out, next_cursor
@@ -490,6 +518,7 @@ def main() -> int:
         for channel in CHANNELS:
             try:
                 threads = fetch_channel(token, channel, now_ts - args.lookback_hours * 3600, now_ts)
+                pending_count = len(set(prev_state.get(channel, {})) - {t['ts'] for t in threads})
                 threads, next_cursor = carry_forward(
                     threads, prev_state.get(channel, []),
                     lambda ts, ch=channel: fetch_thread(token, ch, ts, now_ts),
@@ -497,13 +526,14 @@ def main() -> int:
                     cursor=load_carry_cursor(channel),
                 )
                 save_carry_cursor(channel, next_cursor)
-                if time.monotonic() >= deadline:
-                    # Keep the old tracked state and report unavailable; a partial
-                    # channel snapshot cannot support a trustworthy unanswered count.
-                    result["failures"].append(f"{CHANNELS[channel]}: support collector deadline exceeded; results incomplete")
-                    continue
+                if time.monotonic() >= deadline or pending_count > MAX_CARRY_FORWARD:
+                    result["failures"].append(f"{CHANNELS[channel]}: partial; tracked threads not fully refreshed")
                 new_state[channel] = tracked_roots(threads, now_ts, prev_state.get(channel) or {})
                 result["slack"].extend(select_items(threads, window_start))
+            except PartialChannel as exc:
+                new_state[channel] = tracked_roots(exc.threads, now_ts, prev_state.get(channel) or {})
+                result["slack"].extend(select_items(exc.threads, window_start))
+                result["failures"].append(f"{CHANNELS[channel]}: partial; {exc}")
             except Exception as exc:  # noqa: BLE001
                 # Keep the previous open set for this channel so nothing is dropped.
                 result["failures"].append(f"{CHANNELS[channel]}: {exc}")

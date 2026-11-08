@@ -308,9 +308,9 @@ def load_prod_users() -> dict[str, dict]:
 
 
 def scribie_user(user: dict) -> bool:
-    if 'cohort' in user:
-        return user['cohort'] == 'scribie'
-    return str(user.get('email') or '').strip().lower().endswith('@scribie.com')
+    # Cohort and email are independent exclusion criteria; email is not cohort.
+    return (user.get('cohort') == 'scribie' or
+            str(user.get('email') or '').strip().lower().endswith('@scribie.com'))
 
 
 INTERNAL_LOCAL_PREFIXES = ("e2e-", "e2e+", "e2e.", "qa-", "qa+", "playwright", "test+", "test-")
@@ -406,6 +406,8 @@ def build_active_users_report(rows: list[dict], prior_rows: list[dict] | None = 
                 if scribie_user(db_users[uid]):
                     excluded += 1
                     continue
+                if not str(db_users[uid].get('email') or '').strip():
+                    raise RuntimeError("active user missing production email; exclusion unknown")
             email = _display_email(u["emails"])
             if is_internal_identity(uid, email):
                 internal += 1
@@ -418,7 +420,7 @@ def build_active_users_report(rows: list[dict], prior_rows: list[dict] | None = 
     users, internal, excluded = split(rows)
     report = {"count": len(users), "non_scribie_count": len(users) + internal,
               "internal": internal, "users": users, "excluded_scribie": excluded,
-              "method": "Axiom userId joined to production users; exclude cohort=scribie, fallback to @scribie.com only when cohort is missing."}
+              "method": "Axiom userId joined to production users; exclude cohort=scribie or email @scribie.com independently."}
     if prior_rows is not None:
         prior_users, prior_internal, _ = split(prior_rows)
         report["prior_count"] = len(prior_users)

@@ -101,17 +101,21 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
 def support_block(support: dict | None, window_label: str) -> tuple[list[str], str]:
     if support is None:
         return [f"*Support ({window_label}):* unavailable"], "support unavailable"
-    if support.get("failures"):
-        return [f"*Support ({window_label}):* UNAVAILABLE ({'; '.join(support['failures'])})"], "support unavailable"
+    failures = support.get("failures") or []
     threshold = support.get("threshold_min", 60)
     slack = support.get("slack", [])
     in_app = support.get("in_app", [])
+    if failures and not slack and not in_app:
+        return [f"*Support ({window_label}):* UNAVAILABLE ({'; '.join(failures)})"], "support unavailable"
     if not slack and not in_app:
         return [f"*Support ({window_label}):* quiet"], "support quiet"
     needs = [t for t in slack if t["state"] == "needs_reply"]
     answered = [t for t in slack if t["state"] == "answered"]
     requester_resolved = any(t.get("answered_by") is None for t in answered)
-    lines = [f"*Support ({window_label}):* {len(slack)} Slack thread(s), {len(in_app)} in-app"]
+    prefix = "PARTIAL — " if failures else ""
+    lines = [f"*Support ({window_label}):* {prefix}{len(slack)} Slack thread(s), {len(in_app)} in-app"]
+    if failures:
+        lines.append(f"• Incomplete: {'; '.join(failures)}")
     for t in sorted(needs, key=lambda t: -t["age_min"])[:MAX_SUPPORT]:
         flag = " ⚠" if t["age_min"] >= threshold else ""
         link = f" — linked #{t['links'][0]}" if t.get("links") else ""
@@ -136,7 +140,7 @@ def support_block(support: dict | None, window_label: str) -> tuple[list[str], s
         tldr = "support answered/resolved" if any(t.get("answered_by") for t in answered) else "support resolved"
     if overdue:
         tldr += f" ({len(overdue)} overdue, oldest {max(t['age_min'] for t in overdue)}m)"
-    return lines, tldr
+    return lines, (f"partial: {tldr}" if failures else tldr)
 
 
 MAX_USERS = 6

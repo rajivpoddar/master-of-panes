@@ -204,6 +204,21 @@ def test_support_deadline_and_failure_are_visible(monkeypatch):
     assert status == "support unavailable"
 
 
+def test_support_paginates_and_keeps_partial_results(monkeypatch):
+    calls = []
+    def get(token, method, params):
+        calls.append(dict(params))
+        if params.get('cursor'):
+            raise TimeoutError('timed out')
+        return {'messages': [_m(CUST, 1000)], 'response_metadata': {'next_cursor': 'next'}}
+    monkeypatch.setattr(support, 'slack_get', get)
+    with pytest.raises(support.PartialChannel) as error:
+        support.fetch_channel('token', 'C0A56RX6FNW', 0, 1300)
+    assert len(error.value.threads) == 1 and calls[1]['cursor'] == 'next'
+    lines, summary = compose.support_block({'failures': [str(error.value)], 'slack': error.value.threads}, '3h')
+    assert 'PARTIAL' in lines[0] and 'partial' in summary
+
+
 def test_fetch_channel_skips_replies_for_internal_roots(monkeypatch):
     calls = []
     roots = [dict(_m("U0BNFGX2UAX", 1000), reply_count=3),
@@ -475,7 +490,7 @@ def test_active_users_report_groups_by_userid_and_splits_internal():
         {"userId": "unknown", "emails": ["cron"], "actions": 9, "files": 0},
     ]
     prior = [{"userId": "user_A", "emails": ["b***@gmail.com"], "actions": 1, "files": 1}]
-    db = {f"user_{letter}": {"cohort": "organic"} for letter in "ABCD"}
+    db = {f"user_{letter}": {"cohort": "organic", "email": "person@other.com"} for letter in "ABCD"}
     db["user_C"] = {"cohort": "scribie"}
     r = axiom.build_active_users_report(rows, prior, db)
     assert r["count"] == 2 and r["non_scribie_count"] == 3
@@ -484,20 +499,22 @@ def test_active_users_report_groups_by_userid_and_splits_internal():
     assert [u["user"] for u in r["users"]] == ["bo***@law.com", "b**in**i@gmail.com"]
 
 
-def test_active_users_cohort_authoritative_and_missing_fallback():
+def test_active_users_excludes_cohort_and_domain_independently():
     rows = [{"userId": f"user_{x}", "emails": ["person@scribie.com"], "actions": 1} for x in "ABCD"]
     db = {"user_A": {"cohort": "scribie", "email": "person@other.com"},
           "user_B": {"cohort": "organic", "email": "person@scribie.com"},
           "user_C": {"email": "person@scribie.com"},
           "user_D": {"cohort": "organic", "email": "person@other.com"}}
     result = axiom.build_active_users_report(rows, rows, db)
-    assert result["count"] == 2 and result["non_scribie_count"] == 2
-    assert result["prior_count"] == 2 and result["prior_non_scribie_count"] == 2
-    assert result["excluded_scribie"] == 2 and "cohort" in result["method"]
+    assert result["count"] == 1 and result["non_scribie_count"] == 1
+    assert result["prior_count"] == 1 and result["prior_non_scribie_count"] == 1
+    assert result["excluded_scribie"] == 3 and "cohort" in result["method"]
     line = compose.active_users_block(result, "1h")[0][0]
-    assert "2 non-Scribie" in line and "2 Scribie excluded" in line and "fallback" in line
+    assert "1 non-Scribie" in line and "3 Scribie excluded" in line and "independently" in line
     with pytest.raises(RuntimeError, match="missing"):
         axiom.build_active_users_report(rows, None, {})
+    with pytest.raises(RuntimeError, match="exclusion unknown"):
+        axiom.build_active_users_report([rows[0]], None, {"user_A": {"cohort": "organic"}})
 
 
 def test_internal_matching_survives_masking():
