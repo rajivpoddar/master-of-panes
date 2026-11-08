@@ -11,6 +11,7 @@ import {
   driveYskNotice,
   normalizeYskNote,
   parseYskCapture,
+  yskActivityRefusal,
   yskNoteHash,
   type YskDriveDeps,
   type YskDriveResult,
@@ -173,14 +174,49 @@ test("learn more then chat quotes the note, then the exact suffix is submitted o
   assert.deepEqual(box.keys, ["1", "2", YSK_NOTICE_PROCESS_SUFFIX]);
 });
 
-test("an unreadable composer or a busy pane sends nothing", async () => {
+test("an unreadable composer or unknown pane activity sends nothing", async () => {
   const unreadable = harness(async () => "plain shell $ ");
   assert.equal((await driveYskNotice(unreadable.deps)).reason, "composer_unreadable");
   assert.deepEqual(unreadable.keys, []);
-  const busy = harness(async () => top(), async () => ({ ok: false, reason: "pm_busy" }));
-  assert.equal((await driveYskNotice(busy.deps)).reason, "pm_busy");
-  assert.deepEqual(busy.keys, []);
-  assert.equal(busy.rows.size, 0);
+  assert.equal(yskActivityRefusal("unknown"), "pm_activity_unknown");
+  assert.equal(yskActivityRefusal("idle"), null);
+  assert.equal(yskActivityRefusal("active"), null);
+  const unknown = harness(async () => top(), async () => ({ ok: false, reason: "pm_activity_unknown" }));
+  assert.equal((await driveYskNotice(unknown.deps)).reason, "pm_activity_unknown");
+  assert.deepEqual(unknown.keys, []);
+  assert.equal(unknown.rows.size, 0);
+});
+
+test("a running turn with an empty composer still submits the notice once", async () => {
+  assert.equal(yskActivityRefusal("active"), null);
+  let phase: "top" | "sub" | "quote" | "suffixed" | "done" = "top";
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    if (phase === "quote") return pane(["quoted into the prompt"], NOTE);
+    if (phase === "suffixed") return pane(["quoted into the prompt"], NOTE + YSK_NOTICE_PROCESS_SUFFIX);
+    return pane(["sent"], "");
+  }, async () => {
+    const refusal = yskActivityRefusal("active");
+    return refusal ? { ok: false, reason: refusal } : { ok: true, pin: PIN };
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+    else if (text === YSK_NOTICE_PROCESS_SUFFIX) phase = "suffixed";
+  };
+  box.deps.pressEnter = async () => {
+    phase = "done";
+  };
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.outcome, "submitted");
+  assert.equal(result.reason, "process_this_notice");
+  assert.deepEqual(box.keys, ["1", "2", YSK_NOTICE_PROCESS_SUFFIX]);
+  assert.equal(result.enterPresses, 1);
+  const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  assert.match(server, /yskActivityRefusal\(activity\)/);
+  assert.doesNotMatch(server, /activity === "active" \? "pm_busy"/);
 });
 
 test("the non-empty composer guard allows only the verified quote plus the exact suffix", async () => {

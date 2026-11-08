@@ -90,7 +90,7 @@ import {
   clearComposerText,
   shouldUseBracketedPaste,
 } from "./composer.js";
-import { YSK_SEEN_CONFIG_KEY, driveYskNotice, parseYskCapture, yskNoticeCustodyScope, type YskPin } from "./yskNotice.js";
+import { YSK_SEEN_CONFIG_KEY, driveYskNotice, parseYskCapture, yskActivityRefusal, yskNoticeCustodyScope, type YskPin } from "./yskNotice.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 import { composerClearFence, makeComposerClearKeyWriter } from "./clearComposerFence.js";
 import { DEFAULT_CONFIG } from "./types.js";
@@ -374,7 +374,8 @@ const readPmNoticePin = async (): Promise<{ ok: true; pin: YskPin } | { ok: fals
     const sessionId = currentPmSessionId();
     if (!sessionId) return { ok: false, reason: "session_unreadable" };
     const activity = await relay.getPaneActivityState(id);
-    if (activity !== "idle") return { ok: false, reason: activity === "active" ? "pm_busy" : "pm_activity_unknown" };
+    const activityRefusal = yskActivityRefusal(activity);
+    if (activityRefusal) return { ok: false, reason: activityRefusal };
     return { ok: true, pin: { paneId: id, processId: pid, sessionId } };
   } catch {
     return { ok: false, reason: "pane_unreadable" };
@@ -389,8 +390,9 @@ const yskNoticeTick = (): void => {
       // Peek without the send lock. The common case (no notice) must not delay
       // PM input. The lock is taken only when a top-level notice is visible,
       // and the drive re-checks the pane inside that lock. A stuck
-      // exit_pending latch must not disable this: keystrokes still require an
-      // idle claude pane and an empty composer.
+      // exit_pending latch must not disable this: keystrokes still require a
+      // readable claude pane (idle or mid-turn) and an empty composer. A
+      // running turn queues the note; it does not defer it.
       const peek = parseYskCapture(await capturePaneSnapshot(config.pmPaneAddress));
       if (peek.kind !== "top") {
         const reason = peek.kind === "uncertain" ? peek.reason

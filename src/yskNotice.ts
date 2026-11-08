@@ -15,10 +15,14 @@
  *
  * Rule 50: this never gates, holds, or delays PM input except for the brief
  * send lock it shares with every other PM keystroke. Keystrokes are sent
- * only while the notice is visible, the pane is idle, and the prompt is
- * empty — except the final append, which runs only after this same attempt
- * verified the exact quoted note. Any uncertainty does nothing. The first
- * digit is claimed in the send-custody store before it is typed, and every
+ * only while the notice is visible and the prompt is empty, including while
+ * a turn is still running (Rajiv, same thread, ts 1794160185.336839: "it
+ * won't work that way. pm turn can keep going for a long time."). The
+ * submitted note is queued like any other mid-turn input. The final append
+ * is the only non-empty-composer exception, and it runs only after this
+ * same attempt verified the exact quoted note. Unknown pane activity sends
+ * nothing. The first digit is claimed in the send-custody store before it
+ * is typed, and every
  * later key re-checks the pinned pane, process, session and visible stage.
  * The session fence is synchronous after each awaited revalidate/capture and
  * again inside the literal and Enter writers, so a SessionStart during a
@@ -64,6 +68,18 @@ export function normalizeYskNote(note: string): string {
 
 export function yskNoteHash(note: string): string {
   return createHash("sha256").update(normalizeYskNote(note), "utf8").digest("hex");
+}
+
+export type YskPaneActivity = "active" | "idle" | "unknown";
+
+/**
+ * A running PM turn is not a deferral. Idle and active both may type, and
+ * only when the capture also shows an empty composer. Unknown activity is
+ * uncertainty and sends nothing.
+ */
+export function yskActivityRefusal(activity: YskPaneActivity): string | null {
+  if (activity === "idle" || activity === "active") return null;
+  return "pm_activity_unknown";
 }
 
 export type YskParse =
@@ -146,7 +162,7 @@ export type YskDriveDeps = {
   /** Durable outcome. Never a zero-effect state: a typed attempt stays consumed. */
   finishNotice: (noteHash: string, state: "ambiguous" | "accepted", reason: string) => void;
   ready: () => Promise<{ ok: true; pin: YskPin } | { ok: false; reason: string }>;
-  /** Same pane id, process and session, still claude, still idle, mode allowed. */
+  /** Same pane id, process and session, still claude, idle or mid-turn, mode allowed. */
   revalidate: (pin: YskPin) => Promise<{ ok: true } | { ok: false; reason: string }>;
   /**
    * Synchronous session fence. Read the latest hook session, do not await.
