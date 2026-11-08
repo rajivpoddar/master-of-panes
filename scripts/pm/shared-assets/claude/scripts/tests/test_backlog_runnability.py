@@ -96,6 +96,58 @@ def test_audit_separates_parked_and_owned_from_missing_contract(tmp_path, monkey
     assert any(reason.startswith("missing_ready_pool_fields:") for reason in manifest["contract_defects"][0]["reasons"])
 
 
+def test_dependency_migration_contract_forms(monkeypatch):
+    import ready_pool_select as selector
+    monkeypatch.setattr(bt, "recent_promoter_rejections", lambda: {})
+    monkeypatch.setattr(bt, "open_pr_issue_numbers", lambda: set())
+    monkeypatch.setattr(bt, "issue_contract_ledger_errors", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bt, "handoff_preflight_ok", lambda *args: (True, ""))
+    monkeypatch.setattr(bt, "issue_runnability_refusals", lambda *args: [])
+    forms = [(["pm-blocked:dependency"], "dependency"),
+             (["sub:waiting-on-issue"], "waiting-on-issue"),
+             (["pm-blocked:dependency", "sub:waiting-on-issue"], "dependency, waiting-on-issue")]
+    for form_labels, holds in forms:
+        for other_hold, incomplete in ((False, False), (True, False), (False, True)):
+            extra = ["pm-blocked:external"] if other_hold else []
+            body = ("<!-- ready-pool:\npriority: P1\nlane: app\nbranch_slug: fix-thing\n"
+                    "ac_summary: Fix thing\nclaimable_slot_type: dev\nwork_type: app-code\n"
+                    f"blockers: #999\nholds: {holds}{', external' if other_hold else ''}\n-->")
+            if incomplete:
+                body = body.replace("branch_slug: fix-thing\n", "")
+            issue = {"number": 123, "title": "fix thing", "body": body,
+                     "labels": [{"name": n} for n in ["status:backlog", "P1", *form_labels, *extra]]}
+            names = bt.labels(bt.contract_without_dependency_hold(issue))
+            assert "pm-blocked:dependency" not in names
+            assert ("pm-blocked:external" in names) == other_hold
+            candidates, skipped = bt.classify_promoter([issue], {999})
+            assert bool(candidates) == (not other_hold and not incomplete)
+            if other_hold:
+                assert skipped["missing_ready_pool_contract"] or skipped["blocked_label"]
+                assert "pm-blocked:external" in selector.blocking_labels(selector._labels(issue), issue)
+            if incomplete:
+                assert skipped["missing_ready_pool_contract"]
+
+
+def test_promotion_preserves_existing_legacy_dependency_label(monkeypatch):
+    body = ("<!-- ready-pool:\npriority: P1\nlane: app\nbranch_slug: fix-thing\n"
+            "ac_summary: Fix thing\nclaimable_slot_type: dev\nwork_type: app-code\n"
+            "blockers: none\n-->")
+    issue = {"number": 123, "title": "fix thing", "body": body,
+             "labels": [{"name": n} for n in ("status:backlog", "P1", "pm-blocked:dependency")]}
+    live = {**issue, "labels": [{"name": n} for n in ("status:todo", "P1", "pm-blocked:dependency")]}
+    calls = []
+    views = iter([issue, live])
+    monkeypatch.setattr(bt, "gh_issue_view", lambda _: next(views))
+    monkeypatch.setattr(bt, "dispatch_readiness_reasons", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bt, "issue_runnability_refusals", lambda *args: [])
+    monkeypatch.setattr(bt, "open_pr_issue_numbers", lambda: set())
+    monkeypatch.setattr(bt, "run", lambda cmd, **kwargs: calls.append(cmd))
+    result = bt.promote_backlog_issue({"number": 123, "priority": "P1",
+                                       "body_sha256": bt.issue_body_sha256(body)}, set())
+    assert result["ok"]
+    assert "pm-blocked:dependency" not in calls[0][calls[0].index("--remove-label") + 1]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn) and name != "test_audit_separates_parked_and_owned_from_missing_contract": fn()

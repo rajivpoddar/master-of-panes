@@ -175,6 +175,16 @@ def labels(issue: dict[str, Any]) -> set[str]:
     return names
 
 
+def contract_without_dependency_hold(issue: dict[str, Any]) -> dict[str, Any]:
+    """Ignore only dependency holds while evaluating the underlying contract."""
+    return {
+        **issue,
+        "labels": [label for label in issue.get("labels", [])
+                   if label.get("name") not in {"pm-blocked:dependency", "sub:waiting-on-issue"}],
+        "_dependency_cleared": True,
+    }
+
+
 def canonical_priority_labels(names: set[str]) -> list[str]:
     return sorted(name for name in names if name in PRIORITY_RANK)
 
@@ -1043,7 +1053,7 @@ def classify_promoter(
             # dependency wait non-dispatchable, so valid P0 children (#12183)
             # were routed to contract repair forever. Judge the contract alone.
             is_non_dispatchable_contract(
-                {**issue, "labels": [l for l in issue.get("labels", []) if l.get("name") != "pm-blocked:dependency"]},
+                contract_without_dependency_hold(issue),
                 meta,
             )
             or not meta
@@ -1058,7 +1068,7 @@ def classify_promoter(
         elif is_non_dispatchable_contract(
             # deps is empty here, so a pm-blocked:dependency label is resolved
             # and is removed at apply; it must not mark the contract tracking.
-            {**issue, "labels": [l for l in issue.get("labels", []) if l.get("name") != "pm-blocked:dependency"]},
+            contract_without_dependency_hold(issue),
             meta,
         ):
             skipped["non_dispatchable"].append(promoter_row(issue, "tracking_or_non_dispatchable", meta=meta, deps=deps))
@@ -1974,12 +1984,7 @@ def promote_backlog_issue(
     )
     try:
         labels_to_remove = list(admission_status_labels)
-        if (
-            "pm-blocked:dependency" in labels(admission_issue)
-            and metadata_blockers_clear(ready_pool_metadata(admission_issue))
-            and not open_dependencies(admission_issue, open_nums)
-        ):
-            labels_to_remove.append("pm-blocked:dependency")
+        # Keep legacy dependency labels until all readers have migrated.
         admission_labels = f"status:todo,{canonical_priority}"
         if has_dependency_contract(ready_pool_metadata(admission_issue)):
             admission_labels += ",pm-blocked:dependency"

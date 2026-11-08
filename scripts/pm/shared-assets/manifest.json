@@ -321,7 +321,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "9fec53290354f1e2e44cf5ec197288e3c09115d0ae4ebc55ba8f7122e0854929",
+      "sha256": "3b844bd0e896967c7ab5b102486e476f02ab1650159573a7ba01e66c3477be73",
       "source_path": "claude/scripts/backlog-triage.py"
     },
     {
@@ -818,7 +818,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage-tests",
-      "sha256": "03c563954598592d48ec26f865f0381a40aaaef9a5c35fe64293678b8a551b21",
+      "sha256": "135d2ec2bafa5c68f76a139c2cc627fd6cea415f74a427d46f5b98ef07bdbfe8",
       "source_path": "claude/scripts/tests/test_backlog_runnability.py"
     },
     {
