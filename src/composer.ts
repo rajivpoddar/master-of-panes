@@ -563,7 +563,7 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
       break;
     }
     payloadSeen = noticeAppendOk
-      ? !/\[Pasted text/i.test(composer) && squash(composer) === squash(payload)
+      ? composer === payload && !/\[Pasted text/i.test(composer)
       : composerHoldsPayload(composer, payload)
         || composerShowsNewPastePlaceholder(composer, deps.prePasteComposer);
     if (payloadSeen) {
@@ -630,7 +630,12 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
     // compare whitespace-normalized text: retry only when it is still exactly
     // our submitted composer, never after foreign text appeared.
     if (cleared !== false || lastComposer === null || submittedComposer === null) break;
-    if (squash(lastComposer) !== squash(submittedComposer)) break;
+    // Notice submits own the exact composer only. The ordinary paste path still
+    // tolerates wrap/indent reflow; that tolerance is not a notice hole.
+    const stillOwned = noticeAppendOk
+      ? lastComposer === submittedComposer
+      : squash(lastComposer) === squash(submittedComposer);
+    if (!stillOwned) break;
   }
 
   return queued

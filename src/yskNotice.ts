@@ -17,8 +17,10 @@
  * send lock it shares with every other PM keystroke. Keystrokes are sent
  * only while the notice is visible, the pane is idle, and the prompt is
  * empty — except the final append, which runs only after this same attempt
- * verified the quote. Any uncertainty does nothing. A hash of the note is
- * remembered once we send the first digit, so a partial attempt is not retried.
+ * verified the exact quoted note. Any uncertainty does nothing. The first
+ * digit is claimed in the send-custody store before it is typed, and every
+ * later key re-checks the pinned pane, process, session and visible stage.
+ * A consumed or uncertain claim is never typed again, including after restart.
  */
 
 import { createHash } from "node:crypto";
@@ -31,6 +33,17 @@ import {
 } from "./composer.js";
 
 export const YSK_SEEN_CONFIG_KEY = "ysk_notice_seen_v1";
+/** Custody scope for one note. Rows are never the capped config list. */
+export function yskNoticeCustodyScope(noteHash: string): string {
+  return `ysk-notice:${noteHash}`;
+}
+
+/** Recipient pinned before the first digit and rechecked before every later key. */
+export type YskPin = {
+  paneId: string;
+  processId: string;
+  sessionId: string;
+};
 const CHOICES_TAIL_LINES = 6;
 const NOTE_LOOKBACK_LINES = 8;
 const MIN_NOTE_CHARS = 12;
@@ -118,14 +131,20 @@ export type YskDriveResult = {
 };
 
 export type YskDriveDeps = {
-  capture: () => Promise<string | null>;
-  sendLiteral: (text: string) => Promise<void>;
-  pressEnter: () => Promise<void>;
+  capture: (pin: YskPin) => Promise<string | null>;
+  sendLiteral: (text: string, pin: YskPin) => Promise<void>;
+  pressEnter: (pin: YskPin) => Promise<void>;
   sleep: (ms: number) => Promise<void>;
-  /** Null means the dedupe store cannot be read. Fail open: send nothing. */
-  loadSeen: () => string[] | null;
-  saveSeen: (hashes: string[]) => void;
-  ready: () => Promise<{ ok: true } | { ok: false; reason: string }>;
+  /**
+   * Custody before the first digit. "consumed" includes started, ambiguous,
+   * accepted and queued rows. null means the store cannot be read: send nothing.
+   */
+  claimNotice: (noteHash: string, destination: string) => "execute" | "consumed" | null;
+  /** Durable outcome. Never a zero-effect state: a typed attempt stays consumed. */
+  finishNotice: (noteHash: string, state: "ambiguous" | "accepted", reason: string) => void;
+  ready: () => Promise<{ ok: true; pin: YskPin } | { ok: false; reason: string }>;
+  /** Same pane id, process and session, still claude, still idle, mode allowed. */
+  revalidate: (pin: YskPin) => Promise<{ ok: true } | { ok: false; reason: string }>;
   log: (result: YskDriveResult) => void;
   submenuTimeoutMs?: number;
   quoteTimeoutMs?: number;
@@ -141,6 +160,7 @@ export type YskDriveDeps = {
 
 async function pollCapture(
   deps: YskDriveDeps,
+  pin: YskPin,
   timeoutMs: number,
   accept: (snapshot: string | null) => boolean,
 ): Promise<string | null> {
@@ -149,7 +169,7 @@ async function pollCapture(
   for (;;) {
     let snapshot: string | null;
     try {
-      snapshot = await deps.capture();
+      snapshot = await deps.capture(pin);
     } catch {
       return null;
     }
@@ -164,11 +184,6 @@ function composerOf(snapshot: string | null): string | null {
   return frame ? frame.composer : null;
 }
 
-function remember(deps: YskDriveDeps, seen: string[], hash: string): void {
-  if (!seen.includes(hash)) seen.push(hash);
-  deps.saveSeen(seen);
-}
-
 /**
  * One attempt. The caller must already hold the PM send lock so these
  * keystrokes cannot splice into another delivery. This function does not
@@ -176,7 +191,15 @@ function remember(deps: YskDriveDeps, seen: string[], hash: string): void {
  */
 export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult> {
   const keysSent: string[] = [];
+  let claimedHash: string | null = null;
   const finish = (result: YskDriveResult): YskDriveResult => {
+    if (claimedHash && result.outcome !== "submitted") {
+      try {
+        deps.finishNotice(claimedHash, "ambiguous", result.reason);
+      } catch {
+        /* a failed finish leaves the started row, which is still consumed */
+      }
+    }
     try {
       deps.log(result);
     } catch {
@@ -187,10 +210,9 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
   try {
     const ready = await deps.ready();
     if (!ready.ok) return finish({ outcome: "noop", reason: ready.reason, keysSent, enterPresses: 0 });
-    const seen = deps.loadSeen();
-    if (seen === null) return finish({ outcome: "noop", reason: "seen_unreadable", keysSent, enterPresses: 0 });
+    const pin = ready.pin;
 
-    const first = await deps.capture();
+    const first = await deps.capture(pin);
     const parsed = parseYskCapture(first);
     if (parsed.kind === "unreadable") return finish({ outcome: "noop", reason: "composer_unreadable", keysSent, enterPresses: 0 });
     if (parsed.kind === "none") return finish({ outcome: "noop", reason: "no_notice", keysSent, enterPresses: 0 });
@@ -200,19 +222,40 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
 
     const note = parsed.note;
     const noteHash = yskNoteHash(note);
-    if (seen.includes(noteHash)) {
-      return finish({ outcome: "noop", reason: "deduped", noteHash, keysSent, enterPresses: 0 });
-    }
-    // Remember before the first digit. A lost response must not type "1" again.
-    remember(deps, seen, noteHash);
+    const ownedQuote = note;
+    const blocked = async (expect: (snapshot: string | null) => boolean): Promise<string | null> => {
+      const check = await deps.revalidate(pin);
+      if (!check.ok) return check.reason;
+      let snapshot: string | null;
+      try {
+        snapshot = await deps.capture(pin);
+      } catch {
+        return "capture_failed";
+      }
+      return expect(snapshot) ? null : "ui_stage_changed";
+    };
 
-    await deps.sendLiteral("1");
+    const beforeDigit = await blocked((snapshot) => {
+      const screen = parseYskCapture(snapshot);
+      return screen.kind === "top" && screen.note === note && screen.composer === "";
+    });
+    if (beforeDigit) return finish({ outcome: "noop", reason: beforeDigit, noteHash, keysSent, enterPresses: 0 });
+
+    const claim = deps.claimNotice(noteHash, `${pin.paneId}|${pin.processId}|${pin.sessionId}`);
+    if (claim === null) return finish({ outcome: "noop", reason: "custody_unreadable", noteHash, keysSent, enterPresses: 0 });
+    if (claim === "consumed") return finish({ outcome: "noop", reason: "deduped", noteHash, keysSent, enterPresses: 0 });
+    claimedHash = noteHash;
+
+    const stillTop = await blocked((snapshot) => {
+      const screen = parseYskCapture(snapshot);
+      return screen.kind === "top" && screen.note === note && screen.composer === "";
+    });
+    if (stillTop) return finish({ outcome: "abort", reason: stillTop, noteHash, keysSent, enterPresses: 0 });
+    await deps.sendLiteral("1", pin);
     keysSent.push("1");
-    const submenu = await pollCapture(deps, deps.submenuTimeoutMs ?? 2000, (snapshot) => {
+    const submenu = await pollCapture(deps, pin, deps.submenuTimeoutMs ?? 2000, (snapshot) => {
       const screen = parseYskCapture(snapshot);
       if (screen.kind !== "submenu" || screen.composer !== "") return false;
-      // The Learn-more explanation sits under the note, so the note text must
-      // still be on screen, but lines between it and the choices are not the note.
       const frame = composerFrame(snapshot);
       return !!frame && squashHas(frame.above, note);
     });
@@ -220,51 +263,60 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
       return finish({ outcome: "abort", reason: "submenu_missing", noteHash, keysSent, enterPresses: 0 });
     }
 
-    await deps.sendLiteral("2");
+    const beforeChat = await blocked((snapshot) => {
+      const screen = parseYskCapture(snapshot);
+      const frame = composerFrame(snapshot);
+      return screen.kind === "submenu" && screen.composer === "" && !!frame && squashHas(frame.above, note);
+    });
+    if (beforeChat) return finish({ outcome: "abort", reason: beforeChat, noteHash, keysSent, enterPresses: 0 });
+    await deps.sendLiteral("2", pin);
     keysSent.push("2");
-    const quoted = await pollCapture(deps, deps.quoteTimeoutMs ?? 2000, (snapshot) => {
-      const composer = composerOf(snapshot);
-      if (composer === null || composer === "") return false;
-      return squashHas(composer, note) && !squashHas(composer, YSK_NOTICE_PROCESS_SUFFIX.trim());
+    const quoted = await pollCapture(deps, pin, deps.quoteTimeoutMs ?? 2000, (snapshot) => {
+      return composerOf(snapshot) === ownedQuote;
     });
     if (!quoted) {
-      return finish({ outcome: "abort", reason: "quote_missing", noteHash, keysSent, enterPresses: 0 });
+      return finish({ outcome: "abort", reason: "quote_not_owned", noteHash, keysSent, enterPresses: 0 });
     }
-    const verifiedQuote = composerOf(quoted);
-    if (!verifiedQuote) {
-      return finish({ outcome: "abort", reason: "quote_missing", noteHash, keysSent, enterPresses: 0 });
-    }
-    // Re-read immediately. Step 4 may type only onto this exact quote.
-    const again = composerOf(await deps.capture());
-    if (again !== verifiedQuote) {
-      return finish({ outcome: "abort", reason: "quote_changed", noteHash, keysSent, enterPresses: 0 });
-    }
+    const beforeSuffix = await blocked((snapshot) => composerOf(snapshot) === ownedQuote);
+    if (beforeSuffix) return finish({ outcome: "abort", reason: beforeSuffix, noteHash, keysSent, enterPresses: 0 });
 
-    await deps.sendLiteral(YSK_NOTICE_PROCESS_SUFFIX);
+    await deps.sendLiteral(YSK_NOTICE_PROCESS_SUFFIX, pin);
     keysSent.push(YSK_NOTICE_PROCESS_SUFFIX);
     const timing = deps.submitTiming ?? {};
-    const submit: SubmitCheckResult = await submitWithComposerCheck(verifiedQuote + YSK_NOTICE_PROCESS_SUFFIX, {
-      capture: deps.capture,
-      pressSubmit: deps.pressEnter,
+    const expectedSubmit = ownedQuote + YSK_NOTICE_PROCESS_SUFFIX;
+    const submit: SubmitCheckResult = await submitWithComposerCheck(expectedSubmit, {
+      capture: () => deps.capture(pin),
+      pressSubmit: async () => {
+        const beforeEnter = await blocked((snapshot) => composerOf(snapshot) === expectedSubmit);
+        if (beforeEnter) throw new Error(beforeEnter);
+        await deps.pressEnter(pin);
+      },
       sleep: deps.sleep,
-      prePasteComposer: verifiedQuote,
-      noticeAppend: { verifiedQuote },
+      prePasteComposer: ownedQuote,
+      noticeAppend: { verifiedQuote: ownedQuote },
       dwellMs: timing.dwellMs ?? 400,
       payloadStableMs: timing.payloadStableMs ?? 200,
       payloadGraceMs: timing.payloadGraceMs ?? 1200,
       payloadStableGraceMs: timing.payloadGraceMs ?? 1500,
       clearGraceMs: timing.clearGraceMs ?? 1200,
       pollMs: timing.pollMs ?? 200,
+      maxEnterPresses: 1,
     });
-    if (submit.enterPresses < 1) {
+    if (submit.enterPresses !== 1 || (submit.cleared !== true && submit.queued !== true)) {
       return finish({
-        outcome: "append_not_submitted",
-        reason: "suffix_not_confirmed",
+        outcome: "abort",
+        reason: submit.enterPresses === 1 ? "submit_uncertain" : "suffix_not_confirmed",
         noteHash,
         keysSent,
-        enterPresses: 0,
+        enterPresses: submit.enterPresses,
       });
     }
+    try {
+      deps.finishNotice(noteHash, "accepted", "process_this_notice");
+    } catch {
+      /* started/accepted either way: the row stays consumed */
+    }
+    claimedHash = null;
     return finish({
       outcome: "submitted",
       reason: "process_this_notice",

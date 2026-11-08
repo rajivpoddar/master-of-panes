@@ -90,7 +90,7 @@ import {
   clearComposerText,
   shouldUseBracketedPaste,
 } from "./composer.js";
-import { YSK_SEEN_CONFIG_KEY, driveYskNotice, parseYskCapture } from "./yskNotice.js";
+import { YSK_SEEN_CONFIG_KEY, driveYskNotice, parseYskCapture, yskNoticeCustodyScope, type YskPin } from "./yskNotice.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 import { composerClearFence, makeComposerClearKeyWriter } from "./clearComposerFence.js";
 import { DEFAULT_CONFIG } from "./types.js";
@@ -329,7 +329,57 @@ alertReminderScheduler.start();
 // visible and the prompt is empty (one verified-quote append excepted).
 // Never gates PM input; skips the tick if a drive is already waiting.
 // Rajiv DM D0AMF0XE6TS thread 1794143890.463219.
-const yskSeenMemory = new Set<string>();
+let yskLegacyImported = false;
+let yskLegacyUnreadable = false;
+const importLegacyYskSeen = (): void => {
+  if (yskLegacyImported) return;
+  yskLegacyImported = true;
+  try {
+    const raw = db.getConfig(YSK_SEEN_CONFIG_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
+      yskLegacyUnreadable = true;
+      return;
+    }
+    for (const hash of parsed) {
+      if (!hash) continue;
+      const decision = db.beginSendCustody({
+        scope: yskNoticeCustodyScope(hash),
+        slot: PM_SLOT,
+        key: hash,
+        digest: hash,
+        commandDigest: hash,
+        destination: "legacy-config",
+      }, Date.now());
+      if (decision.kind === "execute") {
+        db.finishSendCustody(yskNoticeCustodyScope(hash), "ambiguous", "legacy_seen", Date.now());
+      }
+    }
+  } catch {
+    yskLegacyUnreadable = true;
+  }
+};
+const readPmNoticePin = async (): Promise<{ ok: true; pin: YskPin } | { ok: false; reason: string }> => {
+  try {
+    const shown = await execShell(
+      `tmux display-message -t ${shellEscape(config.pmPaneAddress)} -p '#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_in_mode}'`,
+      { timeout: 3_000 },
+    );
+    const [id, pid, cmd, mode] = shown.stdout.trim().split("|");
+    if (cmd !== "claude") return { ok: false, reason: "pane_not_claude" };
+    if (paneInputModeRefusalReason(mode)) return { ok: false, reason: "pane_mode_refused" };
+    if (!/^%\d+$/.test(id ?? "")) return { ok: false, reason: "pane_id_unreadable" };
+    if (!/^\d+$/.test(pid ?? "")) return { ok: false, reason: "process_unreadable" };
+    const sessionId = currentPmSessionId();
+    if (!sessionId) return { ok: false, reason: "session_unreadable" };
+    const activity = await relay.getPaneActivityState(id);
+    if (activity !== "idle") return { ok: false, reason: activity === "active" ? "pm_busy" : "pm_activity_unknown" };
+    return { ok: true, pin: { paneId: id, processId: pid, sessionId } };
+  } catch {
+    return { ok: false, reason: "pane_unreadable" };
+  }
+};
 let yskInFlight = false;
 const yskNoticeTick = (): void => {
   if (yskInFlight) return;
@@ -351,52 +401,50 @@ const yskNoticeTick = (): void => {
         console.log(`[ysk-notice] outcome=noop reason=${reason} keys=0 enter=0`);
         return;
       }
+      importLegacyYskSeen();
+      if (yskLegacyUnreadable) {
+        console.log("[ysk-notice] outcome=noop reason=custody_unreadable keys=0 enter=0");
+        return;
+      }
       await withSlotSendLock(PM_SLOT, () => driveYskNotice({
-        capture: () => capturePaneSnapshot(config.pmPaneAddress),
-        sendLiteral: async (text) => {
+        capture: (pin) => capturePaneSnapshot(shellEscape(pin.paneId)),
+        sendLiteral: async (text, pin) => {
           await execShell(
-            `tmux send-keys -t ${shellEscape(config.pmPaneAddress)} -l ${shellEscape(text)}`,
+            `tmux send-keys -t ${shellEscape(pin.paneId)} -l ${shellEscape(text)}`,
             { timeout: 5_000 },
           );
         },
-        pressEnter: async () => {
-          await execShell(`tmux send-keys -t ${shellEscape(config.pmPaneAddress)} Enter`, { timeout: 5_000 });
+        pressEnter: async (pin) => {
+          await execShell(`tmux send-keys -t ${shellEscape(pin.paneId)} Enter`, { timeout: 5_000 });
         },
         sleep,
-        loadSeen: () => {
+        claimNotice: (noteHash, destination) => {
+          if (yskLegacyUnreadable) return null;
           try {
-            const raw = db.getConfig(YSK_SEEN_CONFIG_KEY);
-            if (raw) {
-              const parsed = JSON.parse(raw) as unknown;
-              if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) return null;
-              for (const hash of parsed) yskSeenMemory.add(hash);
-            }
-            return [...yskSeenMemory];
+            const decision = db.beginSendCustody({
+              scope: yskNoticeCustodyScope(noteHash),
+              slot: PM_SLOT,
+              key: noteHash,
+              digest: noteHash,
+              commandDigest: noteHash,
+              destination,
+            }, Date.now());
+            return decision.kind === "execute" ? "execute" : "consumed";
           } catch {
             return null;
           }
         },
-        saveSeen: (hashes) => {
-          for (const hash of hashes) yskSeenMemory.add(hash);
-          const capped = [...yskSeenMemory].slice(-50);
-          db.setConfig(YSK_SEEN_CONFIG_KEY, JSON.stringify(capped));
+        finishNotice: (noteHash, state, reason) => {
+          db.finishSendCustody(yskNoticeCustodyScope(noteHash), state, reason, Date.now());
         },
-        ready: async () => {
-          try {
-            const shown = await execShell(
-              `tmux display-message -t ${shellEscape(config.pmPaneAddress)} -p '#{pane_id}|#{pane_current_command}|#{pane_in_mode}'`,
-              { timeout: 3_000 },
-            );
-            const [id, cmd, mode] = shown.stdout.trim().split("|");
-            if (cmd !== "claude") return { ok: false, reason: "pane_not_claude" };
-            if (paneInputModeRefusalReason(mode)) return { ok: false, reason: "pane_mode_refused" };
-            if (!/^%\d+$/.test(id ?? "")) return { ok: false, reason: "pane_id_unreadable" };
-            const activity = await relay.getPaneActivityState(id);
-            if (activity !== "idle") return { ok: false, reason: activity === "active" ? "pm_busy" : "pm_activity_unknown" };
-            return { ok: true };
-          } catch {
-            return { ok: false, reason: "pane_unreadable" };
-          }
+        ready: readPmNoticePin,
+        revalidate: async (pin) => {
+          const current = await readPmNoticePin();
+          if (!current.ok) return current;
+          if (current.pin.paneId !== pin.paneId) return { ok: false, reason: "pane_replaced" };
+          if (current.pin.processId !== pin.processId) return { ok: false, reason: "process_replaced" };
+          if (current.pin.sessionId !== pin.sessionId) return { ok: false, reason: "session_replaced" };
+          return { ok: true };
         },
         log: (result) => {
           console.log(`[ysk-notice] outcome=${result.outcome} reason=${result.reason} keys=${result.keysSent.length} enter=${result.enterPresses}`);

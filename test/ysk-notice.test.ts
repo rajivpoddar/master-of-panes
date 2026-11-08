@@ -14,6 +14,7 @@ import {
   yskNoteHash,
   type YskDriveDeps,
   type YskDriveResult,
+  type YskPin,
 } from "../src/yskNotice.js";
 
 /** Live PM capture, Rajiv DM D0AMF0XE6TS thread 1794143890.463219 (image ts 1794144956). */
@@ -33,11 +34,15 @@ const submenu = () => pane([
   SUBMENU,
 ], "");
 
-function harness(capture: () => Promise<string | null>, ready: YskDriveDeps["ready"] = async () => ({ ok: true })) {
+const PIN: YskPin = { paneId: "%11", processId: "4242", sessionId: "sess-a" };
+
+function harness(
+  capture: (pin: YskPin) => Promise<string | null>,
+  ready: YskDriveDeps["ready"] = async () => ({ ok: true, pin: PIN }),
+) {
   const keys: string[] = [];
   let enters = 0;
-  let stored: string[] | null = [];
-  const saves: string[][] = [];
+  const rows = new Map<string, "started" | "ambiguous" | "accepted">();
   const logs: YskDriveResult[] = [];
   const deps: YskDriveDeps = {
     capture,
@@ -48,12 +53,17 @@ function harness(capture: () => Promise<string | null>, ready: YskDriveDeps["rea
       enters += 1;
     },
     sleep: async () => {},
-    loadSeen: () => (stored ? [...stored] : null),
-    saveSeen: (hashes) => {
-      stored = [...hashes];
-      saves.push([...hashes]);
+    claimNotice: (hash) => {
+      const row = rows.get(hash);
+      if (row) return "consumed";
+      rows.set(hash, "started");
+      return "execute";
+    },
+    finishNotice: (hash, state) => {
+      rows.set(hash, state);
     },
     ready,
+    revalidate: async () => ({ ok: true }),
     log: (result) => logs.push(result),
     submenuTimeoutMs: 0,
     quoteTimeoutMs: 0,
@@ -63,10 +73,9 @@ function harness(capture: () => Promise<string | null>, ready: YskDriveDeps["rea
   return {
     deps,
     keys,
-    saves,
     logs,
+    rows,
     enters: () => enters,
-    stored: () => stored,
   };
 }
 
@@ -101,7 +110,7 @@ test("draft present is a no-op and is not remembered", async () => {
   assert.equal(result.reason, "draft_present");
   assert.deepEqual(box.keys, []);
   assert.equal(box.enters(), 0);
-  assert.deepEqual(box.saves, []);
+  assert.equal(box.rows.size, 0);
 });
 
 test("no notice is a no-op", async () => {
@@ -109,7 +118,7 @@ test("no notice is a no-op", async () => {
   const result = await driveYskNotice(box.deps);
   assert.equal(result.reason, "no_notice");
   assert.deepEqual(box.keys, []);
-  assert.deepEqual(box.saves, []);
+  assert.equal(box.rows.size, 0);
 });
 
 test("submenu missing after 1 aborts and remembers the note", async () => {
@@ -119,21 +128,21 @@ test("submenu missing after 1 aborts and remembers the note", async () => {
   assert.equal(result.reason, "submenu_missing");
   assert.deepEqual(box.keys, ["1"]);
   assert.equal(box.enters(), 0);
-  assert.equal(box.stored()?.length, 1);
+  assert.equal([...box.rows.values()][0], "ambiguous");
 });
 
 test("quote missing after 2 aborts without the suffix", async () => {
-  let step = 0;
-  const box = harness(async () => {
-    step += 1;
-    if (step === 1) return top();
-    return submenu();
-  });
+  let phase: "top" | "sub" = "top";
+  const box = harness(async () => (phase === "top" ? top() : submenu()));
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+  };
   const result = await driveYskNotice(box.deps);
-  assert.equal(result.reason, "quote_missing");
+  assert.equal(result.reason, "quote_not_owned");
   assert.deepEqual(box.keys, ["1", "2"]);
   assert.equal(box.enters(), 0);
-  assert.equal(box.stored()?.length, 1);
+  assert.equal([...box.rows.values()][0], "ambiguous");
 });
 
 test("learn more then chat quotes the note, then the exact suffix is submitted once", async () => {
@@ -170,7 +179,7 @@ test("an unreadable composer or a busy pane sends nothing", async () => {
   const busy = harness(async () => top(), async () => ({ ok: false, reason: "pm_busy" }));
   assert.equal((await driveYskNotice(busy.deps)).reason, "pm_busy");
   assert.deepEqual(busy.keys, []);
-  assert.deepEqual(busy.saves, []);
+  assert.equal(busy.rows.size, 0);
 });
 
 test("the non-empty composer guard allows only the verified quote plus the exact suffix", async () => {
@@ -224,6 +233,24 @@ test("the non-empty composer guard allows only the verified quote plus the exact
     pollMs: 0,
   });
   assert.equal(extra.enterPresses, 0);
+
+  let spacedEnters = 0;
+  const spaced = await submitWithComposerCheck(quote + YSK_NOTICE_PROCESS_SUFFIX, {
+    capture: async () => pane([], quote.replace(" ", "  ") + YSK_NOTICE_PROCESS_SUFFIX),
+    pressSubmit: async () => {
+      spacedEnters += 1;
+    },
+    sleep: async () => {},
+    prePasteComposer: quote,
+    noticeAppend: { verifiedQuote: quote },
+    dwellMs: 0,
+    payloadGraceMs: 0,
+    payloadStableMs: 0,
+    pollMs: 0,
+    maxEnterPresses: 1,
+  });
+  assert.equal(spaced.enterPresses, 0);
+  assert.equal(spacedEnters, 0);
 });
 
 test("the paste path does not grow its own noticeAppend hole", () => {
@@ -233,4 +260,82 @@ test("the paste path does not grow its own noticeAppend hole", () => {
   assert.doesNotMatch(server, /noticeAppend\s*:/);
   assert.match(notice, /noticeAppend:\s*\{\s*verifiedQuote\s*\}/);
   assert.match(server, /yskNoticeAppendException/);
+  assert.match(notice, /maxEnterPresses:\s*1/);
+  assert.match(server, /beginSendCustody/);
+  assert.doesNotMatch(server, /yskSeenMemory|slice\(-50\)/);
+});
+
+test("a replaced pane receives no further key", async () => {
+  let phase: "top" | "sub" = "top";
+  let checks = 0;
+  const box = harness(async () => (phase === "top" ? top() : submenu()));
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+  };
+  box.deps.revalidate = async () => {
+    checks += 1;
+    return checks >= 3 ? { ok: false, reason: "pane_replaced" } : { ok: true };
+  };
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "pane_replaced");
+  assert.deepEqual(box.keys, ["1"]);
+  assert.equal(box.enters(), 0);
+  assert.equal([...box.rows.values()][0], "ambiguous");
+});
+
+test("a foreign draft that merely contains the notice is not submitted", async () => {
+  let phase: "top" | "sub" | "foreign" = "top";
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    return pane(["quoted into the prompt"], `please ignore this ${NOTE}`);
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "foreign";
+  };
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "quote_not_owned");
+  assert.deepEqual(box.keys, ["1", "2"]);
+  assert.equal(box.enters(), 0);
+  assert.equal([...box.rows.values()][0], "ambiguous");
+});
+
+test("a delayed first submit is not followed by a second Enter", async () => {
+  let phase: "top" | "sub" | "quote" | "suffixed" = "top";
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    if (phase === "quote") return pane(["quoted into the prompt"], NOTE);
+    return pane(["still visible"], NOTE + YSK_NOTICE_PROCESS_SUFFIX);
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+    else if (text === YSK_NOTICE_PROCESS_SUFFIX) phase = "suffixed";
+  };
+  box.deps.pressEnter = async () => {
+    /* the composer stays on the exact payload */
+  };
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "submit_uncertain");
+  assert.equal(result.enterPresses, 1);
+  assert.equal(box.enters(), 1);
+  assert.deepEqual(box.keys, ["1", "2", YSK_NOTICE_PROCESS_SUFFIX]);
+  assert.equal([...box.rows.values()][0], "ambiguous");
+  const again = await driveYskNotice(box.deps);
+  assert.equal(again.reason, "deduped");
+  assert.equal(box.enters(), 1);
+});
+
+test("a consumed custody row from before restart sends nothing", async () => {
+  const box = harness(async () => top());
+  box.deps.claimNotice = () => "consumed";
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "deduped");
+  assert.deepEqual(box.keys, []);
+  assert.equal(box.enters(), 0);
 });
