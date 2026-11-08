@@ -24,6 +24,7 @@ PM_OPS = Path.home() / '.claude/scripts/pm-ops.py'
 HEADER = '*Unblockable now / issue lifecycle:*'
 PARTIAL = re.compile(r'\b(?:part\s+of|refs?)\s+((?:#\d+[ \t,;]*(?:and\s+)?)+)', re.I)
 CLOSES = re.compile(r'\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+((?:#\d+[ \t,;]*(?:and\s+)?)+)', re.I)
+MUST_NOT_CLOSE = re.compile(r'\bmust\s+not\s+close\s+#(\d+)\b', re.I)
 # Only dependency-gated issues can be auto-detected as unblocked; gate/infra/
 # product/external/cto blocks have wake conditions the collector cannot see.
 DEPENDENCY = 'pm-blocked:dependency'
@@ -73,11 +74,22 @@ def refs(pattern, text):
     return {int(n) for match in pattern.finditer(text or '') for n in re.findall(r'#(\d+)', match[1])}
 
 
-def closing(pr):
+def closing_issues(pr):
+    """Return explicit body/title closes and whether text overrides that claim."""
+    text = (pr.get('body') or '') + '\n' + (pr.get('title') or '')
+    explicit = refs(CLOSES, text)
+    overridden = refs(PARTIAL, text) | {int(n) for n in MUST_NOT_CLOSE.findall(text)}
     connection = pr.get('closingIssuesReferences') or {}
     if connection.get('pageInfo', {}).get('hasNextPage'):
         raise ValueError('incomplete PR closing references')
-    return {r['number'] for r in connection.get('nodes', [])} | refs(CLOSES, pr.get('body'))
+    api_refs = {r['number'] for r in connection.get('nodes', [])}
+    # The PR text is authoritative; API-only closing claims are surfaced as conflicts.
+    conflicts = (api_refs ^ explicit) | (api_refs & overridden)
+    return explicit - overridden, conflicts
+
+
+def closing(pr):
+    return closing_issues(pr)[0]
 
 
 def referenced(pr, number):
@@ -107,10 +119,19 @@ def detect(issues, open_prs, slots, merged, resolve):
                 reasons.add('unowned_lifecycle')
         if 'status:done' in labs:
             reasons.add('done_open')
+        conflicts = set()
         for pr in linked:
-            if pr.get('state', '').upper() == 'MERGED' and n in closing(pr):
+            if pr.get('state', '').upper() != 'MERGED':
+                continue
+            close_numbers, conflict_numbers = closing_issues(pr)
+            if n in close_numbers:
                 reasons.add('merged_closes_open')
                 prs.add(pr['number'])
+            if n in conflict_numbers:
+                conflicts.add(pr['number'])
+        if conflicts:
+            reasons.add('closing_reference_conflict')
+            prs.update(conflicts)
         if dependency_gated(labs):
             body = item.get('body') or ''
             blockers = refs(BLOCKERS, body) - {n}
