@@ -348,7 +348,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-ci-admission",
-      "sha256": "f17413143d0393d5cf65513dee6512d7133072976b11f0050dea2ec817441b1b",
+      "sha256": "88080734deec7851b644dce38713bfdfbb824a3d476171464da5686eeeea69f8",
       "source_path": "claude/scripts/ci/pm-admit-12b.py"
     },
     {
@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "6f90dc89942c7b8ed3029cd553ec0a4597d7cd5b4b8b3eef309f2f7949e643ac",
+      "sha256": "491f2464de295a0dd968d640252669507789160936a9af385b6ad5f6bcb781ef",
       "source_path": "claude/scripts/ci/tests/test-pm-admit-ci.sh"
     },
     {

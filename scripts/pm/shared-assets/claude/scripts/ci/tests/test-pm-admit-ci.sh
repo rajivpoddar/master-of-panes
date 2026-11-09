@@ -63,13 +63,6 @@ if [[ "$*" = *pm-ops.py* ]]; then
   printf 'pm-ops %s\n' "$*" >> "$STUB_LOG"
   exit 0
 fi
-# This legacy shell suite covers the deployed comment-only transition contract.
-# Pin only that policy seam; strict provenance/history has its own Python tests.
-if [[ "$*" = *pm-admit-12b.py* ]]; then
-  [ "$1" != -I ] || shift
-  helper="$1"; shift
-  exec "$REAL_PYTHON" -I -c 'import runpy,sys; path=sys.argv[1]; sys.argv=[path]+sys.argv[2:]; m=runpy.run_path(path); m["evaluate"].__globals__["transition_open"]=lambda: True; m["evaluate"].__globals__["read_review"]=lambda pr: None; raise SystemExit(m["main"]())' "$helper" "$@"
-fi
 exec "$REAL_PYTHON" "$@"
 EOF
   chmod +x "$T/bin/gh" "$T/bin/git" "$T/bin/python3"
