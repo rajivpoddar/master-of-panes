@@ -719,6 +719,7 @@ export class ProcessHealthChecker {
     this.db.logEvent(0, "pm_restart_launched", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
 
     // 3. Claude input prompt (pane read, bounded).
+    const exitCandidate = this.db.getExitAttempt(0);
     const bootCommand = await this.waitForPMClaudePrompt(pin.paneId, this.PM_PROMPT_TIMEOUT_MS);
     if (!bootCommand) return fail(`claude prompt not observed within ${this.PM_PROMPT_TIMEOUT_MS}ms`, true);
     this.db.logEvent(0, "agent_booted", null, null, {
@@ -727,6 +728,12 @@ export class ProcessHealthChecker {
     this.db.logEvent(0, "process_restarted", null, null, {
       command: launchCommand, restarted_at: new Date().toISOString(), trigger, model,
     });
+
+    if (trigger === "exit" && exitCandidate?.episode === episode) {
+      const replacementProcess = await this.relay.exitProcessIdentity(0, pin.paneId);
+      this.db.logEvent(0, "exit_replacement_bound", null, null, { episode,
+        submittedAt: exitCandidate.submittedAt, assignmentEpoch: exitCandidate.assignmentEpoch, replacementProcess });
+    }
 
     // This launch's FIRST SessionStart binds the continuation to this boot; a
     // later (successor) boot never inherits it.
@@ -1065,8 +1072,16 @@ export class ProcessHealthChecker {
         pane_command: paneCommand,
       });
 
+      const exitCandidate = this.db.getExitAttempt(slot);
+      const exitEpoch = this.db.getSlot(slot)?.assignment_epoch;
       const restartResult = await this.restartSlot(slot);
       if (restartResult.success) {
+        if (exitCandidate && exitCandidate.assignmentEpoch === exitEpoch
+            && this.db.getSlot(slot)?.assignment_epoch === exitEpoch && !this.db.isExitSlotRetained(slot)) {
+          const replacementProcess = await this.relay.exitProcessIdentity(slot, exitCandidate.paneId);
+          this.db.logEvent(slot, "exit_replacement_bound", null, null, { episode: exitCandidate.episode,
+            submittedAt: exitCandidate.submittedAt, assignmentEpoch: exitEpoch, replacementProcess });
+        }
         this.lastRestart.set(slot, Date.now());
         this.recordRestart(slot);
 

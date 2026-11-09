@@ -1726,9 +1726,7 @@ export class HookProcessor {
         branch: slot.branch,
         reason: "exit_pending flag set — sending /exit for graceful restart",
       });
-      this.relay.injectToPM(
-        `# slot ${slotNum} Stop authorized an /exit attempt — cycle remains unverified until replacement Claude is observed`,
-      );
+      // Deferred relay reports the actual delivery/refusal receipt, not authorization. Lane ownership never implies an effect.
 
       // Check if all slots have cycled — if so, auto-clear the flag
       const status = this.db.getExitStatus();

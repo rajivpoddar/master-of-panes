@@ -121,7 +121,7 @@ test("canonical background dialog is recognized but never authorizes stopping ag
     assert.equal(h.pane.exitEnters, 1);
     assert.deepEqual(h.pane.keys, [], "never select Exit and stop tasks");
     assert.equal(h.db.getExitAttempt(1)?.phase, "blocked");
-    assert.equal(h.db.getExitAttempt(1)?.blockedReason, "background_agents");
+    assert.equal(h.db.getExitAttempt(1)?.blockedReason, "exit_dialog_observed");
     assert.equal(h.db.getExitStatus().cycled[1], false);
   } finally { h.db.close(); }
 });
@@ -156,6 +156,11 @@ test("cycle requires actual replacement Claude PID/start in the SAME immutable p
     await h.relay.observeExitAttempts();
     assert.equal(h.db.getExitStatus().cycled[1], false, "numeric address successor is not our pane");
     h.pane.id = "%40";
+    const attempt = h.db.getExitAttempt(1)!;
+    h.db.logEvent(1, "exit_replacement_bound", null, null, {
+      episode: attempt.episode, submittedAt: attempt.submittedAt, assignmentEpoch: attempt.assignmentEpoch,
+      replacementProcess: JSON.stringify(["%40", 200, "Tue Nov 3 00:00:00 2026"]),
+    });
     await h.relay.observeExitAttempts();
     assert.equal(h.db.getExitStatus().cycled[1], true);
     assert.equal(h.db.getExitAttempt(1)?.replacementProcess, JSON.stringify(["%40", 200, "Tue Nov 3 00:00:00 2026"]));

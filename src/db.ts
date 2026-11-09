@@ -2798,7 +2798,10 @@ export class MoPDatabase {
 
   hasExitAttemptSubmitted(slot: number): boolean {
     const attempt = this.getExitAttempt(slot);
-    return !!attempt && ["dispatching", "delivered", "unknown", "verified"].includes(attempt.phase);
+    return !!attempt && !(attempt.phase === "blocked" && attempt.blockedReason === "exit_dialog_observed"
+      && attempt.attemptCount < 2 && attempt.sessionId === this.latestSessionId(slot)
+      && attempt.inputEventId === (this.getEvents(slot, 1, "UserPromptSubmit")[0]?.id ?? null)
+      && attempt.assignmentEpoch === (this.getSlot(slot)?.assignment_epoch ?? 0));
   }
 
   markSlotExitCycled(slot: number): void {
