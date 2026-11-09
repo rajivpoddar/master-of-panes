@@ -498,6 +498,12 @@ function sameSessionPrompt(db: MoPDatabase) {
   db.startAgentTurn(1, SESSION);
 }
 
+/** The replacement turn starts and Stop finishes before the capture returns. */
+function startAndFinishReplacement(db: MoPDatabase) {
+  sameSessionPrompt(db);
+  db.finishAgentTurn(1, SESSION);
+}
+
 test("same-session UserPromptSubmit before lease admission sends nothing", async () => {
   const h = realLease();
   try {
@@ -577,5 +583,95 @@ test("same-session UserPromptSubmit during the final pre-Enter capture does not 
     }
   } finally {
     ctl.close();
+  }
+});
+
+test("replacement turn that starts and finishes before lease admission sends nothing", async () => {
+  const h = realLease();
+  try {
+    pinOriginalTurn(h.db);
+    h.p.onCapture = (n) => { if (n === 1) startAndFinishReplacement(h.db); };
+    await h.check();
+    const cur = h.db.getSlot(1);
+    assert.equal(cur?.active_turn_state, "inactive");
+    assert.equal(cur?.active_turn_id, null, "Stop cleared the replacement binding");
+    assert.equal(h.p.pastes, 0, "inactive must not fall through to ordinary admission");
+    assert.equal(h.p.enters, 0);
+    assert.equal(h.payload("api_stall_nudge_refused")?.reason, "release_in_progress");
+    assert.equal(h.det.getApiStallStatus(1).state, "stall_pending");
+  } finally {
+    h.close();
+  }
+});
+
+test("replacement turn that starts and finishes during the final pre-paste capture sends nothing", async () => {
+  const ctl = realLease();
+  try {
+    pinOriginalTurn(ctl.db);
+    await ctl.check();
+    const atPaste = ctl.p.capturesAtPaste ?? 0;
+    assert.ok(atPaste > 1);
+    const h = realLease();
+    try {
+      pinOriginalTurn(h.db);
+      h.p.onCapture = (n) => { if (n === atPaste) startAndFinishReplacement(h.db); };
+      await h.check();
+      const cur = h.db.getSlot(1);
+      assert.equal(cur?.active_turn_state, "inactive");
+      assert.equal(cur?.active_turn_id, null);
+      assert.equal(h.p.pastes, 0, "no input after the finished replacement");
+      assert.equal(h.p.enters, 0);
+      assert.equal(h.payload("api_stall_nudge_refused")?.detail, "turn_active");
+      assert.equal(h.det.getApiStallStatus(1).state, "stall_pending");
+    } finally {
+      h.close();
+    }
+  } finally {
+    ctl.close();
+  }
+});
+
+test("replacement turn that starts and finishes during the final pre-Enter capture does not submit", async () => {
+  const ctl = realLease();
+  try {
+    pinOriginalTurn(ctl.db);
+    await ctl.check();
+    const atEnter = ctl.p.capturesAtEnter ?? 0;
+    assert.ok(atEnter > (ctl.p.capturesAtPaste ?? 0));
+    const h = realLease();
+    try {
+      pinOriginalTurn(h.db);
+      h.p.onCapture = (n) => { if (n === atEnter) startAndFinishReplacement(h.db); };
+      await h.check();
+      const cur = h.db.getSlot(1);
+      assert.equal(cur?.active_turn_state, "inactive");
+      assert.equal(cur?.active_turn_id, null);
+      assert.equal(h.p.pastes, 1, "the earlier paste stays");
+      assert.equal(h.p.enters, 0, "Enter must not follow the finished replacement");
+      assert.match(h.payload("api_stall_nudge_uncertain")?.detail ?? "", /turn_active/);
+      h.p.onCapture = undefined;
+      await h.check();
+      await h.check();
+      assert.equal(h.p.pastes, 1, "an earlier paste stays consumed");
+      assert.equal(h.p.enters, 0, "no subsequent input");
+    } finally {
+      h.close();
+    }
+  } finally {
+    ctl.close();
+  }
+});
+
+test("ordinary idle stall still delivers when the exception was not requested", async () => {
+  const h = realLease();
+  try {
+    h.db.finishAgentTurn(1, "turn-mid-response");
+    assert.equal(h.db.getSlot(1)?.active_turn_state, "inactive");
+    await h.check();
+    assert.equal(h.p.pastes, 1);
+    assert.equal(h.p.enters, 1);
+    assert.ok(h.types().includes("api_stall_nudge"));
+  } finally {
+    h.close();
   }
 });

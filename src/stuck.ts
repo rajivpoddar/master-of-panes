@@ -1706,6 +1706,11 @@ export class StuckDetector {
       if (cur.assignment_epoch !== expected.assignment_epoch || cur.assigned_at !== expected.assigned_at) {
         return "identity_changed";
       }
+      // Same exception, both fences. A replacement turn that starts and then
+      // Stop-finishes while the capture is in flight is inactive with the
+      // binding cleared. That must refuse, not take the idle return below.
+      // Ordinary nudges (staleActive false) skip this.
+      if (staleActive && !isObservedAgentTurn(cur, observedTurn)) return "turn_active";
       if (!this.isIdleByHookState(cur).idle) {
         // The one missing-Stop termination: still the observed turn, empty
         // composer before paste, the exact owned nudge before Enter, same

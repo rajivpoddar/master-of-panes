@@ -2956,6 +2956,11 @@ export class MoPDatabase {
     const key = `native_release_intent_${slot}`;
     return this.db.transaction((): string | null => {
       const current = this.getSlot(slot);
+      // The stale-active exception is bound to the observed turn at every later
+      // state. finishAgentTurn clears both fields and sets inactive; that must
+      // refuse here, not pass the ordinary idle checks below. Ordinary nudges
+      // (verifiedStallTermination false) are unchanged.
+      if (verifiedStallTermination && !isObservedAgentTurn(current, observedTurn)) return null;
       // One missing-Stop stall: the hook is exactly "active" because Stop never
       // ran, AND it is still the turn observed before delivery. A later
       // UserPromptSubmit keeps active_turn_id (the session id) and refreshes
