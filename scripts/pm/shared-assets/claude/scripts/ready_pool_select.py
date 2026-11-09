@@ -68,8 +68,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
+import os
+import sys
+
+_SCRIPTS = Path.home() / ".claude" / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+import gh_budget
 
 REPO = "Scribie/heydonna-app"
+POOL_TTL = gh_budget.DEFAULT_TTL
 ASSOCIATED_PRS = ('closedByPullRequestsReferences(first:2,includeClosedPrs:true) '
                   '{ nodes { number state mergedAt } pageInfo { hasNextPage } }')
 PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
@@ -489,21 +497,45 @@ def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -
         c["dependency_reason"] = "dependency_check_disabled"
         return
     unresolved = []
+    # One GraphQL round for every uncached blocker, not one query per number.
+    pending = [number for number, kind in refs if (number, kind) not in cache]
+    if pending and not offline:
+        try:
+            nodes = graphql_nodes(pending)
+        except TimeoutError:
+            raise
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+            nodes = {number: None for number in pending}
+        for number in pending:
+            node = nodes.get(number) if isinstance(nodes, dict) else None
+            if isinstance(node, dict):
+                cache[("state", number)] = node.get("state")
     for number, kind in refs:
         key = (number, kind)
         if key not in cache:
+            node = None
+            if pending and not offline:
+                node = nodes.get(number) if isinstance(nodes, dict) else None
             try:
-                cache[key] = dependency_satisfaction(graphql_nodes([number]).get(number))
-            except TimeoutError:
-                raise
-            except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+                cache[key] = dependency_satisfaction(node)
+            except (ValueError, TypeError):
                 cache[key] = (False, "LOOKUP_FAILED")
         satisfied, state = cache[key]
         if satisfied and number in {n for n, _ in (native or [])}:
             native_state_key = ('native_state', number)
             if native_state_key not in cache:
-                node = graphql_nodes([number]).get(number)
-                cache[native_state_key] = isinstance(node, dict) and node.get('state') == 'CLOSED'
+                known = cache.get(("state", number))
+                if known is None and not offline:
+                    try:
+                        node = graphql_nodes([number]).get(number)
+                    except TimeoutError:
+                        raise
+                    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+                        node = None
+                    known = node.get("state") if isinstance(node, dict) else None
+                    if isinstance(node, dict):
+                        cache[("state", number)] = known
+                cache[native_state_key] = known == 'CLOSED'
             if not cache[native_state_key]:
                 satisfied, state = False, 'NATIVE_BLOCKER_NOT_CLOSED_OR_LOOKUP_FAILED'
         if not satisfied:
@@ -520,6 +552,10 @@ def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -
 
 
 def graphql_nodes(numbers: list[int], comments: bool = False, candidate_details: bool = False) -> dict[int, dict]:
+    if numbers and os.environ.get("GH_BUDGET_DISABLE") != "1" and gh_budget.graphql_low():
+        gh_budget.note_stale(
+            f"graphql remaining {gh_budget.graphql_remaining()} < {gh_budget.LOW_WATER}; skipped a GraphQL node lookup")
+        return {n: None for n in numbers}
     result = {}
     for start in range(0, len(numbers), 50):
         batch = numbers[start:start + 50]
@@ -540,7 +576,57 @@ def graphql_nodes(numbers: list[int], comments: bool = False, candidate_details:
     return result
 
 
+def _dump_dep_cache(issues: list[dict], cache: dict) -> dict:
+    comments = {str(int(i["number"])): i.get("_dependency_comments", "")
+                for i in issues if "_dependency_comments" in i}
+    states = {}
+    for key, value in cache.items():
+        if isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], int):
+            states[f"{key[0]}|{key[1]}"] = list(value) if isinstance(value, tuple) else value
+        elif isinstance(key, tuple) and key and key[0] == "state" and isinstance(key[1], int):
+            states[f"state|{key[1]}"] = value
+    return {"comments": comments, "states": states}
+
+
+def _apply_dep_payload(issues: list[dict], cache: dict, payload: dict) -> None:
+    comments = payload.get("comments") or {}
+    for issue in issues:
+        key = str(int(issue["number"]))
+        if key in comments:
+            issue["_dependency_comments"] = comments[key]
+    for raw, value in (payload.get("states") or {}).items():
+        if raw.startswith("state|"):
+            cache[("state", int(raw.split("|", 1)[1]))] = value
+            continue
+        number_s, sep, kind = raw.partition("|")
+        if not sep:
+            continue
+        cache[(int(number_s), kind)] = tuple(value) if isinstance(value, list) else value
+
+
 def prefetch_dependencies(issues: list[dict], cache: dict) -> None:
+    """Batched dependency lookup, shared for 300s. A cold miss below the GraphQL floor leaves deps unresolved."""
+    if os.environ.get("GH_BUDGET_DISABLE") == "1":
+        _prefetch_dependencies_uncached(issues, cache)
+        return
+    try:
+        payload, _live = gh_budget.serve(
+            "ready-pool-deps", POOL_TTL, lambda: _capture_dependencies(issues))
+    except LookupError:
+        gh_budget.note_stale(
+            f"graphql remaining {gh_budget.graphql_remaining()} < {gh_budget.LOW_WATER} "
+            "and no ready-pool dependency cache")
+        return
+    _apply_dep_payload(issues, cache, payload)
+
+
+def _capture_dependencies(issues: list[dict]) -> dict:
+    local: dict = {}
+    _prefetch_dependencies_uncached(issues, local)
+    return _dump_dep_cache(issues, local)
+
+
+def _prefetch_dependencies_uncached(issues: list[dict], cache: dict) -> None:
     missing = []
     for issue in issues:
         if 'pm-blocked:dependency' not in issue_holds(issue) or '_dependency_comments' in issue:
@@ -570,6 +656,8 @@ def prefetch_dependencies(issues: list[dict], cache: dict) -> None:
             cache[(number, kind)] = (False, 'LOOKUP_FAILED')
             continue
         cache[(number, kind)] = dependency_satisfaction(node)
+        if isinstance(node, dict):
+            cache[("state", number)] = node.get("state")
 
 
 def candidate(issue: dict[str, Any], cls: str) -> dict[str, Any]:
@@ -606,6 +694,8 @@ def rank_candidates(issues: list[dict[str, Any]], extra: list[dict[str, Any]] | 
     best class kept). Gated P0s are excluded here; see gated_p0_candidates()."""
     best: dict[int, dict[str, Any]] = {}
     cache = cache if cache is not None else {}
+    if not offline:
+        prefetch_dependencies(issues, cache)
     gated = {c["issue"] for c in gated_p0_candidates(issues, rework_only, cache, offline)}
     for issue in issues:
         cls = classify(issue)
@@ -731,7 +821,7 @@ def candidate_node(node: dict) -> dict:
     return {**node, "labels": labels["nodes"], "_implementation_merged": ok}
 
 
-def load_open_issues(timeout: int = 240) -> list[dict[str, Any]]:
+def _load_open_issues_uncached(timeout: int = 240) -> list[dict[str, Any]]:
     """Complete candidate-label union, not a truncated all-open body scan."""
     deadline, result = monotonic() + timeout, {}
     fields = ('number title body state createdAt labels(first:100){nodes{name} pageInfo{hasNextPage}} '
@@ -772,12 +862,35 @@ def load_open_issues(timeout: int = 240) -> list[dict[str, Any]]:
     return list(result.values())
 
 
-def load_open_prs(timeout: int = 30) -> list[dict[str, Any]]:
+def load_open_issues(timeout: int = 240) -> list[dict[str, Any]]:
+    """Candidate snapshot. Shared 300s cache; stale cache instead of a GraphQL call below the floor."""
+    if os.environ.get("GH_BUDGET_DISABLE") == "1":
+        return _load_open_issues_uncached(timeout)
+    try:
+        issues, _live = gh_budget.serve(
+            "ready-pool-open-issues", POOL_TTL, lambda: _load_open_issues_uncached(timeout))
+    except LookupError as exc:
+        raise ValueError(str(exc)) from None
+    return issues
+
+
+def _load_open_prs_uncached(timeout: int = 30) -> list[dict[str, Any]]:
     proc = run_lookup(
         ["gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "1000",
          "--json", "number,isDraft,body,updatedAt,closingIssuesReferences"], timeout=timeout,
     )
     return json.loads(proc.stdout)
+
+
+def load_open_prs(timeout: int = 30) -> list[dict[str, Any]]:
+    """`gh pr list` is GraphQL. Share one result for 300s across --check and the full scan."""
+    if os.environ.get("GH_BUDGET_DISABLE") == "1":
+        return _load_open_prs_uncached(timeout)
+    try:
+        prs, _live = gh_budget.serve("ready-pool-open-prs", POOL_TTL, lambda: _load_open_prs_uncached(timeout))
+    except LookupError as exc:
+        raise ValueError(str(exc)) from None
+    return prs
 
 
 def owned_issues(prs: list[dict[str, Any]]) -> tuple[dict[int, list[int]], dict[int, list[int]]]:
@@ -1255,6 +1368,8 @@ class patch_attr:
 
 
 def selftest() -> int:
+    # Disk cache must not poison or skip the stubbed lookups.
+    os.environ["GH_BUDGET_DISABLE"] = "1"
     from unittest.mock import patch
     assert parse_dependencies('[#10]', 'PR #10 merged') == [(10, 'default')]
     assert parse_dependencies('', '#10 closed and Rajiv approval') == [(10, 'closed')]
@@ -1359,7 +1474,7 @@ def evaluate_check(args, issues, extra, prs, cache) -> dict[str, Any]:
     return res
 
 
-def load_light_candidates(timeout: int = 60) -> list[dict[str, Any]]:
+def _load_light_candidates_uncached(timeout: int = 60) -> list[dict[str, Any]]:
     """Number/labels/createdAt only for the candidate-label union (no bodies, no PR links)."""
     deadline, result = monotonic() + timeout, {}
     for label in ["status:todo", *sorted(REWORK_LABELS), "pm-blocked:dependency"]:
@@ -1397,6 +1512,28 @@ def load_light_candidates(timeout: int = 60) -> list[dict[str, Any]]:
     return list(result.values())
 
 
+def load_light_candidates(timeout: int = 60) -> list[dict[str, Any]]:
+    """Label scan used by every --check. This was the repeated GraphQL pagination."""
+    if os.environ.get("GH_BUDGET_DISABLE") == "1":
+        return _load_light_candidates_uncached(timeout)
+    try:
+        rows, _live = gh_budget.serve(
+            "ready-pool-light", POOL_TTL, lambda: _load_light_candidates_uncached(timeout))
+    except LookupError as exc:
+        raise ValueError(str(exc)) from None
+    return rows
+
+
+def _cached_checked_issue(number: int) -> dict | None:
+    payload, _age = gh_budget.peek("ready-pool-open-issues")
+    if not isinstance(payload, list):
+        return None
+    for issue in payload:
+        if isinstance(issue, dict) and int(issue.get("number") or 0) == number:
+            return issue
+    return None
+
+
 def fast_check(args) -> dict[str, Any]:
     """--check N without loading the whole pool.
 
@@ -1413,12 +1550,22 @@ def fast_check(args) -> dict[str, Any]:
     extra = []
     if args.selection_class and args.selection_class != "new_issue":
         extra.append({"issue": args.check, "class": args.selection_class, "pr": args.pr})
-    node = graphql_nodes([args.check], candidate_details=True).get(args.check)
-    if node is None:
-        return {"status": "LOOKUP_FAILED", "issue": args.check, "reason": "issue lookup failed"}
-    if "mergedAt" in node:
-        return {"status": "not_eligible", "issue": args.check, "reason": "issue is not an eligible Ready Pool/rework candidate"}
-    picked = candidate_node(node)
+    low = os.environ.get("GH_BUDGET_DISABLE") != "1" and gh_budget.graphql_low()
+    if low:
+        picked = _cached_checked_issue(args.check)
+        if picked is None:
+            rem = gh_budget.graphql_remaining()
+            return {"status": "LOOKUP_FAILED", "issue": args.check, "stale": True,
+                    "reason": f"UNAVAILABLE: graphql remaining {rem} < {gh_budget.LOW_WATER} and no cached issue"}
+        gh_budget.note_stale(
+            f"graphql remaining {gh_budget.graphql_remaining()} < {gh_budget.LOW_WATER}; --check used the cached pool")
+    else:
+        node = graphql_nodes([args.check], candidate_details=True).get(args.check)
+        if node is None:
+            return {"status": "LOOKUP_FAILED", "issue": args.check, "reason": "issue lookup failed"}
+        if "mergedAt" in node:
+            return {"status": "not_eligible", "issue": args.check, "reason": "issue is not an eligible Ready Pool/rework candidate"}
+        picked = candidate_node(node)
     prs = load_open_prs()
     res = evaluate_check(args, [picked], extra, prs, cache)
     rework_only = res.pop("_rework_only")
@@ -1437,15 +1584,23 @@ def fast_check(args) -> dict[str, Any]:
             continue
         if not ranks or (min(ranks), CLASS_RANK[cls]) < pick_key:
             possible.append(int(light["number"]))
-    details = graphql_nodes(possible, candidate_details=True)
+    if low:
+        details = {n: _cached_checked_issue(n) for n in possible}
+    else:
+        details = graphql_nodes(possible, candidate_details=True)
     better = []
     for number in possible:
         raw = details.get(number)
         if raw is None:
+            if low:
+                continue  # a missing cached row is not a live lookup failure
             raise ValueError(f"candidate #{number} lookup failed")
-        if "mergedAt" in raw:
-            continue
-        issue = candidate_node(raw)
+        if isinstance(raw.get("labels"), list):
+            issue = raw
+        else:
+            if "mergedAt" in raw:
+                continue
+            issue = candidate_node(raw)
         cls = classify(issue)
         if cls is None:
             continue
@@ -1487,6 +1642,9 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("selection-class requires --check")
     if args.check is not None and not args.issues_json and not args.extra_json:
         res = fast_check(args)
+        if gh_budget.stale_info():
+            res.setdefault("stale", True)
+            res.setdefault("stale_reason", gh_budget.stale_info())
         print(json.dumps(res, sort_keys=True))
         return CHECK_EXIT.get(res["status"], 4)
     cache: dict = {}
@@ -1579,6 +1737,7 @@ def main(argv: list[str] | None = None) -> int:
         "dependency_hell": dependency_hell,
         "dependency_hotspots": dependency_hotspots,
         "dependency_hell_meta": hell_meta,
+        **({"stale": True, "stale_reason": gh_budget.stale_info()} if gh_budget.stale_info() else {}),
     }, indent=2, sort_keys=True))
     return 0 if pick else 1
 

@@ -18,6 +18,11 @@ import subprocess
 import sys
 import urllib.request
 
+_SCRIPTS = Path.home() / ".claude" / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+import gh_budget
+
 REPO = 'Scribie/heydonna-app'
 STATE = Path.home() / '.claude/state/issue-lifecycle.json'
 PM_OPS = Path.home() / '.claude/scripts/pm-ops.py'
@@ -209,38 +214,157 @@ def blocker_states(numbers):
     return known
 
 
-def collect(since):
-    issues, cursor = [], None
+LIGHT_TIMELINE = '''nodes { ... on CrossReferencedEvent { source { ... on PullRequest {
+ number state body title headRefName mergedAt } } } } pageInfo { hasNextPage endCursor }'''
+
+
+def rest_issue_record(item: dict) -> dict | None:
+    """REST issue list row -> the shape detect() already consumes. Pull requests are not issues."""
+    if not isinstance(item, dict) or 'pull_request' in item or not isinstance(item.get('number'), int):
+        return None
+    raw_labels = item.get('labels') or []
+    if not isinstance(raw_labels, list):
+        raise ValueError('malformed issue labels')
+    names = []
+    for label in raw_labels:
+        if isinstance(label, dict) and isinstance(label.get('name'), str):
+            names.append({'name': label['name']})
+        elif isinstance(label, str):
+            names.append({'name': label})
+        else:
+            raise ValueError('malformed issue labels')
+    return {
+        'number': item['number'],
+        'title': item.get('title') or '',
+        'body': item.get('body') or '',
+        'state': 'OPEN',
+        'labels': {'nodes': names, 'pageInfo': {'hasNextPage': False}},
+        'references': [],
+    }
+
+
+def rest_open_issues() -> list:
+    """Every open issue via REST. Replaces the GraphQL scan of all 578 issues plus a nested timeline."""
+    issues = []
+    pages = gh('api', '--paginate', '--slurp', f'repos/{REPO}/issues?state=open&per_page=100')
+    if not isinstance(pages, list):
+        raise ValueError('unexpected open-issue pages')
+    for page in pages:
+        if not isinstance(page, list):
+            raise ValueError('unexpected open-issue page')
+        for item in page:
+            record = rest_issue_record(item)
+            if record:
+                issues.append(record)
+    return issues
+
+
+def rest_merged_since(since: str) -> list:
+    """Merged PRs updated at or after `since`, from the REST pulls list. Stops once a page is older."""
+    merged = []
+    for page_no in range(1, 11):
+        batch = gh('api', f'repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={page_no}')
+        if not isinstance(batch, list) or not batch:
+            break
+        older = False
+        for pr in batch:
+            updated = pr.get('updated_at') or ''
+            merged_at = pr.get('merged_at')
+            if updated and updated < since:
+                older = True
+            if not merged_at or merged_at < since:
+                continue
+            merged.append({
+                'number': pr['number'],
+                'body': pr.get('body') or '',
+                'title': pr.get('title') or '',
+                'state': 'MERGED',
+                'mergedAt': merged_at,
+                'updatedAt': updated,
+                'headRefName': ((pr.get('head') or {}).get('ref') or ''),
+            })
+        if older or len(batch) < 100:
+            break
+    return merged
+
+
+def hydrate_closing_refs(prs: list) -> None:
+    """One batched GraphQL read for closing-issue numbers, not one nested connection per timeline event."""
+    need = [pr for pr in prs if isinstance(pr, dict) and pr.get('number') and 'closingIssuesReferences' not in pr]
+    seen = set()
+    ordered = []
+    for pr in need:
+        if pr['number'] in seen:
+            continue
+        seen.add(pr['number'])
+        ordered.append(pr)
+    for start in range(0, len(ordered), 20):
+        batch = ordered[start:start + 20]
+        fields = ' '.join(
+            f'p{pr["number"]}: pullRequest(number:{pr["number"]}) '
+            '{ closingIssuesReferences(first:20) { nodes { number } pageInfo { hasNextPage } } }'
+            for pr in batch)
+        query = 'query { repository(owner:"Scribie",name:"heydonna-app") { ' + fields + ' } }'
+        try:
+            doc = gh('api', 'graphql', '-f', 'query=' + query)
+        except subprocess.CalledProcessError as error:
+            doc = json.loads(error.stdout or '{}')
+            if not doc.get('errors'):
+                raise
+        repo = (doc.get('data') or {}).get('repository') or {}
+        for pr in batch:
+            node = repo.get(f'p{pr["number"]}') or {}
+            refs = node.get('closingIssuesReferences') or {'nodes': [], 'pageInfo': {'hasNextPage': False}}
+            if (refs.get('pageInfo') or {}).get('hasNextPage'):
+                raise ValueError('incomplete PR closing references')
+            pr['closingIssuesReferences'] = refs
+
+
+def timeline_prs(number: int) -> list:
+    """Cross-referenced PRs for one issue. No nested closingIssuesReferences (those were the point bomb)."""
+    out, cursor = [], None
     while True:
-        query = '''query($cursor:String) { repository(owner:"Scribie", name:"heydonna-app") {
- issues(first:30, after:$cursor, states:OPEN) { nodes { number title body state
- labels(first:100) { nodes { name } pageInfo { hasNextPage } }
- timelineItems(first:100, itemTypes:[CROSS_REFERENCED_EVENT]) { ''' + SOURCE + ''' }
- } pageInfo { hasNextPage endCursor } } } }'''
-        page = graphql(query, dict(cursor=cursor))['repository']['issues']
-        for item in page['nodes']:
-            if item['labels']['pageInfo']['hasNextPage']:
-                raise ValueError('incomplete issue labels')
-            item['references'] = timeline(item['number'], item.pop('timelineItems'))
-            issues.append(item)
+        query = '''query($number:Int!, $cursor:String) { repository(owner:"Scribie", name:"heydonna-app") {
+ issue(number:$number) { timelineItems(first:50, after:$cursor, itemTypes:[CROSS_REFERENCED_EVENT]) { ''' + LIGHT_TIMELINE + ' } } } }'
+        page = graphql(query, dict(number=number, cursor=cursor))['repository']['issue']['timelineItems']
+        out.extend(node['source'] for node in page['nodes'] if (node.get('source') or {}).get('number'))
         if not page['pageInfo']['hasNextPage']:
             break
         cursor = page['pageInfo']['endCursor']
+    return out
+
+
+def attach_references(issues: list, merged: list) -> None:
+    """Merged-PR closes, plus timelines only for in-review / in-progress issues."""
+    by_number = {item['number']: item for item in issues}
+    hydrate_closing_refs(merged)
+    for pr in merged:
+        explicit, conflicts = closing_issues(pr)
+        for number in explicit | conflicts:
+            item = by_number.get(number)
+            if item is not None and all(existing.get('number') != pr['number'] for existing in item['references']):
+                item['references'].append(pr)
+    linked = []
+    for item in issues:
+        if labels(item) & LIFECYCLE_LABELS:
+            found = timeline_prs(item['number'])
+            linked.extend(found)
+            for pr in found:
+                if all(existing.get('number') != pr.get('number') for existing in item['references']):
+                    item['references'].append(pr)
+    hydrate_closing_refs(linked)
+
+
+def collect(since):
+    # REST for the full open-issue list and the merged window. GraphQL only for
+    # lifecycle-issue timelines, one closing-ref batch, and blocker states.
+    issues = rest_open_issues()
     open_prs = [pr for page in gh('api', '--paginate', '--slurp', f'repos/{REPO}/pulls?state=open&per_page=100') for pr in page]
     with urllib.request.urlopen('http://127.0.0.1:3100/slots', timeout=10) as response:
         slots = json.load(response)['slots']
-    merged, cursor = [], None
-    while True:
-        query = '''query($cursor:String) { repository(owner:"Scribie", name:"heydonna-app") {
- pullRequests(first:100, after:$cursor, states:MERGED, orderBy:{field:UPDATED_AT, direction:DESC}) {
- nodes { number body mergedAt updatedAt } pageInfo { hasNextPage endCursor } } } }'''
-        page = graphql(query, dict(cursor=cursor))['repository']['pullRequests']
-        merged.extend(pr for pr in page['nodes'] if pr['mergedAt'] >= since)
-        if not page['pageInfo']['hasNextPage'] or (page['nodes'] and page['nodes'][-1]['updatedAt'] < since):
-            break
-        cursor = page['pageInfo']['endCursor']
+    merged = rest_merged_since(since)
+    attach_references(issues, merged)
     known = {i['number']: False for i in issues}
-
     needed = set()
     for item in issues:
         labs = labels(item)
@@ -432,6 +556,28 @@ def run(dry_run=False):
         fcntl.flock(lock, fcntl.LOCK_EX)
         now = dt.datetime.now(dt.timezone.utc)
         saved = json.loads(STATE.read_text()) if STATE.exists() else {}
+        fetched_at = saved.get('fetched_at')
+        if fetched_at and 'findings' in saved:
+            try:
+                fetched = dt.datetime.fromisoformat(fetched_at.replace('Z', '+00:00'))
+                age = (now - fetched).total_seconds()
+            except (ValueError, TypeError):
+                age = None
+            if age is not None and 0 <= age <= gh_budget.DEFAULT_TTL:
+                fresh = dict(saved)
+                fresh['cache'] = 'fresh'
+                return fresh
+        if gh_budget.graphql_low():
+            rem = gh_budget.graphql_remaining()
+            if saved.get('findings') is not None:
+                stale = dict(saved)
+                reason = f'graphql remaining {rem} < {gh_budget.LOW_WATER}; serving the last lifecycle report'
+                stale['stale'] = True
+                stale['stale_reason'] = reason
+                stale['lines'] = [f'• STALE: {reason}'] + list(saved.get('lines') or [])
+                return stale
+            raise RuntimeError(
+                f'UNAVAILABLE: graphql remaining {rem} < {gh_budget.LOW_WATER} and no issue-lifecycle cache')
         since = saved.get('since') or (now - dt.timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%SZ')
         collected = collect(since)
         findings = detect(*collected)
@@ -448,7 +594,8 @@ def run(dry_run=False):
             return dict(dry_run=True, findings=actionable, lines=lines, would_resolve=[])
         # Routine lifecycle findings live in this report and GitHub. Neither
         # create mirrors nor resolve an explicitly tracked issue commitment.
-        doc = dict(since=now.strftime('%Y-%m-%dT%H:%M:%SZ'), findings=actionable, lines=lines,
+        doc = dict(since=now.strftime('%Y-%m-%dT%H:%M:%SZ'), fetched_at=now.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                   findings=actionable, lines=lines,
                    scanned_since=since, reported_blockers_resolved=sorted(resolved))
         temporary = STATE.with_suffix('.new')
         temporary.write_text(json.dumps(doc, indent=2) + '\n')

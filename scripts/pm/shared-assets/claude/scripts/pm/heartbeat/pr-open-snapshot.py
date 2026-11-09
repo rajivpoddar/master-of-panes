@@ -22,8 +22,17 @@ import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+import sys
+
+_SCRIPTS = Path.home() / ".claude" / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+import gh_budget
 
 REPO = "Scribie/heydonna-app"
+# Shared with every other hook/heartbeat caller. A fresh file skips both the
+# `gh pr list` GraphQL read and the review-thread query.
+SNAPSHOT_TTL = gh_budget.DEFAULT_TTL
 RED = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
 PENDING = {"", "PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "EXPECTED", "REQUESTED"}
 # Required merge gates: the CI `test` aggregate job (ci.yml) and the E2E `e2e` job
@@ -564,10 +573,14 @@ STALE_RECHECK_CAP = 50
 
 
 def _live_pr_state(pr: int) -> str | None:
-    """Live PR state (OPEN/CLOSED/MERGED) or None when the gh read fails."""
+    """Live PR state (OPEN/CLOSED/MERGED) or None when the read fails.
+
+    REST pulls, not `gh pr view`: a simple state read was spending the shared
+    GraphQL budget (up to STALE_RECHECK_CAP per sync).
+    """
     try:
         proc = subprocess.run(
-            ["gh", "pr", "view", str(pr), "--repo", REPO, "--json", "number,state"],
+            ["gh", "api", f"repos/{REPO}/pulls/{pr}"],
             capture_output=True, text=True, errors="replace", timeout=15,
         )
         if proc.returncode != 0:
@@ -575,8 +588,10 @@ def _live_pr_state(pr: int) -> str | None:
         doc = json.loads(proc.stdout)
         if doc.get("number") != pr:
             return None
+        if doc.get("merged") is True:
+            return "MERGED"
         state = str(doc.get("state") or "").upper()
-        return state if state in ("OPEN", "CLOSED", "MERGED") else None
+        return state if state in ("OPEN", "CLOSED") else None
     except Exception:
         return None
 
@@ -859,6 +874,16 @@ def format_line(row: dict) -> str:
 
 
 def fetch_open_prs(with_threads: bool = True) -> list[dict]:
+    """Open PRs. Fresh shared cache for 300s; below the GraphQL floor, the last cache with a stale marker."""
+    key = "pr-open-snapshot" if with_threads else "pr-open-snapshot-no-threads"
+    try:
+        prs, _live = gh_budget.serve(key, SNAPSHOT_TTL, lambda: _fetch_open_prs_live(with_threads))
+    except LookupError as exc:
+        raise RuntimeError(str(exc)) from None
+    return prs
+
+
+def _fetch_open_prs_live(with_threads: bool = True) -> list[dict]:
     with ThreadPoolExecutor(max_workers=2) as pool:
         threads_future = pool.submit(fetch_review_threads) if with_threads else None
         proc = subprocess.run(
@@ -942,7 +967,14 @@ def main() -> int:
         (classify_pr(pr, mop_owned_prs, holds, claims) for pr in raw_prs),
         key=lambda r: -int(r["number"]),
     )
+    stale = gh_budget.stale_info()
+    if stale:
+        for row in rows:
+            row["stale"] = True
+            row["stale_reason"] = stale
     if args.text:
+        if stale:
+            print(f"STALE: {stale}")
         print("\n".join(format_line(r) for r in rows))
         for r in rows:
             for a in r["actions"]:
