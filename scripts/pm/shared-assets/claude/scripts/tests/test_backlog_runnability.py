@@ -128,6 +128,29 @@ def test_dependency_migration_contract_forms(monkeypatch):
                 assert skipped["missing_ready_pool_contract"]
 
 
+def test_p0_waiting_on_issue_is_not_rehydrated_as_non_dispatchable():
+    """Rule 54: P0 status:todo + sub:waiting-on-issue judges like pm-blocked:dependency."""
+    body = ("<!-- ready-pool:\npriority: P0\nlane: sync\nbranch_slug: fix-thing\n"
+            "ac_summary: Fix thing\nclaimable_slot_type: dev\nwork_type: app-code\n"
+            "blockers: [#999]\nholds: waiting-on-issue\ndisposition: READY\n-->\n"
+            "## Acceptance criteria\n\n1. AC-1: do the thing\n   - Surface: nonvisual\n"
+            "   - QA reachability: deterministic\n   - Required proof: integration\n\n"
+            "## Issue Contract Ledger\n\n| Contract row | Requirement |\n| --- | --- |\n"
+            "| Positive AC | AC-1 |\n| Negative AC | Do not drop edits |\n"
+            "| Forbidden implementation | No flag flip |\n| Determinism | Deterministic |\n"
+            "| Required proof | integration |\n")
+    issue = {"number": 13230, "title": "fix thing", "body": body,
+             "labels": [{"name": n} for n in ("status:todo", "P0", "sub:waiting-on-issue", "pm-blocked:dependency")]}
+    orig = bt.issue_contract_ledger_errors
+    bt.issue_contract_ledger_errors = lambda *args, **kwargs: []
+    try:
+        reasons = bt.ready_pool_contract_reasons(issue, {999}, allow_backlog=False, allow_dependencies=True)
+    finally:
+        bt.issue_contract_ledger_errors = orig
+    assert "tracking_or_non_dispatchable" not in reasons, reasons
+    assert not any(r.startswith("pm_blocker_label") for r in reasons), reasons
+
+
 def test_promotion_preserves_existing_legacy_dependency_label(monkeypatch):
     body = ("<!-- ready-pool:\npriority: P1\nlane: app\nbranch_slug: fix-thing\n"
             "ac_summary: Fix thing\nclaimable_slot_type: dev\nwork_type: app-code\n"

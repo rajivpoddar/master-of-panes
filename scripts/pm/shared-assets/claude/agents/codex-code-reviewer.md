@@ -582,6 +582,12 @@ the error state. `disabled={isSubmitting}` / `disabled={isPending}` guarding
 the action's own in-flight request is allowed. Full rule:
 `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## fullSection diff scope gate (Mandatory - rule 53)
+Source: Rajiv DM D0AMF0XE6TS ts 1794191847.184409: "only cover, appearances and index can be fullSection. all the other sections have to use wordMode diffs." Rule: `~/.claude/rules/53-heydonna-fullsection-diff-scope.md`.
+- REQUEST_CHANGES on any plan/diff that selects `diffStrategy: 'fullSection'` for an AI-result apply on any section other than `cover`/`appearances`/`index`, whether by section type or by a content condition (paragraph-count change, structural change, size).
+- Required: section-type allowlist (`FULL_SECTION_TYPES = {cover, appearances, index}`), else `'word'`; Reject All/undo structure restore is solved inside word mode.
+- Required test: a proceedings proofread that splits/merges paragraphs applies word-level tracked changes; accept-all == newText, Reject All == undo == exact original (text, paragraphs, speaker labels).
+
 ## Deletion-coverage gate (Mandatory - rule 52, Rajiv 2026-11-06)
 
 Rajiv C0ALZJHGE49 ts 1793982486.522039 ("the deletion coverage should be a product rule"); full rule: `~/.claude/rules/52-heydonna-deletion-coverage.md`.

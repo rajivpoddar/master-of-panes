@@ -159,7 +159,15 @@ SUB_TO_BLOCKER = {"sub:waiting-on-issue": "pm-blocked:dependency", "sub:pm-gate"
 
 def labels(issue: dict[str, Any]) -> set[str]:
     names = {str(label.get("name", "")) for label in issue.get("labels", []) if str(label.get("name", ""))}
-    names |= {legacy for sub, legacy in SUB_TO_BLOCKER.items() if sub in names}
+    # A cleared dependency must not come back from sub:waiting-on-issue. The holds
+    # loop below already skips that hold when _dependency_cleared is set; this
+    # rehydration ran first and made every P0 todo+sub:waiting-on-issue contract
+    # look pm-blocked (rule 54: the two forms judge the same).
+    cleared_dependency = bool(issue.get("_dependency_cleared"))
+    names |= {
+        legacy for sub, legacy in SUB_TO_BLOCKER.items()
+        if sub in names and not (cleared_dependency and legacy == "pm-blocked:dependency")
+    }
     meta = ready_pool_metadata(issue)
     for entry in re.split(r"[;,]", clean_meta_value(meta.get("holds"))):
         hold = entry.strip().lstrip("- ")
@@ -1199,7 +1207,12 @@ def ready_pool_contract_reasons(
         readiness_blocker_labels = norm_names - {"pm-blocked:dependency"}
     if allow_dependencies and status_labels == ["status:todo"] and "P0" in names:
         # Preserve existing gated-P0 membership; assignment still checks gates.
-        readiness_blocker_labels = {n for n in names if not n.startswith("pm-blocked:")}
+        # Drop the dependency sub-label too. labels() maps it back to
+        # pm-blocked:dependency, which then fails the dispatchable-contract check.
+        readiness_blocker_labels = {
+            n for n in names
+            if not n.startswith("pm-blocked:") and n != "sub:waiting-on-issue"
+        }
     if has_pm_blocker_label(readiness_blocker_labels):
         reasons.append("pm_blocker_label")
     if meta and not metadata_blockers_clear(meta) and not has_dependency_contract(meta):

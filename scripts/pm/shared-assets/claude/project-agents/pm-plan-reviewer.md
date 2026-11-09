@@ -84,6 +84,12 @@ when a plan or AC adds a precondition-gated disabled button; require the
 click-time error-state pattern plus a test that clicks the enabled button with
 the precondition unmet. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## fullSection diff scope gate (rule 53)
+Source: Rajiv DM D0AMF0XE6TS ts 1794191847.184409: "only cover, appearances and index can be fullSection. all the other sections have to use wordMode diffs." Rule: `~/.claude/rules/53-heydonna-fullsection-diff-scope.md`.
+- BLOCK any plan/diff that selects `diffStrategy: 'fullSection'` for an AI-result apply on any section other than `cover`/`appearances`/`index`, whether by section type or by a content condition (paragraph-count change, structural change, size).
+- Required: section-type allowlist (`FULL_SECTION_TYPES = {cover, appearances, index}`), else `'word'`; Reject All/undo structure restore is solved inside word mode.
+- Required test: a proceedings proofread that splits/merges paragraphs applies word-level tracked changes; accept-all == newText, Reject All == undo == exact original (text, paragraphs, speaker labels).
+
 ## No-unindexed-query gate (Rajiv product rule 2026-10-30)
 Source: Rajiv DM D0AMF0XE6TS thread 1793355859.689089, ts 1793356037.363689: "add a product rule for indexed queries. audit the code for where else we do a unindexed full-table scan"; trigger P0 #12099 (`docxTemplates` `.filter().collect()` crossed Convex's 16 MiB read limit; 15/19 partner creates returned 500). Rule: `~/.claude/rules/51-heydonna-indexed-convex-queries.md`.
 - Return `PM_CLAUDE_PLAN_REVIEW: BLOCKED` (REQUEST_CHANGES) when a plan adds or changes a `ctx.db.query(...)` on a request or cron path that reaches `.collect()`/`.first()`/`.unique()`/`.take()`/`.paginate()`/iteration without `.withIndex`/`.withSearchIndex`, or reads with `.filter()` alone (still a full-table scan), and names no exception. Allowed exceptions: an explicit small page size, a fixed-size table (<100 rows) or a one-off migration/admin script that requests can't reach, each with a one-line comment naming the bound.

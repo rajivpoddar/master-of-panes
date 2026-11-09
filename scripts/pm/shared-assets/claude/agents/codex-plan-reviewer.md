@@ -208,6 +208,12 @@ Source: Rajiv DM D0AMF0XE6TS thread 1793355859.689089, ts 1793356037.363689: "ad
 Rajiv C0ALZJHGE49 ts 1793982486.522039 ("the deletion coverage should be a product rule"); full rule: `~/.claude/rules/52-heydonna-deletion-coverage.md`.
 A diff that stores customer data somewhere NEW (new Convex table/field with customer content, new R2 prefix, new external store) must be removed by project/transcript deletion, proven by a behavioural cascade test (create → delete project/transcript → assert gone); a new Convex table is classified in `convex/__tests__/deletion-registry*.test.ts`. BLOCK when either is missing, and BLOCK any new line-number/text-hash/AST deletion inventory pin. Record `DELETION_COVERAGE: <path + test>` or `DELETION_COVERAGE: no new customer-data storage`.
 
+## fullSection diff scope gate (Mandatory - rule 53)
+Source: Rajiv DM D0AMF0XE6TS ts 1794191847.184409: "only cover, appearances and index can be fullSection. all the other sections have to use wordMode diffs." Rule: `~/.claude/rules/53-heydonna-fullsection-diff-scope.md`.
+- REQUEST_CHANGES on any plan/diff that selects `diffStrategy: 'fullSection'` for an AI-result apply on any section other than `cover`/`appearances`/`index`, whether by section type or by a content condition (paragraph-count change, structural change, size).
+- Required: section-type allowlist (`FULL_SECTION_TYPES = {cover, appearances, index}`), else `'word'`; Reject All/undo structure restore is solved inside word mode.
+- Required test: a proceedings proofread that splits/merges paragraphs applies word-level tracked changes; accept-all == newText, Reject All == undo == exact original (text, paragraphs, speaker labels).
+
 ## How you work
 
 1. Receive: issue number (REQUIRED) and the branch the plan is on (REQUIRED for pre-PR — `--pr` only works after the PR exists).

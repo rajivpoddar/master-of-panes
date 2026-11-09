@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "0f8bb282134baf69a216535953d7b88a981891c2fde50b462f8f90e2dd15d1f0",
+      "sha256": "73d32dc5ba4740489faaed86c7a05a33c4a1c463f2753546249538983e4990a2",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "46a3fb752b01c77eed0f9c90fc99fd16e5b4b1e9ce5b498ca8a14bfae0592a3a",
+      "sha256": "f2041004f777c30e656ea718fbb62e13d7589e6032f2326604153e791df7e4f5",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -33,7 +33,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "08f0bb65c7c407c7fc7f5a8a1a651369ae1ea96f406593906b267549270cb570",
+      "sha256": "d03d8fb4b5ae123bca64e22c6755d5b11233506887a2b1c2b3095e33aa14fb8c",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -285,7 +285,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "e07ba6da0007269be9b45767a50aed91cd5f90bf65a3bc4e4730e5a05ba44e62",
+      "sha256": "08e61da9cba79f3c84b25e6645274ce155cefa6ebaa274c485f6e0459eed105f",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -294,7 +294,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "eed02b14eb5dfdb76eb0f8f6bd0c2ecce0c0ed05da2db36aef944c2a22afd59b",
+      "sha256": "d2ec3ad7c1dfd3e49bd8f786140881a47337385ce73f3aec25f640788539d8d2",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
@@ -321,7 +321,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "3b844bd0e896967c7ab5b102486e476f02ab1650159573a7ba01e66c3477be73",
+      "sha256": "9038106520026acad67243e71ead9990474b63a83de6de63164f792d34440a88",
       "source_path": "claude/scripts/backlog-triage.py"
     },
     {
@@ -818,7 +818,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage-tests",
-      "sha256": "135d2ec2bafa5c68f76a139c2cc627fd6cea415f74a427d46f5b98ef07bdbfe8",
+      "sha256": "b1aa3f8409662ba7e2d9c56bad703b0ba3ed98a2b9180bda937822496a4df5d4",
       "source_path": "claude/scripts/tests/test_backlog_runnability.py"
     },
     {
