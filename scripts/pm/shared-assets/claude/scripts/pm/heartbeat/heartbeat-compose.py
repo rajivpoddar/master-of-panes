@@ -47,7 +47,7 @@ COLLECTOR_TIMEOUTS = {
     "axiom": 30, "active-users": 10, "error-map": 8, "support": 15,
     "pr-open-snapshot": 12, "priority-inversion": 63,
     "pending-github": 63, "remote-boxes": 8, "training": 6,
-    "usage": 12, "email": 12, "proxies": 1,
+    "usage": 12, "email": 12, "proxies": 5,
 }
 COMPOSE_COLLECTOR_BUDGET = sum(COLLECTOR_TIMEOUTS.values())
 assert COMPOSE_COLLECTOR_BUDGET <= 240
@@ -780,7 +780,9 @@ def agents_line(doc: dict | None) -> str:
     running = doc["running"]
     stale = doc.get("stale", [])
     listed = running + len(completed) + len(inactive) + len(stale)
-    line = (f"*Agents:* {listed} listed · {running} running · {len(completed)} completed · "
+    # Proxy-era work runs in px-* tmux windows, not these transcripts. "0 listed"
+    # used to read as "no agents" (Rajiv C0ALZJHGE49 thread 1794204953.859999).
+    line = (f"*Agents (in-process subagents):* {listed} listed · {running} running · {len(completed)} completed · "
             f"{len(inactive)} inactive")
     if stale:
         line += f" · {len(stale)} stale (quiet >3h or uncollected, oldest {stale[0]['idle_min'] // 60}h)"
@@ -948,6 +950,71 @@ def training_line(probe=None, mon_up=None) -> tuple[str, list[str]]:
 REMOTE_BOX_SCRIPT = Path.home() / ".claude/scripts/remote-test-box.sh"
 
 
+# remote-test-box.sh cmd_list prints the configured target from pool_kind_set.
+# The summary's second number is the live member count, not that target
+# (`pool: N free / members, queued`). Browser target changed 8 → 5 on 2026-11-09
+# (Rajiv C0ALZJHGE49 thread 1794200533.004039, ts 1794201011.607329).
+_POOL_HEADER = re.compile(
+    r"^== (browser|test) pool \((cx33|cx43), (rtb-tpool|rtb-pool)-NN, target (\d+)\) ==$"
+)
+_POOL_SHAPE = {"browser": ("cx43", "rtb-pool"), "test": ("cx33", "rtb-tpool")}
+_POOL_STATES = {"free", "leased", "releasing", "expired", "broken", "preempting", "rebuilding", "borrowed"}
+
+
+def parse_remote_pools(stdout: str) -> str:
+    """Pure parser for `remote-test-box.sh list`. Raises ValueError when unhealthy."""
+    pools = {}
+    current = None
+    for line in stdout.splitlines():
+        header = _POOL_HEADER.match(line.strip())
+        if header:
+            current, typ, prefix, target_s = header.groups()
+            target = int(target_s)
+            if current in pools or _POOL_SHAPE[current] != (typ, prefix) or not 1 <= target <= 64:
+                raise ValueError("unexpected pool header")
+            pools[current] = {"rows": [], "summary": None, "target": target}
+            continue
+        if current is None:
+            continue
+        row = re.match(r"^(rtb-(?:tpool|pool)-\S+)\s+(\S+(?: \(test\))?)(?:\s|$)", line.strip())
+        if row:
+            name, state = row.groups()
+            if state == "borrowed (test)":
+                state = "borrowed"
+            if not name.startswith("rtb-tpool-" if current == "test" else "rtb-pool-"):
+                raise ValueError("box in wrong pool")
+            if state not in _POOL_STATES:
+                raise ValueError("unknown box state")
+            pools[current]["rows"].append((name, state))
+            continue
+        summary = re.match(r"^pool:\s*(\d+) free / (\d+),", line.strip())
+        if summary:
+            pools[current]["summary"] = tuple(map(int, summary.groups()))
+    if set(pools) != {"test", "browser"}:
+        raise ValueError("missing pool")
+    pieces = []
+    for name in ("test", "browser"):
+        pool = pools[name]
+        rows = pool["rows"]
+        names = [box for box, _ in rows]
+        count = lambda state, rows=rows: sum(s == state for _, s in rows)
+        # Summary denominator is live members (cmd_list), not the configured target.
+        if pool["summary"] is None or len(names) != len(set(names)) or pool["summary"] != (count("free"), len(rows)):
+            raise ValueError(f"invalid {name} pool summary")
+        details = [f"{count('leased')} leased", f"{count('releasing')} releasing"]
+        if count("preempting"):
+            details.append(f"{count('preempting')} preempting")
+        if count("rebuilding"):
+            details.append(f"{count('rebuilding')} rebuilding")
+        if count("borrowed"):
+            details.append(f"{count('borrowed')} borrowed")
+        for state in ("expired", "broken"):
+            affected = [box for box, s in rows if s == state]
+            details.append(f"{len(affected)} {state}" + (f": {', '.join(affected)}" if affected else ""))
+        pieces.append(f"{name} pool {count('free')} free / {pool['target']} (" + "; ".join(details) + ")")
+    return "*Remote boxes:* " + " · ".join(pieces)
+
+
 def remote_boxes_line(timeout: int = 20) -> str:
     """Collect both pools; malformed or incomplete output is never reported as healthy."""
     try:
@@ -955,51 +1022,7 @@ def remote_boxes_line(timeout: int = 20) -> str:
                                 text=True, errors="replace", timeout=timeout)
         if result.returncode:
             raise ValueError(f"collector rc={result.returncode}")
-        pools = {}
-        current = None
-        for line in result.stdout.splitlines():
-            header = re.match(r"^== (browser|test) pool \([^)]*target (\d+)\) ==$", line.strip())
-            if header:
-                current = header.group(1)
-                if current in pools or int(header.group(2)) != {"test": 12, "browser": 8}[current]:
-                    raise ValueError("unexpected pool header")
-                pools[current] = {"rows": [], "summary": None}
-                continue
-            if current is None:
-                continue
-            row = re.match(r"^(rtb-(?:tpool|pool)-\S+)\s+(\S+)(?:\s|$)", line.strip())
-            if row:
-                name, state = row.groups()
-                if not name.startswith("rtb-tpool-" if current == "test" else "rtb-pool-"):
-                    raise ValueError("box in wrong pool")
-                if state not in {"free", "leased", "releasing", "expired", "broken", "preempting", "rebuilding", "borrowed"}:
-                    raise ValueError("unknown box state")
-                pools[current]["rows"].append((name, state))
-            summary = re.match(r"^pool:\s*(\d+) free / (\d+),", line.strip())
-            if summary:
-                pools[current]["summary"] = tuple(map(int, summary.groups()))
-        if set(pools) != {"test", "browser"}:
-            raise ValueError("missing pool")
-        pieces = []
-        for name, target in (("test", 12), ("browser", 8)):
-            pool = pools[name]
-            rows = pool["rows"]
-            names = [box for box, _ in rows]
-            count = lambda state: sum(s == state for _, s in rows)
-            if len(names) != len(set(names)) or pool["summary"] != (count("free"), target):
-                raise ValueError(f"invalid {name} pool summary")
-            details = [f"{count('leased')} leased", f"{count('releasing')} releasing"]
-            if count("preempting"):
-                details.append(f"{count('preempting')} preempting")
-            if count("rebuilding"):
-                details.append(f"{count('rebuilding')} rebuilding")
-            if count("borrowed"):
-                details.append(f"{count('borrowed')} borrowed")
-            for state in ("expired", "broken"):
-                affected = [box for box, s in rows if s == state]
-                details.append(f"{len(affected)} {state}" + (f": {', '.join(affected)}" if affected else ""))
-            pieces.append(f"{name} pool {count('free')} free / {target} (" + "; ".join(details) + ")")
-        return "*Remote boxes:* " + " · ".join(pieces)
+        return parse_remote_pools(result.stdout)
     except subprocess.TimeoutExpired:
         reason = f"UNAVAILABLE (timeout {timeout}s)"
     except (OSError, ValueError) as exc:
@@ -1110,66 +1133,207 @@ def proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completions: lis
     return {'rows': rows, 'completions': completions, 'truncated': truncated}
 
 
-def _read_proxies(now: datetime) -> dict | None:
+# One list-windows call. A single batched ps fills model and process age; there is
+# no per-pane ps. Last-activity age comes from tmux window_activity. A failed read
+# reuses the last good snapshot for up to 10 minutes, labelled stale.
+PROXY_CACHE = Path.home() / ".cache" / "pm-heartbeat" / "proxies-last-good.json"
+PROXY_CACHE_MAX_S = 600
+PROXY_STALE_ACTIVITY_MIN = 20
+PROXY_ROW_CAP = 24
+_PROXY_TMUX_FMT = "#{session_name}\t#{window_name}\t#{window_activity}\t#{pane_dead}\t#{pane_pid}"
+
+
+def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completions: list[dict]) -> dict:
+    """px-* windows only. ps_text is one process table, optional; commands are not kept."""
+    windows = []
+    for line in tmux_text.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 5:
+            continue
+        session, name, activity, dead, pid = parts
+        if not name.startswith("px-") or session not in {"0", "proxies"}:
+            continue
+        try:
+            windows.append((name, int(activity), dead == "1", int(pid)))
+        except ValueError:
+            continue
+    processes = {}
+    children: dict[int, list[int]] = {}
+    for line in ps_text.splitlines():
+        match = re.match(r"^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", line)
+        if not match:
+            continue
+        pid_s, ppid_s, age, command = match.groups()
+        pid, ppid = int(pid_s), int(ppid_s)
+        processes[pid] = (ppid, age, command)
+        children.setdefault(ppid, []).append(pid)
+    rows = []
+    for name, activity, dead, pid in windows:
+        age_min = _elapsed_minutes(processes[pid][1]) if pid in processes else None
+        model = "unknown"
+        stack = list(children.get(pid, []))
+        seen: set[int] = set()
+        while stack and len(seen) < 64:
+            child = stack.pop()
+            if child in seen or child not in processes:
+                continue
+            seen.add(child)
+            _ppid, _age, command = processes[child]
+            stack.extend(children.get(child, []))
+            if not re.search(r"(?:^|/)claude(?:\s|$)", command):
+                continue
+            found = re.search(r"(?:^|\s)--model(?:=|\s+)(\S+)", command)
+            if found:
+                model = found.group(1)
+                break
+        last = max(0, int((now.timestamp() - activity) // 60))
+        stale = (not dead) and last >= PROXY_STALE_ACTIVITY_MIN
+        rows.append({
+            "name": name, "model": model, "age": age_min, "last_activity": last,
+            "dead": dead, "stale": stale, "state": "dead" if dead else "stale" if stale else "running",
+        })
+    rows.sort(key=lambda row: (row["dead"], row["name"]))
+    return {"rows": rows, "completions": completions, "truncated": False}
+
+
+def _proxy_cache_load(path: Path, now: datetime) -> dict | None:
     try:
-        tmux = subprocess.run(['tmux', 'list-panes', '-a', '-F', '#{session_name}\t#{window_name}\t#{pane_pid}\t#{pane_dead}'], capture_output=True, text=True, timeout=5, check=True).stdout
-        ps = subprocess.run(['ps', '-ww', '-axo', 'pid,ppid,etime,command'], capture_output=True, text=True, timeout=5, check=True).stdout
-        db = Path.home() / '.local/share/master-of-panes/data/mop.db'
-        with closing(sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=3)) as conn:
-            entries = conn.execute("SELECT payload FROM events WHERE event_type='send_command' AND timestamp >= ? AND payload LIKE '%PROXY_STOP%' ORDER BY id DESC LIMIT 200", ((now - timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%S'),)).fetchall()
-        completed = []
-        for (payload,) in entries:
-            command = json.loads(payload).get('command', '')
-            match = re.match(r'PROXY_STOP name=(\S+) rc=(\S+)\s', command)
-            if match:
-                completed.append({'name': match.group(1), 'rc': match.group(2), 'result': 'unknown'})
-        snapshot = proxy_snapshot(tmux, ps, now, completed)
-        snapshot['truncated'] = snapshot['truncated'] or len(entries) == 200
-        return snapshot
-    except (OSError, subprocess.SubprocessError, sqlite3.Error, ValueError):
+        doc = json.loads(path.read_text())
+        age = now.timestamp() - float(doc["collected_at"])
+    except (OSError, ValueError, KeyError, TypeError):
         return None
+    if not 0 <= age <= PROXY_CACHE_MAX_S or not isinstance(doc.get("rows"), list):
+        return None
+    return {
+        "rows": doc["rows"],
+        "completions": doc.get("completions") if isinstance(doc.get("completions"), list) else [],
+        "truncated": bool(doc.get("truncated")),
+        "cache_age_min": int(age // 60),
+    }
 
 
-def read_proxies(now: datetime) -> dict | None:
-    # The entire operation is bounded, including SQLite and snapshot parsing.
-    # A daemon cannot hold the composer open if an OS call stalls.
-    result = []
-    def collect():
-        result.append(_read_proxies(now))
-    worker = threading.Thread(target=collect, daemon=True)
+def _proxy_cache_save(path: Path, snapshot: dict, now: datetime) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "collected_at": now.timestamp(),
+            "rows": snapshot.get("rows") or [],
+            "completions": snapshot.get("completions") or [],
+            "truncated": bool(snapshot.get("truncated")),
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError:
+        return
+
+
+def _proxy_completions(now: datetime) -> tuple[list[dict], bool]:
+    db = Path.home() / ".local/share/master-of-panes/data/mop.db"
+    with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)) as conn:
+        entries = conn.execute(
+            "SELECT payload FROM events WHERE event_type='send_command' AND timestamp >= ? AND payload LIKE '%PROXY_STOP%' ORDER BY id DESC LIMIT 200",
+            ((now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S"),),
+        ).fetchall()
+    completed = []
+    for (payload,) in entries:
+        command = json.loads(payload).get("command", "")
+        match = re.match(r"PROXY_STOP name=(\S+) rc=(\S+)\s", command)
+        if match:
+            completed.append({"name": match.group(1), "rc": match.group(2), "result": "unknown"})
+    return completed, len(entries) == 200
+
+
+def _read_proxies(now: datetime) -> dict | None:
+    """tmux is required. ps and the stop-event read are best-effort and never wipe a good window list."""
+    try:
+        tmux = subprocess.run(
+            ["tmux", "list-windows", "-a", "-F", _PROXY_TMUX_FMT],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        ps = subprocess.run(
+            ["ps", "-ww", "-axo", "pid,ppid,etime,command"],
+            capture_output=True, text=True, timeout=4, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        ps = ""
+    try:
+        completed, truncated = _proxy_completions(now)
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        completed, truncated = [], False
+    snapshot = build_proxy_snapshot(tmux, ps, now, completed)
+    snapshot["truncated"] = truncated
+    _proxy_cache_save(PROXY_CACHE, snapshot, now)
+    return snapshot
+
+
+def read_proxies(now: datetime, cache_path: Path | None = None, collect=None, budget: float | None = None) -> dict | None:
+    # Bounded so a stalled OS call cannot hold the composer. On expiry, serve the
+    # last good snapshot (≤10 min) labelled stale instead of "collector budget".
+    path = cache_path or PROXY_CACHE
+    limit = COLLECTOR_TIMEOUTS["proxies"] if budget is None else budget
+    result: list = []
+
+    def run():
+        result.append((collect or _read_proxies)(now))
+
+    worker = threading.Thread(target=run, daemon=True)
     worker.start()
-    worker.join(COLLECTOR_TIMEOUTS['proxies'])
+    worker.join(limit)
+    if not worker.is_alive() and result and result[0] is not None:
+        return result[0]
+    cached = _proxy_cache_load(path, now)
+    if cached is not None:
+        return cached
     if worker.is_alive():
-        return {'budget_exhausted': True}
+        return {"budget_exhausted": True}
     return result[0] if result else None
 
 
 def proxies_block(doc: dict | None) -> list[str]:
     if doc is None:
-        return ['*Proxies:* unavailable']
-    if doc.get('budget_exhausted'):
-        return ['*Proxies:* unavailable (collector budget)']
-    completed = doc['completions']
-    failed = sum(c['rc'] != '0' for c in completed)
-    suffix = '; truncated' if doc.get('truncated') else ''
-    # Rajiv C0ALZJHGE49 thread 1794188809.955499, ts 1794190613.274269 ("OK"):
-    # list only RUNNING proxies by name; finished ones are a count. Non-zero
-    # exits stay listed so failures remain visible.
-    running = [r for r in doc['rows'] if r.get('state') == 'running']
-    lines = [f"*Proxies:* {len(running)} running · {len(completed)} finished last hour ({failed} rc≠0{suffix})"]
-    rows = []
-    for row in running:
-        if 'age' not in row:
-            rows.append(f"• {row['name']} — {row['state']}")
-        else:
-            idle = f"{row['idle']}m" if row['idle'] is not None else 'unknown'
-            rows.append(f"• {row['name']} · {row['agent']} · {row['model']} · age {row['age']}m · output {idle}")
+        return ["*Proxies:* unavailable"]
+    if doc.get("budget_exhausted"):
+        return ["*Proxies:* unavailable (collector budget)"]
+    completed = doc["completions"]
+    failed = sum(c["rc"] != "0" for c in completed)
+    suffix = "; truncated" if doc.get("truncated") else ""
+    # Live px-* windows, including quiet ones. Dead windows stay visible with a flag.
+    # Finished successes stay a count (Rajiv C0ALZJHGE49 thread 1794188809.955499,
+    # ts 1794190613.274269). Non-zero exits stay listed.
+    visible = [r for r in doc["rows"] if r.get("state") != "finished"]
+
+    def _dead(row: dict) -> bool:
+        return bool(row.get("dead") or row.get("state") in {"dead", "dead window"})
+
+    live = [r for r in visible if not _dead(r) and r.get("state") != "left-over window"]
+    stale_note = f" (stale, {doc['cache_age_min']}m old)" if doc.get("cache_age_min") is not None else ""
+    lines = [f"*Proxies:* {len(live)} live{stale_note} · {len(completed)} finished last hour ({failed} rc≠0{suffix})"]
+    rendered = []
+    for row in visible:
+        if row.get("state") in {"dead window", "left-over window"} or "age" not in row and "last_activity" not in row:
+            rendered.append(f"• {row['name']} — {row.get('state')}")
+            continue
+        age = f"{row['age']}m" if row.get("age") is not None else "unknown"
+        last = row.get("last_activity", row.get("idle"))
+        last_s = f"{last}m" if last is not None else "unknown"
+        flags = []
+        if row.get("dead") or row.get("state") == "dead":
+            flags.append("dead")
+        elif row.get("stale") or row.get("state") == "STALE":
+            flags.append("stale")
+        flag = f" · {' · '.join(flags)}" if flags else ""
+        rendered.append(f"• {row['name']} · {row.get('model', 'unknown')} · age {age} · last activity {last_s}{flag}")
     for row in completed:
-        if row['rc'] != '0':
-            rows.append(f"• {row['name']} · finished · rc={row['rc']} (FAILED)")
-    lines.extend(rows[:9])
-    if len(rows) > 9:
-        lines.append(f'• +{len(rows) - 9} more')
+        if row["rc"] != "0":
+            rendered.append(f"• {row['name']} · finished · rc={row['rc']} (FAILED)")
+    lines.extend(rendered[:PROXY_ROW_CAP])
+    if len(rendered) > PROXY_ROW_CAP:
+        lines.append(f"• +{len(rendered) - PROXY_ROW_CAP} more")
     return lines
 
 
