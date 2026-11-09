@@ -454,6 +454,54 @@ test("a prompt-indented quote stuck in the composer is submitted once, including
   assert.deepEqual(box.keys, ["1", "2", YSK_NOTICE_PROCESS_SUFFIX]);
 });
 
+test("an internal whitespace edit is not submitted before the suffix or after it settles", async () => {
+  const edited = QUOTE.replace("side agent", "sideagent");
+  assert.notEqual(edited, QUOTE);
+  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(edited))?.composer, QUOTE), false);
+  assert.equal(
+    composerMatchesLogical(composerFrame(indentedQuote(edited + YSK_NOTICE_PROCESS_SUFFIX))?.composer, QUOTE + YSK_NOTICE_PROCESS_SUFFIX),
+    false,
+  );
+
+  let phase: "top" | "sub" | "quote" = "top";
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    return indentedQuote(edited);
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+  };
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "quote_not_owned");
+  assert.equal(result.enterPresses, 0);
+  assert.deepEqual(box.keys, ["1", "2"]);
+  assert.equal(box.enters(), 0);
+
+  let enters = 0;
+  const settled = await submitWithComposerCheck(QUOTE + YSK_NOTICE_PROCESS_SUFFIX, {
+    capture: async () => indentedQuote(edited + YSK_NOTICE_PROCESS_SUFFIX),
+    pressSubmit: async () => {
+      enters += 1;
+    },
+    sleep: async () => {},
+    prePasteComposer: QUOTE,
+    noticeAppend: { verifiedQuote: QUOTE },
+    dwellMs: 0,
+    payloadStableMs: 0,
+    payloadGraceMs: 0,
+    payloadStableGraceMs: 0,
+    clearGraceMs: 0,
+    pollMs: 0,
+    maxEnterPresses: 1,
+  });
+  assert.equal(settled.enterPresses, 0);
+  assert.equal(settled.payloadSeen, false);
+  assert.equal(enters, 0);
+});
+
 test("exact side-agent quote submits process this once; foreign text does not", async () => {
   assert.ok(QUOTE.startsWith("Here is a note offered by a side agent:\n\n> Heads up · "));
   assert.equal(QUOTE + YSK_NOTICE_PROCESS_SUFFIX, QUOTE + "\n\nprocess this");

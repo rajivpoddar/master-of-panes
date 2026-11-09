@@ -162,13 +162,41 @@ export function logicalComposerText(composer: string): string {
 }
 
 /**
- * True when the captured composer is this logical payload. Continuation
- * indent and a leftover soft wrap must not hide an exact side-agent quote.
- * Extra or missing characters still fail.
+ * True when the captured composer is this logical payload. The only tolerated
+ * renderer artifacts are the fixed two-column prompt indent on continuation
+ * lines and a single soft-wrap newline inserted inside a logical line. After
+ * those, the quote must match exactly: an internal whitespace or token-boundary
+ * edit, a missing logical character, or an indent that is not the uniform
+ * continuation indent does not match.
  */
 export function composerMatchesLogical(composer: string | null | undefined, logical: string): boolean {
   if (composer == null) return false;
-  return squash(logicalComposerText(composer)) === squash(logical);
+  return softWrapJoinEquals(logicalComposerText(composer), logical);
+}
+
+/**
+ * True when `captured` is `logical` plus soft-wrap newlines only. A soft wrap
+ * is one extra newline between two non-newline characters. It never replaces
+ * a space, joins a token boundary, or inserts a blank line.
+ */
+function softWrapJoinEquals(captured: string, logical: string): boolean {
+  let i = 0;
+  let j = 0;
+  while (i < captured.length && j < logical.length) {
+    if (captured[i] === logical[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    const next = captured[i + 1];
+    const prev = i > 0 ? captured[i - 1] : "";
+    if (captured[i] === "\n" && logical[j] !== "\n" && prev !== "\n" && next !== undefined && next !== "\n") {
+      i++;
+      continue;
+    }
+    return false;
+  }
+  return i === captured.length && j === logical.length;
 }
 
 /**
