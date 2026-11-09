@@ -1440,10 +1440,10 @@ export class TmuxRelay {
     };
   }
 
-  private exitOwnerRefusal(slotNum: number, pin: ExitOwnerPin): string | null {
+  private exitOwnerRefusal(slotNum: number, pin: ExitOwnerPin, physicalPaste = false): string | null {
     if (!this.db) return "exit_owner_unbound";
     if ((this.db.getEvents(slotNum, 1, "Stop")[0]?.id ?? null) !== pin.stop) return "stop_changed";
-    if (slotNum === 0 && pin.inboundGeneration !== this.pmInboundGeneration) return "pm_inbound_changed";
+    if (!physicalPaste && slotNum === 0 && pin.inboundGeneration !== this.pmInboundGeneration) return "pm_inbound_changed";
     if (slotNum === 0) return (this.db.getEvents(0, 1, "SessionStart")[0]?.id ?? null) === pin.boot
       && (this.db.getEvents(0, 1, "UserPromptSubmit")[0]?.id ?? null) === pin.input ? null : "pm_owner_changed";
     const slot = this.db.getSlot(slotNum);
@@ -1765,7 +1765,12 @@ export class TmuxRelay {
       if (!db.getExitPending() || db.getExitStatus().episode !== status.episode
           || db.getExitAttempt(slot)?.submittedAt !== attempt.submittedAt) continue;
       const pin = attempt.ownerPin as ExitOwnerPin | null;
-      const ownerMatches = !!pin && !db.isExitSlotRetained(slot)
+      let delayedReceiptRetention = false;
+      try {
+        const retained = JSON.parse(db.getConfig(`exit_retained_${slot}`) || "null");
+        delayedReceiptRetention = retained?.episode === attempt.episode && retained.reason === "replacement_not_owned_by_restart";
+      } catch { /* Other retention remains binding. */ }
+      const ownerMatches = !!pin && (!db.isExitSlotRetained(slot) || delayedReceiptRetention)
         && attempt.assignmentEpoch === (db.getSlot(slot)?.assignment_epoch ?? 0)
         && (slot === 0 || (!!db.getSlot(slot) && this.exitAssignment(db.getSlot(slot)!) === pin.assignment))
         && attempt.inputEventId === (db.getEvents(slot, 1, "UserPromptSubmit")[0]?.id ?? null);
@@ -1775,10 +1780,25 @@ export class TmuxRelay {
         let bound = false;
         try {
           const receipt = JSON.parse(restart?.payload ?? "null");
+          const boot = db.getEvents(slot, 1, "SessionStart")[0];
+          const bootPayload = JSON.parse(boot?.payload ?? "null");
+          const replacement = JSON.parse(process);
+
           bound = receipt?.episode === attempt.episode && receipt?.submittedAt === attempt.submittedAt
-            && receipt?.replacementProcess === process && receipt?.assignmentEpoch === attempt.assignmentEpoch;
+            && receipt?.replacementProcess === process && receipt?.assignmentEpoch === attempt.assignmentEpoch
+            && Number.isInteger(receipt.launchEventId) && receipt.launchEventId > 0
+            && receipt.bootEventId > receipt.launchEventId && !!receipt.bootSession
+            && /^\d+:\d+$/.test(receipt.ownedProcess ?? "")
+            && boot?.id === receipt.bootEventId && bootPayload?.session_id === receipt.bootSession
+            && String(replacement[1]) === receipt.ownedProcess.split(":")[1];
         } catch { /* Unbound manual replacement never earns cycle credit. */ }
-        if (!bound) { db.retainExitSlot(slot, "replacement_not_owned_by_restart"); continue; }
+        if (!bound) {
+          attempt.phase = "unknown";
+          attempt.blockedReason = "replacement_not_owned_by_restart";
+          db.saveExitAttempt(slot, attempt);
+          continue;
+        }
+        if (delayedReceiptRetention) db.setConfig(`exit_retained_${slot}`, "");
         attempt.phase = "verified";
         attempt.replacementProcess = process;
         db.saveExitAttempt(slot, attempt);
@@ -2178,16 +2198,25 @@ export class TmuxRelay {
         if (command === "/exit" && effectAttempted && enterSent === 0) {
           // Incoming custody stays queued if our paste cannot be proven removed.
           if (slotNum === 0) this.db?.setConfig("pm_exit_cleanup_pending", JSON.stringify({ paneId, exitProcess }));
-          const owns = async () => !!opts.exitOwnerPin && ownerRefusal() === null
-            && await this.exitProcessIdentity(slotNum, paneId) === exitProcess && ownerRefusal() === null;
+          // Inbound cancels submission, not ownership of our unsubmitted paste.
+          const physicalRefusal = () => opts.exitOwnerPin
+            ? this.exitOwnerRefusal(slotNum, opts.exitOwnerPin, true) : "exit_owner_unbound";
+          const owns = async () => physicalRefusal() === null
+            && await this.exitProcessIdentity(slotNum, paneId) === exitProcess && physicalRefusal() === null;
           let removed = false;
           if (await owns()) {
             const draft = composerText(await capture());
             if (draft === "") removed = true;
-            else if (draft === command && await owns()) {
+            else if (draft === command) {
               try {
-                await this.runShell(`tmux send-keys -t ${paneId} C-u`, { timeout: 3_000 });
-                removed = await owns() && composerText(await capture()) === "" && ownerRefusal() === null;
+                // All awaited identity checks precede the final composer read.
+                if (await owns()) {
+                  const exactDraft = composerText(await capture());
+                  if (exactDraft === command && physicalRefusal() === null) {
+                    await this.runShell(`tmux send-keys -t ${paneId} C-u`, { timeout: 3_000 });
+                    removed = await owns() && composerText(await capture()) === "" && physicalRefusal() === null;
+                  }
+                }
               } catch { /* Unknown cleanup retains inbound custody, never joined paste. */ }
             }
           }

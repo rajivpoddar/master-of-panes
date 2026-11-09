@@ -381,7 +381,7 @@ export class ProcessHealthChecker {
   /**
    * Restart a slot's Claude Code process by sending the alias command.
    */
-  private async restartSlot(slotNum: number): Promise<{ success: boolean; reason: string }> {
+  private async restartSlot(slotNum: number): Promise<{ success: boolean; reason: string; provenance?: { launchEventId: number; bootEventId: number; bootSession: string; ownedProcess: string; replacementProcess: string } }> {
     const launchCmd = typedLaunchCommandForPane(slotNum);
     if (!launchCmd) return { success: false, reason: "launcher command is not configured" };
 
@@ -399,14 +399,35 @@ export class ProcessHealthChecker {
       // Send restart command to the pane's shell.
       // Uses standalone bash scripts (not aliases) — no .zshrc/OMZ dependency.
       // Scripts resolve the atma template vars directly via sed.
+      const shellProcess = await this.pmAgentProcess(paneTarget);
+      if (!shellProcess?.endsWith(":")) return { success: false, reason: "launch shell ownership unknown" };
+      const launchEventId = this.db.logEvent(slotNum, "agent_restart_launch", null, null, { paneId: paneTarget, shellProcess });
       await execShell(
         `tmux send-keys -t ${paneTarget} ${shellEscape(launchCmd)} Enter`,
         { timeout: 10_000 },
       );
       const bootCommand = await this.waitForAgentBoot(slotNum);
-      return bootCommand
-        ? { success: true, reason: `agent boot verified (${bootCommand})` }
-        : { success: false, reason: `agent boot not observed within ${this.AGENT_BOOT_TIMEOUT_MS}ms` };
+      const bootDeadline = Date.now() + this.AGENT_BOOT_TIMEOUT_MS;
+      let boots = this.db.getEvents(slotNum, 50, "SessionStart").filter(e => e.id > launchEventId).sort((a, b) => a.id - b.id);
+      while (bootCommand && boots.length === 0 && Date.now() < bootDeadline) {
+        await this.sleepMs(Math.min(this.AGENT_BOOT_POLL_MS, bootDeadline - Date.now()));
+        boots = this.db.getEvents(slotNum, 50, "SessionStart").filter(e => e.id > launchEventId).sort((a, b) => a.id - b.id);
+      }
+      const boot = boots[0];
+      let payload: any = null;
+      try { payload = JSON.parse(boot?.payload ?? "null"); } catch { /* UNKNOWN */ }
+      const ownedProcess = await this.pmAgentProcess(paneTarget);
+      const replacementProcess = await this.relay.exitProcessIdentity(slotNum, paneTarget);
+      const ownedAgain = await this.pmAgentProcess(paneTarget);
+      if (!bootCommand || boots.length !== 1 || !payload?.session_id || payload.cwd !== SLOT_CWDS[slotNum]
+          || !["startup", "resume"].includes(payload.source) || !ProcessHealthChecker.ownedAgent(ownedProcess)
+          || !ownedProcess!.startsWith(shellProcess) || ownedAgain !== ownedProcess || !replacementProcess
+          || latestSessionStartEventId(this.db, slotNum) !== boot.id) {
+        return { success: false, reason: "launch boot ownership unknown" };
+      }
+      return { success: true, reason: `agent boot verified (${bootCommand})`, provenance: {
+        launchEventId, bootEventId: boot.id, bootSession: payload.session_id, ownedProcess: ownedProcess!, replacementProcess,
+      } };
     } catch (err) {
       console.error(`[health] Failed to restart slot ${slotNum}:`, err);
       return { success: false, reason: `launcher failed: ${String(err)}` };
@@ -729,12 +750,6 @@ export class ProcessHealthChecker {
       command: launchCommand, restarted_at: new Date().toISOString(), trigger, model,
     });
 
-    if (trigger === "exit" && exitCandidate?.episode === episode) {
-      const replacementProcess = await this.relay.exitProcessIdentity(0, pin.paneId);
-      this.db.logEvent(0, "exit_replacement_bound", null, null, { episode,
-        submittedAt: exitCandidate.submittedAt, assignmentEpoch: exitCandidate.assignmentEpoch, replacementProcess });
-    }
-
     // This launch's FIRST SessionStart binds the continuation to this boot; a
     // later (successor) boot never inherits it.
     const bootDeadline = Date.now() + this.PM_BOOT_EVENT_TIMEOUT_MS;
@@ -752,6 +767,15 @@ export class ProcessHealthChecker {
       return fail("launch_boot_process_unowned", true, { boot_process: bootProcess });
     }
     setRecord({ status: "booted", boot_event_id: boot.id, process: bootProcess });
+    if (trigger === "exit" && exitCandidate?.episode === episode) {
+      const replacementProcess = await this.relay.exitProcessIdentity(0, pin.paneId);
+      if (replacementProcess && await this.pmAgentProcess(pin.paneId) === bootProcess
+          && latestSessionStartEventId(this.db, 0) === boot.id) {
+        this.db.logEvent(0, "exit_replacement_bound", null, null, { episode,
+          submittedAt: exitCandidate.submittedAt, assignmentEpoch: exitCandidate.assignmentEpoch, replacementProcess,
+          launchEventId, bootEventId: boot.id, bootSession: boot.session, ownedProcess: bootProcess });
+      }
+    }
     const processGuard = async () => (await this.pmAgentProcess(pin.paneId)) === bootProcess ? null : "pm_process_changed";
 
     // 4. ONE continuation. A PM-only exit episode keeps its durable
@@ -1076,11 +1100,11 @@ export class ProcessHealthChecker {
       const exitEpoch = this.db.getSlot(slot)?.assignment_epoch;
       const restartResult = await this.restartSlot(slot);
       if (restartResult.success) {
-        if (exitCandidate && exitCandidate.assignmentEpoch === exitEpoch
+        if (restartResult.provenance && exitCandidate && exitCandidate.assignmentEpoch === exitEpoch
             && this.db.getSlot(slot)?.assignment_epoch === exitEpoch && !this.db.isExitSlotRetained(slot)) {
-          const replacementProcess = await this.relay.exitProcessIdentity(slot, exitCandidate.paneId);
+          const { replacementProcess } = restartResult.provenance;
           this.db.logEvent(slot, "exit_replacement_bound", null, null, { episode: exitCandidate.episode,
-            submittedAt: exitCandidate.submittedAt, assignmentEpoch: exitEpoch, replacementProcess });
+            submittedAt: exitCandidate.submittedAt, assignmentEpoch: exitEpoch, ...restartResult.provenance, replacementProcess });
         }
         this.lastRestart.set(slot, Date.now());
         this.recordRestart(slot);
