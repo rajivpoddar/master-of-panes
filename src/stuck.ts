@@ -1629,19 +1629,24 @@ export class StuckDetector {
    */
   private async checkApi500Backoff(slot: SlotState): Promise<void> {
     const slotNum = slot.slot;
-    const turnIdle = this.isIdleByHookState(slot).idle;
+    const hookIdle = this.isIdleByHookState(slot).idle;
     let classification = classifyApiStallTail("");
     let observedPaneId: string | null = null;
-    if (turnIdle) {
-      // Observe through the verified immutable pane id; delivery is pinned to
-      // the same id (CTO REVISE P1, 1791049473.052849).
-      const observed = typeof this.relay.observeSlotPane === "function"
-        ? await this.relay.observeSlotPane(slotNum)
-        : null;
-      if (!observed) return; // identity/capture failure: try again next tick
+    let paneText: string | null = null;
+    // Observe through the verified immutable pane id; delivery is pinned to
+    // the same id (CTO REVISE P1, 1791049473.052849). Capture even when the
+    // hook still says active: an API-error ending does not emit Stop.
+    const observed = typeof this.relay.observeSlotPane === "function"
+      ? await this.relay.observeSlotPane(slotNum)
+      : null;
+    if (!observed) {
+      if (hookIdle) return; // identity/capture failure: try again next tick
+    } else {
       observedPaneId = observed.paneId;
+      paneText = observed.text;
       classification = classifyApiStallTail(observed.text);
     }
+    const turnIdle = apiStallTurnIdle(hookIdle, paneText);
     const before = this.apiStall.status(slotNum).state;
     const action = this.apiStall.observe(slotNum, Date.now(), {
       occupied: slot.occupied,
@@ -1697,7 +1702,12 @@ export class StuckDetector {
       if (text === null) return "pane_unreadable";
       const now = classifyApiStallTail(text);
       if (!now.stalled || now.fingerprint !== fingerprint) return `stall_changed:${now.reason}`;
-      return finalCheck(stage);
+      const fence = finalCheck(stage);
+      // Stop never fired, but the composer is still the empty prompt on this
+      // same stall. A listed background agent is not a live turn. Every other
+      // fence (released, dnd, identity) still refuses.
+      if (fence === "turn_active" && apiStallTurnIdle(false, text)) return null;
+      return fence;
     };
     const delivery = await this.sendContinueIfAllowed(
       slotNum,
@@ -2249,6 +2259,7 @@ export const API_STALL_SIGNATURES: ReadonlyArray<{ name: string; pattern: RegExp
   { name: "stream_disconnected", pattern: /stream (?:error|disconnected|closed before)/i },
   { name: "servers_overloaded", pattern: /overloaded/i },
   { name: "http_5xx", pattern: /API Error:\s*(?:\(?\s*)?5\d\d\b/ },
+  { name: "server_error_mid_response", pattern: /API Error:\s*Server error\b|server error mid-response/i },
   { name: "internal_server_error", pattern: /internal server error|server_error|bad gateway|service unavailable|gateway time-?out/i },
   { name: "connection_reset", pattern: /ECONNRESET|connection reset|socket hang up|connection error|ETIMEDOUT|EPIPE|premature close/i },
 ];
@@ -2263,6 +2274,7 @@ const RESUMED_LINE = /^\s*(?:[⏺●]\s*\S|[❯>]\s+\S)/;
 
 const TAIL_LINES = 25;
 const COMPOSER_PROMPT_LINE = /^\s*[❯>](\s|$)/;
+const EMPTY_COMPOSER_PROMPT = /^\s*[❯>]\s*$/;
 
 export interface ApiStallClassification {
   stalled: boolean;
@@ -2276,6 +2288,27 @@ export interface ApiStallClassification {
   /** Stable-ish fingerprint of this stall (error text + error-line count). */
   fingerprint: string | null;
   errorText: string | null;
+}
+
+/** The composer box is an empty ❯ prompt, not a typed or pasted line. */
+export function emptyComposerPrompt(pane: string): boolean {
+  const lines = pane.replace(/\r/g, "").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (COMPOSER_PROMPT_LINE.test(lines[i])) return EMPTY_COMPOSER_PROMPT.test(lines[i]);
+  }
+  return false;
+}
+
+/**
+ * Hook Stop does not run when a turn ends on an API error, so hook-active is
+ * not proof the turn is alive. A listed background agent (`← N agent`) is not
+ * a turn either. Hook-inactive stays idle. Hook-active counts as idle only
+ * when the composer is empty and the tail is a transient API stall.
+ */
+export function apiStallTurnIdle(hookIdle: boolean, pane: string | null): boolean {
+  if (hookIdle) return true;
+  if (!pane || !emptyComposerPrompt(pane)) return false;
+  return classifyApiStallTail(pane).stalled;
 }
 
 export function classifyApiStallTail(pane: string): ApiStallClassification {

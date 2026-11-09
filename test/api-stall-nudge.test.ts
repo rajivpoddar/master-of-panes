@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   API_STALL_NUDGE_MESSAGE,
   ApiStallTracker,
+  apiStallTurnIdle,
   classifyApiStallTail,
 } from "../src/stuck.js";
 import type { MoPDatabase } from "../src/db.js";
@@ -29,6 +30,26 @@ const OVERLOAD_STALL = [
   "✻ Worked for 12m · done 9:03 PM",
   ...PROMPT,
 ].join("\n");
+
+const MID_RESPONSE = [
+  "⏺ API Error: Server error mid-response. The response above may be incomplete.",
+  "← 1 agent",
+  ...PROMPT,
+].join("\n");
+
+test("server error mid-response at an empty prompt is a stall even with a listed background agent", () => {
+  const stalled = classifyApiStallTail(MID_RESPONSE);
+  assert.equal(stalled.stalled, true);
+  assert.equal(stalled.signature, "server_error_mid_response");
+  assert.equal(stalled.errorText, "⏺ API Error: Server error mid-response. The response above may be incomplete.");
+  // Stop did not fire, and "← 1 agent" is not a live turn.
+  assert.equal(apiStallTurnIdle(false, MID_RESPONSE), true);
+  const typed = MID_RESPONSE.replace("❯ ", "❯ keep going");
+  assert.equal(apiStallTurnIdle(false, typed), false);
+  const context = ["⏺ API Error: 400 maximum context length exceeded", "← 1 agent", ...PROMPT].join("\n");
+  assert.equal(classifyApiStallTail(context).reason, "non_transient_api_error");
+  assert.equal(apiStallTurnIdle(false, context), false);
+});
 
 test("signatures: stream disconnect, overload, 5xx/529, connection reset are stalls", () => {
   assert.equal(classifyApiStallTail(STREAM_STALL).signature, "stream_disconnected");
@@ -92,6 +113,15 @@ test("a slot that resumed after the error is not a stall", () => {
 
 const T0 = 1_000_000_000;
 const idle = (pane: string) => ({ occupied: true, turnIdle: true, epoch: 7, classification: classifyApiStallTail(pane) });
+
+test("mid-response stall keeps the grace period, then one nudge", () => {
+  const t = new ApiStallTracker(75_000);
+  const input = idle(MID_RESPONSE);
+  assert.equal(t.observe(1, T0, input).kind, "wait");
+  assert.equal(t.observe(1, T0 + 80_000, input).kind, "nudge");
+  t.recordNudge(1, T0 + 80_000);
+  assert.equal(t.observe(1, T0 + 90_000, input).kind, "none");
+});
 
 test("tracker: grace period, then exactly one nudge per stall", () => {
   const t = new ApiStallTracker(75_000);
@@ -195,6 +225,45 @@ test("StuckDetector delivers the nudge via the guarded relay, logs it, and surfa
   await det.checkApi500Backoff(slot);
   assert.equal(sent.length, 1, "one nudge per stall");
   assert.equal(pmAlerts.length, 0);
+});
+
+test("hook-active empty prompt after mid-response is nudged; a typed composer is not", async () => {
+  const { StuckDetector } = await import("../dist/stuck.js");
+  const slot = {
+    slot: 1, address: "0:0.1", name: "S1", status: "busy", occupied: true, session_id: "s",
+    task: "t", issue: 12906, branch: "b", pr: null, head_sha: null, assignment_epoch: 1766,
+    assigned_at: "2026-11-09T01:16:44.326", last_activity: null, dnd: false, idle: false,
+    activity: null, active_turn_id: "turn", active_turn_started_at: "2026-11-09T02:39:00.000Z",
+    active_turn_state: "active", last_meaningful_work_at: null,
+  };
+  const sent: string[] = [];
+  const db = {
+    getSlot: () => slot,
+    logEvent: () => {},
+    hasActiveNativeReleaseIntent: () => false,
+  } as unknown as MoPDatabase;
+  const relay = {
+    sendToSlot: async () => true,
+    injectToPM: () => {},
+    observeSlotPane: async () => ({ paneId: "%1", text: MID_RESPONSE }),
+  } as unknown as TmuxRelay;
+  const det = new StuckDetector(db, {} as LogManager, relay) as unknown as {
+    apiStall: ApiStallTracker;
+    sendContinueIfAllowed: (n: number, e: unknown, cmd: string) => Promise<{ sent: boolean; reason: string; slot: unknown }>;
+    checkApi500Backoff: (s: unknown) => Promise<void>;
+  };
+  det.apiStall = new ApiStallTracker(0);
+  det.sendContinueIfAllowed = async (_n, _e, cmd) => { sent.push(cmd); return { sent: true, reason: "sent", slot }; };
+  await det.checkApi500Backoff(slot);
+  assert.deepEqual(sent, [API_STALL_NUDGE_MESSAGE]);
+
+  sent.length = 0;
+  relay.observeSlotPane = async () => ({ paneId: "%1", text: MID_RESPONSE.replace("❯ ", "❯ keep going") });
+  const quiet = new StuckDetector(db, {} as LogManager, relay) as typeof det;
+  quiet.apiStall = new ApiStallTracker(0);
+  quiet.sendContinueIfAllowed = async (_n, _e, cmd) => { sent.push(cmd); return { sent: true, reason: "sent", slot }; };
+  await quiet.checkApi500Backoff(slot);
+  assert.deepEqual(sent, []);
 });
 
 async function fakeTmux(pane: string): Promise<string> {
