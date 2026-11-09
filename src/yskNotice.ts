@@ -46,6 +46,7 @@ import {
   QUEUED_HINT,
   YSK_NOTICE_PROCESS_SUFFIX,
   composerFrame,
+  composerMatchesLogical,
   submitWithComposerCheck,
   type SubmitCheckResult,
 } from "./composer.js";
@@ -433,13 +434,16 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     }
     await deps.sendLiteral("2", pin);
     keysSent.push("2");
-    const quoted = await pollCapture(tracked, pin, deps.quoteTimeoutMs ?? 2000, (snapshot) => {
-      return composerOf(snapshot) === ownedQuote;
+    // 02:08Z (keys=2 enter=0): the plugin paste was on screen, but continuation
+    // lines sit two columns in, past ❯. Exact equality never matched, so Enter
+    // was never sent and the quote sat in the composer.
+    const quoted = await pollCapture(tracked, pin, deps.quoteTimeoutMs ?? 5000, (snapshot) => {
+      return composerMatchesLogical(composerOf(snapshot), ownedQuote);
     });
     if (!quoted) {
       return finish({ outcome: "abort", reason: "quote_not_owned", noteHash, keysSent, enterPresses: 0 });
     }
-    const beforeSuffix = await blocked((snapshot) => composerOf(snapshot) === ownedQuote);
+    const beforeSuffix = await blocked((snapshot) => composerMatchesLogical(composerOf(snapshot), ownedQuote));
     if (beforeSuffix) return finish({ outcome: "abort", reason: beforeSuffix, noteHash, keysSent, enterPresses: 0 });
 
     await deps.sendLiteral(YSK_NOTICE_PROCESS_SUFFIX, pin);
@@ -449,7 +453,7 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     const submit: SubmitCheckResult = await submitWithComposerCheck(expectedSubmit, {
       capture: () => captureSeen(pin),
       pressSubmit: async () => {
-        const beforeEnter = await blocked((snapshot) => composerOf(snapshot) === expectedSubmit);
+        const beforeEnter = await blocked((snapshot) => composerMatchesLogical(composerOf(snapshot), expectedSubmit));
         if (beforeEnter) throw new Error(beforeEnter);
         await deps.pressEnter(pin);
       },

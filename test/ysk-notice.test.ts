@@ -4,6 +4,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 
 import {
   YSK_NOTICE_PROCESS_SUFFIX,
+  composerFrame,
+  composerMatchesLogical,
   submitWithComposerCheck,
   yskNoticeAppendException,
 } from "../src/composer.js";
@@ -407,6 +409,51 @@ test("a consumed custody row from before restart sends nothing", async () => {
   assert.equal(box.enters(), 0);
 });
 
+/** Composer box whose continuation lines are indented past ❯, as Ink paints them. */
+function indentedQuote(logical: string): string {
+  const visual = logical.split("\n").flatMap((line) => {
+    if (line.startsWith("> Heads up") && line.length > 24) return [line.slice(0, 24), line.slice(24)];
+    return [line];
+  });
+  const body = visual
+    .map((line, index) => (index === 0 ? `❯ ${line}` : line === "" ? "" : `  ${line}`))
+    .join("\n");
+  return ["quoted into the prompt", RULE, body, RULE, "   Dhruva PM", ""].join("\n");
+}
+
+test("a prompt-indented quote stuck in the composer is submitted once, including mid-turn", async () => {
+  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(QUOTE))?.composer, QUOTE), true);
+  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(`${QUOTE} please ignore`))?.composer, QUOTE), false);
+  let phase: "top" | "sub" | "quote" | "suffixed" | "done" = "top";
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    if (phase === "quote") return indentedQuote(QUOTE);
+    if (phase === "suffixed") return indentedQuote(QUOTE + YSK_NOTICE_PROCESS_SUFFIX);
+    return pane(["sent"], "");
+  }, async () => ({ ok: true, pin: { ...PIN, activity: "active" } }));
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+    else if (text === YSK_NOTICE_PROCESS_SUFFIX) phase = "suffixed";
+  };
+  box.deps.pressEnter = async () => {
+    phase = "done";
+  };
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.outcome, "submitted");
+  assert.equal(result.reason, "process_this_notice");
+  assert.equal(result.enterPresses, 1);
+  assert.deepEqual(box.keys, ["1", "2", YSK_NOTICE_PROCESS_SUFFIX]);
+  assert.equal([...box.rows.values()][0], "accepted");
+  phase = "top";
+  const again = await driveYskNotice(box.deps);
+  assert.equal(again.reason, "deduped");
+  assert.equal(box.enters(), 1);
+  assert.deepEqual(box.keys, ["1", "2", YSK_NOTICE_PROCESS_SUFFIX]);
+});
+
 test("exact side-agent quote submits process this once; foreign text does not", async () => {
   assert.ok(QUOTE.startsWith("Here is a note offered by a side agent:\n\n> Heads up · "));
   assert.equal(QUOTE + YSK_NOTICE_PROCESS_SUFFIX, QUOTE + "\n\nprocess this");
@@ -593,7 +640,7 @@ test("the notice server path claims through custody and does not gate PM input",
   assert.match(server, /joinWrapped \? "-J -p"/);
   assert.match(notice, /prior\?\.retryable && pin\.activity !== "idle"/);
   assert.match(notice, /YSK_NOTICE_PROCESS_SUFFIX/);
-  assert.match(notice, /composerOf\(snapshot\) === ownedQuote/);
+  assert.match(notice, /composerMatchesLogical\(composerOf\(snapshot\), ownedQuote\)/);
   assert.doesNotMatch(server, /UserPromptSubmit/);
 });
 

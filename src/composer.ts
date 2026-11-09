@@ -139,6 +139,39 @@ function squash(text: string): string {
 }
 
 /**
+ * Width of the composer prompt (`❯` plus the following nbsp). Ink lays the
+ * prompt and the input on one row, so every later logical line is captured
+ * two columns in. tmux `-J` joins soft wraps but not these hard newlines.
+ * A blank line is often captured empty because trailing spaces are trimmed.
+ */
+const PROMPT_CONTINUATION_INDENT = "  ";
+
+/** Composer text with the prompt-column indent removed. */
+export function logicalComposerText(composer: string): string {
+  const lines = composer.split("\n");
+  if (lines.length <= 1) return composer;
+  const rest = lines.slice(1);
+  const nonempty = rest.filter((line) => line.length > 0);
+  if (nonempty.length === 0 || !nonempty.every((line) => line.startsWith(PROMPT_CONTINUATION_INDENT))) {
+    return composer;
+  }
+  return [
+    lines[0],
+    ...rest.map((line) => (line.startsWith(PROMPT_CONTINUATION_INDENT) ? line.slice(PROMPT_CONTINUATION_INDENT.length) : line)),
+  ].join("\n");
+}
+
+/**
+ * True when the captured composer is this logical payload. Continuation
+ * indent and a leftover soft wrap must not hide an exact side-agent quote.
+ * Extra or missing characters still fail.
+ */
+export function composerMatchesLogical(composer: string | null | undefined, logical: string): boolean {
+  if (composer == null) return false;
+  return squash(logicalComposerText(composer)) === squash(logical);
+}
+
+/**
  * True only when the full payload is visible in the composer. Claude's
  * `[Pasted text ...]` placeholder hides its contents and cannot prove that a
  * truncated paste contains the expected head, middle, and tail.
@@ -567,7 +600,7 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
       break;
     }
     payloadSeen = noticeAppendOk
-      ? composer === payload && !/\[Pasted text/i.test(composer)
+      ? composerMatchesLogical(composer, payload) && !/\[Pasted text/i.test(composer)
       : composerHoldsPayload(composer, payload)
         || composerShowsNewPastePlaceholder(composer, deps.prePasteComposer);
     if (payloadSeen) {
