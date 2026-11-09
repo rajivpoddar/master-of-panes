@@ -2334,7 +2334,9 @@ def cp_check(helper, apply=False, grace=2):
             members.update(added)
         return identity(snapshot, sorted(members))
 
-    for sig in (signal.SIGTERM, signal.SIGKILL) if apply else ():
+    # Report-only until OPEN issue OR OPEN PR retention is implemented.
+    # Rajiv 1794220979.739019: keep companions linked to active issues/prs.
+    for sig in ():
         for row in reversed(rows):
             pid = row['pid']
             if row['action'] != 'reap':
