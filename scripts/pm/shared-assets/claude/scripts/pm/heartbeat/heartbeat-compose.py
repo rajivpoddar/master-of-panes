@@ -1152,17 +1152,21 @@ def proxies_block(doc: dict | None) -> list[str]:
     completed = doc['completions']
     failed = sum(c['rc'] != '0' for c in completed)
     suffix = '; truncated' if doc.get('truncated') else ''
-    lines = [f"*Proxies:* {len(completed)} finished last hour (best effort; {failed} rc≠0, RESULT unknown for truncated records{suffix})"]
+    # Rajiv C0ALZJHGE49 thread 1794188809.955499, ts 1794190613.274269 ("OK"):
+    # list only RUNNING proxies by name; finished ones are a count. Non-zero
+    # exits stay listed so failures remain visible.
+    running = [r for r in doc['rows'] if r.get('state') == 'running']
+    lines = [f"*Proxies:* {len(running)} running · {len(completed)} finished last hour ({failed} rc≠0{suffix})"]
     rows = []
-    for row in doc['rows']:
+    for row in running:
         if 'age' not in row:
             rows.append(f"• {row['name']} — {row['state']}")
         else:
             idle = f"{row['idle']}m" if row['idle'] is not None else 'unknown'
-            rows.append(f"• {row['name']} · {row['agent']} · {row['model']} · age {row['age']}m · output {idle} · {row['state']}")
+            rows.append(f"• {row['name']} · {row['agent']} · {row['model']} · age {row['age']}m · output {idle}")
     for row in completed:
-        if row['rc'] != '0' or row['result'] != 'ok':
-            rows.append(f"• {row['name']} · finished · rc={row['rc']} · RESULT {row['result']}")
+        if row['rc'] != '0':
+            rows.append(f"• {row['name']} · finished · rc={row['rc']} (FAILED)")
     lines.extend(rows[:9])
     if len(rows) > 9:
         lines.append(f'• +{len(rows) - 9} more')
