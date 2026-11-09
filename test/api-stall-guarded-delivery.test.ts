@@ -478,3 +478,104 @@ test("indeterminate hook is not the missing-Stop exception", async () => {
     h.close();
   }
 });
+
+// A later UserPromptSubmit keeps the session id (it is the turn id) and
+// refreshes active_turn_started_at. The screen is left unchanged.
+const ORIGINAL_TURN = "2020-01-01T00:00:00.000Z";
+const SESSION = "turn-mid-response";
+
+function pinOriginalTurn(db: MoPDatabase) {
+  db.updateSlot(1, {
+    active_turn_id: SESSION,
+    active_turn_started_at: ORIGINAL_TURN,
+    active_turn_state: "active",
+    idle: false,
+    last_meaningful_work_at: ORIGINAL_TURN,
+  });
+}
+
+function sameSessionPrompt(db: MoPDatabase) {
+  db.startAgentTurn(1, SESSION);
+}
+
+test("same-session UserPromptSubmit before lease admission sends nothing", async () => {
+  const h = realLease();
+  try {
+    pinOriginalTurn(h.db);
+    // Capture 1 is the observation, before the lease is claimed.
+    h.p.onCapture = (n) => { if (n === 1) sameSessionPrompt(h.db); };
+    await h.check();
+    const cur = h.db.getSlot(1);
+    assert.equal(cur?.active_turn_id, SESSION, "session id is unchanged");
+    assert.notEqual(cur?.active_turn_started_at, ORIGINAL_TURN, "turn generation moved");
+    assert.equal(cur?.active_turn_state, "active");
+    assert.equal(h.p.pastes, 0);
+    assert.equal(h.p.enters, 0);
+    assert.equal(h.payload("api_stall_nudge_refused")?.reason, "release_in_progress");
+    assert.equal(h.det.getApiStallStatus(1).state, "stall_pending");
+  } finally {
+    h.close();
+  }
+});
+
+test("same-session UserPromptSubmit during the final pre-paste capture sends nothing", async () => {
+  const ctl = realLease();
+  try {
+    pinOriginalTurn(ctl.db);
+    await ctl.check();
+    assert.equal(ctl.p.pastes, 1, "control still delivers the original turn");
+    const atPaste = ctl.p.capturesAtPaste ?? 0;
+    assert.ok(atPaste > 1, "the final pre-paste capture is after lease admission");
+    const h = realLease();
+    try {
+      pinOriginalTurn(h.db);
+      h.p.onCapture = (n) => { if (n === atPaste) sameSessionPrompt(h.db); };
+      await h.check();
+      const cur = h.db.getSlot(1);
+      assert.equal(cur?.active_turn_id, SESSION);
+      assert.notEqual(cur?.active_turn_started_at, ORIGINAL_TURN);
+      assert.equal(h.p.pastes, 0, "zero input after the new generation");
+      assert.equal(h.p.enters, 0);
+      assert.equal(h.payload("api_stall_nudge_refused")?.reason, "guarded_refused");
+      assert.equal(h.payload("api_stall_nudge_refused")?.detail, "turn_active");
+      assert.equal(h.det.getApiStallStatus(1).state, "stall_pending", "no paste, so the episode is not consumed");
+    } finally {
+      h.close();
+    }
+  } finally {
+    ctl.close();
+  }
+});
+
+test("same-session UserPromptSubmit during the final pre-Enter capture does not submit", async () => {
+  const ctl = realLease();
+  try {
+    pinOriginalTurn(ctl.db);
+    await ctl.check();
+    assert.equal(ctl.p.enters, 1);
+    const atEnter = ctl.p.capturesAtEnter ?? 0;
+    assert.ok(atEnter > (ctl.p.capturesAtPaste ?? 0));
+    const h = realLease();
+    try {
+      pinOriginalTurn(h.db);
+      h.p.onCapture = (n) => { if (n === atEnter) sameSessionPrompt(h.db); };
+      await h.check();
+      const cur = h.db.getSlot(1);
+      assert.equal(cur?.active_turn_id, SESSION);
+      assert.notEqual(cur?.active_turn_started_at, ORIGINAL_TURN);
+      assert.equal(h.p.pastes, 1, "the paste already landed");
+      assert.equal(h.p.enters, 0, "Enter must not reach the new turn");
+      assert.ok(h.types().includes("api_stall_nudge_uncertain"));
+      assert.match(h.payload("api_stall_nudge_uncertain")?.detail ?? "", /turn_active/);
+      h.p.onCapture = undefined;
+      await h.check();
+      await h.check();
+      assert.equal(h.p.pastes, 1, "an attempted paste stays consumed");
+      assert.equal(h.p.enters, 0);
+    } finally {
+      h.close();
+    }
+  } finally {
+    ctl.close();
+  }
+});

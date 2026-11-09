@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execShell } from "./asyncCommand.js";
-import { slotAssignmentTuple, type MoPDatabase } from "./db.js";
+import { isObservedAgentTurn, slotAssignmentTuple, type MoPDatabase, type ObservedAgentTurn } from "./db.js";
 import type { LogManager } from "./logs.js";
 import type { GuardedSlotDelivery, TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
@@ -1025,7 +1025,10 @@ export class StuckDetector {
     expected?: { assignment_epoch?: number; assigned_at?: string | null },
     command = "continue your work or remind pm if blocked",
     allowActiveTurn = false,
-    guarded?: GuardedSendOptions & { verifiedStallTermination?: boolean },
+    guarded?: GuardedSendOptions & {
+      verifiedStallTermination?: boolean;
+      observedTurn?: ObservedAgentTurn | null;
+    },
   ): Promise<ContinueDeliveryResult> {
     const current = this.db.getSlot(slotNum) ?? null;
     let reason: ContinueDeliveryResult["reason"] | null = null;
@@ -1083,6 +1086,7 @@ export class StuckDetector {
         undefined,
         allowActiveTurn,
         guarded?.verifiedStallTermination === true,
+        guarded?.verifiedStallTermination === true ? guarded.observedTurn ?? null : null,
       );
     } else if (tuple && typeof claimReleaseIntent === "function") {
       // Compatibility for lightweight detector fakes that predate tokens.
@@ -1094,6 +1098,7 @@ export class StuckDetector {
         undefined,
         allowActiveTurn,
         guarded?.verifiedStallTermination === true,
+        guarded?.verifiedStallTermination === true ? guarded.observedTurn ?? null : null,
       ) ? "__legacy__" : null;
     } else if (tuple) {
       nudgeLeaseToken = "__legacy__";
@@ -1685,9 +1690,15 @@ export class StuckDetector {
     // Established at observation, not re-derived from a later hook flip. A turn
     // that becomes active after this point is real work and stays refused.
     const staleActive = !hookIdle && turnIdle;
+    // The original turn only. UserPromptSubmit refreshes active_turn_started_at
+    // and may keep active_turn_id, so a boolean "still active" is not enough.
+    const observedTurn: ObservedAgentTurn = {
+      active_turn_id: slot.active_turn_id,
+      active_turn_started_at: slot.active_turn_started_at,
+    };
     // Synchronous owner/epoch/turn fence. Runs with no await between it and
-    // the effect (CTO REVISE 00:48, C0ALZJHGE49/1791049473.052849), so a hook
-    // that flips the turn during an awaited capture is always seen.
+    // the effect, so a hook that starts a new generation during an awaited
+    // capture is seen before both paste and Enter.
     const finalCheck = (stage: "pre_paste" | "pre_enter", snapshot?: string | null): string | null => {
       const cur = this.db.getSlot(slotNum);
       if (!cur?.occupied) return "released";
@@ -1696,11 +1707,14 @@ export class StuckDetector {
         return "identity_changed";
       }
       if (!this.isIdleByHookState(cur).idle) {
-        // The one missing-Stop termination. Empty composer before paste, the
-        // exact owned nudge before Enter, same current error. The fence stays.
+        // The one missing-Stop termination: still the observed turn, empty
+        // composer before paste, the exact owned nudge before Enter, same
+        // current error. A new generation refuses even when the session and
+        // the screen fingerprint are unchanged.
         if (
           staleActive
           && cur.active_turn_state === "active"
+          && isObservedAgentTurn(cur, observedTurn)
           && snapshot != null
           && verifiedApiStallTermination(stage, snapshot, fingerprint)
         ) return null;
@@ -1732,7 +1746,13 @@ export class StuckDetector {
       expected,
       API_STALL_NUDGE_MESSAGE,
       false,
-      { expectedPaneId: observedPaneId, recheck, finalCheck, verifiedStallTermination: staleActive },
+      {
+        expectedPaneId: observedPaneId,
+        recheck,
+        finalCheck,
+        verifiedStallTermination: staleActive,
+        observedTurn,
+      },
     );
     const outcome = delivery.outcome ?? (delivery.sent ? "delivered" : "refused_pre_effect");
     // Fence: an attempted or uncertain delivery consumes this stall episode;

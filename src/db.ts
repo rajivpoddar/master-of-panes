@@ -422,6 +422,25 @@ export interface NativeReleaseIntent {
   token: string;
 }
 
+/** Session id plus turn generation already observed for one stall exception. */
+export interface ObservedAgentTurn {
+  active_turn_id: string | null;
+  active_turn_started_at: string | null;
+}
+
+/** True only when current is still that exact turn. A new start time refuses
+ * even when the session id and the screen fingerprint are unchanged. */
+export function isObservedAgentTurn(
+  current: { active_turn_id?: string | null; active_turn_started_at?: string | null } | null | undefined,
+  observed: ObservedAgentTurn | null | undefined,
+): boolean {
+  const id = observed?.active_turn_id;
+  const started = observed?.active_turn_started_at;
+  if (typeof id !== "string" || id.trim() === "") return false;
+  if (typeof started !== "string" || started.trim() === "") return false;
+  return current?.active_turn_id === id && current?.active_turn_started_at === started;
+}
+
 /**
  * Lane start time: kept when the same issue/PR lane is re-pinned, reset to now
  * whenever the issue or PR changes (or it was never recorded).
@@ -2908,6 +2927,7 @@ export class MoPDatabase {
     ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
     allowActiveTurn = false,
     verifiedStallTermination = false,
+    observedTurn: ObservedAgentTurn | null = null,
   ): boolean {
     return this.claimNativeReleaseIntentWithToken(
       slot,
@@ -2916,6 +2936,7 @@ export class MoPDatabase {
       ttlMs,
       allowActiveTurn,
       verifiedStallTermination,
+      observedTurn,
     ) !== null;
   }
 
@@ -2927,6 +2948,7 @@ export class MoPDatabase {
     ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
     allowActiveTurn = false,
     verifiedStallTermination = false,
+    observedTurn: ObservedAgentTurn | null = null,
   ): string | null {
     const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
     if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return null;
@@ -2935,9 +2957,13 @@ export class MoPDatabase {
     return this.db.transaction((): string | null => {
       const current = this.getSlot(slot);
       // One missing-Stop stall: the hook is exactly "active" because Stop never
-      // ran. Indeterminate and every other non-inactive state stay refused.
-      // This is not a general active-turn allowance.
-      const verifiedStaleActive = verifiedStallTermination && current?.active_turn_state === "active";
+      // ran, AND it is still the turn observed before delivery. A later
+      // UserPromptSubmit keeps active_turn_id (the session id) and refreshes
+      // active_turn_started_at. Indeterminate and every other non-inactive
+      // state stay refused. This is not a general active-turn allowance.
+      const verifiedStaleActive = verifiedStallTermination
+        && current?.active_turn_state === "active"
+        && isObservedAgentTurn(current, observedTurn);
       const turnOpen = allowActiveTurn || verifiedStaleActive;
       if (
         !current
