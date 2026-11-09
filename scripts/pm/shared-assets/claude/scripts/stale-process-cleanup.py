@@ -2285,7 +2285,8 @@ def cp_check(helper, apply=False, grace=2):
     for row in rows:
         row['cwd'] = row.get('cwd') or helper.get_cwd(row['pid'])
     attempts, refused = [], []
-    for sig in (signal.SIGTERM, signal.SIGKILL) if apply else ():
+    # Containment: companion selections are report-only pending CTO REVISE fixes.
+    for sig in ():
         fresh = helper.codex_broker_table()
         try:
             current_panes = cp_live_panes(helper)
