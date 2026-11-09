@@ -791,7 +791,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "f0d14bdb7b2b53585cb709e338ec8ffcdd7b642103ba81a6346458a3f5519098",
+      "sha256": "26b31cc0a7abefe84c11dfc14a284f481f536a80688e8b9415514b9237e58294",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
@@ -1694,6 +1694,15 @@
       "ownership_class": "shared-codex-skill-test",
       "sha256": "3b20dfdfa3357e0bd0d0252392d0fb7354df63006330f709fd8b912177427710",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/codex-companion-reap.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-stale-process-cleanup",
+      "sha256": "238a8a3533d148049c6ba37466f79e5b332c85b1360ee4f1f105f1f8e311e38a",
+      "source_path": "claude/scripts/codex-companion-reap.py"
     }
   ],
   "inventory": {

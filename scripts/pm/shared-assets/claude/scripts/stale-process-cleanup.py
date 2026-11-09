@@ -2141,59 +2141,14 @@ def codex_broker_sample(roots: list[dict[str, Any]], history: dict[str, Any], ap
 
 def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, extra_min: int, idle_min: int,
                               history: dict[str, Any] | None = None) -> dict[str, Any]:
-    out: dict[str, Any] = {
-        "class": "codex_broker_cap", "action": "report_only",
-        "orphan_min": orphan_min, "extra_min": extra_min, "idle_min": idle_min,
-        "roots": 0, "before": 0, "killed": 0, "after": 0, "skipped": [], "found": [],
-        "terminated": [], "refused": [], "errors": [], "rules": {},
-    }
-    persistent_history = history is not None
-    history = history if history is not None else {}
-    table = codex_broker_table()
-    texts = codex_companion_texts(table) if table is not None else None
-    if table is None or texts is None:
-        if apply:
-            history["codex_broker_idle"] = {}
-        out["errors"].append("ps_failed" if table is None else "companion_scan_failed")
-        out["after"] = "unknown"
-        return out  # fail closed: never signal when in-flight state is unknown
-    uid, me = os.getuid(), os.getpid()
-    mins = (orphan_min * 60, extra_min * 60, idle_min * 60)
-    plan = codex_broker_policy_plan(table, uid, me, texts, codex_broker_has_client, *mins)
-    out.update(roots=len(plan["roots"]), before=len(plan["members"]), skipped=plan["skipped"])
-    for r in plan["roots"]:
-        for rule in r["rules"]:
-            out["rules"][rule] = out["rules"].get(rule, 0) + 1
-        out["found"].append({"pid": r["root"]["pid"], "shape": r["shape"], "rules": r["rules"],
-                             "age": fmt_age(r["root"]["age_seconds"]), "members": len(r["members"]),
-                             "cwd": codex_broker_endpoint_info(r["root"]["command"])["cwd"]})
-    # CTO REVISE 1794214757.800249: report only; no client does not prove the backend turn stopped.
-    session_cwds = codex_companion_cwds(table)  # relaxed 10-27: live slot cwd is OK unless a companion runs there
-    out["would_kill"] = []
-    out["action"] = "report_only"  # CTO REVISE: socket disconnect is not proof of quiescence.
-    ready, refused = codex_broker_sample(plan["roots"], history, apply, uid, session_cwds, time.time())
-    out["refused"].extend(refused)
-    if apply and persistent_history and not save_history(history):
-        out["errors"].append("history_write_failed")
-        out["after"] = "unknown"
-        return out
-    for r in ready[:CODEX_BROKER_MAX_TREES]:
-        out["would_kill"].append({"root": r["root"]["pid"], "members": [m["pid"] for m in r["members"]]})
-        if False:  # Report-only until quiescence and identity are safely established.
-            res = codex_broker_strict_kill(r, term_wait_s)
-            if res["outcome"] == "terminated":
-                out["terminated"].append(res)
-                out["killed"] += res["signalled"]
-            else:
-                out["refused"].append({"pid": r["root"]["pid"], **res})
-                key = f"{r['root']['pid']}:{r['root']['start_time']}"
-                history.get("codex_broker_idle", {}).pop(key, None)
-                if persistent_history and not save_history(history):
-                    out["errors"].append("history_write_failed")
-                    break
-    # Signals are attempts, not proof of death. A failed post-read stays unknown.
-    out["after"] = "unknown" if apply and out["would_kill"] else out["before"]
-    return out
+    # Rajiv 1794219276.746709 + PM revision: live-pane ancestry replaces idle heuristics.
+    import importlib.util
+    from types import SimpleNamespace
+    spec = importlib.util.spec_from_file_location("companion_reap", Path(__file__).with_name("codex-companion-reap.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.check(SimpleNamespace(**globals()), apply, term_wait_s)
+
 
 
 STRICT_MIN_AGE_S = 24 * 3600
@@ -2906,7 +2861,7 @@ def _main() -> int:
         f"refused={len(broker_cap['refused'])} errors={len(broker_cap['errors'])}"
     )
     for row in broker_cap["found"]:
-        print(f"CODEX_BROKER_CAP_ROOT pid={row['pid']} shape={row['shape']} age={row['age']} rules={','.join(row['rules'])} members={row['members']} cwd={row['cwd']}")
+        print(f"CODEX_COMPANION pid={row['pid']} action={row['action']} reason={row['reason']} cwd={row['cwd']} linkage={row['linkage']}")
     for row in codex_brokers["found"]:
         print(f"CODEX_BROKER_ROOT pid={row['pid']} shape={row['shape']} age={row['age']} members={row['members']}")
     for row in codex_brokers["skipped"]:

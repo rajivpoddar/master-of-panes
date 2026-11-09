@@ -1,223 +1,84 @@
-"""Strict broker cleanup preserves live clients, requests and companions."""
+"""Rajiv 1794219276.746709 / PM revision: ancestry, not age, owns companions.
 
-from __future__ import annotations
-
+Obligation 31735: replace stale strict_kill/idle sampling expectations. Legacy
+report-only orphan scanner remains separately covered; cap entrypoint now reaps.
+"""
 import importlib.util
-import copy
-import io
-import json
 import os
-import sys
-import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-ROOT = Path(__file__).parents[3]
-MODULE_PATH = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "scripts" / "stale-process-cleanup.py"
-SPEC = importlib.util.spec_from_file_location("stale_process_cleanup_cap", MODULE_PATH)
-assert SPEC and SPEC.loader
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
-
+PATH = Path(__file__).parents[1] / 'shared-assets/claude/scripts/codex-companion-reap.py'
+SPEC = importlib.util.spec_from_file_location('reaper', PATH)
+M = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(M)
 UID = os.getuid()
 
 
-def broker(sess: str, cwd: str) -> str:
-    return ("/opt/homebrew/bin/node /Users/rajiv/.claude/plugins/cache/openai-codex/codex/1.0.1/scripts/app-server-broker.mjs serve "
-            f"--endpoint unix:/var/folders/x/cxc-{sess}/broker.sock --cwd {cwd} --pid-file /var/folders/x/cxc-{sess}/broker.pid")
+def row(pid, parent, cmd='node /x/codex-companion.mjs review'):
+    return dict(pid=pid, ppid=parent, command=cmd, uid=UID, stat='S', start_time=str(pid))
 
 
-def proc(pid: int, ppid: int, command: str, age_min: int = 1500) -> dict:
-    return {"pid": pid, "ppid": ppid, "uid": UID, "etime": "x", "age_seconds": age_min * 60,
-            "stat": "S", "start_time": f"t{pid}", "command": command}
+def test_live_pane_and_open_pr_kept():
+    table = {10: row(10, 1, '/bin/zsh'), 20: row(20, 10)}
+    for linkage in ({}, {20: {'state': 'OPEN', 'number': 123}}):
+        assert M.select(table, {10: '0:0.1'}, UID, linkage)[0]['action'] == 'keep'
 
 
-def forbid(name):
-    def _raise(*a, **k):
-        raise AssertionError(f"must not call {name}{a!r}")
-    return _raise
+def test_closed_or_merged_pr_overrides_live_pane():
+    table = {10: row(10, 1, '/bin/zsh'), 20: row(20, 10)}
+    for state in ('CLOSED', 'MERGED'):
+        result = M.select(table, {10: '0:0.1'}, UID, {20: {'state': state}})
+        assert (result[0]['action'], result[0]['reason']) == ('reap', 'closed_pr')
 
 
-def make_table() -> dict:
-    rows = [
-        proc(1, 0, "/sbin/launchd", 9999),
-        proc(60, 1, "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT", 900),
-        proc(100, 1, broker("orphan", "/a")),                       # selected by (a)
-        proc(101, 100, "node /opt/homebrew/bin/codex app-server"),  # its tree
-        proc(102, 101, "/bin/sh -c long-running-local-tool"),       # active tool descendant
-        proc(110, 1, broker("busy", "/b")),                         # in-flight companion
-        proc(120, 60, broker("chatgpt", "/c"), 900),                # ChatGPT-owned
-    ]
-    return {r["pid"]: r for r in rows}
+def test_orphans_including_unresolvable_linkage_reaped_without_age_gate():
+    assert M.select({20: row(20, 1)}, {}, UID, {})[0]['reason'] == 'orphan'
 
 
-class BrokerCapReportOnlyTests(unittest.TestCase):
-    def test_pure_policy_selftest_has_no_real_signal(self):
-        with patch.object(MODULE.os, 'kill', side_effect=forbid('real signal')):
-            self.assertEqual(MODULE.run_self_test(),0)
-    def test_each_term_and_kill_rechecks_full_group_and_activity(self):
-        table = {100: proc(100, 1, broker('safe','/a')),
-                 101: proc(101, 100, 'node /opt/homebrew/bin/codex app-server')}
-        root = MODULE.codex_broker_policy_plan(table, UID, -1, [], lambda *a: False, 0, 0, 0)['roots'][0]
-        for at in ('before_term', 'between_terms', 'before_kill'):
-            for drift in ('reparent', 'protected', 'new_foreign', 'tool', 'client', 'inflight', 'cwd', 'unknown'):
-                with self.subTest(at=at, drift=drift):
-                    state = copy.deepcopy(table)
-                    sent, stepped = [], [False]
-                    def change():
-                        stepped[0] = True
-                        if drift == 'reparent': state[101]['ppid'] = 1
-                        if drift == 'protected': state[101]['command'] = 'claude active-work'
-                        if drift in ('new_foreign','tool'):
-                            state[102] = proc(102,100,'long-running-tool')
-                            if drift == 'new_foreign': state[102]['uid'] = UID + 1
-                    if at == 'before_term': change()
-                    def send(pid, sig):
-                        sent.append((pid,sig))
-                        if at == 'between_terms' and len(sent) == 1: change()
-                    result = MODULE.codex_broker_strict_kill(root, 0,
-                        table_fn=lambda: None if stepped[0] and drift == 'unknown' else state,
-                        has_client=lambda *a: stepped[0] and drift == 'client',
-                        companion_fn=lambda t: [broker('safe','/a')] if stepped[0] and drift == 'inflight' else [],
-                        companion_cwd_fn=lambda t: ['/a'] if stepped[0] and drift == 'cwd' else [],
-                        send=send, sleep=lambda _: change() if at == 'before_kill' else None)
-                    self.assertTrue(result['outcome'].startswith('refused_'), result)
-                    self.assertEqual(len(sent), {'before_term':0,'between_terms':1,'before_kill':2}[at])
-                    self.assertEqual(result['sigkill'], [])
-                    self.assertEqual(result['signalled'], len(sent))
-
-    def test_safe_known_group_control_and_unknown_post_read(self):
-        for unknown in (False, True):
-            table = {100: proc(100,1,broker('safe','/a'))}
-            root = MODULE.codex_broker_policy_plan(table,UID,-1,[],lambda *a:False,0,0,0)['roots'][0]
-            calls = [0]
-            sent = []
-            def scan():
-                calls[0] += 1
-                return (None if unknown else {}) if calls[0] == 3 else table
-            out = MODULE.codex_broker_strict_kill(root,0,table_fn=scan,has_client=lambda *a:False,
-                companion_fn=lambda t:[],companion_cwd_fn=lambda t:[],send=lambda *a:sent.append(a),sleep=lambda _:None)
-            self.assertEqual(out['outcome'], 'refused_post_read_unknown' if unknown else 'terminated')
-            self.assertEqual(len(sent),2)
-
-    def check(self, apply, companions, has_client=True):
-        with patch.object(MODULE, "codex_broker_table", side_effect=make_table), \
-                patch.object(MODULE, "codex_companion_texts", return_value=companions), \
-                patch.object(MODULE, "codex_broker_has_client", return_value=has_client), \
-                patch.object(MODULE.os, "kill", side_effect=forbid("os.kill")), \
-                patch.object(MODULE, "_kill_members", side_effect=forbid("_kill_members")), \
-                patch.object(MODULE.time, "sleep", side_effect=forbid("sleep")), \
-                patch.object(MODULE, "run", side_effect=forbid("run")):
-            return MODULE.codex_broker_policy_check(apply, 0, 0, 0, 0)
-
-    def test_strict_guards_independently_refuse(self):
-        for guard in ("cwd", "inflight", "client", "young"):
-            with self.subTest(guard=guard):
-                table = {100: proc(100, 1, broker("orphan", "/a"), 1439 if guard == "young" else 1440)}
-                with patch.object(MODULE, "codex_broker_table", return_value=table), \
-                     patch.object(MODULE, "codex_companion_texts", return_value=[broker("orphan", "/a")] if guard == "inflight" else []), \
-                     patch.object(MODULE, "codex_companion_cwds", return_value=["/a"] if guard == "cwd" else []), \
-                     patch.object(MODULE, "codex_broker_has_client", return_value=guard == "client"), \
-                     patch.object(MODULE, "codex_broker_strict_kill", side_effect=forbid("signal")):
-                    out = MODULE.codex_broker_policy_check(True, 0, 0, 0, 0)
-                self.assertEqual(out["action"], "strict_kill")
-                self.assertEqual(out["would_kill"], [])
-                self.assertEqual(out["killed"], 0)
-
-    def test_strict_rechecks_before_signalling(self):
-        table = {100: proc(100, 1, broker("orphan", "/a"))}
-        root = MODULE.codex_broker_policy_plan(table, UID, -1, [], lambda *a: False, 0, 0, 0)["roots"][0]
-        for guard in ("identity", "inflight", "cwd", "client"):
-            with self.subTest(guard=guard):
-                result = MODULE.codex_broker_strict_kill(
-                    root, 0, table_fn=lambda: {} if guard == "identity" else table,
-                    has_client=lambda *a: guard == "client",
-                    companion_fn=lambda t: [broker("orphan", "/a")] if guard == "inflight" else [],
-                    companion_cwd_fn=lambda t: ["/a"] if guard == "cwd" else [],
-                    send=forbid("signal"), sleep=forbid("sleep"))
-                self.assertTrue(result["outcome"].startswith("refused_"))
-
-    def test_failed_evidence_cases_never_signal(self):
-        for table_ret, comp_ret in ((None, []), (make_table(), None)):
-            with patch.object(MODULE, "codex_broker_table", return_value=table_ret), \
-                    patch.object(MODULE, "codex_companion_texts", return_value=comp_ret), \
-                    patch.object(MODULE.os, "kill", side_effect=forbid("os.kill")), \
-                    patch.object(MODULE.time, "sleep", side_effect=forbid("sleep")):
-                out = MODULE.codex_broker_policy_check(True, 0, 0, 0, 0)
-            self.assertEqual(out["killed"], 0)
-            self.assertTrue(out["errors"])
-
-    def test_companion_evidence_fails_closed_on_nonzero_or_empty_ps(self):
-        table = {1: proc(1, 0, "/sbin/launchd"), 9: proc(9, 1, "node /x/codex-review-companion.mjs review")}
-        for res in (SimpleNamespace(returncode=1, stdout="x"), SimpleNamespace(returncode=0, stdout="  \n")):
-            with patch.object(MODULE, "run", return_value=res):
-                self.assertIsNone(MODULE.codex_companion_texts(table))
-
-    def test_real_cli_apply_attestation_age0_has_zero_broker_signal_effects(self):
-        with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp) / "p.json"
-            argv = ["x", "--apply", "--attest-slotless-reap", "--output", str(output),
-                    "--status-output", str(Path(temp) / "s.json"), "--codex-broker-min-hours", "0",
-                    "--codex-broker-orphan-min", "0", "--codex-broker-extra-min", "0", "--codex-broker-idle-min", "0"]
-            empty = {"ok": True, "rows": [], "candidates": [], "skipped": []}
-            with patch.object(MODULE, "load_slot_inventory", return_value=({}, "malformed_row:slot=4")), \
-                    patch.object(MODULE, "load_history", side_effect=lambda *a, **k: {}), \
-                    patch.object(MODULE, "save_history"), \
-                    patch.object(MODULE, "collect_processes", return_value=empty), \
-                    patch.object(MODULE, "preview_orphan_scan", return_value={"class": "preview_orphan", "found": [], "terminated": [], "errors": []}), \
-                    patch.object(MODULE, "runaway_scan", return_value={"class": "runaway_scan", "found": [], "terminated": [], "errors": []}), \
-                    patch.object(MODULE, "replayd_check", return_value={"pid": None, "cpu": None, "streak": 0, "action": "none"}), \
-                    patch.object(MODULE, "codex_renderer_check", return_value={"class": "codex_renderer", "observed": 0, "over_threshold": 0, "pending": 0, "found": [], "terminated": [], "refused": [], "errors": []}), \
-                    patch.object(MODULE, "codex_broker_orphan_check", return_value={"class": "codex_broker_orphan", "min_hours": 0, "action": "report_only", "roots": 0, "before": 0, "killed": 0, "exiting": 0, "after": 0, "skipped_protected": 0, "skipped_young": 0, "found": [], "skipped": [], "terminated": [], "exiting_pids": [], "refused": [], "errors": []}), \
-                    patch.object(MODULE, "codex_broker_table", side_effect=lambda: {p:r for p,r in make_table().items() if p in (100,101,102)}), \
-                    patch.object(MODULE, "codex_companion_texts", return_value=[]), \
-                    patch.object(MODULE, "codex_broker_has_client", return_value=False), \
-                    patch.object(MODULE, "_kill_members", side_effect=forbid("_kill_members")), \
-                    patch.object(MODULE.os, "kill", side_effect=forbid("os.kill")), \
-                    patch.object(MODULE.time, "sleep", side_effect=forbid("sleep")), \
-                    patch.object(MODULE, "run", side_effect=forbid("run")), \
-                    patch.object(sys, "argv", argv), patch.object(sys, "stdout", new_callable=io.StringIO) as out:
-                MODULE.main()
-            self.assertIn("CODEX_BROKER_CAP action=strict_kill", out.getvalue())
-            self.assertEqual(json.loads(output.read_text())["codex_broker_cap"]["killed"], 0)
+def test_unreadable_or_cyclic_ancestry_skipped_even_for_closed_pr():
+    for table in ({20: row(20, 19)}, {20: row(20, 21), 21: row(21, 20, 'tool')}):
+        assert all(r['reason'] == 'SKIPPED_UNREADABLE' for r in M.select(table, {}, UID, {20: {'state': 'CLOSED'}}))
 
 
-def test_sampled_apply_resets_and_caps_without_signalling_unsafe_trees():
-    table = {i: proc(i, 1, broker(str(i), f"/tmp/broker-{i}")) for i in range(100, 112)}
-    history = {}
-    calls = []
-    with patch.object(MODULE, "codex_broker_table", return_value=table), \
-         patch.object(MODULE, "codex_companion_texts", return_value=[]), \
-         patch.object(MODULE, "codex_companion_cwds", return_value=[]), \
-         patch.object(MODULE, "codex_broker_has_client", return_value=False), \
-         patch.object(MODULE, "save_history", return_value=True), \
-         patch.object(MODULE, "codex_broker_strict_kill", side_effect=lambda r, w: calls.append(r['root']['pid']) or {"outcome": "terminated", "signalled": 1}):
-        with patch.object(MODULE.time, "time", return_value=1000):
-            assert not MODULE.codex_broker_policy_check(True, 0, 0, 0, 0, history)["would_kill"]
-        with patch.object(MODULE.time, "time", return_value=2799):
-            assert not MODULE.codex_broker_policy_check(True, 0, 0, 0, 0, history)["would_kill"]
-        with patch.object(MODULE.time, "time", return_value=2800):
-            assert len(MODULE.codex_broker_policy_check(True, 0, 0, 0, 0, history)["would_kill"]) == 10
-    assert len(calls) == 10
+def test_noncompanions_and_prompt_mentions_untouched():
+    table = {10: row(10, 1, 'claude --prompt "node /x/codex-companion.mjs"'), 11: row(11, 1, 'node /x/server.js')}
+    assert M.select(table, {}, UID, {}) == []
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_children_and_foreign_uid_and_self_protection():
+    table = {20: row(20, 1), 21: row(21, 20, 'tool'), 22: {**row(22, 20, 'tool'), 'uid': UID + 1}}
+    assert [r['pid'] for r in M.select(table, {}, UID, {})] == [20, 21]
+    assert M.select(table, {}, UID, {}, {20})[0]['action'] == 'keep'
 
 
-def test_eligible_broker_still_requires_fresh_signal_time_evidence():
-    """Retains e148's eligible-root control; unknown fresh evidence cannot lift containment."""
-    table = {100: proc(100, 1, broker("orphan", "/a"))}
-    with patch.object(MODULE, "codex_broker_table", side_effect=[table, None]), \
-            patch.object(MODULE, "codex_companion_texts", return_value=[]), \
-            patch.object(MODULE, "codex_companion_cwds", return_value=[]), \
-            patch.object(MODULE, "codex_broker_has_client", return_value=False), \
-            patch.object(MODULE, "save_history", return_value=True), \
-            patch.object(MODULE.time, "time", return_value=2800), \
-            patch.object(MODULE.os, "kill", side_effect=forbid("signal without fresh evidence")):
-        result = MODULE.codex_broker_policy_check(True, 0, 0, 0, 0, {"codex_broker_idle": {"100:t100": 1000}})
-    assert result['action'] == 'strict_kill' and result['killed'] == 0
-    assert result['would_kill']
-    assert result['refused'][0]['outcome'] == 'refused_ps_failed'
+def helper(table_fn):
+    return SimpleNamespace(codex_broker_table=table_fn, get_cwd=lambda p: '/x', sanitize_command=lambda s: s)
+
+
+def test_apply_terms_then_kills_and_logs_verified_deaths():
+    table = {20: row(20, 1)}
+    snapshots = iter([table, table, table, {}])
+    with patch.object(M, 'live_panes', return_value={}), patch.object(M, 'linkage', return_value={}), \
+         patch.object(M.os, 'kill') as send, patch.object(M.time, 'sleep'):
+        out = M.check(helper(lambda: next(snapshots)), True, 0)
+    assert [c.args[1] for c in send.call_args_list] == [M.signal.SIGTERM, M.signal.SIGKILL]
+    assert out['reaped'] == 1
+    assert out['found'][0]['cwd'] == '/x'
+
+
+def test_pid_reuse_and_fresh_unreadable_never_signalled():
+    table = {20: row(20, 1)}
+    for fresh in (None, {20: {**row(20, 1), 'start_time': 'reused'}}, {20: row(20, 19)}):
+        with patch.object(M, 'live_panes', return_value={}), patch.object(M, 'linkage', return_value={}), \
+             patch.object(M.os, 'kill') as send, patch.object(M.time, 'sleep'):
+            M.check(helper(iter([table, fresh, fresh, fresh]).__next__), True, 0)
+        send.assert_not_called()
+
+
+def test_scan_never_signals():
+    with patch.object(M, 'live_panes', return_value={}), patch.object(M, 'linkage', return_value={}), \
+         patch.object(M.os, 'kill') as send:
+        assert M.check(helper(lambda: {20: row(20, 1)}))['action'] == 'scan'
+    send.assert_not_called()
