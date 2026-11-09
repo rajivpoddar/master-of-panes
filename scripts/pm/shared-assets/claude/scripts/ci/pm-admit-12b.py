@@ -3,6 +3,8 @@
 import argparse
 import base64
 import json
+import os
+from datetime import datetime, timezone
 import re
 import subprocess
 import tempfile
@@ -35,11 +37,96 @@ def exempt(repo, pr, head):
         return scope.get('control_plane_only') is True and scope.get('product_changed') is False
 
 
+# Fixed rollout deadline: reinstall/restart must never renew the 48-hour grace.
+PROVENANCE_DEADLINE = datetime(2026, 11, 11, 18, 40, 9, tzinfo=timezone.utc)
+
+
+def transition_open():
+    return (os.environ.get('PM_ADMIT_12B_STRICT', '') != '1' and
+            datetime.now(timezone.utc) < PROVENANCE_DEADLINE)
+
+
+def read_review(pr):
+    """Local reviewer receipt, not GitHub prose. Invalid receipts grant nothing."""
+    try:
+        path = Path(f'/tmp/pm-admission-review-{pr}.txt')
+        if path.is_symlink() or path.stat().st_uid != os.getuid():
+            return None
+        fields = {}
+        for line in path.read_text().splitlines():
+            key, value = line.split(':', 1)
+            if key in fields:
+                return None
+            fields[key] = value.strip()
+        stamp = datetime.fromisoformat(fields['TIMESTAMP'].replace('Z', '+00:00'))
+        if (fields['PR'] != str(pr) or fields['REVIEWER'] != 'pm-admission-reviewer' or
+                fields['VERDICT'] != 'PASS' or
+                not re.fullmatch('[0-9a-f]{40}', fields['HEAD_SHA']) or
+                stamp.tzinfo is None or stamp > datetime.now(timezone.utc)):
+            return None
+        return fields
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def test_file(path):
+    # Only executable test sources, not fixtures/config/helpers in a tests directory.
+    return bool(re.search(r'(^|/)(test_[^/]+\.py|[^/]+[.-](test|spec)\.(py|[cm]?[jt]sx?)|test-[^/]+\.sh)$', path))
+
+
+def verify_history(repo, pr, reviewed, head, mechanical):
+    """Inspect the complete first-parent chain in an isolated bare object store.
+
+    Main merge labels are not proof: the second parent must be on main and the
+    actual tree must equal Git's clean merge-tree result (no hidden resolutions).
+    """
+    if not re.fullmatch('[0-9a-f]{40}', head):
+        return False
+    if reviewed == head:
+        return True
+    with tempfile.TemporaryDirectory(prefix='pm-12b-history-') as tmp:
+        def git(*args):
+            return subprocess.check_output(['git', '-C', tmp, *args],
+                                           stderr=subprocess.DEVNULL, timeout=120).decode().strip()
+        git('init', '--bare', '--quiet')
+        git('fetch', '--quiet', '--no-tags', f'https://github.com/{repo}.git',
+            reviewed, head, 'refs/heads/main:refs/heads/main')
+        git('merge-base', '--is-ancestor', reviewed, head)
+        base = git('merge-base', reviewed, 'refs/heads/main')
+        own_paths = set(git('diff', '--name-only', '--no-renames', base, reviewed).splitlines())
+        files = api(repo, f'pulls/{pr}/files?per_page=100', True)
+        own_paths.update(p for f in files for p in (f['filename'], f.get('previous_filename')) if p)
+        chain = git('rev-list', '--first-parent', '--reverse', f'{reviewed}..{head}').splitlines()
+        previous = reviewed
+        for sha in chain:
+            parents = git('show', '-s', '--format=%P', sha).split()
+            if not parents or parents[0] != previous:
+                return False
+            paths = set(git('diff', '--name-only', '--no-renames', previous, sha).splitlines())
+            if len(parents) == 2:
+                subject = git('show', '-s', '--format=%s', sha)
+                if not re.match(r"^Merge branch 'main'(?: |$)", subject):
+                    return False
+                git('merge-base', '--is-ancestor', parents[1], 'refs/heads/main')
+                clean_tree = git('merge-tree', '--write-tree', previous, parents[1]).splitlines()[0]
+                if clean_tree != git('rev-parse', f'{sha}^{{tree}}'):
+                    return False
+                if not mechanical and own_paths.intersection(paths):
+                    return False
+            elif len(parents) == 1 and mechanical and paths and all(test_file(p) for p in paths):
+                pass
+            else:
+                return False
+            previous = sha
+        return bool(chain) and previous == head
+
+
 def evaluate(repo, pr, head):
     last = 'none'
     try:
         comments = api(repo, f'issues/{pr}/comments?per_page=100', True)
         markers = []
+        last_body = ''
         for comment in sorted(comments, key=lambda c: (c.get('created_at', ''), c.get('id', 0))):
             lines = (comment.get('body') or '').splitlines()
             first = lines[0] if lines else ''
@@ -49,6 +136,8 @@ def evaluate(repo, pr, head):
             match = MARKER.match(re.sub(r'^#{1,6} ', '', first))
             diagnostic = match
             legacy = LEGACY.match(re.sub(r'^#{1,6} ', '', first))
+            if diagnostic or legacy:
+                last_body = comment.get('body') or ''
             if diagnostic:
                 markers.append((*diagnostic.groups(), bool(match)))
             elif legacy:
@@ -63,9 +152,24 @@ def evaluate(repo, pr, head):
                 return True, '12B_GATE: exempt (control-plane-only)'
         except Exception:
             pass  # An unavailable classifier never grants an exemption.
+        review = read_review(pr)
+        last_marker = review['HEAD_SHA'] if review else 'none'
+        # A later negative/legacy verdict cannot be bypassed by an old PASS receipt.
+        if not markers or (canonical and verdict == 'PASS'):
+            mechanical = bool(markers and head.startswith(sha) and
+                              '(mechanical)' in last_body)
+            if review:
+                try:
+                    if verify_history(repo, pr, last_marker, head, mechanical):
+                        return True, f'12B_GATE: PASS (marker-backed) pr={pr} head={head}'
+                except Exception:
+                    pass  # Missing objects, conflicts and git failures never grant proof.
+            if not transition_open():
+                return False, f'REFUSE: 12b_provenance_missing pr={pr} head={head} last_marker={last_marker}'
         if markers and canonical and verdict == 'PASS':
+            warning = '12B_GATE: WARN provenance_unverified\n'
             if head.startswith(sha):
-                return True, f'12B_GATE: PASS pr={pr} head={head}'
+                return True, warning + f'12B_GATE: PASS pr={pr} head={head}'
             comparison = api(repo, f'compare/{sha}...{head}?per_page=100')
             commits = comparison['commits']
             # GitHub truncates compare files at 300 and commits at page size.
@@ -82,7 +186,7 @@ def evaluate(repo, pr, head):
             if (after and after[-1]['sha'] == head and
                     all(len(c['parents']) >= 2 and c['commit']['message'].splitlines()[0].startswith("Merge branch 'main'") for c in after) and
                     not own_paths.intersection(changed)):
-                return True, f'12B_GATE: PASS (main-merges-only) pr={pr} head={head}'
+                return True, warning + f'12B_GATE: PASS (main-merges-only) pr={pr} head={head}'
     except Exception:
         pass
     return False, f'REFUSE: 12b_missing_or_stale pr={pr} head={head} last_12b={last}'
