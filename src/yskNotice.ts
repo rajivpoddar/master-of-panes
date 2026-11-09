@@ -39,9 +39,12 @@
  * Rajiv, same thread, ts 1794203645.732629: "just match here's a note offered
  * by the side agent". Enter is allowed only when that header is the first
  * non-empty composer line. The wrapped body is not compared. A human line
- * before the header is not ours: no Enter, no C-u. If the header is ours but
- * Enter still cannot be confirmed, C-u clears that verified paste and the note
- * is queued on the existing PM pending-event path instead of sitting in the box.
+ * before the header is not ours: no Enter.
+ * Anything short of a confirmed submit (header never appears, the recipient
+ * fence fails, or Enter was issued but not confirmed) aborts through the
+ * existing consumed path. The composer is left for a person. There is no
+ * automatic C-u and no second copy on the pending-event queue: an uncertain
+ * Enter is never sent again, and a replacement draft is never erased.
  */
 
 import { createHash } from "node:crypto";
@@ -263,17 +266,6 @@ export type YskDriveDeps = {
    */
   observeComposer?: (pin: YskPin) => Promise<{ width: number; text: string } | null>;
   /**
-   * One C-u. Used only after the header line has been verified, so a human
-   * draft is never cleared. Absent in tests that only assert refusal.
-   */
-  pressClearLine?: (pin: YskPin) => Promise<void>;
-  /**
-   * Non-composer delivery: the PM pending-event queue (same store peer and
-   * slot notices drain from). Called only after a verified paste was cleared,
-   * or when the composer is empty and the quote never appeared.
-   */
-  queueUndelivered?: (text: string) => void;
-  /**
    * Synchronous session fence. Read the latest hook session, do not await.
    * Called after awaited observations and immediately inside the writers.
    * A reason stops the attempt; an already-claimed note stays consumed.
@@ -404,44 +396,6 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
         return false;
       }
     };
-    /** C-u may continue only while the remainder is still the verified paste. */
-    const stillVerifiedPaste = (current: string, original: string): boolean => {
-      const vis = current.replace(/\s+/g, "");
-      const orig = original.replace(/\s+/g, "");
-      if (!vis) return true;
-      return vis === orig || orig.startsWith(vis) || orig.endsWith(vis);
-    };
-    const clearVerifiedPaste = async (original: string): Promise<boolean> => {
-      if (!deps.pressClearLine) return false;
-      let previous = original;
-      for (let press = 0; press < 30; press++) {
-        let current: string | null;
-        try {
-          current = composerOf(await deps.capture(pin));
-        } catch {
-          return false;
-        }
-        if (current === null) return false;
-        if (current === "") return true;
-        if (press === 0) {
-          if (!composerStartsWithSideAgentHeader(current)) return false;
-        } else if (!stillVerifiedPaste(current, previous) || current.replace(/\s+/g, "").length >= previous.replace(/\s+/g, "").length) {
-          return false;
-        }
-        if (sessionFence()) return false;
-        try {
-          await deps.pressClearLine(pin);
-        } catch {
-          return false;
-        }
-        previous = current;
-      }
-      try {
-        return composerOf(await deps.capture(pin)) === "";
-      } catch {
-        return false;
-      }
-    };
     const blocked = async (expect: (snapshot: string | null) => boolean | Promise<boolean>): Promise<string | null> => {
       const check = await deps.revalidate(pin);
       if (!check.ok) return check.reason;
@@ -506,49 +460,20 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     keysSent.push("2");
     // 05:44Z event 2609232 (keys=2 enter=0, quote_not_owned): the side-agent
     // paste was on screen, header included, but the wrapped body never equalled
-    // renderWrappedComposer. Enter was not sent and the paste sat in the box.
-    // The header line is the ownership check now. Bounded by quoteTimeoutMs.
-    const releaseStuck = async (reason: string, enterPresses: number): Promise<YskDriveResult> => {
-      let composer: string | null = null;
-      try {
-        composer = composerOf(await deps.capture(pin));
-      } catch {
-        composer = null;
-      }
-      const verified = !!composer && composerStartsWithSideAgentHeader(composer);
-      if (verified && composer) {
-        const cleared = await clearVerifiedPaste(composer);
-        if (cleared) {
-          try {
-            deps.queueUndelivered?.(ownedQuote + YSK_NOTICE_PROCESS_SUFFIX);
-          } catch {
-            /* the alert still fires; a queue failure must not retype */
-          }
-          return finish({
-            outcome: "abort",
-            reason: "heads_up_undelivered",
-            noteHash,
-            keysSent,
-            enterPresses,
-          });
-        }
-      } else if (composer === "") {
-        try {
-          deps.queueUndelivered?.(ownedQuote + YSK_NOTICE_PROCESS_SUFFIX);
-        } catch {
-          /* best-effort */
-        }
-      }
-      return finish({ outcome: "abort", reason, noteHash, keysSent, enterPresses });
-    };
+    // renderWrappedComposer. The header line is the ownership check for Enter
+    // (Rajiv ts 1794203645.732629). It is not authority to erase or re-send.
+    // CTO review ts 1794205117.766299: a miss, a failed recipient fence, or an
+    // unconfirmed Enter stops on the consumed abort. No C-u, no second copy.
+    const manualAbort = (reason: string, enterPresses: number): YskDriveResult =>
+      finish({ outcome: "abort", reason, noteHash, keysSent, enterPresses });
     const quoted = await pollCapture(tracked, pin, deps.quoteTimeoutMs ?? 5000, () => headerOwned());
     if (!quoted) {
-      return releaseStuck("quote_not_owned", 0);
+      return manualAbort("quote_not_owned", 0);
     }
     const beforeSuffix = await blocked(() => true);
-    if (beforeSuffix) return releaseStuck(beforeSuffix, 0);
+    if (beforeSuffix) return manualAbort(beforeSuffix, 0);
     if (!(await headerOwned())) {
-      return releaseStuck("quote_not_owned", 0);
+      return manualAbort("quote_not_owned", 0);
     }
 
     await deps.sendLiteral(YSK_NOTICE_PROCESS_SUFFIX, pin);
@@ -576,7 +501,9 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
       maxEnterPresses: 1,
     });
     if (submit.enterPresses !== 1 || (submit.cleared !== true && submit.queued !== true)) {
-      return releaseStuck(
+      // Enter may already have been accepted. Do not clear and do not enqueue
+      // another copy when confirmation was lost.
+      return manualAbort(
         submit.enterPresses === 1 ? "submit_uncertain" : "suffix_not_confirmed",
         submit.enterPresses,
       );

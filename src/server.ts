@@ -35,7 +35,7 @@ import {
 import type { PmExitStopPin } from "./hooks.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -425,16 +425,6 @@ const yskNoticeTick = (): void => {
             return null;
           }
         },
-        pressClearLine: async (pin) => {
-          const refusal = noticeSessionFence(pin);
-          if (refusal) throw new Error(refusal);
-          await execShell(`tmux send-keys -t ${shellEscape(pin.paneId)} C-u`, { timeout: 5_000 });
-        },
-        queueUndelivered: (text) => {
-          const id = createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
-          db.enqueuePendingPMEvent(PM_SLOT, `ysk-undelivered-${id}`, text);
-          console.log("[ysk-notice] heads-up undelivered");
-        },
         authority: (pin) => noticeSessionFence(pin),
         sendLiteral: async (text, pin) => {
           // Same fence as relay.ts writePMClearFencedNow: after every await,
@@ -508,9 +498,6 @@ const yskNoticeTick = (): void => {
         log: (result) => {
           if (result.pmLog === false) return;
           console.log(`[ysk-notice] outcome=${result.outcome} reason=${result.reason} keys=${result.keysSent.length} enter=${result.enterPresses}`);
-          if (result.reason === "heads_up_undelivered" || result.reason === "quote_not_owned") {
-            console.log("[ysk-notice] heads-up undelivered");
-          }
           try {
             db.logEvent(PM_SLOT, "ysk_notice", null, null, {
               outcome: result.outcome,

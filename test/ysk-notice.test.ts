@@ -861,8 +861,8 @@ test("the notice server path claims through custody and does not gate PM input",
   assert.match(notice, /YSK_NOTICE_PROCESS_SUFFIX/);
   assert.match(notice, /headerOwned\(\)/);
   assert.doesNotMatch(notice, /composerMatchesLogical/);
-  assert.match(server, /pressClearLine/);
-  assert.match(server, /enqueuePendingPMEvent/);
+  assert.doesNotMatch(notice, /pressClearLine|queueUndelivered|clearVerifiedPaste/);
+  assert.doesNotMatch(server, /pressClearLine|ysk-undelivered|enqueuePendingPMEvent/);
   assert.doesNotMatch(server, /UserPromptSubmit/);
 });
 
@@ -976,14 +976,140 @@ test("human text before the side-agent header is not submitted or cleared", asyn
   assert.deepEqual(box.keys, ["1", "2"]);
 });
 
-test("a verified paste that does not submit is cleared and queued", async () => {
-  let phase: "top" | "sub" | "quote" | "empty" = "top";
+test("an uncertain Enter with a late empty composer is not delivered again", async () => {
+  let phase: "top" | "sub" | "quote" = "top";
+  let entered = false;
+  let afterEnterCaptures = 0;
+  let clears = 0;
+  const queued: string[] = [];
+  const box = harness(async () => {
+    if (!entered) {
+      if (phase === "top") return top();
+      if (phase === "sub") return submenu();
+      return pane(["quoted into the prompt"], REAL_QUOTE);
+    }
+    afterEnterCaptures += 1;
+    // The confirmation capture still shows the paste, so Enter is UNKNOWN.
+    // A later read finds an empty composer. That must not become a second copy.
+    if (afterEnterCaptures === 1) return pane(["quoted into the prompt"], REAL_QUOTE);
+    return pane(["late empty"], "");
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+  };
+  box.deps.pressEnter = async () => {
+    entered = true;
+  };
+  box.deps.pressClearLine = async () => {
+    clears += 1;
+  };
+  box.deps.queueUndelivered = (text) => queued.push(text);
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.outcome, "abort");
+  assert.equal(result.reason, "submit_uncertain");
+  assert.equal(result.enterPresses, 1);
+  assert.equal(box.enters(), 1);
+  assert.equal(clears, 0);
+  assert.deepEqual(queued, []);
+  assert.equal([...box.rows.values()][0], "ambiguous");
+  const again = await driveYskNotice(box.deps);
+  assert.equal(again.reason, "deduped");
+  assert.equal(box.enters(), 1);
+  assert.deepEqual(queued, []);
+});
+
+test("a replacement draft that shares the header is not cleared", async () => {
+  const replacement = [
+    "Here is a note offered by a side agent:",
+    "",
+    "leave this replacement draft alone",
+  ].join("\n");
+  assert.equal(composerStartsWithSideAgentHeader(replacement), true);
+  assert.notEqual(replacement, REAL_QUOTE);
+  let phase: "top" | "sub" | "quote" = "top";
+  let entered = false;
+  let afterEnterCaptures = 0;
+  let clears = 0;
+  const queued: string[] = [];
+  const box = harness(async () => {
+    if (!entered) {
+      if (phase === "top") return top();
+      if (phase === "sub") return submenu();
+      return pane(["quoted into the prompt"], REAL_QUOTE);
+    }
+    afterEnterCaptures += 1;
+    if (afterEnterCaptures === 1) return pane(["quoted into the prompt"], REAL_QUOTE);
+    return pane(["replacement"], replacement);
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+  };
+  box.deps.pressEnter = async () => {
+    entered = true;
+  };
+  box.deps.pressClearLine = async () => {
+    clears += 1;
+  };
+  box.deps.queueUndelivered = (text) => queued.push(text);
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "submit_uncertain");
+  assert.equal(box.enters(), 1);
+  assert.equal(clears, 0);
+  assert.deepEqual(queued, []);
+  assert.equal([...box.rows.values()][0], "ambiguous");
+  assert.ok(!JSON.stringify(queued).includes("leave this replacement draft alone"));
+});
+
+test("a changed recipient pin is consumed and not queued", async () => {
+  let phase: "top" | "sub" | "quote" = "top";
   let clears = 0;
   const queued: string[] = [];
   const box = harness(async () => {
     if (phase === "top") return top();
     if (phase === "sub") return submenu();
-    if (phase === "empty") return pane(["cleared"], "");
+    return pane(["quoted into the prompt"], REAL_QUOTE);
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+  };
+  box.deps.revalidate = async () => {
+    if (box.keys.includes("2")) return { ok: false, reason: "session_replaced" };
+    return { ok: true };
+  };
+  box.deps.pressClearLine = async () => {
+    clears += 1;
+  };
+  box.deps.queueUndelivered = (text) => queued.push(text);
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.outcome, "abort");
+  assert.equal(result.reason, "session_replaced");
+  assert.equal(result.enterPresses, 0);
+  assert.equal(box.enters(), 0);
+  assert.equal(clears, 0);
+  assert.deepEqual(queued, []);
+  assert.deepEqual(box.keys, ["1", "2"]);
+  assert.equal([...box.rows.values()][0], "ambiguous");
+});
+
+test("enqueue after clear cannot run, and the note stays consumed", async () => {
+  let phase: "top" | "sub" | "quote" = "top";
+  let entered = false;
+  let afterEnterCaptures = 0;
+  let clears = 0;
+  const box = harness(async () => {
+    if (!entered) {
+      if (phase === "top") return top();
+      if (phase === "sub") return submenu();
+      return pane(["quoted into the prompt"], REAL_QUOTE);
+    }
+    afterEnterCaptures += 1;
+    if (afterEnterCaptures === 1) return pane(["quoted into the prompt"], REAL_QUOTE);
     return pane(["quoted into the prompt"], REAL_QUOTE);
   });
   box.deps.sendLiteral = async (text) => {
@@ -992,19 +1118,22 @@ test("a verified paste that does not submit is cleared and queued", async () => 
     else if (text === "2") phase = "quote";
   };
   box.deps.pressEnter = async () => {
-    /* Enter was swallowed; the verified paste stays */
+    entered = true;
   };
   box.deps.pressClearLine = async () => {
     clears += 1;
-    phase = "empty";
   };
-  box.deps.queueUndelivered = (text) => queued.push(text);
+  box.deps.queueUndelivered = () => {
+    throw new Error("queue refused");
+  };
   const result = await driveYskNotice(box.deps);
-  assert.equal(result.reason, "heads_up_undelivered");
-  assert.equal(result.enterPresses, 1);
+  assert.equal(result.outcome, "abort");
+  assert.equal(result.reason, "submit_uncertain");
+  assert.equal(clears, 0);
   assert.equal(box.enters(), 1);
-  assert.equal(clears, 1);
-  assert.equal(queued.length, 1);
-  assert.match(queued[0], /process this$/);
   assert.equal([...box.rows.values()][0], "ambiguous");
+  const again = await driveYskNotice(box.deps);
+  assert.equal(again.reason, "deduped");
+  assert.equal(box.enters(), 1);
+  assert.equal(clears, 0);
 });
