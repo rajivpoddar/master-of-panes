@@ -6,6 +6,7 @@ import {
   YSK_NOTICE_PROCESS_SUFFIX,
   composerFrame,
   composerMatchesLogical,
+  renderWrappedComposer,
   submitWithComposerCheck,
   yskNoticeAppendException,
 } from "../src/composer.js";
@@ -77,6 +78,7 @@ function harness(
     ready,
     revalidate: async () => ({ ok: true }),
     authority: () => null,
+    paneWidth: async () => PANE_WIDTH,
     log: (result) => logs.push(result),
     submenuTimeoutMs: 0,
     quoteTimeoutMs: 0,
@@ -409,18 +411,26 @@ test("a consumed custody row from before restart sends nothing", async () => {
   assert.equal(box.enters(), 0);
 });
 
-/** Composer box whose continuation lines are indented past ❯, as Ink paints them. */
+/** Columns of the fixture pane. Content width is this minus the two-column prompt. */
+const PANE_WIDTH = 40;
+
+/** Composer box painted the way Ink wraps `logical` at {@link PANE_WIDTH}. */
 function indentedQuote(logical: string): string {
-  const body = logical
+  const rendered = renderWrappedComposer(logical, PANE_WIDTH);
+  if (rendered == null) throw new Error("fixture pane cannot wrap this quote");
+  const body = rendered
     .split("\n")
-    .map((line, index) => (index === 0 ? `❯ ${line}` : line === "" ? "" : `  ${line}`))
+    .map((line, index) => (index === 0 ? `❯ ${line}` : line))
     .join("\n");
   return ["quoted into the prompt", RULE, body, RULE, "   Dhruva PM", ""].join("\n");
 }
 
 test("a prompt-indented quote stuck in the composer is submitted once, including mid-turn", async () => {
-  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(QUOTE))?.composer, QUOTE), true);
-  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(`${QUOTE} please ignore`))?.composer, QUOTE), false);
+  const rendered = renderWrappedComposer(QUOTE, PANE_WIDTH);
+  assert.ok(rendered);
+  assert.notEqual(rendered, QUOTE);
+  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(QUOTE))?.composer, QUOTE, PANE_WIDTH), true);
+  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(`${QUOTE} please ignore`))?.composer, QUOTE, PANE_WIDTH), false);
   let phase: "top" | "sub" | "quote" | "suffixed" | "done" = "top";
   const box = harness(async () => {
     if (phase === "top") return top();
@@ -454,9 +464,9 @@ test("a prompt-indented quote stuck in the composer is submitted once, including
 test("an internal whitespace edit is not submitted before the suffix or after it settles", async () => {
   const edited = QUOTE.replace("side agent", "sideagent");
   assert.notEqual(edited, QUOTE);
-  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(edited))?.composer, QUOTE), false);
+  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(edited))?.composer, QUOTE, PANE_WIDTH), false);
   assert.equal(
-    composerMatchesLogical(composerFrame(indentedQuote(edited + YSK_NOTICE_PROCESS_SUFFIX))?.composer, QUOTE + YSK_NOTICE_PROCESS_SUFFIX),
+    composerMatchesLogical(composerFrame(indentedQuote(edited + YSK_NOTICE_PROCESS_SUFFIX))?.composer, QUOTE + YSK_NOTICE_PROCESS_SUFFIX, PANE_WIDTH),
     false,
   );
 
@@ -486,6 +496,7 @@ test("an internal whitespace edit is not submitted before the suffix or after it
     sleep: async () => {},
     prePasteComposer: QUOTE,
     noticeAppend: { verifiedQuote: QUOTE },
+    paneWidth: async () => PANE_WIDTH,
     dwellMs: 0,
     payloadStableMs: 0,
     payloadGraceMs: 0,
@@ -500,14 +511,40 @@ test("an internal whitespace edit is not submitted before the suffix or after it
 });
 
 test("a newline inserted inside side is not submitted", async () => {
-  const broken = QUOTE.replace("side agent:", "si\nde agent:");
-  assert.notEqual(broken, QUOTE);
-  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(broken))?.composer, QUOTE), false);
+  const rendered = renderWrappedComposer(QUOTE, PANE_WIDTH);
+  assert.ok(rendered);
+  const broken = rendered.replace("side\n", "si\nde\n");
+  assert.notEqual(broken, rendered);
+  assert.equal(composerMatchesLogical(broken, QUOTE, PANE_WIDTH), false);
   let phase: "top" | "sub" | "quote" = "top";
   const box = harness(async () => {
     if (phase === "top") return top();
     if (phase === "sub") return submenu();
-    return indentedQuote(broken);
+    return indentedQuote(QUOTE).replace("side\n", "si\nde\n");
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+  };
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "quote_not_owned");
+  assert.equal(result.enterPresses, 0);
+  assert.deepEqual(box.keys, ["1", "2"]);
+  assert.equal(box.enters(), 0);
+});
+
+test("a break that is not a wrap point is not submitted", async () => {
+  const rendered = renderWrappedComposer(QUOTE, PANE_WIDTH);
+  assert.ok(rendered);
+  const broken = rendered.replace("note offered", "note\noffered");
+  assert.notEqual(broken, rendered);
+  assert.equal(composerMatchesLogical(broken, QUOTE, PANE_WIDTH), false);
+  let phase: "top" | "sub" | "quote" = "top";
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    return indentedQuote(QUOTE).replace("note offered", "note\noffered");
   });
   box.deps.sendLiteral = async (text) => {
     box.keys.push(text);
@@ -526,11 +563,12 @@ test("a second inserted break is not submitted before the suffix or after it set
   // must not be joined away.
   const broken = QUOTE.replace("side agent", "side\nagent");
   assert.notEqual(broken, QUOTE);
-  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(broken))?.composer, QUOTE), false);
+  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(broken))?.composer, QUOTE, PANE_WIDTH), false);
   assert.equal(
     composerMatchesLogical(
       composerFrame(indentedQuote(broken + YSK_NOTICE_PROCESS_SUFFIX))?.composer,
       QUOTE + YSK_NOTICE_PROCESS_SUFFIX,
+      PANE_WIDTH,
     ),
     false,
   );
@@ -561,6 +599,7 @@ test("a second inserted break is not submitted before the suffix or after it set
     sleep: async () => {},
     prePasteComposer: QUOTE,
     noticeAppend: { verifiedQuote: QUOTE },
+    paneWidth: async () => PANE_WIDTH,
     dwellMs: 0,
     payloadStableMs: 0,
     payloadGraceMs: 0,
@@ -581,8 +620,8 @@ test("exact side-agent quote submits process this once; foreign text does not", 
   const box = harness(async () => {
     if (phase === "top") return top();
     if (phase === "sub") return submenu();
-    if (phase === "quote") return pane(["quoted"], QUOTE);
-    if (phase === "suffixed") return pane(["quoted"], QUOTE + YSK_NOTICE_PROCESS_SUFFIX);
+    if (phase === "quote") return indentedQuote(QUOTE);
+    if (phase === "suffixed") return indentedQuote(QUOTE + YSK_NOTICE_PROCESS_SUFFIX);
     return pane(["sent"], "");
   });
   box.deps.sendLiteral = async (text) => {
@@ -760,7 +799,7 @@ test("the notice server path claims through custody and does not gate PM input",
   assert.match(server, /joinWrapped \? "-J -p"/);
   assert.match(notice, /prior\?\.retryable && pin\.activity !== "idle"/);
   assert.match(notice, /YSK_NOTICE_PROCESS_SUFFIX/);
-  assert.match(notice, /composerMatchesLogical\(composerOf\(snapshot\), ownedQuote\)/);
+  assert.match(notice, /quoteMatches\(snapshot, ownedQuote\)/);
   assert.doesNotMatch(server, /UserPromptSubmit/);
 });
 

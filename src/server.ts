@@ -410,6 +410,18 @@ const yskNoticeTick = (): void => {
       }
       await withSlotSendLock(PM_SLOT, () => driveYskNotice({
         capture: (pin) => capturePaneSnapshot(shellEscape(pin.paneId), true),
+        paneWidth: async (pin) => {
+          try {
+            const result = await execShell(
+              `tmux display-message -p -t ${shellEscape(pin.paneId)} '#{pane_width}'`,
+              { timeout: 3_000 },
+            );
+            const width = Number(result.stdout.trim());
+            return Number.isInteger(width) ? width : null;
+          } catch {
+            return null;
+          }
+        },
         authority: (pin) => noticeSessionFence(pin),
         sendLiteral: async (text, pin) => {
           // Same fence as relay.ts writePMClearFencedNow: after every await,

@@ -47,6 +47,7 @@ import {
   YSK_NOTICE_PROCESS_SUFFIX,
   composerFrame,
   composerMatchesLogical,
+  stableNoticeWidth,
   submitWithComposerCheck,
   type SubmitCheckResult,
 } from "./composer.js";
@@ -253,6 +254,11 @@ export type YskDriveDeps = {
   /** Same pane id, process and session, still claude, idle or mid-turn, mode allowed. */
   revalidate: (pin: YskPin) => Promise<{ ok: true } | { ok: false; reason: string }>;
   /**
+   * Live pane width in columns. Two reads must agree. Missing or resized
+   * width fails the quote closed.
+   */
+  paneWidth?: (pin: YskPin) => Promise<number | null>;
+  /**
    * Synchronous session fence. Read the latest hook session, do not await.
    * Called after awaited observations and immediately inside the writers.
    * A reason stops the attempt; an already-claimed note stays consumed.
@@ -275,7 +281,7 @@ async function pollCapture(
   deps: YskDriveDeps,
   pin: YskPin,
   timeoutMs: number,
-  accept: (snapshot: string | null) => boolean,
+  accept: (snapshot: string | null) => boolean | Promise<boolean>,
 ): Promise<string | null> {
   const pollMs = deps.pollMs ?? 200;
   const start = Date.now();
@@ -286,7 +292,7 @@ async function pollCapture(
     } catch {
       return null;
     }
-    if (accept(snapshot)) return snapshot;
+    if (await accept(snapshot)) return snapshot;
     if (Date.now() - start >= timeoutMs) return null;
     await deps.sleep(pollMs);
   }
@@ -372,7 +378,12 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
       return finish({ outcome: "noop", reason: "retry_waits_for_idle", noteHash, keysSent, enterPresses: 0 });
     }
     const sessionFence = (): string | null => deps.authority(pin);
-    const blocked = async (expect: (snapshot: string | null) => boolean): Promise<string | null> => {
+    const quoteMatches = async (snapshot: string | null, logical: string): Promise<boolean> => {
+      if (!deps.paneWidth) return false;
+      const width = await stableNoticeWidth(() => deps.paneWidth!(pin));
+      return composerMatchesLogical(composerOf(snapshot), logical, width);
+    };
+    const blocked = async (expect: (snapshot: string | null) => boolean | Promise<boolean>): Promise<string | null> => {
       const check = await deps.revalidate(pin);
       if (!check.ok) return check.reason;
       // revalidate awaited. A SessionStart can land before the capture starts.
@@ -388,7 +399,7 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
       // that screen, and do not send the key that follows this check.
       const afterCapture = sessionFence();
       if (afterCapture) return afterCapture;
-      return expect(snapshot) ? null : "ui_stage_changed";
+      return (await expect(snapshot)) ? null : "ui_stage_changed";
     };
 
     const beforeDigit = await blocked((snapshot) => {
@@ -438,12 +449,12 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     // lines sit two columns in, past ❯. Exact equality never matched, so Enter
     // was never sent and the quote sat in the composer.
     const quoted = await pollCapture(tracked, pin, deps.quoteTimeoutMs ?? 5000, (snapshot) => {
-      return composerMatchesLogical(composerOf(snapshot), ownedQuote);
+      return quoteMatches(snapshot, ownedQuote);
     });
     if (!quoted) {
       return finish({ outcome: "abort", reason: "quote_not_owned", noteHash, keysSent, enterPresses: 0 });
     }
-    const beforeSuffix = await blocked((snapshot) => composerMatchesLogical(composerOf(snapshot), ownedQuote));
+    const beforeSuffix = await blocked((snapshot) => quoteMatches(snapshot, ownedQuote));
     if (beforeSuffix) return finish({ outcome: "abort", reason: beforeSuffix, noteHash, keysSent, enterPresses: 0 });
 
     await deps.sendLiteral(YSK_NOTICE_PROCESS_SUFFIX, pin);
@@ -453,13 +464,14 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     const submit: SubmitCheckResult = await submitWithComposerCheck(expectedSubmit, {
       capture: () => captureSeen(pin),
       pressSubmit: async () => {
-        const beforeEnter = await blocked((snapshot) => composerMatchesLogical(composerOf(snapshot), expectedSubmit));
+        const beforeEnter = await blocked((snapshot) => quoteMatches(snapshot, expectedSubmit));
         if (beforeEnter) throw new Error(beforeEnter);
         await deps.pressEnter(pin);
       },
       sleep: deps.sleep,
       prePasteComposer: ownedQuote,
       noticeAppend: { verifiedQuote: ownedQuote },
+      paneWidth: deps.paneWidth ? () => stableNoticeWidth(() => deps.paneWidth!(pin)) : undefined,
       dwellMs: timing.dwellMs ?? 1500,
       payloadStableMs: timing.payloadStableMs ?? 200,
       payloadGraceMs: timing.payloadGraceMs ?? 1200,

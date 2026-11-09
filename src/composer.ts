@@ -161,18 +161,73 @@ export function logicalComposerText(composer: string): string {
   ].join("\n");
 }
 
+const MIN_WRAP_CONTENT = 8;
+
 /**
- * True when the captured composer is this logical payload. The only tolerated
- * renderer artifact is the fixed two-column prompt indent on continuation
- * lines. Capture already joins terminal wraps (`tmux -J`), so any remaining
- * newline is unexplained and does not match: the quote is left for manual
- * handling. An internal whitespace or token-boundary edit, a missing logical
- * character, or an indent that is not the uniform continuation indent does
- * not match either.
+ * Ink's composer wrap for one logical line. Break at the last space that still
+ * fits in `width` columns. A token with no such space cannot be wrapped
+ * confidently, so the caller fails closed. The break space is not kept: tmux
+ * trims the trailing space, and the next visual line starts at the next word.
  */
-export function composerMatchesLogical(composer: string | null | undefined, logical: string): boolean {
-  if (composer == null) return false;
-  return logicalComposerText(composer) === logical;
+function wrapLogicalLine(line: string, width: number): string[] | null {
+  if (line.length <= width) return [line];
+  const parts: string[] = [];
+  let rest = line;
+  while (rest.length > width) {
+    const space = rest.slice(0, width).lastIndexOf(" ");
+    if (space <= 0) return null;
+    parts.push(rest.slice(0, space));
+    rest = rest.slice(space + 1);
+  }
+  parts.push(rest);
+  return parts;
+}
+
+/**
+ * The composer text Ink paints for `logical` in a pane of `paneWidth` columns.
+ * The prompt occupies two columns, so every visual line has that many columns
+ * of text. Later visual lines are captured two columns in. A logical newline
+ * is a real note-line boundary only when the next line starts with `"> "`;
+ * those lines are never produced by a wrap. Null when the width or a token
+ * cannot be wrapped confidently.
+ */
+export function renderWrappedComposer(logical: string, paneWidth: number): string | null {
+  if (!Number.isInteger(paneWidth)) return null;
+  const width = paneWidth - PROMPT_CONTINUATION_INDENT.length;
+  if (width < MIN_WRAP_CONTENT) return null;
+  const visual: string[] = [];
+  for (const line of logical.split("\n")) {
+    const wrapped = wrapLogicalLine(line, width);
+    if (!wrapped) return null;
+    visual.push(...wrapped);
+  }
+  return visual
+    .map((line, index) => (index === 0 || line.length === 0 ? line : PROMPT_CONTINUATION_INDENT + line))
+    .join("\n");
+}
+
+/**
+ * True when the captured composer is exactly the wrapped rendering of `logical`
+ * at `paneWidth`. Characters and spaces stay exact. A manual break, including
+ * one inside a word, is not a wrap point and does not match. Unknown width
+ * fails closed.
+ */
+export function composerMatchesLogical(
+  composer: string | null | undefined,
+  logical: string,
+  paneWidth: number | null,
+): boolean {
+  if (composer == null || paneWidth == null) return false;
+  const expected = renderWrappedComposer(logical, paneWidth);
+  return expected != null && composer === expected;
+}
+
+/** Two agreeing reads. A resize between them, or an unreadable width, is null. */
+export async function stableNoticeWidth(read: () => Promise<number | null>): Promise<number | null> {
+  const first = await read();
+  const second = await read();
+  if (first == null || first !== second || !Number.isInteger(first)) return null;
+  return first;
 }
 
 /**
@@ -561,6 +616,11 @@ export type SubmitCheckDeps = {
   pollMs?: number;
   /** Upper bound on Enter presses; guarded recovery nudges pass 1. Default 2. */
   maxEnterPresses?: number;
+  /**
+   * Pane width for a You-should-know quote. Two reads must agree; a missing
+   * or changed width fails closed instead of guessing the wrap.
+   */
+  paneWidth?: () => Promise<number | null>;
 };
 
 /**
@@ -603,8 +663,9 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
       payloadStable = null;
       break;
     }
+    const width = noticeAppendOk && deps.paneWidth ? await stableNoticeWidth(deps.paneWidth) : null;
     payloadSeen = noticeAppendOk
-      ? composerMatchesLogical(composer, payload) && !/\[Pasted text/i.test(composer)
+      ? composerMatchesLogical(composer, payload, width) && !/\[Pasted text/i.test(composer)
       : composerHoldsPayload(composer, payload)
         || composerShowsNewPastePlaceholder(composer, deps.prePasteComposer);
     if (payloadSeen) {
