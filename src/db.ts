@@ -2744,7 +2744,7 @@ export class MoPDatabase {
    * next Stop / idle empty prompt. No second dev phase after the PM restart.
    */
   setExitPending(enabled: boolean, devOnly = false, pmOnly = false, continuationPrompt?: string, requireHandoff = false, withDevs = false): void {
-    const episode = randomUUID();
+    const episode = enabled ? randomUUID() : this.getConfig("exit_pending_episode") || randomUUID();
     this.setConfig("exit_pending_episode", episode);
     const handoff = enabled && pmOnly && requireHandoff;
     let session = "";
@@ -2776,8 +2776,34 @@ export class MoPDatabase {
     }
   }
 
+  getExitAttempt(slot: number): import("./devExitAttempt.js").DevExitAttempt | null {
+    try {
+      const attempt = JSON.parse(this.getConfig(`exit_attempt_${slot}`) || "null");
+      return attempt?.episode === this.getConfig("exit_pending_episode") ? attempt : null;
+    } catch { return null; }
+  }
+
+  saveExitAttempt(slot: number, attempt: import("./devExitAttempt.js").DevExitAttempt): void {
+    this.setConfig(`exit_attempt_${slot}`, JSON.stringify(attempt));
+  }
+
+  retainExitSlot(slot: number, reason: string): void {
+    this.setConfig(`exit_retained_${slot}`, JSON.stringify({ episode: this.getConfig("exit_pending_episode"), reason }));
+  }
+
+  isExitSlotRetained(slot: number): boolean {
+    try { return JSON.parse(this.getConfig(`exit_retained_${slot}`) || "null")?.episode === this.getConfig("exit_pending_episode"); }
+    catch { return false; }
+  }
+
+  hasExitAttemptSubmitted(slot: number): boolean {
+    const attempt = this.getExitAttempt(slot);
+    return !!attempt && ["dispatching", "delivered", "unknown", "verified"].includes(attempt.phase);
+  }
+
   markSlotExitCycled(slot: number): void {
-    this.setConfig(`exit_cycled_${slot}`, "true");
+    // A legacy flag or a send receipt is never proof of replacement.
+    if (this.getExitAttempt(slot)?.phase === "verified") this.setConfig(`exit_cycled_${slot}`, "true");
   }
 
   /**
@@ -2807,11 +2833,12 @@ export class MoPDatabase {
 
   getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; with_devs: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean>;
     handoff_requested_at: string | null; handoff_obligation_id: string | null;
-    handoff_episode: string | null; exit_terminal: Record<string, unknown> | null } {
+    handoff_episode: string | null; exit_terminal: Record<string, unknown> | null;
+    attempts: Record<number, import("./devExitAttempt.js").DevExitAttempt | null>; retained: Record<number, boolean> } {
     const pending = this.getExitPending();
     const cycled: Record<number, boolean> = {};
     for (const i of [PM_SLOT, ...devSlots(this.config.slotCount)]) {
-      cycled[i] = this.getConfig(`exit_cycled_${i}`) === "true";
+      cycled[i] = this.getConfig(`exit_cycled_${i}`) === "true" && this.getExitAttempt(i)?.phase === "verified";
     }
     return { pending, episode: this.getConfig("exit_pending_episode"), dev_only: this.getConfig("exit_pending_dev_only") === "true",
       pm_only: this.getConfig("exit_pending_pm_only") === "true",
@@ -2819,6 +2846,8 @@ export class MoPDatabase {
       continuation_prompt: this.getConfig("exit_pending_continuation_prompt") || null,
       continuation_delivery: this.getConfig("exit_pending_continuation_delivery") || null,
       stop_only: this.getConfig("exit_pending_stop_only") === "true", cycled,
+      attempts: Object.fromEntries(Object.keys(cycled).map(i => [i, this.getExitAttempt(Number(i))])),
+      retained: Object.fromEntries(Object.keys(cycled).map(i => [i, this.isExitSlotRetained(Number(i))])),
       handoff_requested_at: this.getConfig("pm_exit_handoff_requested_at") || null,
       handoff_obligation_id: this.getConfig("pm_exit_handoff_obligation_id") || null,
       handoff_episode: this.getConfig("pm_exit_handoff_episode") || null,

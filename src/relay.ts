@@ -17,6 +17,7 @@ import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./sl
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { QUEUED_HINT, composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, isSlashCommand, resolveSlashCommandEnterDelayMs, slashComposerClearable, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
+import { parseForegroundClaude, type DevExitAttempt } from "./devExitAttempt.js";
 import type { PMClearFenceRefusal } from "./pmClearLatch.js";
 import type { PasteGuard } from "./pasteGuard.js";
 
@@ -31,6 +32,8 @@ type ExitOwnerPin = Readonly<{
   turnStarted: string | null;
   turnState: string;
   stopSession: string | null;
+  stop: number | null;
+  inboundGeneration?: number;
 }>;
 
 /** Shared PM + numbered-slot paste->Enter dwell (see composer.ts). */
@@ -314,6 +317,8 @@ export class TmuxRelay {
     return Number.isFinite(n) && n >= 0 ? n : 90_000;
   })();
   private directInjectChain: Promise<unknown> = Promise.resolve();
+  private pmInboundGeneration = 0;
+  private pmInboundPending = 0;
   /** Serialize queue selection through post-submit deletion as one operation. */
   private pmDrainChain: Promise<number> = Promise.resolve(0);
   private directInjectSeq = 0;
@@ -651,6 +656,7 @@ export class TmuxRelay {
    * signals — they must never sit in a queue waiting to drain.
    */
   injectToPM(message: string, eventTypeOverride?: string): boolean {
+    ++this.pmInboundGeneration;
     if (this.pmRuntime === "claude") {
       void this.injectNativeClaudeOrQueue(message, eventTypeOverride);
       return true;
@@ -730,6 +736,7 @@ export class TmuxRelay {
    * send.
    */
   injectToPMDirect(message: string): boolean {
+    ++this.pmInboundGeneration;
     const parsed = parseRelayMessage(message);
     const decorated = withMopSlotHeader(message, parsed);
     if (this.pmRuntime === "claude") {
@@ -774,6 +781,7 @@ export class TmuxRelay {
    * active turn when PM is busy.
    */
   async submitToPM(message: string, eventTypeOverride?: string, guard?: PasteGuard): Promise<PMSubmitResult> {
+    ++this.pmInboundGeneration;
     this.pmMaintenanceGate?.deferCLIInput();
     // Cadence has an exact durable event identity. Native Claude must use the
     // same attempt journal as queue drains, not the ordinary inbound fast path.
@@ -970,8 +978,10 @@ export class TmuxRelay {
   }
 
   private injectDirectWithSubmitKey(message: string, submitKey: PMSubmitKey, guard?: PasteGuard): Promise<DirectSubmitResult> {
+    ++this.pmInboundGeneration;
+    ++this.pmInboundPending;
     const run = (): Promise<DirectSubmitResult> => this.injectDirectNow(message, submitKey, guard);
-    const result = this.directInjectChain.then(run, run);
+    const result = this.directInjectChain.then(run, run).finally(() => { --this.pmInboundPending; });
     this.directInjectChain = result.then(() => undefined, () => undefined);
     return result;
   }
@@ -1345,11 +1355,11 @@ export class TmuxRelay {
    *
    * `force` parameter is now a no-op (kept for callsite compatibility).
    */
-  sendToSlot(slotNum: number, command: string, _force = false, raw = false, exitEpisode?: string, stopSession?: string): boolean {
+  sendToSlot(slotNum: number, command: string, _force = false, raw = false, exitEpisode?: string, stopSession?: string, stopOwnerPin?: ExitOwnerPin): boolean {
     if (command === "/exit" && exitEpisode) {
       if (this.pendingExitDispatch.get(slotNum)?.episode === exitEpisode) return true;
       // Capture at consumption, before the timer OR pane verification can yield.
-      const ownerPin = this.captureExitOwner(slotNum, stopSession);
+      const ownerPin = stopOwnerPin ?? this.captureExitOwner(slotNum, stopSession);
       if (!ownerPin) {
         this.db?.logEvent(slotNum, "guarded_delivery", null, null, { outcome: "refused_pre_effect", reason: "exit_owner_unbound", command, episode: exitEpisode });
         return false;
@@ -1373,8 +1383,16 @@ export class TmuxRelay {
       slot.branch_ref, slot.occupied, slot.dnd]);
   }
 
-  private captureExitOwner(slotNum: number, stopSession?: string): ExitOwnerPin | null {
+  captureExitOwner(slotNum: number, stopSession?: string): ExitOwnerPin | null {
     if (!this.db) return null;
+    if (slotNum === 0) {
+      if (!stopSession || this.db.latestSessionId(0) !== stopSession) return null;
+      return { assignment: "PM", boot: this.db.getEvents(0, 1, "SessionStart")[0]?.id ?? null,
+        input: this.db.getEvents(0, 1, "UserPromptSubmit")[0]?.id ?? null,
+        stop: this.db.getEvents(0, 1, "Stop")[0]?.id ?? null,
+        work: null, turn: null, turnStarted: null, turnState: "inactive", stopSession,
+        inboundGeneration: this.pmInboundGeneration };
+    }
     const slot = this.db.getSlot(slotNum);
     if (!slot) return null;
     const boot = this.db.getEvents(slotNum, 1, "SessionStart")[0];
@@ -1391,11 +1409,16 @@ export class TmuxRelay {
       work: slot.last_meaningful_work_at, turn: slot.active_turn_id,
       turnStarted: slot.active_turn_started_at, turnState: slot.active_turn_state,
       stopSession: stopSession ?? null,
+      stop: this.db.getEvents(slotNum, 1, "Stop")[0]?.id ?? null,
     };
   }
 
   private exitOwnerRefusal(slotNum: number, pin: ExitOwnerPin): string | null {
     if (!this.db) return "exit_owner_unbound";
+    if ((this.db.getEvents(slotNum, 1, "Stop")[0]?.id ?? null) !== pin.stop) return "stop_changed";
+    if (slotNum === 0 && pin.inboundGeneration !== this.pmInboundGeneration) return "pm_inbound_changed";
+    if (slotNum === 0) return (this.db.getEvents(0, 1, "SessionStart")[0]?.id ?? null) === pin.boot
+      && (this.db.getEvents(0, 1, "UserPromptSubmit")[0]?.id ?? null) === pin.input ? null : "pm_owner_changed";
     const slot = this.db.getSlot(slotNum);
     if (!slot || this.exitAssignment(slot) !== pin.assignment
         || (this.db.getEvents(slotNum, 1, "SessionStart")[0]?.id ?? null) !== pin.boot
@@ -1447,7 +1470,7 @@ export class TmuxRelay {
       this.db?.logEvent(slotNum, "guarded_delivery", null, null, { outcome: "refused_pre_effect", reason: pinnedRefusal, command, episode: exitEpisode });
       return false;
     }
-    if (slotNum === 0 && !raw) {
+    if (slotNum === 0 && !raw && !exitEpisode) {
       // Text delivery to PM must use the observation-bound submit key. Raw
       // key sequences intentionally remain the explicit low-level escape
       // hatch for callers such as clear/compact recovery.
@@ -1696,12 +1719,43 @@ export class TmuxRelay {
       const processes = await this.runShell(`ps -t ${shellEscape(tty)} -o pid=,pgid=,stat=,lstart=,comm=`, { timeout: Math.min(1_000, deadline - Date.now()) });
       // Hook/MCP children may finish normally after Stop. Pin the foreground
       // process-group leader, not every transient child sharing its terminal.
-      const leaders = processes.stdout.split(/\r?\n/).flatMap(line => {
-        const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
-        return row && row[1] === row[2] && row[3].includes("+") ? [`${row[1]}|${row[2]}|${row[4]}`] : [];
-      });
-      return leaders.length === 1 ? JSON.stringify([paneId, probe.stdout.trim(), leaders[0]]) : null;
+      const leader = parseForegroundClaude(processes.stdout);
+      return leader ? JSON.stringify([paneId, leader.pid, leader.start]) : null;
     } catch { return null; }
+  }
+
+  /** Health observes only; initial and bounded retry dispatch belong to Stop. */
+  async observeExitAttempts(): Promise<void> {
+    const db = this.db;
+    if (!db || !db.getExitPending()) return;
+    const status = db.getExitStatus();
+    for (const slot of [0, ...db.getAllSlots().map(row => row.slot)]) {
+      const attempt = db.getExitAttempt(slot);
+      if (!attempt || attempt.phase === "verified") continue;
+      const identity = await verifyPaneIdentity(slot, this.runShell);
+      if (!identity.ok || identity.snapshot.paneId !== attempt.paneId) continue;
+      const process = await this.exitProcessIdentity(slot, attempt.paneId);
+      if (!db.getExitPending() || db.getExitStatus().episode !== status.episode
+          || db.getExitAttempt(slot)?.submittedAt !== attempt.submittedAt) continue;
+      if (process && process !== attempt.originalProcess) {
+        attempt.phase = "verified";
+        attempt.replacementProcess = process;
+        db.saveExitAttempt(slot, attempt);
+        db.markSlotExitCycled(slot);
+        db.logEvent(slot, "exit_cycle_verified", null, null, { ...attempt });
+        if (slot > 0) this.injectToPM(`# 🔄 slot ${slot} cycled — replacement Claude process verified in ${attempt.paneId}`);
+      } else if (process === attempt.originalProcess && Date.now() - Date.parse(attempt.submittedAt) >= 60_000 && !attempt.reported) {
+        const screen = await this.runShell(`tmux capture-pane -t ${attempt.paneId} -p`, { timeout: 3_000 }).catch(() => null);
+        if (db.getExitAttempt(slot)?.submittedAt !== attempt.submittedAt || db.getExitStatus().episode !== status.episode) continue;
+        const agents = /(?:background|running)\s+(?:tasks?|agents?)|[←↤]\s*\d+\s+agents?\b/i.test(screen?.stdout ?? "");
+        attempt.phase = agents ? "blocked" : "unknown";
+        attempt.blockedReason = agents ? "background_agents" : screen ? "same_original_process_no_exit_receipt" : "pane_unobservable";
+        attempt.reported = true;
+        db.saveExitAttempt(slot, attempt);
+        db.logEvent(slot, "exit_blocked", null, null, { ...attempt });
+        if (slot > 0) this.injectToPM(`# ⚠️ slot ${slot} exit blocked: ${attempt.blockedReason}; original Claude ${attempt.originalClaudePid} still running. ${agents && attempt.attemptCount < 2 ? "One retry may run at the next eligible Stop only." : "No automatic replay."}`);
+      }
+    }
   }
 
   /** Claim one bounded continuation after our /exit Enter; never replay it. */
@@ -1716,7 +1770,11 @@ export class TmuxRelay {
       this.db.setConfig(key, JSON.stringify({ episode, process, attempts: 0, done: false, deadline: Date.now() + 5_000, owner_pin: ownerPin ?? null }));
       // Do not await our own send lock or the dialog from the HTTP Stop handler.
       // The finite continuation acquires the same lock after /exit delivery returns.
-      void withSlotSendLock(slotNum, () => this.confirmExitDialog(slotNum, paneId, episode, process, owner, ownerPin)).catch(() => undefined);
+      const run = () => withSlotSendLock(slotNum, () => this.confirmExitDialog(slotNum, paneId, episode, process, owner, ownerPin));
+      if (slotNum === 0) {
+        const result = this.directInjectChain.then(run, run);
+        this.directInjectChain = result.then(() => undefined, () => undefined);
+      } else void run().catch(() => undefined);
     } catch { /* Never change the original /exit receipt or retry an uncertain claim. */ }
   }
 
@@ -1741,6 +1799,7 @@ export class TmuxRelay {
     } catch { return; } // Unknown retained custody never grants more attempts.
     const deadline = state.deadline;
     const current = () => Date.now() < deadline && db.getExitPending() && db.getExitStatus().episode === episode
+      && !(slotNum === 0 && (this.pmInboundPending > 0 || db.peekPendingPMEvents().length > 0))
       && (ownerPin ? this.exitOwnerRefusal(slotNum, ownerPin) === null : token() === owner);
     const save = () => db.setConfig(key, JSON.stringify(state));
     const inspect = async () => {
@@ -1759,13 +1818,18 @@ export class TmuxRelay {
         if (screen === "changed" || (screen === "absent" && seen)) break;
         if (screen === "absent") continue; // Initial absence never finishes the render window.
         seen = true;
-        state.attempts++;
-        save(); // Consume before any key: unknown key delivery cannot renew the budget.
-        if (!current()) break;
-        await this.runShell(`tmux send-keys -t ${paneId} 1`, { timeout: Math.min(1_000, deadline - Date.now()) });
-        if (await inspect() !== "dialog") break; // A manual answer/resume must not receive Enter.
-        await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: Math.min(1_000, deadline - Date.now()) });
-        enterPresses++;
+        // This canonical dialog's option 1 STOPS background tasks. Never select
+        // it: the agents must finish/handoff, then a fresh Stop may retry once.
+        const attempt = db.getExitAttempt(slotNum);
+        if (attempt && attempt.originalProcess === process) {
+          attempt.phase = "blocked";
+          attempt.blockedReason = "background_agents";
+          attempt.reported = true;
+          db.saveExitAttempt(slotNum, attempt);
+          db.logEvent(slotNum, "exit_blocked", null, null, { ...attempt, source: "exit_dialog_confirmation" });
+          if (slotNum > 0) this.injectToPM(`# ⚠️ slot ${slotNum} exit blocked: background_agents; agents are not stopped. Retry only at the next eligible Stop, once.`);
+        }
+        break;
       }
       state.done = true;
       save();
@@ -1837,7 +1901,24 @@ export class TmuxRelay {
    * - reports refused_pre_effect only before any clearing key or paste attempt,
    *   and uncertain for unconfirmed outcomes after either effect.
    */
-  async deliverGuardedToSlot(
+  deliverGuardedToSlot(slotNum: number, command: string,
+    opts: Parameters<TmuxRelay["deliverGuardedToSlotNow"]>[2]): Promise<GuardedSlotDelivery> {
+    const generation = this.pmInboundGeneration;
+    const check = opts.finalCheck;
+    const run = () => this.deliverGuardedToSlotNow(slotNum, command, {
+      ...opts,
+      finalCheck: (stage, snapshot) => slotNum === 0 && command === "/exit"
+        && (generation !== this.pmInboundGeneration || this.pmInboundPending > 0 || (this.db?.peekPendingPMEvents().length ?? 0) > 0)
+        ? "pm_inbound_pending" : check?.(stage, snapshot) ?? null,
+    });
+    if (slotNum !== 0) return run();
+    // Exit uses the SAME chain as inbound PM writes. No input admission gate.
+    const result = this.directInjectChain.then(run, run);
+    this.directInjectChain = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async deliverGuardedToSlotNow(
     slotNum: number,
     command: string,
     opts: {
@@ -1902,8 +1983,17 @@ export class TmuxRelay {
       ]) : "";
       const exitProcess = command === "/exit" && opts.exitEpisode
         ? await this.exitProcessIdentity(slotNum, paneId) : null;
+      const previous = this.db?.getExitAttempt(slotNum);
+      const trackedExit = command === "/exit" && !!opts.exitEpisode;
+      if (trackedExit && !opts.exitOwnerPin) return { outcome: "refused_pre_effect", reason: "stop_owner_required", paneId };
+      if (trackedExit && (!exitProcess || !this.db)) return { outcome: "refused_pre_effect", reason: "claude_process_unknown", paneId };
+      if (trackedExit && previous && (previous.originalProcess !== exitProcess || previous.phase !== "blocked" || previous.attemptCount >= 2
+          || previous.blockedReason !== "background_agents" || previous.stopEventId === (this.db?.getEvents(slotNum, 1, "Stop")[0]?.id ?? null))) {
+        return { outcome: "refused_pre_effect", reason: "exit_attempt_already_owned", paneId };
+      }
       const prePaste = await recheck("pre_paste");
       if (prePaste) return { outcome: "refused_pre_effect", reason: prePaste, paneId };
+      let attempt: DevExitAttempt | null = null;
       let effectAttempted = false;
       const refuse = (reason: string): GuardedSlotDelivery => ({
         outcome: effectAttempted ? "uncertain" : "refused_pre_effect", reason, paneId,
@@ -1911,7 +2001,7 @@ export class TmuxRelay {
       const before = await capture();
       let prePasteComposer = composerText(before);
       const slash = isSlashCommand(command);
-      if (slash && !opts.skipSlashClear && slashComposerClearable(prePasteComposer, command)) {
+      if (slash && command !== "/exit" && !opts.skipSlashClear && slashComposerClearable(prePasteComposer, command)) {
         const cleared = await this.clearComposerForSlash(paneId, async () => composerText(await capture()), command,
           async () => (await recheck("pre_paste"))
             ?? (await this.getSlotActivityState(slotNum, paneId) !== "idle" ? "pane_not_idle" : null),
@@ -1936,6 +2026,7 @@ export class TmuxRelay {
         if (loadedRefusal) return refuse(loadedRefusal);
         // File/buffer loading and the caller's fence can yield to a new draft.
         // Read the composer again after those awaits, before the paste effect.
+        if (trackedExit && await this.exitProcessIdentity(slotNum, paneId) !== exitProcess) return refuse("claude_process_changed");
         const loadedSnapshot = await capture();
         const loadedQueued = QUEUED_HINT.test(loadedSnapshot ?? "");
         if (loadedQueued) nativeQueueSeen = true;
@@ -1945,6 +2036,19 @@ export class TmuxRelay {
         if (loadedComposer !== "") return refuse("composer_not_empty");
         const prePasteFence = finalCheck("pre_paste", loadedSnapshot);
         if (prePasteFence) return refuse(prePasteFence);
+        if (trackedExit && exitProcess && this.db) {
+          const [, pid, start] = JSON.parse(exitProcess);
+          attempt = {
+            episode: opts.exitEpisode!, paneId, originalClaudePid: pid, originalStart: start,
+            originalProcess: exitProcess, sessionId: this.db.latestSessionId(slotNum),
+            inputEventId: this.db.getEvents(slotNum, 1, "UserPromptSubmit")[0]?.id ?? null,
+            assignmentEpoch: this.db.getSlot(slotNum)?.assignment_epoch ?? 0,
+            stopEventId: this.db.getEvents(slotNum, 1, "Stop")[0]?.id ?? null,
+            ownerPin: opts.exitOwnerPin ?? null, phase: "dispatching",
+            attemptCount: (previous?.attemptCount ?? 0) + 1, submittedAt: new Date().toISOString(), blockedReason: null,
+          };
+          this.db.saveExitAttempt(slotNum, attempt); // Durable BEFORE any paste; crash means UNKNOWN, never replay.
+        }
         effectAttempted = true;
         await this.runShell(`tmux paste-buffer${opts.bracketedPaste ? " -p" : ""} -b ${bufName} -t ${paneId} -d`, { timeout: 3_000 });
         const submit = await submitWithComposerCheck(command, {
@@ -1976,7 +2080,7 @@ export class TmuxRelay {
           prePasteComposer,
           // Slash commands: one Enter retry only while the exact text is still
           // buffered (autocomplete swallowed the first Enter).
-          maxEnterPresses: slash ? 2 : 1,
+          maxEnterPresses: slash && command !== "/exit" ? 2 : 1,
           ...(slash ? this.slashSubmitTiming() : {}),
           ...opts.timing,
         });
@@ -1991,7 +2095,10 @@ export class TmuxRelay {
         const confirmed = submit.payloadSeen === true && submit.payloadStable === true
           && (submit.cleared === true || (submit.queued === true && !(opts.allowNativeQueuedInput && nativeQueueSeen)))
           && (submit.enterPresses === 1 || (slash && submit.enterPresses === 2));
-        if (confirmed) return { outcome: "delivered", paneId };
+        if (confirmed) {
+          if (attempt && this.db) { attempt.phase = "delivered"; this.db.saveExitAttempt(slotNum, attempt); }
+          return { outcome: "delivered", paneId };
+        }
         return {
           outcome: "uncertain",
           reason: submit.enterPresses === 0 ? "pasted_not_submitted"
@@ -2010,6 +2117,17 @@ export class TmuxRelay {
           ? { outcome: "uncertain", reason: "effect_error", paneId }
           : { outcome: "refused_pre_effect", reason: "load_buffer_failed", paneId };
       } finally {
+        if (command === "/exit" && effectAttempted && enterSent === 0) {
+          // Release the common PM writer only after removing OUR exact paste.
+          // Never clear a foreign draft. Incoming Slack is not held for an idle window.
+          if (composerText(await capture()) === command) {
+            await this.runShell(`tmux send-keys -t ${paneId} C-u`, { timeout: 3_000 }).catch(() => undefined);
+          }
+        }
+        if (attempt && this.db && attempt.phase === "dispatching") {
+          attempt.phase = "unknown";
+          this.db.saveExitAttempt(slotNum, attempt);
+        }
         await fs.unlink(tmpFile).catch(() => undefined);
         if (enterSent > 0 && opts.exitEpisode && exitProcess) {
           // Preserve the original /exit disposition, including UNKNOWN. This

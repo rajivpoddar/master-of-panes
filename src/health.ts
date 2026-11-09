@@ -748,7 +748,7 @@ export class ProcessHealthChecker {
     //    waiting -> attempted claim (and its saved continuation); every other
     //    restart claims this boot once.
     const status = this.db.getExitStatus();
-    if (pin.episode && status.pending && status.pm_only && status.cycled[0] && status.episode === pin.episode) {
+    if (pin.episode && status.pending && status.pm_only && this.db.hasExitAttemptSubmitted(0) && status.episode === pin.episode) {
       await this.reconcilePMRestartContinuation(boot.id);  // binds the booted record + process inside
       // Read this episode's continuation receipt: a with_devs episode whose devs
       // all cycled ends (and resets its flags) as soon as the PM part lands.
@@ -1047,7 +1047,7 @@ export class ProcessHealthChecker {
       if (slot === 0) {
         console.log("[health] PM process DEAD — fresh relaunch with configured model + continuation");
         const status = this.db.getExitStatus();
-        const trigger = status.pending && status.pm_only && status.cycled[0] ? "exit" : "crash";
+        const trigger = status.pending && status.pm_only && this.db.hasExitAttemptSubmitted(0) ? "exit" : "crash";
         void this.restartPMFresh(trigger, status.episode).catch((err) => console.error("[health] PM restart failed:", err));
         continue;
       }
@@ -1121,133 +1121,18 @@ export class ProcessHealthChecker {
     await this.checkExitPending();
   }
 
-  // ─── Exit Pending: Scan for Already-Idle Slots ─────────
+  // ─── Exit Pending: process receipts only, never timer-driven /exit ───
 
-  /**
-   * When exit_pending is set, slots that go idle AFTER the flag
-   * trigger /exit via handleStop() in hooks.ts. But slots that
-   * were ALREADY idle when the flag was set would never trigger.
-   *
-   * This method runs every 30s in checkAll() and catches those
-   * already-idle slots: if exit_pending is true, process is alive
-   * (cmd=claude), slot is idle, and hasn't cycled yet → send /exit.
-   */
   private async checkExitPending(): Promise<void> {
-    if (!this.db.getExitPending()) return;
-
+    await this.relay.observeExitAttempts();
     const status = this.db.getExitStatus();
-    // PM-first episodes fire at Stop only, never on the already-idle health
-    // scan (and never from tracked-tool accounting). A with_devs episode (04:00,
-    // obligation 30559) still scans its dev slots; the PM stays Stop-only.
-    const withDevs = (s: { pm_only: boolean; with_devs: boolean }) => s.pm_only && s.with_devs;
-    if (status.pm_only && !withDevs(status)) return;
-    // Dev successors of a PM-first episode (stop_only) also exit a dev slot whose
-    // pane is idle at an EMPTY prompt: a turn ended with Escape fires no Stop,
-    // so episode f0a1b666 (2026-11-04) sat pending while slots were idle.
-    // with_devs devs follow the same empty-prompt-only rule.
-    const effectiveStopOnly = (s: { stop_only: boolean; pm_only: boolean; with_devs: boolean }) => s.stop_only || withDevs(s);
-    const stopOnly = effectiveStopOnly(status);
-
-    // Dev-only episodes leave PM replacement exclusively to /slots/0/respawn.
-    for (const slot of RUNTIME_SLOT_NUMBERS) {
-      if (slot === 0 && (status.dev_only || stopOnly)) continue;
-      // Already cycled — skip
-      if (status.cycled[slot]) continue;
-
-      // Skip DND slots (slot 0/PM has no DB entry — never DND)
-      if (slot > 0) {
-        try {
-          const slotState = this.db.getSlot(slot);
-          // with_devs cohort (CTO REVISE ts 1794018596.287469): only the
-          // session/epoch armed at the occurrence may exit; DND or a later
-          // session consumes the flag (retained) without an exit.
-          const cohort = status.with_devs ? (slotState?.dnd ? "dnd" : this.db.exitArmCheck(slot, this.db.latestSessionId(slot))) : "match";
-          if (cohort !== "match") {
-            this.db.markSlotExitCycled(slot);
-            this.db.logEvent(slot, "exit_pending_cohort_superseded", null, null, { episode: status.episode, reason: cohort, source: "health_check" });
-            continue;
-          }
-          if (slotState?.dnd) continue;
-        } catch {
-          continue;
-        }
-      }
-
-      // Process must be alive (cmd=claude) — if dead, the main
-      // checkAll loop handles restart, not /exit
-      const cmd = await this.getPaneCommand(slot);
-      if (!cmd || SHELL_COMMANDS.has(cmd)) continue;
-
-      // Activity and effect must own the same immutable pane and generation.
-      const observed = await this.relay.observeSlotPane(slot);
-      if (!observed) continue;
-      const session = () => String(latestSessionStartEventId(this.db, slot));
-      const sessionId = session();
-      const row = slot > 0 ? this.db.getSlot(slot) : null;
-      // A row still marked active (Escape-ended turn, no Stop) qualifies only
-      // when the pane is idle (checked below) with an empty composer; such a
-      // send never presses Escape/C-u, so a working turn is never interrupted.
-      const emptyPrompt = composerText(observed.text) === "";
-      const idlePromptOnly = slot > 0 && !!row && row.active_turn_state !== "inactive";
-      if (slot > 0 && (!row || ((idlePromptOnly || stopOnly) && !emptyPrompt))) continue;
-      const pin = row ? pinFrom({ paneId: observed.paneId, checkout: SLOT_RUNTIME_IDENTITIES[slot].checkoutPath }, { ...row, session_id: sessionId }) : null;
-      const fence = (): string | null => {
-        const freshStatus = this.db.getExitStatus();
-        const freshStopOnly = effectiveStopOnly(freshStatus);
-        if (!this.db.getExitPending() || freshStatus.episode !== status.episode || (freshStatus.pm_only && !withDevs(freshStatus))
-            || freshStopOnly !== stopOnly || freshStatus.cycled[slot]
-            || (slot === 0 && (freshStatus.dev_only || freshStopOnly))) return "exit_pending_consumed";
-        if (session() !== sessionId) return "session_changed";
-        if (slot === 0) return null;
-        const fresh = this.db.getSlot(slot);
-        if (!fresh || fresh.dnd) return "slot_unavailable";
-        if (freshStatus.with_devs && this.db.exitArmCheck(slot, this.db.latestSessionId(slot)) !== "match") return "exit_cohort_changed";
-        return pinDrift(pin!, { ...fresh, session_id: session() });
-      };
-      if ((await this.relay.getSlotActivityState(slot, observed.paneId)) !== "idle" || fence()) continue;
-
-      // ─── Idle + alive + exit_pending + not cycled → send /exit ──
-      const exitLabel = slot === 0 ? "PM" : `slot ${slot}`;
-      console.log(`[health] exit_pending: ${exitLabel} already idle — sending /exit`);
-      const delivered = await this.relay.deliverGuardedToSlot(slot, "/exit", {
-        exitEpisode: status.episode ?? undefined,
-        expectedPaneId: observed.paneId,
-        recheck: async () => {
-          if ((await this.relay.getSlotActivityState(slot, observed.paneId)) !== "idle") return "pane_not_idle";
-          return fence();
-        },
-        finalCheck: fence,
-        ...(idlePromptOnly || stopOnly ? { skipSlashClear: true } : {}),
-      });
-      if (delivered.outcome === "refused_pre_effect") continue;
-      // A possible paste/submit consumes this existing episode too; never retry
-      // an uncertain /exit on a subsequent health tick.
-      this.db.markSlotExitCycled(slot);
-      this.db.logEvent(slot, "exit_pending_triggered", null, null, {
-        source: "health_check",
-        delivery: delivered.outcome,
-        reason: `${exitLabel} was already idle when exit_pending was set`,
-      });
-      // Can't inject to PM when PM itself is the target — just log
-      if (slot !== 0) {
-        this.relay.injectToPM(
-          delivered.outcome === "delivered"
-            ? `# 🔄 slot ${slot} sent /exit (exit_pending — was already idle) — watchdog will restart`
-            : `# ⚠️ slot ${slot} /exit delivery uncertain — episode consumed; no automatic retry`,
-        );
-      }
-    }
-
-    // Check if all slots have now cycled
-    const updatedStatus = this.db.getExitStatus();
-    const allCycled = Object.entries(updatedStatus.cycled).every(([slot, v]) => (updatedStatus.dev_only && Number(slot) === 0) || v);
-    // A with_devs episode stays pending until the PM continuation is delivered.
-    if (allCycled && !updatedStatus.pm_only && !this.relay.hasPendingExitConfirmation?.(updatedStatus.episode)) {
+    if (!status.pending || status.pm_only) return;
+    const settled = Object.entries(status.cycled).every(([slot, verified]) =>
+      (status.dev_only && Number(slot) === 0) || verified || this.db.isExitSlotRetained(Number(slot)));
+    if (settled && !this.relay.hasPendingExitConfirmation(status.episode)) {
       this.db.setExitPending(false);
-      this.relay.injectToPM("# All exit_pending attempts consumed — flag auto-cleared; this is not restart verification");
       this.db.logEvent(0, "exit_pending_complete", null, null, {
-        source: "health_check",
-        reason: "All runtime-slot exit attempts consumed — flag cleared",
+        source: "health_observer", reason: "Every targeted slot has a verified process replacement or explicit cohort retention",
       });
     }
   }
@@ -1426,7 +1311,7 @@ export class ProcessHealthChecker {
       this.db.setConfig("exit_pending_stop_only", "true");
       this.db.setConfig("exit_pending_continuation_delivery", "delivered");
       const after = this.db.getExitStatus();
-      const devsDone = Object.entries(after.cycled).every(([slot, v]) => Number(slot) === 0 || v);
+      const devsDone = Object.entries(after.cycled).every(([slot, v]) => Number(slot) === 0 || v || this.db.isExitSlotRetained(Number(slot)));
       this.db.logEvent(0, "pm_restart_continuation_with_devs", null, null, {
         episode: status.episode, devs_all_cycled: devsDone,
         reason: "PM continuation delivered; dev slots of the same episode keep their cycle flags",

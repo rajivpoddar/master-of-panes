@@ -1621,7 +1621,7 @@ app.post("/exit-pending", async (c) => {
       const session = db.latestSessionId(slot);
       const reason = row?.dnd ? "dnd" : !running.get(slot) ? "no_running_agent" : !session ? "session_unknown" : null;
       if (reason) {
-        db.markSlotExitCycled(slot);
+        db.retainExitSlot(slot, reason);
         db.logEvent(slot, "exit_pending_slot_exempt", null, null, { episode: armed, reason });
       } else {
         db.recordExitArm(slot, armed, session, row?.assignment_epoch ?? null);

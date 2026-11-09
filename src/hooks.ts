@@ -1304,6 +1304,7 @@ export class HookProcessor {
       payload.tool_name ?? null,
       payload as unknown as Record<string, unknown>
     );
+    const exitStopOwner = payload.type === "Stop" ? this.relay.captureExitOwner(slotNum, payload.session_id) : null;
     await this.syncObservedCheckout(slotNum, payload);
 
     // Capture pre-update idle state for idle→active transition detection.
@@ -1344,7 +1345,7 @@ export class HookProcessor {
     // Route by hook type
     switch (payload.type) {
       case "Stop":
-        return await this.handleStop(slotNum, payload, stopPin);
+        return await this.handleStop(slotNum, payload, stopPin, exitStopOwner);
       case "PostToolUse":
         return await this.handlePostToolUse(slotNum, payload, wasIdle);
       case "PreToolUse":
@@ -1478,13 +1479,14 @@ export class HookProcessor {
 
   // ─── Stop Hook ─────────────────────────────────────────
 
-  private async handleStop(slotNum: number, payload: HookPayload, stopPin?: PmExitStopPin): Promise<HookResponse> {
+  private async handleStop(slotNum: number, payload: HookPayload, stopPin?: PmExitStopPin,
+    exitStopOwner?: ReturnType<TmuxRelay["captureExitOwner"]>): Promise<HookResponse> {
     // Rajiv 1793501776.726249 / 1793502261.099499: PM exits ONLY on Stop.
     // Slot 0 has no slot-table row. Consume before any await so duplicate Stops
     // cannot send a second /exit; never consult stale tracked-tool accounting.
     const exitStatus = this.db.getExitStatus();
     if (slotNum === 0 && exitStatus.pending && exitStatus.pm_only) {
-      if (exitStatus.cycled[0]) return {};
+      if (exitStatus.cycled[0] || this.db.hasExitAttemptSubmitted(0)) return {};
       const boot = this.db.getEvents(0, 1, "SessionStart")[0];
       let currentSession: unknown;
       try { currentSession = boot && JSON.parse(boot.payload).session_id; } catch { /* Unknown identity refuses the exit. */ }
@@ -1513,7 +1515,8 @@ export class HookProcessor {
       } else {
         if (readiness?.kind === "ready") consumePmExitHandoff(this.db, this.pmExitHandoffOps, readiness.requestedAt, readiness.via);
         this.db.setConfig(PM_EXIT_CONSUMED_EPISODE_KEY, exitStatus.episode ?? "");
-        this.db.markSlotExitCycled(0);
+        const exitOwnerPin = exitStopOwner;
+        if (!exitOwnerPin) return {};
         // Paste and Enter fences: only a cancelled/replaced episode refuses.
         // No Escape/C-u (they would interrupt a busy turn) and no idle check:
         // the PM pane is busy at its own Stop and Claude Code queues /exit.
@@ -1529,6 +1532,7 @@ export class HookProcessor {
           skipSlashClear: true,
           allowNativeQueuedInput: true,
           exitEpisode: exitStatus.episode ?? undefined,
+          exitOwnerPin,
         }) : { outcome: "refused_pre_effect", reason: "pm_pane_unknown" };
         if (delivery.outcome === "refused_pre_effect") {
           // Proven zero effect: explicit durable terminal + same-owner recovery edge; never resent.
@@ -1593,7 +1597,7 @@ export class HookProcessor {
     if (slotNum > 0 && this.db.getExitPending() && this.db.getExitStatus().with_devs && !this.db.getExitStatus().cycled[slotNum]) {
       const cohort = slot.dnd ? "dnd" : this.db.exitArmCheck(slotNum, payload.session_id);
       if (cohort !== "match") {
-        this.db.markSlotExitCycled(slotNum);
+        this.db.retainExitSlot(slotNum, cohort);
         this.db.logEvent(slotNum, "exit_pending_cohort_superseded", "Stop", null, {
           episode: this.db.getExitStatus().episode, reason: cohort, session_id: payload.session_id ?? null,
         });
@@ -1711,16 +1715,17 @@ export class HookProcessor {
     // watchdog restarts the slot with --continue and it goes idle again).
     // A PM-only episode armed with_devs (04:00, obligation 30559) also exits each dev at its Stop.
     if (this.db.getExitPending() && (!this.db.getExitStatus().pm_only || (this.db.getExitStatus().with_devs && slotNum > 0))
-        && !(slotNum === 0 && this.db.getExitStatus().dev_only) && !this.db.getExitStatus().cycled[slotNum]) {
-      this.db.markSlotExitCycled(slotNum);
-      this.relay.sendToSlot(slotNum, "/exit", true, false, this.db.getExitStatus().episode ?? undefined, payload.session_id);
+        && !(slotNum === 0 && this.db.getExitStatus().dev_only) && !this.db.getExitStatus().cycled[slotNum]
+        && !this.db.isExitSlotRetained(slotNum) && !this.db.hasExitAttemptSubmitted(slotNum)) {
+      if (!exitStopOwner) return {};
+      this.relay.sendToSlot(slotNum, "/exit", true, false, this.db.getExitStatus().episode ?? undefined, payload.session_id, exitStopOwner);
       this.db.logEvent(slotNum, "exit_pending_triggered", "Stop", null, {
         task: slot.task,
         branch: slot.branch,
         reason: "exit_pending flag set — sending /exit for graceful restart",
       });
       this.relay.injectToPM(
-        `# 🔄 slot ${slotNum} sent /exit (exit_pending) — watchdog will restart`,
+        `# slot ${slotNum} Stop authorized an /exit attempt — cycle remains unverified until replacement Claude is observed`,
       );
 
       // Check if all slots have cycled — if so, auto-clear the flag

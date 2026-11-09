@@ -232,7 +232,8 @@ export function selectPmStopMaintenance(db: Db, options: {
   if (pmExitInCustody(db)) return "exit_custody";
   if (db.hasPendingClear(0)) return "clear";
   const status = db.getExitStatus();
-  if (!status.pending || !status.pm_only || status.cycled[0]) return "clear";
+  if (!status.pending || !status.pm_only || status.cycled[0]
+      || ["dispatching", "delivered", "unknown", "verified"].includes(status.attempts?.[0]?.phase ?? "")) return "clear";
   const handoffRequired = !!db.getConfig(PM_EXIT_HANDOFF_EPISODE_KEY);
   if (!handoffRequired) return "exit"; // legacy direct arming: unconditioned single-Stop exit
   const readiness = pmExitHandoffReadiness(db, { ops: options.ops, files: options.files });
