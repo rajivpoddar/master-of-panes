@@ -548,11 +548,12 @@ def load_history(path: Path = HISTORY_JSON) -> dict[str, Any]:
         return {}
 
 
-def save_history(doc: dict[str, Any], path: Path = HISTORY_JSON) -> None:
+def save_history(doc: dict[str, Any], path: Path = HISTORY_JSON) -> bool:
     try:
         path.write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
+        return True
     except OSError:
-        pass
+        return False
 
 
 def idle_seconds_for_daemons(
@@ -2111,16 +2112,48 @@ def codex_broker_policy_plan(
     return {"roots": roots, "skipped": skipped, "members": [m for r in roots for m in r["members"]]}
 
 
-def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, extra_min: int, idle_min: int) -> dict[str, Any]:
+def codex_broker_sample(roots: list[dict[str, Any]], history: dict[str, Any], apply: bool,
+                        uid: int, session_cwds: list[str] | None, now: float) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Track uninterrupted eligible apply observations; dry scans never mutate history."""
+    previous = history.get("codex_broker_idle", {})
+    if not isinstance(previous, dict):
+        previous = {}
+    tracked, ready, refused = {}, [], []
+    for root in roots:
+        row = root["root"]
+        ok, why = codex_broker_strict_eligible(root, uid, session_cwds, STRICT_MIN_AGE_S)
+        if not ok:
+            refused.append({"pid": row["pid"], "reason": why})
+            continue
+        key = f"{row['pid']}:{row['start_time']}"
+        first = previous.get(key)
+        if not isinstance(first, (int, float)) or isinstance(first, bool) or first > now:
+            first = now
+        tracked[key] = first
+        if now - first >= CODEX_BROKER_SAMPLE_S:
+            ready.append(root)
+        else:
+            refused.append({"pid": row["pid"], "reason": "sample_pending"})
+    if apply:
+        history["codex_broker_idle"] = tracked
+    return ready, refused
+
+
+def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, extra_min: int, idle_min: int,
+                              history: dict[str, Any] | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {
         "class": "codex_broker_cap", "action": "report_only",
         "orphan_min": orphan_min, "extra_min": extra_min, "idle_min": idle_min,
         "roots": 0, "before": 0, "killed": 0, "after": 0, "skipped": [], "found": [],
         "terminated": [], "refused": [], "errors": [], "rules": {},
     }
+    persistent_history = history is not None
+    history = history if history is not None else {}
     table = codex_broker_table()
     texts = codex_companion_texts(table) if table is not None else None
     if table is None or texts is None:
+        if apply:
+            history["codex_broker_idle"] = {}
         out["errors"].append("ps_failed" if table is None else "companion_scan_failed")
         out["after"] = "unknown"
         return out  # fail closed: never signal when in-flight state is unknown
@@ -2140,11 +2173,13 @@ def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, 
     session_cwds = codex_companion_cwds(table)  # relaxed 10-27: live slot cwd is OK unless a companion runs there
     out["would_kill"] = []
     out["action"] = "strict_kill" if apply else "report_only"
-    for r in plan["roots"]:
-        ok, why = codex_broker_strict_eligible(r, uid, session_cwds, STRICT_MIN_AGE_S)
-        if not ok:
-            out["refused"].append({"pid": r["root"]["pid"], "reason": why})
-            continue
+    ready, refused = codex_broker_sample(plan["roots"], history, apply, uid, session_cwds, time.time())
+    out["refused"].extend(refused)
+    if apply and persistent_history and not save_history(history):
+        out["errors"].append("history_write_failed")
+        out["after"] = "unknown"
+        return out
+    for r in ready[:CODEX_BROKER_MAX_TREES]:
         out["would_kill"].append({"root": r["root"]["pid"], "members": [m["pid"] for m in r["members"]]})
         if apply:
             res = codex_broker_strict_kill(r, term_wait_s)
@@ -2153,12 +2188,19 @@ def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, 
                 out["killed"] += res["signalled"]
             else:
                 out["refused"].append({"pid": r["root"]["pid"], **res})
+                key = f"{r['root']['pid']}:{r['root']['start_time']}"
+                history.get("codex_broker_idle", {}).pop(key, None)
+                if persistent_history and not save_history(history):
+                    out["errors"].append("history_write_failed")
+                    break
     # Signals are attempts, not proof of death. A failed post-read stays unknown.
     out["after"] = "unknown" if apply and out["would_kill"] else out["before"]
     return out
 
 
-STRICT_MIN_AGE_S = 2 * 3600
+STRICT_MIN_AGE_S = 24 * 3600
+CODEX_BROKER_SAMPLE_S = 30 * 60
+CODEX_BROKER_MAX_TREES = 10
 _CLAUDE_SESSION_RE = re.compile(r"(^|/)(claude|openclaude)(\s|$)")
 
 
@@ -2199,7 +2241,7 @@ def codex_broker_strict_eligible(root: dict[str, Any], uid: int, session_cwds: l
     if "c_idle_no_client" not in root["rules"]:
         return False, "rule_c_not_met"
     if row["age_seconds"] < min_age_s:
-        return False, "younger_than_2h"
+        return False, "younger_than_24h"
     if row["uid"] != uid:
         return False, "other_uid"
     if _CODEX_CHATGPT_RE.search(row["command"]):
@@ -2534,7 +2576,7 @@ def run_self_test() -> int:
     assert ids(pplan([mrow(710, 1, bcmd("s", "/s9"), 90), mrow(711, 710, NS, 90)], self_pid=711)) == []
     assert codex_broker_endpoint_info(bcmd("q", "/a b/c"))["cwd"] == "/a b/c"
     # --- STRICT kill rule (Rajiv ts 1793086894.175369) ---
-    sroot = lambda pid, rules=("a_orphan_ppid1", "c_idle_no_client"), age_h=3, uid=me, cmd=None, shape="broker": {
+    sroot = lambda pid, rules=("a_orphan_ppid1", "c_idle_no_client"), age_h=25, uid=me, cmd=None, shape="broker": {
         "root": prow(pid, 1, cmd or bcmd(f"k{pid}", f"/tmp/dead{pid}"), age_h, uid=uid), "shape": shape,
         "rules": list(rules), "members": [prow(pid, 1, cmd or bcmd(f"k{pid}", f"/tmp/dead{pid}"), age_h, uid=uid),
                                           prow(pid + 1, pid, NS, age_h), prow(pid + 2, pid + 1, NR, age_h)]}
@@ -2596,6 +2638,21 @@ def run_self_test() -> int:
     calls = iter([stbl, {**stbl, 802: {**stbl[802], "start_time": "new"}}])
     k(table_fn=lambda: next(calls))
     assert not sent
+    # Sampled apply passes: eligible, reset on client/companion, dry-run and PID reuse.
+    hist: dict[str, Any] = {}
+    eligible = sroot(1000)
+    assert not codex_broker_sample([eligible], hist, True, me, [], 1000)[0]
+    assert not codex_broker_sample([eligible], hist, False, me, [], 2799)[0]
+    assert codex_broker_sample([eligible], hist, False, me, [], 2800)[0] == [eligible]
+    assert hist["codex_broker_idle"] == {f"1000:{eligible['root']['start_time']}": 1000}
+    assert not codex_broker_sample([sroot(1000, rules=("a_orphan_ppid1",))], hist, True, me, [], 2800)[0]
+    assert hist["codex_broker_idle"] == {}  # a client resets the observation
+    assert not codex_broker_sample([sroot(1000, age_h=23)], hist, True, me, [], 3000)[0]
+    assert not codex_broker_sample([sroot(1000, cmd=bcmd("g", "/Applications/ChatGPT.app/x"))], hist, True, me, [], 3000)[0]
+    assert not codex_broker_sample([eligible], hist, True, me, None, 3000)[0]
+    assert hist["codex_broker_idle"] == {}  # companion scan failure cannot authorize a signal
+    comp_root = pplan([mrow(600, 1, bcmd("f", "/f"), 1500)], companions=comp, client=lambda p, s: False)
+    assert not comp_root["roots"]  # a referenced broker is spared
     print("SELF_TEST ok (including Codex broker apply fences and broker cap policy + strict kill)")
     return 0
 
@@ -2699,7 +2756,7 @@ def _main() -> int:
     codex_renderers = codex_renderer_check(history, args.apply)
     codex_brokers = codex_broker_orphan_check(args.apply, args.codex_broker_min_hours, args.term_wait_s)
     broker_cap = codex_broker_policy_check(args.apply, args.term_wait_s, args.codex_broker_orphan_min,
-                                           args.codex_broker_extra_min, args.codex_broker_idle_min)
+                                           args.codex_broker_extra_min, args.codex_broker_idle_min, history)
     if args.apply:
         save_history(history)
     terminated = [item for item in outcomes if item.get("outcome") == "terminated"]
@@ -2728,7 +2785,7 @@ def _main() -> int:
             "codex_renderer": "ChatGPT-bundled Codex (Renderer).app --type=renderer only: age >60m AND CPU >50% on 2 consecutive apply passes keyed by PID+start; max 5 per pass; revalidate PID/start/args before TERM and KILL, with 10s grace; dry run does not persist",
             "preview_orphan": "ppid-1 python -m http.server (only --directory under /tmp or vanished) / astro|vite dev older than 24h, and ppid-1 node docs/marketing/drafts render scripts older than 60m (+descendants); independent of slots",
             "codex_broker_orphan": f"REPORT ONLY even on --apply: same-user, ppid-1 Codex broker trees at least {args.codex_broker_min_hours}h old; identity and age do not establish quiescence; never signal broker roots or descendants",
-            "codex_broker_cap": f"REPORT-ONLY, never signals under any flag (would apply: same-user, never ChatGPT.app-owned, never the running script, never a broker whose socket/endpoint is referenced by a running codex companion process, fail-closed if ps/companion scan fails): (a) ppid-1 broker / orphan app-server + children >= {args.codex_broker_orphan_min}m; (b) per session (--cwd) keep newest broker, kill extras >= {args.codex_broker_extra_min}m; (c) broker with no socket client >= {args.codex_broker_idle_min}m. Fresh re-plan and identity recheck before TERM/KILL.",
+            "codex_broker_cap": "Apply only same-user ppid-1 brokers aged >=24h with no socket client or companion reference on consecutive apply observations spanning >=30m, max 10 trees; ChatGPT-owned and self excluded; scans fail closed; revalidate before signals. Other rules remain report-only.",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],

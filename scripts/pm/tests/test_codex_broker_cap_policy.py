@@ -29,7 +29,7 @@ def broker(sess: str, cwd: str) -> str:
             f"--endpoint unix:/var/folders/x/cxc-{sess}/broker.sock --cwd {cwd} --pid-file /var/folders/x/cxc-{sess}/broker.pid")
 
 
-def proc(pid: int, ppid: int, command: str, age_min: int = 120) -> dict:
+def proc(pid: int, ppid: int, command: str, age_min: int = 1500) -> dict:
     return {"pid": pid, "ppid": ppid, "uid": UID, "etime": "x", "age_seconds": age_min * 60,
             "stat": "S", "start_time": f"t{pid}", "command": command}
 
@@ -115,7 +115,7 @@ class BrokerCapReportOnlyTests(unittest.TestCase):
     def test_strict_guards_independently_refuse(self):
         for guard in ("cwd", "inflight", "client", "young"):
             with self.subTest(guard=guard):
-                table = {100: proc(100, 1, broker("orphan", "/a"), 119 if guard == "young" else 120)}
+                table = {100: proc(100, 1, broker("orphan", "/a"), 1439 if guard == "young" else 1440)}
                 with patch.object(MODULE, "codex_broker_table", return_value=table), \
                      patch.object(MODULE, "codex_companion_texts", return_value=[broker("orphan", "/a")] if guard == "inflight" else []), \
                      patch.object(MODULE, "codex_companion_cwds", return_value=["/a"] if guard == "cwd" else []), \
@@ -184,6 +184,25 @@ class BrokerCapReportOnlyTests(unittest.TestCase):
             self.assertEqual(json.loads(output.read_text())["codex_broker_cap"]["killed"], 0)
 
 
+def test_sampled_apply_resets_and_caps_without_signalling_unsafe_trees():
+    table = {i: proc(i, 1, broker(str(i), f"/tmp/broker-{i}")) for i in range(100, 112)}
+    history = {}
+    calls = []
+    with patch.object(MODULE, "codex_broker_table", return_value=table), \
+         patch.object(MODULE, "codex_companion_texts", return_value=[]), \
+         patch.object(MODULE, "codex_companion_cwds", return_value=[]), \
+         patch.object(MODULE, "codex_broker_has_client", return_value=False), \
+         patch.object(MODULE, "save_history", return_value=True), \
+         patch.object(MODULE, "codex_broker_strict_kill", side_effect=lambda r, w: calls.append(r['root']['pid']) or {"outcome": "terminated", "signalled": 1}):
+        with patch.object(MODULE.time, "time", return_value=1000):
+            assert not MODULE.codex_broker_policy_check(True, 0, 0, 0, 0, history)["would_kill"]
+        with patch.object(MODULE.time, "time", return_value=2799):
+            assert not MODULE.codex_broker_policy_check(True, 0, 0, 0, 0, history)["would_kill"]
+        with patch.object(MODULE.time, "time", return_value=2800):
+            assert len(MODULE.codex_broker_policy_check(True, 0, 0, 0, 0, history)["would_kill"]) == 10
+    assert len(calls) == 10
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -195,8 +214,10 @@ def test_eligible_broker_still_requires_fresh_signal_time_evidence():
             patch.object(MODULE, "codex_companion_texts", return_value=[]), \
             patch.object(MODULE, "codex_companion_cwds", return_value=[]), \
             patch.object(MODULE, "codex_broker_has_client", return_value=False), \
+            patch.object(MODULE, "save_history", return_value=True), \
+            patch.object(MODULE.time, "time", return_value=2800), \
             patch.object(MODULE.os, "kill", side_effect=forbid("signal without fresh evidence")):
-        result = MODULE.codex_broker_policy_check(True, 0, 0, 0, 0)
+        result = MODULE.codex_broker_policy_check(True, 0, 0, 0, 0, {"codex_broker_idle": {"100:t100": 1000}})
     assert result['action'] == 'strict_kill' and result['killed'] == 0
     assert result['would_kill']
     assert result['refused'][0]['outcome'] == 'refused_ps_failed'
