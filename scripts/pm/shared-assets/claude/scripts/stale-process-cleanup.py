@@ -1961,10 +1961,8 @@ def codex_broker_orphan_check(apply: bool, min_hours: float, term_wait_s: float)
 
 
 # ---------------------------------------------------------------------------
-# Codex broker cap policy (Rajiv 2026-10-22): the report-only 6h scan above never
-# freed anything while 65 plugin processes piled up. These rules DO signal, but
-# only same-user trees, never ChatGPT.app-owned ones, never the running script,
-# and never a broker with an in-flight companion review.
+# Codex broker cap policy: report only. A disconnected client does not prove
+# the backend turn has stopped; quiescence currently cannot be established.
 #   (a) ppid-1 orphan broker / orphan app-server older than ORPHAN_MIN
 #   (b) per owning session (broker --cwd): keep the newest broker, kill extras older than EXTRA_MIN
 #   (c) broker with no socket client older than IDLE_MIN
@@ -2126,10 +2124,12 @@ def codex_broker_sample(roots: list[dict[str, Any]], history: dict[str, Any], ap
             refused.append({"pid": row["pid"], "reason": why})
             continue
         key = f"{row['pid']}:{row['start_time']}"
-        first = previous.get(key)
+        members = sorted([[m["pid"], m["start_time"], m["ppid"], m["command"]] for m in root["members"]])
+        sample = previous.get(key)
+        first = sample.get("first") if isinstance(sample, dict) and sample.get("members") == members else None
         if not isinstance(first, (int, float)) or isinstance(first, bool) or first > now:
             first = now
-        tracked[key] = first
+        tracked[key] = {"first": first, "members": members}
         if now - first >= CODEX_BROKER_SAMPLE_S:
             ready.append(root)
         else:
@@ -2256,7 +2256,9 @@ def codex_broker_strict_eligible(root: dict[str, Any], uid: int, session_cwds: l
             continue  # a session parked in $HOME or / does not own every checkout below it
         if rc == s or s.startswith(rc.rstrip("/") + "/") or rc.startswith(s.rstrip("/") + "/"):
             return False, "companion_running_in_cwd"
-    return True, "strict_ok"
+    # The broker may keep a backend turn alive after its socket owner disconnects.
+    # There is no authoritative turn-completion observation in this scan.
+    return False, "backend_quiescence_unknown"
 
 
 def codex_companion_cwds(table: dict[int, dict[str, Any]] | None,
@@ -2350,6 +2352,10 @@ def codex_broker_strict_kill(
                 return "refused_descendant_work"
         return None
 
+    # No client or companion is not positive evidence that the backend turn ended.
+    # Keep even direct calls fail-closed until an authoritative activity source exists.
+    return refuse("refused_backend_quiescence_unknown")
+
     # Children first: do not orphan an unexamined descendant by signalling root first.
     order = list(reversed(list(planned)))
     for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -2360,7 +2366,26 @@ def codex_broker_strict_kill(
             reason = verified(table)
             if reason:
                 return refuse(reason)
-            if pid in table:
+            # Re-read after the potentially blocking companion/cwd/lsof probes.
+            fresh_table = table_fn()
+            if fresh_table is None:
+                return refuse("refused_ps_failed")
+            if set(fresh_table).intersection(planned) != set(table).intersection(planned):
+                return refuse("refused_group_changed")
+            for member_pid in set(table).intersection(planned):
+                if (_codex_identity(fresh_table[member_pid]) != _codex_identity(planned[member_pid])
+                        or fresh_table[member_pid]["ppid"] != planned[member_pid]["ppid"]):
+                    return refuse("refused_identity_or_parent_changed")
+            descendants, pending = set(), [r0["pid"]]
+            while pending:
+                parent = pending.pop()
+                for candidate in fresh_table.values():
+                    if candidate["ppid"] == parent and candidate["pid"] not in descendants:
+                        descendants.add(candidate["pid"])
+                        pending.append(candidate["pid"])
+            if descendants - set(planned):
+                return refuse("refused_group_changed")
+            if pid in fresh_table:
                 try:
                     send(pid, sig)
                     (signalled if sig == signal.SIGTERM else killed).append(pid)
