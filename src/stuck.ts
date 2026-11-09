@@ -1025,7 +1025,7 @@ export class StuckDetector {
     expected?: { assignment_epoch?: number; assigned_at?: string | null },
     command = "continue your work or remind pm if blocked",
     allowActiveTurn = false,
-    guarded?: GuardedSendOptions,
+    guarded?: GuardedSendOptions & { verifiedStallTermination?: boolean },
   ): Promise<ContinueDeliveryResult> {
     const current = this.db.getSlot(slotNum) ?? null;
     let reason: ContinueDeliveryResult["reason"] | null = null;
@@ -1082,6 +1082,7 @@ export class StuckDetector {
         tuple,
         undefined,
         allowActiveTurn,
+        guarded?.verifiedStallTermination === true,
       );
     } else if (tuple && typeof claimReleaseIntent === "function") {
       // Compatibility for lightweight detector fakes that predate tokens.
@@ -1092,6 +1093,7 @@ export class StuckDetector {
         tuple,
         undefined,
         allowActiveTurn,
+        guarded?.verifiedStallTermination === true,
       ) ? "__legacy__" : null;
     } else if (tuple) {
       nudgeLeaseToken = "__legacy__";
@@ -1680,17 +1682,30 @@ export class StuckDetector {
 
     const fingerprint = classification.fingerprint;
     const expected = { assignment_epoch: slot.assignment_epoch, assigned_at: slot.assigned_at };
+    // Established at observation, not re-derived from a later hook flip. A turn
+    // that becomes active after this point is real work and stays refused.
+    const staleActive = !hookIdle && turnIdle;
     // Synchronous owner/epoch/turn fence. Runs with no await between it and
     // the effect (CTO REVISE 00:48, C0ALZJHGE49/1791049473.052849), so a hook
     // that flips the turn during an awaited capture is always seen.
-    const finalCheck = (_stage: "pre_paste" | "pre_enter"): string | null => {
+    const finalCheck = (stage: "pre_paste" | "pre_enter", snapshot?: string | null): string | null => {
       const cur = this.db.getSlot(slotNum);
       if (!cur?.occupied) return "released";
       if (cur.dnd) return "dnd";
       if (cur.assignment_epoch !== expected.assignment_epoch || cur.assigned_at !== expected.assigned_at) {
         return "identity_changed";
       }
-      if (!this.isIdleByHookState(cur).idle) return "turn_active";
+      if (!this.isIdleByHookState(cur).idle) {
+        // The one missing-Stop termination. Empty composer before paste, the
+        // exact owned nudge before Enter, same current error. The fence stays.
+        if (
+          staleActive
+          && cur.active_turn_state === "active"
+          && snapshot != null
+          && verifiedApiStallTermination(stage, snapshot, fingerprint)
+        ) return null;
+        return "turn_active";
+      }
       return null;
     };
     // Async observation first; the owner/turn fence is evaluated after it.
@@ -1702,19 +1717,22 @@ export class StuckDetector {
       if (text === null) return "pane_unreadable";
       const now = classifyApiStallTail(text);
       if (!now.stalled || now.fingerprint !== fingerprint) return `stall_changed:${now.reason}`;
-      const fence = finalCheck(stage);
-      // Stop never fired, but the composer is still the empty prompt on this
-      // same stall. A listed background agent is not a live turn. Every other
-      // fence (released, dnd, identity) still refuses.
-      if (fence === "turn_active" && apiStallTurnIdle(false, text)) return null;
-      return fence;
+      const cur = this.db.getSlot(slotNum);
+      if (staleActive && cur && !this.isIdleByHookState(cur).idle) {
+        // A badge in the scrollback is not activity. The chevron color is.
+        // Unknown and busy both refuse; neither is permission to type.
+        const activity = await this.relay.getSlotActivityState(slotNum, observedPaneId);
+        if (activity === "unknown") return "activity_unknown";
+        if (activity !== "idle") return "pane_not_idle";
+      }
+      return finalCheck(stage, text);
     };
     const delivery = await this.sendContinueIfAllowed(
       slotNum,
       expected,
       API_STALL_NUDGE_MESSAGE,
       false,
-      { expectedPaneId: observedPaneId, recheck, finalCheck },
+      { expectedPaneId: observedPaneId, recheck, finalCheck, verifiedStallTermination: staleActive },
     );
     const outcome = delivery.outcome ?? (delivery.sent ? "delivered" : "refused_pre_effect");
     // Fence: an attempted or uncertain delivery consumes this stall episode;
@@ -2288,6 +2306,23 @@ export interface ApiStallClassification {
   /** Stable-ish fingerprint of this stall (error text + error-line count). */
   fingerprint: string | null;
   errorText: string | null;
+}
+
+/**
+ * The one API-stall termination that may pass a still-active hook. The tail is
+ * this same current error, not a quoted or resumed one. Before paste the
+ * composer is empty. Before Enter it is the owned nudge and nothing else.
+ */
+function verifiedApiStallTermination(
+  stage: "pre_paste" | "pre_enter",
+  pane: string,
+  fingerprint: string | null,
+): boolean {
+  const now = classifyApiStallTail(pane);
+  if (!now.stalled || now.fingerprint !== fingerprint) return false;
+  const composer = composerText(pane);
+  if (stage === "pre_paste") return composer === "";
+  return composer === API_STALL_NUDGE_MESSAGE;
 }
 
 /** The composer box is an empty ❯ prompt, not a typed or pasted line. */

@@ -227,45 +227,6 @@ test("StuckDetector delivers the nudge via the guarded relay, logs it, and surfa
   assert.equal(pmAlerts.length, 0);
 });
 
-test("hook-active empty prompt after mid-response is nudged; a typed composer is not", async () => {
-  const { StuckDetector } = await import("../dist/stuck.js");
-  const slot = {
-    slot: 1, address: "0:0.1", name: "S1", status: "busy", occupied: true, session_id: "s",
-    task: "t", issue: 12906, branch: "b", pr: null, head_sha: null, assignment_epoch: 1766,
-    assigned_at: "2026-11-09T01:16:44.326", last_activity: null, dnd: false, idle: false,
-    activity: null, active_turn_id: "turn", active_turn_started_at: "2026-11-09T02:39:00.000Z",
-    active_turn_state: "active", last_meaningful_work_at: null,
-  };
-  const sent: string[] = [];
-  const db = {
-    getSlot: () => slot,
-    logEvent: () => {},
-    hasActiveNativeReleaseIntent: () => false,
-  } as unknown as MoPDatabase;
-  const relay = {
-    sendToSlot: async () => true,
-    injectToPM: () => {},
-    observeSlotPane: async () => ({ paneId: "%1", text: MID_RESPONSE }),
-  } as unknown as TmuxRelay;
-  const det = new StuckDetector(db, {} as LogManager, relay) as unknown as {
-    apiStall: ApiStallTracker;
-    sendContinueIfAllowed: (n: number, e: unknown, cmd: string) => Promise<{ sent: boolean; reason: string; slot: unknown }>;
-    checkApi500Backoff: (s: unknown) => Promise<void>;
-  };
-  det.apiStall = new ApiStallTracker(0);
-  det.sendContinueIfAllowed = async (_n, _e, cmd) => { sent.push(cmd); return { sent: true, reason: "sent", slot }; };
-  await det.checkApi500Backoff(slot);
-  assert.deepEqual(sent, [API_STALL_NUDGE_MESSAGE]);
-
-  sent.length = 0;
-  relay.observeSlotPane = async () => ({ paneId: "%1", text: MID_RESPONSE.replace("❯ ", "❯ keep going") });
-  const quiet = new StuckDetector(db, {} as LogManager, relay) as typeof det;
-  quiet.apiStall = new ApiStallTracker(0);
-  quiet.sendContinueIfAllowed = async (_n, _e, cmd) => { sent.push(cmd); return { sent: true, reason: "sent", slot }; };
-  await quiet.checkApi500Backoff(slot);
-  assert.deepEqual(sent, []);
-});
-
 async function fakeTmux(pane: string): Promise<string> {
   const { mkdtemp, writeFile, chmod } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");

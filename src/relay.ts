@@ -1843,8 +1843,9 @@ export class TmuxRelay {
     opts: {
       expectedPaneId: string;
       recheck: (stage: "pre_paste" | "pre_enter", capture: () => Promise<string | null>) => Promise<string | null>;
-      /** Synchronous fence run with no await before the paste and the Enter effect. */
-      finalCheck?: (stage: "pre_paste" | "pre_enter") => string | null;
+      /** Synchronous fence run with no await before the paste and the Enter effect.
+       * The snapshot is the composer capture just taken for that stage. */
+      finalCheck?: (stage: "pre_paste" | "pre_enter", snapshot?: string | null) => string | null;
       /** Bracketed paste (-p) so a multi-line payload cannot submit early. */
       bracketedPaste?: boolean;
       /**
@@ -1871,7 +1872,8 @@ export class TmuxRelay {
   ): Promise<GuardedSlotDelivery> {
     if (!isValidRuntimeSlot(slotNum)) return { outcome: "refused_pre_effect", reason: "unknown_slot", paneId: null };
     const ownerRefusal = () => opts.exitOwnerPin ? this.exitOwnerRefusal(slotNum, opts.exitOwnerPin) : null;
-    const finalCheck = (stage: "pre_paste" | "pre_enter") => ownerRefusal() ?? opts.finalCheck?.(stage) ?? null;
+    const finalCheck = (stage: "pre_paste" | "pre_enter", snapshot?: string | null) =>
+      ownerRefusal() ?? opts.finalCheck?.(stage, snapshot) ?? null;
     if (ownerRefusal()) return { outcome: "refused_pre_effect", reason: "slot_owner_changed", paneId: null };
     const identity = await verifyPaneIdentity(slotNum, this.runShell);
     if (!identity.ok) return { outcome: "refused_pre_effect", reason: `pane_identity:${identity.reason}`, paneId: null };
@@ -1941,7 +1943,7 @@ export class TmuxRelay {
         const loadedComposer = composerText(loadedSnapshot);
         if (loadedComposer === null) return refuse("composer_unreadable");
         if (loadedComposer !== "") return refuse("composer_not_empty");
-        const prePasteFence = finalCheck("pre_paste");
+        const prePasteFence = finalCheck("pre_paste", loadedSnapshot);
         if (prePasteFence) return refuse(prePasteFence);
         effectAttempted = true;
         await this.runShell(`tmux paste-buffer${opts.bracketedPaste ? " -p" : ""} -b ${bufName} -t ${paneId} -d`, { timeout: 3_000 });
@@ -1965,7 +1967,7 @@ export class TmuxRelay {
                 prePasteComposer,
               }) ? "composer_not_owned_by_send" : null;
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
-            preEnterRefusal = finalCheck("pre_enter");
+            preEnterRefusal = finalCheck("pre_enter", submitSnapshot);
             if (preEnterRefusal) throw new GuardedEnterRefused(preEnterRefusal);
             enterSent++;
             await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: 3_000 });

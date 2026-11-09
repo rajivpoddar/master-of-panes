@@ -3,10 +3,14 @@
 // (TmuxRelay.deliverGuardedToSlot -> submitWithComposerCheck) against a fake
 // tmux pane model. Effects are counted at the tmux command boundary.
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import Database from "better-sqlite3";
 
-import type { MoPDatabase } from "../src/db.js";
+import { MoPDatabase } from "../src/db.js";
 import type { LogManager } from "../src/logs.js";
 import { TmuxRelay } from "../src/relay.js";
 import { ApiStallTracker, StuckDetector } from "../src/stuck.js";
@@ -48,10 +52,15 @@ type Pane = {
   capturesAtPaste?: number;
   capturesAtEnter?: number;
   identityCalls: number;
+  /** Chevron color on capture-pane -e. Idle is the default (no SGR). */
+  chevron?: "idle" | "active" | "unknown";
 };
 
-function render(p: Pane): string {
-  return [...p.history, "", RULE, `❯ ${p.composer}`, RULE, "  ⏵⏵ bypass permissions on"].join("\n");
+function render(p: Pane, ansi = false): string {
+  let prompt = `❯ ${p.composer}`;
+  if (ansi && p.chevron === "active") prompt = `\x1b[38;2;153;153;153m❯ ${p.composer}`;
+  else if (ansi && p.chevron === "unknown") prompt = `\x1b[31m❯ ${p.composer}`;
+  return [...p.history, "", RULE, prompt, RULE, "  ⏵⏵ bypass permissions on"].join("\n");
 }
 
 function fakeShell(p: Pane) {
@@ -66,7 +75,7 @@ function fakeShell(p: Pane) {
     if (command.startsWith("tmux capture-pane")) {
       if (p.ackLoss && p.enters > 0) throw Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
       p.captures = (p.captures ?? 0) + 1;
-      const out = render(p);
+      const out = render(p, command.startsWith("tmux capture-pane -e"));
       await new Promise((r) => setImmediate(r));
       p.onCapture?.(p.captures);
       return { stdout: out, stderr: "" };
@@ -315,4 +324,157 @@ test("turn starts DURING the pre-paste captures: zero paste, zero Enter", async 
   assert.equal(h.p.pastes, 0, "never paste when a turn started during an awaited capture");
   assert.equal(h.p.enters, 0);
   assert.ok(h.types().includes("api_stall_nudge_refused"));
+});
+
+const MID_HISTORY = [
+  "⏺ API Error: Server error mid-response. The response above may be incomplete.",
+  "← 1 agent",
+];
+
+/** Real lease + real guarded relay. Only the tmux shell is fake. */
+function realLease(pane: Partial<Pane> = {}, turn: "active" | "indeterminate" = "active") {
+  const directory = mkdtempSync(join(tmpdir(), "mop-stall-lease-"));
+  const dbPath = join(directory, "mop.db");
+  const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath });
+  const assigned = db.assignSlot(1, "issue 12906", "github:heydonna-app/heydonna-app", 12906, "fix/12906", null, null, 0);
+  assert.equal(assigned.ok, true, JSON.stringify(assigned));
+  db.startAgentTurn(1, "turn-mid-response");
+  if (turn === "indeterminate") db.updateSlot(1, { active_turn_state: "indeterminate" });
+  const p: Pane = {
+    paneIds: ["%11"], history: [...MID_HISTORY], composer: "", buffer: "", pastes: 0, enters: 0,
+    ackLoss: false, identityCalls: 0, ...pane,
+  };
+  const relay = new TmuxRelay(DEFAULT_CONFIG, { runShell: fakeShell(p) as never });
+  relay.setDatabase(db);
+  const det = new StuckDetector(db, { getLogMtime: async () => null } as unknown as LogManager, relay);
+  const inner = det as unknown as {
+    apiStall: ApiStallTracker;
+    checkApi500Backoff: (s: SlotState) => Promise<void>;
+  };
+  inner.apiStall = new ApiStallTracker(0);
+  const events = () => db.getEvents(1, 30);
+  return {
+    p, db, dbPath, det,
+    check: () => inner.checkApi500Backoff(db.getSlot(1)!),
+    types: () => events().map((e) => e.event_type),
+    payload: (type: string) => {
+      const row = [...events()].reverse().find((e) => e.event_type === type);
+      return row ? JSON.parse(row.payload) as { reason?: string; detail?: string } : null;
+    },
+    close: () => {
+      db.close();
+      rmSync(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+test("stale active hook after mid-response: exactly one Enter; a listed agent is not a live turn", async () => {
+  const h = realLease();
+  try {
+    await h.check();
+    assert.equal(h.p.pastes, 1);
+    assert.equal(h.p.enters, 1);
+    assert.equal(h.db.getSlot(1)?.active_turn_state, "active", "Stop still has not fired");
+    assert.ok(h.types().includes("api_stall_nudge"));
+    await h.check();
+    assert.equal(h.p.pastes, 1, "one nudge per stall");
+    assert.equal(h.p.enters, 1);
+  } finally {
+    h.close();
+  }
+});
+
+test("stale active hook refuses a busy or unknown chevron", async () => {
+  for (const [chevron, detail] of [["active", "pane_not_idle"], ["unknown", "activity_unknown"]] as const) {
+    const h = realLease({ chevron });
+    try {
+      await h.check();
+      assert.equal(h.p.pastes, 0, chevron);
+      assert.equal(h.p.enters, 0, chevron);
+      assert.equal(h.payload("api_stall_nudge_refused")?.detail, detail, chevron);
+      assert.equal(h.det.getApiStallStatus(1).state, "stall_pending", chevron);
+    } finally {
+      h.close();
+    }
+  }
+});
+
+test("stale active hook refuses a changed owner before any key", async () => {
+  const h = realLease();
+  try {
+    h.p.onCapture = (n) => {
+      if (n !== 1) return;
+      const raw = new Database(h.dbPath);
+      raw.prepare("UPDATE slots SET assigned_at = ? WHERE slot = 1").run("2026-01-01T00:00:00.000");
+      raw.close();
+    };
+    await h.check();
+    assert.equal(h.p.pastes, 0);
+    assert.equal(h.p.enters, 0);
+    assert.equal(h.payload("api_stall_nudge_refused")?.reason, "identity_changed");
+  } finally {
+    h.close();
+  }
+});
+
+test("stale active hook refuses a draft that appears before paste", async () => {
+  const h = realLease();
+  try {
+    h.p.onCapture = (n) => { if (n === 1) h.p.composer = "keep going"; };
+    await h.check();
+    assert.equal(h.p.pastes, 0);
+    assert.equal(h.p.enters, 0);
+    assert.equal(h.payload("api_stall_nudge_refused")?.detail, "turn_active");
+    assert.equal(h.det.getApiStallStatus(1).state, "stall_pending");
+  } finally {
+    h.close();
+  }
+});
+
+test("stale active hook refuses a quoted error that replaces the current stall", async () => {
+  const h = realLease();
+  try {
+    h.p.onCapture = (n) => {
+      if (n === 1) {
+        h.p.history = ["⏺ Noted the earlier line was quoted: API Error: Server error mid-response."];
+      }
+    };
+    await h.check();
+    assert.equal(h.p.pastes, 0);
+    assert.equal(h.p.enters, 0);
+    assert.match(h.payload("api_stall_nudge_refused")?.detail ?? "", /^stall_changed:/);
+  } finally {
+    h.close();
+  }
+});
+
+test("stale active hook: an uncertain Enter is not repeated", async () => {
+  const h = realLease({ ackLoss: true });
+  try {
+    await h.check();
+    assert.equal(h.p.pastes, 1);
+    assert.equal(h.p.enters, 1);
+    assert.ok(h.types().includes("api_stall_nudge_uncertain"));
+    h.p.ackLoss = false;
+    h.p.composer = "";
+    await h.check();
+    await h.check();
+    assert.equal(h.p.pastes, 1, "uncertain delivery consumes the episode");
+    assert.equal(h.p.enters, 1);
+  } finally {
+    h.close();
+  }
+});
+
+test("indeterminate hook is not the missing-Stop exception", async () => {
+  const h = realLease({}, "indeterminate");
+  try {
+    await h.check();
+    assert.equal(h.p.pastes, 0);
+    assert.equal(h.p.enters, 0);
+    assert.ok(h.types().includes("api_stall_nudge_refused"));
+    assert.equal(h.db.getSlot(1)?.active_turn_state, "indeterminate");
+  } finally {
+    h.close();
+  }
 });

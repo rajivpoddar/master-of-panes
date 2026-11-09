@@ -2907,6 +2907,7 @@ export class MoPDatabase {
     // that complete critical section so a stale nudge cannot overtake it.
     ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
     allowActiveTurn = false,
+    verifiedStallTermination = false,
   ): boolean {
     return this.claimNativeReleaseIntentWithToken(
       slot,
@@ -2914,6 +2915,7 @@ export class MoPDatabase {
       expectedTupleInput,
       ttlMs,
       allowActiveTurn,
+      verifiedStallTermination,
     ) !== null;
   }
 
@@ -2924,6 +2926,7 @@ export class MoPDatabase {
     expectedTupleInput: AssignmentTupleInput,
     ttlMs = NATIVE_RELEASE_INTENT_TTL_MS,
     allowActiveTurn = false,
+    verifiedStallTermination = false,
   ): string | null {
     const expectedTuple = normalizeAssignmentTuple(expectedTupleInput);
     if (!Number.isInteger(slot) || !Number.isInteger(expectedEpoch) || !expectedTuple) return null;
@@ -2931,12 +2934,17 @@ export class MoPDatabase {
     const key = `native_release_intent_${slot}`;
     return this.db.transaction((): string | null => {
       const current = this.getSlot(slot);
+      // One missing-Stop stall: the hook is exactly "active" because Stop never
+      // ran. Indeterminate and every other non-inactive state stay refused.
+      // This is not a general active-turn allowance.
+      const verifiedStaleActive = verifiedStallTermination && current?.active_turn_state === "active";
+      const turnOpen = allowActiveTurn || verifiedStaleActive;
       if (
         !current
         || !current.occupied
         || current.assignment_epoch !== expectedEpoch
-        || (!allowActiveTurn && current.active_turn_id !== null)
-        || (!allowActiveTurn && current.active_turn_state !== "inactive")
+        || (!turnOpen && current.active_turn_id !== null)
+        || (!turnOpen && current.active_turn_state !== "inactive")
         || !assignmentTupleMatches(slotAssignmentTuple(current), expectedTuple)
       ) return null;
 
