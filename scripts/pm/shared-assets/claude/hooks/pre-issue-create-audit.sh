@@ -151,7 +151,13 @@ TITLE_DIGEST=$(sha256_of "${TITLE:-}")
 # ---------------------------------------------------------------------------
 # Slack thread / channel extraction
 # ---------------------------------------------------------------------------
-THREAD_TS=$(printf '%s' "$BODY_OR_CMD" | grep -oE '[0-9]{10}\.[0-9]{6}' | head -1 || true)
+# A Slack permalink's thread_ts identifies the root; its message timestamp (or
+# an earlier timestamp in the prose) may instead identify a reply. Resolve the
+# root before looking up permits, classifying origin, or creating obligations.
+THREAD_TS=$(printf '%s' "$BODY_OR_CMD" | perl -ne 'if (m{https?://[^\s<>]*slack\.com/archives/[CD][A-Z0-9]{10}/p[0-9]{16}\?[^\s<>]*\bthread_ts=([0-9]{10}\.[0-9]{6})(?:[&\s)>]|$)}) { print $1; exit }' || true)
+if [ -z "$THREAD_TS" ]; then
+  THREAD_TS=$(printf '%s' "$BODY_OR_CMD" | grep -oE '[0-9]{10}\.[0-9]{6}' | head -1 || true)
+fi
 # p-form Slack permalink (.../p<10 digits><6 digits>) carries the same ts
 # without the dot (e.g. p1787047674584719 == 1787047674.584719). Resolve it to
 # the identical dotted identity so the permit gate, latch invalidation,

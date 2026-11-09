@@ -22,6 +22,7 @@ ledger, GitHub, Slack and the installed hooks are never touched.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -328,6 +329,31 @@ def test_customer_channel_source_still_classifies_after_the_boilerplate_fix(tmp_
     message = _decision(out)["message"]
     assert "Customer-origin" in message and "explore-issue" in message
     assert "customer source channel" in message
+
+
+@pytest.mark.parametrize("source_root,allowed", [("1794207884.242379", True), ("1794207885.242379", False)])
+def test_reply_timestamp_uses_root_permit_not_unrelated_root(tmp_path, source_root, allowed):
+    env = dict(_env(tmp_path), EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX="^C0AGWPQFKHA$")
+    title = "customer bug report"
+    root_digits = source_root.replace(".", "")
+    text = (VALID_BODY + "\nReporter reply: 1794208507.857479\n"
+            + f"Source: https://scribiers.slack.com/archives/C0AGWPQFKHA/p{root_digits}?thread_ts={source_root}&cid=C0AGWPQFKHA\n")
+    body = _body(tmp_path, "reply.md", text)
+    permit_dir = tmp_path / "permit"
+    permit_dir.mkdir()
+    digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
+    (permit_dir / "C0AGWPQFKHA__1794207884_242379.permit.json").write_text(json.dumps({
+        "channel": "C0AGWPQFKHA", "thread_ts": "1794207884.242379",
+        "body_sha256": digest(text.rstrip("\n")), "title_digest": digest(title),
+    }))
+    rc, out = _run(AUDIT_HOOK, _create_cmd(str(body), title=title), env)
+    assert rc == 0
+    if allowed:
+        assert out == ""
+        assert not list(permit_dir.glob("*.json"))
+    else:
+        assert "Customer-origin" in _decision(out)["message"]
+        assert list(permit_dir.glob("*.json"))
 
 
 def test_non_internal_originator_still_classifies_without_any_prose(tmp_path):
