@@ -411,11 +411,8 @@ test("a consumed custody row from before restart sends nothing", async () => {
 
 /** Composer box whose continuation lines are indented past ❯, as Ink paints them. */
 function indentedQuote(logical: string): string {
-  const visual = logical.split("\n").flatMap((line) => {
-    if (line.startsWith("> Heads up") && line.length > 24) return [line.slice(0, 24), line.slice(24)];
-    return [line];
-  });
-  const body = visual
+  const body = logical
+    .split("\n")
     .map((line, index) => (index === 0 ? `❯ ${line}` : line === "" ? "" : `  ${line}`))
     .join("\n");
   return ["quoted into the prompt", RULE, body, RULE, "   Dhruva PM", ""].join("\n");
@@ -502,9 +499,31 @@ test("an internal whitespace edit is not submitted before the suffix or after it
   assert.equal(enters, 0);
 });
 
+test("a newline inserted inside side is not submitted", async () => {
+  const broken = QUOTE.replace("side agent:", "si\nde agent:");
+  assert.notEqual(broken, QUOTE);
+  assert.equal(composerMatchesLogical(composerFrame(indentedQuote(broken))?.composer, QUOTE), false);
+  let phase: "top" | "sub" | "quote" = "top";
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    return indentedQuote(broken);
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+  };
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "quote_not_owned");
+  assert.equal(result.enterPresses, 0);
+  assert.deepEqual(box.keys, ["1", "2"]);
+  assert.equal(box.enters(), 0);
+});
+
 test("a second inserted break is not submitted before the suffix or after it settles", async () => {
-  // The Heads-up line still takes the one demonstrated wrap. This break is a
-  // second one, inside the prefix, and must not be joined away.
+  // Capture joins real terminal wraps. This break remains in the quote and
+  // must not be joined away.
   const broken = QUOTE.replace("side agent", "side\nagent");
   assert.notEqual(broken, QUOTE);
   assert.equal(composerMatchesLogical(composerFrame(indentedQuote(broken))?.composer, QUOTE), false);

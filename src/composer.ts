@@ -163,51 +163,16 @@ export function logicalComposerText(composer: string): string {
 
 /**
  * True when the captured composer is this logical payload. The only tolerated
- * renderer artifacts are the fixed two-column prompt indent on continuation
- * lines and one soft-wrap newline between two non-newline characters. After those,
- * the quote must match exactly: a second inserted break, an internal whitespace
- * or token-boundary edit, a missing logical character, or an indent that is not
- * the uniform continuation indent does not match.
+ * renderer artifact is the fixed two-column prompt indent on continuation
+ * lines. Capture already joins terminal wraps (`tmux -J`), so any remaining
+ * newline is unexplained and does not match: the quote is left for manual
+ * handling. An internal whitespace or token-boundary edit, a missing logical
+ * character, or an indent that is not the uniform continuation indent does
+ * not match either.
  */
 export function composerMatchesLogical(composer: string | null | undefined, logical: string): boolean {
   if (composer == null) return false;
-  return softWrapJoinEquals(logicalComposerText(composer), logical);
-}
-
-/**
- * True when `captured` is `logical` plus the one demonstrated soft wrap.
- * That wrap is a single extra newline between two non-newline characters.
- * It never replaces a space, joins a token boundary, or inserts a blank line.
- * A second extra newline is an ambiguous manual or internal break, not another
- * wrap, so the quote does not match. Every other character stays exact.
- */
-function softWrapJoinEquals(captured: string, logical: string): boolean {
-  let i = 0;
-  let j = 0;
-  let wrapped = false;
-  while (i < captured.length && j < logical.length) {
-    if (captured[i] === logical[j]) {
-      i++;
-      j++;
-      continue;
-    }
-    const next = captured[i + 1];
-    const prev = i > 0 ? captured[i - 1] : "";
-    if (
-      !wrapped &&
-      captured[i] === "\n" &&
-      logical[j] !== "\n" &&
-      prev !== "\n" &&
-      next !== undefined &&
-      next !== "\n"
-    ) {
-      wrapped = true;
-      i++;
-      continue;
-    }
-    return false;
-  }
-  return i === captured.length && j === logical.length;
+  return logicalComposerText(composer) === logical;
 }
 
 /**
