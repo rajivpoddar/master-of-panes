@@ -1987,7 +1987,10 @@ export class TmuxRelay {
       const trackedExit = command === "/exit" && !!opts.exitEpisode;
       if (trackedExit && !opts.exitOwnerPin) return { outcome: "refused_pre_effect", reason: "stop_owner_required", paneId };
       if (trackedExit && (!exitProcess || !this.db)) return { outcome: "refused_pre_effect", reason: "claude_process_unknown", paneId };
-      if (trackedExit && previous && (previous.originalProcess !== exitProcess || previous.phase !== "blocked" || previous.attemptCount >= 2
+      if (trackedExit && previous && (previous.originalProcess !== exitProcess
+          || previous.sessionId !== this.db?.latestSessionId(slotNum)
+          || previous.assignmentEpoch !== (this.db?.getSlot(slotNum)?.assignment_epoch ?? 0)
+          || previous.phase !== "blocked" || previous.attemptCount >= 2
           || previous.blockedReason !== "background_agents" || previous.stopEventId === (this.db?.getEvents(slotNum, 1, "Stop")[0]?.id ?? null))) {
         return { outcome: "refused_pre_effect", reason: "exit_attempt_already_owned", paneId };
       }

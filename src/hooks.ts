@@ -1485,7 +1485,7 @@ export class HookProcessor {
     // Slot 0 has no slot-table row. Consume before any await so duplicate Stops
     // cannot send a second /exit; never consult stale tracked-tool accounting.
     const exitStatus = this.db.getExitStatus();
-    if (slotNum === 0 && exitStatus.pending && exitStatus.pm_only) {
+    if (slotNum === 0 && exitStatus.pending && !exitStatus.dev_only) {
       if (exitStatus.cycled[0] || this.db.hasExitAttemptSubmitted(0)) return {};
       const boot = this.db.getEvents(0, 1, "SessionStart")[0];
       let currentSession: unknown;
@@ -1507,7 +1507,10 @@ export class HookProcessor {
       const readiness = handoffRequired ? pmExitHandoffReadiness(this.db, {
         ops: this.pmExitHandoffOps, files: this.pmExitHandoffFiles,
       }) : null;
-      const fire = pin.selected && !this.db.hasPendingClear(0) && (!readiness || readiness.kind === "ready");
+      const previousAttempt = this.db.getExitAttempt(0);
+      const retryAtThisStop = previousAttempt?.phase === "blocked" && previousAttempt.blockedReason === "background_agents"
+        && previousAttempt.attemptCount < 2 && previousAttempt.sessionId === currentSession;
+      const fire = (!exitStatus.pm_only || pin.selected || retryAtThisStop) && !this.db.hasPendingClear(0) && (!readiness || readiness.kind === "ready");
       if (!fire) {
         if (handoffRequired && this.pmExitHandoffOps && !this.db.getConfig(PM_EXIT_HANDOFF_OBLIGATION_KEY)) {
           void ensurePmExitHandoffObligation(this.db, this.pmExitHandoffOps).catch(() => null);
@@ -1517,12 +1520,11 @@ export class HookProcessor {
         this.db.setConfig(PM_EXIT_CONSUMED_EPISODE_KEY, exitStatus.episode ?? "");
         const exitOwnerPin = exitStopOwner;
         if (!exitOwnerPin) return {};
-        // Paste and Enter fences: only a cancelled/replaced episode refuses.
-        // No Escape/C-u (they would interrupt a busy turn) and no idle check:
-        // the PM pane is busy at its own Stop and Claude Code queues /exit.
+        // The consumed Stop, session and input generation own both effects.
+        // Never clear a foreign composer or interrupt a busy PM turn.
         const fence = () => {
           const current = this.db.getExitStatus();
-          return !current.pending || !current.pm_only || current.episode !== exitStatus.episode ? "exit_pending_cancelled" : null;
+          return !current.pending || current.pm_only !== exitStatus.pm_only || current.dev_only || current.episode !== exitStatus.episode ? "exit_pending_cancelled" : null;
         };
         const observed = await this.relay.observeSlotPane(0);
         const delivery = observed ? await this.relay.deliverGuardedToSlot(0, "/exit", {

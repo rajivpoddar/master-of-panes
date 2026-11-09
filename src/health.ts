@@ -631,6 +631,9 @@ export class ProcessHealthChecker {
     let shell = await this.waitForPMShellPrompt(trigger === "unresponsive" ? 0 : this.PM_EXIT_SHELL_TIMEOUT_MS);
     if (shell && shell.paneId !== pin.paneId) return fail("pane_identity_changed");
     if (!shell) {
+      // /exit is graceful only. A blocked dialog or background agent must
+      // never turn a timeout into respawn-pane -k, even at an idle prompt.
+      if (trigger === "exit") return fail("exit_blocked_shell_not_observed_no_force");
       const command = await this.getPaneCommand(0);
       if (!command) return fail("shell_prompt_timeout_pane_unknown");
       const agentAlive = this.isAgentCommand(0, command);

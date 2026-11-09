@@ -254,3 +254,34 @@ test("after 60 seconds same process reports an honest unknown block, never succe
     assert.equal(h.db.getEvents(1, 1, "exit_blocked").length, 1);
   } finally { h.db.close(); }
 });
+
+test("all-pane episodes include PM at its genuine Stop, without an idle health send", async () => {
+  const h = harness(0, { afterStop: true });
+  try {
+    h.db.setExitPending(true, false, false);
+    await h.serverStop();
+    await h.finished;
+    assert.equal(h.pane.exitEnters, 1);
+    assert.equal(h.db.getExitStatus().cycled[0], false);
+    assert.equal(h.db.getExitAttempt(0)?.phase, "blocked");
+    assert.deepEqual(h.pane.keys, []);
+  } finally { h.db.close(); }
+});
+
+test("graceful PM /exit timeout never escalates to respawn-pane -k", async () => {
+  const h = harness(0);
+  const health = new ProcessHealthChecker(h.db, h.relay) as any;
+  let kills = 0;
+  health.runShell = async (command: string) => {
+    if (command.includes("respawn-pane")) { kills++; throw new Error("must never kill blocked PM"); }
+    return h.shell(command);
+  };
+  health.pmAgentProcess = async () => "100:200";
+  health.waitForPMShellPrompt = async () => null;
+  try {
+    const result = await health.runPMFreshRestart("exit", h.episode);
+    assert.equal(result.success, false);
+    assert.equal(result.reason, "exit_blocked_shell_not_observed_no_force");
+    assert.equal(kills, 0);
+  } finally { h.db.close(); }
+});

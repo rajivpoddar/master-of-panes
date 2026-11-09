@@ -51,13 +51,13 @@ const PM_WORK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse"] as con
 export const PM_EXIT_HANDOFF_ACTION =
   "PM exit is pending (daily restart). 1) Save the PM handoff: update MEMORY-session-handoff-current.md "
   + "(~/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/memory/) and "
-  + "data/pm-continuation-note.md. 2) Stop ALL running background agents/tasks with TaskStop. "
+  + "data/pm-continuation-note.md. 2) Let running background agents/tasks finish or hand off; never kill them to force /exit. "
   + "3) End the turn. MoP sends /exit at the next PM Stop after the save (a busy pane queues it); "
   + "MoP waits for the zsh prompt, relaunches PM fresh with the configured model and injects the saved continuation "
   + "(daily 04:00: dev slots exit at their own next Stop in the same episode). Nothing is blocked meanwhile.";
 
 export const PM_HANDOFF_EXIT_VARIANT: HandoffObligationVariant = {
-  title: "Save PM handoff and stop subagents before MoP sends /exit",
+  title: "Save PM handoff and let background work finish before /exit",
   action: PM_EXIT_HANDOFF_ACTION,
   dedupeGroup: "pm_save_handoff:pm:exit",
   actionFor: (evidence) => evidence.variant === "exit_refused" ? pmExitRefusedAction(evidence) : PM_EXIT_HANDOFF_ACTION,
