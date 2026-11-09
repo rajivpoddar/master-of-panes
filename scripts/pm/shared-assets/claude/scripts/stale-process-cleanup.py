@@ -2201,16 +2201,21 @@ def cp_select(table, panes, uid, pr_states, protected=()):
     for pid in sorted(members):
         row = table[pid]
         state, chain = cp_ancestry(pid, table, panes)
-        linked = next((pr_states[p] for p in chain if p in pr_states and pr_states[p].get('state') in ('OPEN', 'CLOSED', 'MERGED')), {})
+        links = [pr_states[p] for p in chain if p in pr_states]
+        # Any affirmative OPEN link wins, including conflicting ancestor links.
+        linked = next((link for link in links if link.get('state') == 'OPEN'),
+                      next((link for link in links if link.get('state') in ('CLOSED', 'MERGED')), {}))
         desktop = any(re.search(r'/Applications/(?:ChatGPT|Codex)\.app/Contents/MacOS/|Codex Framework', table[p]['command']) for p in chain)
         if pid in protected or pid in panes or desktop:
             reason, action = 'protected_session', 'keep'
+        elif linked.get('state') == 'OPEN':
+            reason, action = 'open_pr', 'keep'
         elif state == 'SKIPPED_UNREADABLE':
             reason, action = state, 'skip'
-        elif linked.get('state') in ('CLOSED', 'MERGED'):
-            reason, action = 'closed_pr', 'reap'
         elif state == 'live_pane':
             reason, action = 'live_pane', 'keep'
+        elif links and all(link.get('state') in ('CLOSED', 'MERGED') for link in links):
+            reason, action = 'closed_pr', 'reap'
         else:
             reason, action = 'orphan', 'reap'
         result.append({**row, 'action': action, 'reason': reason, 'linkage': linked, 'ancestry': chain})
@@ -2234,28 +2239,58 @@ def cp_live_panes(helper):
 
 
 def cp_linkage(row, helper, cache):
-    cwd = helper.get_cwd(row['pid'])
+    try:
+        cwd = helper.get_cwd(row['pid'])
+    except Exception:
+        cwd = None
     row['cwd'] = cwd
     args = shlex.split(row['command'])
-    explicit = None
+    targets = set()
     for i, arg in enumerate(args):
-        if arg in ('--pr', '--pr-number') and i + 1 < len(args) and args[i + 1].isdigit():
-            explicit = args[i + 1]
-        match = re.fullmatch(r'https://github.com/heydonna-app/heydonna-app/pull/(\d+)', arg)
+        if arg in ('--pr', '--pr-number', '--branch') and i + 1 < len(args):
+            targets.add(args[i + 1])
+        match = re.fullmatch(r'https://github.com/(?:heydonna-app|Scribie)/heydonna-app/pull/(\d+)', arg)
         if match:
-            explicit = match[1]
-    branch = next((args[i + 1] for i, arg in enumerate(args[:-1]) if arg == '--branch'), None)
-    if cwd and branch is None:
-        proc = cp_run(['git', '-C', cwd, 'symbolic-ref', '--quiet', '--short', 'HEAD'])
-        branch = proc.stdout.strip() if proc.returncode == 0 else None
-    target = explicit or branch
-    if not target:
-        return {'state': 'UNKNOWN'}
-    key = target
-    if key not in cache:
-        proc = cp_run(['gh', 'pr', 'view', target, '--repo', 'heydonna-app/heydonna-app', '--json', 'number,state,url'])
-        cache[key] = json.loads(proc.stdout) if proc.returncode == 0 else {'state': 'UNKNOWN', 'target': target}
-    return {**cache[key], 'branch': branch}
+            targets.add(match[1])
+    branch = None
+    ownership_readable = bool(cwd)
+    if cwd:
+        try:
+            proc = cp_run(['git', '-C', cwd, 'symbolic-ref', '--quiet', '--short', 'HEAD'])
+            branch = proc.stdout.strip() if proc.returncode == 0 else None
+            ownership_readable = bool(branch)
+            if branch:
+                targets.add(branch)
+        except Exception:
+            ownership_readable = False
+    links = []
+    for target in sorted(targets):
+        if target not in cache:
+            try:
+                if target.isdigit():
+                    proc = cp_run(['gh', 'pr', 'view', target, '--repo', 'heydonna-app/heydonna-app', '--json', 'number,state,url'])
+                    cache[target] = json.loads(proc.stdout) if proc.returncode == 0 else {'state': 'UNKNOWN', 'target': target}
+                else:
+                    proc = cp_run(['gh', 'pr', 'list', '--repo', 'heydonna-app/heydonna-app', '--head', target,
+                                   '--state', 'all', '--limit', '100', '--json', 'number,state,url'])
+                    found = json.loads(proc.stdout) if proc.returncode == 0 else None
+                    opened = next((link for link in (found or []) if link.get('state') == 'OPEN'), None)
+                    state = ('UNKNOWN' if found is None or len(found) >= 100 else
+                             'CLOSED' if found and all(link.get('state') in ('CLOSED', 'MERGED') for link in found) else
+                             'NONE' if not found else 'UNKNOWN')
+                    cache[target] = {**(opened or {'state': state}), 'target': target, 'links': found}
+            except Exception:
+                cache[target] = {'state': 'UNKNOWN', 'target': target}
+        value = cache[target]
+        links.append(value if isinstance(value, dict) else {'state': 'UNKNOWN', 'target': target})
+    # Never overwrite a positive OPEN with another link's failure or CLOSED state.
+    linked = next((link for link in links if link.get('state') == 'OPEN'), None)
+    if linked is None:
+        linked = (next((link for link in links if link.get('state') in ('CLOSED', 'MERGED')), {'state': 'NONE'})
+                  if links and all(link.get('state') in ('NONE', 'CLOSED', 'MERGED') for link in links)
+                  else {'state': 'UNKNOWN'})
+    return {**linked, 'branch': branch, 'links': links, 'cwd': cwd,
+            'readable': ownership_readable and bool(links) and all(link.get('state') in ('NONE', 'OPEN', 'CLOSED', 'MERGED') for link in links)}
 
 
 def cp_check(helper, apply=False, grace=2):
@@ -2285,33 +2320,72 @@ def cp_check(helper, apply=False, grace=2):
     for row in rows:
         row['cwd'] = row.get('cwd') or helper.get_cwd(row['pid'])
     attempts, refused = [], []
-    # Containment: companion selections are report-only pending CTO REVISE fixes.
-    for sig in ():
-        fresh = helper.codex_broker_table()
-        try:
-            current_panes = cp_live_panes(helper)
-        except Exception:
-            refused.append({'reason': 'SKIPPED_UNREADABLE'})
-            break
-        if fresh is None:
-            refused.append({'reason': 'SKIPPED_UNREADABLE'})
-            break
-        eligible = {r['pid']: r for r in cp_select(fresh, current_panes, os.getuid(), states, protected)}
+    identity_keys = ('start_time', 'command', 'uid', 'ppid')
+    def identity(snapshot, chain):
+        return [(p, tuple(snapshot[p][k] for k in identity_keys)) for p in chain]
+
+    def tree_identity(snapshot, original_chain):
+        root = next(p for p in reversed(original_chain) if p in states)
+        members = {root}
+        while True:
+            added = {p for p, process in snapshot.items() if process['ppid'] in members} - members
+            if not added:
+                break
+            members.update(added)
+        return identity(snapshot, sorted(members))
+
+    for sig in (signal.SIGTERM, signal.SIGKILL) if apply else ():
         for row in reversed(rows):
             pid = row['pid']
-            if row['action'] != 'reap' or pid not in fresh:
-                continue
-            current = fresh[pid]
-            if any(current[k] != row[k] for k in ('start_time', 'command', 'uid', 'ppid')) or eligible.get(pid, {}).get('action') != 'reap':
-                refused.append({'pid': pid, 'reason': 'identity_or_ownership_changed'})
+            if row['action'] != 'reap':
                 continue
             try:
+                # All blocking slot/tmux/PR probes are repeated per target/signal.
+                current_panes = cp_live_panes(helper)
+                probe = helper.codex_broker_table()
+                if probe is None:
+                    raise RuntimeError('SKIPPED_UNREADABLE')
+                probe_state, probe_chain = cp_ancestry(pid, probe, current_panes)
+                if probe_state == 'SKIPPED_UNREADABLE':
+                    raise RuntimeError('SKIPPED_UNREADABLE')
+                if (probe_chain != row['ancestry'] or identity(probe, probe_chain) != identity(table, row['ancestry'])
+                        or tree_identity(probe, row['ancestry']) != tree_identity(table, row['ancestry'])):
+                    raise RuntimeError('identity_or_ownership_changed')
+                fresh_states = {}
+                for ancestor in probe_chain:
+                    if ancestor in states or cp_companion(probe[ancestor]['command']):
+                        link = cp_linkage(probe[ancestor], helper, {})
+                        if link.get('state') not in ('NONE', 'OPEN', 'CLOSED', 'MERGED') or not link.get('readable'):
+                            raise RuntimeError('SKIPPED_UNREADABLE')
+                        fresh_states[ancestor] = link
+                if fresh_states != {p: states[p] for p in probe_chain if p in states}:
+                    raise RuntimeError('identity_or_ownership_changed')
+                eligible = {r['pid']: r for r in cp_select(probe, current_panes, os.getuid(), fresh_states, protected)}
+                if eligible.get(pid, {}).get('action') != 'reap':
+                    raise RuntimeError('identity_or_ownership_changed')
+                for ancestor, link in fresh_states.items():
+                    if not link.get('cwd') or helper.get_cwd(ancestor) != link['cwd']:
+                        raise RuntimeError('identity_or_ownership_changed')
+                # PR/git probes can block too. Re-read the entire original chain
+                # AFTER them, immediately before this one signal (never a batch).
+                final = helper.codex_broker_table()
+                if final is None:
+                    raise RuntimeError('SKIPPED_UNREADABLE')
+                final_state, final_chain = cp_ancestry(pid, final, current_panes)
+                if final_state == 'SKIPPED_UNREADABLE':
+                    raise RuntimeError('SKIPPED_UNREADABLE')
+                if (final_chain != row['ancestry'] or identity(final, final_chain) != identity(table, row['ancestry'])
+                        or tree_identity(final, row['ancestry']) != tree_identity(table, row['ancestry'])):
+                    raise RuntimeError('identity_or_ownership_changed')
                 os.kill(pid, sig)
                 attempts.append({'pid': pid, 'signal': sig.name})
             except ProcessLookupError:
                 pass
             except PermissionError:
                 refused.append({'pid': pid, 'reason': 'permission_denied'})
+            except Exception as exc:
+                reason = str(exc) if str(exc) in ('SKIPPED_UNREADABLE', 'identity_or_ownership_changed') else 'SKIPPED_UNREADABLE'
+                refused.append({'pid': pid, 'reason': reason, 'signal': sig.name})
         if sig == signal.SIGTERM:
             time.sleep(max(0, grace))
     after = helper.codex_broker_table() if apply else table
