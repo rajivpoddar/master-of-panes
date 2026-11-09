@@ -106,6 +106,28 @@ export function composerText(snapshot: string | null | undefined): string | null
  */
 export const YSK_NOTICE_PROCESS_SUFFIX = "\n\nprocess this";
 
+/**
+ * First line Choice 2 inserts. Rajiv, DM D0AMF0XE6TS thread 1794143890.463219,
+ * ts 1794203645.732629: "just match here's a note offered by the side agent".
+ * The delivery path compares this line only, not the wrapped body.
+ */
+export const YSK_SIDE_AGENT_HEADER = "Here is a note offered by a side agent:";
+
+/**
+ * True when the first non-empty composer line is exactly the side-agent header.
+ * Tolerates the ❯ prompt, a following nbsp, and blank lines above the header.
+ * Text before that header is a human draft and must not match.
+ */
+export function composerStartsWithSideAgentHeader(composer: string | null | undefined): boolean {
+  if (composer == null) return false;
+  for (const line of composer.split("\n")) {
+    const trimmed = line.replace(/^\s*❯[\s ]*/, "").trim();
+    if (!trimmed) continue;
+    return trimmed === YSK_SIDE_AGENT_HEADER;
+  }
+  return false;
+}
+
 export type YskNoticeAppend = { verifiedQuote: string };
 
 /**
@@ -669,11 +691,11 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
   let payloadStable: boolean | null = false;
   for (;;) {
     let composer: string | null;
-    let width: number | null = null;
     if (noticeAppendOk) {
       const observed = deps.observeComposer ? await deps.observeComposer() : null;
-      composer = observed ? composerText(observed.text) : null;
-      width = observed?.width ?? null;
+      // A width mismatch used to discard the capture. The header check does not
+      // use width; fall back to a plain capture so a resize cannot block Enter.
+      composer = composerText(observed ? observed.text : await deps.capture());
     } else {
       composer = composerText(await deps.capture());
     }
@@ -681,8 +703,10 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
       payloadStable = null;
       break;
     }
+    // Notice delivery matches the header line only (Rajiv ts 1794203645.732629).
+    // Width and re-wrap are not consulted; a human line before the header misses.
     payloadSeen = noticeAppendOk
-      ? composerMatchesLogical(composer, payload, width) && !/\[Pasted text/i.test(composer)
+      ? composerStartsWithSideAgentHeader(composer) && !/\[Pasted text/i.test(composer)
       : composerHoldsPayload(composer, payload)
         || composerShowsNewPastePlaceholder(composer, deps.prePasteComposer);
     if (payloadSeen) {

@@ -6,6 +6,7 @@ import {
   YSK_NOTICE_PROCESS_SUFFIX,
   composerFrame,
   composerMatchesLogical,
+  composerStartsWithSideAgentHeader,
   renderWrappedComposer,
   submitWithComposerCheck,
   yskNoticeAppendException,
@@ -858,7 +859,10 @@ test("the notice server path claims through custody and does not gate PM input",
   assert.match(server, /joinWrapped \? "-J -p"/);
   assert.match(notice, /prior\?\.retryable && pin\.activity !== "idle"/);
   assert.match(notice, /YSK_NOTICE_PROCESS_SUFFIX/);
-  assert.match(notice, /quoteOwned\(ownedQuote\)/);
+  assert.match(notice, /headerOwned\(\)/);
+  assert.doesNotMatch(notice, /composerMatchesLogical/);
+  assert.match(server, /pressClearLine/);
+  assert.match(server, /enqueuePendingPMEvent/);
   assert.doesNotMatch(server, /UserPromptSubmit/);
 });
 
@@ -900,4 +904,107 @@ test("foreign sensitive abort capture never reaches custody or events", async ()
     assert.ok(!JSON.stringify(db.getEvents(0)).includes(sentinel));
     assert.ok(!JSON.stringify(result).includes(sentinel));
   } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+/** Composer text from the 05:44Z PM pane (screenshot ts 1794203185). No "process this" suffix. */
+const REAL_QUOTE = [
+  "Here is a note offered by a side agent:",
+  "",
+  "> Heads up · We told Abi the 66 RL files still showing the double space will fix themselves on their next save, but that save-time repair (#13237) isn't built yet.",
+  ">",
+  "> **Abi was told a pending fix already heals files**",
+  "> - In Abi's thread we said 66 RL transcripts still carry the extra space after the opening period. We said those files repair themselves the next time someone opens and saves them.",
+  "> - That self-repair is a separate fix, **#13237**. It isn't built or merged yet. The producer fix only stops new files getting the problem, and it's #13236, now PR #13295.",
+  "> - If reporters save those files before #13237 ships, nothing changes, and Abi may think the fix failed.",
+  "> - **Consider telling Abi** that the repair-on-save part is still coming, or getting #13237 scheduled alongside the Tue 10 merge.",
+].join("\n");
+
+test("the 05:44Z multi-paragraph quote submits from the header alone", async () => {
+  const captured = composerFrame(pane(["quoted into the prompt"], REAL_QUOTE))?.composer;
+  assert.equal(composerStartsWithSideAgentHeader(captured), true);
+  assert.equal(composerMatchesLogical(captured, REAL_QUOTE, PANE_WIDTH), false);
+  assert.equal(composerMatchesLogical(captured, QUOTE, PANE_WIDTH), false);
+  let phase: "top" | "sub" | "quote" | "done" = "top";
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    if (phase === "quote") return pane(["quoted into the prompt"], REAL_QUOTE);
+    return pane(["sent"], "");
+  }, async () => ({ ok: true, pin: { ...PIN, activity: "active" } }));
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+  };
+  box.deps.pressEnter = async () => {
+    phase = "done";
+  };
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.outcome, "submitted");
+  assert.equal(result.reason, "process_this_notice");
+  assert.equal(result.enterPresses, 1);
+  assert.deepEqual(box.keys, ["1", "2", YSK_NOTICE_PROCESS_SUFFIX]);
+});
+
+test("human text before the side-agent header is not submitted or cleared", async () => {
+  const human = `please hold this draft\n\n${REAL_QUOTE}`;
+  assert.equal(composerStartsWithSideAgentHeader(human), false);
+  assert.equal(composerStartsWithSideAgentHeader(REAL_QUOTE), true);
+  let phase: "top" | "sub" | "human" = "top";
+  let clears = 0;
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    return pane(["quoted into the prompt"], human);
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "human";
+  };
+  box.deps.pressClearLine = async () => {
+    clears += 1;
+  };
+  const queued: string[] = [];
+  box.deps.queueUndelivered = (text) => queued.push(text);
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "quote_not_owned");
+  assert.equal(result.enterPresses, 0);
+  assert.equal(box.enters(), 0);
+  assert.equal(clears, 0);
+  assert.deepEqual(queued, []);
+  assert.deepEqual(box.keys, ["1", "2"]);
+});
+
+test("a verified paste that does not submit is cleared and queued", async () => {
+  let phase: "top" | "sub" | "quote" | "empty" = "top";
+  let clears = 0;
+  const queued: string[] = [];
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    if (phase === "empty") return pane(["cleared"], "");
+    return pane(["quoted into the prompt"], REAL_QUOTE);
+  });
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+  };
+  box.deps.pressEnter = async () => {
+    /* Enter was swallowed; the verified paste stays */
+  };
+  box.deps.pressClearLine = async () => {
+    clears += 1;
+    phase = "empty";
+  };
+  box.deps.queueUndelivered = (text) => queued.push(text);
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "heads_up_undelivered");
+  assert.equal(result.enterPresses, 1);
+  assert.equal(box.enters(), 1);
+  assert.equal(clears, 1);
+  assert.equal(queued.length, 1);
+  assert.match(queued[0], /process this$/);
+  assert.equal([...box.rows.values()][0], "ambiguous");
 });
