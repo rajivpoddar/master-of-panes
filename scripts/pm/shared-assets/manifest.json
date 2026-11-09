@@ -168,7 +168,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "063a30540371f4fd8101a0a5ded1f81310c1a320f270d53a22d04b83b1252d5e",
+      "sha256": "77b0ac1a7ab6eb88fc447bd70546e95b512c87123ea1f2f6d5f03b20e5c73ce1",
       "source_path": "claude/hooks/pre-issue-create-audit.sh"
     },
     {

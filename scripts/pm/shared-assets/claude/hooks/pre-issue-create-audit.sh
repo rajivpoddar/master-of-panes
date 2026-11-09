@@ -151,39 +151,79 @@ TITLE_DIGEST=$(sha256_of "${TITLE:-}")
 # ---------------------------------------------------------------------------
 # Slack thread / channel extraction
 # ---------------------------------------------------------------------------
-# A Slack permalink's thread_ts identifies the root; its message timestamp (or
-# an earlier timestamp in the prose) may instead identify a reply. Resolve the
-# root before looking up permits, classifying origin, or creating obligations.
-THREAD_TS=$(printf '%s' "$BODY_OR_CMD" | perl -ne 'if (m{https?://[^\s<>]*slack\.com/archives/[CD][A-Z0-9]{10}/p[0-9]{16}\?[^\s<>]*\bthread_ts=([0-9]{10}\.[0-9]{6})(?:[&\s)>]|$)}) { print $1; exit }' || true)
-if [ -z "$THREAD_TS" ]; then
-  THREAD_TS=$(printf '%s' "$BODY_OR_CMD" | grep -oE '[0-9]{10}\.[0-9]{6}' | head -1 || true)
+# Only a labelled Source/handoff line can supply the pair. Never combine a
+# channel from one line with a timestamp from quoted, unrelated material.
+# A reply URL must be corroborated by Slack's thread response before use.
+SOURCE_RESULT=$(printf '%s' "$BODY_OR_CMD" | python3 -c '
+import json, os, re, subprocess, sys, urllib.parse
+body = sys.stdin.read()
+lines = re.findall(r"(?im)^\s*(?:[-*]\s*)?(?:source|handoff)\s*:\s*(.*?)\s*$", body)
+if not lines:
+    print("NONE")
+    sys.exit()
+if len(lines) != 1:
+    print("INVALID")
+    sys.exit()
+line = lines[0]
+pair = re.fullmatch(r"\s*([CD][A-Z0-9]{10}):([0-9]{10}\.[0-9]{6})\s*", line)
+if pair:
+    print(pair.group(1), pair.group(2))
+    sys.exit()
+url = re.fullmatch(r"\s*<?(https?://[^\s<>]+)>?\s*", line)
+if not url:
+    print("INVALID")
+    sys.exit()
+u = urllib.parse.urlsplit(url.group(1))
+m = re.fullmatch(r"/archives/([CD][A-Z0-9]{10})/p([0-9]{16})", u.path)
+q = urllib.parse.parse_qs(u.query)
+if not m or not (u.hostname or "").endswith(".slack.com") or len(q.get("thread_ts", [])) != 1:
+    print("INVALID")
+    sys.exit()
+channel, digits = m.groups()
+reply = digits[:10] + "." + digits[10:]
+root = q["thread_ts"][0]
+if not re.fullmatch(r"[0-9]{10}\.[0-9]{6}", root) or ("cid" in q and q["cid"] != [channel]):
+    print("INVALID")
+    sys.exit()
+cache = os.path.join(os.environ.get("EXPLORE_ISSUE_SLACK_CACHE_DIR", "/tmp/slack-thread-cache"), root + ".json")
+data = {}
+try:
+    with open(cache) as f: data = json.load(f)
+except (OSError, ValueError): pass
+def matches(d):
+    return d.get("ok") is True and any(x.get("ts") == reply and x.get("thread_ts", x.get("ts")) == root for x in d.get("messages", [])) and any(x.get("ts") == root for x in d.get("messages", []))
+# Cached results alone do not establish channel identity; only use a cache
+# explicitly tagged with the channel. Otherwise query Slack for this pair.
+if data.get("channel") != channel or not matches(data):
+    token = os.environ.get("SLACK_BOT_TOKEN", "")
+    if not token:
+        try:
+            with open(os.environ.get("EXPLORE_ISSUE_ENV_LOCAL", os.path.expanduser("~/Downloads/projects/heydonna-app/.env.local"))) as f:
+                for entry in f:
+                    if entry.startswith("SLACK_BOT_TOKEN="):
+                        token = entry.split("=", 1)[1].strip().strip("\"\047")
+                        break
+        except OSError: pass
+    if token:
+        args = urllib.parse.urlencode({"channel": channel, "ts": root, "limit": 1000})
+        try:
+            p = subprocess.run(["curl", "-s", "--max-time", "5", "-H", "Authorization: Bearer " + token, "https://slack.com/api/conversations.replies?" + args], capture_output=True, text=True, timeout=6)
+            data = json.loads(p.stdout)
+        except (OSError, ValueError, subprocess.TimeoutExpired): data = {}
+    else: data = {}
+if not matches(data):
+    print("INVALID")
+else:
+    print(channel, root)
+' || true)
+CHANNEL=""
+THREAD_TS=""
+if [ "$SOURCE_RESULT" = "INVALID" ] || [ -z "$SOURCE_RESULT" ]; then
+  printf '%s\n' '{"decision":"block","message":"BLOCKED: Source identity is missing, ambiguous, or its reply-to-root correspondence could not be verified. Provide one Source: CHANNEL:ROOT or a verified Source permalink. No permit was consumed and no obligation was written."}'
+  exit 0
 fi
-# p-form Slack permalink (.../p<10 digits><6 digits>) carries the same ts
-# without the dot (e.g. p1787047674584719 == 1787047674.584719). Resolve it to
-# the identical dotted identity so the permit gate, latch invalidation,
-# Slack-cache read, and obligation upsert key the same source regardless of
-# permalink form.
-if [ -z "$THREAD_TS" ]; then
-  PFORM_TS=$(printf '%s' "$BODY_OR_CMD" | grep -oE '/p[0-9]{16}' | head -1 || true)
-  if [ -n "$PFORM_TS" ]; then
-    PFORM_DIGITS=${PFORM_TS#/p}
-    PFORM_DIGITS=${PFORM_DIGITS#/}
-    THREAD_TS="${PFORM_DIGITS:0:10}.${PFORM_DIGITS:10:6}"
-  fi
-fi
-
-# Slack channel ids are C… (public/private) or D… (DM, e.g. Rajiv's D0AMF0XE6TS);
-# both are 11 chars. Without D, DM-sourced intakes fell back to C0AGWPQFKHA and
-# missed their correctly minted permit (2026-10-26, account dropdown + upload overlay).
-CHANNEL=$(printf '%s' "$BODY_OR_CMD" | grep -oE '\b[CD][A-Z0-9]{10}\b' | head -1 || true)
-if [ -z "$CHANNEL" ]; then
-  if printf '%s' "$BODY_OR_CMD" | grep -qE 'heydonna-dev'; then
-    CHANNEL="C0ALZJHGE49"
-  elif printf '%s' "$BODY_OR_CMD" | grep -qE 'heydonna-pm'; then
-    CHANNEL="C0AGWPQFKHA"
-  else
-    CHANNEL="C0AGWPQFKHA"
-  fi
+if [ "$SOURCE_RESULT" != "NONE" ]; then
+  read -r CHANNEL THREAD_TS <<< "$SOURCE_RESULT"
 fi
 
 # ---------------------------------------------------------------------------

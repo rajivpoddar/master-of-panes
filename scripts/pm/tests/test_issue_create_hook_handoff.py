@@ -185,12 +185,8 @@ def test_customer_origin_with_marker_still_requires_the_explore_issue_permit(tmp
     rc, out = _run(AUDIT_HOOK, cmd, env)
     assert rc == 0
     message = _decision(out)["message"]
-    assert "Customer-origin" in message and "explore-issue" in message
-    # The marker never releases a customer-origin create: whether the refusal
-    # comes from the resolvable-thread branch ("audit-bypass marker is NOT
-    # accepted for customer-origin") or the empty-thread branch, the caller is
-    # told to run Skill(explore-issue) and mint the one-use permit.
-    assert "permit" in message
+    assert "Source identity" in message
+    assert "No permit was consumed" in message
 
 
 def test_unreadable_body_file_gets_one_typed_remedy_from_the_audit_hook(tmp_path):
@@ -335,9 +331,14 @@ def test_customer_channel_source_still_classifies_after_the_boilerplate_fix(tmp_
 def test_reply_timestamp_uses_root_permit_not_unrelated_root(tmp_path, source_root, allowed):
     env = dict(_env(tmp_path), EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX="^C0AGWPQFKHA$")
     title = "customer bug report"
-    root_digits = source_root.replace(".", "")
-    text = (VALID_BODY + "\nReporter reply: 1794208507.857479\n"
-            + f"Source: https://scribiers.slack.com/archives/C0AGWPQFKHA/p{root_digits}?thread_ts={source_root}&cid=C0AGWPQFKHA\n")
+    reply = "1794208507.857479"
+    text = (VALID_BODY + f"\nReporter reply: {reply}\n"
+            + f"Source: https://scribiers.slack.com/archives/C0AGWPQFKHA/p{reply.replace('.', '')}?thread_ts={source_root}&cid=C0AGWPQFKHA\n")
+    cache = tmp_path / "slack"
+    cache.mkdir()
+    (cache / f"{source_root}.json").write_text(json.dumps({"ok": True, "channel": "C0AGWPQFKHA", "messages": [
+        {"ts": source_root}, {"ts": reply, "thread_ts": source_root},
+    ]}))
     body = _body(tmp_path, "reply.md", text)
     permit_dir = tmp_path / "permit"
     permit_dir.mkdir()
@@ -356,11 +357,45 @@ def test_reply_timestamp_uses_root_permit_not_unrelated_root(tmp_path, source_ro
         assert list(permit_dir.glob("*.json"))
 
 
+def test_explicit_source_wins_over_unrelated_quoted_permalink(tmp_path):
+    env = dict(_env(tmp_path), EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX="^C0AGWPQFKHA$")
+    title = "customer bug report"
+    text = (VALID_BODY + "\nSource: C0AGWPQFKHA:1794207884.242379\n"
+            + "> unrelated: https://scribiers.slack.com/archives/C0AGWPQFKHA/p1794208507857479?thread_ts=1794207885.242379\n")
+    body = _body(tmp_path, "source.md", text)
+    permits = tmp_path / "permit"
+    permits.mkdir()
+    digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
+    (permits / "C0AGWPQFKHA__1794207884_242379.permit.json").write_text(json.dumps({
+        "channel": "C0AGWPQFKHA", "thread_ts": "1794207884.242379",
+        "body_sha256": digest(text.rstrip("\n")), "title_digest": digest(title),
+    }))
+    assert _run(AUDIT_HOOK, _create_cmd(str(body), title=title), env) == (0, "")
+    assert not list(permits.glob("*.json"))
+    assert not (tmp_path / "pm-ops-calls.log").exists()
+
+
+@pytest.mark.parametrize("source", ["Source: C0AGWPQFKHA", "Source: C0AGWPQFKHA:1794207884.242379\nSource: C0AGWPQFKHA:1794207885.242379", "Source: 1794207884.242379"])
+def test_unresolved_source_neither_consumes_permit_nor_upserts(tmp_path, source):
+    env = dict(_env(tmp_path), EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX="^C0AGWPQFKHA$", EXPLORE_ISSUE_PM_OPS_CLI=str(tmp_path / "pm-ops-recorder.py"))
+    body = _body(tmp_path, "ambiguous.md", VALID_BODY + "\n" + source + "\n")
+    permits = tmp_path / "permit"
+    permits.mkdir()
+    permit = permits / "C0AGWPQFKHA__1794207884_242379.permit.json"
+    permit.write_text("{}")
+    rc, out = _run(AUDIT_HOOK, _create_cmd(str(body)), env)
+    assert rc == 0
+    assert "Source identity" in _decision(out)["message"]
+    assert permit.exists()
+    assert not (tmp_path / "pm-ops-calls.log").exists()
+    assert not (tmp_path / "state").exists()
+
+
 def test_non_internal_originator_still_classifies_without_any_prose(tmp_path):
     """Originator identity remains a real signal: a non-internal Slack user id
     in the cached thread still refuses even when the body says nothing."""
     env = _env(tmp_path)
-    body = _body(tmp_path, "body-userid.md", VALID_BODY + "\n<!-- audit-bypass: internal-followup -->\n\nSource: 1785932534.656769\n")
+    body = _body(tmp_path, "body-userid.md", VALID_BODY + "\n<!-- audit-bypass: internal-followup -->\n\nSource: C0AGWPQFKHA:1785932534.656769\n")
     cache_dir = tmp_path / "slack"
     cache_dir.mkdir(exist_ok=True)
     # The hook looks up one cache file per (channel, ts); write the fixture the
