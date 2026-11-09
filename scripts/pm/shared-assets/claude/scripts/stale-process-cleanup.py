@@ -2156,7 +2156,7 @@ import time
 
 
 def cp_run(args):
-    return subprocess.cp_run(args, capture_output=True, text=True, timeout=15)
+    return subprocess.run(args, capture_output=True, text=True, timeout=15)
 
 
 def cp_companion(command):

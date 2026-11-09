@@ -791,7 +791,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "add8ffcd64be699d693a25a51aab3e7094b3a9b9216d8276f3226cbe606d8ac7",
+      "sha256": "a6173f00ece9b3f8281965985fe1c1eda64b9026e65a9e3fd7b36284f942ae2e",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
