@@ -370,15 +370,6 @@
       "source_path": "claude/scripts/codex-companion-broker-freshness.py"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/scripts/codex-companion-reap.py",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 420,
-      "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "238a8a3533d148049c6ba37466f79e5b332c85b1360ee4f1f105f1f8e311e38a",
-      "source_path": "claude/scripts/codex-companion-reap.py"
-    },
-    {
       "canonical_target": "/Users/rajiv/.claude/scripts/control_plane_issue_policy.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -800,7 +791,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "26b31cc0a7abefe84c11dfc14a284f481f536a80688e8b9415514b9237e58294",
+      "sha256": "add8ffcd64be699d693a25a51aab3e7094b3a9b9216d8276f3226cbe606d8ac7",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
@@ -1719,7 +1710,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 187,
+    "selected_count": 186,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
