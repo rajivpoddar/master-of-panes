@@ -2167,12 +2167,10 @@ def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, 
         out["found"].append({"pid": r["root"]["pid"], "shape": r["shape"], "rules": r["rules"],
                              "age": fmt_age(r["root"]["age_seconds"]), "members": len(r["members"]),
                              "cwd": codex_broker_endpoint_info(r["root"]["command"])["cwd"]})
-    # STRICT KILL (Rajiv DM D0AMF0XE6TS thread 1793086596.414959, ts 1793086894.175369) replaces the CTO REVISE
-    # 2026-10-22 hard report-only fence. Only rule (a)+(c) roots that pass every strict check are signalled; rule (b)
-    # alone stays report-only. Every unknown fails closed.
+    # CTO REVISE 1794214757.800249: report only; no client does not prove the backend turn stopped.
     session_cwds = codex_companion_cwds(table)  # relaxed 10-27: live slot cwd is OK unless a companion runs there
     out["would_kill"] = []
-    out["action"] = "strict_kill" if apply else "report_only"
+    out["action"] = "report_only"  # CTO REVISE: socket disconnect is not proof of quiescence.
     ready, refused = codex_broker_sample(plan["roots"], history, apply, uid, session_cwds, time.time())
     out["refused"].extend(refused)
     if apply and persistent_history and not save_history(history):
@@ -2181,7 +2179,7 @@ def codex_broker_policy_check(apply: bool, term_wait_s: float, orphan_min: int, 
         return out
     for r in ready[:CODEX_BROKER_MAX_TREES]:
         out["would_kill"].append({"root": r["root"]["pid"], "members": [m["pid"] for m in r["members"]]})
-        if apply:
+        if False:  # Report-only until quiescence and identity are safely established.
             res = codex_broker_strict_kill(r, term_wait_s)
             if res["outcome"] == "terminated":
                 out["terminated"].append(res)
@@ -2785,7 +2783,7 @@ def _main() -> int:
             "codex_renderer": "ChatGPT-bundled Codex (Renderer).app --type=renderer only: age >60m AND CPU >50% on 2 consecutive apply passes keyed by PID+start; max 5 per pass; revalidate PID/start/args before TERM and KILL, with 10s grace; dry run does not persist",
             "preview_orphan": "ppid-1 python -m http.server (only --directory under /tmp or vanished) / astro|vite dev older than 24h, and ppid-1 node docs/marketing/drafts render scripts older than 60m (+descendants); independent of slots",
             "codex_broker_orphan": f"REPORT ONLY even on --apply: same-user, ppid-1 Codex broker trees at least {args.codex_broker_min_hours}h old; identity and age do not establish quiescence; never signal broker roots or descendants",
-            "codex_broker_cap": "Apply only same-user ppid-1 brokers aged >=24h with no socket client or companion reference on consecutive apply observations spanning >=30m, max 10 trees; ChatGPT-owned and self excluded; scans fail closed; revalidate before signals. Other rules remain report-only.",
+            "codex_broker_cap": "Report only: socket disconnect does not establish that a backend turn has stopped; no brokers are signalled.",
             "allowlist": ["agent-browser", "Chrome for Testing", "Chromium remote-debugging/playwright", "next dev/start", "next-server", "convex dev", "tsc --noEmit"],
             "slotless_reap_requires_operator_attestation": True,
             "outcome_arrays": ["terminated", "refused", "already_exited", "errors"],
