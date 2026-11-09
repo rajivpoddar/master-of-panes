@@ -89,6 +89,7 @@ import {
   composerIsOnlyPastePlaceholders,
   clearComposerText,
   shouldUseBracketedPaste,
+  parseBoundPaneObservation,
 } from "./composer.js";
 import { YSK_SEEN_CONFIG_KEY, driveYskNotice, parseYskCapture, yskActivityRefusal, yskNoticeCustodyScope, type YskPin } from "./yskNotice.js";
 import { withSlotSendLock } from "./slotSendLock.js";
@@ -410,14 +411,16 @@ const yskNoticeTick = (): void => {
       }
       await withSlotSendLock(PM_SLOT, () => driveYskNotice({
         capture: (pin) => capturePaneSnapshot(shellEscape(pin.paneId), true),
-        paneWidth: async (pin) => {
+        observeComposer: async (pin) => {
+          const pane = shellEscape(pin.paneId);
           try {
+            // One shell call. Width reads bracket the capture; a mismatch is a
+            // resize and the text is not used.
             const result = await execShell(
-              `tmux display-message -p -t ${shellEscape(pin.paneId)} '#{pane_width}'`,
-              { timeout: 3_000 },
+              `f=$(mktemp) && w1=$(tmux display-message -p -t ${pane} '#{pane_width}') && tmux capture-pane -J -p -t ${pane} > "$f" && w2=$(tmux display-message -p -t ${pane} '#{pane_width}') && printf '%s\\n%s\\n' "$w1" "$w2" && cat "$f" && rm -f "$f"`,
+              { timeout: 5_000 },
             );
-            const width = Number(result.stdout.trim());
-            return Number.isInteger(width) ? width : null;
+            return parseBoundPaneObservation(result.stdout);
           } catch {
             return null;
           }

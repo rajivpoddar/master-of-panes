@@ -47,7 +47,6 @@ import {
   YSK_NOTICE_PROCESS_SUFFIX,
   composerFrame,
   composerMatchesLogical,
-  stableNoticeWidth,
   submitWithComposerCheck,
   type SubmitCheckResult,
 } from "./composer.js";
@@ -254,10 +253,11 @@ export type YskDriveDeps = {
   /** Same pane id, process and session, still claude, idle or mid-turn, mode allowed. */
   revalidate: (pin: YskPin) => Promise<{ ok: true } | { ok: false; reason: string }>;
   /**
-   * Live pane width in columns. Two reads must agree. Missing or resized
-   * width fails the quote closed.
+   * Width and composer from one observation. Null on resize or an unreadable
+   * width. Callers must use this result, never an earlier snapshot, to approve
+   * the suffix or Enter.
    */
-  paneWidth?: (pin: YskPin) => Promise<number | null>;
+  observeComposer?: (pin: YskPin) => Promise<{ width: number; text: string } | null>;
   /**
    * Synchronous session fence. Read the latest hook session, do not await.
    * Called after awaited observations and immediately inside the writers.
@@ -378,10 +378,11 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
       return finish({ outcome: "noop", reason: "retry_waits_for_idle", noteHash, keysSent, enterPresses: 0 });
     }
     const sessionFence = (): string | null => deps.authority(pin);
-    const quoteMatches = async (snapshot: string | null, logical: string): Promise<boolean> => {
-      if (!deps.paneWidth) return false;
-      const width = await stableNoticeWidth(() => deps.paneWidth!(pin));
-      return composerMatchesLogical(composerOf(snapshot), logical, width);
+    const quoteOwned = async (logical: string): Promise<boolean> => {
+      if (!deps.observeComposer) return false;
+      const observed = await deps.observeComposer(pin);
+      if (!observed) return false;
+      return composerMatchesLogical(composerOf(observed.text), logical, observed.width);
     };
     const blocked = async (expect: (snapshot: string | null) => boolean | Promise<boolean>): Promise<string | null> => {
       const check = await deps.revalidate(pin);
@@ -448,14 +449,16 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     // 02:08Z (keys=2 enter=0): the plugin paste was on screen, but continuation
     // lines sit two columns in, past ❯. Exact equality never matched, so Enter
     // was never sent and the quote sat in the composer.
-    const quoted = await pollCapture(tracked, pin, deps.quoteTimeoutMs ?? 5000, (snapshot) => {
-      return quoteMatches(snapshot, ownedQuote);
-    });
+    const quoted = await pollCapture(tracked, pin, deps.quoteTimeoutMs ?? 5000, () => quoteOwned(ownedQuote));
     if (!quoted) {
       return finish({ outcome: "abort", reason: "quote_not_owned", noteHash, keysSent, enterPresses: 0 });
     }
-    const beforeSuffix = await blocked((snapshot) => quoteMatches(snapshot, ownedQuote));
+    const beforeSuffix = await blocked(() => true);
     if (beforeSuffix) return finish({ outcome: "abort", reason: beforeSuffix, noteHash, keysSent, enterPresses: 0 });
+    // blocked() awaited. Approve the suffix only from a new bound observation.
+    if (!(await quoteOwned(ownedQuote))) {
+      return finish({ outcome: "abort", reason: "quote_not_owned", noteHash, keysSent, enterPresses: 0 });
+    }
 
     await deps.sendLiteral(YSK_NOTICE_PROCESS_SUFFIX, pin);
     keysSent.push(YSK_NOTICE_PROCESS_SUFFIX);
@@ -464,14 +467,15 @@ export async function driveYskNotice(deps: YskDriveDeps): Promise<YskDriveResult
     const submit: SubmitCheckResult = await submitWithComposerCheck(expectedSubmit, {
       capture: () => captureSeen(pin),
       pressSubmit: async () => {
-        const beforeEnter = await blocked((snapshot) => quoteMatches(snapshot, expectedSubmit));
+        const beforeEnter = await blocked(() => true);
         if (beforeEnter) throw new Error(beforeEnter);
+        if (!(await quoteOwned(expectedSubmit))) throw new Error("quote_not_owned");
         await deps.pressEnter(pin);
       },
       sleep: deps.sleep,
       prePasteComposer: ownedQuote,
       noticeAppend: { verifiedQuote: ownedQuote },
-      paneWidth: deps.paneWidth ? () => stableNoticeWidth(() => deps.paneWidth!(pin)) : undefined,
+      observeComposer: deps.observeComposer ? () => deps.observeComposer!(pin) : undefined,
       dwellMs: timing.dwellMs ?? 1500,
       payloadStableMs: timing.payloadStableMs ?? 200,
       payloadGraceMs: timing.payloadGraceMs ?? 1200,

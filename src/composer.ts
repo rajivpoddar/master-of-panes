@@ -222,12 +222,22 @@ export function composerMatchesLogical(
   return expected != null && composer === expected;
 }
 
-/** Two agreeing reads. A resize between them, or an unreadable width, is null. */
-export async function stableNoticeWidth(read: () => Promise<number | null>): Promise<number | null> {
-  const first = await read();
-  const second = await read();
-  if (first == null || first !== second || !Number.isInteger(first)) return null;
-  return first;
+/**
+ * One shell observation: two width reads bracket the capture. A resize or an
+ * unreadable width is null, so a decision cannot use a composer from a
+ * different width. The returned text is the capture between those reads, not
+ * an earlier snapshot.
+ */
+export function parseBoundPaneObservation(stdout: string): { width: number; text: string } | null {
+  const firstBreak = stdout.indexOf("\n");
+  if (firstBreak < 0) return null;
+  const width = Number(stdout.slice(0, firstBreak).trim());
+  const rest = stdout.slice(firstBreak + 1);
+  const secondBreak = rest.indexOf("\n");
+  if (secondBreak < 0) return null;
+  const again = Number(rest.slice(0, secondBreak).trim());
+  if (!Number.isInteger(width) || width !== again) return null;
+  return { width, text: rest.slice(secondBreak + 1) };
 }
 
 /**
@@ -617,10 +627,10 @@ export type SubmitCheckDeps = {
   /** Upper bound on Enter presses; guarded recovery nudges pass 1. Default 2. */
   maxEnterPresses?: number;
   /**
-   * Pane width for a You-should-know quote. Two reads must agree; a missing
-   * or changed width fails closed instead of guessing the wrap.
+   * You-should-know only. Width and composer from one observation. Missing
+   * width fails closed. The poll must not approve a composer captured earlier.
    */
-  paneWidth?: () => Promise<number | null>;
+  observeComposer?: () => Promise<{ width: number; text: string } | null>;
 };
 
 /**
@@ -658,12 +668,19 @@ export async function submitWithComposerCheck(payload: string, deps: SubmitCheck
   let stableForMs = 0;
   let payloadStable: boolean | null = false;
   for (;;) {
-    const composer = composerText(await deps.capture());
+    let composer: string | null;
+    let width: number | null = null;
+    if (noticeAppendOk) {
+      const observed = deps.observeComposer ? await deps.observeComposer() : null;
+      composer = observed ? composerText(observed.text) : null;
+      width = observed?.width ?? null;
+    } else {
+      composer = composerText(await deps.capture());
+    }
     if (composer === null) {
       payloadStable = null;
       break;
     }
-    const width = noticeAppendOk && deps.paneWidth ? await stableNoticeWidth(deps.paneWidth) : null;
     payloadSeen = noticeAppendOk
       ? composerMatchesLogical(composer, payload, width) && !/\[Pasted text/i.test(composer)
       : composerHoldsPayload(composer, payload)

@@ -78,7 +78,11 @@ function harness(
     ready,
     revalidate: async () => ({ ok: true }),
     authority: () => null,
-    paneWidth: async () => PANE_WIDTH,
+    observeComposer: async () => {
+      const text = await capture(PIN);
+      if (text == null) return null;
+      return { width: PANE_WIDTH, text };
+    },
     log: (result) => logs.push(result),
     submenuTimeoutMs: 0,
     quoteTimeoutMs: 0,
@@ -496,7 +500,7 @@ test("an internal whitespace edit is not submitted before the suffix or after it
     sleep: async () => {},
     prePasteComposer: QUOTE,
     noticeAppend: { verifiedQuote: QUOTE },
-    paneWidth: async () => PANE_WIDTH,
+    observeComposer: async () => ({ width: PANE_WIDTH, text: indentedQuote(edited + YSK_NOTICE_PROCESS_SUFFIX) }),
     dwellMs: 0,
     payloadStableMs: 0,
     payloadGraceMs: 0,
@@ -508,6 +512,61 @@ test("an internal whitespace edit is not submitted before the suffix or after it
   assert.equal(settled.enterPresses, 0);
   assert.equal(settled.payloadSeen, false);
   assert.equal(enters, 0);
+});
+
+test("a draft replaced while the width read is pending is not suffixed", async () => {
+  let phase: "top" | "sub" | "quote" | "foreign" = "top";
+  let sawQuote = false;
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    if (phase === "quote") return indentedQuote(QUOTE);
+    return pane(["quoted"], "foreign draft");
+  });
+  box.deps.observeComposer = async () => {
+    if (sawQuote && phase === "quote") phase = "foreign";
+    const text = await box.deps.capture(PIN);
+    if (phase === "quote") sawQuote = true;
+    if (text == null) return null;
+    return { width: PANE_WIDTH, text };
+  };
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+  };
+  const result = await driveYskNotice(box.deps);
+  assert.equal(result.reason, "quote_not_owned");
+  assert.equal(result.enterPresses, 0);
+  assert.deepEqual(box.keys, ["1", "2"]);
+  assert.equal(box.enters(), 0);
+});
+
+test("a draft replaced while the width read is pending is not submitted", async () => {
+  let phase: "top" | "sub" | "quote" | "suffixed" | "foreign" = "top";
+  let sawSuffix = false;
+  const box = harness(async () => {
+    if (phase === "top") return top();
+    if (phase === "sub") return submenu();
+    if (phase === "quote") return indentedQuote(QUOTE);
+    if (phase === "suffixed") return indentedQuote(QUOTE + YSK_NOTICE_PROCESS_SUFFIX);
+    return pane(["quoted"], "foreign draft");
+  });
+  box.deps.observeComposer = async () => {
+    if (sawSuffix && phase === "suffixed") phase = "foreign";
+    const text = await box.deps.capture(PIN);
+    if (phase === "suffixed") sawSuffix = true;
+    if (text == null) return null;
+    return { width: PANE_WIDTH, text };
+  };
+  box.deps.sendLiteral = async (text) => {
+    box.keys.push(text);
+    if (text === "1") phase = "sub";
+    else if (text === "2") phase = "quote";
+    else if (text === YSK_NOTICE_PROCESS_SUFFIX) phase = "suffixed";
+  };
+  await assert.rejects(() => driveYskNotice(box.deps));
+  assert.equal(box.enters(), 0);
 });
 
 test("a newline inserted inside side is not submitted", async () => {
@@ -599,7 +658,7 @@ test("a second inserted break is not submitted before the suffix or after it set
     sleep: async () => {},
     prePasteComposer: QUOTE,
     noticeAppend: { verifiedQuote: QUOTE },
-    paneWidth: async () => PANE_WIDTH,
+    observeComposer: async () => ({ width: PANE_WIDTH, text: indentedQuote(broken + YSK_NOTICE_PROCESS_SUFFIX) }),
     dwellMs: 0,
     payloadStableMs: 0,
     payloadGraceMs: 0,
@@ -799,7 +858,7 @@ test("the notice server path claims through custody and does not gate PM input",
   assert.match(server, /joinWrapped \? "-J -p"/);
   assert.match(notice, /prior\?\.retryable && pin\.activity !== "idle"/);
   assert.match(notice, /YSK_NOTICE_PROCESS_SUFFIX/);
-  assert.match(notice, /quoteMatches\(snapshot, ownedQuote\)/);
+  assert.match(notice, /quoteOwned\(ownedQuote\)/);
   assert.doesNotMatch(server, /UserPromptSubmit/);
 });
 
