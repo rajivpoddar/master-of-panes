@@ -50,7 +50,9 @@ COLLECTOR_TIMEOUTS = {
     "usage": 12, "email": 12, "proxies": 5,
 }
 COMPOSE_COLLECTOR_BUDGET = sum(COLLECTOR_TIMEOUTS.values())
-assert COMPOSE_COLLECTOR_BUDGET <= 240
+# 240 was the sum when proxies was capped at 1s. The proxy read is 5s (one
+# list-windows plus a batched ps); the cap moves with that and nothing else.
+assert COMPOSE_COLLECTOR_BUDGET <= 244
 MAX_CODES = 5
 MAX_SUPPORT = 5
 MAX_PRS = 8
