@@ -582,7 +582,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "30e3ee8026896093e52728696a22babce61613061911b8091162ced6b4dbfa65",
+      "sha256": "febfdc346d4af051a17e4730666c3556f49c015b323180ed2e1983b41d2d0be3",
       "source_path": "claude/scripts/pm-cleanup-pr.py"
     },
     {
@@ -672,7 +672,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "a3ef1d02e07480de00a6be460caf25cfd522e2a4281b86d3d77c008c2b9f7075",
+      "sha256": "2c1950fac7c03445ddcf27f97f1dde7a0a33ea42011310b4d0cf7df0be898ac1",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -726,7 +726,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "aac8e2c99fb8a0f7a6837b57e75bc6a3517ae3d8a244a515596048b3e1875eb1",
+      "sha256": "c7843b7c792ce92730f2ccebd8260f0209018ca881657ac18372e22ac88aec2c",
       "source_path": "claude/scripts/pm/heartbeat/support-inbox-snapshot.py"
     },
     {

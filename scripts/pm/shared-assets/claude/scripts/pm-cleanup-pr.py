@@ -358,8 +358,8 @@ def _validate_pr_for_request(request: dict[str, Any], pr: dict[str, Any]) -> lis
         if pr.get("closingIssuesReferences") == []:
             return _validate_issue_less_snapshot(request, pr)
         labels = _validate_merged_snapshot(request, pr)
-        if len(pr["closingIssuesReferences"]) != 1:
-            raise CleanupError("linked_issue_not_unique")
+        if not _closing_ref_names_issue(pr, request["issue"]):
+            raise CleanupError("linked_issue_mismatch")
         return labels
     return _validate_merged_snapshot(request, pr)
 
@@ -434,8 +434,8 @@ def _validate_label_only_terminal(request: dict[str, Any], pr: dict[str, Any], i
     refs = pr.get("closingIssuesReferences")
     if not isinstance(refs, list):
         raise CleanupError("linked_issue_readback_invalid")
-    if len(refs) != 1 or not isinstance(refs[0], dict) or refs[0].get("number") != request["issue"]:
-        raise CleanupError("linked_issue_not_unique")
+    if not _closing_ref_names_issue(pr, request["issue"]):
+        raise CleanupError("linked_issue_mismatch")
     if str(issue.get("state", "")).upper() != "CLOSED" or str(issue.get("stateReason", "")).upper() != "COMPLETED":
         raise CleanupError("linked_issue_not_terminal")
 

@@ -1169,6 +1169,56 @@ def proxies_block(doc: dict | None) -> list[str]:
     return lines
 
 
+# Rajiv C0ALZJHGE49 thread 1794184422.765479, ts 1794186319.204389: the heartbeat
+# tracks these four accounts only. Antigravity/Gemini/Grok stay in the proxy quota
+# cache; they are not part of this report.
+USAGE_ACCOUNTS = (
+    ("Claude", "dev@scribie.com"),
+    ("Claude", "rajiv@scribie.com"),
+    ("Codex", "rajiv@scribie.com"),
+    ("Codex", "rpoddar@gmail.com"),
+)
+
+
+def account_usage_lines(raw: list[str] | None, missing_reason: str = "not reported") -> list[str]:
+    """Exactly one line per Claude/Codex account. Keeps a real weekly reading, else that account's UNAVAILABLE line."""
+    lines = [u.strip() for u in (raw or []) if u and u.strip()]
+    out = []
+    for kind, email in USAGE_ACCOUNTS:
+        prefix = re.compile(rf"^(WARN\s+)?{re.escape(kind)}\s+{re.escape(email)}\b")
+        matched = [ln for ln in lines if prefix.match(ln) and "fable" not in ln.lower()]
+        good = [ln for ln in matched if "unavailable" not in ln.lower()]
+        weekly = [ln for ln in good if re.search(r"\bweekly:", ln)]
+        if weekly or good:
+            out.append((weekly or good)[0])
+            continue
+        bad = [ln for ln in matched if "unavailable" in ln.lower()]
+        out.append(bad[0] if bad else f"{kind} {email}: UNAVAILABLE ({missing_reason})")
+    return out
+
+
+def _usage_tldr(lines: list[str]) -> str:
+    """ok only when all four account lines are real readings. WARN stays the low-quota prefix."""
+    bad = []
+    for line in lines:
+        if "unavailable" in line.lower():
+            bad.append(re.sub(r"^WARN\s+", "", line).split(":", 1)[0].strip())
+    if bad:
+        return "usage UNAVAILABLE: " + ", ".join(bad)
+    warns = [line for line in lines if line.startswith("WARN")]
+    if warns:
+        def _used(line: str) -> float:
+            match = re.search(r"(\d+(?:\.\d+)?)% used", line)
+            return float(match.group(1)) if match else -1.0
+        head = max(warns, key=_used)
+        acct = re.sub(r"^WARN\s+", "", head).split(":", 1)[0]
+        eta = re.search(r"ETA 100% in (\S+(?: \S+)?) \(BEFORE reset\)", head)
+        if eta:
+            return f"usage WARN: {acct} projects 100% in {eta.group(1)} before reset"
+        return f"usage WARN: {acct} at or above 80% used"
+    return "usage ok"
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -1197,6 +1247,7 @@ def compose(
     remote_boxes: str | None = None,
     pending_actions: tuple[dict, dict] | None = None,
     proxies: dict | None = None,
+    usage_error: str | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -1221,18 +1272,9 @@ def compose(
     if mode == "3h":
         include_slots = False
         merge_asks = []
-        ul = [u for u in (usage_lines or []) if u.strip()]
-        body += ["", "*Usage (Claude + Codex):*", *(["• " + u for u in ul] or ["• unavailable (usage-snapshot failed)"])]
-        _bad = any("UNAVAILABLE" in u or "unavailable" in u for u in ul) or not any(u.startswith("Claude") or u.startswith("WARN Claude") for u in ul)
-        _warn = any(u.startswith("WARN") for u in ul)
-        if _warn:
-            import re as _re
-            _w = next(u for u in ul if u.startswith("WARN"))
-            _acct = _re.sub(r"^WARN\s+", "", _w).split(":")[0]
-            _m = _re.search(r"ETA 100% in (\S+(?: \S+)?) \(BEFORE reset\)", _w)
-            parts.append(f"usage WARN: {_acct} projects 100% in {_m.group(1)} before reset" if _m else f"usage WARN: {_acct} at or above 80% used")
-        else:
-            parts.append("usage " + ("Claude UNAVAILABLE" if _bad else "ok"))
+        ul = account_usage_lines(usage_lines, missing_reason=usage_error or "not reported")
+        body += ["", "*Usage (Claude + Codex):*", *["• " + u for u in ul]]
+        parts.append(_usage_tldr(ul))
         # Email digest lives only in the 3h heartbeat; the DM is removed (Rajiv 2026-10-09 12:06 IST,
         # DM D0AMF0XE6TS 1791527801.053979). Shared channel: sender + subject only, previews stripped.
         body += ["", *email_block(email_doc)]
@@ -1629,15 +1671,34 @@ def main() -> int:
             (out / f"{name}.json").write_text(json.dumps(value, indent=2))
 
     usage_lines = None
+    usage_error = None
     if args.mode == "3h":
+        # Read stdout even on timeout. A killed snapshot has often already printed
+        # the account lines; discarding them is what turned a late helper into
+        # "usage Claude UNAVAILABLE" with no Codex lines.
+        proc = subprocess.Popen(
+            [py, str(Path.home() / ".claude/scripts/usage-snapshot.py")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
+        )
         try:
-            up = subprocess.run([py, str(Path.home() / ".claude/scripts/usage-snapshot.py")], capture_output=True, text=True, errors="replace", timeout=COLLECTOR_TIMEOUTS["usage"])
-            # Rajiv 2026-10-27 (C0ALZJHGE49 ts 1793096042.185159): drop Fable from the Claude accounts.
-            usage_lines = [l for l in up.stdout.splitlines() if l.strip() and "fable" not in l.lower()]
-            if up.returncode != 0 and not usage_lines:
-                failures.append(f"usage: rc={up.returncode}")
+            out, _err = proc.communicate(timeout=COLLECTOR_TIMEOUTS["usage"])
+            usage_lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+            if proc.returncode != 0 and not usage_lines:
+                usage_error = f"usage-snapshot rc={proc.returncode}"
+                failures.append(f"usage: {usage_error}")
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _err = proc.communicate()
+            usage_lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+            usage_error = f"usage-snapshot timed out after {COLLECTOR_TIMEOUTS['usage']}s"
+            failures.append(f"usage: {usage_error}")
         except Exception as exc:
-            failures.append(f"usage: {exc}")
+            usage_error = f"usage-snapshot {type(exc).__name__}"
+            failures.append(f"usage: {usage_error}")
+            try:
+                proc.kill()
+            except OSError:
+                pass
     email_doc = None
     if args.mode == "3h":
         try:
@@ -1658,7 +1719,7 @@ def main() -> int:
         support=support, failures=failures, escalations=args.escalation,
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
-        usage_lines=usage_lines, cleanup_alert=cleanup_status_alert(),
+        usage_lines=usage_lines, usage_error=usage_error, cleanup_alert=cleanup_status_alert(),
         email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
         priority_flags=priority_flags,
         priority_unavailable=(f"UNAVAILABLE (timeout {COLLECTOR_TIMEOUTS['priority-inversion']}s)" if priority_flags is None else None),

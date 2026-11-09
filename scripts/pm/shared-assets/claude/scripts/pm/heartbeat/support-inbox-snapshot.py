@@ -464,6 +464,66 @@ def open_roots(threads: list[dict]) -> list[str]:
     return sorted(t["ts"] for t in threads if t["state"] == "needs_reply")
 
 
+def load_slack_reply_skips(paths: list[Path] | None = None) -> dict[str, str]:
+    """Load skipped thread keys -> reason from slack-reply-skip.jsonl.
+    Matches key 'channel:ts', 'ts', 'thread_ts', etc.
+    """
+    skips: dict[str, str] = {}
+    candidates = paths or [
+        OPEN_STATE.with_name("slack-reply-skip.jsonl"),
+        Path.home() / ".claude/state/slack-reply-skip.jsonl",
+        MAIN_CHECKOUT / ".claude/state/slack-reply-skip.jsonl",
+    ]
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                reason = entry.get("reason", "skipped")
+                key = entry.get("key")
+                if key:
+                    skips[key] = reason
+                    if ":" in key:
+                        skips[key.split(":", 1)[1]] = reason
+                ch = entry.get("channel")
+                tts = entry.get("thread_ts") or entry.get("ts")
+                if tts:
+                    skips[str(tts)] = reason
+                    if ch:
+                        skips[f"{ch}:{tts}"] = reason
+        except Exception:
+            pass
+    return skips
+
+
+def apply_skips(threads: list[dict], channel: str, skips: dict[str, str]) -> list[dict]:
+    """Mark threads found in slack-reply-skip.jsonl as answered."""
+    if not skips:
+        return threads
+    for t in threads:
+        ts = str(t.get("ts", ""))
+        chan_id = str(channel)
+        chan_name = str(t.get("channel", ""))
+        skip_reason = (
+            skips.get(f"{chan_id}:{ts}")
+            or skips.get(f"{chan_name}:{ts}")
+            or skips.get(ts)
+        )
+        if skip_reason and t.get("state") == "needs_reply":
+            t["state"] = "answered"
+            t["answered_by"] = "skip"
+            t["skip_reason"] = skip_reason
+            t["answered_at"] = t.get("answered_at") or (float(ts) if _is_ts(ts) else None)
+    return threads
+
+
 def classify_feedback_rows(rows: list[dict], window_start_ms: int) -> list[dict]:
     """Pure: in-app feedback rows created in the window."""
     out = []
@@ -513,6 +573,7 @@ def main() -> int:
     if not token:
         result["failures"].append("SLACK_BOT_TOKEN missing")
     else:
+        skips = load_slack_reply_skips()
         prev_state = load_open_state()
         new_state = dict(prev_state)
         for channel in CHANNELS:
@@ -526,13 +587,15 @@ def main() -> int:
                     cursor=load_carry_cursor(channel),
                 )
                 save_carry_cursor(channel, next_cursor)
+                threads = apply_skips(threads, channel, skips)
                 if time.monotonic() >= deadline or pending_count > MAX_CARRY_FORWARD:
                     result["failures"].append(f"{CHANNELS[channel]}: partial; tracked threads not fully refreshed")
                 new_state[channel] = tracked_roots(threads, now_ts, prev_state.get(channel) or {})
                 result["slack"].extend(select_items(threads, window_start))
             except PartialChannel as exc:
-                new_state[channel] = tracked_roots(exc.threads, now_ts, prev_state.get(channel) or {})
-                result["slack"].extend(select_items(exc.threads, window_start))
+                exc_threads = apply_skips(exc.threads, channel, skips)
+                new_state[channel] = tracked_roots(exc_threads, now_ts, prev_state.get(channel) or {})
+                result["slack"].extend(select_items(exc_threads, window_start))
                 result["failures"].append(f"{CHANNELS[channel]}: partial; {exc}")
             except Exception as exc:  # noqa: BLE001
                 # Keep the previous open set for this channel so nothing is dropped.
