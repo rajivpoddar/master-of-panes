@@ -2209,16 +2209,28 @@ def cp_select(table, panes, uid, pr_states, protected=()):
         if pid in protected or pid in panes or desktop:
             reason, action = 'protected_session', 'keep'
         elif linked.get('state') == 'OPEN':
-            reason, action = 'open_pr', 'keep'
+            reason, action = ('open_issue' if linked.get('kind') == 'issue' else 'open_pr'), 'keep'
         elif state == 'SKIPPED_UNREADABLE':
             reason, action = state, 'skip'
         elif state == 'live_pane':
             reason, action = 'live_pane', 'keep'
+        elif any(not link.get('readable', False) for link in links):
+            reason, action = 'linkage_unreadable', 'skip'
         elif links and all(link.get('state') in ('CLOSED', 'MERGED') for link in links):
             reason, action = 'closed_pr', 'reap'
         else:
             reason, action = 'orphan', 'reap'
         result.append({**row, 'action': action, 'reason': reason, 'linkage': linked, 'ancestry': chain})
+    # A broker is required by its dependent tree: retaining a child must also
+    # retain its ancestors. Unknown child ownership cannot authorize teardown.
+    for row in result:
+        if row['action'] != 'reap':
+            continue
+        dependents = [other for other in result if row['pid'] in other['ancestry'] and other['pid'] != row['pid']]
+        if any(other['action'] == 'keep' for other in dependents):
+            row['action'], row['reason'] = 'keep', 'retained_descendant'
+        elif any(other['action'] == 'skip' for other in dependents):
+            row['action'], row['reason'] = 'skip', 'descendant_linkage_unreadable'
     return result
 
 
@@ -2263,7 +2275,34 @@ def cp_linkage(row, helper, cache):
                 targets.add(branch)
         except Exception:
             ownership_readable = False
+    # Reuse the same argv/cwd/branch linkage evidence for issue ownership.
+    issue_numbers = set(re.findall(r'(?:fix/|feat/|issue-)(\d+)(?=[-/_.\s]|$)',
+                                   ' '.join(args + [cwd or '', branch or ''])))
+    issue_numbers.update(re.findall(r'codex-app-(?:plan|arch)-review-(\d+)\.(?:txt|md)', ' '.join(args)))
+    for i, arg in enumerate(args):
+        marker = re.search(r'codex-app-(?:code|qa)-review-(\d+)\.(?:txt|md)', arg)
+        if marker:
+            targets.add(marker[1])
+        if arg in ('--issue', '--issue-number') and i + 1 < len(args):
+            if args[i + 1].isdigit():
+                issue_numbers.add(args[i + 1])
+            else:
+                ownership_readable = False
+        match = re.fullmatch(r'https://github.com/(?:heydonna-app|Scribie)/heydonna-app/issues/(\d+)', arg)
+        if match:
+            issue_numbers.add(match[1])
     links = []
+    for number in sorted(issue_numbers):
+        key = 'issue:' + number
+        if key not in cache:
+            try:
+                proc = cp_run(['gh', 'issue', 'view', number, '--repo', 'heydonna-app/heydonna-app', '--json', 'number,state,url'])
+                value = json.loads(proc.stdout) if proc.returncode == 0 else {}
+                cache[key] = {**value, 'kind': 'issue', 'target': number,
+                              'state': value.get('state', 'UNKNOWN')}
+            except Exception:
+                cache[key] = {'state': 'UNKNOWN', 'kind': 'issue', 'target': number}
+        links.append(cache[key])
     for target in sorted(targets):
         if target not in cache:
             try:
@@ -2354,13 +2393,20 @@ def cp_check(helper, apply=False, grace=2):
                         or tree_identity(probe, row['ancestry']) != tree_identity(table, row['ancestry'])):
                     raise RuntimeError('identity_or_ownership_changed')
                 fresh_states = {}
-                for ancestor in probe_chain:
+                required_root = next(p for p in reversed(probe_chain) if p in states)
+                required_tree = {required_root}
+                while True:
+                    added = {p for p, process in probe.items() if process['ppid'] in required_tree} - required_tree
+                    if not added:
+                        break
+                    required_tree.update(added)
+                for ancestor in set(probe_chain) | required_tree:
                     if ancestor in states or cp_companion(probe[ancestor]['command']):
                         link = cp_linkage(probe[ancestor], helper, {})
                         if link.get('state') not in ('NONE', 'OPEN', 'CLOSED', 'MERGED') or not link.get('readable'):
                             raise RuntimeError('SKIPPED_UNREADABLE')
                         fresh_states[ancestor] = link
-                if fresh_states != {p: states[p] for p in probe_chain if p in states}:
+                if fresh_states != {p: states[p] for p in set(probe_chain) | required_tree if p in states}:
                     raise RuntimeError('identity_or_ownership_changed')
                 eligible = {r['pid']: r for r in cp_select(probe, current_panes, os.getuid(), fresh_states, protected)}
                 if eligible.get(pid, {}).get('action') != 'reap':
