@@ -50,6 +50,15 @@ export function isExitConfirmationDialog(text: string): boolean {
     && !dialog.some(line => /^\s*[❯>]\s*/.test(line) && !/^\s*[❯>]\s*[123][.)]\s/.test(line));
 }
 
+/** Complete numbered PM menu from the captured canonical dialog fixture. */
+export function isCompletePMExitMenu(text: string): boolean {
+  const plain = text.replace(/\x1b\[[0-9;]*m/g, "");
+  return isExitConfirmationDialog(plain)
+    && /^[\s│┃║❯>]*1\.\s+Exit and stop tasks\s*[│┃║]?\s*$/m.test(plain)
+    && /^[\s│┃║❯>]*2\.\s+Move to background and exit\s*[│┃║]?\s*$/m.test(plain)
+    && /^[\s│┃║❯>]*3\.\s+Stay\s*[│┃║]?\s*$/m.test(plain);
+}
+
 // v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
 // wrapper. Kept for reference / fallback diagnostic; no longer invoked by
 // sendToSlot. send-to-slot.sh waits for chevron-idle confirmation that
@@ -1798,7 +1807,7 @@ export class TmuxRelay {
       if (saved?.episode === episode) return;
     } catch { return; }
     try {
-      this.db.setConfig(key, JSON.stringify({ episode, process, attempts: 0, done: false, deadline: Date.now() + 5_000, owner_pin: ownerPin ?? null }));
+      this.db.setConfig(key, JSON.stringify({ episode, process, attempts: 0, done: false, deadline: Date.now() + (slotNum === 0 ? 10_000 : 5_000), owner_pin: ownerPin ?? null }));
       // Do not await our own send lock or the dialog from the HTTP Stop handler.
       // The finite continuation acquires the same lock after /exit delivery returns.
       const run = () => withSlotSendLock(slotNum, () => this.confirmExitDialog(slotNum, paneId, episode, process, owner, ownerPin));
@@ -1838,17 +1847,29 @@ export class TmuxRelay {
       // Visible screen only: a historical dialog in scrollback is not authority.
       const screen = await this.runShell(`tmux capture-pane -t ${paneId} -p`, { timeout: Math.min(1_000, deadline - Date.now()) });
       if (await this.exitProcessIdentity(slotNum, paneId, deadline) !== process || !current()) return "changed";
-      return isExitConfirmationDialog(screen.stdout) ? "dialog" : "absent";
+      return (slotNum === 0 ? isCompletePMExitMenu(screen.stdout) : isExitConfirmationDialog(screen.stdout)) ? "dialog" : "absent";
     };
     let seen = false;
     let enterPresses = 0;
     try {
-      while (state.attempts < 2 && current()) {
+      while (state.attempts < (slotNum === 0 ? 1 : 2) && current()) {
         await sleep(350); // Allow the dialog to render after /exit or the prior Enter.
         const screen = await inspect();
         if (screen === "changed" || (screen === "absent" && seen)) break;
         if (screen === "absent") continue; // Initial absence never finishes the render window.
         seen = true;
+        if (slotNum === 0) {
+          // Rajiv 1794244109.359299: PM only. Fully rendered fixture explicitly
+          // requires Enter. Consume before the await; uncertainty never retries.
+          if (await inspect() !== "dialog" || !current()) break;
+          state.attempts = 1;
+          save();
+          await this.runShell(`tmux send-keys -t ${paneId} 1`, { timeout: Math.min(1_000, deadline - Date.now()) });
+          if (await inspect() !== "dialog" || !current()) break;
+          enterPresses++;
+          await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: Math.min(1_000, deadline - Date.now()) });
+          break;
+        }
         // This canonical dialog's option 1 STOPS background tasks. Never select
         // it: the agents must finish/handoff, then a fresh Stop may retry once.
         const attempt = db.getExitAttempt(slotNum);

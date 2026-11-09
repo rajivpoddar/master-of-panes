@@ -33,7 +33,7 @@ function actualHookRoute(db: MoPDatabase, processor: HookProcessor, slot: number
   return app;
 }
 
-function harness(slot: number, options: { persistent?: boolean; noDialog?: boolean; delay?: number; afterStop?: boolean } = {}) {
+function harness(slot: number, options: { persistent?: boolean; noDialog?: boolean; delay?: number; afterStop?: boolean; partial?: boolean } = {}) {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
   db.setExitPending(true, slot !== 0, slot === 0);
   db.logEvent(slot, "SessionStart", "SessionStart", null, { session_id: "original" });
@@ -60,7 +60,7 @@ function harness(slot: number, options: { persistent?: boolean; noDialog?: boole
         // rechecks pane idleness before its single send).
         const renderAt = options.afterStop ? pane.stopRespondedAt : pane.exitAt;
         stdout = !pane.exitAt ? `${rule}\n❯ \n${rule}`
-          : renderAt && pane.showing && Date.now() - renderAt >= (options.delay ?? 0) ? dialog : "shell $";
+          : renderAt && pane.showing && Date.now() - renderAt >= (options.delay ?? 0) ? (options.partial ? "Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm" : dialog) : "shell $";
       }
     } else if (command.startsWith("tmux load-buffer")) {
       pane.buffer = await readFile(command.match(/'([^']+)'\s*$/)![1], "utf8");
@@ -289,4 +289,31 @@ test("graceful PM /exit timeout never escalates to respawn-pane -k", async () =>
     assert.equal(result.reason, "exit_blocked_shell_not_observed_no_force");
     assert.equal(kills, 0);
   } finally { h.db.close(); }
+});
+
+
+test("PM delayed menu sends one 1 then Enter only after full visible choices", async () => {
+  const h = harness(0, { delay: 800 });
+  let selectedAt = 0;
+  h.pane.onOne = () => { selectedAt = Date.now(); };
+  try {
+    await h.send();
+    assert.ok(selectedAt - h.pane.exitAt >= 800);
+    assert.deepEqual(h.pane.keys, ["1", "Enter"]);
+  } finally { h.db.close(); }
+});
+
+test("PM partial render sends no menu keys", async () => {
+  const h = harness(0, { partial: true });
+  try {
+    assert.equal(relayExports.isCompletePMExitMenu("Background work is running\n1. Exit and stop tasks\nEnter to confirm"), false);
+    await h.send();
+    assert.deepEqual(h.pane.keys, []);
+  } finally { h.db.close(); }
+});
+
+test("dev slot complete menu never selects 1", async () => {
+  const h = harness(2);
+  try { await h.send(); assert.deepEqual(h.pane.keys, []); }
+  finally { h.db.close(); }
 });
