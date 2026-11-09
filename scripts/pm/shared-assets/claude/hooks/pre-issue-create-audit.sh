@@ -162,9 +162,27 @@ if not lines:
     print("NONE")
     sys.exit()
 if len(lines) != 1:
-    print("INVALID")
+    print("MULTIPLE")
     sys.exit()
 line = lines[0]
+if re.fullmatch(r"none\s*\(internal\)\s*[—–-]\s*\S.*", line, re.I):
+    print("INTERNAL_NONE")
+    sys.exit()
+gh = re.fullmatch(r"<?https://github\.com/Scribie/heydonna-app/(issues|pull)/([0-9]+)#issuecomment-([0-9]+)>?", line, re.I)
+if gh:
+    kind, number, comment = gh.groups()
+    try:
+        p = subprocess.run(["gh", "api", "repos/Scribie/heydonna-app/issues/comments/" + comment], capture_output=True, text=True, timeout=10)
+        d = json.loads(p.stdout) if p.returncode == 0 else {}
+        author = d.get("user", {}).get("login", "").lower()
+        expected = "https://api.github.com/repos/scribie/heydonna-app/issues/" + number
+        if d.get("issue_url", "").lower() == expected and author in {"rajivpoddar", "chatgpt-codex-connector[bot]"}:
+            print("GITHUB")
+        else:
+            print("INVALID")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        print("INVALID")
+    sys.exit()
 pair = re.fullmatch(r"\s*([CD][A-Z0-9]{10}):([0-9]{10}\.[0-9]{6})\s*", line)
 if pair:
     print(pair.group(1), pair.group(2))
@@ -218,12 +236,39 @@ else:
 ' || true)
 CHANNEL=""
 THREAD_TS=""
+if [ "$SOURCE_RESULT" = "MULTIPLE" ]; then
+  printf '%s\n' '{"decision":"block","message":"BLOCKED: Source identity has multiple Source lines (including handoff lines); provide exactly one unambiguous Source. No permit was consumed and no obligation was written."}'
+  exit 0
+fi
 if [ "$SOURCE_RESULT" = "INVALID" ] || [ -z "$SOURCE_RESULT" ]; then
   printf '%s\n' '{"decision":"block","message":"BLOCKED: Source identity is missing, ambiguous, or its reply-to-root correspondence could not be verified. Provide one Source: CHANNEL:ROOT or a verified Source permalink. No permit was consumed and no obligation was written."}'
   exit 0
 fi
-if [ "$SOURCE_RESULT" != "NONE" ]; then
+if [ "$SOURCE_RESULT" != "NONE" ] && [ "$SOURCE_RESULT" != "GITHUB" ] && [ "$SOURCE_RESULT" != "INTERNAL_NONE" ]; then
   read -r CHANNEL THREAD_TS <<< "$SOURCE_RESULT"
+fi
+
+# High-priority internal bypasses require an explicit, verifiable origin or a
+# deliberate internal exception. A renamed or omitted Source is not an exception.
+if [ "$SOURCE_RESULT" = "NONE" ] && printf '%s' "$BODY_OR_CMD" | grep -qF '<!-- audit-bypass: internal-followup -->'; then
+  HIGH_PRIORITY=$(printf '%s' "$CMD" | python3 -c '
+import re, shlex, sys
+try:
+    args = shlex.split(sys.stdin.read())
+except ValueError:
+    print("yes"); sys.exit()
+labels = []
+for i, arg in enumerate(args):
+    if arg in ("--label", "-l") and i + 1 < len(args): labels.append(args[i+1])
+    elif arg.startswith("--label="): labels.append(arg.split("=", 1)[1])
+    elif arg.startswith("-l") and len(arg) > 2: labels.append(arg[2:])
+if any(re.fullmatch(r"(?:priority:)?p[01]", label.strip(), re.I) for group in labels for label in group.split(",")):
+    print("yes")
+')
+  if [ "$HIGH_PRIORITY" = "yes" ]; then
+    printf '%s\n' '{"decision":"block","message":"BLOCKED: P0/P1 internal follow-up requires a Source: verified GitHub comment or Slack thread, or Source: none (internal) — reason. Renamed or missing Source lines are not accepted."}'
+    exit 0
+  fi
 fi
 
 # ---------------------------------------------------------------------------

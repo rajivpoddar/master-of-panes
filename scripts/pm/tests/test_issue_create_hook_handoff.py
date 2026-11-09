@@ -438,3 +438,51 @@ def test_cto_source_user_and_bot_ids_classify_as_internal(tmp_path, originator):
     rc, out = _run(AUDIT_HOOK, _create_cmd(str(body)), env)
 
     assert (rc, out) == (0, "")
+
+
+@pytest.mark.parametrize("source,allowed", [
+    ("", False),
+    ("Origin: internal", False),
+    ("Source: none (internal) — maintenance follow-up", True),
+    ("Source: none (internal)", False),
+    ("Source: C0ALZJHGE49:1794257214.316859\nSource: docs/plans/foo.md", False),
+])
+def test_high_priority_bypass_requires_single_explicit_source(tmp_path, source, allowed):
+    env = _env(tmp_path)
+    body = _body(tmp_path, "priority.md", VALID_BODY + "\n<!-- audit-bypass: internal-followup -->\n" + source)
+    rc, out = _run(AUDIT_HOOK, _create_cmd(str(body)) + " --label priority:P1", env)
+    assert rc == 0
+    assert (out == "") == allowed
+    if "docs/plans" in source:
+        assert "multiple Source lines" in _decision(out)["message"]
+
+
+def test_alerts_root_is_internal_even_with_pm_reply(tmp_path):
+    env = _env(tmp_path)
+    root = "1794257214.316859"
+    cache = tmp_path / "slack"
+    cache.mkdir()
+    (cache / f"{root}.json").write_text(json.dumps({"ok": True, "messages": [
+        {"ts": root, "user": "U0AJZTN7SM6", "bot_id": "B0AJ3HSC2PQ"},
+        {"ts": "1794258103.810189", "thread_ts": root, "user": "U0ALEAYCAUT"},
+    ]}))
+    body = _body(tmp_path, "slack-root.md", VALID_BODY + f"\nSource: C0ALZJHGE49:{root}\n<!-- audit-bypass: internal-followup -->")
+    assert _run(AUDIT_HOOK, _create_cmd(str(body)) + " --label priority:P1", env) == (0, "")
+
+
+@pytest.mark.parametrize("author,number,allowed", [
+    ("rajivpoddar", "12000", True),
+    ("chatgpt-codex-connector[bot]", "12000", True),
+    ("other-user", "12000", False),
+    ("rajivpoddar", "999", False),
+])
+def test_github_comment_requires_trusted_author_and_matching_issue(tmp_path, author, number, allowed):
+    env = _env(tmp_path)
+    gh = tmp_path / "bin" / "gh"
+    response = json.dumps({"issue_url": f"https://api.github.com/repos/Scribie/heydonna-app/issues/{number}", "user": {"login": author}})
+    gh.write_text("#!/bin/sh\nprintf '%s\\n' '" + response + "'\n")
+    gh.chmod(0o755)
+    body = _body(tmp_path, "comment.md", VALID_BODY + "\nSource: https://github.com/Scribie/heydonna-app/issues/12000#issuecomment-123\n<!-- audit-bypass: internal-followup -->")
+    rc, out = _run(AUDIT_HOOK, _create_cmd(str(body)) + " --label priority:P1", env)
+    assert rc == 0
+    assert (out == "") == allowed
