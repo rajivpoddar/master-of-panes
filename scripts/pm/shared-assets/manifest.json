@@ -348,7 +348,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "997c9273d1860bad8a91f91a327668f7a951c8bc25d860614fb0229fa89d8358",
+      "sha256": "b165b18fb6e340d56d4369d567d7cc1bbf7df93444352d417125fafcddb0552f",
       "source_path": "claude/scripts/ci/pm-admit-ci.sh"
     },
     {
@@ -672,7 +672,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "7c8f1420cbcf2a15ca7830fae5394d8cd920b0b9c7f80c446983395b1eb68e82",
+      "sha256": "cc7557015030171a086ecd4c7a70b878828e0672e716b8738b1ba2912c54a46a",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {

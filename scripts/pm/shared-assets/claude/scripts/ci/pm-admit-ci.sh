@@ -4,10 +4,15 @@
 # The CI/E2E trigger is the exact `ci-head:<40-hex head>` label (e2e.yml/ci.yml `labeled` gate).
 # Related-tests gate (Rajiv "go", DM D0AMF0XE6TS thread 1791298729.215119): vitest related + tsc on the PR head before admission.
 # Usage: pm-admit-ci.sh <PR> [--no-update] [--dry-run] [--skip-related-tests "<reason>"] [--force-ci "<reason>"] [--allow-main-red "<reason>"]
+# 12b: --check-12b-only <PR> is read-only; --no-12b-gate --reason "<text>" audits an explicit override.
 # Main-red gate REMOVED (Rajiv C0ALZJHGE49 thread 1793958692.281499, ts 1793960417.571149: "remove it outright. note main red flakes have to be rerun. ... the skip pr has to be immediately merged with a followup issue. for affected pr's, merge main and re-admit."). Supersedes DM ts 1791877690.725089. --allow-main-red is still accepted (no-op) for compatibility.
 # Scope gate (Rajiv 2026-10-08, DM thread 1791461793.117869): site/docs-only PRs are refused (no CI/E2E); PM may override with --force-ci.
 set -euo pipefail
-PR="$1"; shift; REPO=Scribie/heydonna-app
+CHECK_12B_ONLY=0
+if [ "${1:-}" = --check-12b-only ]; then CHECK_12B_ONLY=1; shift; fi
+PR="${1:-}"; [ -n "$PR" ] || exit 64
+shift; REPO=Scribie/heydonna-app
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAIN_REPO=/Users/rajiv/Downloads/projects/heydonna-app
 # Crash = non-zero (never 0): any unexpected error/unbound var exits 70 with a REFUSE line.
 trap 'rc=$?; echo "REFUSE: script_error line $LINENO rc=$rc"; exit 70' ERR
@@ -56,9 +61,12 @@ clean_bad_ci_head_labels() {
 }
 
 # Related-tests gate is OFF by default (Rajiv 2026-10-11, DM ts 1791738750.254179: "why does pm admission have to run tsc or vitest? that's already done by the slots."). Slots run tests; CI is the gate. Opt in with --related-tests.
+NO_12B_GATE=0; OVERRIDE_REASON=""
 NO_UPDATE=0; DRY=0; SKIP_REASON="default-off: slots ran tests, CI is the gate (Rajiv ts 1791738750.254179)"; FORCE_CI=""; ALLOW_MAIN_RED=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --no-12b-gate) NO_12B_GATE=1 ;;
+    --reason) OVERRIDE_REASON="${2:-}"; [ -n "$OVERRIDE_REASON" ] || exit 64; shift ;;
     --no-update) NO_UPDATE=1 ;;
     --dry-run) DRY=1 ;;
     --related-tests) SKIP_REASON="" ;;
@@ -69,6 +77,35 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$NO_12B_GATE" = 1 ] && ! printf '%s' "$OVERRIDE_REASON" | grep -q '[^[:space:]]'; then
+  echo 'REFUSE: --no-12b-gate requires --reason "<text>"'; exit 64
+fi
+if [ "$CHECK_12B_ONLY" = 1 ] && { [ "$NO_12B_GATE" = 1 ] || [ "$DRY" = 1 ]; }; then
+  echo 'REFUSE: --check-12b-only does not allow overrides or other execution modes'; exit 64
+fi
+
+gate_12b() {
+  local head="$1" payload
+  if [ "$NO_12B_GATE" = 0 ]; then
+    python3 -I "$SCRIPT_DIR/pm-admit-12b.py" --repo "$REPO" --pr "$PR" --head "$head"
+    return $?
+  fi
+  echo "12B_GATE: override pr=$PR head=$head reason=$OVERRIDE_REASON"
+  [ "$DRY" = 1 ] && return 0
+  # Fail closed if either audit sink is unavailable. Never silently bypass auditing.
+  printf '%s PR=%s head=%s no-12b-gate reason=%s\n' "$(date -u +%FT%TZ)" "$PR" "$head" "$OVERRIDE_REASON" >> "$HOME/.claude/logs/pm-admit-skip.log" || return 3
+  payload=$(python3 -I -c 'import json,sys;print(json.dumps({"reason":sys.argv[1]}))' "$OVERRIDE_REASON") || return 3
+  python3 -I "$SCRIPT_DIR/../pm-ops.py" record --source pm-admit-ci --event 12b_gate_override --actor PM --target-type github_pr --target-id "$PR" --pr "$PR" --head-sha "$head" --payload-json "$payload" >/dev/null || return 3
+}
+
+# This precedes ALL admission effects, including body/label writes and main updates.
+H0=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
+PRSTATE=$(gh_get pr_state ok gh pr view "$PR" --repo "$REPO" --json state --jq .state) || api_fail pr_state
+[ "$PRSTATE" = OPEN ] || { echo "REFUSE: PR #$PR is $PRSTATE, not OPEN; nothing admitted"; exit 8; }
+rc=0; gate_12b "$H0" || rc=$?
+[ "$rc" = 0 ] || exit "$rc"
+[ "$CHECK_12B_ONLY" = 0 ] || exit 0
 
 related_tests_gate() {
   local head="$1" wt="/tmp/admit-$PR-${1:0:12}" out rc=0 files n
@@ -216,9 +253,7 @@ if [ "$DRY" = 1 ]; then
   echo "DRY RUN done (gate rc=$rc); nothing admitted"; exit $rc
 fi
 
-H0=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
-PRSTATE=$(gh_get pr_state ok gh pr view "$PR" --repo "$REPO" --json state --jq .state) || api_fail pr_state
-[ "$PRSTATE" = "OPEN" ] || { echo "REFUSE: PR #$PR is $PRSTATE, not OPEN; nothing admitted"; exit 8; }
+# H0 remains the pre-check's reviewed head; never overwrite it with an unchecked read.
 # Closing-reference gate (Rajiv C0ALZJHGE49 thread 1793953549.727149, ts 1793971953.982729 "yes, do it";
 # ts 1793972664.618549: "pr admit ci should add the closes #N if it's not already present instead of refusing it").
 # Every admitted PR must close its own issue. If closingIssuesReferences is empty, derive exactly one issue number
@@ -270,6 +305,11 @@ if [ "$NO_UPDATE" = 0 ]; then
 fi
 HM=$(gh_get pr_head_mergeable head_mergeable gh pr view "$PR" --repo "$REPO" --json headRefOid,mergeable --jq '.headRefOid+" "+.mergeable') || api_fail pr_head_mergeable
 read -r HEAD MERGEABLE <<<"$HM"
+# A concurrent push or merge-main update must not carry stale review into dispatch.
+if [ "$HEAD" != "$H0" ]; then
+  rc=0; gate_12b "$HEAD" || rc=$?
+  [ "$rc" = 0 ] || exit "$rc"
+fi
 echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 [ "$MERGEABLE" = "CONFLICTING" ] && { echo "REFUSE: conflict with main; route to slot"; exit 2; }
 # Priority mirroring is best-effort and must never block admission.

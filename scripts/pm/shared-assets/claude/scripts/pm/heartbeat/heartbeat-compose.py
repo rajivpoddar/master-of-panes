@@ -960,7 +960,7 @@ _POOL_HEADER = re.compile(
     r"^== (browser|test) pool \((cx33|cx43), (rtb-tpool|rtb-pool)-NN, target (\d+)\) ==$"
 )
 _POOL_SHAPE = {"browser": ("cx43", "rtb-pool"), "test": ("cx33", "rtb-tpool")}
-_POOL_STATES = {"free", "leased", "releasing", "expired", "broken", "preempting", "rebuilding", "borrowed"}
+_POOL_STATES = {"free", "leased", "releasing", "expired", "broken", "preempting", "rebuilding", "borrowed", "reserved"}
 
 
 def parse_remote_pools(stdout: str) -> str:
@@ -1008,6 +1008,8 @@ def parse_remote_pools(stdout: str) -> str:
             details.append(f"{count('preempting')} preempting")
         if count("rebuilding"):
             details.append(f"{count('rebuilding')} rebuilding")
+        if count("reserved"):
+            details.append(f"{count('reserved')} reserved")
         if count("borrowed"):
             details.append(f"{count('borrowed')} borrowed")
         for state in ("expired", "broken"):
@@ -1017,6 +1019,39 @@ def parse_remote_pools(stdout: str) -> str:
     return "*Remote boxes:* " + " · ".join(pieces)
 
 
+def remote_queue_lines(timeout: int = 5) -> str:
+    """Existing hourly invocation only; append local sizing snapshots for the 48h rollout."""
+    try:
+        result = subprocess.run(["bash", str(REMOTE_BOX_SCRIPT), "queue-metrics", "snapshot"],
+                                capture_output=True, text=True, errors="replace", timeout=timeout)
+        if result.returncode:
+            raise ValueError(f"collector rc={result.returncode}")
+        records = [json.loads(line.split(" ", 1)[1]) for line in result.stdout.splitlines()
+                   if line.startswith("RTB_QUEUE_METRICS ")]
+        if len(records) != 2 or {r["pool"] for r in records} != {"pool", "pool-cx33"}:
+            raise ValueError("missing/duplicate pool metrics")
+        lines = []
+        for r in records:
+            name = "test" if r["pool"] == "pool-cx33" else "browser"
+            states = r["states"]
+            waits = []
+            for tier, key in (("P0", "3"), ("P1", "2"), ("P2", "1"), ("untagged", "0")):
+                sample = r["wait_s"][key]
+                p50, p95 = sample["p50"], sample["p95"]
+                value = "UNAVAILABLE (no samples)" if not sample["n"] else f"{p50}/{p95}s"
+                waits.append(f"{tier} {value}")
+            lines.append(f"• RTB {name}: {states.get('free', 0)} free / {states.get('leased', 0)} leased / "
+                         f"{r['queued']} queued / {r['reserved']} reserved; wait p50/p95: " + "; ".join(waits))
+            for alert in r["alerts"]:
+                lines.append(f"  ALERT: {name} ticket {alert['ticket']} waiting {alert['age_s']}s "
+                             f"(base {'P' + str(3-alert['base']) if alert['base'] else 'untagged'})")
+        return "\n".join(lines)
+    except subprocess.TimeoutExpired:
+        return f"*RTB queue:* UNAVAILABLE (timeout {timeout}s)"
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return f"*RTB queue:* UNAVAILABLE ({type(exc).__name__})"
+
+
 def remote_boxes_line(timeout: int = 20) -> str:
     """Collect both pools; malformed or incomplete output is never reported as healthy."""
     try:
@@ -1024,7 +1059,7 @@ def remote_boxes_line(timeout: int = 20) -> str:
                                 text=True, errors="replace", timeout=timeout)
         if result.returncode:
             raise ValueError(f"collector rc={result.returncode}")
-        return parse_remote_pools(result.stdout)
+        return parse_remote_pools(result.stdout) + "\n" + remote_queue_lines(timeout=min(timeout, 5))
     except subprocess.TimeoutExpired:
         reason = f"UNAVAILABLE (timeout {timeout}s)"
     except (OSError, ValueError) as exc:
