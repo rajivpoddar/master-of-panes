@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "73d32dc5ba4740489faaed86c7a05a33c4a1c463f2753546249538983e4990a2",
+      "sha256": "f346d151159c117a22c5c88ca6f21e61b4dd776aa5d96a87fb919a153a4f2c97",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "f2041004f777c30e656ea718fbb62e13d7589e6032f2326604153e791df7e4f5",
+      "sha256": "68771736b1b9df671fb126eacb9e7d7b41b24ee8173cc59f0cc2f10711f1b0b8",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -33,7 +33,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "d03d8fb4b5ae123bca64e22c6755d5b11233506887a2b1c2b3095e33aa14fb8c",
+      "sha256": "6b5c701de01d60b8b762f992b5313a5bf30ee878a6e8962841d7f92e9f9ff894",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -285,7 +285,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "08e61da9cba79f3c84b25e6645274ce155cefa6ebaa274c485f6e0459eed105f",
+      "sha256": "2d3fa8d654b44f96353119e417eccfa0cb7f1659953c16e1b3b8037bca5aeed9",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -294,7 +294,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "d2ec3ad7c1dfd3e49bd8f786140881a47337385ce73f3aec25f640788539d8d2",
+      "sha256": "237f116f50d4a1369ef479175b2b02e0503db382804bf9d73cabf90b188a1968",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
@@ -690,7 +690,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "cc7557015030171a086ecd4c7a70b878828e0672e716b8738b1ba2912c54a46a",
+      "sha256": "1f285f7291e97ee91937fd61c7d4c0906e5d385a8d0d471139427a7152ddac20",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -791,7 +791,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "8bb6855a3e38b277a0a24ff68b3f1af773bd1fda8550ce31dc7a20ccdf836781",
+      "sha256": "d2f67bb594508e03673b696afa511f0a76650ea50abe1e96d08bf9f47e1bbb8f",
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {

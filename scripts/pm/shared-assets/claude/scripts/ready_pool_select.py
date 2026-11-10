@@ -58,12 +58,16 @@ Exit codes: 0 ok/pick, 1 no pick, 3 PRIORITY_INVERSION,
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import importlib.util
 import json
 import re
 import subprocess
 import sys
+import threading
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, sleep
@@ -84,6 +88,18 @@ PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 UNKNOWN_RANK = 9
 CLASS_RANK = {"rework": 0, "repro": 1, "new_issue": 2}
 REWORK_LABELS = {"status:qa-rework", "pm-state:qa-failed-rework", "pm-state:blocked-rework"}
+# Shared snapshot for every caller (heartbeat, hourly, --check inversion scan).
+# 60–120s: long enough that a collector timeout cannot stampede GitHub, short
+# enough that a full ranking is not a five-minute-old pool. The issue passed to
+# --check does not use this snapshot for its own dependency or merged-PR facts.
+CANDIDATE_LABELS = ("status:todo", *tuple(sorted(REWORK_LABELS)), "pm-blocked:dependency")
+SNAPSHOT_TTL = 90
+_FRESH = "__fresh_issues__"
+
+
+def pool_cache_name(kind: str) -> str:
+    """Disk key is repo + the exact label set, so a different filter cannot reuse it."""
+    return f"{kind}:{REPO}:{','.join(CANDIDATE_LABELS)}"
 EXCLUDE_LABELS = {
     "status:in-progress", "status:blocked", "status:deferred", "status:backlog",
     "status:done", "pm-nonclaimable:tracking", "umbrella",
@@ -112,15 +128,29 @@ _CONTRACT_MEMO: dict[str, list[str]] = {}
 
 
 def contract_reasons(issue: dict[str, Any]) -> list[str]:
-    # Pure over the issue content, but each call spawns the ICL validator; one run
-    # used to re-validate every candidate ~8 times. Memoize on the full content.
-    key = json.dumps(issue, sort_keys=True, default=str)
+    # Pure over the issue content, but each call runs the ICL validator; one run
+    # used to re-validate every candidate ~8 times. Memoize on the content, and
+    # reuse a stamp carried in the shared issue snapshot so the next process
+    # does not pay the scan again.
+    # Annotation keys (_dependency_comments, _implementation_merged, stamps) are not
+    # inputs to the contract. Including them busted the memo every time a prefetch
+    # attached comments and made every --check chunk re-scan the body.
+    key = json.dumps(
+        {k: v for k, v in issue.items() if not str(k).startswith("_")},
+        sort_keys=True, default=str)
     if key not in _CONTRACT_MEMO:
-        issue = {**issue, "labels": [{"name": name} for name in _labels(issue)]}
-        _CONTRACT_MEMO[key] = contract_policy().ready_pool_contract_reasons(
-            issue, set(), allow_backlog="status:todo" not in _labels(issue),
-            allow_dependencies=True,
-        )
+        stamped = issue.get("_contract_reasons")
+        if issue.get("_contract_key") == key and isinstance(stamped, list):
+            _CONTRACT_MEMO[key] = list(stamped)
+        else:
+            normalized = {**issue, "labels": [{"name": name} for name in _labels(issue)]}
+            _CONTRACT_MEMO[key] = contract_policy().ready_pool_contract_reasons(
+                normalized, set(), allow_backlog="status:todo" not in _labels(issue),
+                allow_dependencies=True,
+            )
+            issue["_contract_key"] = key
+            issue["_contract_reasons"] = list(_CONTRACT_MEMO[key])
+            sleep(0)  # let an in-flight dependency-hell fetch take the GIL
     return list(_CONTRACT_MEMO[key])
 
 
@@ -336,6 +366,115 @@ def prose_dependencies(text: str) -> list[tuple[int, str]]:
     return list(refs.items())
 
 
+_TOKEN_LOCK = threading.Lock()
+_GITHUB_TOKEN: str | None = None
+
+
+def _github_token() -> str:
+    """Read gh's credential once. Callers must not log the return value."""
+    global _GITHUB_TOKEN
+    with _TOKEN_LOCK:
+        if _GITHUB_TOKEN:
+            return _GITHUB_TOKEN
+        proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=20)
+        token = (proc.stdout or "").strip()
+        if proc.returncode != 0 or not token:
+            raise OSError("gh auth token unavailable")
+        _GITHUB_TOKEN = token
+        return token
+
+
+def graphql_http(query: str, variables: dict | None = None, timeout: int = 60,
+                 deadline: float | None = None) -> dict:
+    """One GraphQL round trip without a gh process per page. Falls back to gh on transport errors."""
+    remaining = deadline - monotonic() if deadline is not None else timeout
+    if remaining <= 0:
+        raise TimeoutError("candidate snapshot deadline reached")
+    body = json.dumps({"query": query, **({"variables": variables} if variables else {})}).encode()
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/graphql",
+            data=body,
+            headers={
+                "Authorization": "Bearer " + _github_token(),
+                "Content-Type": "application/json",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "ready-pool-select",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=min(timeout, remaining)) as resp:
+            return json.loads(resp.read().decode())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+        cmd = ["gh", "api", "graphql", "-f", "query=" + query]
+        for key, value in (variables or {}).items():
+            if value is not None:
+                cmd += ["-f", f"{key}={value}"]
+        return json.loads(run_lookup(cmd, timeout=timeout, deadline=deadline).stdout)
+
+
+def _paginate_issues(label: str, node_fields: str, deadline: float, page_size: int,
+                     timeout: int, transform, *, order_by: bool, on_row=None) -> dict[int, dict]:
+    """One label's cursor walk. Callers run a label per thread; each returns its own dict."""
+    cursor, seen, expected, rows = None, set(), None, {}
+    order = ",orderBy:{field:CREATED_AT,direction:ASC}" if order_by else ""
+    while True:
+        if deadline - monotonic() <= 0:
+            raise TimeoutError("candidate snapshot deadline reached")
+        query = (
+            'query($cursor:String){repository(owner:"Scribie",name:"heydonna-app"){'
+            f'issues(first:{page_size},after:$cursor,states:OPEN,labels:[{json.dumps(label)}]{order})'
+            f'{{totalCount nodes{{{node_fields}}} pageInfo{{hasNextPage endCursor}}}}}}}}'
+        )
+        payload = graphql_http(query, {"cursor": cursor}, timeout=timeout, deadline=deadline)
+        if payload.get("errors"):
+            raise ValueError("candidate lookup failed")
+        page = payload["data"]["repository"]["issues"]
+        if expected is not None and expected != page["totalCount"]:
+            raise ValueError("candidate population changed during pagination")
+        expected = page["totalCount"]
+        for raw in page["nodes"]:
+            number = int(raw["number"])
+            if number in seen:
+                raise ValueError("duplicate candidate page")
+            seen.add(number)
+            rows[number] = transform(raw)
+            if on_row is not None:
+                on_row(rows[number])
+        if not page["pageInfo"]["hasNextPage"]:
+            if len(seen) != expected:
+                raise ValueError("incomplete candidate pagination")
+            return rows
+        cursor = page["pageInfo"].get("endCursor")
+        if not cursor:
+            raise ValueError("missing candidate cursor")
+
+
+def _load_label_union(timeout: int, node_fields: str, transform, *, page_size: int,
+                      page_timeout: int, order_by: bool, on_row=None) -> list[dict[str, Any]]:
+    deadline = monotonic() + timeout
+
+    def one(label: str) -> dict[int, dict]:
+        last = None
+        for _ in range(2):
+            try:
+                return _paginate_issues(
+                    label, node_fields, deadline, page_size, page_timeout, transform,
+                    order_by=order_by, on_row=on_row)
+            except ValueError as exc:
+                last = exc
+                if "changed during pagination" not in str(exc) and "duplicate candidate page" not in str(exc):
+                    raise
+        raise last
+
+    with ThreadPoolExecutor(max_workers=len(CANDIDATE_LABELS)) as pool:
+        parts = list(pool.map(one, CANDIDATE_LABELS))
+    merged: dict[int, dict] = {}
+    for part in parts:
+        merged.update(part)
+    return list(merged.values())
+
+
 def run_lookup(cmd: list[str], timeout: int = 60, deadline: float | None = None) -> subprocess.CompletedProcess:
     for attempt in range(3):
         remaining = deadline - monotonic() if deadline is not None else timeout
@@ -425,36 +564,210 @@ def native_dependencies(number: int, cache: dict) -> list[tuple[int, str]] | Non
         return None
 
 
-def prefetch_native(numbers: list[int], cache: dict, workers: int = 8) -> None:
-    """Fill the native-blocker cache concurrently (one REST call per candidate was ~0.8s
-    serially, ~300 candidates per full run). Same calls, same cache entries; a failure
-    sets the same `unavailable` latch native_dependencies() uses."""
-    from concurrent.futures import ThreadPoolExecutor
-    todo = [n for n in dict.fromkeys(numbers) if ('native', n) not in cache]
-    if not todo or cache.get(('native', 'unavailable')):
+def _blocked_by_refs(connection: dict | None) -> list[tuple[int, str]]:
+    """Same tuples REST `/dependencies/blocked_by` produced: (number, 'default'), this repo only."""
+    if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+        raise ValueError("invalid native dependency response")
+    page = connection.get("pageInfo")
+    if not isinstance(page, dict) or page.get("hasNextPage") is not False:
+        raise ValueError("incomplete native dependency page")
+    refs = []
+    for item in connection["nodes"]:
+        repo = ((item or {}).get("repository") or {}).get("nameWithOwner") if isinstance(item, dict) else None
+        if not isinstance(item, dict) or not isinstance(item.get("number"), int) or not isinstance(repo, str):
+            raise ValueError("unsupported native dependency")
+        if repo.lower() != REPO.lower():
+            raise ValueError("unsupported native dependency")
+        refs.append((item["number"], "default"))
+    return refs
+
+
+def _assemble_blocked_by(number: int, connection: dict) -> dict:
+    """Follow blockedBy cursors so a page cap cannot drop a blocker."""
+    if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+        raise ValueError("invalid native dependency response")
+    nodes = list(connection["nodes"])
+    page = connection.get("pageInfo") if isinstance(connection.get("pageInfo"), dict) else {}
+    hops = 0
+    while page.get("hasNextPage") is True:
+        hops += 1
+        cursor = page.get("endCursor")
+        if hops > 5 or not cursor:
+            raise ValueError("incomplete native dependency page")
+        query = (
+            '{repository(owner:"Scribie",name:"heydonna-app"){issue(number:%d){'
+            'blockedBy(first:100,after:%s){pageInfo{hasNextPage endCursor}'
+            'nodes{number repository{nameWithOwner}}}}}}'
+        ) % (number, json.dumps(cursor))
+        payload = graphql_http(query, timeout=60)
+        issue = ((payload.get("data") or {}).get("repository") or {}).get("issue")
+        nxt = issue.get("blockedBy") if isinstance(issue, dict) else None
+        if not isinstance(nxt, dict) or not isinstance(nxt.get("nodes"), list):
+            raise ValueError("invalid native dependency response")
+        nodes.extend(nxt["nodes"])
+        page = nxt.get("pageInfo") if isinstance(nxt.get("pageInfo"), dict) else {}
+    if page.get("hasNextPage") is not False:
+        raise ValueError("incomplete native dependency page")
+    return {"nodes": nodes, "pageInfo": {"hasNextPage": False}}
+
+
+def _native_refs_blob(payload: dict) -> dict:
+    if isinstance(payload.get("refs"), dict):
+        return payload["refs"]
+    return {key: value for key, value in payload.items() if key not in {"refs", "states"}}
+
+
+def _apply_cached_states(cache: dict, states: dict) -> None:
+    for raw, value in states.items():
+        if not isinstance(raw, str):
+            continue
+        if raw.startswith("state|"):
+            cache[("state", int(raw.split("|", 1)[1]))] = value
+            continue
+        number_s, sep, kind = raw.partition("|")
+        if sep:
+            cache[(int(number_s), kind)] = tuple(value) if isinstance(value, list) else value
+
+
+def _native_disk_load(cache: dict) -> None:
+    if os.environ.get("GH_BUDGET_DISABLE") == "1":
         return
-    with ThreadPoolExecutor(max_workers=min(workers, len(todo))) as pool:
-        futures = {n: pool.submit(_native_fetch, n) for n in todo}
-    failed = False
-    for n, future in futures.items():
+    payload, age = gh_budget.peek(pool_cache_name("ready-pool-native"))
+    if not isinstance(payload, dict) or age is None or age > SNAPSHOT_TTL:
+        return
+    for key, refs in _native_refs_blob(payload).items():
         try:
-            cache[('native', n)] = future.result()
+            number = int(key)
+        except (TypeError, ValueError):
+            continue
+        if ("native", number) in cache or not isinstance(refs, list):
+            continue
+        cache[("native", number)] = [tuple(item) for item in refs]
+    if isinstance(payload.get("states"), dict):
+        _apply_cached_states(cache, payload["states"])
+
+
+def _native_disk_store(cache: dict) -> None:
+    if os.environ.get("GH_BUDGET_DISABLE") == "1" or cache.get(("native", "unavailable")):
+        return
+    refs, states = {}, {}
+    payload, age = gh_budget.peek(pool_cache_name("ready-pool-native"))
+    if isinstance(payload, dict) and age is not None and age <= SNAPSHOT_TTL:
+        refs.update(_native_refs_blob(payload))
+        if isinstance(payload.get("states"), dict):
+            states.update(payload["states"])
+    for key, value in cache.items():
+        if isinstance(key, tuple) and len(key) == 2 and key[0] == "native" and isinstance(key[1], int) and isinstance(value, list):
+            refs[str(key[1])] = value
+        elif isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], int) and isinstance(value, tuple):
+            states[f"{key[0]}|{key[1]}"] = list(value)
+        elif isinstance(key, tuple) and key[0] == "state" and isinstance(key[1], int):
+            states[f"state|{key[1]}"] = value
+    if not refs and not states:
+        return
+    try:
+        gh_budget.store(pool_cache_name("ready-pool-native"), {"refs": refs, "states": states})
+    except OSError:
+        pass
+
+
+def _prefetch_native_batch(batch: list[int]) -> dict[int, list[tuple[int, str]] | None]:
+    aliases = " ".join(
+        f'i{n}: issue(number:{n}){{blockedBy(first:100){{pageInfo{{hasNextPage endCursor}}'
+        f'nodes{{number repository{{nameWithOwner}}}}}}}}'
+        for n in batch
+    )
+    query = '{ repository(owner:"Scribie",name:"heydonna-app") { ' + aliases + " } }"
+    payload = graphql_http(query, timeout=60)
+    repo = (payload.get("data") or {}).get("repository")
+    if not isinstance(repo, dict):
+        raise ValueError("native batch failed")
+    out: dict[int, list[tuple[int, str]] | None] = {}
+    for number in batch:
+        raw = repo.get(f"i{number}")
+        if not isinstance(raw, dict) or not isinstance(raw.get("blockedBy"), dict):
+            out[number] = None
+            continue
+        try:
+            out[number] = _blocked_by_refs(_assemble_blocked_by(number, raw["blockedBy"]))
+        except ValueError:
+            out[number] = None
+    return out
+
+
+def _store_native_satisfaction(cache: dict) -> None:
+    """One batched state lookup for every native blocker. Per-candidate lookups were a round trip each."""
+    pending = []
+    for key, refs in cache.items():
+        if not (isinstance(key, tuple) and len(key) == 2 and key[0] == "native" and isinstance(refs, list)):
+            continue
+        for number, kind in refs:
+            if (number, kind) not in cache:
+                pending.append(number)
+    pending = list(dict.fromkeys(pending))
+    if not pending:
+        return
+    try:
+        nodes = graphql_nodes(pending)
+    except TimeoutError:
+        raise
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        nodes = {number: None for number in pending}
+    for number in pending:
+        node = nodes.get(number) if isinstance(nodes, dict) else None
+        if isinstance(node, dict):
+            cache[("state", number)] = node.get("state")
+        try:
+            cache[(number, "default")] = dependency_satisfaction(node if isinstance(node, dict) else None)
+        except (ValueError, TypeError):
+            cache[(number, "default")] = (False, "LOOKUP_FAILED")
+
+
+def prefetch_native(numbers: list[int], cache: dict, workers: int = 8, *, persist: bool = True) -> None:
+    """Fill native blockers with batched GraphQL `blockedBy` (same cache entries as the REST path).
+
+    One REST call per candidate was ~1.2s. `blockedBy` returns the same (number, repo) set;
+    a failed number still latches `unavailable` and stores None, and a cross-repo blocker
+    is still an error rather than a silently dropped dependency.
+    """
+    _native_disk_load(cache)
+    if cache.get(("native", "unavailable")):
+        return
+    todo = [n for n in dict.fromkeys(numbers) if ("native", n) not in cache]
+    failed = False
+    if todo:
+        batches = [todo[start:start + 50] for start in range(0, len(todo), 50)]
+        try:
+            with ThreadPoolExecutor(max_workers=min(workers, len(batches), 4)) as pool:
+                parts = list(pool.map(_prefetch_native_batch, batches))
         except _NATIVE_ERRORS:
-            cache[('native', n)] = None
-            failed = True
+            for number in todo:
+                cache[("native", number)] = None
+            cache[("native", "unavailable")] = True
+            print("native_deps=unavailable", file=sys.stderr)
+            return
+        for part in parts:
+            for number, refs in part.items():
+                cache[("native", number)] = refs
+                failed = failed or refs is None
     if failed:
-        cache[('native', 'unavailable')] = True
-        print('native_deps=unavailable', file=sys.stderr)
+        cache[("native", "unavailable")] = True
+        print("native_deps=unavailable", file=sys.stderr)
+        return
+    _store_native_satisfaction(cache)
+    if persist:
+        _native_disk_store(cache)
 
 
 def native_candidates(issues: list[dict[str, Any]], extra: list[dict[str, Any]]) -> list[int]:
-    """Exactly the issues rank/gated evaluation will call evaluate_dependency() on."""
+    """Issues evaluate_dependency() can run on. Contract rejects are included so this
+    stays off the contract-validator critical path; rank still skips them before evaluating."""
     out = []
     for issue in issues:
         cls = classify(issue)
         if not cls:
             continue
-        if cls == "new_issue" and (issue.get("_implementation_merged") or contract_reasons(issue)):
+        if cls == "new_issue" and issue.get("_implementation_merged"):
             continue
         out.append(int(issue["number"]))
     return out + [int(r["issue"]) for r in extra or []]
@@ -466,7 +779,28 @@ def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -
     # Canonical blockers are authoritative even when an advisory label is missing.
     if str(c.get("blockers") or "").strip().lower() not in {"", "none", "null", "n/a", "[]"}:
         c["blocking_labels"] = sorted(set(c.get("blocking_labels") or []) | {"pm-blocked:dependency"})
-    native = native_dependencies(c['issue'], cache) if not offline and c.get('issue') else []
+    fresh = (not offline) and int(c.get("issue") or -1) in set(cache.get(_FRESH) or ())
+    fresh_done = ("fresh_done", int(c.get("issue") or -1))
+    if fresh and not cache.get(fresh_done):
+        # The shared snapshot must not satisfy, or clear, the issue being assigned.
+        # One live read per process: later chunks in the same --check reuse it.
+        try:
+            native = _native_fetch(int(c["issue"]))
+        except _NATIVE_ERRORS:
+            native = None
+        cache[("native", c["issue"])] = native
+        if not parse_dependencies(c.get("blockers", ""), c.get("wake_condition", "")):
+            node = graphql_nodes([int(c["issue"])], comments=True).get(int(c["issue"]))
+            comment_nodes = node.get("comments") if isinstance(node, dict) else None
+            if isinstance(comment_nodes, dict) and isinstance(comment_nodes.get("nodes"), list):
+                comment_text = "\n".join(x.get("body", "") for x in comment_nodes["nodes"] if isinstance(x, dict))
+            else:
+                comment_text = ""
+        cache[fresh_done] = True
+    elif fresh:
+        native = cache.get(("native", c["issue"]))
+    else:
+        native = native_dependencies(c['issue'], cache) if not offline and c.get('issue') else []
     if native is None:
         c['blocking_labels'] = sorted(set(c.get('blocking_labels') or []) | {'pm-blocked:dependency'})
         c['dependency_reason'] = 'LOOKUP_FAILED'
@@ -487,6 +821,12 @@ def evaluate_dependency(c: dict[str, Any], cache: dict, offline: bool = False) -
     refs = refs or []
     known = {n for n, _ in refs}
     refs.extend((n, kind) for n, kind in (native or []) if n not in known)
+    if fresh and cache.get(fresh_done) is True and not cache.get(("fresh_states", int(c.get("issue") or -1))):
+        for number, kind in refs:
+            cache.pop((number, kind), None)
+            cache.pop(("state", number), None)
+            cache.pop(("native_state", number), None)
+        cache[("fresh_states", int(c.get("issue") or -1))] = True
     if not refs:
         # The label says blocked, but nothing is named. Do not assign (unverifiable) and do not
         # hide it as unparseable prose: this is a stale label an operator must re-queue.
@@ -566,7 +906,12 @@ def graphql_nodes(numbers: list[int], comments: bool = False, candidate_details:
         aliases = ' '.join(f'i{n}: issueOrPullRequest(number:{n}) {{ {fields} }}' for n in batch)
         query = '{ repository(owner:"Scribie",name:"heydonna-app") { ' + aliases + ' } }'
         try:
-            payload = json.loads(run_lookup(['gh', 'api', 'graphql', '-f', 'query=' + query]).stdout)
+            # gh process startup dominated small batches. Tests pin GH_BUDGET_DISABLE
+            # so the subprocess stub still sees the query.
+            if os.environ.get("GH_BUDGET_DISABLE") == "1":
+                payload = json.loads(run_lookup(['gh', 'api', 'graphql', '-f', 'query=' + query]).stdout)
+            else:
+                payload = graphql_http(query)
             nodes = payload['data']['repository']
             if payload.get('errors') or not isinstance(nodes, dict):
                 raise ValueError('GraphQL errors')
@@ -604,26 +949,40 @@ def _apply_dep_payload(issues: list[dict], cache: dict, payload: dict) -> None:
         cache[(int(number_s), kind)] = tuple(value) if isinstance(value, list) else value
 
 
-def prefetch_dependencies(issues: list[dict], cache: dict) -> None:
-    """Batched dependency lookup, shared for 300s. A cold miss below the GraphQL floor leaves deps unresolved."""
+def prefetch_dependencies(issues: list[dict], cache: dict, *, snapshot: bool = False) -> None:
+    """Batched dependency lookup.
+
+    Only the full candidate snapshot is written to the shared TTL cache. A --check of
+    one issue must not replace that snapshot with a partial result; it may read it,
+    then live-refresh the issue being assigned.
+    """
     if os.environ.get("GH_BUDGET_DISABLE") == "1":
         _prefetch_dependencies_uncached(issues, cache)
         return
-    try:
-        payload, _live = gh_budget.serve(
-            "ready-pool-deps", POOL_TTL, lambda: _capture_dependencies(issues))
-    except LookupError:
-        gh_budget.note_stale(
-            f"graphql remaining {gh_budget.graphql_remaining()} < {gh_budget.LOW_WATER} "
-            "and no ready-pool dependency cache")
-        return
-    _apply_dep_payload(issues, cache, payload)
+    name = pool_cache_name("ready-pool-deps")
+    if snapshot:
+        try:
+            payload, _live = gh_budget.serve(name, SNAPSHOT_TTL, lambda: _capture_dependencies(issues))
+        except LookupError:
+            gh_budget.note_stale(
+                f"graphql remaining {gh_budget.graphql_remaining()} < {gh_budget.LOW_WATER} "
+                "and no ready-pool dependency cache")
+            return
+    else:
+        payload, age = gh_budget.peek(name)
+        if not (isinstance(payload, dict) and payload.get("complete") and age is not None and age <= SNAPSHOT_TTL):
+            _prefetch_dependencies_uncached(issues, cache)
+            return
+    if isinstance(payload, dict) and payload.get("complete"):
+        _apply_dep_payload(issues, cache, payload)
 
 
 def _capture_dependencies(issues: list[dict]) -> dict:
     local: dict = {}
     _prefetch_dependencies_uncached(issues, local)
-    return _dump_dep_cache(issues, local)
+    payload = _dump_dep_cache(issues, local)
+    payload["complete"] = True
+    return payload
 
 
 def _prefetch_dependencies_uncached(issues: list[dict], cache: dict) -> None:
@@ -822,53 +1181,23 @@ def candidate_node(node: dict) -> dict:
 
 
 def _load_open_issues_uncached(timeout: int = 240) -> list[dict[str, Any]]:
-    """Complete candidate-label union, not a truncated all-open body scan."""
-    deadline, result = monotonic() + timeout, {}
+    """Complete candidate-label union. Labels are fetched together; each label is pages of 100.
+
+    Contract checks run as each page lands, overlapping the remaining round trips.
+    """
     fields = ('number title body state createdAt labels(first:100){nodes{name} pageInfo{hasNextPage}} '
               + ASSOCIATED_PRS)
-    for label in ["status:todo", *sorted(REWORK_LABELS), "pm-blocked:dependency"]:
-        cursor, seen, expected = None, set(), None
-        while True:
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                raise TimeoutError("candidate snapshot deadline reached")
-            query = ('query($cursor:String){repository(owner:"Scribie",name:"heydonna-app"){'
-                     'issues(first:20,after:$cursor,states:OPEN,labels:[' + json.dumps(label) + '],'
-                     'orderBy:{field:CREATED_AT,direction:ASC}){totalCount nodes{' + fields
-                     + '} pageInfo{hasNextPage endCursor}}}}')
-            cmd = ["gh", "api", "graphql", "-f", "query=" + query]
-            if cursor:
-                cmd += ["-f", "cursor=" + cursor]
-            payload = json.loads(run_lookup(cmd, timeout=60, deadline=deadline).stdout)
-            if payload.get("errors"):
-                raise ValueError("candidate lookup failed")
-            page = payload["data"]["repository"]["issues"]
-            if expected is not None and expected != page["totalCount"]:
-                raise ValueError("candidate population changed during pagination")
-            expected = page["totalCount"]
-            for raw in page["nodes"]:
-                number = int(raw["number"])
-                if number in seen:
-                    raise ValueError("duplicate candidate page")
-                seen.add(number)
-                result[number] = candidate_node(raw)
-            if not page["pageInfo"]["hasNextPage"]:
-                if len(seen) != expected:
-                    raise ValueError("incomplete candidate pagination")
-                break
-            cursor = page["pageInfo"].get("endCursor")
-            if not cursor:
-                raise ValueError("missing candidate cursor")
-    return list(result.values())
+    return _load_label_union(timeout, fields, candidate_node, page_size=100, page_timeout=60, order_by=True)
 
 
 def load_open_issues(timeout: int = 240) -> list[dict[str, Any]]:
-    """Candidate snapshot. Shared 300s cache; stale cache instead of a GraphQL call below the floor."""
+    """Candidate snapshot. Shared SNAPSHOT_TTL cache keyed by repo + label set.
+    Below the GraphQL floor a stale cache is served; a miss stays UNAVAILABLE."""
     if os.environ.get("GH_BUDGET_DISABLE") == "1":
         return _load_open_issues_uncached(timeout)
     try:
         issues, _live = gh_budget.serve(
-            "ready-pool-open-issues", POOL_TTL, lambda: _load_open_issues_uncached(timeout))
+            pool_cache_name("ready-pool-open-issues"), SNAPSHOT_TTL, lambda: _load_open_issues_uncached(timeout))
     except LookupError as exc:
         raise ValueError(str(exc)) from None
     return issues
@@ -882,12 +1211,14 @@ def _load_open_prs_uncached(timeout: int = 30) -> list[dict[str, Any]]:
     return json.loads(proc.stdout)
 
 
-def load_open_prs(timeout: int = 30) -> list[dict[str, Any]]:
-    """`gh pr list` is GraphQL. Share one result for 300s across --check and the full scan."""
-    if os.environ.get("GH_BUDGET_DISABLE") == "1":
+def load_open_prs(timeout: int = 30, *, fresh: bool = False) -> list[dict[str, Any]]:
+    """`gh pr list` is GraphQL. The ranking snapshot is shared; --check passes fresh=True
+    so the issue being assigned is not excluded or kept by a stale open-PR list."""
+    if fresh or os.environ.get("GH_BUDGET_DISABLE") == "1":
         return _load_open_prs_uncached(timeout)
     try:
-        prs, _live = gh_budget.serve("ready-pool-open-prs", POOL_TTL, lambda: _load_open_prs_uncached(timeout))
+        prs, _live = gh_budget.serve(
+            pool_cache_name("ready-pool-open-prs"), SNAPSHOT_TTL, lambda: _load_open_prs_uncached(timeout))
     except LookupError as exc:
         raise ValueError(str(exc)) from None
     return prs
@@ -973,31 +1304,38 @@ def normalize_node(raw: dict | None) -> dict | None:
     }
 
 
+def _graphql_detail_batch(batch: list[int]) -> tuple[dict[int, dict | None], int]:
+    aliases = " ".join(f"i{n}: issueOrPullRequest(number:{n}) {{ {_ISSUE_DETAIL} {_PR_DETAIL} }}" for n in batch)
+    query = '{ repository(owner:"Scribie",name:"heydonna-app") { ' + aliases + " } }"
+    repo = None
+    for _ in range(2):
+        try:
+            payload = graphql_http(query, timeout=60)
+            repo = (payload.get("data") or {}).get("repository")
+            if isinstance(repo, dict):
+                break
+        except (OSError, ValueError, TimeoutError):
+            repo = None
+    if not isinstance(repo, dict):
+        return {n: None for n in batch}, 1
+    return {n: normalize_node(repo.get(f"i{n}")) for n in batch}, 0
+
+
 def graphql_details(numbers: list[int]) -> tuple[dict[int, dict | None], int]:
-    """Batched detail lookup (25/batch, one retry). Partial GraphQL data is kept: a
-    deleted/transferred number comes back null with an error but must not void its batch."""
+    """Batched detail lookup (25/batch, one retry, batches in flight together).
+    Partial GraphQL data is kept: a deleted/transferred number comes back null
+    with an error but must not void its batch."""
+    batches = [numbers[start:start + 25] for start in range(0, len(numbers), 25)]
     result: dict[int, dict | None] = {}
     failures = 0
-    for start in range(0, len(numbers), 25):
-        batch = numbers[start:start + 25]
-        aliases = " ".join(f"i{n}: issueOrPullRequest(number:{n}) {{ {_ISSUE_DETAIL} {_PR_DETAIL} }}" for n in batch)
-        query = '{ repository(owner:"Scribie",name:"heydonna-app") { ' + aliases + " } }"
-        repo = None
-        for _ in range(2):
-            try:
-                p = subprocess.run(["gh", "api", "graphql", "-f", "query=" + query],
-                                   capture_output=True, text=True, timeout=60)
-                repo = (json.loads(p.stdout or "{}").get("data") or {}).get("repository")
-                if isinstance(repo, dict):
-                    break
-            except (OSError, subprocess.SubprocessError, ValueError):
-                repo = None
-        if not isinstance(repo, dict):
-            failures += 1
-            result.update({n: None for n in batch})
-            continue
-        for n in batch:
-            result[n] = normalize_node(repo.get(f"i{n}"))
+    if len(batches) <= 1:
+        parts = [_graphql_detail_batch(batch) for batch in batches]
+    else:
+        with ThreadPoolExecutor(max_workers=min(4, len(batches))) as pool:
+            parts = list(pool.map(_graphql_detail_batch, batches))
+    for part, failed in parts:
+        result.update(part)
+        failures += failed
     return result, failures
 
 
@@ -1474,58 +1812,35 @@ def evaluate_check(args, issues, extra, prs, cache) -> dict[str, Any]:
     return res
 
 
+def _light_row(raw: dict) -> dict:
+    labels = raw.get("labels") or {}
+    if (labels.get("pageInfo") or {}).get("hasNextPage") is not False:
+        raise ValueError("incomplete candidate labels")
+    return {**raw, "labels": labels["nodes"]}
+
+
 def _load_light_candidates_uncached(timeout: int = 60) -> list[dict[str, Any]]:
-    """Number/labels/createdAt only for the candidate-label union (no bodies, no PR links)."""
-    deadline, result = monotonic() + timeout, {}
-    for label in ["status:todo", *sorted(REWORK_LABELS), "pm-blocked:dependency"]:
-        cursor, seen, expected = None, set(), None
-        while True:
-            if deadline - monotonic() <= 0:
-                raise TimeoutError("light candidate deadline reached")
-            query = ('query($cursor:String){repository(owner:"Scribie",name:"heydonna-app"){'
-                     'issues(first:100,after:$cursor,states:OPEN,labels:[' + json.dumps(label) + ']){'
-                     'totalCount nodes{number state createdAt labels(first:100){nodes{name} pageInfo{hasNextPage}}}'
-                     ' pageInfo{hasNextPage endCursor}}}}')
-            cmd = ["gh", "api", "graphql", "-f", "query=" + query]
-            if cursor:
-                cmd += ["-f", "cursor=" + cursor]
-            payload = json.loads(run_lookup(cmd, timeout=30, deadline=deadline).stdout)
-            if payload.get("errors"):
-                raise ValueError("light candidate lookup failed")
-            page = payload["data"]["repository"]["issues"]
-            if expected is not None and expected != page["totalCount"]:
-                raise ValueError("candidate population changed during pagination")
-            expected = page["totalCount"]
-            for raw in page["nodes"]:
-                labels = raw.get("labels") or {}
-                if (labels.get("pageInfo") or {}).get("hasNextPage") is not False:
-                    raise ValueError("incomplete candidate labels")
-                seen.add(int(raw["number"]))
-                result[int(raw["number"])] = {**raw, "labels": labels["nodes"]}
-            if not page["pageInfo"]["hasNextPage"]:
-                if len(seen) != expected:
-                    raise ValueError("incomplete candidate pagination")
-                break
-            cursor = page["pageInfo"].get("endCursor")
-            if not cursor:
-                raise ValueError("missing candidate cursor")
-    return list(result.values())
+    """Number/labels/createdAt only. Labels run together, 100 per page."""
+    fields = "number state createdAt labels(first:100){nodes{name} pageInfo{hasNextPage}}"
+    return _load_label_union(timeout, fields, _light_row, page_size=100, page_timeout=30, order_by=False)
 
 
 def load_light_candidates(timeout: int = 60) -> list[dict[str, Any]]:
-    """Label scan used by every --check. This was the repeated GraphQL pagination."""
+    """Label scan used by every --check. Shared with the full ranking's label set."""
     if os.environ.get("GH_BUDGET_DISABLE") == "1":
         return _load_light_candidates_uncached(timeout)
     try:
         rows, _live = gh_budget.serve(
-            "ready-pool-light", POOL_TTL, lambda: _load_light_candidates_uncached(timeout))
+            pool_cache_name("ready-pool-light"), SNAPSHOT_TTL, lambda: _load_light_candidates_uncached(timeout))
     except LookupError as exc:
         raise ValueError(str(exc)) from None
     return rows
 
 
 def _cached_checked_issue(number: int) -> dict | None:
-    payload, _age = gh_budget.peek("ready-pool-open-issues")
+    payload, age = gh_budget.peek(pool_cache_name("ready-pool-open-issues"))
+    if not isinstance(payload, list) or age is None or age > SNAPSHOT_TTL:
+        return None
     if not isinstance(payload, list):
         return None
     for issue in payload:
@@ -1534,47 +1849,76 @@ def _cached_checked_issue(number: int) -> dict | None:
     return None
 
 
-def fast_check(args) -> dict[str, Any]:
-    """--check N without loading the whole pool.
+def _warm_contracts(issues: list[dict[str, Any]]) -> None:
+    """Fill the contract memo while GitHub round trips are in flight. Rank still decides."""
+    for issue in issues:
+        if classify(issue) == "new_issue":
+            contract_reasons(issue)
 
-    1. Evaluate N alone with the full pipeline. GATED / DEPENDENCY_OPEN / PR_CAP /
-       not_eligible / class mismatch depend only on N (and open PRs), so they are final.
-    2. If N is eligible, only candidates that sort strictly better on (priority, class)
-       can invert it. A light label query finds them; label-only exclusions are a safe
-       prefilter (a body can only exclude more). Unlabelled-priority issues are kept
-       (their Ready Pool priority needs the body). Those are fetched in full and
-       evaluated in the mandatory sort order with the same pipeline, stopping at the
-       first eligible one, which is exactly the full path's `should_take`.
+
+def _issue_from_detail(raw: dict | None, number: int) -> dict | None:
+    if raw is None:
+        raise ValueError(f"candidate #{number} lookup failed")
+    if isinstance(raw.get("labels"), list):
+        return raw
+    if "mergedAt" in raw:
+        return None
+    return candidate_node(raw)
+
+
+def _fresh_snapshot() -> list | None:
+    """Full candidate bodies from the shared TTL, or None when the snapshot is stale."""
+    if os.environ.get("GH_BUDGET_DISABLE") == "1":
+        return None
+    payload, age = gh_budget.peek(pool_cache_name("ready-pool-open-issues"))
+    if isinstance(payload, list) and age is not None and age <= SNAPSHOT_TTL:
+        return payload
+    return None
+
+
+def fast_check(args) -> dict[str, Any]:
+    """--check N without loading every issue body.
+
+    The checked issue's dependency blockers and merged-PR association are always
+    live (`__fresh_issues__`). The rest of the pool is the shared short-TTL
+    snapshot, used only to see whether something sorts strictly better.
+    Bodies for that inversion scan are fetched in sort order, 8 at a time,
+    and the scan stops at the first eligible better candidate.
     """
-    cache: dict = {}
+    cache: dict = {_FRESH: {int(args.check)}}
     extra = []
     if args.selection_class and args.selection_class != "new_issue":
         extra.append({"issue": args.check, "class": args.selection_class, "pr": args.pr})
     low = os.environ.get("GH_BUDGET_DISABLE") != "1" and gh_budget.graphql_low()
-    if low:
-        picked = _cached_checked_issue(args.check)
-        if picked is None:
+    snap = _fresh_snapshot()
+    snap_by = {int(row["number"]): row for row in snap} if snap else {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        light_fut = None if snap is not None else pool.submit(load_light_candidates)
+        pr_fut = pool.submit(lambda: load_open_prs(fresh=True))
+        if low:
+            pr_fut.result()
             rem = gh_budget.graphql_remaining()
             return {"status": "LOOKUP_FAILED", "issue": args.check, "stale": True,
-                    "reason": f"UNAVAILABLE: graphql remaining {rem} < {gh_budget.LOW_WATER} and no cached issue"}
-        gh_budget.note_stale(
-            f"graphql remaining {gh_budget.graphql_remaining()} < {gh_budget.LOW_WATER}; --check used the cached pool")
-    else:
+                    "reason": f"UNAVAILABLE: graphql remaining {rem} < {gh_budget.LOW_WATER}; "
+                              "refusing a stale assignment check"}
         node = graphql_nodes([args.check], candidate_details=True).get(args.check)
+        prs = pr_fut.result()
         if node is None:
             return {"status": "LOOKUP_FAILED", "issue": args.check, "reason": "issue lookup failed"}
         if "mergedAt" in node:
-            return {"status": "not_eligible", "issue": args.check, "reason": "issue is not an eligible Ready Pool/rework candidate"}
+            return {"status": "not_eligible", "issue": args.check,
+                    "reason": "issue is not an eligible Ready Pool/rework candidate"}
         picked = candidate_node(node)
-    prs = load_open_prs()
-    res = evaluate_check(args, [picked], extra, prs, cache)
-    rework_only = res.pop("_rework_only")
-    if res["status"] != "ok":
-        return res
+        res = evaluate_check(args, [picked], extra, prs, cache)
+        rework_only = res.pop("_rework_only")
+        if res["status"] != "ok":
+            return res
+        light_rows = snap if snap is not None else light_fut.result()
     pick = res["pick"]
     pick_key = (pick["priority_rank"], CLASS_RANK.get(pick["class"], 9))
-    possible = []
-    for light in load_light_candidates():
+    labelled = []
+    unlabelled = []
+    for light in light_rows:
         if int(light["number"]) == args.check or classify(light, light=True) is None:
             continue
         labels = _labels(light)
@@ -1583,42 +1927,60 @@ def fast_check(args) -> dict[str, Any]:
         if rework_only and cls == "new_issue":
             continue
         if not ranks or (min(ranks), CLASS_RANK[cls]) < pick_key:
-            possible.append(int(light["number"]))
-    if low:
-        details = {n: _cached_checked_issue(n) for n in possible}
-    else:
-        details = graphql_nodes(possible, candidate_details=True)
-    better = []
-    for number in possible:
-        raw = details.get(number)
-        if raw is None:
-            if low:
-                continue  # a missing cached row is not a live lookup failure
-            raise ValueError(f"candidate #{number} lookup failed")
-        if isinstance(raw.get("labels"), list):
-            issue = raw
-        else:
-            if "mergedAt" in raw:
+            if ranks:
+                labelled.append((min(ranks), CLASS_RANK[cls], light.get("createdAt") or "~", int(light["number"])))
+            else:
+                unlabelled.append(int(light["number"]))
+    labelled.sort()
+    events = [((rank, cls_rank, created, number), "id", number)
+              for rank, cls_rank, created, number in labelled]
+    if unlabelled:
+        raws = {} if snap_by else graphql_nodes(unlabelled, candidate_details=True)
+        for number in unlabelled:
+            issue = snap_by.get(number) if snap_by else _issue_from_detail(raws.get(number), number)
+            if issue is None:
                 continue
-            issue = candidate_node(raw)
-        cls = classify(issue)
-        if cls is None:
+            cls = classify(issue)
+            if cls is None:
+                continue
+            row = candidate(issue, cls)
+            if (row["priority_rank"], CLASS_RANK.get(cls, 9)) < pick_key:
+                events.append((sort_key(row), "issue", issue))
+    events.sort(key=lambda item: item[0])
+    evaluated = 0
+    eligible_higher = 0
+    for start in range(0, len(events), 8):
+        chunk_events = events[start:start + 8]
+        ids = [item[2] for item in chunk_events if item[1] == "id" and item[2] not in snap_by]
+        raws = graphql_nodes(ids, candidate_details=True) if ids else {}
+        chunk = []
+        for kind, payload in ((item[1], item[2]) for item in chunk_events):
+            if kind == "issue":
+                chunk.append(payload)
+                eligible_higher += 1
+                continue
+            issue = snap_by.get(payload) if payload in snap_by else _issue_from_detail(raws.get(payload), payload)
+            if issue is None:
+                continue
+            cls = classify(issue)
+            if cls is None:
+                continue
+            row = candidate(issue, cls)
+            if (row["priority_rank"], CLASS_RANK.get(cls, 9)) < pick_key:
+                chunk.append(issue)
+                eligible_higher += 1
+        evaluated += len(chunk_events)
+        if not chunk:
             continue
-        c = candidate(issue, cls)
-        if (c["priority_rank"], CLASS_RANK.get(cls, 9)) < pick_key:
-            better.append((sort_key(c), issue))
-    better.sort(key=lambda item: item[0])
-    for start in range(0, len(better), 8):
-        chunk = [issue for _, issue in better[start:start + 8]]
         verdict = evaluate_check(args, [picked, *chunk], extra, prs, cache)
-        verdict.pop("_rework_only")
+        verdict.pop("_rework_only", None)
         if verdict["status"] != "ok":
-            verdict["fast_path"] = {"higher_candidates": len(better), "evaluated": start + len(chunk)}
+            verdict["fast_path"] = {"higher_candidates": eligible_higher, "evaluated": evaluated}
             return verdict
     if res.get("priority_reason"):
         res["priority_reason"] = (f"priority_reason: {pick['priority']} {pick['class']} #{pick['issue']} taken because "
-                                  f"no ready P0/P1 candidate exists ({len(better)} higher-priority candidates checked)")
-    res["fast_path"] = {"higher_candidates": len(better), "evaluated": len(better)}
+                                  f"no ready P0/P1 candidate exists ({eligible_higher} higher-priority candidates checked)")
+    res["fast_path"] = {"higher_candidates": eligible_higher, "evaluated": evaluated}
     return res
 
 
@@ -1661,22 +2023,52 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(node, dict) and "mergedAt" not in node:
             issues.append(candidate_node(node))
     prs = load_open_prs()
-    contract_defects = [
-        {"issue": int(i["number"]), "reasons": reasons}
-        for i in issues if classify(i) == "new_issue"
-        if (reasons := contract_reasons(i))
-    ]
+    prefetch_pool = None
     if not args.no_dependency_check:
-        prefetch_dependencies(issues, cache)
-        prefetch_native(native_candidates(issues, extra), cache)
+        dep_box: dict = {}
+        nat_box: dict = {}
+        prefetch_pool = ThreadPoolExecutor(max_workers=2)
+        deps = prefetch_pool.submit(prefetch_dependencies, issues, dep_box, snapshot=True)
+        native = prefetch_pool.submit(prefetch_native, native_candidates(issues, extra), nat_box)
+        deps.result()
+        native.result()
+        cache.update(dep_box)
+        cache.update(nat_box)
+        prefetch_pool.shutdown(wait=True)
     open_pr_count = sum(not pr["isDraft"] for pr in prs)
     rework_only = args.rework_only or open_pr_count > 25
     owned, uncertain = owned_issues(prs)
     # Existing PRs own new work, not rework/repro on that same PR.
     eligible_issues = [i for i in issues if classify(i) != "new_issue" or int(i["number"]) not in owned]
     eligible_extra = [r for r in extra if r.get("class", "rework") != "new_issue" or int(r["issue"]) not in owned]
+    # GraphQL for dependency hell overlaps the contract scan inside rank. The fetch
+    # walks every gated issue; contract rejects are dropped before the report.
+    hell_pool = None
+    hell_fetch = None
+    if not args.no_dependency_check:
+        hell_input = []
+        for issue in eligible_issues:
+            cls = classify(issue)
+            if not cls or (cls == "new_issue" and issue.get("_implementation_merged")):
+                continue
+            row = candidate(issue, cls)
+            evaluate_dependency(row, cache, False)
+            if is_gated(row) and "pm-blocked:dependency" in row.get("blocking_labels", []):
+                hell_input.append(row)
+        hell_pool = ThreadPoolExecutor(max_workers=1)
+        hell_fetch = hell_pool.submit(fetch_dependency_graph, hell_input)
     ranked = rank_candidates(eligible_issues, eligible_extra, rework_only, cache, args.no_dependency_check)
     gated = gated_p0_candidates(eligible_issues, rework_only, cache, args.no_dependency_check)
+    if os.environ.get("GH_BUDGET_DISABLE") != "1":
+        try:
+            gh_budget.store(pool_cache_name("ready-pool-open-issues"), issues)
+        except OSError:
+            pass
+    contract_defects = [
+        {"issue": int(i["number"]), "reasons": reasons}
+        for i in issues if classify(i) == "new_issue"
+        if (reasons := contract_reasons(i))
+    ]
     all_dependencies = []
     for issue in eligible_issues:
         cls = classify(issue)
@@ -1700,7 +2092,11 @@ def main(argv: list[str] | None = None) -> int:
     dependency_hell, dependency_hotspots, hell_meta = [], [], {"skipped": "offline"}
     if not args.no_dependency_check:
         started = datetime.now(timezone.utc)
-        nodes, failures = fetch_dependency_graph(dependency_gated)
+        try:
+            nodes, failures = hell_fetch.result() if hell_fetch is not None else fetch_dependency_graph(dependency_gated)
+        finally:
+            if hell_pool is not None:
+                hell_pool.shutdown(wait=True)
         pr_updated = {int(pr["number"]): pr.get("updatedAt") or "" for pr in prs}
         dependency_hell, dependency_hotspots = dependency_hell_report(
             dependency_gated, nodes, owned, pr_updated, started)

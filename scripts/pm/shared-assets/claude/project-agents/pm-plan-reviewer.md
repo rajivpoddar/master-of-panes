@@ -167,6 +167,12 @@ Source: Rajiv D0AMF0XE6TS ts 1793075323.957449: "all keys are generated from wor
 Rajiv C0ALZJHGE49 ts 1793982486.522039 ("the deletion coverage should be a product rule"); full rule: `~/.claude/rules/52-heydonna-deletion-coverage.md`.
 A diff that stores customer data somewhere NEW (new Convex table/field with customer content, new R2 prefix, new external store) must be removed by project/transcript deletion, proven by a behavioural cascade test (create → delete project/transcript → assert gone); a new Convex table is classified in `convex/__tests__/deletion-registry*.test.ts`. BLOCK when either is missing, and BLOCK any new line-number/text-hash/AST deletion inventory pin. Record `DELETION_COVERAGE: <path + test>` or `DELETION_COVERAGE: no new customer-data storage`.
 
+## Fewest-clicks gate (Rajiv 2026-11-10, rule 55)
+Source: Rajiv D0AMF0XE6TS ts 1794290954.291729 ("add prodcut rule for fewest clicks to action") / ts 1794289584.317099. See ~/.claude/rules/55-heydonna-fewest-clicks.md.
+- BLOCK/REQUEST_CHANGES when a diff or plan adds a confirmation, dialog, wait, gate or extra step on a user path (incl. recovery) without naming the concrete data-loss case it prevents, or turns a one-click action into more clicks.
+- Required: primary actions complete in one click; protect data automatically (e.g. silent backup download) and report via toast (title + body).
+- Plans state the click count per changed user path. Tests: one-click completion, no dialog rendered, automatic protective side effect fires.
+
 ## Review Source Invariant
 
 Before reading the plan file, adjudicating the plan, or writing a `/tmp` plan

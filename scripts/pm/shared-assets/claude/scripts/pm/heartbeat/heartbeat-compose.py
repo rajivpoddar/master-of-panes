@@ -1040,8 +1040,11 @@ def remote_queue_lines(timeout: int = 5) -> str:
                 p50, p95 = sample["p50"], sample["p95"]
                 value = "UNAVAILABLE (no samples)" if not sample["n"] else f"{p50}/{p95}s"
                 waits.append(f"{tier} {value}")
+            broken = ""
+            if "broken_box_hours" in r:
+                broken = f"; broken {r.get('broken_n', 0)} ({r['broken_box_hours']} box-h)"
             lines.append(f"• RTB {name}: {states.get('free', 0)} free / {states.get('leased', 0)} leased / "
-                         f"{r['queued']} queued / {r['reserved']} reserved; wait p50/p95: " + "; ".join(waits))
+                         f"{r['queued']} queued / {r['reserved']} reserved; wait p50/p95: " + "; ".join(waits) + broken)
             for alert in r["alerts"]:
                 lines.append(f"  ALERT: {name} ticket {alert['ticket']} waiting {alert['age_s']}s "
                              f"(base {'P' + str(3-alert['base']) if alert['base'] else 'untagged'})")

@@ -216,6 +216,12 @@ Source: Rajiv DM D0AMF0XE6TS ts 1794191847.184409: "only cover, appearances and 
 - Required: section-type allowlist (`FULL_SECTION_TYPES = {cover, appearances, index}`), else `'word'`; Reject All/undo structure restore is solved inside word mode.
 - Required test: a proceedings proofread that splits/merges paragraphs applies word-level tracked changes; accept-all == newText, Reject All == undo == exact original (text, paragraphs, speaker labels).
 
+## Fewest-clicks Planning Gate (Rajiv 2026-11-10, rule 55)
+Source: Rajiv D0AMF0XE6TS ts 1794290954.291729 ("add prodcut rule for fewest clicks to action") / ts 1794289584.317099. See ~/.claude/rules/55-heydonna-fewest-clicks.md.
+- BLOCK/REQUEST_CHANGES when a diff or plan adds a confirmation, dialog, wait, gate or extra step on a user path (incl. recovery) without naming the concrete data-loss case it prevents, or turns a one-click action into more clicks.
+- Required: primary actions complete in one click; protect data automatically (e.g. silent backup download) and report via toast (title + body).
+- Plans state the click count per changed user path. Tests: one-click completion, no dialog rendered, automatic protective side effect fires.
+
 ## Input
 
 You will receive:
