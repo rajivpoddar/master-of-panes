@@ -822,6 +822,15 @@
       "source_path": "claude/scripts/sakshi-heartbeat.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/spark-run-monitor.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-spark-monitor",
+      "sha256": "e9ea6439c320a377e6efdb20ddc1dcd6ead41ce2f39d211c328ce6f5ad352ed5",
+      "source_path": "claude/scripts/spark-run-monitor.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/stale-process-cleanup.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1800,7 +1809,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 196,
+    "selected_count": 197,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1904,7 +1913,8 @@
       "/Users/rajiv/.claude/scripts/tests/test_backlog_runnability.py",
       "~/.codex/skills/heydonna-file-promote-issue",
       "~/.claude/hooks/explore-issue-latch-guard.sh",
-      "~/.claude/skills/explore-issue/SKILL.md"
+      "~/.claude/skills/explore-issue/SKILL.md",
+      "~/.claude/scripts/spark-run-monitor.sh"
     ]
   },
   "owner": "master-of-panes",
