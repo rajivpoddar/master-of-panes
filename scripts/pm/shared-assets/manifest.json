@@ -1305,7 +1305,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
-      "sha256": "fb094c6759b52d428ecbec5f274b530f0c8d1fed80a8fa59dd3ae573347b54e3",
+      "sha256": "e63488378112c3ddad80ab9ffd1b3be44335fedbb03d15307bf574f34f418153",
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {

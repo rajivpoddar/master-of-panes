@@ -1007,7 +1007,11 @@ text = payload.get('text', '')
 
 # Check for routable content
 import re
-has_routing = bool(re.search(r'<!channel>|<!here>|<@U0(AMETSAHC0|ALE8Z8X2P|AMEUQ8DR6|AMEUZPQ5N)>', text))
+# Rajiv 2026-11-10 D0AMF0XE6TS ts 1794323794.225359: remove at-channel injection to slots.
+# Broadcast tokens (channel/here/everyone) never route to panes; only explicit slot mentions do.
+has_routing = bool(re.search(r'<@U0(AMETSAHC0|ALE8Z8X2P|AMEUQ8DR6|AMEUZPQ5N)>', text))
+if has_routing:
+    text = re.sub(r'<!(?:channel|here|everyone)(?:[|][^>]*)?>', '', text)
 if has_routing:
     try:
         route_payload = json.dumps({'text': text, 'formatted': text}).encode()
