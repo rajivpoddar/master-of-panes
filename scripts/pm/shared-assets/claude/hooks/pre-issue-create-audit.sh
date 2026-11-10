@@ -167,7 +167,7 @@ if len(lines) != 1:
 line = lines[0]
 pair = re.fullmatch(r"\s*([CD][A-Z0-9]{10}):([0-9]{10}\.[0-9]{6})\s*", line)
 if pair:
-    print(pair.group(1), pair.group(2))
+    print(pair.group(1), pair.group(2), pair.group(2))
     sys.exit()
 url = re.fullmatch(r"\s*<?(https?://[^\s<>]+)>?\s*", line)
 if not url:
@@ -225,7 +225,14 @@ if data.get("channel") != channel or not matches(data):
 if not matches(data):
     print("INVALID")
 else:
-    print(channel, root)
+    # Reuse the corroborated response for origin classification; a later reply
+    # need not appear in the first ten messages fetched by the legacy path.
+    data["channel"] = channel
+    try:
+        with open(cache + ".tmp." + str(os.getpid()), "w") as f: json.dump(data, f)
+        os.replace(cache + ".tmp." + str(os.getpid()), cache)
+    except OSError: pass
+    print(channel, root, reply)
 ' || true)
 CHANNEL=""
 THREAD_TS=""
@@ -246,7 +253,13 @@ if [ "$SOURCE_RESULT" = "INVALID" ] || [ -z "$SOURCE_RESULT" ]; then
   exit 0
 fi
 if [ "$SOURCE_RESULT" != "NONE" ]; then
-  read -r CHANNEL THREAD_TS <<< "$SOURCE_RESULT"
+  read -r CHANNEL THREAD_TS EXPLORE_ISSUE_SOURCE_MESSAGE_TS <<< "$SOURCE_RESULT"
+  export EXPLORE_ISSUE_SOURCE_MESSAGE_TS
+  SELECTED_STATE="$(explore_issue_state_file "$CHANNEL" "$THREAD_TS")"
+  if [ -f "$SELECTED_STATE" ] && jq -e ' .state == "RESOLVED_FILED" or .state == "RESOLVED_NO_ISSUE" ' "$SELECTED_STATE" >/dev/null; then
+    printf '%s\n' '{"decision":"block","message":"BLOCKED: This source is already terminal. For a new report, use the later reply permalink with the original thread_ts. The terminal record was not changed."}'
+    exit 0
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -332,10 +345,10 @@ if [ -n "$THREAD_TS" ]; then
   if [ -f "$CACHE_FILE" ] && [ -s "$CACHE_FILE" ]; then
     OK=$(jq -r '.ok // false' "$CACHE_FILE" 2>/dev/null || echo "false")
     if [ "$OK" = "true" ]; then
-      ORIGINATOR_USER=$(jq -r '.messages[0].user // empty' "$CACHE_FILE" 2>/dev/null || true)
-      ORIGINATOR_USERNAME=$(jq -r '.messages[0].username // empty' "$CACHE_FILE" 2>/dev/null || true)
-      ORIGINATOR_BOT_ID=$(jq -r '.messages[0].bot_id // empty' "$CACHE_FILE" 2>/dev/null || true)
-      ORIGINATOR_APP_ID=$(jq -r '.messages[0].app_id // empty' "$CACHE_FILE" 2>/dev/null || true)
+      ORIGINATOR_USER=$(jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).user // empty' "$CACHE_FILE" 2>/dev/null || true)
+      ORIGINATOR_USERNAME=$(jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).username // empty' "$CACHE_FILE" 2>/dev/null || true)
+      ORIGINATOR_BOT_ID=$(jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).bot_id // empty' "$CACHE_FILE" 2>/dev/null || true)
+      ORIGINATOR_APP_ID=$(jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).app_id // empty' "$CACHE_FILE" 2>/dev/null || true)
 
       if [ -n "$ORIGINATOR_BOT_ID" ] && echo "$ORIGINATOR_BOT_ID" | grep -qE "$INTERNAL_BOT_IDS_REGEX"; then
         ORIGIN_CLASS="internal"
@@ -425,7 +438,7 @@ write_durable_block() {
     gap_note="\nCONTROL_PLANE_GAP: durable obligation could not be written — surface this to PM."
   fi
   cat <<BLOCK
-{"decision": "block", "message": "BLOCKED: Customer-origin issue (${detail}) requires /explore-issue validation. audit-bypass marker is NOT accepted for customer-origin issues. A durable HIGH hourly pm-ops obligation is open for this Slack source; the one-use READY_TO_FILE permit (minted after CONFIRMED review) is the only release.\n\nObligation kind=explore_issue_required source=${CHANNEL}:${THREAD_TS} (dedupe_group=explore-issue:${CHANNEL}:${THREAD_TS})${gap_note}\nState file: ${state_file}\nRemedy: run Skill(explore-issue) with this source; after CONFIRMED the agent mints the permit, files the issue, and resolves the obligation."}
+{"decision": "block", "message": "BLOCKED: Customer-origin issue (${detail}) requires /explore-issue validation. audit-bypass marker is NOT accepted for customer-origin issues. A durable HIGH hourly pm-ops obligation is open for this Slack source; the one-use READY_TO_FILE permit (minted after CONFIRMED review) is the only release.\n\nObligation kind=explore_issue_required source=$(explore_issue_target_id "$CHANNEL" "$THREAD_TS") (dedupe_group=explore-issue:$(explore_issue_target_id "$CHANNEL" "$THREAD_TS"))${gap_note}\nState file: ${state_file}\nRemedy: run Skill(explore-issue) with this source; after CONFIRMED the agent mints the permit, files the issue, and resolves the obligation."}
 BLOCK
   exit 0
 }

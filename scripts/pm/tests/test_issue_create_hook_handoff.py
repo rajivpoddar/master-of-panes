@@ -116,7 +116,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
         PATH=f"{fake_bin}:{os.environ['PATH']}",
         BLOCKED_CP_ISSUE_ARTIFACTS=str(tmp_path / "cp-artifacts"),
         PM_OPS=str(pm_ops),
-        EXPLORE_ISSUE_LATCH_GUARD=str(ROOT / "test/fixtures/explore-issue-latch-guard.sh"),
+        EXPLORE_ISSUE_LATCH_GUARD=str(SHARED / "explore-issue-latch-guard.sh"),
         EXPLORE_ISSUE_ENV_LOCAL=str(tmp_path / "no-credentials.env"),
         SLACK_BOT_TOKEN="",
         EXPLORE_ISSUE_STATE_DIR=str(tmp_path / "state"),

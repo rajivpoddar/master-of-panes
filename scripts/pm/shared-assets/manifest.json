@@ -132,7 +132,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "8abb220a72577b1add13319279897070b96f2fc5bf3cbd9d2af11d646daf71d4",
+      "sha256": "e1a4067f35c8682678f4fe560da7ce32866a33d1fef0cd92ba4a96652af3f4f8",
       "source_path": "claude/hooks/explore-issue-latch-guard.sh"
     },
     {
@@ -186,7 +186,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "c9fd7665cf41e9ff4c8e2e6848feb47b1d90b745d60e3d8433d90cfe62a1d28c",
+      "sha256": "bdbcddd73678c204a1bfeaba2d53bb9ea99de97e54a2cb39e5e6f522457b9035",
       "source_path": "claude/hooks/pre-issue-create-audit.sh"
     },
     {
@@ -1034,7 +1034,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-intake",
-      "sha256": "e163b732ea9df494ef90699157255fe6aa96499265c1bf65141af2f8c98a9edb",
+      "sha256": "fb0eac07a50e1b69712e3e8a8f29144ac58667b11ee8615ce14e0f75c23705db",
       "source_path": "claude/skills/explore-issue/SKILL.md"
     },
     {

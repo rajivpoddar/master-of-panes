@@ -91,26 +91,58 @@ EXPLORE_ISSUE_PM_OPS_CLI="${EXPLORE_ISSUE_PM_OPS_CLI:-/Users/rajiv/.claude/scrip
 EXPLORE_ISSUE_KIND="explore_issue_required"
 EXPLORE_ISSUE_TARGET_TYPE="slack_thread"
 
+# One invocation handles one source. Export this for a reply intake; all state,
+# permit and obligation helpers share the same selector. Optional helper arguments
+# override it only for the duration of that call.
 explore_issue_source_key() {
-  # channel thread_ts -> C0AGWPQFKHA__1785932534_656769 (dot in ts -> underscore)
-  printf '%s__%s' "$1" "${2//./_}"
+  local channel="$1" root="$2" reply="${3:-${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}}"
+  local root_file root_state original_message
+  [[ "$channel" =~ ^[CD][A-Z0-9]{10}$ ]] || return 2
+  [[ "$root" =~ ^[0-9]{10}\.[0-9]{6}$ ]] || return 2
+  if [ -n "$reply" ]; then
+    [[ "$reply" =~ ^[0-9]{10}\.[0-9]{6}$ ]] || return 2
+    [[ "$reply" == "$root" || "$reply" > "$root" ]] || return 2
+  fi
+  root_file="$EXPLORE_ISSUE_STATE_DIR/${channel}__${root//./_}.json"
+  if [ -n "$reply" ] && [ "$reply" != "$root" ] && [ -f "$root_file" ]; then
+    root_state="$(jq -er '.state' "$root_file")" || return 2
+    original_message="$(jq -er '.source_message_ts // .thread_ts' "$root_file")" || return 2
+    case "$root_state" in
+      RESOLVED_FILED|RESOLVED_NO_ISSUE)
+        if [ "$original_message" != "$reply" ]; then
+          printf '%s__%s__%s' "$channel" "${root//./_}" "${reply//./_}"
+          return 0
+        fi ;;
+    esac
+  fi
+  printf '%s__%s' "$channel" "${root//./_}"
 }
 
 explore_issue_state_file() {
-  printf '%s/%s.json' "$EXPLORE_ISSUE_STATE_DIR" "$(explore_issue_source_key "$1" "$2")"
+  local key
+  key="$(explore_issue_source_key "$1" "$2" "${3:-}")" || return $?
+  printf '%s/%s.json' "$EXPLORE_ISSUE_STATE_DIR" "$key"
 }
 
 explore_issue_permit_file() {
-  printf '%s/%s.permit.json' "$EXPLORE_ISSUE_PERMIT_DIR" "$(explore_issue_source_key "$1" "$2")"
+  local key
+  key="$(explore_issue_source_key "$1" "$2" "${3:-}")" || return $?
+  printf '%s/%s.permit.json' "$EXPLORE_ISSUE_PERMIT_DIR" "$key"
 }
 
 explore_issue_target_id() {
+  local key root_key
+  key="$(explore_issue_source_key "$1" "$2" "${3:-}")" || return $?
+  root_key="${1}__${2//./_}"
   printf '%s:%s' "$1" "$2"
+  if [ "$key" != "$root_key" ]; then
+    printf ':%s' "${3:-${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}}"
+  fi
 }
 
 explore_issue_permalink() {
-  local ts_without_dot="${2//./}"
-  printf 'https://scribiers.slack.com/archives/%s/p%s?thread_ts=%s&cid=%s' "$1" "$ts_without_dot" "$2" "$1"
+  local message="${3:-${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-$2}}"
+  printf 'https://scribiers.slack.com/archives/%s/p%s?thread_ts=%s&cid=%s' "$1" "${message//./}" "$2" "$1"
 }
 
 explore_issue_upsert_obligation() {
@@ -118,11 +150,12 @@ explore_issue_upsert_obligation() {
   local channel="$1" thread_ts="$2" permalink="$3" body_file="$4" title="$5"
   local reason="$6" required_at="$7" original_sha="$8" current_sha="$9"
   local target_id dedupe_group evidence
-  target_id="$(explore_issue_target_id "$channel" "$thread_ts")"
-  dedupe_group="explore-issue:${channel}:${thread_ts}"
+  target_id="$(explore_issue_target_id "$channel" "$thread_ts")" || return $?
+  dedupe_group="explore-issue:${target_id}"
   evidence="$(jq -nc \
     --arg channel "$channel" \
     --arg thread_ts "$thread_ts" \
+    --arg source_message_ts "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-$thread_ts}" \
     --arg source_permalink "$permalink" \
     --arg title "$title" \
     --arg body_file "$body_file" \
@@ -130,7 +163,7 @@ explore_issue_upsert_obligation() {
     --arg required_at "$required_at" \
     --arg original_body_sha256 "$original_sha" \
     --arg current_body_sha256 "$current_sha" \
-    '{channel: $channel, thread_ts: $thread_ts, source_permalink: $source_permalink, title: $title, body_file: $body_file, reason: $reason, required_at: $required_at, original_body_sha256: $original_body_sha256, current_body_sha256: $current_body_sha256}')"
+    '{channel: $channel, thread_ts: $thread_ts, source_message_ts: $source_message_ts, source_permalink: $source_permalink, title: $title, body_file: $body_file, reason: $reason, required_at: $required_at, original_body_sha256: $original_body_sha256, current_body_sha256: $current_body_sha256}')"
   "$EXPLORE_ISSUE_PM_OPS_CLI" obligation-upsert \
     --kind "$EXPLORE_ISSUE_KIND" \
     --severity high \
@@ -148,7 +181,7 @@ explore_issue_upsert_obligation() {
 explore_issue_has_open_obligation() {
   # channel thread_ts -> 0 if an open explore_issue_required obligation exists
   local channel="$1" thread_ts="$2" target_id json
-  target_id="$(explore_issue_target_id "$channel" "$thread_ts")"
+  target_id="$(explore_issue_target_id "$channel" "$thread_ts")" || return $?
   json="$("$EXPLORE_ISSUE_PM_OPS_CLI" snapshot --surface hourly --format json --read-only 2>/dev/null || true)"
   printf '%s' "$json" | jq -e --arg kind "$EXPLORE_ISSUE_KIND" \
     --arg tt "$EXPLORE_ISSUE_TARGET_TYPE" --arg tid "$target_id" '
@@ -157,11 +190,25 @@ explore_issue_has_open_obligation() {
 }
 
 explore_issue_atomic_write_json() {
-  local file="$1" json="$2" tmp
-  mkdir -p "$(dirname "$file")"
-  tmp="${file}.tmp.$$"
-  printf '%s\n' "$json" > "$tmp"
-  mv -f "$tmp" "$file"
+  # Serialize writers, then check terminality inside the lock. A denied retry
+  # must never reopen or replace a terminal root (or terminal reply) record.
+  python3 -c '
+import fcntl, json, os, sys, tempfile
+path, payload = sys.argv[1:]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path + ".lock", "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    if os.path.exists(path):
+        with open(path) as f:
+            previous = json.load(f)
+        if previous.get("state") in ("RESOLVED_FILED", "RESOLVED_NO_ISSUE"):
+            sys.exit(1)
+    json.loads(payload)
+    fd, temporary = tempfile.mkstemp(prefix=os.path.basename(path) + ".tmp.", dir=os.path.dirname(path))
+    with os.fdopen(fd, "w") as f:
+        f.write(payload + "\n")
+    os.replace(temporary, path)
+' "$1" "$2"
 }
 
 explore_issue_write_state() {
@@ -169,13 +216,14 @@ explore_issue_write_state() {
   local channel="$1" thread_ts="$2" state="$3" body_file="$4" title="$5"
   local reason="$6" required_at="$7" original_sha="$8" current_sha="$9" obligation_id="${10:-}"
   local file permalink now
-  file="$(explore_issue_state_file "$channel" "$thread_ts")"
+  file="$(explore_issue_state_file "$channel" "$thread_ts")" || return $?
   permalink="$(explore_issue_permalink "$channel" "$thread_ts")"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   explore_issue_atomic_write_json "$file" "$(jq -nc \
     --arg state "$state" \
     --arg channel "$channel" \
     --arg thread_ts "$thread_ts" \
+    --arg source_message_ts "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-$thread_ts}" \
     --arg source_permalink "$permalink" \
     --arg body_file "$body_file" \
     --arg title "$title" \
@@ -185,13 +233,13 @@ explore_issue_write_state() {
     --arg current_body_sha256 "$current_sha" \
     --arg obligation_id "$obligation_id" \
     --arg updated_at "$now" \
-    '{state: $state, channel: $channel, thread_ts: $thread_ts, source_permalink: $source_permalink, body_file: $body_file, title: $title, reason: $reason, required_at: $required_at, original_body_sha256: $original_body_sha256, current_body_sha256: $current_body_sha256, obligation_id: $obligation_id, updated_at: $updated_at}')"
+    '{state: $state, channel: $channel, thread_ts: $thread_ts, source_message_ts: $source_message_ts, source_permalink: $source_permalink, body_file: $body_file, title: $title, reason: $reason, required_at: $required_at, original_body_sha256: $original_body_sha256, current_body_sha256: $current_body_sha256, obligation_id: $obligation_id, updated_at: $updated_at}')"
 }
 
 explore_issue_read_state() {
   # channel thread_ts -> prints state JSON (or nothing if absent)
   local file
-  file="$(explore_issue_state_file "$1" "$2")"
+  file="$(explore_issue_state_file "$1" "$2")" || return $?
   [ -f "$file" ] || return 1
   cat "$file"
 }
@@ -202,45 +250,47 @@ explore_issue_set_state() {
   # RESOLVED_NO_ISSUE) while preserving every other record field.
   local channel="$1" thread_ts="$2" state="$3"
   local file now tmp
-  file="$(explore_issue_state_file "$channel" "$thread_ts")"
+  file="$(explore_issue_state_file "$channel" "$thread_ts")" || return $?
   [ -f "$file" ] || return 1
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  tmp="${file}.tmp.$$"
-  if ! jq --arg state "$state" --arg updated_at "$now" \
-    '.state = $state | .updated_at = $updated_at' "$file" > "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
-  mv -f "$tmp" "$file"
+  local updated
+  updated="$(jq --arg state "$state" --arg updated_at "$now" \
+    '.state = $state | .updated_at = $updated_at' "$file")" || return 1
+  explore_issue_atomic_write_json "$file" "$updated"
 }
 
 explore_issue_mint_permit() {
   # channel thread_ts final_body_sha title_digest obligation_id
   local channel="$1" thread_ts="$2" body_sha="$3" title_digest="$4" obligation_id="$5"
   local file now
-  file="$(explore_issue_permit_file "$channel" "$thread_ts")"
+  file="$(explore_issue_permit_file "$channel" "$thread_ts")" || return $?
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   explore_issue_atomic_write_json "$file" "$(jq -nc \
     --arg channel "$channel" \
     --arg thread_ts "$thread_ts" \
+    --arg source_message_ts "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-$thread_ts}" \
     --arg body_sha256 "$body_sha" \
     --arg title_digest "$title_digest" \
     --arg obligation_id "$obligation_id" \
     --arg minted_at "$now" \
-    '{channel: $channel, thread_ts: $thread_ts, body_sha256: $body_sha256, title_digest: $title_digest, obligation_id: $obligation_id, minted_at: $minted_at}')"
+    '{channel: $channel, thread_ts: $thread_ts, source_message_ts: $source_message_ts, body_sha256: $body_sha256, title_digest: $title_digest, obligation_id: $obligation_id, minted_at: $minted_at}')"
 }
 
 explore_issue_permit_status() {
   # channel thread_ts body_sha title_digest -> 0 valid, 1 absent, 2 drift
   local channel="$1" thread_ts="$2" body_sha="$3" title_digest="$4"
-  local file p_channel p_thread p_body p_title
-  file="$(explore_issue_permit_file "$channel" "$thread_ts")"
+  local file p_channel p_thread p_message p_body p_title
+  file="$(explore_issue_permit_file "$channel" "$thread_ts")" || return $?
   [ -f "$file" ] || return 1
   p_channel="$(jq -r '.channel // ""' "$file" 2>/dev/null || true)"
   p_thread="$(jq -r '.thread_ts // ""' "$file" 2>/dev/null || true)"
+  # Legacy root permits have no message field; reply-specific filenames still
+  # prevent those permits being reused after a terminal root.
+  p_message="$(jq -r '.source_message_ts // ""' "$file" 2>/dev/null || true)"
   p_body="$(jq -r '.body_sha256 // ""' "$file" 2>/dev/null || true)"
   p_title="$(jq -r '.title_digest // ""' "$file" 2>/dev/null || true)"
   if [ "$p_channel" = "$channel" ] && [ "$p_thread" = "$thread_ts" ] \
+     && { [ -z "$p_message" ] || [ "$p_message" = "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-$thread_ts}" ]; } \
      && [ "$p_body" = "$body_sha" ] && [ "$p_title" = "$title_digest" ]; then
     return 0
   fi
@@ -251,7 +301,7 @@ explore_issue_consume_permit() {
   # channel thread_ts body_sha title_digest -> 0 consumed (allow create), 1 absent, 2 drift
   local channel="$1" thread_ts="$2" body_sha="$3" title_digest="$4"
   local file consumed now key
-  file="$(explore_issue_permit_file "$channel" "$thread_ts")"
+  file="$(explore_issue_permit_file "$channel" "$thread_ts")" || return $?
   [ -f "$file" ] || return 1
   if ! explore_issue_permit_status "$channel" "$thread_ts" "$body_sha" "$title_digest"; then
     return 2
@@ -267,10 +317,13 @@ explore_issue_consume_permit() {
 explore_issue_resolve_obligation() {
   # channel thread_ts external_state reason
   local channel="$1" thread_ts="$2" external_state="$3" reason="$4"
+  local EXPLORE_ISSUE_SOURCE_MESSAGE_TS="${5:-${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}}"
+  local target_id
+  target_id="$(explore_issue_target_id "$channel" "$thread_ts")" || return $?
   "$EXPLORE_ISSUE_PM_OPS_CLI" obligation-resolve \
     --kind "$EXPLORE_ISSUE_KIND" \
     --target-type "$EXPLORE_ISSUE_TARGET_TYPE" \
-    --target-id "$(explore_issue_target_id "$channel" "$thread_ts")" \
+    --target-id "$target_id" \
     --external-state "$external_state" \
     --reason "$reason"
 }
@@ -278,10 +331,15 @@ explore_issue_resolve_obligation() {
 explore_issue_resolve_filed() {
   # channel thread_ts issue_number issue_url title body_sha
   local channel="$1" thread_ts="$2" issue_number="$3" issue_url="$4" title="$5" body_sha="$6"
+  local EXPLORE_ISSUE_SOURCE_MESSAGE_TS="${7:-${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}}"
   local file state
+  file="$(explore_issue_state_file "$channel" "$thread_ts")" || return $?
+  [ -f "$file" ] || return 1
+  state="$(jq -er .state "$file")" || return 1
+  case "$state" in RESOLVED_FILED|RESOLVED_NO_ISSUE) return 0 ;; esac
   explore_issue_resolve_obligation "$channel" "$thread_ts" RESOLVED_FILED \
     "filed issue #${issue_number} ${issue_url}" || true
-  file="$(explore_issue_state_file "$channel" "$thread_ts")"
+  file="$(explore_issue_state_file "$channel" "$thread_ts")" || return $?
   if [ -f "$file" ]; then
     state="$(jq -r '.state // "OPEN"' "$file" 2>/dev/null || true)"
     if [ "$state" != "RESOLVED_FILED" ] && [ "$state" != "RESOLVED_NO_ISSUE" ]; then
@@ -298,10 +356,15 @@ explore_issue_resolve_filed() {
 explore_issue_resolve_no_issue() {
   # channel thread_ts resolution_reason title body_sha
   local channel="$1" thread_ts="$2" resolution="$3" title="$4" body_sha="$5"
+  local EXPLORE_ISSUE_SOURCE_MESSAGE_TS="${6:-${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}}"
   local file state
+  file="$(explore_issue_state_file "$channel" "$thread_ts")" || return $?
+  [ -f "$file" ] || return 1
+  state="$(jq -er .state "$file")" || return 1
+  case "$state" in RESOLVED_FILED|RESOLVED_NO_ISSUE) return 0 ;; esac
   explore_issue_resolve_obligation "$channel" "$thread_ts" RESOLVED_NO_ISSUE \
     "$resolution" || true
-  file="$(explore_issue_state_file "$channel" "$thread_ts")"
+  file="$(explore_issue_state_file "$channel" "$thread_ts")" || return $?
   if [ -f "$file" ]; then
     state="$(jq -r '.state // "OPEN"' "$file" 2>/dev/null || true)"
     if [ "$state" != "RESOLVED_FILED" ] && [ "$state" != "RESOLVED_NO_ISSUE" ]; then

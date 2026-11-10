@@ -76,7 +76,7 @@ A background agent may carry EXACTLY ONE obligation/source. Never batch unrelate
 Slack sources into one agent, one obligation, or one completion. Each source gets its
 own obligation (dedupe_group=explore-issue:<CHANNEL>:<THREAD_TS>), its own agent, and
 its own resolution. Launching one agent per source keeps the state machine and permit
-bound to a single channel/thread.
+bound to a single channel/root/message.
 
 ## Quick Start
 
@@ -88,16 +88,39 @@ bound to a single channel/thread.
    /tmp/heydonna-explore-issue-state/<CHANNEL>__<THREAD_TS>.json
    ```
 
+   If the root record is terminal and a DIFFERENT later reply reports a new
+   problem, its key is `<CHANNEL>__<ROOT_TS>__<REPLY_TS>.json` (dots become
+   underscores). NEVER overwrite or reopen a terminal root. The record retains
+   `thread_ts=<ROOT_TS>` and `source_message_ts=<REPLY_TS>`; the obligation target
+   and dedupe suffix become `<CHANNEL>:<ROOT_TS>:<REPLY_TS>`. A replay of the
+   original source remains terminal; it does not create a new intake.
+
+   In every helper shell for a reply intake, set this BEFORE any read, transition,
+   permit mint or resolution (use the original source message timestamp for an
+   existing root intake, or the root timestamp for a legacy root record):
+
+   ```bash
+   export EXPLORE_ISSUE_SOURCE_MESSAGE_TS="<SOURCE_MESSAGE_TS>"
+   source /Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh
+   explore_issue_state_file "<CHANNEL>" "<ROOT_TS>"
+   ```
+
+   The helper chooses the reply key only when the root is terminal and belongs
+   to a different source message. Preserve this selector throughout the intake.
+   Never guess the source from the newest state file or replace root thread_ts
+   with reply_ts. Use the verified reply permalink as the single `Source:` line
+   in the final issue body, keeping `thread_ts` in its query equal to the root.
+
    Where `<CHANNEL>__<THREAD_TS>` is the Slack source key (dot in thread_ts replaced
    with underscore), e.g. `C0AGWPQFKHA__1785932534_656769.json`. The block message names
    the exact state file and source. To find the matching record:
 
    ```bash
-   ls -t /tmp/heydonna-explore-issue-state/*.json 2>/dev/null | head -1
+   explore_issue_state_file "<CHANNEL>" "<ROOT_TS>"
    ```
 
    If the state record exists, READ it and PRESERVE the original Slack/body context
-   (`channel`, `thread_ts`, `body_file`, `reason`, `original_body_sha256`,
+   (`channel`, `thread_ts`, `source_message_ts`, `body_file`, `reason`, `original_body_sha256`,
    `current_body_sha256`) and pass it through to the agent prompt verbatim. The
    investigation MUST use the same source intel that triggered the gate — don't fabricate
    a different scenario. Record `OBLIGATION_SOURCE=<CHANNEL>:<THREAD_TS>` and
@@ -178,7 +201,7 @@ Task(
   [Paste the declaration gate fields from Quick Start step 2]
 
   OBLIGATION CONTEXT:
-  [Paste STATE_FILE, CHANNEL, THREAD_TS, body_file, reason, original+current body SHA.]
+  [Paste STATE_FILE, CHANNEL, THREAD_TS, SOURCE_MESSAGE_TS, body_file, reason, original+current body SHA.]
 
   Requirements:
   - write IN_PROGRESS for this single source at launch
@@ -301,11 +324,14 @@ PHASE 3 — READY_TO_FILE + File GitHub Issue:
 
   Body format:
   ```
+  Source: [verified source-message permalink with thread_ts=root]
+
   ## Source
   - Reporter: [name or Slack handle]
-  - Slack: [full canonical thread permalink]
+  - Slack: [same verified source-message permalink]
   - Channel: [channel ID]
   - Root thread_ts: [exact root timestamp]
+  - Source message_ts: [exact reply timestamp, or root for a root report]
 
   ## Problem
   [User's exact reported symptom — quote their words]
@@ -340,9 +366,10 @@ PHASE 3 — READY_TO_FILE + File GitHub Issue:
   ```
 
   For every Slack-origin issue, `## Source` is mandatory. Build the canonical permalink
-  from the obligation's `channel` and root `thread_ts`:
-  `https://scribiers.slack.com/archives/<CHANNEL>/p<THREAD_TS_WITHOUT_DOT>?thread_ts=<THREAD_TS>&cid=<CHANNEL>`.
-  A bare timestamp, channel name, reply timestamp, or different-channel URL is
+  from the obligation's `channel`, root `thread_ts`, and `source_message_ts`
+  (legacy records default the source message to the root):
+  `https://scribiers.slack.com/archives/<CHANNEL>/p<SOURCE_MESSAGE_TS_WITHOUT_DOT>?thread_ts=<THREAD_TS>&cid=<CHANNEL>`.
+  A bare timestamp, channel name, uncorroborated reply, or different-channel URL is
   insufficient. The pre-create hook rejects drift against the permit-bound body SHA,
   so the body must be byte-identical to the final body the permit was minted for.
 
@@ -358,10 +385,15 @@ PHASE 4 — Resolution (MANDATORY):
   ```bash
   source /Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh
   # Issue filed:
-  explore_issue_resolve_filed "<CHANNEL>" "<THREAD_TS>" "<issue_number>" "<issue_url>" "<title>" "<FINAL_BODY_SHA>"
+  explore_issue_resolve_filed "<CHANNEL>" "<THREAD_TS>" "<issue_number>" "<issue_url>" "<title>" "<FINAL_BODY_SHA>" "<SOURCE_MESSAGE_TS>"
   # Typed no-issue disposition (Rajiv redirected to a verified direct-main fix):
-  explore_issue_resolve_no_issue "<CHANNEL>" "<THREAD_TS>" "fixed_directly_on_main: <note>" "<title>" "<FINAL_BODY_SHA>"
+  explore_issue_resolve_no_issue "<CHANNEL>" "<THREAD_TS>" "fixed_directly_on_main: <note>" "<title>" "<FINAL_BODY_SHA>" "<SOURCE_MESSAGE_TS>"
   ```
+
+  The final optional source-message argument on both resolve helpers binds the
+  resolution to the same reply as the state and permit; omitting it uses the
+  exported selector. `explore_issue_resolve_obligation` also accepts it as its
+  fifth argument. Terminal records are immutable and repeated resolution is a no-op.
 
   Resolution atomically resolves the pm-ops obligation (external_state RESOLVED_FILED
   with the issue number/URL, or RESOLVED_NO_ISSUE with the disposition) and writes the
