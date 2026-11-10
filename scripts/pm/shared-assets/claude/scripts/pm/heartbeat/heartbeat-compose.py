@@ -919,13 +919,102 @@ def monitor_up(container: str | None = None) -> bool:
         return False
 
 
+import datetime as spark_datetime
+import tempfile
+import time
+
+SPARK_PROGRESS_STATE_DIR = Path.home() / '.claude/state/spark-monitor/progress'
+
+
+def spark_progress_state_path(run, host, log):
+    import hashlib
+    key = hashlib.sha256((host + '\0' + log).encode()).hexdigest()[:12]
+    return SPARK_PROGRESS_STATE_DIR / (re.sub(r'[^\w.-]', '_', run) + '-' + key + '.json')
+
+
+def spark_progress_update(run, host, log, step, total, now=None):
+    now = time.time() if now is None else now
+    path = spark_progress_state_path(run, host, log)
+    try:
+        data = json.loads(path.read_text())
+        samples = data['samples']
+        if data['total'] != total or not isinstance(samples, list):
+            samples = []
+    except (OSError, ValueError, KeyError, TypeError):
+        samples = []
+    samples = [[t, s] for t, s in samples if isinstance(t, (int, float)) and isinstance(s, int) and now - 14400 <= t <= now]
+    if samples and (step < samples[-1][1] or now < samples[-1][0]):
+        samples = []
+    samples.append([now, step])
+    samples = samples[-256:]
+    data = {'run': run, 'host': host, 'log': log, 'total': total, 'samples': samples, 'updated': now}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.progress-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return spark_progress_render(data, now)
+
+
+def spark_progress_render(data, now=None):
+    now = time.time() if now is None else now
+    samples = data.get('samples') or []
+    if not samples:
+        return 'ETA n/a | sec/step n/a | steps last hour n/a'
+    t, step = samples[-1]
+    recent = [(a, b) for a, b in samples[:-1] if 0 < t-a <= 10800 and b < step]
+    preferred = [(a, b) for a, b in recent if t-a >= 3600]
+    base = (preferred or recent)
+    sec = (t - base[0][0]) / (step - base[0][1]) if base else None
+    hour = [(a, b) for a, b in samples[:-1] if 0 < t-a <= 3600]
+    steps = str(step - hour[0][1]) if hour else 'n/a'
+    eta = 'n/a'
+    if sec is not None and data.get('total') is not None:
+        remaining = max(0, data['total'] - step) * sec
+        minutes = int(remaining // 60)
+        duration = '%dh%02dm' % (minutes // 60, minutes % 60) if minutes >= 60 else '%dm' % minutes
+        date = spark_datetime.datetime.fromtimestamp(t + remaining, spark_datetime.timezone(spark_datetime.timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M IST')
+        eta = duration + ' (' + date + ')'
+    result = 'ETA %s | sec/step %s | steps last hour %s' % (eta, ('%.1f' % sec) if sec is not None else 'n/a', steps)
+    if len(samples) > 1 and samples[-2][1] == step:
+        interval = max(0, int(t - samples[-2][0]))
+        result += ' | NO STEP PROGRESS in %ds' % interval
+    return result
+
+
+def spark_progress_latest(max_age=3600, now=None):
+    now = time.time() if now is None else now
+    found = []
+    for path in SPARK_PROGRESS_STATE_DIR.glob('*.json'):
+        try:
+            data = json.loads(path.read_text())
+            if 0 <= now - data['updated'] <= max_age:
+                found.append(data)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    if not found:
+        return None
+    data = max(found, key=lambda d: d['updated'])
+    return data['run'] + ' · step %s/%s · ' % (data['samples'][-1][1], data['total']) + spark_progress_render(data, now)
+
+
 def training_line(probe=None, mon_up=None) -> tuple[str, list[str]]:
     """Never omitted. Returns (line, actions)."""
     doc, reason = probe if probe is not None else spark_probe()
     if doc is None:
         return f"*Training:* UNKNOWN ({reason or 'probe failed'})", []
     status = "RUNNING" if doc.get("running") else "NOT RUNNING"
-    return f"*Training:* {status} · GPU {doc.get('gpu', 0):g}% · container {doc.get('run', 'none')}", []
+    line = f"*Training:* {status} · GPU {doc.get('gpu', 0):g}% · container {doc.get('run', 'none')}"
+    if doc.get("running"):
+        try:
+            line += " · " + (spark_progress_latest() or "ETA n/a | sec/step n/a | steps last hour n/a")
+        except Exception:
+            line += " · ETA n/a | sec/step n/a | steps last hour n/a"
+    return line, []
 
 
 

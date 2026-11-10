@@ -228,13 +228,16 @@ while True:
         mt = first(sec, "MTIME", 0); now = first(sec, "MTIME", 1)
         mtime = int(mt) if mt.isdigit() else None
         stale = stale + 1 if (mtime is not None and mtime == last_mtime) else 0; last_mtime = mtime
-        eta = None
+        progress = "ETA n/a | sec/step n/a | steps last hour n/a"
         if d["step"] is not None and d["total"]:
-            rem = d["total"] - d["step"]
-            obs.append((time.time(), d["step"])); obs[:] = [o for o in obs if o[0] > time.time() - 10800]
-            # Recent-rate ETA over the last 3h of observed steps. No tqdm s/it fallback:
-            # after a resume tqdm's s/it is wrong (reported 2.9d vs a real ~20d, 2026-10-29).
-            if obs[0][1] < d["step"]: eta = rem * (time.time() - obs[0][0]) / (d["step"] - obs[0][1])
+            try:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("spark_heartbeat", os.path.expanduser("~/.claude/scripts/pm/heartbeat/heartbeat-compose.py"))
+                composer = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(composer)
+                progress = composer.spark_progress_update(a.run_name, a.host, a.log, d["step"], d["total"])
+            except Exception:
+                progress += " (progress state unavailable)"
         proc = first(sec, "PROC"); proc_gone = proc.strip() == "0"
         cstate = first(sec, "CONT").strip()
         container_gone = docker_gone(cstate)
@@ -245,8 +248,8 @@ while True:
               if memory_config.get("cuda_floor_mib", floor) == floor else
               "%s; floor OS %d / CUDA %d MiB (ACTIVE); minima CUDA=%s OS=%s" % (memory["verdict"]["state"], floor, memory_config["cuda_floor_mib"], min_cuda, min_avail))
         lines = [("*[%s] run ended*" if ended else "*[%s]*") % a.run_name if not os.environ.get("MONITOR_TEST") else "*[TEST - monitor self-test, ignore] %s*" % a.run_name,
-                 "step %s/%s | loss %s | grad_norm %s | lr %s | tok/s %s | ETA %s" % (d["step"] if d["step"] is not None else "n/a", d["total"] or "n/a",
-                    d["loss"] if d["loss"] is not None else "n/a", d["gn"] if d["gn"] is not None else "n/a", ("%.2e" % d["lr"]) if d["lr"] is not None else "n/a", "%.1f" % d["tps"] if d["tps"] else "n/a (not logged)", fmt_eta(eta)),
+                 "step %s/%s | loss %s | grad_norm %s | lr %s | tok/s %s | %s" % (d["step"] if d["step"] is not None else "n/a", d["total"] or "n/a",
+                    d["loss"] if d["loss"] is not None else "n/a", d["gn"] if d["gn"] is not None else "n/a", ("%.2e" % d["lr"]) if d["lr"] is not None else "n/a", "%.1f" % d["tps"] if d["tps"] else "n/a (not logged)", progress),
                  "GPU %s | CUDA free %s MiB | MemAvailable %s MiB | %s" % (gpu, cuda, guard_os, fl),
                  thermal_line(thermal(sec.get("THERM", [])), sec.get("TALERT", []))]
         if not d["step"] and not d["loss"]:
