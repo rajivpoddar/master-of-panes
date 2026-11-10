@@ -11,7 +11,7 @@ Read LESSONS.md before writing the brief. JSON names `scenario` + `parameters`, 
 
 Clone the sample through an existing internal mutation on the owned disposable backend. Never guess its API, use another slot/production, or silently replace a named customer artifact. Missing bindings return SCENARIO_BINDING_MISSING. Creation/upload/audio ACs retain the real jobsheet + MP3 path. For two-tabs use ONE session/profile and two actual tabs, not a second profile.
 
-Free-form steps are allowed ONLY when no scenario fits: record `scenario: null`, `scenario_miss_reason`, parameters and bounded steps, and append the miss to LESSONS.md. Missing adapters for a matching scenario are blockers, not an excuse to bypass the library.
+When no scenario fits, record `scenario: null`, `scenario_miss_reason`, parameters and bounded steps, and append the miss to LESSONS.md. When a matching named scenario lacks `clone_internal` or `observe` bindings, named execution must still refuse with `SCENARIO_BINDING_MISSING`. Until the adapters exist, explicitly permit the existing canonical manual QA route at the SAME exact head and owned backend; label it `manual (scenario adapter missing)`, record the adapter gap as a lesson row, and never report a named-scenario PASS for the manual run. Retain every AC, required artifact, server readback and safety check; do not add a wrapper, gate or review chain.
 
 Use capture-bg, wait for AGENT_BROWSER_READY within 2100s, and retain canonical synthetic auth, finite command timeouts, one diagnosed transient retry and controller-owned teardown. Never host browser QA. Every run emits command timing, session summary and cleanup receipts.
 

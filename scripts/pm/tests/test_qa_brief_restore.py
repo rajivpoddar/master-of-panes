@@ -25,3 +25,13 @@ def test_historical_qa_brief_is_manifest_bound_and_read_only() -> None:
         assert required in text
     for forbidden in ("ProofShot", "PM Operator", "kernel-assignment-boundary", "pm-transition"):
         assert forbidden not in text
+
+
+def test_missing_scenario_adapters_preserve_manual_qa_route() -> None:
+    runner = SHARED / "claude" / "agents" / "remote-qa-runner.md"
+    for path in (SKILL, runner):
+        text = path.read_text(encoding="utf-8")
+        for required in ("manual (scenario adapter missing)", "SCENARIO_BINDING_MISSING", "named-scenario PASS", "server readback", "owned backend", "lesson row"):
+            assert required in text
+    lessons = (SKILL.parent / "LESSONS.md").read_text(encoding="utf-8")
+    assert "clone_internal" in lessons and "observe" in lessons

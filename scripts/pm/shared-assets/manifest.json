@@ -42,7 +42,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "180b934384b1db4684a32bdcce76fbd6e6bbe8f3831fd3c04cff120bde640389",
+      "sha256": "37a125c633f453a26b79d3b333e3633a39c4af84ad234d3207469087c1ba4e17",
       "source_path": "claude/agents/remote-qa-runner.md"
     },
     {
@@ -1227,7 +1227,7 @@
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
       "source_path": "claude/skills/qa-brief/LESSONS.md",
-      "sha256": "6c0c6b84c3b04c1e02156873e29cebd09ec8022cf7b925a4e7c73b6e87446b67"
+      "sha256": "188f6e4666aa477ad78b0b1c70eb93075e899e62b3d74684e15e6dc8fd2fe66b"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/qa-brief/SKILL.md",
@@ -1235,7 +1235,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-brief-contract",
-      "sha256": "477ba2fbd25302881d395867bc0ff2cd8d4c52a325768ee0a4bfd81aa92ca99b",
+      "sha256": "a7121a81a1575acc001559f4b72cab9a7134502f3026f8a2c7049668a7bfafb7",
       "source_authority": {
         "commit": "2bc454d9603dff1c2c485bd2cd51e92d005a7c6",
         "path": "scripts/pm/shared-assets/claude/skills/qa-brief/SKILL.md",
