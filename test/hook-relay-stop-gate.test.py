@@ -79,6 +79,25 @@ class HookRelayStopGateTest(unittest.TestCase):
         self.assertEqual(self.server.hits[0]["mop_stop_allowed"], 1)
         self.assertEqual(self.server.hits[0]["hook_event_name"], "Stop")
 
+    def test_parent_filename_substring_does_not_allow_stop(self):
+        # CTO REVISE a4ebc0f4 (C0ALZJHGE49 ts 1794276606.286049): a parent
+        # command that merely contains the terminal-hook filename is not an
+        # allowed Stop. Only the explicit marker is.
+        env = os.environ.copy()
+        env["MOP_HOOK_BASE"] = self.base
+        env["HEYDONNA_SLOT_STOP_GATED"] = "1"
+        env.pop("MOP_SLOT_STOP_ALLOWED", None)
+        env.pop("MOP_STOP_MARK_ALLOWED", None)
+        result = subprocess.run(
+            ["bash", "-c", 'exec bash "$1" Stop', "slot-terminal-message-pm-stop.sh", SCRIPT],
+            input=json.dumps({"cwd": CWD}).encode(),
+            env=env,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.server.hits, [])
+
 
 if __name__ == "__main__":
     unittest.main()

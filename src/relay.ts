@@ -41,6 +41,14 @@ type ExitOwnerPin = Readonly<{
   inboundGeneration?: number;
 }>;
 
+type PendingExitDispatch = {
+  episode: string;
+  work: Promise<unknown>;
+  successor?: ExitOwnerPin;
+  /** Monotonic Stop id of the newest pin this episode has accepted. */
+  acceptedStop: number | null;
+};
+
 /** Shared PM + numbered-slot paste->Enter dwell (see composer.ts). */
 export const PM_INJECT_ENTER_DELAY_MS: number = INJECT_ENTER_DELAY_MS;
 
@@ -336,7 +344,7 @@ export class TmuxRelay {
   /** Serialize queue selection through post-submit deletion as one operation. */
   private pmDrainChain: Promise<number> = Promise.resolve(0);
   private directInjectSeq = 0;
-  private pendingExitDispatch = new Map<number, { episode: string; work: Promise<unknown>; successor?: ExitOwnerPin }>();
+  private pendingExitDispatch = new Map<number, PendingExitDispatch>();
   /** One PM notice per (slot, episode, outcome). The exit itself still retries. */
   private exitNoticeSent = new Set<string>();
   /**
@@ -1387,14 +1395,20 @@ export class TmuxRelay {
     if (command === "/exit" && exitEpisode) {
       const existing = this.pendingExitDispatch.get(slotNum);
       if (existing?.episode === exitEpisode) {
-        // A later Stop in this episode used to return here and then lose its
-        // dispatch when the in-flight op deleted the pending entry. Keep it.
+        // Checkout sync yields, so an older Stop can return after a newer one
+        // already owns this episode. Keep the newest entry-captured Stop id.
         const ownerPin = stopOwnerPin ?? this.captureExitOwner(slotNum, stopSession);
         if (!ownerPin) {
           this.db?.logEvent(slotNum, "guarded_delivery", null, null, { outcome: "refused_pre_effect", reason: "exit_owner_unbound", command, episode: exitEpisode });
           return false;
         }
+        const accepted = this.laterExitStop(existing.acceptedStop, existing.successor?.stop);
+        if (!this.isNewerExitStop(ownerPin, accepted)) {
+          this.db?.logEvent(slotNum, "exit_stop_out_of_order", null, null, { outcome: "refused_pre_effect", reason: "exit_stop_out_of_order", command, episode: exitEpisode, stop: ownerPin.stop, accepted });
+          return false;
+        }
         existing.successor = ownerPin;
+        existing.acceptedStop = this.laterExitStop(existing.acceptedStop, ownerPin.stop);
         return true;
       }
       // Capture at consumption, before the timer OR pane verification can yield.
@@ -1405,9 +1419,10 @@ export class TmuxRelay {
       }
       // The server closes this Stop's matching turn after process() returns.
       // Continue the SAME consumed send only after that response can complete.
-      const pending: { episode: string; work: Promise<unknown>; successor?: ExitOwnerPin } = {
+      const pending: PendingExitDispatch = {
         episode: exitEpisode,
         work: Promise.resolve(),
+        acceptedStop: this.exitStopRank(ownerPin.stop),
       };
       const work = sleep(0).then(() => this.settleExitDispatch(slotNum, command, exitEpisode, ownerPin, pending, _force, raw));
       pending.work = work;
@@ -1439,6 +1454,28 @@ export class TmuxRelay {
     }
   }
 
+  /** Stop event ids are monotonic. Anything else is not an order. */
+  private exitStopRank(stop: number | null | undefined): number | null {
+    return typeof stop === "number" && Number.isSafeInteger(stop) ? stop : null;
+  }
+
+  /** Newest of two entry-captured Stop ids. A missing id does not outrank a real one. */
+  private laterExitStop(left: number | null | undefined, right: number | null | undefined): number | null {
+    const a = this.exitStopRank(left);
+    const b = this.exitStopRank(right);
+    if (a === null) return b;
+    if (b === null) return a;
+    return a > b ? a : b;
+  }
+
+  /** True only when candidate is a strictly newer owner-bound Stop than current. */
+  private isNewerExitStop(candidate: ExitOwnerPin, current: number | null | undefined): boolean {
+    const next = this.exitStopRank(candidate.stop);
+    const rank = this.exitStopRank(current);
+    if (next === null) return false;
+    return rank === null || next > rank;
+  }
+
   /** A newer Stop can arrive while this op is suspended. TS can't see that write. */
   private takeExitSuccessor(pending: { successor?: ExitOwnerPin }): ExitOwnerPin | undefined {
     const next = pending.successor;
@@ -1451,7 +1488,7 @@ export class TmuxRelay {
     command: string,
     exitEpisode: string,
     initialPin: ExitOwnerPin,
-    pending: { successor?: ExitOwnerPin },
+    pending: PendingExitDispatch,
     _force: boolean,
     raw: boolean,
   ): Promise<void> {
@@ -1471,12 +1508,16 @@ export class TmuxRelay {
         if (!continued) pin = this.exitPinAfterDuplicateStops(slotNum, pin);
       }
       const newer = this.takeExitSuccessor(pending);
-      if (newer && newer.stop !== pin.stop) {
+      if (newer && this.isNewerExitStop(newer, pin.stop)) {
         if (continued) {
           this.db?.logEvent(slotNum, "exit_dispatch_skipped", null, null, { episode: exitEpisode, reason: continued, superseded: true });
         }
         pin = newer;
+        pending.acceptedStop = this.laterExitStop(pending.acceptedStop, newer.stop);
         continue;
+      }
+      if (newer && this.exitStopRank(newer.stop) !== this.exitStopRank(pin.stop)) {
+        this.db?.logEvent(slotNum, "exit_stop_out_of_order", null, null, { outcome: "refused_pre_effect", reason: "exit_stop_out_of_order", command, episode: exitEpisode, stop: newer.stop, accepted: pin.stop });
       }
       if (continued) {
         this.db?.logEvent(slotNum, "exit_dispatch_skipped", null, null, { episode: exitEpisode, reason: continued });
@@ -1493,9 +1534,13 @@ export class TmuxRelay {
         try { const data = JSON.parse(receipt.payload); detail = `${data.outcome}: ${data.reason ?? "submitted"}`; } catch { /* Report fallback. */ }
       } else this.db?.logEvent(slotNum, "exit_dispatch_refused", null, null, { episode: exitEpisode, reason: failure });
       const late = this.takeExitSuccessor(pending);
-      if (late && !delivered && late.stop !== pin.stop) {
+      if (late && !delivered && this.isNewerExitStop(late, pin.stop)) {
         pin = late;
+        pending.acceptedStop = this.laterExitStop(pending.acceptedStop, late.stop);
         continue;
+      }
+      if (late && this.exitStopRank(late.stop) !== this.exitStopRank(pin.stop)) {
+        this.db?.logEvent(slotNum, "exit_stop_out_of_order", null, null, { outcome: "refused_pre_effect", reason: "exit_stop_out_of_order", command, episode: exitEpisode, stop: late.stop, accepted: pin.stop });
       }
       const outcome = delivered ? "delivered" : detail;
       const noticeKey = `${slotNum}\0${exitEpisode}\0${outcome}`;

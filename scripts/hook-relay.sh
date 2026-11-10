@@ -7,20 +7,12 @@ HOOK_TYPE="${1:-}"
 
 # Dev slots set HEYDONNA_SLOT_STOP_GATED=1 (Rajiv ts 1794273343.877539). The
 # plugin hooks.json still runs this script on every Stop, including a blocked
-# turn. The allowed Stop is the child of slot-terminal-message-pm-stop.sh, or
-# an explicit MOP_SLOT_STOP_ALLOWED=1. PM leaves the env unset and still posts.
-# Every other hook type posts either way.
+# turn. The only allowed Stop is an explicit MOP_SLOT_STOP_ALLOWED=1 set by
+# the caller (slot-terminal-message-pm-stop.sh). A parent command that merely
+# contains that filename is not allowed. PM leaves the env unset and still
+# posts. Every other hook type posts either way.
 if [ "$HOOK_TYPE" = "Stop" ] && [ "${HEYDONNA_SLOT_STOP_GATED:-}" = "1" ]; then
-  allowed=0
-  if [ "${MOP_SLOT_STOP_ALLOWED:-}" = "1" ]; then
-    allowed=1
-  else
-    parent_cmd=$(ps -o command= -p "$PPID" 2>/dev/null || true)
-    case "$parent_cmd" in
-      *slot-terminal-message-pm-stop.sh*) allowed=1 ;;
-    esac
-  fi
-  if [ "$allowed" != "1" ]; then
+  if [ "${MOP_SLOT_STOP_ALLOWED:-}" != "1" ]; then
     exit 0
   fi
   export MOP_STOP_MARK_ALLOWED=1

@@ -1304,6 +1304,9 @@ export class HookProcessor {
       payload.tool_name ?? null,
       payload as unknown as Record<string, unknown>
     );
+    // This Stop's owner, including its monotonic event id, is captured before
+    // checkout sync can yield. Handlers then finish out of order. The relay
+    // keeps the newest of those entry-captured ids and drops an older one.
     const exitStopOwner = payload.type === "Stop" ? this.relay.captureExitOwner(slotNum, payload.session_id) : null;
     await this.syncObservedCheckout(slotNum, payload);
 
