@@ -334,6 +334,12 @@ export class TmuxRelay {
   private pendingExitDispatch = new Map<number, { episode: string; work: Promise<unknown> }>();
   /** One PM notice per (slot, episode, outcome). The exit itself still retries. */
   private exitNoticeSent = new Set<string>();
+  /**
+   * After a Stop, wait this long before /exit so a turn that continued
+   * (a blocked Stop hook) is not treated as idle. Not a PM input gate.
+   * Tests set 0.
+   */
+  exitSettleMs = 500;
   private runShell: typeof execShell;
   private readonly pmPaneReadyOverride?: () => Promise<boolean>;
   private readonly pmIdleHandoff?: () => Promise<void>;
@@ -1384,10 +1390,19 @@ export class TmuxRelay {
       // The server closes this Stop's matching turn after process() returns.
       // Continue the SAME consumed send only after that response can complete.
       const work = sleep(0).then(async () => {
+        // A blocked Stop hook continues the turn. Do not attempt /exit, and do not
+        // notify, until this Stop has actually ended it. A later real Stop retries.
+        const continued = await this.exitTurnContinued(slotNum, ownerPin);
+        if (continued) {
+          this.db?.logEvent(slotNum, "exit_dispatch_skipped", null, null, { episode: exitEpisode, reason: continued });
+          return;
+        }
+        // Duplicate Stop relays for the same session are one turn end, not a new owner.
+        const pin = this.exitPinAfterDuplicateStops(slotNum, ownerPin);
         const before = this.db?.getEvents(slotNum, 1, "guarded_delivery")[0]?.id;
         let delivered = false;
         let failure = "dispatch_refused_before_attempt";
-        try { delivered = await this.sendToSlotAsync(slotNum, command, _force, raw, exitEpisode, ownerPin); }
+        try { delivered = await this.sendToSlotAsync(slotNum, command, _force, raw, exitEpisode, pin); }
         catch { failure = "dispatch_error_unknown"; }
         const receipt = this.db?.getEvents(slotNum, 1, "guarded_delivery")[0];
         let detail = failure;
@@ -1414,6 +1429,38 @@ export class TmuxRelay {
     }
     void this.sendToSlotAsync(slotNum, command, _force, raw);
     return true;
+  }
+
+  private async exitTurnContinued(slotNum: number, pin: ExitOwnerPin): Promise<string | null> {
+    const deadline = Date.now() + Math.max(0, this.exitSettleMs);
+    while (Date.now() < deadline) await sleep(Math.min(50, deadline - Date.now()));
+    return this.exitContinuationReason(slotNum, pin);
+  }
+
+  /** A Stop that did not end the turn. Duplicate Stop rows alone do not count. */
+  private exitContinuationReason(slotNum: number, pin: ExitOwnerPin): string | null {
+    if (!this.db) return null;
+    const slot = this.db.getSlot(slotNum);
+    if (!slot) return null;
+    if (slot.active_turn_state === "active") return "turn_active";
+    const floor = pin.stop ?? 0;
+    const newer = this.db.getEvents(slotNum, 40).filter(event => event.id > floor);
+    const continued = newer.find(event => event.event_type !== "Stop"
+      && event.event_type !== "exit_pending_triggered"
+      && !event.event_type.startsWith("exit_")
+      && event.event_type !== "guarded_delivery");
+    return continued ? `continued:${continued.event_type}` : null;
+  }
+
+  private exitPinAfterDuplicateStops(slotNum: number, pin: ExitOwnerPin): ExitOwnerPin {
+    if (!this.db || this.exitContinuationReason(slotNum, pin)) return pin;
+    const latest = this.db.getEvents(slotNum, 1, "Stop")[0];
+    if (!latest || latest.id === pin.stop || !pin.stopSession) return pin;
+    try {
+      const session = JSON.parse(latest.payload).session_id;
+      if (session !== pin.stopSession) return pin;
+    } catch { return pin; }
+    return { ...pin, stop: latest.id };
   }
 
   private exitAssignment(slot: SlotState): string {
