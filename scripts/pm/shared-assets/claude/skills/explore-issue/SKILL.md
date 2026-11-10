@@ -102,11 +102,19 @@ bound to a single channel/root/message.
    ```bash
    export EXPLORE_ISSUE_SOURCE_MESSAGE_TS="<SOURCE_MESSAGE_TS>"
    source /Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh
+   # Select ONCE at intake; when resuming, use the key of the supplied STATE_FILE.
+   export EXPLORE_ISSUE_SELECTED_KEY="$(basename "<STATE_FILE>" .json)"
    explore_issue_state_file "<CHANNEL>" "<ROOT_TS>"
    ```
 
-   The helper chooses the reply key only when the root is terminal and belongs
-   to a different source message. Preserve this selector throughout the intake.
+   For fresh intake without a supplied STATE_FILE, select once with
+   `explore_issue_source_key "<CHANNEL>" "<ROOT_TS>"` and export that result as
+   EXPLORE_ISSUE_SELECTED_KEY before the first read or side effect. Carry this exact
+   selected key, STATE_FILE and obligation_id into the agent brief and EVERY later
+   helper shell (including mint, create and resolution). Never run the selector
+   again: root closure or reopening cannot change an in-flight intake's target.
+   The helper initially chooses the reply key only when the root is terminal and
+   belongs to a different source message. Preserve this selector throughout the intake.
    Never guess the source from the newest state file or replace root thread_ts
    with reply_ts. Use the verified reply permalink as the single `Source:` line
    in the final issue body, keeping `thread_ts` in its query equal to the root.
@@ -307,7 +315,12 @@ PHASE 3 — READY_TO_FILE + File GitHub Issue:
   The hook consumes the permit atomically and allows exactly one create. If the create
   is rejected for drift, the body/title changed after the mint — fix the body/title,
   re-mint the permit against the new final SHA/digest, and retry. If the create fails
-  after the permit was consumed, re-mint (state stays READY_TO_FILE) and retry.
+  after the permit was consumed, or the create result is UNKNOWN (GitHub may have
+  accepted it but its response was lost), NEVER re-mint or create again for that
+  source. Use the existing reconcile-by-search path to find the issue by canonical
+  Source permalink and resolve the same obligation. If search is inconclusive,
+  remain reconciliation-only; absence of a response is not proof of no create.
+  A distinct reply source can still mint its own permit.
 
   Before reporting the issue as filed, register each confirmed OPEN prerequisite explicitly
   named in its body as a native GitHub blocked-by dependency. For each `<dep>`, resolve

@@ -88,6 +88,7 @@ EXPLORE_ISSUE_STATE_DIR="${EXPLORE_ISSUE_STATE_DIR:-/tmp/heydonna-explore-issue-
 EXPLORE_ISSUE_PERMIT_DIR="${EXPLORE_ISSUE_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit}"
 EXPLORE_ISSUE_CONSUMED_PERMIT_DIR="${EXPLORE_ISSUE_CONSUMED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-consumed}"
 EXPLORE_ISSUE_PM_OPS_CLI="${EXPLORE_ISSUE_PM_OPS_CLI:-/Users/rajiv/.claude/scripts/pm-ops.py}"
+export EXPLORE_ISSUE_CONSUMED_PERMIT_DIR
 EXPLORE_ISSUE_KIND="explore_issue_required"
 EXPLORE_ISSUE_TARGET_TYPE="slack_thread"
 
@@ -102,6 +103,21 @@ explore_issue_source_key() {
   if [ -n "$reply" ]; then
     [[ "$reply" =~ ^[0-9]{10}\.[0-9]{6}$ ]] || return 2
     [[ "$reply" == "$root" || "$reply" > "$root" ]] || return 2
+  fi
+  if [ -n "${EXPLORE_ISSUE_SELECTED_KEY:-}" ]; then
+    case "$EXPLORE_ISSUE_SELECTED_KEY" in
+      "${channel}__${root//./_}") ;;
+      "${channel}__${root//./_}__${reply//./_}") [ -n "$reply" ] || return 2 ;;
+      *) return 2 ;;
+    esac
+    printf '%s' "$EXPLORE_ISSUE_SELECTED_KEY"
+    return 0
+  fi
+  # A previously selected reply remains that reply even if root state changes.
+  if [ -n "$reply" ] && [ "$reply" != "$root" ] &&
+     [ -f "$EXPLORE_ISSUE_STATE_DIR/${channel}__${root//./_}__${reply//./_}.json" ]; then
+    printf '%s__%s__%s' "$channel" "${root//./_}" "${reply//./_}"
+    return 0
   fi
   root_file="$EXPLORE_ISSUE_STATE_DIR/${channel}__${root//./_}.json"
   if [ -n "$reply" ] && [ "$reply" != "$root" ] && [ -f "$root_file" ]; then
@@ -119,20 +135,26 @@ explore_issue_source_key() {
 }
 
 explore_issue_state_file() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${3:-}")" || return $?
   local key
-  key="$(explore_issue_source_key "$1" "$2" "${3:-}")" || return $?
+  key="$EXPLORE_ISSUE_SELECTED_KEY"
   printf '%s/%s.json' "$EXPLORE_ISSUE_STATE_DIR" "$key"
 }
 
 explore_issue_permit_file() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${3:-}")" || return $?
   local key
-  key="$(explore_issue_source_key "$1" "$2" "${3:-}")" || return $?
+  key="$EXPLORE_ISSUE_SELECTED_KEY"
   printf '%s/%s.permit.json' "$EXPLORE_ISSUE_PERMIT_DIR" "$key"
 }
 
 explore_issue_target_id() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${3:-}")" || return $?
   local key root_key
-  key="$(explore_issue_source_key "$1" "$2" "${3:-}")" || return $?
+  key="$EXPLORE_ISSUE_SELECTED_KEY"
   root_key="${1}__${2//./_}"
   printf '%s:%s' "$1" "$2"
   if [ "$key" != "$root_key" ]; then
@@ -146,6 +168,8 @@ explore_issue_permalink() {
 }
 
 explore_issue_upsert_obligation() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   # channel thread_ts permalink body_file title reason required_at orig_sha cur_sha
   local channel="$1" thread_ts="$2" permalink="$3" body_file="$4" title="$5"
   local reason="$6" required_at="$7" original_sha="$8" current_sha="$9"
@@ -179,6 +203,8 @@ explore_issue_upsert_obligation() {
 }
 
 explore_issue_has_open_obligation() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   # channel thread_ts -> 0 if an open explore_issue_required obligation exists
   local channel="$1" thread_ts="$2" target_id json
   target_id="$(explore_issue_target_id "$channel" "$thread_ts")" || return $?
@@ -193,11 +219,16 @@ explore_issue_atomic_write_json() {
   # Serialize writers, then check terminality inside the lock. A denied retry
   # must never reopen or replace a terminal root (or terminal reply) record.
   python3 -c '
-import fcntl, json, os, sys, tempfile
+import fcntl, glob, json, os, sys, tempfile
 path, payload = sys.argv[1:]
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path + ".lock", "a") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
+    if path.endswith(".permit.json"):
+        key = os.path.basename(path)[:-len(".permit.json")]
+        consumed = os.environ.get("EXPLORE_ISSUE_CONSUMED_PERMIT_DIR", "/tmp/heydonna-explore-issue-permit-consumed")
+        if glob.glob(os.path.join(consumed, key + ".permit.consumed.*.json")):
+            sys.exit(1)  # Consumed/UNKNOWN creates are reconciliation-only.
     if os.path.exists(path):
         with open(path) as f:
             previous = json.load(f)
@@ -212,6 +243,8 @@ with open(path + ".lock", "a") as lock:
 }
 
 explore_issue_write_state() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   # channel thread_ts state body_file title reason required_at orig_sha cur_sha obligation_id
   local channel="$1" thread_ts="$2" state="$3" body_file="$4" title="$5"
   local reason="$6" required_at="$7" original_sha="$8" current_sha="$9" obligation_id="${10:-}"
@@ -237,6 +270,8 @@ explore_issue_write_state() {
 }
 
 explore_issue_read_state() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   # channel thread_ts -> prints state JSON (or nothing if absent)
   local file
   file="$(explore_issue_state_file "$1" "$2")" || return $?
@@ -245,6 +280,8 @@ explore_issue_read_state() {
 }
 
 explore_issue_set_state() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   # channel thread_ts state — transition the per-source state machine
   # (OPEN|IN_PROGRESS|READY_TO_FILE|WAITING_EXTERNAL|RESOLVED_FILED|
   # RESOLVED_NO_ISSUE) while preserving every other record field.
@@ -260,6 +297,8 @@ explore_issue_set_state() {
 }
 
 explore_issue_mint_permit() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   # channel thread_ts final_body_sha title_digest obligation_id
   local channel="$1" thread_ts="$2" body_sha="$3" title_digest="$4" obligation_id="$5"
   local file now
@@ -277,10 +316,16 @@ explore_issue_mint_permit() {
 }
 
 explore_issue_permit_status() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   # channel thread_ts body_sha title_digest -> 0 valid, 1 absent, 2 drift
   local channel="$1" thread_ts="$2" body_sha="$3" title_digest="$4"
   local file p_channel p_thread p_message p_body p_title
   file="$(explore_issue_permit_file "$channel" "$thread_ts")" || return $?
+  local consumed
+  for consumed in "$EXPLORE_ISSUE_CONSUMED_PERMIT_DIR/${EXPLORE_ISSUE_SELECTED_KEY}.permit.consumed."*.json; do
+    [ ! -f "$consumed" ] || return 3
+  done
   [ -f "$file" ] || return 1
   p_channel="$(jq -r '.channel // ""' "$file" 2>/dev/null || true)"
   p_thread="$(jq -r '.thread_ts // ""' "$file" 2>/dev/null || true)"
@@ -298,6 +343,8 @@ explore_issue_permit_status() {
 }
 
 explore_issue_consume_permit() {
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   # channel thread_ts body_sha title_digest -> 0 consumed (allow create), 1 absent, 2 drift
   local channel="$1" thread_ts="$2" body_sha="$3" title_digest="$4"
   local file consumed now key
@@ -307,10 +354,23 @@ explore_issue_consume_permit() {
     return 2
   fi
   mkdir -p "$EXPLORE_ISSUE_CONSUMED_PERMIT_DIR"
-  key="$(explore_issue_source_key "$channel" "$thread_ts")"
+  key="$EXPLORE_ISSUE_SELECTED_KEY"
   now="$(date -u +%Y%m%dT%H%M%SZ)"
   consumed="$EXPLORE_ISSUE_CONSUMED_PERMIT_DIR/${key}.permit.consumed.${now}.json"
-  mv -f "$file" "$consumed" 2>/dev/null || return 1
+  python3 -c '
+import fcntl, glob, json, os, sys
+path, consumed, body, title, message = sys.argv[1:]
+with open(path + ".lock", "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    history = consumed.rsplit(".permit.consumed.", 1)[0] + ".permit.consumed.*.json"
+    if glob.glob(history) or not os.path.exists(path):
+        sys.exit(1)
+    with open(path) as f:
+        permit = json.load(f)
+    if permit.get("body_sha256") != body or permit.get("title_digest") != title or permit.get("source_message_ts", message) != message:
+        sys.exit(2)
+    os.rename(path, consumed)  # Persist UNKNOWN before allowing the external create.
+' "$file" "$consumed" "$body_sha" "$title_digest" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-$thread_ts}" || return $?
   return 0
 }
 
@@ -318,6 +378,8 @@ explore_issue_resolve_obligation() {
   # channel thread_ts external_state reason
   local channel="$1" thread_ts="$2" external_state="$3" reason="$4"
   local EXPLORE_ISSUE_SOURCE_MESSAGE_TS="${5:-${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}}"
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   local target_id
   target_id="$(explore_issue_target_id "$channel" "$thread_ts")" || return $?
   "$EXPLORE_ISSUE_PM_OPS_CLI" obligation-resolve \
@@ -332,6 +394,8 @@ explore_issue_resolve_filed() {
   # channel thread_ts issue_number issue_url title body_sha
   local channel="$1" thread_ts="$2" issue_number="$3" issue_url="$4" title="$5" body_sha="$6"
   local EXPLORE_ISSUE_SOURCE_MESSAGE_TS="${7:-${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}}"
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   local file state
   file="$(explore_issue_state_file "$channel" "$thread_ts")" || return $?
   [ -f "$file" ] || return 1
@@ -357,6 +421,8 @@ explore_issue_resolve_no_issue() {
   # channel thread_ts resolution_reason title body_sha
   local channel="$1" thread_ts="$2" resolution="$3" title="$4" body_sha="$5"
   local EXPLORE_ISSUE_SOURCE_MESSAGE_TS="${6:-${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}}"
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   local file state
   file="$(explore_issue_state_file "$channel" "$thread_ts")" || return $?
   [ -f "$file" ] || return 1

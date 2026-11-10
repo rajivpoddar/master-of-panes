@@ -255,6 +255,7 @@ fi
 if [ "$SOURCE_RESULT" != "NONE" ]; then
   read -r CHANNEL THREAD_TS EXPLORE_ISSUE_SOURCE_MESSAGE_TS <<< "$SOURCE_RESULT"
   export EXPLORE_ISSUE_SOURCE_MESSAGE_TS
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$CHANNEL" "$THREAD_TS")" || exit 2
   SELECTED_STATE="$(explore_issue_state_file "$CHANNEL" "$THREAD_TS")"
   if [ -f "$SELECTED_STATE" ] && jq -e ' .state == "RESOLVED_FILED" or .state == "RESOLVED_NO_ISSUE" ' "$SELECTED_STATE" >/dev/null; then
     printf '%s\n' '{"decision":"block","message":"BLOCKED: This source is already terminal. For a new report, use the later reply permalink with the original thread_ts. The terminal record was not changed."}'
@@ -277,7 +278,11 @@ if [ -n "$THREAD_TS" ]; then
     if explore_issue_consume_permit "$CHANNEL" "$THREAD_TS" "$BODY_SHA" "$TITLE_DIGEST"; then
       exit 0
     fi
-    PERMIT_STATUS=1
+    PERMIT_STATUS=3
+  fi
+  if [ "$PERMIT_STATUS" = "3" ]; then
+    printf '%s\n' '{"decision":"block","message":"BLOCKED: This source already consumed its create permit; the create result may be UNKNOWN. Reconcile by searching GitHub for the canonical Source permalink. Do not re-mint or create again for this source."}'
+    exit 0
   fi
 fi
 

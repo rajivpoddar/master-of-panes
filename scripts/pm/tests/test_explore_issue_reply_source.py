@@ -200,3 +200,41 @@ def test_terminal_reply_does_not_reopen(intake):
     before = child.read_bytes()
     assert write_state(env).returncode != 0
     assert child.read_bytes() == before
+
+
+def test_root_closes_between_upsert_and_state_write_without_retarget(intake):
+    tmp_path, root, env = intake
+    root.write_text(json.dumps({"state": "OPEN", "thread_ts": THREAD}))
+    recorder = Path(env["EXPLORE_ISSUE_PM_OPS_CLI"])
+    recorder.write_text(recorder.read_text().replace(
+        "print(4242)",
+        "p=" + repr(str(root)) + "\nwith open(p, 'w') as f: json.dump({'state':'RESOLVED_FILED','thread_ts':"
+        + repr(THREAD) + "}, f)\nprint(4242)"))
+    result = run_hook(tmp_path, env)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block"
+    invocation, = calls(env)
+    assert invocation[invocation.index("--target-id") + 1] == f"{CHANNEL}:{THREAD}"
+    assert json.loads(root.read_text())["state"] == "RESOLVED_FILED"
+    assert not (tmp_path / "state" / f"{REPLY_KEY}.json").exists()
+
+
+def test_consumed_unknown_create_reentry_is_reconcile_only_distinct_reply_proceeds(intake):
+    tmp_path, root, env = intake
+    assert write_state(env).returncode == 0
+    mint = f"explore_issue_mint_permit {CHANNEL} {THREAD} sha title 4242"
+    consume = f"explore_issue_consume_permit {CHANNEL} {THREAD} sha title"
+    assert shell(env, mint).returncode == 0
+    # External create was accepted, but its response was lost: no resolve call.
+    assert shell(env, consume).returncode == 0
+    assert shell(env, mint).returncode != 0
+    assert shell(env, consume).returncode != 0
+    before = (tmp_path / "state" / f"{REPLY_KEY}.json").read_bytes()
+    result = run_hook(tmp_path, env)
+    assert "Reconcile" in json.loads(result.stdout)["message"]
+    assert calls(env) == []
+    assert (tmp_path / "state" / f"{REPLY_KEY}.json").read_bytes() == before
+    other = dict(env, EXPLORE_ISSUE_SOURCE_MESSAGE_TS="1794296584.975299")
+    assert write_state(other).returncode == 0
+    assert shell(other, mint).returncode == 0
+    assert shell(other, consume).returncode == 0
