@@ -11,10 +11,11 @@ color: cyan
 ---
 
 
-## Named scenario execution (preferred)
-Read qa-brief/LESSONS.md and prefer the brief's named scenario + parameters: `editor-takeover-two-tabs` or `clone-sample-open-editor`. Resolve deterministic exact-head adapters BEFORE recording, then run qa-brief/scenarios/run.py once on the owned remote box with agent-browser. No LLM reasoning between scripted steps. Same-session tabs, never separate profiles; generic bounded readiness/sync/head-version waits, not exact-text waits. Internal sample-clone binding must exist; otherwise report SCENARIO_BINDING_MISSING. Scenario misses alone allow free-form steps and MUST be logged as lessons. Preserve exact customer-artifact and creation-flow requirements.
-Capture the session summary (wall_s, idle_s, idle_share, gaps_gt30s, daemon_wedged, agent_think, watchdog restarts) and receipt. Missing metrics are UNKNOWN. Every video goes to PM qa-video-review for its mandatory LESSON_APPLIED/LESSON_NONE learning verdict, not self-approval.
+## Test project: clone the sample (Rajiv 2026-11-06)
 
+Rajiv: "update the agent browser skills with this method" (DM D0AMF0XE6TS thread 1793961247.204519, ts 1793961404.966929). For remote HeyDonna QA, provision `--seed-project medium`, open the dashboard and click **Try a sample deposition** to clone `[Test] E2E Seed - Medium Deposition (Frazier)` (`api.projects.cloneSampleProject`; `app/(pages)/dashboard/page.tsx`). Add only AC-needed data through the real UI, then run the requested action. Fresh jobsheet + MP3 projects are only for creation, upload or audio-processing ACs; preserve exact-artifact diagnostic requirements.
+
+On a box provisioned with `--seed-project medium`, the seeded Frazier project is already present and the dashboard hides **Try a sample deposition**. Use that seeded project directly (it's disposable test data). For a separate copy, use Account menu → **Start Tour**, which runs the same sample-clone handler. Never delete the seed to unhide the button.
 ## [HIGH] Test-only work is NOT yours (Rajiv C0ALZJHGE49 thread 1793299570.404429, ts 1793337367.539999: "why does a test only runs need browser? ... remote test agent is for tests")
 - If the request has NO browser AC (only vitest/pytest/tsc/jest/harness/RED-on-revert), do not start a capture. Return
   `ROUTE_TO=remote-test-runner reason=no_browser_ac` and stop; the caller relaunches `remote-test-runner`.
@@ -90,7 +91,7 @@ Deployed implementation: `~/.claude/scripts/remote-qa-capture.sh`, `remote-qa-ca
 
 ## Safe deployed edits
 
-Never edit a running deployed script in place. Write a sibling `.next`, run `bash -n` (shell) / `node --check < file.next` (JS), preserve executable mode, then atomic `mv` into place. Install dependencies before publishing a wrapper that calls them. MoP-managed assets MUST be changed and committed in MoP shared-asset sources first, then installed through stage/activate/shared-install; never leave live-only edits.
+Never edit a running deployed script in place. Write a sibling `.next`, run `bash -n` (shell) / `node --check < file.next` (JS), preserve executable mode, then atomic `mv` into place. Install dependencies before publishing a wrapper that calls them. Edit deployed copies first (S19); repository sync is a later batch, not a reason to fork the implementation.
 
 ## Always screenshot + batch-post (mandatory, Rajiv D0AMF0XE6TS thread 1793192925.456499, ts 1793213389.078079)
 Every UI or editor run screenshots EACH state the brief, AC or plan Parity inventory names (`NN-<state>.png`), on the REAL feature flow, never a hand-typed stand-in. Spec runs: keep Playwright's per-step PNGs and add `page.screenshot` at each named state when the brief asks for a flow. After `fetch`, run ONCE `~/.claude/scripts/qa-post-screenshots.sh --dir <evidence> --channel C0ALZJHGE49 --thread <thread ts from the brief> --pr <N> --head <sha> --ac "<AC ids>" --label "<flow + states>"`. Quote its `QA_SCREENSHOTS_POSTED` line in the report. Zero PNGs means a FAIL, not a pass. If the brief gives no thread ts, ask PM once before posting.
@@ -106,7 +107,7 @@ Every UI or editor run screenshots EACH state the brief, AC or plan Parity inven
 ## Output
 
 Report exact head, command/exit, authenticated status, viewport, screenshot/log directory + SHA256, the QA_SCREENSHOTS_POSTED line, the video path + sha256 (QA_RECORDING_LOCAL) and the QA_VIDEO_POSTED line, config restoration rc and destruction result. End with:
-`REMOTE_QA verdict=<pass|fail|blocked> slot=<N> head=<40-hex> box_destroyed=<yes|no> scenario=<name|none> wall_s=<seconds|UNKNOWN> idle_s=<seconds|UNKNOWN> idle_share=<ratio|UNKNOWN> artifacts=<local dir>`.
+`REMOTE_QA verdict=<pass|fail|blocked> slot=<N> head=<40-hex> box_destroyed=<yes|no> artifacts=<local dir>`.
 
 ## Processing QA policy (Rajiv 2026-10-20, DM D0AMF0XE6TS thread 1792504906.600109, ts 1792505340.576849: "do B")
 Flows that need processing (new-project wizard -> editor, audit, any Modal stage) MUST use the default Modal lane (or explicit `--requires-modal`), never `--ui-only`: per-box disposable Modal app (runtime-fetched coordinator token, env main), torn down on box destroy, STRICT_FIXTURES/LLM proxy on with capture-on-miss (see above; `--strict-replay` opts out), synthetic auth. Do not report the UI-only Modal block as a blocker; switch lanes instead. No image credential bake.
