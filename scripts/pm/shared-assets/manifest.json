@@ -1226,7 +1226,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "188f6e4666aa477ad78b0b1c70eb93075e899e62b3d74684e15e6dc8fd2fe66b",
+      "sha256": "03b36108b69d12a818639b7f4305b8bcf3ad94ac07a0fdfdaaaa92fdd3826efb",
       "source_path": "claude/skills/qa-brief/LESSONS.md"
     },
     {
