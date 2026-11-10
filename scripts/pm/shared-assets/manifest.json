@@ -708,7 +708,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "8914fa1e8bc0bffd2676c99db26ba140e000a2e4e613ecc0bc77fa85f8e80e46",
+      "sha256": "73c3d3e6821063c6c595313f09043f092b7fb291fc2c8e54a9880f8f8d5746a6",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -827,7 +827,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-spark-monitor",
-      "sha256": "977516bb3b72783e9970227e89fdb3aae23f817208987b2981578034b644d5d1",
+      "sha256": "3dd9693b97e58afe76b367e7cf10f3ee19b455727653aa4969dc437fe12ec012",
       "source_path": "claude/scripts/spark-run-monitor.sh"
     },
     {

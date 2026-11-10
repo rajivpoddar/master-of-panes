@@ -79,6 +79,7 @@ ap.add_argument("--validate-config-only", action="store_true", help="CPU-only bi
 ap.add_argument("--channel", default="C0ALZJHGE49")
 ap.add_argument("--host", default="dgx-spark")
 ap.add_argument("--container", help="exact owned training container name/id; enforcement stops ONLY this one (never by pattern)")
+ap.add_argument("--total-steps", type=int, help="authoritative optimizer-step total for this run; required for persisted progress")
 a = ap.parse_args()
 memory_config = load_memory_config(a.memory_config, a.run_name, a.floor_mib)
 binding = memory_status(memory_config, a.host, "config")
@@ -121,7 +122,9 @@ def post(text, thread=None):
         print("UNDELIVERED: Slack post failed twice and the alert file failed: " + type(e).__name__, file=sys.stderr, flush=True)
     return None
 
-REMOTE = ("L=%s; P=%s; C=%s; echo '##TAIL'; tail -c 30000 \"$L\" 2>&1 | tr '\\r' '\\n' | tail -n 400; grep -o \"{.loss.: [^}]*}\" \"$L\" 2>/dev/null | tail -1;"
+REMOTE = ("L=%s; P=%s; C=%s; echo '##IDENTITY_BEFORE'; stat -c '%%d:%%i:%%s' \"$L\" 2>/dev/null; if [ -n \"$C\" ]; then docker inspect -f '{{.Id}}:{{.State.StartedAt}}' \"$C\" 2>/dev/null; fi;"
+          " echo '##TAIL'; tail -c 30000 \"$L\" 2>&1 | tr '\\r' '\\n' | tail -n 400; grep -o \"{.loss.: [^}]*}\" \"$L\" 2>/dev/null | tail -1;"
+          " echo '##IDENTITY_AFTER'; stat -c '%%d:%%i:%%s' \"$L\" 2>/dev/null; if [ -n \"$C\" ]; then docker inspect -f '{{.Id}}:{{.State.StartedAt}}' \"$C\" 2>/dev/null; fi;"
           " echo '##MTIME'; stat -c %%Y \"$L\" 2>&1; date +%%s;"
           " echo '##SMI'; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader 2>&1;"
           " echo '##MEM'; grep MemAvailable /proc/meminfo;"
@@ -165,16 +168,16 @@ def gather():
     return sec
 
 num = r"(-?\d+(?:\.\d+)?(?:e-?\d+)?)"
-def parse(tail):
+def parse(tail, expected_total=None):
     d = {"step": None, "total": None, "loss": None, "gn": None, "lr": None, "tps": None, "spi": None, "errs": [], "terminal": None}
     for ln in tail:
+        # A bare tqdm bar can be dataset loading or a probe, even with a matching total.
+        # Accept trainer bars only when accompanied by the optimizer's loss and grad norm.
         m = re.search(r"\b(\d+)/(\d+)\s*\[[^\]]*?(?:([\d.]+)s/it|([\d.]+)it/s)", ln)
-        if m:
+        optimizer_bar = m and re.search(r"['\"](?:train_)?loss['\"]\s*:", ln) and re.search(r"['\"]grad_norm['\"]\s*:", ln)
+        if optimizer_bar and expected_total and int(m[2]) == expected_total and int(m[1]) <= expected_total:
             d["step"], d["total"] = int(m[1]), int(m[2])
             d["spi"] = float(m[3]) if m[3] else (1 / float(m[4]) if m[4] and float(m[4]) else None)
-        else:
-            m = re.search(r"(?:\bstep\b[\s=:]*|\bmicro[_-]?step\b[\s=:]*)(\d+)\s*(?:/|of)\s*(\d+)", ln, re.I)
-            if m: d["step"], d["total"] = int(m[1]), int(m[2])
         m = re.search(r"['\"]?(?:train_)?loss['\"]?\s*[:=]\s*['\"]?" + num, ln, re.I)
         if m: d["loss"] = float(m[1])
         m = re.search(r"['\"]?grad_norm['\"]?\s*[:=]\s*['\"]?" + num, ln, re.I)
@@ -214,7 +217,7 @@ min_avail = min_cuda = None; unreachable_posted = False; obs = []; last_mtime = 
 while True:
     try:
         sec = gather(); unreachable_posted = False
-        d = parse(sec.get("TAIL", []))
+        d = parse(sec.get("TAIL", []), a.total_steps)
         mem = re.search(r"(\d+)", first(sec, "MEM")); avail = int(mem[1]) / 1024 if mem else None
         smi = first(sec, "SMI"); gpu = "n/a (unified memory)"
         sm = re.match(r"\s*(\d+) MiB,\s*(\d+) MiB,\s*(\d+) %", smi)
@@ -229,13 +232,21 @@ while True:
         mtime = int(mt) if mt.isdigit() else None
         stale = stale + 1 if (mtime is not None and mtime == last_mtime) else 0; last_mtime = mtime
         progress = "ETA n/a | sec/step n/a | steps last hour n/a"
-        if d["step"] is not None and d["total"]:
+        before, after = sec.get("IDENTITY_BEFORE", []), sec.get("IDENTITY_AFTER", [])
+        identity = None
+        if (first(sec, 'CONT').strip() == 'running' and len(before) == len(after) == 2
+                and before[1] == after[1] and re.fullmatch(r'[0-9a-f]{64}:.+', after[1])):
+            b = re.fullmatch(r'(\d+):(\d+):(\d+)', before[0])
+            e = re.fullmatch(r'(\d+):(\d+):(\d+)', after[0])
+            if b and e and b.group(1, 2) == e.group(1, 2) and int(e[3]) >= int(b[3]):
+                identity = {'log_id': ':'.join(e.group(1, 2)), 'size': int(e[3]), 'container': after[1]}
+        if d["step"] is not None and d["total"] and identity:
             try:
                 import importlib.util
                 spec = importlib.util.spec_from_file_location("spark_heartbeat", os.path.expanduser("~/.claude/scripts/pm/heartbeat/heartbeat-compose.py"))
                 composer = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(composer)
-                progress = composer.spark_progress_update(a.run_name, a.host, a.log, d["step"], d["total"])
+                progress = composer.spark_progress_update(a.run_name, a.host, a.log, d["step"], d["total"], identity=identity)
             except Exception:
                 progress += " (progress state unavailable)"
         proc = first(sec, "PROC"); proc_gone = proc.strip() == "0"

@@ -847,8 +847,9 @@ def collect_langsmith(py: str, timeout: int = 60) -> str:
 # ---------------------------------------------------------------------------
 _SPARK_REMOTE = (
     'nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader && '
-    'printf "\\n__CONTAINERS__\\n" && docker ps --format "{{.Names}} {{.Status}}" && '
-    'printf "__PROCESSES__\\n" && ps -eo args= && printf "__END__\\n"'
+    'printf "\\n__CONTAINERS__\\n" && docker ps --no-trunc --format "{{.Names}} {{.Status}}|{{.ID}}" && '
+    'printf "__PROCESSES__\\n" && ps -eo args= && printf "__END__\\n" && '
+    'printf "__IDENTITIES__\\n" && docker ps -q --no-trunc | xargs -r docker inspect -f "{{.Id}}:{{.State.StartedAt}}"'
 )
 
 
@@ -859,7 +860,12 @@ def parse_training_output(stdout: str, expected_container: str | None = None) ->
         container_text, rest = rest.split("__PROCESSES__\n", 1)
         process_text, tail = rest.split("__END__\n", 1)
         gpu = [float(m.group(1)) for m in re.finditer(r"^\s*([\d.]+)\s*%?\s*,", gpu_text, re.M)]
-        if not gpu or not container_text.strip() or not process_text.strip() or tail.strip():
+        identities = []
+        if tail.strip():
+            if not tail.startswith('__IDENTITIES__\n'):
+                return None
+            identities = [line for line in tail.splitlines()[1:] if re.fullmatch(r'[0-9a-f]{64}:.+', line)]
+        if not gpu or not container_text.strip() or not process_text.strip():
             return None
         containers = [line.split(None, 1)[0] for line in container_text.splitlines()
                       if re.match(r"^\S+\s+Up\b", line)]
@@ -867,7 +873,7 @@ def parse_training_output(stdout: str, expected_container: str | None = None) ->
         trainers = [line for line in process_text.splitlines()
                     if re.search(r"(?:^|\s)(?:\S*/)?(?:python[\d.]*|torchrun)\s+(?:-u\s+)?(?:\S*/)?(?:train(?:_[\w-]+)?\.py|-[m]\s+\S*train\S*)", line)]
         owned = expected_container if expected_container in containers else None
-        return {"running": bool(owned or trainers), "gpu": max(gpu),
+        return {"running": bool(owned or trainers), "gpu": max(gpu), 'container_ids': identities,
                 "run": owned or ("trainer process" if trainers else "none")}
     except (ValueError, TypeError):
         return None
@@ -932,13 +938,16 @@ def spark_progress_state_path(run, host, log):
     return SPARK_PROGRESS_STATE_DIR / (re.sub(r'[^\w.-]', '_', run) + '-' + key + '.json')
 
 
-def spark_progress_update(run, host, log, step, total, now=None):
+def spark_progress_update(run, host, log, step, total, now=None, *, identity):
     now = time.time() if now is None else now
     path = spark_progress_state_path(run, host, log)
     try:
         data = json.loads(path.read_text())
         samples = data['samples']
-        if data['total'] != total or not isinstance(samples, list):
+        old = data['identity']
+        if (data['total'] != total or not isinstance(samples, list)
+                or old['log_id'] != identity['log_id'] or old['container'] != identity['container']
+                or old['size'] > identity['size']):
             samples = []
     except (OSError, ValueError, KeyError, TypeError):
         samples = []
@@ -947,7 +956,7 @@ def spark_progress_update(run, host, log, step, total, now=None):
         samples = []
     samples.append([now, step])
     samples = samples[-256:]
-    data = {'run': run, 'host': host, 'log': log, 'total': total, 'samples': samples, 'updated': now}
+    data = {'run': run, 'host': host, 'log': log, 'total': total, 'identity': identity, 'samples': samples, 'updated': now}
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix='.progress-', dir=path.parent)
     try:
@@ -969,9 +978,15 @@ def spark_progress_render(data, now=None):
     recent = [(a, b) for a, b in samples[:-1] if 0 < t-a <= 10800 and b < step]
     preferred = [(a, b) for a, b in recent if t-a >= 3600]
     base = (preferred or recent)
-    sec = (t - base[0][0]) / (step - base[0][1]) if base else None
+    stalled = len(samples) > 1 and samples[-2][1] == step
+    sec = (t - base[0][0]) / (step - base[0][1]) if base and not stalled else None
     hour = [(a, b) for a, b in samples[:-1] if 0 < t-a <= 3600]
-    steps = str(step - hour[0][1]) if hour else 'n/a'
+    if hour:
+        elapsed = t - hour[0][0]
+        window = 'hour' if elapsed == 3600 else ('%gm' % (elapsed / 60))
+        steps = 'steps in last %s: %s' % (window, step - hour[0][1])
+    else:
+        steps = 'steps in last hour: n/a'
     eta = 'n/a'
     if sec is not None and data.get('total') is not None:
         remaining = max(0, data['total'] - step) * sec
@@ -979,20 +994,22 @@ def spark_progress_render(data, now=None):
         duration = '%dh%02dm' % (minutes // 60, minutes % 60) if minutes >= 60 else '%dm' % minutes
         date = spark_datetime.datetime.fromtimestamp(t + remaining, spark_datetime.timezone(spark_datetime.timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M IST')
         eta = duration + ' (' + date + ')'
-    result = 'ETA %s | sec/step %s | steps last hour %s' % (eta, ('%.1f' % sec) if sec is not None else 'n/a', steps)
-    if len(samples) > 1 and samples[-2][1] == step:
+    result = 'ETA %s | sec/step %s | %s' % (eta, ('%.1f' % sec) if sec is not None else 'n/a', steps)
+    if stalled:
         interval = max(0, int(t - samples[-2][0]))
         result += ' | NO STEP PROGRESS in %ds' % interval
     return result
 
 
-def spark_progress_latest(max_age=3600, now=None):
+def spark_progress_latest(max_age=3600, now=None, container_ids=()):
     now = time.time() if now is None else now
     found = []
     for path in SPARK_PROGRESS_STATE_DIR.glob('*.json'):
         try:
             data = json.loads(path.read_text())
-            if 0 <= now - data['updated'] <= max_age:
+            identity = data.get('identity') or {}
+            if (identity.get('container', '') in container_ids
+                    and data.get('samples') and 0 <= now - data['updated'] <= max_age):
                 found.append(data)
         except (OSError, ValueError, KeyError, TypeError):
             continue
@@ -1011,7 +1028,7 @@ def training_line(probe=None, mon_up=None) -> tuple[str, list[str]]:
     line = f"*Training:* {status} · GPU {doc.get('gpu', 0):g}% · container {doc.get('run', 'none')}"
     if doc.get("running"):
         try:
-            line += " · " + (spark_progress_latest() or "ETA n/a | sec/step n/a | steps last hour n/a")
+            line += " · " + (spark_progress_latest(container_ids=doc.get('container_ids', ())) or "ETA n/a | sec/step n/a | steps last hour n/a")
         except Exception:
             line += " · ETA n/a | sec/step n/a | steps last hour n/a"
     return line, []
