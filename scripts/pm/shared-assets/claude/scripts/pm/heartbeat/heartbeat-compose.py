@@ -846,22 +846,31 @@ def collect_langsmith(py: str, timeout: int = 60) -> str:
 # ALWAYS present in the hourly post; probes the Spark directly, read-only.
 # ---------------------------------------------------------------------------
 _SPARK_REMOTE = (
-    'nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; '
-    'docker ps --format "{{.Names}} {{.Status}}"'
+    'nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader && '
+    'printf "\\n__CONTAINERS__\\n" && docker ps --format "{{.Names}} {{.Status}}" && '
+    'printf "__PROCESSES__\\n" && ps -eo args= && printf "__END__\\n"'
 )
 
 
-def parse_training_output(stdout: str) -> dict:
-    """An SSH-success snapshot always yields RUNNING or NOT RUNNING."""
-    gpu = [float(m.group(1)) for m in re.finditer(r"^\s*([\d.]+)\s*%?\s*,", stdout, re.M)]
-    containers = [line.split(None, 1)[0] for line in stdout.splitlines()
-                  if re.match(r"^\S+\s+Up\b", line)]
-    trainers = [name for name in containers if re.search(r"train|sindhu", name, re.I)]
-    # On this dedicated training host, include an otherwise-named active container.
-    names = trainers or containers
-    utilization = max(gpu, default=0)
-    return {"running": bool(names and utilization > 0), "gpu": utilization,
-            "run": ", ".join(names) if names else "none"}
+def parse_training_output(stdout: str, expected_container: str | None = None) -> dict | None:
+    """GPU activity is telemetry, not proof of trainer liveness."""
+    try:
+        gpu_text, rest = stdout.split("__CONTAINERS__\n", 1)
+        container_text, rest = rest.split("__PROCESSES__\n", 1)
+        process_text, tail = rest.split("__END__\n", 1)
+        gpu = [float(m.group(1)) for m in re.finditer(r"^\s*([\d.]+)\s*%?\s*,", gpu_text, re.M)]
+        if not gpu or not container_text.strip() or not process_text.strip() or tail.strip():
+            return None
+        containers = [line.split(None, 1)[0] for line in container_text.splitlines()
+                      if re.match(r"^\S+\s+Up\b", line)]
+        # Match executable trainer argv, never an arbitrary busy container or monitor.
+        trainers = [line for line in process_text.splitlines()
+                    if re.search(r"(?:^|\s)(?:\S*/)?(?:python[\d.]*|torchrun)\s+(?:-u\s+)?(?:\S*/)?(?:train(?:_[\w-]+)?\.py|-[m]\s+\S*train\S*)", line)]
+        owned = expected_container if expected_container in containers else None
+        return {"running": bool(owned or trainers), "gpu": max(gpu),
+                "run": owned or ("trainer process" if trainers else "none")}
+    except (ValueError, TypeError):
+        return None
 
 
 def spark_probe(timeout: int = 30) -> tuple[dict | None, str]:
@@ -878,7 +887,7 @@ def spark_probe(timeout: int = 30) -> tuple[dict | None, str]:
         return None, type(exc).__name__
     if r.returncode != 0:
         return None, f"ssh rc={r.returncode}"
-    return parse_training_output(r.stdout), ""
+    return parse_training_output(r.stdout), "incomplete probe"
 
 
 
@@ -914,7 +923,7 @@ def training_line(probe=None, mon_up=None) -> tuple[str, list[str]]:
     """Never omitted. Returns (line, actions)."""
     doc, reason = probe if probe is not None else spark_probe()
     if doc is None:
-        return f"*Training:* UNAVAILABLE ({reason or 'probe failed'})", []
+        return f"*Training:* UNKNOWN ({reason or 'probe failed'})", []
     status = "RUNNING" if doc.get("running") else "NOT RUNNING"
     return f"*Training:* {status} · GPU {doc.get('gpu', 0):g}% · container {doc.get('run', 'none')}", []
 
@@ -1455,6 +1464,7 @@ def compose(
     pending_actions: tuple[dict, dict] | None = None,
     proxies: dict | None = None,
     usage_error: str | None = None,
+    slots_authoritative: bool = True,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -1499,6 +1509,8 @@ def compose(
             sl_tldr += f", {len(priority_flags)} PRIORITY_INVERSION"
             sl_lines = [*sl_lines, *("• ⚠ " + f for f in priority_flags)]
             slot_actions = slot_actions + list(priority_flags)
+        if not slots_authoritative:
+            slot_actions = []
         parts.append(sl_tldr)
         body += ["", *sl_lines]
     if mode == "1h":
@@ -1793,10 +1805,33 @@ def collector_success(value) -> bool:
     if value is None:
         return False
     if isinstance(value, dict):
-        return not value.get("error") and not value.get("failures")
+        return (not value.get("error") and not value.get("failures")
+                and not value.get("cached") and not value.get("incomplete")
+                and value.get("cache_age_min") is None)
     if isinstance(value, str):
-        return "unavailable" not in value.lower()
+        return not any(token in value.lower() for token in ("unavailable", "unknown", "(as of ", "(stale,"))
     return True
+
+
+def store_observation(path, value, at):
+    """Serialize compare-and-replace so older invocations cannot overwrite newer data."""
+    import fcntl
+    import tempfile
+    if not collector_success(value):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            current = json.loads(path.read_text())
+            if current["at"] >= at:
+                return
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
+            json.dump({"at": at, "value": value}, f)
+            tmp = f.name
+        os.replace(tmp, path)
 
 
 def parallel_collect(jobs, wall_cap=COMPOSE_COLLECTOR_BUDGET, cache_dir=HOURLY_CACHE):
@@ -1811,35 +1846,33 @@ def parallel_collect(jobs, wall_cap=COMPOSE_COLLECTOR_BUDGET, cache_dir=HOURLY_C
     inbox = queue.Queue()
     deadline = monotonic() + wall_cap
     results, stale = {}, {}
+    observed = {}
 
     def work(name, collect):
         try:
             value = collect()
-            inbox.put((name, value, None))
+            inbox.put((name, value, None, time.time()))
         except Exception as exc:
-            inbox.put((name, None, "timed out" if isinstance(exc, subprocess.TimeoutExpired) or "timeout" in str(exc).lower() or "timed out" in str(exc).lower() else type(exc).__name__))
+            inbox.put((name, None, "timed out" if isinstance(exc, subprocess.TimeoutExpired) or "timeout" in str(exc).lower() or "timed out" in str(exc).lower() else type(exc).__name__, time.time()))
 
     for name, collect in jobs.items():
         threading.Thread(target=work, args=(name, collect), daemon=True).start()
     pending = set(jobs)
     while pending:
         try:
-            name, value, error = inbox.get(timeout=max(0, deadline - monotonic()))
+            name, value, error, at = inbox.get(timeout=max(0, deadline - monotonic()))
         except queue.Empty:
             break
         pending.remove(name)
         results[name] = (value, error)
+        observed[name] = at
     for name in jobs:
         value, error = results.get(name, (None, "timed out"))
         path = cache_dir / (name + ".json")
         if collector_success(value):
             try:
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                # Unique temp + atomic replace protects overlapping hourly invocations.
-                with tempfile.NamedTemporaryFile(mode="w", dir=cache_dir, delete=False) as f:
-                    json.dump({"at": time.time(), "value": value}, f)
-                    tmp = f.name
-                os.replace(tmp, path)
+                store_observation(path, value, observed[name])
             except OSError:
                 pass  # A cache-write failure must not hide a good live result.
             results[name] = value
@@ -2065,7 +2098,7 @@ def main() -> int:
             email_doc = json.loads(ep.stdout)
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")
-    training = (hourly.get("training") or "*Training:* UNAVAILABLE (no recent successful probe)", []) if args.mode == "1h" else None
+    training = (hourly.get("training") or "*Training:* UNKNOWN (no recent successful probe)", []) if args.mode == "1h" else None
     # Tracked features and issue lifecycle moved to their own thread replies
     # (tracked-features-report.py / issue-lifecycle-report.py, invoked by slack-send.sh
     # after the Hourly parent, like pr-status-report.py). Rajiv C0ALZJHGE49
@@ -2078,6 +2111,7 @@ def main() -> int:
         support=support, failures=failures, escalations=args.escalation,
         active=active, include_active=not args.no_active_users,
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
+        slots_authoritative=not ({"slots", "priority"} & stale.keys()),
         usage_lines=usage_lines, usage_error=usage_error, cleanup_alert=cleanup_status_alert(),
         email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
         priority_flags=priority_flags,
