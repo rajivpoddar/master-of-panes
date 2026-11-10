@@ -1226,7 +1226,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "03b36108b69d12a818639b7f4305b8bcf3ad94ac07a0fdfdaaaa92fdd3826efb",
+      "sha256": "267b4e747ff28031cce354cd5ab1be5bf6b34f6040c896aacde449de1914ead6",
       "source_path": "claude/skills/qa-brief/LESSONS.md"
     },
     {
@@ -1235,7 +1235,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-brief-contract",
-      "sha256": "a7121a81a1575acc001559f4b72cab9a7134502f3026f8a2c7049668a7bfafb7",
+      "sha256": "ec54a8298281c0e0487ba558d4422b38aaa97b8513b0cb9611b378ed25ed5a9a",
       "source_authority": {
         "commit": "2bc454d9603dff1c2c485bd2cd51e92d005a7c6",
         "path": "scripts/pm/shared-assets/claude/skills/qa-brief/SKILL.md",

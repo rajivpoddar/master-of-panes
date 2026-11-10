@@ -19,6 +19,8 @@ Every QA video must be reviewed through qa-video-review with its session summary
 
 The implementing slot includes issue, PR, exact 40-hex head, full AC/proof inventory and privacy-safe exact-artifact locators in the brief. Scenario selection does not waive any AC. Evidence must map each AC to the real production path, exact head and required artifact.
 
+Every brief, including manual routes, specifies an observable precondition assertion before each action under test and an observable end-state assertion after it. The driver checks the visible precondition before acting and checks the actual resulting state after the action; navigation or a click alone is not proof. At the first unmet assertion, stop the scenario, report a named failure (`PRECONDITION_NOT_ESTABLISHED` or `END_STATE_ASSERTION_FAILED`), and exit non-zero. Keep recording active through the final assertion, including a failing assertion, before controller-owned teardown.
+
 The tester writes one exact-head evidence envelope and posts the durable
 `qa-artifact-evidence` marker. Its `tester_verdict` and `codex_qa_verdict`
 must both be unconditional `PASS`/`PASSED`/`APPROVE`/`APPROVED`; any error,
