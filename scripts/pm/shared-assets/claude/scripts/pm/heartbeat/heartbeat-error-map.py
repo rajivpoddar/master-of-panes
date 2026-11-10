@@ -71,7 +71,7 @@ def search_github(code: str) -> list[dict]:
     query = f'repo:{REPO} is:open "{code}"'
     proc = subprocess.run(
         ["gh", "api", "-X", "GET", "search/issues", "-f", f"q={query}", "-f", "per_page=5"],
-        capture_output=True, text=True, errors="replace", timeout=60,
+        capture_output=True, text=True, errors="replace", timeout=1,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"gh search failed: {proc.stderr.strip()[:200]}")
@@ -82,7 +82,7 @@ def search_github(code: str) -> list[dict]:
 def search_pm_ops(code: str, db: Path = PM_OPS_DB) -> list[dict]:
     if not db.exists():
         raise RuntimeError(f"pm-ops.db missing at {db}")
-    conn = sqlite3.connect(str(db))
+    conn = sqlite3.connect(str(db), timeout=0.2)
     try:
         conn.execute("PRAGMA query_only=ON")
         like = f"%{code}%"

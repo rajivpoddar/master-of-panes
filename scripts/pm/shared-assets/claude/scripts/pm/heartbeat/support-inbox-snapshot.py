@@ -577,9 +577,13 @@ def main() -> int:
         prev_state = load_open_state()
         new_state = dict(prev_state)
         for channel in CHANNELS:
+            # Each channel and tracked refresh owns a small budget; neither may
+            # spend the following channel's or in-app read's allowance.
+            DEADLINE = time.monotonic() + 2.0
             try:
                 threads = fetch_channel(token, channel, now_ts - args.lookback_hours * 3600, now_ts)
                 pending_count = len(set(prev_state.get(channel, {})) - {t['ts'] for t in threads})
+                DEADLINE = deadline = time.monotonic() + 1.0
                 threads, next_cursor = carry_forward(
                     threads, prev_state.get(channel, []),
                     lambda ts, ch=channel: fetch_thread(token, ch, ts, now_ts),
@@ -605,6 +609,7 @@ def main() -> int:
         except OSError as exc:
             result["failures"].append(f"open-state save: {exc}")
     if not args.no_in_app:
+        DEADLINE = time.monotonic() + 3.0
         try:
             result["in_app"] = fetch_in_app(int(window_start * 1000))
         except Exception as exc:  # noqa: BLE001

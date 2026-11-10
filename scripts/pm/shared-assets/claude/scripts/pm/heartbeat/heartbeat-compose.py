@@ -1756,7 +1756,15 @@ def _priority_inversion_worker(selector_path: str, slots_doc: dict | list | None
     rps = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rps)
     slots = slots_doc.get("slots", []) if isinstance(slots_doc, dict) else (slots_doc or [])
-    issues = rps.load_open_issues(timeout=timeout)
+    # Bound each dependency read as well as the worker's outer deadline.
+    graphql_http = rps.graphql_http
+
+    def bounded_graphql(*args, **kwargs):
+        kwargs['timeout'] = min(kwargs.get('timeout', 5), 5)
+        return graphql_http(*args, **kwargs)
+
+    rps.graphql_http = bounded_graphql
+    issues = rps.load_open_issues(timeout=min(timeout, 10))
     prio = {int(i["number"]): rps.priority_rank({l["name"] for l in i.get("labels") or []}, i.get("body") or "")
             for i in issues}
     return rps.priority_inversions(slots, prio, rps.rank_candidates(issues))
