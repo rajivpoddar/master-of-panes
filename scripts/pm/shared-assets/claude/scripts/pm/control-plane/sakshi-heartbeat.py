@@ -2341,7 +2341,7 @@ def collect_queue(slots: dict[str, dict[str, Any]]) -> dict[str, Any]:
     sweep = run_cmd(
         ["bash", str(PR_STATE_SWEEP), "--trigger=heartbeat", "--dry-run"],
         cwd=PROJECT_ROOT,
-        timeout=30,
+        timeout=90,
     )
     if not sweep.ok:
         return {
@@ -3167,6 +3167,30 @@ def build_report(data: dict[str, Any]) -> str:
     else:
         lines.append(f"*Queue-motion gate:* UNKNOWN - {queue.get('error', 'todo unavailable')}")
 
+    # Cache the DISPLAY only. Never turn historical queue data into live dispatch
+    # authority (the actions below continue to read the original live queue result).
+    queue_cache = Path.home() / ".claude/state/hourly-cache/queue-motion.json"
+    if queue.get("ok"):
+        try:
+            queue_cache.parent.mkdir(parents=True, exist_ok=True)
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode="w", dir=queue_cache.parent, delete=False) as f:
+                json.dump({"at": time.time(), "value": lines[-1]}, f)
+                tmp = f.name
+            os.replace(tmp, queue_cache)
+        except OSError:
+            pass
+    else:
+        try:
+            cached = json.loads(queue_cache.read_text())
+            age = time.time() - cached["at"]
+            if 0 <= age < 6 * 3600:
+                at = datetime.fromtimestamp(cached["at"], IST).strftime("%H:%M")
+                reason = "timed out" if "timeout" in str(queue).lower() or "timed out" in str(queue).lower() else "failed"
+                lines[-1] = cached["value"] + f" (as of {at}, live check {reason}; age {int(age // 60)}m; recheck before dispatch)"
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
     actions: list[str] = []
     actions.extend(open_pr_activity_action_lines(data.get("open_pr_activity_audit")))
     for row in clear_due:
@@ -3334,6 +3358,36 @@ def main() -> int:
     axiom_window_start = now_utc - timedelta(hours=CONTROL_PLANE_HOURS)
     mop = collect_mop()
     slots = slot_state_map(mop)
+    # Start independent read-only collectors together. Local session policy work
+    # continues while network checks run; no future context manager waits on exit.
+    import threading
+    deadline = time.monotonic() + 150
+    pending_collectors = {}
+    def start_collector(name, collect):
+        done, result = threading.Event(), []
+        def work():
+            try:
+                result.append(collect())
+            except Exception as exc:
+                result.append({"ok": False, "error": type(exc).__name__})
+            finally:
+                done.set()
+        threading.Thread(target=work, daemon=True).start()
+        pending_collectors[name] = (done, result)
+    for name, collect in {
+        "axiom": lambda: collect_axiom(window_start=axiom_window_start, window_end=now_utc),
+        "pr_drift": collect_pr_drift,
+        "queue": lambda: collect_queue(slots),
+        "open_pr_audit": lambda: collect_open_pr_activity_audit(slots),
+        "runner_capacity": lambda: collect_runner_capacity_alerts(now_utc=now_utc),
+        "ready_pool_audit": collect_ready_pool_audit,
+    }.items():
+        start_collector(name, collect)
+    def collected(name):
+        done, result = pending_collectors[name]
+        if not done.wait(max(0, deadline - time.monotonic())):
+            return {"ok": False, "error": "collector wall cap timeout (150s)"}
+        return result[0]
     mop_events = {
         key: (mop.get(key, {}).get("json") or {})
         for key in ("recent_cleared", "recent_clear_executed")
@@ -3352,8 +3406,8 @@ def main() -> int:
     apply_clear_policy(sessions, slots)
     mark_recent_clear_requests(sessions, mop, now_utc)
 
-    open_pr_audit = collect_open_pr_activity_audit(slots)
-    runner_capacity = collect_runner_capacity_alerts(now_utc=now_utc)
+    open_pr_audit = collected("open_pr_audit")
+    runner_capacity = collected("runner_capacity")
     active_capacity_alerts = runner_capacity.get("active", []) if runner_capacity.get("ok") else []
     new_capacity_alerts = runner_capacity.get("alerts", []) if runner_capacity.get("ok") else []
     data: dict[str, Any] = {
@@ -3364,15 +3418,15 @@ def main() -> int:
         "mop_summary": summarize_mop(mop, slots),
         "tmux": capture_tmux(),
         "process_sweep": process_sweep(),
-        "axiom": collect_axiom(window_start=axiom_window_start, window_end=now_utc),
-        "pr_drift": collect_pr_drift(),
-        "queue": collect_queue(slots),
+        "axiom": collected("axiom"),
+        "pr_drift": collected("pr_drift"),
+        "queue": collected("queue"),
         "cc_reports": collect_cc_reports(),
         "post_issue_latches": collect_post_issue_latches(),
         "runner_capacity_alerts": new_capacity_alerts,
         "runner_capacity_active": active_capacity_alerts,
         "runner_capacity_observation": runner_capacity,
-        "ready_pool_audit": collect_ready_pool_audit(),
+        "ready_pool_audit": collected("ready_pool_audit"),
         "open_pr_activity_audit": open_pr_audit,
     }
     _, _, axiom_parsed = format_health(data["axiom"])

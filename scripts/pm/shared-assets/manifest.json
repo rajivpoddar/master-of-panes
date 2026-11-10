@@ -672,7 +672,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
-      "sha256": "1bf6fa26549fdcb25f5df890cedd9ffb6abaff1b2b3f332e4217a75780320f6a",
+      "sha256": "4fdeeb1e327b55c53c2433eaf1d07766cbbbab21bd04183dfef2890e0d67d79c",
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py"
     },
     {
@@ -708,7 +708,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "be08350f815e67e5ab2cee0898a92e3b36abc1e7a606490b33de1bf06385955f",
+      "sha256": "af632fdec6a928f7211fb3cbd05d0cdd971b1c2c24b896b63aa004d7709f6751",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -1775,6 +1775,17 @@
       "ownership_class": "shared-codex-skill-test",
       "sha256": "3b20dfdfa3357e0bd0d0252392d0fb7354df63006330f709fd8b912177427710",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_hourly_collectors.py",
+      "dependencies": [
+        "/Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-compose.py"
+      ],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "26cca8f9974dec09826b60eefe9c15365ba8fab43c2c9639a3c6dc54ebc0a78a",
+      "source_path": "claude/scripts/tests/test_hourly_collectors.py"
     }
   ],
   "inventory": {

@@ -44,15 +44,15 @@ AXIOM_REPORT = SCRIPTS / "heartbeat-axiom.py"  # MoP-side helper (moved from hey
 # Priority inversion and pending GitHub checks complete paginated, live reads; allow one
 # bounded 45s extension for those legitimately necessary probes.
 COLLECTOR_TIMEOUTS = {
-    "axiom": 30, "active-users": 10, "error-map": 8, "support": 15,
-    "pr-open-snapshot": 12, "priority-inversion": 63,
-    "pending-github": 63, "remote-boxes": 8, "training": 6,
-    "usage": 12, "email": 12, "proxies": 5,
+    "axiom": 45, "active-users": 45, "error-map": 90, "support": 30,
+    "pr-open-snapshot": 90, "priority-inversion": 90,
+    "pending-github": 90, "remote-boxes": 30, "training": 30,
+    "usage": 30, "email": 30, "proxies": 5,
 }
-COMPOSE_COLLECTOR_BUDGET = sum(COLLECTOR_TIMEOUTS.values())
-# 240 was the sum when proxies was capped at 1s. The proxy read is 5s (one
-# list-windows plus a batched ps); the cap moves with that and nothing else.
-assert COMPOSE_COLLECTOR_BUDGET <= 244
+# Independent hourly checks share one deadline, not the sum of their limits.
+COMPOSE_COLLECTOR_BUDGET = 150
+HOURLY_CACHE = Path.home() / ".claude/state/hourly-cache"
+CACHE_MAX_AGE = 6 * 3600
 MAX_CODES = 5
 MAX_SUPPORT = 5
 MAX_PRS = 8
@@ -846,53 +846,40 @@ def collect_langsmith(py: str, timeout: int = 60) -> str:
 # ALWAYS present in the hourly post; probes the Spark directly, read-only.
 # ---------------------------------------------------------------------------
 _SPARK_REMOTE = (
-    'C=$(docker ps --format "{{.Names}}" | grep -iE "train|sindhu" | head -1); '
-    'echo "##C $C"; [ -n "$C" ] || exit 0; '
-    'L=$(ls -t /home/user/*/native.log /home/user/*/*/native.log /home/user/*/*/*/native.log 2>/dev/null | head -1); '
-    '{ docker logs --tail 600 "$C" 2>&1; [ -n "$L" ] && tail -c 200000 "$L"; } | tr "\\r" "\\n" | tail -400'
+    'nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; '
+    'docker ps --format "{{.Names}} {{.Status}}"'
 )
 
 
-def spark_probe(timeout: int = 8) -> tuple[dict | None, str]:
+def parse_training_output(stdout: str) -> dict:
+    """An SSH-success snapshot always yields RUNNING or NOT RUNNING."""
+    gpu = [float(m.group(1)) for m in re.finditer(r"^\s*([\d.]+)\s*%?\s*,", stdout, re.M)]
+    containers = [line.split(None, 1)[0] for line in stdout.splitlines()
+                  if re.match(r"^\S+\s+Up\b", line)]
+    trainers = [name for name in containers if re.search(r"train|sindhu", name, re.I)]
+    # On this dedicated training host, include an otherwise-named active container.
+    names = trainers or containers
+    utilization = max(gpu, default=0)
+    return {"running": bool(names and utilization > 0), "gpu": utilization,
+            "run": ", ".join(names) if names else "none"}
+
+
+def spark_probe(timeout: int = 30) -> tuple[dict | None, str]:
     """Return (doc|None, reason). doc is {} when no trainer is running."""
     import re as _re
     try:
         r = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", "dgx-spark", _SPARK_REMOTE],
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "dgx-spark", _SPARK_REMOTE],
             capture_output=True, text=True, errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return None, f"UNAVAILABLE (timeout {timeout}s)"
     except Exception as exc:
         return None, type(exc).__name__
-    if r.returncode != 0 and "##C" not in r.stdout:
+    if r.returncode != 0:
         return None, f"ssh rc={r.returncode}"
-    out = r.stdout
-    m = _re.search(r"^##C (.*)$", out, _re.M)
-    name = (m.group(1).strip() if m else "")
-    if not name:
-        return {}, ""
-    doc: dict = {"run": name}
-    # Trainer bar only: skip HF "Loading weights" bars (677 tensors on gemma-4-12B), which matched as "12/677" after a
-    # resume (2026-11-02). The trainer bar is already GLOBAL (resume offset included: "2753/5625"). Right after a native
-    # resume tqdm prints a bogus it/s rate (it divides by the global step), so accept it/s for the step but use only s/it
-    # for the ETA.
-    prog = None
-    for line in out.splitlines():
-        if "Loading" in line:
-            continue
-        for mm in _re.finditer(r"(\d+)/(\d+)\s*\[[^\]]*?([\d.]+)(s/it|it/s)", line):
-            if prog is None or int(mm[2]) > int(prog[2]) or (int(mm[2]) == int(prog[2]) and int(mm[1]) >= int(prog[1])):
-                prog = mm
-    if prog:
-        doc.update(step=int(prog[1]), total=int(prog[2]), spi=float(prog[3]) if prog[4] == "s/it" else None)
-    losses = _re.findall(r"'loss': '?([\d.]+)'?", out)
-    if losses:
-        doc["loss"] = losses[-1]
-    mins = _re.findall(r'"min_free_mib": ([\d.]+)', out)
-    if mins:
-        doc["mem_min"] = int(float(mins[-1]))
-    return doc, ""
+    return parse_training_output(r.stdout), ""
+
 
 
 def monitor_up(container: str | None = None) -> bool:
@@ -928,25 +915,9 @@ def training_line(probe=None, mon_up=None) -> tuple[str, list[str]]:
     doc, reason = probe if probe is not None else spark_probe()
     if doc is None:
         return f"*Training:* UNAVAILABLE ({reason or 'probe failed'})", []
-    if not doc:
-        return "*Training:* no run active", []
-    up = monitor_up(doc.get("run")) if mon_up is None else mon_up
-    bits = [doc["run"]]
-    if doc.get("step") is not None:
-        pct = 100.0 * doc["step"] / doc["total"] if doc["total"] else 0
-        bits.append(f"step {doc['step']}/{doc['total']} ({pct:.0f}%)")
-    else:
-        bits.append("step n/a")
-    bits.append(f"loss {doc.get('loss', 'n/a')}")
-    if doc.get("step") is not None and doc.get("spi"):
-        h = (doc["total"] - doc["step"]) * doc["spi"] / 3600
-        bits.append(f"ETA {h:.0f}h" if h < 48 else f"ETA {h/24:.1f}d")
-    else:
-        bits.append("ETA n/a")
-    bits.append(f"mem min {doc['mem_min']} MiB" if "mem_min" in doc else "mem min n/a")
-    bits.append(f"monitor {'up' if up else 'DOWN'}")
-    acts = [] if up else [f"spark-monitor DOWN while {doc['run']} active: restart spark-run-monitor.sh"]
-    return "*Training:* " + " · ".join(bits), acts
+    status = "RUNNING" if doc.get("running") else "NOT RUNNING"
+    return f"*Training:* {status} · GPU {doc.get('gpu', 0):g}% · container {doc.get('run', 'none')}", []
+
 
 
 REMOTE_BOX_SCRIPT = Path.home() / ".claude/scripts/remote-test-box.sh"
@@ -1038,7 +1009,7 @@ def remote_queue_lines(timeout: int = 5) -> str:
             for tier, key in (("P0", "3"), ("P1", "2"), ("P2", "1"), ("untagged", "0")):
                 sample = r["wait_s"][key]
                 p50, p95 = sample["p50"], sample["p95"]
-                value = "UNAVAILABLE (no samples)" if not sample["n"] else f"{p50}/{p95}s"
+                value = "no samples" if not sample["n"] else f"{p50}/{p95}s"
                 waits.append(f"{tier} {value}")
             broken = ""
             if "broken_box_hours" in r:
@@ -1062,7 +1033,7 @@ def remote_boxes_line(timeout: int = 20) -> str:
                                 text=True, errors="replace", timeout=timeout)
         if result.returncode:
             raise ValueError(f"collector rc={result.returncode}")
-        return parse_remote_pools(result.stdout) + "\n" + remote_queue_lines(timeout=min(timeout, 5))
+        return parse_remote_pools(result.stdout) + "\n" + remote_queue_lines(timeout=timeout)
     except subprocess.TimeoutExpired:
         reason = f"UNAVAILABLE (timeout {timeout}s)"
     except (OSError, ValueError) as exc:
@@ -1817,6 +1788,144 @@ def _load(path: str | None):
     return json.loads(Path(path).read_text()) if path else None
 
 
+def collector_success(value) -> bool:
+    """Never refresh last-good timestamps with a sentinel or a partial failure."""
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return not value.get("error") and not value.get("failures")
+    if isinstance(value, str):
+        return "unavailable" not in value.lower()
+    return True
+
+
+def parallel_collect(jobs, wall_cap=COMPOSE_COLLECTOR_BUDGET, cache_dir=HOURLY_CACHE):
+    """Daemon workers cannot extend the report deadline; only the coordinator caches.
+
+    Jobs must bound their own subprocess calls. Late results are never cached or
+    rendered, and a cached value's timestamp is never advanced on a failed probe.
+    """
+    import queue
+    import tempfile
+    import time
+    inbox = queue.Queue()
+    deadline = monotonic() + wall_cap
+    results, stale = {}, {}
+
+    def work(name, collect):
+        try:
+            value = collect()
+            inbox.put((name, value, None))
+        except Exception as exc:
+            inbox.put((name, None, "timed out" if isinstance(exc, subprocess.TimeoutExpired) or "timeout" in str(exc).lower() or "timed out" in str(exc).lower() else type(exc).__name__))
+
+    for name, collect in jobs.items():
+        threading.Thread(target=work, args=(name, collect), daemon=True).start()
+    pending = set(jobs)
+    while pending:
+        try:
+            name, value, error = inbox.get(timeout=max(0, deadline - monotonic()))
+        except queue.Empty:
+            break
+        pending.remove(name)
+        results[name] = (value, error)
+    for name in jobs:
+        value, error = results.get(name, (None, "timed out"))
+        path = cache_dir / (name + ".json")
+        if collector_success(value):
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                # Unique temp + atomic replace protects overlapping hourly invocations.
+                with tempfile.NamedTemporaryFile(mode="w", dir=cache_dir, delete=False) as f:
+                    json.dump({"at": time.time(), "value": value}, f)
+                    tmp = f.name
+                os.replace(tmp, path)
+            except OSError:
+                pass  # A cache-write failure must not hide a good live result.
+            results[name] = value
+            continue
+        reason = error or ("timed out" if "timeout" in str(value).lower() else "failed")
+        try:
+            cached = json.loads(path.read_text())
+            age = time.time() - cached["at"]
+            if not 0 <= age < CACHE_MAX_AGE or not collector_success(cached["value"]):
+                raise ValueError("expired/invalid cache")
+            value = cached["value"]
+            at = datetime.fromtimestamp(cached["at"], IST).strftime("%H:%M")
+            stale[name] = f" (as of {at}, live check {reason}; age {int(age // 60)}m)"
+        except (OSError, ValueError, KeyError, TypeError):
+            value = None
+        results[name] = value
+    return results, stale
+
+
+def collect_hourly(args, py, hours, now, failures):
+    """Independent network probes start together; dependencies remain in their worker."""
+    def json_job(name, cmd):
+        def run():
+            errors = []
+            value = _run_json(cmd, errors, name, COLLECTOR_TIMEOUTS[name])
+            if errors:
+                failures.extend(errors)
+                raise RuntimeError("; ".join(errors))
+            return value
+        return run
+
+    def slots_job():
+        return _load(args.slots_json) if args.slots_json else _fetch_slots()
+
+    def priority_job():
+        slots = slots_job()
+        return priority_inversion_flags(slots, [], timeout=COLLECTOR_TIMEOUTS["priority-inversion"]) if slots is not None else None
+
+    def training_job():
+        doc, reason = spark_probe(timeout=COLLECTOR_TIMEOUTS["training"])
+        if doc is None:
+            raise subprocess.TimeoutExpired("training", 30) if "timeout" in reason else RuntimeError(reason)
+        return training_line(probe=(doc, ""))[0]
+
+    jobs = {
+        "axiom": json_job("axiom", [py, str(AXIOM_REPORT), "--hours", hours, "--errors-by-code", "--compare"]),
+        "prs": json_job("pr-open-snapshot", [py, str(SCRIPTS / "pr-open-snapshot.py")]),
+        "decisions": lambda: _load(args.decisions_json) if args.decisions_json else read_decisions(PM_OPS_DB, now),
+        "agents": lambda: _load(args.agents_json) if args.agents_json else read_agents(PM_PROJECT, now),
+        "training": training_job,
+        "remote-boxes": lambda: remote_boxes_line(timeout=COLLECTOR_TIMEOUTS["remote-boxes"]),
+        "pending-github": lambda: pending_github(timeout=COLLECTOR_TIMEOUTS["pending-github"]),
+        "proxies": lambda: read_proxies(now),
+    }
+    for key, path in (("axiom", args.axiom_json), ("prs", args.prs_json)):
+        if path:
+            jobs[key] = lambda path=path: _load(path)
+    if not args.no_active_users:
+        jobs["active"] = (lambda: _load(args.active_json)) if args.active_json else json_job("active-users", [py, str(AXIOM_REPORT), "--hours", hours, "--active-users"])
+    if not args.no_slots:
+        jobs["slots"] = slots_job
+        jobs["priority"] = priority_job
+    # Error mapping depends only on Axiom, not on any of the slow GitHub probes.
+    axiom_job = jobs["axiom"]
+    ready = threading.Event()
+    axiom_result = [None]
+    def axiom_with_signal():
+        try:
+            axiom_result[0] = axiom_job()
+            return axiom_result[0]
+        finally:
+            ready.set()
+    jobs["axiom"] = axiom_with_signal
+    def mapping_job():
+        if args.map_json:
+            return _load(args.map_json)
+        if not ready.wait(COLLECTOR_TIMEOUTS["axiom"]):
+            return None
+        if axiom_result[0] is None:
+            return None
+        codes = [a for row in axiom_result[0].get("top", []) for a in ("--code", row["code"])]
+        return json_job("error-map", [py, str(SCRIPTS / "heartbeat-error-map.py"), *codes])() if codes else {}
+    jobs["map"] = mapping_job
+    return parallel_collect(jobs, cache_dir=HOURLY_CACHE / args.mode)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compose the 3h/1h heartbeat post (prints, never posts)")
     parser.add_argument("--mode", choices=("3h", "1h"), default="3h")
@@ -1837,31 +1946,32 @@ def main() -> int:
 
     failures: list[str] = []
     now = datetime.now(timezone.utc)
-    decisions = _load(args.decisions_json) if args.decisions_json else read_decisions(PM_OPS_DB, now)
+    hourly, stale = collect_hourly(args, sys.executable, "1", now, failures) if args.mode == "1h" else ({}, {})
+    decisions = hourly.get("decisions") if args.mode == "1h" else (_load(args.decisions_json) if args.decisions_json else read_decisions(PM_OPS_DB, now))
     agents = None
     if args.mode == "1h":
-        agents = _load(args.agents_json) if args.agents_json else read_agents(PM_PROJECT, now)
+        agents = hourly.get("agents")
         if agents is None:
             failures.append("agents: transcripts unavailable")
     if decisions is None:
         failures.append("decisions: ledger unavailable")
     hours = "3" if args.mode == "3h" else "1"
     py = sys.executable
-    axiom = _load(args.axiom_json)
-    if axiom is None and not args.axiom_json:
+    axiom = hourly.get("axiom") if args.mode == "1h" else _load(args.axiom_json)
+    if args.mode != "1h" and axiom is None and not args.axiom_json:
         axiom = _run_json(
             [py, str(AXIOM_REPORT), "--hours", hours, "--errors-by-code", "--compare"],
             failures, "axiom", COLLECTOR_TIMEOUTS["axiom"],
         )
     active = None
     if not args.no_active_users:
-        active = _load(args.active_json)
-        if active is None and not args.active_json:
+        active = hourly.get("active") if args.mode == "1h" else _load(args.active_json)
+        if args.mode != "1h" and active is None and not args.active_json:
             active = _run_json([py, str(AXIOM_REPORT), "--hours", hours, "--active-users"], failures, "active-users", COLLECTOR_TIMEOUTS["active-users"])
     slots = None
     if not args.no_slots:
-        slots = _load(args.slots_json)
-        if slots is None and not args.slots_json:
+        slots = hourly.get("slots") if args.mode == "1h" else _load(args.slots_json)
+        if args.mode != "1h" and slots is None and not args.slots_json:
             slots = _fetch_slots()  # read-only; None => "MoP unreachable", never a failure
     release_seen = None
     if slots is not None:
@@ -1875,8 +1985,8 @@ def main() -> int:
             SLOT_STATE.write_text(json.dumps(new_state, indent=2))
         except OSError as exc:
             failures.append(f"slot-state save: {exc}")
-    mapping_doc = _load(args.map_json)
-    if mapping_doc is None and axiom:
+    mapping_doc = hourly.get("map") if args.mode == "1h" else _load(args.map_json)
+    if args.mode != "1h" and mapping_doc is None and axiom:
         codes = [a for row in axiom.get("top", []) for a in ("--code", row["code"])]
         mapping_doc = _run_json([py, str(SCRIPTS / "heartbeat-error-map.py"), *codes], failures, "error-map", COLLECTOR_TIMEOUTS["error-map"]) if codes else {}
     mapping_doc = mapping_doc or {}
@@ -1891,8 +2001,8 @@ def main() -> int:
             support = _run_json(cmd, failures, "support", COLLECTOR_TIMEOUTS["support"])
         if support:
             failures += support.get("failures", [])
-    prs = _load(args.prs_json)
-    if prs is None and not args.prs_json:
+    prs = hourly.get("prs") if args.mode == "1h" else _load(args.prs_json)
+    if args.mode != "1h" and prs is None and not args.prs_json:
         prs = _run_json([py, str(SCRIPTS / "pr-open-snapshot.py")], failures, "pr-open-snapshot", COLLECTOR_TIMEOUTS["pr-open-snapshot"])
         # The snapshot already supplies direct PR actions. Routine PR progress
         # does not create a second queue in the obligations ledger.
@@ -1904,8 +2014,13 @@ def main() -> int:
     priority_flags: list[str] | None = []
     if slots is not None and not args.no_slots:
         _, _, slot_actions = slot_block(slots, datetime.now(timezone.utc), release_seen)
-        priority_flags = priority_inversion_flags(slots, failures)
+        priority_flags = hourly.get("priority") if args.mode == "1h" else priority_inversion_flags(slots, failures)
         slot_actions += priority_flags or []
+    # Historical status is useful; historical authorization is not.
+    if "prs" in stale:
+        prs = [dict(r, actions=[], next="live head recheck required") for r in prs]
+    if "slots" in stale or "priority" in stale:
+        slot_actions = []
     pm_actions = [a for r in (prs or []) for a in r.get("actions") or []] + slot_actions
 
     if args.save_inputs:
@@ -1950,7 +2065,7 @@ def main() -> int:
             email_doc = json.loads(ep.stdout)
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")
-    training = training_line(probe=spark_probe(timeout=COLLECTOR_TIMEOUTS["training"])) if args.mode == "1h" else None
+    training = (hourly.get("training") or "*Training:* UNAVAILABLE (no recent successful probe)", []) if args.mode == "1h" else None
     # Tracked features and issue lifecycle moved to their own thread replies
     # (tracked-features-report.py / issue-lifecycle-report.py, invoked by slack-send.sh
     # after the Hourly parent, like pr-status-report.py). Rajiv C0ALZJHGE49
@@ -1958,7 +2073,7 @@ def main() -> int:
     unblockable = None
     tracked = None
     langsmith = None  # LangSmith ingest dropped from the hourly (Rajiv ts 1792806414.519859)
-    print(compose(
+    report = compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
         active=active, include_active=not args.no_active_users,
@@ -1967,10 +2082,22 @@ def main() -> int:
         email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
         priority_flags=priority_flags,
         priority_unavailable=(f"UNAVAILABLE (timeout {COLLECTOR_TIMEOUTS['priority-inversion']}s)" if priority_flags is None else None),
-        remote_boxes=remote_boxes_line(timeout=COLLECTOR_TIMEOUTS["remote-boxes"]) if args.mode == "1h" else None,
-        pending_actions=(pending_obligations(PM_OPS_DB, now), pending_github(timeout=COLLECTOR_TIMEOUTS["pending-github"])) if args.mode == "1h" else None,
-        proxies=read_proxies(now) if args.mode == "1h" else None,
-    ))
+        remote_boxes=hourly.get("remote-boxes") or "*Remote boxes:* UNAVAILABLE (no recent successful probe)" if args.mode == "1h" else None,
+        pending_actions=(pending_obligations(PM_OPS_DB, now), hourly.get("pending-github") or {"error": "UNAVAILABLE (no recent successful probe)"}) if args.mode == "1h" else None,
+        proxies=hourly.get("proxies") if args.mode == "1h" else None,
+    )
+    labels = {"axiom": "*Axiom errors", "active": "*Active users", "prs": "open non-draft PRs",
+              "slots": "*Slots", "priority": "*Slots", "training": "*Training:",
+              "remote-boxes": "*Remote boxes:", "pending-github": "*Pending PM actions:",
+              "agents": "*Agents", "decisions": "*Decisions pending", "proxies": "*Proxies",
+              "map": "*Axiom errors"}
+    lines = report.splitlines()
+    for name, note in stale.items():
+        for i, line in enumerate(lines):
+            if labels.get(name, "\0") in line and not line.startswith("*Hourly"):
+                lines[i] += note
+                break
+    print("\n".join(lines))
     pm_actions += (training[1] if training else [])
     if pm_actions:
         print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)
