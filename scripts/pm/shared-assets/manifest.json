@@ -1712,6 +1712,24 @@
       "ownership_class": "shared-codex-skill-test",
       "sha256": "3b20dfdfa3357e0bd0d0252392d0fb7354df63006330f709fd8b912177427710",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/qa-video-review/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "c841ce2259acdd6aea7defeeb40bd9d8e7154aedd9aaac512cfc2c940ef7afe8",
+      "source_path": "claude/skills/qa-video-review/SKILL.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/agents/remote-qa-runner.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "0a84b9f42cae8f8e121685fb8c96f1d5747d225b0956a57415b8b2bbbbb448a5",
+      "source_path": "claude/agents/remote-qa-runner.md"
     }
   ],
   "inventory": {
@@ -1728,7 +1746,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 188,
+    "selected_count": 190,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
