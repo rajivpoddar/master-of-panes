@@ -708,7 +708,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "1f285f7291e97ee91937fd61c7d4c0906e5d385a8d0d471139427a7152ddac20",
+      "sha256": "be08350f815e67e5ab2cee0898a92e3b36abc1e7a606490b33de1bf06385955f",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -717,7 +717,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "b7d10993c3fd4b49c63f304d063e64dc695e94565e8a306e3ed7c4963bf9c45c",
+      "sha256": "4fb375fa76d387bfb54b86aa2773b30275caca58ef3924a3adf4c724a2ba8735",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-error-map.py"
     },
     {
@@ -762,7 +762,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "c7843b7c792ce92730f2ccebd8260f0209018ca881657ac18372e22ac88aec2c",
+      "sha256": "4223e5b20aaf32e6b79a6597313664b0bb84050dcc875bf568b50338c0f0ab0a",
       "source_path": "claude/scripts/pm/heartbeat/support-inbox-snapshot.py"
     },
     {
@@ -1226,8 +1226,8 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "source_path": "claude/skills/qa-brief/LESSONS.md",
-      "sha256": "188f6e4666aa477ad78b0b1c70eb93075e899e62b3d74684e15e6dc8fd2fe66b"
+      "sha256": "188f6e4666aa477ad78b0b1c70eb93075e899e62b3d74684e15e6dc8fd2fe66b",
+      "source_path": "claude/skills/qa-brief/LESSONS.md"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/qa-brief/SKILL.md",
@@ -1251,8 +1251,8 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "source_path": "claude/skills/qa-brief/scenarios/README.md",
-      "sha256": "9661300b8a57ec15ee1b62f17c5d5822de491a04775bf7deeb4b85c99e195066"
+      "sha256": "9661300b8a57ec15ee1b62f17c5d5822de491a04775bf7deeb4b85c99e195066",
+      "source_path": "claude/skills/qa-brief/scenarios/README.md"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/qa-brief/scenarios/run.py",
@@ -1260,8 +1260,8 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "source_path": "claude/skills/qa-brief/scenarios/run.py",
-      "sha256": "b82d83b1139cabf1c92d5f4af3fa811ea2dc86a8b95dd5b67fe404a5e5fd05f6"
+      "sha256": "b82d83b1139cabf1c92d5f4af3fa811ea2dc86a8b95dd5b67fe404a5e5fd05f6",
+      "source_path": "claude/skills/qa-brief/scenarios/run.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/qa-video-review/SKILL.md",
