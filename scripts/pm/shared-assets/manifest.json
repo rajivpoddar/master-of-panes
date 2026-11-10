@@ -1199,7 +1199,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-brief-contract",
-      "sha256": "8d895ff4377e58655ed3fe823057786dcc228013739ed23ddd8fb2e0d8c88e35",
+      "sha256": "477ba2fbd25302881d395867bc0ff2cd8d4c52a325768ee0a4bfd81aa92ca99b",
       "source_authority": {
         "commit": "2bc454d9603dff1c2c485bd2cd51e92d005a7c6",
         "path": "scripts/pm/shared-assets/claude/skills/qa-brief/SKILL.md",
@@ -1719,7 +1719,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "c841ce2259acdd6aea7defeeb40bd9d8e7154aedd9aaac512cfc2c940ef7afe8",
+      "sha256": "3d68b2d6ded59b3b342897c3905470d1b6dfa7ac27e14149ea8b4c50e1edb574",
       "source_path": "claude/skills/qa-video-review/SKILL.md"
     },
     {
@@ -1728,8 +1728,35 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "0a84b9f42cae8f8e121685fb8c96f1d5747d225b0956a57415b8b2bbbbb448a5",
+      "sha256": "180b934384b1db4684a32bdcce76fbd6e6bbe8f3831fd3c04cff120bde640389",
       "source_path": "claude/agents/remote-qa-runner.md"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/qa-brief/LESSONS.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-tooling",
+      "source_path": "claude/skills/qa-brief/LESSONS.md",
+      "sha256": "6c0c6b84c3b04c1e02156873e29cebd09ec8022cf7b925a4e7c73b6e87446b67"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/qa-brief/scenarios/run.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-tooling",
+      "source_path": "claude/skills/qa-brief/scenarios/run.py",
+      "sha256": "b82d83b1139cabf1c92d5f4af3fa811ea2dc86a8b95dd5b67fe404a5e5fd05f6"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/qa-brief/scenarios/README.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-tooling",
+      "source_path": "claude/skills/qa-brief/scenarios/README.md",
+      "sha256": "9661300b8a57ec15ee1b62f17c5d5822de491a04775bf7deeb4b85c99e195066"
     }
   ],
   "inventory": {
@@ -1746,7 +1773,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 190,
+    "selected_count": 193,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

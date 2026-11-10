@@ -49,3 +49,11 @@ python3 ~/.claude/scripts/pm-ops.py obligation-resolve --kind qa_video_review --
 ```
 
 Do not resolve before the summary is posted. If posting or obligation resolution fails, report the exact blocker and leave the obligation open.
+
+## Mandatory per-video learning loop
+
+For EVERY video (PASS, FAIL or INCONCLUSIVE), read the session summary as well as the extracted frames: `idle_share`, `gaps_gt30s`, `daemon_wedged`, `agent_think`, watchdog restart count, wall time and teardown receipts. Correlate each >30s gap with command/controller logs and frame timestamps; frozen frames alone do not prove agent think. Missing summary fields are UNKNOWN and a review evidence gap, never zero.
+
+Append exactly one structured row for this review/run to `~/.claude/skills/qa-brief/LESSONS.md` through its MoP source. Include date, PR/run/head, scenario, wall/idle, EACH gap interval/cause, wrong waits, scenario drift vs brief, broken-box leftovers and applied diff. Count normalized causes against previous rows. If any cause repeats >=2 times OR idle_share >0.4, patch scenarios/run.py or qa-brief guidance in this SAME review, record the actual diff and deploy it via MoP. Do not merely recommend a future fix. If blocked, report the patch blocker explicitly and do not claim it applied.
+
+Every verdict ends with `LESSON_APPLIED: <file:change>` or `LESSON_NONE: <reason>` (a first non-recurring low-idle run may legitimately need no patch, but still gets a row). Include wall_s, idle_s, idle_share, gap causes and the lesson diff in the review. Review learning must not alter product code or weaken an AC. No Slack posts when the requesting brief explicitly prohibits them; return the review to PM instead and leave posting-bound obligations open.

@@ -1,0 +1,8 @@
+# QA scenario lessons
+
+Append one row for EVERY reviewed video (including failed/inconclusive runs). Keep customer data, credentials and raw traces out. Unknown metrics/causes stay UNKNOWN; never infer agent think from frozen frames alone. Cause identifiers permit repeat counting across scenarios. Every gap >30s gets its interval and evidence-backed cause (or UNKNOWN). A repeated cause (>=2 rows) OR idle_share >0.4 requires a same-review scenario/guidance patch and its diff reference; missing evidence is not permission to skip logging.
+
+| Date | PR/run | Scenario | Wall / idle | Gap causes and timing | Wrong waits | Drift vs brief | Broken-box leftovers | Applied diff / verdict |
+|---|---|---|---|---|---|---|---|---|
+| 2026-11-10 | #13357 run7 | editor-takeover-two-tabs (retrospective) | 24 min / 79% idle; ~17 min agent_think | agent_think; daemon_wedged; individual gap intervals UNKNOWN in supplied evidence; watchdog restart count UNKNOWN | Exact-text wait timed out | Second profile instead of second tab | Box left broken; root-fixed today via rtb-exec bypass fix (PM-provided evidence, not independently re-proven here) | scenarios/run.py: single scripted invocation, same-session tab new, bounded generic waits; LESSON_APPLIED: scenarios/run.py:remove between-step reasoning and exact-text save waits |
+| 2026-11-10 | #13326 | UNKNOWN (retrospective) | 27 min / ~11 min idle at start; idle_share UNKNOWN | startup_idle ~0–11 min; controller rc124; daemon_wedged/agent_think/watchdog restarts UNKNOWN | UNKNOWN | UNKNOWN | Box left broken; root-fixed today via rtb-exec bypass fix (PM-provided evidence) | scenarios/README.md: bounded execution plus mandatory controller cleanup/readback; LESSON_APPLIED: scenarios/README.md:require teardown on timeout |
