@@ -46,7 +46,7 @@ AXIOM_REPORT = SCRIPTS / "heartbeat-axiom.py"  # MoP-side helper (moved from hey
 COLLECTOR_TIMEOUTS = {
     "axiom": 45, "active-users": 45, "error-map": 90, "support": 30,
     "pr-open-snapshot": 90, "priority-inversion": 90,
-    "pending-github": 90, "remote-boxes": 30, "training": 30,
+    "pending-github": 90, "remote-boxes": 30,
     "usage": 30, "email": 30, "proxies": 5,
 }
 # Independent hourly checks share one deadline, not the sum of their limits.
@@ -1525,15 +1525,11 @@ def compose(
         # Rajiv 2026-10-27 DM D0AMF0XE6TS thread 1793097714.304129: tracked features right after Slots.
         body += ["", *tracked]
     if mode == "1h":
-        # Empty line before Agents and before Training; LangSmith ingest line dropped
-        # (Rajiv 2026-10-24, C0ALZJHGE49 thread 1792806307.991749, ts 1792806414.519859).
+        # Training has its own thread and is not part of the hourly report.
         if unblockable:
             body += ["", *unblockable]
         body += ["", agents_line(agents)]
         body += ["", *proxies_block(proxies)]
-        tl, t_acts = training if training is not None else training_line()
-        body += ["", tl]
-        slot_actions = slot_actions + t_acts
     # Exactly one empty spacer before this shared 1h/3h section.
     body += ["", *decision_block(decisions, now)]
     if mode == "1h":
@@ -1917,18 +1913,11 @@ def collect_hourly(args, py, hours, now, failures):
         slots = slots_job()
         return priority_inversion_flags(slots, [], timeout=COLLECTOR_TIMEOUTS["priority-inversion"]) if slots is not None else None
 
-    def training_job():
-        doc, reason = spark_probe(timeout=COLLECTOR_TIMEOUTS["training"])
-        if doc is None:
-            raise subprocess.TimeoutExpired("training", 30) if "timeout" in reason else RuntimeError(reason)
-        return training_line(probe=(doc, ""))[0]
-
     jobs = {
         "axiom": json_job("axiom", [py, str(AXIOM_REPORT), "--hours", hours, "--errors-by-code", "--compare"]),
         "prs": json_job("pr-open-snapshot", [py, str(SCRIPTS / "pr-open-snapshot.py")]),
         "decisions": lambda: _load(args.decisions_json) if args.decisions_json else read_decisions(PM_OPS_DB, now),
         "agents": lambda: _load(args.agents_json) if args.agents_json else read_agents(PM_PROJECT, now),
-        "training": training_job,
         "remote-boxes": lambda: remote_boxes_line(timeout=COLLECTOR_TIMEOUTS["remote-boxes"]),
         "pending-github": lambda: pending_github(timeout=COLLECTOR_TIMEOUTS["pending-github"]),
         "proxies": lambda: read_proxies(now),
@@ -2104,7 +2093,6 @@ def main() -> int:
             email_doc = json.loads(ep.stdout)
         except Exception as exc:
             failures.append(f"email: {type(exc).__name__}")
-    training = (hourly.get("training") or "*Training:* UNKNOWN (no recent successful probe)", []) if args.mode == "1h" else None
     # Tracked features and issue lifecycle moved to their own thread replies
     # (tracked-features-report.py / issue-lifecycle-report.py, invoked by slack-send.sh
     # after the Hourly parent, like pr-status-report.py). Rajiv C0ALZJHGE49
@@ -2119,7 +2107,7 @@ def main() -> int:
         slots=slots, include_slots=not args.no_slots, release_seen=release_seen,
         slots_authoritative=not ({"slots", "priority"} & stale.keys()),
         usage_lines=usage_lines, usage_error=usage_error, cleanup_alert=cleanup_status_alert(),
-        email_doc=email_doc, decisions=decisions, agents=agents, training=training, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
+        email_doc=email_doc, decisions=decisions, agents=agents, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
         priority_flags=priority_flags,
         priority_unavailable=(f"UNAVAILABLE (timeout {COLLECTOR_TIMEOUTS['priority-inversion']}s)" if priority_flags is None else None),
         remote_boxes=hourly.get("remote-boxes") or "*Remote boxes:* UNAVAILABLE (no recent successful probe)" if args.mode == "1h" else None,
@@ -2127,7 +2115,7 @@ def main() -> int:
         proxies=hourly.get("proxies") if args.mode == "1h" else None,
     )
     labels = {"axiom": "*Axiom errors", "active": "*Active users", "prs": "open non-draft PRs",
-              "slots": "*Slots", "priority": "*Slots", "training": "*Training:",
+              "slots": "*Slots", "priority": "*Slots",
               "remote-boxes": "*Remote boxes:", "pending-github": "*Pending PM actions:",
               "agents": "*Agents", "decisions": "*Decisions pending", "proxies": "*Proxies",
               "map": "*Axiom errors"}
@@ -2138,7 +2126,6 @@ def main() -> int:
                 lines[i] += note
                 break
     print("\n".join(lines))
-    pm_actions += (training[1] if training else [])
     if pm_actions:
         print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)
     return 0

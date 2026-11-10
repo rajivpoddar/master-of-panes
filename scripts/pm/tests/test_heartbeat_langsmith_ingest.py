@@ -76,8 +76,9 @@ def test_hourly_only_3h_excluded():
     assert line not in composer.compose("3h", now, None, {}, [], langsmith=line)
 
 
-def test_hourly_renders_training_line_but_not_langsmith():
+def test_hourly_omits_training_and_langsmith():
     ls = "*LangSmith ingest (1h):* OK — 0 observed ingest errors (traces 5 / calls 5)"
     tr = ("*Training:* run-x · 10/100 (10%) · loss 0.1 · ETA 1h · mem min 1 MiB · monitor up", [])
     out = composer.compose("1h", datetime.now(timezone.utc), None, {}, [], langsmith=ls, training=tr)
-    assert ls not in out and tr[0] in out
+    assert ls not in out and tr[0] not in out
+    assert "training" not in out.lower() and "spark" not in out.lower()

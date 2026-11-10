@@ -64,11 +64,9 @@ STEP 1 — compose (prints; never posts). Record the report bucket at compose ti
     --save-inputs /tmp/heartbeat-1h-latest > /tmp/heartbeat-1h-post.txt
   If PM passed ladder-approved escalations, add one `--escalation "<text>"` each.
 
-STEP 1b — REMOVED (Rajiv C0ALZJHGE49 thread 1792946760.974709, ts 1792947851.712089:
-  "why does this report have two sindhu sections with different values? drop the 2nd one").
-  The composer (STEP 1) already emits the single "*Training:*" line. Do NOT append a second
-  Spark/monitor training line. If the composer's Training line is missing or stale, report
-  "spark-monitor-stale <run-name>" in ACTIONS only.
+STEP 1b — Training is not part of the hourly report or TL;DR. It has its own
+  thread (1794326745.821609) and Skill(training-run-processing) (Rajiv C0ALZJHGE49
+  thread 1794325620.830029, ts 1794326704.859239).
 
 STEP 2 — check: first line is "*Hourly — HH:MM IST*", or starts with
   "<@U0BNFGX2UAX> " ONLY when an "*Asks:*" line (merge/admission/escalation)
