@@ -1070,10 +1070,7 @@ if r.get('ok'):
         rc = 0
         for name in ('pr-status-report.py', 'tracked-features-report.py', 'issue-lifecycle-report.py'):
             report = os.path.expanduser('~/.claude/scripts/pm/heartbeat/' + name)
-            reply_env = os.environ.copy()
-            reply_env.pop('SLACK_SEND_AS', None)  # Replies use PM identity, never Alerts.
-            result = subprocess.run([sys.executable, report, '--channel', channel, '--thread', ts],
-                                    env=reply_env, stdout=sys.stderr)
+            result = subprocess.run([sys.executable, report, '--channel', channel, '--thread', ts])
             if result.returncode:
                 print(f'HOURLY_REPLY_FAILED parent_ts={ts}; retry {name} --thread {ts}', file=sys.stderr)
                 rc = rc or result.returncode
