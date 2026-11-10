@@ -332,6 +332,8 @@ export class TmuxRelay {
   private pmDrainChain: Promise<number> = Promise.resolve(0);
   private directInjectSeq = 0;
   private pendingExitDispatch = new Map<number, { episode: string; work: Promise<unknown> }>();
+  /** One PM notice per (slot, episode, outcome). The exit itself still retries. */
+  private exitNoticeSent = new Set<string>();
   private runShell: typeof execShell;
   private readonly pmPaneReadyOverride?: () => Promise<boolean>;
   private readonly pmIdleHandoff?: () => Promise<void>;
@@ -1392,7 +1394,16 @@ export class TmuxRelay {
         if (receipt && receipt.id !== before) {
           try { const data = JSON.parse(receipt.payload); detail = `${data.outcome}: ${data.reason ?? "submitted"}`; } catch { /* Report fallback. */ }
         } else this.db?.logEvent(slotNum, "exit_dispatch_refused", null, null, { episode: exitEpisode, reason: failure });
-        this.injectToPM(`# slot ${slotNum} /exit ${delivered ? "delivered; cycle unverified" : detail}`);
+        // Same slot, episode and outcome: keep the event, do not inject again.
+        // A different reason, or a delivered result, notifies once of its own.
+        const outcome = delivered ? "delivered" : detail;
+        const noticeKey = `${slotNum}\0${exitEpisode}\0${outcome}`;
+        if (this.exitNoticeSent.has(noticeKey)) {
+          this.db?.logEvent(slotNum, "exit_pm_notice_suppressed", null, null, { episode: exitEpisode, outcome });
+        } else {
+          this.exitNoticeSent.add(noticeKey);
+          this.injectToPM(`# slot ${slotNum} /exit ${delivered ? "delivered; cycle unverified" : detail}`);
+        }
       });
       const pending = { episode: exitEpisode, work };
       this.pendingExitDispatch.set(slotNum, pending);
