@@ -1791,7 +1791,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 193,
+    "selected_count": 195,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1893,7 +1893,9 @@
       "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/ready-pool-low-stop-validator.sh",
       "/Users/rajiv/.claude/scripts/test_ready_pool_select.py",
       "/Users/rajiv/.claude/scripts/tests/test_backlog_runnability.py",
-      "~/.codex/skills/heydonna-file-promote-issue"
+      "~/.codex/skills/heydonna-file-promote-issue",
+      "~/.claude/hooks/explore-issue-latch-guard.sh",
+      "~/.claude/skills/explore-issue/SKILL.md"
     ]
   },
   "owner": "master-of-panes",
