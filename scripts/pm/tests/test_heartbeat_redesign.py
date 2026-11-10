@@ -455,7 +455,7 @@ def test_3h_always_mentions_cto_first_even_without_asks():
 def test_3h_full_post_shape():
     out = compose.compose("3h", NOW, AXIOM, MAP, PRS, support=SUPPORT)
     lines = out.splitlines()
-    assert len(lines) <= 20
+    assert len([line for line in lines if line.strip()]) <= 20
     assert "|---" not in out  # no tables
     assert "NEW → launch customer-artifact-investigator" in out
     assert "NEEDS REPLY (95m) ⚠" in out
@@ -485,7 +485,20 @@ def test_ops_footer_only_on_failure():
 def test_pr_list_is_capped(n):
     prs = [{"number": 8000 + i, "head": "abc1234", "state": "not admitted", "owner": "PM", "next": "x"} for i in range(n)]
     out = compose.compose("3h", NOW, AXIOM, MAP, prs, support=SUPPORT)
-    assert len(out.splitlines()) <= 22
+    assert len([line for line in out.splitlines() if line.strip()]) <= 22
+
+
+@pytest.mark.parametrize("mode", ["1h", "3h"])
+def test_sections_have_one_blank_separator(mode):
+    out = compose.compose(mode, NOW, AXIOM, MAP, PRS, support=SUPPORT,
+                          training=("*Training:* healthy", []),
+                          failures=["collector unavailable"])
+    lines = out.splitlines()
+    headers = [i for i, line in enumerate(lines)
+               if i and (line.startswith("*") or line.startswith("_Ops:_"))]
+    assert len(headers) >= 4
+    assert all(lines[i - 1] == "" and (i < 2 or lines[i - 2] != "") for i in headers)
+    assert "\n\n\n" not in out
 
 
 # --- active users (Rajiv 2026-09-29 13:17 IST) ---------------------------

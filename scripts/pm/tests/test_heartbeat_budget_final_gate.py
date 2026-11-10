@@ -19,7 +19,7 @@ def test_oversized_report_keeps_every_section_and_unavailable():
         lines += [f'• item {item}' for item in range(20)]
     for limit in (20, 24):
         text = composer.compact_report(lines, limit)
-        assert len(text.splitlines()) <= limit
+        assert len([line for line in text.splitlines() if line.strip()]) <= limit
         assert all(f'*Section {section}:*' in text for section in range(12))
         assert text.count('UNAVAILABLE') == 12
         assert '+20 more' in text

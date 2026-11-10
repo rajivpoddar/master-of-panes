@@ -1420,9 +1420,9 @@ def compact_report(lines: list[str], limit: int) -> str:
                     start -= 1
                 runs.append((i - start + 1, start, i + 1))
         if not runs:
-            # All remaining rows are sections: keep each verbatim on a shared line.
-            rows[-2:] = [" | ".join(rows[-2:])]
-            continue
+            # Never merge named sections; retain all evidence if sections alone
+            # exceed the content-line budget.
+            break
         _, start, end = max(runs)
         items = rows[start:end]
         unavailable = [item for item in items if "UNAVAILABLE" in item]
@@ -1432,7 +1432,13 @@ def compact_report(lines: list[str], limit: int) -> str:
         if more:
             summary += f"; +{more} more"
         rows[start - 1:end] = [rows[start - 1] + summary]
-    return "\n".join(rows)
+    # The cap counts content lines, not the restored section separators.
+    spaced = []
+    for row in rows:
+        if spaced and (row.startswith("*") or row.startswith("_Ops:_")):
+            spaced.append("")
+        spaced.append(row)
+    return "\n".join(spaced)
 
 
 def compose(
