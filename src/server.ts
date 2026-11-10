@@ -61,7 +61,7 @@ import {
 import { createGhIssueOwnershipProjection, configuredProjectionRepository } from "./issueProjection.js";
 import { registerFamily2Routes } from "./family2Routes.js";
 import { registerAssignmentEffectRoutes } from "./assignmentEffectRoutes.js";
-import { TmuxRelay } from "./relay.js";
+import { isGatedDevSlot, TmuxRelay } from "./relay.js";
 import { HookProcessor } from "./hooks.js";
 import { LogManager } from "./logs.js";
 import { StuckDetector } from "./stuck.js";
@@ -1137,6 +1137,9 @@ const hookPayloadSchema = z.object({
   stop_hook_active: z.boolean().optional(),
   last_assistant_message: z.string().optional(),
   stop_reason: z.string().optional(),
+  // 1 only when the gated slot's allowed Stop relay posts. Absent on PM and
+  // on any raw plugin Stop that still reaches the server.
+  mop_stop_allowed: z.union([z.literal(1), z.literal(0), z.boolean()]).optional(),
 
   // Notification fields
   notification_type: z.string().optional(),
@@ -1173,6 +1176,7 @@ function normalizePayload(raw: z.infer<typeof hookPayloadSchema>): HookPayload {
     source: raw.source,
     trigger: raw.trigger,
     compact_summary: raw.compact_summary,
+    mop_stop_allowed: raw.mop_stop_allowed === 1 || raw.mop_stop_allowed === true,
   };
 }
 
@@ -1431,7 +1435,12 @@ app.post("/hooks/slot/:slotNum", async (c) => {
   }
   const response = await processor.process(slotNum, payload,
     (c as unknown as { get(key: string): PmExitStopPin | undefined }).get("pmExitStopPin"));
-  if ((payload.type === "Stop" || payload.type === "SessionEnd") && payload.session_id?.trim()) {
+  // Gated dev slots finish a turn only on the allowed Stop (mop_stop_allowed).
+  // A raw Stop used to mark the turn idle before the slot hook's block decision,
+  // and the 500ms quiet check then dispatched /exit. PM and ungated slots are
+  // unchanged. SessionEnd still closes the named turn. CTO ts 1794274758.572099.
+  const gatedRawStop = isGatedDevSlot(slotNum) && payload.type === "Stop" && payload.mop_stop_allowed !== true;
+  if (!gatedRawStop && (payload.type === "Stop" || payload.type === "SessionEnd") && payload.session_id?.trim()) {
     db.finishAgentTurn(slotNum, payload.session_id);
   }
 

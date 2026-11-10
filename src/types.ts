@@ -52,6 +52,12 @@ export interface HookPayload {
   trigger?: string;
   /** PostCompact summary text */
   compact_summary?: string;
+  /**
+   * Gated dev slots (1-4) set this only on the allowed Stop, the one
+   * slot-terminal-message-pm-stop.sh relays after the turn may end.
+   * A raw plugin Stop does not.
+   */
+  mop_stop_allowed?: boolean;
 }
 
 /** Response to Claude Code hook — can modify behavior */

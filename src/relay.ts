@@ -23,6 +23,11 @@ import type { PasteGuard } from "./pasteGuard.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
+/** Slots 1-4 set HEYDONNA_SLOT_STOP_GATED. A Stop that reaches MoP from them is allowed only when marked. */
+export function isGatedDevSlot(slotNum: number): boolean {
+  return slotNum >= 1 && slotNum <= 4;
+}
+
 type ExitOwnerPin = Readonly<{
   assignment: string;
   boot: number | null;
@@ -331,7 +336,7 @@ export class TmuxRelay {
   /** Serialize queue selection through post-submit deletion as one operation. */
   private pmDrainChain: Promise<number> = Promise.resolve(0);
   private directInjectSeq = 0;
-  private pendingExitDispatch = new Map<number, { episode: string; work: Promise<unknown> }>();
+  private pendingExitDispatch = new Map<number, { episode: string; work: Promise<unknown>; successor?: ExitOwnerPin }>();
   /** One PM notice per (slot, episode, outcome). The exit itself still retries. */
   private exitNoticeSent = new Set<string>();
   /**
@@ -1380,7 +1385,18 @@ export class TmuxRelay {
    */
   sendToSlot(slotNum: number, command: string, _force = false, raw = false, exitEpisode?: string, stopSession?: string, stopOwnerPin?: ExitOwnerPin): boolean {
     if (command === "/exit" && exitEpisode) {
-      if (this.pendingExitDispatch.get(slotNum)?.episode === exitEpisode) return true;
+      const existing = this.pendingExitDispatch.get(slotNum);
+      if (existing?.episode === exitEpisode) {
+        // A later Stop in this episode used to return here and then lose its
+        // dispatch when the in-flight op deleted the pending entry. Keep it.
+        const ownerPin = stopOwnerPin ?? this.captureExitOwner(slotNum, stopSession);
+        if (!ownerPin) {
+          this.db?.logEvent(slotNum, "guarded_delivery", null, null, { outcome: "refused_pre_effect", reason: "exit_owner_unbound", command, episode: exitEpisode });
+          return false;
+        }
+        existing.successor = ownerPin;
+        return true;
+      }
       // Capture at consumption, before the timer OR pane verification can yield.
       const ownerPin = stopOwnerPin ?? this.captureExitOwner(slotNum, stopSession);
       if (!ownerPin) {
@@ -1389,38 +1405,12 @@ export class TmuxRelay {
       }
       // The server closes this Stop's matching turn after process() returns.
       // Continue the SAME consumed send only after that response can complete.
-      const work = sleep(0).then(async () => {
-        // A blocked Stop hook continues the turn. Do not attempt /exit, and do not
-        // notify, until this Stop has actually ended it. A later real Stop retries.
-        const continued = await this.exitTurnContinued(slotNum, ownerPin);
-        if (continued) {
-          this.db?.logEvent(slotNum, "exit_dispatch_skipped", null, null, { episode: exitEpisode, reason: continued });
-          return;
-        }
-        // Duplicate Stop relays for the same session are one turn end, not a new owner.
-        const pin = this.exitPinAfterDuplicateStops(slotNum, ownerPin);
-        const before = this.db?.getEvents(slotNum, 1, "guarded_delivery")[0]?.id;
-        let delivered = false;
-        let failure = "dispatch_refused_before_attempt";
-        try { delivered = await this.sendToSlotAsync(slotNum, command, _force, raw, exitEpisode, pin); }
-        catch { failure = "dispatch_error_unknown"; }
-        const receipt = this.db?.getEvents(slotNum, 1, "guarded_delivery")[0];
-        let detail = failure;
-        if (receipt && receipt.id !== before) {
-          try { const data = JSON.parse(receipt.payload); detail = `${data.outcome}: ${data.reason ?? "submitted"}`; } catch { /* Report fallback. */ }
-        } else this.db?.logEvent(slotNum, "exit_dispatch_refused", null, null, { episode: exitEpisode, reason: failure });
-        // Same slot, episode and outcome: keep the event, do not inject again.
-        // A different reason, or a delivered result, notifies once of its own.
-        const outcome = delivered ? "delivered" : detail;
-        const noticeKey = `${slotNum}\0${exitEpisode}\0${outcome}`;
-        if (this.exitNoticeSent.has(noticeKey)) {
-          this.db?.logEvent(slotNum, "exit_pm_notice_suppressed", null, null, { episode: exitEpisode, outcome });
-        } else {
-          this.exitNoticeSent.add(noticeKey);
-          this.injectToPM(`# slot ${slotNum} /exit ${delivered ? "delivered; cycle unverified" : detail}`);
-        }
-      });
-      const pending = { episode: exitEpisode, work };
+      const pending: { episode: string; work: Promise<unknown>; successor?: ExitOwnerPin } = {
+        episode: exitEpisode,
+        work: Promise.resolve(),
+      };
+      const work = sleep(0).then(() => this.settleExitDispatch(slotNum, command, exitEpisode, ownerPin, pending, _force, raw));
+      pending.work = work;
       this.pendingExitDispatch.set(slotNum, pending);
       void work.catch(() => undefined).finally(() => {
         if (this.pendingExitDispatch.get(slotNum) === pending) this.pendingExitDispatch.delete(slotNum);
@@ -1429,6 +1419,94 @@ export class TmuxRelay {
     }
     void this.sendToSlotAsync(slotNum, command, _force, raw);
     return true;
+  }
+
+  /**
+   * Gated slots 1-4: null when this pin is not a classified Stop (legacy quiet
+   * check). false when the Stop row has no mop_stop_allowed mark (a raw Stop,
+   * including one whose block decision lands after the old 500ms quiet window).
+   * true when the slot hook marked the Stop allowed.
+   */
+  private gatedStopAllowed(slotNum: number, pin: ExitOwnerPin): boolean | null {
+    if (!isGatedDevSlot(slotNum) || !this.db || !pin.stop) return null;
+    const event = this.db.getEvents(slotNum, 40, "Stop").find((item) => item.id === pin.stop);
+    if (!event) return null;
+    try {
+      const payload = JSON.parse(event.payload) as { mop_stop_allowed?: unknown };
+      return payload.mop_stop_allowed === 1 || payload.mop_stop_allowed === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** A newer Stop can arrive while this op is suspended. TS can't see that write. */
+  private takeExitSuccessor(pending: { successor?: ExitOwnerPin }): ExitOwnerPin | undefined {
+    const next = pending.successor;
+    pending.successor = undefined;
+    return next;
+  }
+
+  private async settleExitDispatch(
+    slotNum: number,
+    command: string,
+    exitEpisode: string,
+    initialPin: ExitOwnerPin,
+    pending: { successor?: ExitOwnerPin },
+    _force: boolean,
+    raw: boolean,
+  ): Promise<void> {
+    let pin = initialPin;
+    for (let hop = 0; hop < 4; hop++) {
+      const allowed = this.gatedStopAllowed(slotNum, pin);
+      let continued: string | null;
+      if (allowed === false) {
+        // Not the allowed Stop. Do not wait out quiet time and then send.
+        continued = "stop_not_allowed";
+      } else if (allowed === true) {
+        // The mark is the disposition. Owner fences still run at send time.
+        continued = this.db?.getSlot(slotNum)?.active_turn_state === "active" ? "turn_active" : null;
+        if (!continued) pin = this.exitPinAfterDuplicateStops(slotNum, pin);
+      } else {
+        continued = await this.exitTurnContinued(slotNum, pin);
+        if (!continued) pin = this.exitPinAfterDuplicateStops(slotNum, pin);
+      }
+      const newer = this.takeExitSuccessor(pending);
+      if (newer && newer.stop !== pin.stop) {
+        if (continued) {
+          this.db?.logEvent(slotNum, "exit_dispatch_skipped", null, null, { episode: exitEpisode, reason: continued, superseded: true });
+        }
+        pin = newer;
+        continue;
+      }
+      if (continued) {
+        this.db?.logEvent(slotNum, "exit_dispatch_skipped", null, null, { episode: exitEpisode, reason: continued });
+        return;
+      }
+      const before = this.db?.getEvents(slotNum, 1, "guarded_delivery")[0]?.id;
+      let delivered = false;
+      let failure = "dispatch_refused_before_attempt";
+      try { delivered = await this.sendToSlotAsync(slotNum, command, _force, raw, exitEpisode, pin); }
+      catch { failure = "dispatch_error_unknown"; }
+      const receipt = this.db?.getEvents(slotNum, 1, "guarded_delivery")[0];
+      let detail = failure;
+      if (receipt && receipt.id !== before) {
+        try { const data = JSON.parse(receipt.payload); detail = `${data.outcome}: ${data.reason ?? "submitted"}`; } catch { /* Report fallback. */ }
+      } else this.db?.logEvent(slotNum, "exit_dispatch_refused", null, null, { episode: exitEpisode, reason: failure });
+      const late = this.takeExitSuccessor(pending);
+      if (late && !delivered && late.stop !== pin.stop) {
+        pin = late;
+        continue;
+      }
+      const outcome = delivered ? "delivered" : detail;
+      const noticeKey = `${slotNum}\0${exitEpisode}\0${outcome}`;
+      if (this.exitNoticeSent.has(noticeKey)) {
+        this.db?.logEvent(slotNum, "exit_pm_notice_suppressed", null, null, { episode: exitEpisode, outcome });
+      } else {
+        this.exitNoticeSent.add(noticeKey);
+        this.injectToPM(`# slot ${slotNum} /exit ${delivered ? "delivered; cycle unverified" : detail}`);
+      }
+      return;
+    }
   }
 
   private async exitTurnContinued(slotNum: number, pin: ExitOwnerPin): Promise<string | null> {

@@ -13,6 +13,7 @@ Idempotent; writes <settings.json>.bak-noplugin before the first change.
 import argparse
 import json
 import os
+import re
 import shutil
 import stat
 
@@ -20,12 +21,22 @@ PLUGIN = "master-of-panes@rajiv-plugins"
 DEFAULT_SCRIPTS = os.path.expanduser("~/.local/share/master-of-panes/current/scripts")
 RELAY_EVENTS = ["UserPromptSubmit", "Stop", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Notification", "SessionStart"]
 MARK = "master-of-panes/current/scripts/"
+# Dev-slot checkouts relay Stop only through slot-terminal-message-pm-stop.sh.
+# Re-adding hook-relay Stop here undoes that removal. PM (heydonna-app, no
+# -300N) keeps its Stop relay. UserPromptSubmit is unchanged (rule 50).
+DEV_SLOT_SETTINGS = re.compile(r"(?:^|/)heydonna-app-300[1-8](?:/|$)")
 
 
-def desired_hooks(scripts_dir):
+def stop_relay_for(settings_path):
+    return DEV_SLOT_SETTINGS.search(os.path.abspath(settings_path)) is None
+
+
+def desired_hooks(scripts_dir, stop_relay=True):
     hooks = {}
     for ev in RELAY_EVENTS:
-        inner = [{"type": "command", "command": f'bash "{scripts_dir}/hook-relay.sh" {ev}', "timeout": 5}]
+        inner = []
+        if ev != "Stop" or stop_relay:
+            inner.append({"type": "command", "command": f'bash "{scripts_dir}/hook-relay.sh" {ev}', "timeout": 5})
         if ev == "Stop":
             inner.append({
                 "type": "command",
@@ -43,11 +54,11 @@ def is_mop_command(cmd, scripts_dir):
     return scripts_dir in cmd or MARK in cmd or legacy
 
 
-def apply(settings, scripts_dir):
+def apply(settings, scripts_dir, stop_relay=True):
     """Replace only MoP-owned hook commands; keep every other command and
     each group's metadata (matcher etc.) intact."""
     hooks = settings.setdefault("hooks", {})
-    for ev, entry in desired_hooks(scripts_dir).items():
+    for ev, entry in desired_hooks(scripts_dir, stop_relay=stop_relay).items():
         groups = []
         for g in hooks.get(ev, []):
             inner = g.get("hooks", [])
@@ -72,7 +83,7 @@ def main():
     if os.path.exists(a.settings):
         with open(a.settings) as f:
             data = json.load(f)
-    new = apply(json.loads(json.dumps(data)), a.scripts_dir)
+    new = apply(json.loads(json.dumps(data)), a.scripts_dir, stop_relay=stop_relay_for(a.settings))
     if new == data:
         print(f"unchanged {a.settings}")
         return

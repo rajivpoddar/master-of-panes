@@ -72,6 +72,35 @@ class InstallRelayHooksTest(unittest.TestCase):
             stop = [h["command"] for g in s1["hooks"]["Stop"] for h in g["hooks"]]
             self.assertEqual(sum("hook-relay.sh" in c for c in stop), 1)
 
+    def test_dev_slot_settings_keep_other_relays_but_not_stop_relay(self):
+        with tempfile.TemporaryDirectory() as d:
+            slot = os.path.join(d, "heydonna-app-3002", ".claude")
+            os.makedirs(slot)
+            p = os.path.join(slot, "settings.json")
+            orig = {"hooks": {"Stop": [{"hooks": [
+                {"type": "command", "command": 'bash "/old/master-of-panes/current/scripts/hook-relay.sh" Stop'},
+                {"type": "command", "command": "keep-stop"},
+            ]}]}}
+            with open(p, "w") as f:
+                json.dump(orig, f)
+            s1 = self.run_it(p)
+            s2 = self.run_it(p)
+            self.assertEqual(s1, s2)
+            stop = [h["command"] for g in s1["hooks"]["Stop"] for h in g["hooks"]]
+            self.assertIn("keep-stop", stop)
+            self.assertFalse(any("hook-relay.sh" in c for c in stop))
+            self.assertTrue(any("--cleanup-session" in c for c in stop))
+            ups = [h["command"] for g in s1["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
+            self.assertTrue(any("hook-relay.sh\" UserPromptSubmit" in c for c in ups))
+            pm = os.path.join(d, "heydonna-app", ".claude")
+            os.makedirs(pm)
+            pm_settings = os.path.join(pm, "settings.json")
+            with open(pm_settings, "w") as f:
+                json.dump({}, f)
+            pm_out = self.run_it(pm_settings)
+            pm_stop = [h["command"] for g in pm_out["hooks"]["Stop"] for h in g["hooks"]]
+            self.assertTrue(any("hook-relay.sh\" Stop" in c for c in pm_stop))
+
     def test_mode_retained_and_new_files_created_0600(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "settings.local.json")

@@ -79,8 +79,8 @@ test("a continued Stop is skipped and the following real Stop attempts once", as
   await box.exitOnce(0);
   assert.equal(box.attempts(), 0);
   assert.deepEqual(box.notices, []);
-  const stopId = box.db.logEvent(1, "Stop", "Stop", null, { session_id: "sess" });
-  const duplicate = box.db.logEvent(1, "Stop", "Stop", null, { session_id: "sess" });
+  const stopId = box.db.logEvent(1, "Stop", "Stop", null, { session_id: "sess", mop_stop_allowed: 1 });
+  const duplicate = box.db.logEvent(1, "Stop", "Stop", null, { session_id: "sess", mop_stop_allowed: 1 });
   await box.exitOnce(stopId);
   assert.equal(box.attempts(), 1);
   assert.equal(box.seenStop(), duplicate);
