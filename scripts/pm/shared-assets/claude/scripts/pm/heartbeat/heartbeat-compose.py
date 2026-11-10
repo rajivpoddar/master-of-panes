@@ -1427,6 +1427,34 @@ def _usage_tldr(lines: list[str]) -> str:
     return "usage ok"
 
 
+def compact_report(lines: list[str], limit: int) -> str:
+    """Bound physical lines without discarding sections or unavailable evidence."""
+    rows = [row for line in lines for row in line.splitlines() if row.strip()]
+    # Fold item runs into their section, retaining counts and overflow evidence.
+    while len(rows) > limit:
+        runs = []
+        for i, row in enumerate(rows):
+            if row.lstrip().startswith(("•", "- ", "  ")) and i:
+                start = i
+                while start > 0 and rows[start - 1].lstrip().startswith(("•", "- ")):
+                    start -= 1
+                runs.append((i - start + 1, start, i + 1))
+        if not runs:
+            # All remaining rows are sections: keep each verbatim on a shared line.
+            rows[-2:] = [" | ".join(rows[-2:])]
+            continue
+        _, start, end = max(runs)
+        items = rows[start:end]
+        unavailable = [item for item in items if "UNAVAILABLE" in item]
+        top = unavailable or items[:1]
+        more = len(items) - len(top)
+        summary = f" ({len(items)} items): " + "; ".join(top)
+        if more:
+            summary += f"; +{more} more"
+        rows[start - 1:end] = [rows[start - 1] + summary]
+    return "\n".join(rows)
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -1546,7 +1574,7 @@ def compose(
         timed_out = [f for f in failures if "UNAVAILABLE (timeout " in f]
         shown = timed_out + [f for f in failures if f not in timed_out]
         lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:100] for f in shown[:4]))
-    return "\n".join(lines)
+    return compact_report(lines, 24 if mode == "3h" else 20)
 
 
 
