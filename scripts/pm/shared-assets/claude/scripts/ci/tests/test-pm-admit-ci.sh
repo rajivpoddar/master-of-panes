@@ -29,6 +29,7 @@ emit() { # mode okvalue name
   esac
 }
 case "$args" in
+  "api repos/"*"/issues/"*"/comments"*) printf '%s\n' "${REMOTE_RECEIPTS:-}" ;;
   "api repos/"*"/comments"*)
     if [ "${GATE_MODE:-same}" = none ]; then printf '[[]]\n'; else
       prefix=''; [ "${GATE_MODE:-same}" != heading ] || prefix='## '
@@ -47,7 +48,7 @@ case "$args" in
   "pr view"*"--json state"*) printf 'OPEN\n' ;;
   "pr view"*"--json closingIssuesReferences"*) printf '11173\n' ;;
   "run list"*) exit 1 ;;
-  "pr diff"*) exit 1 ;;
+  "pr diff"*) printf '%s\n' "${CHANGED_TESTS:-}" ;;
   "pr view"*"--json headRefOid,mergeable"*) emit "$MODE_HM" "$HM_VALUE" hm ;;
   "pr view"*"--json headRefOid"*) emit "$MODE_HEAD" "$STUB_SHA" head ;;
   "pr view"*"--json labels,closingIssuesReferences"*) printf '{"labels":[{"name":"P2"}],"closingIssuesReferences":[]}\n' ;;
@@ -170,6 +171,23 @@ GATE_MODE=same VERDICT=PASS REVIEW_SHA=${SHA:0:7}; export GATE_MODE VERDICT REVI
 OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" --check-12b-only 11173 2>&1); RC=$?
 check 'check-only: accepts seven-hex PASS' '[ "$RC" = 0 ]'
 check 'check-only PASS: no effects' '! grep -qE "^git |pm-ops |pr edit|label create|update-branch" "$STUB_LOG"'
+
+CHANGED_TESTS='tests/unit/remote-gate.test.ts'; export CHANGED_TESTS
+RECEIPT=$(printf 'REMOTE_BOX_RUN head=%s command_1_rc=0\\ntests/unit/remote-gate.test.ts rc=0\\nRED-on-revert: rc=0\\ntypecheck rc=0' "$SHA"); export REMOTE_RECEIPTS="$RECEIPT"
+run_case remote_exact
+check 'remote exact-head receipt: pass' '[ "$RC" = 0 ] && printf "%s" "$OUT" | grep -q "remote red-green gate: PASS"'
+
+REMOTE_RECEIPTS=$(printf 'REMOTE_BOX_RUN head=%s command_1_rc=0\\ntests/unit/remote-gate.test.ts rc=0\\nRED-on-revert: rc=0\\ntypecheck rc=0' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa); export REMOTE_RECEIPTS
+run_case remote_stale
+check 'remote stale head: refuse' '[ "$RC" -ne 0 ] && printf "%s" "$OUT" | grep -q "REFUSE remote_redgreen_missing tests/unit/remote-gate.test.ts"'
+
+REMOTE_RECEIPTS=$(printf 'REMOTE_BOX_RUN head=%s command_1_rc=0\\nRED-on-revert: rc=0\\ntypecheck rc=0' "$SHA"); export REMOTE_RECEIPTS
+run_case remote_missing_file
+check 'remote missing file result: refuse' '[ "$RC" -ne 0 ] && printf "%s" "$OUT" | grep -q "REFUSE remote_redgreen_missing tests/unit/remote-gate.test.ts"'
+
+REMOTE_RECEIPTS=$(printf 'REMOTE_BOX_RUN head=%s command_1_rc=0\\ntests/unit/remote-gate.test.ts rc=0\\ntypecheck rc=0' "$SHA"); export REMOTE_RECEIPTS
+run_case remote_missing_red
+check 'remote missing RED-on-revert: refuse' '[ "$RC" -ne 0 ] && printf "%s" "$OUT" | grep -q "REFUSE remote_redgreen_missing tests/unit/remote-gate.test.ts"'
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
