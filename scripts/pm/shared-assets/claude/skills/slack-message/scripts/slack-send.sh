@@ -1070,7 +1070,9 @@ if r.get('ok'):
         rc = 0
         for name in ('pr-status-report.py', 'tracked-features-report.py', 'issue-lifecycle-report.py'):
             report = os.path.expanduser('~/.claude/scripts/pm/heartbeat/' + name)
-            result = subprocess.run([sys.executable, report, '--channel', channel, '--thread', ts])
+            # Keep child receipts out of the parent sender's stdout; retain them
+            # on stderr alongside each hook's own custody/diagnostic output.
+            result = subprocess.run([sys.executable, report, '--channel', channel, '--thread', ts], stdout=sys.stderr)
             if result.returncode:
                 print(f'HOURLY_REPLY_FAILED parent_ts={ts}; retry {name} --thread {ts}', file=sys.stderr)
                 rc = rc or result.returncode

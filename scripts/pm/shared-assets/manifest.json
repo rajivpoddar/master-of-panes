@@ -1070,7 +1070,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "6e2d422ae59d63c6063595fcf91ed9e71ad41ca878acbe5211d6e1017d165c5e",
+      "sha256": "7b76a22c9148deacc49b6ca144adc45829caede77b3426ebf53e67c3d1ac2afd",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
@@ -1305,7 +1305,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
-      "sha256": "e63488378112c3ddad80ab9ffd1b3be44335fedbb03d15307bf574f34f418153",
+      "sha256": "bcea1121cc708e54c296c56518814d570ffcbeba297440c4a9ba13a0a1fa15bc",
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {

@@ -108,12 +108,12 @@ STEP 3 — post ONE NEW TOP-LEVEL message (no -t):
   fi
   if SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-1h-post.txt > "$CLAIM/receipt" 2> "$CLAIM/errors"; then :; else SEND_RC=$?; fi
   RECEIPT=$(<"$CLAIM/receipt")
-  VALID_COUNT=$(grep -Ec '^OK ts=[0-9]+\\.[0-9]+ channel=C0ALZJHGE49$' "$CLAIM/receipt" || true)
+  VALID_COUNT=$(grep -Ec '^OK ts=[0-9]+\.[0-9]+ channel=C0ALZJHGE49$' "$CLAIM/receipt" || true)
   if [ "$VALID_COUNT" -ne 1 ]; then
     printf 'HOURLY_POST_UNCERTAIN bucket=%s; reconcile Alerts delivery before retry (sender_rc=%s)\n' "$BUCKET" "${SEND_RC:-0}" >&2
     exit 1
   fi
-  TS=$(sed -n 's/^OK ts=\\([0-9][0-9.]*\\) channel=C0ALZJHGE49$/\\1/p' "$CLAIM/receipt")
+  TS=$(sed -n 's/^OK ts=\([0-9][0-9]*\.[0-9][0-9]*\) channel=C0ALZJHGE49$/\1/p' "$CLAIM/receipt")
   /Users/rajiv/.claude/scripts/hourly-thread-ts --set "$TS" --bucket "$BUCKET" --receipt "$RECEIPT"
   ```
   If no unique valid receipt is persisted, delivery is UNKNOWN: do not resend; reconcile
