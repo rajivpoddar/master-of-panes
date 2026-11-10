@@ -239,6 +239,13 @@ def template_send_allowed(touch: str, statuses: dict[str, str]) -> bool:
             and all(statuses.get(t) == "APPROVED" for t in TOUCHES if t != "TRY_FULL_FILE"))
 
 
+def omit_unavailable_credit_lines(text: str, credits_left: float) -> str:
+    """Omit any template/body line that makes a credit claim at zero or below."""
+    if credits_left > 0:
+        return text
+    return "\n".join(line for line in text.splitlines() if "{credits" not in line)
+
+
 # ---------------------------------------------------------------- facts
 def ms(iso: str | None) -> float | None:
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1000 if iso else None
@@ -371,6 +378,10 @@ def select(now: datetime, dry_run: bool) -> dict:
             continue
 
         granted, avail = credit_balance(led)
+        credits_left = round(avail)
+        template_path = TEMPLATES / f"{touch}.txt"
+        template_body = template_path.read_text() if template_path.exists() else ""
+        template_body = omit_unavailable_credit_lines(template_body, credits_left)
         files = []
         for t in own:
             stages = set()
@@ -404,6 +415,7 @@ def select(now: datetime, dry_run: bool) -> dict:
             "touch": touch,
             "template_status": tstatus.get(touch),
             "send_allowed": now.astimezone(ET).weekday() < 5 and template_send_allowed(touch, tstatus),
+            "template_copy": template_body,
             "activity_facts": {
                 "signup_at": u.get("createdAt"),
                 "days_since_signup": round(days, 1),
@@ -414,7 +426,8 @@ def select(now: datetime, dry_run: bool) -> dict:
                                "tours_completed": sorted(k for k, v in ob.items() if k.endswith("TourCompleted") and v)},
                 "sample": {"touched": touched_sample, "actions": sample_actions},
                 "own_files": files,
-                "credits": {"granted": round(granted), "used": round(granted - avail), "left": round(avail)},
+                "credits": {"granted": round(granted), "used": round(granted - avail), "left": credits_left},
+                "credits_left_ok": credits_left > 0,
                 "last_seen": last_seen.get(uid),
                 "days_inactive": round(inactive_days, 1),
                 "template_used": sorted({f["template"] for f in files if f["template"]}),

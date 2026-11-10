@@ -27,8 +27,9 @@ Launch `lifecycle-email-agent` in the background (`run_in_background=true`) with
 ## Hard gates (agent refuses otherwise)
 1. **Templates approved**: every template used must be `STATUS: APPROVED`. A draft TRY_FULL_FILE is held per record: its `send_allowed=false`; return it to PM without sending or recording it. Other eligible records may proceed only when their own `send_allowed=true`, even if the batch-level `meta.send_allowed=false` because it contains a held record. The existing batch-wide gate for all other templates remains. Only Rajiv flips a draft status; PM edits the line after his written approval and cites the ts.
 2. **Weekdays only** (America/New_York). `meta.weekday_et=false` means no send.
-3. **Facts only**: personalization uses ONLY the record's `activity_facts`. No invented numbers, names, templates, states or outcomes. If a fact is absent, drop the sentence.
-4. Plain text, Rajiv's founder voice, short. Keep the calendar link https://calendar.app.google/dDdvx2G3UzKrC7zY9 and the last line "Reply 'stop' and I won't email again." Never mention PR/issue numbers, internal terms (pipeline, BoN, ledger) or other users.
+3. **Facts only**: personalization uses ONLY the record's `activity_facts`. No invented numbers, names, templates, states or outcomes. If a fact is absent, drop the sentence. Never invent other copy.
+4. **Credit claims**: never state a credit balance unless `credits_left_ok` is true. Use the selector's `template_copy`; it omits every template line containing a `{credits...}` placeholder when the balance is zero or negative. Do not restore or paraphrase omitted credit claims.
+5. Plain text, Rajiv's founder voice, short. Keep the calendar link https://calendar.app.google/dDdvx2G3UzKrC7zY9 and the last line "Reply 'stop' and I won't email again." Never mention PR/issue numbers, internal terms (pipeline, BoN, ledger) or other users.
 
 ## Send loop (only records with send_allowed=true)
 For each allowed record; never send a held record:
