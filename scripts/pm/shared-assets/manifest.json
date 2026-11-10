@@ -1757,6 +1757,24 @@
       "ownership_class": "shared-codex-skill-test",
       "sha256": "3b20dfdfa3357e0bd0d0252392d0fb7354df63006330f709fd8b912177427710",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-create-audit",
+      "sha256": "8abb220a72577b1add13319279897070b96f2fc5bf3cbd9d2af11d646daf71d4",
+      "source_path": "claude/hooks/explore-issue-latch-guard.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/explore-issue/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-issue-intake",
+      "sha256": "e163b732ea9df494ef90699157255fe6aa96499265c1bf65141af2f8c98a9edb",
+      "source_path": "claude/skills/explore-issue/SKILL.md"
     }
   ],
   "inventory": {
