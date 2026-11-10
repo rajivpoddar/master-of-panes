@@ -107,7 +107,7 @@ remote_redgreen_gate() {
   local head="$1" files comments verdict="" file
   if [ "$MAIN_RED_SKIP" = 1 ]; then echo "remote red-green gate: BYPASSED (--main-red-skip sanctioned untested path)"; return 0; fi
   files=$(gh pr diff "$PR" --repo "$REPO" --name-only) || { echo "REFUSE remote_redgreen_missing <unavailable test file list>"; return 10; }
-  files=$(printf '%s\n' "$files" | grep -Ei '(^|/)(test|tests|__tests__|spec|specs)/|\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|py)$' | sort -u || true)
+  files=$(printf '%s\n' "$files" | grep -Ei '(^|/)(test|tests|__tests__|spec|specs)/|(^|/)test_[^/]+\.py$|_test\.py$|\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|py)$' | sort -u || true)
   if [ -z "$files" ]; then echo "remote red-green gate: no test files"; return 0; fi
   comments=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[].body') || { echo "REFUSE remote_redgreen_missing $files"; return 10; }
   # The receipt header is the first line. Exact-head is normal; H0 is accepted only
@@ -119,12 +119,12 @@ text=sys.stdin.read(); files=sys.argv[1].splitlines(); head=sys.argv[2]; pre=sys
 for body in re.split(r"(?m)(?=^REMOTE_BOX_RUN head=)", text):
     lines=body.splitlines()
     if not lines: continue
-    m=re.fullmatch(r"REMOTE_BOX_RUN head=([0-9a-f]{40})(?:\\s+.*)?", lines[0].strip())
+    m=re.fullmatch(r"REMOTE_BOX_RUN head=([0-9a-f]{40})(?:\s+.*)?", lines[0].strip())
     if not m or m.group(1) not in {head,pre}: continue
-    receipt="\\n".join(lines)
-    if not re.search(r"(?i)RED[- ]on[- ]revert[^\\n]*(?:PASS|GREEN|rc=0|passed)", receipt): continue
-    if not re.search(r"(?i)(?:typecheck|tsc)[^\\n]*(?:rc=0|passed|green)", receipt): continue
-    if not all(re.search(r"(?m)(?:^|[^\\S\\n])"+re.escape(f)+r"[^\\n]*(?:rc=0|PASS|passed)", receipt) for f in files): continue
+    receipt="\n".join(lines)
+    if not re.search(r"(?i)RED[- ]on[- ]revert[^\n]*(?:PASS|GREEN|rc=0|passed)", receipt): continue
+    if not re.search(r"(?i)(?:typecheck|tsc)[^\n]*(?:rc=0|passed|green)", receipt): continue
+    if not all(re.search(r"(?m)(?:^|[^\S\n])"+re.escape(f)+r"[^\n]*(?:rc=0|PASS|passed)", receipt) for f in files): continue
     print(m.group(1)); break
 ' "$files" "$head" "$H0")
   fi
