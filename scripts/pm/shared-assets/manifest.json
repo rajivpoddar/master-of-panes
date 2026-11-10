@@ -859,9 +859,7 @@
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_hourly_collectors.py",
-      "dependencies": [
-        "/Users/rajiv/.claude/scripts/pm/heartbeat/heartbeat-compose.py"
-      ],
+      "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
@@ -1802,7 +1800,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 195,
+    "selected_count": 196,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
