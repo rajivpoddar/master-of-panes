@@ -1672,6 +1672,19 @@ def activate(
             for name in _shared_entry_targets(entry):
                 prior = baseline.get(name)
                 if prior is None:
+                    # A shared target added on main after the running release, already
+                    # deployed with exactly the candidate bytes. Adopt that live file
+                    # as the preimage (no write). Any other byte still refuses.
+                    # The running service is required, same as candidate-equal drift.
+                    target = _shared_target_path(name, shared_target_root)
+                    try:
+                        live = file_record(target, name)
+                    except OSError:
+                        live = None
+                    candidate_record = {"path": name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+                    if live == candidate_record and old_service_running():
+                        old_preimages[name] = live
+                        continue
                     raise InstallerError(f"REFUSE: no pinned old manifest preimage for {name}")
                 target = _shared_target_path(name, shared_target_root)
                 expected = old_preimages.get(name) or {"path": name, "kind": "file", "mode": prior["mode"], "sha256": prior["sha256"]}
