@@ -945,41 +945,237 @@ def _thread_reply_readback(external: External, token: str, thread_ts: str, text:
     )
 
 
-def reconcile_ambiguous(pr: int, receipt_file: Path, ext: External | None = None) -> dict[str, Any]:
+CLOSED_CLEAN_STEP = "pr_label_add:pm-state:closed-clean"
+_LABEL_OPS = {"add", "remove"}
+_NON_LABEL_STEPS = {
+    ("issue_close", "issue", "close", ""),
+    ("thread_reply", "slack", "reply", ""),
+}
+
+
+def _ambiguous_attempts(receipts: dict[str, Any], pr: int) -> list[tuple[str, dict[str, Any]]]:
+    """Ambiguous journal rows for one PR that actually started an effect.
+
+    Continuation rows and `:ambiguity_reconciled` lists are not attempts.
+    Selection is by PR, not by one step name: a ci-head removal and a
+    closed-clean add are both attempts for the same PR.
+    """
+    found: list[tuple[str, dict[str, Any]]] = []
+    for key, value in receipts.items():
+        if not isinstance(value, dict) or not isinstance(value.get("request"), dict):
+            continue
+        if value["request"].get("pr") != pr or value.get("status") != "ambiguous":
+            continue
+        steps = value.get("steps") if isinstance(value.get("steps"), dict) else {}
+        started = any(
+            isinstance(step, dict) and step.get("status") in {"effect_started", "ambiguous"}
+            for step in steps.values()
+        )
+        ambiguous = value.get("ambiguous_steps")
+        if started or (isinstance(ambiguous, list) and ambiguous):
+            found.append((key, value))
+    return found
+
+
+def _plan_intent(receipt: dict[str, Any]) -> tuple[tuple[str, str, str, str], ...]:
+    plan = receipt.get("plan")
+    if not isinstance(plan, list):
+        return tuple()
+    rows = []
+    for step in plan:
+        if not isinstance(step, dict):
+            return tuple()
+        rows.append((
+            str(step.get("scope") or ""),
+            str(step.get("operation") or ""),
+            str(step.get("label") or ""),
+            str(step.get("name") or ""),
+        ))
+    return tuple(sorted(rows))
+
+
+def _latest_effect_attempt(
+    attempts: list[tuple[str, dict[str, Any]]],
+) -> tuple[str, dict[str, Any]]:
+    """The latest started attempt. Same timestamp is allowed only when every
+    tied receipt intends the same effects; the greatest key is the tie-break.
+    Differing intents at the same timestamp are not a unique attempt.
+    """
+    if not attempts:
+        raise CleanupError("reconciliation_receipt_not_unique", ambiguous=True)
+    latest_at = max(str(receipt.get("started_at") or "") for _, receipt in attempts)
+    tied = [(key, receipt) for key, receipt in attempts if str(receipt.get("started_at") or "") == latest_at]
+    if len({_plan_intent(receipt) for _, receipt in tied}) != 1:
+        raise CleanupError("reconciliation_receipt_not_unique", ambiguous=True)
+    return sorted(tied, key=lambda item: item[0])[-1]
+
+
+def _label_mismatches(
+    plan: list[dict[str, str]], pr_labels: list[str], issue_labels: list[str] | None,
+) -> list[str]:
+    mismatched: list[str] = []
+    for step in plan:
+        operation = step.get("operation")
+        if operation not in _LABEL_OPS:
+            continue
+        live = pr_labels if step.get("scope") == "pr" else issue_labels
+        if live is None or not isinstance(step.get("label"), str):
+            mismatched.append(str(step.get("name") or ""))
+            continue
+        present = step["label"] in live
+        if (operation == "add" and not present) or (operation == "remove" and present):
+            mismatched.append(step["name"])
+    return mismatched
+
+
+def reconcile_ambiguous(
+    pr: int, receipt_file: Path, ext: External | None = None, *, dry_run: bool = False,
+) -> dict[str, Any]:
     ext = ext or External()
-    name = "pr_label_add:pm-state:closed-clean"
     with _locked(receipt_file):
         receipts = _load_json(receipt_file, {})
-        matches = [(k, v) for k, v in receipts.items() if isinstance(v, dict)
-                   and isinstance(v.get("request"), dict) and v["request"].get("pr") == pr
-                   and v.get("status") == "ambiguous" and v.get("ambiguous_steps") == [name]
-                   and isinstance(v.get("steps"), dict) and isinstance(v["steps"].get(name), dict)
-                   and v["steps"][name].get("status") in {"effect_started", "ambiguous"}]
-        if len(matches) != 1:
-            raise CleanupError("reconciliation_receipt_not_unique", ambiguous=True)
-        key, receipt = matches[0]
-        if key + ":continuation" in receipts:
-            raise CleanupError("reconciliation_already_continued", ambiguous=True)
-        if any(n != name and s.get("status") in {"effect_started", "ambiguous"} for n, s in receipt["steps"].items() if isinstance(s, dict)):
-            raise CleanupError("reconciliation_other_ambiguity", ambiguous=True)
-        _validate_plan(receipt.get("plan"))
-        if not any(s.get("name") == name for s in receipt["plan"]):
-            raise CleanupError("reconciliation_step_missing", ambiguous=True)
-        request = receipt["request"]
-        canonical = ext._repository(request)
-        snapshot = ext.read_pr({**request, "repository": canonical})
-        labels = _validate_merged_snapshot_without_ref(request, snapshot)
-        result = "effect_present_by_readback" if "pm-state:closed-clean" in labels else "effect_absent_by_readback"
-        record = {"timestamp": _now_iso(), "pr": pr, "step": name, "result": result,
-                  "original_step": receipt["steps"][name], "reason": "live canonical PR label readback",
-                  "evidence": {"repository": canonical, "number": snapshot["number"], "labels": labels,
-                               "merge_commit": request["merge_commit"], "head": request["head"]}}
-        records = receipts.setdefault(key + ":ambiguity_reconciled", [])
-        if not isinstance(records, list):
-            raise CleanupError("reconciliation_journal_invalid", ambiguous=True)
-        records.append(record)
-        _write_json(receipt_file, receipts)
+        if not isinstance(receipts, dict):
+            raise CleanupError("cleanup_receipt_invalid", ambiguous=True)
+        attempts = _ambiguous_attempts(receipts, pr)
+        narrow = [
+            (key, receipt) for key, receipt in attempts
+            if receipt.get("ambiguous_steps") == [CLOSED_CLEAN_STEP]
+            and isinstance(receipt.get("steps"), dict)
+            and isinstance(receipt["steps"].get(CLOSED_CLEAN_STEP), dict)
+            and receipt["steps"][CLOSED_CLEAN_STEP].get("status") in {"effect_started", "ambiguous"}
+        ]
+        # One closed-clean-only attempt keeps the historical readback. Any other
+        # shape, including several attempts for the same PR, uses the latest
+        # attempt and accepts it only when live labels already match.
+        if len(narrow) == 1 and len(attempts) == 1:
+            return _reconcile_one_closed_clean(receipts, receipt_file, narrow[0][0], narrow[0][1], pr, ext, dry_run=dry_run)
+        return _reconcile_latest_attempt(receipts, receipt_file, attempts, pr, ext, dry_run=dry_run)
+
+
+def _reconcile_one_closed_clean(
+    receipts: dict[str, Any], receipt_file: Path, key: str, receipt: dict[str, Any], pr: int,
+    ext: External, *, dry_run: bool,
+) -> dict[str, Any]:
+    name = CLOSED_CLEAN_STEP
+    if key + ":continuation" in receipts:
+        raise CleanupError("reconciliation_already_continued", ambiguous=True)
+    if any(
+        step_name != name and isinstance(step, dict) and step.get("status") in {"effect_started", "ambiguous"}
+        for step_name, step in receipt["steps"].items()
+    ):
+        raise CleanupError("reconciliation_other_ambiguity", ambiguous=True)
+    _validate_plan(receipt.get("plan"))
+    if not any(isinstance(step, dict) and step.get("name") == name for step in receipt["plan"]):
+        raise CleanupError("reconciliation_step_missing", ambiguous=True)
+    request = receipt["request"]
+    canonical = ext._repository(request)
+    snapshot = ext.read_pr({**request, "repository": canonical})
+    labels = _validate_merged_snapshot_without_ref(request, snapshot)
+    result = "effect_present_by_readback" if "pm-state:closed-clean" in labels else "effect_absent_by_readback"
+    record = {"timestamp": _now_iso(), "pr": pr, "step": name, "result": result,
+              "original_step": receipt["steps"][name], "reason": "live canonical PR label readback",
+              "evidence": {"repository": canonical, "number": snapshot["number"], "labels": labels,
+                           "merge_commit": request["merge_commit"], "head": request["head"]}}
+    if dry_run:
+        record["dry_run"] = True
         return record
+    records = receipts.setdefault(key + ":ambiguity_reconciled", [])
+    if not isinstance(records, list):
+        raise CleanupError("reconciliation_journal_invalid", ambiguous=True)
+    records.append(record)
+    _write_json(receipt_file, receipts)
+    return record
+
+
+def _reconcile_latest_attempt(
+    receipts: dict[str, Any], receipt_file: Path, attempts: list[tuple[str, dict[str, Any]]],
+    pr: int, ext: External, *, dry_run: bool,
+) -> dict[str, Any]:
+    """Attest the latest attempt from live labels. Never issues a GitHub or Slack write."""
+    key, receipt = _latest_effect_attempt(attempts)
+    if key + ":continuation" in receipts:
+        raise CleanupError("reconciliation_already_continued", ambiguous=True)
+    plan = receipt.get("plan")
+    _validate_plan(plan)
+    request = receipt.get("request")
+    if not isinstance(request, dict):
+        raise CleanupError("cleanup_receipt_request_mismatch", ambiguous=True)
+    unfinished_side_effects = [
+        step["name"] for step in plan
+        if (step["name"], step["scope"], step["operation"], step["label"]) in _NON_LABEL_STEPS
+        and not (
+            isinstance(receipt.get("steps"), dict)
+            and isinstance(receipt["steps"].get(step["name"]), dict)
+            and receipt["steps"][step["name"]].get("status") == "completed"
+        )
+    ]
+    if unfinished_side_effects:
+        raise CleanupError(
+            "reconciliation_side_effect_unverified", ambiguous=True,
+            details={"cleanup_key": key, "steps": unfinished_side_effects},
+        )
+    needs_issue = any(step["scope"] == "issue" and step["operation"] in _LABEL_OPS for step in plan)
+    if needs_issue and not isinstance(request.get("issue"), int):
+        raise CleanupError("reconciliation_live_state_mismatch", ambiguous=True, details={"cleanup_key": key})
+    canonical = ext._repository(request)
+    bound = {**request, "repository": canonical}
+    snapshot = ext.read_pr(bound)
+    pr_labels = _validate_merged_snapshot_without_ref(request, snapshot)
+    issue_labels = None
+    if needs_issue:
+        issue_labels = _validate_issue_snapshot(request, ext.read_issue(bound))
+    mismatched = _label_mismatches(plan, pr_labels, issue_labels)
+    if mismatched:
+        raise CleanupError(
+            "reconciliation_live_state_mismatch", ambiguous=True,
+            details={"cleanup_key": key, "mismatched_steps": mismatched},
+        )
+    verified_steps = []
+    for step in plan:
+        if step["operation"] not in _LABEL_OPS:
+            continue
+        verified_steps.append({
+            "name": step["name"],
+            "status": "completed",
+            "verified_by": "live_label_readback",
+            "replayed": False,
+            "result": "effect_present_by_readback" if step["operation"] == "add" else "effect_absent_by_readback",
+        })
+    closed_clean = next((step for step in verified_steps if step["name"] == CLOSED_CLEAN_STEP), None)
+    record: dict[str, Any] = {
+        "timestamp": _now_iso(), "pr": pr, "cleanup_key": key,
+        "result": "caller_verified_by_label_readback",
+        "caller_verified": closed_clean is not None,
+        "closed_clean": "caller_verified" if closed_clean is not None else "not_in_receipt",
+        "reason": "live GitHub labels match the latest effect attempt; no side effect replayed",
+        "original_status": receipt.get("status"),
+        "original_ambiguous_steps": list(receipt.get("ambiguous_steps") or []),
+        "original_steps": json.loads(json.dumps(receipt.get("steps"))),
+        "verified_steps": [step["name"] for step in verified_steps],
+        "evidence": {
+            "repository": canonical, "number": snapshot.get("number"), "pr_labels": pr_labels,
+            "issue_labels": issue_labels, "merge_commit": request.get("merge_commit"),
+            "head": request.get("head"),
+        },
+    }
+    if dry_run:
+        record["dry_run"] = True
+        return record
+    journal_key = key + ":ambiguity_reconciled"
+    records = receipts.setdefault(journal_key, [])
+    if not isinstance(records, list):
+        raise CleanupError("reconciliation_journal_invalid", ambiguous=True)
+    records.append(record)
+    steps = receipt.setdefault("steps", {})
+    if not isinstance(steps, dict):
+        raise CleanupError("cleanup_receipt_steps_invalid", ambiguous=True)
+    for step in verified_steps:
+        steps[step["name"]] = {k: v for k, v in step.items() if k != "name"}
+    receipt["ambiguous_steps"] = []
+    receipt["status"] = "completed"
+    receipt["caller_verified_closed_clean"] = closed_clean is not None
+    _write_json(receipt_file, receipts)
+    return record
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -987,11 +1183,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mapping-path", type=Path)
     parser.add_argument("--receipt-path", type=Path)
     parser.add_argument("--reconcile-ambiguous", type=int, metavar="PR")
+    parser.add_argument("--dry-run", action="store_true", help="read back only; do not write the receipt journal")
     args = parser.parse_args(argv)
     try:
+        if args.dry_run and args.reconcile_ambiguous is None:
+            raise CleanupError("dry_run_requires_reconcile")
         if args.reconcile_ambiguous is not None:
             path = args.receipt_path or Path(os.environ.get("MOP_CLEANUP_RECEIPT_PATH", str(DEFAULT_RECEIPT))).expanduser()
-            result = reconcile_ambiguous(args.reconcile_ambiguous, path)
+            result = reconcile_ambiguous(args.reconcile_ambiguous, path, dry_run=args.dry_run)
         else:
             result = run(json.load(__import__("sys").stdin), mapping_path=args.mapping_path, receipt_path=args.receipt_path)
     except CleanupError as exc:

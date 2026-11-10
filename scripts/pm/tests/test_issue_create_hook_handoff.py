@@ -443,7 +443,7 @@ def test_cto_source_user_and_bot_ids_classify_as_internal(tmp_path, originator):
 @pytest.mark.parametrize("source,allowed", [
     ("", False),
     ("Origin: internal", False),
-    ("Source: none (internal) — maintenance follow-up", True),
+    ("Source: none (internal) — maintenance follow-up", False),
     ("Source: none (internal)", False),
     ("Source: C0ALZJHGE49:1794257214.316859\nSource: docs/plans/foo.md", False),
 ])
@@ -454,7 +454,8 @@ def test_high_priority_bypass_requires_single_explicit_source(tmp_path, source, 
     assert rc == 0
     assert (out == "") == allowed
     if "docs/plans" in source:
-        assert "multiple Source lines" in _decision(out)["message"]
+        # Live hook: more than one Source line is INVALID, not a separate MULTIPLE code.
+        assert "ambiguous" in _decision(out)["message"]
 
 
 def test_alerts_root_is_internal_even_with_pm_reply(tmp_path):
@@ -470,19 +471,17 @@ def test_alerts_root_is_internal_even_with_pm_reply(tmp_path):
     assert _run(AUDIT_HOOK, _create_cmd(str(body)) + " --label priority:P1", env) == (0, "")
 
 
-@pytest.mark.parametrize("author,number,allowed", [
-    ("rajivpoddar", "12000", True),
-    ("chatgpt-codex-connector[bot]", "12000", True),
-    ("other-user", "12000", False),
-    ("rajivpoddar", "999", False),
-])
-def test_github_comment_requires_trusted_author_and_matching_issue(tmp_path, author, number, allowed):
+@pytest.mark.parametrize("gh_rc,allowed", [(0, True), (1, False)])
+def test_github_comment_requires_the_comment_to_read_back(tmp_path, gh_rc, allowed):
+    # Live hook: a single heydonna-app comment URL is a source after `gh api` reads the id.
+    # Author and issue matching are no longer done in the hook.
     env = _env(tmp_path)
     gh = tmp_path / "bin" / "gh"
-    response = json.dumps({"issue_url": f"https://api.github.com/repos/Scribie/heydonna-app/issues/{number}", "user": {"login": author}})
-    gh.write_text("#!/bin/sh\nprintf '%s\\n' '" + response + "'\n")
+    gh.write_text(f"#!/bin/sh\nexit {gh_rc}\n")
     gh.chmod(0o755)
     body = _body(tmp_path, "comment.md", VALID_BODY + "\nSource: https://github.com/Scribie/heydonna-app/issues/12000#issuecomment-123\n<!-- audit-bypass: internal-followup -->")
     rc, out = _run(AUDIT_HOOK, _create_cmd(str(body)) + " --label priority:P1", env)
     assert rc == 0
     assert (out == "") == allowed
+    if not allowed:
+        assert "GitHub comment" in _decision(out)["message"]

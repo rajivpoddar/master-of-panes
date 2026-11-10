@@ -168,7 +168,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "78dec7d65edac8ab0f8d5667bb2d3391589db20f25290e05a33be63f7d747faa",
+      "sha256": "c9fd7665cf41e9ff4c8e2e6848feb47b1d90b745d60e3d8433d90cfe62a1d28c",
       "source_path": "claude/hooks/pre-issue-create-audit.sh"
     },
     {
@@ -600,7 +600,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "febfdc346d4af051a17e4730666c3556f49c015b323180ed2e1983b41d2d0be3",
+      "sha256": "911d53baf78ad7b276570f0f1bded9a887d66d86f41669b1e39998753f367e09",
       "source_path": "claude/scripts/pm-cleanup-pr.py"
     },
     {

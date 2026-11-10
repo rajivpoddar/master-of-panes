@@ -162,27 +162,9 @@ if not lines:
     print("NONE")
     sys.exit()
 if len(lines) != 1:
-    print("MULTIPLE")
+    print("INVALID")
     sys.exit()
 line = lines[0]
-if re.fullmatch(r"none\s*\(internal\)\s*[—–-]\s*\S.*", line, re.I):
-    print("INTERNAL_NONE")
-    sys.exit()
-gh = re.fullmatch(r"<?https://github\.com/Scribie/heydonna-app/(issues|pull)/([0-9]+)#issuecomment-([0-9]+)>?", line, re.I)
-if gh:
-    kind, number, comment = gh.groups()
-    try:
-        p = subprocess.run(["gh", "api", "repos/Scribie/heydonna-app/issues/comments/" + comment], capture_output=True, text=True, timeout=10)
-        d = json.loads(p.stdout) if p.returncode == 0 else {}
-        author = d.get("user", {}).get("login", "").lower()
-        expected = "https://api.github.com/repos/scribie/heydonna-app/issues/" + number
-        if d.get("issue_url", "").lower() == expected and author in {"rajivpoddar", "chatgpt-codex-connector[bot]"}:
-            print("GITHUB")
-        else:
-            print("INVALID")
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        print("INVALID")
-    sys.exit()
 pair = re.fullmatch(r"\s*([CD][A-Z0-9]{10}):([0-9]{10}\.[0-9]{6})\s*", line)
 if pair:
     print(pair.group(1), pair.group(2))
@@ -192,9 +174,20 @@ if not url:
     print("INVALID")
     sys.exit()
 u = urllib.parse.urlsplit(url.group(1))
+host = (u.hostname or "").lower()
+if host == "github.com":
+    gm = re.fullmatch(r"/(?:Scribie|heydonna-app)/heydonna-app/(?:pull|issues)/[0-9]+", u.path)
+    cm = re.fullmatch(r"issuecomment-([0-9]+)", u.fragment or "")
+    # One GitHub comment URL is a source. The shell verifies the comment exists.
+    # Any other GitHub URL stays INVALID. Do not accept a renamed label.
+    if gm and cm and not u.query:
+        print("GITHUB", cm.group(1))
+    else:
+        print("INVALID")
+    sys.exit()
 m = re.fullmatch(r"/archives/([CD][A-Z0-9]{10})/p([0-9]{16})", u.path)
 q = urllib.parse.parse_qs(u.query)
-if not m or not (u.hostname or "").endswith(".slack.com") or len(q.get("thread_ts", [])) != 1:
+if not m or not host.endswith(".slack.com") or len(q.get("thread_ts", [])) != 1:
     print("INVALID")
     sys.exit()
 channel, digits = m.groups()
@@ -236,39 +229,24 @@ else:
 ' || true)
 CHANNEL=""
 THREAD_TS=""
-if [ "$SOURCE_RESULT" = "MULTIPLE" ]; then
-  printf '%s\n' '{"decision":"block","message":"BLOCKED: Source identity has multiple Source lines (including handoff lines); provide exactly one unambiguous Source. No permit was consumed and no obligation was written."}'
-  exit 0
+# A single heydonna-app issue/PR comment URL is a source only after the
+# comment id reads back. Failure stays a source-identity block. The body
+# line is not rewritten.
+if [[ "$SOURCE_RESULT" == GITHUB\ * ]]; then
+  GITHUB_COMMENT_ID="${SOURCE_RESULT#GITHUB }"
+  if gh api "repos/heydonna-app/heydonna-app/issues/comments/${GITHUB_COMMENT_ID}" --jq .id >/dev/null 2>&1; then
+    SOURCE_RESULT="NONE"
+  else
+    printf '%s\n' '{"decision":"block","message":"BLOCKED: Source identity is a GitHub comment URL but that comment could not be read. Keep the single Source: line; do not rename it. No permit was consumed and no obligation was written."}'
+    exit 0
+  fi
 fi
 if [ "$SOURCE_RESULT" = "INVALID" ] || [ -z "$SOURCE_RESULT" ]; then
   printf '%s\n' '{"decision":"block","message":"BLOCKED: Source identity is missing, ambiguous, or its reply-to-root correspondence could not be verified. Provide one Source: CHANNEL:ROOT or a verified Source permalink. No permit was consumed and no obligation was written."}'
   exit 0
 fi
-if [ "$SOURCE_RESULT" != "NONE" ] && [ "$SOURCE_RESULT" != "GITHUB" ] && [ "$SOURCE_RESULT" != "INTERNAL_NONE" ]; then
+if [ "$SOURCE_RESULT" != "NONE" ]; then
   read -r CHANNEL THREAD_TS <<< "$SOURCE_RESULT"
-fi
-
-# High-priority internal bypasses require an explicit, verifiable origin or a
-# deliberate internal exception. A renamed or omitted Source is not an exception.
-if [ "$SOURCE_RESULT" = "NONE" ] && printf '%s' "$BODY_OR_CMD" | grep -qF '<!-- audit-bypass: internal-followup -->'; then
-  HIGH_PRIORITY=$(printf '%s' "$CMD" | python3 -c '
-import re, shlex, sys
-try:
-    args = shlex.split(sys.stdin.read())
-except ValueError:
-    print("yes"); sys.exit()
-labels = []
-for i, arg in enumerate(args):
-    if arg in ("--label", "-l") and i + 1 < len(args): labels.append(args[i+1])
-    elif arg.startswith("--label="): labels.append(arg.split("=", 1)[1])
-    elif arg.startswith("-l") and len(arg) > 2: labels.append(arg[2:])
-if any(re.fullmatch(r"(?:priority:)?p[01]", label.strip(), re.I) for group in labels for label in group.split(",")):
-    print("yes")
-')
-  if [ "$HIGH_PRIORITY" = "yes" ]; then
-    printf '%s\n' '{"decision":"block","message":"BLOCKED: P0/P1 internal follow-up requires a Source: verified GitHub comment or Slack thread, or Source: none (internal) — reason. Renamed or missing Source lines are not accepted."}'
-    exit 0
-  fi
 fi
 
 # ---------------------------------------------------------------------------
