@@ -1858,7 +1858,11 @@ def _priority_inversion_worker(selector_path: str, slots_doc: dict | list | None
     issues = rps.load_open_issues(timeout=min(timeout, 60))
     prio = {int(i["number"]): rps.priority_rank({l["name"] for l in i.get("labels") or []}, i.get("body") or "")
             for i in issues}
-    return rps.priority_inversions(slots, prio, rps.rank_candidates(issues))
+    # Match the selector's batched native-dependency path; without this shared
+    # cache ranking falls back to one REST subprocess per candidate.
+    cache = {}
+    rps.prefetch_native(rps.native_candidates(issues, []), cache, persist=False)
+    return rps.priority_inversions(slots, prio, rps.rank_candidates(issues, cache=cache))
 
 
 def priority_inversion_flags(slots_doc, failures: list[str], timeout: int = COLLECTOR_TIMEOUTS["priority-inversion"],
