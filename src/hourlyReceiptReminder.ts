@@ -103,6 +103,7 @@ export async function tickHourlyReminders(db: MoPDatabase, run: Scheduler = exec
       const time = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(Number(row.ts) * 1000));
       const at = new Date(row.due).toISOString().replace(".000Z", "Z");
       const verification = `<@U0BNFGX2UAX> CTO verification for Hourly ${time}, parent ${row.ts}: ` +
+        `Apply $heydonna-cto-hourly-review from /Users/rajiv/.codex/skills/heydonna-cto-hourly-review/SKILL.md; CTO Decisions delegates this one parent-bound audit to the existing PR Reviews owner under the wake SOP. ` +
         `verify Step 3 actually inspected every current in-progress lane, not just ACTIONS or owner labels. ` +
         `Each eligible lane needs current assignment/epoch/issue/PR/head (explicit parent/child mapping), substantive progress and AC/runtime/test evidence, a tailored continue/checkpoint or correction, and PM's native communication receipt/disposition with next checkpoint. ` +
         `Distinguish accepted delivery from slot acknowledgement and completed work. Reconcile existing messages; never resend issued/UNKNOWN effects. ` +
