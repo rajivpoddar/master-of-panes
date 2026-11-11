@@ -26,12 +26,6 @@ Excluded: already on a slot (status:in-progress or slot:N), pm-blocked:*
 pm-nonclaimable:tracking, umbrella, and Ready Pool claimable_slot_type values
 that are not slot work.
 
-The explicit Ready Pool header `merge_after: #N[, #M]` records merge ordering,
-not an assignment gate (CTO C0ALZJHGE49 ts 1794385105.483169). `--check`
-reports live open referenced issues in `merge_after_open`; malformed declarations
-fail closed. Do not infer merge ordering from prose. Canonical blockers and native
-blocked-by dependencies retain their existing gating semantics.
-
 Dependency-blocked candidates of all priorities are listed in the pool. Their
 referenced PR must be merged, or a referenced issue must have exactly one
 authoritatively linked implementation PR that is merged. Issue closure, deploy
@@ -171,48 +165,6 @@ def ready_pool_value(body: str, field: str) -> str:
     return contract_policy().ready_pool_metadata({"body": body or ""}).get(field, "")
 
 
-def merge_after_refs(body: str) -> list[int]:
-    """Parse only the last explicit Ready Pool header, without normalizing malformed input."""
-    blocks = READY_POOL_RE.findall(body or "")
-    if not blocks:
-        return []
-    block = blocks[-1]
-    if block.strip().startswith("{"):
-        try:
-            data = json.loads(block)
-        except ValueError:
-            if re.search(r'"merge_after"', block, re.I):
-                raise ValueError("malformed merge_after header") from None
-            return []
-        if not isinstance(data, dict) or "merge_after" not in data:
-            return []
-        lines = [data["merge_after"]] if isinstance(data["merge_after"], str) else [""]
-    else:
-        lines = re.findall(r"(?im)^[ \t]*merge_after\s*[:=][ \t]*([^\r\n]*)", block)
-    if not lines:
-        return []
-    if len(lines) != 1 or not re.fullmatch(r"\s*#[1-9]\d*(?:\s*,\s*#[1-9]\d*)*\s*", lines[0]):
-        raise ValueError("malformed merge_after: expected #N[, #M]")
-    return list(dict.fromkeys(int(n) for n in re.findall(r"#(\d+)", lines[0])))
-
-
-def merge_after_receipt(res: dict, issue: dict | None, offline: bool = False) -> dict:
-    if issue is None:
-        return res
-    try:
-        refs = merge_after_refs(issue.get("body") or "")
-    except ValueError as exc:
-        return {"status": "not_eligible", "issue": issue["number"], "reason": str(exc)}
-    if refs and offline:
-        return {"status": "LOOKUP_FAILED", "issue": issue["number"], "reason": "merge_after live lookup unavailable"}
-    nodes = graphql_nodes(refs) if refs else {}
-    if any(not isinstance(nodes.get(n), dict) or "mergedAt" in nodes[n]
-           or nodes[n].get("state") not in {"OPEN", "CLOSED"} for n in refs):
-        return {"status": "LOOKUP_FAILED", "issue": issue["number"], "reason": "merge_after issue lookup failed"}
-    res["merge_after_open"] = [n for n in refs if nodes[n]["state"] == "OPEN"]
-    return res
-
-
 def dispatch_content_refusals(issue: dict[str, Any]) -> list[str]:
     """Screen authoritative Ready Pool fields, never historical prose or comments."""
     body = issue.get("body") or ""
@@ -273,11 +225,6 @@ def classify(issue: dict[str, Any], requested_class: str | None = None, *, light
     """Return the selection class; light mode is only a non-authoritative prefilter."""
     if not light and (not isinstance(issue.get("body"), str) or not issue["body"].strip() or dispatch_content_refusals(issue)):
         return None
-    if not light:
-        try:
-            merge_after_refs(issue.get("body") or "")
-        except ValueError:
-            return None
     labels = _labels(issue)
     holds = issue_holds(issue)
     status = {l for l in labels if l.startswith("status:")}
@@ -411,9 +358,6 @@ def prose_dependencies(text: str) -> list[tuple[int, str]]:
         if not match:
             continue
         clause = match.group(1)
-        if (line[match.start():].lower().startswith('after')
-                and re.search(r'(?i)\bmerge\s*$', line[:match.start()])):
-            continue  # merge-order prose is never an assignment dependency
         if line[match.start():].lower().startswith('after') and not re.search(r'(?i)\b(?:merg\w*|clos\w*|land\w*)\b', clause):
             continue
         clause = re.sub(r'#(\d+)\s*[–—-]\s*#(\d+)', lambda m: ' '.join('#'+str(n) for n in range(int(m[1]), min(int(m[2]), int(m[1])+100)+1)), clause)
@@ -1967,7 +1911,6 @@ def fast_check(args) -> dict[str, Any]:
         picked = candidate_node(node)
         res = evaluate_check(args, [picked], extra, prs, cache)
         rework_only = res.pop("_rework_only")
-        res = merge_after_receipt(res, picked, args.no_dependency_check)
         if res["status"] != "ok":
             return res
         light_rows = snap if snap is not None else light_fut.result()
@@ -2033,7 +1976,6 @@ def fast_check(args) -> dict[str, Any]:
         verdict.pop("_rework_only", None)
         if verdict["status"] != "ok":
             verdict["fast_path"] = {"higher_candidates": eligible_higher, "evaluated": evaluated}
-            verdict["merge_after_open"] = res["merge_after_open"]
             return verdict
     if res.get("priority_reason"):
         res["priority_reason"] = (f"priority_reason: {pick['priority']} {pick['class']} #{pick['issue']} taken because "
@@ -2144,8 +2086,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check is not None:
         res = check_decision(args, issues, extra, ranked, gated, rework_only, open_pr_count, cache)
-        checked = next ( (i for i in issues if int(i["number"]) == args.check), None)
-        res = merge_after_receipt(res, checked, args.no_dependency_check)
         print(json.dumps(res, sort_keys=True))
         return CHECK_EXIT.get(res["status"], 4)
 

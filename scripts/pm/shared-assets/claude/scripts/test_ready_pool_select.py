@@ -50,46 +50,6 @@ def issue(n, labels, created="2026-10-01T00:00:00Z", body=""):
             "createdAt": created, "body": body}
 
 
-class MergeAfterTests(unittest.TestCase):
-    def test_open_merge_order_is_informational(self):
-        row = issue(901, ["P1", "status:todo"], body="<!-- ready-pool:\nmerge_after: #902, #903\n-->")
-        with patch.object(rps, "graphql_nodes", return_value={902: {"state": "OPEN"}, 903: {"state": "CLOSED"}}):
-            result = rps.merge_after_receipt({"status": "ok"}, row)
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["merge_after_open"], [902])
-        self.assertEqual(rps.classify(row), "new_issue")
-        c = rps.candidate(row, "new_issue")
-        rps.evaluate_dependency(c, {("native", 901): []})
-        self.assertFalse(rps.is_gated(c))
-
-    def test_malformed_header_fails_closed(self):
-        for value in ("", "#902,", "902", "#902 and #903", "#0"):
-            with self.subTest(value=value):
-                row = issue(901, ["P1", "status:todo"], body=f"<!-- ready-pool:\nmerge_after: {value}\n-->")
-                self.assertIsNone(rps.classify(row))
-                result = rps.merge_after_receipt({"status": "ok"}, row)
-                self.assertEqual(result["status"], "not_eligible")
-                self.assertIn("malformed merge_after", result["reason"])
-
-    def test_canonical_and_native_blockers_still_gate(self):
-        row = issue(901, ["P1", "status:todo"], body="<!-- ready-pool:\nmerge_after: #902\nblockers: #903\n-->")
-        for blockers, native in (("#903", []), ("none", [(903, "default")])):
-            with self.subTest(blockers=blockers, native=native):
-                c = rps.candidate(row, "new_issue")
-                c["blockers"] = blockers
-                rps.evaluate_dependency(c, {("native", 901): native, (903, "default"): (False, "OPEN")})
-                self.assertTrue(rps.is_gated(c))
-                self.assertEqual(c["open_dependencies"][0]["number"], 903)
-
-    def test_prose_does_not_declare_merge_after(self):
-        row = issue(901, ["P1", "status:todo"], body="Merge after #902 merges.")
-        with patch.object(rps, "graphql_nodes") as lookup:
-            result = rps.merge_after_receipt({"status": "ok"}, row)
-        self.assertEqual(result["merge_after_open"], [])
-        self.assertEqual(rps.prose_dependencies("Merge after #902 merges."), [])
-        lookup.assert_not_called()
-
-
 class HoldCompatibilityTests(unittest.TestCase):
     def test_transitive_prose_discovery_for_all_hold_forms(self):
         forms = (
