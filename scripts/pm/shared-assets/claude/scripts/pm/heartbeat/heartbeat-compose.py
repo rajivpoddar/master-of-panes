@@ -1156,6 +1156,84 @@ def remote_boxes_line(timeout: int = 20) -> str:
     return f"*Remote boxes:* unavailable ({reason})"
 
 
+def parse_mac_list(text: str) -> str:
+    match = re.search(r'^boxes:\s*(\d+)/(\d+)\s*$', text, re.MULTILINE)
+    if not match or int(match[1]) > int(match[2]) or int(match[2]) != 3:
+        raise ValueError('invalid list')
+    return f'containers {match[1]}/{match[2]}'
+
+
+def parse_mac_receipts(text: str, now: datetime) -> str:
+    counts = {'mac': 0, 'hetzner': 0, 'fallback': 0}
+    for line in text.splitlines():
+        fields = line.split('\t')
+        if len(fields) != 7:
+            raise ValueError('invalid TSV')
+        timestamp, provider, requested, _, _, fallback, outcome = fields
+        when = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        if when.tzinfo is None:
+            raise ValueError('missing timezone')
+        if now - timedelta(hours=1) <= when <= now and outcome == 'acquired':
+            if provider not in ('mac', 'hetzner'):
+                raise ValueError('unknown provider')
+            counts[provider] += 1
+            if fallback and fallback not in ('-', 'none'):
+                counts['fallback'] += 1
+    return f"provider log 60m acquired mac {counts['mac']}, hetzner {counts['hetzner']}, fallback {counts['fallback']}"
+
+
+def parse_mac_load(text: str) -> str:
+    load = re.search(r'load averages?:\s*([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)', text)
+    cpu = re.search(r'CPU usage:\s*([\d.]+)% user,\s*([\d.]+)% sys,\s*([\d.]+)% idle', text)
+    if not load or not cpu:
+        raise ValueError('invalid top/uptime')
+    return f'load {load[1]}/{load[2]}/{load[3]}, CPU idle {cpu[3]}%'
+
+
+def mac_box_stats() -> dict:
+    """Three independently cached, read-only probes; never treat missing data as zero."""
+    cache = HOURLY_CACHE / 'mac-box-v2'
+    now = time.time()
+    py = sys.executable
+    sources = (
+        ('list', ['bash', str(REMOTE_BOX_SCRIPT), 'list', '--provider', 'mac'], parse_mac_list),
+        ('provider-log', [py, '-I', '-c', 'import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())',
+                          str(Path.home() / '.claude/logs/rtb-provider.log')],
+         lambda text: parse_mac_receipts(text, datetime.now(timezone.utc))),
+        ('top/uptime', ['ssh', '-i', str(Path.home() / '.ssh/id_ed25519_mac_runner'),
+                        '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=8',
+                        'runner@192.168.68.114', 'uptime; top -l 1 -n 0'], parse_mac_load),
+    )
+    parts = []
+    for name, command, parse in sources:
+        path = cache / (name.replace('/', '-') + '.json')
+        try:
+            cached = json.loads(path.read_text())
+            if 0 <= now - cached['at'] < 60 and isinstance(cached['value'], str):
+                parts.append(cached['value'] + ' (cached)')
+                continue
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, errors='replace', timeout=10)
+            if result.returncode:
+                parts.append(f'{name} UNAVAILABLE (rc={result.returncode})')
+                continue
+            value = parse(result.stdout)
+            parts.append(value)
+            try:
+                store_observation(path, value, time.time())
+            except OSError:
+                pass
+        except subprocess.TimeoutExpired:
+            parts.append(f'{name} UNAVAILABLE (rc=timeout, 10s)')
+        except OSError:
+            parts.append(f'{name} UNAVAILABLE (rc=unavailable, launch failed)')
+        except (ValueError, TypeError, OverflowError):
+            parts.append(f'{name} UNKNOWN (rc=0, invalid output)')
+    return {'line': '• Mac test box: ' + ' · '.join(parts)}
+
+
 def _elapsed_minutes(value: str) -> int:
     days, sep, rest = value.partition('-')
     if not sep:
@@ -1993,6 +2071,10 @@ def parallel_collect(jobs, wall_cap=COMPOSE_COLLECTOR_BUDGET, cache_dir=HOURLY_C
     for name in jobs:
         value, error = results.get(name, (None, "timed out"))
         path = cache_dir / (name + ".json")
+        if name == 'mac-box':
+            # Individual sources own their caches; do not cache partial UNKNOWNs.
+            results[name] = value
+            continue
         if collector_success(value):
             try:
                 cache_dir.mkdir(parents=True, exist_ok=True)
@@ -2041,6 +2123,7 @@ def collect_hourly(args, py, hours, now, failures):
         "decisions": lambda: _load(args.decisions_json) if args.decisions_json else read_decisions(PM_OPS_DB, now),
         "agents": lambda: _load(args.agents_json) if args.agents_json else read_agents(PM_PROJECT, now),
         "remote-boxes": lambda: remote_boxes_line(timeout=COLLECTOR_TIMEOUTS["remote-boxes"]),
+        "mac-box": mac_box_stats,
         "pending-github": lambda: pending_github(timeout=COLLECTOR_TIMEOUTS["pending-github"]),
         "proxies": lambda: read_proxies(now),
     }
@@ -2233,7 +2316,8 @@ def main() -> int:
         email_doc=email_doc, decisions=decisions, agents=agents, langsmith=langsmith, unblockable=unblockable, tracked=tracked,
         priority_flags=priority_flags,
         priority_unavailable=(f"UNAVAILABLE (timeout {COLLECTOR_TIMEOUTS['priority-inversion']}s)" if priority_flags is None else None),
-        remote_boxes=hourly.get("remote-boxes") or "*Remote boxes:* UNAVAILABLE (no recent successful probe)" if args.mode == "1h" else None,
+        remote_boxes=((hourly.get("remote-boxes") or "*Remote boxes:* UNAVAILABLE (no recent successful probe)")
+                      + "\n" + (hourly.get("mac-box") or {}).get("line", "• Mac test box: UNKNOWN (collector deadline)")) if args.mode == "1h" else None,
         pending_actions=(pending_obligations(PM_OPS_DB, now), hourly.get("pending-github") or {"error": "UNAVAILABLE (no recent successful probe)"}) if args.mode == "1h" else None,
         proxies=hourly.get("proxies") if args.mode == "1h" else None,
     )

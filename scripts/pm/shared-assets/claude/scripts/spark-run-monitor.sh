@@ -64,11 +64,49 @@ def load_memory_config(path, run_name, floor_mib):
 def memory_status(cfg, host, mode="sample"):
     cmd = shlex.join(["python3", "-I", "-c", MEMORY_PROGRAM, json.dumps(cfg), mode])
     result = subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", host, cmd],
-                            capture_output=True, text=True, timeout=60)
+                            capture_output=True, text=True, errors="replace", timeout=60)
     if result.returncode != 0:
         return {"verdict": {"state": "UNKNOWN", "reason": "memory telemetry SSH failed"},
                 "floor_mib": cfg["floor_mib"], "cuda_free_mib": None, "os_avail_mib": None}
     return json.loads(result.stdout)
+
+class SSHFailure(Exception):
+    def __init__(self, rc):
+        self.rc = rc
+        super().__init__("ssh rc=%d" % rc)
+
+def monitor_error_line(exc, interval):
+    if isinstance(exc, SSHFailure):
+        return "monitor: Spark unreachable (ssh rc=%d); retrying every %ds" % (exc.rc, interval)
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "monitor: Spark unreachable (ssh rc=124); retrying every %ds" % interval
+    msg = str(exc).replace("\n", " ").replace("\r", " ").strip()[:120] or "no details"
+    return "monitor error (%s: %s); Spark reachability unaffected" % (type(exc).__name__, msg)
+
+def progress_from_history(history, now, total_steps):
+    # history contains (gather_epoch_seconds, optimizer_step); no rate is shown until two observations exist.
+    recent = [(ts, step) for ts, step in history if now - ts <= 3600 and now >= ts]
+    steps_hour = None
+    if len(recent) >= 2 and recent[-1][0] > recent[0][0]:
+        elapsed = recent[-1][0] - recent[0][0]
+        steps_hour = max(0, round((recent[-1][1] - recent[0][1]) * 3600 / elapsed))
+    rate = None
+    for (t0, s0), (t1, s1) in zip(reversed(history[:-1]), reversed(history[1:])):
+        if t1 > t0 and s1 > s0:
+            rate = (s1 - s0) / (t1 - t0)
+            break
+    sec_step = 1 / rate if rate else None
+    eta_seconds = (max(0, total_steps - history[-1][1]) / rate
+                   if rate and total_steps is not None else None)
+    eta = "n/a"
+    if eta_seconds is not None:
+        eta_epoch = now + eta_seconds
+        eta = "%s UTC / %s IST" % (
+            time.strftime("%Y-%m-%d %H:%M", time.gmtime(eta_epoch)),
+            time.strftime("%Y-%m-%d %H:%M", time.gmtime(eta_epoch + 19800)))
+    return "ETA %s | sec/step %s | steps last hour %s" % (
+        eta, ("%.1f" % sec_step) if sec_step is not None else "n/a",
+        str(steps_hour) if steps_hour is not None else "n/a")
 ap = argparse.ArgumentParser()
 ap.add_argument("--run-name", required=True); ap.add_argument("--log", required=True)
 ap.add_argument("--thread-ts"); ap.add_argument("--interval", type=float, default=900)
@@ -103,7 +141,7 @@ def post(text, thread=None):
     why = ""
     for attempt in (1, 2):
         try:
-            r = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=120)
+            r = subprocess.run(cmd, input=text, capture_output=True, text=True, errors="replace", timeout=120)
             m = re.search(r"^OK ts=(\d+\.\d+)\b", r.stdout or "", re.M)
             if r.returncode == 0 and m: return m.group(1)
             why = "rc=%d %s" % (r.returncode, redact(((r.stdout or "") + (r.stderr or "")).strip())[:200])
@@ -158,9 +196,12 @@ def thermal_line(d, alerts):
 
 def gather():
     cmd = REMOTE % (shlex.quote(a.log), shlex.quote(a.proc_pattern or ""), shlex.quote(a.container or ""))
-    r = subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", a.host, cmd],
-                       capture_output=True, text=True, timeout=60)
-    if r.returncode != 0 and "##TAIL" not in r.stdout: raise RuntimeError("ssh rc=%d" % r.returncode)
+    try:
+        r = subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", a.host, cmd],
+                           capture_output=True, text=True, errors="replace", timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        raise SSHFailure(124) from exc
+    if r.returncode != 0: raise SSHFailure(r.returncode)
     sec = {}; cur = None
     for line in r.stdout.splitlines():
         if line.startswith("##"): cur = line[2:]; sec[cur] = []
@@ -213,7 +254,7 @@ if not thread:
     thread = post("*Spark run started: %s*\nlog: `%s`\nmonitor every %ds (stats replies below)" % (a.run_name, a.log, a.interval))
     if not thread: sys.exit("could not create parent thread")
 print("thread_ts=" + thread, flush=True)
-min_avail = min_cuda = None; unreachable_posted = False; obs = []; last_mtime = None; stale = 0; last = None
+min_avail = min_cuda = None; unreachable_posted = False; obs = []; step_history = []; last_mtime = None; stale = 0; last = None
 while True:
     try:
         sec = gather(); unreachable_posted = False
@@ -231,7 +272,12 @@ while True:
         mt = first(sec, "MTIME", 0); now = first(sec, "MTIME", 1)
         mtime = int(mt) if mt.isdigit() else None
         stale = stale + 1 if (mtime is not None and mtime == last_mtime) else 0; last_mtime = mtime
-        progress = "ETA n/a | sec/step n/a | steps last hour n/a"
+        observed_at = time.time()
+        if d["step"] is not None:
+            if not step_history or (observed_at > step_history[-1][0] and d["step"] >= step_history[-1][1]):
+                step_history.append((observed_at, d["step"]))
+            step_history = [(ts, step) for ts, step in step_history if observed_at - ts <= 3600]
+        progress = progress_from_history(step_history, observed_at, a.total_steps or d["total"])
         before, after = sec.get("IDENTITY_BEFORE", []), sec.get("IDENTITY_AFTER", [])
         identity = None
         if (first(sec, 'CONT').strip() == 'running' and len(before) == len(after) == 2
@@ -246,7 +292,7 @@ while True:
                 spec = importlib.util.spec_from_file_location("spark_heartbeat", os.path.expanduser("~/.claude/scripts/pm/heartbeat/heartbeat-compose.py"))
                 composer = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(composer)
-                progress = composer.spark_progress_update(a.run_name, a.host, a.log, d["step"], d["total"], identity=identity)
+                composer.spark_progress_update(a.run_name, a.host, a.log, d["step"], d["total"], identity=identity)
             except Exception:
                 progress += " (progress state unavailable)"
         proc = first(sec, "PROC"); proc_gone = proc.strip() == "0"
@@ -278,7 +324,7 @@ while True:
         elif re.search(r"['\"](?:loss|grad_norm)['\"]\s*:\s*(?:nan|inf|-inf)", tail_txt, re.I): harm = "non-finite loss/grad_norm in log"
         else:
             try:
-                dfo = subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", a.host, "df -Pk /home/user | tail -1"], capture_output=True, text=True, timeout=30).stdout.split()
+                dfo = subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", a.host, "df -Pk /home/user | tail -1"], capture_output=True, text=True, errors="replace", timeout=30).stdout.split()
                 if len(dfo) >= 4 and int(dfo[3]) < 50 * 1024 * 1024: harm = "free disk %d GiB < 50 GiB" % (int(dfo[3]) // (1024 * 1024))
             except Exception: pass
         if harm and not ended:
@@ -289,7 +335,7 @@ while True:
                     lines.append(":warning: ENFORCE skipped (no --container given; never stop by pattern): " + harm)
                 else:
                     cmd = "docker stop " + shlex.quote(a.container)
-                    rr = subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", a.host, cmd], capture_output=True, text=True, timeout=120)
+                    rr = subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", a.host, cmd], capture_output=True, text=True, errors="replace", timeout=120)
                     lines.append(":octagonal_sign: ENFORCE: stopped owned container %s (%s); rc=%d" % (a.container, harm, rr.returncode))
         handed_off = False
         # Copy-timeout only (Rajiv ts 1794287346.192189). Memory and OOM still fall through to the ended post.
@@ -308,14 +354,14 @@ while True:
 
                 def copy_once(timeout_s, _f=fetched):
                     argv = mod.ssh_copy_argv(a.host, _f.get("leg") or "", _f.get("checkpoint_step"), a.container)
-                    r = subprocess.run(argv, capture_output=True, text=True, timeout=2100)
+                    r = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=2100)
                     if r.returncode != 0 or not (r.stdout or "").strip():
                         return {"ok": False}
                     return json.loads(r.stdout.strip().splitlines()[-1])
 
                 def launch_once(plan, _f=fetched):
                     argv = mod.ssh_launch_argv(a.host, _f.get("leg") or "", _f.get("checkpoint_step"), a.container)
-                    r = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+                    r = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=180)
                     if r.returncode != 0 or not (r.stdout or "").strip():
                         return {"ok": False}
                     data = json.loads(r.stdout.strip().splitlines()[-1])
@@ -325,7 +371,7 @@ while True:
                     os.makedirs(os.path.dirname(local_cfg), exist_ok=True)
                     scp = subprocess.run(["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                                           a.host + ":" + data["memory_config_remote"], local_cfg],
-                                         capture_output=True, text=True, timeout=60)
+                                         capture_output=True, text=True, errors="replace", timeout=60)
                     if scp.returncode != 0:
                         return {"ok": False}
                     flags = [x for x in sys.argv[1:] if x != "-"]
@@ -350,7 +396,8 @@ while True:
         if ended or (harm and not os.environ.get("MONITOR_DRY_RUN")): break
     except Exception as e:
         if not unreachable_posted:
-            post("monitor: Spark unreachable (%s); retrying every %ds" % (type(e).__name__, a.interval), thread); unreachable_posted = True
+            post(monitor_error_line(e, a.interval), thread)
+            unreachable_posted = isinstance(e, (SSHFailure, subprocess.TimeoutExpired))
     if time.time() + a.interval > deadline:
         post("monitor stopping at max-hours; run still active (step %s/%s)" % ((last or {}).get("step", "n/a"), (last or {}).get("total", "n/a")), thread); break
     time.sleep(a.interval)

@@ -1064,11 +1064,11 @@ if r.get('ok'):
     if (os.environ.get('SLACK_SEND_AS') == 'alerts'
             and channel == 'C0ALZJHGE49' and not pl.get('thread_ts')
             and re.match(r'^(?:<@U0BNFGX2UAX> )?[*]?Hourly — ', pl.get('text', ''))):
-        # Three replies: PR status, tracked features, issue lifecycle (Rajiv
-        # C0ALZJHGE49 thread 1793116023.781399, ts 1793118979.539329). Each is
-        # idempotent per thread; one failure does not skip the others.
+        # ONE reply: open PR status only. Tracked features and issue lifecycle
+        # replies removed (Rajiv C0ALZJHGE49 thread 1794375876.799129, ts
+        # 1794380788.474799 and ts 1794380973.336489). Supersedes ts 1793118979.539329.
         rc = 0
-        for name in ('pr-status-report.py', 'tracked-features-report.py', 'issue-lifecycle-report.py'):
+        for name in ('pr-status-report.py',):
             report = os.path.expanduser('~/.claude/scripts/pm/heartbeat/' + name)
             # Keep child receipts out of the parent sender's stdout; retain them
             # on stderr alongside each hook's own custody/diagnostic output.
