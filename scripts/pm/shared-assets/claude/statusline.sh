@@ -36,19 +36,8 @@ PROJECT_ROOT=$(echo "$input" | jq -r '.workspace.current_dir // ""')
 if [ -z "$PROJECT_ROOT" ] || [ ! -f "${PROJECT_ROOT}/.env.local" ]; then
   PROJECT_ROOT=$(git -C "${PROJECT_ROOT}" rev-parse --show-toplevel 2>/dev/null || echo "")
 fi
-# Numbered checkout identity wins over stale or missing .env.local values. This
-# also works when Claude is relaunched directly from the pane, bypassing the launcher.
-case "$PROJECT_ROOT" in
-  /Users/rajiv/Downloads/projects/heydonna-app-3001) SLOT_NAME=Rohini ;;
-  /Users/rajiv/Downloads/projects/heydonna-app-3002) SLOT_NAME=Hasta ;;
-  /Users/rajiv/Downloads/projects/heydonna-app-3003) SLOT_NAME=Ashwini ;;
-  /Users/rajiv/Downloads/projects/heydonna-app-3004) SLOT_NAME=Chitra ;;
-  /Users/rajiv/Downloads/projects/heydonna-app-3005) SLOT_NAME=Revati ;;
-  /Users/rajiv/Downloads/projects/heydonna-app-3006) SLOT_NAME=Pushya ;;
-  /Users/rajiv/Downloads/projects/heydonna-app-3007) SLOT_NAME=Swati ;;
-  /Users/rajiv/Downloads/projects/heydonna-app-3008) SLOT_NAME=Anuradha ;;
-  *) SLOT_NAME=${SLOT_NAME:-$(grep '^SLOT_NAME=' "${PROJECT_ROOT}/.env.local" 2>/dev/null | cut -d= -f2- | tr -d '"' || echo "")} ;;
-esac
+# Read SLOT_NAME from project root .env.local — uses PROJECT_ROOT (works from any subdir)
+SLOT_NAME=$(grep '^SLOT_NAME=' "${PROJECT_ROOT}/.env.local" 2>/dev/null | cut -d= -f2- | tr -d '"' || echo "")
 ROOT_NAME=$(basename "$PROJECT_ROOT")
 CWD=$(pwd)
 
