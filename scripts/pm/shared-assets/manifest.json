@@ -1212,6 +1212,15 @@
       "source_path": "claude/skills/pane-video/scripts/record-pane.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/skills/playwright-qa-spec/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "93dda1ba290cf19ed733431c823eeb63acceec5bbffcd8259624becbc3b0952a",
+      "source_path": "claude/skills/playwright-qa-spec/SKILL.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/skills/pm-cleanup-pr/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1487,6 +1496,15 @@
       "ownership_class": "shared-claude-slot-skill-wrapper",
       "sha256": "304e715d621e2a67fe0ee40d64e483b060db6405a28065b3314ef03a5ad55cda",
       "source_path": "claude/slot-skills/slot7/respawn/scripts/respawn.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/statusline.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-slot-identity",
+      "sha256": "6a657c6d4e3b087627daeb5ab8532c8a45313a53af5977661c01d6612c6e7a92",
+      "source_path": "claude/statusline.sh"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/rules/33-heydonna-ui-product-rules.md",
@@ -1802,24 +1820,6 @@
       "ownership_class": "shared-codex-skill-test",
       "sha256": "3b20dfdfa3357e0bd0d0252392d0fb7354df63006330f709fd8b912177427710",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
-    },
-    {
-      "canonical_target": "/Users/rajiv/.claude/skills/playwright-qa-spec/SKILL.md",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 420,
-      "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "93dda1ba290cf19ed733431c823eeb63acceec5bbffcd8259624becbc3b0952a",
-      "source_path": "claude/skills/playwright-qa-spec/SKILL.md"
-    },
-    {
-      "canonical_target": "/Users/rajiv/.claude/statusline.sh",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 493,
-      "ownership_class": "shared-claude-slot-identity",
-      "sha256": "77532593cd395f0cc25a3cec14bfaf78d914f10e6578cea5baab8febd7ffcab6",
-      "source_path": "claude/statusline.sh"
     }
   ],
   "inventory": {
