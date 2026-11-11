@@ -23,6 +23,14 @@ import type { PasteGuard } from "./pasteGuard.js";
 
 export type SlotActivityState = "active" | "idle" | "unknown";
 
+/** Fail closed when the recent pane cannot prove background agents are absent. */
+export function devExitQuietRefusal(quiet: boolean, snapshot?: string | null): string | null {
+  if (!quiet) return "exit_not_quiet_60s";
+  if (typeof snapshot !== "string" || !snapshot.trim()) return "exit_capture_unknown";
+  const recent = snapshot.trimEnd().split(/\r?\n/).slice(-6).join("\n");
+  return /←\s*\d+\s+agents?|agents running/i.test(recent) ? "exit_background_agents" : null;
+}
+
 /** Slots 1-4 set HEYDONNA_SLOT_STOP_GATED. A Stop that reaches MoP from them is allowed only when marked. */
 export function isGatedDevSlot(slotNum: number): boolean {
   return slotNum >= 1 && slotNum <= 4;
@@ -1493,6 +1501,9 @@ export class TmuxRelay {
     raw: boolean,
   ): Promise<void> {
     let pin = initialPin;
+    // Stop completes the turn after its handler returns. Re-evaluate once after
+    // the quiet window; busy transitions reset the database's observation clock.
+    if (isGatedDevSlot(slotNum)) await sleep(61_000);
     for (let hop = 0; hop < 4; hop++) {
       const allowed = this.gatedStopAllowed(slotNum, pin);
       let continued: string | null;
@@ -2207,7 +2218,9 @@ export class TmuxRelay {
     if (!isValidRuntimeSlot(slotNum)) return { outcome: "refused_pre_effect", reason: "unknown_slot", paneId: null };
     const ownerRefusal = () => opts.exitOwnerPin ? this.exitOwnerRefusal(slotNum, opts.exitOwnerPin) : null;
     const finalCheck = (stage: "pre_paste" | "pre_enter", snapshot?: string | null) =>
-      ownerRefusal() ?? opts.finalCheck?.(stage, snapshot) ?? null;
+      ownerRefusal() ?? (isGatedDevSlot(slotNum) && command === "/exit" && opts.exitEpisode
+        ? devExitQuietRefusal(this.db?.exitQuietReady(slotNum) === true, snapshot) : null)
+      ?? opts.finalCheck?.(stage, snapshot) ?? null;
     if (ownerRefusal()) return { outcome: "refused_pre_effect", reason: "slot_owner_changed", paneId: null };
     const identity = await verifyPaneIdentity(slotNum, this.runShell);
     if (!identity.ok) return { outcome: "refused_pre_effect", reason: `pane_identity:${identity.reason}`, paneId: null };
@@ -2240,6 +2253,7 @@ export class TmuxRelay {
       const trackedExit = command === "/exit" && !!opts.exitEpisode;
       if (trackedExit && !opts.exitOwnerPin) return { outcome: "refused_pre_effect", reason: "stop_owner_required", paneId };
       if (trackedExit && (!exitProcess || !this.db)) return { outcome: "refused_pre_effect", reason: "claude_process_unknown", paneId };
+      if (trackedExit && isGatedDevSlot(slotNum) && previous) return { outcome: "refused_pre_effect", reason: "exit_attempt_already_owned", paneId };
       if (trackedExit && previous && (previous.originalProcess !== exitProcess
           || previous.sessionId !== this.db?.latestSessionId(slotNum)
           || previous.assignmentEpoch !== (this.db?.getSlot(slotNum)?.assignment_epoch ?? 0)

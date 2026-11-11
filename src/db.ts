@@ -1064,6 +1064,20 @@ export class MoPDatabase {
     })) as unknown as SlotState[];
   }
 
+  // In-memory by design: after a server restart, quiet time must be observed anew.
+  private exitQuietSince = new Map<number, number>();
+
+  exitQuietReady(slot: number, now = Date.now()): boolean {
+    const row = this.getSlot(slot);
+    if (!row || !row.idle || row.active_turn_state !== "inactive") {
+      this.exitQuietSince.delete(slot);
+      return false;
+    }
+    const since = this.exitQuietSince.get(slot);
+    if (since === undefined) { this.exitQuietSince.set(slot, now); return false; }
+    return now - since >= 60_000;
+  }
+
   updateSlot(slot: number, updates: Partial<SlotState>): void {
     const allowedFields = [
       "name", "session_id", "task", "last_activity", "dnd", "idle", "activity",
@@ -1106,6 +1120,10 @@ export class MoPDatabase {
 
     values.push(slot);
     this.db.prepare(`UPDATE slots SET ${sets.join(", ")} WHERE slot = ?`).run(...values);
+    if (updates.idle === false || (updates.active_turn_state !== undefined && updates.active_turn_state !== "inactive") || updates.active_turn_id) {
+      this.exitQuietSince.delete(slot);
+    }
+    this.exitQuietReady(slot);
   }
 
   /**
