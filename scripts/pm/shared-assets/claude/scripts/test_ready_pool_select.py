@@ -5,6 +5,7 @@ Run: python3 -m unittest ~/.claude/scripts/test_ready_pool_select.py  (stdlib on
 """
 
 import http.client
+import os
 import importlib.util
 import pathlib
 import unittest
@@ -426,6 +427,11 @@ class GraphQLTransportRetryTests(unittest.TestCase):
     http.client.IncompleteRead (a HTTPException, not an OSError) straight out of
     _paginate_issues, so every slot assignment failed with a traceback.
     """
+
+    def setUp(self):
+        # These tests stub the transport; never let them write fixture issues into the
+        # shared GitHub cache that live selection reads.
+        os.environ["GH_BUDGET_DISABLE"] = "1"
 
     def _query(self, page_size=100):
         return ("query($cursor:String){repository(owner:\"Scribie\",name:\"heydonna-app\"){"
