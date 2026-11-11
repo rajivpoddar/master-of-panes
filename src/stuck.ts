@@ -2301,6 +2301,7 @@ export const API_STALL_MAX_CONSECUTIVE_NUDGES = 3;
 export const API_STALL_SIGNATURES: ReadonlyArray<{ name: string; pattern: RegExp }> = [
   { name: "stream_disconnected", pattern: /stream (?:error|disconnected|closed before)/i },
   { name: "servers_overloaded", pattern: /overloaded/i },
+  { name: "provider_generic_error", pattern: /An error occurred while processing your request/i },
   { name: "http_5xx", pattern: /API Error:\s*(?:\(?\s*)?5\d\d\b/ },
   { name: "server_error_mid_response", pattern: /API Error:\s*Server error\b|server error mid-response/i },
   { name: "internal_server_error", pattern: /internal server error|server_error|bad gateway|service unavailable|gateway time-?out/i },

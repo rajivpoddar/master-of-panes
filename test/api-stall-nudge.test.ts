@@ -123,6 +123,25 @@ test("mid-response stall keeps the grace period, then one nudge", () => {
   assert.equal(t.observe(1, T0 + 90_000, input).kind, "none");
 });
 
+const PROVIDER_GENERIC_ERROR = "⏺ API Error: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID <uuid> in your message.";
+
+test("provider generic error is detected and nudged after the grace period", () => {
+  const pane = [PROVIDER_GENERIC_ERROR, ...PROMPT].join("\n");
+  assert.equal(classifyApiStallTail(pane).stalled, true);
+  assert.equal(classifyApiStallTail(pane).signature, "provider_generic_error");
+  const t = new ApiStallTracker(75_000);
+  assert.equal(t.observe(3, T0, idle(pane)).kind, "wait");
+  assert.equal(t.observe(3, T0 + 80_000, idle(pane)).kind, "nudge");
+});
+
+test("provider generic error in a tool result is not detected or nudged", () => {
+  const pane = [PROVIDER_GENERIC_ERROR.replace("⏺ ", "  ⎿  "), ...PROMPT].join("\n");
+  assert.equal(classifyApiStallTail(pane).stalled, false);
+  const t = new ApiStallTracker(75_000);
+  assert.equal(t.observe(3, T0, idle(pane)).kind, "none");
+  assert.equal(t.observe(3, T0 + 80_000, idle(pane)).kind, "none");
+});
+
 test("tracker: grace period, then exactly one nudge per stall", () => {
   const t = new ApiStallTracker(75_000);
   assert.equal(t.observe(1, T0, idle(STREAM_STALL)).kind, "wait");
