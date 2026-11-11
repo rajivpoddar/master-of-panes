@@ -708,7 +708,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "2677968e6c8c6df322f75310955e53beffc45d34a5538407fd1d5475035c0450",
+      "sha256": "bc6672acf12e10402a9bb25fd7cce6993e922bf694efc688d3c64ceb4f2c7202",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -1100,7 +1100,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "1e111a068d23948859b4ba66b60aa4212abb59f9bd1ffc9f17d24e8bc584d09d",
+      "sha256": "fb89af473d002c0f311a4d0059309a5b61a184937edb782a638e64747b527cca",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
@@ -1793,6 +1793,15 @@
       "ownership_class": "shared-codex-skill-test",
       "sha256": "3b20dfdfa3357e0bd0d0252392d0fb7354df63006330f709fd8b912177427710",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules/20-buddhi-pm.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-buddhi",
+      "sha256": "f8d9f32e6c1583a42ee88135e505445964fe29ab049c497386d30dafff4bbe37",
+      "source_path": "claude/rules/20-buddhi-pm.md"
     }
   ],
   "inventory": {

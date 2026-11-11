@@ -1449,6 +1449,47 @@ def _proxy_completions(now: datetime) -> tuple[list[dict], bool]:
     return completed, len(entries) == 200
 
 
+def proxy_work_history(rows: list[dict], now: datetime, path: Path = PM_OPS_DB) -> None:
+    """Existing custody records only; process uptime never establishes work age."""
+    try:
+        with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
+            records = conn.execute(
+                "SELECT issue, payload_json FROM events WHERE source='proxy-agent' "
+                "AND target_type='proxy_assignment' ORDER BY id DESC LIMIT 1001"
+            ).fetchall()
+        # A truncated history cannot certify a complete original work clock.
+        complete = len(records) <= 1000
+        by_name = {}
+        for issue, raw in records[:1000]:
+            payload = json.loads(raw)
+            name = payload.get('proxy')
+            if isinstance(name, str) and name not in by_name:
+                by_name[name] = (issue, payload)
+        for row in rows:
+            name = row['name']
+            record = by_name.get(name) or by_name.get('proxy-' + name.removeprefix('px-'))
+            if not record:
+                continue
+            issue, payload = record
+            ref = payload.get('ref', '')
+            if not isinstance(ref, str) or not re.fullmatch(r'(issue|pr):[1-9][0-9]*', ref):
+                continue
+            row['work_ref'] = ref
+            row['work_issue'] = issue
+            head = payload.get('head_sha')
+            if isinstance(head, str) and re.fullmatch(r'[0-9a-fA-F]{40}', head):
+                row['work_head'] = head
+            for field in ('stage_started_at', 'work_started_at', 'last_progress_at'):
+                start = _parse_ts(payload.get(field))
+                if start and start <= now and (field != 'work_started_at' or complete):
+                    row[field + '_minutes'] = int((now - start).total_seconds() // 60)
+            for field in ('boundary', 'next_checkpoint'):
+                if isinstance(payload.get(field), str):
+                    row[field] = _compact(payload[field], 100)
+    except (OSError, sqlite3.Error, ValueError, TypeError, AttributeError):
+        return  # Unavailable metadata stays UNKNOWN; never substitute process age.
+
+
 def _read_proxies(now: datetime) -> dict | None:
     """tmux is required. ps and the stop-event read are best-effort and never wipe a good window list."""
     try:
@@ -1470,6 +1511,7 @@ def _read_proxies(now: datetime) -> dict | None:
     except (OSError, sqlite3.Error, ValueError, TypeError):
         completed, truncated = [], False
     snapshot = build_proxy_snapshot(tmux, ps, now, completed)
+    proxy_work_history(snapshot['rows'], now)
     snapshot["truncated"] = truncated
     _proxy_cache_save(PROXY_CACHE, snapshot, now)
     return snapshot
@@ -1531,13 +1573,16 @@ def proxies_block(doc: dict | None) -> list[str]:
         elif row.get("stale") or row.get("state") == "STALE":
             flags.append("stale")
         flag = f" · {' · '.join(flags)}" if flags else ""
-        rendered.append(f"• {row['name']} · {row.get('model', 'unknown')} · age {age} · last activity {last_s}{flag}")
+        def elapsed(field):
+            value = row.get(field + '_minutes')
+            return f'{value // 60}h{value % 60:02d}m' if isinstance(value, int) and value >= 0 else 'UNKNOWN'
+        rendered.append(f"• {row.get('work_ref', 'issue/PR UNKNOWN')} @{row.get('work_head', 'UNKNOWN')} · {row.get('model', 'unknown')} {row['name']} · this stage {elapsed('stage_started_at')} · total {elapsed('work_started_at')} · last progress {elapsed('last_progress_at')} ago · boundary {row.get('boundary', 'UNKNOWN')} · next {row.get('next_checkpoint', 'UNKNOWN')} · process age {age} · activity {last_s}{flag}")
     for row in completed:
         if row["rc"] != "0":
             rendered.append(f"• {row['name']} · finished · rc={row['rc']} (FAILED)")
-    lines.extend(rendered[:PROXY_ROW_CAP])
-    if len(rendered) > PROXY_ROW_CAP:
-        lines.append(f"• +{len(rendered) - PROXY_ROW_CAP} more")
+    # Parent compaction may abbreviate this block; saved input/full block retains
+    # every row for the existing hourly inspector rather than dropping row 25+.
+    lines.extend(rendered)
     return lines
 
 
