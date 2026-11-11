@@ -44,7 +44,7 @@ AXIOM_REPORT = SCRIPTS / "heartbeat-axiom.py"  # MoP-side helper (moved from hey
 # Priority inversion and pending GitHub checks complete paginated, live reads; allow one
 # bounded 45s extension for those legitimately necessary probes.
 COLLECTOR_TIMEOUTS = {
-    "axiom": 45, "active-users": 45, "error-map": 90, "support": 30,
+    "axiom": 45, "active-users": 45, "error-map": 90, "support": 120,
     "pr-open-snapshot": 90, "priority-inversion": 90,
     "pending-github": 90, "remote-boxes": 30,
     "usage": 30, "email": 30, "proxies": 5,
@@ -1851,11 +1851,11 @@ def _priority_inversion_worker(selector_path: str, slots_doc: dict | list | None
     graphql_http = rps.graphql_http
 
     def bounded_graphql(*args, **kwargs):
-        kwargs['timeout'] = min(kwargs.get('timeout', 5), 5)
+        kwargs['timeout'] = min(kwargs.get('timeout', 20), 20)
         return graphql_http(*args, **kwargs)
 
     rps.graphql_http = bounded_graphql
-    issues = rps.load_open_issues(timeout=min(timeout, 10))
+    issues = rps.load_open_issues(timeout=min(timeout, 60))
     prio = {int(i["number"]): rps.priority_rank({l["name"] for l in i.get("labels") or []}, i.get("body") or "")
             for i in issues}
     return rps.priority_inversions(slots, prio, rps.rank_candidates(issues))

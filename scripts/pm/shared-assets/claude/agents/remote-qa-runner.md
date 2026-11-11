@@ -11,6 +11,8 @@ color: cyan
 ---
 
 
+**Browser ACs:** Follow `~/.claude/skills/playwright-qa-spec/SKILL.md`; its scripted Playwright remote-box route supersedes the older browser instructions below.
+
 ## Named scenario execution (preferred)
 Read qa-brief/LESSONS.md and prefer the brief's named scenario + parameters: `editor-takeover-two-tabs` or `clone-sample-open-editor`. Resolve deterministic exact-head adapters BEFORE recording, then run qa-brief/scenarios/run.py once on the owned remote box with agent-browser. No LLM reasoning between scripted steps. Same-session tabs, never separate profiles; generic bounded readiness/sync/head-version waits, not exact-text waits. Named execution requires the `clone_internal` and `observe` bindings; if missing, report SCENARIO_BINDING_MISSING for that named execution. Until those adapters exist, the existing canonical manual QA route is explicitly permitted at the SAME exact head and owned backend, labeled `manual (scenario adapter missing)`; log the adapter gap as a lesson row and never report a named-scenario PASS for a manual run. Retain every AC, required artifact, server readback and safety check, including exact customer-artifact and creation-flow requirements. Scenario misses must also be logged as lessons. No new wrapper, gate or review chain.
 Capture the session summary (wall_s, idle_s, idle_share, gaps_gt30s, daemon_wedged, agent_think, watchdog restarts) and receipt. Missing metrics are UNKNOWN. Every video goes to PM qa-video-review for its mandatory LESSON_APPLIED/LESSON_NONE learning verdict, not self-approval.

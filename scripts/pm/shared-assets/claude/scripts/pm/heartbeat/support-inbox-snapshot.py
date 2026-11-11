@@ -22,9 +22,11 @@ import json
 import os
 import re
 import subprocess
+import socket
 import sys
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -90,10 +92,9 @@ CLOSING_MAX_CHARS = 100
 MAIN_CHECKOUT = Path.home() / "Downloads/projects/heydonna-app"
 OPEN_STATE = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/support-inbox-open.json"
 
-# Total wall budget for the whole collector. The heartbeat composer blocks on this
-# process, so exceeding it stalls the entire report (observed: two missed heartbeats).
-# Override with SUPPORT_INBOX_BUDGET_S.
-SUPPORT_BUDGET_S = min(float(os.environ.get("SUPPORT_INBOX_BUDGET_S") or 12.0), 12.0)
+# Fallback deadline for direct function calls. main assigns bounded per-source
+# deadlines; the composer enforces the overall process timeout.
+SUPPORT_BUDGET_S = 120.0
 DEADLINE: float | None = None
 
 
@@ -237,8 +238,13 @@ def slack_get(token: str, method: str, params: dict) -> dict:
     url = f"https://slack.com/api/{method}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     for attempt in range(3):
-        with urllib.request.urlopen(req, timeout=min(2.0, remaining_budget())) as resp:
-            body = json.load(resp)
+        try:
+            with urllib.request.urlopen(req, timeout=min(10.0, remaining_budget())) as resp:
+                body = json.load(resp)
+        except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+            if attempt < 2 and remaining_budget() > 0:
+                continue
+            raise RuntimeError(f"slack {method}: request failed after retries: {exc}") from exc
         if body.get("ok"):
             return body
         if body.get("error") == "ratelimited" and attempt < 2:
@@ -547,8 +553,8 @@ def classify_feedback_rows(rows: list[dict], window_start_ms: int) -> list[dict]
 
 def fetch_in_app(window_start_ms: int, limit: int = 50) -> list[dict]:
     proc = subprocess.run(
-        ["npx", "convex", "data", "feedback", "--prod", "--limit", str(limit), "--order", "desc", "--format", "jsonl"],
-        capture_output=True, text=True, errors="replace", timeout=min(3.0, remaining_budget()), cwd=str(MAIN_CHECKOUT),
+        ["npx", "convex", "data", "feedback", "--deployment", "beloved-cardinal-941", "--limit", str(limit), "--order", "desc", "--format", "jsonl"],
+        capture_output=True, text=True, errors="replace", timeout=min(45.0, remaining_budget()), cwd=str(MAIN_CHECKOUT),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"convex data feedback failed: {proc.stderr.strip()[-200:]}")
@@ -561,6 +567,7 @@ def main() -> int:
     parser.add_argument("--hours", type=float, default=3.0)
     parser.add_argument("--lookback-hours", type=float, default=24.0, help="how far back to find still-open threads")
     parser.add_argument("--no-in-app", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="do not save tracking state")
     args = parser.parse_args()
 
     now = datetime.now(timezone.utc)
@@ -579,18 +586,19 @@ def main() -> int:
         for channel in CHANNELS:
             # Each channel and tracked refresh owns a small budget; neither may
             # spend the following channel's or in-app read's allowance.
-            DEADLINE = time.monotonic() + 2.0
+            DEADLINE = time.monotonic() + 25.0
             try:
                 threads = fetch_channel(token, channel, now_ts - args.lookback_hours * 3600, now_ts)
                 pending_count = len(set(prev_state.get(channel, {})) - {t['ts'] for t in threads})
-                DEADLINE = deadline = time.monotonic() + 1.0
+                DEADLINE = deadline = time.monotonic() + 5.0
                 threads, next_cursor = carry_forward(
                     threads, prev_state.get(channel, []),
                     lambda ts, ch=channel: fetch_thread(token, ch, ts, now_ts),
                     deadline=deadline,
                     cursor=load_carry_cursor(channel),
                 )
-                save_carry_cursor(channel, next_cursor)
+                if not args.dry_run:
+                    save_carry_cursor(channel, next_cursor)
                 threads = apply_skips(threads, channel, skips)
                 if time.monotonic() >= deadline or pending_count > MAX_CARRY_FORWARD:
                     result["failures"].append(f"{CHANNELS[channel]}: partial; tracked threads not fully refreshed")
@@ -605,11 +613,12 @@ def main() -> int:
                 # Keep the previous open set for this channel so nothing is dropped.
                 result["failures"].append(f"{CHANNELS[channel]}: {exc}")
         try:
-            save_open_state(new_state)
+            if not args.dry_run:
+                save_open_state(new_state)
         except OSError as exc:
             result["failures"].append(f"open-state save: {exc}")
     if not args.no_in_app:
-        DEADLINE = time.monotonic() + 3.0
+        DEADLINE = time.monotonic() + 45.0
         try:
             result["in_app"] = fetch_in_app(int(window_start * 1000))
         except Exception as exc:  # noqa: BLE001

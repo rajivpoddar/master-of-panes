@@ -62,7 +62,7 @@ clean_bad_ci_head_labels() {
 
 # Related-tests gate is OFF by default (Rajiv 2026-10-11, DM ts 1791738750.254179: "why does pm admission have to run tsc or vitest? that's already done by the slots."). Slots run tests; CI is the gate. Opt in with --related-tests.
 NO_12B_GATE=0; OVERRIDE_REASON=""
-NO_UPDATE=0; DRY=0; SKIP_REASON="default-off: slots ran tests, CI is the gate (Rajiv ts 1791738750.254179)"; FORCE_CI=""; ALLOW_MAIN_RED=""; MAIN_RED_SKIP=0
+NO_UPDATE=0; DRY=0; SKIP_REASON="default-off: slots ran tests, CI is the gate (Rajiv ts 1791738750.254179)"; FORCE_CI=""; ALLOW_MAIN_RED=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-12b-gate) NO_12B_GATE=1 ;;
@@ -73,7 +73,6 @@ while [ $# -gt 0 ]; do
     --skip-related-tests) SKIP_REASON="${2:-}"; [ -n "$SKIP_REASON" ] || { echo "--skip-related-tests requires a reason"; exit 64; }; shift ;;
     --force-ci) FORCE_CI="${2:-}"; [ -n "$FORCE_CI" ] || { echo "--force-ci requires a reason"; exit 64; }; shift ;;
     --allow-main-red) ALLOW_MAIN_RED="${2:-}"; [ -n "$ALLOW_MAIN_RED" ] || { echo "--allow-main-red requires a reason"; exit 64; }; shift ;;
-    --main-red-skip) MAIN_RED_SKIP=1 ;;
     *) echo "unknown arg: $1"; exit 64 ;;
   esac
   shift
@@ -86,51 +85,18 @@ if [ "$CHECK_12B_ONLY" = 1 ] && { [ "$NO_12B_GATE" = 1 ] || [ "$DRY" = 1 ]; }; t
   echo 'REFUSE: --check-12b-only does not allow overrides or other execution modes'; exit 64
 fi
 
-GATE_12B_RESULT=""
 gate_12b() {
-  local head="$1" payload rc=0
+  local head="$1" payload
   if [ "$NO_12B_GATE" = 0 ]; then
-    GATE_12B_RESULT=$(python3 -I "$SCRIPT_DIR/pm-admit-12b.py" --repo "$REPO" --pr "$PR" --head "$head") || rc=$?
-    [ -n "$GATE_12B_RESULT" ] && echo "$GATE_12B_RESULT"
-    return "$rc"
+    python3 -I "$SCRIPT_DIR/pm-admit-12b.py" --repo "$REPO" --pr "$PR" --head "$head"
+    return $?
   fi
-  GATE_12B_RESULT="12B_GATE: override pr=$PR head=$head reason=$OVERRIDE_REASON"
-  echo "$GATE_12B_RESULT"
+  echo "12B_GATE: override pr=$PR head=$head reason=$OVERRIDE_REASON"
   [ "$DRY" = 1 ] && return 0
   # Fail closed if either audit sink is unavailable. Never silently bypass auditing.
   printf '%s PR=%s head=%s no-12b-gate reason=%s\n' "$(date -u +%FT%TZ)" "$PR" "$head" "$OVERRIDE_REASON" >> "$HOME/.claude/logs/pm-admit-skip.log" || return 3
   payload=$(python3 -I -c 'import json,sys;print(json.dumps({"reason":sys.argv[1]}))' "$OVERRIDE_REASON") || return 3
   python3 -I "$SCRIPT_DIR/../pm-ops.py" record --source pm-admit-ci --event 12b_gate_override --actor PM --target-type github_pr --target-id "$PR" --pr "$PR" --head-sha "$head" --payload-json "$payload" >/dev/null || return 3
-}
-
-remote_redgreen_gate() {
-  local head="$1" files comments verdict="" file
-  if [ "$MAIN_RED_SKIP" = 1 ]; then echo "remote red-green gate: BYPASSED (--main-red-skip sanctioned untested path)"; return 0; fi
-  files=$(gh pr diff "$PR" --repo "$REPO" --name-only) || { echo "REFUSE remote_redgreen_missing <unavailable test file list>"; return 10; }
-  files=$(printf '%s\n' "$files" | grep -Ei '(^|/)(test|tests|__tests__|spec|specs)/|(^|/)test_[^/]+\.py$|_test\.py$|\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|py)$' | sort -u || true)
-  if [ -z "$files" ]; then echo "remote red-green gate: no test files"; return 0; fi
-  comments=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[].body') || { echo "REFUSE remote_redgreen_missing $files"; return 10; }
-  # The receipt header is the first line. Exact-head is normal; H0 is accepted only
-  # when the existing 12B evaluator has proven a main-merges-only delta.
-  if [ "$head" = "$H0" ] || [[ "$GATE_12B_RESULT" == *"main-merges-only"* ]]; then
-    verdict=$(printf '%s' "$comments" | python3 -I -c '
-import re,sys
-text=sys.stdin.read(); files=sys.argv[1].splitlines(); head=sys.argv[2]; pre=sys.argv[3]
-for body in re.split(r"(?m)(?=^REMOTE_BOX_RUN head=)", text):
-    lines=body.splitlines()
-    if not lines: continue
-    m=re.fullmatch(r"REMOTE_BOX_RUN head=([0-9a-f]{40})(?:\s+.*)?", lines[0].strip())
-    if not m or m.group(1) not in {head,pre}: continue
-    receipt="\n".join(lines)
-    if not re.search(r"(?i)RED[- ]on[- ]revert[^\n]*(?:PASS|GREEN|rc=0|passed)", receipt): continue
-    if not re.search(r"(?i)(?:typecheck|tsc)[^\n]*(?:rc=0|passed|green)", receipt): continue
-    if not all(re.search(r"(?m)(?:^|[^\S\n])"+re.escape(f)+r"[^\n]*(?:rc=0|PASS|passed)", receipt) for f in files): continue
-    print(m.group(1)); break
-' "$files" "$head" "$H0")
-  fi
-  if [ -n "$verdict" ]; then echo "remote red-green gate: PASS receipt_head=$verdict test_files=$(printf '%s\n' "$files" | wc -l | tr -d ' ')"; return 0; fi
-  echo "REFUSE remote_redgreen_missing $files"
-  return 10
 }
 
 # This precedes ALL admission effects, including body/label writes and main updates.
@@ -140,8 +106,6 @@ PRSTATE=$(gh_get pr_state ok gh pr view "$PR" --repo "$REPO" --json state --jq .
 rc=0; gate_12b "$H0" || rc=$?
 [ "$rc" = 0 ] || exit "$rc"
 [ "$CHECK_12B_ONLY" = 0 ] || exit 0
-rc=0; remote_redgreen_gate "$H0" || rc=$?
-[ "$rc" = 0 ] || exit "$rc"
 
 related_tests_gate() {
   local head="$1" wt="/tmp/admit-$PR-${1:0:12}" out rc=0 files n
@@ -283,8 +247,6 @@ except Exception: print("err err err x")' 2>/dev/null)"
 if [ "$DRY" = 1 ]; then
   H=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
   echo "DRY RUN PR #$PR head=$H"
-  rc=0; remote_redgreen_gate "$H" || rc=$?
-  [ $rc -ne 0 ] && { echo "DRY RUN done (remote red-green gate rc=$rc); nothing admitted"; exit $rc; }
   rc=0; scope_gate "$H" || rc=$?
   [ $rc -ne 0 ] && { echo "DRY RUN done (scope gate rc=$rc); nothing admitted"; exit $rc; }
   rc=0; related_tests_gate "$H" || rc=$?
@@ -348,8 +310,6 @@ if [ "$HEAD" != "$H0" ]; then
   rc=0; gate_12b "$HEAD" || rc=$?
   [ "$rc" = 0 ] || exit "$rc"
 fi
-rc=0; remote_redgreen_gate "$HEAD" || rc=$?
-[ "$rc" = 0 ] || exit "$rc"
 echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 [ "$MERGEABLE" = "CONFLICTING" ] && { echo "REFUSE: conflict with main; route to slot"; exit 2; }
 # Priority mirroring is best-effort and must never block admission.

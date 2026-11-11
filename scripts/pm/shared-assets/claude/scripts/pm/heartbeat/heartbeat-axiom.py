@@ -39,6 +39,8 @@ SUPERSEDED_FILTER = f"{MESSAGE_CLASS_EXTEND}| where mclass == '{SUPERSEDED_CLASS
 ERROR_CODE_EXTEND = (
     "| where ['level'] == 'error' "
     f"{MESSAGE_CLASS_EXTEND}| where mclass != '{SUPERSEDED_CLASS}' "
+    # 2026-11-11 PM: some superseded-save events carry no messageClass; exclude by their fixed errorMessage (inside meta JSON) too.
+    "| where tostring(['meta']) !contains 'Save superseded by a newer local completion' "
     "| extend code = coalesce(tostring(['action']), tostring(['message']), 'unknown'), "
     "uid = tostring(['userId']), em = tostring(['email']) "
     f"| extend who = case(isnotempty(uid) and uid !in ({_apl_list(WHO_SENTINELS)}), uid, "
