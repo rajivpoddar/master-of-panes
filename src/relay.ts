@@ -1501,9 +1501,6 @@ export class TmuxRelay {
     raw: boolean,
   ): Promise<void> {
     let pin = initialPin;
-    // Stop completes the turn after its handler returns. Re-evaluate once after
-    // the quiet window; busy transitions reset the database's observation clock.
-    if (isGatedDevSlot(slotNum)) await sleep(61_000);
     for (let hop = 0; hop < 4; hop++) {
       const allowed = this.gatedStopAllowed(slotNum, pin);
       let continued: string | null;

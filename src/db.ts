@@ -1120,7 +1120,7 @@ export class MoPDatabase {
 
     values.push(slot);
     this.db.prepare(`UPDATE slots SET ${sets.join(", ")} WHERE slot = ?`).run(...values);
-    if (updates.idle === false || (updates.active_turn_state !== undefined && updates.active_turn_state !== "inactive") || updates.active_turn_id) {
+    if (updates.idle === false || (updates.active_turn_state !== undefined && updates.active_turn_state !== "inactive")) {
       this.exitQuietSince.delete(slot);
     }
     this.exitQuietReady(slot);
