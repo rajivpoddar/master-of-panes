@@ -130,6 +130,22 @@ def test_native_peer_and_current_brief_bind_double_prefixed_window(tmp_path, mon
         assert 'pr:13533 @UNKNOWN' in rendered and 'this stage UNKNOWN' in rendered
 
 
+def test_reparented_named_proxy_and_unverified_cases(tmp_path):
+    now = datetime(2026, 11, 11, 14, tzinfo=timezone.utc)
+    job = tmp_path / 'proxy-agent-job.reparented'
+    job.mkdir()
+    runner = job / 'run.sh'
+    runner.write_text('claude --name px-owned --model luna\n')
+    window = f'0\tpx-owned\t{int(now.timestamp())}\t{{dead}}\t100\tbash {runner}\n'
+    process = '100 1 00:00:10 bash run.sh\n101 1 00:00:09 /usr/bin/claude --name px-owned --model luna\n'
+    def row(dead, ps):
+        return module.build_proxy_snapshot(window.format(dead=dead), ps, now, [])['rows'][0]
+    assert row(0, process)['current_peer'] == 'px-owned'
+    assert 'current_peer' not in row(1, process)
+    assert 'current_peer' not in row(0, '100 1 00:00:10 bash run.sh\n')
+    assert 'current_peer' not in row(0, process + '102 1 00:00:08 /usr/bin/claude --name px-owned\n')
+
+
 def test_proxy_output_age_future_and_invalid_is_unknown(tmp_path, monkeypatch):
     from types import SimpleNamespace
     now = datetime(2026, 11, 11, 14, tzinfo=timezone.utc)

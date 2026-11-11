@@ -1421,7 +1421,6 @@ def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completion
         except ValueError:
             continue
     processes = {}
-    children: dict[int, list[int]] = {}
     for line in ps_text.splitlines():
         match = re.match(r"^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", line)
         if not match:
@@ -1429,7 +1428,19 @@ def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completion
         pid_s, ppid_s, age, command = match.groups()
         pid, ppid = int(pid_s), int(ppid_s)
         processes[pid] = (ppid, age, command)
-        children.setdefault(ppid, []).append(pid)
+    # A proxy's named Claude can be reparented outside the tmux pane. Match the
+    # launch identity across the complete process table, never by pane ancestry.
+    named_processes: dict[str, list[str]] = {}
+    for _ppid, _age, command in processes.values():
+        if not re.search(r"(?:^|/)claude(?:\s|$)", command):
+            continue
+        try:
+            argv = shlex.split(command)
+            if '--name' in argv:
+                peer = argv[argv.index('--name') + 1]
+                named_processes.setdefault(peer, []).append(command)
+        except (ValueError, IndexError):
+            continue
     rows = []
     for name, activity, dead, pid, start in windows:
         try:
@@ -1438,31 +1449,13 @@ def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completion
             age_min = None
         metadata = _proxy_runner_metadata(start, now, dead)
         model = metadata.get('model', 'unknown')
-        stack = list(children.get(pid, []))
-        seen: set[int] = set()
-        peers: list[str] = []
-        while stack and len(seen) < 64:
-            child = stack.pop()
-            if child in seen or child not in processes:
-                continue
-            seen.add(child)
-            _ppid, _age, command = processes[child]
-            stack.extend(children.get(child, []))
-            if not re.search(r"(?:^|/)claude(?:\s|$)", command):
-                continue
-            current_name = None
-            try:
-                argv = shlex.split(command)
-                if '--name' in argv:
-                    current_name = argv[argv.index('--name') + 1]
-                    peers.append(current_name)
-            except (ValueError, IndexError):
-                pass
-            found = re.search(r"(?:^|\s)--model(?:=|\s+)(\S+)", command)
-            if found and current_name == metadata.get('launch_peer'):
+        peer = metadata.get('launch_peer')
+        matches = named_processes.get(peer, [])
+        if not dead and peer and len(matches) == 1:
+            metadata['current_peer'] = peer
+            found = re.search(r"(?:^|\s)--model(?:=|\s+)(\S+)", matches[0])
+            if found:
                 model = found.group(1)
-        if peers.count(metadata.get('launch_peer')) == 1:
-            metadata['current_peer'] = metadata['launch_peer']
         last = max(0, int((now.timestamp() - activity) // 60))
         stale = (not dead) and last >= PROXY_STALE_ACTIVITY_MIN
         rows.append({
