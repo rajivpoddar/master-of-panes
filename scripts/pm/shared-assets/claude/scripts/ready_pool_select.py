@@ -229,12 +229,27 @@ def _live_proxy_briefs() -> dict[str, set[int]]:
             run = Path(rm.group(1)).read_text(errors="replace") if rm else ""
             bm = re.search(r"<\s+'?([^'\s]+)'?\s+2>", run)
             brief = Path(bm.group(1)) if bm else None
-            # CTO REVISE #1: launch-time fence. A brief rewritten after this claude
-            # process started is not this launch's brief -> unverified.
-            if brief is None or pids[0] not in started or brief.stat().st_mtime > started[pids[0]] + 1:
-                raise ValueError("brief not launch-bound")
-            head = brief.read_text(errors="replace")[:400]
-            issues = {int(n) for n in re.findall(r"#([1-9][0-9]{3,6})\b", head)}
+            if brief is None or rm is None:
+                raise ValueError("no launch brief")
+            # CTO REVISE ts 1794423035.853629 #1: launch-byte binding. run.sh is written
+            # by proxy-agent.sh at launch and never modified; the brief must have been
+            # last written strictly BEFORE run.sh (ns precision), and must be byte-stable
+            # across the read (same inode/size/mtime_ns before and after). Any rewrite
+            # after launch, or during the read, leaves the peer unverified.
+            launch_ns = Path(rm.group(1)).stat().st_mtime_ns
+            before = brief.stat()
+            if before.st_mtime_ns >= launch_ns:
+                raise ValueError("brief rewritten at/after launch")
+            text = brief.read_bytes().decode("utf-8", "replace")
+            after = brief.stat()
+            if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
+                raise ValueError("brief changed during read")
+            # CTO REVISE #2: only the explicit OWNING task counts: an `ISSUE: N` header
+            # line, else lines that START with `#N` (the task headline). Mentions inside
+            # prose (Depends on #N, PR #N, history) never bind.
+            explicit = {int(n) for n in re.findall(r"(?m)^ISSUE:\s*#?([1-9][0-9]{3,6})\s*$", text)}
+            headline = {int(n) for n in re.findall(r"(?m)^#([1-9][0-9]{3,6})\b", text[:1200])}
+            issues = explicit if explicit else headline
         except (OSError, ValueError):
             issues = set()
         live[peer] = issues if len(issues) == 1 else set()
