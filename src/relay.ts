@@ -47,6 +47,7 @@ type ExitOwnerPin = Readonly<{
   stopSession: string | null;
   stop: number | null;
   inboundGeneration?: number;
+  savedPmHandoff?: boolean;
   quietPaneId?: string;
   quietProcess?: string;
 }>;
@@ -1650,9 +1651,9 @@ export class TmuxRelay {
   private exitOwnerRefusal(slotNum: number, pin: ExitOwnerPin, physicalPaste = false): string | null {
     if (!this.db) return "exit_owner_unbound";
     if ((this.db.getEvents(slotNum, 1, "Stop")[0]?.id ?? null) !== pin.stop) return "stop_changed";
-    if (!physicalPaste && slotNum === 0 && pin.inboundGeneration !== this.pmInboundGeneration) return "pm_inbound_changed";
+    if (!physicalPaste && slotNum === 0 && !pin.savedPmHandoff && pin.inboundGeneration !== this.pmInboundGeneration) return "pm_inbound_changed";
     if (slotNum === 0) return (this.db.getEvents(0, 1, "SessionStart")[0]?.id ?? null) === pin.boot
-      && (this.db.getEvents(0, 1, "UserPromptSubmit")[0]?.id ?? null) === pin.input ? null : "pm_owner_changed";
+      && (pin.savedPmHandoff || (this.db.getEvents(0, 1, "UserPromptSubmit")[0]?.id ?? null) === pin.input) ? null : "pm_owner_changed";
     const slot = this.db.getSlot(slotNum);
     if (!slot || this.exitAssignment(slot) !== pin.assignment
         || (this.db.getEvents(slotNum, 1, "SessionStart")[0]?.id ?? null) !== pin.boot
@@ -2187,6 +2188,7 @@ export class TmuxRelay {
     const run = () => this.deliverGuardedToSlotNow(slotNum, command, {
       ...opts,
       finalCheck: (stage, snapshot) => slotNum === 0 && command === "/exit"
+        && !opts.exitOwnerPin?.savedPmHandoff
         && (generation !== this.pmInboundGeneration || this.pmInboundPending > 0 || (this.db?.peekPendingPMEvents().length ?? 0) > 0)
         ? "pm_inbound_pending" : check?.(stage, snapshot) ?? null,
     });
@@ -2236,7 +2238,8 @@ export class TmuxRelay {
       ownerRefusal() ?? (isGatedDevSlot(slotNum) && command === "/exit" && opts.exitEpisode
         ? devExitQuietRefusal(this.db?.exitQuietReady(slotNum) === true, snapshot) : null)
       ?? opts.finalCheck?.(stage, snapshot) ?? null;
-    if (ownerRefusal()) return { outcome: "refused_pre_effect", reason: "slot_owner_changed", paneId: null };
+    const initialOwnerRefusal = ownerRefusal();
+    if (initialOwnerRefusal) return { outcome: "refused_pre_effect", reason: initialOwnerRefusal, paneId: null };
     const identity = await verifyPaneIdentity(slotNum, this.runShell);
     if (!identity.ok) return { outcome: "refused_pre_effect", reason: `pane_identity:${identity.reason}`, paneId: null };
     const paneId = identity.snapshot.paneId;

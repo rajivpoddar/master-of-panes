@@ -596,6 +596,12 @@ export class ProcessHealthChecker {
     const { model, launcher, command: launchCommand } = pmLaunchPlan(this.db);
     const cwd = SLOT_CWDS[0];
     const fail = (reason: string, launched = false, extra: Record<string, unknown> = {}) => {
+      const current = this.db.getExitStatus();
+      if (trigger === "exit" && episode && current.pending && current.episode === episode) {
+        // End only this failed episode; retain launch custody and continuation evidence.
+        this.db.setConfig("exit_pending_continuation_delivery", "failed");
+        this.db.setConfig("exit_pending", "false");
+      }
       this.db.logEvent(0, "pm_restart_failed", null, null, { trigger, episode, model, reason, ...extra });
       console.error(`[health][pm-restart] ${trigger}: ${reason}`);
       return { success: false, launched, reason };

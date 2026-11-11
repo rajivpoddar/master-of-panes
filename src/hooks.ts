@@ -1521,9 +1521,10 @@ export class HookProcessor {
       } else {
         if (readiness?.kind === "ready") consumePmExitHandoff(this.db, this.pmExitHandoffOps, readiness.requestedAt, readiness.via);
         this.db.setConfig(PM_EXIT_CONSUMED_EPISODE_KEY, exitStatus.episode ?? "");
-        const exitOwnerPin = exitStopOwner;
+        const exitOwnerPin = exitStopOwner && { ...exitStopOwner, savedPmHandoff: readiness?.kind === "ready" };
         if (!exitOwnerPin) return {};
-        // The consumed Stop, session and input generation own both effects.
+        // The consumed Stop and PM session own both effects; a saved handoff
+        // remains valid despite new input. Dev-slot ownership is independent.
         // Never clear a foreign composer or interrupt a busy PM turn.
         const fence = () => {
           const current = this.db.getExitStatus();

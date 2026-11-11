@@ -243,6 +243,35 @@ test("healthy flow: save -> natural Stop -> one /exit -> continuation -> dev-onl
   } finally { h.close(); }
 });
 
+test("saved handoff still refuses a different PM session at delivery", async () => {
+  const h = harness();
+  try {
+    await boot(h);
+    await h.arm();
+    h.saveAll();
+    h.setObserveBarrier(async () => { h.setObserveBarrier(null); await boot(h, "successor"); });
+    await h.hook("Stop");
+    assert.equal(h.exits(), 0);
+    assert.equal(h.db.getExitStatus().exit_terminal?.reason, "pm_owner_changed");
+  } finally { h.close(); }
+});
+
+test("inbound between save and Stop does not refuse exit or alter inbound custody", async () => {
+  const h = harness();
+  try {
+    await boot(h);
+    await h.arm();
+    h.saveAll();
+    h.db.enqueuePendingPMEvent(1, "handoff", "inbound");
+    const response = await h.hook("UserPromptSubmit", { prompt: "new work" });
+    assert.equal(response.status, 200);
+    await h.hook("Stop");
+    assert.equal(h.exits(), 1);
+    assert.equal(h.db.peekPendingPMEvents().length, 1, "exit does not change inbound delivery");
+    assert.equal(h.db.getEvents(0, 5, "pm_exit_refused_terminal").length, 0);
+  } finally { h.close(); }
+});
+
 test("Rajiv proof: request -> save -> PM Stop on a BUSY pane while a new prompt arrives -> exactly one /exit, continuation kept, no ACK", async () => {
   const h = harness();
   try {

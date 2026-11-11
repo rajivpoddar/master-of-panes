@@ -35,6 +35,7 @@ import {
   PM_EXIT_HANDOFF_OBLIGATION_KEY,
   PM_EXIT_HANDOFF_REQUESTED_AT_KEY,
   PM_HANDOFF_EXIT_VARIANT,
+  pmExitRecoveryCommand,
 } from "../src/pmHandoffExit.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
@@ -112,6 +113,14 @@ function fixture() {
 const until = async (done: () => boolean) => {
   for (let i = 0; i < 100 && !done(); i++) await new Promise((r) => setTimeout(r, 100));
 };
+
+test("refusal recovery action preserves the original with_devs setting", () => {
+  for (const with_devs of [false, true]) {
+    const action = PM_HANDOFF_EXIT_VARIANT.actionFor!({ variant: "exit_refused", episode: "episode-1", with_devs });
+    assert.ok(action.includes(pmExitRecoveryCommand("episode-1", with_devs)));
+    assert.ok(action.includes(`"with_devs":${with_devs}`));
+  }
+});
 
 test("REST PM-only exit opens ONE pm_save_handoff exit obligation; /exit at the next Stop after the save (no ACK)", async () => {
   const f = fixture();

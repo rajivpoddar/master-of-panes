@@ -244,6 +244,21 @@ test("Claude prompt never appears: bounded wait, no continuation typed into the 
   } finally { h.db.close(); }
 });
 
+test("exit relaunch timeout ends only the current episode without draining inbound", async () => {
+  const h = harness({ state: "shell", neverBoots: true });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    h.db.enqueuePendingPMEvent(1, "handoff", "inbound");
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, false);
+    assert.match(result.reason, /claude prompt not observed/);
+    assert.equal(h.db.getExitStatus().pending, false);
+    assert.equal(h.db.getExitStatus().continuation_delivery, "failed");
+    assert.equal(h.db.peekPendingPMEvents().length, 1);
+    assert.deepEqual(h.pane.sends, []);
+  } finally { h.db.close(); }
+});
+
 test("PM-only Stop hands its consumed /exit to the fresh-restart handler exactly once", async () => {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
   const calls: Array<[string | null, string]> = [];
