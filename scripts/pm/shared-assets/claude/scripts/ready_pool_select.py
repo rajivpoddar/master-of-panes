@@ -173,41 +173,84 @@ def ready_pool_value(body: str, field: str) -> str:
     return contract_policy().ready_pool_metadata({"body": body or ""}).get(field, "")
 
 
+_CLAUDE_BINARIES = {"/opt/homebrew/bin/claude", str(Path.home() / ".local/bin/claude"), str(Path.home() / ".claude/local/claude")}
+
+
 @lru_cache(maxsize=1)
+def _live_proxy_briefs() -> dict[str, set[int]]:
+    """Live px-* peers -> issue numbers named in their CURRENT launch brief header.
+
+    Rajiv D0AMF0XE6TS thread 1794422105.466839 ("do the selector fix in place");
+    CTO REVISE ts 1794421177.658089 (bind to launch/brief identity, fail closed).
+    A peer counts only if: a live `claude ... --name px-X` process exists exactly once,
+    a live (pane not dead) tmux window `px-px-X`/`px-X` exists, its parent is the
+    proxy-agent run.sh, and the brief that run.sh feeds on stdin names exactly ONE
+    issue (#NNNN) in its first 400 chars. Anything else is unverified (empty set).
+    """
+    import time as _time
+    ps = subprocess.run(["/bin/ps", "-ww", "-axo", "pid=,ppid=,etime=,command="],
+                        capture_output=True, text=True, timeout=4, check=True).stdout
+    now = _time.time()
+    procs = {}
+    started: dict[int, float] = {}
+    for line in ps.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) == 4 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), parts[3])
+            et = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)", parts[2])
+            if et:
+                d, h, mi, se = (int(x or 0) for x in et.groups())
+                started[int(parts[0])] = now - (((d * 24 + h) * 60 + mi) * 60 + se)
+    windows = subprocess.run(["tmux", "list-windows", "-a", "-F", "#{window_name} #{pane_dead}"],
+                             capture_output=True, text=True, timeout=5, check=True).stdout
+    alive_windows = set()
+    for line in windows.splitlines():
+        name, _, dead = line.rpartition(" ")
+        if dead == "0":
+            alive_windows.add(re.sub(r"^px-(?=px-)", "", name))
+    seen: dict[str, list[int]] = {}
+    for pid, (_ppid, cmd) in procs.items():
+        # CTO REVISE ts 1794422312.335049 #2: the EXECUTABLE token must be the real
+        # claude binary in -p mode; a mention inside another program's argv never counts.
+        argv = cmd.split()
+        if len(argv) < 4 or argv[0] not in _CLAUDE_BINARIES or argv[1] != "-p" or "--name" not in argv:
+            continue
+        i = argv.index("--name") + 1
+        if i < len(argv) and re.fullmatch(r"px-[A-Za-z0-9_-]+", argv[i]):
+            seen.setdefault(argv[i], []).append(pid)
+    live: dict[str, set[int]] = {}
+    for peer, pids in seen.items():
+        if len(pids) != 1 or peer not in alive_windows:
+            continue
+        parent = procs.get(procs[pids[0]][0])
+        rm = re.search(r"\s(\S+/run\.sh)\b", " " + parent[1]) if parent else None
+        issues: set[int] = set()
+        try:
+            run = Path(rm.group(1)).read_text(errors="replace") if rm else ""
+            bm = re.search(r"<\s+'?([^'\s]+)'?\s+2>", run)
+            brief = Path(bm.group(1)) if bm else None
+            # CTO REVISE #1: launch-time fence. A brief rewritten after this claude
+            # process started is not this launch's brief -> unverified.
+            if brief is None or pids[0] not in started or brief.stat().st_mtime > started[pids[0]] + 1:
+                raise ValueError("brief not launch-bound")
+            head = brief.read_text(errors="replace")[:400]
+            issues = {int(n) for n in re.findall(r"#([1-9][0-9]{3,6})\b", head)}
+        except (OSError, ValueError):
+            issues = set()
+        live[peer] = issues if len(issues) == 1 else set()
+    return live
+
+
 def non_slot_owners() -> tuple[dict[str, set[int]], dict[int, set[str]]]:
     """Live peers bound to exact current brief issues, plus matching obligations."""
     try:
-        path = _SCRIPTS / "pm" / "heartbeat" / "heartbeat-compose.py"
-        spec = importlib.util.spec_from_file_location("ready_pool_proxy_verifier", path)
-        if spec is None or spec.loader is None:
-            return {}, {}
-        verifier = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(verifier)
-        tmux = subprocess.run(["tmux", "list-windows", "-a", "-F", verifier._PROXY_TMUX_FMT],
-                              capture_output=True, text=True, timeout=5, check=True).stdout
-        ps = subprocess.run(["ps", "-ww", "-axo", "pid,ppid,etime,command"],
-                            capture_output=True, text=True, timeout=4, check=True).stdout
-        rows = verifier.build_proxy_snapshot(tmux, ps, datetime.now(timezone.utc), [])['rows']
-        live: dict[str, set[int]] = {}
-        ambiguous: set[str] = set()
-        for row in rows:
-            peer = row.get('current_peer', '')
-            if row.get('dead') or not re.fullmatch(r'px-[A-Za-z0-9_-]+', peer):
-                continue
-            refs = row.get('brief_refs', [])
-            issues = {int(ref[6:]) for ref in refs
-                      if isinstance(ref, str) and re.fullmatch(r'issue:[1-9][0-9]*', ref)}
-            if peer in live:
-                ambiguous.add(peer)
-            else:
-                live[peer] = issues if len(issues) == 1 else set()
-        for peer in ambiguous:
-            live.pop(peer, None)
-    except (OSError, subprocess.SubprocessError, ImportError, AttributeError, ValueError, KeyError, TypeError):
+        live = _live_proxy_briefs()
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return {}, {}
+    pm_ops_db = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db"
     obligations: dict[int, set[str]] = {}
     try:
-        uri = Path(verifier.PM_OPS_DB).resolve().as_uri() + '?mode=ro'
+        uri = pm_ops_db.resolve().as_uri() + '?mode=ro'
         with sqlite3.connect(uri, uri=True, timeout=2) as conn:
             for issue, target_type, target_id, owner in conn.execute(
                     "SELECT issue, target_type, target_id, owner FROM obligations WHERE status='open'"):
