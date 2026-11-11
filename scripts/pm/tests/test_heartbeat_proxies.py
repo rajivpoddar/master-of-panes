@@ -36,7 +36,7 @@ def test_proxy_rows_show_runner_metadata_and_exit_result(tmp_path):
     brief = tmp_path / 'brief.md'
     brief.write_text('ISSUE: 123\nPR: 456\n')
     output = tmp_path / 'output.md'
-    output.write_text('summary\nRESULT complete\n')
+    output.write_text('summary\nRESULT private-secret customer-text\n')
     jsonl = tmp_path / 'output.jsonl'
     jsonl.write_text('{}\n')
     os.utime(jsonl, (now.timestamp() - 420, now.timestamp() - 420))
@@ -48,7 +48,9 @@ def test_proxy_rows_show_runner_metadata_and_exit_result(tmp_path):
     assert 'px-task' in rendered and 'px-px-task' not in rendered
     assert 'gpt-6.1-sol' in rendered and 'issue:123' in rendered and 'pr:456' in rendered
     assert 'process age 62m' in rendered and 'output age 7m' in rendered
-    assert 'RESULT complete' in rendered and 'hidden' not in rendered
+    assert 'RESULT AVAILABLE' in rendered and 'hidden' not in rendered
+    assert 'private-secret' not in rendered and 'customer-text' not in rendered
+    assert 'result_line' not in doc['rows'][0]
 
 
 def test_proxy_unknown_metadata_stays_unknown():
@@ -65,14 +67,106 @@ def test_proxy_finished_result_and_custody_fallback(tmp_path):
     now = datetime(2026, 11, 8, tzinfo=timezone.utc)
     db = tmp_path / 'ops.db'
     with sqlite3.connect(db) as conn:
-        conn.execute('CREATE TABLE events (id INTEGER, source TEXT, target_type TEXT, issue INTEGER, payload_json TEXT)')
-        conn.execute('INSERT INTO events VALUES (1, ?, ?, ?, ?)', ('proxy-agent', 'proxy_assignment', 12, json.dumps({'proxy': 'px-task', 'ref': 'pr:34'})))
+        conn.execute('CREATE TABLE events (id INTEGER, source TEXT, target_type TEXT, issue INTEGER, payload_json TEXT, ts TEXT)')
+        conn.execute('INSERT INTO events VALUES (1, ?, ?, ?, ?, ?)', ('proxy-agent', 'proxy_assignment', 12, json.dumps({'proxy': 'px-task', 'ref': 'pr:34', 'brief_sha256': 'digest'}), now.isoformat()))
     rows = [{'name': 'px-px-task', 'state': 'running', 'age': None}]
     module.proxy_work_history(rows, now, db)
-    assert rows[0]['work_ref'] == 'pr:34'
+    assert 'work_ref' not in rows[0]  # Display name alone is not current custody.
     doc = {'rows': rows, 'completions': [{'name': 'px-task', 'rc': '0', 'result': 'RESULT done'}]}
     rendered = '\n'.join(module.proxies_block(doc))
-    assert 'pr:34' in rendered and 'RESULT done' in rendered
+    assert 'issue/PR UNKNOWN' in rendered and 'RESULT UNKNOWN' in rendered
+    assert 'RESULT done' not in rendered
+
+
+# Authored producer/reader regression definitions. Standing directive: NOT_RUN.
+def test_native_peer_and_current_brief_bind_double_prefixed_window(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    import sqlite3
+    now = datetime(2026, 11, 11, 14, tzinfo=timezone.utc)
+    born = now.timestamp() - 10
+    job = tmp_path / 'proxy-agent-job.bound'
+    job.mkdir()
+    brief = tmp_path / 'brief.md'
+    brief.write_text('MODE: REWORK\nPR: 13533\n')
+    digest = hashlib.sha256(brief.read_bytes()).hexdigest()
+    runner = job / 'run.sh'
+    runner.write_text(f'claude --name px-13533-sol --model gpt-6.1-sol < {brief} 2> /tmp/x.log | python3 -I -u /x/proxy-agent-stream.py /tmp/out /tmp/out.jsonl\n')
+    original = module._proxy_runner_metadata
+    def metadata(*args):
+        value = original(*args)
+        value['launch_birth'] = born  # Mock only the retained filesystem birth identity.
+        return value
+    monkeypatch.setattr(module, '_proxy_runner_metadata', metadata)
+    tmux = f'0\tpx-px-13533-sol\t{int(now.timestamp())}\t0\t100\tbash {runner}\n'
+    ps = '100 1 00:00:10 bash run.sh\n101 100 00:00:09 /usr/bin/claude --name px-13533-sol --model gpt-6.1-sol\n'
+    db = tmp_path / 'ops.db'
+    payload = {'proxy': 'px-13533-sol', 'ref': 'pr:13533', 'brief_sha256': digest,
+               'head_sha': 'a' * 40, 'work_started_at': '2026-11-11T10:00:00Z',
+               'stage_started_at': '2026-11-11T13:00:00Z'}
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE events (id INTEGER, source TEXT, target_type TEXT, issue INTEGER, payload_json TEXT, ts TEXT)')
+        conn.execute('INSERT INTO events VALUES (1, ?, ?, ?, ?, ?)', ('proxy-agent', 'proxy_assignment', 13533, json.dumps(payload), now.isoformat()))
+    rows = module.build_proxy_snapshot(tmux, ps, now, [])['rows']
+    assert rows[0]['current_peer'] == 'px-13533-sol'
+    module.proxy_work_history(rows, now, db)
+    assert rows[0]['work_ref'] == 'pr:13533'
+    assert rows[0]['work_started_at_minutes'] == 240
+    for bad in ('brief', 'ref', 'old-launch', 'missing-peer', 'same-second'):
+        fresh = module.build_proxy_snapshot(tmux, ps, now, [])['rows']
+        changed = dict(payload)
+        stamp = now.isoformat()
+        if bad == 'brief': changed['brief_sha256'] = 'foreign'
+        if bad == 'ref': changed['ref'] = 'pr:999'
+        if bad == 'old-launch': stamp = '2026-11-11T12:00:00Z'
+        if bad == 'missing-peer': fresh[0].pop('current_peer')
+        if bad == 'same-second': fresh[0]['launch_birth'] = now.timestamp() + .1
+        with sqlite3.connect(db) as conn:
+            conn.execute('UPDATE events SET payload_json=?, ts=?', (json.dumps(changed), stamp))
+        module.proxy_work_history(fresh, now, db)
+        assert 'work_ref' not in fresh[0]
+        assert 'work_head' not in fresh[0] and 'stage_started_at_minutes' not in fresh[0]
+        rendered = '\n'.join(module.proxies_block({'rows': fresh, 'completions': []}))
+        assert 'pr:13533 @UNKNOWN' in rendered and 'this stage UNKNOWN' in rendered
+
+
+def test_proxy_output_age_future_and_invalid_is_unknown(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    now = datetime(2026, 11, 11, 14, tzinfo=timezone.utc)
+    job = tmp_path / 'proxy-agent-job.age'
+    job.mkdir()
+    brief = tmp_path / 'brief.md'
+    brief.write_text('PR: 34\n')
+    jsonl = tmp_path / 'output.jsonl'
+    runner = job / 'run.sh'
+    runner.write_text(f'claude --name proxy-age < {brief} 2> /tmp/x | python3 -I -u /x/proxy-agent-stream.py /tmp/out {jsonl}\n')
+    original_stat = Path.stat
+    for mtime in (now.timestamp() + 60, float('nan'), float('inf'), -1):
+        def stat(path, *args, **kwargs):
+            return SimpleNamespace(st_mtime=mtime) if path == jsonl else original_stat(path, *args, **kwargs)
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, 'stat', stat)
+            metadata = module._proxy_runner_metadata(f'bash {runner}', now, False)
+        assert 'output_age' not in metadata
+        doc = {'rows': [{'name': 'px-age', 'state': 'running', 'age': 2, **metadata}], 'completions': []}
+        assert 'output age UNKNOWN' in '\n'.join(module.proxies_block(doc))
+
+
+def test_proxy_completion_result_prose_stays_private(tmp_path, monkeypatch):
+    import json
+    import sqlite3
+    now = datetime(2026, 11, 11, 14, tzinfo=timezone.utc)
+    db = tmp_path / '.local/share/master-of-panes/data/mop.db'
+    db.parent.mkdir(parents=True)
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE events (id INTEGER, event_type TEXT, timestamp TEXT, payload TEXT)')
+        conn.execute('INSERT INTO events VALUES (1, ?, ?, ?)', ('send_command', now.isoformat(), json.dumps({'command': 'PROXY_STOP name=proxy-test rc=1 out=/private RESULT private-secret customer-text'})))
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    completed, _ = module._proxy_completions(now)
+    rendered = '\n'.join(module.proxies_block({'rows': [], 'completions': completed}))
+    assert 'rc=1' in rendered and 'RESULT AVAILABLE' in rendered
+    assert 'private-secret' not in rendered and 'customer-text' not in rendered
+    assert 'private-secret' not in repr(completed)
 
 
 def test_proxy_collector_budget_bounds_slow_ps_and_sqlite(monkeypatch):

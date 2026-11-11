@@ -22,6 +22,8 @@ for dry runs and tests.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import math
 import json
 import importlib.util
 import os
@@ -1344,21 +1346,78 @@ PROXY_CACHE = Path.home() / ".cache" / "pm-heartbeat" / "proxies-last-good.json"
 PROXY_CACHE_MAX_S = 600
 PROXY_STALE_ACTIVITY_MIN = 20
 PROXY_ROW_CAP = 24
-_PROXY_TMUX_FMT = "#{session_name}\t#{window_name}\t#{window_activity}\t#{pane_dead}\t#{pane_pid}"
+_PROXY_TMUX_FMT = "#{session_name}\t#{window_name}\t#{window_activity}\t#{pane_dead}\t#{pane_pid}\t#{pane_start_command}"
+
+
+def _proxy_runner_metadata(start: str, now: datetime, exited: bool) -> dict:
+    """Read only launcher arguments, never expose its secret-bearing exports."""
+    try:
+        argv = shlex.split(start)
+        if len(argv) == 1:
+            argv = shlex.split(argv[0])
+        if len(argv) != 2 or Path(argv[0]).name != 'bash':
+            return {}
+        runner = Path(argv[1])
+        if runner.name != 'run.sh' or not runner.parent.name.startswith('proxy-agent-job.'):
+            return {}
+        text = runner.read_text()
+        model = re.search(r'(?:^|\s)--model\s+([^\s]+)', text)
+        peer = re.search(r'(?:^|\s)--name\s+([^\s]+)', text)
+        pipeline = re.search(r'<\s+(\S+)\s+2>\s+\S+\s+\|\s+python3\s+-I\s+-u\s+\S*proxy-agent-stream\.py\s+(\S+)\s+(\S+)', text)
+        result = {'model': model.group(1)} if model else {}
+        if peer:
+            result['launch_peer'] = shlex.split(peer.group(1))[0]
+        # Identity fence only, never a source for work/stage elapsed time.
+        born = getattr(runner.parent.stat(), 'st_birthtime', None)
+        if born is not None and 0 < born <= now.timestamp():
+            result['launch_birth'] = born
+        if not pipeline:
+            return result
+        brief, out, jsonl = (Path(shlex.split(value)[0]) for value in pipeline.groups())
+        try:
+            with brief.open('rb') as handle:
+                raw = handle.read(200001)
+            if len(raw) > 200000:
+                return result  # No partial-content digest may certify a receipt.
+            result['brief_sha256'] = hashlib.sha256(raw).hexdigest()
+            content = raw.decode('utf-8', 'replace')
+            refs = [f'{kind.lower()}:{number}' for kind, number in re.findall(r'(?im)^\s*(PR|ISSUE):\s*#?(\d+)\s*$', content)]
+            if refs:
+                result['brief_refs'] = list(dict.fromkeys(refs))
+        except (OSError, UnicodeError):
+            pass
+        try:
+            mtime = jsonl.stat().st_mtime
+            if math.isfinite(mtime) and 0 <= mtime <= now.timestamp():
+                result['output_age'] = int((now.timestamp() - mtime) // 60)
+        except (OSError, TypeError, ValueError, OverflowError):
+            pass
+        if exited:
+            try:
+                lines = out.read_text()[-200000:].splitlines()
+                line = next((line.strip() for line in reversed(lines) if re.match(r'^RESULT\b', line.strip(), re.I)), None)
+                if line:
+                    result['result_available'] = True
+            except (OSError, UnicodeError):
+                pass
+        return result
+    except (OSError, UnicodeError, ValueError, IndexError):
+        return {}
 
 
 def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completions: list[dict]) -> dict:
     """px-* windows only. ps_text is one process table, optional; commands are not kept."""
     windows = []
     for line in tmux_text.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 5:
+        parts = line.split("\t", 5)
+        if len(parts) not in (5, 6):
             continue
-        session, name, activity, dead, pid = parts
+        session, name, activity, dead, pid = parts[:5]
+        start = parts[5] if len(parts) == 6 else ''
         if not name.startswith("px-") or session not in {"0", "proxies"}:
             continue
         try:
-            windows.append((name, int(activity), dead == "1", int(pid)))
+            windows.append((name, int(activity), dead == "1", int(pid), start))
         except ValueError:
             continue
     processes = {}
@@ -1372,11 +1431,16 @@ def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completion
         processes[pid] = (ppid, age, command)
         children.setdefault(ppid, []).append(pid)
     rows = []
-    for name, activity, dead, pid in windows:
-        age_min = _elapsed_minutes(processes[pid][1]) if pid in processes else None
-        model = "unknown"
+    for name, activity, dead, pid, start in windows:
+        try:
+            age_min = _elapsed_minutes(processes[pid][1]) if pid in processes else None
+        except ValueError:
+            age_min = None
+        metadata = _proxy_runner_metadata(start, now, dead)
+        model = metadata.get('model', 'unknown')
         stack = list(children.get(pid, []))
         seen: set[int] = set()
+        peers: list[str] = []
         while stack and len(seen) < 64:
             child = stack.pop()
             if child in seen or child not in processes:
@@ -1386,14 +1450,23 @@ def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completion
             stack.extend(children.get(child, []))
             if not re.search(r"(?:^|/)claude(?:\s|$)", command):
                 continue
+            current_name = None
+            try:
+                argv = shlex.split(command)
+                if '--name' in argv:
+                    current_name = argv[argv.index('--name') + 1]
+                    peers.append(current_name)
+            except (ValueError, IndexError):
+                pass
             found = re.search(r"(?:^|\s)--model(?:=|\s+)(\S+)", command)
-            if found:
+            if found and current_name == metadata.get('launch_peer'):
                 model = found.group(1)
-                break
+        if peers.count(metadata.get('launch_peer')) == 1:
+            metadata['current_peer'] = metadata['launch_peer']
         last = max(0, int((now.timestamp() - activity) // 60))
         stale = (not dead) and last >= PROXY_STALE_ACTIVITY_MIN
         rows.append({
-            "name": name, "model": model, "age": age_min, "last_activity": last,
+            **metadata, "name": name, "model": model, "age": age_min, "last_activity": last,
             "dead": dead, "stale": stale, "state": "dead" if dead else "stale" if stale else "running",
         })
     rows.sort(key=lambda row: (row["dead"], row["name"]))
@@ -1443,9 +1516,13 @@ def _proxy_completions(now: datetime) -> tuple[list[dict], bool]:
     completed = []
     for (payload,) in entries:
         command = json.loads(payload).get("command", "")
-        match = re.match(r"PROXY_STOP name=(\S+) rc=(\S+)\s", command)
+        match = re.match(r"PROXY_STOP name=([A-Za-z0-9_.-]+) rc=([0-9]+)\s+out=\S+\s+(RESULT\b[^\n]*)", command)
         if match:
-            completed.append({"name": match.group(1), "rc": match.group(2), "result": "unknown"})
+            completed.append({"name": match.group(1), "rc": match.group(2), "result_available": True})
+        else:
+            match = re.match(r"PROXY_STOP name=([A-Za-z0-9_.-]+) rc=([0-9]+)\s", command)
+            if match:
+                completed.append({"name": match.group(1), "rc": match.group(2), "result": "unknown"})
     return completed, len(entries) == 200
 
 
@@ -1454,25 +1531,39 @@ def proxy_work_history(rows: list[dict], now: datetime, path: Path = PM_OPS_DB) 
     try:
         with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
             records = conn.execute(
-                "SELECT issue, payload_json FROM events WHERE source='proxy-agent' "
+                "SELECT issue, payload_json, ts FROM events WHERE source='proxy-agent' "
                 "AND target_type='proxy_assignment' ORDER BY id DESC LIMIT 1001"
             ).fetchall()
         # A truncated history cannot certify a complete original work clock.
         complete = len(records) <= 1000
         by_name = {}
-        for issue, raw in records[:1000]:
+        for issue, raw, timestamp in records[:1000]:
             payload = json.loads(raw)
             name = payload.get('proxy')
             if isinstance(name, str) and name not in by_name:
-                by_name[name] = (issue, payload)
+                by_name[name] = (issue, payload, timestamp)
         for row in rows:
-            name = row['name']
-            record = by_name.get(name) or by_name.get('proxy-' + name.removeprefix('px-'))
+            # Never guess the native peer from its lossy tmux display label.
+            peer = row.get('current_peer')
+            digest = row.get('brief_sha256')
+            born = row.get('launch_birth')
+            if not peer or not digest or not isinstance(born, (int, float)):
+                continue
+            record = by_name.get(peer)
             if not record:
                 continue
-            issue, payload = record
+            issue, payload, timestamp = record
+            recorded = _parse_ts(timestamp)
+            # Native receipt timestamps have second precision. Same-second or
+            # older records cannot prove correspondence to this launch.
+            if not recorded or not born < recorded.timestamp() <= now.timestamp():
+                continue
+            if payload.get('brief_sha256') != digest:
+                continue
             ref = payload.get('ref', '')
             if not isinstance(ref, str) or not re.fullmatch(r'(issue|pr):[1-9][0-9]*', ref):
+                continue
+            if ref not in row.get('brief_refs', []):
                 continue
             row['work_ref'] = ref
             row['work_issue'] = issue
@@ -1576,10 +1667,16 @@ def proxies_block(doc: dict | None) -> list[str]:
         def elapsed(field):
             value = row.get(field + '_minutes')
             return f'{value // 60}h{value % 60:02d}m' if isinstance(value, int) and value >= 0 else 'UNKNOWN'
-        rendered.append(f"• {row.get('work_ref', 'issue/PR UNKNOWN')} @{row.get('work_head', 'UNKNOWN')} · {row.get('model', 'unknown')} {row['name']} · this stage {elapsed('stage_started_at')} · total {elapsed('work_started_at')} · last progress {elapsed('last_progress_at')} ago · boundary {row.get('boundary', 'UNKNOWN')} · next {row.get('next_checkpoint', 'UNKNOWN')} · process age {age} · activity {last_s}{flag}")
+        refs = row.get('brief_refs') or ([row['work_ref']] if row.get('work_ref') else [])
+        ref = ', '.join(refs) if refs else 'issue/PR UNKNOWN'
+        output = row.get('output_age')
+        output_s = f'{output}m' if output is not None else 'UNKNOWN'
+        name = row['name'].removeprefix('px-') if row['name'].startswith('px-px-') else row['name']
+        result = f" · RESULT {'AVAILABLE' if row.get('result_available') is True else 'UNKNOWN'}" if _dead(row) else ''
+        rendered.append(f"• {ref} @{row.get('work_head', 'UNKNOWN')} · {row.get('model', 'unknown')} {name} · this stage {elapsed('stage_started_at')} · total {elapsed('work_started_at')} · last progress {elapsed('last_progress_at')} ago · boundary {row.get('boundary', 'UNKNOWN')} · next {row.get('next_checkpoint', 'UNKNOWN')} · process age {age} · output age {output_s} · activity {last_s}{flag}{result}")
     for row in completed:
-        if row["rc"] != "0":
-            rendered.append(f"• {row['name']} · finished · rc={row['rc']} (FAILED)")
+        result = 'RESULT AVAILABLE' if row.get('result_available') is True else 'RESULT UNKNOWN'
+        rendered.append(f"• {row['name']} · finished · rc={row['rc']} · {result}")
     # Parent compaction may abbreviate this block; saved input/full block retains
     # every row for the existing hourly inspector rather than dropping row 25+.
     lines.extend(rendered)
