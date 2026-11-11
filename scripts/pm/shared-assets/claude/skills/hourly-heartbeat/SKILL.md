@@ -41,8 +41,11 @@ readmit."
    fires at :13 local) queues "Invoke Skill(hourly-heartbeat)".
 2. PM launches ONE background agent (`run_in_background=true`) with the prompt
    below, then returns to event processing. Never inline.
-3. When the agent returns, PM executes its `ACTIONS:` list (PM can launch
-   agents; the background agent cannot).
+3. The confirmed sender receipt handed to `hourly-thread-ts` requests processing
+   through MoP's existing PM relay, keyed by the exact parent ts. PM consumes
+   `Skill(hourly-report-processing)`, including Step 3, as well as `ACTIONS:`.
+   Reconcile an existing processing owner/receipt before launching anything;
+   the heartbeat agent's return must not cause duplicate inspection or sends.
 4. The old session-only cron (`:13`, thread `1790531842.023499`) is retired.
    Delete it with CronDelete if it is still armed; do not re-arm it after a clear.
 
@@ -164,7 +167,7 @@ STEP 5 — return exactly:
 
 [HIGH] Rajiv 2026-10-14, C0ALZJHGE49 thread 1791945910.806879, ts 1791946284.802109: *"are slot checkouts being reviewed on this alert? S1, S3 and S4 are in interrupted state. S5 and S8 are idle"*, then ts 1791946355.104529: *"why was it missed? is there a gap in the workflow?"* The gap: this skill's agent only composes and posts the report. PM read the agent's summary as "done" and never ran `Skill(hourly-report-processing)` on the posted report, so Step 3 (the all-slot checkout review) never ran.
 
-Rule: when the heartbeat agent returns `HOURLY_POSTED ts=…`, PM MUST in that same turn launch `Skill(hourly-report-processing)` against that ts, including the Step 3 all-slot checkout review in ONE bg agent (slot state, pane, branch vs assigned lane, intervene via message-slot). The heartbeat agent's "items needing PM action" list does not replace it. A turn that ends after a heartbeat with no Step 3 agent launched is a process miss.
+Rule: the receipt-bound `cadence-hourly-processing-<ts>` PM handoff consumes this exact report through `Skill(hourly-report-processing)`, including the read-only all-slot Step 3 inspection and PM-owned direction. On `HOURLY_POSTED ts=…`, reconcile that handoff and any already-running/completed inspection first; never launch a second inspector or replay an issued/UNKNOWN direction. If the handoff failed or is uncertain, retain its evidence and report the processing blocker; do not blindly repeat it. The heartbeat agent's ACTIONS summary does not certify processing, and a launched inspector does not certify delivered steering. PM's reply must carry each current lane's evidence, tailored direction, native communication disposition and next checkpoint; the existing +5m CTO verification checks it. Normal agent limits apply, with no short-proxy exception. No new completion gate blocks customer recovery or product merges.
 
 Also: a `new_issue` assign via `mop-assign-slot.py` MUST pass `--task-file` with the full packet. Assigning without one leaves the slot with a null task after its clear (S2/S6/S7 on 2026-10-14).
 

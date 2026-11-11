@@ -1079,7 +1079,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "1eb886e90c8e9b9eabcb538d564bdc01bf11851324f0315dd0db6698bd1de168",
+      "sha256": "dfc485f2b7df07563c199ca9fd37f923205e71b2ac59d5083dd9487c7b801769",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
@@ -1100,7 +1100,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "8d8ffca532cdc1f4d6f0c8617b9628744aabc5c2b250d59b3bda2efe5fe23ffb",
+      "sha256": "1e111a068d23948859b4ba66b60aa4212abb59f9bd1ffc9f17d24e8bc584d09d",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
