@@ -56,6 +56,31 @@ def github_fixture(selector, monkeypatch, states):
     monkeypatch.setattr(selector, "run_lookup", lookup)
 
 
+def test_live_non_slot_owner_excluded_from_ranking_and_inversion(selector, monkeypatch):
+    monkeypatch.setattr(selector, 'non_slot_owners', lambda: ({'px-owner'}, {}))
+    p0 = issue(100, 'P0')
+    p0['body'] = p0['body'].replace('blockers: none', 'blockers: none\nowner: px-owner\ndisposition: IN_PROGRESS')
+    rows = [p0, issue(101)]
+    ranked = selector.rank_candidates(rows, offline=True)
+    assert [row['issue'] for row in ranked] == [101]
+    assert selector.check_pick(101, ranked)['status'] == 'ok'
+    assert selector.classify(p0, light=True) is not None  # fast scan fetches full details
+    assert selector.classify(p0) is None
+
+
+def test_unverified_owner_stays_in_inversion_and_live_obligation_excludes(selector, monkeypatch):
+    p0 = issue(100, 'P0')
+    p0['body'] = p0['body'].replace('blockers: none', 'blockers: none\nowner: px-owner\ndisposition: IN_PROGRESS')
+    monkeypatch.setattr(selector, 'non_slot_owners', lambda: (set(), {100: {'px-owner'}}))
+    ranked = selector.rank_candidates([p0, issue(101)], offline=True)
+    assert selector.check_pick(101, ranked)['status'] == 'PRIORITY_INVERSION'
+    p0['body'] = p0['body'].replace('owner: px-owner\ndisposition: IN_PROGRESS', 'owner: none\ndisposition: READY')
+    monkeypatch.setattr(selector, 'non_slot_owners', lambda: ({'px-owner'}, {100: {'px-owner'}}))
+    assert selector.classify(p0) is None
+    monkeypatch.setattr(selector, 'non_slot_owners', lambda: ({'px-owner'}, {}))
+    assert selector.classify(p0) == 'new_issue'
+
+
 def test_open_issue_and_merged_associated_pr_unblock_before_p1(selector, monkeypatch):
     rows = [issue(100, "P0", "#10", ["pm-blocked:dependency"]), issue(101)]
     github_fixture(selector, monkeypatch, {10: linked_issue([MERGED])})

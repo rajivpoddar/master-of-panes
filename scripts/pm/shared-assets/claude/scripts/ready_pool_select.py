@@ -64,6 +64,7 @@ import http.client
 import importlib.util
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -172,6 +173,54 @@ def ready_pool_value(body: str, field: str) -> str:
     return contract_policy().ready_pool_metadata({"body": body or ""}).get(field, "")
 
 
+@lru_cache(maxsize=1)
+def non_slot_owners() -> tuple[set[str], dict[int, set[str]]]:
+    """Fresh live native proxy peers and open issue obligations; uncertainty owns nothing."""
+    try:
+        path = _SCRIPTS / "pm" / "heartbeat" / "heartbeat-compose.py"
+        spec = importlib.util.spec_from_file_location("ready_pool_proxy_verifier", path)
+        if spec is None or spec.loader is None:
+            return set(), {}
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        tmux = subprocess.run(["tmux", "list-windows", "-a", "-F", verifier._PROXY_TMUX_FMT],
+                              capture_output=True, text=True, timeout=5, check=True).stdout
+        ps = subprocess.run(["ps", "-ww", "-axo", "pid,ppid,etime,command"],
+                            capture_output=True, text=True, timeout=4, check=True).stdout
+        rows = verifier.build_proxy_snapshot(tmux, ps, datetime.now(timezone.utc), [])['rows']
+        live = {row['current_peer'] for row in rows
+                if not row.get('dead') and re.fullmatch(r'px-[A-Za-z0-9_-]+', row.get('current_peer', ''))}
+    except (OSError, subprocess.SubprocessError, ImportError, AttributeError, ValueError, KeyError, TypeError):
+        return set(), {}
+    obligations: dict[int, set[str]] = {}
+    try:
+        uri = Path(verifier.PM_OPS_DB).resolve().as_uri() + '?mode=ro'
+        with sqlite3.connect(uri, uri=True, timeout=2) as conn:
+            for issue, target_type, target_id, owner in conn.execute(
+                    "SELECT issue, target_type, target_id, owner FROM obligations WHERE status='open'"):
+                if owner not in live:
+                    continue
+                number = issue if issue is not None else target_id if target_type == 'github_issue' else None
+                if number is not None and str(number).isdigit() and int(number) > 0:
+                    obligations.setdefault(int(number), set()).add(owner)
+    except (OSError, sqlite3.Error, ValueError, TypeError, AttributeError):
+        pass  # A missing ledger cannot certify ownership.
+    return live, obligations
+
+
+def verified_non_slot_owner(issue: dict[str, Any]) -> bool:
+    body = issue.get('body') or ''
+    owner = ready_pool_value(body, 'owner').strip()
+    disposition = ready_pool_value(body, 'disposition').strip().upper()
+    live, obligations = non_slot_owners()
+    if disposition == 'IN_PROGRESS' and owner in live:
+        return True
+    try:
+        return bool(obligations.get(int(issue.get('number') or 0), set()) & live)
+    except (TypeError, ValueError):
+        return False
+
+
 def dispatch_content_refusals(issue: dict[str, Any]) -> list[str]:
     """Screen authoritative Ready Pool fields, never historical prose or comments."""
     body = issue.get("body") or ""
@@ -230,7 +279,8 @@ def issue_holds(issue: dict[str, Any]) -> set[str]:
 
 def classify(issue: dict[str, Any], requested_class: str | None = None, *, light: bool = False) -> str | None:
     """Return the selection class; light mode is only a non-authoritative prefilter."""
-    if not light and (not isinstance(issue.get("body"), str) or not issue["body"].strip() or dispatch_content_refusals(issue)):
+    if not light and (not isinstance(issue.get("body"), str) or not issue["body"].strip() or dispatch_content_refusals(issue)
+                      or verified_non_slot_owner(issue)):
         return None
     labels = _labels(issue)
     holds = issue_holds(issue)
