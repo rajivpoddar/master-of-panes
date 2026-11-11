@@ -149,6 +149,7 @@ function updateSettings(slotRoot, overrides, checkOnly) {
     },
     skillOverrides: overrides,
   };
+  if (overrides === null) delete next.skillOverrides;
   const serialized = `${JSON.stringify(next, null, 2)}\n`;
   const existing = fs.existsSync(settingsPath)
     ? fs.readFileSync(settingsPath, "utf8")
@@ -244,7 +245,9 @@ function ensureAgentGuardSettings(slotRoot, checkOnly) {
 }
 
 const checkOnly = process.argv.includes("--check");
-const overrides = desiredOverrides();
+// --no-skill-overrides: hosted (non-Spark) profiles drop the Spark skill allowlist; the agent guard still applies.
+const noSkillOverrides = process.argv.includes("--no-skill-overrides");
+const overrides = noSkillOverrides ? null : desiredOverrides();
 let drifted = false;
 let guardMissing = false;
 for (const slotRoot of slotRoots) {
@@ -254,14 +257,14 @@ for (const slotRoot of slotRoots) {
   drifted = guardResult === true || drifted;
 }
 
-const fullyDescribed = Object.entries(overrides)
+const fullyDescribed = Object.entries(overrides ?? {})
   .filter(([, value]) => value === "on")
   .map(([name]) => name);
-const nameOnly = Object.entries(overrides)
+const nameOnly = Object.entries(overrides ?? {})
   .filter(([, value]) => value === "name-only")
   .map(([name]) => name);
 process.stdout.write(
-  `DEV_SKILL_ALLOWLIST_OK fully_described=${fullyDescribed.length} name_only=${nameOnly.length}\n`,
+  `DEV_SKILL_ALLOWLIST_${noSkillOverrides ? "DISABLED" : "OK"} fully_described=${fullyDescribed.length} name_only=${nameOnly.length}\n`,
 );
 process.stdout.write(
   `DEV_SLOT_AGENT_GUARD_OK hook=${agentGuardHook} slots=${slotRoots.length}\n`,

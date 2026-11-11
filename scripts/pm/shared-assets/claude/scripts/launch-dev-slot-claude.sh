@@ -5,7 +5,7 @@ set -euo pipefail
 SLOT_NUMBER="${1:-}"
 shift || true
 
-SPARK_PROFILE="${DEV_SLOT_SPARK_PROFILE:-ornith}"
+SPARK_PROFILE="${DEV_SLOT_SPARK_PROFILE:-gpt6luna}"  # Luna default (Rajiv D0AMF0XE6TS ts 1794363491.248259); Spark profiles need --spark-profile
 CLAUDE_ARGS=()
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -356,7 +356,12 @@ repair_rule_link "$DEV_SLOT_RULES/20-buddhi-dev.md" "$SLOT_CLONE/.claude/rules/2
 repair_rule_link "$IDENTITY_RULE_PATH" "$SLOT_CLONE/.claude/rules/$IDENTITY_RULE"
 repair_rule_link "$PROJECT_RULES/21-lessons.md" "$SLOT_CLONE/.claude/rules/21-lessons.md"
 
-"$SKILL_SYNC"
+# Skill allowlist (skillOverrides) is a Spark small-context measure only; hosted GPT/Claude profiles get every skill.
+# Rajiv D0AMF0XE6TS thread 1794362901.533399, ts 1794363491.248259: "it's needed only for spark, not luna."
+case "$SPARK_PROFILE" in
+  gpt6luna|gpt61sol|gpt61terra|opus55) "$SKILL_SYNC" --no-skill-overrides ;;
+  *) "$SKILL_SYNC" ;;
+esac
 
 export SLOT_NUMBER
 export SLOT_NAME

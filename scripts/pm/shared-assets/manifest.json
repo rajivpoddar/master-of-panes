@@ -474,7 +474,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "1b11a1f90ab1f020cc7cab0b1bb12dc8d0889554385f0ec28aefde98eb1c03e4",
+      "sha256": "5fc5178435cbbdb9db46f0ec62b919356285e13e0626b9fccc4dd6572103d658",
       "source_path": "claude/scripts/launch-dev-slot-claude.sh"
     },
     {
@@ -483,7 +483,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "a263c9cbb118feb09fee86bb1d70f72827fbeeb5295697bda22ae3a97d02c3b4",
+      "sha256": "cb70d1f72c3f648180181a4fc5ad9631e55604d398c72cca0e5d735dfc96714a",
       "source_path": "claude/scripts/launch-slot-1.sh"
     },
     {
@@ -492,7 +492,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "419d1ad1b08aefac1cee15b9dcca6ff5fbb9b809c76ccdbce27304d19a691d35",
+      "sha256": "eafb09e61e9ee3e37ef8deda1c297417de8b29839c5e5648472ebb42d9b44988",
       "source_path": "claude/scripts/launch-slot-2.sh"
     },
     {
@@ -501,7 +501,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "d1154911834e5e612c928d5061699ca85797c622baea30c42061c872659f7b4a",
+      "sha256": "624ef96768b782f427e5e05fe9e8ccd322dc3dbbf98d784db35f32f7887857ce",
       "source_path": "claude/scripts/launch-slot-3.sh"
     },
     {
@@ -510,7 +510,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher",
-      "sha256": "54521c7e3b0438b4bf8b50c985f08970cc39e31f0c042e961c2ccefb46634b36",
+      "sha256": "4448397c2439f2762b7a6c54c6ac3464cc0ce9f6d56483bb2806314e7e0b02f6",
       "source_path": "claude/scripts/launch-slot-4.sh"
     },
     {
@@ -845,7 +845,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slot-launcher-dependency",
-      "sha256": "82dff31da892ea2eeaa974457084b3d8f43ef06eaf7be9316569269a66888c4e",
+      "sha256": "1894b9cd2a81772a7b5812994e3064f256e7de4caaaf85c3510d50dc076354ed",
       "source_path": "claude/scripts/sync-dev-slot-skill-allowlist.mjs"
     },
     {
