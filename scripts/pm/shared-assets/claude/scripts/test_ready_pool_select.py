@@ -4,6 +4,7 @@
 Run: python3 -m unittest ~/.claude/scripts/test_ready_pool_select.py  (stdlib only)
 """
 
+import http.client
 import importlib.util
 import pathlib
 import unittest
@@ -416,6 +417,139 @@ class IssueLabelCompatibilityTests(unittest.TestCase):
         item = issue(303, ["P0", "status:blocked", "sub:waiting-on-issue"],
                      body="<!-- ready-pool:\nholds: dependency\n-->")
         self.assertIsNone(rps.classify(item))
+
+
+class GraphQLTransportRetryTests(unittest.TestCase):
+    """A truncated TLS read must retry, not abort the whole selection.
+
+    Regression for the 2026-11-11 21:08 IST host restart: graphql_http raised
+    http.client.IncompleteRead (a HTTPException, not an OSError) straight out of
+    _paginate_issues, so every slot assignment failed with a traceback.
+    """
+
+    def _query(self, page_size=100):
+        return ("query($cursor:String){repository(owner:\"Scribie\",name:\"heydonna-app\"){"
+                f"issues(first:{page_size},after:$cursor,states:OPEN){{"
+                "totalCount nodes{number} pageInfo{hasNextPage endCursor}}}}}")
+
+    def _resp(self, payload):
+        body = json.dumps(payload).encode()
+
+        class R:
+            def read(self_inner):
+                return body
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+        return R()
+
+    def test_incomplete_read_is_retried_and_succeeds(self):
+        calls = []
+
+        def flaky(req, timeout=None):
+            calls.append(req.data)
+            if len(calls) == 1:
+                raise http.client.IncompleteRead(b'{"data"', 12)
+            return self._resp({"data": {"ok": True}})
+
+        with patch.object(rps.urllib.request, "urlopen", side_effect=flaky), \
+             patch.object(rps, "_github_token", return_value="x"), \
+             patch.object(rps, "sleep", lambda s: None):
+            out = rps.graphql_http(self._query(), timeout=5)
+        self.assertEqual(out, {"data": {"ok": True}})
+        self.assertEqual(len(calls), 2, "first short read must be retried once")
+
+    def test_connection_reset_and_urlerror_are_retried(self):
+        for exc in (ConnectionResetError("reset"), rps.urllib.error.URLError("boom")):
+            calls = []
+
+            def flaky(req, timeout=None, _exc=exc):
+                calls.append(req.data)
+                if len(calls) == 1:
+                    raise _exc
+                return self._resp({"data": {"ok": True}})
+
+            with patch.object(rps.urllib.request, "urlopen", side_effect=flaky), \
+                 patch.object(rps, "_github_token", return_value="x"), \
+                 patch.object(rps, "sleep", lambda s: None):
+                self.assertEqual(rps.graphql_http(self._query(), timeout=5), {"data": {"ok": True}})
+            self.assertEqual(len(calls), 2)
+
+    def test_retry_shrinks_page_size(self):
+        seen = []
+
+        def flaky(req, timeout=None):
+            seen.append(req.data.decode())
+            if len(seen) == 1:
+                raise http.client.IncompleteRead(b'{"data"', 12)
+            return self._resp({"data": {"ok": True}})
+
+        with patch.object(rps.urllib.request, "urlopen", side_effect=flaky), \
+             patch.object(rps, "_github_token", return_value="x"), \
+             patch.object(rps, "sleep", lambda s: None):
+            rps.graphql_http(self._query(100), timeout=5)
+        self.assertIn("first:100", seen[0])
+        self.assertIn("first:50", seen[1], "retry must ask for a smaller page")
+        self.assertEqual(len(seen), 2)
+
+    def test_page_size_shrinks_to_floor_and_stops(self):
+        sizes = []
+        current = 100
+        while True:
+            nxt = rps._shrink_page_size("first:%d" % current, current)
+            if nxt is None:
+                break
+            sizes.append(nxt)
+            current = nxt
+        self.assertEqual(sizes, [50, 25, 12, 10])
+        self.assertIsNone(rps._shrink_page_size("first:10", 10))
+
+    def test_exhausted_retries_fall_back_to_gh(self):
+        def always_short(req, timeout=None):
+            raise http.client.IncompleteRead(b'{"data"', 12)
+
+        gh_calls = []
+
+        def fake_run(cmd, **kw):
+            gh_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"data": {"ok": 1}}), "")
+
+        with patch.object(rps.urllib.request, "urlopen", side_effect=always_short), \
+             patch.object(rps, "_github_token", return_value="x"), \
+             patch.object(rps, "sleep", lambda s: None), \
+             patch.object(rps, "run_lookup", side_effect=fake_run):
+            out = rps.graphql_http(self._query(), timeout=5)
+        self.assertEqual(out, {"data": {"ok": 1}})
+        self.assertEqual(len(gh_calls), 1, "gh fallback runs once after retries are exhausted")
+
+    def test_budget_caps_attempts_at_three(self):
+        attempts = []
+
+        def always_short(req, timeout=None):
+            attempts.append(req.data)
+            raise http.client.IncompleteRead(b'{"data"', 12)
+
+        with patch.object(rps.urllib.request, "urlopen", side_effect=always_short), \
+             patch.object(rps, "_github_token", return_value="x"), \
+             patch.object(rps, "sleep", lambda s: None), \
+             patch.object(rps, "run_lookup", side_effect=OSError("gh unavailable")):
+            with self.assertRaises(OSError):
+                rps.graphql_http(self._query(), timeout=5)
+        self.assertEqual(len(attempts), rps._HTTP_RETRIES)
+        self.assertEqual(len(attempts), 3)
+
+    def test_deadline_still_bounds_retries(self):
+        def always_short(req, timeout=None):
+            raise http.client.IncompleteRead(b'{"data"', 12)
+
+        with patch.object(rps.urllib.request, "urlopen", side_effect=always_short), \
+             patch.object(rps, "_github_token", return_value="x"), \
+             patch.object(rps, "run_lookup", side_effect=OSError("gh unavailable")):
+            with self.assertRaises(TimeoutError):
+                rps.graphql_http(self._query(), timeout=5, deadline=rps.monotonic() - 1)
 
 
 if __name__ == "__main__":

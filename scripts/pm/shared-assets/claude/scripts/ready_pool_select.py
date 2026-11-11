@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+import http.client
 import importlib.util
 import json
 import re
@@ -95,6 +96,12 @@ REWORK_LABELS = {"status:qa-rework", "pm-state:qa-failed-rework", "pm-state:bloc
 CANDIDATE_LABELS = ("status:todo", *tuple(sorted(REWORK_LABELS)), "pm-blocked:dependency")
 SNAPSHOT_TTL = 90
 _FRESH = "__fresh_issues__"
+# Truncated TLS reads (http.client.IncompleteRead) are transient: retry the same
+# request a bounded number of times, halving the page when the query pages.
+_HTTP_RETRIES = 3
+_RETRY_BASE_DELAY = 0.5
+_DEFAULT_PAGE_SIZE = 100
+_MIN_PAGE_SIZE = 10
 
 
 def pool_cache_name(kind: str) -> str:
@@ -384,33 +391,106 @@ def _github_token() -> str:
         return token
 
 
+# Truncated/reset TLS reads. `http.client.IncompleteRead` derives from `HTTPException`,
+# not `OSError`, so it slips past the old except tuple and kills the whole selection with
+# a bare traceback. IncompleteRead is listed before HTTPException so a short read is
+# matched (and retried) rather than treated as a malformed response.
+_TRANSPORT_RETRY = (http.client.IncompleteRead, http.client.HTTPException,
+                    ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
+                    TimeoutError, urllib.error.URLError, OSError)
+
+
+def _is_transport_retry(exc: BaseException) -> bool:
+    """True for a truncated/reset read worth retrying, or a body left unread."""
+    return isinstance(exc, _TRANSPORT_RETRY) and not isinstance(exc, (json.JSONDecodeError, ValueError))
+
+
+def _shrink_page_size(query: str, current: int) -> int | None:
+    """Next smaller `first:` page size for this query, or None if already at the floor."""
+    if current <= _MIN_PAGE_SIZE:
+        return None
+    return max(_MIN_PAGE_SIZE, current // 2)
+
+
+def _page_size_of(query: str, default: int) -> int:
+    found = re.search(r"first:(\d+)", query)
+    return int(found.group(1)) if found else default
+
+
 def graphql_http(query: str, variables: dict | None = None, timeout: int = 60,
                  deadline: float | None = None) -> dict:
-    """One GraphQL round trip without a gh process per page. Falls back to gh on transport errors."""
-    remaining = deadline - monotonic() if deadline is not None else timeout
-    if remaining <= 0:
-        raise TimeoutError("candidate snapshot deadline reached")
-    body = json.dumps({"query": query, **({"variables": variables} if variables else {})}).encode()
+    """One GraphQL round trip without a gh process per page.
+
+    Retries a truncated or reset read up to _HTTP_RETRIES times inside the caller's
+    deadline. When the query carries `first:N`, each retry asks for a smaller page: a
+    body that cannot be read in full is answered by fewer rows per request, which is the
+    only change - the candidate set is walked the same way. Falls back to gh afterwards.
+    """
     try:
-        req = urllib.request.Request(
-            "https://api.github.com/graphql",
-            data=body,
-            headers={
-                "Authorization": "Bearer " + _github_token(),
-                "Content-Type": "application/json",
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "ready-pool-select",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=min(timeout, remaining)) as resp:
-            return json.loads(resp.read().decode())
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
-        cmd = ["gh", "api", "graphql", "-f", "query=" + query]
-        for key, value in (variables or {}).items():
-            if value is not None:
-                cmd += ["-f", f"{key}={value}"]
-        return json.loads(run_lookup(cmd, timeout=timeout, deadline=deadline).stdout)
+        return _graphql_attempt(query, variables, timeout, deadline)
+    except (TimeoutError, ValueError, OSError, http.client.HTTPException) as exc:
+        if not _is_transport_retry(exc):
+            raise
+        # The caller's deadline bounds the whole lookup, gh fallback included.
+        if deadline is not None and deadline - monotonic() <= 0:
+            raise TimeoutError("candidate snapshot deadline reached") from exc
+        # A short read is not a selection failure: surface it as unavailable with a
+        # reason, the same as any other lookup failure, rather than a traceback.
+        return _graphql_via_gh(query, variables, timeout, deadline)
+
+
+def _graphql_via_gh(query: str, variables: dict | None, timeout: int, deadline: float | None) -> dict:
+    cmd = ["gh", "api", "graphql", "-f", "query=" + query]
+    for key, value in (variables or {}).items():
+        if value is not None:
+            cmd += ["-f", f"{key}={value}"]
+    return json.loads(run_lookup(cmd, timeout=timeout, deadline=deadline).stdout)
+
+
+def _graphql_attempt(query: str, variables: dict | None, timeout: int,
+                     deadline: float | None) -> dict:
+    page_size = _page_size_of(query, _DEFAULT_PAGE_SIZE)
+    last: Exception | None = None
+    for attempt in range(_HTTP_RETRIES):
+        remaining = deadline - monotonic() if deadline is not None else timeout
+        if remaining <= 0:
+            raise TimeoutError("candidate snapshot deadline reached")
+        body = json.dumps({"query": query, **({"variables": variables} if variables else {})}).encode()
+        try:
+            req = urllib.request.Request(
+                "https://api.github.com/graphql",
+                data=body,
+                headers={
+                    "Authorization": "Bearer " + _github_token(),
+                    "Content-Type": "application/json",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "ready-pool-select",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=min(timeout, remaining)) as resp:
+                raw = resp.read()
+                if not raw:
+                    # A clean EOF with no body is the same failure shape as a short read.
+                    raise http.client.IncompleteRead(b"", None)
+                return json.loads(raw.decode())
+        except _TRANSPORT_RETRY as exc:
+            # The body was consumed and the connection is not reusable: retry as a new
+            # request, with a smaller page when this query pages at all.
+            if not _is_transport_retry(exc):
+                raise
+            last = exc
+            if attempt + 1 >= _HTTP_RETRIES:
+                break
+            smaller = _shrink_page_size(query, page_size)
+            if smaller is not None:
+                query = re.sub(r"first:\d+", f"first:{smaller}", query, count=1)
+                page_size = smaller
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            if deadline is not None and monotonic() + delay >= deadline:
+                raise TimeoutError("candidate snapshot deadline reached")
+            sleep(delay)
+    raise last if last is not None else RuntimeError("unreachable")
 
 
 def _paginate_issues(label: str, node_fields: str, deadline: float, page_size: int,
