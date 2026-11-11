@@ -23,7 +23,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { execShell } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import { recentJsonlActivity } from "./jsonlActivity.js";
@@ -538,9 +540,14 @@ export class ProcessHealthChecker {
     }
     const rows = listing.split(/\r?\n/).map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).filter(Boolean) as RegExpExecArray[];
     if (!rows.some((row) => row[1] === pane)) return null;
-    // ps may render the executable as an absolute path (e.g. Homebrew's
-    // /opt/homebrew/bin/claude), not just the basename.
-    const children = rows.filter((row) => row[2] === pane && /^(?:\S*\/)?claude(?:\s|$)/.test(row[3])).map((row) => row[1]);
+    // Only the stable executable and explicitly named aliases (including their
+    // resolved targets) establish ownership; an arbitrary */claude does not.
+    const paths = [join(homedir(), ".local/opt/claude-code/claude"), "/opt/homebrew/bin/claude", join(homedir(), ".local/bin/claude")];
+    const executables = new Set(paths);
+    for (const path of paths) {
+      try { executables.add(realpathSync(path)); } catch { /* unavailable alias */ }
+    }
+    const children = rows.filter((row) => row[2] === pane && executables.has(row[3].split(/\s/, 1)[0])).map((row) => row[1]);
     if (children.length > 1) return null;
     return `${pane}:${children[0] ?? ""}`;
   }
