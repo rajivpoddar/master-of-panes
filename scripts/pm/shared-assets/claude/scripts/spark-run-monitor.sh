@@ -259,7 +259,7 @@ while True:
               if memory_config.get("cuda_floor_mib", floor) == floor else
               "%s; floor OS %d / CUDA %d MiB (ACTIVE); minima CUDA=%s OS=%s" % (memory["verdict"]["state"], floor, memory_config["cuda_floor_mib"], min_cuda, min_avail))
         lines = [("*[%s] run ended*" if ended else "*[%s]*") % a.run_name if not os.environ.get("MONITOR_TEST") else "*[TEST - monitor self-test, ignore] %s*" % a.run_name,
-                 "step %s/%s | loss %s | grad_norm %s | lr %s | tok/s %s | %s" % (d["step"] if d["step"] is not None else "n/a", d["total"] or "n/a",
+                 "step %s/%s (%s) | loss %s | grad_norm %s | lr %s | tok/s %s | %s" % (d["step"] if d["step"] is not None else "n/a", d["total"] or "n/a", ("%.1f%%" % (100.0 * d["step"] / d["total"])) if (d["step"] is not None and d["total"]) else "n/a",
                     d["loss"] if d["loss"] is not None else "n/a", d["gn"] if d["gn"] is not None else "n/a", ("%.2e" % d["lr"]) if d["lr"] is not None else "n/a", "%.1f" % d["tps"] if d["tps"] else "n/a (not logged)", progress),
                  "GPU %s | CUDA free %s MiB | MemAvailable %s MiB | %s" % (gpu, cuda, guard_os, fl),
                  thermal_line(thermal(sec.get("THERM", [])), sec.get("TALERT", []))]
