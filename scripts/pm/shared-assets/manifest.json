@@ -42,7 +42,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "9dae70eb75cc23c14e5ecf0c7667c69e78da075c9cc714529d0014904d4f1cfd",
+      "sha256": "5653c6c50bac25565b9b080bb9377e70189b86007a56983ff1ef7d05c6807f67",
       "source_path": "claude/agents/remote-qa-runner.md"
     },
     {
