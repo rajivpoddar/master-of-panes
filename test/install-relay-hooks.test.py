@@ -77,7 +77,7 @@ class InstallRelayHooksTest(unittest.TestCase):
             slot = os.path.join(d, "heydonna-app-3002", ".claude")
             os.makedirs(slot)
             p = os.path.join(slot, "settings.json")
-            orig = {"hooks": {"Stop": [{"hooks": [
+            orig = {"env": {"HEYDONNA_SLOT_STOP_GATED": "1"}, "hooks": {"Stop": [{"hooks": [
                 {"type": "command", "command": 'bash "/old/master-of-panes/current/scripts/hook-relay.sh" Stop'},
                 {"type": "command", "command": "keep-stop"},
             ]}]}}
@@ -100,6 +100,32 @@ class InstallRelayHooksTest(unittest.TestCase):
             pm_out = self.run_it(pm_settings)
             pm_stop = [h["command"] for g in pm_out["hooks"]["Stop"] for h in g["hooks"]]
             self.assertTrue(any("hook-relay.sh\" Stop" in c for c in pm_stop))
+
+    def test_dev_gate_repair_preserves_hooks_and_missing_gate_fails_loud(self):
+        with tempfile.TemporaryDirectory() as d:
+            slot = os.path.join(d, "heydonna-app-3001", ".claude")
+            os.makedirs(slot)
+            path = os.path.join(slot, "settings.json")
+            original = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "keep"}]}]}}
+            with open(path, "w") as f:
+                json.dump(original, f)
+            def run(*args):
+                return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True)
+            self.assertNotEqual(run(path).returncode, 0)
+            self.assertNotEqual(run("--check-slot-stop-gates", d).returncode, 0)
+            self.assertEqual(run(path, "--ensure-slot-stop-gate").returncode, 0)
+            with open(path) as f:
+                repaired = json.load(f)
+            self.assertEqual(repaired["hooks"], original["hooks"])
+            self.assertEqual(repaired["env"]["HEYDONNA_SLOT_STOP_GATED"], "1")
+            for slot_num in range(2, 5):
+                other = os.path.join(d, f"heydonna-app-300{slot_num}", ".claude")
+                os.makedirs(other)
+                with open(os.path.join(other, "settings.json"), "w") as f:
+                    json.dump({"env": {"HEYDONNA_SLOT_STOP_GATED": "1"}}, f)
+            self.assertEqual(run("--check-slot-stop-gates", d).returncode, 0)
+            pm = os.path.join(d, "heydonna-app", ".claude", "settings.json")
+            self.assertNotEqual(run(pm, "--ensure-slot-stop-gate").returncode, 0)
 
     def test_mode_retained_and_new_files_created_0600(self):
         with tempfile.TemporaryDirectory() as d:

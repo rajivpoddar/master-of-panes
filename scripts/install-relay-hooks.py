@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 
 PLUGIN = "master-of-panes@rajiv-plugins"
 DEFAULT_SCRIPTS = os.path.expanduser("~/.local/share/master-of-panes/current/scripts")
@@ -76,14 +77,49 @@ def apply(settings, scripts_dir, stop_relay=True):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("settings")
+    ap.add_argument("settings", nargs="?")
+    ap.add_argument("--check-slot-stop-gates", metavar="PROJECTS_DIR",
+                    help="Fail if any active dev slot 1-4 lacks the Stop gate")
     ap.add_argument("--scripts-dir", default=DEFAULT_SCRIPTS)
+    ap.add_argument("--ensure-slot-stop-gate", action="store_true",
+                    help="Set only the dev-slot Stop gate, preserving all hooks")
     a = ap.parse_args()
+    if a.check_slot_stop_gates:
+        if a.settings or a.ensure_slot_stop_gate:
+            ap.error("--check-slot-stop-gates cannot be combined with a settings path")
+        failures = []
+        # Slots 5-8 are decommissioned; a missing active checkout is an error.
+        for slot in range(1, 5):
+            checkout = os.path.join(a.check_slot_stop_gates, f"heydonna-app-300{slot}")
+            path = os.path.join(checkout, ".claude", "settings.json")
+            try:
+                with open(path) as f:
+                    value = json.load(f).get("env", {}).get("HEYDONNA_SLOT_STOP_GATED")
+            except (OSError, ValueError, AttributeError):
+                value = None
+            if value != "1":
+                failures.append(path)
+        if failures:
+            print("ERROR: missing HEYDONNA_SLOT_STOP_GATED=1: " + ", ".join(failures), file=sys.stderr)
+            return 1
+        print("all active dev slots 1-4 have HEYDONNA_SLOT_STOP_GATED=1")
+        return 0
+    if not a.settings:
+        ap.error("settings path is required")
+    if a.ensure_slot_stop_gate and stop_relay_for(a.settings):
+        ap.error("--ensure-slot-stop-gate requires a dev-slot settings path")
     data = {}
     if os.path.exists(a.settings):
         with open(a.settings) as f:
             data = json.load(f)
-    new = apply(json.loads(json.dumps(data)), a.scripts_dir, stop_relay=stop_relay_for(a.settings))
+    if (not a.ensure_slot_stop_gate and not stop_relay_for(a.settings)
+            and data.get("env", {}).get("HEYDONNA_SLOT_STOP_GATED") != "1"):
+        ap.error("dev slot missing HEYDONNA_SLOT_STOP_GATED=1; use --ensure-slot-stop-gate first")
+    new = json.loads(json.dumps(data))
+    if a.ensure_slot_stop_gate:
+        new.setdefault("env", {})["HEYDONNA_SLOT_STOP_GATED"] = "1"
+    else:
+        new = apply(new, a.scripts_dir, stop_relay=stop_relay_for(a.settings))
     if new == data:
         print(f"unchanged {a.settings}")
         return
@@ -102,4 +138,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
