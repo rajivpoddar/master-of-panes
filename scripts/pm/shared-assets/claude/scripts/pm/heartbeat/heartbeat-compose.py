@@ -1344,21 +1344,64 @@ PROXY_CACHE = Path.home() / ".cache" / "pm-heartbeat" / "proxies-last-good.json"
 PROXY_CACHE_MAX_S = 600
 PROXY_STALE_ACTIVITY_MIN = 20
 PROXY_ROW_CAP = 24
-_PROXY_TMUX_FMT = "#{session_name}\t#{window_name}\t#{window_activity}\t#{pane_dead}\t#{pane_pid}"
+_PROXY_TMUX_FMT = "#{session_name}\t#{window_name}\t#{window_activity}\t#{pane_dead}\t#{pane_pid}\t#{pane_start_command}"
+
+
+def _proxy_runner_metadata(start: str, now: datetime, exited: bool) -> dict:
+    """Read only launcher arguments, never expose its secret-bearing exports."""
+    try:
+        argv = shlex.split(start)
+        if len(argv) == 1:
+            argv = shlex.split(argv[0])
+        if len(argv) != 2 or Path(argv[0]).name != 'bash':
+            return {}
+        runner = Path(argv[1])
+        if runner.name != 'run.sh' or not runner.parent.name.startswith('proxy-agent-job.'):
+            return {}
+        text = runner.read_text()
+        model = re.search(r'(?:^|\s)--model\s+([^\s]+)', text)
+        pipeline = re.search(r'<\s+(\S+)\s+2>\s+\S+\s+\|\s+python3\s+-I\s+-u\s+\S*proxy-agent-stream\.py\s+(\S+)\s+(\S+)', text)
+        result = {'model': model.group(1)} if model else {}
+        if not pipeline:
+            return result
+        brief, out, jsonl = (Path(shlex.split(value)[0]) for value in pipeline.groups())
+        try:
+            content = brief.read_text()[:200000]
+            refs = [f'{kind.lower()}:{number}' for kind, number in re.findall(r'(?im)^\s*(PR|ISSUE):\s*#?(\d+)\s*$', content)]
+            if refs:
+                result['brief_refs'] = list(dict.fromkeys(refs))
+        except (OSError, UnicodeError):
+            pass
+        try:
+            result['output_age'] = max(0, int((now.timestamp() - jsonl.stat().st_mtime) // 60))
+        except OSError:
+            pass
+        if exited:
+            try:
+                lines = out.read_text()[-200000:].splitlines()
+                line = next((line.strip() for line in reversed(lines) if re.match(r'^RESULT\b', line.strip(), re.I)), None)
+                if line:
+                    result['result_line'] = _compact(line, 200)
+            except (OSError, UnicodeError):
+                pass
+        return result
+    except (OSError, UnicodeError, ValueError, IndexError):
+        return {}
 
 
 def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completions: list[dict]) -> dict:
     """px-* windows only. ps_text is one process table, optional; commands are not kept."""
     windows = []
     for line in tmux_text.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 5:
+        parts = line.split("\t", 5)
+        if len(parts) not in (5, 6):
             continue
-        session, name, activity, dead, pid = parts
+        session, name, activity, dead, pid = parts[:5]
+        start = parts[5] if len(parts) == 6 else ''
         if not name.startswith("px-") or session not in {"0", "proxies"}:
             continue
         try:
-            windows.append((name, int(activity), dead == "1", int(pid)))
+            windows.append((name, int(activity), dead == "1", int(pid), start))
         except ValueError:
             continue
     processes = {}
@@ -1372,9 +1415,13 @@ def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completion
         processes[pid] = (ppid, age, command)
         children.setdefault(ppid, []).append(pid)
     rows = []
-    for name, activity, dead, pid in windows:
-        age_min = _elapsed_minutes(processes[pid][1]) if pid in processes else None
-        model = "unknown"
+    for name, activity, dead, pid, start in windows:
+        try:
+            age_min = _elapsed_minutes(processes[pid][1]) if pid in processes else None
+        except ValueError:
+            age_min = None
+        metadata = _proxy_runner_metadata(start, now, dead)
+        model = metadata.get('model', 'unknown')
         stack = list(children.get(pid, []))
         seen: set[int] = set()
         while stack and len(seen) < 64:
@@ -1393,7 +1440,7 @@ def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completion
         last = max(0, int((now.timestamp() - activity) // 60))
         stale = (not dead) and last >= PROXY_STALE_ACTIVITY_MIN
         rows.append({
-            "name": name, "model": model, "age": age_min, "last_activity": last,
+            **metadata, "name": name, "model": model, "age": age_min, "last_activity": last,
             "dead": dead, "stale": stale, "state": "dead" if dead else "stale" if stale else "running",
         })
     rows.sort(key=lambda row: (row["dead"], row["name"]))
@@ -1443,9 +1490,13 @@ def _proxy_completions(now: datetime) -> tuple[list[dict], bool]:
     completed = []
     for (payload,) in entries:
         command = json.loads(payload).get("command", "")
-        match = re.match(r"PROXY_STOP name=(\S+) rc=(\S+)\s", command)
+        match = re.match(r"PROXY_STOP name=(\S+) rc=(\S+)\s+out=\S+\s+(RESULT\b[^\n]*)", command)
         if match:
-            completed.append({"name": match.group(1), "rc": match.group(2), "result": "unknown"})
+            completed.append({"name": match.group(1), "rc": match.group(2), "result": _compact(match.group(3), 200)})
+        else:
+            match = re.match(r"PROXY_STOP name=(\S+) rc=(\S+)\s", command)
+            if match:
+                completed.append({"name": match.group(1), "rc": match.group(2), "result": "unknown"})
     return completed, len(entries) == 200
 
 
@@ -1467,7 +1518,8 @@ def proxy_work_history(rows: list[dict], now: datetime, path: Path = PM_OPS_DB) 
                 by_name[name] = (issue, payload)
         for row in rows:
             name = row['name']
-            record = by_name.get(name) or by_name.get('proxy-' + name.removeprefix('px-'))
+            short_name = name.removeprefix('px-')
+            record = by_name.get(name) or by_name.get(short_name) or by_name.get('proxy-' + short_name)
             if not record:
                 continue
             issue, payload = record
@@ -1576,10 +1628,16 @@ def proxies_block(doc: dict | None) -> list[str]:
         def elapsed(field):
             value = row.get(field + '_minutes')
             return f'{value // 60}h{value % 60:02d}m' if isinstance(value, int) and value >= 0 else 'UNKNOWN'
-        rendered.append(f"• {row.get('work_ref', 'issue/PR UNKNOWN')} @{row.get('work_head', 'UNKNOWN')} · {row.get('model', 'unknown')} {row['name']} · this stage {elapsed('stage_started_at')} · total {elapsed('work_started_at')} · last progress {elapsed('last_progress_at')} ago · boundary {row.get('boundary', 'UNKNOWN')} · next {row.get('next_checkpoint', 'UNKNOWN')} · process age {age} · activity {last_s}{flag}")
+        refs = row.get('brief_refs') or ([row['work_ref']] if row.get('work_ref') else [])
+        ref = ', '.join(refs) if refs else 'issue/PR UNKNOWN'
+        output = row.get('output_age')
+        output_s = f'{output}m' if output is not None else 'UNKNOWN'
+        name = row['name'].removeprefix('px-') if row['name'].startswith('px-px-') else row['name']
+        result = f" · {row.get('result_line', 'RESULT UNKNOWN')}" if _dead(row) else ''
+        rendered.append(f"• {ref} @{row.get('work_head', 'UNKNOWN')} · {row.get('model', 'unknown')} {name} · this stage {elapsed('stage_started_at')} · total {elapsed('work_started_at')} · last progress {elapsed('last_progress_at')} ago · boundary {row.get('boundary', 'UNKNOWN')} · next {row.get('next_checkpoint', 'UNKNOWN')} · process age {age} · output age {output_s} · activity {last_s}{flag}{result}")
     for row in completed:
-        if row["rc"] != "0":
-            rendered.append(f"• {row['name']} · finished · rc={row['rc']} (FAILED)")
+        result = row.get('result', 'unknown')
+        rendered.append(f"• {row['name']} · finished · rc={row['rc']} · {result if result != 'unknown' else 'RESULT UNKNOWN'}")
     # Parent compaction may abbreviate this block; saved input/full block retains
     # every row for the existing hourly inspector rather than dropping row 25+.
     lines.extend(rendered)
