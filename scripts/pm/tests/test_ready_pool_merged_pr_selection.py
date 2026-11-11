@@ -57,7 +57,7 @@ def github_fixture(selector, monkeypatch, states):
 
 
 def test_live_non_slot_owner_excluded_from_ranking_and_inversion(selector, monkeypatch):
-    monkeypatch.setattr(selector, 'non_slot_owners', lambda: ({'px-owner'}, {}))
+    monkeypatch.setattr(selector, 'non_slot_owners', lambda: ({'px-owner': {100}}, {}))
     p0 = issue(100, 'P0')
     p0['body'] = p0['body'].replace('blockers: none', 'blockers: none\nowner: px-owner\ndisposition: IN_PROGRESS')
     rows = [p0, issue(101)]
@@ -71,14 +71,46 @@ def test_live_non_slot_owner_excluded_from_ranking_and_inversion(selector, monke
 def test_unverified_owner_stays_in_inversion_and_live_obligation_excludes(selector, monkeypatch):
     p0 = issue(100, 'P0')
     p0['body'] = p0['body'].replace('blockers: none', 'blockers: none\nowner: px-owner\ndisposition: IN_PROGRESS')
-    monkeypatch.setattr(selector, 'non_slot_owners', lambda: (set(), {100: {'px-owner'}}))
+    monkeypatch.setattr(selector, 'non_slot_owners', lambda: ({}, {}))
     ranked = selector.rank_candidates([p0, issue(101)], offline=True)
     assert selector.check_pick(101, ranked)['status'] == 'PRIORITY_INVERSION'
     p0['body'] = p0['body'].replace('owner: px-owner\ndisposition: IN_PROGRESS', 'owner: none\ndisposition: READY')
-    monkeypatch.setattr(selector, 'non_slot_owners', lambda: ({'px-owner'}, {100: {'px-owner'}}))
+    monkeypatch.setattr(selector, 'non_slot_owners', lambda: ({'px-owner': {100}}, {100: {'px-owner'}}))
     assert selector.classify(p0) is None
-    monkeypatch.setattr(selector, 'non_slot_owners', lambda: ({'px-owner'}, {}))
+    monkeypatch.setattr(selector, 'non_slot_owners', lambda: ({'px-owner': {100}}, {}))
     assert selector.classify(p0) == 'new_issue'
+
+
+def test_real_producer_binds_reparented_peer_to_current_issue(selector, monkeypatch, tmp_path):
+    import sqlite3
+    db = tmp_path / 'ops.db'
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE obligations (issue, target_type, target_id, owner, status)')
+        conn.execute("INSERT INTO obligations VALUES (100, 'github_issue', '100', 'px-owner', 'open')")
+    connect = sqlite3.connect
+    monkeypatch.setattr(selector.sqlite3, 'connect', lambda *a, **kw: connect(db))
+    job = tmp_path / 'proxy-agent-job.test'
+    job.mkdir()
+    brief = tmp_path / 'brief.md'
+    runner = job / 'run.sh'
+    runner.write_text(f'claude --name px-owner --model luna < {brief} 2> /tmp/x | python3 -I -u /x/proxy-agent-stream.py /tmp/out /tmp/out.jsonl\n')
+    tmux = f'0\tpx-owner\t1794405600\t0\t100\tbash {runner}\n'
+    ps = '100 1 00:01:00 bash run.sh\n101 1 00:00:59 /usr/bin/claude --name px-owner --model luna\n'
+    monkeypatch.setattr(selector.subprocess, 'run', lambda cmd, **kw: SimpleNamespace(stdout=tmux if cmd[0] == 'tmux' else ps))
+    p0 = issue(100, 'P0')
+    lower = issue(101)
+    for text, expected in [('ISSUE: 200\n', 'PRIORITY_INVERSION'), ('ISSUE: 100\n', 'ok')]:
+        brief.write_text(text)
+        selector.non_slot_owners.cache_clear()
+        ranked = selector.rank_candidates([p0, lower], offline=True)
+        assert selector.check_pick(101, ranked)['status'] == expected
+    p0['body'] = p0['body'].replace('blockers: none', 'blockers: none\nowner: px-owner\ndisposition: IN_PROGRESS')
+    brief.write_text('ISSUE: 200\n')
+    selector.non_slot_owners.cache_clear()
+    assert selector.classify(p0) == 'new_issue'
+    brief.write_text('ISSUE: 100\n')
+    selector.non_slot_owners.cache_clear()
+    assert selector.classify(p0) is None
 
 
 def test_open_issue_and_merged_associated_pr_unblock_before_p1(selector, monkeypatch):
