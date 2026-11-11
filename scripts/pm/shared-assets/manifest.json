@@ -316,6 +316,15 @@
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules/20-buddhi-pm.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-pm-buddhi",
+      "sha256": "f8d9f32e6c1583a42ee88135e505445964fe29ab049c497386d30dafff4bbe37",
+      "source_path": "claude/rules/20-buddhi-pm.md"
+    },
+    {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules/99-pm-fable-review-cap.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1793,15 +1802,6 @@
       "ownership_class": "shared-codex-skill-test",
       "sha256": "3b20dfdfa3357e0bd0d0252392d0fb7354df63006330f709fd8b912177427710",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
-    },
-    {
-      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/rules/20-buddhi-pm.md",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 420,
-      "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "f8d9f32e6c1583a42ee88135e505445964fe29ab049c497386d30dafff4bbe37",
-      "source_path": "claude/rules/20-buddhi-pm.md"
     }
   ],
   "inventory": {
