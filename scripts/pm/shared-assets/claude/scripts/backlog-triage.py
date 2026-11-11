@@ -5,6 +5,10 @@ Ready Pool membership is separate from assignment eligibility:
 - Dependency-held app work stays in status:todo at every priority (Rajiv S113).
 - The selector checks live dependencies before assignment; pool admission does
   not authorize execution of blocked work.
+- An explicit `merge_after: #N[, #M]` Ready Pool header is merge ordering,
+  not an assignment hold; don't convert it into blockers or infer it from prose.
+  Use selector --check for live merge_after_open. Canonical blockers and native
+  blocked-by remain gates (CTO C0ALZJHGE49 ts 1794385105.483169).
 - status:backlog promotion candidates are surfaced to PM ops; the script does
   not auto-promote them in audit mode because that requires product/priority
   judgement.
