@@ -244,18 +244,51 @@ test("Claude prompt never appears: bounded wait, no continuation typed into the 
   } finally { h.db.close(); }
 });
 
-test("exit relaunch timeout ends only the current episode without draining inbound", async () => {
+test("issued exit relaunch timeout retains custody and reconciles its late owned boot once", async () => {
   const h = harness({ state: "shell", neverBoots: true });
   try {
-    const episode = armPmOnlyEpisode(h.db);
+    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old", cwd: PM_PATH });
+    h.db.setExitPending(true, false, true, "saved continuation", true, true);
+    h.db.markSlotExitCycled(0);
+    const episode = h.db.getExitStatus().episode;
+    h.db.logEvent(0, "exit_pending_triggered", "Stop", null, { episode, delivery: "delivered" });
     h.db.enqueuePendingPMEvent(1, "handoff", "inbound");
     const result = await h.health.restartPMFresh("exit", episode);
     assert.equal(result.success, false);
     assert.match(result.reason, /claude prompt not observed/);
-    assert.equal(h.db.getExitStatus().pending, false);
-    assert.equal(h.db.getExitStatus().continuation_delivery, "failed");
+    assert.equal(h.db.getExitStatus().pending, true);
+    assert.equal(h.db.getExitStatus().continuation_delivery, "waiting");
+    assert.equal(h.db.getExitStatus().with_devs, true);
     assert.equal(h.db.peekPendingPMEvents().length, 1);
+    (h.health as any).lastRestart.clear();
+    assert.equal((await h.health.restartPMFresh("exit", episode)).reason, "uncertain_launch_no_resend");
+    assert.equal(launchTyped(h.pane).length, 1);
+    h.pane.state = "fresh";
+    h.pane.child = "502";
+    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "late", cwd: PM_PATH });
+    await h.health.reconcilePMRestartContinuation();
+    await h.health.reconcilePMRestartContinuation();
+    assert.deepEqual(h.pane.sends, ["saved continuation"]);
+    assert.equal(h.db.getExitStatus().continuation_delivery, "delivered");
+    assert.equal(h.db.getExitStatus().with_devs, true);
+    assert.equal(h.db.peekPendingPMEvents().length, 1);
+  } finally { h.db.close(); }
+});
+
+test("late successor boot cannot inherit an issued launch's continuation", async () => {
+  const h = harness({ state: "shell", neverBoots: true });
+  try {
+    const episode = armPmOnlyEpisode(h.db, "saved continuation");
+    await h.health.restartPMFresh("exit", episode);
+    h.pane.state = "fresh";
+    h.pane.child = "502";
+    for (const session_id of ["first", "successor"]) {
+      h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id, cwd: PM_PATH });
+    }
+    await h.health.reconcilePMRestartContinuation();
     assert.deepEqual(h.pane.sends, []);
+    assert.equal(h.db.getExitStatus().pending, true);
+    assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).status, "issued");
   } finally { h.db.close(); }
 });
 
@@ -403,6 +436,8 @@ test("a failed paste leaves the launch UNKNOWN; it is never resent and its recor
     const first = await h.health.restartPMFresh("exit", episode);
     assert.match(first.reason, /launcher send failed/);
     assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).status, "unknown");
+    assert.equal(h.db.getExitStatus().pending, true);
+    assert.equal(h.db.getExitStatus().continuation_delivery, "waiting");
     h.pane.failPaste = false;
     (h.health as any).lastRestart.clear();
     const second = await h.health.restartPMFresh("exit", episode);

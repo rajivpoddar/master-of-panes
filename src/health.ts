@@ -596,12 +596,8 @@ export class ProcessHealthChecker {
     const { model, launcher, command: launchCommand } = pmLaunchPlan(this.db);
     const cwd = SLOT_CWDS[0];
     const fail = (reason: string, launched = false, extra: Record<string, unknown> = {}) => {
-      const current = this.db.getExitStatus();
-      if (trigger === "exit" && episode && current.pending && current.episode === episode) {
-        // End only this failed episode; retain launch custody and continuation evidence.
-        this.db.setConfig("exit_pending_continuation_delivery", "failed");
-        this.db.setConfig("exit_pending", "false");
-      }
+      // A restart failure does not cancel an issued or uncertain /exit or launcher.
+      // The separate refused_pre_effect exit terminal owns proven zero-effect cleanup.
       this.db.logEvent(0, "pm_restart_failed", null, null, { trigger, episode, model, reason, ...extra });
       console.error(`[health][pm-restart] ${trigger}: ${reason}`);
       return { success: false, launched, reason };
@@ -1276,7 +1272,32 @@ export class ProcessHealthChecker {
     // CTO REVISE ts 1794019803.549589: a planned/issued record is not a
     // launch; only a `booted` record (owned Claude process + its SessionStart)
     // binds the boot, and that same process must still own the pane.
-    const launch = this.pmLaunchRecord();
+    let launch = this.pmLaunchRecord();
+    // A successfully issued launcher may become healthy after the bounded wait.
+    // Bind only its first boot in the same pane and shell; planned/unknown sends
+    // cannot establish that ownership and remain in custody without replay.
+    if (launch?.status === "issued" && launch.episode === status.episode && launch.launch_event_id >= exit.id) {
+      const first = this.launchBoot(launch.launch_event_id);
+      const identity = await verifyPaneIdentity(0, this.runShell);
+      const process = identity.ok && identity.snapshot.paneId === launch.pane_id
+        ? await this.pmAgentProcess(launch.pane_id) : null;
+      const command = await this.getPaneCommand(0);
+      const idle = await this.relay.getSlotActivityState(0, launch.pane_id);
+      const processAgain = await this.pmAgentProcess(launch.pane_id);
+      const current = this.db.getExitStatus();
+      const latest = this.pmLaunchRecord();
+      if (first && first.id === boot.id && latestSessionStartEventId(this.db, 0) === boot.id
+          && ProcessHealthChecker.ownedAgent(process) && process!.startsWith(`${launch.pane_pid}:`)
+          && processAgain === process && this.isAgentCommand(0, command) && idle === "idle"
+          && current.pending && current.episode === status.episode && current.continuation_delivery === "waiting"
+          && latest?.status === "issued" && latest.launch_event_id === launch.launch_event_id
+          && latest.episode === launch.episode && latest.pane_id === launch.pane_id) {
+        launch = { ...latest, status: "booted", boot_event_id: boot.id, process: process! };
+        this.db.setConfig(PM_RESTART_LAUNCH_KEY, JSON.stringify(launch));
+        this.db.logEvent(0, "process_restarted", null, null, { trigger: "exit", episode: status.episode,
+          command: launch.command, reason: "late_owned_boot" });
+      }
+    }
     if (!launch || launch.status !== "booted" || launch.episode !== status.episode || launch.launch_event_id < exit.id
         || launch.boot_event_id !== boot.id || !ProcessHealthChecker.ownedAgent(launch.process ?? null)) {
       this.noteUncertainContinuation(status.episode, "boot_not_bound_to_mop_launch", exit.id, boot.id);

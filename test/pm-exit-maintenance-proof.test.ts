@@ -398,6 +398,7 @@ test("a zero-effect refusal (PM draft in the composer) ends in a durable termina
     const triggered = JSON.parse(h.db.getEvents(0, 1, "exit_pending_triggered")[0]!.payload);
     assert.equal(triggered.delivery, "refused_pre_effect");
     assert.equal(h.db.getEvents(0, 1, "pm_exit_custody_released_zero_effect").length, 1, "proven zero effect releases custody");
+    assert.equal(h.db.getEvents(0, 1, "pm_restart_started").length, 0, "zero-effect refusal never starts a launcher");
     assert.equal(h.status().cycled[0], true, "the attempt record is kept (not erased)");
     const refused = h.status();
     assert.equal(refused.pending, false, "episode is not left indefinitely active/cycled/waiting");
