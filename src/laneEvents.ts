@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { SlotState } from "./types.js";
 import type { MoPDatabase } from "./db.js";
-import { classifyWriterError } from "./hourlyReportObligation.js";
 
 const exec = promisify(execFile);
 const STATE = "lane_events_v1";
@@ -13,6 +12,14 @@ type LaneEvent = { slot: number; issue: number; pr: number | null; assigned_at: 
 type State = { activated: boolean; seen: string[]; events: LaneEvent[] };
 const empty = (): State => ({ activated: false, seen: [], events: [] });
 const key = (slot: SlotState, pr: number | null, threshold: string) => JSON.stringify([slot.slot, slot.issue, pr, slot.assigned_at, threshold]);
+
+/** Epoch-only repins do not change the lane; branch changes invalidate its PR lookup. */
+function sameLane(db: MoPDatabase, captured: SlotState): boolean {
+  const live = db.getSlot(captured.slot);
+  return !!live && !!live.occupied && live.issue === captured.issue && live.pr === captured.pr &&
+    live.assigned_at === captured.assigned_at && live.branch === captured.branch &&
+    live.branch_ref === captured.branch_ref && live.repository_id === captured.repository_id;
+}
 
 /** Read-only: never initializes state or evaluates thresholds. */
 export function readLaneEvents(db: MoPDatabase): LaneEvent[] {
@@ -24,6 +31,10 @@ export async function evaluateLaneEvents(db: MoPDatabase, repo: string, now = Da
   try { state = JSON.parse(db.getConfig(STATE) || "null") ?? empty(); } catch { return; }
   const initial = !state.activated;
   const slots = db.getAllSlots();
+  const persist = (): void => {
+    state.events = state.events.filter(e => slots.some(s => s.slot === e.slot && s.issue === e.issue && s.assigned_at === e.assigned_at && sameLane(db, s)));
+    db.setConfig(STATE, JSON.stringify(state));
+  };
   state.events = state.events.filter(e => slots.some(s => s.occupied && s.slot === e.slot && s.issue === e.issue && s.assigned_at === e.assigned_at));
   for (const slot of slots) {
     if (!slot.slot || !slot.occupied || !slot.issue || !slot.assigned_at) continue;
@@ -49,6 +60,7 @@ export async function evaluateLaneEvents(db: MoPDatabase, repo: string, now = Da
         prs = candidates.filter(p => typeof p.headRefName === "string" && issueToken.test(p.headRefName));
         if (prs.length > 1) continue;
       }
+      if (!sameLane(db, slot)) continue;
       const ready = prs.some(p => !p.isDraft);
       const pr = prs[0]?.number ?? null;
       state.events = state.events.filter(e => e.slot !== slot.slot || (!ready && e.pr === pr && !(e.threshold === "lane_no_pr" && pr !== null)));
@@ -61,6 +73,7 @@ export async function evaluateLaneEvents(db: MoPDatabase, repo: string, now = Da
         } catch { /* unknown count is explicitly represented */ }
       }
       for (const [minutes, threshold] of thresholds) {
+        if (!sameLane(db, slot)) break;
         if (age < minutes) continue;
         const id = key(slot, pr, threshold);
         if (state.seen.includes(id) || state.seen.includes(key(slot, null, `baseline:${threshold}`))) continue;
@@ -69,20 +82,28 @@ export async function evaluateLaneEvents(db: MoPDatabase, repo: string, now = Da
         if (threshold === "lane_overrun") {
           event.severity = "high";
           const target = Buffer.from(id).toString("base64url");
+          // Consume the effect before spawning the writer. A crash or UNKNOWN
+          // outcome is reconciliation-only, never an automatic replay.
+          state.seen.push(id);
+          persist();
+          if (!sameLane(db, slot)) break;
           try {
             const args = [process.env.MOP_PM_OPS_SCRIPT ?? join(homedir(), ".claude/scripts/pm-ops.py"), "obligation-upsert", "--kind", "lane_overrun", "--target-type", "lane", "--target-id", target, "--slot", String(slot.slot), "--issue", String(slot.issue), "--owner", "pm", "--severity", "high", "--horizon", "hourly", "--title", `Lane overrun: slot ${slot.slot} issue #${slot.issue}`, "--action", "PM review lane; user/PM owns close and reimplementation", "--evidence-json", JSON.stringify(event)];
             if (pr !== null) args.push("--pr", String(pr));
             await execute("python3", args, { timeout: 10000 });
-          } catch (error) {
-            // An ambiguous writer result may already have committed; never replay it.
-            if (classifyWriterError(error) === "failed") continue;
+          } catch {
+            // No retry: a failed or lost response may have committed externally.
+            continue;
           }
+          if (!sameLane(db, slot)) break;
+        } else {
+          state.seen.push(id);
         }
-        state.seen.push(id);
+        if (!sameLane(db, slot)) break;
         state.events.push(event);
       }
     } catch { /* Unknown PR state must not create a false event. */ }
   }
   state.activated = true;
-  db.setConfig(STATE, JSON.stringify(state));
+  persist();
 }

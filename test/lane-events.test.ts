@@ -7,7 +7,7 @@ function fixture() {
   let raw: string | null = null;
   let writes = 0;
   const slot = { slot: 1, occupied: true, issue: 12, pr: null, branch: "feature" as string | null, assigned_at: "2026-01-01T00:00:00.000Z", assignment_epoch: 1 };
-  const db = { getConfig: () => raw, setConfig: (_key: string, value: string) => { raw = value; writes++; }, getAllSlots: () => [slot] } as unknown as MoPDatabase;
+  const db = { getConfig: () => raw, setConfig: (_key: string, value: string) => { raw = value; writes++; }, getAllSlots: () => [{ ...slot }], getSlot: () => ({ ...slot }) } as unknown as MoPDatabase;
   return { db, slot, writes: () => writes };
 }
 
@@ -53,6 +53,49 @@ describe("lane events", () => {
     await evaluateLaneEvents(f.db, "owner/repo", Date.parse("2026-01-01T03:00:00Z"), runner);
     assert.deepEqual(readLaneEvents(f.db).map(e => [e.threshold, e.pr, e.commit_count]), [["lane_overrun", 8, null]]);
     assert.equal(calls.some(args => args.includes("--head") || args[0] === "api"), false);
+  });
+  it("drops stale work when assignment changes during GitHub lookup", async () => {
+    const f = fixture();
+    await evaluateLaneEvents(f.db, "owner/repo", Date.parse("2026-01-01T00:00:00Z"));
+    const calls: string[][] = [];
+    const runner = (async (_file: string, args: string[]) => {
+      calls.push(args);
+      if (args[0] === "pr") f.slot.issue = 99;
+      return { stdout: "[]", stderr: "" };
+    }) as never;
+    await evaluateLaneEvents(f.db, "owner/repo", Date.parse("2026-01-01T03:30:00Z"), runner);
+    assert.deepEqual(readLaneEvents(f.db), []);
+    assert.equal(calls.some(args => args.includes("obligation-upsert")), false);
+  });
+  it("does not persist an event if the lane changes during the writer", async () => {
+    const f = fixture();
+    await evaluateLaneEvents(f.db, "owner/repo", Date.parse("2026-01-01T00:00:00Z"));
+    const runner = (async (_file: string, args: string[]) => {
+      if (args.includes("obligation-upsert")) f.slot.issue = 99;
+      return { stdout: args[0] === "pr" ? "[]" : "1", stderr: "" };
+    }) as never;
+    await evaluateLaneEvents(f.db, "owner/repo", Date.parse("2026-01-01T03:00:00Z"), runner);
+    assert.deepEqual(readLaneEvents(f.db), []);
+  });
+  it("consumes the durable claim before an accepted or unknown writer across restart", async () => {
+    for (const outcome of ["accepted-response-lost", "timeout"]) {
+      const f = fixture();
+      await evaluateLaneEvents(f.db, "owner/repo", Date.parse("2026-01-01T00:00:00Z"));
+      let writes = 0;
+      const runner = (async (_file: string, args: string[]) => {
+        if (args.includes("obligation-upsert")) {
+          writes++;
+          const state = JSON.parse(f.db.getConfig("lane_events_v1")!);
+          assert.ok(state.seen.some((entry: string) => entry.includes("lane_overrun")));
+          throw new Error(outcome);
+        }
+        return { stdout: args[0] === "pr" ? "[]" : "1", stderr: "" };
+      }) as never;
+      await evaluateLaneEvents(f.db, "owner/repo", Date.parse("2026-01-01T03:00:00Z"), runner);
+      await evaluateLaneEvents(f.db, "owner/repo", Date.parse("2026-01-01T03:01:00Z"), runner);
+      assert.equal(writes, 1);
+      assert.equal(readLaneEvents(f.db).some(e => e.threshold === "lane_overrun"), false);
+    }
   });
   it("suppresses a ready PR", async () => {
     const f = fixture();

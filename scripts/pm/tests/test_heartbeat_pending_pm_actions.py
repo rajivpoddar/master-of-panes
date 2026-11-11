@@ -156,3 +156,17 @@ def test_inventory_rows_are_counted_not_listed_as_pending_actions(tmp_path):
     block = composer.pending_actions_block(result, {'items': []}, NOW)
     assert block[-1] == '• Inventory: 2 ready-pool, 1 triage (not actions)'
     assert not any('#200' in line or '#300' in line for line in block)
+
+
+def test_stale_lane_events_never_become_actions_in_either_output():
+    slots = {'slots': [], 'lane_events': [dict(threshold='lane_close_reimplement_due', slot=2,
+                                                issue=123, pr=None, age_minutes=220, commit_count=1)]}
+    stale_report = composer.compose('1h', NOW, None, {}, [], slots=slots, include_slots=True,
+                                    slots_authoritative=False, decisions={'items': [], 'stale': 0})
+    assert 'lane_close_reimplement_due' not in stale_report
+    assert not composer.structured_pm_actions([], [], slots, '1h', False)
+    live_report = composer.compose('1h', NOW, None, {}, [], slots=slots, include_slots=True,
+                                   slots_authoritative=True, decisions={'items': [], 'stale': 0})
+    assert 'lane_close_reimplement_due' in live_report
+    assert any('lane_close_reimplement_due' in action
+               for action in composer.structured_pm_actions([], [], slots, '1h', True))
