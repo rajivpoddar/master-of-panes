@@ -47,6 +47,8 @@ type ExitOwnerPin = Readonly<{
   stopSession: string | null;
   stop: number | null;
   inboundGeneration?: number;
+  quietPaneId?: string;
+  quietProcess?: string;
 }>;
 
 type PendingExitDispatch = {
@@ -364,16 +366,18 @@ export class TmuxRelay {
   private runShell: typeof execShell;
   private readonly pmPaneReadyOverride?: () => Promise<boolean>;
   private readonly pmIdleHandoff?: () => Promise<void>;
+  private readonly waitForExitQuiet: (ms: number) => Promise<void>;
 
   constructor(
     config: MoPConfig,
-    deps: { runShell?: typeof execShell; pmRuntime?: PMRuntime; pmPaneReady?: () => Promise<boolean>; pmIdleHandoff?: () => Promise<void> } = {},
+    deps: { runShell?: typeof execShell; pmRuntime?: PMRuntime; pmPaneReady?: () => Promise<boolean>; pmIdleHandoff?: () => Promise<void>; waitForExitQuiet?: (ms: number) => Promise<void> } = {},
   ) {
     this.pmPaneAddress = config.pmPaneAddress;
     this.pmRuntime = deps.pmRuntime ?? resolvePMRuntime(process.env.MOP_PM_RUNTIME);
     this.runShell = deps.runShell ?? execShell;
     this.pmPaneReadyOverride = deps.pmPaneReady;
     this.pmIdleHandoff = deps.pmIdleHandoff;
+    this.waitForExitQuiet = deps.waitForExitQuiet ?? sleep;
   }
 
   private pmMaintenanceGate?: { isHeld(): boolean; isSafe(): boolean; deferCLIInput(): void; isRespawnInProgress?(): boolean };
@@ -1508,8 +1512,22 @@ export class TmuxRelay {
         // Not the allowed Stop. Do not wait out quiet time and then send.
         continued = "stop_not_allowed";
       } else if (allowed === true) {
-        // The mark is the disposition. Owner fences still run at send time.
+        // Keep this genuine allowed Stop's SAME pending operation alive while
+        // its matching turn closure accrues quiet time. No extra Stop is needed;
+        // expiry only re-evaluates the guarded writer, never authorizes a send.
         continued = this.db?.getSlot(slotNum)?.active_turn_state === "active" ? "turn_active" : null;
+        if (!continued && !this.db?.exitQuietReady(slotNum)) {
+          const identity = await verifyPaneIdentity(slotNum, this.runShell);
+          const process = identity.ok ? await this.exitProcessIdentity(slotNum, identity.snapshot.paneId) : null;
+          if (!identity.ok || !process) continued = "quiet_process_unknown";
+          else {
+            pin = { ...pin, quietPaneId: identity.snapshot.paneId, quietProcess: process };
+            await this.waitForExitQuiet(60_000);
+            continued = this.exitOwnerRefusal(slotNum, pin)
+              ?? (!this.db?.getExitPending() || this.db.getExitStatus().episode !== exitEpisode ? "exit_episode_changed" : null)
+              ?? (!this.db?.exitQuietReady(slotNum) ? "exit_not_quiet_60s" : null);
+          }
+        }
         if (!continued) pin = this.exitPinAfterDuplicateStops(slotNum, pin);
       } else {
         continued = await this.exitTurnContinued(slotNum, pin);
@@ -2222,7 +2240,7 @@ export class TmuxRelay {
     const identity = await verifyPaneIdentity(slotNum, this.runShell);
     if (!identity.ok) return { outcome: "refused_pre_effect", reason: `pane_identity:${identity.reason}`, paneId: null };
     const paneId = identity.snapshot.paneId;
-    if (paneId !== opts.expectedPaneId) {
+    if (paneId !== opts.expectedPaneId || (opts.exitOwnerPin?.quietPaneId && paneId !== opts.exitOwnerPin.quietPaneId)) {
       return { outcome: "refused_pre_effect", reason: "pane_changed_since_observation", paneId };
     }
     const capture = async (): Promise<string | null> => {
@@ -2250,6 +2268,9 @@ export class TmuxRelay {
       const trackedExit = command === "/exit" && !!opts.exitEpisode;
       if (trackedExit && !opts.exitOwnerPin) return { outcome: "refused_pre_effect", reason: "stop_owner_required", paneId };
       if (trackedExit && (!exitProcess || !this.db)) return { outcome: "refused_pre_effect", reason: "claude_process_unknown", paneId };
+      if (opts.exitOwnerPin?.quietProcess && exitProcess !== opts.exitOwnerPin.quietProcess) {
+        return { outcome: "refused_pre_effect", reason: "quiet_process_changed", paneId };
+      }
       if (trackedExit && isGatedDevSlot(slotNum) && previous) return { outcome: "refused_pre_effect", reason: "exit_attempt_already_owned", paneId };
       if (trackedExit && previous && (previous.originalProcess !== exitProcess
           || previous.sessionId !== this.db?.latestSessionId(slotNum)
