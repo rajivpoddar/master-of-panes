@@ -986,8 +986,12 @@ export class MoPDatabase {
   pruneEvents(maxRows: number = 200_000, maxAgeDays: number = 14): number {
     const safeMaxRows = Math.max(1_000, Math.floor(maxRows));
     const safeMaxAgeDays = Math.max(1, Math.floor(maxAgeDays));
+    // SQLite otherwise walks the rowid table through 200k payload-bearing rows
+    // before HTTP startup. The existing slot index includes rowids: sorting its
+    // compact, covering entries preserves the exact ID cutoff without loading
+    // event payload pages (or building a new index during first boot).
     const cutoff = this.db
-      .prepare("SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?")
+      .prepare("SELECT id FROM events INDEXED BY idx_events_slot ORDER BY id DESC LIMIT 1 OFFSET ?")
       .get(safeMaxRows - 1) as { id: number } | undefined;
 
     const result = cutoff

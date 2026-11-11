@@ -263,11 +263,14 @@ const family2ReleaseEffectAdapter = new Family2ReleaseEffectAdapter();
 const eventRetentionMaxRows = parseInt(process.env.MOP_EVENT_RETENTION_MAX_ROWS ?? "200000", 10);
 const eventRetentionDays = parseInt(process.env.MOP_EVENT_RETENTION_DAYS ?? "14", 10);
 const pruneEvents = (): void => {
+  const started = performance.now();
+  console.log("[mop] event retention starting");
   db.pruneSendCustody(Date.now() - 14 * 24 * 60 * 60 * 1000);
   const removed = db.pruneEvents(eventRetentionMaxRows, eventRetentionDays);
   if (removed > 0) {
     console.log(`[mop] pruned ${removed} old events; retention rows=${eventRetentionMaxRows} days=${eventRetentionDays}`);
   }
+  console.log(`[mop] event retention complete elapsed_ms=${Math.round(performance.now() - started)}`);
 };
 pruneEvents();
 const eventRetentionTimer = setInterval(pruneEvents, 6 * 60 * 60 * 1000);
