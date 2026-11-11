@@ -121,6 +121,20 @@ test("launcher failure is logged and queued without counting a restart success",
   assert.match(notifications[0] ?? "", /restart failed/);
 });
 
+test("restart ownership recognizes an absolute Claude executable without accepting unrelated or ambiguous processes", async () => {
+  const checker = new ProcessHealthChecker({} as never, {} as never);
+  const health = checker as any;
+  let listing = "100 1 -zsh\n200 100 /opt/homebrew/bin/claude --continue\n";
+  health.runShell = async (command: string) => ({
+    stdout: command.startsWith("tmux ") ? "100|/dev/ttys010\n" : listing, stderr: "",
+  });
+  assert.equal(await health.pmAgentProcess("%4"), "100:200");
+  listing = "100 1 -zsh\n200 100 /opt/homebrew/bin/claude-helper --continue\n";
+  assert.equal(await health.pmAgentProcess("%4"), "100:");
+  listing = "100 1 -zsh\n200 100 /opt/homebrew/bin/claude\n201 100 claude\n";
+  assert.equal(await health.pmAgentProcess("%4"), null);
+});
+
 test("agent boot is the success boundary", async () => {
   const events: string[] = [];
   const checker = new ProcessHealthChecker(

@@ -538,7 +538,9 @@ export class ProcessHealthChecker {
     }
     const rows = listing.split(/\r?\n/).map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).filter(Boolean) as RegExpExecArray[];
     if (!rows.some((row) => row[1] === pane)) return null;
-    const children = rows.filter((row) => row[2] === pane && /^claude( |$)/.test(row[3])).map((row) => row[1]);
+    // ps may render the executable as an absolute path (e.g. Homebrew's
+    // /opt/homebrew/bin/claude), not just the basename.
+    const children = rows.filter((row) => row[2] === pane && /^(?:\S*\/)?claude(?:\s|$)/.test(row[3])).map((row) => row[1]);
     if (children.length > 1) return null;
     return `${pane}:${children[0] ?? ""}`;
   }
