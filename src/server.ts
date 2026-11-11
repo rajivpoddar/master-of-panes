@@ -44,6 +44,8 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { MoPDatabase } from "./db.js";
+import { evaluateLaneEvents, readLaneEvents } from "./laneEvents.js";
+import { handoffHourlyReceipt, tickHourlyReminders } from "./hourlyReceiptReminder.js";
 import { assignmentIdentityPatchFields, registerAssignmentRoute } from "./assignmentRoute.js";
 import {
   evaluateRespawnTurnPersistence,
@@ -292,6 +294,17 @@ processor.pmExitRestartHandler = (episode, delivery) => healthChecker.onPmExitDi
 // Owns cadence (1h), in-process lock, PM busy queueing (via TmuxRelay).
 // Delegates business logic to ~/.claude/scripts/hourly-ops-review-bg.sh.
 // Rajiv CTO directive 2026-05-26 thread C0ALZJHGE49/1779790681.847219.
+let laneTickRunning = false;
+const laneTick = async (): Promise<void> => {
+  if (laneTickRunning) return;
+  laneTickRunning = true;
+  try { await evaluateLaneEvents(db, configuredProjectionRepository()); }
+  catch (error) { console.error(`[lane-events] ${String(error)}`); }
+  finally { laneTickRunning = false; }
+};
+void laneTick();
+setInterval(() => { void laneTick(); }, 60_000).unref();
+
 const opsAuditScheduler = new OpsAuditScheduler(db, relay);
 opsAuditScheduler.start();
 
@@ -325,6 +338,16 @@ const alertReminderScheduler = new AlertReminderScheduler({
   },
 });
 alertReminderScheduler.start();
+let hourlyReminderTickRunning = false;
+const hourlyReminderTick = async (): Promise<void> => {
+  if (hourlyReminderTickRunning) return;
+  hourlyReminderTickRunning = true;
+  try { await tickHourlyReminders(db); }
+  catch (error) { console.error(`[hourly-reminder] ${String(error)}`); }
+  finally { hourlyReminderTickRunning = false; }
+};
+void hourlyReminderTick();
+setInterval(() => { void hourlyReminderTick(); }, 30_000).unref();
 
 // You-should-know notices on the PM pane. Keystrokes only while the note is
 // visible and the prompt is empty (one verified-quote append excepted).
@@ -1348,6 +1371,17 @@ registerAlertReminderRoutes(app, {
 // MoP-owned recurring PM tasks:
 // - heartbeat: `[scheduled-task | 3h heartbeat | HH:MM]`
 // - morning-brief: `/morning-brief`
+app.post("/hourly-receipt", async (c) => {
+  try {
+    const body = await c.req.json() as { ts?: unknown; receipt?: unknown };
+    if (typeof body.ts !== "string" || typeof body.receipt !== "string" || !handoffHourlyReceipt(db, body.ts, body.receipt)) {
+      return c.json({ error: "invalid hourly receipt" }, 400);
+    }
+    void hourlyReminderTick();
+    return c.json({ ok: true });
+  } catch { return c.json({ error: "hourly receipt unavailable" }, 503); }
+});
+
 app.get("/pm-cadence/status", (c) => {
   return c.json(pmCadenceScheduler.getStatus());
 });
@@ -1454,7 +1488,7 @@ app.get("/slots", (c) => {
     ...s,
     api_stall: stuckDetector.getApiStallStatus(s.slot),
   }));
-  return c.json({ slots });
+  return c.json({ slots, lane_events: readLaneEvents(db) });
 });
 
 /** Read-only: resolve the issue MoP assigned for a PR (pr, then branch). */

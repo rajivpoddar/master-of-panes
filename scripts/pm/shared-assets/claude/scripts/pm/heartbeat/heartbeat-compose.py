@@ -1656,7 +1656,7 @@ def compose(
     lines = [first, *body]
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
-    pm_actions = ([] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]) + slot_actions
+    pm_actions = ([] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []] + lane_event_actions(slots)) + slot_actions
     if pm_actions:
         lines += ["", "*ACTIONS (PM):* " + "; ".join(pm_actions)]
     if cleanup_alert:
@@ -1814,6 +1814,13 @@ def _run_json(cmd: list[str], failures: list[str], label: str, timeout: int = 20
     except json.JSONDecodeError:
         failures.append(f"{label}: invalid JSON")
         return None
+
+
+def lane_event_actions(slots_doc):
+    if not isinstance(slots_doc, dict):
+        return []
+    return [f"{'HIGH ' if e.get('severity') == 'high' else ''}{e.get('threshold')} slot {e.get('slot')} issue #{e.get('issue')} PR {e.get('pr') or 'none'} age {e.get('age_minutes')}m commits {e.get('commit_count') if e.get('commit_count') is not None else 'unknown'}"
+            for e in slots_doc.get('lane_events', []) if isinstance(e, dict)]
 
 
 def _fetch_slots(url: str = MOP_SLOTS_URL, timeout: int = 5):
@@ -2159,7 +2166,7 @@ def main() -> int:
         prs = [dict(r, actions=[], next="live head recheck required") for r in prs]
     if "slots" in stale or "priority" in stale:
         slot_actions = []
-    pm_actions = [a for r in (prs or []) for a in r.get("actions") or []] + slot_actions
+    pm_actions = [a for r in (prs or []) for a in r.get("actions") or []] + slot_actions + (lane_event_actions(slots) if args.mode == "1h" else [])
 
     if args.save_inputs:
         out = Path(args.save_inputs)

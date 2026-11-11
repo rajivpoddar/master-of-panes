@@ -21,6 +21,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 STATE = Path(os.environ.get(
@@ -153,6 +154,19 @@ def main() -> int:
         if refusal:
             print(f"hourly_report_due NOT resolved: {refusal}", file=sys.stderr)
             return 3 if (a.bucket or a.receipt) else 0
+        # The receipt, not the thread pointer, is the handoff authority. Never retry an
+        # uncertain HTTP result here; the server keys accepted handoffs by Slack ts.
+        try:
+            request = urllib.request.Request(
+                os.environ.get("MOP_HOURLY_RECEIPT_URL", "http://127.0.0.1:3100/hourly-receipt"),
+                data=json.dumps({"ts": a.set, "receipt": a.receipt.strip()}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if response.status != 200:
+                    print("hourly reminder handoff unavailable", file=sys.stderr)
+        except Exception as exc:
+            print(f"hourly reminder handoff unknown: {exc}", file=sys.stderr)
         for oid, reason in resolve_hourly_report_due(a.set, a.bucket, supersede_older=advanced):
             print(f"resolved hourly_report_due obligation {oid}: {reason}", file=sys.stderr)
         return 0
