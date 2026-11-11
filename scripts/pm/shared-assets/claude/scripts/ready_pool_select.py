@@ -288,6 +288,11 @@ def verified_non_slot_owner(issue: dict[str, Any]) -> bool:
         number = int(issue.get('number') or 0)
         if disposition == 'IN_PROGRESS' and number in live.get(owner, set()):
             return True
+        # PM inline (S135, 2026-11-12 00:40 IST): a live peer whose verified launch brief
+        # names exactly this issue as its owning task IS current custody, even when the
+        # issue header was never updated (#12953 → px-12953-terra was offered to S3).
+        if any(number in issues for issues in live.values()):
+            return True
         return bool(obligations.get(number, set()))
     except (TypeError, ValueError):
         return False

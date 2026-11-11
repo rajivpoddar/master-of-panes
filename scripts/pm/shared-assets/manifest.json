@@ -818,7 +818,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "22fb9874a71d96fc6106fcef6299c35ef509cad5364ea90bd61895d8e3f23b4a",
+      "sha256": "3ee5963b8daeb9d8af1f3010f767c2308f43ca4579bafcb1fa126f0168427afc",
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
