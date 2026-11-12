@@ -1,0 +1,83 @@
+{
+  "events": 13,
+  "users": 6,
+  "top": [
+    {
+      "code": "uncaught_error",
+      "events": 5,
+      "users": 3
+    },
+    {
+      "code": "hydration_base_install_refused",
+      "events": 4,
+      "users": 1
+    },
+    {
+      "code": "ai_format_client_error",
+      "events": 1,
+      "users": 1
+    },
+    {
+      "code": "explicitSaveError",
+      "events": 1,
+      "users": 1
+    },
+    {
+      "code": "invalid_response",
+      "events": 1,
+      "users": 1
+    }
+  ],
+  "other_codes": 1,
+  "other_events": 1,
+  "prior_events": 24,
+  "delta_vs_prior": -11,
+  "same_slot_median_events": 13.0,
+  "same_slot_events": [
+    65,
+    5,
+    7,
+    13,
+    14,
+    15,
+    11
+  ],
+  "delta_vs_median": 0.0,
+  "all_codes": [
+    {
+      "code": "uncaught_error",
+      "events": 5,
+      "users": 3
+    },
+    {
+      "code": "hydration_base_install_refused",
+      "events": 4,
+      "users": 1
+    },
+    {
+      "code": "ai_format_client_error",
+      "events": 1,
+      "users": 1
+    },
+    {
+      "code": "explicitSaveError",
+      "events": 1,
+      "users": 1
+    },
+    {
+      "code": "invalid_response",
+      "events": 1,
+      "users": 1
+    },
+    {
+      "code": "save_failed_client_exception",
+      "events": 1,
+      "users": 1
+    }
+  ],
+  "superseded_saves": 6,
+  "window": {
+    "start": "2026-11-12T09:44:52Z",
+    "end": "2026-11-12T10:44:52Z"
+  }
+}

@@ -94,8 +94,21 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
         else:
             target = ""
         lines.append(f"• {row['code']} — {row['events']} ev / {row['users']} users {target}".rstrip())
-    if axiom.get("other_codes"):
-        lines.append(f"• +{axiom['other_codes']} other codes, {axiom['other_events']} events")
+    # Keep mapped off-top classes visible to Step 1, including after compaction.
+    shown = {row["code"] for row in axiom.get("top", [])[:MAX_CODES]}
+    other_codes = axiom.get("other_codes", 0)
+    other_events = axiom.get("other_events", 0)
+    for row in axiom.get("all_codes", []):
+        code = row["code"]
+        m = mapping.get(code, {})
+        if code in shown or m.get("status") != "mapped" or not m.get("refs"):
+            continue
+        shown.add(code)
+        lines.append(f"+ {code}: {row['events']} ev / {row['users']} user{'s' if row['users'] != 1 else ''} → {', '.join(m['refs'][:2])}")
+        other_codes -= 1
+        other_events -= row["events"]
+    if other_codes > 0:
+        lines.append(f"• +{other_codes} other codes, {other_events} events")
     tldr = f"{axiom['events']} errors / {axiom['users']} users"
     if new:
         tldr += f" ({new} NEW code{'s' if new > 1 else ''})"
