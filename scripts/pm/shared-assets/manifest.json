@@ -1,15 +1,6 @@
 {
   "entries": [
     {
-      "canonical_target": "/Users/rajiv/.claude/hooks/validate-codex-review-agent-result.py",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 493,
-      "ownership_class": "shared-claude-review-agents",
-      "sha256": "b7b09c4fddb03a62486541eb49f21e4499a0eb1038b93e6f69daf24320705724",
-      "source_path": "claude/hooks/validate-codex-review-agent-result.py"
-    },
-    {
       "canonical_target": "/Users/rajiv/Downloads/projects/tmux-slack-bridge/cto-bridge.ts",
       "dependencies": [],
       "dependency_status": "closed",
@@ -206,6 +197,15 @@
       "ownership_class": "shared-claude-issue-triage",
       "sha256": "64fb84cf4b336888899e1e63c58c5a908b906ba94eec4ff71d72d021a74d8fbf",
       "source_path": "claude/hooks/ready-pool-low-stop-validator.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/hooks/validate-codex-review-agent-result.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-review-agents",
+      "sha256": "b7b09c4fddb03a62486541eb49f21e4499a0eb1038b93e6f69daf24320705724",
+      "source_path": "claude/hooks/validate-codex-review-agent-result.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/plugins/cache/rajiv-plugins/master-of-panes/1.0.0/dist/assignmentAuthority.js",
