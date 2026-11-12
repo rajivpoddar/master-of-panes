@@ -229,6 +229,11 @@ Source: Rajiv D0AMF0XE6TS ts 1794290954.291729 ("add prodcut rule for fewest cli
 - Required: primary actions complete in one click; protect data automatically (e.g. silent backup download) and report via toast (title + body).
 - Plans state the click count per changed user path. Tests: one-click completion, no dialog rendered, automatic protective side effect fires.
 
+## No per-commit main CI queues Planning Gate
+
+Source: Rajiv, C0ALZJHGE49 thread 1794234970.206389, ts 1794487134.343129; rule `~/.claude/rules/56-heydonna-ci-main-shared-concurrency.md`.
+For `ci.yml`, require one shared newest-head group `ci-main` with `cancel-in-progress: false`; BLOCK per-SHA groups or any design that queues main runs per commit. Require a workflow contract test asserting main push resolves to that shared group. Main-red culprit attribution uses bisect, not every commit.
+
 ## Input
 
 You will receive:

@@ -84,6 +84,11 @@ require click-time validation, the error state on the offending control
 for it. `disabled={isSubmitting}` for the action's own in-flight guard is
 allowed. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No per-commit main CI queues gate
+
+Source: Rajiv, C0ALZJHGE49 thread 1794234970.206389, ts 1794487134.343129; rule `~/.claude/rules/56-heydonna-ci-main-shared-concurrency.md`.
+BLOCK a `ci.yml` diff that splits main's shared newest-head group or uses per-SHA groups. Require `group: ci-main`, `cancel-in-progress: false`, and a workflow contract test asserting main push resolves to that shared group; main-red attribution uses bisect.
+
 ## fullSection diff scope gate (rule 53)
 Source: Rajiv DM D0AMF0XE6TS ts 1794191847.184409: "only cover, appearances and index can be fullSection. all the other sections have to use wordMode diffs." Rule: `~/.claude/rules/53-heydonna-fullsection-diff-scope.md`.
 - BLOCK any plan/diff that selects `diffStrategy: 'fullSection'` for an AI-result apply on any section other than `cover`/`appearances`/`index`, whether by section type or by a content condition (paragraph-count change, structural change, size).
