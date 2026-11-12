@@ -167,7 +167,10 @@ def main() -> int:
     if not codes:
         raw = Path(args.axiom_json).read_text() if args.axiom_json else sys.stdin.read()
         try:
-            codes = [row["code"] for row in parse_axiom_payload(raw).get("top", [])]
+            payload = parse_axiom_payload(raw)
+            codes = [row["code"] for row in payload.get("top", [])]
+            if any(row.get("code") == "save_failed_client_exception" for row in payload.get("all_codes", [])) and "save_failed_client_exception" not in codes:
+                codes.append("save_failed_client_exception")
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             print(f"Axiom response unavailable: {exc}", file=sys.stderr)
             return 1

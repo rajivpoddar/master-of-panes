@@ -786,10 +786,11 @@ def agents_line(doc: dict | None) -> str:
     listed = running + len(completed) + len(inactive) + len(stale)
     # Proxy-era work runs in px-* tmux windows, not these transcripts. "0 listed"
     # used to read as "no agents" (Rajiv C0ALZJHGE49 thread 1794204953.859999).
-    line = (f"*Agents (in-process subagents):* {listed} listed · {running} running · {len(completed)} completed · "
+    line = (f"*Agents:* {listed} listed · {running} running · {len(completed)} completed · "
             f"{len(inactive)} inactive")
     if stale:
         line += f" · {len(stale)} stale (quiet >3h or uncollected, oldest {stale[0]['idle_min'] // 60}h)"
+    line += f" — PM stops {len(completed) + len(inactive)} in Step 3c"
     names = [f"{_compact(r['description'], 64)} (completed, last write {r['idle_min']}m ago)" for r in completed]
     names += [f"{_compact(r['description'], 64)} (inactive {r['idle_min']}m)" for r in inactive]
     if names:
@@ -1848,10 +1849,10 @@ def compose(
         if unblockable:
             body += ["", *unblockable]
         body += ["", agents_line(agents)]
-        body += ["", *proxies_block(proxies)]
     # Exactly one empty spacer before this shared 1h/3h section.
     body += ["", *decision_block(decisions, now)]
     if mode == "1h":
+        body += ["", *proxies_block(proxies)]
         ledger, github = pending_actions if pending_actions is not None else ({'error': 'collector not run'}, {'error': 'collector not run'})
         body += ["", *pending_actions_block(ledger, github, now)]
 
@@ -2288,7 +2289,10 @@ def collect_hourly(args, py, hours, now, failures):
             return None
         if axiom_result[0] is None:
             return None
-        codes = [a for row in axiom_result[0].get("top", []) for a in ("--code", row["code"])]
+        rows = axiom_result[0].get("top", [])
+        codes = [a for row in rows for a in ("--code", row["code"])]
+        if any(r.get("code") == "save_failed_client_exception" for r in axiom_result[0].get("all_codes", [])) and "save_failed_client_exception" not in codes:
+            codes += ["--code", "save_failed_client_exception"]
         return json_job("error-map", [py, str(SCRIPTS / "heartbeat-error-map.py"), *codes])() if codes else {}
     jobs["map"] = mapping_job
     return parallel_collect(jobs, cache_dir=HOURLY_CACHE / args.mode)
@@ -2356,6 +2360,8 @@ def main() -> int:
     mapping_doc = hourly.get("map") if args.mode == "1h" else _load(args.map_json)
     if args.mode != "1h" and mapping_doc is None and axiom:
         codes = [a for row in axiom.get("top", []) for a in ("--code", row["code"])]
+        if any(r.get("code") == "save_failed_client_exception" for r in axiom.get("all_codes", [])) and "save_failed_client_exception" not in codes:
+            codes += ["--code", "save_failed_client_exception"]
         mapping_doc = _run_json([py, str(SCRIPTS / "heartbeat-error-map.py"), *codes], failures, "error-map", COLLECTOR_TIMEOUTS["error-map"]) if codes else {}
     mapping_doc = mapping_doc or {}
     failures += mapping_doc.get("failures", [])

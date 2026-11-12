@@ -148,10 +148,10 @@ def test_agent_collector_reads_tail_and_metadata_without_mutation(tmp_path):
     # Live edit (Rajiv 2026-10-25): quiet >3h (<=24h) agents are reported as stale, not dropped.
     assert [r["description"] for r in doc["stale"]] == ["agent-expired"]
     assert composer.agents_line(doc) == ("*Agents:* 5 listed · 1 running · 1 completed · 2 inactive · 1 stale (quiet >3h or uncollected, oldest 3h)"
-        ": "
+        " — PM stops 3 in Step 3c: "
         "agent-done (completed, last write 30m ago), Review report (inactive 85m), specialist (inactive 70m)")
     plain = composer.agents_line({"running": 2, "inactive": [], "unreadable": 0})
-    assert plain == "*Agents:* 2 listed · 2 running · 0 completed · 0 inactive"
+    assert plain == "*Agents:* 2 listed · 2 running · 0 completed · 0 inactive — PM stops 0 in Step 3c"
 
 
 def test_only_current_session_counts_after_clear(tmp_path):
@@ -179,7 +179,7 @@ def test_only_current_session_counts_after_clear(tmp_path):
     assert [r["description"] for r in doc["stale"]] == ["agent-current-too-old"]
     line = composer.agents_line(doc)
     assert line.startswith("*Agents:* 4 listed · 1 running · 1 completed · 1 inactive · 1 stale (quiet >3h or uncollected, oldest 3h)"
-                           ": ")
+                           " — PM stops 2 in Step 3c: ")
     assert "ancient" not in line and "Pre clear" not in line
 
 
@@ -246,7 +246,8 @@ def test_shared_composer_orders_agents_and_exactly_one_decision_spacer(mode):
     assert "\n\n\n" + HEADER not in out
     if mode == "1h":
         # Decisions retain one spacer after Agents; training moved to its own thread.
-        assert lines[i - 2] == "*Agents:* 1 listed · 1 running · 0 completed · 0 inactive"
+        assert lines[i - 2] == "*Agents:* 1 listed · 1 running · 0 completed · 0 inactive — PM stops 0 in Step 3c"
+        assert out.index(HEADER) < out.index("*Proxies:*")
         assert lines[i - 3] == ""
         assert "*Training:*" not in out
         assert out.index("*Slots") < out.index("*Agents") < out.index(HEADER)
