@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-ci-admission",
-      "sha256": "88080734deec7851b644dce38713bfdfbb824a3d476171464da5686eeeea69f8",
+      "sha256": "7b00d8cef078b7edecbaa7283a072fd4f277cf371a95b8fdf7ae1a40d0be833c",
       "source_path": "claude/scripts/ci/pm-admit-12b.py"
     },
     {
@@ -1109,7 +1109,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "ccc98e11f1f7aa93565bad00f82f5c4a0fa1b5c5267170b64cfefb0982cfce15",
+      "sha256": "f0e983205df1db6261fa5268924101a8497ce5fcdaf20b71e9b9f2c292b301e8",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
@@ -1764,7 +1764,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "aa351318b3dafa2db6bfd865012168d7df30ee6582ecda16d690d9672c9c07cd",
+      "sha256": "a5f78ea0436dbdd9dc25558db5d69a0e6e7984499ea329f63b455d118048a525",
       "source_path": "codex/skills/heydonna-open-pr-status/scripts/merge.py"
     },
     {

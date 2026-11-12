@@ -143,8 +143,18 @@ EVENT_NAME_KEY = re.compile(r"^\s*EVENT_NAME\b")
 
 
 def job_log(job_id):
-    """Raw job log text via the existing gh transport (no JSON decode)."""
-    return command("gh", "api", f"repos/{REPO}/actions/jobs/{job_id}/logs")
+    """Raw job log text via the existing gh transport (no JSON decode).
+
+    Job logs legitimately contain ANSI colour; newer gh refuses to print terminal
+    escape sequences unless told to. strip_log_framing() removes ANSI afterwards.
+    """
+    path = f"repos/{REPO}/actions/jobs/{job_id}/logs"
+    try:
+        return command("gh", "api", path)
+    except Refusal as exc:
+        if "allow-escape-sequences" not in str(exc):
+            raise
+        return command("gh", "api", "--allow-escape-sequences", path)
 
 
 def strip_log_framing(text):

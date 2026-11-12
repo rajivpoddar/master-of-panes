@@ -79,8 +79,19 @@ def evaluate(repo, pr, head):
             files = api(repo, f'pulls/{pr}/files?per_page=100', True)
             own_paths = {p for f in files for p in (f['filename'], f.get('previous_filename')) if p}
             changed = {p for f in comparison['files'] for p in (f['filename'], f.get('previous_filename')) if p}
+            def main_merge(c):
+                # A merge counts as a main merge by its message OR, since some merge
+                # tools copy the merged commit's subject (#13357/#13597, 2026-11-12),
+                # by every non-first parent already being on main. Any API failure
+                # raises and the gate refuses (fail-closed).
+                if len(c['parents']) < 2:
+                    return False
+                if c['commit']['message'].splitlines()[0].startswith("Merge branch 'main'"):
+                    return True
+                return all(api(repo, f"compare/{p['sha']}...main").get('status') in ('ahead', 'identical')
+                           for p in c['parents'][1:])
             if (after and after[-1]['sha'] == head and
-                    all(len(c['parents']) >= 2 and c['commit']['message'].splitlines()[0].startswith("Merge branch 'main'") for c in after) and
+                    all(main_merge(c) for c in after) and
                     not own_paths.intersection(changed)):
                 return True, f'12B_GATE: PASS (main-merges-only) pr={pr} head={head}'
     except Exception:
