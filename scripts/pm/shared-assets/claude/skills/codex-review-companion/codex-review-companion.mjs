@@ -127,6 +127,7 @@ export function parseArgs(argv) {
     issue: null,
     reworkItems: null,
     previousHead: null,
+    expectedHead: null,
     rebaseBaseline: null,
     reviewOrdinal: null,
     planFile: null,
@@ -171,6 +172,9 @@ export function parseArgs(argv) {
         break;
       case "--previous-head":
         out.previousHead = next();
+        break;
+      case "--expected-head":
+        out.expectedHead = next();
         break;
       case "--rebase-baseline":
         out.rebaseBaseline = next();
@@ -232,6 +236,7 @@ Optional:
   --scope <paths...>                  restrict diff to specific paths
   --exclude <glob>                    exclude paths (repeatable)
   --issue <N>                         override auto-resolved issue number
+  --expected-head <sha>               refuse if the live PR head differs
   --rework-items <text>               optional plan/code re-review scope
   --previous-head <sha>               required baseline for explicit re-review
   --rebase-baseline <sha>             explicit baseline for an intentional rebase lineage
@@ -1135,6 +1140,21 @@ function resolveDiffBaseSha(repoRoot, baseRef, headRef, runner = sh) {
   return mb.code === 0 && mb.stdout.trim() ? mb.stdout.trim() : null;
 }
 
+export function fetchExactPrHead(repoRoot, pr, head, runner = sh) {
+  if (!/^\d+$/.test(String(pr)) || !/^[0-9a-f]{40}$/.test(String(head))) {
+    throw new Error("PR number and exact 40-character PR head are required");
+  }
+  // SHA-scoped refs prevent concurrent reviews of different heads colliding.
+  const ref = `refs/codex-review/pr-${pr}/${head}`;
+  const fetch = runner("git", ["fetch", "--no-tags", "origin", `+refs/pull/${pr}/head:${ref}`], { cwd: repoRoot });
+  if (fetch.code !== 0) throw new Error(`PR head fetch failed: ${fetch.stderr}`);
+  const resolved = runner("git", ["rev-parse", "--verify", `${ref}^{commit}`], { cwd: repoRoot });
+  if (resolved.code !== 0 || resolved.stdout.trim() !== head) {
+    throw new Error(`PR head mismatch: requested ${head}, fetched ${resolved.stdout.trim() || "missing"}`);
+  }
+  return { ref, head };
+}
+
 function resolveDiff(args) {
   let baseRef, headRef;
   if (args.pr) {
@@ -1144,9 +1164,12 @@ function resolveDiff(args) {
       args.pr,
       "--json",
       "baseRefName,baseRefOid,headRefName,headRefOid,title,body,number,commits",
-    ]);
+    ], { cwd: args.repoRoot });
     if (r.code !== 0) fail(`gh pr view ${args.pr} failed: ${r.stderr}`);
     const j = JSON.parse(r.stdout);
+    if (args.expectedHead && (!/^[0-9a-f]{7,40}$/.test(args.expectedHead) || !String(j.headRefOid || "").startsWith(args.expectedHead))) {
+      fail(`Requested head ${args.expectedHead} does not match PR#${args.pr} head ${j.headRefOid}; refusing review`);
+    }
     baseRef = `origin/${j.baseRefName}`;
     // Fetch the base ref to avoid "bad revision" failures.
     const baseFetch = sh("git", ["fetch", "origin", j.baseRefName], {
@@ -1190,13 +1213,14 @@ function resolveDiff(args) {
       args._currentHead = currentHead;
     } else {
       headRef = `origin/${j.headRefName}`;
-      const fetch = sh("git", ["fetch", "origin", j.headRefName], {
-        cwd: args.repoRoot,
-      });
-      if (new Set(["plan", "qa"]).has(args.reviewType) && fetch.code !== 0) {
-        fail(
-          `git fetch origin ${j.headRefName} failed for ${args.reviewType} review: ${fetch.stderr}`,
-        );
+      if (new Set(["plan", "qa"]).has(args.reviewType)) {
+        try {
+          headRef = fetchExactPrHead(args.repoRoot, args.pr, j.headRefOid).ref;
+        } catch (error) {
+          fail(error instanceof Error ? error.message : String(error));
+        }
+      } else {
+        sh("git", ["fetch", "origin", j.headRefName], { cwd: args.repoRoot });
       }
       if (new Set(["plan", "qa"]).has(args.reviewType)) {
         const resolved = sh(
@@ -1215,6 +1239,10 @@ function resolveDiff(args) {
           );
         }
         if (args.reviewType === "qa") {
+          const checkoutHead = currentHeadSha(args.repoRoot);
+          if (checkoutHead !== resolvedHead) {
+            fail(`QA checkout HEAD ${checkoutHead || "missing"} does not match requested PR head ${resolvedHead}; refusing review`);
+          }
           try {
             const binding = exactQaPrHeadBinding(
               args.reviewType,

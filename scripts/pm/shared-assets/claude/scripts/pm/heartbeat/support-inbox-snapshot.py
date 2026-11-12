@@ -18,6 +18,7 @@ Bot/alert roots are excluded. Output: JSON on stdout.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -420,18 +421,21 @@ def carry_forward(threads: list[dict], prev_tracked, fetch_thread, *, deadline: 
     start = cursor % total if total else 0
     window = [pending[(start + i) % total] for i in range(min(MAX_CARRY_FORWARD, total))]
     next_cursor = (start + len(window)) % total if total else 0
-    for ts in window:
-        if deadline is not None and time.monotonic() >= deadline:
-            # Preserve rotation progress, but the caller must report this collector as
-            # unavailable because a partial set cannot support an unanswered count.
-            next_cursor = pending.index(ts) % total
-            return out, next_cursor
-        try:
-            item = fetch_thread(ts)
-        except Exception as exc:
-            raise PartialChannel(str(exc), out) from exc
-        if item:
-            out.append(item)
+    # Fetch in small batches to avoid serial network latency while retaining ordered
+    # cursor progress and the existing deadline/partial-result semantics.
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        for offset in range(0, len(window), 5):
+            batch = window[offset:offset + 5]
+            if deadline is not None and time.monotonic() >= deadline:
+                return out, pending.index(batch[0]) % total
+            futures = [pool.submit(fetch_thread, ts) for ts in batch]
+            for future in futures:
+                try:
+                    item = future.result()
+                except Exception as exc:
+                    raise PartialChannel(str(exc), out) from exc
+                if item:
+                    out.append(item)
     return out, next_cursor
 
 

@@ -109,7 +109,7 @@ def support_block(support: dict | None, window_label: str) -> tuple[list[str], s
     threshold = support.get("threshold_min", 60)
     slack = support.get("slack", [])
     in_app = support.get("in_app", [])
-    if failures and not slack and not in_app:
+    if failures:
         return [f"*Support ({window_label}):* UNAVAILABLE ({'; '.join(failures)})"], "support unavailable"
     if not slack and not in_app:
         return [f"*Support ({window_label}):* quiet"], "support quiet"

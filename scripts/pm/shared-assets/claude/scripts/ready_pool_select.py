@@ -64,6 +64,7 @@ import http.client
 import importlib.util
 import json
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -94,7 +95,7 @@ REWORK_LABELS = {"status:qa-rework", "pm-state:qa-failed-rework", "pm-state:bloc
 # 60–120s: long enough that a collector timeout cannot stampede GitHub, short
 # enough that a full ranking is not a five-minute-old pool. The issue passed to
 # --check does not use this snapshot for its own dependency or merged-PR facts.
-CANDIDATE_LABELS = ("status:todo", *tuple(sorted(REWORK_LABELS)), "pm-blocked:dependency")
+CANDIDATE_LABELS = ("status:todo", "status:in-progress", "status:in-review", *tuple(sorted(REWORK_LABELS)), "pm-blocked:dependency")
 SNAPSHOT_TTL = 90
 _FRESH = "__fresh_issues__"
 # Truncated TLS reads (http.client.IncompleteRead) are transient: retry the same
@@ -249,7 +250,8 @@ def _live_proxy_briefs() -> dict[str, set[int]]:
             # prose (Depends on #N, PR #N, history) never bind.
             explicit = {int(n) for n in re.findall(r"(?m)^ISSUE:\s*#?([1-9][0-9]{3,6})\s*$", text)}
             headline = {int(n) for n in re.findall(r"(?m)^#([1-9][0-9]{3,6})\b", text[:1200])}
-            issues = explicit if explicit else headline
+            pr_refs = {int(n) for n in re.findall(r"(?im)^PR:\s*#?([1-9][0-9]{3,6})\s*$", text)}
+            issues = (explicit if explicit else headline) | pr_refs
         except (OSError, ValueError):
             issues = set()
         live[peer] = issues if len(issues) == 1 else set()
@@ -380,8 +382,13 @@ def classify(issue: dict[str, Any], requested_class: str | None = None, *, light
         return None
     if current_status == "status:todo" and any(h != "pm-blocked:dependency" for h in holds):
         return None
+    in_progress_rework = current_status in ("status:in-progress", "status:in-review") and issue.get("_open_pr_rework") is True
     excluded = EXCLUDE_LABELS - ({"status:blocked"} if holds == {"pm-blocked:dependency"} else set())
+    if in_progress_rework:
+        excluded = excluded - {"status:in-progress", "status:in-review"}
     if labels & excluded or any(l.startswith("slot:") for l in labels):
+        return None
+    if in_progress_rework and (declared or (holds and holds != {"pm-blocked:dependency"})):
         return None
     if holds and holds != {"pm-blocked:dependency"} and "P0" not in labels:
         return None
@@ -390,6 +397,8 @@ def classify(issue: dict[str, Any], requested_class: str | None = None, *, light
     if requested_class in {"rework", "repro"}:
         return requested_class
     if labels & REWORK_LABELS:
+        return "rework"
+    if in_progress_rework:
         return "rework"
     if current_status == "status:todo":
         return "new_issue"
@@ -1413,7 +1422,7 @@ def load_open_issues(timeout: int = 240) -> list[dict[str, Any]]:
 def _load_open_prs_uncached(timeout: int = 30) -> list[dict[str, Any]]:
     proc = run_lookup(
         ["gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "1000",
-         "--json", "number,isDraft,body,updatedAt,closingIssuesReferences"], timeout=timeout,
+         "--json", "number,isDraft,body,labels,updatedAt,closingIssuesReferences,headRefOid,statusCheckRollup"], timeout=timeout,
     )
     return json.loads(proc.stdout)
 
@@ -1448,6 +1457,125 @@ def owned_issues(prs: list[dict[str, Any]]) -> tuple[dict[int, list[int]], dict[
                 uncertain.setdefault(issue, []).append(int(pr["number"]))
             owned.setdefault(issue, []).append(int(pr["number"]))
     return owned, uncertain
+
+
+def _live_slot_issue_ids() -> set[int]:
+    """Read MoP's live slot surface; any unavailable or malformed slot fails closed."""
+    command = Path.home() / ".claude" / "scripts" / "mop.py"
+    owned: set[int] = set()
+    for slot in range(1, 5):
+        proc = subprocess.run([str(command), "status", "--slot", str(slot)],
+                              capture_output=True, text=True, timeout=8, check=True)
+        row = json.loads(proc.stdout)
+        if not isinstance(row, dict) or row.get("slot") != slot or not isinstance(row.get("occupied"), bool):
+            raise ValueError("invalid MoP slot status")
+        if row["occupied"]:
+            for field in ("issue", "pr"):
+                value = row.get(field)
+                if value is not None:
+                    if not str(value).isdigit():
+                        raise ValueError("invalid MoP slot assignment")
+                    owned.add(int(value))
+    return owned
+
+
+def rework_mode(args: argparse.Namespace, prs: list[dict[str, Any]]) -> tuple[bool, int]:
+    """The 25-open-PR freeze counts drafts as open PRs too."""
+    count = len(prs)
+    return bool(args.rework_only or count > 25), count
+
+
+def _live_proxy_pr_ids() -> set[int]:
+    """Read live proxy launch arguments and their file briefs without logging argv."""
+    proc = subprocess.run(["/bin/ps", "-axo", "args"], capture_output=True,
+                         text=True, timeout=5, check=True)
+    found: set[int] = set()
+    for command in proc.stdout.splitlines():
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            continue
+        proxy_at = next((i for i, arg in enumerate(argv)
+                         if Path(arg).name == "proxy-agent.sh"), None)
+        if proxy_at is None:
+            continue
+        brief_index = proxy_at + 2  # proxy-agent.sh <agent-type> <prompt-file>
+        if brief_index >= len(argv):
+            continue
+        path = Path(argv[brief_index])
+        if not path.is_absolute() or not path.is_file():
+            continue
+        try:
+            brief = path.read_text(errors="replace")
+        except OSError:
+            continue
+        for match in re.finditer(r"(?i)\bPR:\s*#?(\d+)\b|#(\d+)", brief):
+            found.update(int(number) for number in match.groups() if number)
+    return found
+
+
+def mark_unowned_open_pr_rework(issues: list[dict[str, Any]], prs: list[dict[str, Any]]) -> None:
+    """Admit only status:in-progress issues with an unheld, unowned closing PR.
+
+    Slot and proxy lookups are one live snapshot. Failure of either lookup means no
+    in-progress issue is promoted, while ordinary Ready Pool candidates remain usable.
+    """
+    try:
+        slot_owners = _live_slot_issue_ids()
+        proxy_refs = _live_proxy_pr_ids()
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return
+
+    linked: dict[int, list[dict[str, Any]]] = {}
+    for pr in prs:
+        refs = pr.get("closingIssuesReferences") or []
+        for ref in refs:
+            number = ref.get("number") if isinstance(ref, dict) else ref
+            if number is not None and str(number).isdigit():
+                linked.setdefault(int(number), []).append(pr)
+        # Draft PRs may have a closing directive in the body before GitHub exposes
+        # closingIssuesReferences; only explicit close verbs establish this relation.
+        for match in re.finditer(r"(?im)^\s*(?:closes?|fix(?:es)?|resolves?)\s+#(\d+)\b", pr.get("body") or ""):
+            linked.setdefault(int(match.group(1)), []).append(pr)
+
+    for issue in issues:
+        labels = _labels(issue)
+        if not ({"status:in-progress", "status:in-review"} & labels) or any(label.startswith("slot:") for label in labels):
+            continue
+        holds = issue_holds(issue)
+        if declared_issue_holds(issue) or (holds and holds != {"pm-blocked:dependency"}):
+            continue
+        number = int(issue.get("number") or 0)
+        for pr in linked.get(number, []):
+            pr_labels = {str(label.get("name", "")) if isinstance(label, dict) else str(label)
+                         for label in (pr.get("labels") or [])}
+            pr_body = pr.get("body") or ""
+            if (any(label.startswith("pm-blocked:") for label in pr_labels)
+                    or any(re.search(r"(?i)\bDO\s+NOT\s+MERGE\b", label) for label in pr_labels)
+                    or re.search(r"(?i)\bDO\s+NOT\s+MERGE\b|\bpm-blocked:", pr_body)):
+                continue
+            # An admitted PR waiting on CI is not rework (2026-11-12 side-agent review):
+            # skip when ci-head matches the live head, or on any ci-head label when the
+            # head is unknown (fail closed), or when it is qa-passed-awaiting-ci.
+            head = str(pr.get("headRefOid") or "")
+            ci_heads = {label.split(":", 1)[1] for label in pr_labels if label.startswith("ci-head:")}
+            # A failed CI run at the admitted head IS rework (2026-11-12 side-agent note):
+            # only running/passed admitted heads are skipped.
+            ci_failed = any(
+                str((c or {}).get("conclusion") or (c or {}).get("state") or "").upper()
+                in ("FAILURE", "TIMED_OUT", "CANCELLED", "ERROR", "STARTUP_FAILURE")
+                for c in (pr.get("statusCheckRollup") or []) if isinstance(c, dict))
+            if ("pm-state:qa-passed-awaiting-ci" in pr_labels and not ci_failed) or (
+                    ci_heads and (not head or head in ci_heads) and not ci_failed):
+                continue
+            pr_number = int(pr.get("number") or 0)
+            if number in slot_owners or pr_number in slot_owners:
+                continue
+            if number in proxy_refs or pr_number in proxy_refs:
+                continue
+            issue["_open_pr_rework"] = True
+            issue["pr"] = pr_number
+            break
 
 
 # ---------------------------------------------------------------------------
@@ -2007,8 +2135,8 @@ def evaluate_check(args, issues, extra, prs, cache) -> dict[str, Any]:
     if not args.no_dependency_check:
         prefetch_dependencies(issues, cache)
         prefetch_native(native_candidates(issues, extra), cache)
-    open_pr_count = sum(not pr["isDraft"] for pr in prs)
-    rework_only = args.rework_only or open_pr_count > 25
+    mark_unowned_open_pr_rework(issues, prs)
+    rework_only, open_pr_count = rework_mode(args, prs)
     owned, _ = owned_issues(prs)
     eligible_issues = [i for i in issues if classify(i) != "new_issue" or int(i["number"]) not in owned]
     eligible_extra = [r for r in extra if r.get("class", "rework") != "new_issue" or int(r["issue"]) not in owned]
@@ -2242,8 +2370,8 @@ def main(argv: list[str] | None = None) -> int:
         cache.update(dep_box)
         cache.update(nat_box)
         prefetch_pool.shutdown(wait=True)
-    open_pr_count = sum(not pr["isDraft"] for pr in prs)
-    rework_only = args.rework_only or open_pr_count > 25
+    mark_unowned_open_pr_rework(issues, prs)
+    rework_only, open_pr_count = rework_mode(args, prs)
     owned, uncertain = owned_issues(prs)
     # Existing PRs own new work, not rework/repro on that same PR.
     eligible_issues = [i for i in issues if classify(i) != "new_issue" or int(i["number"]) not in owned]

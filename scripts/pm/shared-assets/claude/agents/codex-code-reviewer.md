@@ -43,6 +43,11 @@ suspend before ownership is visible, hydration/cache heal can enter the remote
 save funnel, or an upload acknowledgement is consumed as an external loader
 head. Require adverse-interleaving tests that fail on the old ordering and
 consumer-visible proof that the latest edit remains durable.
+Scope (CTO ruling, C0ALZJHGE49 thread 1794459105.693909, ts 1794471699.587099,
+item 8): "suspend before ownership" applies to producers the diff CHANGES or
+ADDS. Unchanged discovery paths must be enumerated and classified; a confirmed
+effect-order defect in them is a separate issue, not a REQUEST_CHANGES on this
+diff. Rule 48 is preserved.
 
 ## Auto-process-critical immutable budget gate
 

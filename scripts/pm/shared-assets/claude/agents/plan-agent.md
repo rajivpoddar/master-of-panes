@@ -68,6 +68,13 @@ cache-only and must never enter a remote-upload funnel. Missing siblings,
 unclassified awaits, or a producer/consumer assignment that differs from this
 contract is a plan blocker.
 
+Scope (CTO ruling, C0ALZJHGE49 thread 1794459105.693909, ts 1794471699.587099,
+item 8): the ownership-before-await proof applies to CHANGED or ADDED effect
+producers. Unchanged discovery paths are still enumerated and their awaits
+classified, but they are recorded, not re-proven; any confirmed effect-order
+defect in them is filed as a separate issue. Rule 48 is preserved, and the plan
+must prove the real path it changes (e.g. rerender → autosave → CAS).
+
 ### Auto-process-critical immutable budget
 
 <!-- AUTO_PROCESS_CRITICAL_IMMUTABLE_V1 -->
