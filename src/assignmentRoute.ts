@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { Hono } from "hono";
 import { z } from "zod";
 
@@ -260,10 +262,23 @@ function isSameCompleteTuple(
     && metadataMatches;
 }
 
+type PrVerifier = (repository: string, oldPr: number, newPr: number, branch: string, head: string) => Promise<boolean>;
+const exec = promisify(execFile);
+const verifyPrTransition: PrVerifier = async (repository, oldPr, newPr, branch, head) => {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) return false;
+  try {
+    const read = async (pr: number) => JSON.parse((await exec("gh", ["pr", "view", String(pr), "--repo", repository, "--json", "state,headRefName,headRefOid"], { timeout: 15_000 })).stdout);
+    const [old, replacement] = await Promise.all([read(oldPr), read(newPr)]);
+    return old.state === "CLOSED" && replacement.state === "OPEN"
+      && replacement.headRefName === branch && replacement.headRefOid.toLowerCase() === head.toLowerCase();
+  } catch { return false; }
+};
+
 export function registerAssignmentRoute(
   app: Hono,
   db: MoPDatabase,
   issueProjection: IssueOwnershipProjection = NO_ISSUE_PROJECTION,
+  verifyRetargetPr: PrVerifier = verifyPrTransition,
 ): void {
   app.post("/slots/:slotNum/assign", async (c) => {
     const slotParse = assignmentSlotParamSchema.safeParse(c.req.param("slotNum"));
@@ -517,6 +532,34 @@ export function registerAssignmentRoute(
       issue_projection: ownershipProjection,
       predecessor_context: { cleared: clearance.cleared, reason: clearance.reason },
     });
+  });
+
+  // This changes metadata on an existing owner; it is deliberately not an assignment.
+  app.post("/slots/:slotNum/retarget-pr", async (c) => {
+    const slot = assignmentSlotParamSchema.safeParse(c.req.param("slotNum"));
+    if (!slot.success) return c.json({ error: "Invalid slot number" }, 400);
+    const body: unknown = await c.req.json();
+    if (!isRecord(body) || !hasEvery(body, COMPLETE_REBIND_EXPECTED_FIELDS)
+      || !Number.isInteger(body.expected_epoch) || !Number.isInteger(body.issue)
+      || body.issue !== body.expected_current_issue || !Number.isInteger(body.pr)
+      || Number(body.pr) <= 0 || !Number.isInteger(body.expected_current_pr)
+      || typeof body.expected_current_repository_id !== "string"
+      || typeof body.branch !== "string" || !normalizeBranchIdentity(body.branch)?.branch
+      || typeof body.head_sha !== "string" || !/^[a-f0-9]{40}$/i.test(body.head_sha)
+      || typeof body.reason !== "string" || !body.reason.trim()) {
+      return c.json({ success: false, reason: "invalid_retarget" }, 400);
+    }
+    const current = db.getSlot(slot.data);
+    if (!current?.occupied || current.issue !== body.issue || current.assignment_epoch !== body.expected_epoch) {
+      return c.json({ success: false, reason: "owner_mismatch" }, 409);
+    }
+    const branch = normalizeBranchIdentity(body.branch)!.branch!;
+    if (!(await verifyRetargetPr(body.expected_current_repository_id, body.expected_current_pr as number, body.pr as number, branch, body.head_sha))) {
+      return c.json({ success: false, reason: "pr_transition_unverified" }, 409);
+    }
+    const result = db.retargetSlotPr(slot.data, body.expected_epoch as number, completeTuple(body, "expected_current_"), body.pr as number, branch, body.head_sha, body.reason);
+    if (!result.ok) return c.json({ success: false, ...result }, 409);
+    return c.json({ success: true, slot: db.getSlot(slot.data) });
   });
 
   app.post("/slots/:slotNum/adopt-issue-claim", async (c) => {

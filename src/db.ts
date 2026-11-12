@@ -41,6 +41,8 @@ export interface SlotMutationResult {
     | "invalid_repository_id"
     | "invalid_branch_ref"
     | "invalid_assignment_metadata"
+    | "invalid_retarget"
+    | "invalid_pr_transition"
     | "target_already_assigned"
     | "slot_already_occupied"
     | "active_turn"
@@ -2516,6 +2518,35 @@ export class MoPDatabase {
         idempotent: false,
         predecessor,
       };
+    })();
+  }
+
+  /** Correct PR metadata without transferring ownership or restarting its clock. */
+  retargetSlotPr(
+    slot: number, expectedEpoch: number, expected: AssignmentTupleInput,
+    pr: number, branch: string, head: string, reason: string,
+  ): SlotMutationResult {
+    const tuple = normalizeAssignmentTuple(expected);
+    const branchIdentity = normalizeBranchIdentity(branch);
+    const invalid = !tuple || !Number.isInteger(expectedEpoch) || !Number.isInteger(pr) || pr <= 0
+      || !branchIdentity?.branch || !/^[a-f0-9]{40}$/i.test(head) || !reason.trim();
+    return this.db.transaction((): SlotMutationResult => {
+      const current = this.getSlot(slot);
+      const epoch = current?.assignment_epoch ?? 0;
+      if (invalid || !tuple || !branchIdentity) return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "invalid_retarget" };
+      if (!current?.occupied) return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "slot_not_occupied" };
+      if (epoch !== expectedEpoch) return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "epoch_mismatch" };
+      if (!assignmentTupleMatches(slotAssignmentTuple(current), tuple)) return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "observed_tuple_mismatch" };
+      if (!current.issue || !current.pr || current.pr === pr) return { ok: false, conflict: true, assignment_epoch: epoch, idempotent: false, reason: "invalid_pr_transition" };
+      // updateAssignmentState refreshes last_activity; metadata corrections must not.
+      this.db.prepare("UPDATE slots SET pr = ?, branch = ?, branch_ref = ?, head_sha = ? WHERE slot = ?")
+        .run(pr, branchIdentity.branch, branchIdentity.branchRef, head.toLowerCase(), slot);
+      this.logEvent(slot, "slot_pr_retargeted", null, null, {
+        issue: current.issue, assignment_epoch: epoch, old_pr: current.pr,
+        old_branch: current.branch, old_head: current.head_sha,
+        new_pr: pr, new_branch: branchIdentity.branch, new_head: head.toLowerCase(), reason: reason.trim(),
+      });
+      return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: false };
     })();
   }
 

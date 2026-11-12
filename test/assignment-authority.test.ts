@@ -22,6 +22,7 @@ const RETIRED_AUTHORITY_VALUE = "pm-transition-v1";
 async function withAssignmentRoute(
   run: (app: Hono, db: MoPDatabase, directory: string) => Promise<void>,
   paneState: "live" | "dead" = "live",
+  verifyRetargetPr?: (repository: string, oldPr: number, newPr: number, branch: string, head: string) => Promise<boolean>,
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "mop-assignment-route-"));
   const config: MoPConfig = {
@@ -34,7 +35,7 @@ async function withAssignmentRoute(
   };
   const db = new MoPDatabase(config);
   const app = new Hono();
-  registerAssignmentRoute(app, db);
+  registerAssignmentRoute(app, db, undefined, verifyRetargetPr);
   setPaneCheckExecutor(async (target) => paneState === "live"
     ? { state: "live", paneId: target }
     : { state: "dead" });
@@ -97,6 +98,33 @@ function assignmentRequest(
     body: JSON.stringify(body),
   };
 }
+
+test("PR retarget preserves occupied owner and clock, requires verification and audits atomically", async () => {
+  let verified = false;
+  await withAssignmentRoute(async (app, db) => {
+    assert.equal((await app.request("/slots/1/assign", assignmentRequest(undefined, assignment))).status, 200);
+    const before = db.getSlot(1)!;
+    const body = { ...completeRebindBody(before), issue: 10, pr: 21, branch: "fix/new", head_sha: "b".repeat(40), reason: "old PR superseded" };
+    const request = (change: Record<string, unknown> = {}) => assignmentRequest(undefined, { ...body, ...change });
+    assert.equal((await app.request("/slots/2/retarget-pr", request())).status, 409);
+    assert.equal((await app.request("/slots/1/retarget-pr", request({ issue: 11 }))).status, 400);
+    assert.equal((await app.request("/slots/1/retarget-pr", request({ expected_epoch: before.assignment_epoch + 1 }))).status, 409);
+    assert.equal((await app.request("/slots/1/retarget-pr", request())).status, 409);
+    verified = true;
+    assert.equal((await app.request("/slots/1/retarget-pr", request({ expected_current_head_sha: "c".repeat(40) }))).status, 409);
+    assert.equal((await app.request("/slots/1/retarget-pr", request())).status, 200);
+    const after = db.getSlot(1)!;
+    for (const field of ["issue", "assignment_epoch", "assigned_at", "claimed_at", "last_activity", "last_meaningful_work_at", "task", "active_turn_id", "active_turn_state"] as const) assert.equal(after[field], before[field]);
+    assert.equal(after.pr, 21);
+    assert.equal(after.branch, "fix/new");
+    assert.equal(after.head_sha, "b".repeat(40));
+    const events = db.getEvents(1, 50, "slot_pr_retargeted");
+    assert.equal(events.length, 1);
+    assert.match(JSON.stringify(events[0]), /old PR superseded/);
+    assert.equal((await app.request("/slots/1/retarget-pr", request())).status, 409);
+    assert.equal(db.getEvents(1, 50, "slot_pr_retargeted").length, 1);
+  }, "live", async () => verified);
+});
 
 test("the retired authority contract is gone: no header, no refusal path, no remediation", () => {
   assert.equal(existsSync(new URL("../src/assignmentAuthority.ts", import.meta.url)), false, "the authority module is deleted");
