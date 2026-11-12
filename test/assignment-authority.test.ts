@@ -6,7 +6,7 @@ import test from "node:test";
 import { Hono } from "hono";
 import Database from "better-sqlite3";
 
-import { assignmentIdentityPatchFields, registerAssignmentRoute } from "../src/assignmentRoute.js";
+import { assignmentIdentityPatchFields, registerAssignmentRoute, verifiedPrTransition } from "../src/assignmentRoute.js";
 import { MoPDatabase } from "../src/db.js";
 import { setPaneCheckExecutor } from "../src/sessionDelivery.js";
 import type { MoPConfig } from "../src/types.js";
@@ -104,7 +104,7 @@ test("PR retarget preserves occupied owner and clock, requires verification and 
   await withAssignmentRoute(async (app, db) => {
     assert.equal((await app.request("/slots/1/assign", assignmentRequest(undefined, assignment))).status, 200);
     const before = db.getSlot(1)!;
-    const body = { ...completeRebindBody(before), issue: 10, pr: 21, branch: "fix/new", head_sha: "b".repeat(40), reason: "old PR superseded" };
+    const body = { ...completeRebindBody(before), operator: "pm", issue: 10, pr: 21, branch: "fix/new", head_sha: "b".repeat(40), reason: "old PR superseded" };
     const request = (change: Record<string, unknown> = {}) => assignmentRequest(undefined, { ...body, ...change });
     assert.equal((await app.request("/slots/2/retarget-pr", request())).status, 409);
     assert.equal((await app.request("/slots/1/retarget-pr", request({ issue: 11 }))).status, 400);
@@ -124,6 +124,26 @@ test("PR retarget preserves occupied owner and clock, requires verification and 
     assert.equal((await app.request("/slots/1/retarget-pr", request())).status, 409);
     assert.equal(db.getEvents(1, 50, "slot_pr_retargeted").length, 1);
   }, "live", async () => verified);
+});
+
+test("retarget binds issue and head repository", () => {
+  const old = { state: "CLOSED" };
+  const replacement = { state: "OPEN", headRefName: "fix/new", headRefOid: "b".repeat(40), headRepositoryOwner: { login: "owner" }, headRepository: { name: "repo" }, body: "Closes #10", closingIssuesReferences: [] };
+  const verify = (value: typeof replacement) => verifiedPrTransition("owner/repo", old, value, "fix/new", "b".repeat(40), 10);
+  assert.equal(verify(replacement), true);
+  assert.equal(verify({ ...replacement, body: "Closes #11" }), false);
+  assert.equal(verify({ ...replacement, headRepositoryOwner: { login: "fork" } }), false);
+});
+
+test("competing retargets commit exactly one audit event", async () => {
+  await withAssignmentRoute(async (app, db) => {
+    await app.request("/slots/1/assign", assignmentRequest(undefined, assignment));
+    const body = { ...completeRebindBody(db.getSlot(1)!), operator: "pm", issue: 10, pr: 21, branch: "fix/new", head_sha: "b".repeat(40), reason: "superseded" };
+    assert.equal((await app.request("/slots/1/retarget-pr", assignmentRequest(undefined, { ...body, operator: "other" }))).status, 400);
+    const responses = await Promise.all([1, 2].map(() => app.request("/slots/1/retarget-pr", assignmentRequest(undefined, body))));
+    assert.deepEqual(responses.map(r => r.status).sort(), [200, 409]);
+    assert.equal(db.getEvents(1, 50, "slot_pr_retargeted").length, 1);
+  }, "live", async () => true);
 });
 
 test("the retired authority contract is gone: no header, no refusal path, no remediation", () => {

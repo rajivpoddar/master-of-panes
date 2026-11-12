@@ -2525,6 +2525,7 @@ export class MoPDatabase {
   retargetSlotPr(
     slot: number, expectedEpoch: number, expected: AssignmentTupleInput,
     pr: number, branch: string, head: string, reason: string,
+    caller: { pid: number | null; uid: number | null } = { pid: null, uid: null },
   ): SlotMutationResult {
     const tuple = normalizeAssignmentTuple(expected);
     const branchIdentity = normalizeBranchIdentity(branch);
@@ -2545,6 +2546,7 @@ export class MoPDatabase {
         issue: current.issue, assignment_epoch: epoch, old_pr: current.pr,
         old_branch: current.branch, old_head: current.head_sha,
         new_pr: pr, new_branch: branchIdentity.branch, new_head: head.toLowerCase(), reason: reason.trim(),
+        operator_claim: "pm", caller_pid: caller.pid, caller_uid: caller.uid,
       });
       return { ok: true, conflict: false, assignment_epoch: epoch, idempotent: false };
     })();

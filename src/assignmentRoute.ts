@@ -262,17 +262,45 @@ function isSameCompleteTuple(
     && metadataMatches;
 }
 
-type PrVerifier = (repository: string, oldPr: number, newPr: number, branch: string, head: string) => Promise<boolean>;
+type PrVerifier = (repository: string, oldPr: number, newPr: number, branch: string, head: string, issue: number) => Promise<boolean>;
 const exec = promisify(execFile);
-const verifyPrTransition: PrVerifier = async (repository, oldPr, newPr, branch, head) => {
+export function verifiedPrTransition(repository: string, old: any, replacement: any, branch: string, head: string, issue: number): boolean {
+  const repo = repository.toLowerCase();
+  const same = (value: unknown) => typeof value === "string" && value.toLowerCase() === repo;
+  const headRepo = `${replacement.headRepositoryOwner?.login}/${replacement.headRepository?.name}`;
+  const linked = Array.isArray(replacement.closingIssuesReferences) && replacement.closingIssuesReferences.some((ref: any) =>
+    ref.number === issue && typeof ref.url === "string" && ref.url.toLowerCase() === `https://github.com/${repo}/issues/${issue}`);
+  // Only unqualified references are accepted here; cross-repository references cannot bind this slot.
+  const closes = typeof replacement.body === "string" && new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#${issue}(?!\\d)`, "i").test(replacement.body);
+  return same(headRepo) && (linked || closes) && old.state === "CLOSED" && replacement.state === "OPEN"
+    && replacement.headRefName === branch && typeof replacement.headRefOid === "string" && replacement.headRefOid.toLowerCase() === head.toLowerCase();
+}
+const verifyPrTransition: PrVerifier = async (repository, oldPr, newPr, branch, head, issue) => {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) return false;
   try {
-    const read = async (pr: number) => JSON.parse((await exec("gh", ["pr", "view", String(pr), "--repo", repository, "--json", "state,headRefName,headRefOid"], { timeout: 15_000 })).stdout);
+    const read = async (pr: number) => JSON.parse((await exec("gh", ["pr", "view", String(pr), "--repo", repository, "--json", "state,headRefName,headRefOid,headRepository,headRepositoryOwner,closingIssuesReferences,body"], { timeout: 15_000 })).stdout);
     const [old, replacement] = await Promise.all([read(oldPr), read(newPr)]);
-    return old.state === "CLOSED" && replacement.state === "OPEN"
-      && replacement.headRefName === branch && replacement.headRefOid.toLowerCase() === head.toLowerCase();
+    return verifiedPrTransition(repository, old, replacement, branch, head, issue);
   } catch { return false; }
 };
+
+// Best-effort process attribution only: neither the claim nor lsof establishes authority.
+async function callerAttribution(env: any): Promise<{ pid: number | null; uid: number | null }> {
+  const socket = env?.incoming?.socket;
+  const port = socket?.remotePort;
+  const localPort = socket?.localPort;
+  if (!Number.isInteger(port) || !Number.isInteger(localPort) || !["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(socket.remoteAddress)) return { pid: null, uid: null };
+  try {
+    const { stdout } = await exec("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:ESTABLISHED", "-Fpun"], { timeout: 2000 });
+    let pid: number | null = null, uid: number | null = null;
+    for (const line of stdout.split("\n")) {
+      if (line.startsWith("p")) { pid = Number(line.slice(1)); uid = null; }
+      else if (line.startsWith("u")) uid = Number(line.slice(1));
+      else if (line.startsWith("n") && new RegExp(`:${port}->(?:127\\.0\\.0\\.1|\\[::1\\]):${localPort}$`).test(line.slice(1)) && Number.isInteger(pid) && Number.isInteger(uid)) return { pid, uid };
+    }
+  } catch { /* unavailable attribution must not be confused with authentication */ }
+  return { pid: null, uid: null };
+}
 
 export function registerAssignmentRoute(
   app: Hono,
@@ -539,7 +567,7 @@ export function registerAssignmentRoute(
     const slot = assignmentSlotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slot.success) return c.json({ error: "Invalid slot number" }, 400);
     const body: unknown = await c.req.json();
-    if (!isRecord(body) || !hasEvery(body, COMPLETE_REBIND_EXPECTED_FIELDS)
+    if (!isRecord(body) || body.operator !== "pm" || !hasEvery(body, COMPLETE_REBIND_EXPECTED_FIELDS)
       || !Number.isInteger(body.expected_epoch) || !Number.isInteger(body.issue)
       || body.issue !== body.expected_current_issue || !Number.isInteger(body.pr)
       || Number(body.pr) <= 0 || !Number.isInteger(body.expected_current_pr)
@@ -554,10 +582,11 @@ export function registerAssignmentRoute(
       return c.json({ success: false, reason: "owner_mismatch" }, 409);
     }
     const branch = normalizeBranchIdentity(body.branch)!.branch!;
-    if (!(await verifyRetargetPr(body.expected_current_repository_id, body.expected_current_pr as number, body.pr as number, branch, body.head_sha))) {
+    if (!(await verifyRetargetPr(body.expected_current_repository_id, body.expected_current_pr as number, body.pr as number, branch, body.head_sha, body.issue as number))) {
       return c.json({ success: false, reason: "pr_transition_unverified" }, 409);
     }
-    const result = db.retargetSlotPr(slot.data, body.expected_epoch as number, completeTuple(body, "expected_current_"), body.pr as number, branch, body.head_sha, body.reason);
+    const caller = await callerAttribution(c.env);
+    const result = db.retargetSlotPr(slot.data, body.expected_epoch as number, completeTuple(body, "expected_current_"), body.pr as number, branch, body.head_sha, body.reason, caller);
     if (!result.ok) return c.json({ success: false, ...result }, 409);
     return c.json({ success: true, slot: db.getSlot(slot.data) });
   });
