@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "96923a96da22ece305fbbda4a2ccf224a7d9b33fb5218cf4d46a957c72af7c5d",
+      "sha256": "a32bf71ed98b61cb53d1064be0ee444d22b2a445eb674eb09a7c9bbc8b84a935",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -204,7 +204,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "b7b09c4fddb03a62486541eb49f21e4499a0eb1038b93e6f69daf24320705724",
+      "sha256": "a2914e81e5c0e0469bfbf39c67621415d7eb8f7f5b8bd328772f5e1753bf6433",
       "source_path": "claude/hooks/validate-codex-review-agent-result.py"
     },
     {
@@ -1025,7 +1025,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "1228adc1285a0cca06147d0b4e40e773fbd16c1153c7a17557b0163afeb02194",
+      "sha256": "b1ea905a71f91931e39c6a53b0c9e12cdc925065516a5ff0a7c34def8383933b",
       "source_path": "claude/skills/codex-review-companion/codex-review-companion.mjs"
     },
     {

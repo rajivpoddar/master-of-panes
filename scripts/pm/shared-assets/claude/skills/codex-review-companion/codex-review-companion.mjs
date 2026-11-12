@@ -3232,6 +3232,7 @@ function writeMarker(args, parsed, codexText) {
     `ISSUE: ${args.issue ? "#" + args.issue : "-"}`,
     `PR: ${args.pr ? "#" + args.pr : "-"}`,
     args._currentBranch ? `BRANCH: ${args._currentBranch}` : null,
+    `CHECKOUT: ${fs.realpathSync(args.repoRoot)}`,
     args._currentHead ? `HEAD_SHA: ${args._currentHead}` : null,
     args._currentHead ? `headRefOid: ${args._currentHead}` : null,
     args._diffBaseRef ? `DIFF_BASE: ${args._diffBaseRef}` : null,

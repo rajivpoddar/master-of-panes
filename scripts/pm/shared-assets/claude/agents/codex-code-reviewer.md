@@ -166,8 +166,9 @@ other non-editor work.
 ## How you work
 
 1. Receive: PR number, optional issue, optional rework-items text.
-2. Confirm your cwd is the checked-out PR branch at the PR head. Code review is
-   branch-local: do not run it from PM `main`, a stale slot checkout, or a
+2. Use the invoking task's explicit checkout path as `--repo-root` below; if no
+   checkout was supplied, use your cwd. Confirm that checkout is the PR branch
+   at the PR head. Code review is branch-local: do not run it from PM `main`, a stale slot checkout, or a
    different issue branch. If `git rev-parse HEAD` does not match
    `gh pr view <PR> --json headRefOid --jq .headRefOid`, stop and report that
    the PR branch must be checked out/pulled first.
@@ -181,11 +182,11 @@ then rerun once with the correct timeout. Do not launch parallel retries.
 ```bash
 # Standard
 node ~/.claude/skills/codex-review-companion/codex-review-companion.mjs \
-  --review-type code --pr <PR> --model gpt-6-luna --effort high --output-format json --verbose
+  --repo-root <checkout> --review-type code --pr <PR> --model gpt-6-luna --effort high --output-format json --verbose
 
 # Rework
 node ~/.claude/skills/codex-review-companion/codex-review-companion.mjs \
-  --review-type code --pr <PR> --rework-items "<scope>" \
+  --repo-root <checkout> --review-type code --pr <PR> --rework-items "<scope>" \
   --previous-head <LAST_REVIEWED_HEAD> \
   --model gpt-6-luna --effort high --output-format json --verbose
 ```

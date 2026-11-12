@@ -222,21 +222,30 @@ def main() -> int:
 
     if pr_number:
         marker_head = field(marker_text, "HEAD_SHA")
+        checkout = field(marker_text, "CHECKOUT") or cwd
         try:
+            def common_dir(path: str) -> str:
+                return subprocess.check_output(
+                    ["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                    text=True, stderr=subprocess.DEVNULL, timeout=3,
+                ).strip()
+
+            if not Path(checkout).is_absolute() or Path(common_dir(checkout)).resolve() != Path(common_dir(cwd)).resolve():
+                raise ValueError("review checkout does not belong to the invoking repository")
             checkout_head = subprocess.check_output(
-                ["git", "-C", cwd, "rev-parse", "HEAD"],
+                ["git", "-C", checkout, "rev-parse", "HEAD"],
                 text=True,
                 stderr=subprocess.DEVNULL,
                 timeout=3,
             ).strip()
             live_head = subprocess.check_output(
                 ["/opt/homebrew/bin/gh", "pr", "view", pr_number, "--json", "headRefOid", "--jq", ".headRefOid"],
-                cwd=cwd,
+                cwd=checkout,
                 text=True,
                 stderr=subprocess.DEVNULL,
                 timeout=5,
             ).strip()
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, ValueError, subprocess.SubprocessError):
             emit_feedback(
                 "[CODEX_REVIEW_HEAD_UNVERIFIED] Could not resolve checkout/live PR head after "
                 f"{requested}. Do not report the verdict to PM; verify PR #{pr_number} and rerun."
