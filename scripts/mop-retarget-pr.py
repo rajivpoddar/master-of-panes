@@ -20,7 +20,7 @@ def main():
         raise SystemExit("REFUSE: occupied assignment, issue, epoch or old PR differs")
     fields = ("repository_id", "issue", "pr", "branch", "head_sha", "work_kind", "handoff_id", "claimed_at")
     payload = {"expected_current_" + name: current.get(name) for name in fields}
-    payload.update(expected_epoch=args.epoch, issue=args.issue, pr=args.pr, branch=args.branch, head_sha=args.head, reason=args.reason)
+    payload.update(expected_epoch=args.epoch, issue=args.issue, pr=args.pr, branch=args.branch, head_sha=args.head, reason=args.reason, operator="pm")
     request = urllib.request.Request(url + "/retarget-pr", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=40) as response:

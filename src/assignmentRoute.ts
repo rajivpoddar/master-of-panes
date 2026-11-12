@@ -264,6 +264,40 @@ function isSameCompleteTuple(
 
 type PrVerifier = (repository: string, oldPr: number, newPr: number, branch: string, head: string, issue: number) => Promise<boolean>;
 const exec = promisify(execFile);
+function hasClosingDeclaration(body: string, issue: number): boolean {
+  const declaration = new RegExp(`^\\s*(?:closes|fixes|resolves)\\s+#${issue}\\s*$`, "i");
+  let comment = false;
+  let fence: { char: string; length: number } | null = null;
+  for (const line of body.split(/\r?\n/)) {
+    if (fence) {
+      const end = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+      if (end && end[1][0] === fence.char && end[1].length >= fence.length) fence = null;
+      continue;
+    }
+    let visible = "";
+    let cursor = 0;
+    while (cursor < line.length) {
+      if (comment) {
+        const end = line.indexOf("-->", cursor);
+        if (end < 0) break;
+        cursor = end + 3;
+        comment = false;
+      } else {
+        const start = line.indexOf("<!--", cursor);
+        if (start < 0) { visible += line.slice(cursor); break; }
+        visible += line.slice(cursor, start);
+        cursor = start + 4;
+        comment = true;
+      }
+    }
+    const startFence = visible.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (startFence) { fence = { char: startFence[1][0], length: startFence[1].length }; continue; }
+    // Do not turn a line containing a comment into a declaration by stripping it.
+    if (visible === line && declaration.test(line)) return true;
+  }
+  return false;
+}
+
 export function verifiedPrTransition(repository: string, old: any, replacement: any, branch: string, head: string, issue: number): boolean {
   const repo = repository.toLowerCase();
   const same = (value: unknown) => typeof value === "string" && value.toLowerCase() === repo;
@@ -271,7 +305,7 @@ export function verifiedPrTransition(repository: string, old: any, replacement: 
   const linked = Array.isArray(replacement.closingIssuesReferences) && replacement.closingIssuesReferences.some((ref: any) =>
     ref.number === issue && typeof ref.url === "string" && ref.url.toLowerCase() === `https://github.com/${repo}/issues/${issue}`);
   // Only unqualified references are accepted here; cross-repository references cannot bind this slot.
-  const closes = typeof replacement.body === "string" && new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#${issue}(?!\\d)`, "i").test(replacement.body);
+  const closes = typeof replacement.body === "string" && hasClosingDeclaration(replacement.body, issue);
   return same(headRepo) && (linked || closes) && old.state === "CLOSED" && replacement.state === "OPEN"
     && replacement.headRefName === branch && typeof replacement.headRefOid === "string" && replacement.headRefOid.toLowerCase() === head.toLowerCase();
 }

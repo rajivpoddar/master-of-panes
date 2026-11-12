@@ -132,7 +132,11 @@ test("retarget binds issue and head repository", () => {
   const verify = (value: typeof replacement) => verifiedPrTransition("owner/repo", old, value, "fix/new", "b".repeat(40), 10);
   assert.equal(verify(replacement), true);
   assert.equal(verify({ ...replacement, body: "Closes #11" }), false);
-  assert.equal(verify({ ...replacement, headRepositoryOwner: { login: "fork" } }), false);
+  for (const body of ["Does not closes #10", "> Closes #10", '"Closes #10"', "<!--\nCloses #10\n-->", "```\nCloses #10\n```", "~~~text\nCloses #10\n~~~"]) {
+    assert.equal(verify({ ...replacement, body }), false, body);
+  }
+  assert.equal(verify({ ...replacement, body: "Summary\n  fIxEs #10  \n" }), true);
+  assert.equal(verify({ ...replacement, body: "Closes #10", headRepositoryOwner: { login: "fork" } }), false);
 });
 
 test("competing retargets commit exactly one audit event", async () => {
