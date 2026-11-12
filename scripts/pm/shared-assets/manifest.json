@@ -1,6 +1,15 @@
 {
   "entries": [
     {
+      "canonical_target": "/Users/rajiv/.claude/hooks/validate-codex-review-agent-result.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-review-agents",
+      "sha256": "b7b09c4fddb03a62486541eb49f21e4499a0eb1038b93e6f69daf24320705724",
+      "source_path": "claude/hooks/validate-codex-review-agent-result.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/Downloads/projects/tmux-slack-bridge/cto-bridge.ts",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1836,7 +1845,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 200,
+    "selected_count": 201,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
