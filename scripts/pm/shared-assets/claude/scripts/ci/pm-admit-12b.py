@@ -45,6 +45,18 @@ def authorized_reviewer_login():
         return ''
 
 
+def resolve_commit(sha):
+    """Resolve a marker to one unambiguous local commit, or fail closed."""
+    try:
+        checkout = Path.home() / 'Downloads/projects/heydonna-app'
+        return subprocess.check_output(
+            ['git', '-C', str(checkout), 'rev-parse', '--verify', sha + '^{commit}'],
+            stderr=subprocess.DEVNULL, timeout=60,
+        ).decode().strip().lower()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def main_merges_only(repo, old, head):
     """Carry a review only across clean main merges with an unchanged PR patch."""
     checkout = Path.home() / 'Downloads/projects/heydonna-app'
@@ -123,9 +135,13 @@ def reviewed_12b_verdict(comments, head, reviewer_login, repo, pr):
     sha = sha.lower()
     if not canonical or not authorized:
         return None
-    if head.lower().startswith(sha):
+    reviewed = resolve_commit(sha)
+    current = resolve_commit(head)
+    if not reviewed or not current:
+        return None
+    if reviewed == current:
         return verdict
-    if verdict == 'PASS' and main_merges_only(repo, sha, head):
+    if verdict == 'PASS' and main_merges_only(repo, reviewed, current):
         return verdict
     return None
 
@@ -147,7 +163,7 @@ def evaluate(repo, pr, head):
         verdict = reviewed_12b_verdict(comments, head, reviewer_login, repo, pr)
         if verdict == 'PASS':
             sha = markers[-1][1].lower()
-            if head.lower().startswith(sha):
+            if resolve_commit(sha) == resolve_commit(head):
                 return True, f'12B_GATE: PASS pr={pr} head={head}'
             return True, f'12B_GATE main-merge-only carry-forward from {sha} pr={pr} head={head}'
     except Exception:

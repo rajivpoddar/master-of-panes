@@ -12,7 +12,7 @@ spec.loader.exec_module(composer)
 
 def test_3h_summary_and_physical_line_budget():
     hashes = ['aaa'] * 12 + ['bbb'] * 8 + ['ccc'] * 5 + ['ddd'] * 3
-    refs = [{'time': '12:34', 'user_hash': h} for h in hashes]
+    refs = [{'time': '12:34', 'identity_kind': 'userIdSha256', 'user_hash': h} for h in hashes]
     axiom = {'events': 0, 'users': 0, 'superseded_saves': len(refs), 'superseded_save_refs': refs}
     report = composer.compose('3h', datetime.now(timezone.utc), axiom, {}, [], escalations=[composer.CTO])
     assert composer.CTO not in report
@@ -28,12 +28,13 @@ def test_3h_fold_keeps_named_actionable_error_codes_and_tldr_names_new_code():
         {"code": f"actionable_{i}", "events": 4, "users": 2}
         for i in range(8)
     ]
-    mapping = {row["code"]: {"status": "mapped", "refs": [f"owner-{i}"]}
-               for i, row in enumerate(rows)}
     axiom = {
         "events": 33, "users": 12, "top": rows[:5],
         "all_codes": rows, "other_codes": 0, "other_events": 0,
     }
+    requested = composer.three_hour_map_args(axiom)[1::2]
+    mapping = {code: {"status": "mapped", "refs": [f"owner-{i}"]}
+               for i, code in enumerate(requested)}
     lines, tldr, _ = composer.error_block(axiom, mapping, "3h")
     # The named mappings below the top-five list must survive the 3h fold too.
     folded = composer.compact_report(lines + ["• filler"] * 8, limit=1, cadence="3h")
@@ -49,27 +50,56 @@ def test_3h_fold_always_reports_overflow_and_hourly_compaction_is_unchanged():
     folded_3h = composer.compact_report(["*Axiom errors (3h):*", *rows], limit=1, cadence="3h")
     assert "+4 more" in folded_3h
     folded_1h = composer.compact_report(["*Axiom errors (1h):*", *rows], limit=1, cadence="1h")
-    assert "+4 more" not in folded_1h
+    assert "+7 more" in folded_1h
 
     new_axiom = {"events": 1, "users": 1,
                  "top": [{"code": "new_fault", "events": 1, "users": 1}]}
-    _, new_tldr, _ = composer.error_block(new_axiom, {}, "3h")
+    _, new_tldr, _ = composer.error_block(new_axiom, {'new_fault': {'status': 'NEW'}}, "3h")
     assert "NEW code: new_fault" in new_tldr
 
 
 def test_3h_superseded_save_fallback_identities_are_not_counted_as_users():
     refs = [
-        {"time": "12:34", "identity_kind": "userSha256", "user_hash": "u1"},
+        {"time": "12:34", "identity_kind": "userIdSha256", "user_hash": "u1"},
         {"time": "12:35", "identity_kind": "fileIdSha256", "user_hash": "f1"},
         {"time": "12:36", "identity_kind": "unknown", "user_hash": "unknown"},
+        {"time": "12:37", "identity_kind": "userSha256", "user_hash": "u2"},
+        {"time": "12:38", "user_hash": "missing"},
     ]
     lines, _, _ = composer.error_block(
-        {"events": 0, "users": 0, "superseded_saves": 3,
+        {"events": 0, "users": 0, "superseded_saves": len(refs),
          "superseded_save_refs": refs}, {}, "3h")
     line = next(item for item in lines if "superseded saves:" in item)
     assert "1 distinct users" in line
-    assert "2 fallback observations" in line
-    assert "fileIdSha256 f1" in line and "unknown unknown" in line
+    for kind in ('userSha256', 'fileIdSha256', 'unknown', 'missing-kind'):
+        assert f'{kind} fallback: 1' in line
+
+
+def test_hourly_output_matches_pre_correction_renderer():
+    import subprocess
+    import types
+    import sys
+    root = PATH.parents[7]
+    source = subprocess.check_output([
+        'git', '-C', str(root), 'show',
+        '3e44e791:scripts/pm/shared-assets/claude/scripts/pm/heartbeat/heartbeat-compose.py',
+    ], text=True)
+    baseline = types.ModuleType('baseline_heartbeat_renderer')
+    baseline.__file__ = str(PATH)
+    sys.modules[baseline.__name__] = baseline
+    exec(compile(source, str(PATH), 'exec'), baseline.__dict__)
+    baseline.composer_release_sha = lambda: 'fixture'
+    old_release = composer.composer_release_sha
+    composer.composer_release_sha = lambda: 'fixture'
+    try:
+        rows = [{'code': f'fault_{i}', 'events': 2, 'users': 1} for i in range(5)]
+        axiom = {'events': 10, 'users': 2, 'top': rows}
+        mapping = {row['code']: {'status': 'NEW'} for row in rows}
+        args = ('1h', datetime(2026, 1, 1, tzinfo=timezone.utc), axiom, mapping, [])
+        assert composer.compose(*args).encode() == baseline.compose(*args).encode()
+    finally:
+        composer.composer_release_sha = old_release
+        sys.modules.pop(baseline.__name__, None)
 
 
 def test_3h_retained_sample_counts_user_id_hashes_as_users():

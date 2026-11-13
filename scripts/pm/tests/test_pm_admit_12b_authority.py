@@ -26,6 +26,7 @@ def _evaluate(author):
         gate.authorized_reviewer_login = lambda: "pm-reviewer"
         gate.exempt = lambda *args: False
         gate.main_merges_only = lambda *args: True
+        gate.resolve_commit = lambda sha: sha
         return gate.evaluate("owner/repo", 123, HEAD)
     finally:
         gate.api = original_api

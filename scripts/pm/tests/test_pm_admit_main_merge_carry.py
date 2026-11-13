@@ -56,6 +56,25 @@ def history(tmp_path, edit_merge=False, extra_commit=False):
         return gate.main_merges_only('owner/repo', old, head)
 
 
+def test_review_prefix_requires_unambiguous_commit_and_passes_full_sha():
+    head = 'a' * 40
+    other = 'b' * 40
+    comments = [{'body': f'PM 12b: PASS at {head[:7]}', 'user': {'login': 'pm'}}]
+    with patch.object(gate, 'resolve_commit', side_effect=lambda s: {head[:7]: head, head: head, other: other}.get(s)), \
+         patch.object(gate, 'main_merges_only', return_value=False) as carry:
+        assert gate.reviewed_12b_verdict(comments, head, 'pm', 'owner/repo', 1) == 'PASS'
+        assert gate.reviewed_12b_verdict(comments, other, 'pm', 'owner/repo', 1) is None
+        carry.assert_called_once_with('owner/repo', head, other)
+    with patch.object(gate, 'resolve_commit', return_value=None):
+        assert gate.reviewed_12b_verdict(comments, head, 'pm', 'owner/repo', 1) is None
+
+
+def test_resolve_commit_refuses_ambiguous_or_missing():
+    for error in (subprocess.CalledProcessError(128, 'git'), FileNotFoundError()):
+        with patch.object(gate.subprocess, 'check_output', side_effect=error):
+            assert gate.resolve_commit('abcdef0') is None
+
+
 def test_clean_main_merge_carries_review(tmp_path):
     assert history(tmp_path)
 

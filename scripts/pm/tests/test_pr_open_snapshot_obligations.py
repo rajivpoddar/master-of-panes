@@ -352,7 +352,8 @@ def test_ci_exempt_without_ask_raises_merge_ask_not_admission():
     assert prsnap.classify_pr(pr)["next"] == "CI-exempt -> merge ask"
 
 
-def test_12b_pass_carry_forward_requires_authenticated_author_and_exact_reviewed_head():
+def test_12b_pass_carry_forward_requires_authenticated_author_and_exact_reviewed_head(monkeypatch):
+    monkeypatch.setattr(prsnap._REVIEW_GATE, 'resolve_commit', lambda sha: sha)
     head = "d" * 40
     pr = _pr(221, head=head)
     pr["comments"] = [{
