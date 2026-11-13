@@ -1016,7 +1016,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "74db62e8a44999280df79e0cffc839fe62de9e48d1d47bb6c003607c67283f11",
+      "sha256": "4bf6c37a912fe393373b1548800b19acf796d96648780e98481b78ba4e669251",
       "source_path": "claude/skills/codex-review-companion/SKILL.md"
     },
     {
@@ -1025,7 +1025,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "b1ea905a71f91931e39c6a53b0c9e12cdc925065516a5ff0a7c34def8383933b",
+      "sha256": "28665f99a0e9dfdcfaa8f3b20f3ff7eec9491d6de1e9f61dd3965d1cf29b14d6",
       "source_path": "claude/skills/codex-review-companion/codex-review-companion.mjs"
     },
     {
