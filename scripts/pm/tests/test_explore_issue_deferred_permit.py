@@ -21,6 +21,7 @@ Tests are committed but NOT executed under the MoP no-test-proof directive.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -856,3 +857,171 @@ def test_investigation_without_hypothesis_or_unknown_does_not_trigger():
     )
     assert not has_inv_full, \
         "INVESTIGATION without HYPOTHESIS/UNKNOWN Cause must not trigger the gate"
+
+
+# ---------------------------------------------------------------------------
+# Behavioral integration: verdict gate REACHABLE for permit-approved creates
+#
+# Control-flow defect fixed: pre-issue-create-audit.sh formerly exited 0
+# immediately after explore_issue_write_permit_pending succeeded (line 283),
+# so the verdict gate was dead code for every permit-approved create.
+#
+# These tests run the ACTUAL hook end-to-end (no network, hermetic tmp_path)
+# and prove that verdict evaluation occurs BEFORE pending is written, so:
+#   - a verdict block leaves no stranded pending file (permit intact for retry)
+#   - a verdict pass writes the pending file and allows the create
+#
+# Note: MoP no-test-proof directive — committed but NOT executed in CI.
+# ---------------------------------------------------------------------------
+
+def _body_sha(body: str) -> str:
+    """Match hook's sha256_of: strip trailing newlines (bash command-substitution strips them)."""
+    return hashlib.sha256(body.rstrip('\n').encode()).hexdigest()
+
+
+def _title_sha(title: str) -> str:
+    return hashlib.sha256(title.encode()).hexdigest()
+
+
+def _write_permit_for_body(tmp_path: Path, body: str, title: str) -> None:
+    """Write a permit file whose SHA bindings match the given body and title."""
+    permit_dir = tmp_path / "permits"
+    permit_dir.mkdir(exist_ok=True)
+    (permit_dir / f"{KEY}.permit.json").write_text(json.dumps({
+        "channel": CHANNEL,
+        "thread_ts": THREAD,
+        "source_message_ts": SOURCE_MSG,
+        "body_sha256": _body_sha(body),
+        "title_digest": _title_sha(title),
+        "obligation_id": OBLIGATION_ID,
+        "minted_at": "2026-11-14T10:00:00Z",
+    }))
+
+
+def _run_pre_audit(env: dict, body: str, title: str, tmp_path: Path) -> subprocess.CompletedProcess:
+    """Run pre-issue-create-audit.sh via a --body-file so body is read exactly."""
+    body_file = tmp_path / "issue_body.md"
+    body_file.write_text(body)
+    input_json = json.dumps({
+        "tool_input": {
+            "command": f"gh issue create --title {json.dumps(title)} --body-file {body_file}"
+        }
+    })
+    return subprocess.run(
+        ["bash", str(PRE_AUDIT)],
+        input=input_json,
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+
+
+def test_permit_plus_fix_claim_plus_needs_deeper_verdict_blocks(tmp_path):
+    """CRITICAL behavioral test: permit present + Status: FIX + NEEDS_DEEPER verdict must BLOCK.
+
+    Before the control-flow fix, pre-issue-create-audit.sh exited 0 immediately
+    after explore_issue_write_permit_pending succeeded — the verdict gate was
+    unreachable for every permit-approved create. This test proves the gate is
+    now reached and enforced before the pending file is written.
+
+    Expected behaviour:
+      - hook outputs {"decision": "block", ...} naming NEEDS_DEEPER_INVESTIGATION
+      - NO pending file is written (permit remains intact for a corrected retry)
+    """
+    title = "Behavioral test: FIX claim with NEEDS_DEEPER verdict"
+    body = (
+        "Status: FIX\n"
+        f"Source: {CHANNEL}:{THREAD}\n"
+        "Cause: CODE_DEFECT\n"
+        "Description: Fix a confirmed root cause.\n"
+    )
+    env = _env(tmp_path)
+    _write_permit_for_body(tmp_path, body, title)
+    _write_verdict(tmp_path, CHANNEL, THREAD,
+                   "Verdict: NEEDS_DEEPER_INVESTIGATION\nEFFORT:M\n")
+
+    result = _run_pre_audit(env, body, title, tmp_path)
+    assert result.returncode == 0, f"hook must exit 0 (block via JSON): {result.stderr}"
+    output = result.stdout
+    assert '"decision"' in output and '"block"' in output, (
+        "hook must BLOCK when permit is valid but verdict is NEEDS_DEEPER_INVESTIGATION\n"
+        f"stdout={output!r}\nstderr={result.stderr!r}"
+    )
+    assert "NEEDS_DEEPER_INVESTIGATION" in output, \
+        "block message must name the actual verdict returned"
+    assert "intact for a corrected retry" in output, \
+        "block message must confirm the permit is preserved for retry"
+    # Critical: NO pending file must exist — the verdict block must run BEFORE
+    # explore_issue_write_permit_pending is called, leaving the permit intact.
+    pending_dir = tmp_path / "pending"
+    if pending_dir.exists():
+        pending_files = list(pending_dir.glob("*.pending.json"))
+        assert len(pending_files) == 0, (
+            "verdict block must NOT write a pending file — permit must remain "
+            "intact for a corrected retry, but found: "
+            + str([str(f) for f in pending_files])
+        )
+
+
+def test_permit_plus_fix_claim_plus_confirmed_verdict_allows_and_writes_pending(tmp_path):
+    """Permit + FIX claim + CONFIRMED verdict: hook writes pending and exits without block.
+
+    Proves the happy path through the new control flow: verdict passes, then
+    explore_issue_write_permit_pending is called, then hook exits 0 with no block.
+    """
+    title = "Behavioral test: FIX claim with CONFIRMED verdict"
+    body = (
+        "Status: FIX\n"
+        f"Source: {CHANNEL}:{THREAD}\n"
+        "Cause: CODE_DEFECT\n"
+        "Description: Fix a confirmed root cause.\n"
+    )
+    env = _env(tmp_path)
+    _write_permit_for_body(tmp_path, body, title)
+    _write_verdict(tmp_path, CHANNEL, THREAD,
+                   "Verdict: CONFIRMED\nEFFORT:S\n")
+
+    result = _run_pre_audit(env, body, title, tmp_path)
+    assert result.returncode == 0, f"hook must exit 0: {result.stderr}"
+    output = result.stdout
+    assert '"block"' not in output, (
+        "hook must NOT block when permit is valid and verdict is CONFIRMED\n"
+        f"stdout={output!r}\nstderr={result.stderr!r}"
+    )
+    # Pending file must have been written
+    pending_dir = tmp_path / "pending"
+    assert pending_dir.exists(), "pending dir must exist after write_permit_pending"
+    pending_files = list(pending_dir.glob("*.pending.json"))
+    assert len(pending_files) == 1, (
+        "hook must write exactly one pending file when CONFIRMED verdict passes\n"
+        f"pending_dir contents: {[str(f) for f in pending_dir.iterdir()]}"
+    )
+
+
+def test_permit_plus_no_verdict_claim_skips_verdict_check(tmp_path):
+    """Permit present, body has no Status: FIX/INVESTIGATION claim: verdict check skipped.
+
+    Non-verdict creates (internal follow-ups, tracking tickets without a verdict
+    claim) must not be blocked even when no verdict file exists.
+    """
+    title = "Behavioral test: internal follow-up, no verdict claim"
+    body = (
+        f"Source: {CHANNEL}:{THREAD}\n"
+        "Description: Internal tracking issue, no Status: FIX or INVESTIGATION.\n"
+    )
+    env = _env(tmp_path)
+    _write_permit_for_body(tmp_path, body, title)
+    # Deliberately write NO verdict file.
+
+    result = _run_pre_audit(env, body, title, tmp_path)
+    assert result.returncode == 0, f"hook must exit 0: {result.stderr}"
+    output = result.stdout
+    assert '"block"' not in output, (
+        "body without FIX/INVESTIGATION claim must not be blocked even with no verdict file\n"
+        f"stdout={output!r}\nstderr={result.stderr!r}"
+    )
+    # Pending file must be written — permit is consumed by finalizer later
+    pending_dir = tmp_path / "pending"
+    assert pending_dir.exists(), "pending dir must exist"
+    pending_files = list(pending_dir.glob("*.pending.json"))
+    assert len(pending_files) == 1, (
+        "pending file must be written for non-verdict-claim body with valid permit"
+    )

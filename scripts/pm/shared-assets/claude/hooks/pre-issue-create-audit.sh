@@ -264,6 +264,61 @@ if [ "$SOURCE_RESULT" != "NONE" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Verdict gate helpers — computed HERE, before the permit gate, so the
+# verdict check can run BEFORE explore_issue_write_permit_pending is called.
+# A verdict block must never strand a pending file (which the finalizer would
+# then try to consume); checking first keeps the permit intact for a corrected
+# retry.
+# ---------------------------------------------------------------------------
+NOW=$(date +%s)
+WINDOW_START=$((NOW - 1800))
+
+# Parse the anchored Verdict: line from a file and return one of:
+#   CONFIRMED | NEEDS_DEEPER_INVESTIGATION | MISDIAGNOSED | CANNOT_REPRODUCE
+#   ABSENT  — file missing or unreadable
+#   STALE   — file exists but mtime <= WINDOW_START
+#   INVALID — file present and fresh but no recognized Verdict: line
+_vg_parse_verdict() {
+  local path="$1" window_start="$2"
+  python3 - "$path" "$window_start" <<'PYEOF'
+import os, re, sys
+path, window_start = sys.argv[1], int(sys.argv[2])
+try:
+    s = os.stat(path)
+except OSError:
+    print("ABSENT"); sys.exit()
+if int(s.st_mtime) <= window_start:
+    print("STALE"); sys.exit()
+try:
+    content = open(path).read()
+except OSError:
+    print("ABSENT"); sys.exit()
+# Anchored to start of line; value must be a known verdict word; optional
+# trailing prose (e.g. "CONFIRMED - looks right") is allowed after a non-word
+# boundary character.
+m = re.search(
+    r"(?im)^Verdict:\s+(CONFIRMED|NEEDS_DEEPER_INVESTIGATION|MISDIAGNOSED|CANNOT_REPRODUCE)(?:[^_A-Z]|$)",
+    content,
+)
+print(m.group(1) if m else "INVALID")
+PYEOF
+}
+
+# Classify the body claim that determines which verdict is required.
+# Only Status: FIX and Status: INVESTIGATION trigger the verdict gate;
+# all other bodies (internal creates, follow-ups without a Status: claim)
+# are preserved without change.
+_VG_CLAIMS_FIX=false
+_VG_CLAIMS_INVESTIGATION=false
+if printf '%s' "$BODY_OR_CMD" | grep -qiE '^Status:[[:space:]]*(FIX|CONFIRMED)'; then
+  _VG_CLAIMS_FIX=true
+fi
+if printf '%s' "$BODY_OR_CMD" | grep -qiE '^Status:[[:space:]]*INVESTIGATION' && \
+   printf '%s' "$BODY_OR_CMD" | grep -qiE '^Cause:[[:space:]]*(HYPOTHESIS|UNKNOWN)'; then
+  _VG_CLAIMS_INVESTIGATION=true
+fi
+
+# ---------------------------------------------------------------------------
 # READY_TO_FILE permit gate (one-use; source/body-bound)
 # ---------------------------------------------------------------------------
 PERMIT_STATUS=""
@@ -274,11 +329,38 @@ if [ -n "$THREAD_TS" ]; then
     PERMIT_STATUS=$?
   fi
   if [ "$PERMIT_STATUS" = "0" ]; then
-    # Valid permit — write a pending marker; the finalizer hook
-    # (explore-issue-permit-consume-gate.sh, which runs AFTER all other blocking
-    # hooks including block-invalid-issue-contract-ledger.sh) atomically consumes
-    # the permit so that any intervening hook block preserves the permit intact.
-    # The actual persist-UNKNOWN-first consumption happens in the finalizer.
+    # Verdict gate BEFORE writing pending so a verdict block leaves no stranded
+    # pending file and the permit remains intact for a corrected retry.
+    if [ -n "$THREAD_TS" ] && { [ "$_VG_CLAIMS_FIX" = "true" ] || [ "$_VG_CLAIMS_INVESTIGATION" = "true" ]; }; then
+      _VERDICT_PATH="$(explore_issue_verdict_path "$CHANNEL" "$THREAD_TS" 2>/dev/null || true)"
+      _VG_VERDICT="ABSENT"
+      if [ -n "$_VERDICT_PATH" ]; then
+        _VG_VERDICT="$(_vg_parse_verdict "$_VERDICT_PATH" "$WINDOW_START")"
+      fi
+      if [ "$_VG_CLAIMS_FIX" = "true" ]; then
+        # FIX/CONFIRMED body: requires CONFIRMED and nothing else.
+        if [ "$_VG_VERDICT" != "CONFIRMED" ]; then
+          printf '%s\n' "{\"decision\": \"block\", \"message\": \"BLOCKED: Body claims Status: FIX or CONFIRMED but Codex verdict is '${_VG_VERDICT}' for ${CHANNEL}:${THREAD_TS}. A CONFIRMED verdict is required. Address the concerns raised by Codex, or file a tracking ticket with Status: INVESTIGATION + Cause: HYPOTHESIS/UNKNOWN instead. The permit is intact for a corrected retry.\"}"
+          exit 0
+        fi
+      else
+        # INVESTIGATION + HYPOTHESIS/UNKNOWN body.
+        # Allowed: CONFIRMED, NEEDS_DEEPER_INVESTIGATION, MISDIAGNOSED.
+        # Blocked: ABSENT, STALE, INVALID, CANNOT_REPRODUCE.
+        case "$_VG_VERDICT" in
+          CONFIRMED|NEEDS_DEEPER_INVESTIGATION|MISDIAGNOSED)
+            : # Verdict is acceptable for a tracking/investigation ticket.
+            ;;
+          *)
+            printf '%s\n' "{\"decision\": \"block\", \"message\": \"BLOCKED: Body declares Status: INVESTIGATION but Codex verdict is '${_VG_VERDICT}' for ${CHANNEL}:${THREAD_TS}. An INVESTIGATION ticket requires a fresh verdict file containing CONFIRMED, NEEDS_DEEPER_INVESTIGATION, or MISDIAGNOSED. A missing, stale, or CANNOT_REPRODUCE verdict does not permit filing. The permit is intact for a corrected retry.\"}"
+            exit 0
+            ;;
+        esac
+      fi
+    fi
+    # Verdict passed (or not applicable for this body type). Write pending;
+    # the finalizer hook (explore-issue-permit-consume-gate.sh) atomically
+    # consumes the permit right before gh runs.
     if explore_issue_write_permit_pending "$CHANNEL" "$THREAD_TS" "$BODY_SHA" "$TITLE_DIGEST"; then
       exit 0  # Pending written; finalizer will consume right before gh runs.
     fi
@@ -493,78 +575,20 @@ if [ -n "$HAS_BYPASS_MARKER" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# MoP events Codex-evidence gate (existing logic, non-customer path)
-# ---------------------------------------------------------------------------
-NOW=$(date +%s)
-WINDOW_START=$((NOW - 1800))
-
-# PM-pane Codex architecture-review evidence gate REMOVED (Rajiv, DM D0AMF0XE6TS
-# thread 1794566037.087919, ts 1794566485.412849: "drop it"). Slots are retired; every
-# proxy dev run already performs Codex plan/code/QA reviews, and customer-origin issues
-# still require the explore-issue CONFIRMED permit above. Backup:
-# ~/.claude/hooks/pre-issue-create-audit.sh.bak-20261113-droparch
-
-# ---------------------------------------------------------------------------
-# Verdict gate: source-bound per-investigation verdict file
+# Verdict gate: source-bound per-investigation verdict file (non-permit path)
 #
-# Defects fixed vs. prior implementation:
-#   1. Loose grep: grep for CONFIRMED anywhere matched "observation CONFIRMED"
-#      even when Verdict: line said NEEDS_DEEPER_INVESTIGATION. Now uses anchored
-#      python3 parsing that extracts only the value on the Verdict: line.
-#   2. Absent/stale file silently permitted FIX/CONFIRMED claims. Now blocks.
-#   3. INVESTIGATION bypassed the verdict check entirely (including when verdict
-#      was absent, stale, invalid, or CANNOT_REPRODUCE). Now INVESTIGATION still
-#      requires a fresh verdict file; it is only allowed when the parsed verdict
-#      is CONFIRMED, NEEDS_DEEPER_INVESTIGATION, or MISDIAGNOSED.
+# _vg_parse_verdict, _VG_CLAIMS_FIX, _VG_CLAIMS_INVESTIGATION, NOW and
+# WINDOW_START are defined above, before the permit gate, so the same check
+# runs for permit-approved creates (inside the permit gate) and for creates
+# that reach this point without a permit (internal/unknown non-bypass creates).
 #
 # Non-verdict creates (no Status: FIX/CONFIRMED/INVESTIGATION claim, or no
 # Source: line) are preserved as-is and do not require a verdict file.
+#
+# PM-pane Codex architecture-review evidence gate REMOVED (Rajiv, DM D0AMF0XE6TS
+# thread 1794566037.087919, ts 1794566485.412849: "drop it"). Backup:
+# ~/.claude/hooks/pre-issue-create-audit.sh.bak-20261113-droparch
 # ---------------------------------------------------------------------------
-
-# Parse the anchored Verdict: line from a file and return one of:
-#   CONFIRMED | NEEDS_DEEPER_INVESTIGATION | MISDIAGNOSED | CANNOT_REPRODUCE
-#   ABSENT  — file missing or unreadable
-#   STALE   — file exists but mtime <= WINDOW_START
-#   INVALID — file present and fresh but no recognized Verdict: line
-_vg_parse_verdict() {
-  local path="$1" window_start="$2"
-  python3 - "$path" "$window_start" <<'PYEOF'
-import os, re, sys
-path, window_start = sys.argv[1], int(sys.argv[2])
-try:
-    s = os.stat(path)
-except OSError:
-    print("ABSENT"); sys.exit()
-if int(s.st_mtime) <= window_start:
-    print("STALE"); sys.exit()
-try:
-    content = open(path).read()
-except OSError:
-    print("ABSENT"); sys.exit()
-# Anchored to start of line; value must be a known verdict word; optional
-# trailing prose (e.g. "CONFIRMED - looks right") is allowed after a non-word
-# boundary character.
-m = re.search(
-    r"(?im)^Verdict:\s+(CONFIRMED|NEEDS_DEEPER_INVESTIGATION|MISDIAGNOSED|CANNOT_REPRODUCE)(?:[^_A-Z]|$)",
-    content,
-)
-print(m.group(1) if m else "INVALID")
-PYEOF
-}
-
-# Classify the body claim that determines which verdict is required.
-# Only Status: FIX and Status: INVESTIGATION trigger the verdict gate;
-# all other bodies (internal creates, follow-ups without a Status: claim)
-# are preserved without change.
-_VG_CLAIMS_FIX=false
-_VG_CLAIMS_INVESTIGATION=false
-if printf '%s' "$BODY_OR_CMD" | grep -qiE '^Status:[[:space:]]*(FIX|CONFIRMED)'; then
-  _VG_CLAIMS_FIX=true
-fi
-if printf '%s' "$BODY_OR_CMD" | grep -qiE '^Status:[[:space:]]*INVESTIGATION' && \
-   printf '%s' "$BODY_OR_CMD" | grep -qiE '^Cause:[[:space:]]*(HYPOTHESIS|UNKNOWN)'; then
-  _VG_CLAIMS_INVESTIGATION=true
-fi
 
 if [ -n "$THREAD_TS" ] && { [ "$_VG_CLAIMS_FIX" = "true" ] || [ "$_VG_CLAIMS_INVESTIGATION" = "true" ]; }; then
   _VERDICT_PATH="$(explore_issue_verdict_path "$CHANNEL" "$THREAD_TS" 2>/dev/null || true)"
