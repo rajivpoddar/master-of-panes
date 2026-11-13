@@ -88,9 +88,11 @@ EXPLORE_ISSUE_STATE_DIR="${EXPLORE_ISSUE_STATE_DIR:-/tmp/heydonna-explore-issue-
 EXPLORE_ISSUE_PERMIT_DIR="${EXPLORE_ISSUE_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit}"
 EXPLORE_ISSUE_CONSUMED_PERMIT_DIR="${EXPLORE_ISSUE_CONSUMED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-consumed}"
 EXPLORE_ISSUE_RECONCILED_PERMIT_DIR="${EXPLORE_ISSUE_RECONCILED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-reconciled}"
+EXPLORE_ISSUE_VERDICT_DIR="${EXPLORE_ISSUE_VERDICT_DIR:-/tmp/heydonna-explore-issue-verdict}"
 EXPLORE_ISSUE_PM_OPS_CLI="${EXPLORE_ISSUE_PM_OPS_CLI:-/Users/rajiv/.claude/scripts/pm-ops.py}"
 export EXPLORE_ISSUE_CONSUMED_PERMIT_DIR
 export EXPLORE_ISSUE_RECONCILED_PERMIT_DIR
+export EXPLORE_ISSUE_VERDICT_DIR
 EXPLORE_ISSUE_KIND="explore_issue_required"
 EXPLORE_ISSUE_TARGET_TYPE="slack_thread"
 
@@ -437,6 +439,19 @@ with open(found_consumed + ".lock", "a") as lock:
     os.replace(reconciled + ".tmp", reconciled)
     os.remove(found_consumed)
 ' "$key" "$found_consumed" "$reconciled_dir" "$now" "$absence_proof" || return $?
+}
+
+explore_issue_verdict_path() {
+  # channel thread_ts [source_msg_ts] -> prints path for the per-source verdict file.
+  # The verdict file is written by the explore-issue agent after CONFIRMED/INVESTIGATION
+  # review. The pre-issue-create gate reads this file — not the global
+  # /tmp/codex-explore-output.txt — to avoid cross-source contamination when two
+  # sessions run concurrently for different sources.
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${3:-${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}}")" || return $?
+  local key
+  key="$EXPLORE_ISSUE_SELECTED_KEY"
+  printf '%s/%s.verdict.txt' "${EXPLORE_ISSUE_VERDICT_DIR:-/tmp/heydonna-explore-issue-verdict}" "$key"
 }
 
 explore_issue_resolve_obligation() {

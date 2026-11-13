@@ -500,16 +500,34 @@ WINDOW_START=$((NOW - 1800))
 # still require the explore-issue CONFIRMED permit above. Backup:
 # ~/.claude/hooks/pre-issue-create-audit.sh.bak-20261113-droparch
 
-# Optional: verify CONFIRMED verdict in the most recent Codex output.
-if [ -f /tmp/codex-explore-output.txt ]; then
-  OUTPUT_MTIME=$(stat -c %Y /tmp/codex-explore-output.txt 2>/dev/null || stat -f %m /tmp/codex-explore-output.txt 2>/dev/null || echo "0")
-  [ -z "$OUTPUT_MTIME" ] && OUTPUT_MTIME=0
-  if [ "$OUTPUT_MTIME" -gt "$WINDOW_START" ]; then
-    if ! grep -qE '(^|[[:space:]])Verdict:.*CONFIRMED|CONFIRMED($|[[:space:]])' /tmp/codex-explore-output.txt; then
-      cat <<BLOCK
-{"decision": "block", "message": "BLOCKED: /tmp/codex-explore-output.txt does not contain a CONFIRMED verdict. Codex returned MISDIAGNOSED or NEEDS_DEEPER_INVESTIGATION — address those concerns before filing the issue."}
+# Verdict gate: per-source verdict file (not global /tmp/codex-explore-output.txt).
+#
+# The global file causes cross-source contamination: a CONFIRMED verdict from
+# session A for source X would incorrectly satisfy source Y's gate in session B.
+# Instead, each source is bound to its own verdict file keyed by channel+thread.
+#
+# A body explicitly declaring INVESTIGATION with cause HYPOTHESIS or UNKNOWN is
+# an in-progress tracking ticket, not a confirmed fix; it may pass with
+# NEEDS_DEEPER or MISDIAGNOSED. A body claiming FIX or CONFIRMED requires a
+# CONFIRMED verdict in the per-source file.
+_BODY_DECLARES_INVESTIGATION=false
+if printf '%s' "$BODY_OR_CMD" | grep -qiE '^Status:[[:space:]]*INVESTIGATION' && \
+   printf '%s' "$BODY_OR_CMD" | grep -qiE '^Cause:[[:space:]]*(HYPOTHESIS|UNKNOWN)'; then
+  _BODY_DECLARES_INVESTIGATION=true
+fi
+
+if [ -n "$THREAD_TS" ] && [ "$_BODY_DECLARES_INVESTIGATION" != "true" ]; then
+  _VERDICT_PATH="$(explore_issue_verdict_path "$CHANNEL" "$THREAD_TS" 2>/dev/null || true)"
+  if [ -n "$_VERDICT_PATH" ] && [ -f "$_VERDICT_PATH" ]; then
+    _VERDICT_MTIME=$(stat -c %Y "$_VERDICT_PATH" 2>/dev/null || stat -f %m "$_VERDICT_PATH" 2>/dev/null || echo "0")
+    [ -z "$_VERDICT_MTIME" ] && _VERDICT_MTIME=0
+    if [ "$_VERDICT_MTIME" -gt "$WINDOW_START" ]; then
+      if ! grep -qE '(^|[[:space:]])Verdict:.*CONFIRMED|CONFIRMED($|[[:space:]])' "$_VERDICT_PATH"; then
+        cat <<BLOCK
+{"decision": "block", "message": "BLOCKED: Per-source verdict for ${CHANNEL}:${THREAD_TS} does not contain a CONFIRMED verdict and the issue body does not declare INVESTIGATION (Status: INVESTIGATION + Cause: HYPOTHESIS or UNKNOWN). Codex returned MISDIAGNOSED or NEEDS_DEEPER_INVESTIGATION — address those concerns or declare Status: INVESTIGATION + Cause: HYPOTHESIS/UNKNOWN in the body before filing a tracking ticket."}
 BLOCK
-      exit 0
+        exit 0
+      fi
     fi
   fi
 fi
