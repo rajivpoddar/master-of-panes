@@ -56,6 +56,51 @@ CACHE_MAX_AGE = 6 * 3600
 MAX_CODES = 5
 MAX_SUPPORT = 5
 MAX_PRS = 8
+# Slack rejects a block whose text exceeds 3,000 chars (invalid_blocks); a 3,141-char superseded-saves
+# line did exactly that. No output line may exceed MAX_LINE_CHARS. compose() caps lines earlier by
+# MAX_LINE_CHARS - LINE_NOTE_RESERVE so that main() can still append a stale-evidence note, then
+# main() applies the full cap as the final backstop.
+MAX_LINE_CHARS = 2900
+LINE_NOTE_RESERVE = 300
+MAX_SUPERSEDED_REFS = 12
+
+
+def cap_line(line: str, limit: int = MAX_LINE_CHARS) -> str:
+    """Bound one physical line to `limit` chars: first N items plus "+K more".
+
+    Cuts at a ", " or "; " item boundary (whichever keeps more) so no item is split. A line with no
+    usable boundary is hard-truncated with an ellipsis. Never raises; lines within the limit are
+    returned unchanged.
+    """
+    if not isinstance(line, str) or len(line) <= limit:
+        return line
+    best = None
+    for sep in ("; ", ", "):
+        items = line.split(sep)
+        total = len(items)
+        joined = 0  # length of sep.join(items[:kept])
+        fit = 0
+        for kept in range(1, total):  # at least one item is dropped, so "+K more" is always honest
+            joined += len(items[kept - 1]) + (len(sep) if kept > 1 else 0)
+            if joined > limit:
+                break
+            if joined + len(sep) + len(f"+{total - kept} more") <= limit:
+                fit = kept
+        if fit:
+            candidate = f"{sep.join(items[:fit])}{sep}+{total - fit} more"
+            if best is None or len(candidate) > len(best):
+                best = candidate
+    if best is not None:
+        return best
+    head = line[: max(limit - 1, 0)]
+    if head.rfind("<") > head.rfind(">"):  # never leave half a <@U…> mention
+        head = head[: head.rfind("<")]
+    return head.rstrip() + "…"
+
+
+def cap_lines(text: str, limit: int = MAX_LINE_CHARS) -> str:
+    """cap_line over every physical line of a report; line count and order are unchanged."""
+    return "\n".join(cap_line(line, limit) for line in text.split("\n"))
 
 
 def _num(value) -> str:
@@ -106,7 +151,11 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
                 sup_line = [f"superseded saves: {sup} — {', '.join(groups) or 'no identified observations'}; "
                             f"top: {', '.join(details) or 'none'}"]
             else:
-                details = ', '.join(f"{r['time']} {r.get('identity_kind', 'userSha256')}:{r['user_hash']}" for r in refs)
+                shown = [f"{r['time']} {r.get('identity_kind', 'userSha256')}:{r['user_hash']}"
+                         for r in refs[:MAX_SUPERSEDED_REFS]]
+                if len(refs) > MAX_SUPERSEDED_REFS:
+                    shown.append(f"+{len(refs) - MAX_SUPERSEDED_REFS} more")
+                details = ', '.join(shown)
                 sup_line = [f"superseded saves: {sup}" + (f" — {details}" if details else '')]
         else:
             sup_line = [f"superseded saves: {sup} — references unavailable"]
@@ -2269,7 +2318,8 @@ def compose(
         timed_out = [f for f in failures if "UNAVAILABLE (timeout " in f]
         shown = timed_out + [f for f in failures if f not in timed_out]
         lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:100] for f in shown[:4]))
-    report = compact_report(lines, 23 if mode == "3h" else 20, cadence=mode)
+    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20, cadence=mode),
+                       MAX_LINE_CHARS - LINE_NOTE_RESERVE)
     if mode == "3h":
         report = '\n'.join(line for line in report.splitlines() if line.strip()).replace(CTO, '')
         return report + f"\n_MoP composer release: {composer_release_sha()}_"
@@ -2838,7 +2888,7 @@ def main() -> int:
             if labels.get(name, "\0") in line and not line.startswith("*Hourly"):
                 lines[i] += note
                 break
-    print("\n".join(lines))
+    print(cap_lines("\n".join(lines)))
     if pm_actions:
         print("ACTIONS:" + json.dumps(pm_actions), file=sys.stderr)
     return 0

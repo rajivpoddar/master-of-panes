@@ -45,6 +45,23 @@ def authorized_reviewer_login():
         return ''
 
 
+def fetch_review_inputs(pr, head, reviewed=None):
+    """Refresh only the PR head, pinned main and any missing reviewed commit; bounded, no checkout."""
+    checkout = Path.home() / 'Downloads/projects/heydonna-app'
+    refs = [f'+refs/pull/{int(pr)}/head:refs/remotes/origin/pull/{int(pr)}/head',
+            '+refs/heads/main:refs/remotes/origin/main']
+    for sha in (head, reviewed):
+        if sha and re.fullmatch(r'[0-9a-fA-F]{40}', sha) and not resolve_commit(sha):
+            refs.append(sha)
+    try:
+        subprocess.check_output(
+            ['git', '-C', str(checkout), 'fetch', '--no-tags', 'origin', *refs],
+            stderr=subprocess.DEVNULL, timeout=30)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def resolve_commit(sha):
     """Resolve a marker to one unambiguous local commit, or fail closed."""
     try:
@@ -57,7 +74,7 @@ def resolve_commit(sha):
         return None
 
 
-def main_merges_only(repo, old, head):
+def main_merges_only(repo, old, head, main_tip=None):
     """Carry a review only across clean main merges with an unchanged PR patch."""
     checkout = Path.home() / 'Downloads/projects/heydonna-app'
 
@@ -65,6 +82,9 @@ def main_merges_only(repo, old, head):
         return subprocess.check_output(['git', '-C', str(checkout), *args],
                                        stderr=subprocess.DEVNULL, timeout=60).strip()
 
+    main_tip = main_tip or str(api(repo, 'commits/main').get('sha') or '').lower()
+    if not re.fullmatch(r'[0-9a-f]{40}', main_tip):
+        return False
     old = git('rev-parse', '--verify', old + '^{commit}').decode()
     head = git('rev-parse', '--verify', head + '^{commit}').decode()
     git('merge-base', '--is-ancestor', old, head)
@@ -77,7 +97,7 @@ def main_merges_only(repo, old, head):
         if len(parents) != 2 or parents[0] != previous:
             return False
         main = parents[1]
-        if api(repo, f'compare/{main}...main').get('status') not in ('ahead', 'identical'):
+        if api(repo, f'compare/{main}...{main_tip}').get('status') not in ('ahead', 'identical'):
             return False
         # A conflicted merge or any manual tree edit is never carried forward.
         tree = git('merge-tree', '--write-tree', previous, main)
@@ -160,6 +180,8 @@ def evaluate(repo, pr, head):
                 return True, '12B_GATE: exempt (control-plane-only)'
         except Exception:
             pass  # An unavailable classifier never grants an exemption.
+        if not fetch_review_inputs(pr, head, markers[-1][1] if markers else None):
+            return False, f'REFUSE: 12b_fetch_failed pr={pr} head={head}'
         verdict = reviewed_12b_verdict(comments, head, reviewer_login, repo, pr)
         if verdict == 'PASS':
             sha = markers[-1][1].lower()
@@ -192,40 +214,94 @@ def path_stem(path):
     return re.split(r'\.(?:test|spec)\.|\.', name)[0]
 
 
+SHA40 = re.compile(r'^[0-9a-f]{40}$')
+MAX_PATH_CHARS = 160
+
+
+def one_line(text, limit=MAX_PATH_CHARS):
+    """Render API-supplied text (paths, counts) on exactly one output line.
+
+    A path may legally contain a newline; printed raw it would forge a second
+    `12B_*`-looking line. Control characters and Unicode line separators become '?'.
+    """
+    clean = re.sub(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]', '?', str(text))
+    return clean if len(clean) <= limit else clean[:limit - 1] + '\u2026'
+
+
+def gate_accepted_pass(comments, head, reviewer_login, repo, main_tip=None):
+    """The authenticated, canonical, full-SHA PASS the admission gate itself accepts.
+
+    Mirrors `reviewed_12b_verdict`/`evaluate`: the decision marker is the LAST canonical
+    marker only (an earlier PASS never rescues a later REVISE), it must be authored by the
+    authenticated reviewer, and its SHA must resolve to one local commit that is the
+    current head or reaches it through the clean main-merge-only carry. There is no
+    fallback to a short or unresolved SHA. Returns ((reviewed_sha, patch_carry), None)
+    or (None, reason).
+    """
+    markers = canonical_markers(comments, reviewer_login)
+    if not markers:
+        return None, 'no_authorized_12b_marker'
+    verdict, sha, canonical, authorized = markers[-1]
+    if not canonical or not authorized:
+        return None, 'latest_12b_marker_not_canonical_authenticated'
+    if verdict != 'PASS':
+        return None, f'latest_12b_marker_is_{verdict}'
+    reviewed, current = resolve_commit(sha.lower()), resolve_commit(head)
+    if not reviewed or not SHA40.match(reviewed) or not current:
+        return None, 'reviewed_sha_unresolved'
+    if reviewed == current:
+        return (reviewed, 'exact'), None
+    if main_merges_only(repo, reviewed, current, main_tip=main_tip):
+        return (reviewed, 'main_merges_only'), None
+    return None, 'patch_carry_unproved'
+
+
 def overlap_report(repo, pr, head):
     """Advisory overlap lines for the admission output (retro #13357/#13435; CTO C0ALZJHGE49 ts 1794578332.315349).
 
-    Names the reviewed base, current main, the paths changed by BOTH the PR and
-    main since that base, and the proof to re-run. Never changes the verdict:
-    a clean file merge is not proof, so overlap means re-prove, no overlap means
-    the reviewed proof carries (paths only; imports are not analyzed).
+    Uses the SAME authenticated full-SHA PASS the gate accepted and ONE pinned
+    current-main SHA for every compare (a moving `main` ref could answer two
+    questions about two different mains). Names the reviewed base, the paths
+    changed by BOTH the PR and main since that base, and the proof to re-run.
+    Never changes the verdict. A disjoint path set does not prove imports or
+    contracts carry, so the report says UNKNOWN there, never CARRY; any gap in
+    the evidence (unresolved SHA, unproved patch carry, mismatched merge base,
+    truncated file list) is UNKNOWN too.
     """
     try:
-        usable = [m for m in canonical_markers(api(repo, f'issues/{pr}/comments?per_page=100', True),
-                                               authorized_reviewer_login()) if m[2] and m[3]]
-        if not usable:
-            return ['12B_OVERLAP: UNKNOWN reason=no_authorized_12b_marker']
-        reviewed = resolve_commit(usable[-1][1]) or usable[-1][1].lower()
-        main_side = api(repo, f'compare/{reviewed}...main')
-        base = (main_side.get('merge_base_commit') or {}).get('sha') or 'UNKNOWN'
-        tip = api(repo, 'commits/main').get('sha') or 'UNKNOWN'
+        comments = api(repo, f'issues/{pr}/comments?per_page=100', True)
+        tip = str((api(repo, 'commits/main') or {}).get('sha') or '').lower()
+        if not SHA40.match(tip):
+            return ['12B_OVERLAP: UNKNOWN reason=current_main_unresolved']
+        accepted, why = gate_accepted_pass(comments, head, authorized_reviewer_login(), repo, main_tip=tip)
+        if not accepted:
+            return [f'12B_OVERLAP: UNKNOWN reason={why}']
+        reviewed, patch_carry = accepted
+        main_side = api(repo, f'compare/{reviewed}...{tip}')
+        pr_side = api(repo, f'compare/{tip}...{reviewed}')
+        base = str((main_side.get('merge_base_commit') or {}).get('sha') or '').lower()
+        if not SHA40.match(base) or base != str((pr_side.get('merge_base_commit') or {}).get('sha') or '').lower():
+            return ['12B_OVERLAP: UNKNOWN reason=merge_base_unproved']
         main_paths, main_cut = changed_paths(main_side)
-        pr_paths, pr_cut = changed_paths(api(repo, f'compare/main...{reviewed}'))
+        pr_paths, pr_cut = changed_paths(pr_side)
         overlap = sorted(main_paths & pr_paths)
-        shown = ','.join(overlap[:OVERLAP_PATH_LIMIT]) + (f',+{len(overlap) - OVERLAP_PATH_LIMIT} more' if len(overlap) > OVERLAP_PATH_LIMIT else '')
+        shown = ','.join(one_line(p) for p in overlap[:OVERLAP_PATH_LIMIT])
+        if len(overlap) > OVERLAP_PATH_LIMIT:
+            shown += f',+{len(overlap) - OVERLAP_PATH_LIMIT} more'
         stems = {path_stem(p) for p in overlap if not TEST_PATH.search(p)}
         tests = sorted(p for p in pr_paths if TEST_PATH.search(p) and (p in overlap or path_stem(p) in stems))
         if main_cut or pr_cut:
             action, proof = 'UNKNOWN', 'file lists truncated at the API cap; re-prove the affected behavior'
         elif overlap:
             action = 'RE-PROVE'
-            proof = ','.join(tests[:OVERLAP_PATH_LIMIT]) if tests else 'UNKNOWN (no owning test matched by name; re-run the PR changed tests)'
+            proof = ','.join(one_line(p) for p in tests[:OVERLAP_PATH_LIMIT]) if tests else 'UNKNOWN (no owning test matched by name; re-run the PR changed tests)'
         else:
-            action, proof = 'CARRY', 'none (no path changed by both the PR and main since the reviewed base)'
+            action = 'UNKNOWN'
+            proof = 'dependency carry unproved (no shared path, but imports and contracts are not analyzed); re-run the PR changed tests if main touched code they use'
         return [
-            f'12B_OVERLAP: reviewed_head={reviewed} reviewed_base={base} current_head={head} current_main={tip} main_commits_since_review={main_side.get("ahead_by", "UNKNOWN")}',
+            f'12B_OVERLAP: reviewed_head={reviewed} patch_carry={patch_carry} reviewed_base={base} current_head={one_line(head)} current_main={tip} main_commits_since_review={one_line(main_side.get("ahead_by", "UNKNOWN"))}',
             f'12B_OVERLAP: pr_paths={len(pr_paths)} main_paths={len(main_paths)} overlap={len(overlap)} paths={shown or "none"}',
-            f'12B_OVERLAP: proof_action={action} affected_proof={proof} (advisory only; a clean merge is not proof; the admission decision is unchanged)',
+            f'12B_OVERLAP: proof_action={action} dependency_carry=UNPROVED affected_proof={proof} (advisory only; a clean merge is not proof; the admission decision is unchanged)',
         ]
     except Exception as exc:
         return [f'12B_OVERLAP: UNKNOWN reason={type(exc).__name__}']

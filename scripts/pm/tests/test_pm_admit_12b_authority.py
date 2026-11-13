@@ -27,6 +27,7 @@ def _evaluate(author):
         gate.exempt = lambda *args: False
         gate.main_merges_only = lambda *args: True
         gate.resolve_commit = lambda sha: sha
+        gate.fetch_review_inputs = lambda *args: True  # transport covered by test_pm_admit_12b_fetch.py
         return gate.evaluate("owner/repo", 123, HEAD)
     finally:
         gate.api = original_api
@@ -51,6 +52,8 @@ elif args[:2] == ["pr", "view"] and "--json state" in joined:
     print("OPEN")
 elif args[:2] == ["api", "user"]:
     print("pm-reviewer")
+elif args[:1] == ["api"] and "commits/main" in joined:
+    print(json.dumps({{"sha": "d" * 40}}))
 elif args[:1] == ["api"] and "issues/11173/comments?per_page=100" in joined:
     print(json.dumps([{{"body":"## PM 12b: PASS at {OLD}","user":{{"login":"pm-reviewer"}},"created_at":"2026-11-12T00:00:00Z","id":1}}]))
 elif len(args) > 1 and args[0] == "api" and "compare/" in args[1]:
@@ -65,7 +68,9 @@ import sys
 args = sys.argv[1:]
 if args[:2] == ["-C", "/Users/rajiv/Downloads/projects/heydonna-app"]:
     args = args[2:]
-if args[:2] == ["rev-parse", "--verify"]:
+if args[:1] == ["fetch"]:
+    sys.exit(0)
+elif args[:2] == ["rev-parse", "--verify"]:
     print(args[2].removesuffix("^{{commit}}"))
 elif args[:2] == ["merge-base", "--is-ancestor"]:
     sys.exit(0)

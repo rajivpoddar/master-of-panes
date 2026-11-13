@@ -246,17 +246,48 @@ except Exception: print("err err err x")' 2>/dev/null)"
 
 # Overlap report (retro #13357/#13435; CTO C0ALZJHGE49 ts 1794578332.315349). Advisory output only: it names the
 # reviewed base, current main, paths changed by both the PR and main, and the proof to re-run. A clean file merge
-# is not proof. It never changes an admission decision or exit status.
-overlap_report() {
-  timeout 120 python3 -I "$SCRIPT_DIR/pm-admit-12b.py" --overlap-only --repo "$REPO" --pr "$PR" --head "$1" \
-    || echo "12B_OVERLAP: UNKNOWN reason=report_unavailable"
+# is not proof. It never changes an admission decision or exit status, and it never delays one: the report runs in
+# the background while the label writes happen, and its wait is bounded by PM_ADMIT_OVERLAP_TIMEOUT seconds.
+# A failure is reported with its real reason (timeout vs exit code), never swallowed.
+OVERLAP_TIMEOUT="${PM_ADMIT_OVERLAP_TIMEOUT:-25}"
+case "$OVERLAP_TIMEOUT" in ''|*[!0-9]*) OVERLAP_TIMEOUT=25 ;; esac
+# An environment override may shorten, never unbound, the advisory wait.
+if [ "${#OVERLAP_TIMEOUT}" -gt 2 ] || [ "$OVERLAP_TIMEOUT" -gt 25 ] || [ "$OVERLAP_TIMEOUT" -lt 1 ]; then OVERLAP_TIMEOUT=25; fi
+OVERLAP_OUT="" OVERLAP_PID=""
+overlap_cleanup() { [ -z "$OVERLAP_OUT" ] || rm -f "$OVERLAP_OUT" "$OVERLAP_OUT.rc" 2>/dev/null || true; }
+trap overlap_cleanup EXIT
+overlap_start() {
+  OVERLAP_OUT=$(mktemp /tmp/admit-overlap.XXXXXX 2>/dev/null) || { OVERLAP_OUT=""; return 0; }
+  (
+    rc=0
+    timeout "$OVERLAP_TIMEOUT" python3 -I "$SCRIPT_DIR/pm-admit-12b.py" --overlap-only --repo "$REPO" --pr "$PR" --head "$1" \
+      >"$OVERLAP_OUT" 2>/dev/null || rc=$?
+    echo "$rc" >"$OVERLAP_OUT.rc"
+  ) &
+  OVERLAP_PID=$!
+  return 0
+}
+overlap_finish() {
+  local rc lines
+  if [ -z "$OVERLAP_OUT" ]; then echo "12B_OVERLAP: UNKNOWN reason=report_not_started"; return 0; fi
+  wait "$OVERLAP_PID" 2>/dev/null || true
+  rc=$(cat "$OVERLAP_OUT.rc" 2>/dev/null || echo missing)
+  lines=$(cat "$OVERLAP_OUT" 2>/dev/null || true)
+  if [ "$rc" = 0 ] && [ -n "$lines" ]; then
+    printf '%s\n' "$lines"
+  elif [ "$rc" = 124 ]; then
+    echo "12B_OVERLAP: UNKNOWN reason=report_timeout after=${OVERLAP_TIMEOUT}s"
+  else
+    echo "12B_OVERLAP: UNKNOWN reason=report_failed rc=$rc"
+  fi
+  overlap_cleanup; OVERLAP_OUT=""
   return 0
 }
 
 if [ "$DRY" = 1 ]; then
   H=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
   echo "DRY RUN PR #$PR head=$H"
-  overlap_report "$H"
+  overlap_start "$H"; overlap_finish
   rc=0; scope_gate "$H" || rc=$?
   [ $rc -ne 0 ] && { echo "DRY RUN done (scope gate rc=$rc); nothing admitted"; exit $rc; }
   rc=0; related_tests_gate "$H" || rc=$?
@@ -322,7 +353,7 @@ if [ "$HEAD" != "$H0" ]; then
 fi
 echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 [ "$MERGEABLE" = "CONFLICTING" ] && { echo "REFUSE: conflict with main; route to slot"; exit 2; }
-overlap_report "$HEAD"
+overlap_start "$HEAD"
 # Priority mirroring is best-effort and must never block admission.
 mirror_priority() {
   local data existing issues issue labels priorities="" priority
@@ -356,4 +387,5 @@ for old in $(printf '%s' "$LJ" | jq -r '.labels[].name|select(startswith("ci-hea
   [ "$old" != "$L" ] && gh_do remove_old_ci_head gh pr edit "$PR" --repo "$REPO" --remove-label "$old"
 done
 gh_do add_ci_head_label gh pr edit "$PR" --repo "$REPO" --add-label "$L" --add-label pm-state:qa-passed-awaiting-ci
+overlap_finish
 echo "ADMITTED #$PR at $HEAD"
