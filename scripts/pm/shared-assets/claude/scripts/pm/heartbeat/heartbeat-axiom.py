@@ -10,6 +10,7 @@ Token: AXIOM_API_TOKEN / AXIOM_QUERY_TOKEN / AXIOM_TOKEN env, or AXIOM_ENV_FILE.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -235,10 +236,10 @@ def query_uncaught_signatures(token: str, start_time: str, end_time: str) -> dic
 
 
 def query_superseded_saves(token: str, start_time: str, end_time: str) -> dict:
-    """Count lifecycle rows and retain their exact time and pseudonymous user hash."""
-    apl = (f"['{DATASET}'] {PROD_FILTER} | where ['context'] == 'SaveSafetyLifecycle' "
-           "| extend m = parse_json(tostring(['meta'])) | where tostring(m.superseded) == 'true' "
-           "| project _time, user_hash = tostring(m.userSha256) | limit 10001")
+    """Count the original error-level message class and reference those exact rows."""
+    apl = (f"['{DATASET}'] {PROD_FILTER} | where ['level'] == 'error' {SUPERSEDED_FILTER} "
+           "| extend m = parse_json(tostring(['meta'])) "
+           "| project _time, userId, fileId, user_hash = tostring(m.userSha256) | limit 10001")
     result = run_apl_query(token, apl, start_time, end_time)
     matches = result.get('matches', [])
     if result.get('status', {}).get('isPartial') or len(matches) >= 10001:
@@ -248,9 +249,21 @@ def query_superseded_saves(token: str, start_time: str, end_time: str) -> dict:
         data = row.get('data') or {}
         timestamp = row.get('_time')
         user_hash = data.get('user_hash')
-        if not isinstance(timestamp, str) or not isinstance(user_hash, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', user_hash):
-            raise RuntimeError('superseded observation missing pseudonymous reference')
-        refs.append({'time': timestamp, 'user_hash': user_hash})
+        kind = 'userSha256'
+        if not isinstance(user_hash, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', user_hash):
+            identity = str(data.get('userId') or '').strip()
+            if identity.lower() not in {v.lower() for v in WHO_SENTINELS} | {''}:
+                kind = 'userIdSha256'
+            else:
+                identity = str(data.get('fileId') or '').strip()
+                kind = 'fileIdSha256'
+            if identity.lower() in {v.lower() for v in WHO_SENTINELS} | {''}:
+                kind, user_hash = 'identity', '?'
+            else:
+                user_hash = hashlib.sha256(identity.encode('utf-8')).hexdigest()
+        if not isinstance(timestamp, str):
+            raise RuntimeError('superseded observation missing timestamp')
+        refs.append({'time': timestamp, 'user_hash': user_hash, 'identity_kind': kind})
     return {'count': len(refs), 'refs': refs}
 
 

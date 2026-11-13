@@ -31,9 +31,45 @@ def test_signature_and_superseded_queries_use_exact_window_and_evidence(monkeypa
         return {'matches': [{'_time': '2026-11-13T03:27:32.543Z', 'data': {'user_hash': 'a' * 64}}]}
     monkeypatch.setattr(axiom, 'run_apl_query', query)
     assert axiom.query_uncaught_signatures('fake', 'start', 'end') == {'resize_observer': 2, 'unmapped': 1}
-    assert axiom.query_superseded_saves('fake', 'start', 'end') == {'count': 1, 'refs': [{'time': '2026-11-13T03:27:32.543Z', 'user_hash': 'a' * 64}]}
+    assert axiom.query_superseded_saves('fake', 'start', 'end') == {'count': 1, 'refs': [{'time': '2026-11-13T03:27:32.543Z', 'user_hash': 'a' * 64, 'identity_kind': 'userSha256'}]}
     assert all(start == 'start' and end == 'end' for _, start, end in seen)
-    assert "m.superseded" in seen[1][0] and 'SaveSafetyLifecycle' in seen[1][0]
+    assert "['level'] == 'error'" in seen[1][0] and 'superseded_local_completion' in seen[1][0]
+    assert 'SaveSafetyLifecycle' not in seen[1][0] and 'm.superseded' not in seen[1][0]
+
+
+def test_error_grain_reference_hashes_raw_user_id_without_exposing_it(monkeypatch):
+    import hashlib
+    spec = importlib.util.spec_from_file_location('heartbeat_axiom_error_grain', HEARTBEAT / 'heartbeat-axiom.py')
+    axiom = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(axiom)
+    monkeypatch.setattr(axiom, 'run_apl_query', lambda *args: {'matches': [{'_time': '2026-11-13T03:35:21.154Z', 'data': {'userId': 'synthetic-user'}}]})
+    result = axiom.query_superseded_saves('fake', 'start', 'end')
+    assert result == {'count': 1, 'refs': [{'time': '2026-11-13T03:35:21.154Z', 'user_hash': hashlib.sha256(b'synthetic-user').hexdigest(), 'identity_kind': 'userIdSha256'}]}
+    assert 'synthetic-user' not in repr(result)
+
+
+def test_composer_footer_binds_executing_bytes_to_release(tmp_path, monkeypatch):
+    import hashlib
+    spec = importlib.util.spec_from_file_location('heartbeat_compose_release', HEARTBEAT / 'heartbeat-compose.py')
+    composer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(composer)
+    sha = 'a' * 40
+    release = tmp_path / sha
+    payload = release / 'scripts/pm/shared-assets/claude/scripts/pm/heartbeat/heartbeat-compose.py'
+    payload.parent.mkdir(parents=True)
+    payload.write_bytes(b'candidate')
+    digest = hashlib.sha256(b'candidate').hexdigest()
+    shared = release / 'scripts/pm/shared-assets/manifest.json'
+    shared.write_text(json.dumps({'entries': [{'source_path': 'claude/scripts/pm/heartbeat/heartbeat-compose.py', 'sha256': digest}]}))
+    (release / 'RELEASE_MANIFEST.json').write_text(json.dumps({'commit': sha, 'shared_assets': {'sha256': hashlib.sha256(shared.read_bytes()).hexdigest()}}))
+    current = tmp_path / 'current'
+    current.symlink_to(release)
+    assert composer.composer_release_sha(current, payload) == sha
+    other = tmp_path / 'changed.py'
+    other.write_bytes(b'different')
+    assert composer.composer_release_sha(current, other) == 'UNVERIFIED'
+    monkeypatch.setattr(composer, 'composer_release_sha', lambda: sha)
+    assert composer.compose('1h', datetime.now(timezone.utc), None, {}, []).endswith('_MoP composer release: ' + sha + '_' )
 
 
 def test_uncaught_mapping_is_signature_bound_not_action_bound():

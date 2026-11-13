@@ -83,7 +83,7 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
     if sup is not None:
         refs = axiom.get('superseded_save_refs')
         if isinstance(refs, list) and len(refs) == sup:
-            details = ', '.join(f"{r['time']} userSha256:{r['user_hash']}" for r in refs)
+            details = ', '.join(f"{r['time']} {r.get('identity_kind', 'userSha256')}:{r['user_hash']}" for r in refs)
             sup_line = [f"superseded saves: {sup}" + (f" — {details}" if details else '')]
         else:
             sup_line = [f"superseded saves: {sup} — references unavailable"]
@@ -2017,6 +2017,35 @@ def compact_report(lines: list[str], limit: int) -> str:
     return "\n".join(spaced)
 
 
+def composer_release_sha(current: Path | None = None, source: Path | None = None) -> str:
+    """Bind the executing composer bytes to the current release's shared manifest."""
+    current = current or Path.home() / '.local/share/master-of-panes/current'
+    source = source or Path(__file__)
+    try:
+        release = current.resolve(strict=True)
+        manifest = json.loads((release / 'RELEASE_MANIFEST.json').read_text())
+        sha = manifest.get('commit')
+        if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha) or release.name != sha:
+            return 'UNVERIFIED'
+        shared_path = release / 'scripts/pm/shared-assets/manifest.json'
+        shared_bytes = shared_path.read_bytes()
+        if hashlib.sha256(shared_bytes).hexdigest() != manifest.get('shared_assets', {}).get('sha256'):
+            return 'UNVERIFIED'
+        shared = json.loads(shared_bytes)
+        entries = [entry for entry in shared.get('entries', [])
+                   if entry.get('source_path') == 'claude/scripts/pm/heartbeat/heartbeat-compose.py']
+        if len(entries) != 1:
+            return 'UNVERIFIED'
+        expected = entries[0].get('sha256')
+        deployed_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+        payload = release / 'scripts/pm/shared-assets/claude/scripts/pm/heartbeat/heartbeat-compose.py'
+        if deployed_sha != expected or hashlib.sha256(payload.read_bytes()).hexdigest() != expected:
+            return 'UNVERIFIED'
+        return sha if current.resolve(strict=True) == release else 'UNVERIFIED'
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 'UNVERIFIED'
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -2119,7 +2148,8 @@ def compose(
         timed_out = [f for f in failures if "UNAVAILABLE (timeout " in f]
         shown = timed_out + [f for f in failures if f not in timed_out]
         lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:100] for f in shown[:4]))
-    return compact_report(lines, 24 if mode == "3h" else 20)
+    report = compact_report(lines, 24 if mode == "3h" else 20)
+    return report + f"\n\n_MoP composer release: {composer_release_sha()}_"
 
 
 
