@@ -384,7 +384,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-ci-admission",
-      "sha256": "7b00d8cef078b7edecbaa7283a072fd4f277cf371a95b8fdf7ae1a40d0be833c",
+      "sha256": "d61e3014ac0b5aae3b180d4a517a320790304f59d989e3f9f6e70a5a450f5b70",
       "source_path": "claude/scripts/ci/pm-admit-12b.py"
     },
     {

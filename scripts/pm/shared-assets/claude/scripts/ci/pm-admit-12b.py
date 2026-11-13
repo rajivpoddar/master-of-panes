@@ -35,6 +35,51 @@ def exempt(repo, pr, head):
         return scope.get('control_plane_only') is True and scope.get('product_changed') is False
 
 
+def main_merges_only(repo, old, head):
+    """Carry a review only across clean main merges with an unchanged PR patch."""
+    checkout = Path.home() / 'Downloads/projects/heydonna-app'
+
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(checkout), *args],
+                                       stderr=subprocess.DEVNULL, timeout=60).strip()
+
+    old = git('rev-parse', '--verify', old + '^{commit}').decode()
+    head = git('rev-parse', '--verify', head + '^{commit}').decode()
+    git('merge-base', '--is-ancestor', old, head)
+    chain = git('rev-list', '--first-parent', '--reverse', f'{old}..{head}').decode().splitlines()
+    if not chain or chain[-1] != head:
+        return False
+    previous = old
+    for commit in chain:
+        parents = git('show', '-s', '--format=%P', commit).decode().split()
+        if len(parents) != 2 or parents[0] != previous:
+            return False
+        main = parents[1]
+        if api(repo, f'compare/{main}...main').get('status') not in ('ahead', 'identical'):
+            return False
+        # A conflicted merge or any manual tree edit is never carried forward.
+        tree = git('merge-tree', '--write-tree', previous, main)
+        if tree != git('rev-parse', commit + '^{tree}'):
+            return False
+        base = git('merge-base', previous, main).decode()
+        def patch(left, right):
+            raw = git('diff', '--binary', '--no-ext-diff', '--no-renames', '-U0', left, right)
+            # Main may shift line numbers and change blob IDs without changing the
+            # reviewed edits. Keep every changed byte and file/mode header.
+            lines = []
+            for line in raw.splitlines(keepends=True):
+                if line.startswith(b'index '):
+                    continue
+                if line.startswith(b'@@ '):
+                    line = b'@@\n'
+                lines.append(line)
+            return b''.join(lines)
+        if patch(base, previous) != patch(main, commit):
+            return False
+        previous = commit
+    return True
+
+
 def evaluate(repo, pr, head):
     last = 'none'
     try:
@@ -66,34 +111,8 @@ def evaluate(repo, pr, head):
         if markers and canonical and verdict == 'PASS':
             if head.startswith(sha):
                 return True, f'12B_GATE: PASS pr={pr} head={head}'
-            comparison = api(repo, f'compare/{sha}...{head}?per_page=100')
-            commits = comparison['commits']
-            # GitHub truncates compare files at 300 and commits at page size.
-            if (comparison.get('status') != 'ahead' or
-                    comparison.get('total_commits') != len(commits) or
-                    len(comparison['files']) >= 300):
-                raise ValueError('incomplete comparison')
-            own = api(repo, f'pulls/{pr}/commits?per_page=100', True)
-            own_shas = {c['sha'] for c in own}
-            after = [c for c in commits if c['sha'] in own_shas]
-            files = api(repo, f'pulls/{pr}/files?per_page=100', True)
-            own_paths = {p for f in files for p in (f['filename'], f.get('previous_filename')) if p}
-            changed = {p for f in comparison['files'] for p in (f['filename'], f.get('previous_filename')) if p}
-            def main_merge(c):
-                # A merge counts as a main merge by its message OR, since some merge
-                # tools copy the merged commit's subject (#13357/#13597, 2026-11-12),
-                # by every non-first parent already being on main. Any API failure
-                # raises and the gate refuses (fail-closed).
-                if len(c['parents']) < 2:
-                    return False
-                if c['commit']['message'].splitlines()[0].startswith("Merge branch 'main'"):
-                    return True
-                return all(api(repo, f"compare/{p['sha']}...main").get('status') in ('ahead', 'identical')
-                           for p in c['parents'][1:])
-            if (after and after[-1]['sha'] == head and
-                    all(main_merge(c) for c in after) and
-                    not own_paths.intersection(changed)):
-                return True, f'12B_GATE: PASS (main-merges-only) pr={pr} head={head}'
+            if main_merges_only(repo, sha, head):
+                return True, f'12B_GATE main-merge-only carry-forward from {sha} pr={pr} head={head}'
     except Exception:
         pass
     return False, f'REFUSE: 12b_missing_or_stale pr={pr} head={head} last_12b={last}'
