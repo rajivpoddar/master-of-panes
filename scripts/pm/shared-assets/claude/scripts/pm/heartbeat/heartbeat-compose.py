@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Compose the 3h heartbeat and the 1h hourly post (docs/pm/heartbeat-redesign-2026-09-29.md).
 
-3h (--mode 3h): Axiom errors + support inbox + open PRs. First line ALWAYS
-@-mentions CTO (Rajiv 2026-09-29 10:58 IST, thread 1790659381.537339:
-"build it. note that it has to have an cto at mention.").
+3h (--mode 3h): Axiom errors + support inbox + usage. Do not mention the CTO.
 
 1h (--mode 1h): "Hourly — HH:MM IST", Axiom errors + open PRs. Mentions CTO
 ONLY when the post carries a merge ask, an admission ask or a ladder
@@ -83,8 +81,15 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
     if sup is not None:
         refs = axiom.get('superseded_save_refs')
         if isinstance(refs, list) and len(refs) == sup:
-            details = ', '.join(f"{r['time']} {r.get('identity_kind', 'userSha256')}:{r['user_hash']}" for r in refs)
-            sup_line = [f"superseded saves: {sup}" + (f" — {details}" if details else '')]
+            if window_label == '3h':
+                from collections import Counter
+                counts = Counter(r['user_hash'] for r in refs)
+                top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+                details = ', '.join(f'{user}: {count}' for user, count in top) or 'none'
+                sup_line = [f"superseded saves: {sup} — {len(counts)} distinct users; top 3: {details}"]
+            else:
+                details = ', '.join(f"{r['time']} {r.get('identity_kind', 'userSha256')}:{r['user_hash']}" for r in refs)
+                sup_line = [f"superseded saves: {sup}" + (f" — {details}" if details else '')]
         else:
             sup_line = [f"superseded saves: {sup} — references unavailable"]
     if not axiom.get("events"):
@@ -2194,7 +2199,7 @@ def compose(
         asks.append(f"escalation: {esc}")
     tldr = "; ".join(parts) + "."
     if mode == "3h":
-        first = f"{CTO} *Heartbeat {stamp}* — TL;DR: {tldr}"
+        first = f"*Heartbeat {stamp}* — TL;DR: {tldr}"
     else:
         mention = f"{CTO} " if asks else ""
         first = f"{mention}*Hourly — {stamp}* — TL;DR: {tldr}"
@@ -2210,7 +2215,10 @@ def compose(
         timed_out = [f for f in failures if "UNAVAILABLE (timeout " in f]
         shown = timed_out + [f for f in failures if f not in timed_out]
         lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:100] for f in shown[:4]))
-    report = compact_report(lines, 24 if mode == "3h" else 20)
+    report = compact_report(lines, 23 if mode == "3h" else 20)
+    if mode == "3h":
+        report = '\n'.join(line for line in report.splitlines() if line.strip()).replace(CTO, '')
+        return report + f"\n_MoP composer release: {composer_release_sha()}_"
     return report + f"\n\n_MoP composer release: {composer_release_sha()}_"
 
 

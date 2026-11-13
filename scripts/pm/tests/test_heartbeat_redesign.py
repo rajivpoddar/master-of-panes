@@ -445,10 +445,11 @@ SUPPORT = {"threshold_min": 60, "in_app": [],
            "slack": [{"channel": "#heydonna-feedback", "state": "needs_reply", "age_min": 95, "summary": "audio won't load", "links": []}]}
 
 
-def test_3h_always_mentions_cto_first_even_without_asks():
+def test_3h_does_not_mention_cto():
     out = compose.compose("3h", NOW, {"events": 0, "users": 0, "top": []}, {}, [], support={"slack": [], "in_app": []})
     first = out.splitlines()[0]
-    assert first.startswith("<@U0BNFGX2UAX> *Heartbeat 11:00 IST*")
+    assert first.startswith("*Heartbeat 11:00 IST*")
+    assert "<@U0BNFGX2UAX>" not in out
     assert "quiet" in out and "Asks" not in out
 
 
