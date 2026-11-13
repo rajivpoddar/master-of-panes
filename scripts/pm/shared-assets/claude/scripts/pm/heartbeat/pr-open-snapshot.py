@@ -21,6 +21,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 import sys
@@ -895,16 +896,27 @@ def fetch_open_prs(with_threads: bool = True) -> list[dict]:
 def _fetch_open_prs_live(with_threads: bool = True) -> list[dict]:
     with ThreadPoolExecutor(max_workers=2) as pool:
         threads_future = pool.submit(fetch_review_threads) if with_threads else None
-        proc = subprocess.run(
-            [
-                "gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "100",
-                "--json", "number,headRefOid,title,isDraft,labels,statusCheckRollup,files,body,comments",
-            ],
-            capture_output=True, text=True, errors="replace", timeout=120,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(f"gh pr list failed: {proc.stderr.strip()[:200]}")
-        prs = json.loads(proc.stdout)
+        # Every field is consumed by classification, ownership or review checks.
+        cmd = [
+            "gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "200",
+            "--json", "number,headRefOid,title,isDraft,labels,statusCheckRollup,files,body,comments",
+        ]
+        error = "unknown error"
+        for attempt in range(3):
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60)
+                if proc.returncode == 0:
+                    prs = json.loads(proc.stdout)
+                    if not isinstance(prs, list):
+                        raise ValueError("expected a PR list")
+                    break
+                error = proc.stderr.strip()[:200] or f"exit {proc.returncode}"
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                error = str(exc)[:200]
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+        else:
+            raise RuntimeError(f"UNAVAILABLE: gh pr list failed: {error}")
         threads = threads_future.result() if threads_future else None
     for pr in prs:
         pr["reviewThreads"] = None if threads is None else threads.get(pr.get("number"), [])

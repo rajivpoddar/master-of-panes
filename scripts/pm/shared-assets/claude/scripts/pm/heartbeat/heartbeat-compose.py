@@ -45,12 +45,12 @@ AXIOM_REPORT = SCRIPTS / "heartbeat-axiom.py"  # MoP-side helper (moved from hey
 # bounded 45s extension for those legitimately necessary probes.
 COLLECTOR_TIMEOUTS = {
     "axiom": 45, "active-users": 45, "error-map": 90, "support": 120,
-    "pr-open-snapshot": 90, "priority-inversion": 90,
+    "pr-open-snapshot": 210, "priority-inversion": 90,
     "pending-github": 90, "remote-boxes": 30,
     "usage": 30, "email": 30, "proxies": 5,
 }
 # Independent hourly checks share one deadline, not the sum of their limits.
-COMPOSE_COLLECTOR_BUDGET = 150
+COMPOSE_COLLECTOR_BUDGET = 210
 HOURLY_CACHE = Path.home() / ".claude/state/hourly-cache"
 CACHE_MAX_AGE = 6 * 3600
 MAX_CODES = 5
