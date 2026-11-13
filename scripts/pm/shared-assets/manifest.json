@@ -132,7 +132,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "1ed691d1fabf62e0d6d686ab951ec2eb2a1ddf2ab1bf589b359c199b53d56cd5",
+      "sha256": "3c1778a44560401739520861afb1b7aea1a42a3fd4a8fe19de43c3e49c2647fa",
       "source_path": "claude/hooks/explore-issue-latch-guard.sh"
     },
     {
@@ -186,8 +186,19 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "1cdae20047c22397d35d12a6dfc723acca48b9bb4889fdf1f25b34f6374fdec5",
+      "sha256": "33138501972554e8f41fb6930b220dd46cc165c8d0550107f4bd44612ba9ab56",
       "source_path": "claude/hooks/pre-issue-create-audit.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/hooks/explore-issue-permit-consume-gate.sh",
+      "dependencies": [
+        "/Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh"
+      ],
+      "dependency_status": "open",
+      "mode": 493,
+      "ownership_class": "shared-pm-hooks",
+      "sha256": "d13a8b9713b2c10bb38e55f8bf51ce5ccd56b030a902ee9198ccd4d9f9cd6f59",
+      "source_path": "claude/hooks/explore-issue-permit-consume-gate.sh"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/ready-pool-low-stop-validator.sh",
@@ -1097,7 +1108,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-intake",
-      "sha256": "9ec202529d5d684db91685ae217a6aededeb0151d1b4d8eba5d3ed80fc944c0b",
+      "sha256": "ce9c207997683d1b6a63c6bd3ef69ec58604e1b21a2366de92c7d2746bac99ad",
       "source_path": "claude/skills/explore-issue/SKILL.md"
     },
     {

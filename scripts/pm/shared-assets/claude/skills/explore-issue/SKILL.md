@@ -283,6 +283,18 @@ PHASE 2 — Codex Architecture Review (causal/FIX work only):
   b. Run Codex CLI with 15m timeout:
      timeout 900 bash -c 'cat /tmp/codex-explore-prompt.txt | codex exec --skip-git-repo-check --sandbox read-only --full-auto 2>/dev/null' > /tmp/codex-explore-output.txt
   c. Read the output: cat /tmp/codex-explore-output.txt
+  c2. Write the per-source verdict file so the pre-issue-create gate can verify CONFIRMED
+      for this exact source without being contaminated by a concurrent session's global
+      /tmp/codex-explore-output.txt (the pre-issue-create hook reads the per-source file,
+      not the global one). Run immediately after step (c):
+        source /Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh
+        _VERDICT_PATH="$(explore_issue_verdict_path "<CHANNEL>" "<THREAD_TS>")"
+        mkdir -p "$(dirname "$_VERDICT_PATH")"
+        cp /tmp/codex-explore-output.txt "$_VERDICT_PATH"
+      Replace <CHANNEL> and <THREAD_TS> with the actual values from Phase 1. If
+      `explore_issue_verdict_path` returns a non-empty path and the copy succeeds, the
+      pre-issue-create gate will read from that file. If it fails (best-effort), proceed;
+      the gate falls back to allowing the create when no per-source verdict file exists.
   d. Parse the verdict. [HIGH] ONE Codex pass only (Rajiv 2026-09-28 20:58 IST, thread `1790609092.596809`, verbatim: *"limit the codex arch review to 1 pass in explore issue agent"*); never re-run the reviewer on a revised body; residual concerns go under `## Open questions`:
      - If CONFIRMED: proceed to Phase 3 with the causal claim marked CONFIRMED.
      - If NEEDS_DEEPER_INVESTIGATION and the reported observation is CONFIRMED:

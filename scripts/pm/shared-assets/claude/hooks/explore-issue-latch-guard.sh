@@ -89,10 +89,12 @@ EXPLORE_ISSUE_PERMIT_DIR="${EXPLORE_ISSUE_PERMIT_DIR:-/tmp/heydonna-explore-issu
 EXPLORE_ISSUE_CONSUMED_PERMIT_DIR="${EXPLORE_ISSUE_CONSUMED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-consumed}"
 EXPLORE_ISSUE_RECONCILED_PERMIT_DIR="${EXPLORE_ISSUE_RECONCILED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-reconciled}"
 EXPLORE_ISSUE_VERDICT_DIR="${EXPLORE_ISSUE_VERDICT_DIR:-/tmp/heydonna-explore-issue-verdict}"
+EXPLORE_ISSUE_PERMIT_PENDING_DIR="${EXPLORE_ISSUE_PERMIT_PENDING_DIR:-/tmp/heydonna-explore-issue-permit-pending}"
 EXPLORE_ISSUE_PM_OPS_CLI="${EXPLORE_ISSUE_PM_OPS_CLI:-/Users/rajiv/.claude/scripts/pm-ops.py}"
 export EXPLORE_ISSUE_CONSUMED_PERMIT_DIR
 export EXPLORE_ISSUE_RECONCILED_PERMIT_DIR
 export EXPLORE_ISSUE_VERDICT_DIR
+export EXPLORE_ISSUE_PERMIT_PENDING_DIR
 EXPLORE_ISSUE_KIND="explore_issue_required"
 EXPLORE_ISSUE_TARGET_TYPE="slack_thread"
 
@@ -452,6 +454,102 @@ explore_issue_verdict_path() {
   local key
   key="$EXPLORE_ISSUE_SELECTED_KEY"
   printf '%s/%s.verdict.txt' "${EXPLORE_ISSUE_VERDICT_DIR:-/tmp/heydonna-explore-issue-verdict}" "$key"
+}
+
+# ---------------------------------------------------------------------------
+# Deferred permit consumption — pending state
+#
+# The permit is NOT consumed in pre-issue-create-audit.sh (hook #9). Instead
+# a pending file is written there. The actual atomic consumption (persist-
+# UNKNOWN-first) happens in explore-issue-permit-consume-gate.sh, which runs
+# AFTER all other blocking hooks (including block-invalid-issue-contract-ledger,
+# hook #19). This ensures that if any hook between #9 and the finalizer blocks
+# the tool call, the permit file remains intact for the next attempt.
+#
+# If the finalizer runs and gh then fails: permit is consumed/UNKNOWN — the
+# existing manual explore_issue_restore_permit path (with proven GitHub absence)
+# is the only recovery. No unsafe auto-restore is wired here.
+# ---------------------------------------------------------------------------
+
+explore_issue_write_permit_pending() {
+  # channel thread_ts body_sha title_digest -> 0 pending written, 1 consumed guard hit, 2 error
+  #
+  # Writes $EXPLORE_ISSUE_PERMIT_PENDING_DIR/<key>.permit.pending.json bound to
+  # the exact body SHA and title digest. The finalizer hook reads and consumes it.
+  # Overwrites any stale pending from a previous aborted attempt (safe: the actual
+  # permit file is untouched until explore_issue_consume_pending_permit runs).
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
+  local channel="$1" thread_ts="$2" body_sha="$3" title_digest="$4"
+  local key pending_dir pending_file now
+  key="$EXPLORE_ISSUE_SELECTED_KEY"
+  pending_dir="${EXPLORE_ISSUE_PERMIT_PENDING_DIR:-/tmp/heydonna-explore-issue-permit-pending}"
+  # Consumed guard: if the permit was already consumed/UNKNOWN, refuse pending.
+  local _consumed
+  for _consumed in "$EXPLORE_ISSUE_CONSUMED_PERMIT_DIR/${key}.permit.consumed."*.json; do
+    [ ! -f "$_consumed" ] || return 1
+  done
+  mkdir -p "$pending_dir"
+  pending_file="$pending_dir/${key}.permit.pending.json"
+  now="$(date -u +%Y%m%dT%H%M%SZ)"
+  python3 -c '
+import json, os, sys, tempfile
+path, channel, thread_ts, body_sha, title_digest, message, now, pid = sys.argv[1:]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+data = {
+    "channel": channel,
+    "thread_ts": thread_ts,
+    "source_message_ts": message,
+    "body_sha256": body_sha,
+    "title_digest": title_digest,
+    "pending_at": now,
+    "pid": int(pid),
+}
+fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".tmp.", dir=os.path.dirname(path))
+with os.fdopen(fd, "w") as f:
+    json.dump(data, f)
+os.replace(tmp, path)
+' "$pending_file" "$channel" "$thread_ts" "$body_sha" "$title_digest" \
+  "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-$thread_ts}" "$now" "$$" || return 2
+  return 0
+}
+
+explore_issue_consume_pending_permit() {
+  # channel thread_ts body_sha title_digest -> 0 consumed, 1 no matching pending, 2 consume failed
+  #
+  # Called by explore-issue-permit-consume-gate.sh (the finalizer hook). Checks
+  # for a pending file matching the exact body SHA and title digest, then
+  # atomically moves the actual permit to consumed (persist-UNKNOWN-first).
+  # Clears the pending file on any outcome to avoid stale state.
+  # Safety: if gh then fails, the permit is in consumed/UNKNOWN — manual
+  # explore_issue_restore_permit with proven GitHub absence is the recovery path.
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
+  local channel="$1" thread_ts="$2" body_sha="$3" title_digest="$4"
+  local key pending_dir pending_file p_body p_title p_message
+  key="$EXPLORE_ISSUE_SELECTED_KEY"
+  pending_dir="${EXPLORE_ISSUE_PERMIT_PENDING_DIR:-/tmp/heydonna-explore-issue-permit-pending}"
+  pending_file="$pending_dir/${key}.permit.pending.json"
+  [ -f "$pending_file" ] || return 1
+  p_body="$(jq -r '.body_sha256 // ""' "$pending_file" 2>/dev/null || true)"
+  p_title="$(jq -r '.title_digest // ""' "$pending_file" 2>/dev/null || true)"
+  p_message="$(jq -r '.source_message_ts // ""' "$pending_file" 2>/dev/null || true)"
+  if [ "$p_body" != "$body_sha" ] || [ "$p_title" != "$title_digest" ]; then
+    # Stale pending (body/title changed between pre-audit and finalizer). Clear it.
+    rm -f "$pending_file" 2>/dev/null || true
+    return 1
+  fi
+  # Restore source_message_ts from the pending file if not already exported.
+  [ -n "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}" ] || export EXPLORE_ISSUE_SOURCE_MESSAGE_TS="$p_message"
+  # Atomically consume the actual permit (persist-UNKNOWN-first).
+  local _rc=0
+  if explore_issue_consume_permit "$channel" "$thread_ts" "$body_sha" "$title_digest"; then
+    _rc=0
+  else
+    _rc=$?
+  fi
+  rm -f "$pending_file" 2>/dev/null || true
+  return $_rc
 }
 
 explore_issue_resolve_obligation() {

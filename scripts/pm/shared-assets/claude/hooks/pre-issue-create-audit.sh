@@ -274,11 +274,15 @@ if [ -n "$THREAD_TS" ]; then
     PERMIT_STATUS=$?
   fi
   if [ "$PERMIT_STATUS" = "0" ]; then
-    # Valid permit — consume atomically and allow exactly one create.
-    if explore_issue_consume_permit "$CHANNEL" "$THREAD_TS" "$BODY_SHA" "$TITLE_DIGEST"; then
-      exit 0
+    # Valid permit — write a pending marker; the finalizer hook
+    # (explore-issue-permit-consume-gate.sh, which runs AFTER all other blocking
+    # hooks including block-invalid-issue-contract-ledger.sh) atomically consumes
+    # the permit so that any intervening hook block preserves the permit intact.
+    # The actual persist-UNKNOWN-first consumption happens in the finalizer.
+    if explore_issue_write_permit_pending "$CHANNEL" "$THREAD_TS" "$BODY_SHA" "$TITLE_DIGEST"; then
+      exit 0  # Pending written; finalizer will consume right before gh runs.
     fi
-    PERMIT_STATUS=3
+    PERMIT_STATUS=3  # Consumed guard hit: permit already consumed/UNKNOWN.
   fi
   if [ "$PERMIT_STATUS" = "3" ]; then
     printf '%s\n' '{"decision":"block","message":"BLOCKED: This source already consumed its create permit; the create result may be UNKNOWN. Reconcile by searching GitHub for the canonical Source permalink. Do not re-mint or create again for this source."}'
