@@ -141,7 +141,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "d13a8b9713b2c10bb38e55f8bf51ce5ccd56b030a902ee9198ccd4d9f9cd6f59",
+      "sha256": "8229514d6ea7a619d98d708eb60d1ff6a00069101bc9ec358d992865fcd8da53",
       "source_path": "claude/hooks/explore-issue-permit-consume-gate.sh"
     },
     {
@@ -1106,7 +1106,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-intake",
-      "sha256": "ce9c207997683d1b6a63c6bd3ef69ec58604e1b21a2366de92c7d2746bac99ad",
+      "sha256": "02d731df6834fa1caf112d083bb9b24a01262fec65d60aaa600c50e4a1bdf3c8",
       "source_path": "claude/skills/explore-issue/SKILL.md"
     },
     {

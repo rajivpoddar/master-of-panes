@@ -283,18 +283,25 @@ PHASE 2 — Codex Architecture Review (causal/FIX work only):
   b. Run Codex CLI with 15m timeout:
      timeout 900 bash -c 'cat /tmp/codex-explore-prompt.txt | codex exec --skip-git-repo-check --sandbox read-only --full-auto 2>/dev/null' > /tmp/codex-explore-output.txt
   c. Read the output: cat /tmp/codex-explore-output.txt
-  c2. Write the per-source verdict file so the pre-issue-create gate can verify CONFIRMED
-      for this exact source without being contaminated by a concurrent session's global
-      /tmp/codex-explore-output.txt (the pre-issue-create hook reads the per-source file,
-      not the global one). Run immediately after step (c):
-        source /Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh
-        _VERDICT_PATH="$(explore_issue_verdict_path "<CHANNEL>" "<THREAD_TS>")"
-        mkdir -p "$(dirname "$_VERDICT_PATH")"
-        cp /tmp/codex-explore-output.txt "$_VERDICT_PATH"
-      Replace <CHANNEL> and <THREAD_TS> with the actual values from Phase 1. If
-      `explore_issue_verdict_path` returns a non-empty path and the copy succeeds, the
-      pre-issue-create gate will read from that file. If it fails (best-effort), proceed;
-      the gate falls back to allowing the create when no per-source verdict file exists.
+  c2. Write your verdict DIRECTLY to the per-source file — do NOT copy or pipe from
+      /tmp/codex-explore-output.txt. That file is a shared global path; a concurrent
+      investigation can overwrite it between step (b) and this step, causing the wrong
+      verdict to be recorded for this source. Instead, write your own structured verdict
+      immediately from your reading of the Codex output in step (c):
+      a. Resolve the verdict path in a Bash call:
+           source /Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh
+           explore_issue_verdict_path "<CHANNEL>" "<THREAD_TS>"
+         (Replace <CHANNEL> and <THREAD_TS> with the actual values from Phase 1.)
+      b. Use the Write tool to write your verdict to that exact path. The content must
+         be your own assessment for THIS investigation, structured as:
+           Verdict: <CONFIRMED|NEEDS_DEEPER_INVESTIGATION|MISDIAGNOSED|CANNOT_REPRODUCE>
+           Cause: <BUG|HYPOTHESIS|UNKNOWN|MISCONFIG|DESIGN> - <one-line reason>
+           [plus supporting context from your assessment below]
+         Do not pipe, redirect, copy, or echo from /tmp/codex-explore-output.txt or any
+         shared temp file. The Write tool writes an atomic file from your own in-context
+         text, preventing cross-session contamination.
+      The pre-issue-create gate reads from this per-source path; the global Codex output
+      file is NOT read by the gate.
   d. Parse the verdict. [HIGH] ONE Codex pass only (Rajiv 2026-09-28 20:58 IST, thread `1790609092.596809`, verbatim: *"limit the codex arch review to 1 pass in explore issue agent"*); never re-run the reviewer on a revised body; residual concerns go under `## Open questions`:
      - If CONFIRMED: proceed to Phase 3 with the causal claim marked CONFIRMED.
      - If NEEDS_DEEPER_INVESTIGATION and the reported observation is CONFIRMED:

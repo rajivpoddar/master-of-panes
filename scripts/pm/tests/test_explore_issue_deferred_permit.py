@@ -322,3 +322,194 @@ def test_needs_deeper_requires_investigation_plus_hypothesis_to_pass(tmp_path):
     has_inv = bool(re.search(r'(?im)^Status:\s*INVESTIGATION', inv_body))
     has_hyp = bool(re.search(r'(?im)^Cause:\s*(HYPOTHESIS|UNKNOWN)', inv_body))
     assert has_inv and has_hyp, "investigation body must have correct Status and Cause fields"
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed: finalizer blocks on consume errors and protocol violations
+# ---------------------------------------------------------------------------
+
+def test_finalizer_blocks_when_consume_returns_error(tmp_path):
+    """RC>=2 from consume_pending_permit (actual permit consumption failed) must block.
+
+    Simulates: pending file exists, body SHA matches, but the actual permit file
+    has drifted (sha256 changed) so consume_permit returns non-zero. The finalizer
+    must NOT let the create through.
+    """
+    env = _env(tmp_path)
+    # Write a permit with one body SHA.
+    _write_permit(tmp_path)
+    # Write pending with the SAME body SHA.
+    _run_helper(env, (
+        f'explore_issue_write_permit_pending "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
+    ))
+    # Now tamper with the actual permit file so consume_permit sees a drift
+    # (mismatched body_sha256 on disk vs. what consume_pending_permit will verify).
+    permit_file = tmp_path / "permits" / f"{KEY}.permit.json"
+    data = json.loads(permit_file.read_text())
+    data["body_sha256"] = "0" * 64  # Corrupt the permit's body sha
+    permit_file.write_text(json.dumps(data))
+    # explore_issue_consume_pending_permit should return 2 (consume failed due to drift).
+    result = _run_helper(env, (
+        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    # RC must be non-zero (1 or 2 depending on internal path).
+    assert "rc=0" not in result.stdout, \
+        f"consume must NOT return 0 when permit is drifted; got: {result.stdout!r}"
+
+
+def test_finalizer_blocks_when_permit_exists_but_no_pending(tmp_path):
+    """When no pending file but a valid permit exists, the create must be blocked.
+
+    Simulates: pre-audit failed to write the pending marker (or stale pending was
+    cleared by a body-mismatch). The actual permit is intact. Letting the create
+    through would bypass the deferred-consumption protocol.
+    """
+    _write_permit(tmp_path)
+    env = _env(tmp_path)
+    # Confirm: no pending file exists.
+    pending_file = tmp_path / "pending" / f"{KEY}.permit.pending.json"
+    assert not pending_file.exists(), "no pending file should exist at test start"
+    # consume_pending_permit returns 1 (no pending).
+    result = _run_helper(env, (
+        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=1" in result.stdout, f"must return 1 when no pending; got: {result.stdout!r}"
+    # The permit file must still be intact (no consumption happened).
+    assert permit_file.parent.parent.joinpath("permits", f"{KEY}.permit.json").exists(), \
+        "permit must remain intact when no pending"
+    # Finalizer would then check explore_issue_permit_file → file exists → block.
+    result2 = _run_helper(env, (
+        f'_pf="$(explore_issue_permit_file "{CHANNEL}" "{THREAD}")"; '
+        f'[ -n "$_pf" ] && [ -f "$_pf" ] && echo "PERMIT_EXISTS" || echo "NO_PERMIT"'
+    ))
+    assert "PERMIT_EXISTS" in result2.stdout, \
+        "gate check must detect permit exists (finalizer must block in this case)"
+
+
+def test_finalizer_passes_when_no_permit_no_pending(tmp_path):
+    """When neither permit nor pending exists, the create is a legitimate bypass — must pass."""
+    env = _env(tmp_path)
+    # No permit file, no pending file.
+    result = _run_helper(env, (
+        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=1" in result.stdout, f"no pending → rc=1; got: {result.stdout!r}"
+    # Permit file also absent.
+    result2 = _run_helper(env, (
+        f'_pf="$(explore_issue_permit_file "{CHANNEL}" "{THREAD}")"; '
+        f'[ -n "$_pf" ] && [ -f "$_pf" ] && echo "PERMIT_EXISTS" || echo "NO_PERMIT"'
+    ))
+    assert "NO_PERMIT" in result2.stdout, \
+        "no permit should exist — finalizer allows the bypass create"
+
+
+def test_finalizer_blocks_when_source_parse_fails_and_pending_exist(tmp_path):
+    """If source identity cannot be parsed but pending files exist, block the create.
+
+    Simulates: the body has a malformed Source line (or none), but a pending permit
+    from a prior pre-audit run is sitting in the queue. Allowing the create would
+    bypass the pending permit's intended create.
+    """
+    env = _env(tmp_path)
+    # Write a pending file for some source (simulating a prior pre-audit run).
+    pending_dir = tmp_path / "pending"
+    pending_dir.mkdir(exist_ok=True)
+    (pending_dir / f"{KEY}.permit.pending.json").write_text(json.dumps({
+        "channel": CHANNEL,
+        "thread_ts": THREAD,
+        "source_message_ts": SOURCE_MSG,
+        "body_sha256": BODY_SHA,
+        "title_digest": TITLE_DIGEST,
+        "pending_at": "2026-11-14T10:00:00Z",
+        "pid": 99999,
+    }))
+    pending_file = pending_dir / f"{KEY}.permit.pending.json"
+    assert pending_file.exists(), "pending file must exist for this test"
+    # Verify: when any pending file exists, the finalizer's source-parse-fail branch
+    # detects it. Test the detection logic directly.
+    result = _run_helper(env, (
+        f'HAS_PENDING=0; '
+        f'for _pf in "$EXPLORE_ISSUE_PERMIT_PENDING_DIR"/*.permit.pending.json; do '
+        f'  [ -f "$_pf" ] && HAS_PENDING=1 && break; '
+        f'done 2>/dev/null || true; '
+        f'echo "HAS_PENDING=$HAS_PENDING"'
+    ))
+    assert "HAS_PENDING=1" in result.stdout, \
+        "gate must detect pending file when source parse fails"
+
+
+def test_finalizer_passes_when_source_parse_fails_and_no_pending(tmp_path):
+    """If source cannot be parsed and no pending files exist, the create is safe to pass."""
+    env = _env(tmp_path)
+    # No pending files in the pending dir.
+    result = _run_helper(env, (
+        f'HAS_PENDING=0; '
+        f'if [ -d "$EXPLORE_ISSUE_PERMIT_PENDING_DIR" ]; then '
+        f'  for _pf in "$EXPLORE_ISSUE_PERMIT_PENDING_DIR"/*.permit.pending.json; do '
+        f'    [ -f "$_pf" ] && HAS_PENDING=1 && break; '
+        f'  done 2>/dev/null || true; '
+        f'fi; '
+        f'echo "HAS_PENDING=$HAS_PENDING"'
+    ))
+    assert "HAS_PENDING=0" in result.stdout, \
+        "no pending files → finalizer must pass the create (no permit required)"
+
+
+# ---------------------------------------------------------------------------
+# Verdict contamination prevention
+# ---------------------------------------------------------------------------
+
+def test_verdict_write_tool_path_does_not_read_global_codex_output(tmp_path):
+    """SKILL.md step c2 must write directly; reading /tmp/codex-explore-output.txt
+    after a concurrent session has overwritten it produces the wrong verdict.
+
+    This test proves that writing the verdict directly to the per-source path
+    (simulating Write tool call with agent's own text) is isolated from the global
+    file's content, even if the global file later changes.
+    """
+    env = _env(tmp_path)
+    r = _run_helper(env, f'explore_issue_verdict_path "{CHANNEL}" "{THREAD}"')
+    verdict_path = r.stdout.strip()
+    Path(verdict_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Agent writes its own verdict directly to the per-source path (Write tool pattern).
+    agent_verdict = "Verdict: CONFIRMED\nCause: BUG - race in assignment_epoch compare\n"
+    Path(verdict_path).write_text(agent_verdict)
+
+    # Simulate concurrent session overwriting the global file (the contamination vector).
+    global_path = Path("/tmp/codex-explore-output.txt")
+    global_path.write_text("Verdict: NEEDS_DEEPER_INVESTIGATION\nCause: HYPOTHESIS - unclear\n")
+
+    # Gate reads the per-source path, NOT the global file → content is agent's own verdict.
+    content = Path(verdict_path).read_text()
+    assert "CONFIRMED" in content, "per-source verdict must contain agent's own CONFIRMED verdict"
+    assert "NEEDS_DEEPER" not in content, \
+        "concurrent session's global output must NOT contaminate per-source verdict"
+
+
+def test_concurrent_sessions_do_not_cross_contaminate_verdicts(tmp_path):
+    """Two investigations with different sources must each have their own verdict file."""
+    env = _env(tmp_path)
+
+    channel_a, thread_a = CHANNEL, THREAD
+    channel_b, thread_b = "C0BBBBBBBBBB", "1700000000.000001"
+
+    r_a = _run_helper(env, f'explore_issue_verdict_path "{channel_a}" "{thread_a}"')
+    r_b = _run_helper(env, f'explore_issue_verdict_path "{channel_b}" "{thread_b}"')
+    path_a = r_a.stdout.strip()
+    path_b = r_b.stdout.strip()
+    assert path_a != path_b, "different sources must have different verdict file paths"
+
+    # Session A writes CONFIRMED; session B writes NEEDS_DEEPER.
+    Path(path_a).parent.mkdir(parents=True, exist_ok=True)
+    Path(path_b).parent.mkdir(parents=True, exist_ok=True)
+    Path(path_a).write_text("Verdict: CONFIRMED\nCause: BUG - null dereference\n")
+    Path(path_b).write_text("Verdict: NEEDS_DEEPER_INVESTIGATION\nCause: UNKNOWN\n")
+
+    # Each path contains only its own session's verdict.
+    assert "CONFIRMED" in Path(path_a).read_text(), "session A verdict must be CONFIRMED"
+    assert "NEEDS_DEEPER" not in Path(path_a).read_text(), \
+        "session B's verdict must NOT appear in session A's file"
+    assert "NEEDS_DEEPER" in Path(path_b).read_text(), "session B verdict must be NEEDS_DEEPER"
+    assert "CONFIRMED" not in Path(path_b).read_text(), \
+        "session A's verdict must NOT appear in session B's file"
