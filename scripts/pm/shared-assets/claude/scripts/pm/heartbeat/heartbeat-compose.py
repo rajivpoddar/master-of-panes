@@ -1501,10 +1501,6 @@ def _proxy_display_metadata(name: str, start: str, pid: int, processes: dict, no
                         break
         except (OSError, UnicodeError):
             pass
-    if not result.get('display_refs'):
-        found = re.search(r'(?:^|\D)(\d{4,})(?:\D|$)', name)
-        if found:
-            result['display_refs'] = [found.group(1)]
     return result
 
 
@@ -1735,8 +1731,33 @@ def proxy_work_history(rows: list[dict], now: datetime, path: Path = PM_OPS_DB) 
         return  # Unavailable metadata stays UNKNOWN; never substitute process age.
 
 
-def _read_proxies(now: datetime, path: Path | None = None) -> dict | None:
-    """Read proxy runs only from the canonical PM obligations ledger."""
+def _proxy_live_processes() -> dict[str, list[int]]:
+    """Cross-check named Claude processes against live PID sockets, without reading logs."""
+    try:
+        result = subprocess.run(['ps', '-ww', '-axo', 'pid,etime,command'],
+                                capture_output=True, text=True, timeout=3, check=True)
+        live = {}
+        for line in result.stdout.splitlines():
+            match = re.match(r'^\s*(\d+)\s+(\S+)\s+(.*)$', line)
+            if not match:
+                continue
+            pid, elapsed, command = match.groups()
+            try:
+                executable = command.split(maxsplit=1)[0]
+                names = re.findall(r'(?:^|\s)--name(?:=|\s+)([\w.-]+)(?=\s|$)', command)
+                if Path(executable).name != 'claude' or len(names) != 1 or not (Path('/tmp/cc-socks') / (pid + '.sock')).is_socket():
+                    continue
+                age = _elapsed_minutes(elapsed)
+                live.setdefault(names[0], []).append(age)
+            except (ValueError, IndexError, OSError):
+                continue
+        return live
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+
+def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None = None) -> dict | None:
+    """Read proxy runs from the PM ledger; socket/process data is only a cross-check."""
     path = path or PM_OPS_DB
     try:
         with closing(sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=2)) as conn:
@@ -1746,6 +1767,7 @@ def _read_proxies(now: datetime, path: Path | None = None) -> dict | None:
     except (OSError, sqlite3.Error):
         return None
     rows = []
+    liveness = _proxy_live_processes() if liveness is None else liveness
     for record in records:
         try:
             evidence = json.loads(record['evidence_json'] or '{}')
@@ -1753,6 +1775,8 @@ def _read_proxies(now: datetime, path: Path | None = None) -> dict | None:
             evidence = {}
         if not isinstance(evidence, dict):
             evidence = {}
+        if 'finished_at' in evidence or 'rc' in evidence:
+            continue  # Terminal evidence overrides stale OPEN status, even for rc=0.
         name = str(record['target_id'] or '')
         if not re.fullmatch(r'px-[\w.-]+', name):
             name = '?'
@@ -1762,8 +1786,13 @@ def _read_proxies(now: datetime, path: Path | None = None) -> dict | None:
         started = _parse_ts(evidence.get('started_at')) if isinstance(evidence.get('started_at'), str) else None
         minutes = int((now - started).total_seconds() // 60) if started and started <= now else None
         refs = [str(value) for value in (record['issue'], record['pr']) if value is not None and str(value).isdigit()]
-        rows.append({'name': name, 'state': 'running', 'model': model, 'runtime_minutes': minutes,
-                     'model_source': 'model missing in PM ledger', 'display_refs': list(dict.fromkeys(refs))})
+        ages = liveness.get(name, [])
+        # A name alone can be reused. Bind its unique socket process to this
+        # ledger launch time, allowing startup and elapsed-time rounding.
+        confirmed = minutes is not None and len(ages) == 1 and -1 <= minutes - ages[0] <= 3
+        rows.append({'name': name, 'state': 'running' if confirmed else 'uncertain', 'model': model,
+                     'runtime_minutes': minutes, 'model_source': 'model missing in PM ledger',
+                     'display_refs': list(dict.fromkeys(refs))})
     return {'rows': rows, 'completions': [], 'truncated': False}
 
 
@@ -1796,14 +1825,16 @@ def proxies_block(doc: dict | None) -> list[str]:
     def _dead(row: dict) -> bool:
         return bool(row.get("dead") or row.get("state") in {"dead", "dead window"})
 
-    live = [r for r in visible if not _dead(r) and r.get("state") != "left-over window"]
+    live = [r for r in visible if r.get('state') != 'uncertain']
+    uncertain = sum(r.get('state') == 'uncertain' for r in visible)
     stale_note = f" (stale, {doc['cache_age_min']}m old)" if doc.get("cache_age_min") is not None else ""
     model_counts = {}
     for row in live:
         model = row.get('model') or 'unknown'
         model_counts[model] = model_counts.get(model, 0) + 1
     counts = ', '.join(f'{model}: {count}' for model, count in sorted(model_counts.items())) or 'none'
-    lines = [f"*Proxies:* {len(live)} live ({counts}){stale_note}"]
+    uncertain_note = f' · {uncertain} liveness ?' if uncertain else ''
+    lines = [f"*Proxies:* {len(live)} live ({counts}){uncertain_note}{stale_note}"]
     rendered = []
     def runtime(row):
         return row.get('runtime_minutes') if row.get('runtime_minutes') is not None else row.get('age')
@@ -1817,8 +1848,9 @@ def proxies_block(doc: dict | None) -> list[str]:
             minutes = runtime(row)
             duration = f'{minutes // 60}h{minutes % 60:02d}m' if isinstance(minutes, int) and minutes >= 0 else '?'
             refs = row.get('display_refs') or [ref.split(':', 1)[1] for ref in (row.get('brief_refs') or []) if re.fullmatch(r'(?:issue|pr):\d+', ref)]
-            details = ' · ' + ', '.join('#' + str(ref) for ref in refs) if refs else ''
-            rendered.append(f'• {name} · {model} · running {duration}{details}')
+            details = ' · ' + (', '.join('#' + str(ref) for ref in refs) if refs else '?')
+            state = f'running {duration}' if row.get('state') != 'uncertain' else f'? · elapsed {duration}'
+            rendered.append(f'• {name} · {model} · {state}{details}')
             continue
         if row.get("state") in {"dead window", "left-over window"} or "age" not in row and "last_activity" not in row:
             rendered.append(f"• {row['name']} — {row.get('state')}")

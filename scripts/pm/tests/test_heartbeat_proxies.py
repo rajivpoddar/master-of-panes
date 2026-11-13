@@ -37,12 +37,19 @@ def test_proxy_report_reads_only_pm_obligations(tmp_path):
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-first', 'open', 12345, None, json.dumps({'model': 'gpt-6-luna', 'started_at': '2026-11-13T10:48:00Z'}), None))
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-missing', 'open', None, None, '{}', None))
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-done', 'resolved', None, None, json.dumps({'rc': 1, 'result': 'done'}), '2026-11-13T11:45:00Z'))
+        conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-terminal', 'open', None, 54321, json.dumps({'rc': 0}), None))
+        conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-ended', 'open', None, None, json.dumps({'finished_at': '2026-11-13T11:59:00Z'}), None))
+        conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-unbound-98765', 'open', None, None, json.dumps({'model': 'gpt-6-luna', 'started_at': '2026-11-13T10:48:00Z'}), None))
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('other', 'px-ignore', 'open', None, None, '{}', None))
-    doc = module._read_proxies(now, db)
+    doc = module._read_proxies(now, db, liveness={'px-first': [72], 'px-unbound-98765': [12]})
     text = '\n'.join(module.proxies_block(doc))
     assert 'px-first · gpt-6-luna · running 1h12m · #12345' in text
-    assert 'px-missing · ? · running ?' in text
-    assert 'px-ignore' not in text and 'px-done' not in text and 'finished' not in text
+    assert 'px-missing · ? · ? · elapsed ? · ?' in text
+    assert 'px-unbound-98765 · gpt-6-luna · ? · elapsed 1h12m · ?' in text
+    assert '#98765' not in text
+    assert '1 live' in text and '2 liveness ?' in text
+    assert all(name not in text for name in ('px-ignore', 'px-done', 'px-terminal', 'px-ended'))
+    assert 'finished' not in text
 
 
 def test_display_metadata_uses_bound_stream_timestamp_and_prompt(tmp_path, monkeypatch):
@@ -56,7 +63,7 @@ def test_display_metadata_uses_bound_stream_timestamp_and_prompt(tmp_path, monke
     processes = {101: (100, '01:12:00', f'python /x/proxy-agent-stream.py /tmp/out {stream}')}
     value = module._proxy_display_metadata('px-px-task', f'bash {job / "run.sh"}', 100, processes, now)
     assert value == {'runtime_minutes': 72, 'display_refs': ['12345', '54321']}
-    assert module._proxy_display_metadata('px-98765', '', 100, {}, now)['display_refs'] == ['98765']
+    assert 'display_refs' not in module._proxy_display_metadata('px-98765', '', 100, {}, now)
     assert 'display_refs' not in module._proxy_display_metadata('px-task', '', 100, {}, now)
 
 
