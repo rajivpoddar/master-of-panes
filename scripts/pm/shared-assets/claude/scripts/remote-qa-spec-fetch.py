@@ -119,6 +119,7 @@ def publish_media(source, target):
     has_video = any(p.suffix.lower() in ('.webm', '.mp4') for p in media)
     complete = has_trace and has_video
     print(f'QA_FETCH_MEDIA={"COMPLETE" if complete else "PARTIAL"} files={len(media)} duplicates={len(links)}' + ('' if complete else ' reason=missing-trace-or-video'))
+    return 0 if complete else 3
 
 
 if __name__ == '__main__':
@@ -126,7 +127,7 @@ if __name__ == '__main__':
         if len(sys.argv) == 5 and sys.argv[1] == 'prepare':
             prepare(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])
         elif len(sys.argv) == 4 and sys.argv[1] == 'publish':
-            publish_media(Path(sys.argv[2]), Path(sys.argv[3]))
+            sys.exit(publish_media(Path(sys.argv[2]), Path(sys.argv[3])))
         else:
             raise ValueError('invalid arguments')
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:

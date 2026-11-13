@@ -384,7 +384,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-ci-admission",
-      "sha256": "7e2ab115b113ba7b475f79e14c5db7a20effb13be7170618c211d0eeb61cde29",
+      "sha256": "034541701b67dcc3d180bf591cb61b2febf886b7f0a01f10ec14f82d6ccad47c",
       "source_path": "claude/scripts/ci/pm-admit-12b.py"
     },
     {
@@ -845,7 +845,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "f08fd5d8bf62fbe8c0e9b50dece1a1d89ce889d0c6ebe9bf89a102d77736697a",
+      "sha256": "cd9c9a577a3ac75a93c550a10ad8ad1f0c73ac20f0959381f9853f53cdad6686",
       "source_path": "claude/scripts/remote-qa-spec-fetch.py"
     },
     {
@@ -854,7 +854,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "cf4ea3a23a5529c295e8121d306fc54e84f740a2af756e849d6aea58cf7ebdc6",
+      "sha256": "985b4f770f499a229fe1684f3c7053c91dfb1a7f6114e220ff4bc5abf9e35182",
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {
@@ -1253,7 +1253,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "ea0112ac4889055454ad9f03c15970bbe931c540b55dbe06e7d68c920133ca31",
+      "sha256": "805a6d3f8b863048ef7ae9a3c734aaeb360ecf4a833b8c208fe952d17e863e0d",
       "source_path": "claude/skills/playwright-qa-spec/SKILL.md"
     },
     {

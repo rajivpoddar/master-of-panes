@@ -89,9 +89,6 @@ def main_merges_only(repo, old, head, main_tip=None):
     main_tip = main_tip or str(api(repo, 'commits/main').get('sha') or '').lower()
     if not re.fullmatch(r'[0-9a-f]{40}', main_tip):
         return False
-    if not resolve_commit(main_tip):
-        subprocess.check_output(['git', '-C', str(checkout), 'fetch', '--no-tags', 'origin', main_tip],
-                                stderr=subprocess.DEVNULL, timeout=30)
     old = git('rev-parse', '--verify', old + '^{commit}').decode()
     head = git('rev-parse', '--verify', head + '^{commit}').decode()
     git('merge-base', '--is-ancestor', old, head)

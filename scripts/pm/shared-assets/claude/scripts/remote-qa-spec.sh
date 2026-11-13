@@ -197,6 +197,7 @@ onmiss_label() {
   else ONMISS_VERDICT=lane-ok-onmiss-replay-only; fi
 }
 # ONMISS_LABEL_END
+media_status=UNKNOWN
 # QA_SPEC_FETCH_BEGIN
 # Every remote operation uses the existing lease fence or the pinned ephemeral SSH identity.
 # Only these cleanup commands get artifact deadlines; the Playwright run budget is unchanged.
@@ -225,15 +226,17 @@ qa_spec_fetch() {
   qa_spec_fetch_remote 300 timeout 290 python3 -I "$helper" prepare /root/qa/out "$remote_out" small || { echo 'QA_FETCH_UNAVAILABLE: small snapshot failed'; return 1; }
   RTB_FETCH_TIMEOUT_SECONDS=300 timeout --kill-after=5 330 "$HOME/.claude/scripts/remote-browser-box.sh" fetch "$box" "$remote_out" "$out" || { echo 'QA_FETCH_UNAVAILABLE: small transfer failed'; return 1; }
   echo 'QA_FETCH_SMALL=VERIFIED'
+  media_status=PARTIAL
   remote_out="$root/media/out"
   if ! qa_spec_fetch_remote 300 timeout 290 python3 -I "$helper" prepare /root/qa/out "$remote_out" media; then
-    echo 'QA_FETCH_MEDIA=PARTIAL reason=media-snapshot-unavailable'; return 0
+    echo 'QA_FETCH_MEDIA=PARTIAL reason=media-snapshot-unavailable'; return 3
   fi
-  mkdir -p "$media_dir" || { echo 'QA_FETCH_MEDIA=PARTIAL reason=media-directory-unavailable'; return 0; }
+  mkdir -p "$media_dir" || { echo 'QA_FETCH_MEDIA=PARTIAL reason=media-directory-unavailable'; return 3; }
   if ! RTB_FETCH_TIMEOUT_SECONDS=900 timeout --kill-after=5 930 "$HOME/.claude/scripts/remote-browser-box.sh" fetch "$box" "$remote_out" "$media_dir"; then
-    echo 'QA_FETCH_MEDIA=PARTIAL reason=media-transfer-unavailable'; return 0
+    echo 'QA_FETCH_MEDIA=PARTIAL reason=media-transfer-unavailable'; return 3
   fi
-  python3 -I "$fetch_helper" publish "$media_dir/out" "$out/out" || echo 'QA_FETCH_MEDIA=PARTIAL reason=media-publication-unavailable'
+  python3 -I "$fetch_helper" publish "$media_dir/out" "$out/out" || { echo 'QA_FETCH_MEDIA=PARTIAL reason=media-publication-unavailable'; return 3; }
+  media_status=COMPLETE
   return 0
 }
 # QA_SPEC_FETCH_END
@@ -249,7 +252,10 @@ cleanup() {
         qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py capture-report --box '$box' --root '$remote' --output /root/qa/out/llm-ledger.json $llm_onmiss" >"$out/llm-report.log" 2>&1 || rc=1
         grep -E '^QA_ONMISS_(REPORT|TERMINAL)' "$out/llm-report.log" >"$out/llm-onmiss.txt" || true
       fi
-      qa_spec_fetch >>"$out/fetch.log" 2>&1 || rc=1
+      local fetch_rc=0
+      qa_spec_fetch >>"$out/fetch.log" 2>&1 || fetch_rc=$?
+      # Preserve the Playwright lane.rc and any earlier failure; media-only incompleteness is rc 3.
+      if [ "$fetch_rc" != 0 ] && [ "$rc" = 0 ]; then rc=$fetch_rc; fi
       [ ! -f "$out/out/legs.tsv" ] || cat "$out/out/legs.tsv"
     fi
     if [ "$modal_registered" = 1 ]; then
@@ -302,8 +308,14 @@ cleanup() {
     onmiss_label "$out" "$rc"; rc=$ONMISS_RC; verdict=$ONMISS_VERDICT; reason=$ONMISS_REASON
     echo "LLM_MODE=capture-on-miss label=$ONMISS_LABEL live_captures=$ONMISS_CAPTURES charged_upper_bound_usd=$ONMISS_BOUND${reason:+ reason=$reason} payloads=box-local canonical_writes=0" | tee -a "$out/lane.txt"
   fi
+  if [ "$media_status" = PARTIAL ]; then
+    [ "$rc" != 0 ] || rc=3
+    verdict=lane-partial
+  fi
+  printf 'media_status=%s\nterminal_rc=%s\n' "$media_status" "$rc" >>"$out/lane.txt"
+  echo "$rc" >"$out/terminal.rc"
   find "$out" -type f ! -name SHA256SUMS -exec shasum -a 256 {} \; >"$out/SHA256SUMS" 2>/dev/null
-  echo "REMOTE_SPEC verdict=$verdict${reason:+ reason=$reason} llm_mode=$([ -n "$llm_onmiss" ] && echo capture-on-miss || echo strict) slot=$slot head=$head spec=$spec legs=$legs artifacts=$out"
+  echo "REMOTE_SPEC verdict=$verdict${reason:+ reason=$reason} media_status=$media_status terminal_rc=$rc playwright_rc=${lane_rc:-UNKNOWN} llm_mode=$([ -n "$llm_onmiss" ] && echo capture-on-miss || echo strict) slot=$slot head=$head spec=$spec legs=$legs artifacts=$out"
   exit "$rc"
 }
 trap cleanup EXIT

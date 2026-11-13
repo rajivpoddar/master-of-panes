@@ -75,6 +75,18 @@ def test_resolve_commit_refuses_ambiguous_or_missing():
             assert gate.resolve_commit('abcdef0') is None
 
 
+def test_pinned_main_is_api_only_without_local_fetch():
+    old, head, main, tip = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
+    outputs = [old.encode(), head.encode(), b'', head.encode(),
+               f'{old} {main}'.encode(), b'tree', b'tree', b'base', b'patch', b'patch']
+    with patch.object(gate.subprocess, 'check_output', side_effect=outputs) as commands, \
+         patch.object(gate, 'resolve_commit', side_effect=AssertionError('main is API-only')), \
+         patch.object(gate, 'api', return_value={'status': 'ahead'}) as api:
+        assert gate.main_merges_only('owner/repo', old, head, tip)
+    assert all('fetch' not in call.args[0] for call in commands.call_args_list)
+    api.assert_called_once_with('owner/repo', f'compare/{main}...{tip}')
+
+
 def test_clean_main_merge_carries_review(tmp_path):
     assert history(tmp_path)
 
