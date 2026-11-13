@@ -1727,37 +1727,40 @@ def proxy_work_history(rows: list[dict], now: datetime, path: Path = PM_OPS_DB) 
         return  # Unavailable metadata stays UNKNOWN; never substitute process age.
 
 
-def _read_proxies(now: datetime) -> dict | None:
-    """tmux is required. ps and the stop-event read are best-effort and never wipe a good window list."""
+def _read_proxies(now: datetime, path: Path | None = None) -> dict | None:
+    """Read proxy runs only from the canonical PM obligations ledger."""
+    path = path or PM_OPS_DB
     try:
-        tmux = subprocess.run(
-            ["tmux", "list-windows", "-a", "-F", _PROXY_TMUX_FMT],
-            capture_output=True, text=True, timeout=5, check=True,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
+        with closing(sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=2)) as conn:
+            conn.row_factory = sqlite3.Row
+            records = conn.execute("SELECT target_id, issue, pr, evidence_json "
+                                   "FROM obligations WHERE kind='proxy_run' AND status='open'").fetchall()
+    except (OSError, sqlite3.Error):
         return None
-    try:
-        ps = subprocess.run(
-            ["ps", "-ww", "-axo", "pid,ppid,etime,command"],
-            capture_output=True, text=True, timeout=4, check=True,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        ps = ""
-    try:
-        completed, truncated = _proxy_completions(now)
-    except (OSError, sqlite3.Error, ValueError, TypeError):
-        completed, truncated = [], False
-    snapshot = build_proxy_snapshot(tmux, ps, now, completed)
-    proxy_work_history(snapshot['rows'], now)
-    snapshot["truncated"] = truncated
-    _proxy_cache_save(PROXY_CACHE, snapshot, now)
-    return snapshot
+    rows = []
+    for record in records:
+        try:
+            evidence = json.loads(record['evidence_json'] or '{}')
+        except (TypeError, ValueError):
+            evidence = {}
+        if not isinstance(evidence, dict):
+            evidence = {}
+        name = str(record['target_id'] or '')
+        if not re.fullmatch(r'px-[\w.-]+', name):
+            name = '?'
+        model = evidence.get('model')
+        if not isinstance(model, str) or not re.fullmatch(r'[\w.:-]+', model):
+            model = '?'
+        started = _parse_ts(evidence.get('started_at')) if isinstance(evidence.get('started_at'), str) else None
+        minutes = int((now - started).total_seconds() // 60) if started and started <= now else None
+        refs = [str(value) for value in (record['issue'], record['pr']) if value is not None and str(value).isdigit()]
+        rows.append({'name': name, 'state': 'running', 'model': model, 'runtime_minutes': minutes,
+                     'model_source': 'model missing in PM ledger', 'display_refs': list(dict.fromkeys(refs))})
+    return {'rows': rows, 'completions': [], 'truncated': False}
 
 
 def read_proxies(now: datetime, cache_path: Path | None = None, collect=None, budget: float | None = None) -> dict | None:
-    # Bounded so a stalled OS call cannot hold the composer. On expiry, serve the
-    # last good snapshot (≤10 min) labelled stale instead of "collector budget".
-    path = cache_path or PROXY_CACHE
+    # Do not reuse the legacy process/log cache: only the PM ledger is authoritative.
     limit = COLLECTOR_TIMEOUTS["proxies"] if budget is None else budget
     result: list = []
 
@@ -1769,9 +1772,6 @@ def read_proxies(now: datetime, cache_path: Path | None = None, collect=None, bu
     worker.join(limit)
     if not worker.is_alive() and result and result[0] is not None:
         return result[0]
-    cached = _proxy_cache_load(path, now)
-    if cached is not None:
-        return cached
     if worker.is_alive():
         return {"budget_exhausted": True}
     return result[0] if result else None
@@ -1782,13 +1782,8 @@ def proxies_block(doc: dict | None) -> list[str]:
         return ["*Proxies:* unavailable"]
     if doc.get("budget_exhausted"):
         return ["*Proxies:* unavailable (collector budget)"]
-    completed = doc["completions"]
-    failed = sum(c["rc"] != "0" for c in completed)
-    suffix = "; truncated" if doc.get("truncated") else ""
-    # Live px-* windows, including quiet ones. Dead windows stay visible with a flag.
-    # Finished successes stay a count (Rajiv C0ALZJHGE49 thread 1794188809.955499,
-    # ts 1794190613.274269). Non-zero exits stay listed.
-    visible = [r for r in doc["rows"] if r.get("state") != "finished"]
+    # The report contains live proxy obligations only.
+    visible = [r for r in doc["rows"] if r.get("state") not in {'finished', 'dead', 'dead window', 'left-over window'} and not r.get('dead')]
 
     def _dead(row: dict) -> bool:
         return bool(row.get("dead") or row.get("state") in {"dead", "dead window"})
@@ -1800,7 +1795,7 @@ def proxies_block(doc: dict | None) -> list[str]:
         model = row.get('model') or 'unknown'
         model_counts[model] = model_counts.get(model, 0) + 1
     counts = ', '.join(f'{model}: {count}' for model, count in sorted(model_counts.items())) or 'none'
-    lines = [f"*Proxies:* {len(live)} live ({counts}){stale_note} · {len(completed)} finished last hour ({failed} rc≠0{suffix})"]
+    lines = [f"*Proxies:* {len(live)} live ({counts}){stale_note}"]
     rendered = []
     def runtime(row):
         return row.get('runtime_minutes') if row.get('runtime_minutes') is not None else row.get('age')
@@ -1812,7 +1807,7 @@ def proxies_block(doc: dict | None) -> list[str]:
             if model == 'UNAVAILABLE':
                 model += f" ({row.get('model_source', 'no model evidence')})"
             minutes = runtime(row)
-            duration = f'{minutes // 60}h{minutes % 60:02d}m' if isinstance(minutes, int) and minutes >= 0 else 'UNAVAILABLE'
+            duration = f'{minutes // 60}h{minutes % 60:02d}m' if isinstance(minutes, int) and minutes >= 0 else '?'
             refs = row.get('display_refs') or [ref.split(':', 1)[1] for ref in (row.get('brief_refs') or []) if re.fullmatch(r'(?:issue|pr):\d+', ref)]
             details = ' · ' + ', '.join('#' + str(ref) for ref in refs) if refs else ''
             rendered.append(f'• {name} · {model} · running {duration}{details}')
@@ -1842,9 +1837,6 @@ def proxies_block(doc: dict | None) -> list[str]:
             model += f" ({row.get('model_source', 'no model evidence')})"
         result = f" · RESULT {'AVAILABLE' if row.get('result_available') is True else 'UNKNOWN'}" if _dead(row) else ''
         rendered.append(f"• {ref} @{row.get('work_head', 'UNKNOWN')} · {model} {name} · this stage {elapsed('stage_started_at')} · total {elapsed('work_started_at')} · last progress {elapsed('last_progress_at')} ago · boundary {row.get('boundary', 'UNKNOWN')} · next {row.get('next_checkpoint', 'UNKNOWN')} · process age {age} · output age {output_s} · activity {last_s}{flag}{result}")
-    for row in completed:
-        result = 'RESULT AVAILABLE' if row.get('result_available') is True else 'RESULT UNKNOWN'
-        rendered.append(f"• {row['name']} · finished · rc={row['rc']} · {result}")
     # Parent compaction may abbreviate this block; saved input/full block retains
     # every row for the existing hourly inspector rather than dropping row 25+.
     lines.extend(rendered)
@@ -2369,8 +2361,9 @@ def parallel_collect(jobs, wall_cap=COMPOSE_COLLECTOR_BUDGET, cache_dir=HOURLY_C
     for name in jobs:
         value, error = results.get(name, (None, "timed out"))
         path = cache_dir / (name + ".json")
-        if name == 'mac-box':
-            # Individual sources own their caches; do not cache partial UNKNOWNs.
+        if name in {'mac-box', 'proxies'}:
+            # Proxy observations must never fall back to legacy MoP/log caches.
+            # Individual mac-box sources own their own caches.
             results[name] = value
             continue
         if collector_success(value):
