@@ -1426,6 +1426,80 @@ def _proxy_runner_metadata(start: str, now: datetime, exited: bool) -> dict:
 PROXY_LOG_ROOT = Path('/tmp/proxy-agent')
 
 
+def _bound_proxy_stream(pid: int, processes: dict) -> Path | None:
+    streams = []
+    for parent, _, command in processes.values():
+        if parent != pid:
+            continue
+        try:
+            argv = shlex.split(command)
+            index = next(i for i, arg in enumerate(argv) if arg.endswith('/proxy-agent-stream.py'))
+            path = Path(argv[index + 2])
+            if path.resolve().parent == PROXY_LOG_ROOT.resolve() and path.suffix == '.jsonl':
+                streams.append(path)
+        except (ValueError, IndexError, StopIteration, OSError):
+            continue
+    return streams[0] if len(streams) == 1 else None
+
+
+def _proxy_display_metadata(name: str, start: str, pid: int, processes: dict, now: datetime) -> dict:
+    name = name.removeprefix('px-') if name.startswith('px-px-') else name
+    result = {}
+    stream = _bound_proxy_stream(pid, processes)
+    if stream:
+        match = re.fullmatch(r'.+-' + re.escape(name) + r'-\d+-(\d{8}T\d{6}Z)\.jsonl', stream.name)
+        if match:
+            try:
+                started = datetime.strptime(match.group(1), '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+                seconds = (now - started).total_seconds()
+                if seconds >= 0:
+                    result['runtime_minutes'] = int(seconds // 60)
+            except ValueError:
+                pass
+    try:
+        argv = shlex.split(start)
+        if len(argv) == 1:
+            argv = shlex.split(argv[0])
+        runner = Path(argv[1]) if len(argv) == 2 and Path(argv[0]).name == 'bash' else None
+        if runner and runner.name == 'run.sh' and runner.parent.name.startswith('proxy-agent-job.'):
+            with (runner.parent / 'prompt0.md').open(encoding='utf-8') as source:
+                content = source.read(200000)
+            refs = re.findall(r'(?im)^\s*(?:ISSUE|PR):\s*#?(\d+)\s*$', content)
+            if refs:
+                result['display_refs'] = list(dict.fromkeys(refs))
+    except (OSError, UnicodeError, ValueError):
+        pass
+    if not result.get('display_refs') and stream:
+        try:
+            with stream.open(encoding='utf-8') as source:
+                for _ in range(50):
+                    line = source.readline(1048577)
+                    if not line or len(line) > 1048576:
+                        break
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict) or record.get('type') != 'user' or record.get('parent_tool_use_id'):
+                        continue
+                    message = record.get('message') or {}
+                    content = message.get('content') if isinstance(message, dict) else None
+                    if isinstance(content, list):
+                        content = '\n'.join(item.get('text', '') for item in content if isinstance(item, dict) and item.get('type') == 'text' and isinstance(item.get('text'), str))
+                    if isinstance(content, str):
+                        refs = re.findall(r'(?im)^\s*(?:ISSUE|PR):\s*#?(\d+)\s*$', content)
+                        if refs:
+                            result['display_refs'] = list(dict.fromkeys(refs))
+                        break
+        except (OSError, UnicodeError):
+            pass
+    if not result.get('display_refs'):
+        found = re.search(r'(?:^|\D)(\d{4,})(?:\D|$)', name)
+        if found:
+            result['display_refs'] = [found.group(1)]
+    return result
+
+
 def _live_proxy_model(name: str, pid: int, age: int | None, processes: dict, now: datetime) -> tuple[str, str]:
     """Use an exact, recent launch record or this pane's own stream init only."""
     name = name.removeprefix('px-') if name.startswith('px-px-') else name
@@ -1534,6 +1608,7 @@ def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completion
         if not dead:
             model, model_source = _live_proxy_model(name, pid, age_min, processes, now)
             metadata['model_source'] = model_source
+            metadata.update(_proxy_display_metadata(name, start, pid, processes, now))
         last = max(0, int((now.timestamp() - activity) // 60))
         stale = (not dead) and last >= PROXY_STALE_ACTIVITY_MIN
         rows.append({
@@ -1727,8 +1802,21 @@ def proxies_block(doc: dict | None) -> list[str]:
     counts = ', '.join(f'{model}: {count}' for model, count in sorted(model_counts.items())) or 'none'
     lines = [f"*Proxies:* {len(live)} live ({counts}){stale_note} · {len(completed)} finished last hour ({failed} rc≠0{suffix})"]
     rendered = []
-    visible.sort(key=lambda row: (_dead(row), row.get('age') is None, -(row.get('age') or 0), row.get('name', '')))
+    def runtime(row):
+        return row.get('runtime_minutes') if row.get('runtime_minutes') is not None else row.get('age')
+    visible.sort(key=lambda row: (_dead(row), runtime(row) is None, -(runtime(row) or 0), row.get('name', '')))
     for row in visible:
+        if not _dead(row) and row.get('state') != 'left-over window':
+            name = row['name'].removeprefix('px-') if row['name'].startswith('px-px-') else row['name']
+            model = row.get('model') or 'UNAVAILABLE'
+            if model == 'UNAVAILABLE':
+                model += f" ({row.get('model_source', 'no model evidence')})"
+            minutes = runtime(row)
+            duration = f'{minutes // 60}h{minutes % 60:02d}m' if isinstance(minutes, int) and minutes >= 0 else 'UNAVAILABLE'
+            refs = row.get('display_refs') or [ref.split(':', 1)[1] for ref in (row.get('brief_refs') or []) if re.fullmatch(r'(?:issue|pr):\d+', ref)]
+            details = ' · ' + ', '.join('#' + str(ref) for ref in refs) if refs else ''
+            rendered.append(f'• {name} · {model} · running {duration}{details}')
+            continue
         if row.get("state") in {"dead window", "left-over window"} or "age" not in row and "last_activity" not in row:
             rendered.append(f"• {row['name']} — {row.get('state')}")
             continue

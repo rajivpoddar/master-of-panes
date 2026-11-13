@@ -20,9 +20,26 @@ def test_hourly_retains_all_proxies_sorted_and_drops_slot_actions():
     assert '*Slots' not in report and 'priority inversion' not in report and 'overdue slot' not in report
     assert 'review PR' in report
     assert '30 live (luna: 15, sol: 15)' in report
-    assert all(f'issue:{n} @' in report for n in range(30))
-    assert report.index('issue:29 @') < report.index('issue:0 @')
+    assert all(f'px-{n} · ' in report for n in range(30))
+    assert report.index('px-29 · ') < report.index('px-0 · ')
+    assert 'px-29 · luna · running 0h29m · #29' in report
+    assert 'issue/PR UNKNOWN' not in report
     assert module.structured_pm_actions([{'actions': ['review PR']}], ['idle-slot'], slots, '1h', True) == ['review PR']
+
+
+def test_display_metadata_uses_bound_stream_timestamp_and_prompt(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 13, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(module, 'PROXY_LOG_ROOT', tmp_path)
+    stream = tmp_path / 'pm-hotfix-px-task-55-20261113T104800Z.jsonl'
+    stream.write_text('{}\n')
+    job = tmp_path / 'proxy-agent-job.test'
+    job.mkdir()
+    (job / 'prompt0.md').write_text('issue: 12345\nPR: #54321\nprivate text')
+    processes = {101: (100, '01:12:00', f'python /x/proxy-agent-stream.py /tmp/out {stream}')}
+    value = module._proxy_display_metadata('px-px-task', f'bash {job / "run.sh"}', 100, processes, now)
+    assert value == {'runtime_minutes': 72, 'display_refs': ['12345', '54321']}
+    assert module._proxy_display_metadata('px-98765', '', 100, {}, now)['display_refs'] == ['98765']
+    assert 'display_refs' not in module._proxy_display_metadata('px-task', '', 100, {}, now)
 
 
 def test_live_model_uses_exact_recent_log_or_bound_stream(tmp_path, monkeypatch):
@@ -93,8 +110,8 @@ def test_proxy_unknown_metadata_stays_unknown():
     now = datetime(2026, 11, 8, tzinfo=timezone.utc)
     doc = module.build_proxy_snapshot(f'0\tpx-task\t{int(now.timestamp())}\t0\t100\n', '', now, [])
     rendered = '\n'.join(module.proxies_block(doc))
-    assert 'issue/PR UNKNOWN' in rendered and 'process age unknown' in rendered
-    assert 'output age UNKNOWN' in rendered and 'UNAVAILABLE (no matching launch record or stream model) px-task' in rendered
+    assert 'issue/PR UNKNOWN' not in rendered
+    assert 'px-task · UNAVAILABLE (no matching launch record or stream model) · running UNAVAILABLE' in rendered
 
 
 def test_proxy_finished_result_and_custody_fallback(tmp_path):
@@ -110,7 +127,7 @@ def test_proxy_finished_result_and_custody_fallback(tmp_path):
     assert 'work_ref' not in rows[0]  # Display name alone is not current custody.
     doc = {'rows': rows, 'completions': [{'name': 'px-task', 'rc': '0', 'result': 'RESULT done'}]}
     rendered = '\n'.join(module.proxies_block(doc))
-    assert 'issue/PR UNKNOWN' in rendered and 'RESULT UNKNOWN' in rendered
+    assert 'issue/PR UNKNOWN' not in rendered and 'RESULT UNKNOWN' in rendered
     assert 'RESULT done' not in rendered
 
 
@@ -163,7 +180,7 @@ def test_native_peer_and_current_brief_bind_double_prefixed_window(tmp_path, mon
         assert 'work_ref' not in fresh[0]
         assert 'work_head' not in fresh[0] and 'stage_started_at_minutes' not in fresh[0]
         rendered = '\n'.join(module.proxies_block({'rows': fresh, 'completions': []}))
-        assert 'pr:13533 @UNKNOWN' in rendered and 'this stage UNKNOWN' in rendered
+        assert 'running ' in rendered and 'this stage UNKNOWN' not in rendered
 
 
 def test_reparented_named_proxy_and_unverified_cases(tmp_path):
@@ -201,7 +218,7 @@ def test_proxy_output_age_future_and_invalid_is_unknown(tmp_path, monkeypatch):
             metadata = module._proxy_runner_metadata(f'bash {runner}', now, False)
         assert 'output_age' not in metadata
         doc = {'rows': [{'name': 'px-age', 'state': 'running', 'age': 2, **metadata}], 'completions': []}
-        assert 'output age UNKNOWN' in '\n'.join(module.proxies_block(doc))
+        assert 'output age UNKNOWN' not in '\n'.join(module.proxies_block(doc))
 
 
 def test_proxy_completion_result_prose_stays_private(tmp_path, monkeypatch):
