@@ -55,6 +55,7 @@ def _env(tmp_path: Path) -> dict:
         EXPLORE_ISSUE_VERDICT_DIR=str(tmp_path / "verdicts"),
         EXPLORE_ISSUE_PERMIT_PENDING_DIR=str(tmp_path / "pending"),
         EXPLORE_ISSUE_PM_OPS_CLI="/usr/bin/true",
+        EXPLORE_ISSUE_LATCH_GUARD=str(HELPER),
         EXPLORE_ISSUE_SOURCE_MESSAGE_TS=SOURCE_MSG,
         SLACK_BOT_TOKEN="",
     )
@@ -884,13 +885,13 @@ def _title_sha(title: str) -> str:
 
 
 def _write_permit_for_body(tmp_path: Path, body: str, title: str) -> None:
-    """Write a permit file whose SHA bindings match the given body and title."""
+    """Bind the permit to the root-message Source in these hook tests."""
     permit_dir = tmp_path / "permits"
     permit_dir.mkdir(exist_ok=True)
     (permit_dir / f"{KEY}.permit.json").write_text(json.dumps({
         "channel": CHANNEL,
         "thread_ts": THREAD,
-        "source_message_ts": SOURCE_MSG,
+        "source_message_ts": THREAD,
         "body_sha256": _body_sha(body),
         "title_digest": _title_sha(title),
         "obligation_id": OBLIGATION_ID,
