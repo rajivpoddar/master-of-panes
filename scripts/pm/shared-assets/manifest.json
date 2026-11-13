@@ -1829,6 +1829,33 @@
       "ownership_class": "shared-codex-skill-test",
       "sha256": "3b20dfdfa3357e0bd0d0252392d0fb7354df63006330f709fd8b912177427710",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-spec.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "cf4ea3a23a5529c295e8121d306fc54e84f740a2af756e849d6aea58cf7ebdc6",
+      "source_path": "claude/scripts/remote-qa-spec.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-spec-fetch.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "f08fd5d8bf62fbe8c0e9b50dece1a1d89ce889d0c6ebe9bf89a102d77736697a",
+      "source_path": "claude/scripts/remote-qa-spec-fetch.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm-hourly-post.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
+      "sha256": "9398f827060e3e8960513106043e4613ac3551abc71b0c43b687a2770a7ccadf",
+      "source_path": "claude/scripts/pm-hourly-post.sh"
     }
   ],
   "inventory": {
