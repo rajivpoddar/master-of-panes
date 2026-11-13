@@ -1750,7 +1750,7 @@ def proxy_work_history(rows: list[dict], now: datetime, path: Path = PM_OPS_DB) 
         return  # Unavailable metadata stays UNKNOWN; never substitute process age.
 
 
-def _proxy_live_processes() -> dict[str, list[tuple[int, int]]]:
+def _proxy_live_processes() -> dict[str, list[tuple[int, int]]] | None:
     """Cross-check named Claude processes against live PID sockets, without reading logs."""
     try:
         result = subprocess.run(['ps', '-ww', '-axo', 'pid,etime,command'],
@@ -1772,7 +1772,28 @@ def _proxy_live_processes() -> dict[str, list[tuple[int, int]]]:
                 continue
         return live
     except (OSError, subprocess.SubprocessError):
-        return {}
+        return None
+
+
+def _proxy_live_panes() -> set[str] | None:
+    """Return names of proxy windows with at least one non-dead pane."""
+    try:
+        result = subprocess.run(['tmux', 'list-panes', '-a', '-F',
+                                 '#{session_name}\t#{window_name}\t#{pane_dead}'],
+                                capture_output=True, text=True, timeout=3, check=True)
+        names = set()
+        for line in result.stdout.splitlines():
+            parts = line.split('\t')
+            if len(parts) != 3:
+                return None  # Malformed collector output cannot prove absence.
+            session, window, dead = parts
+            if dead not in {'0', '1'}:
+                return None
+            if dead == '0' and window.startswith('px-'):
+                names.add(window[3:])
+        return names
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _proxy_run_binding(name: str, token: object, started: datetime | None) -> bool:
@@ -1790,7 +1811,7 @@ def _proxy_run_binding(name: str, token: object, started: datetime | None) -> bo
         return False
 
 
-def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None = None, binding=None) -> dict | None:
+def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None = None, binding=None, panes: set[str] | None = None) -> dict | None:
     """Read proxy runs from the PM ledger; socket/process data is only a cross-check."""
     path = path or PM_OPS_DB
     try:
@@ -1803,6 +1824,9 @@ def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None
     rows = []
     candidates_by_row = []
     liveness = _proxy_live_processes() if liveness is None else liveness
+    panes = _proxy_live_panes() if panes is None else panes
+    if liveness is None or panes is None:
+        return None  # Failed collection is unavailable, not evidence of termination.
     binding = binding or _proxy_run_binding
     for record in records:
         try:
@@ -1814,8 +1838,8 @@ def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None
         if 'finished_at' in evidence or 'rc' in evidence:
             continue  # Terminal evidence overrides stale OPEN status, even for rc=0.
         name = str(record['target_id'] or '')
-        if not re.fullmatch(r'px-[\w.-]+', name):
-            name = '?'
+        if not re.fullmatch(r'px-[\w.-]+', name) or name not in panes or not liveness.get(name):
+            continue  # A leftover viewer or dead window is not a live proxy.
         model = evidence.get('model')
         if not isinstance(model, str) or not re.fullmatch(r'[\w.:-]+', model):
             model = '?'
