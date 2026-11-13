@@ -39,8 +39,16 @@ readmit."
 
 1. MoP `PMCadenceScheduler` task `hourly-heartbeat` (bucket `YYYY-MM-DD:HH`,
    fires at :13 local) queues "Invoke Skill(hourly-heartbeat)".
-2. PM launches ONE background agent (`run_in_background=true`) with the prompt
-   below, then returns to event processing. Never inline.
+2. PM runs STEP 1 (compose) and STEP 3 (post) itself as ONE Bash command with `run_in_background=true`
+   (no agent). They are deterministic scripts; an agent adds tokens, and agent types such as `pm-ops-tooling`
+   are forbidden to post to Slack (the 20:16 IST 11-13 run refused). Before STEP 3, cap every line at 2,900
+   chars (Slack rejects a block over 3,000 with `invalid_blocks`; the 20:16 report bounced on a 3,141-char
+   superseded-saves line):
+   `awk 'length($0)>2900{print substr($0,1,2800) " … (truncated; full list in /tmp/heartbeat-1h-latest)";next}{print}'`.
+   A send that returns `SLACK_SEND_FAILED ... invalid_blocks` delivered nothing: record that in the bucket claim
+   (`reconcile.txt`), fix the text, and retry once into the same claim. STEP 4 ACTIONS are PM's hourly processing.
+   (Changed 2026-11-13 after two manual workarounds on the 20:16 report.)
+   One command does all of it: `bash ~/.claude/scripts/pm-hourly-post.sh` (Bash run_in_background:true); it prints POSTED ts=… / HOURLY_ALREADY_POSTED / HOURLY_POST_UNCERTAIN.
 3. The confirmed sender receipt handed to `hourly-thread-ts` requests processing
    through MoP's existing PM relay, keyed by the exact parent ts. PM consumes
    `Skill(hourly-report-processing)`, including Step 3, as well as `ACTIONS:`.
