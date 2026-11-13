@@ -786,6 +786,17 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
         (kind, target_type, target_id, pr, issue),
     ).fetchone()
     if row:
+        if evidence_supplied:
+            try:
+                retained_evidence = json.loads(row["evidence_json"])
+                if not isinstance(retained_evidence, dict):
+                    raise ValueError("evidence is not an object")
+            except (TypeError, ValueError):
+                con.rollback()
+                con.close()
+                print("REFUSED: retained_evidence_invalid", file=sys.stderr)
+                return None
+            evidence = {**retained_evidence, **evidence}
         if not evidence_supplied and kind in CONTINUATION_KIND_LANES:
             try:
                 retained = json.loads(row["evidence_json"])

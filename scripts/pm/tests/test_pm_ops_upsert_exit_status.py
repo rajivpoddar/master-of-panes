@@ -45,6 +45,17 @@ def test_insert_and_update_row_two_are_success_without_duplicate(tmp_path):
     assert json.loads(rows[1][2]) == {"revision": 2}
 
 
+def test_upsert_merges_evidence_and_overwrites_only_supplied_keys(tmp_path):
+    db = tmp_path / "pm-ops.db"
+    assert upsert(db, "merge", {"keep": "original", "replace": "old"}).returncode == 0
+    result = upsert(db, "merge", {"replace": "new", "added": 42})
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(db) as con:
+        rows = con.execute("SELECT evidence_json FROM obligations WHERE target_id='merge'").fetchall()
+    assert len(rows) == 1
+    assert json.loads(rows[0][0]) == {"keep": "original", "replace": "new", "added": 42}
+
+
 def test_true_refusal_keeps_exit_two_and_does_not_initialize_db(tmp_path):
     db = tmp_path / "absent.db"
     result = refuse(db)
