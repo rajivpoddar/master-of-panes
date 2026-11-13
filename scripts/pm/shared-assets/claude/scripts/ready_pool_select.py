@@ -239,7 +239,10 @@ def _live_proxy_briefs() -> dict[str, set[int]]:
             # after launch, or during the read, leaves the peer unverified.
             launch_ns = Path(rm.group(1)).stat().st_mtime_ns
             before = brief.stat()
-            if before.st_mtime_ns >= launch_ns:
+            # proxy-agent.sh writes its private job-dir copy (prompt0.md) just AFTER run.sh;
+            # accept only that launcher-owned copy within a 5 s launch window (2026-11-13 PM S135 fix).
+            in_job_dir = brief.parent == Path(rm.group(1)).parent
+            if before.st_mtime_ns >= launch_ns and not (in_job_dir and before.st_mtime_ns - launch_ns < 5_000_000_000):
                 raise ValueError("brief rewritten at/after launch")
             text = brief.read_bytes().decode("utf-8", "replace")
             after = brief.stat()
@@ -248,9 +251,9 @@ def _live_proxy_briefs() -> dict[str, set[int]]:
             # CTO REVISE #2: only the explicit OWNING task counts: an `ISSUE: N` header
             # line, else lines that START with `#N` (the task headline). Mentions inside
             # prose (Depends on #N, PR #N, history) never bind.
-            explicit = {int(n) for n in re.findall(r"(?m)^ISSUE:\s*#?([1-9][0-9]{3,6})\s*$", text)}
+            explicit = {int(n) for n in re.findall(r"(?im)^ISSUE:\s*#?([1-9][0-9]{3,6})\b(?!\s*[,/&+])", text)}
             headline = {int(n) for n in re.findall(r"(?m)^#([1-9][0-9]{3,6})\b", text[:1200])}
-            pr_refs = {int(n) for n in re.findall(r"(?im)^PR:\s*#?([1-9][0-9]{3,6})\s*$", text)}
+            pr_refs = {int(n) for n in re.findall(r"(?im)^PR:\s*#?([1-9][0-9]{3,6})\b(?!\s*[,/&+])", text)}
             issues = (explicit if explicit else headline) | pr_refs
         except (OSError, ValueError):
             issues = set()
