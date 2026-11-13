@@ -25,6 +25,25 @@ def test_hourly_retains_all_proxies_sorted_and_drops_slot_actions():
     assert module.structured_pm_actions([{'actions': ['review PR']}], ['idle-slot'], slots, '1h', True) == ['review PR']
 
 
+def test_live_model_uses_exact_recent_log_or_bound_stream(tmp_path, monkeypatch):
+    import json
+    import os
+    now = datetime(2026, 11, 13, tzinfo=timezone.utc)
+    monkeypatch.setattr(module, 'PROXY_LOG_ROOT', tmp_path)
+    log = tmp_path / 'px-task.launch.log'
+    log.write_text('model=luna id=gpt-6-luna\n')
+    os.utime(log, (now.timestamp() - 600, now.timestamp() - 600))
+    assert module._live_proxy_model('px-px-task', 100, 10, {}, now) == ('gpt-6-luna', 'launch log')
+    # A similarly named proxy and a stale log cannot certify this launch.
+    assert module._live_proxy_model('px-task2', 100, 10, {}, now)[0] == 'UNAVAILABLE'
+    stream = tmp_path / 'task.jsonl'
+    stream.write_text(json.dumps({'type': 'system', 'subtype': 'init', 'model': 'gpt-6.1-sol', 'padding': 'x' * 100000}) + '\n')
+    processes = {101: (100, '00:10:00', f'python /x/proxy-agent-stream.py /tmp/out {stream}')}
+    assert module._live_proxy_model('px-task', 100, 30, processes, now) == ('gpt-6.1-sol', 'live stream init')
+    assert module._live_proxy_model('px-task', 200, 30, processes, now)[0] == 'UNAVAILABLE'
+    assert 'no matching launch record' in module._live_proxy_model('px-task', 200, 30, processes, now)[1]
+
+
 def test_proxy_tmux_ps_fixture(tmp_path):
     now = datetime(2026, 11, 8, tzinfo=timezone.utc)
     out = tmp_path / 'task.md'
@@ -75,7 +94,7 @@ def test_proxy_unknown_metadata_stays_unknown():
     doc = module.build_proxy_snapshot(f'0\tpx-task\t{int(now.timestamp())}\t0\t100\n', '', now, [])
     rendered = '\n'.join(module.proxies_block(doc))
     assert 'issue/PR UNKNOWN' in rendered and 'process age unknown' in rendered
-    assert 'output age UNKNOWN' in rendered and 'unknown px-task' in rendered
+    assert 'output age UNKNOWN' in rendered and 'UNAVAILABLE (no matching launch record or stream model) px-task' in rendered
 
 
 def test_proxy_finished_result_and_custody_fallback(tmp_path):

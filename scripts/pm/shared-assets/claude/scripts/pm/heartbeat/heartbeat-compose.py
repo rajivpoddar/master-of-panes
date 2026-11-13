@@ -1423,6 +1423,63 @@ def _proxy_runner_metadata(start: str, now: datetime, exited: bool) -> dict:
         return {}
 
 
+PROXY_LOG_ROOT = Path('/tmp/proxy-agent')
+
+
+def _live_proxy_model(name: str, pid: int, age: int | None, processes: dict, now: datetime) -> tuple[str, str]:
+    """Use an exact, recent launch record or this pane's own stream init only."""
+    name = name.removeprefix('px-') if name.startswith('px-px-') else name
+    if not re.fullmatch(r'px-[\w.-]+', name):
+        return 'UNAVAILABLE', 'invalid proxy identity'
+    root = PROXY_LOG_ROOT
+    if age is not None:
+        try:
+            exact = re.compile(r'.+-' + re.escape(name) + r'-\d+-\d{8}T\d{6}Z\.launch\.log\Z')
+            candidates = [path for path in root.glob('*.launch.log')
+                          if path.name == name + '.launch.log' or exact.fullmatch(path.name)]
+            candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+            for launch in candidates:
+                # etime is minute-granular. Reject a log from a previous incarnation.
+                if abs((now.timestamp() - launch.stat().st_mtime) / 60 - age) <= 2:
+                    with launch.open(encoding='utf-8', errors='replace') as source:
+                        text = source.read(65536)
+                    ids = re.findall(r'\bmodel=([^\s]+)\s+id=([\w.:-]+)', text)
+                    if ids:
+                        return ids[-1][1], 'launch log'
+        except OSError:
+            pass
+    children = [command for parent, _, command in processes.values() if parent == pid]
+    streams = []
+    for command in children:
+        try:
+            argv = shlex.split(command)
+            index = next(i for i, arg in enumerate(argv) if arg.endswith('/proxy-agent-stream.py'))
+            path = Path(argv[index + 2])
+            if path.resolve().parent == root.resolve() and path.suffix == '.jsonl':
+                streams.append(path)
+        except (ValueError, IndexError, StopIteration, OSError):
+            continue
+    if len(streams) == 1:
+        try:
+            with streams[0].open(encoding='utf-8') as source:
+                for _ in range(50):
+                    line = source.readline(1048577)
+                    if not line or len(line) > 1048576:
+                        break
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(record, dict) and record.get('type') == 'system' and record.get('subtype') == 'init':
+                        model = record.get('model')
+                        if isinstance(model, str) and re.fullmatch(r'[\w.:-]+', model):
+                            return model, 'live stream init'
+                        break
+        except (OSError, UnicodeError):
+            pass
+    return 'UNAVAILABLE', 'no matching launch record or stream model'
+
+
 def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completions: list[dict]) -> dict:
     """px-* windows only. ps_text is one process table, optional; commands are not kept."""
     windows = []
@@ -1474,6 +1531,9 @@ def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completion
             found = re.search(r"(?:^|\s)--model(?:=|\s+)(\S+)", matches[0])
             if found:
                 model = found.group(1)
+        if not dead:
+            model, model_source = _live_proxy_model(name, pid, age_min, processes, now)
+            metadata['model_source'] = model_source
         last = max(0, int((now.timestamp() - activity) // 60))
         stale = (not dead) and last >= PROXY_STALE_ACTIVITY_MIN
         rows.append({
@@ -1689,8 +1749,11 @@ def proxies_block(doc: dict | None) -> list[str]:
         output = row.get('output_age')
         output_s = f'{output}m' if output is not None else 'UNKNOWN'
         name = row['name'].removeprefix('px-') if row['name'].startswith('px-px-') else row['name']
+        model = row.get('model', 'UNAVAILABLE')
+        if model == 'UNAVAILABLE':
+            model += f" ({row.get('model_source', 'no model evidence')})"
         result = f" · RESULT {'AVAILABLE' if row.get('result_available') is True else 'UNKNOWN'}" if _dead(row) else ''
-        rendered.append(f"• {ref} @{row.get('work_head', 'UNKNOWN')} · {row.get('model', 'unknown')} {name} · this stage {elapsed('stage_started_at')} · total {elapsed('work_started_at')} · last progress {elapsed('last_progress_at')} ago · boundary {row.get('boundary', 'UNKNOWN')} · next {row.get('next_checkpoint', 'UNKNOWN')} · process age {age} · output age {output_s} · activity {last_s}{flag}{result}")
+        rendered.append(f"• {ref} @{row.get('work_head', 'UNKNOWN')} · {model} {name} · this stage {elapsed('stage_started_at')} · total {elapsed('work_started_at')} · last progress {elapsed('last_progress_at')} ago · boundary {row.get('boundary', 'UNKNOWN')} · next {row.get('next_checkpoint', 'UNKNOWN')} · process age {age} · output age {output_s} · activity {last_s}{flag}{result}")
     for row in completed:
         result = 'RESULT AVAILABLE' if row.get('result_available') is True else 'RESULT UNKNOWN'
         rendered.append(f"• {row['name']} · finished · rc={row['rc']} · {result}")
