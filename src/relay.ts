@@ -13,7 +13,7 @@ import type { LogManager } from "./logs.js";
 import type { MoPDatabase } from "./db.js";
 import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
-import { DEFAULT_DEV_SLOT_COUNT, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
+import { DEFAULT_DEV_SLOT_COUNT, isDecommissionedSlot, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { QUEUED_HINT, composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, isSlashCommand, resolveSlashCommandEnterDelayMs, slashComposerClearable, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
@@ -1699,6 +1699,7 @@ export class TmuxRelay {
   }
 
   async sendToSlotAsync(slotNum: number, command: string, _force = false, raw = false, exitEpisode?: string, exitOwnerPin?: ExitOwnerPin): Promise<boolean> {
+    if (isDecommissionedSlot(slotNum)) return false;
     void _force; // v3: every send is unconditional
     const pinnedRefusal = exitEpisode ? (exitOwnerPin ? this.exitOwnerRefusal(slotNum, exitOwnerPin) : "exit_owner_unbound") : null;
     if (pinnedRefusal) {

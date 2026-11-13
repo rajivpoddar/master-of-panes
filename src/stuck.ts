@@ -17,7 +17,7 @@ import { isObservedAgentTurn, slotAssignmentTuple, type MoPDatabase, type Observ
 import type { LogManager } from "./logs.js";
 import type { GuardedSlotDelivery, TmuxRelay } from "./relay.js";
 import type { SlotState } from "./types.js";
-import { isValidDevSlot, PM_SLOT } from "./slotConfig.js";
+import { isDecommissionedSlot, isValidDevSlot, PM_SLOT } from "./slotConfig.js";
 import { composerText } from "./composer.js";
 
 function debugLog(line: string): void {
@@ -345,7 +345,7 @@ export class StuckDetector {
    * - Log mtime > STUCK_THRESHOLD_MS ago (no output produced)
    */
   async checkAll(): Promise<void> {
-    const slots = this.db.getAllSlots();
+    const slots = this.db.getAllSlots().filter((slot) => !isDecommissionedSlot(slot.slot));
 
     // Phase 1: context-overflow detection for active+occupied DEV slots only.
     // Slot 0 (PM) is intentionally excluded: Rajiv removed the PM-pane
@@ -775,6 +775,7 @@ export class StuckDetector {
    * GitHub nor mutates capacity.
    */
   async checkIdleFree(slot: SlotState): Promise<void> {
+    if (isDecommissionedSlot(slot.slot)) return;
     if (process.env.MOP_PM_WAIT_NUDGES_DISABLED === "1") return;
     if (!isValidDevSlot(slot.slot)) return;
     if (slot.occupied || slot.dnd) return;

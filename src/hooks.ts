@@ -30,7 +30,7 @@ import { execShell, sleep } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import type { TmuxRelay } from "./relay.js";
 import type { HookPayload, HookResponse, SlotState } from "./types.js";
-import { isValidDevSlot } from "./slotConfig.js";
+import { isDecommissionedSlot, isValidDevSlot } from "./slotConfig.js";
 import { paneAddress as resolvePaneAddress } from "./paneIdentity.js";
 
 const execFileAsync = promisify(execFile);
@@ -250,7 +250,7 @@ export class HookProcessor {
    * unrelated checkout.
    */
   private async syncObservedCheckout(slotNum: number, payload: HookPayload): Promise<void> {
-    if (!isValidDevSlot(slotNum) || !payload.cwd) return;
+    if (!isValidDevSlot(slotNum) || isDecommissionedSlot(slotNum) || !payload.cwd) return;
     if (!["PostToolUse", "SessionStart", "Stop"].includes(payload.type)) return;
     const slot = this.db.getSlot(slotNum);
     if (!slot?.occupied || !slot.branch) return;
@@ -1755,6 +1755,7 @@ export class HookProcessor {
     // numbered slots retain ownership and must use exact native release.
     // Rajiv directive 2026-04-04: "if idle trigger immediately or wait till next idle"
     if (this.db.hasPendingClear(slotNum)) {
+      if (isDecommissionedSlot(slotNum)) return {};
       try {
         if (slot.occupied) {
           this.db.clearPendingClear(slotNum);

@@ -603,6 +603,7 @@ export function registerAssignmentRoute(
   app.post("/slots/:slotNum/retarget-pr", async (c) => {
     const slot = assignmentSlotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slot.success) return c.json({ error: "Invalid slot number" }, 400);
+    if (isDecommissionedSlot(slot.data)) return c.json({ success: false, conflict: true, reason: "slot_decommissioned" }, 409);
     const body: unknown = await c.req.json();
     if (!isRecord(body) || body.operator !== "pm" || !hasEvery(body, COMPLETE_REBIND_EXPECTED_FIELDS)
       || !Number.isInteger(body.expected_epoch) || !Number.isInteger(body.issue)

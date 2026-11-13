@@ -3191,6 +3191,7 @@ app.post("/slots/:slotNum/send", async (c) => {
   if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
 
   const slotNum = slotParse.data;
+  if (isDecommissionedSlot(slotNum)) return c.json({ success: false, reason: "slot_decommissioned" }, 409);
   const body = await c.req.json().catch(() => ({}));
   let command = body.command?.trim() || "";
   let filePath = body.file || "";
