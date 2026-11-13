@@ -171,6 +171,66 @@ def evaluate(repo, pr, head):
     return False, f'REFUSE: 12b_missing_or_stale pr={pr} head={head} last_12b={last}'
 
 
+TEST_PATH = re.compile(r'(^|/)(__tests__|tests?)/|\.(test|spec)\.[A-Za-z]+$|(^|/)test_[^/]+\.py$')
+COMPARE_FILE_CAP = 300  # GitHub's compare API stops listing files at 300.
+OVERLAP_PATH_LIMIT = 20
+
+
+def changed_paths(payload):
+    """Changed paths (renames included) of a compare payload, plus whether the list may be truncated."""
+    files = payload.get('files') or []
+    paths = set()
+    for item in files:
+        for key in ('filename', 'previous_filename'):
+            if item.get(key):
+                paths.add(item[key])
+    return paths, len(files) >= COMPARE_FILE_CAP
+
+
+def path_stem(path):
+    name = re.sub(r'^test_', '', path.rsplit('/', 1)[-1])
+    return re.split(r'\.(?:test|spec)\.|\.', name)[0]
+
+
+def overlap_report(repo, pr, head):
+    """Advisory overlap lines for the admission output (retro #13357/#13435; CTO C0ALZJHGE49 ts 1794578332.315349).
+
+    Names the reviewed base, current main, the paths changed by BOTH the PR and
+    main since that base, and the proof to re-run. Never changes the verdict:
+    a clean file merge is not proof, so overlap means re-prove, no overlap means
+    the reviewed proof carries (paths only; imports are not analyzed).
+    """
+    try:
+        usable = [m for m in canonical_markers(api(repo, f'issues/{pr}/comments?per_page=100', True),
+                                               authorized_reviewer_login()) if m[2] and m[3]]
+        if not usable:
+            return ['12B_OVERLAP: UNKNOWN reason=no_authorized_12b_marker']
+        reviewed = resolve_commit(usable[-1][1]) or usable[-1][1].lower()
+        main_side = api(repo, f'compare/{reviewed}...main')
+        base = (main_side.get('merge_base_commit') or {}).get('sha') or 'UNKNOWN'
+        tip = api(repo, 'commits/main').get('sha') or 'UNKNOWN'
+        main_paths, main_cut = changed_paths(main_side)
+        pr_paths, pr_cut = changed_paths(api(repo, f'compare/main...{reviewed}'))
+        overlap = sorted(main_paths & pr_paths)
+        shown = ','.join(overlap[:OVERLAP_PATH_LIMIT]) + (f',+{len(overlap) - OVERLAP_PATH_LIMIT} more' if len(overlap) > OVERLAP_PATH_LIMIT else '')
+        stems = {path_stem(p) for p in overlap if not TEST_PATH.search(p)}
+        tests = sorted(p for p in pr_paths if TEST_PATH.search(p) and (p in overlap or path_stem(p) in stems))
+        if main_cut or pr_cut:
+            action, proof = 'UNKNOWN', 'file lists truncated at the API cap; re-prove the affected behavior'
+        elif overlap:
+            action = 'RE-PROVE'
+            proof = ','.join(tests[:OVERLAP_PATH_LIMIT]) if tests else 'UNKNOWN (no owning test matched by name; re-run the PR changed tests)'
+        else:
+            action, proof = 'CARRY', 'none (no path changed by both the PR and main since the reviewed base)'
+        return [
+            f'12B_OVERLAP: reviewed_head={reviewed} reviewed_base={base} current_head={head} current_main={tip} main_commits_since_review={main_side.get("ahead_by", "UNKNOWN")}',
+            f'12B_OVERLAP: pr_paths={len(pr_paths)} main_paths={len(main_paths)} overlap={len(overlap)} paths={shown or "none"}',
+            f'12B_OVERLAP: proof_action={action} affected_proof={proof} (advisory only; a clean merge is not proof; the admission decision is unchanged)',
+        ]
+    except Exception as exc:
+        return [f'12B_OVERLAP: UNKNOWN reason={type(exc).__name__}']
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', required=True)
@@ -179,6 +239,9 @@ def main():
     args = parser.parse_args()
     ok, line = evaluate(args.repo, args.pr, args.head)
     print(line)
+    if not line.startswith('12B_GATE: exempt'):
+        for extra in overlap_report(args.repo, args.pr, args.head):
+            print(extra)
     return 0 if ok else 3
 
 

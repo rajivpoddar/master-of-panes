@@ -10,6 +10,7 @@ Use after a browser QA video is posted. This is PM-owned analysis; the recording
 ## Required inputs
 - PR number and exact 40-hex head.
 - Complete acceptance-criteria list and QA brief, including ordered scenario steps for each AC.
+- The runner's run receipt: preflight fields (scenario, target route, target context, storage scope, browser contexts) and the per-action markers (time, context/tab, route, action, outcome). A missing receipt or marker list is a review evidence gap, never an assumption.
 - Local video path or Slack file ID, plus the channel and thread timestamp where QA was posted.
 - Owning slot/agent for any correction and matching `qa_video_review` pm-ops obligation.
 
@@ -26,6 +27,8 @@ It records duration, source frame count, extracted frame count, fixed-cadence fr
 
 ## Faithfulness matrix
 For every AC, quote the scenario steps from the QA brief and map each step to one or more frame timestamps. Mark each step `EXECUTED`, `MISSING`, `SUBSTITUTED`, or `UNCLEAR`. A different file, project, or path is `SUBSTITUTED`, even if visually similar. Check wrong-project identity, read-only state, error badges, stale head, and any setup artifacts. Note when the recording starts after setup or ends before the observable result.
+
+**Target check (retro #13357/#13435; CTO C0ALZJHGE49 thread 1794234970.206389, ts 1794578332.315349).** Make this check for every step, from the receipt's markers rather than from memory of the clip. For each marker, take the frame at its time (use the helper's frame when one falls within 1s, otherwise extract it: `ffmpeg -ss <t> -i /absolute/path/session.mp4 -frames:v 1 /absolute/private/review-frames/marker-<n>.png`) and confirm it shows the marker's target route/dialog in the marker's context/tab, signed in as the intended identity. A frame showing another tab, route, identity or no target dialog marks that step `SUBSTITUTED` and names what it shows instead. A step with no marker, or whose frame cannot be read, is `UNCLEAR`. For a same-user writer move also confirm from the receipt that two independent browser contexts for the same user were used; frames of one profile's two tabs do not establish a different-browser move. A clip that never shows the target stays partial evidence: the verdict is `INCONCLUSIVE`, never `PASS`, and the correction names the missing marker.
 
 ## Verdict and corrections
 Return `PASS`, `FAIL`, or `INCONCLUSIVE`:
