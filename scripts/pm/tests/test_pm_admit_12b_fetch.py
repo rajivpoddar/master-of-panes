@@ -57,17 +57,17 @@ def test_new_head_after_last_fetch_keeps_main_merge_only_pass(tmp_path):
          patch.object(gate, 'authorized_reviewer_login', return_value='pm'), patch.object(gate, 'exempt', return_value=False):
         ok, line = gate.evaluate('owner/repo', 13693, head)
     assert ok and line == f'12B_GATE main-merge-only carry-forward from {reviewed} pr=13693 head={head}'
-    assert git(checkout, 'rev-parse', 'origin/main') == tip
+    assert git(checkout, 'rev-parse', tip + '^{commit}') == tip
 
 
-def test_fetch_failure_is_explicit_fail_closed():
+def test_fetch_failure_uses_existing_missing_proof_refusal():
     comments = [{'body': 'PM 12b: PASS at ' + 'a' * 40, 'user': {'login': 'pm'}}]
     with patch.object(gate, 'api', return_value=comments), patch.object(gate, 'exempt', return_value=False), \
          patch.object(gate, 'authorized_reviewer_login', return_value='pm'), \
          patch.object(gate, 'fetch_review_inputs', return_value=False), \
-         patch.object(gate, 'reviewed_12b_verdict', side_effect=AssertionError('must not inspect stale objects')):
-        assert gate.evaluate('owner/repo', 13503, 'b' * 40) == (
-            False, 'REFUSE: 12b_fetch_failed pr=13503 head=' + 'b' * 40)
+         patch.object(gate, 'resolve_commit', return_value=None):
+        ok, line = gate.evaluate('owner/repo', 13503, 'b' * 40)
+        assert not ok and line.startswith('REFUSE: 12b_missing_or_stale')
 
 
 def test_missing_reviewed_full_sha_is_fetched_with_bounded_pr_and_main_refs():
@@ -75,7 +75,23 @@ def test_missing_reviewed_full_sha_is_fetched_with_bounded_pr_and_main_refs():
          patch.object(gate.subprocess, 'check_output', return_value=b'') as run:
         assert gate.fetch_review_inputs(13503, 'b' * 40, 'a' * 40)
     argv = run.call_args.args[0]
-    assert '+refs/pull/13503/head:refs/remotes/origin/pull/13503/head' in argv
-    assert '+refs/heads/main:refs/remotes/origin/main' in argv
+    assert not any('refs/' in arg for arg in argv)
     assert 'a' * 40 in argv and 'b' * 40 in argv
     assert run.call_args.kwargs['timeout'] == 30
+
+
+def test_locally_resolved_proof_never_fetches():
+    with patch.object(gate, 'resolve_commit', return_value='a' * 40), \
+         patch.object(gate.subprocess, 'check_output', side_effect=OSError('offline')) as run:
+        assert gate.fetch_review_inputs(1, 'a' * 40, 'a' * 40)
+        run.assert_not_called()
+
+
+def test_failed_fetch_does_not_override_exact_pass():
+    head = 'a' * 40
+    comments = [{'body': 'PM 12b: PASS at ' + head, 'user': {'login': 'pm'}}]
+    with patch.object(gate, 'api', return_value=comments), patch.object(gate, 'exempt', return_value=False), \
+         patch.object(gate, 'authorized_reviewer_login', return_value='pm'), \
+         patch.object(gate, 'fetch_review_inputs', return_value=False), \
+         patch.object(gate, 'resolve_commit', return_value=head):
+        assert gate.evaluate('owner/repo', 1, head)[0] is True

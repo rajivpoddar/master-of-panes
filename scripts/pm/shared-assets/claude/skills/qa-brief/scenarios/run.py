@@ -56,7 +56,8 @@ def normalize_receipt(declared):
     receipt, unknown, malformed = {}, [], []
     for key in RECEIPT_FIELDS:
         value = source.get(key)
-        valid_type = (isinstance(value, str) if key != 'browser_contexts' else
+        valid_type = (isinstance(value, (str, dict)) if key in ('target_context', 'storage_scope') else
+                      isinstance(value, str) if key != 'browser_contexts' else
                       isinstance(value, (str, list)) or (type(value) is int and value > 0))
         if usable(value) and valid_type:
             receipt[key] = value
@@ -201,15 +202,17 @@ def assess(receipt, readbacks, two_tabs):
             or [UNKNOWN])
 
     declared = receipt['target_context']
-    if declared == UNKNOWN or not isinstance(declared, str):
-        status['target_context'] = UNKNOWN
-    elif host_of(declared):
-        want = host_of(declared)
-        status['target_context'] = combine(
-            [UNKNOWN if s['origin'] == UNKNOWN else ('MATCH' if host_of(s['origin']) == want else 'MISMATCH')
-             for s in readbacks] or [UNKNOWN])
+    if not isinstance(declared, dict) or not host_of(declared.get('origin', '')) or 'tab' not in declared:
+        status['target_context'] = UNKNOWN  # host alone cannot prove a selected tab
     else:
-        status['target_context'] = UNKNOWN  # free text cannot prove the declared environment
+        want = declared['origin'].rstrip('/')
+        def expected_tab(state):
+            value = declared['tab']
+            return str(value.get(state['label'], UNKNOWN)) if isinstance(value, dict) else str(value)
+        status['target_context'] = combine([
+            UNKNOWN if s['origin'] == UNKNOWN or s['active_tab'] == UNKNOWN or expected_tab(s) == UNKNOWN else
+            ('MATCH' if s['origin'].rstrip('/') == want and s['active_tab'] == expected_tab(s) else 'MISMATCH')
+            for s in readbacks] or [UNKNOWN])
 
     needed = max([n for n in (required_identities(receipt['browser_contexts']),
                               required_identities(receipt['storage_scope'])) if n is not None] or [0])
@@ -230,6 +233,18 @@ def assess(receipt, readbacks, two_tabs):
             status[key] = 'MISMATCH'
         else:
             status[key] = 'MATCH'
+
+    # Device IDs establish browser identity only, never arbitrary storage claims.
+    storage = receipt['storage_scope']
+    status['storage_scope'] = UNKNOWN
+    if (isinstance(storage, dict) and storage.get('kind') == 'localStorage'
+            and isinstance(storage.get('origin'), str)
+            and isinstance(storage.get('keys'), list)
+            and all(isinstance(k, str) for k in storage['keys'])):
+        status['storage_scope'] = combine([
+            UNKNOWN if s['origin'] == UNKNOWN or s['storage_keys'] == UNKNOWN else
+            ('MATCH' if s['origin'] == storage['origin'] and sorted(s['storage_keys']) == sorted(storage['keys'])
+             else 'MISMATCH') for s in readbacks] or [UNKNOWN])
 
     if needed >= 2 and (two_tabs or len(identities) < needed) and not identity_unread and readbacks:
         reasons.append('two_tabs_one_profile' if two_tabs else 'independent_browsers_not_proven')
@@ -385,6 +400,8 @@ def run(brief):
     reasons += ['receipt_field_missing:' + key for key in unknown if key not in malformed]
     clock = bind_recording_clock(events, recording_window(os.environ.get('QA_RECORDING_DIR', '/root/qa'),
                                                           int(time.time() * 1000)))
+    if clock == 'unavailable':
+        reasons.append('recording_clock_unavailable')
     reasons = sorted(set(reasons))
     return {'scenario': name, 'receipt': receipt, 'receipt_status': field_status,
             'readback': {'summary': readback_summary, 'before_action': readbacks},

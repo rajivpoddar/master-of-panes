@@ -260,7 +260,7 @@ overlap_start() {
   OVERLAP_OUT=$(mktemp /tmp/admit-overlap.XXXXXX 2>/dev/null) || { OVERLAP_OUT=""; return 0; }
   (
     rc=0
-    timeout "$OVERLAP_TIMEOUT" python3 -I "$SCRIPT_DIR/pm-admit-12b.py" --overlap-only --repo "$REPO" --pr "$PR" --head "$1" \
+    timeout --kill-after=5 "$OVERLAP_TIMEOUT" python3 -I "$SCRIPT_DIR/pm-admit-12b.py" --overlap-only --repo "$REPO" --pr "$PR" --head "$1" \
       >"$OVERLAP_OUT" 2>/dev/null || rc=$?
     echo "$rc" >"$OVERLAP_OUT.rc"
   ) &
@@ -275,7 +275,7 @@ overlap_finish() {
   lines=$(cat "$OVERLAP_OUT" 2>/dev/null || true)
   if [ "$rc" = 0 ] && [ -n "$lines" ]; then
     printf '%s\n' "$lines"
-  elif [ "$rc" = 124 ]; then
+  elif [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
     echo "12B_OVERLAP: UNKNOWN reason=report_timeout after=${OVERLAP_TIMEOUT}s"
   else
     echo "12B_OVERLAP: UNKNOWN reason=report_failed rc=$rc"

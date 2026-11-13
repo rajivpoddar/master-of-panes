@@ -46,13 +46,17 @@ def authorized_reviewer_login():
 
 
 def fetch_review_inputs(pr, head, reviewed=None):
-    """Refresh only the PR head, pinned main and any missing reviewed commit; bounded, no checkout."""
+    """Fetch only missing exact proof inputs; local proof never depends on the network."""
     checkout = Path.home() / 'Downloads/projects/heydonna-app'
-    refs = [f'+refs/pull/{int(pr)}/head:refs/remotes/origin/pull/{int(pr)}/head',
-            '+refs/heads/main:refs/remotes/origin/main']
+    refs = []
     for sha in (head, reviewed):
-        if sha and re.fullmatch(r'[0-9a-fA-F]{40}', sha) and not resolve_commit(sha):
-            refs.append(sha)
+        if sha and not resolve_commit(sha):
+            if re.fullmatch(r'[0-9a-fA-F]{40}', sha):
+                refs.append(sha)
+            else:
+                refs.append(f'+refs/pull/{int(pr)}/head:refs/remotes/origin/pull/{int(pr)}/head')
+    if not refs:
+        return True
     try:
         subprocess.check_output(
             ['git', '-C', str(checkout), 'fetch', '--no-tags', 'origin', *refs],
@@ -85,6 +89,9 @@ def main_merges_only(repo, old, head, main_tip=None):
     main_tip = main_tip or str(api(repo, 'commits/main').get('sha') or '').lower()
     if not re.fullmatch(r'[0-9a-f]{40}', main_tip):
         return False
+    if not resolve_commit(main_tip):
+        subprocess.check_output(['git', '-C', str(checkout), 'fetch', '--no-tags', 'origin', main_tip],
+                                stderr=subprocess.DEVNULL, timeout=30)
     old = git('rev-parse', '--verify', old + '^{commit}').decode()
     head = git('rev-parse', '--verify', head + '^{commit}').decode()
     git('merge-base', '--is-ancestor', old, head)
@@ -180,8 +187,9 @@ def evaluate(repo, pr, head):
                 return True, '12B_GATE: exempt (control-plane-only)'
         except Exception:
             pass  # An unavailable classifier never grants an exemption.
-        if not fetch_review_inputs(pr, head, markers[-1][1] if markers else None):
-            return False, f'REFUSE: 12b_fetch_failed pr={pr} head={head}'
+        fetch_review_inputs(pr, head, markers[-1][1] if markers else None)
+        # Re-evaluate exact proof even after a failed fetch; use the existing
+        # missing/stale refusal only when the proof itself remains unavailable.
         verdict = reviewed_12b_verdict(comments, head, reviewer_login, repo, pr)
         if verdict == 'PASS':
             sha = markers[-1][1].lower()

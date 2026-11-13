@@ -21,8 +21,10 @@ spec.loader.exec_module(mod)
 
 ROUTE = '/editor/t1'
 URL = 'http://localhost:3000' + ROUTE
-FULL_RECEIPT = {'target_route': ROUTE, 'target_context': 'http://localhost:3000',
-                'storage_scope': 'same profile', 'browser_contexts': 1}
+FULL_RECEIPT = {'target_route': ROUTE,
+                'target_context': {'origin': 'http://localhost:3000', 'tab': '0'},
+                'storage_scope': {'kind': 'localStorage', 'origin': 'http://localhost:3000', 'keys': [mod.DEVICE_KEY]},
+                'browser_contexts': 1}
 MISSING = object()
 
 
@@ -128,6 +130,7 @@ def test_read_state_tolerates_garbage_probe_output(garbage):
 # ---- end to end ------------------------------------------------------------
 
 def test_matching_readback_is_complete_evidence(tmp_path, monkeypatch):
+    write_clock(tmp_path, started=int(time.time() * 1000) - 5000)
     out = run_scenario(tmp_path, monkeypatch)
     assert out['partial_evidence'] is False and out['partial_reasons'] == []
     assert out['receipt_status']['target_route'] == 'MATCH' and out['receipt_status']['target_context'] == 'MATCH'
@@ -167,7 +170,7 @@ def test_two_tabs_in_one_profile_do_not_prove_a_different_browser(tmp_path, monk
                        scenario='editor-takeover-two-tabs', receipt=receipt)
     assert out['partial_evidence'] is True and 'two_tabs_one_profile' in out['partial_reasons']
     assert out['readback']['summary'] == {'tabs_read': 2, 'distinct_browser_identities': 1, 'independent_browsers': False}
-    assert out['receipt_status']['browser_contexts'] == 'MISMATCH' and out['receipt_status']['storage_scope'] == 'MISMATCH'
+    assert out['receipt_status']['browser_contexts'] == 'MISMATCH' and out['receipt_status']['storage_scope'] == 'UNKNOWN'
     assert [s['label'] for s in out['readback']['before_action']] == ['tab_a_before_action', 'tab_b_before_action']
 
 
@@ -175,7 +178,9 @@ def test_two_tabs_declared_as_one_profile_is_not_flagged(tmp_path, monkeypatch):
     receipt = {**FULL_RECEIPT, 'storage_scope': 'same profile, two tabs', 'browser_contexts': 'one browser, two tabs'}
     out = run_scenario(tmp_path, monkeypatch, box=FakeBox(devices=('dev-a', 'dev-a'), tabs=2),
                        scenario='editor-takeover-two-tabs', receipt=receipt)
-    assert out['partial_evidence'] is False, out['partial_reasons']
+    assert out['receipt_status']['browser_contexts'] == 'MATCH'
+    assert out['partial_evidence'] is True
+    assert 'unknown:storage_scope' in out['partial_reasons']
 
 
 def test_changing_device_storage_inside_two_tabs_does_not_prove_independent_browsers(tmp_path, monkeypatch):
@@ -229,6 +234,8 @@ def write_clock(tmp_path, started=None, stop=None):
 def test_without_a_recording_clock_marker_timing_is_unknown(tmp_path, monkeypatch):
     out = run_scenario(tmp_path, monkeypatch)
     assert out['recording_clock'] == 'unavailable'
+    assert out['partial_evidence'] is True
+    assert 'recording_clock_unavailable' in out['partial_reasons']
     assert out['events'] and all(e['recording_s'] == 'UNKNOWN' for e in out['events'])
     assert all('_wall_ms' not in e for e in out['events'])
     assert all(isinstance(e['elapsed_s'], float) for e in out['events'])  # scenario clock stays, labeled as such
@@ -273,3 +280,19 @@ def test_event_after_stop_or_before_start_is_not_mislabeled():
     clock = mod.bind_recording_clock(events, (1_000_000, 1_005_000))
     assert clock == 'recording.started_ms'
     assert [e['recording_s'] for e in events] == [-1.0, 2.0, 'UNKNOWN', 'UNKNOWN']
+
+
+def test_right_host_wrong_selected_tab_is_mismatch(tmp_path, monkeypatch):
+    out = run_scenario(tmp_path, monkeypatch, box=FakeBox(tabs=2))
+    assert out['receipt_status']['target_context'] == 'MISMATCH'
+
+
+def test_storage_claim_must_bind_actual_storage(tmp_path, monkeypatch):
+    receipt = {**FULL_RECEIPT, 'storage_scope': {'kind': 'localStorage', 'origin': 'http://localhost:3000', 'keys': ['not-present']}}
+    out = run_scenario(tmp_path, monkeypatch, receipt=receipt)
+    assert out['receipt_status']['storage_scope'] == 'MISMATCH'
+
+
+def test_device_id_does_not_prove_free_text_storage(tmp_path, monkeypatch):
+    out = run_scenario(tmp_path, monkeypatch, receipt={**FULL_RECEIPT, 'storage_scope': 'same profile'})
+    assert out['receipt_status']['storage_scope'] == 'UNKNOWN'

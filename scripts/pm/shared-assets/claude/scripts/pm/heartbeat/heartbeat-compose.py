@@ -2172,7 +2172,7 @@ def compact_report(lines: list[str], limit: int, cadence: str | None = None) -> 
         # Error-code rows carry routing instructions. Fold them together without
         # replacing named actions with a generic "+N more" that loses ownership.
         actionable = [item for item in items if re.search(r"• [A-Za-z0-9_]+ — \d+ ev", item)]
-        top = unavailable or (actionable if cadence == "3h" else []) or items[:1]
+        top = items if cadence == "3h" else (unavailable or items[:1])
         more = len(items) - len(top)
         summary = f" ({len(items)} items): " + "; ".join(top)
         if more:
@@ -2184,6 +2184,19 @@ def compact_report(lines: list[str], limit: int, cadence: str | None = None) -> 
         if spaced and (row.startswith("*") or row.startswith("_Ops:_")):
             spaced.append("")
         spaced.append(row)
+    if cadence == '3h':
+        # Keep every named folded route visible in Slack. Prefer extra physical
+        # lines over cap_line's lossy '+K more' when a folded section is long.
+        expanded = []
+        for row in spaced:
+            while len(row) > MAX_LINE_CHARS - LINE_NOTE_RESERVE:
+                boundary = row.rfind('; ', 0, MAX_LINE_CHARS - LINE_NOTE_RESERVE)
+                if boundary < 1:
+                    boundary = MAX_LINE_CHARS - LINE_NOTE_RESERVE - 20
+                expanded.append(row[:boundary])
+                row = '↳ ' + row[boundary:].lstrip('; ')
+            expanded.append(row)
+        spaced = expanded
     return "\n".join(spaced)
 
 

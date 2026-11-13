@@ -6,6 +6,8 @@ Named scenarios:
 - `clone-sample-open-editor`: internal sample clone → editor tab A → mounted, nonempty, writer-ready editor → screenshot.
 - `editor-takeover-two-tabs`: base → same editor tab B in the SAME browser profile → real Continue editing here action and any required explicit confirmation → wait for B writer/A fenced → type → save → sync idle + changed head → authoritative server readback of edit and B lease → screenshot.
 
+Context proof compares the full origin AND the actual selected tab index. `tab` may be a single index or a map keyed by readback label. Storage proof binds the declared localStorage origin and exact key inventory; free-text profile/session/Convex/R2 claims remain UNKNOWN rather than being inferred from device IDs. No valid recording clock means PARTIAL (`recording_clock_unavailable`), even when other readbacks match.
+
 Brief shape (parameters are exact-head bindings resolved BEFORE recording):
 
 ```json
@@ -19,8 +21,8 @@ Brief shape (parameters are exact-head bindings resolved BEFORE recording):
     "save_shortcut": "Control+s",
     "receipt": {
       "target_route": "<exact editor route/dialog the AC acts on>",
-      "target_context": "<which tab/context performs each action>",
-      "storage_scope": "<profile/storage per context, Convex deployment, QA R2 bucket scope>",
+      "target_context": {"origin": "http://localhost:3000", "tab": {"tab_a_before_action": "0", "tab_b_before_action": "1"}},
+      "storage_scope": {"kind": "localStorage", "origin": "http://localhost:3000", "keys": ["heydonna-device-id"]},
       "browser_contexts": [{"id": "A", "tab": 1, "subject": "<synthetic subject>", "profile": "<profile>"}]
     },
     "adapters": {
