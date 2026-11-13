@@ -146,10 +146,25 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
     for row in axiom.get("all_codes", []):
         code = row["code"]
         m = mapping.get(code, {})
-        if code == 'uncaught_error' or code in shown or m.get("status") != "mapped" or not m.get("refs"):
+        if code == 'uncaught_error' or code in shown:
+            continue
+        status = m.get("status")
+        refs = m.get("refs") or []
+        if status == "mapped" and refs:
+            target = "→ " + ", ".join(refs[:2])
+            prefix = "+"
+        elif status == "NEW":
+            new += 1
+            new_codes.append(code)
+            target = "NEW → launch customer-artifact-investigator"
+            prefix = "•"
+        elif status in {"unmapped", None} or not refs:
+            target = "unmapped → classify and route for investigation"
+            prefix = "•"
+        else:
             continue
         shown.add(code)
-        lines.append(f"+ {code}: {row['events']} ev / {row['users']} user{'s' if row['users'] != 1 else ''} → {', '.join(m['refs'][:2])}")
+        lines.append(f"{prefix} {code} — {row['events']} ev / {row['users']} users {target}")
         other_codes -= 1
         other_events -= row["events"]
     if other_codes > 0:

@@ -44,6 +44,36 @@ def test_3h_fold_keeps_named_actionable_error_codes_and_tldr_names_new_code():
     assert "33 errors" in tldr
 
 
+def test_3h_off_top_new_and_unmapped_mapper_results_are_named_and_actionable():
+    rows = [
+        {"code": f"known_{i}", "events": 10 - i, "users": 2}
+        for i in range(5)
+    ] + [
+        {"code": "sixth_new", "events": 4, "users": 3},
+        {"code": "seventh_unmapped", "events": 2, "users": 1},
+    ]
+    axiom = {
+        "events": 36, "users": 8, "top": rows[:5],
+        "all_codes": rows, "other_codes": 2, "other_events": 6,
+    }
+    requested = composer.three_hour_map_args(axiom)[1::2]
+    assert "sixth_new" in requested and "seventh_unmapped" in requested
+    # This is the heartbeat-error-map.py production result shape.
+    mapping = {code: {"code": code, "status": "mapped", "refs": ["#123"]}
+               for code in requested[:5]}
+    mapping["sixth_new"] = {"code": "sixth_new", "status": "NEW", "refs": []}
+    mapping["seventh_unmapped"] = {"code": "seventh_unmapped", "status": "unmapped", "refs": []}
+
+    lines, tldr, new_count = composer.error_block(axiom, mapping, "3h")
+    folded = composer.compact_report(lines + ["• filler"] * 8, limit=1, cadence="3h")
+
+    assert new_count == 1
+    assert "sixth_new" in folded and "NEW → launch customer-artifact-investigator" in folded
+    assert "sixth_new" in tldr
+    assert "seventh_unmapped" in folded and "unmapped → classify and route for investigation" in folded
+    assert "+0 other codes" not in "\\n".join(lines)
+
+
 def test_3h_fold_always_reports_overflow_and_hourly_compaction_is_unchanged():
     rows = [f"• actionable_{i} — 1 ev / 1 users → owner-{i}" for i in range(4)]
     rows += ["• generic detail"] * 4
