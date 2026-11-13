@@ -494,23 +494,11 @@ fi
 NOW=$(date +%s)
 WINDOW_START=$((NOW - 1800))
 
-RECENT=$(curl -s --max-time 5 "${EXPLORE_ISSUE_MOP_EVENTS_URL:-http://localhost:3100/events?limit=500}" 2>/dev/null | \
-  jq --arg ws "$WINDOW_START" '
-    [.events[]?
-      | select(.slot == 0)
-      | select(.event_type == "PostToolUse")
-      | select(.payload | test("codex\\s+exec|codex-app-arch-review|codex-architecture-review|codex-explore-prompt|explore-issue"; "i"))
-      | select(
-          ((.timestamp | sub("\\.[0-9]+"; "") | . + "Z" | fromdateiso8601) // 0) > ($ws | tonumber)
-        )
-    ] | length' 2>/dev/null || echo "0")
-
-if [ "$RECENT" = "0" ] || [ -z "$RECENT" ] || [ "$RECENT" = "null" ]; then
-  cat <<BLOCK
-{"decision": "block", "message": "BLOCKED: gh issue create requires prior Codex architecture review. No matching tool invocation found in MoP events for PM pane in the last 30 minutes.\n\nOPTIONS:\n  1. Run /explore-issue to investigate + file the issue through the full SOP (preferred for customer-origin bugs).\n  2. For INTERNAL follow-up tickets (post-merge cleanup, refactors), add '<!-- audit-bypass: internal-followup -->' to the issue body to skip this gate.\n\n(Rajiv directive 2026-04-21: prevent exploration-skipping on customer bug reports.)"}
-BLOCK
-  exit 0
-fi
+# PM-pane Codex architecture-review evidence gate REMOVED (Rajiv, DM D0AMF0XE6TS
+# thread 1794566037.087919, ts 1794566485.412849: "drop it"). Slots are retired; every
+# proxy dev run already performs Codex plan/code/QA reviews, and customer-origin issues
+# still require the explore-issue CONFIRMED permit above. Backup:
+# ~/.claude/hooks/pre-issue-create-audit.sh.bak-20261113-droparch
 
 # Optional: verify CONFIRMED verdict in the most recent Codex output.
 if [ -f /tmp/codex-explore-output.txt ]; then
