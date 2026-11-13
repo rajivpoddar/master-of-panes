@@ -139,7 +139,9 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
         else:
             target = ""
         lines.append(f"• {row['code']} — {row['events']} ev / {row['users']} users {target}".rstrip())
-    # Keep mapped off-top classes visible to Step 1, including after compaction.
+    # The named off-top NEW/unmapped detail belongs only to the 3h cadence.
+    # Keep the 1h branch byte-for-byte compatible with the prior renderer:
+    # its top-five mapper contract intentionally does not expose off-top rows.
     shown = {row["code"] for row in axiom.get("top", [])[:MAX_CODES]}
     other_codes = axiom.get("other_codes", 0)
     other_events = axiom.get("other_events", 0)
@@ -147,6 +149,14 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
         code = row["code"]
         m = mapping.get(code, {})
         if code == 'uncaught_error' or code in shown:
+            continue
+        if window_label != "3h":
+            if m.get("status") != "mapped" or not m.get("refs"):
+                continue
+            shown.add(code)
+            lines.append(f"+ {code}: {row['events']} ev / {row['users']} user{'s' if row['users'] != 1 else ''} → {', '.join(m['refs'][:2])}")
+            other_codes -= 1
+            other_events -= row["events"]
             continue
         status = m.get("status")
         refs = m.get("refs") or []

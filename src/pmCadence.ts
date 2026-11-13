@@ -409,6 +409,16 @@ export class PMCadenceScheduler {
     const now = new Date();
     const dueKey = this.currentDueKey(taskName, now);
     const lastDueKey = this.db.getConfig(configKey(task, "last_due_key"));
+    if (reason === "boot") {
+      // Never deliver cadence work during restart recovery. Seed the live bucket
+      // so an old persisted key cannot be replayed; preserve the hourly pre-window
+      // marker so a startup before :13 still allows the current hour's run.
+      const seedKey = taskName === "hourly-heartbeat" && !isHourlyHeartbeatWindow(now)
+        ? `${dueKey}:pre`
+        : dueKey;
+      this.seedCurrentBucket(taskName, reason, seedKey);
+      return null;
+    }
     if (lastDueKey === null && reason !== "manual" && (taskName === "heartbeat" || taskName === "hourly-heartbeat" || taskName === "rtb-split-update")) {
       // Hourly: a startup before :13 must not suppress this hour's :13 run. Seed a
       // pre-window marker that differs from the hour's due key so :13 still fires.
@@ -661,13 +671,21 @@ export class PMCadenceScheduler {
    */
   revalidateQueuedReminder(eventType: string, now: Date = new Date()): PMQueuedEffectVerdict {
     const match = REINJECT_EVENT_RE.exec(eventType);
-    if (!match) return "deliver";
-    const bucket = match[1]!;
-    if (bucket !== hourlyHeartbeatDueKey(now)) return { drop: "hourly-reminder-expired" };
-    const state = this.hourlyReport.readState(bucket);
-    if (state === "open") return "deliver";
-    if (state === "unknown") return "retain";
-    return { drop: state === "resolved" ? "hourly-report-already-posted" : "hourly-debt-absent" };
+    if (match) {
+      const bucket = match[1]!;
+      if (bucket !== hourlyHeartbeatDueKey(now)) return { drop: "hourly-reminder-expired" };
+      const state = this.hourlyReport.readState(bucket);
+      if (state === "open") return "deliver";
+      if (state === "unknown") return "retain";
+      return { drop: state === "resolved" ? "hourly-report-already-posted" : "hourly-debt-absent" };
+    }
+    const queuedCadence = /^cadence-(heartbeat|morning-brief|hourly-heartbeat|growth-daily|lifecycle-email|daily-pm-restart|rtb-split-update)-(.+)$/.exec(eventType);
+    if (!queuedCadence) return "deliver";
+    const taskName = queuedCadence[1] as PMCadenceTaskName;
+    if (queuedCadence[2] !== this.currentDueKey(taskName, now)) {
+      return { drop: "cadence-bucket-expired" };
+    }
+    return "deliver";
   }
 
   private isTaskPaused(taskName: PMCadenceTaskName): boolean {

@@ -112,7 +112,7 @@ def test_hourly_output_matches_pre_correction_renderer():
     root = PATH.parents[7]
     source = subprocess.check_output([
         'git', '-C', str(root), 'show',
-        '3e44e791:scripts/pm/shared-assets/claude/scripts/pm/heartbeat/heartbeat-compose.py',
+        '25f2e682:scripts/pm/shared-assets/claude/scripts/pm/heartbeat/heartbeat-compose.py',
     ], text=True)
     baseline = types.ModuleType('baseline_heartbeat_renderer')
     baseline.__file__ = str(PATH)
@@ -123,8 +123,21 @@ def test_hourly_output_matches_pre_correction_renderer():
     composer.composer_release_sha = lambda: 'fixture'
     try:
         rows = [{'code': f'fault_{i}', 'events': 2, 'users': 1} for i in range(5)]
-        axiom = {'events': 10, 'users': 2, 'top': rows}
+        off_top = [
+            {'code': 'off_top_mapped', 'events': 3, 'users': 1},
+            {'code': 'off_top_new', 'events': 2, 'users': 1},
+            {'code': 'off_top_unmapped', 'events': 1, 'users': 1},
+        ]
+        axiom = {
+            'events': 16, 'users': 5, 'top': rows,
+            'all_codes': rows + off_top, 'other_codes': len(off_top), 'other_events': 6,
+        }
         mapping = {row['code']: {'status': 'NEW'} for row in rows}
+        mapping.update({
+            'off_top_mapped': {'status': 'mapped', 'refs': ['#123']},
+            'off_top_new': {'status': 'NEW', 'refs': []},
+            'off_top_unmapped': {'status': 'unmapped', 'refs': []},
+        })
         args = ('1h', datetime(2026, 1, 1, tzinfo=timezone.utc), axiom, mapping, [])
         assert composer.compose(*args).encode() == baseline.compose(*args).encode()
     finally:

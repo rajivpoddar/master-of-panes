@@ -89,6 +89,26 @@ async function withClock<T>(at: Date, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+test("boot never injects stale persisted cadence work; scheduled ticks use the live bucket", async () => {
+  const db = new FakeMopDb();
+  const relay = new FakeRelay();
+  db.setConfig("pm_cadence_hourly_heartbeat_last_due_key", "2026-11-13:02");
+  const cadence = new PMCadenceScheduler(db as never, relay as never);
+  await withClock(new Date(2026, 10, 13, 10, 20, 0), () => cadence.tick("boot"));
+  assert.deepEqual(relay.injections, []);
+
+  // Stale relay rows are independently rejected at their delivery boundary.
+  assert.deepEqual(
+    await withClock(new Date(2026, 10, 13, 11, 13, 0), () =>
+      Promise.resolve(cadence.revalidateQueuedReminder("cadence-hourly-heartbeat-2026-11-13:02"))),
+    { drop: "cadence-bucket-expired" },
+  );
+
+  // The next regular pass is evaluated from its current time, never the old boot key.
+  await withClock(new Date(2026, 10, 13, 11, 13, 0), () => cadence.tick("scheduled"));
+  assert.equal(relay.injections.length, 1);
+});
+
 test("startup before :13 does not suppress that hour's :13 hourly heartbeat", async () => {
   const db = new FakeMopDb();
   const relay = new FakeRelay();
