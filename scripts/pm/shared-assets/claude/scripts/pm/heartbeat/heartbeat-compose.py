@@ -347,7 +347,8 @@ def slot_block(slots_doc: dict | None, now: datetime, release_seen: dict | None 
     for i in range(0, len(cells), 2):
         lines.append("• " + " | ".join(cells[i:i + 2]))
     idle_n = sum(a.startswith("idle-slot") for a in actions)
-    tldr = f"{idle_n} idle slot(s) ≥{IDLE_SLOT_MIN}m" if idle_n else "slots busy"
+    all_decommissioned = bool(slots) and all(s.get("decommissioned") or s.get("status") == "decommissioned" for s in slots)
+    tldr = "dev slots decommissioned" if all_decommissioned else (f"{idle_n} idle slot(s) ≥{IDLE_SLOT_MIN}m" if idle_n else "slots busy")
     split_n = len(actions) - idle_n
     if split_n:
         tldr += f", {split_n} lane(s) ≥{LANE_SPLIT_MIN // 60}h"
