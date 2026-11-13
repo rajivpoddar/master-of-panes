@@ -167,3 +167,24 @@ test("boot after the morning-brief window never delivers and suppresses only unt
   await withClock(new Date(2026, 10, 15, 10, 0, 0), () => cadence.tick("scheduled"));
   assert.equal(brief(), 1);
 });
+
+
+test("start before the morning window keeps it eligible when boot timer crosses 10:00", async (t) => {
+  const db = new FakeMopDb();
+  const relay = new FakeRelay();
+  const cadence = new PMCadenceScheduler(db as never, relay as never);
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: new Date(2026, 10, 14, 9, 59, 30) });
+  try {
+    cadence.start();
+    t.mock.timers.tick(45_000);
+    // The timer callback intentionally does not await the asynchronous tick.
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    assert.equal(db.getConfig("pm_cadence_morning_brief_last_due_key"), null);
+    assert.equal(relay.injections.some((m) => m.includes("Skill(morning-brief)")), false);
+    await cadence.tick("scheduled");
+    assert.equal(relay.injections.filter((m) => m.includes("Skill(morning-brief)")).length, 1);
+  } finally {
+    cadence.stop();
+    t.mock.timers.reset();
+  }
+});

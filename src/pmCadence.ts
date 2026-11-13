@@ -296,12 +296,13 @@ export class PMCadenceScheduler {
 
   start(): void {
     if (this.timer) return;
+    const startupTime = new Date();
     this.timer = setInterval(() => {
       void this.tick("scheduled");
     }, this.CHECK_INTERVAL_MS);
     this.bootCatchupTimer = setTimeout(() => {
       this.bootCatchupTimer = null;
-      void this.tick("boot");
+      void this.tick("boot", startupTime);
     }, this.BOOT_CATCHUP_DELAY_MS);
     console.log(
       `[pm-cadence] Scheduler started — check interval ${this.CHECK_INTERVAL_MS}ms, ` +
@@ -320,7 +321,7 @@ export class PMCadenceScheduler {
     }
   }
 
-  async tick(reason: PMCadenceTriggerReason): Promise<PMCadenceRunResult[]> {
+  async tick(reason: PMCadenceTriggerReason, startupTime?: Date): Promise<PMCadenceRunResult[]> {
     if (this.running) {
       return [];
     }
@@ -329,17 +330,17 @@ export class PMCadenceScheduler {
       const results: PMCadenceRunResult[] = [];
       const heartbeat = await this.runIfDue("heartbeat", reason);
       if (heartbeat) results.push(heartbeat);
-      const morningBrief = await this.runIfDue("morning-brief", reason);
+      const morningBrief = await this.runIfDue("morning-brief", reason, startupTime);
       if (morningBrief) results.push(morningBrief);
       const hourly = await this.runIfDue("hourly-heartbeat", reason);
       if (hourly) results.push(hourly);
       const rtb = await this.runIfDue("rtb-split-update", reason);
       if (rtb) results.push(rtb);
-      const growth = await this.runIfDue("growth-daily", reason);
+      const growth = await this.runIfDue("growth-daily", reason, startupTime);
       if (growth) results.push(growth);
-      const lifecycle = await this.runIfDue("lifecycle-email", reason);
+      const lifecycle = await this.runIfDue("lifecycle-email", reason, startupTime);
       if (lifecycle) results.push(lifecycle);
-      const restart = await this.runIfDue("daily-pm-restart", reason);
+      const restart = await this.runIfDue("daily-pm-restart", reason, startupTime);
       if (restart) results.push(restart);
       await this.reconcileHourlyDebt();
       if (reason === "scheduled") await this.escalateHourlyReportIfMissed();
@@ -410,13 +411,13 @@ export class PMCadenceScheduler {
     };
   }
 
-  private async runIfDue(taskName: PMCadenceTaskName, reason: PMCadenceTriggerReason): Promise<PMCadenceRunResult | null> {
+  private async runIfDue(taskName: PMCadenceTaskName, reason: PMCadenceTriggerReason, startupTime?: Date): Promise<PMCadenceRunResult | null> {
     if (this.db.getConfig(CFG_GLOBAL_PAUSED) === "true" || this.isTaskPaused(taskName)) {
       return null;
     }
 
     const task = TASKS[taskName];
-    const now = new Date();
+    const now = reason === "boot" && startupTime ? startupTime : new Date();
     const dueKey = this.currentDueKey(taskName, now);
     const lastDueKey = this.db.getConfig(configKey(task, "last_due_key"));
     if (reason === "boot") {
@@ -968,7 +969,7 @@ async function redeliverFenced(
   const task = TASKS[taskName];
   const result = await relay.writePMPromptFenced(task.commandDescription, check);
   const releases = pending.zero_effect_releases ?? 0;
-  if (result.reason === "cadence_bucket_expired") {
+  if (result.reason === "cadence_bucket_expired" && result.zeroEffect === true) {
     db.setConfig(pendingKey(taskName), "");
   } else if (!result.ok && result.zeroEffect && releases < 1) {
     // Proven pre-paste, zero-effect refusal: release the claim for one retry.

@@ -293,3 +293,35 @@ test("a pre-paste zero-effect refusal can retry exactly once", () =>
     await verifyPMCadenceDelivery(db2 as never, busy, stop, later(30_000), 0);
     assert.equal(enterCount(pane2), 0, "no third attempt");
   }));
+
+
+test("rollover after paste consumes custody without pressing Enter or retrying", async (t) => {
+  const before = new Date(2026, 10, 14, 10, 59, 59);
+  t.mock.timers.enable({ apis: ["Date"], now: before });
+  try {
+    await withDir(async (path) => {
+      const db = new FakeMopDb();
+      const injectedAt = await armHourly(db);
+      writeFileSync(path, userRec(new Date(injectedAt.getTime() - 60_000), "earlier") + userRec(injectedAt, "unrelated"));
+      const pane: Pane = { composer: "", buffer: "", commands: [] };
+      const relay = fencedRelay(pane, true);
+      const realRun = (relay as unknown as { runShell: (c: string, o?: unknown) => Promise<unknown> }).runShell;
+      (relay as unknown as { runShell: (c: string, o?: unknown) => Promise<unknown> }).runShell = async (c, o) => {
+        const result = await realRun(c, o);
+        if (c.startsWith("tmux paste-buffer")) t.mock.timers.setTime(before.getTime() + 2_000);
+        return result;
+      };
+      const stop = { sessionId: SESSION, transcriptPath: path };
+      await verifyPMCadenceDelivery(db as never, relay, stop, new Date(before.getTime() + 10_000), 0);
+      assert.equal(pane.commands.filter((c) => c.startsWith("tmux paste-buffer")).length, 1);
+      assert.equal(enterCount(pane), 0);
+      const pending = JSON.parse(db.getConfig(PENDING_KEY)!);
+      assert.equal(pending.retried, true);
+      assert.equal(pending.inflight, false);
+      await verifyPMCadenceDelivery(db as never, relay, stop, new Date(before.getTime() + 20_000), 0);
+      assert.equal(pane.commands.filter((c) => c.startsWith("tmux paste-buffer")).length, 1);
+    });
+  } finally {
+    t.mock.timers.reset();
+  }
+});
