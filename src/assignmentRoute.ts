@@ -51,7 +51,7 @@ import {
   isValidPaneTarget,
   verifySessionPane,
 } from "./sessionDelivery.js";
-import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
+import { DEFAULT_DEV_SLOT_COUNT, isDecommissionedSlot } from "./slotConfig.js";
 
 const assignmentSlotParamSchema = z.coerce.number().int().min(1).max(DEFAULT_DEV_SLOT_COUNT);
 
@@ -348,6 +348,9 @@ export function registerAssignmentRoute(
       return c.json({ error: "Invalid slot number" }, 400);
     }
 
+    if (isDecommissionedSlot(slotParse.data)) {
+      return c.json({ success: false, conflict: true, reason: "slot_decommissioned" }, 409);
+    }
     const body = await c.req.json();
     if (!isRecord(body) || !Number.isInteger(body.issue) || Number(body.issue) <= 0) {
       return c.json({
@@ -629,6 +632,9 @@ export function registerAssignmentRoute(
     const slotParse = assignmentSlotParamSchema.safeParse(c.req.param("slotNum"));
     if (!slotParse.success) {
       return c.json({ error: "Invalid slot number" }, 400);
+    }
+    if (isDecommissionedSlot(slotParse.data)) {
+      return c.json({ success: false, conflict: true, reason: "slot_decommissioned" }, 409);
     }
 
     const body = await c.req.json();

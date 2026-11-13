@@ -296,6 +296,9 @@ def slot_block(slots_doc: dict | None, now: datetime, release_seen: dict | None 
     max_slot = active_slot_max()
     for s in sorted(slots, key=lambda s: s.get("slot", 0)):
         n = s.get("slot")
+        if s.get("decommissioned") or s.get("status") == "decommissioned":
+            cells.append(f"S{n} {s.get('name') or '?'}: decommissioned")
+            continue
         try:
             above_max = int(n) > max_slot
         except (TypeError, ValueError):

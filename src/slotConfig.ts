@@ -1,6 +1,11 @@
 /** Canonical numbered-slot configuration shared by every MoP control surface. */
 export const PM_SLOT = 0;
 export const DEFAULT_DEV_SLOT_COUNT = 8;
+/** Remove a slot from this list to return it to service. PM is never included. */
+export const DECOMMISSIONED_SLOTS: readonly number[] = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
+export function isDecommissionedSlot(slot: number): boolean {
+  return DECOMMISSIONED_SLOTS.includes(slot);
+}
 export const DEV_SLOT_NUMBERS: readonly number[] = Object.freeze(
   Array.from({ length: DEFAULT_DEV_SLOT_COUNT }, (_, index) => index + 1),
 );

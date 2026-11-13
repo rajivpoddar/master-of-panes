@@ -109,7 +109,7 @@ import {
   WEDGE_INTERRUPT_KEY,
 } from "./wedgeInterruptRoute.js";
 import type { HookPayload, MoPConfig } from "./types.js";
-import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, PM_SLOT } from "./slotConfig.js";
+import { DEFAULT_DEV_SLOT_COUNT, devSlots, isValidDevSlot, isValidRuntimeSlot, isDecommissionedSlot, PM_SLOT } from "./slotConfig.js";
 import { runtimeIdentity } from "./slotConfig.js";
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import {
@@ -1499,6 +1499,7 @@ app.post("/hooks/slot/:slotNum", async (c) => {
 app.get("/slots", (c) => {
   const slots = db.getAllSlots().map((s) => ({
     ...s,
+    ...(isDecommissionedSlot(s.slot) ? { status: "decommissioned", decommissioned: true } : { decommissioned: false }),
     api_stall: stuckDetector.getApiStallStatus(s.slot),
   }));
   return c.json({ slots, lane_events: readLaneEvents(db) });
@@ -1528,7 +1529,7 @@ app.get("/slots/:slotNum", (c) => {
     return c.json({ error: "Slot not found" }, 404);
   }
 
-  return c.json(slot);
+  return c.json(isDecommissionedSlot(slot.slot) ? { ...slot, status: "decommissioned", decommissioned: true } : { ...slot, decommissioned: false });
 });
 
 /** Set or clear Do Not Disturb on a slot (REST parity for mop_set_dnd).
@@ -2251,6 +2252,7 @@ app.post("/slots/:slotNum/respawn", async (c) => {
   if (!slotParse.success) return c.json({ error: "Invalid slot number" }, 400);
 
   const slotNum = slotParse.data;
+  if (isDecommissionedSlot(slotNum)) return c.json({ error: "slot_decommissioned", reason: "slot_decommissioned" }, 409);
   const body = await c.req.json().catch(() => ({}));
   const continueSession = body.continue_session !== false; // default true
   const model: string | undefined = typeof body.model === "string" ? body.model : undefined;

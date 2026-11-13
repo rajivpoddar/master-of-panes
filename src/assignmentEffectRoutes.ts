@@ -16,7 +16,7 @@ import {
   type ProjectionGuard,
   type IssueProjectionOutcome,
 } from "./issueProjection.js";
-import { DEFAULT_DEV_SLOT_COUNT } from "./slotConfig.js";
+import { DEFAULT_DEV_SLOT_COUNT, isDecommissionedSlot } from "./slotConfig.js";
 import { pinDrift, pinFrom, type OperationPin, type PaneObservation, type SlotRowLike } from "./interruptBeforeClear.js";
 
 const assignmentEffectSlotParamSchema = z.coerce
@@ -429,6 +429,9 @@ export function registerAssignmentEffectRoutes(
       return c.json({ error: "Invalid slot number" }, 400);
     }
     const slotNum = slotParse.data;
+    if (isDecommissionedSlot(slotNum)) {
+      return c.json(refusal("ownership", "slot_decommissioned", slotStateSummary(db.getSlot(slotNum))), 409);
+    }
 
     let raw: unknown;
     try {

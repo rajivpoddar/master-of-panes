@@ -30,7 +30,7 @@ import { execShell } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import { recentJsonlActivity } from "./jsonlActivity.js";
 import type { TmuxRelay } from "./relay.js";
-import { DEV_SLOT_NUMBERS, RUNTIME_SLOT_NUMBERS, SLOT_RUNTIME_IDENTITIES } from "./slotConfig.js";
+import { DEV_SLOT_NUMBERS, RUNTIME_SLOT_NUMBERS, SLOT_RUNTIME_IDENTITIES, isDecommissionedSlot } from "./slotConfig.js";
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity, type PaneCommandRunner } from "./paneIdentity.js";
 import { pinFrom, pinDrift } from "./interruptBeforeClear.js";
 import { latestSessionStartEventId } from "./sessionStartClearWait.js";
@@ -1035,6 +1035,7 @@ export class ProcessHealthChecker {
     if (now - this.startTime < 30_000) return;
 
     for (const slot of RUNTIME_SLOT_NUMBERS) {
+      if (isDecommissionedSlot(slot)) continue;
       // Skip controlled or recently completed respawns.
       if (this.isRestartSuppressed(slot, now)) continue;
 
