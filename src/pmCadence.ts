@@ -203,6 +203,16 @@ export function isGrowthDailyWindow(now: Date): boolean {
   return now.getHours() * 60 + now.getMinutes() >= GROWTH_DAILY_HOUR * 60 + GROWTH_DAILY_MINUTE;
 }
 
+function currentDueKeyForTask(taskName: PMCadenceTaskName, now: Date): string {
+  if (taskName === "rtb-split-update") return rtbSplitUpdateDueKey(now);
+  if (taskName === "daily-pm-restart") return dailyPMRestartParts(now).day;
+  if (taskName === "lifecycle-email") return lifecycleEmailParts(now).day;
+  if (taskName === "heartbeat") return heartbeatDueKey(now);
+  if (taskName === "hourly-heartbeat") return hourlyHeartbeatDueKey(now);
+  if (taskName === "growth-daily") return growthDailyDueKey(now);
+  return morningBriefDueKey(now);
+}
+
 function configKey(task: PMCadenceTask, key: string): string {
   return `${task.configPrefix}_${key}`;
 }
@@ -410,13 +420,21 @@ export class PMCadenceScheduler {
     const dueKey = this.currentDueKey(taskName, now);
     const lastDueKey = this.db.getConfig(configKey(task, "last_due_key"));
     if (reason === "boot") {
-      // Never deliver cadence work during restart recovery. Seed the live bucket
-      // so an old persisted key cannot be replayed; preserve the hourly pre-window
-      // marker so a startup before :13 still allows the current hour's run.
+      // Never deliver cadence work during restart recovery. Do not mark a daily
+      // bucket handled before its scheduled window; a regular tick must still be
+      // able to run it when due. Preserve the hourly pre-window marker so a
+      // startup before :13 still allows the current hour's run.
+      const dailyWindowHasStarted =
+        (taskName === "morning-brief" && isMorningBriefWindow(now)) ||
+        (taskName === "growth-daily" && isGrowthDailyWindow(now)) ||
+        (taskName === "lifecycle-email" && isLifecycleEmailWindow(now)) ||
+        (taskName === "daily-pm-restart" && dailyPMRestartParts(now).hour >= 4);
       const seedKey = taskName === "hourly-heartbeat" && !isHourlyHeartbeatWindow(now)
         ? `${dueKey}:pre`
         : dueKey;
-      this.seedCurrentBucket(taskName, reason, seedKey);
+      if (!["morning-brief", "growth-daily", "lifecycle-email", "daily-pm-restart"].includes(taskName) || dailyWindowHasStarted) {
+        this.seedCurrentBucket(taskName, reason, seedKey);
+      }
       return null;
     }
     if (lastDueKey === null && reason !== "manual" && (taskName === "heartbeat" || taskName === "hourly-heartbeat" || taskName === "rtb-split-update")) {
@@ -693,13 +711,7 @@ export class PMCadenceScheduler {
   }
 
   private currentDueKey(taskName: PMCadenceTaskName, now = new Date()): string {
-    if (taskName === "rtb-split-update") return rtbSplitUpdateDueKey(now);
-    if (taskName === "daily-pm-restart") return dailyPMRestartParts(now).day;
-    if (taskName === "lifecycle-email") return lifecycleEmailParts(now).day;
-    if (taskName === "heartbeat") return heartbeatDueKey(now);
-    if (taskName === "hourly-heartbeat") return hourlyHeartbeatDueKey(now);
-    if (taskName === "growth-daily") return growthDailyDueKey(now);
-    return morningBriefDueKey(now);
+    return currentDueKeyForTask(taskName, now);
   }
 
   private isTaskDue(taskName: PMCadenceTaskName, now: Date, lastDueKey: string | null): boolean {
@@ -938,10 +950,17 @@ async function redeliverFenced(
   if (!raw) return false;
   const pending = JSON.parse(raw) as PendingVerify;
   if (pending.retried || pending.inflight || pending.due_key !== dueKey) return false;
+  const bucketIsCurrent = () => pending.due_key === currentDueKeyForTask(taskName, new Date());
+  if (!bucketIsCurrent()) {
+    db.setConfig(pendingKey(taskName), "");
+    db.logEvent(0, "pm_cadence_redeliver_expired", "Stop", null, { task: taskName, due_key: dueKey });
+    return false;
+  }
   // Claim synchronously, before the first await: at most one submission.
   const claimed: PendingVerify = { ...pending, retried: true, inflight: true, session_id: sessionId };
   db.setConfig(pendingKey(taskName), JSON.stringify(claimed));
   const check = () => {
+    if (!bucketIsCurrent()) return { reason: "cadence_bucket_expired", busy: false };
     if (!relay.isPMIdleProven()) return { reason: "pm_idle_not_proven", busy: true };
     if (db.getConfig(CFG_PM_STOP_SESSION) !== sessionId) return { reason: "pm_session_changed", busy: false };
     return null;
@@ -949,7 +968,9 @@ async function redeliverFenced(
   const task = TASKS[taskName];
   const result = await relay.writePMPromptFenced(task.commandDescription, check);
   const releases = pending.zero_effect_releases ?? 0;
-  if (!result.ok && result.zeroEffect && releases < 1) {
+  if (result.reason === "cadence_bucket_expired") {
+    db.setConfig(pendingKey(taskName), "");
+  } else if (!result.ok && result.zeroEffect && releases < 1) {
     // Proven pre-paste, zero-effect refusal: release the claim for one retry.
     db.setConfig(pendingKey(taskName), JSON.stringify({
       ...pending, retried: false, inflight: false, session_id: sessionId, zero_effect_releases: releases + 1,

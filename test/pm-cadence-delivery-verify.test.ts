@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { PMCadenceScheduler, verifyPMCadenceDelivery } from "../src/pmCadence.js";
+import { hourlyHeartbeatDueKey, PMCadenceScheduler, verifyPMCadenceDelivery } from "../src/pmCadence.js";
 import { TmuxRelay } from "../src/relay.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
@@ -170,6 +170,42 @@ test("a non-idle claude pane gets no Enter; the re-send stays available", () =>
     assert.ok(db.events.includes("pm_cadence_redeliver_refused"));
     const pending = JSON.parse(db.getConfig("pm_cadence_hourly_heartbeat_pending_verify")!);
     assert.equal(pending.retried, false);
+  }));
+
+test("expired pending verification after restart is cleared without redelivery", () =>
+  withDir(async (path) => {
+    const db = new FakeMopDb();
+    db.setConfig("pm_cadence_last_stop_session", SESSION);
+    const now = new Date();
+    const injectedAt = new Date(now.getTime() - 60_000);
+    const expiredKey = hourlyHeartbeatDueKey(new Date(now.getTime() - 60 * 60_000));
+    db.setConfig(PENDING_KEY, JSON.stringify({ due_key: expiredKey, injected_at: injectedAt.toISOString(), retried: false, session_id: SESSION }));
+    writeFileSync(path, userRec(new Date(injectedAt.getTime() - 10_000), "earlier") + userRec(injectedAt, "unrelated"));
+    const pane: Pane = { composer: "", buffer: "", commands: [] };
+
+    await verifyPMCadenceDelivery(db as never, fencedRelay(pane, true), { sessionId: SESSION, transcriptPath: path }, later(10_000), 0);
+
+    assert.equal(pane.commands.some((command) => command.startsWith("tmux paste-buffer")), false);
+    assert.equal(enterCount(pane), 0);
+    assert.equal(db.getConfig(PENDING_KEY), "");
+    assert.ok(db.events.includes("pm_cadence_redeliver_expired"));
+  }));
+
+test("current-bucket pending verification remains eligible for fenced redelivery", () =>
+  withDir(async (path) => {
+    const db = new FakeMopDb();
+    db.setConfig("pm_cadence_last_stop_session", SESSION);
+    const now = new Date();
+    const injectedAt = new Date(now.getTime() - 60_000);
+    const dueKey = hourlyHeartbeatDueKey(now);
+    db.setConfig(PENDING_KEY, JSON.stringify({ due_key: dueKey, injected_at: injectedAt.toISOString(), retried: false, session_id: SESSION }));
+    writeFileSync(path, userRec(new Date(injectedAt.getTime() - 10_000), "earlier") + userRec(injectedAt, "unrelated"));
+    const pane: Pane = { composer: "", buffer: "", commands: [] };
+
+    await verifyPMCadenceDelivery(db as never, fencedRelay(pane, true), { sessionId: SESSION, transcriptPath: path }, later(10_000), 0);
+
+    assert.equal(enterCount(pane), 1);
+    assert.ok(db.events.includes("pm_cadence_redelivered"));
   }));
 
 // ─── CTO REVISE of 02aa84e4 (thread 1792122734.658139, ts 1792123850.776859) ───

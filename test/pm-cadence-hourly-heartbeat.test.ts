@@ -135,3 +135,35 @@ test("startup at or after :13 seeds the current hour and fires next hour", async
   await withClock(new Date(2026, 8, 29, 11, 13, 0), () => cadence.tick("scheduled"));
   assert.equal(hourly(), 1);
 });
+
+test("boot before the morning-brief window leaves today's key for the 10:00 regular tick", async () => {
+  const db = new FakeMopDb();
+  const relay = new FakeRelay();
+  const cadence = new PMCadenceScheduler(db as never, relay as never);
+  const brief = () => relay.injections.filter((m) => m.includes("Skill(morning-brief)")).length;
+
+  await withClock(new Date(2026, 10, 14, 9, 59, 0), () => cadence.tick("boot"));
+  assert.equal(brief(), 0);
+  assert.equal(db.getConfig("pm_cadence_morning_brief_last_due_key"), null);
+
+  await withClock(new Date(2026, 10, 14, 10, 0, 0), () => cadence.tick("scheduled"));
+  assert.equal(brief(), 1);
+});
+
+test("boot after the morning-brief window never delivers and suppresses only until tomorrow's window", async () => {
+  const db = new FakeMopDb();
+  const relay = new FakeRelay();
+  const cadence = new PMCadenceScheduler(db as never, relay as never);
+  const brief = () => relay.injections.filter((m) => m.includes("Skill(morning-brief)")).length;
+
+  await withClock(new Date(2026, 10, 14, 10, 1, 0), () => cadence.tick("boot"));
+  assert.equal(brief(), 0, "boot must never inject cadence work");
+  assert.equal(db.getConfig("pm_cadence_morning_brief_last_due_key"), "2026-11-14");
+
+  // The next regular tick sees today's bucket as handled; the next daily window
+  // (2026-11-15 at 10:00 local) is the next eligible regular delivery.
+  await withClock(new Date(2026, 10, 14, 10, 2, 0), () => cadence.tick("scheduled"));
+  assert.equal(brief(), 0);
+  await withClock(new Date(2026, 10, 15, 10, 0, 0), () => cadence.tick("scheduled"));
+  assert.equal(brief(), 1);
+});
