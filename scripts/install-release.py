@@ -1585,11 +1585,11 @@ def retire_shared_assets(
     }
 
 
-# CTO 1793943470.924319: only these decommissioned install mappings may
-# have an absent old preimage. Never recreate or remove a reappearing file.
+# Decommissioned numbered-slot mappings may have an absent old preimage.
+# Never recreate or remove a reappearing file; present targets remain protected.
 RETIRED_ABSENT_TARGETS = frozenset(
     str(Path.home() / "Downloads/projects" / f"heydonna-app-{slot}" / suffix)
-    for slot in (3006, 3008)
+    for slot in range(3001, 3009)
     for suffix in (".claude/skills/respawn/SKILL.md", ".claude/skills/respawn/scripts/respawn.sh")
 )
 
@@ -1642,6 +1642,13 @@ def activate(
         retired_absent = (baseline.keys() - candidate_targets) & RETIRED_ABSENT_TARGETS
         if baseline.keys() - candidate_targets - RETIRED_ABSENT_TARGETS:
             raise InstallerError("REFUSE: candidate removes unapproved shared targets")
+        for name in baseline.keys() & candidate_targets & RETIRED_ABSENT_TARGETS:
+            try:
+                _shared_target_path(name, shared_target_root).lstat()
+            except FileNotFoundError:
+                retired_absent.add(name)
+            except OSError as exc:
+                raise InstallerError(f"REFUSE: retired target absence unknown: {name}: {exc}") from exc
         verify_retired_absent()
         # Candidate equality is not evidence of the old preimage, EXCEPT while
         # the old release's service is running and owned: then the live bytes
@@ -1670,6 +1677,8 @@ def activate(
             old_preimages[name] = expected
         for entry in _load_shared_manifest(release_dir)["entries"]:
             for name in _shared_entry_targets(entry):
+                if name in retired_absent:
+                    continue
                 prior = baseline.get(name)
                 if prior is None:
                     # A shared target added on main after the running release, already

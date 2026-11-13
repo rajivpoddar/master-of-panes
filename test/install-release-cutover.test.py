@@ -286,6 +286,26 @@ class StoppedCutoverTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest))
         return name, self.targets / name.lstrip("/")
 
+    def test_retained_retired_mapping_absent_is_not_recreated(self):
+        name, target = self.add_retired_old_target()
+        old_manifest = json.loads((self.old / m.SHARED_ASSET_MANIFEST).read_text())
+        entry = next(e for e in old_manifest["entries"] if e["canonical_target"] == name)
+        source = self.new / "scripts/pm/shared-assets" / entry["source_path"]
+        source.parent.mkdir(parents=True)
+        source.write_text("old client\n")
+        source.chmod(0o755)
+        path = self.new / m.SHARED_ASSET_MANIFEST
+        manifest = json.loads(path.read_text())
+        manifest["entries"].append(entry)
+        manifest["entries"].sort(key=lambda item: item["source_path"])
+        manifest["inventory"]["selected_count"] += 1
+        path.write_text(json.dumps(manifest))
+        self.set_inventory()
+        self.assertEqual(self.activate(), 0)
+        self.assertFalse(target.exists())
+        plan = json.loads((self.root / "rollback/CUTOVER.json").read_text())
+        self.assertEqual(plan["retired_absent"], [name])
+
     def test_retired_absence_is_captured_and_preserved(self):
         name, target = self.add_retired_old_target()
         self.set_inventory()
