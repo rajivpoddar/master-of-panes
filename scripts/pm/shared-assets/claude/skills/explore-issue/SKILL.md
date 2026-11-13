@@ -264,8 +264,16 @@ PHASE 1 — Code Exploration:
   f. Document your findings: root cause, affected files, call chain
 
 PHASE 2 — Codex Architecture Review (causal/FIX work only):
-  a. Write the review prompt to a temp file:
-     cat > /tmp/codex-explore-prompt.txt << 'PROMPT_EOF'
+  Derive source-bound file paths FIRST (replace <CHANNEL> and <THREAD_TS> with the
+  actual values from Phase 1; THREAD_SAFE replaces the dot with an underscore):
+     _CG_SAFE="<CHANNEL>_$(printf '%s' '<THREAD_TS>' | tr '.' '_')"
+     _PROMPT_PATH="/tmp/codex-explore-prompt-${_CG_SAFE}.txt"
+     _OUTPUT_PATH="/tmp/codex-explore-output-${_CG_SAFE}.txt"
+  These paths are unique to this source; concurrent investigations for different
+  sources cannot overwrite them.
+
+  a. Write the review prompt to the source-bound prompt path:
+     cat > "$_PROMPT_PATH" << 'PROMPT_EOF'
      Review this root cause diagnosis for a bug in HeyDonna (court reporter transcript editor).
      Focus on production soundness: simplicity, integration fit, and hidden complexity.
      REPORTED SYMPTOM: [user's exact description from Phase 1]
@@ -280,28 +288,20 @@ PHASE 2 — Codex Architecture Review (causal/FIX work only):
      Verdict: CONFIRMED / NEEDS_DEEPER_INVESTIGATION / MISDIAGNOSED
      6. EFFORT ESTIMATE: classify S / M / L / XL. Output: `EFFORT:<S|M|L|XL>` on its own line.
      PROMPT_EOF
-  b. Run Codex CLI with 15m timeout:
-     timeout 900 bash -c 'cat /tmp/codex-explore-prompt.txt | codex exec --skip-git-repo-check --sandbox read-only --full-auto 2>/dev/null' > /tmp/codex-explore-output.txt
-  c. Read the output: cat /tmp/codex-explore-output.txt
-  c2. Write your verdict DIRECTLY to the per-source file — do NOT copy or pipe from
-      /tmp/codex-explore-output.txt. That file is a shared global path; a concurrent
-      investigation can overwrite it between step (b) and this step, causing the wrong
-      verdict to be recorded for this source. Instead, write your own structured verdict
-      immediately from your reading of the Codex output in step (c):
-      a. Resolve the verdict path in a Bash call:
-           source /Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh
-           explore_issue_verdict_path "<CHANNEL>" "<THREAD_TS>"
-         (Replace <CHANNEL> and <THREAD_TS> with the actual values from Phase 1.)
-      b. Use the Write tool to write your verdict to that exact path. The content must
-         be your own assessment for THIS investigation, structured as:
-           Verdict: <CONFIRMED|NEEDS_DEEPER_INVESTIGATION|MISDIAGNOSED|CANNOT_REPRODUCE>
-           Cause: <BUG|HYPOTHESIS|UNKNOWN|MISCONFIG|DESIGN> - <one-line reason>
-           [plus supporting context from your assessment below]
-         Do not pipe, redirect, copy, or echo from /tmp/codex-explore-output.txt or any
-         shared temp file. The Write tool writes an atomic file from your own in-context
-         text, preventing cross-session contamination.
-      The pre-issue-create gate reads from this per-source path; the global Codex output
-      file is NOT read by the gate.
+  b. Run Codex CLI with 15m timeout, writing to the source-bound output path:
+     timeout 900 bash -c 'cat '"$_PROMPT_PATH"' | codex exec --skip-git-repo-check --sandbox read-only --full-auto 2>/dev/null' > "$_OUTPUT_PATH"
+  c. Read the output: cat "$_OUTPUT_PATH"
+  c2. Copy the actual Codex output to the per-source verdict file. Because both
+      $_OUTPUT_PATH and the verdict path are source-bound, this cp is safe from
+      concurrent-session contamination:
+        source /Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh
+        _VERDICT_PATH="$(explore_issue_verdict_path "<CHANNEL>" "<THREAD_TS>")"
+        mkdir -p "$(dirname "$_VERDICT_PATH")"
+        cp "$_OUTPUT_PATH" "$_VERDICT_PATH"
+      (Replace <CHANNEL> and <THREAD_TS> with the actual values from Phase 1.)
+      Do NOT use /tmp/codex-explore-output.txt or /tmp/codex-explore-prompt.txt;
+      those are shared global paths from before this fix and must not be used here.
+      The pre-issue-create gate reads from $_VERDICT_PATH; it is not the global path.
   d. Parse the verdict. [HIGH] ONE Codex pass only (Rajiv 2026-09-28 20:58 IST, thread `1790609092.596809`, verbatim: *"limit the codex arch review to 1 pass in explore issue agent"*); never re-run the reviewer on a revised body; residual concerns go under `## Open questions`:
      - If CONFIRMED: proceed to Phase 3 with the causal claim marked CONFIRMED.
      - If NEEDS_DEEPER_INVESTIGATION and the reported observation is CONFIRMED:

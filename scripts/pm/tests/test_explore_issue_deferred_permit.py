@@ -456,60 +456,139 @@ def test_finalizer_passes_when_source_parse_fails_and_no_pending(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Verdict contamination prevention
+# Source-bound path derivation and verdict isolation (SKILL.md Phase 2)
 # ---------------------------------------------------------------------------
 
-def test_verdict_write_tool_path_does_not_read_global_codex_output(tmp_path):
-    """SKILL.md step c2 must write directly; reading /tmp/codex-explore-output.txt
-    after a concurrent session has overwritten it produces the wrong verdict.
+def _cg_safe(channel: str, thread: str) -> str:
+    """Reproduce the _CG_SAFE derivation from SKILL.md Phase 2 header."""
+    return f"{channel}_{thread.replace('.', '_')}"
 
-    This test proves that writing the verdict directly to the per-source path
-    (simulating Write tool call with agent's own text) is isolated from the global
-    file's content, even if the global file later changes.
+
+def _prompt_path(channel: str, thread: str) -> Path:
+    return Path(f"/tmp/codex-explore-prompt-{_cg_safe(channel, thread)}.txt")
+
+
+def _output_path(channel: str, thread: str) -> Path:
+    return Path(f"/tmp/codex-explore-output-{_cg_safe(channel, thread)}.txt")
+
+
+def test_source_bound_prompt_path_differs_from_global(tmp_path):
+    """SKILL.md Phase 2 header must derive a prompt path that is NOT the global shared one."""
+    prompt = _prompt_path(CHANNEL, THREAD)
+    assert str(prompt) != "/tmp/codex-explore-prompt.txt", \
+        "source-bound prompt path must differ from the shared global path"
+    assert CHANNEL in str(prompt), "prompt path must incorporate the channel"
+    assert THREAD.replace(".", "_") in str(prompt), "prompt path must incorporate the thread ts"
+
+
+def test_source_bound_output_path_differs_from_global(tmp_path):
+    """SKILL.md step b must write Codex output to a source-bound path, not the global one."""
+    output = _output_path(CHANNEL, THREAD)
+    assert str(output) != "/tmp/codex-explore-output.txt", \
+        "source-bound output path must differ from the shared global path"
+    assert CHANNEL in str(output), "output path must incorporate the channel"
+    assert THREAD.replace(".", "_") in str(output), "output path must incorporate the thread ts"
+
+
+def test_different_sources_have_different_prompt_and_output_paths(tmp_path):
+    """Two concurrent investigations must use completely separate prompt and output files."""
+    channel_a, thread_a = CHANNEL, THREAD
+    channel_b, thread_b = "C0BBBBBBBBBB", "1700000000.000001"
+
+    assert _prompt_path(channel_a, thread_a) != _prompt_path(channel_b, thread_b), \
+        "concurrent sessions must have different prompt file paths"
+    assert _output_path(channel_a, thread_a) != _output_path(channel_b, thread_b), \
+        "concurrent sessions must have different output file paths"
+
+
+def test_global_codex_output_overwrite_does_not_contaminate_source_bound_output(tmp_path):
+    """Overwriting /tmp/codex-explore-output.txt must not affect the source-bound path.
+
+    Simulates the contamination race: session B overwrites the global shared file
+    while session A's investigation has already written to its source-bound path.
+    Session A's cp (step c2) reads from the source-bound path, not the global one.
     """
-    env = _env(tmp_path)
-    r = _run_helper(env, f'explore_issue_verdict_path "{CHANNEL}" "{THREAD}"')
-    verdict_path = r.stdout.strip()
-    Path(verdict_path).parent.mkdir(parents=True, exist_ok=True)
+    output_a = _output_path(CHANNEL, THREAD)
+    # Session A writes its Codex output to its source-bound path.
+    output_a.write_text("Verdict: CONFIRMED\nCause: BUG - null-deref in lease check\n")
 
-    # Agent writes its own verdict directly to the per-source path (Write tool pattern).
-    agent_verdict = "Verdict: CONFIRMED\nCause: BUG - race in assignment_epoch compare\n"
-    Path(verdict_path).write_text(agent_verdict)
+    # Session B (concurrent) overwrites the global shared file.
+    Path("/tmp/codex-explore-output.txt").write_text(
+        "Verdict: NEEDS_DEEPER_INVESTIGATION\nCause: HYPOTHESIS - timing unclear\n"
+    )
 
-    # Simulate concurrent session overwriting the global file (the contamination vector).
-    global_path = Path("/tmp/codex-explore-output.txt")
-    global_path.write_text("Verdict: NEEDS_DEEPER_INVESTIGATION\nCause: HYPOTHESIS - unclear\n")
-
-    # Gate reads the per-source path, NOT the global file → content is agent's own verdict.
-    content = Path(verdict_path).read_text()
-    assert "CONFIRMED" in content, "per-source verdict must contain agent's own CONFIRMED verdict"
-    assert "NEEDS_DEEPER" not in content, \
-        "concurrent session's global output must NOT contaminate per-source verdict"
+    # Session A reads from its own source-bound path → uncontaminated.
+    content_a = output_a.read_text()
+    assert "CONFIRMED" in content_a, \
+        "session A's source-bound output must contain CONFIRMED"
+    assert "NEEDS_DEEPER" not in content_a, \
+        "session B's global overwrite must NOT contaminate session A's source-bound file"
 
 
-def test_concurrent_sessions_do_not_cross_contaminate_verdicts(tmp_path):
-    """Two investigations with different sources must each have their own verdict file."""
+def test_concurrent_codex_runs_do_not_cross_contaminate_via_source_bound_paths(tmp_path):
+    """Full concurrent isolation: each session's prompt+output+verdict paths are independent."""
     env = _env(tmp_path)
 
     channel_a, thread_a = CHANNEL, THREAD
     channel_b, thread_b = "C0BBBBBBBBBB", "1700000000.000001"
 
+    # Derive source-bound paths for both sessions.
+    output_a = _output_path(channel_a, thread_a)
+    output_b = _output_path(channel_b, thread_b)
+    assert output_a != output_b, "output paths must differ"
+
+    # Session A's Codex writes CONFIRMED to its path.
+    output_a.write_text("Verdict: CONFIRMED\nCause: BUG - epoch not incremented\n")
+    # Session B's Codex writes NEEDS_DEEPER to its path.
+    output_b.write_text("Verdict: NEEDS_DEEPER_INVESTIGATION\nCause: HYPOTHESIS\n")
+
+    # Get verdict paths (source-bound via explore_issue_verdict_path).
     r_a = _run_helper(env, f'explore_issue_verdict_path "{channel_a}" "{thread_a}"')
     r_b = _run_helper(env, f'explore_issue_verdict_path "{channel_b}" "{thread_b}"')
-    path_a = r_a.stdout.strip()
-    path_b = r_b.stdout.strip()
-    assert path_a != path_b, "different sources must have different verdict file paths"
+    verdict_a = r_a.stdout.strip()
+    verdict_b = r_b.stdout.strip()
+    assert verdict_a != verdict_b, "verdict paths must differ for different sources"
 
-    # Session A writes CONFIRMED; session B writes NEEDS_DEEPER.
-    Path(path_a).parent.mkdir(parents=True, exist_ok=True)
-    Path(path_b).parent.mkdir(parents=True, exist_ok=True)
-    Path(path_a).write_text("Verdict: CONFIRMED\nCause: BUG - null dereference\n")
-    Path(path_b).write_text("Verdict: NEEDS_DEEPER_INVESTIGATION\nCause: UNKNOWN\n")
+    # Both paths are within the per-source verdict dir (not /tmp/codex-explore-output.txt).
+    assert str(output_a) != verdict_a, \
+        "source-bound output path and verdict path are different; cp bridges them"
+    assert str(output_b) != verdict_b
 
-    # Each path contains only its own session's verdict.
-    assert "CONFIRMED" in Path(path_a).read_text(), "session A verdict must be CONFIRMED"
-    assert "NEEDS_DEEPER" not in Path(path_a).read_text(), \
-        "session B's verdict must NOT appear in session A's file"
-    assert "NEEDS_DEEPER" in Path(path_b).read_text(), "session B verdict must be NEEDS_DEEPER"
-    assert "CONFIRMED" not in Path(path_b).read_text(), \
-        "session A's verdict must NOT appear in session B's file"
+    # cp from source-bound output to verdict path (SKILL.md step c2).
+    Path(verdict_a).parent.mkdir(parents=True, exist_ok=True)
+    Path(verdict_b).parent.mkdir(parents=True, exist_ok=True)
+    import shutil
+    shutil.copy(str(output_a), verdict_a)
+    shutil.copy(str(output_b), verdict_b)
+
+    # Each verdict contains only its own session's Codex output.
+    assert "CONFIRMED" in Path(verdict_a).read_text(), "verdict A must be CONFIRMED"
+    assert "NEEDS_DEEPER" not in Path(verdict_a).read_text(), \
+        "session B must not contaminate verdict A"
+    assert "NEEDS_DEEPER" in Path(verdict_b).read_text(), "verdict B must be NEEDS_DEEPER"
+    assert "CONFIRMED" not in Path(verdict_b).read_text(), \
+        "session A must not contaminate verdict B"
+
+
+def test_verdict_cp_from_source_bound_output_matches_codex_content_exactly(tmp_path):
+    """SKILL.md step c2 cp must preserve the exact Codex output — no agent substitution."""
+    env = _env(tmp_path)
+    output = _output_path(CHANNEL, THREAD)
+    # Simulate Codex writing a specific verdict to the source-bound output.
+    codex_content = (
+        "Verdict: CONFIRMED\n"
+        "Cause: BUG - assignment_epoch not incremented on decommission\n"
+        "EFFORT:S\n"
+    )
+    output.write_text(codex_content)
+
+    # Get verdict path and cp (SKILL.md step c2).
+    r = _run_helper(env, f'explore_issue_verdict_path "{CHANNEL}" "{THREAD}"')
+    verdict_path = r.stdout.strip()
+    Path(verdict_path).parent.mkdir(parents=True, exist_ok=True)
+    import shutil
+    shutil.copy(str(output), verdict_path)
+
+    # Verdict file must contain the EXACT Codex output — not agent-rewritten text.
+    assert Path(verdict_path).read_text() == codex_content, \
+        "verdict file must be byte-identical to Codex output (no agent substitution)"
