@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "a32bf71ed98b61cb53d1064be0ee444d22b2a445eb674eb09a7c9bbc8b84a935",
+      "sha256": "4b794dd11e40ab89f08ff9fc89229676b615ae4ab4bce9b4bacb2f9e28fdb3a5",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "a62aff569dd0255359a2e9bf1c69c9ad4ac3b4fa330c5e3c959db32f4fdd9bc6",
+      "sha256": "e00cfe2f8258160d68d0bd917637f3e726a1ccd8dff09a9e58acf87385a91645",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -330,7 +330,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "fa5af71a002fdb277799cfb52cdf068bd3387a59706bf070004f157c0dfca68d",
+      "sha256": "f6b81d12d753e5a21cba1ec94f85635f7fd78d8a51d92e9eff1743f9549e7677",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -1016,7 +1016,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "4bf6c37a912fe393373b1548800b19acf796d96648780e98481b78ba4e669251",
+      "sha256": "3f11a31113fd78a6bdb81f973e939758e770176ccb1432ce6c6bddf28372175c",
       "source_path": "claude/skills/codex-review-companion/SKILL.md"
     },
     {
@@ -1025,7 +1025,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-codex-review-companion",
-      "sha256": "28665f99a0e9dfdcfaa8f3b20f3ff7eec9491d6de1e9f61dd3965d1cf29b14d6",
+      "sha256": "66f4393226973c3d70d4c1d35ceeff0d544cb4dbc8ead6b3b172236a2105b07c",
       "source_path": "claude/skills/codex-review-companion/codex-review-companion.mjs"
     },
     {
@@ -1118,7 +1118,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "f0e983205df1db6261fa5268924101a8497ce5fcdaf20b71e9b9f2c292b301e8",
+      "sha256": "dcf0cb15e01f2c52ec345dd22b9be61c5c2e1289b3a45c2dd4e48bafe0fab118",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {

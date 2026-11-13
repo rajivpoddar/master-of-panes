@@ -242,7 +242,7 @@ node ~/.claude/skills/codex-review-companion/codex-review-companion.mjs \
   --review-type plan --issue <ISSUE> --branch <branch-name> \
   --plan-file docs/plans/issue-<ISSUE>-*.md \
   --model gpt-6-luna \
-  --effort high \
+  --effort medium \
   --output-format json --verbose > /tmp/<ISSUE>-plan-review.json
 
 # Post-PR plan-review:
@@ -250,7 +250,7 @@ node ~/.claude/skills/codex-review-companion/codex-review-companion.mjs \
   --review-type plan --issue <ISSUE> --pr <PR> \
   --plan-file docs/plans/issue-<ISSUE>-*.md \
   --model gpt-6-luna \
-  --effort high \
+  --effort medium \
   --output-format json --verbose > /tmp/<ISSUE>-plan-review.json
 
 # Re-review after plan changes (required after any prior plan verdict):
@@ -259,7 +259,7 @@ node ~/.claude/skills/codex-review-companion/codex-review-companion.mjs \
   --plan-file docs/plans/issue-<ISSUE>-*.md \
   --rework-items "<stable blocker IDs and bounded changed scope>" \
   --previous-head <LAST_REVIEWED_HEAD> \
-  --model gpt-6-luna --effort high \
+  --model gpt-6-luna --effort medium \
   --output-format json --verbose > /tmp/<ISSUE>-plan-review.json
 ```
 

@@ -226,7 +226,7 @@ node ~/.claude/skills/codex-review-companion/codex-review-companion.mjs \
   --review-type code --pr <PR> --issue <N> \
   --previous-head <prior-review-head-sha> \
   --rework-items "delta since prior head" \
-  --model gpt-6.1-terra --effort high --output-format json --verbose
+  --model gpt-6.1-terra --effort medium --output-format json --verbose
 ```
 
 This starts a GENUINE new Codex invocation and the companion writes a fresh

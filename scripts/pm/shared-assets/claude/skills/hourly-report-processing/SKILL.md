@@ -219,6 +219,16 @@ for s in 0 proxies; do for w in $(tmux list-windows -t $s -F '#{window_id}:#{win
 ```
 Never close a window whose pane is alive (`pane_dead=0`), even when the heartbeat marks it STALE. Classify its work through Step 3b; silence is not death and never authorizes kill/relaunch. Even for an exited pane, reconcile live children/remote jobs, retained results and UNKNOWN custody before ownership-safe cleanup. The Step 4 reply includes `Proxy windows: closed N dead` and Step 3b progress/handoff dispositions.
 
+## Step 3c-3: Every proxy running for more than an hour (Rajiv 2026-11-13, C0ALZJHGE49 thread 1794548660.126669, ts 1794549737.295419)
+*"Update the processing skill to check all proxies running for more than an hour."*
+Each hourly, list EVERY live proxy (`ListAgents` plus live `px-*` tmux panes with `pane_dead=0`) whose current run has been going for more than 60 minutes. Use the run's own launch time (proxy-agent out/jsonl timestamp, or the pm-ops `proxy_run` row), never the report badge alone.
+For each one, record in the Step 4 reply: name · issue/PR · model · elapsed · S131 stage start/bound · last substantive progress (head pushed, proof receipt, review marker), with its time · current blocker · next checkpoint. Classify each:
+- *progressing:* new evidence within the last 60 min. Send one tailored checkpoint naming the next deliverable.
+- *waiting:* a named external wait (CI run, CTO decision, merge, box lease). Record the wait and its wake; the S131 clock pauses for external waits.
+- *stalled:* no new evidence for 60 min or more and no named wait. Ask for the exact state in the same turn; if it's still stalled at the next check, apply S131 (push WIP, hand-off, transfer).
+- *over bound:* past its S131 3h bound. Push WIP, hand off and transfer the same turn (Luna→Terra→Sol; after Sol, one CTO decision). No age-only kill.
+Report rows for exited or fenced runs as `ended`, with their PROXY_STOP result, not as live. Stale badges in the heartbeat report don't prove a run is alive or dead; check the pane and the socket.
+
 ## Step 3d: Social digest cycle receipts (CTO 2026-11-06, C0ALZJHGE49 thread 1793951140.445569, ts 1793954568.068649)
 Every scheduled `donna-daily-social-digest` cycle (IST 00:30, 03:30 … 21:30) posts a receipt in C0C7U35LBKR showing attempts / confirmed / UNKNOWN / reason, even when it sends 0. Each hourly, check the cycles due in the last 3h. If a cycle has no receipt 45 min after its slot, flag it `MISSING` in the Step 4 reply (or `UNKNOWN` if a partial receipt exists) and report it in the CP Repairs thread. Missing proof is not proof that the slot never ran, and it is never a replay trigger. Add no new timer or registry.
 

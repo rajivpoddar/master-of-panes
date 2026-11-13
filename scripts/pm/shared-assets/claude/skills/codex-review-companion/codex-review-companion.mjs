@@ -59,7 +59,7 @@ import process from "node:process";
 const HOME = os.homedir();
 const REVIEW_TYPES = new Set(["arch", "plan", "code", "qa"]);
 export const DEFAULT_MODEL = "gpt-6.1-terra";
-export const DEFAULT_REVIEW_EFFORT = "high";
+export const DEFAULT_REVIEW_EFFORT = "medium";
 const DIFF_TRUNCATE_AT = 800_000; // chars
 const DEFAULT_CODEX_BIN = "/opt/homebrew/bin/codex";
 const CODEX_TIMEOUT_MS = parseInt(
