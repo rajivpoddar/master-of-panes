@@ -34,14 +34,15 @@ def test_proxy_report_reads_only_pm_obligations(tmp_path):
     db = tmp_path / 'ops.db'
     with sqlite3.connect(db) as conn:
         conn.execute('CREATE TABLE obligations (kind TEXT, target_id TEXT, status TEXT, issue INTEGER, pr INTEGER, evidence_json TEXT, resolved_at TEXT)')
-        conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-first', 'open', 12345, None, json.dumps({'model': 'gpt-6-luna', 'started_at': '2026-11-13T10:48:00Z'}), None))
+        conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-first', 'open', 12345, None, json.dumps({'model': 'gpt-6-luna', 'token': 'first', 'started_at': '2026-11-13T10:48:00Z'}), None))
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-missing', 'open', None, None, '{}', None))
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-done', 'resolved', None, None, json.dumps({'rc': 1, 'result': 'done'}), '2026-11-13T11:45:00Z'))
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-terminal', 'open', None, 54321, json.dumps({'rc': 0}), None))
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-ended', 'open', None, None, json.dumps({'finished_at': '2026-11-13T11:59:00Z'}), None))
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('proxy_run', 'px-unbound-98765', 'open', None, None, json.dumps({'model': 'gpt-6-luna', 'started_at': '2026-11-13T10:48:00Z'}), None))
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('other', 'px-ignore', 'open', None, None, '{}', None))
-    doc = module._read_proxies(now, db, liveness={'px-first': [72], 'px-unbound-98765': [12]})
+    doc = module._read_proxies(now, db, liveness={'px-first': [(11, 72)], 'px-unbound-98765': [(12, 12)]},
+                               binding=lambda name, token, started: name == 'px-first' and token == 'first')
     text = '\n'.join(module.proxies_block(doc))
     assert 'px-first · gpt-6-luna · running 1h12m · #12345' in text
     assert 'px-missing · ? · ? · elapsed ? · ?' in text
@@ -50,6 +51,38 @@ def test_proxy_report_reads_only_pm_obligations(tmp_path):
     assert '1 live' in text and '2 liveness ?' in text
     assert all(name not in text for name in ('px-ignore', 'px-done', 'px-terminal', 'px-ended'))
     assert 'finished' not in text
+
+
+def test_proxy_process_identity_requires_unique_token_and_pid(tmp_path):
+    import json
+    import sqlite3
+    now = datetime(2026, 11, 13, 12, 0, tzinfo=timezone.utc)
+    db = tmp_path / 'ops.db'
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE obligations (kind TEXT, target_id TEXT, status TEXT, issue INTEGER, pr INTEGER, evidence_json TEXT)')
+        for name, token, started in [('px-reused', 'a', '2026-11-13T10:48:00Z'),
+                                     ('px-reused', 'b', '2026-11-13T10:50:00Z'),
+                                     ('px-unique', 'c', '2026-11-13T10:50:00Z'),
+                                     ('px-unverified', 'd', '2026-11-13T10:50:00Z')]:
+            conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?)',
+                         ('proxy_run', name, 'open', None, None, json.dumps({'token': token, 'started_at': started})))
+    doc = module._read_proxies(now, db, liveness={'px-reused': [(20, 70)], 'px-unique': [(21, 70)], 'px-unverified': [(22, 70)]},
+                               binding=lambda name, token, started: token in {'a', 'b', 'c'})
+    assert [r['state'] for r in doc['rows']] == ['uncertain', 'uncertain', 'running', 'uncertain']
+
+
+def test_proxy_binding_requires_matching_active_lock_and_manifest(tmp_path, monkeypatch):
+    import json
+    now = datetime(2026, 11, 13, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    base = tmp_path / '.local/state/proxy-agent-runs/px-task'
+    (base / 'active').mkdir(parents=True)
+    (base / 'active/token').write_text('token-a')
+    (base / 'manifest.json').write_text(json.dumps({'name': 'px-task', 'token': 'token-a', 'started_at': now.isoformat()}))
+    assert module._proxy_run_binding('px-task', 'token-a', now)
+    assert not module._proxy_run_binding('px-task', 'token-b', now)
+    (base / 'manifest.json').write_text(json.dumps({'name': 'px-task', 'token': 'token-a', 'started_at': now.isoformat(), 'rc': 0}))
+    assert not module._proxy_run_binding('px-task', 'token-a', now)
 
 
 def test_display_metadata_uses_bound_stream_timestamp_and_prompt(tmp_path, monkeypatch):

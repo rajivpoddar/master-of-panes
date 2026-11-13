@@ -1731,7 +1731,7 @@ def proxy_work_history(rows: list[dict], now: datetime, path: Path = PM_OPS_DB) 
         return  # Unavailable metadata stays UNKNOWN; never substitute process age.
 
 
-def _proxy_live_processes() -> dict[str, list[int]]:
+def _proxy_live_processes() -> dict[str, list[tuple[int, int]]]:
     """Cross-check named Claude processes against live PID sockets, without reading logs."""
     try:
         result = subprocess.run(['ps', '-ww', '-axo', 'pid,etime,command'],
@@ -1748,7 +1748,7 @@ def _proxy_live_processes() -> dict[str, list[int]]:
                 if Path(executable).name != 'claude' or len(names) != 1 or not (Path('/tmp/cc-socks') / (pid + '.sock')).is_socket():
                     continue
                 age = _elapsed_minutes(elapsed)
-                live.setdefault(names[0], []).append(age)
+                live.setdefault(names[0], []).append((int(pid), age))
             except (ValueError, IndexError, OSError):
                 continue
         return live
@@ -1756,7 +1756,22 @@ def _proxy_live_processes() -> dict[str, list[int]]:
         return {}
 
 
-def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None = None) -> dict | None:
+def _proxy_run_binding(name: str, token: object, started: datetime | None) -> bool:
+    """Require the ledger run to own the matching active lock and manifest."""
+    if not re.fullmatch(r'px-[\w.-]+', name) or not isinstance(token, str) or not token or started is None:
+        return False
+    base = Path.home() / '.local/state/proxy-agent-runs' / name
+    try:
+        lock_token = (base / 'active' / 'token').read_text()
+        manifest = json.loads((base / 'manifest.json').read_text())
+        return (isinstance(manifest, dict) and lock_token == token and manifest.get('token') == token
+                and manifest.get('name') == name and _parse_ts(manifest.get('started_at')) == started
+                and 'finished_at' not in manifest and 'rc' not in manifest)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None = None, binding=None) -> dict | None:
     """Read proxy runs from the PM ledger; socket/process data is only a cross-check."""
     path = path or PM_OPS_DB
     try:
@@ -1767,7 +1782,9 @@ def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None
     except (OSError, sqlite3.Error):
         return None
     rows = []
+    candidates_by_row = []
     liveness = _proxy_live_processes() if liveness is None else liveness
+    binding = binding or _proxy_run_binding
     for record in records:
         try:
             evidence = json.loads(record['evidence_json'] or '{}')
@@ -1786,13 +1803,22 @@ def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None
         started = _parse_ts(evidence.get('started_at')) if isinstance(evidence.get('started_at'), str) else None
         minutes = int((now - started).total_seconds() // 60) if started and started <= now else None
         refs = [str(value) for value in (record['issue'], record['pr']) if value is not None and str(value).isdigit()]
-        ages = liveness.get(name, [])
-        # A name alone can be reused. Bind its unique socket process to this
-        # ledger launch time, allowing startup and elapsed-time rounding.
-        confirmed = minutes is not None and len(ages) == 1 and -1 <= minutes - ages[0] <= 3
-        rows.append({'name': name, 'state': 'running' if confirmed else 'uncertain', 'model': model,
+        candidates = []
+        if minutes is not None and binding(name, evidence.get('token'), started):
+            candidates = [pid for pid, age in liveness.get(name, []) if -1 <= minutes - age <= 3]
+        candidates_by_row.append(candidates)
+        rows.append({'name': name, 'state': 'uncertain', 'model': model,
                      'runtime_minutes': minutes, 'model_source': 'model missing in PM ledger',
                      'display_refs': list(dict.fromkeys(refs))})
+    # A PID may certify one and only one row; duplicate tokens/rows and shared
+    # candidate processes are ambiguous, even when each row has one candidate.
+    claims = {}
+    for candidates in candidates_by_row:
+        for pid in set(candidates):
+            claims[pid] = claims.get(pid, 0) + 1
+    for row, candidates in zip(rows, candidates_by_row):
+        if len(candidates) == 1 and claims[candidates[0]] == 1:
+            row['state'] = 'running'
     return {'rows': rows, 'completions': [], 'truncated': False}
 
 
