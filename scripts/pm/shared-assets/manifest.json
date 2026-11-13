@@ -137,12 +137,10 @@
     },
     {
       "canonical_target": "/Users/rajiv/.claude/hooks/explore-issue-permit-consume-gate.sh",
-      "dependencies": [
-        "/Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh"
-      ],
-      "dependency_status": "open",
+      "dependencies": [],
+      "dependency_status": "closed",
       "mode": 493,
-      "ownership_class": "shared-pm-hooks",
+      "ownership_class": "shared-claude-issue-create-audit",
       "sha256": "d13a8b9713b2c10bb38e55f8bf51ce5ccd56b030a902ee9198ccd4d9f9cd6f59",
       "source_path": "claude/hooks/explore-issue-permit-consume-gate.sh"
     },
