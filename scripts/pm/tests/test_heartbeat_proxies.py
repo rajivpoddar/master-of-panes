@@ -43,13 +43,14 @@ def test_proxy_report_reads_only_pm_obligations(tmp_path):
         conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?, ?)', ('other', 'px-ignore', 'open', None, None, '{}', None))
     doc = module._read_proxies(now, db, liveness={'px-first': [(11, 72)], 'px-unbound-98765': [(12, 12)]},
                                binding=lambda name, token, started: name == 'px-first' and token == 'first',
-                               panes={'px-first', 'px-missing', 'px-unbound-98765'})
+                               panes={'px-first': {10}, 'px-missing': {13}, 'px-unbound-98765': {14}},
+                               ancestry={11: 10, 10: 1, 12: 14, 14: 1}, pid_binding=lambda pid, token: True)
     text = '\n'.join(module.proxies_block(doc))
     assert 'px-first · gpt-6-luna · running 1h12m · #12345' in text
-    assert 'px-missing' not in text
+    assert 'px-missing' in text
     assert 'px-unbound-98765 · gpt-6-luna · ? · elapsed 1h12m · ?' in text
     assert '#98765' not in text
-    assert '1 live' in text and '1 liveness ?' in text
+    assert '1 live' in text and '2 liveness ?' in text
     assert all(name not in text for name in ('px-ignore', 'px-done', 'px-terminal', 'px-ended'))
     assert 'finished' not in text
 
@@ -69,7 +70,8 @@ def test_proxy_process_identity_requires_unique_token_and_pid(tmp_path):
                          ('proxy_run', name, 'open', None, None, json.dumps({'token': token, 'started_at': started})))
     doc = module._read_proxies(now, db, liveness={'px-reused': [(20, 70)], 'px-unique': [(21, 70)], 'px-unverified': [(22, 70)]},
                                binding=lambda name, token, started: token in {'a', 'b', 'c'},
-                               panes={'px-reused', 'px-unique', 'px-unverified'})
+                               panes={'px-reused': {1}, 'px-unique': {2}, 'px-unverified': {3}},
+                               ancestry={20: 1, 21: 2, 22: 3, 1: 0, 2: 0, 3: 0}, pid_binding=lambda pid, token: True)
     assert [r['state'] for r in doc['rows']] == ['uncertain', 'uncertain', 'running', 'uncertain']
 
 
@@ -89,15 +91,31 @@ def test_proxy_liveness_requires_named_socket_and_live_pane(tmp_path, monkeypatc
           '103 00:10:00 tail -f --name px-follower\n'
           '104 00:10:00 jq --name px-follower\n'
           '105 00:10:00 /usr/bin/claude --name px-nosocket\n')
-    tmux = ('0\tpx-px-alive\t0\n0\tpx-px-dead\t1\n'
-            '0\tpx-px-follower\t0\n0\tpx-px-nosocket\t0\n')
+    tmux = ('0\tpx-px-alive\t0\t100\n0\tpx-px-dead\t1\t99\n'
+            '0\tpx-px-follower\t0\t98\n0\tpx-px-nosocket\t0\t97\n')
     monkeypatch.setattr(module.subprocess, 'run', lambda args, **kwargs: SimpleNamespace(stdout=ps if args[0] == 'ps' else tmux))
     monkeypatch.setattr(Path, 'is_socket', lambda path: path.name in {'101.sock', '102.sock', '103.sock', '104.sock'})
-    doc = module._read_proxies(now, db, binding=lambda *args: True)
-    assert [(row['name'], row['state']) for row in doc['rows']] == [('px-alive', 'running')]
-    assert 'px-follower' not in '\n'.join(module.proxies_block(doc))
+    doc = module._read_proxies(now, db, binding=lambda *args: True, ancestry={101: 100, 100: 1}, pid_binding=lambda *args: True)
+    assert [(row['name'], row['state']) for row in doc['rows']] == [('px-alive', 'running'), ('px-dead', 'uncertain'), ('px-follower', 'uncertain'), ('px-nosocket', 'uncertain')]
+    assert 'px-follower' in '\n'.join(module.proxies_block(doc))
     monkeypatch.setattr(module, '_proxy_live_panes', lambda: None)
     assert module._read_proxies(now, db, binding=lambda *args: True) is None
+
+
+def test_name_collision_and_starting_runs_are_uncertain(tmp_path):
+    import json
+    import sqlite3
+    now = datetime(2026, 11, 13, 12, 0, tzinfo=timezone.utc)
+    db = tmp_path / 'ops.db'
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE obligations (kind TEXT, target_id TEXT, status TEXT, issue INTEGER, pr INTEGER, evidence_json TEXT)')
+        for name in ('px-collision', 'px-starting'):
+            conn.execute('INSERT INTO obligations VALUES (?, ?, ?, ?, ?, ?)',
+                         ('proxy_run', name, 'open', None, None, json.dumps({'token': 't', 'started_at': '2026-11-13T11:50:00Z'})))
+    doc = module._read_proxies(now, db, liveness={'px-collision': [(55, 10)]},
+                               panes={'px-collision': {10}}, ancestry={55: 20, 20: 1, 10: 1},
+                               binding=lambda *args: True, pid_binding=lambda *args: True)
+    assert [(row['name'], row['state']) for row in doc['rows']] == [('px-collision', 'uncertain'), ('px-starting', 'uncertain')]
 
 
 def test_proxy_binding_requires_matching_active_lock_and_manifest(tmp_path, monkeypatch):

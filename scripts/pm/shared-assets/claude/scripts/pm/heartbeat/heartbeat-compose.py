@@ -1775,25 +1775,61 @@ def _proxy_live_processes() -> dict[str, list[tuple[int, int]]] | None:
         return None
 
 
-def _proxy_live_panes() -> set[str] | None:
-    """Return names of proxy windows with at least one non-dead pane."""
+def _proxy_live_panes() -> dict[str, set[int]] | None:
+    """Return pane roots for each live proxy window."""
     try:
         result = subprocess.run(['tmux', 'list-panes', '-a', '-F',
-                                 '#{session_name}\t#{window_name}\t#{pane_dead}'],
+                                 '#{session_name}\t#{window_name}\t#{pane_dead}\t#{pane_pid}'],
                                 capture_output=True, text=True, timeout=3, check=True)
-        names = set()
+        names = {}
         for line in result.stdout.splitlines():
             parts = line.split('\t')
-            if len(parts) != 3:
-                return None  # Malformed collector output cannot prove absence.
-            session, window, dead = parts
-            if dead not in {'0', '1'}:
+            if len(parts) != 4:
+                return None
+            session, window, dead, pid = parts
+            if dead not in {'0', '1'} or not pid.isdigit():
                 return None
             if dead == '0' and window.startswith('px-'):
-                names.add(window[3:])
+                names.setdefault(window[3:], set()).add(int(pid))
         return names
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _proxy_ancestry() -> dict[int, int] | None:
+    try:
+        result = subprocess.run(['ps', '-axo', 'pid,ppid'], capture_output=True, text=True, timeout=3, check=True)
+        parents = {}
+        for line in result.stdout.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) != 2 or not all(field.isdigit() for field in fields):
+                return None
+            parents[int(fields[0])] = int(fields[1])
+        return parents
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _pane_owns_pid(pid: int, roots: set[int], parents: dict[int, int]) -> bool:
+    seen = set()
+    while pid not in seen and pid in parents:
+        if pid in roots:
+            return True
+        seen.add(pid)
+        pid = parents[pid]
+    return False
+
+
+def _proxy_pid_token_matches(pid: int, token: object) -> bool:
+    if not isinstance(token, str) or not re.fullmatch(r'[\w.-]+', token):
+        return False
+    try:
+        result = subprocess.run(['ps', '-Eww', '-p', str(pid), '-o', 'command='],
+                                capture_output=True, text=True, timeout=3, check=True)
+        tokens = re.findall(r'(?:^|\s)PROXY_AGENT_RUN_TOKEN=([^\s]+)', result.stdout)
+        return tokens == [token]
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _proxy_run_binding(name: str, token: object, started: datetime | None) -> bool:
@@ -1811,7 +1847,7 @@ def _proxy_run_binding(name: str, token: object, started: datetime | None) -> bo
         return False
 
 
-def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None = None, binding=None, panes: set[str] | None = None) -> dict | None:
+def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None = None, binding=None, panes: dict | None = None, ancestry: dict | None = None, pid_binding=None) -> dict | None:
     """Read proxy runs from the PM ledger; socket/process data is only a cross-check."""
     path = path or PM_OPS_DB
     try:
@@ -1825,9 +1861,11 @@ def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None
     candidates_by_row = []
     liveness = _proxy_live_processes() if liveness is None else liveness
     panes = _proxy_live_panes() if panes is None else panes
-    if liveness is None or panes is None:
+    ancestry = _proxy_ancestry() if ancestry is None else ancestry
+    if liveness is None or panes is None or ancestry is None:
         return None  # Failed collection is unavailable, not evidence of termination.
     binding = binding or _proxy_run_binding
+    pid_binding = pid_binding or _proxy_pid_token_matches
     for record in records:
         try:
             evidence = json.loads(record['evidence_json'] or '{}')
@@ -1838,8 +1876,6 @@ def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None
         if 'finished_at' in evidence or 'rc' in evidence:
             continue  # Terminal evidence overrides stale OPEN status, even for rc=0.
         name = str(record['target_id'] or '')
-        if not re.fullmatch(r'px-[\w.-]+', name) or name not in panes or not liveness.get(name):
-            continue  # A leftover viewer or dead window is not a live proxy.
         model = evidence.get('model')
         if not isinstance(model, str) or not re.fullmatch(r'[\w.:-]+', model):
             model = '?'
@@ -1848,7 +1884,9 @@ def _read_proxies(now: datetime, path: Path | None = None, liveness: dict | None
         refs = [str(value) for value in (record['issue'], record['pr']) if value is not None and str(value).isdigit()]
         candidates = []
         if minutes is not None and binding(name, evidence.get('token'), started):
-            candidates = [pid for pid, age in liveness.get(name, []) if -1 <= minutes - age <= 3]
+            candidates = [pid for pid, age in liveness.get(name, [])
+                          if -1 <= minutes - age <= 3 and _pane_owns_pid(pid, panes.get(name, set()), ancestry)
+                          and pid_binding(pid, evidence.get('token'))]
         candidates_by_row.append(candidates)
         rows.append({'name': name, 'state': 'uncertain', 'model': model,
                      'runtime_minutes': minutes, 'model_source': 'model missing in PM ledger',

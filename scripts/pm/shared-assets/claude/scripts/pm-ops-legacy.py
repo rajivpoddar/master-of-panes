@@ -723,6 +723,16 @@ def continuation_upsert_refusal(*, kind, evidence, owner, required_action):
     return None
 
 
+def merge_evidence(previous: dict, update: dict) -> dict:
+    result = previous.copy()
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge_evidence(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 def upsert_obligation(args: argparse.Namespace) -> int | None:
     # Validate BEFORE init_db()/connect(): a refused continuation upsert must write zero
     # rows and leave no partial state.
@@ -770,7 +780,7 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
     # longer commit between our open-row lookup and our UPDATE (which would
     # write fresh evidence onto a RESOLVED row and lose the debt).  After a
     # competing resolve has committed, the lookup finds no open row and a new
-    # OPEN row is inserted.  Validation above stays outside the lock.
+    # OPEN row is inserted. Validate the merged evidence under this lock.
     con.execute("BEGIN IMMEDIATE")
     row = con.execute(
         """
@@ -796,7 +806,18 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
                 con.close()
                 print("REFUSED: retained_evidence_invalid", file=sys.stderr)
                 return None
-            evidence = {**retained_evidence, **evidence}
+            if not getattr(args, 'replace_evidence', False):
+                evidence = merge_evidence(retained_evidence, evidence)
+            refusal = continuation_upsert_refusal(
+                kind=kind, evidence=evidence,
+                owner=args.owner if args.owner is not None else row['owner'],
+                required_action=args.action if args.action is not None else row['required_action'],
+            )
+            if refusal:
+                con.rollback()
+                con.close()
+                print(f'REFUSED: {refusal}', file=sys.stderr)
+                return None
         if not evidence_supplied and kind in CONTINUATION_KIND_LANES:
             try:
                 retained = json.loads(row["evidence_json"])
@@ -2663,6 +2684,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--dedupe-group")
     p.add_argument("--evidence", action="append")
     p.add_argument("--evidence-json")
+    p.add_argument("--replace-evidence", action="store_true", help="replace rather than merge supplied evidence")
     p.add_argument("--print-id", action="store_true")
 
     p = sub.add_parser("obligation-resolve")
