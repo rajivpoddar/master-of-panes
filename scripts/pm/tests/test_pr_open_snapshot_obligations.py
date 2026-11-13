@@ -49,6 +49,7 @@ def _pr(number, head="a" * 40, labels=None, draft=False, checks=None, title="Som
         "title": title,
         "labels": [{"name": name} for name in (labels or [])],
         "statusCheckRollup": checks or [],
+        "_authorized_12b_reviewer": "pm-reviewer",
     }
 
 
@@ -351,12 +352,29 @@ def test_ci_exempt_without_ask_raises_merge_ask_not_admission():
     assert prsnap.classify_pr(pr)["next"] == "CI-exempt -> merge ask"
 
 
+def test_12b_pass_carry_forward_requires_authenticated_author_and_exact_reviewed_head():
+    head = "d" * 40
+    pr = _pr(221, head=head)
+    pr["comments"] = [{
+        "body": f"PM 12b: PASS at {head}",
+        "author": {"login": "untrusted-commenter"},
+    }]
+    assert prsnap._latest_12b_verdict(pr, head) is None
+
+    pr["comments"] = [{
+        "body": f"PM 12b: PASS at {head}",
+        "author": {"login": "pm-reviewer"},
+    }]
+    assert prsnap._latest_12b_verdict(pr, head) == "PASS"
+    assert prsnap._latest_12b_verdict(pr, "e" * 40) is None
+
+
 def test_later_same_head_12b_pass_releases_earlier_block():
     head = "7654321" + "0" * 33
     pr = _pr(206, head=head)
     pr["comments"] = [
         {"body": "PM_OPUS_REVIEW: BLOCK @7654321 - missing guard"},
-        {"body": "PM_OPUS_REVIEW: PASS @7654321"},
+        {"body": "PM_OPUS_REVIEW: PASS @7654321", "author": {"login": "pm-reviewer"}},
     ]
     rework_row = {"owner": "pm-rework-queued", "updated_at": _now_iso(minutes_ago=30),
                   "suppress_until": _future_iso(), "evidence_json": '{"head": "' + head + '"}'}

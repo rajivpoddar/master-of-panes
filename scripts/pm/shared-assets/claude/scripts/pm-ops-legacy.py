@@ -723,6 +723,20 @@ def continuation_upsert_refusal(*, kind, evidence, owner, required_action):
     return None
 
 
+def object_to_nonobject_replacement(previous: dict, update: dict, path: str = "") -> str | None:
+    """Return the first path where a partial update would erase a nested object."""
+    for key, value in update.items():
+        current_path = f"{path}.{key}" if path else key
+        old = previous.get(key)
+        if isinstance(old, dict) and not isinstance(value, dict):
+            return current_path
+        if isinstance(old, dict) and isinstance(value, dict):
+            nested = object_to_nonobject_replacement(old, value, current_path)
+            if nested:
+                return nested
+    return None
+
+
 def merge_evidence(previous: dict, update: dict) -> dict:
     result = previous.copy()
     for key, value in update.items():
@@ -807,6 +821,12 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
                 print("REFUSED: retained_evidence_invalid", file=sys.stderr)
                 return None
             if not getattr(args, 'replace_evidence', False):
+                replaced_path = object_to_nonobject_replacement(retained_evidence, evidence)
+                if replaced_path:
+                    con.rollback()
+                    con.close()
+                    print(f"REFUSED: evidence_object_replacement_requires_flag path={replaced_path}", file=sys.stderr)
+                    return None
                 evidence = merge_evidence(retained_evidence, evidence)
             refusal = continuation_upsert_refusal(
                 kind=kind, evidence=evidence,

@@ -83,10 +83,20 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
         if isinstance(refs, list) and len(refs) == sup:
             if window_label == '3h':
                 from collections import Counter
-                counts = Counter(r['user_hash'] for r in refs)
-                top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:3]
-                details = ', '.join(f'{user}: {count}' for user, count in top) or 'none'
-                sup_line = [f"superseded saves: {sup} — {len(counts)} distinct users; top 3: {details}"]
+                users = Counter(r['user_hash'] for r in refs if r.get('identity_kind', 'userSha256') == 'userSha256')
+                fallback = Counter((r.get('identity_kind', 'unknown'), r.get('user_hash', 'unknown'))
+                                   for r in refs if r.get('identity_kind', 'userSha256') != 'userSha256')
+                top_users = sorted(users.items(), key=lambda item: (-item[1], item[0]))[:3]
+                details = [f'{user}: {count}' for user, count in top_users]
+                details.extend(f'{kind} {identity}: {count}' for (kind, identity), count in
+                               sorted(fallback.items(), key=lambda item: (-item[1], item[0]))[:3])
+                groups = []
+                if users:
+                    groups.append(f'{len(users)} distinct users')
+                if fallback:
+                    groups.append(f'{sum(fallback.values())} fallback observations')
+                sup_line = [f"superseded saves: {sup} — {', '.join(groups) or 'no identified observations'}; "
+                            f"top: {', '.join(details) or 'none'}"]
             else:
                 details = ', '.join(f"{r['time']} {r.get('identity_kind', 'userSha256')}:{r['user_hash']}" for r in refs)
                 sup_line = [f"superseded saves: {sup}" + (f" — {details}" if details else '')]
@@ -96,6 +106,7 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
         return [head + " — quiet"] + sup_line, "errors quiet", 0
     lines = [head]
     new = 0
+    new_codes = []
     for row in axiom.get("top", [])[:MAX_CODES]:
         m = mapping.get(row["code"], {})
         if row['code'] == 'uncaught_error':
@@ -107,11 +118,13 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
                 if signatures.get('unmapped'):
                     parts.append(f"unmapped (new signature): {signatures['unmapped']} ev")
                     new += 1
+                    new_codes.append(row['code'])
                 target = '→ ' + '; '.join(parts) if parts else ''
             else:
                 target = '→ unmapped (signature unavailable)'
         elif m.get("status") == "NEW":
             new += 1
+            new_codes.append(row['code'])
             target = "NEW → launch customer-artifact-investigator"
         elif m.get("refs"):
             target = "→ " + ", ".join(m["refs"][:2])
@@ -135,7 +148,7 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
         lines.append(f"• +{other_codes} other codes, {other_events} events")
     tldr = f"{axiom['events']} errors / {axiom['users']} users"
     if new:
-        tldr += f" ({new} NEW code{'s' if new > 1 else ''})"
+        tldr += f" ({new} NEW code{'s' if new > 1 else ''}: {', '.join(new_codes)})"
     return lines + sup_line, tldr, new
 
 
@@ -2069,10 +2082,13 @@ def compact_report(lines: list[str], limit: int) -> str:
         _, start, end = max(runs)
         items = rows[start:end]
         unavailable = [item for item in items if "UNAVAILABLE" in item]
-        top = unavailable or items[:1]
+        # Error-code rows carry routing instructions. Fold them together without
+        # replacing named actions with a generic "+N more" that loses ownership.
+        actionable = [item for item in items if re.search(r"• [A-Za-z0-9_]+ — \d+ ev", item)]
+        top = unavailable or actionable or items[:1]
         more = len(items) - len(top)
         summary = f" ({len(items)} items): " + "; ".join(top)
-        if more:
+        if more and not actionable:
             summary += f"; +{more} more"
         rows[start - 1:end] = [rows[start - 1] + summary]
     # The cap counts content lines, not the restored section separators.

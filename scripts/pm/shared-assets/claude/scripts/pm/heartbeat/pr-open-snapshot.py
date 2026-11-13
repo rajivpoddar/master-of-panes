@@ -317,22 +317,37 @@ def _row_holds_head(row: dict | None, head: str) -> bool:
     return parsed > datetime.datetime.now(datetime.timezone.utc)
 
 
-def _latest_12b_verdict(pr: dict, head: str) -> str | None:
-    """"PASS" / "BLOCK" from the LATEST head-bound PM 12b comment, else None.
+def _authorized_12b_reviewer() -> str:
+    """Resolve the currently configured gh account; never guess a reviewer login."""
+    try:
+        result = subprocess.run(["gh", "api", "user", "--jq", ".login"],
+                                capture_output=True, text=True, timeout=15)
+        login = result.stdout.strip()
+        return login if result.returncode == 0 and login else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
-    Comments are chronological (gh order); a later same-head PASS supersedes
-    an earlier same-head BLOCK and vice versa (CTO REVISE 2026-10-01).
+
+def _latest_12b_verdict(pr: dict, head: str, authorized_login: str | None = None) -> str | None:
+    """PASS/BLOCK from the latest head-bound PM 12b comment, else None.
+
+    A PASS is authoritative only when its author is the authenticated PM gh
+    account. Missing authorship or identity lookup fails closed to 12b required.
     """
     head_short = head[:7]
+    if authorized_login is None:
+        authorized_login = pr.get("_authorized_12b_reviewer") or _authorized_12b_reviewer()
     verdict = None
     for c in pr.get("comments") or []:
         body = c.get("body") or ""
         if not head_short or head_short not in body:
             continue
+        author = c.get("author") or {}
+        login = author.get("login", "") if isinstance(author, dict) else str(author)
         if PM_12B_BLOCK_RE.search(body):
             verdict = "BLOCK"
         elif PM_12B_PASS_RE.search(body):
-            verdict = "PASS"
+            verdict = "PASS" if authorized_login and login == authorized_login else None
     return verdict
 
 

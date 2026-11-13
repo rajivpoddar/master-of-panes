@@ -170,6 +170,38 @@ class WriterRefusalEndToEnd(unittest.TestCase):
             with self.subTest(kind=kind, evidence=evidence, owner=owner):
                 self._case(kind, evidence, owner, action)
 
+    def test_partial_object_to_null_refuses_preserving_nested_evidence(self):
+        import json
+        base = ("obligation-upsert", "--kind", "pr_admission", "--pr", "7721",
+                "--owner", "pm", "--title", "t", "--action", "Keep the reviewed evidence.")
+        initial = _run_writer(self.db, *base, "--evidence-json", '{"custody":{"status":"known","sha":"abc"}}')
+        self.assertEqual(initial.returncode, 0, initial.stderr)
+        merged = _run_writer(self.db, *base, "--evidence-json", '{"custody":{"ticket":"t1"}}')
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+
+        refused = _run_writer(self.db, *base, "--evidence-json", '{"custody":null}')
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("evidence_object_replacement_requires_flag", refused.stderr)
+        con = sqlite3.connect(self.db)
+        try:
+            stored = json.loads(con.execute(
+                "SELECT evidence_json FROM obligations WHERE pr=7721 AND status='open'"
+            ).fetchone()[0])
+        finally:
+            con.close()
+        self.assertEqual(stored["custody"], {"status": "known", "sha": "abc", "ticket": "t1"})
+
+        replaced = _run_writer(self.db, *base, "--evidence-json", '{"custody":null}', "--replace-evidence")
+        self.assertEqual(replaced.returncode, 0, replaced.stderr)
+        con = sqlite3.connect(self.db)
+        try:
+            stored = json.loads(con.execute(
+                "SELECT evidence_json FROM obligations WHERE pr=7721 AND status='open'"
+            ).fetchone()[0])
+        finally:
+            con.close()
+        self.assertIsNone(stored["custody"])
+
     def test_valid_continuation_writes_one_row(self):
         r = _run_writer(self.db, "obligation-upsert", "--kind", "capture_recovery", "--pr", "7721",
                         "--owner", "pm", "--title", "t",

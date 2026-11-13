@@ -35,6 +35,16 @@ def exempt(repo, pr, head):
         return scope.get('control_plane_only') is True and scope.get('product_changed') is False
 
 
+def authorized_reviewer_login():
+    """Use the authenticated gh account that PM's 12b comment is posted as."""
+    try:
+        out = subprocess.check_output(['gh', 'api', 'user', '--jq', '.login'],
+                                      stderr=subprocess.DEVNULL, timeout=15).decode().strip()
+        return out
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
 def main_merges_only(repo, old, head):
     """Carry a review only across clean main merges with an unchanged PR patch."""
     checkout = Path.home() / 'Downloads/projects/heydonna-app'
@@ -84,6 +94,7 @@ def evaluate(repo, pr, head):
     last = 'none'
     try:
         comments = api(repo, f'issues/{pr}/comments?per_page=100', True)
+        reviewer_login = authorized_reviewer_login()
         markers = []
         for comment in sorted(comments, key=lambda c: (c.get('created_at', ''), c.get('id', 0))):
             lines = (comment.get('body') or '').splitlines()
@@ -94,13 +105,14 @@ def evaluate(repo, pr, head):
             match = MARKER.match(re.sub(r'^#{1,6} ', '', first))
             diagnostic = match
             legacy = LEGACY.match(re.sub(r'^#{1,6} ', '', first))
+            author = (comment.get('user') or {}).get('login', '')
             if diagnostic:
-                markers.append((*diagnostic.groups(), bool(match)))
+                markers.append((*diagnostic.groups(), bool(match), bool(reviewer_login and author == reviewer_login)))
             elif legacy:
                 old_sha, old_verdict = legacy.groups()
-                markers.append((old_verdict, old_sha, False))
+                markers.append((old_verdict, old_sha, False, bool(reviewer_login and author == reviewer_login)))
         if markers:
-            verdict, sha, canonical = markers[-1]
+            verdict, sha, canonical, authorized = markers[-1]
             sha = sha.lower()
             last = f'{verdict}@{sha}'
         try:
@@ -108,7 +120,7 @@ def evaluate(repo, pr, head):
                 return True, '12B_GATE: exempt (control-plane-only)'
         except Exception:
             pass  # An unavailable classifier never grants an exemption.
-        if markers and canonical and verdict == 'PASS':
+        if markers and canonical and verdict == 'PASS' and authorized:
             if head.startswith(sha):
                 return True, f'12B_GATE: PASS pr={pr} head={head}'
             if main_merges_only(repo, sha, head):
