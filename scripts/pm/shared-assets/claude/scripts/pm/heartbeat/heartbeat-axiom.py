@@ -311,8 +311,10 @@ def load_prod_users() -> dict[str, dict]:
 
 def scribie_user(user: dict) -> bool:
     # Cohort and email are independent exclusion criteria; email is not cohort.
-    return (user.get('cohort') == 'scribie' or
-            str(user.get('email') or '').strip().lower().endswith('@scribie.com'))
+    email = str(user.get('email') or '').strip().lower()
+    domain = email.rpartition('@')[2] if '@' in email else ''
+    return (user.get('cohort') == 'scribie' or domain == 'scribie.com' or
+            domain.endswith('.scribie.com'))
 
 
 INTERNAL_LOCAL_PREFIXES = ("e2e-", "e2e+", "e2e.", "qa-", "qa+", "playwright", "test+", "test-")

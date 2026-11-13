@@ -167,8 +167,17 @@ def active_users_block(active: dict | None, window_label: str) -> tuple[list[str
     """One header line + up to MAX_USERS compact user lines (keeps the post <= ~22 lines)."""
     if active is None:
         return [f"*Active users ({window_label}):* unavailable"], "active users unavailable"
-    count = active.get("count", 0)
+    users = active.get('users', [])
+    def excluded_domain(row):
+        email = str(row.get('user') or '').strip().lower()
+        domain = email.rpartition('@')[2] if '@' in email else ''
+        return domain == 'scribie.com' or domain.endswith('.scribie.com')
+    users = [u for u in users if not excluded_domain(u)]
+    removed = len(active.get('users', [])) - len(users)
+    count = max(0, active.get("count", 0) - removed)
     non_scribie_count = active.get("non_scribie_count")
+    if non_scribie_count is not None:
+        non_scribie_count = max(0, non_scribie_count - removed)
     if non_scribie_count is None:
         head = f"*Active users ({window_label}):* {count}"
     else:
@@ -180,12 +189,11 @@ def active_users_block(active: dict | None, window_label: str) -> tuple[list[str
         head += f" (prior {active['prior_count']})"
     if non_scribie_count is None and active.get("internal"):
         head += f" +{active['internal']} internal"
-    if "excluded_scribie" in active:
-        head += f"; {active['excluded_scribie']} Scribie excluded"
+    if "excluded_scribie" in active or removed:
+        head += f"; {active.get('excluded_scribie', 0) + removed} Scribie excluded"
         head += f" — {active.get('method', '')}"
     if active.get("unclassified"):
         head += f"; unclassified {active['unclassified']} ({', '.join(active.get('unclassified_users', []))})"
-    users = active.get("users", [])
     if not users:
         total = non_scribie_count if non_scribie_count is not None else count
         suffix = " — quiet" if total == 0 and not active.get("unclassified") else ""

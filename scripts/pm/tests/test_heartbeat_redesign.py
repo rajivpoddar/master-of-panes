@@ -544,6 +544,20 @@ def test_active_users_excludes_cohort_and_domain_independently():
     assert "unclassified 1 (***user_A)" in compose.active_users_block(no_email, "1h")[0][0]
 
 
+def test_active_user_domain_exclusion_without_cohort_and_in_cached_snapshot():
+    rows = [{'userId': 'user_a', 'emails': ['masked@TEAM.SCRIBIE.COM'], 'actions': 1}]
+    result = axiom.build_active_users_report(rows, None, {'user_a': {'email': 'person@Team.Scribie.Com'}})
+    assert result['count'] == 0 and result['excluded_scribie'] == 1
+    assert not axiom.scribie_user({'email': 'person@notscribie.com'})
+    snapshot = {'count': 2, 'non_scribie_count': 2, 'excluded_scribie': 3, 'internal': 0,
+                'users': [{'user': 'masked@SCRIBIE.COM', 'files': 1},
+                          {'user': 'masked@other.com', 'files': 1}]}
+    lines, _ = compose.active_users_block(snapshot, '1h')
+    assert '1 non-Scribie' in lines[0] and '4 Scribie excluded' in lines[0]
+    assert not any('@SCRIBIE.COM' in line for line in lines)
+    assert snapshot['count'] == 2  # Rendering does not modify the source snapshot.
+
+
 def test_active_users_missing_user_does_not_hide_known_users():
     rows = [{"userId": "user_3Goiv26LLvSOCHFTKYZVwBhM7F9", "actions": 2},
             {"userId": "user_known", "emails": ["customer@example.org"], "actions": 1}]
