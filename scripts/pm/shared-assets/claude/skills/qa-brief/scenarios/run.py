@@ -9,8 +9,9 @@ import subprocess
 import sys
 import time
 
-# Receipt fields the brief must declare before the affected scenario starts
-# (retro #13357/#13435, CTO C0ALZJHGE49 ts 1794578332.315349).
+# Receipt fields recorded with every run (retro #13357/#13435, CTO C0ALZJHGE49
+# ts 1794578332.315349). A field the brief omits is recorded as UNKNOWN and the
+# run is labeled partial evidence; it never blocks or changes the scenario.
 RECEIPT_FIELDS = ('target_route', 'target_context', 'storage_scope', 'browser_contexts')
 
 
@@ -22,9 +23,8 @@ def run(brief):
     if p.get('owned_disposable_backend') is not True:
         raise ValueError('OWNED_DISPOSABLE_BACKEND_REQUIRED')
     declared = p.get('receipt') or {}
-    missing = [key for key in RECEIPT_FIELDS if not declared.get(key)]
-    if missing:
-        raise ValueError('PRECONDITION_NOT_ESTABLISHED: receipt fields missing: ' + ','.join(missing))
+    receipt = {key: declared.get(key) or 'UNKNOWN' for key in RECEIPT_FIELDS}
+    unknown = [key for key, value in receipt.items() if value == 'UNKNOWN']
     # All adapters receive JSON via stdin; credentials never go in argv.
     adapters = p['adapters']
     for key in ('clone_internal', 'observe'):
@@ -90,7 +90,8 @@ def run(brief):
             raise AssertionError('SERVER_READBACK_FAILED')
         ab('screenshot', '/root/qa/out/02-editor-b-saved.png',
            marker={'tab': 'B', 'route': route, 'action': 'screenshot editor B saved'})
-    return {'scenario': name, 'receipt': declared, 'wall_s': round(time.monotonic()-started, 3), 'events': events}
+    return {'scenario': name, 'receipt': receipt, 'partial_evidence': bool(unknown), 'unknown_fields': unknown,
+            'wall_s': round(time.monotonic()-started, 3), 'events': events}
 
 
 if __name__ == '__main__':

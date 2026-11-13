@@ -74,9 +74,25 @@ def test_api_failure_reports_unknown_and_never_raises():
         assert gate.overlap_report('owner/repo', 7, HEAD) == ['12B_OVERLAP: UNKNOWN reason=OSError']
 
 
-def test_main_prints_report_without_changing_exit_code(capsys):
+def test_overlap_only_prints_report_and_no_verdict(capsys):
+    with patch.object(gate, 'overlap_report', return_value=['12B_OVERLAP: x']), \
+         patch.object(gate, 'evaluate') as evaluate, \
+         patch('sys.argv', ['pm-admit-12b.py', '--repo', 'owner/repo', '--pr', '7', '--head', HEAD, '--overlap-only']):
+        assert gate.main() == 0
+        evaluate.assert_not_called()
+    assert capsys.readouterr().out.splitlines() == ['12B_OVERLAP: x']
+
+
+def test_default_gate_output_and_exit_code_are_unchanged(capsys):
     with patch.object(gate, 'evaluate', return_value=(False, 'REFUSE: 12b_missing_or_stale pr=7')), \
-         patch.object(gate, 'overlap_report', return_value=['12B_OVERLAP: x']), \
+         patch.object(gate, 'overlap_report') as report, \
          patch('sys.argv', ['pm-admit-12b.py', '--repo', 'owner/repo', '--pr', '7', '--head', HEAD]):
         assert gate.main() == 3
-    assert capsys.readouterr().out.splitlines() == ['REFUSE: 12b_missing_or_stale pr=7', '12B_OVERLAP: x']
+        report.assert_not_called()
+    assert capsys.readouterr().out.splitlines() == ['REFUSE: 12b_missing_or_stale pr=7']
+
+
+def test_admission_script_prints_report_after_main_update_before_admit_and_never_blocks():
+    text = (P.parent / 'pm-admit-ci.sh').read_text()
+    assert text.index('REFUSE: conflict with main') < text.index('overlap_report "$HEAD"') < text.index('echo "ADMITTED')
+    assert '|| echo "12B_OVERLAP: UNKNOWN reason=report_unavailable"' in text

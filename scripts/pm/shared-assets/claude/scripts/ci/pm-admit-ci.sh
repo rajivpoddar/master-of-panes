@@ -244,9 +244,19 @@ except Exception: print("err err err x")' 2>/dev/null)"
   return 6
 }
 
+# Overlap report (retro #13357/#13435; CTO C0ALZJHGE49 ts 1794578332.315349). Advisory output only: it names the
+# reviewed base, current main, paths changed by both the PR and main, and the proof to re-run. A clean file merge
+# is not proof. It never changes an admission decision or exit status.
+overlap_report() {
+  timeout 120 python3 -I "$SCRIPT_DIR/pm-admit-12b.py" --overlap-only --repo "$REPO" --pr "$PR" --head "$1" \
+    || echo "12B_OVERLAP: UNKNOWN reason=report_unavailable"
+  return 0
+}
+
 if [ "$DRY" = 1 ]; then
   H=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
   echo "DRY RUN PR #$PR head=$H"
+  overlap_report "$H"
   rc=0; scope_gate "$H" || rc=$?
   [ $rc -ne 0 ] && { echo "DRY RUN done (scope gate rc=$rc); nothing admitted"; exit $rc; }
   rc=0; related_tests_gate "$H" || rc=$?
@@ -312,6 +322,7 @@ if [ "$HEAD" != "$H0" ]; then
 fi
 echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 [ "$MERGEABLE" = "CONFLICTING" ] && { echo "REFUSE: conflict with main; route to slot"; exit 2; }
+overlap_report "$HEAD"
 # Priority mirroring is best-effort and must never block admission.
 mirror_priority() {
   local data existing issues issue labels priorities="" priority

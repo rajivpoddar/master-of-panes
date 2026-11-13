@@ -23,9 +23,9 @@ Every brief, including manual routes, specifies an observable precondition asser
 
 Recovery and writer-move flows (retro #13357/#13435; CTO C0ALZJHGE49 thread 1794234970.206389, ts 1794578332.315349): the brief specifies the actual product transition and asserts its authoritative outcome, never button, banner or toast text alone. Reload saved asserts the saved SERVER head: after the action the head version and content read back from the server equal the saved version, and the editor shows that content. Same-user writer move asserts the lease handoff: the server lease/session/device now names the target context and the old context is fenced and publishes nothing. Use two independent browser contexts for the same user (see the remote-qa-runner run receipt), and take every UI state and element name from the shipped component at the exact head, not from a guessed id or an earlier banner.
 
-The brief also supplies the runner's receipt fields: scenario, target route/dialog, which tab/context performs each action, storage scope, and each browser context's signed-in identity. The runner checks them before the affected scenario starts.
+The brief also supplies the runner's receipt fields: scenario, target route/dialog, which tab/context performs each action, storage scope, and each browser context's signed-in identity. The runner reads them back and records anything it cannot verify as UNKNOWN.
 
-Before routing rework from a failed or blocked QA, record the FIRST failing boundary as `product`, `harness`, `oracle` or `UNKNOWN`, with the evidence for it (for example wrong tab or identity, stale token, wrong element id or a setup failure is harness/oracle, not product). A harness or oracle fault is corrected in the brief or runner and the scenario rerun; it does not start product rework. `UNKNOWN` names the missing evidence and is not routed as a product defect.
+Before routing rework from a failed or blocked QA, record the FIRST failing boundary as `product`, `harness`, `oracle` or `UNKNOWN`, with the evidence for it (for example wrong tab or identity, stale token, wrong element id or a setup failure is harness/oracle, not product). `UNKNOWN` names the missing evidence.
 
 The tester writes one exact-head evidence envelope and posts the durable
 `qa-artifact-evidence` marker. Its `tester_verdict` and `codex_qa_verdict`

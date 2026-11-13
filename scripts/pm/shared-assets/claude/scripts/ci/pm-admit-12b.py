@@ -236,12 +236,15 @@ def main():
     parser.add_argument('--repo', required=True)
     parser.add_argument('--pr', required=True, type=int)
     parser.add_argument('--head', required=True)
+    parser.add_argument('--overlap-only', action='store_true',
+                        help='print only the advisory overlap report (called by pm-admit-ci.sh); no verdict')
     args = parser.parse_args()
+    if args.overlap_only:
+        for line in overlap_report(args.repo, args.pr, args.head):
+            print(line)
+        return 0
     ok, line = evaluate(args.repo, args.pr, args.head)
     print(line)
-    if not line.startswith('12B_GATE: exempt'):
-        for extra in overlap_report(args.repo, args.pr, args.head):
-            print(extra)
     return 0 if ok else 3
 
 
