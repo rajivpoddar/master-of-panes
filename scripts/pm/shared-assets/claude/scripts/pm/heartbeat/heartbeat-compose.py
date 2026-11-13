@@ -79,14 +79,33 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
     if compare:
         head += f" ({', '.join(compare)})"
     sup = axiom.get("superseded_saves")
-    sup_line = [f"superseded saves: {sup}"] if sup is not None else []
+    sup_line = []
+    if sup is not None:
+        refs = axiom.get('superseded_save_refs')
+        if isinstance(refs, list) and len(refs) == sup:
+            details = ', '.join(f"{r['time']} userSha256:{r['user_hash']}" for r in refs)
+            sup_line = [f"superseded saves: {sup}" + (f" — {details}" if details else '')]
+        else:
+            sup_line = [f"superseded saves: {sup} — references unavailable"]
     if not axiom.get("events"):
         return [head + " — quiet"] + sup_line, "errors quiet", 0
     lines = [head]
     new = 0
     for row in axiom.get("top", [])[:MAX_CODES]:
         m = mapping.get(row["code"], {})
-        if m.get("status") == "NEW":
+        if row['code'] == 'uncaught_error':
+            signatures = axiom.get('uncaught_signatures')
+            if isinstance(signatures, dict) and sum(signatures.get(k, 0) for k in ('resize_observer', 'unmapped')) == row['events']:
+                parts = []
+                if signatures.get('resize_observer'):
+                    parts.append(f"#13670 ({signatures['resize_observer']} ev)")
+                if signatures.get('unmapped'):
+                    parts.append(f"unmapped (new signature): {signatures['unmapped']} ev")
+                    new += 1
+                target = '→ ' + '; '.join(parts) if parts else ''
+            else:
+                target = '→ unmapped (signature unavailable)'
+        elif m.get("status") == "NEW":
             new += 1
             target = "NEW → launch customer-artifact-investigator"
         elif m.get("refs"):
@@ -101,7 +120,7 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
     for row in axiom.get("all_codes", []):
         code = row["code"]
         m = mapping.get(code, {})
-        if code in shown or m.get("status") != "mapped" or not m.get("refs"):
+        if code == 'uncaught_error' or code in shown or m.get("status") != "mapped" or not m.get("refs"):
             continue
         shown.add(code)
         lines.append(f"+ {code}: {row['events']} ev / {row['users']} user{'s' if row['users'] != 1 else ''} → {', '.join(m['refs'][:2])}")

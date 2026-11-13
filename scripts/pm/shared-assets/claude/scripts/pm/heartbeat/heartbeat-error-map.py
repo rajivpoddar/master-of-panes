@@ -49,6 +49,8 @@ def load_known_codes(path: Path = KNOWN_CODES_PATH) -> dict:
 def classify_mapping(code: str, issues: list[dict], obligations: list[dict], investigations: list[str],
                      known: dict | None = None) -> dict:
     """Pure: decide mapped vs NEW and build ordered refs (issue/PR first, then known-code ref)."""
+    if code == 'uncaught_error':
+        return {'code': code, 'status': 'generic', 'refs': []}
     refs: list[str] = []
     for item in issues:
         kind = "PR" if item.get("is_pr") else "issue"
@@ -137,7 +139,8 @@ def map_codes(codes: list[str]) -> tuple[dict, list[str]]:
     failures: list[str] = []
     known = load_known_codes()
     for code in codes:
-        if code in GENERIC_CODES:
+        if code in GENERIC_CODES or code == 'uncaught_error':
+            # An action is not a signature; the composer uses Axiom's per-message breakdown.
             result[code] = {"code": code, "status": "generic", "refs": []}
             continue
         issues, obligations = [], []

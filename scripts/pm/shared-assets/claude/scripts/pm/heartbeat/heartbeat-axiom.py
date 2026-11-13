@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -214,11 +215,43 @@ def query_error_totals(token: str, start_time: str, end_time: str) -> dict:
     return {"events": int(row.get("events") or 0), "users": int(row.get("users") or 0)}
 
 
-def query_superseded_saves(token: str, start_time: str, end_time: str) -> int:
-    """Error-level superseded-save events excluded from the error count (kept visible)."""
-    apl = f"['{DATASET}'] {PROD_FILTER} | where ['level'] == 'error' {SUPERSEDED_FILTER}| summarize events = count()"
-    rows = extract_aggregations(run_apl_query(token, apl, start_time, end_time))
-    return int((rows[0] if rows else {}).get("events") or 0)
+RESIZE_OBSERVER_SIGNATURE = 'ResizeObserver loop completed with undelivered notifications'
+
+
+def query_uncaught_signatures(token: str, start_time: str, end_time: str) -> dict:
+    """Return only known-signature and unmapped counts; never publish arbitrary error messages."""
+    apl = (f"['{DATASET}'] {PROD_FILTER} {ERROR_CODE_EXTEND} | where code == 'uncaught_error' "
+           "| extend signature = tostring(parse_json(tostring(['meta'])).errorMessage) "
+           "| summarize events = count() by signature")
+    result = run_apl_query(token, apl, start_time, end_time)
+    if result.get('status', {}).get('isPartial'):
+        raise RuntimeError('partial uncaught signatures')
+    counts = {'resize_observer': 0, 'unmapped': 0}
+    for row in extract_aggregations(result):
+        signature = str(row.get('signature') or '')
+        key = 'resize_observer' if signature in (RESIZE_OBSERVER_SIGNATURE, RESIZE_OBSERVER_SIGNATURE + '.') else 'unmapped'
+        counts[key] += int(row.get('events') or 0)
+    return counts
+
+
+def query_superseded_saves(token: str, start_time: str, end_time: str) -> dict:
+    """Count lifecycle rows and retain their exact time and pseudonymous user hash."""
+    apl = (f"['{DATASET}'] {PROD_FILTER} | where ['context'] == 'SaveSafetyLifecycle' "
+           "| extend m = parse_json(tostring(['meta'])) | where tostring(m.superseded) == 'true' "
+           "| project _time, user_hash = tostring(m.userSha256) | limit 10001")
+    result = run_apl_query(token, apl, start_time, end_time)
+    matches = result.get('matches', [])
+    if result.get('status', {}).get('isPartial') or len(matches) >= 10001:
+        raise RuntimeError('partial superseded save observations')
+    refs = []
+    for row in matches:
+        data = row.get('data') or {}
+        timestamp = row.get('_time')
+        user_hash = data.get('user_hash')
+        if not isinstance(timestamp, str) or not isinstance(user_hash, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', user_hash):
+            raise RuntimeError('superseded observation missing pseudonymous reference')
+        refs.append({'time': timestamp, 'user_hash': user_hash})
+    return {'count': len(refs), 'refs': refs}
 
 
 def normalize_error_code_rows(rows: list[dict]) -> list[dict]:
@@ -487,6 +520,7 @@ def main() -> int:
                 return 1
             totals_future = pool.submit(query_error_totals, token, s, e)
             saves_future = pool.submit(query_superseded_saves, token, s, e)
+            signatures_future = pool.submit(query_uncaught_signatures, token, s, e) if any(row['code'] == 'uncaught_error' for row in codes) else None
             prior_future = None
             same_futures = []
             if a.compare:
@@ -497,7 +531,11 @@ def main() -> int:
             same_slot = [f.result() for f in same_futures] if a.compare else None
             report = build_error_code_report(codes, totals_future.result(), prior, same_slot, top=a.top)
             report['all_codes'] = codes
-            report['superseded_saves'] = saves_future.result()
+            saves = saves_future.result()
+            report['superseded_saves'] = saves['count']
+            report['superseded_save_refs'] = saves['refs']
+            if signatures_future:
+                report['uncaught_signatures'] = signatures_future.result()
     report["window"] = {"start": s, "end": e}
     if AXIOM_QUERY_FAILED:
         report["ops_error"] = f"axiom_query_failed statuses={sorted(set(AXIOM_QUERY_FAILED))}"
