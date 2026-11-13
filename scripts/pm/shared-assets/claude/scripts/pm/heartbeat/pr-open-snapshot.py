@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import datetime
+import importlib.util
 import json
 import re
 import sqlite3
@@ -28,6 +29,11 @@ _SCRIPTS = Path.home() / ".claude" / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 import gh_budget
+
+_REVIEW_GATE_PATH = Path(__file__).resolve().parents[2] / "ci" / "pm-admit-12b.py"
+_REVIEW_GATE_SPEC = importlib.util.spec_from_file_location("pm_admit_12b_shared", _REVIEW_GATE_PATH)
+_REVIEW_GATE = importlib.util.module_from_spec(_REVIEW_GATE_SPEC)
+_REVIEW_GATE_SPEC.loader.exec_module(_REVIEW_GATE)
 
 REPO = "Scribie/heydonna-app"
 # Shared with every other hook/heartbeat caller. A fresh file skips both the
@@ -49,8 +55,6 @@ MOP_URL = "http://127.0.0.1:3100/slots"
 # these gets a direct CI-exempt merge ask instead of sitting in the PM 12b queue.
 CI_EXEMPT_PREFIXES = ("benchmarks/", "website/", "scripts/ci/hetzner/", "docs/", "docs-site/", "blog/")
 DO_NOT_MERGE_RE = re.compile(r"do not merge", re.IGNORECASE)
-PM_12B_PASS_RE = re.compile(r"PM[ _-]?12b|PM_OPUS_REVIEW:\s*PASS", re.IGNORECASE)
-PM_12B_BLOCK_RE = re.compile(r"PM_OPUS_REVIEW:\s*(BLOCK|REVISE|REQUEST_CHANGES)|PM[ _-]?12b[^\n]{0,40}\b(BLOCK|REVISE)\b", re.IGNORECASE)
 # Rajiv 2026-10-01 13:17 IST (C0ALZJHGE49/1790840684.251169): "why are so many
 # pr's stuck at pm 12b review? is there a workflow gap somewhere?" -- PRs whose
 # 12b already BLOCKed (rework queued) or whose CI-exempt merge ask is already
@@ -329,26 +333,16 @@ def _authorized_12b_reviewer() -> str:
 
 
 def _latest_12b_verdict(pr: dict, head: str, authorized_login: str | None = None) -> str | None:
-    """PASS/BLOCK from the latest head-bound PM 12b comment, else None.
-
-    A PASS is authoritative only when its author is the authenticated PM gh
-    account. Missing authorship or identity lookup fails closed to 12b required.
-    """
-    head_short = head[:7]
+    """Use the admission helper's canonical marker and reviewed-head rules."""
     if authorized_login is None:
         authorized_login = pr.get("_authorized_12b_reviewer") or _authorized_12b_reviewer()
-    verdict = None
-    for c in pr.get("comments") or []:
-        body = c.get("body") or ""
-        if not head_short or head_short not in body:
-            continue
-        author = c.get("author") or {}
-        login = author.get("login", "") if isinstance(author, dict) else str(author)
-        if PM_12B_BLOCK_RE.search(body):
-            verdict = "BLOCK"
-        elif PM_12B_PASS_RE.search(body):
-            verdict = "PASS" if authorized_login and login == authorized_login else None
-    return verdict
+    try:
+        return _REVIEW_GATE.reviewed_12b_verdict(
+            pr.get("comments") or [], head, authorized_login, REPO, pr.get("number")
+        )
+    except Exception:
+        # Missing authority or unavailable carry-forward evidence never grants 12b.
+        return None
 
 
 def _has_12b_block(pr: dict, head: str) -> bool:

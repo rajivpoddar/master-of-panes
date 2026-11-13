@@ -31,15 +31,25 @@ def test_3h_fold_keeps_named_actionable_error_codes_and_tldr_names_new_code():
     mapping = {row["code"]: {"status": "mapped", "refs": [f"owner-{i}"]}
                for i, row in enumerate(rows)}
     axiom = {
-        "events": 33, "users": 12, "top": rows,
+        "events": 33, "users": 12, "top": rows[:5],
         "all_codes": rows, "other_codes": 0, "other_events": 0,
     }
     lines, tldr, _ = composer.error_block(axiom, mapping, "3h")
-    folded = composer.compact_report(lines + ["• filler"] * 8, limit=1)
+    # The named mappings below the top-five list must survive the 3h fold too.
+    folded = composer.compact_report(lines + ["• filler"] * 8, limit=1, cadence="3h")
     for row in rows:
         assert row["code"] in folded
         assert mapping[row["code"]]["refs"][0] in folded
     assert "33 errors" in tldr
+
+
+def test_3h_fold_always_reports_overflow_and_hourly_compaction_is_unchanged():
+    rows = [f"• actionable_{i} — 1 ev / 1 users → owner-{i}" for i in range(4)]
+    rows += ["• generic detail"] * 4
+    folded_3h = composer.compact_report(["*Axiom errors (3h):*", *rows], limit=1, cadence="3h")
+    assert "+4 more" in folded_3h
+    folded_1h = composer.compact_report(["*Axiom errors (1h):*", *rows], limit=1, cadence="1h")
+    assert "+4 more" not in folded_1h
 
     new_axiom = {"events": 1, "users": 1,
                  "top": [{"code": "new_fault", "events": 1, "users": 1}]}
@@ -60,3 +70,18 @@ def test_3h_superseded_save_fallback_identities_are_not_counted_as_users():
     assert "1 distinct users" in line
     assert "2 fallback observations" in line
     assert "fileIdSha256 f1" in line and "unknown unknown" in line
+
+
+def test_3h_retained_sample_counts_user_id_hashes_as_users():
+    hashes = [f"user-hash-{i}" for i in range(6)]
+    refs = [
+        {"time": f"12:{i:02d}", "identity_kind": "userIdSha256", "user_hash": hashes[i % 6]}
+        for i in range(68)
+    ]
+    lines, _, _ = composer.error_block(
+        {"events": 0, "users": 0, "superseded_saves": 68,
+         "superseded_save_refs": refs}, {}, "3h")
+    line = next(item for item in lines if "superseded saves:" in item)
+    assert "68 — 6 distinct users" in line
+    assert "fallback observations" not in line
+    assert "user-hash-0: 12" in line

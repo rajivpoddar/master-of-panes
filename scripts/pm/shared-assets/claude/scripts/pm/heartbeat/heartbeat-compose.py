@@ -83,9 +83,10 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
         if isinstance(refs, list) and len(refs) == sup:
             if window_label == '3h':
                 from collections import Counter
-                users = Counter(r['user_hash'] for r in refs if r.get('identity_kind', 'userSha256') == 'userSha256')
+                user_kinds = {'userSha256', 'userIdSha256'}
+                users = Counter(r['user_hash'] for r in refs if r.get('identity_kind', 'userSha256') in user_kinds)
                 fallback = Counter((r.get('identity_kind', 'unknown'), r.get('user_hash', 'unknown'))
-                                   for r in refs if r.get('identity_kind', 'userSha256') != 'userSha256')
+                                   for r in refs if r.get('identity_kind', 'userSha256') not in user_kinds)
                 top_users = sorted(users.items(), key=lambda item: (-item[1], item[0]))[:3]
                 details = [f'{user}: {count}' for user, count in top_users]
                 details.extend(f'{kind} {identity}: {count}' for (kind, identity), count in
@@ -125,7 +126,7 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
         elif m.get("status") == "NEW":
             new += 1
             new_codes.append(row['code'])
-            target = "NEW → launch customer-artifact-investigator"
+            target = "NEW → launch customer-artifact-investigator" if window_label == "3h" else ""
         elif m.get("refs"):
             target = "→ " + ", ".join(m["refs"][:2])
         else:
@@ -2058,8 +2059,12 @@ def _usage_tldr(lines: list[str]) -> str:
     return "usage ok"
 
 
-def compact_report(lines: list[str], limit: int) -> str:
-    """Bound physical lines without discarding sections or unavailable evidence."""
+def compact_report(lines: list[str], limit: int, cadence: str | None = None) -> str:
+    """Bound physical lines without discarding sections or unavailable evidence.
+
+    The named-action overflow behavior belongs only to the 3h report; 1h keeps
+    its historical compaction contract.
+    """
     rows = [row for line in lines for row in line.splitlines() if row.strip()]
     # Fold item runs into their section, retaining counts and overflow evidence.
     while len(rows) > limit:
@@ -2088,7 +2093,7 @@ def compact_report(lines: list[str], limit: int) -> str:
         top = unavailable or actionable or items[:1]
         more = len(items) - len(top)
         summary = f" ({len(items)} items): " + "; ".join(top)
-        if more and not actionable:
+        if more and (cadence == "3h" or not actionable):
             summary += f"; +{more} more"
         rows[start - 1:end] = [rows[start - 1] + summary]
     # The cap counts content lines, not the restored section separators.
@@ -2231,7 +2236,7 @@ def compose(
         timed_out = [f for f in failures if "UNAVAILABLE (timeout " in f]
         shown = timed_out + [f for f in failures if f not in timed_out]
         lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:100] for f in shown[:4]))
-    report = compact_report(lines, 23 if mode == "3h" else 20)
+    report = compact_report(lines, 23 if mode == "3h" else 20, cadence=mode)
     if mode == "3h":
         report = '\n'.join(line for line in report.splitlines() if line.strip()).replace(CTO, '')
         return report + f"\n_MoP composer release: {composer_release_sha()}_"

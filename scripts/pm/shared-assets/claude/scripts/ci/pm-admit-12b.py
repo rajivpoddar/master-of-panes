@@ -90,41 +90,66 @@ def main_merges_only(repo, old, head):
     return True
 
 
+def canonical_markers(comments, reviewer_login):
+    """Parse only canonical first-line markers and bind them to the authenticated reviewer."""
+    markers = []
+    for comment in sorted(comments or [], key=lambda c: (c.get('created_at', ''), c.get('id', 0))):
+        lines = (comment.get('body') or '').splitlines()
+        first = lines[0] if lines else ''
+        first = re.sub(r'^#{1,6} ', '', first)
+        match = MARKER.match(first)
+        legacy = LEGACY.match(first)
+        identity = comment.get('user') or comment.get('author') or {}
+        author = identity.get('login', '') if isinstance(identity, dict) else str(identity)
+        authorized = bool(reviewer_login and author == reviewer_login)
+        if match:
+            markers.append((*match.groups(), True, authorized))
+        elif legacy:
+            old_sha, old_verdict = legacy.groups()
+            markers.append((old_verdict, old_sha, False, authorized))
+    return markers
+
+
+def reviewed_12b_verdict(comments, head, reviewer_login, repo, pr):
+    """Return latest canonical, authenticated verdict valid for this head.
+
+    PASS may carry only across the same clean main-merge-only transformation
+    accepted by admission; other verdicts require the exact reviewed head.
+    """
+    markers = canonical_markers(comments, reviewer_login)
+    if not markers:
+        return None
+    verdict, sha, canonical, authorized = markers[-1]
+    sha = sha.lower()
+    if not canonical or not authorized:
+        return None
+    if head.lower().startswith(sha):
+        return verdict
+    if verdict == 'PASS' and main_merges_only(repo, sha, head):
+        return verdict
+    return None
+
+
 def evaluate(repo, pr, head):
     last = 'none'
     try:
         comments = api(repo, f'issues/{pr}/comments?per_page=100', True)
         reviewer_login = authorized_reviewer_login()
-        markers = []
-        for comment in sorted(comments, key=lambda c: (c.get('created_at', ''), c.get('id', 0))):
-            lines = (comment.get('body') or '').splitlines()
-            first = lines[0] if lines else ''
-            # A markdown heading prefix ("## PM 12b: PASS at <sha>") is the house
-            # format for 12b comments and counts as canonical (PM 2026-11-09).
-            # Legacy "PM 12b at <sha>: VERDICT" headings still never grant admission.
-            match = MARKER.match(re.sub(r'^#{1,6} ', '', first))
-            diagnostic = match
-            legacy = LEGACY.match(re.sub(r'^#{1,6} ', '', first))
-            author = (comment.get('user') or {}).get('login', '')
-            if diagnostic:
-                markers.append((*diagnostic.groups(), bool(match), bool(reviewer_login and author == reviewer_login)))
-            elif legacy:
-                old_sha, old_verdict = legacy.groups()
-                markers.append((old_verdict, old_sha, False, bool(reviewer_login and author == reviewer_login)))
+        markers = canonical_markers(comments, reviewer_login)
         if markers:
-            verdict, sha, canonical, authorized = markers[-1]
-            sha = sha.lower()
-            last = f'{verdict}@{sha}'
+            verdict, sha, _, _ = markers[-1]
+            last = f'{verdict}@{sha.lower()}'
         try:
             if exempt(repo, pr, head):
                 return True, '12B_GATE: exempt (control-plane-only)'
         except Exception:
             pass  # An unavailable classifier never grants an exemption.
-        if markers and canonical and verdict == 'PASS' and authorized:
-            if head.startswith(sha):
+        verdict = reviewed_12b_verdict(comments, head, reviewer_login, repo, pr)
+        if verdict == 'PASS':
+            sha = markers[-1][1].lower()
+            if head.lower().startswith(sha):
                 return True, f'12B_GATE: PASS pr={pr} head={head}'
-            if main_merges_only(repo, sha, head):
-                return True, f'12B_GATE main-merge-only carry-forward from {sha} pr={pr} head={head}'
+            return True, f'12B_GATE main-merge-only carry-forward from {sha} pr={pr} head={head}'
     except Exception:
         pass
     return False, f'REFUSE: 12b_missing_or_stale pr={pr} head={head} last_12b={last}'
