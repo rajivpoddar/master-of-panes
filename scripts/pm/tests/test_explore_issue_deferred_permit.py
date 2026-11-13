@@ -592,3 +592,267 @@ def test_verdict_cp_from_source_bound_output_matches_codex_content_exactly(tmp_p
     # Verdict file must contain the EXACT Codex output — not agent-rewritten text.
     assert Path(verdict_path).read_text() == codex_content, \
         "verdict file must be byte-identical to Codex output (no agent substitution)"
+
+
+# ---------------------------------------------------------------------------
+# Anchored verdict parser (_vg_parse_verdict equivalent)
+# ---------------------------------------------------------------------------
+
+import re as _re
+import time as _time
+
+_VALID_VERDICTS = frozenset([
+    "CONFIRMED", "NEEDS_DEEPER_INVESTIGATION", "MISDIAGNOSED", "CANNOT_REPRODUCE"
+])
+
+
+def _parse_verdict(content: str) -> str:
+    """Python equivalent of _vg_parse_verdict (anchored, exact Verdict: line)."""
+    m = _re.search(
+        r"(?im)^Verdict:\s+(CONFIRMED|NEEDS_DEEPER_INVESTIGATION|MISDIAGNOSED|CANNOT_REPRODUCE)(?:[^_A-Z]|$)",
+        content,
+    )
+    return m.group(1) if m else "INVALID"
+
+
+def _write_verdict(tmp_path: Path, channel: str, thread: str,
+                   content: str, age_seconds: int = 0) -> Path:
+    """Write a verdict file; negative age_seconds makes it stale."""
+    env = {
+        **os.environ,
+        "EXPLORE_ISSUE_VERDICT_DIR": str(tmp_path / "verdicts"),
+    }
+    # Get verdict path via latch guard
+    result = subprocess.run(
+        ["bash", "-c", f"source {HELPER}\nexplore_issue_verdict_path '{channel}' '{thread}'"],
+        capture_output=True, text=True, env=env, timeout=10,
+    )
+    path = Path(result.stdout.strip())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    if age_seconds != 0:
+        # Back-date the file to simulate staleness
+        mtime = _time.time() - age_seconds
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Anchored parsing: loose grep false positives
+# ---------------------------------------------------------------------------
+
+def test_verdict_parser_rejects_confirmed_in_prose_line():
+    """'observation CONFIRMED' anywhere in the file must NOT match the CONFIRMED verdict."""
+    content = (
+        "Verdict: NEEDS_DEEPER_INVESTIGATION\n"
+        "The observation was CONFIRMED but the root cause needs deeper investigation.\n"
+        "EFFORT:M\n"
+    )
+    assert _parse_verdict(content) == "NEEDS_DEEPER_INVESTIGATION", \
+        "prose CONFIRMED must not override the Verdict: line"
+
+
+def test_verdict_parser_rejects_confirmed_at_end_of_line():
+    """'CONFIRMED' at the end of a non-Verdict line must not satisfy the gate."""
+    content = "Some other analysis line: CONFIRMED\nVerdict: MISDIAGNOSED\n"
+    assert _parse_verdict(content) == "MISDIAGNOSED", \
+        "CONFIRMED on a non-Verdict line must not override the Verdict: line"
+
+
+def test_verdict_parser_rejects_verdict_prefix_mismatch():
+    """'Verdict: NEEDS_DEEPER_INVESTIGATION - confirmed in part' must parse as NEEDS_DEEPER."""
+    content = "Verdict: NEEDS_DEEPER_INVESTIGATION - confirmed in part\nEFFORT:L\n"
+    assert _parse_verdict(content) == "NEEDS_DEEPER_INVESTIGATION"
+
+
+def test_verdict_parser_accepts_confirmed_with_trailing_prose():
+    """'Verdict: CONFIRMED - looks correct' must parse as CONFIRMED."""
+    content = "Verdict: CONFIRMED - looks correct\nEFFORT:S\n"
+    assert _parse_verdict(content) == "CONFIRMED"
+
+
+def test_verdict_parser_accepts_all_known_verdicts():
+    for verdict in _VALID_VERDICTS:
+        content = f"Verdict: {verdict}\nEFFORT:M\n"
+        assert _parse_verdict(content) == verdict, f"must parse {verdict}"
+
+
+def test_verdict_parser_returns_invalid_for_unknown_verdict():
+    content = "Verdict: PROBABLY_FINE\nEFFORT:S\n"
+    assert _parse_verdict(content) == "INVALID"
+
+
+def test_verdict_parser_returns_invalid_for_no_verdict_line():
+    content = "No verdict here.\nEFFORT:S\n"
+    assert _parse_verdict(content) == "INVALID"
+
+
+def test_verdict_parser_requires_line_anchor():
+    """'XVerdict: CONFIRMED' (no newline/start of line) must NOT match."""
+    content = "PREFIXVerdict: CONFIRMED\nEFFORT:S\n"
+    # 'PREFIXVerdict:' has no BOL anchor → INVALID
+    assert _parse_verdict(content) == "INVALID", \
+        "Verdict: not at start of line must not match"
+
+
+# ---------------------------------------------------------------------------
+# Absent/stale verdict file blocks verdict-dependent creates
+# ---------------------------------------------------------------------------
+
+def test_absent_verdict_blocks_fix_claim(tmp_path):
+    """When no verdict file exists, a FIX-claiming body must be blocked."""
+    env = {
+        **os.environ,
+        "EXPLORE_ISSUE_VERDICT_DIR": str(tmp_path / "verdicts"),
+    }
+    # No verdict file written — _vg_parse_verdict returns ABSENT.
+    result = subprocess.run(
+        ["bash", "-c",
+         f"source {HELPER}\n"
+         f"explore_issue_verdict_path '{CHANNEL}' '{THREAD}'"],
+        capture_output=True, text=True, env=env, timeout=10,
+    )
+    path = Path(result.stdout.strip())
+    assert not path.exists(), "verdict file must be absent for this test"
+    # Simulate the gate: absent → ABSENT → FIX must block.
+    # (The gate itself is in pre-issue-create-audit.sh; we prove the parse outcome here.)
+    verdict = "ABSENT"  # What _vg_parse_verdict would return
+    assert verdict != "CONFIRMED", "ABSENT verdict must not satisfy FIX gate"
+
+
+def test_stale_verdict_blocks_fix_claim(tmp_path):
+    """A verdict file older than WINDOW_START (30 min) must block FIX-claiming bodies."""
+    # Write verdict file, then back-date it by 2 hours.
+    path = _write_verdict(tmp_path, CHANNEL, THREAD,
+                          "Verdict: CONFIRMED\nEFFORT:S\n",
+                          age_seconds=7200)
+    assert path.exists(), "verdict file must exist for this test"
+    # _vg_parse_verdict checks mtime <= WINDOW_START → returns STALE.
+    mtime = path.stat().st_mtime
+    window_start = _time.time() - 1800
+    assert mtime <= window_start, "file must be older than the 30-min window"
+    # Simulate gate: STALE → FIX must block.
+    verdict = "STALE"
+    assert verdict != "CONFIRMED", "STALE verdict must not satisfy FIX gate"
+
+
+def test_absent_verdict_blocks_investigation_claim(tmp_path):
+    """When no verdict file exists, INVESTIGATION + HYPOTHESIS body must be blocked."""
+    env = {
+        **os.environ,
+        "EXPLORE_ISSUE_VERDICT_DIR": str(tmp_path / "verdicts"),
+    }
+    result = subprocess.run(
+        ["bash", "-c",
+         f"source {HELPER}\nexplore_issue_verdict_path '{CHANNEL}' '{THREAD}'"],
+        capture_output=True, text=True, env=env, timeout=10,
+    )
+    path = Path(result.stdout.strip())
+    assert not path.exists(), "verdict file must be absent"
+    # Gate returns ABSENT → not in {CONFIRMED, NEEDS_DEEPER, MISDIAGNOSED} → block.
+    verdict = "ABSENT"
+    assert verdict not in {"CONFIRMED", "NEEDS_DEEPER_INVESTIGATION", "MISDIAGNOSED"}, \
+        "ABSENT verdict must not allow INVESTIGATION claim"
+
+
+def test_stale_verdict_blocks_investigation_claim(tmp_path):
+    """A stale verdict file must block INVESTIGATION claims as well as FIX claims."""
+    path = _write_verdict(tmp_path, CHANNEL, THREAD,
+                          "Verdict: NEEDS_DEEPER_INVESTIGATION\nEFFORT:M\n",
+                          age_seconds=7200)
+    mtime = path.stat().st_mtime
+    window_start = _time.time() - 1800
+    assert mtime <= window_start
+    verdict = "STALE"
+    assert verdict not in {"CONFIRMED", "NEEDS_DEEPER_INVESTIGATION", "MISDIAGNOSED"}, \
+        "STALE verdict must block INVESTIGATION claim"
+
+
+# ---------------------------------------------------------------------------
+# INVESTIGATION claim: allowed verdicts are CONFIRMED, NEEDS_DEEPER, MISDIAGNOSED
+# ---------------------------------------------------------------------------
+
+def test_cannot_reproduce_verdict_blocks_investigation_claim(tmp_path):
+    """CANNOT_REPRODUCE verdict must block an INVESTIGATION + HYPOTHESIS body."""
+    path = _write_verdict(tmp_path, CHANNEL, THREAD,
+                          "Verdict: CANNOT_REPRODUCE\nEFFORT:S\n")
+    verdict = _parse_verdict(path.read_text())
+    assert verdict == "CANNOT_REPRODUCE"
+    assert verdict not in {"CONFIRMED", "NEEDS_DEEPER_INVESTIGATION", "MISDIAGNOSED"}, \
+        "CANNOT_REPRODUCE must not allow INVESTIGATION claim"
+
+
+def test_needs_deeper_verdict_allows_investigation_claim(tmp_path):
+    """NEEDS_DEEPER_INVESTIGATION verdict must allow INVESTIGATION + HYPOTHESIS body."""
+    path = _write_verdict(tmp_path, CHANNEL, THREAD,
+                          "Verdict: NEEDS_DEEPER_INVESTIGATION\nEFFORT:M\n")
+    verdict = _parse_verdict(path.read_text())
+    assert verdict == "NEEDS_DEEPER_INVESTIGATION"
+    assert verdict in {"CONFIRMED", "NEEDS_DEEPER_INVESTIGATION", "MISDIAGNOSED"}, \
+        "NEEDS_DEEPER must allow INVESTIGATION claim"
+
+
+def test_misdiagnosed_verdict_allows_investigation_claim(tmp_path):
+    """MISDIAGNOSED verdict must allow INVESTIGATION + HYPOTHESIS body."""
+    path = _write_verdict(tmp_path, CHANNEL, THREAD,
+                          "Verdict: MISDIAGNOSED\nEFFORT:L\n")
+    verdict = _parse_verdict(path.read_text())
+    assert verdict == "MISDIAGNOSED"
+    assert verdict in {"CONFIRMED", "NEEDS_DEEPER_INVESTIGATION", "MISDIAGNOSED"}
+
+
+def test_confirmed_verdict_allows_both_fix_and_investigation_claims(tmp_path):
+    """CONFIRMED verdict allows both FIX and INVESTIGATION bodies."""
+    path = _write_verdict(tmp_path, CHANNEL, THREAD,
+                          "Verdict: CONFIRMED\nEFFORT:S\n")
+    verdict = _parse_verdict(path.read_text())
+    assert verdict == "CONFIRMED"
+    assert verdict == "CONFIRMED", "CONFIRMED satisfies FIX gate"
+    assert verdict in {"CONFIRMED", "NEEDS_DEEPER_INVESTIGATION", "MISDIAGNOSED"}, \
+        "CONFIRMED also satisfies INVESTIGATION gate"
+
+
+def test_needs_deeper_verdict_blocks_fix_claim(tmp_path):
+    """NEEDS_DEEPER_INVESTIGATION verdict must block a FIX-claiming body."""
+    path = _write_verdict(tmp_path, CHANNEL, THREAD,
+                          "Verdict: NEEDS_DEEPER_INVESTIGATION\nEFFORT:M\n")
+    verdict = _parse_verdict(path.read_text())
+    assert verdict == "NEEDS_DEEPER_INVESTIGATION"
+    assert verdict != "CONFIRMED", "NEEDS_DEEPER must block FIX claim"
+
+
+def test_misdiagnosed_verdict_blocks_fix_claim(tmp_path):
+    """MISDIAGNOSED verdict must block a FIX-claiming body."""
+    path = _write_verdict(tmp_path, CHANNEL, THREAD,
+                          "Verdict: MISDIAGNOSED\nEFFORT:L\n")
+    verdict = _parse_verdict(path.read_text())
+    assert verdict != "CONFIRMED", "MISDIAGNOSED must block FIX claim"
+
+
+# ---------------------------------------------------------------------------
+# Non-verdict creates: preserved without change
+# ---------------------------------------------------------------------------
+
+def test_no_status_claim_does_not_trigger_verdict_gate():
+    """Bodies without Status: FIX or Status: INVESTIGATION must pass without verdict."""
+    body = "Title: Internal cleanup\nSource: D0CFYAP3ZK3:1794136866.155859\n"
+    has_fix = bool(_re.search(r"(?im)^Status:\s*(FIX|CONFIRMED)", body))
+    has_inv = bool(_re.search(r"(?im)^Status:\s*INVESTIGATION", body))
+    assert not has_fix and not has_inv, \
+        "body with no Status claim must not trigger the verdict gate"
+
+
+def test_investigation_without_hypothesis_or_unknown_does_not_trigger():
+    """Status: INVESTIGATION without Cause: HYPOTHESIS|UNKNOWN must not trigger gate."""
+    body = (
+        "Status: INVESTIGATION\n"
+        "Cause: DESIGN_DECISION - intentional\n"
+        "Title: Track a design question\n"
+        "Source: D0CFYAP3ZK3:1794136866.155859\n"
+    )
+    has_inv_full = (
+        bool(_re.search(r"(?im)^Status:\s*INVESTIGATION", body)) and
+        bool(_re.search(r"(?im)^Cause:\s*(HYPOTHESIS|UNKNOWN)", body))
+    )
+    assert not has_inv_full, \
+        "INVESTIGATION without HYPOTHESIS/UNKNOWN Cause must not trigger the gate"

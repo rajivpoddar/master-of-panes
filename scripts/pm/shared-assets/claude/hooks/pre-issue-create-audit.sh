@@ -504,35 +504,96 @@ WINDOW_START=$((NOW - 1800))
 # still require the explore-issue CONFIRMED permit above. Backup:
 # ~/.claude/hooks/pre-issue-create-audit.sh.bak-20261113-droparch
 
-# Verdict gate: per-source verdict file (not global /tmp/codex-explore-output.txt).
+# ---------------------------------------------------------------------------
+# Verdict gate: source-bound per-investigation verdict file
 #
-# The global file causes cross-source contamination: a CONFIRMED verdict from
-# session A for source X would incorrectly satisfy source Y's gate in session B.
-# Instead, each source is bound to its own verdict file keyed by channel+thread.
+# Defects fixed vs. prior implementation:
+#   1. Loose grep: grep for CONFIRMED anywhere matched "observation CONFIRMED"
+#      even when Verdict: line said NEEDS_DEEPER_INVESTIGATION. Now uses anchored
+#      python3 parsing that extracts only the value on the Verdict: line.
+#   2. Absent/stale file silently permitted FIX/CONFIRMED claims. Now blocks.
+#   3. INVESTIGATION bypassed the verdict check entirely (including when verdict
+#      was absent, stale, invalid, or CANNOT_REPRODUCE). Now INVESTIGATION still
+#      requires a fresh verdict file; it is only allowed when the parsed verdict
+#      is CONFIRMED, NEEDS_DEEPER_INVESTIGATION, or MISDIAGNOSED.
 #
-# A body explicitly declaring INVESTIGATION with cause HYPOTHESIS or UNKNOWN is
-# an in-progress tracking ticket, not a confirmed fix; it may pass with
-# NEEDS_DEEPER or MISDIAGNOSED. A body claiming FIX or CONFIRMED requires a
-# CONFIRMED verdict in the per-source file.
-_BODY_DECLARES_INVESTIGATION=false
+# Non-verdict creates (no Status: FIX/CONFIRMED/INVESTIGATION claim, or no
+# Source: line) are preserved as-is and do not require a verdict file.
+# ---------------------------------------------------------------------------
+
+# Parse the anchored Verdict: line from a file and return one of:
+#   CONFIRMED | NEEDS_DEEPER_INVESTIGATION | MISDIAGNOSED | CANNOT_REPRODUCE
+#   ABSENT  — file missing or unreadable
+#   STALE   — file exists but mtime <= WINDOW_START
+#   INVALID — file present and fresh but no recognized Verdict: line
+_vg_parse_verdict() {
+  local path="$1" window_start="$2"
+  python3 - "$path" "$window_start" <<'PYEOF'
+import os, re, sys
+path, window_start = sys.argv[1], int(sys.argv[2])
+try:
+    s = os.stat(path)
+except OSError:
+    print("ABSENT"); sys.exit()
+if int(s.st_mtime) <= window_start:
+    print("STALE"); sys.exit()
+try:
+    content = open(path).read()
+except OSError:
+    print("ABSENT"); sys.exit()
+# Anchored to start of line; value must be a known verdict word; optional
+# trailing prose (e.g. "CONFIRMED - looks right") is allowed after a non-word
+# boundary character.
+m = re.search(
+    r"(?im)^Verdict:\s+(CONFIRMED|NEEDS_DEEPER_INVESTIGATION|MISDIAGNOSED|CANNOT_REPRODUCE)(?:[^_A-Z]|$)",
+    content,
+)
+print(m.group(1) if m else "INVALID")
+PYEOF
+}
+
+# Classify the body claim that determines which verdict is required.
+# Only Status: FIX and Status: INVESTIGATION trigger the verdict gate;
+# all other bodies (internal creates, follow-ups without a Status: claim)
+# are preserved without change.
+_VG_CLAIMS_FIX=false
+_VG_CLAIMS_INVESTIGATION=false
+if printf '%s' "$BODY_OR_CMD" | grep -qiE '^Status:[[:space:]]*(FIX|CONFIRMED)'; then
+  _VG_CLAIMS_FIX=true
+fi
 if printf '%s' "$BODY_OR_CMD" | grep -qiE '^Status:[[:space:]]*INVESTIGATION' && \
    printf '%s' "$BODY_OR_CMD" | grep -qiE '^Cause:[[:space:]]*(HYPOTHESIS|UNKNOWN)'; then
-  _BODY_DECLARES_INVESTIGATION=true
+  _VG_CLAIMS_INVESTIGATION=true
 fi
 
-if [ -n "$THREAD_TS" ] && [ "$_BODY_DECLARES_INVESTIGATION" != "true" ]; then
+if [ -n "$THREAD_TS" ] && { [ "$_VG_CLAIMS_FIX" = "true" ] || [ "$_VG_CLAIMS_INVESTIGATION" = "true" ]; }; then
   _VERDICT_PATH="$(explore_issue_verdict_path "$CHANNEL" "$THREAD_TS" 2>/dev/null || true)"
-  if [ -n "$_VERDICT_PATH" ] && [ -f "$_VERDICT_PATH" ]; then
-    _VERDICT_MTIME=$(stat -c %Y "$_VERDICT_PATH" 2>/dev/null || stat -f %m "$_VERDICT_PATH" 2>/dev/null || echo "0")
-    [ -z "$_VERDICT_MTIME" ] && _VERDICT_MTIME=0
-    if [ "$_VERDICT_MTIME" -gt "$WINDOW_START" ]; then
-      if ! grep -qE '(^|[[:space:]])Verdict:.*CONFIRMED|CONFIRMED($|[[:space:]])' "$_VERDICT_PATH"; then
-        cat <<BLOCK
-{"decision": "block", "message": "BLOCKED: Per-source verdict for ${CHANNEL}:${THREAD_TS} does not contain a CONFIRMED verdict and the issue body does not declare INVESTIGATION (Status: INVESTIGATION + Cause: HYPOTHESIS or UNKNOWN). Codex returned MISDIAGNOSED or NEEDS_DEEPER_INVESTIGATION — address those concerns or declare Status: INVESTIGATION + Cause: HYPOTHESIS/UNKNOWN in the body before filing a tracking ticket."}
-BLOCK
-        exit 0
-      fi
+  _VG_VERDICT="ABSENT"
+  if [ -n "$_VERDICT_PATH" ]; then
+    _VG_VERDICT="$(_vg_parse_verdict "$_VERDICT_PATH" "$WINDOW_START")"
+  fi
+
+  if [ "$_VG_CLAIMS_FIX" = "true" ]; then
+    # FIX/CONFIRMED body: requires CONFIRMED and nothing else.
+    # ABSENT, STALE, INVALID, NEEDS_DEEPER_INVESTIGATION, MISDIAGNOSED and
+    # CANNOT_REPRODUCE all block.
+    if [ "$_VG_VERDICT" != "CONFIRMED" ]; then
+      printf '%s\n' "{\"decision\": \"block\", \"message\": \"BLOCKED: Body claims Status: FIX or CONFIRMED but Codex verdict is '${_VG_VERDICT}' for ${CHANNEL}:${THREAD_TS}. A CONFIRMED verdict is required. Address the concerns raised by Codex, or file a tracking ticket with Status: INVESTIGATION + Cause: HYPOTHESIS/UNKNOWN instead.\"}"
+      exit 0
     fi
+  else
+    # INVESTIGATION + HYPOTHESIS/UNKNOWN body.
+    # Allowed: CONFIRMED, NEEDS_DEEPER_INVESTIGATION, MISDIAGNOSED.
+    # Blocked: ABSENT, STALE, INVALID, CANNOT_REPRODUCE.
+    case "$_VG_VERDICT" in
+      CONFIRMED|NEEDS_DEEPER_INVESTIGATION|MISDIAGNOSED)
+        : # Verdict is acceptable for a tracking/investigation ticket.
+        ;;
+      *)
+        printf '%s\n' "{\"decision\": \"block\", \"message\": \"BLOCKED: Body declares Status: INVESTIGATION but Codex verdict is '${_VG_VERDICT}' for ${CHANNEL}:${THREAD_TS}. An INVESTIGATION ticket requires a fresh verdict file containing CONFIRMED, NEEDS_DEEPER_INVESTIGATION, or MISDIAGNOSED. A missing, stale, or CANNOT_REPRODUCE verdict does not permit filing.\"}"
+        exit 0
+        ;;
+    esac
   fi
 fi
 
