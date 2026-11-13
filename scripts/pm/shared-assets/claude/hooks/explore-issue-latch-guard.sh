@@ -87,8 +87,10 @@ explore_issue_invalidate_false_positive_latch() {
 EXPLORE_ISSUE_STATE_DIR="${EXPLORE_ISSUE_STATE_DIR:-/tmp/heydonna-explore-issue-state}"
 EXPLORE_ISSUE_PERMIT_DIR="${EXPLORE_ISSUE_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit}"
 EXPLORE_ISSUE_CONSUMED_PERMIT_DIR="${EXPLORE_ISSUE_CONSUMED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-consumed}"
+EXPLORE_ISSUE_RECONCILED_PERMIT_DIR="${EXPLORE_ISSUE_RECONCILED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-reconciled}"
 EXPLORE_ISSUE_PM_OPS_CLI="${EXPLORE_ISSUE_PM_OPS_CLI:-/Users/rajiv/.claude/scripts/pm-ops.py}"
 export EXPLORE_ISSUE_CONSUMED_PERMIT_DIR
+export EXPLORE_ISSUE_RECONCILED_PERMIT_DIR
 EXPLORE_ISSUE_KIND="explore_issue_required"
 EXPLORE_ISSUE_TARGET_TYPE="slack_thread"
 
@@ -372,6 +374,69 @@ with open(path + ".lock", "a") as lock:
     os.rename(path, consumed)  # Persist UNKNOWN before allowing the external create.
 ' "$file" "$consumed" "$body_sha" "$title_digest" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-$thread_ts}" || return $?
   return 0
+}
+
+explore_issue_restore_permit() {
+  # channel thread_ts absence_proof -> 0 cleared, 1 not found or wrong state, 2 already reconciled
+  #
+  # Moves a consumed permit to the reconciled dir when the caller has proven that
+  # the guarded gh issue create never landed in GitHub (searched by title, keywords,
+  # channel, and both source permalinks; no match found). After this returns 0, the
+  # agent MUST re-prepare the body with the correct source_message_ts, compute fresh
+  # body_sha256 and title_digest, call explore_issue_mint_permit, set state
+  # READY_TO_FILE, and run gh issue create. This function never re-mints the permit
+  # itself; minting is the agent's responsibility so the body content is correct.
+  #
+  # Safety invariants:
+  #   - Only succeeds when state is READY_TO_FILE (not any terminal state).
+  #   - Exactly one reconcile per key: a second call returns 2.
+  #   - The consumed permit is preserved in the reconciled dir with absence_proof
+  #     annotation for audit. EXPLORE_ISSUE_CONSUMED_PERMIT_DIR still passes the
+  #     atomic_write_json and permit_status guards after the consumed file is moved.
+  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
+  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
+  local channel="$1" thread_ts="$2" absence_proof="${3:-}"
+  local consumed_dir reconciled_dir key state_file state
+  key="$EXPLORE_ISSUE_SELECTED_KEY"
+  consumed_dir="${EXPLORE_ISSUE_CONSUMED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-consumed}"
+  reconciled_dir="${EXPLORE_ISSUE_RECONCILED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-reconciled}"
+
+  # State must be READY_TO_FILE (not terminal, not unstarted).
+  state_file="$EXPLORE_ISSUE_STATE_DIR/$key.json"
+  [ -f "$state_file" ] || return 1
+  state="$(jq -er .state "$state_file" 2>/dev/null)" || return 1
+  [ "$state" = "READY_TO_FILE" ] || return 1
+
+  # Find the consumed permit for this key.
+  local consumed_file found_consumed=""
+  for consumed_file in "$consumed_dir/${key}.permit.consumed."*.json; do
+    [ -f "$consumed_file" ] && found_consumed="$consumed_file" && break
+  done
+  [ -n "$found_consumed" ] || return 1
+
+  # Atomically archive consumed → reconciled. Blocks a second reconcile.
+  local now
+  now="$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "$reconciled_dir"
+  python3 -c '
+import fcntl, glob, json, os, sys
+key_prefix, found_consumed, reconciled_dir, now, absence_proof = sys.argv[1:]
+with open(found_consumed + ".lock", "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    if glob.glob(os.path.join(reconciled_dir, key_prefix + ".permit.reconciled.*.json")):
+        sys.exit(2)  # Already reconciled once; preserve UNKNOWN safety.
+    if not os.path.exists(found_consumed):
+        sys.exit(1)
+    with open(found_consumed) as f:
+        permit = json.load(f)
+    permit["reconciled_at"] = now
+    permit["absence_proof"] = absence_proof
+    reconciled = os.path.join(reconciled_dir, key_prefix + ".permit.reconciled." + now + ".json")
+    with open(reconciled + ".tmp", "w") as f:
+        json.dump(permit, f)
+    os.replace(reconciled + ".tmp", reconciled)
+    os.remove(found_consumed)
+' "$key" "$found_consumed" "$reconciled_dir" "$now" "$absence_proof" || return $?
 }
 
 explore_issue_resolve_obligation() {

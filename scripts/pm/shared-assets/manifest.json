@@ -132,7 +132,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "8f269af8b84d0b774f9366c8d248a6b29d70b19ca8ac3535ea7918941a297480",
+      "sha256": "83330f55bea12228803efdc3e7caeadf53aafb86f231cc48497db821e53571e9",
       "source_path": "claude/hooks/explore-issue-latch-guard.sh"
     },
     {
