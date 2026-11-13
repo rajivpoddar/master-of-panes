@@ -1480,7 +1480,7 @@ def build_proxy_snapshot(tmux_text: str, ps_text: str, now: datetime, completion
             **metadata, "name": name, "model": model, "age": age_min, "last_activity": last,
             "dead": dead, "stale": stale, "state": "dead" if dead else "stale" if stale else "running",
         })
-    rows.sort(key=lambda row: (row["dead"], row["name"]))
+    rows.sort(key=lambda row: (row["dead"], row["age"] is None, -(row["age"] or 0), row["name"]))
     return {"rows": rows, "completions": completions, "truncated": False}
 
 
@@ -1660,8 +1660,14 @@ def proxies_block(doc: dict | None) -> list[str]:
 
     live = [r for r in visible if not _dead(r) and r.get("state") != "left-over window"]
     stale_note = f" (stale, {doc['cache_age_min']}m old)" if doc.get("cache_age_min") is not None else ""
-    lines = [f"*Proxies:* {len(live)} live{stale_note} · {len(completed)} finished last hour ({failed} rc≠0{suffix})"]
+    model_counts = {}
+    for row in live:
+        model = row.get('model') or 'unknown'
+        model_counts[model] = model_counts.get(model, 0) + 1
+    counts = ', '.join(f'{model}: {count}' for model, count in sorted(model_counts.items())) or 'none'
+    lines = [f"*Proxies:* {len(live)} live ({counts}){stale_note} · {len(completed)} finished last hour ({failed} rc≠0{suffix})"]
     rendered = []
+    visible.sort(key=lambda row: (_dead(row), row.get('age') is None, -(row.get('age') or 0), row.get('name', '')))
     for row in visible:
         if row.get("state") in {"dead window", "left-over window"} or "age" not in row and "last_activity" not in row:
             rendered.append(f"• {row['name']} — {row.get('state')}")
@@ -1750,8 +1756,13 @@ def compact_report(lines: list[str], limit: int) -> str:
     # Fold item runs into their section, retaining counts and overflow evidence.
     while len(rows) > limit:
         runs = []
+        in_proxies = False
         for i, row in enumerate(rows):
-            if row.lstrip().startswith(("•", "- ", "  ")) and i:
+            if row.startswith('*Proxies:'):
+                in_proxies = True
+            elif row.startswith('*') or row.startswith('_Ops:_'):
+                in_proxies = False
+            if not in_proxies and row.lstrip().startswith(("•", "- ", "  ")) and i:
                 start = i
                 while start > 0 and rows[start - 1].lstrip().startswith(("•", "- ")):
                     start -= 1
@@ -1813,8 +1824,7 @@ def compose(
     window = "3h" if mode == "3h" else "1h"
     stamp = now.astimezone(IST).strftime("%H:%M IST")
     err_lines, err_tldr, _ = error_block(axiom, mapping or {}, window)
-    # Slots block costs ~5 lines; trim the PR list so the post stays <= ~24 lines.
-    pr_lines, pr_tldr, merge_asks = pr_block(prs, MAX_PRS - 4 if include_slots else MAX_PRS)
+    pr_lines, pr_tldr, merge_asks = pr_block(prs, MAX_PRS)
     parts = []
     body: list[str] = []
     if include_active:
@@ -1841,21 +1851,6 @@ def compose(
     else:
         parts.append(pr_tldr)
         body += ["", *pr_lines]
-    slot_actions: list[str] = []
-    if include_slots:
-        sl_lines, sl_tldr, slot_actions = slot_block(slots, now, release_seen)
-        if priority_unavailable:
-            sl_tldr += f", priority check {priority_unavailable}"
-            sl_lines = [*sl_lines, "• Priority check: " + priority_unavailable]
-        elif priority_flags:
-            # Rajiv C0ALZJHGE49 thread 1793195119.674919, ts 1793202340.562609: P2 lane while a P0 is ready.
-            sl_tldr += f", {len(priority_flags)} PRIORITY_INVERSION"
-            sl_lines = [*sl_lines, *("• ⚠ " + f for f in priority_flags)]
-            slot_actions = slot_actions + list(priority_flags)
-        if not slots_authoritative:
-            slot_actions = []
-        parts.append(sl_tldr)
-        body += ["", *sl_lines]
     if mode == "1h":
         body += ["", remote_boxes or "*Remote boxes:* unavailable (collector not run)"]
     if tracked:
@@ -1887,7 +1882,7 @@ def compose(
     lines = [first, *body]
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
-    pm_actions = ([] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []] + lane_event_actions(slots, include_slots and slots_authoritative)) + slot_actions
+    pm_actions = [] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]
     if pm_actions:
         lines += ["", "*ACTIONS (PM):* " + "; ".join(pm_actions)]
     if cleanup_alert:
@@ -2055,8 +2050,7 @@ def lane_event_actions(slots_doc, authoritative=True):
 
 
 def structured_pm_actions(prs, slot_actions, slots, mode, slots_authoritative):
-    lane_actions = lane_event_actions(slots, slots_authoritative) if mode == "1h" else []
-    return [a for r in (prs or []) for a in r.get("actions") or []] + slot_actions + lane_actions
+    return [a for r in (prs or []) for a in r.get("actions") or []] if mode == "1h" else []
 
 
 def _fetch_slots(url: str = MOP_SLOTS_URL, timeout: int = 5):
@@ -2285,9 +2279,6 @@ def collect_hourly(args, py, hours, now, failures):
             jobs[key] = lambda path=path: _load(path)
     if not args.no_active_users:
         jobs["active"] = (lambda: _load(args.active_json)) if args.active_json else json_job("active-users", [py, str(AXIOM_REPORT), "--hours", hours, "--active-users"])
-    if not args.no_slots:
-        jobs["slots"] = slots_job
-        jobs["priority"] = priority_job
     # Error mapping depends only on Axiom, not on any of the slow GitHub probes.
     axiom_job = jobs["axiom"]
     ready = threading.Event()
@@ -2358,22 +2349,7 @@ def main() -> int:
         if args.mode != "1h" and active is None and not args.active_json:
             active = _run_json([py, str(AXIOM_REPORT), "--hours", hours, "--active-users"], failures, "active-users", COLLECTOR_TIMEOUTS["active-users"])
     slots = None
-    if not args.no_slots:
-        slots = hourly.get("slots") if args.mode == "1h" else _load(args.slots_json)
-        if args.mode != "1h" and slots is None and not args.slots_json:
-            slots = _fetch_slots()  # read-only; None => "MoP unreachable", never a failure
     release_seen = None
-    if slots is not None:
-        try:
-            prev = json.loads(SLOT_STATE.read_text())
-        except (OSError, ValueError):
-            prev = {}
-        release_seen, new_state = slot_transitions(slots, datetime.now(timezone.utc), prev)
-        try:
-            SLOT_STATE.parent.mkdir(parents=True, exist_ok=True)
-            SLOT_STATE.write_text(json.dumps(new_state, indent=2))
-        except OSError as exc:
-            failures.append(f"slot-state save: {exc}")
     mapping_doc = hourly.get("map") if args.mode == "1h" else _load(args.map_json)
     if args.mode != "1h" and mapping_doc is None and axiom:
         codes = [a for row in axiom.get("top", []) for a in ("--code", row["code"])]
@@ -2398,22 +2374,11 @@ def main() -> int:
         # The snapshot already supplies direct PR actions. Routine PR progress
         # does not create a second queue in the obligations ledger.
 
-    # Idle-slot actions are only rendered into the post's ACTIONS line by `compose()`.
-    # The runtime contract requires them in the structured ACTIONS: channel the agent
-    # copies into its return value, so compute + persist them here too (Codex #7 P2).
-    slot_actions: list[str] = []
-    priority_flags: list[str] | None = []
-    if slots is not None and not args.no_slots:
-        _, _, slot_actions = slot_block(slots, datetime.now(timezone.utc), release_seen)
-        priority_flags = hourly.get("priority") if args.mode == "1h" else priority_inversion_flags(slots, failures)
-        slot_actions += priority_flags or []
+    priority_flags = []
     # Historical status is useful; historical authorization is not.
     if "prs" in stale:
         prs = [dict(r, actions=[], next="live head recheck required") for r in prs]
-    if "slots" in stale or "priority" in stale:
-        slot_actions = []
-    pm_actions = structured_pm_actions(prs, slot_actions, slots, args.mode,
-                                       not args.no_slots and not ({"slots", "priority"} & stale.keys()))
+    pm_actions = structured_pm_actions(prs, [], None, args.mode, False)
 
     if args.save_inputs:
         out = Path(args.save_inputs)

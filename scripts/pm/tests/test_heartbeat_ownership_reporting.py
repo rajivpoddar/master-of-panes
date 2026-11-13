@@ -92,7 +92,7 @@ def test_same_head_live_canonical_claim_and_true_unowned_remain_distinct(lane, m
     text = report(composer, rows)
     assert "2 red (1 unowned)" in text and "owner: ci-repair-agent" in text
     assert "*Agents:* 3 listed · 3 running · 0 completed · 0 inactive" in text
-    assert "*Slots (4):*" in text and "12791" in text and "4 errors / 1 users" in text
+    assert "*Slots" not in text and "4 errors / 1 users" in text
     assert "PM stops" not in text and "Step 3c" not in text
     assert db.read_bytes() == before
     with closing(sqlite3.connect(db)) as con:

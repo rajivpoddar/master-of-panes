@@ -51,7 +51,7 @@ def test_after_slots_with_one_blank_line():
     line = "*Remote boxes:* test pool 1 free / 12"
     post = composer.compose("1h", datetime.now(timezone.utc), None, {}, [], slots={"slots": []}, include_slots=True,
                             training=("*Training:* no run active", []), remote_boxes=line)
-    assert "*Slots (0):*\n\n" + line + "\n\n" in post
+    assert "*Slots" not in post and "\n\n" + line + "\n\n" in post
 
 
 def test_invalid_or_incomplete_output_is_unavailable(monkeypatch):

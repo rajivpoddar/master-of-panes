@@ -167,6 +167,5 @@ def test_stale_lane_events_never_become_actions_in_either_output():
     assert not composer.structured_pm_actions([], [], slots, '1h', False)
     live_report = composer.compose('1h', NOW, None, {}, [], slots=slots, include_slots=True,
                                    slots_authoritative=True, decisions={'items': [], 'stale': 0})
-    assert 'lane_close_reimplement_due' in live_report
-    assert any('lane_close_reimplement_due' in action
-               for action in composer.structured_pm_actions([], [], slots, '1h', True))
+    assert 'lane_close_reimplement_due' not in live_report
+    assert not composer.structured_pm_actions([], [], slots, '1h', True)

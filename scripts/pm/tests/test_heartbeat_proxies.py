@@ -8,6 +8,23 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
+def test_hourly_retains_all_proxies_sorted_and_drops_slot_actions():
+    now = datetime(2026, 11, 13, tzinfo=timezone.utc)
+    rows = [{'name': f'px-{n}', 'state': 'running', 'model': 'luna' if n % 2 else 'sol',
+             'age': n, 'brief_refs': [f'issue:{n}']} for n in range(30)]
+    slots = {'slots': [], 'lane_events': [{'slot': 1, 'issue': 99, 'threshold': 'overdue'}]}
+    doc = {'rows': rows, 'completions': []}
+    report = module.compose('1h', now, None, {}, [{'actions': ['review PR']}],
+                            slots=slots, include_slots=True, priority_flags=['priority inversion'],
+                            proxies=doc)
+    assert '*Slots' not in report and 'priority inversion' not in report and 'overdue slot' not in report
+    assert 'review PR' in report
+    assert '30 live (luna: 15, sol: 15)' in report
+    assert all(f'issue:{n} @' in report for n in range(30))
+    assert report.index('issue:29 @') < report.index('issue:0 @')
+    assert module.structured_pm_actions([{'actions': ['review PR']}], ['idle-slot'], slots, '1h', True) == ['review PR']
+
+
 def test_proxy_tmux_ps_fixture(tmp_path):
     now = datetime(2026, 11, 8, tzinfo=timezone.utc)
     out = tmp_path / 'task.md'

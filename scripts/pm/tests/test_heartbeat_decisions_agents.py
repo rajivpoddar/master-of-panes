@@ -250,7 +250,7 @@ def test_shared_composer_orders_agents_and_exactly_one_decision_spacer(mode):
         assert out.index(HEADER) < out.index("*Proxies:*")
         assert lines[i - 3] == ""
         assert "*Training:*" not in out
-        assert out.index("*Slots") < out.index("*Agents") < out.index(HEADER)
+        assert "*Slots" not in out and out.index("*Agents") < out.index(HEADER)
         assert not out.startswith(composer.CTO)
     else:
         assert "*Agents:*" not in out and out.startswith(composer.CTO)

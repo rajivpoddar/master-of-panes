@@ -633,7 +633,7 @@ def test_compose_with_slots_active_users_agents_and_empty_decisions_stays_under_
                           {}, prs, active=active, include_active=True, slots=six, include_slots=True,
                           training=("*Training:* no run active", []))  # hermetic: never probe the live Spark
     lines = msg.splitlines()
-    assert "*ACTIONS (PM):* idle-slot S2 #8478 idle 25m; idle-slot S3 free idle 40m" in lines
+    assert not any('idle-slot' in line or '*Slots' in line for line in lines)
     # Rajiv's Agents line + the spacer and empty Decisions section add 3 lines.
     pending = lines.index('*Pending PM actions:*')
     assert lines[pending + 1:pending + 3] == ['• obligations: UNAVAILABLE (collector not run)', '• GitHub: UNAVAILABLE (collector not run)']
