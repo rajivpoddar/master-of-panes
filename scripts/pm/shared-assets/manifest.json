@@ -1226,7 +1226,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "93dda1ba290cf19ed733431c823eeb63acceec5bbffcd8259624becbc3b0952a",
+      "sha256": "55fa7d2675f66de2153d310f3c358eecae8252eab120feb75b5a706f2a7372f1",
       "source_path": "claude/skills/playwright-qa-spec/SKILL.md"
     },
     {
