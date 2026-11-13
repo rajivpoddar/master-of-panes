@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shutil
 import stat
@@ -165,6 +166,25 @@ def refuse_claude_plugin_cache(path: Path, *, label: str) -> None:
             )
 
 
+def service_node(service: str, requested: str | None = None) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", service):
+        raise InstallerError("invalid service name")
+    plist_path = Path.home() / "Library/LaunchAgents" / f"{service}.plist"
+    try:
+        with plist_path.open("rb") as handle:
+            arguments = plistlib.load(handle).get("ProgramArguments", [])
+        node = Path(arguments[0]).resolve(strict=True)
+        if requested and Path(requested).resolve(strict=True) != node:
+            raise InstallerError("--node-bin differs from the launchd service runtime")
+    except (OSError, ValueError, IndexError, TypeError, plistlib.InvalidFileException) as exc:
+        raise InstallerError(f"cannot determine service Node runtime from {plist_path}") from exc
+    return str(node)
+
+
+def verify_native_runtime(release: Path, node_bin: str) -> None:
+    _run([node_bin, "-e", "const D=require('./node_modules/better-sqlite3'); new D(':memory:').close()"], cwd=release)
+
+
 def stage_release(
     *,
     repo: Path,
@@ -208,6 +228,7 @@ def stage_release(
             raise InstallerError("existing release has a different install scope")
         if runtime_only:
             _verify_runtime_preimages(release_dir, expected_old, shared_target_root)
+        verify_native_runtime(release_dir, node_bin)
         return {"status": "ALREADY_STAGED", "release_dir": str(release_dir), "manifest": manifest}
 
     runtime_record = _capture_runtime_preimages(repo, expected_old, shared_target_root, preimage_bundle) if runtime_only else None
@@ -229,6 +250,7 @@ def stage_release(
         environment = dict(os.environ)
         environment["PATH"] = str(node_path.parent) + os.pathsep + environment.get("PATH", "")
         _run([str(npm_bin), "rebuild", "better-sqlite3", "--no-audit", "--no-fund"], cwd=temporary, env=environment)
+        verify_native_runtime(temporary, str(node_path))
         tracked = _tracked_paths(repo)
         generated = [str(path.relative_to(temporary)) for path in (temporary / "dist").rglob("*") if path.is_file()]
         if runtime_record is not None:
@@ -1942,7 +1964,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode == "stage":
             if not args.repo or not args.candidate or not args.base or not args.patch_id:
                 raise InstallerError("stage requires --repo, --candidate, --base, and --patch-id")
-            result = stage_release(repo=args.repo, candidate=args.candidate, base=args.base, patch_id=args.patch_id, release_root=args.release_root, node_bin=args.node_bin, current=current_pointer, shared_target_root=args.shared_assets_root, accept_overwrite=args.accept_overwrite, runtime_only=args.runtime_only, expected_old=args.expected_old, preimage_bundle=args.rollback_bundle)
+            result = stage_release(repo=args.repo, candidate=args.candidate, base=args.base, patch_id=args.patch_id, release_root=args.release_root, node_bin=service_node(args.service, args.node_bin), current=current_pointer, shared_target_root=args.shared_assets_root, accept_overwrite=args.accept_overwrite, runtime_only=args.runtime_only, expected_old=args.expected_old, preimage_bundle=args.rollback_bundle)
         elif args.mode == "shared-retire":
             release_dir = args.release_root / args.candidate if args.candidate else None
             if release_dir is None:
