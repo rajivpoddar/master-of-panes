@@ -969,6 +969,77 @@ def install_one_shared_asset(
     }
 
 
+def _target_absent(target: Path) -> bool:
+    """True only on an affirmative ENOENT; any other lstat failure is UNKNOWN, never absence."""
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise InstallerError(f"REFUSE: shared target absence unknown: {target}: {exc}") from exc
+    return False
+
+
+def _assert_absent_target(target: Path) -> None:
+    if not _target_absent(target):
+        raise InstallerError(f"REFUSE: new shared target is no longer absent: {target}; kept the fresh bytes")
+
+
+def create_absent_shared_asset(
+    *,
+    release_dir: Path,
+    target_root: Path | None,
+    target_name: str,
+    entry: dict[str, Any],
+    written: dict[str, str],
+) -> dict[str, Any]:
+    """Create ONE brand-new shared target that the pinned old manifest never listed.
+
+    Only a target that is affirmatively absent is created; the create is
+    ``os.link`` onto a fully written, fsynced, digest-checked temporary file, so it
+    can never replace bytes that appear at the last moment (``EEXIST`` refuses and
+    the fresh bytes are kept). The path is recorded in ``written`` as soon as the
+    link exists, so the caller's recovery (``restore_rollback_bundle`` with
+    ``only_if_current``) deletes it again only while it still holds exactly these
+    bytes. The captured rollback preimage for the target is ``present: False``.
+    """
+    target = _shared_target_path(target_name, target_root)
+    source = release_dir / Path(SHARED_ASSET_MANIFEST).parent / _safe_relative(entry["source_path"])
+    temporary = target.with_name(f".{target.name}.shared.{os.getpid()}.new.tmp")
+    expected = {"path": target_name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+    try:
+        if temporary.exists() or temporary.is_symlink():
+            temporary.unlink()
+        with source.open("rb") as source_handle, temporary.open("xb") as destination:
+            shutil.copyfileobj(source_handle, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(temporary, entry["mode"])
+        if file_record(temporary, target_name).get("sha256") != entry["sha256"]:
+            raise InstallerError("new shared asset does not match its manifest digest")
+        _before_replace_hook(target)
+        _assert_absent_target(target)
+        try:
+            os.link(temporary, target)
+        except FileExistsError as exc:
+            raise InstallerError(
+                f"REFUSE: new shared target appeared at creation: {target}; kept the fresh bytes"
+            ) from exc
+        written[str(target)] = entry["sha256"]
+        _fsync_directory(target.parent)
+        if file_record(target, target_name) != expected:
+            raise InstallerError(f"shared asset target readback mismatch: {target}")
+    finally:
+        if temporary.exists() or temporary.is_symlink():
+            temporary.unlink()
+    return {
+        "status": "SHARED_ABSENT_CREATED",
+        "target": str(target),
+        "installed_sha256": entry["sha256"],
+        "installed_mode": entry["mode"],
+    }
+
+
 def check_shared_assets(*, release_dir: Path, target_root: Path | None) -> dict[str, Any]:
     manifest = _load_shared_manifest(release_dir)
     checked: list[str] = []
@@ -1644,6 +1715,10 @@ def activate(
     planned: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     old_preimages: dict[str, dict[str, Any]] = {}
     retired_absent: set[str] = set()
+    # Brand-new shared targets: absent from the pinned old manifest AND affirmatively
+    # absent on disk. They are created inside the stop/switch/write/restart
+    # transaction and removed again (only while they hold exactly our bytes) on rollback.
+    created_absent: dict[str, dict[str, Any]] = {}
 
     def verify_retired_absent() -> None:
         for name in retired_absent:
@@ -1708,6 +1783,16 @@ def activate(
                     # as the preimage (no write). Any other byte still refuses.
                     # The running service is required, same as candidate-equal drift.
                     target = _shared_target_path(name, shared_target_root)
+                    if _target_absent(target):
+                        # Brand-new target (never in the old manifest, not on disk): create
+                        # it transactionally. The parent directory must already exist; the
+                        # installer never creates directories. Anything PRESENT below keeps
+                        # the adopt-or-refuse rule, so unexpected bytes still refuse.
+                        if not target.parent.is_dir() or target.parent.is_symlink():
+                            raise InstallerError(
+                                f"REFUSE: no pinned old manifest preimage for {name} (target absent and parent directory missing)")
+                        created_absent[name] = entry
+                        continue
                     try:
                         live = file_record(target, name)
                     except OSError:
@@ -1728,18 +1813,24 @@ def activate(
     if install_shared:
         captured = create_rollback_bundle(
             [_shared_target_path(name, shared_target_root) for name in old_preimages]
-            + [_shared_target_path(name, shared_target_root) for name in sorted(retired_absent)], shared_bundle
+            + [_shared_target_path(name, shared_target_root) for name in sorted(retired_absent)]
+            + [_shared_target_path(name, shared_target_root) for name in sorted(created_absent)], shared_bundle
         )
         for record, (name, expected) in zip(captured["entries"], old_preimages.items()):
             if not record.get("present") or any(record.get(key) != expected[key] for key in ("kind", "mode", "sha256")):
                 raise InstallerError(f"REFUSE: captured old preimage changed: {name}")
-        for record in captured["entries"][len(old_preimages):]:
+        retired_end = len(old_preimages) + len(retired_absent)
+        for record in captured["entries"][len(old_preimages):retired_end]:
             if record.get("present"):
                 raise InstallerError(f"REFUSE: retired target appeared during capture: {record['path']}")
+        for record in captured["entries"][retired_end:]:
+            if record.get("present"):
+                raise InstallerError(f"REFUSE: new shared target appeared during capture: {record['path']}; kept the fresh bytes")
         _write_json(rollback_bundle / "CUTOVER.json", {
             "old_release": str(old), "old_manifest_sha256": baseline_digest,
             "candidate": str(release_dir), "preimages": list(old_preimages.values()),
             "retired_absent": sorted(retired_absent),
+            "created_absent": sorted(created_absent),
         })
         _fsync_directory(rollback_bundle)
     planned_names = {name for name, _, _ in planned}
@@ -1760,6 +1851,14 @@ def activate(
                 expected = preimage
             if observed != expected:
                 raise InstallerError(f"UNKNOWN: fresh shared bytes on captured target {name} {stage}; preserved, not overwritten")
+        for name, entry in created_absent.items():
+            target = _shared_target_path(name, shared_target_root)
+            if str(target) in written:
+                expected_new = {"path": name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+                if file_record(target, name) != expected_new:
+                    raise InstallerError(f"UNKNOWN: fresh shared bytes on new target {name} {stage}; preserved, not overwritten")
+            elif not _target_absent(target):
+                raise InstallerError(f"UNKNOWN: fresh shared bytes on new target {name} {stage}; preserved, not overwritten")
 
     switched = False
     stop_attempted = False
@@ -1778,6 +1877,8 @@ def activate(
             for name, preimage in old_preimages.items():
                 if file_record(_shared_target_path(name, shared_target_root), name) != preimage:
                     raise InstallerError(f"pinned preimage changed before shutdown: {name}")
+            for name in created_absent:
+                _assert_absent_target(_shared_target_path(name, shared_target_root))
         stop_attempted = True
         stop()
         shared_preimage_check()
@@ -1792,6 +1893,12 @@ def activate(
             )
             written[str(_shared_target_path(name, shared_target_root))] = entry["sha256"]
             installed.append(result)
+        for name in sorted(created_absent):
+            # Create-only (os.link): never replaces bytes that appear at the last moment.
+            installed.append(create_absent_shared_asset(
+                release_dir=release_dir, target_root=shared_target_root, target_name=name,
+                entry=created_absent[name], written=written,
+            ))
         verify_retired_absent()
         shared_preimage_check()
         verify_captured("before startup")
@@ -1842,10 +1949,20 @@ def activate(
                 replacement = {"path": name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
                 if observed != preimage and (str(_shared_target_path(name, shared_target_root)) not in written or observed != replacement):
                     raise InstallerError(f"fresh shared drift during recovery: {name}; kept fresh bytes")
+            for name, entry in created_absent.items():
+                target = _shared_target_path(name, shared_target_root)
+                if _target_absent(target):
+                    continue
+                replacement = {"path": name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
+                if str(target) not in written or file_record(target, name) != replacement:
+                    raise InstallerError(f"fresh shared drift during recovery: {name}; kept fresh bytes")
             if install_shared:
                 restore_rollback_bundle(shared_bundle, only_if_current=written)
                 for name, preimage in old_preimages.items():
                     if file_record(_shared_target_path(name, shared_target_root), name) != preimage:
+                        raise InstallerError(f"shared preimage recovery incomplete: {name}")
+                for name in created_absent:
+                    if not _target_absent(_shared_target_path(name, shared_target_root)):
                         raise InstallerError(f"shared preimage recovery incomplete: {name}")
             restore_rollback_bundle(rollback_bundle)
             phases["assets"] = "restored"
@@ -1863,6 +1980,9 @@ def activate(
             for name, preimage in old_preimages.items():
                 if file_record(_shared_target_path(name, shared_target_root), name) != preimage:
                     raise InstallerError(f"shared preimage changed before recovery start: {name}")
+            for name in created_absent:
+                if not _target_absent(_shared_target_path(name, shared_target_root)):
+                    raise InstallerError(f"new shared target present before recovery start: {name}")
             restart()
             health()
             phases["service"] = "prior release healthy"

@@ -399,6 +399,80 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertEqual(self.current.resolve(), self.old)
         self.assertEqual(self.helper.read_text(), "old client\n")
 
+    def add_new_absent_target(self, canonical="/opt/pm/brand-new-hook.py", body="brand new hook\n"):
+        """A shared target that only the NEW manifest lists and that is absent on disk."""
+        source = self.new / "scripts/pm/shared-assets/claude/hooks/brand-new-hook.py"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(body)
+        source.chmod(0o755)
+        path = self.new / m.SHARED_ASSET_MANIFEST
+        manifest = json.loads(path.read_text())
+        manifest["entries"].append({
+            "canonical_target": canonical, "dependencies": [], "dependency_status": "closed",
+            "mode": 0o755, "sha256": hashlib.sha256(body.encode()).hexdigest(),
+            "source_path": "claude/hooks/brand-new-hook.py"})
+        manifest["entries"].sort(key=lambda item: item["source_path"])
+        manifest["inventory"]["selected_count"] += 1
+        path.write_text(json.dumps(manifest))
+        return canonical, self.targets / canonical.lstrip("/")
+
+    def test_brand_new_absent_target_is_created_inside_the_transaction(self):
+        name, target = self.add_new_absent_target()
+        self.set_inventory()
+        self.assertFalse(target.exists())
+        self.assertEqual(self.activate(), 0)
+        self.assertEqual(target.read_text(), "brand new hook\n")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+        # One replace hook for the planned helper, one for the create; created after the stop/switch.
+        self.assertEqual(self.events, ["bootout", "replace", "replace", "bootstrap:new"])
+        self.assertEqual(list(target.parent.glob(".*.tmp")), [])
+        plan = json.loads((self.root / "rollback/CUTOVER.json").read_text())
+        self.assertEqual(plan["created_absent"], [name])
+        backup = json.loads((self.root / "rollback/shared-preimages/ROLLBACK_MANIFEST.json").read_text())
+        self.assertTrue(any(e["path"] == str(target) and e["present"] is False for e in backup["entries"]))
+
+    def test_brand_new_target_is_removed_when_the_candidate_is_rolled_back(self):
+        name, target = self.add_new_absent_target()
+        self.set_inventory()
+        self.fail_health = True
+        self.assertEqual(self.activate(), 2)
+        self.assertFalse(target.exists(), "rollback deletes exactly the path this run created")
+        self.assertEqual(self.current.resolve(), self.old)
+        self.assertEqual(self.helper.read_text(), "old client\n")
+        self.assertEqual(self.events, ["bootout", "replace", "replace", "bootstrap:new", "bootout", "bootstrap:old"])
+        self.assertTrue(self.owned)
+
+    def test_target_that_exists_with_unexpected_bytes_still_refuses(self):
+        _, target = self.add_new_absent_target()
+        target.write_text("someone else's file\n")
+        self.set_inventory()
+        self.assertEqual(self.activate(), 2)
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.owned)
+        self.assertEqual(self.current.resolve(), self.old)
+        self.assertEqual(target.read_text(), "someone else's file\n")
+
+    def test_new_target_with_a_missing_parent_directory_refuses_without_creating_it(self):
+        _, target = self.add_new_absent_target(canonical="/opt/pm/not-yet/brand-new-hook.py")
+        self.set_inventory()
+        self.assertEqual(self.activate(), 2)
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.owned)
+        self.assertEqual(self.current.resolve(), self.old)
+        self.assertFalse(target.parent.exists())
+
+    def test_foreign_bytes_appearing_at_create_time_are_preserved_and_never_replaced(self):
+        _, target = self.add_new_absent_target()
+        self.set_inventory()
+        def race(path):
+            self.replace(path)
+            if Path(path) == target:
+                target.write_text("fresh foreign bytes\n")
+        self.assertEqual(self.activate(race), 2)
+        self.assertEqual(target.read_text(), "fresh foreign bytes\n")
+        self.assertFalse(any(event.startswith("bootstrap") for event in self.events))
+        self.assertEqual(list(target.parent.glob(".*.tmp")), [])
+
 
 if __name__ == "__main__":
     unittest.main()
