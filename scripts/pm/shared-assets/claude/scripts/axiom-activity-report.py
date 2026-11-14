@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 AXIOM_API_URL = "https://api.axiom.co/v1/datasets/_apl?format=legacy"
 DATASET = "heydonna-logs"
@@ -1304,7 +1305,7 @@ def main():
         )
         result = run_apl_query(token, apl, start_iso, end_iso)
         if result.get('_unavailable'):
-            print(json.dumps(result))
+            print(json.dumps({"error": "query_unavailable"}))
             sys.exit(1)
         status = result.get("status")
         partial = status.get("isPartial") if isinstance(status, dict) else None
@@ -1326,6 +1327,18 @@ def main():
             error_class = meta.get("errorName")
             if isinstance(error_class, str) and error_class in allowed_classes:
                 event["error_class"] = error_class
+            # Arbitrary paths may contain customer identifiers. Only the root
+            # path is known to be identifier-free; do not emit other paths.
+            url = meta.get("url")
+            if isinstance(url, str):
+                try:
+                    if urlsplit(url).path == "/":
+                        event["page_path"] = "/"
+                except ValueError:
+                    pass
+            build = meta.get("buildId") or meta.get("build_id")
+            if isinstance(build, str) and re.fullmatch(r"[0-9a-f]{7,40}", build):
+                event["build_id"] = build
             user_id = data.get("userId")
             if isinstance(user_id, str) and user_id:
                 event["user_hash"] = hashlib.sha256(user_id.encode()).hexdigest()
