@@ -492,7 +492,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-lifecycle-email",
-      "sha256": "2c07d9bbf807ec16a59c774cb9cceb03d0b9b090c565f364382b743949ba141b",
+      "sha256": "aed3abceb44c1cf14580f0ac7af2a729fc1abf262c5d3201f178b71a4e5e6c5d",
       "source_path": "claude/scripts/growth/lifecycle-drip.py"
     },
     {
@@ -744,7 +744,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-producer",
-      "sha256": "4fdeeb1e327b55c53c2433eaf1d07766cbbbab21bd04183dfef2890e0d67d79c",
+      "sha256": "47391ce59a74cba6bfcda39aec9cabc6efb086ba3272e5ae935aa7f936b01000",
       "source_path": "claude/scripts/pm/control-plane/sakshi-heartbeat.py"
     },
     {
@@ -1002,7 +1002,7 @@
       "source_path": "claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/ci-success-reconciliation/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/ci-success-reconciliation/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1016,7 +1016,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "ec05ca474f86f762b9dc1474146f7b13dbfa6659e38a667fb4996326c8559ecd",
+      "sha256": "46a9bf8130525e14e9f723a3f7b2d08383d1075037724cae54fa8e3cdc661963",
       "source_path": "claude/skills/cleanup-pr/SKILL.md"
     },
     {
@@ -1101,7 +1101,7 @@
       "source_path": "claude/skills/codex-review-companion/codex-review-companion.mjs"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/cp-repair-request/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/cp-repair-request/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1110,7 +1110,7 @@
       "source_path": "claude/skills/cp-repair-request/SKILL.md"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/daily-pm-restart/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/daily-pm-restart/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1119,7 +1119,7 @@
       "source_path": "claude/skills/daily-pm-restart/SKILL.md"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/direct-assign/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/direct-assign/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1128,7 +1128,7 @@
       "source_path": "claude/skills/direct-assign/SKILL.md"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/direct-release/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/direct-release/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1182,10 +1182,7 @@
       "source_path": "claude/skills/hourly-ops-audit/SKILL.md"
     },
     {
-      "additional_targets": [
-        "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/hourly-report-processing/SKILL.md"
-      ],
-      "canonical_target": "/Users/rajiv/.claude/skills/hourly-report-processing/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/hourly-report-processing/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1194,7 +1191,7 @@
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1203,7 +1200,7 @@
       "source_path": "claude/skills/lifecycle-email-processing/SKILL.md"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D0.txt",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D0.txt",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1212,7 +1209,7 @@
       "source_path": "claude/skills/lifecycle-email-processing/templates/D0.txt"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D1.txt",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D1.txt",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1221,7 +1218,7 @@
       "source_path": "claude/skills/lifecycle-email-processing/templates/D1.txt"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D3.txt",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D3.txt",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1230,7 +1227,7 @@
       "source_path": "claude/skills/lifecycle-email-processing/templates/D3.txt"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D7.txt",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D7.txt",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1239,7 +1236,7 @@
       "source_path": "claude/skills/lifecycle-email-processing/templates/D7.txt"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/FIRST_FILE_READY.txt",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/FIRST_FILE_READY.txt",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1266,16 +1263,16 @@
       "source_path": "claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/message-slot/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-message-slot",
-      "sha256": "b5dfa70e79a465899d4788ae7bde4ffa040f6c713ba27ad0a5ddf051833fc884",
+      "sha256": "9e38e51bc567e1f59ca8e6f140f72b82a258d8a4b0fdea556a37a970af7471dd",
       "source_path": "claude/skills/message-slot/SKILL.md"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/message-slot/scripts/message-slot.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 493,
@@ -1302,7 +1299,7 @@
       "source_path": "claude/skills/playwright-qa-spec/SKILL.md"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/pm-cleanup-pr/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pm-cleanup-pr/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1320,16 +1317,16 @@
       "source_path": "claude/skills/pm-triage/skill.md"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/pr-state-sweep/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pr-state-sweep",
-      "sha256": "f69f52792f46ac77e167baabaf6666778f9c2e95217100cc4f8bbc357330e450",
+      "sha256": "5b9ae81504697a1d81e8a0817a6d16f727845cdee34b1fb820bcb32cb043c7a2",
       "source_path": "claude/skills/pr-state-sweep/SKILL.md"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/scripts/sweep.sh",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 493,
@@ -1462,7 +1459,7 @@
       "source_path": "claude/skills/tmux-slot-command/scripts/slot-pane.sh"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/todo-prioritize/SKILL.md",
+      "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/todo-prioritize/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
@@ -1957,22 +1954,22 @@
       "~/.codex/skills/heydonna-cto-label-gated-ci/SKILL.md",
       "~/.codex/monitors/heydonna-issue-triage/WAKE_SOP.md",
       "~/.codex/automations/templates/heydonna-3h-ready-pool-reconciliation.prompt",
-      "~/.claude/skills/pm-cleanup-pr/SKILL.md",
-      "~/.claude/skills/pr-state-sweep/SKILL.md",
-      "~/.claude/skills/pr-state-sweep/scripts/sweep.sh",
-      "~/.claude/skills/ci-success-reconciliation/SKILL.md",
+      "~/Downloads/projects/heydonna-app/.claude/skills/pm-cleanup-pr/SKILL.md",
+      "~/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/SKILL.md",
+      "~/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/scripts/sweep.sh",
+      "~/Downloads/projects/heydonna-app/.claude/skills/ci-success-reconciliation/SKILL.md",
       "~/.claude/skills/codex-companion-cap-mechanism/SKILL.md",
-      "~/.claude/skills/cp-repair-request/SKILL.md",
+      "~/Downloads/projects/heydonna-app/.claude/skills/cp-repair-request/SKILL.md",
       "~/.claude/skills/anthropic-529-overload-inline-fallback/SKILL.md",
       "~/.claude/skills/heydonna-review-cap-cto-approve-handoff/SKILL.md",
       "~/.claude/skills/macos-word-window-screenshot/SKILL.md",
       "~/.claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift",
-      "~/.claude/skills/message-slot/SKILL.md",
-      "~/.claude/skills/message-slot/scripts/message-slot.sh",
+      "~/Downloads/projects/heydonna-app/.claude/skills/message-slot/SKILL.md",
+      "~/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh",
       "~/.claude/skills/tmux-slot-command/scripts/send-to-slot.sh",
       "~/.claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
       "~/.claude/skills/codex-review-companion/SKILL.md",
-      "~/.claude/skills/todo-prioritize/SKILL.md",
+      "~/Downloads/projects/heydonna-app/.claude/skills/todo-prioritize/SKILL.md",
       "~/.claude/agents/codex-code-reviewer.md",
       "~/.claude/agents/codex-plan-reviewer.md",
       "~/.claude/agents/plan-agent.md",

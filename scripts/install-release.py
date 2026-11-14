@@ -1531,7 +1531,50 @@ def _load_retirement_manifest(release_dir: Path) -> dict[str, Any]:
             raise InstallerError(f"unsupported retirement disposition: {target}")
         if not str(item.get("replacement") or "").strip():
             raise InstallerError(f"retirement item lacks an explicit replacement contract: {target}")
+        destination = item.get("relocated_to")
+        if destination is not None:
+            destination_path = Path(destination) if isinstance(destination, str) and destination else None
+            if (
+                destination_path is None
+                or not destination_path.is_absolute()
+                or ".." in destination_path.parts
+                or destination == target
+            ):
+                raise InstallerError(f"invalid retirement relocated_to: {target}")
     return manifest
+
+
+def _relocated_baseline_targets(
+    release_dir: Path,
+    baseline: dict[str, dict[str, Any]],
+    candidate_targets: set[str],
+) -> set[str]:
+    """Baseline shared targets the candidate deliberately moves to a new home.
+
+    A target may leave the shared manifest only when the candidate's canonical
+    retirement inventory declares it DELETE with ``relocated_to`` naming a
+    candidate shared target, and the declared preimage equals the pinned old
+    manifest entry (same bytes and mode).  Such a target is still pinned and
+    captured as a rollback preimage by ``activate``, which never writes or
+    deletes it; ``shared-retire`` removes it afterwards under its own
+    exact-preimage drift check and rollback bundle.
+    """
+    if not (release_dir / RETIREMENT_MANIFEST).is_file():
+        return set()
+    relocated: set[str] = set()
+    for item in _load_retirement_manifest(release_dir)["items"]:
+        name = item["absolute_current_path"]
+        prior = baseline.get(name)
+        if (
+            item.get("disposition") == "DELETE"
+            and prior is not None
+            and name not in candidate_targets
+            and item.get("relocated_to") in candidate_targets
+            and item["preimage_sha256"] == prior["sha256"]
+            and item["preimage_mode"] == prior["mode"]
+        ):
+            relocated.add(name)
+    return relocated
 
 
 def _assert_no_symlink_components(path: Path) -> None:
@@ -1739,7 +1782,8 @@ def activate(
         candidate_manifest = _load_shared_manifest(release_dir)
         candidate_targets = {name for entry in candidate_manifest["entries"] for name in _shared_entry_targets(entry)}
         retired_absent = (baseline.keys() - candidate_targets) & RETIRED_ABSENT_TARGETS
-        if baseline.keys() - candidate_targets - RETIRED_ABSENT_TARGETS:
+        relocated = _relocated_baseline_targets(release_dir, baseline, candidate_targets)
+        if baseline.keys() - candidate_targets - RETIRED_ABSENT_TARGETS - relocated:
             raise InstallerError("REFUSE: candidate removes unapproved shared targets")
         for name in baseline.keys() & candidate_targets & RETIRED_ABSENT_TARGETS:
             try:

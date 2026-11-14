@@ -77,6 +77,276 @@
         "check": "zero executable prompt/owner callers: no surviving invocation in the pm-backlog-promoter agent, the installed issue-triage heartbeat prompt, any hook, or any skill",
         "status": "PENDING"
       }
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/ci-success-reconciliation/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "c80324bf0d984f8f68f481c1bd88f66540f5ee1d24ef5670bed14b8bff927d09",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs ci-success-reconciliation under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/ci-success-reconciliation/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/ci-success-reconciliation/SKILL.md"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/cp-repair-request/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "66aae9c546b13db9521f521de701ecfda401fb13b8f01d4a952b3ece96a78fdc",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs cp-repair-request under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/cp-repair-request/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/cp-repair-request/SKILL.md"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/daily-pm-restart/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "a68a578a65909de3c25c3647ae6d3d710c306630ae7de63ad7a181cf53d276b9",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs daily-pm-restart under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/daily-pm-restart/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/daily-pm-restart/SKILL.md"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/direct-assign/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "2a8536ed29f97ee078e0341272a5a6ea2bf6e12cb52733e81c045f9023872c6b",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs direct-assign under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/direct-assign/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/direct-assign/SKILL.md"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/direct-release/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "4e4981eaf3b78fc7ac8af16421c945722f8b9acc25dfc7eb9559ca264a937cec",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs direct-release under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/direct-release/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/direct-release/SKILL.md"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/hourly-report-processing/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "9df738b3ac5600b649a24bda0d0066920b4c286464bf1ab452e4daf39fff4288",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs hourly-report-processing under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/hourly-report-processing/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/hourly-report-processing/SKILL.md"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/lifecycle-email-processing/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "0aa19797a7416d4d57e49e1fca8052f788c138a276a1d8a0b576d7658f9d4e07",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs lifecycle-email-processing under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/SKILL.md"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D0.txt",
+      "disposition": "DELETE",
+      "preimage_sha256": "90c53d111ed7b937368f4d64950904d22b54beb9a97b68c8eb5db91a3912bc4d",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs lifecycle-email-processing under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D0.txt before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D0.txt"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D1.txt",
+      "disposition": "DELETE",
+      "preimage_sha256": "123de320b0b31118e8c9bc64ee1716acb2e33c2a45f28051ff9fea274bf2a16b",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs lifecycle-email-processing under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D1.txt before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D1.txt"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D3.txt",
+      "disposition": "DELETE",
+      "preimage_sha256": "03304ef632b9656e97a75262a2b7ec034b6103dd0f5bb927c2435e65bf61acab",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs lifecycle-email-processing under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D3.txt before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D3.txt"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/D7.txt",
+      "disposition": "DELETE",
+      "preimage_sha256": "3c6cbe331612f8ceca917e33ee98ed632ddf894b8e39a15f78e6f2aa11605856",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs lifecycle-email-processing under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D7.txt before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/D7.txt"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/lifecycle-email-processing/templates/FIRST_FILE_READY.txt",
+      "disposition": "DELETE",
+      "preimage_sha256": "aa03cea0176ee570956f93d8865c0f7dda48a83344a5f340e6845dde228b1e59",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs lifecycle-email-processing under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/FIRST_FILE_READY.txt before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates/FIRST_FILE_READY.txt"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/message-slot/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "b5dfa70e79a465899d4788ae7bde4ffa040f6c713ba27ad0a5ddf051833fc884",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs message-slot under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/SKILL.md"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/message-slot/scripts/message-slot.sh",
+      "disposition": "DELETE",
+      "preimage_sha256": "1336b538032fe3df4a924b02d99155b41be61d603c42c8ec47377ec97b231a4c",
+      "preimage_mode": 493,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs message-slot under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/pm-cleanup-pr/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "a12579e0e381947be8dccbe3c648e93858df29ad25556fbb45e4cb37f3dbe4f2",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs pm-cleanup-pr under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pm-cleanup-pr/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pm-cleanup-pr/SKILL.md"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/pr-state-sweep/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "f69f52792f46ac77e167baabaf6666778f9c2e95217100cc4f8bbc357330e450",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs pr-state-sweep under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/SKILL.md"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh",
+      "disposition": "DELETE",
+      "preimage_sha256": "c2ee5791cd4f75b8e6b359776e6bb92ddb147a7077f72f38db4d37e619c39f6b",
+      "preimage_mode": 493,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs pr-state-sweep under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/scripts/sweep.sh before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/scripts/sweep.sh"
+    },
+    {
+      "absolute_current_path": "/Users/rajiv/.claude/skills/todo-prioritize/SKILL.md",
+      "disposition": "DELETE",
+      "preimage_sha256": "31feb0b5ba101251a44ba72b857a0d6d2dbdc7205a4e35b7a1a199c0e1b100b2",
+      "preimage_mode": 420,
+      "installed_root": "/Users/rajiv/.claude/skills",
+      "registration": "NOT_REGISTERED_IN_SETTINGS",
+      "retirement_reason": "PM-only skill relocated out of the globally loaded ~/.claude/skills so dev proxies and slots no longer receive it (Rajiv, DM D0AMF0XE6TS thread 1794624936.567599, ts 1794639068.829289: move all pm skills to heydonna-app/.claude/skills so that the dev agents don't get it).",
+      "replacement": "MoP installs todo-prioritize under the PM-only app skills directory; PM-type proxies load it through the pm-skills plugin and the PM pane loads it as a project skill.",
+      "deletion_proof": {
+        "check": "the candidate shared manifest installs the same bytes at /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/todo-prioritize/SKILL.md before this home copy is removed",
+        "status": "SATISFIED"
+      },
+      "relocated_to": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/todo-prioritize/SKILL.md"
     }
   ]
 }

@@ -98,7 +98,7 @@ const LIFECYCLE_EMAIL_TASK: PMCadenceTask = {
   commandDescription: "MoP: lifecycle email due. Invoke Skill(lifecycle-email-processing) now. Launch the lifecycle-email-agent background agent with run_in_background=true; preserve the selector send_allowed gate. Do not run it inline.",
 };
 
-export function lifecycleEmailApproved(root = join(homedir(), ".claude/skills/lifecycle-email-processing/templates")): boolean {
+export function lifecycleEmailApproved(root = join(homedir(), "Downloads/projects/heydonna-app/.claude/skills/lifecycle-email-processing/templates")): boolean {
   return ["D0", "D1", "D3", "D7", "FIRST_FILE_READY"].every((touch) => {
     try {
       return /^STATUS:\s*APPROVED(?:\s|$)/m.test(readFileSync(join(root, `${touch}.txt`), "utf8"));

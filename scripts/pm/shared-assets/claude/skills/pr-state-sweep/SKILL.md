@@ -32,7 +32,7 @@ It is intentionally separate from issue dispatch:
 Run order is mandatory:
 
 ```bash
-~/.claude/skills/pr-state-sweep/scripts/sweep.sh --trigger=reconcile-capacity
+/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/scripts/sweep.sh --trigger=reconcile-capacity
 ```
 
 If the PR sweep emits any `PR_*_REQUIRED` line, PM must resolve that current-PR
@@ -237,7 +237,7 @@ resolved only when a later sweep is clean.
 Dry-run mode mutates nothing:
 
 ```bash
-~/.claude/skills/pr-state-sweep/scripts/sweep.sh --trigger=pm-stop --dry-run
+/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/scripts/sweep.sh --trigger=pm-stop --dry-run
 ```
 
 Real mode performs no label deletion and no MoP slot release itself. It

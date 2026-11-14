@@ -46,7 +46,7 @@ PM_OPS_DB = Path(
 PR_STATE_SWEEP = Path(
     os.environ.get(
         "HEYDONNA_PR_STATE_SWEEP",
-        "/Users/rajiv/.claude/skills/pr-state-sweep/scripts/sweep.sh",
+        "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/pr-state-sweep/scripts/sweep.sh",
     )
 )
 SLACK_SEND = Path("/Users/rajiv/.claude/scripts/slack-send.sh")

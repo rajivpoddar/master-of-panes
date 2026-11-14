@@ -38,17 +38,17 @@ a formal work assignment:
 ## Canonical Command
 
 ```bash
-bash ~/.claude/skills/message-slot/scripts/message-slot.sh <slot> '<message>'
-bash ~/.claude/skills/message-slot/scripts/message-slot.sh <slot> --file /tmp/short-direction.md --force
-cat /tmp/short-direction.md | bash ~/.claude/skills/message-slot/scripts/message-slot.sh --slot <slot> -f --force
+bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh <slot> '<message>'
+bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh <slot> --file /tmp/short-direction.md --force
+cat /tmp/short-direction.md | bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh --slot <slot> -f --force
 ```
 
 Examples:
 
 ```bash
-bash ~/.claude/skills/message-slot/scripts/message-slot.sh 3 'Plan approved. Proceed with implementation.' --force
-bash ~/.claude/skills/message-slot/scripts/message-slot.sh 2 'Status please: PR, branch, tests, exact blocker.'
-bash ~/.claude/skills/message-slot/scripts/message-slot.sh 4 'slot 2 says the fixture key is 6b7810ec; verify before rerun.' --from 'slot 2 (Hasta)'
+bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh 3 'Plan approved. Proceed with implementation.' --force
+bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh 2 'Status please: PR, branch, tests, exact blocker.'
+bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh 4 'slot 2 says the fixture key is 6b7810ec; verify before rerun.' --from 'slot 2 (Hasta)'
 ```
 
 For file-backed content, always use `--file`; do not pass
