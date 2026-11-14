@@ -229,6 +229,17 @@ Source: Rajiv D0AMF0XE6TS ts 1794290954.291729 ("add prodcut rule for fewest cli
 - Required: primary actions complete in one click; protect data automatically (e.g. silent backup download) and report via toast (title + body).
 - Plans state the click count per changed user path. Tests: one-click completion, no dialog rendered, automatic protective side effect fires.
 
+## Proof Matrix Planning Gate (Mandatory - three-agent conveyor)
+
+Source: Rajiv, D0AMF0XE6TS thread 1794624936.567599, ts 1794633707.502709 ("go on all three. should the planning should also cover the qa spec if browser testing is required?").
+The plan is the contract that the implementer codes against and pm-proof-qa executes. pm-proof-qa runs ONLY what the matrix names, so a missing row means a missing proof.
+- Every plan MUST contain `## Proof matrix`: ONE row per changed control point (each production function, guard, branch, handler, config or prompt section the diff changes).
+- Each row names: the control point (`file:symbol`); a behavioural RED-on-revert test (`test/file::case`, which drives the real entrypoint, not a source grep); the exact mutation that must turn it RED (for example "revert `if (!lease) throw` to no-op"); and the exact remote command (`~/.claude/scripts/remote-test-box.sh run <box> -- <vitest|pytest> <file> -t '<case>'`).
+- Add the affected-test list (changed tests plus the tests over each changed source, including source-guard tests) and the remote typecheck command.
+- For each browser AC, add `### QA spec design`: spec path under `tests/e2e/specs/qa-tests/<issue>-<slug>.spec.ts` (never core/core-rest, never e2e.yml); seed `SEED_PROJECT_MEDIUM` (the Frazier medium deposition, the only seed with captured fixtures) unless the AC needs another, with the reason; a proven helper/pattern to reuse, citing an existing passing qa-tests spec and the helper it imports; numbered steps; and assertions (DOM/toast/network/Convex read-back) per AC. Video and trace are on; pm-proof-qa runs the blank check.
+- No browser AC → write `### QA spec design: N/A (no browser AC)`.
+- codex-plan-reviewer BLOCKs a plan whose matrix lacks a row for a changed control point, names a non-behavioural test, omits the mutation or remote command, or omits the QA spec design for a browser AC.
+
 ## No per-commit main CI queues Planning Gate
 
 Source: Rajiv, C0ALZJHGE49 thread 1794234970.206389, ts 1794487134.343129; rule `~/.claude/rules/56-heydonna-ci-main-shared-concurrency.md`.
@@ -648,6 +659,22 @@ For plans touching `modal/shared/llm_proxy_server.py`, WhisperX/AssemblyAI/TSVAD
 - The production proxy path or `TestClient` plus upstream-spy test that proves forwarding behavior.
 - The latest-head capture plus latest-head strict replay evidence required before readiness.
 
+## Proof matrix (MANDATORY - see Proof Matrix Planning Gate)
+
+| # | Control point (`file:symbol`) | RED-on-revert test (`file::case`) | Mutation that must go RED | Remote command |
+|---|-------------------------------|-----------------------------------|---------------------------|----------------|
+| 1 | `lib/x.ts:applyFoo` | `__tests__/x.test.ts::refuses stale head` | delete the `parent !== head` check | `remote-test-box.sh run <box> -- npx vitest run __tests__/x.test.ts -t 'refuses stale head'` |
+
+Affected tests: <changed tests + tests over each changed source, incl. source guards>
+Typecheck: `remote-test-box.sh run <box> -- <typecheck command>`
+
+### QA spec design (browser ACs only; else `N/A (no browser AC)`)
+- Spec: `tests/e2e/specs/qa-tests/<issue>-<slug>.spec.ts`
+- Seed: `SEED_PROJECT_MEDIUM` (Frazier) | other + reason
+- Reuse: `<existing passing qa-tests spec>` + `<helper import>`
+- Steps: 1. ... 2. ...
+- Assertions per AC: ...
+
 ## Feasibility probes (when applicable)
 
 | Claim | Repro | Exit | Output |
@@ -677,6 +704,10 @@ Verify ONE of the following is present in the plan, or fail self-review:
 A plan with zero executable verification anchors fails Phase 4 and must be revised before handoff to PM.
 
 **Audit your own plan**: count the verification anchors. If zero, add them now.
+
+#### Phase 4 step 0d — Proof matrix check (MANDATORY)
+
+List every control point the plan changes and confirm each has exactly one `## Proof matrix` row with a behavioural test, a named mutation and a remote command. Every browser AC has a `### QA spec design` with path, seed, a cited reusable passing spec and assertions. Any gap fails self-review.
 
 #### Phase 4 step 0b — Mutual-exclusion check: Scope-Audit vs Rework (MANDATORY)
 

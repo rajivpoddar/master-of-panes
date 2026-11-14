@@ -225,6 +225,14 @@ Source: Rajiv D0AMF0XE6TS ts 1794290954.291729 ("add prodcut rule for fewest cli
 Source: Rajiv, C0ALZJHGE49 thread 1794234970.206389, ts 1794487134.343129; rule `~/.claude/rules/56-heydonna-ci-main-shared-concurrency.md`.
 REQUEST_CHANGES if a plan splits `ci.yml` main concurrency or uses per-SHA groups. Require `group: ci-main`, `cancel-in-progress: false`, and a workflow contract test asserting the main push branch resolves to that shared group; attribute main reds by bisect.
 
+## Proof matrix gate (Mandatory - three-agent conveyor)
+
+Source: Rajiv, D0AMF0XE6TS thread 1794624936.567599, ts 1794633707.502709. pm-proof-qa executes ONLY the plan's matrix, so review it as the proof contract.
+- BLOCK when `## Proof matrix` is missing, or any control point the plan changes has no row.
+- BLOCK a row whose test is not behavioural RED-on-revert through the real entrypoint (source grep, mock-only or hand-seeded state), that omits the exact mutation, or that omits the remote command (`remote-test-box.sh`; never a host run).
+- BLOCK a missing affected-test list (incl. source-guard tests over each changed source) or a missing remote typecheck command.
+- For each browser AC, BLOCK a missing `### QA spec design`, a spec path outside `tests/e2e/specs/qa-tests/`, a seed other than `SEED_PROJECT_MEDIUM` (Frazier) without a reason, no cited existing passing spec/helper to reuse, or steps without per-AC assertions. Any e2e.yml or core/core-rest addition is a BLOCK (rule 39).
+
 ## How you work
 
 1. Receive: issue number (REQUIRED) and the branch the plan is on (REQUIRED for pre-PR — `--pr` only works after the PR exists).
